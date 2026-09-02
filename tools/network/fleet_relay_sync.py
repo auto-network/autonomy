@@ -42,6 +42,7 @@ from tools.network.fleet_sync_scheduler import (
     decode_authored,
     decode_done,
     decode_breadcrumb,
+    discover_org_sync_scopes,
     encode_pull_request,
     encode_breadcrumb,
     FleetSyncProtocolError,
@@ -269,6 +270,7 @@ class ConnectorFleetRuntime:
             peer_addresses=lambda: {},
             personal_db_path=_org_db_path("personal"),
             telemetry_recorder=fleet_sync_telemetry.record_iteration,
+            sync_scopes=discover_org_sync_scopes,
         )
         scheduler = FleetSyncScheduler(config)
         scheduler._roster_snapshot = entries
@@ -341,9 +343,18 @@ class ConnectorFleetRuntime:
             raise FleetRelaySyncError("serving machine is locked for Fleet sync")
         if message.get("op") == BLOB_OP:
             return await self._handle_blob(token, message)
-        if set(message) != _REQUEST_FIELDS or message.get("v") != PROTOCOL_VERSION \
+        # "scope" is the one optional field, mirroring the direct protocol:
+        # absent means personal, so a mixed-version fleet keeps syncing the
+        # personal scope while only organization pulls carry the field an
+        # older server refuses.
+        if not (_REQUEST_FIELDS <= set(message)
+                <= _REQUEST_FIELDS | {"scope"}) \
+                or message.get("v") != PROTOCOL_VERSION \
                 or message.get("op") != PULL_OP:
             raise FleetRelaySyncError("fleet sync pull has unknown fields")
+        scope = message.get("scope", "personal")
+        if not isinstance(scope, str) or not scope or ":" in scope:
+            raise FleetRelaySyncError("fleet sync pull scope is malformed")
         requested_epoch = message.get("roster_epoch")
         if not isinstance(requested_epoch, str) or len(requested_epoch) != 64:
             raise FleetRelaySyncError("fleet sync pull has no roster epoch")
@@ -367,13 +378,18 @@ class ConnectorFleetRuntime:
             or any(ch not in "0123456789abcdef" for ch in peer_digest)
         ):
             raise FleetRelaySyncError("fleet sync pull compat digest is malformed")
+        try:
+            scope_store = await asyncio.to_thread(scheduler._store_for, scope)
+        except FleetSyncProtocolError as exc:
+            raise FleetRelaySyncError(str(exc)) from exc
         local_digest = await asyncio.to_thread(
-            scheduler.store.compatibility_digest
+            scope_store.compatibility_digest
         )
         if peer_digest != local_digest:
-            # Mixed-schema fleet: the puller has not applied this machine's
-            # migration yet (or vice versa). Refusing before the checkpoint
-            # is built pauses BOTH transports until the schemas reconverge.
+            # Mixed-schema fleet: the puller has not applied this scope's
+            # migration yet (or vice versa). Each scope is its own pull, so
+            # refusing here pauses only the mismatched scope on this
+            # transport until the schemas reconverge.
             raise FleetRelaySyncError("fleet sync schema mismatch")
         hello = canonical_json(message.get("hello"))
         peer_pub, _private, server_hello, _transcript = (
@@ -393,10 +409,15 @@ class ConnectorFleetRuntime:
         resume_position = 0
         if resume_trail:
             resume_position = await asyncio.to_thread(
-                scheduler.store.resume_ref, resume_trail
+                scope_store.resume_ref, resume_trail
             )
-        journal_gap = await asyncio.to_thread(scheduler.store.journal_gap)
-        serve_checkpoint = _serve_checkpoint_decision(
+        journal_gap = await asyncio.to_thread(scope_store.journal_gap)
+        # An empty server has nothing a checkpoint delivers; two freshly
+        # prepared machines must meet through (empty) deltas, not by
+        # installing each other's blank databases — same guard as the
+        # direct path's serve decision.
+        server_has_content = await asyncio.to_thread(scope_store.has_state)
+        serve_checkpoint = server_has_content and _serve_checkpoint_decision(
             resume_position, include_checkpoint, journal_gap
         )
         logger.warning(
@@ -432,10 +453,11 @@ class ConnectorFleetRuntime:
                         scheduler._roster_snapshot,
                         anchor_root_pub=scheduler.config.personal_root_pub,
                     )))
+                    scope_path = scheduler._scope_paths()[scope]
 
                     def create_checkpoint():
                         with FleetSyncAlpha(
-                            scheduler.config.personal_db_path,
+                            scope_path,
                             scheduler.authenticator.machine_pub,
                         ) as alpha:
                             alpha.checkpoint(
@@ -484,6 +506,7 @@ class ConnectorFleetRuntime:
                         requested_epoch,
                         compat=peer_digest,
                         resume=resume_trail,
+                        scope=scope,
                     ),
                     peer_pub,
                     telemetry_channel="relay",
@@ -527,6 +550,7 @@ class ConnectorFleetRuntime:
                             peer_pub,
                             channel="relay",
                             direction="serve",
+                            scope=scope,
                             mode="checkpoint" if serve_checkpoint else "delta",
                             outcome=outcome,
                             started_at_ns=started_at_ns,
@@ -570,7 +594,10 @@ class ConnectorFleetRuntime:
             scheduler.authenticator.accept_client(hello, session=token)
         )
         current_epoch = scheduler._current_epoch()
-        db_path = scheduler.config.personal_db_path
+        # Digests are self-certifying, so every synchronized scope's store
+        # is a legitimate candidate regardless of which scope's backlog
+        # asked — same rule as the direct path's blob response.
+        db_paths = list(scheduler._scope_paths().values())
 
         async def stream():
             yield canonical_json({
@@ -579,7 +606,7 @@ class ConnectorFleetRuntime:
                 "hello": _json(server_hello, "fleet server hello"),
                 "roster_epoch": current_epoch,
             })
-            frames = iter_blob_frames(db_path, list(digests))
+            frames = iter_blob_frames(db_paths, list(digests))
             while True:
                 scheduler.authenticator.authorize(peer_pub)
                 frame = await asyncio.to_thread(next, frames, None)
@@ -625,12 +652,94 @@ async def _fetch_envelope(base: str, token: str) -> dict:
     return value
 
 
+def _scope_db_path(scope: str) -> Path:
+    """The local database path one sync scope replicates into."""
+    if scope == "personal":
+        return _org_db_path("personal")
+    scopes = discover_org_sync_scopes()
+    if scope not in scopes:
+        raise FleetRelaySyncError(f"unknown fleet sync scope: {scope!r}")
+    return scopes[scope]
+
+
+_activated_scope_paths: set[Path] = set()
+
+
+def _scoped_store(scope: str, machine_pub: str) -> SQLiteFleetSyncStore:
+    """The scope's client store, with fleet writers activated once per path.
+
+    Mirrors the direct scheduler's ``_store_for``: organization databases
+    share the graph schema, so the same policy audit applies and activation
+    fails closed on any unpoliced table. The personal database is prepared
+    by the production migration and is never activated here.
+    """
+    path = _scope_db_path(scope)
+    if scope != "personal" and path not in _activated_scope_paths:
+        from tools.graph.db import GraphDB
+
+        graph = GraphDB(path)
+        try:
+            graph.activate_fleet_sync_writers(machine_pub)
+        finally:
+            graph.close()
+        _activated_scope_paths.add(path)
+    return SQLiteFleetSyncStore(path)
+
+
+async def _install_scoped_checkpoint(
+    checkpoint: Path,
+    scope: str,
+    credential: fleet_runtime.FleetRuntimeCredential,
+    source_machine_pub: str,
+) -> None:
+    """Quiesce one organization database and publish a received checkpoint.
+
+    The personal scope installs through ``dashboard_fleet_sync_service``,
+    which pauses the whole runtime; an organization scope quiesces only its
+    own database, mirroring the direct path's ``_install_direct_checkpoint``.
+    """
+    from tools.graph.db import GraphDB
+    from tools.network.fleet_checkpoint_handoff import (
+        install_quiesced_checkpoint,
+    )
+    from tools.network.fleet_sync_connection import (
+        acquire_database_quiescence,
+    )
+
+    scope_path = _scope_db_path(scope)
+    entries = tuple(fleet_roster.load_entries(org=None))
+    root_pub = credential.delegation_cert.org.removeprefix("personal:")
+    active = tuple(sorted(fleet_roster.resolve(
+        entries, anchor_root_pub=root_pub
+    )))
+    epoch = roster_epoch(entries, root_pub)
+
+    def install() -> None:
+        GraphDB.close_pooled_path(scope_path)
+        token = acquire_database_quiescence(scope_path)
+        try:
+            install_quiesced_checkpoint(
+                checkpoint,
+                scope_path,
+                quiescence=token,
+                target_origin_incarnation=credential.machine_pub,
+                expected_roster_epoch=epoch,
+                expected_active_roster=active,
+                source_machine_pub=source_machine_pub,
+            )
+        finally:
+            token.release()
+
+    await asyncio.to_thread(install)
+
+
 async def pull_checkpoint_once(
     credential: fleet_runtime.FleetRuntimeCredential,
     route: fleet_route.FleetRoute,
     *,
     include_checkpoint: bool = True,
     metrics: dict[str, int] | None = None,
+    scope: str = "personal",
 ) -> dict[str, int]:
     metrics = metrics if metrics is not None else {}
     metrics.update({
@@ -666,13 +775,16 @@ async def pull_checkpoint_once(
         private, hello = auth.build_client_hello(token)
         client_eph = _json(hello, "fleet client hello")["eph_pub"]
         resume_trail = await asyncio.to_thread(
-            fleet_sync_telemetry.read_resume_breadcrumbs,
-            route.origin_machine_pub,
+            lambda: fleet_sync_telemetry.read_resume_breadcrumbs(
+                route.origin_machine_pub, scope=scope,
+            )
         )
         local_digest = await asyncio.to_thread(
-            SQLiteFleetSyncStore(_org_db_path("personal")).compatibility_digest
+            lambda: _scoped_store(
+                scope, credential.machine_pub
+            ).compatibility_digest()
         )
-        request = canonical_json({
+        body = {
             "v": PROTOCOL_VERSION,
             "op": PULL_OP,
             "roster_epoch": epoch,
@@ -682,13 +794,18 @@ async def pull_checkpoint_once(
                 encode_breadcrumb(breadcrumb) for breadcrumb in resume_trail
             ],
             "hello": _json(hello, "fleet client hello"),
-        })
+        }
+        # The personal scope keeps the historical request shape; only
+        # organization pulls carry the field an older server refuses.
+        if scope != "personal":
+            body["scope"] = scope
+        request = canonical_json(body)
         metrics["bytes_sent"] += len(request)
         await channel.send_message(request)
         expected_files = expected_bytes = seen_files = seen_bytes = None
         saw_hello = False
         installed_checkpoint = False
-        store = SQLiteFleetSyncStore(_org_db_path("personal"))
+        store = SQLiteFleetSyncStore(_scope_db_path(scope))
         pending = []
         pending_identity = None
         pending_count = None
@@ -822,11 +939,17 @@ async def pull_checkpoint_once(
                     or value.get("total_bytes") != seen_bytes
                 ):
                     raise FleetRelaySyncError("checkpoint stream is incomplete")
-                await dashboard_fleet_sync_service.install_checkpoint(
-                    checkpoint,
-                    source_machine_pub=route.origin_machine_pub,
-                )
-                store = SQLiteFleetSyncStore(_org_db_path("personal"))
+                if scope == "personal":
+                    await dashboard_fleet_sync_service.install_checkpoint(
+                        checkpoint,
+                        source_machine_pub=route.origin_machine_pub,
+                    )
+                else:
+                    await _install_scoped_checkpoint(
+                        checkpoint, scope, credential,
+                        route.origin_machine_pub,
+                    )
+                store = SQLiteFleetSyncStore(_scope_db_path(scope))
                 installed_checkpoint = True
                 continue
             raise FleetRelaySyncError("checkpoint stream has an unknown control")
@@ -840,12 +963,15 @@ async def pull_checkpoint_once(
     try:
         entries = tuple(fleet_roster.load_entries(org=None))
         epoch = roster_epoch(entries, root_pub)
+        # No checkpoint receipt here: the install path's
+        # _record_checkpoint_receipt already recorded it durably with source
+        # attribution — a second additive write double-counted every relay
+        # install (the same class 64963898 removed on the direct path).
         await asyncio.to_thread(
-            SQLiteFleetSyncStore(_org_db_path("personal")).record_peer,
+            SQLiteFleetSyncStore(_scope_db_path(scope)).record_peer,
             route.origin_machine_pub,
             epoch,
             online=False,
-            checkpoints_received=int(installed_checkpoint),
             deltas_received=1,
             acknowledgements=1,
             success=True,
@@ -854,7 +980,7 @@ async def pull_checkpoint_once(
         # it, but it is logged rather than swallowed.
         try:
             await _drain_attachments_via_relay(
-                route, auth, ws_base, token, envelope
+                route, auth, ws_base, token, envelope, scope=scope,
             )
         except Exception:
             logger.warning(
@@ -866,7 +992,8 @@ async def pull_checkpoint_once(
 
 
 async def _drain_attachments_via_relay(
-    route, auth, ws_base: str, token: str, envelope: dict
+    route, auth, ws_base: str, token: str, envelope: dict,
+    scope: str = "personal",
 ) -> None:
     """Fetch quarantined attachment bytes from the serving peer and drain."""
     from tools.network.fleet_sync.blob_transport import (
@@ -874,7 +1001,7 @@ async def _drain_attachments_via_relay(
         MAX_BLOB_REQUEST_DIGESTS,
     )
 
-    store_api = SQLiteFleetSyncStore(_org_db_path("personal"))
+    store_api = SQLiteFleetSyncStore(_scope_db_path(scope))
     entries = await asyncio.to_thread(store_api.attachment_backlog)
     if not entries:
         return
@@ -1077,6 +1204,10 @@ class DashboardFleetRelaySyncService:
                     "fleet relay sync: pull succeeded (%s)",
                     "checkpoint" if include_checkpoint else "delta",
                 )
+                # Organization scopes ride the same route after the
+                # personal pull; each failure pauses only its own scope,
+                # and the personal result above stays the money line.
+                await self._pull_org_scopes(credential, route)
                 delay = 0.5
                 await asyncio.sleep(10.0)
             except asyncio.CancelledError:
@@ -1128,6 +1259,82 @@ class DashboardFleetRelaySyncService:
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 30.0)
 
+    async def _pull_org_scopes(
+        self,
+        credential: fleet_runtime.FleetRuntimeCredential,
+        route: fleet_route.FleetRoute,
+    ) -> None:
+        """Pull every organization scope over the same relay route.
+
+        Mirrors the direct scheduler's ``_sync_peer`` contract: a schema
+        mismatch — or any other per-scope failure — pauses only that scope
+        until the next round. Per-scope telemetry keeps each scope's bytes,
+        resume trail, and freshness separate.
+        """
+        import time
+
+        for scope in sorted(await asyncio.to_thread(discover_org_sync_scopes)):
+            started_at_ns = time.time_ns()
+            started_monotonic_ns = time.monotonic_ns()
+            metrics: dict[str, int] = {}
+            include_checkpoint = False
+            outcome = "success"
+            error_code = ""
+            try:
+                if await asyncio.to_thread(
+                    fleet_sync_telemetry.direct_pull_fresh,
+                    route.origin_machine_pub,
+                    window_s=DIRECT_FRESHNESS_WINDOW_S,
+                    scope=scope,
+                ):
+                    continue
+                include_checkpoint = not await asyncio.to_thread(
+                    _has_local_sync_state,
+                    route.origin_machine_pub,
+                    credential.delegation_cert.org.removeprefix("personal:"),
+                    _scope_db_path(scope),
+                )
+                await pull_checkpoint_once(
+                    credential,
+                    route,
+                    include_checkpoint=include_checkpoint,
+                    metrics=metrics,
+                    scope=scope,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                outcome = "failed"
+                error_code = _classify_pull_failure(exc)
+                if error_code == "schema_mismatch":
+                    logger.info(
+                        "fleet relay sync scope %r paused on schema mismatch",
+                        scope,
+                    )
+                else:
+                    logger.warning(
+                        "fleet relay sync scope %r pull failed", scope,
+                        exc_info=True,
+                    )
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(
+                    fleet_sync_telemetry.record_iteration,
+                    route.origin_machine_pub,
+                    channel="relay",
+                    direction="pull",
+                    scope=scope,
+                    mode="checkpoint" if include_checkpoint else "delta",
+                    outcome=outcome,
+                    started_at_ns=started_at_ns,
+                    duration_ms=max(
+                        0,
+                        (time.monotonic_ns() - started_monotonic_ns)
+                        // 1_000_000,
+                    ),
+                    error_code=error_code,
+                    **metrics,
+                )
+
 
 dashboard_relay_sync_service = DashboardFleetRelaySyncService()
 
@@ -1141,7 +1348,9 @@ def _serve_checkpoint_decision(
     return resume_position == 0 and (requested or journal_gap)
 
 
-def _has_local_sync_state(machine_pub: str, root_pub: str) -> bool:
+def _has_local_sync_state(
+    machine_pub: str, root_pub: str, db_path: Path | None = None
+) -> bool:
     """Whether this machine holds any applied sync state at all.
 
     A machine with state syncs by deltas: its breadcrumb trail is
@@ -1150,10 +1359,10 @@ def _has_local_sync_state(machine_pub: str, root_pub: str) -> bool:
     epoch and did exactly that). State is a checkpoint receipt from ANY
     epoch, or any applied/authored transaction. The peer arguments are kept
     for call-site continuity; state is a property of this machine, not of
-    one peer.
+    one peer. ``db_path`` selects the scope database; None means personal.
     """
     del machine_pub, root_pub
-    path = _org_db_path("personal")
+    path = db_path if db_path is not None else _org_db_path("personal")
     try:
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
             receipt = conn.execute(
