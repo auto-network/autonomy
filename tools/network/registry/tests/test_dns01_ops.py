@@ -268,3 +268,55 @@ def test_value_cap_refused_uniformly(app, client, clock, root):
         reply = _ctrl(ws, "serve.dns01.present", _present_args(
             root, clock, order="o9", value="v9"))
         assert reply["ok"] is False and reply["error"] == "refused"
+
+
+def test_audit_records_survive_a_warning_level_service(
+    app, client, clock, root,
+):
+    """auto-dn6bo: production runs uvicorn at log_level=warning, which
+    starves the root logger of INFO handlers. Audits own their sink, so
+    a present, a cleanup, and a refusal each emit a retained record even
+    with the root at WARNING (pitfall cac2fc7a)."""
+    import logging
+
+    from tools.network.registry import relay as relay_mod
+
+    audit = logging.getLogger("autonomy.registry.audit")
+    assert audit.isEnabledFor(logging.INFO)
+    assert audit.propagate is False
+    assert audit.handlers, "audit logger must own a handler"
+
+    records: list = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    capture = _Capture(level=logging.INFO)
+    audit.addHandler(capture)
+    root_logger = logging.getLogger()
+    old_level = root_logger.level
+    root_logger.setLevel(logging.WARNING)
+    try:
+        register(client, clock, root, org_uuid=ORG)
+        with _tunnel(client, clock, root) as ws:
+            _bind_label(ws)
+            assert _ctrl(ws, "serve.dns01.present",
+                         _present_args(root, clock))["ok"] is True
+            assert _ctrl(ws, "serve.dns01.cleanup",
+                         _cleanup_args(root, clock))["ok"] is True
+            refused = _ctrl(ws, "serve.dns01.present",
+                            _present_args(root, clock, ttl="bogus"))
+            assert refused["ok"] is False
+    finally:
+        audit.removeHandler(capture)
+        root_logger.setLevel(old_level)
+
+    assert any("op=serve.dns01.present" in m and "result=ok" in m
+               for m in records)
+    assert any("op=serve.dns01.cleanup" in m and "result=ok" in m
+               for m in records)
+    assert any("result=refused" in m for m in records)
+    # The privacy contract holds in the retained line: hashed order/value
+    # only, never the raw token value.
+    assert not any("tok-1" in m for m in records)

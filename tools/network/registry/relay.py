@@ -1228,6 +1228,24 @@ DNS01_TTL_FLOOR, DNS01_TTL_CEILING = 30, 300
 DNS01_DEADLINE_MIN, DNS01_DEADLINE_MAX = 60, 900
 
 
+#: Security-audit sink (auto-dn6bo). The production service runs uvicorn at
+#: log_level="warning", which leaves the root logger with no INFO-passing
+#: handler — DNS-01 audit events logged through the module logger were
+#: silently dropped in production (pitfall cac2fc7a). Audits must not
+#: depend on the service's noise threshold, so this logger owns its own
+#: stderr handler (journald picks it up) and never propagates: it emits at
+#: default configuration no matter what the root is set to.
+_AUDIT_LOGGER = logging.getLogger("autonomy.registry.audit")
+_AUDIT_LOGGER.setLevel(logging.INFO)
+_AUDIT_LOGGER.propagate = False
+if not _AUDIT_LOGGER.handlers:
+    _audit_handler = logging.StreamHandler()
+    _audit_handler.setFormatter(
+        logging.Formatter("%(asctime)s audit %(message)s")
+    )
+    _AUDIT_LOGGER.addHandler(_audit_handler)
+
+
 def _dns01_audit(op: str, persona: str, args: dict, result: str) -> None:
     """One audit line per op: hashed order/value, never raw values, never
     key material. The uniform wire error keeps detail server-side."""
@@ -1235,7 +1253,7 @@ def _dns01_audit(op: str, persona: str, args: dict, result: str) -> None:
         raw = args.get(field)
         return hashlib.sha256(
             raw.encode() if isinstance(raw, str) else b"?").hexdigest()[:16]
-    logger.info(
+    _AUDIT_LOGGER.info(
         "dns01 op=%s persona=%s order=%s value=%s ttl=%s expiry=%s "
         "result=%s",
         op, (persona or "")[:8], _h("order"), _h("value"),
