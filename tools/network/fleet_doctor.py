@@ -48,6 +48,23 @@ from pathlib import Path
 _QUIET = False  # set True in main() for --json: report data still collected, nothing printed but the JSON
 
 
+def _observe(path) -> "sqlite3.Connection":
+    """Read-only connection for a live database, chosen eyes-open.
+
+    Deliberately NOT immutable=1: immutable ignores the WAL, and a live
+    dashboard's long-lived connections keep real state in the WAL for long
+    stretches — an immutable doctor would chronically misreport a healthy
+    machine as empty. The residual risk is the checkpoint-install swap
+    window: the doctor runs outside the dashboard's quiescence gate, and a
+    swap underneath a mapped -shm is an uncatchable SIGBUS. That window is
+    sub-second and rare; check_sync_data detects the install marker and
+    says readings may be unstable instead of pretending the risk away.
+    """
+    import sqlite3
+
+    return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+
+
 def _section(title: str) -> None:
     if not _QUIET:
         print(f"\n== {title} ==")
@@ -133,7 +150,7 @@ def _machine_identity_cross_check() -> tuple[str | None, list[str]]:
         if not path.exists():
             continue
         try:
-            conn = sqlite3.connect(str(path))
+            conn = _observe(path)
             row = conn.execute(
                 "SELECT payload FROM settings WHERE set_id='autonomy.machine.identity'"
             ).fetchone()
@@ -244,7 +261,7 @@ def check_local_store_migration(report: dict) -> None:
                 continue  # single copy, either location -- nothing to compare
 
             def _keys(path: Path) -> set[tuple[str, str]]:
-                conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+                conn = _observe(path)
                 try:
                     return {
                         (r[0], r[1])
@@ -285,7 +302,7 @@ def _roster_entry_setting_id(machine_pub: str) -> str | None:
     import sqlite3
     from tools.graph.db import _org_db_path
 
-    conn = sqlite3.connect(_org_db_path("personal"))
+    conn = _observe(_org_db_path("personal"))
     rows = conn.execute(
         "SELECT id, payload FROM settings WHERE set_id='autonomy.fleet.roster'"
     ).fetchall()
@@ -535,7 +552,7 @@ def check_org_resolution(report: dict) -> None:
         try:
             path = _org_db_path(default_org_slug)
             if path.exists():
-                conn = sqlite3.connect(str(path))
+                conn = _observe(path)
                 row = conn.execute(
                     "SELECT payload FROM settings WHERE set_id='autonomy.network.binding' LIMIT 1"
                 ).fetchone()
@@ -575,6 +592,21 @@ def check_org_resolution(report: dict) -> None:
 def check_sync_data(report: dict) -> None:
     _section("Personal-DB sync state")
     try:
+        from tools.network.fleet_checkpoint_handoff import _marker_path
+        from tools.graph.db import _org_db_path as _odp
+
+        marker = _marker_path(Path(_odp("personal")))
+        if marker.exists():
+            _line(
+                "checkpoint install in progress",
+                "handoff marker present -- readings below may be unstable "
+                "and this process may crash on the swap window; rerun after",
+                warn=True,
+            )
+            report["checkpoint_install_in_progress"] = True
+    except Exception:
+        pass
+    try:
         from tools.graph.db import _org_db_path
         import sqlite3
 
@@ -586,7 +618,7 @@ def check_sync_data(report: dict) -> None:
         size = path.stat().st_size
         _line("personal.db size", f"{size:,} bytes")
         report["personal_db_bytes"] = size
-        conn = sqlite3.connect(str(path))
+        conn = _observe(path)
         conn.row_factory = None
         for table in ("thoughts", "sources", "fleet_sync_catalog"):
             try:
@@ -623,7 +655,7 @@ def check_sync_data(report: dict) -> None:
             if not org_path.exists():
                 _line(f"scope {slug}", "database missing", warn=True)
                 continue
-            with sqlite3.connect(str(org_path)) as org_conn:
+            with _observe(org_path) as org_conn:
                 try:
                     catalog_rows = org_conn.execute(
                         "SELECT COUNT(*) FROM fleet_sync_catalog"
@@ -721,7 +753,7 @@ def check_catalog_canary(report: dict) -> None:
         if not path.exists():
             _line("personal.db", "does not exist", warn=True)
             return
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        conn = _observe(path)
         try:
             tracked_live = conn.execute(
                 "SELECT COUNT(*) FROM fleet_sync_catalog WHERE tombstone=0"
@@ -779,7 +811,7 @@ def verify_catalog(*, org: str = "personal") -> dict:
     if not path.exists():
         _line(f"{org}.db", "does not exist", fail=True)
         return {"ok": False}
-    conn = sqlite3.connect(str(path))
+    conn = _observe(path)
     try:
         origin_incarnation = conn.execute(
             "SELECT origin_incarnation FROM fleet_sync_state"
@@ -836,7 +868,7 @@ def repair_catalog(*, org: str = "personal", dry_run: bool = True) -> dict:
     if not path.exists():
         _line(f"{org}.db", "does not exist", fail=True)
         return {"ok": False}
-    conn = sqlite3.connect(str(path))
+    conn = _observe(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=30000")
     try:
@@ -982,7 +1014,7 @@ def _find_stale_fleet_join_state() -> dict:
 
     machine_path = _org_db_path("machine")
     if machine_path.exists():
-        conn = sqlite3.connect(machine_path)
+        conn = _observe(machine_path)
         conn.row_factory = sqlite3.Row
         try:
             rows = conn.execute(
@@ -1005,7 +1037,7 @@ def _find_stale_fleet_join_state() -> dict:
         path = _org_db_path(slug)
         if not path.exists():
             continue
-        conn = sqlite3.connect(path)
+        conn = _observe(path)
         try:
             rows = conn.execute(
                 "SELECT id, key, payload FROM settings "
@@ -1081,7 +1113,7 @@ def clear_stale_fleet_join(*, dry_run: bool = True) -> dict:
         return found
 
     machine_path = _org_db_path("machine")
-    conn = sqlite3.connect(machine_path)
+    conn = _observe(machine_path)
     conn.execute("DELETE FROM fleet_enrollment_invites")
     conn.commit()
     conn.close()
@@ -1121,7 +1153,7 @@ def kick_roster_entry(setting_id: str, *, dry_run: bool = True) -> dict:
     import sqlite3
     from tools.graph.db import _org_db_path
 
-    conn = sqlite3.connect(_org_db_path("personal"))
+    conn = _observe(_org_db_path("personal"))
     row = conn.execute(
         "SELECT payload FROM settings WHERE set_id='autonomy.fleet.roster' AND id=?",
         (setting_id,),

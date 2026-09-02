@@ -53,7 +53,8 @@ FLEET_SYNC_PROTOCOL_VERSION = 3
 _REQUEST_FIELDS = frozenset({
     "v", "op", "roster_epoch", "resume", "compat",
 })
-_REQUEST_FIELDS_SCOPED = _REQUEST_FIELDS | {"scope"}
+_REQUEST_OPTIONAL_FIELDS = frozenset({"scope", "bootstrap"})
+FILE_MAGIC = b"FSB1"
 _REFUSAL_FIELDS = frozenset({"v", "kind", "digest"})
 _DONE_FIELDS = frozenset(
     {
@@ -214,6 +215,20 @@ def roster_epoch(entries: Iterable[RosterEntry], root_pub: str) -> str:
     ).hexdigest()
 
 
+def _json_loose(raw: bytes) -> dict:
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise FleetSyncProtocolError(
+            "fleet stream control frame is not JSON"
+        ) from exc
+    if not isinstance(value, dict):
+        raise FleetSyncProtocolError(
+            "fleet stream control frame must be an object"
+        )
+    return value
+
+
 def _json_object(raw: bytes, fields: frozenset[str], what: str) -> dict:
     try:
         value = json.loads(raw)
@@ -287,12 +302,60 @@ def decode_schema_refusal(raw: bytes) -> str:
     return _require_hex64(value["digest"], "fleet sync refusal digest")
 
 
+def encode_checkpoint_file(relative: str, body: bytes) -> bytes:
+    header = canonical_json({
+        "path": relative,
+        "size": len(body),
+        "sha256": hashlib.sha256(body).hexdigest(),
+    })
+    return FILE_MAGIC + struct.pack(">I", len(header)) + header + body
+
+
+def decode_checkpoint_file(raw: bytes) -> tuple[str, bytes]:
+    from pathlib import PurePosixPath
+
+    if not isinstance(raw, bytes) or not raw.startswith(FILE_MAGIC) or len(raw) < 8:
+        raise FleetSyncProtocolError("checkpoint file frame is malformed")
+    header_size = struct.unpack(">I", raw[4:8])[0]
+    if header_size > 4096 or 8 + header_size > len(raw):
+        raise FleetSyncProtocolError("checkpoint file header is malformed")
+    try:
+        header = json.loads(raw[8:8 + header_size])
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise FleetSyncProtocolError("checkpoint file header is not JSON") from exc
+    if not isinstance(header, dict) or set(header) != {"path", "size", "sha256"}:
+        raise FleetSyncProtocolError("checkpoint file header has unknown fields")
+    relative = header["path"]
+    path = PurePosixPath(relative) if isinstance(relative, str) else None
+    if (
+        path is None
+        or path.is_absolute()
+        or not path.parts
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise FleetSyncProtocolError("checkpoint file path escapes its stage")
+    body = raw[8 + header_size:]
+    if header["size"] != len(body) or header["sha256"] != hashlib.sha256(body).hexdigest():
+        raise FleetSyncProtocolError("checkpoint file digest does not match")
+    return path.as_posix(), body
+
+
+def serve_checkpoint_decision(
+    resume_position: int, requested: bool, journal_gap: bool
+) -> bool:
+    """A resolvable trail always means deltas; an unresolvable one means a
+    checkpoint when the peer asked or when replay would omit retired
+    history."""
+    return resume_position == 0 and (requested or journal_gap)
+
+
 def encode_pull_request(
     epoch: str,
     *,
     compat: str,
     resume: Sequence[tuple[str, str, int]] = (),
     scope: str = "personal",
+    bootstrap: bool = False,
 ) -> bytes:
     """Ask for every journal transaction after a content-addressed position.
 
@@ -320,22 +383,37 @@ def encode_pull_request(
         if not scope or not isinstance(scope, str) or ":" in scope:
             raise FleetSyncProtocolError("fleet sync scope is malformed")
         body["scope"] = scope
+    if bootstrap:
+        body["bootstrap"] = True
     return canonical_json(body)
 
 
 def decode_pull_request(
     raw: bytes,
-) -> tuple[str, tuple[tuple[str, str, int], ...], str, str]:
+) -> tuple[str, tuple[tuple[str, str, int], ...], str, str, bool]:
     try:
-        value = _json_object(raw, _REQUEST_FIELDS, "fleet sync request")
-        scope = "personal"
-    except FleetSyncProtocolError:
-        value = _json_object(
-            raw, _REQUEST_FIELDS_SCOPED, "fleet sync request"
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
+        raise FleetSyncProtocolError(
+            "fleet sync request is not valid JSON"
+        ) from exc
+    if (
+        not isinstance(value, dict)
+        or not _REQUEST_FIELDS <= set(value)
+        or not set(value) <= (_REQUEST_FIELDS | _REQUEST_OPTIONAL_FIELDS)
+    ):
+        raise FleetSyncProtocolError(
+            f"fleet sync request must carry {sorted(_REQUEST_FIELDS)} "
+            f"plus only {sorted(_REQUEST_OPTIONAL_FIELDS)}"
         )
-        scope = value["scope"]
-        if not isinstance(scope, str) or not scope or ":" in scope:
-            raise FleetSyncProtocolError("fleet sync scope is malformed")
+    if value["v"] != FLEET_SYNC_PROTOCOL_VERSION:
+        raise FleetSyncProtocolError("unsupported fleet sync request version")
+    scope = value.get("scope", "personal")
+    if not isinstance(scope, str) or not scope or ":" in scope:
+        raise FleetSyncProtocolError("fleet sync scope is malformed")
+    bootstrap = value.get("bootstrap", False)
+    if not isinstance(bootstrap, bool):
+        raise FleetSyncProtocolError("fleet sync bootstrap flag must be bool")
     if value["op"] != "pull":
         raise FleetSyncProtocolError("unsupported fleet sync operation")
     epoch = _require_hex64(value["roster_epoch"], "fleet sync roster_epoch")
@@ -346,7 +424,7 @@ def decode_pull_request(
     return epoch, tuple(
         decode_breadcrumb(entry, "fleet sync resume breadcrumb")
         for entry in resume
-    ), compat, scope
+    ), compat, scope, bootstrap
 
 
 def encode_authored(item: AuthoredMutation, *, transaction_operations: int) -> bytes:
@@ -549,6 +627,33 @@ class SQLiteFleetSyncStore:
         conn, catalog = self._open()
         try:
             return catalog.apply_remote_batch(items)
+        finally:
+            conn.close()
+
+    def has_state(self) -> bool:
+        """Any applied or authored sync state at all, receipts included.
+
+        Read with a plain connection: the answer is needed before fleet
+        writers are activated on a brand-new database, where absent tables
+        simply mean no state.
+        """
+        import sqlite3 as _sqlite3
+
+        if not Path(self.path).exists():
+            return False
+        conn = _sqlite3.connect(f"file:{self.path}?mode=ro", uri=True)
+        try:
+            receipt = conn.execute(
+                "SELECT 1 FROM fleet_sync_peer_state "
+                "WHERE checkpoints_received>0 LIMIT 1"
+            ).fetchone()
+            if receipt is not None:
+                return True
+            return conn.execute(
+                "SELECT 1 FROM fleet_sync_transactions LIMIT 1"
+            ).fetchone() is not None
+        except _sqlite3.Error:
+            return False
         finally:
             conn.close()
 
@@ -818,12 +923,13 @@ class FleetSyncScheduler:
         telemetry_stats: dict[str, int] | None = None,
         telemetry_started_at_ns: int | None = None,
         telemetry_started_monotonic_ns: int | None = None,
+        allow_checkpoint: bool = True,
     ):
         from tools.network.fleet_sync.blob_transport import peek_request_op
 
         if peek_request_op(message) == "blob":
             return self._blob_response(message, peer_pub)
-        _requested_epoch, resume_trail, peer_digest, scope = (
+        _requested_epoch, resume_trail, peer_digest, scope, bootstrap = (
             decode_pull_request(message)
         )
         store = await asyncio.to_thread(self._store_for, scope)
@@ -864,9 +970,80 @@ class FleetSyncScheduler:
                 # ids; the position is recomputed here so a database restored
                 # from backup re-serves its divergence window instead of
                 # honouring a cursor into journal rows that no longer exist.
-                cursor = await asyncio.to_thread(
-                    store.resume_ref, resume_trail
-                )
+                cursor = 0
+                if resume_trail:
+                    cursor = await asyncio.to_thread(
+                        store.resume_ref, resume_trail
+                    )
+                journal_gap = await asyncio.to_thread(store.journal_gap)
+                # An empty server has nothing a checkpoint delivers; two
+                # freshly prepared machines must meet through (empty) deltas,
+                # not by installing each other's blank databases.
+                server_has_content = await asyncio.to_thread(store.has_state)
+                if allow_checkpoint and server_has_content and (
+                    serve_checkpoint_decision(cursor, bootstrap, journal_gap)
+                ):
+                    import shutil as _shutil
+                    import tempfile as _tempfile
+
+                    from tools.network.fleet_sync.sync import FleetSyncAlpha
+
+                    scope_path = self._scope_paths()[scope]
+                    active = tuple(sorted(resolve(
+                        self._roster_snapshot,
+                        anchor_root_pub=self.config.personal_root_pub,
+                    )))
+                    stage = Path(_tempfile.mkdtemp(
+                        prefix="fleet-direct-checkpoint-"
+                    ))
+                    built = stage / "checkpoint"
+                    try:
+                        def build() -> None:
+                            with FleetSyncAlpha(
+                                scope_path, self.authenticator.machine_pub
+                            ) as alpha:
+                                alpha.checkpoint(
+                                    built,
+                                    roster_epoch=epoch,
+                                    active_roster=active,
+                                )
+
+                        await asyncio.to_thread(build)
+                        files = tuple(sorted(
+                            path for path in built.rglob("*")
+                            if path.is_file()
+                        ))
+                        total = sum(path.stat().st_size for path in files)
+                        begin = canonical_json({
+                            "v": FLEET_SYNC_PROTOCOL_VERSION,
+                            "kind": "checkpoint.begin",
+                            "file_count": len(files),
+                            "total_bytes": total,
+                            "source_machine_pub":
+                                self.authenticator.machine_pub,
+                            "roster_epoch": epoch,
+                        })
+                        stats["bytes_sent"] += len(begin)
+                        yield begin
+                        for path in files:
+                            self.authenticator.authorize(peer_pub)
+                            encoded = encode_checkpoint_file(
+                                path.relative_to(built).as_posix(),
+                                await asyncio.to_thread(path.read_bytes),
+                            )
+                            stats["bytes_sent"] += len(encoded)
+                            stats["checkpoint_bytes"] += len(encoded)
+                            yield encoded
+                        end = canonical_json({
+                            "v": FLEET_SYNC_PROTOCOL_VERSION,
+                            "kind": "checkpoint.end",
+                            "file_count": len(files),
+                            "total_bytes": total,
+                        })
+                        stats["bytes_sent"] += len(end)
+                        yield end
+                    finally:
+                        _shutil.rmtree(stage, ignore_errors=True)
                 # A resolvable trail is the peer's durable acknowledgement of
                 # this journal's prefix through that transaction. Record it
                 # before serving; the fleet-wide floor of these
@@ -1001,6 +1178,52 @@ class FleetSyncScheduler:
                 yield frame
 
         return response()
+
+    async def _install_direct_checkpoint(
+        self, stage: Path, scope: str, source_machine_pub: str, epoch: str
+    ) -> None:
+        """Quiesce the scope database and publish a received checkpoint.
+
+        The scheduler's own store connections are short-lived, so between
+        stream messages nothing of ours holds the database; any OTHER live
+        production handle makes the quiescence gate refuse, the pull fails,
+        and the ordinary backoff retries.
+        """
+        from tools.graph.db import GraphDB
+        from tools.network.fleet_checkpoint_handoff import (
+            install_quiesced_checkpoint,
+        )
+        from tools.network.fleet_sync_connection import (
+            acquire_database_quiescence,
+        )
+
+        scope_path = self._scope_paths()[scope]
+        active = tuple(sorted(resolve(
+            self._roster_snapshot,
+            anchor_root_pub=self.config.personal_root_pub,
+        )))
+
+        def install() -> None:
+            GraphDB.close_pooled_path(scope_path)
+            token = acquire_database_quiescence(scope_path)
+            try:
+                install_quiesced_checkpoint(
+                    stage,
+                    scope_path,
+                    quiescence=token,
+                    target_origin_incarnation=(
+                        self.config.roster_machine_pub
+                        or self.config.machine_key.public_hex
+                    ),
+                    expected_roster_epoch=epoch,
+                    expected_active_roster=active,
+                    source_machine_pub=source_machine_pub,
+                )
+            finally:
+                token.release()
+
+        await asyncio.to_thread(install)
+        _emit_settings_materialized(gap=True)
 
     async def _drain_attachment_backlog(
         self, machine_pub: str, addresses: Sequence[str],
@@ -1187,14 +1410,20 @@ class FleetSyncScheduler:
             local_digest = await asyncio.to_thread(
                 store.compatibility_digest
             )
+            bootstrap = not await asyncio.to_thread(store.has_state)
             request = encode_pull_request(
-                epoch, compat=local_digest, resume=resume_trail, scope=scope
+                epoch, compat=local_digest, resume=resume_trail, scope=scope,
+                bootstrap=bootstrap,
             )
             sent += len(request)
             await channel.send_message(request)
 
             digest = hashlib.sha256()
             message_count = 0
+            checkpoint_stage: Path | None = None
+            checkpoint_expected: tuple[int, int] | None = None
+            checkpoint_seen = [0, 0]
+            installed_checkpoint = False
             pending: list[AuthoredMutation] = []
             pending_identity = None
             pending_count: int | None = None
@@ -1273,6 +1502,60 @@ class FleetSyncScheduler:
                     break
                 if stream_final:
                     raise FleetSyncProtocolError("fleet mutation ended the stream")
+                if message.startswith(FILE_MAGIC):
+                    if checkpoint_stage is None:
+                        raise FleetSyncProtocolError(
+                            "checkpoint file arrived before its header"
+                        )
+                    relative, body = decode_checkpoint_file(message)
+                    target_file = checkpoint_stage / relative
+                    target_file.parent.mkdir(parents=True, exist_ok=True)
+                    target_file.write_bytes(body)
+                    checkpoint_seen[0] += 1
+                    checkpoint_seen[1] += len(body)
+                    continue
+                if message.startswith(b"{"):
+                    control = _json_loose(message)
+                    kind = control.get("kind")
+                    if kind == "checkpoint.begin":
+                        if checkpoint_stage is not None:
+                            raise FleetSyncProtocolError(
+                                "nested checkpoint stream"
+                            )
+                        import tempfile as _tempfile
+
+                        checkpoint_stage = Path(_tempfile.mkdtemp(
+                            prefix="fleet-direct-received-"
+                        ))
+                        checkpoint_expected = (
+                            int(control["file_count"]),
+                            int(control["total_bytes"]),
+                        )
+                        continue
+                    if kind == "checkpoint.end":
+                        if (
+                            checkpoint_stage is None
+                            or checkpoint_expected is None
+                            or tuple(checkpoint_seen) != checkpoint_expected
+                        ):
+                            raise FleetSyncProtocolError(
+                                "checkpoint stream is incomplete"
+                            )
+                        await self._install_direct_checkpoint(
+                            checkpoint_stage, scope, machine_pub, epoch
+                        )
+                        installed_checkpoint = True
+                        await asyncio.to_thread(
+                            store.record_peer,
+                            machine_pub,
+                            epoch,
+                            online=True,
+                            checkpoints_received=1,
+                        )
+                        continue
+                    raise FleetSyncProtocolError(
+                        "unknown fleet stream control frame"
+                    )
                 item, operation_count = decode_authored(message)
                 identity = _transaction_identity(item)
                 if pending_identity is not None and identity != pending_identity:
@@ -1367,6 +1650,10 @@ class FleetSyncScheduler:
             # already happened above.
             raise
         finally:
+            if checkpoint_stage is not None:
+                import shutil as _shutil
+
+                _shutil.rmtree(checkpoint_stage, ignore_errors=True)
             if channel is not None:
                 await channel.close()
 

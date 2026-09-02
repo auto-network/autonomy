@@ -491,6 +491,9 @@ class ConnectorFleetRuntime:
                     telemetry_stats=stats,
                     telemetry_started_at_ns=started_at_ns,
                     telemetry_started_monotonic_ns=started_monotonic_ns,
+                    # The relay stream handles its own checkpoint phase above;
+                    # the delegated delta phase must never start a second one.
+                    allow_checkpoint=False,
                 )
                 async for frame in deltas:
                     yield frame

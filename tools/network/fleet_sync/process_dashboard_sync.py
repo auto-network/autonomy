@@ -62,6 +62,22 @@ def _peer_report(path: Path) -> dict:
 async def _worker(config_path: Path) -> int:
     payload = json.loads(config_path.read_text())
     entries = tuple(_entry(item) for item in payload["roster_entries"])
+    # In-memory resume trails, as production keeps durably: without a trail
+    # every pull presents position zero, and against a gap-pruned journal
+    # the continuity decision would re-checkpoint on every poll. Losing the
+    # trail on process death is correct — the restarted worker re-bootstraps
+    # once and resumes.
+    acknowledged: dict[tuple[str, str], list] = {}
+
+    def record(peer, **values):
+        breadcrumb = values.get("acknowledged_breadcrumb")
+        if breadcrumb is not None and values.get("outcome") == "success":
+            acknowledged[(peer, values.get("scope", "personal"))] = [(
+                breadcrumb["origin"],
+                breadcrumb["transaction"],
+                breadcrumb["timestamp"],
+            )]
+
     scheduler = FleetSyncScheduler(
         FleetSyncRuntimeConfig(
             machine_key=KeyPair.from_private_hex(payload["machine_private"]),
@@ -69,13 +85,16 @@ async def _worker(config_path: Path) -> int:
             roster_entries=lambda: entries,
             peer_addresses=lambda: payload["peer_addresses"],
             personal_db_path=Path(payload["personal_db_path"]),
+            telemetry_recorder=record,
+            resume_cursor=lambda peer, scope="personal": acknowledged.get(
+                (peer, scope), []
+            ),
             sync_scopes=(
                 (lambda scopes: (lambda: {
                     slug: Path(path) for slug, path in scopes.items()
                 }))(payload["sync_scopes"])
                 if payload.get("sync_scopes") else None
             ),
-            poll_interval=0.03,
             connect_timeout=3.0,
             min_backoff=0.02,
             max_backoff=0.08,
@@ -109,6 +128,15 @@ def _insert(path: Path, source_id: str, title: str) -> None:
     db = GraphDB(path)
     try:
         db.insert_source(Source(id=source_id, type="note", title=title))
+    finally:
+        db.close()
+
+
+def _delete(path: Path, source_id: str) -> None:
+    db = GraphDB(path)
+    try:
+        db.conn.execute("DELETE FROM sources WHERE id=?", (source_id,))
+        db.conn.commit()
     finally:
         db.close()
 
@@ -193,6 +221,11 @@ def run_process_acceptance(root_dir: Path) -> dict:
     _prepare(left_db, left_key)
     _prepare(right_db, right_key)
     _insert(right_db, "process-first", "first process crossing")
+    # Authored-then-deleted local state keeps the probe on the delta path
+    # it exists to prove (checkpoint bootstrap has its own harness coverage)
+    # without a live row that would diverge the final digests.
+    _insert(left_db, "left-local-seed", "keeps the delta path")
+    _delete(left_db, "left-local-seed")
 
     base = {
         "personal_root_pub": personal_root.public_hex,

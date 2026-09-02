@@ -52,3 +52,15 @@ bootstrap (all machines enroll before first writes). Checkpoint-over-direct
 arrives with bead auto-bo6qr. Seed scenarios live in
 `tests/test_harness_scenarios.py`; the adversarial matrix is bead
 auto-doio1.
+
+## Observer rule — read machines with `mode=ro&immutable=1`
+
+The parent observes machine databases while workers may be atomically
+replacing them (checkpoint installs). A plain — even read-only — WAL
+connection mmaps the `-shm` file, and a replacement underneath that mapping
+is a SIGBUS: `Fatal Python error: Bus error`, a hard crash no except block
+catches (observed live under xdist, 2026-09-02). `immutable=1` reads take no
+locks and map nothing, so a torn mid-swap read degrades into an
+`sqlite3.Error` the observers already treat as "not yet observable". Never
+open a machine database from scenario code with a plain connect; use
+`fleet.has` / `fleet.digest` / `fleet._read_only`.

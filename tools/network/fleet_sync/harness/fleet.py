@@ -125,6 +125,7 @@ class HarnessFleet:
                 f"ws://{link.host}:{link.port}"
             ]
         machine.config_path.write_text(json.dumps({
+            "poll_interval": 0.06,
             "personal_root_pub": self._root_key.public_hex,
             "roster_entries": [entry.to_dict() for entry in self._entries],
             "machine_private": machine.key.private_hex,
@@ -239,10 +240,13 @@ class HarnessFleet:
         self.evidence["writes"] += 1
 
     def has_org(self, index: int, slug: str, source_id: str) -> bool:
-        with sqlite3.connect(self.org_db_path(index, slug)) as conn:
-            return conn.execute(
-                "SELECT 1 FROM sources WHERE id=?", (source_id,)
-            ).fetchone() is not None
+        try:
+            with self._read_only(self.org_db_path(index, slug)) as conn:
+                return conn.execute(
+                    "SELECT 1 FROM sources WHERE id=?", (source_id,)
+                ).fetchone() is not None
+        except sqlite3.Error:
+            return False
 
     def write(self, index: int, source_id: str, title: str) -> None:
         graph = GraphDB(self.machines[index].db_path)
@@ -252,18 +256,38 @@ class HarnessFleet:
             graph.close()
         self.evidence["writes"] += 1
 
+    def _read_only(self, path: Path) -> sqlite3.Connection:
+        # immutable=1 takes no locks and maps no WAL shared memory: a plain
+        # read-only WAL connection mmaps the -shm file, and a concurrent
+        # checkpoint install replacing the database underneath that mapping
+        # is a SIGBUS (observed as "Fatal Python error: Bus error" under
+        # xdist). Immutable reads degrade a torn mid-swap read into an
+        # sqlite3.Error, which every caller already treats as
+        # "not yet observable".
+        return sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)
+
     def has(self, index: int, source_id: str) -> bool:
-        with sqlite3.connect(self.machines[index].db_path) as conn:
-            return conn.execute(
-                "SELECT 1 FROM sources WHERE id=?", (source_id,)
-            ).fetchone() is not None
+        # Read-only and swap-tolerant: a checkpoint install atomically
+        # replaces the database file, and mid-swap is by definition not yet
+        # the observed state (a plain connect would even create a parasite
+        # empty file at the momentarily absent path).
+        try:
+            with self._read_only(self.machines[index].db_path) as conn:
+                return conn.execute(
+                    "SELECT 1 FROM sources WHERE id=?", (source_id,)
+                ).fetchone() is not None
+        except sqlite3.Error:
+            return False
 
     def digest(self, index: int) -> str:
-        with sqlite3.connect(self.machines[index].db_path) as conn:
-            rows = conn.execute(
-                "SELECT id,type,title,metadata,created_at,ingested_at "
-                "FROM sources ORDER BY id"
-            ).fetchall()
+        try:
+            with self._read_only(self.machines[index].db_path) as conn:
+                rows = conn.execute(
+                    "SELECT id,type,title,metadata,created_at,ingested_at "
+                    "FROM sources ORDER BY id"
+                ).fetchall()
+        except sqlite3.Error:
+            return f"mid-install:{index}"  # never equal across machines
         return hashlib.sha256(
             canonical_json([list(row) for row in rows])
         ).hexdigest()
@@ -272,18 +296,63 @@ class HarnessFleet:
         digests = {self.digest(machine.index) for machine in self.machines}
         return len(digests) == 1
 
+    def _progress_signal(self) -> tuple:
+        """Everything that observably advances while the fleet works."""
+        signal = []
+        for machine in self.machines:
+            signal.append(self.digest(machine.index))
+            try:
+                with self._read_only(machine.db_path) as conn:
+                    signal.append(conn.execute(
+                        "SELECT COALESCE(SUM(transactions_applied),0),"
+                        "COALESCE(SUM(bytes_received),0) "
+                        "FROM fleet_sync_peer_state"
+                    ).fetchone())
+            except sqlite3.Error:
+                signal.append(None)
+        return tuple(signal)
+
     def wait(
         self, predicate: Callable[[], bool], *, timeout: float,
         interval: float = 0.05, label: str = "condition",
+        stall_after: float = 30.0,
     ) -> float:
+        """Poll until the predicate holds; fail on STALL, not on schedule.
+
+        The primary failure signal is forward progress: if no machine's
+        digest, applied-transaction count, or received-byte counter changes
+        for ``stall_after`` seconds while the predicate stays false, the
+        fleet is wedged and the wait fails fast with that diagnosis. The
+        absolute ``timeout`` is a distant backstop for pathological
+        progress-without-convergence, so a loaded-but-working fleet is
+        never mistaken for a broken one.
+        """
         started = time.monotonic()
         deadline = started + timeout
+        last_signal = self._progress_signal()
+        last_advance = started
+        longest_stall = 0.0
         while not predicate():
-            if time.monotonic() >= deadline:
+            now = time.monotonic()
+            signal = self._progress_signal()
+            if signal != last_signal:
+                last_signal = signal
+                last_advance = now
+            stalled = now - last_advance
+            longest_stall = max(longest_stall, stalled)
+            if stalled >= stall_after:
                 raise TimeoutError(
-                    f"harness {label} not met within {timeout:.1f}s"
+                    f"harness {label}: no forward progress for "
+                    f"{stalled:.1f}s (stall threshold {stall_after:.0f}s, "
+                    f"{now - started:.1f}s elapsed)"
+                )
+            if now >= deadline:
+                raise TimeoutError(
+                    f"harness {label} not met within {timeout:.1f}s "
+                    "despite continuing progress"
                 )
             time.sleep(interval)
+        self.evidence["longest_stall_s"] = round(longest_stall, 2)
         return time.monotonic() - started
 
     def wait_converged(self, *, timeout: float) -> float:

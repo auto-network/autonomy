@@ -125,14 +125,38 @@ def test_end_to_end_attachment_crosses_the_fleet(tmp_path: Path) -> None:
             graph.close()
 
         def realized_on_b() -> bool:
-            with sqlite3.connect(fleet.machines[1].db_path) as conn:
-                row = conn.execute(
-                    "SELECT file_path FROM attachments WHERE id='shared-att'"
-                ).fetchone()
-            return row is not None and Path(row[0]).is_file()
+            try:
+                with sqlite3.connect(
+                    f"file:{fleet.machines[1].db_path}"
+                    "?mode=ro&immutable=1",
+                    uri=True,
+                ) as conn:
+                    row = conn.execute(
+                        "SELECT file_path FROM attachments "
+                        "WHERE id='shared-att'"
+                    ).fetchone()
+            except sqlite3.Error:
+                return False
+            if row is None or not Path(row[0]).is_file():
+                return False
+            # Realization and the quarantine-entry delete commit in
+            # separate transactions; converged means both are visible.
+            try:
+                with sqlite3.connect(
+                    f"file:{fleet.machines[1].db_path}"
+                    "?mode=ro&immutable=1",
+                    uri=True,
+                ) as conn:
+                    return conn.execute(
+                        "SELECT COUNT(*) FROM fleet_sync_quarantine"
+                    ).fetchone()[0] == 0
+            except sqlite3.Error:
+                return False
 
-        fleet.wait(realized_on_b, timeout=30.0, label="attachment realized")
-        with sqlite3.connect(fleet.machines[1].db_path) as conn:
+        fleet.wait(realized_on_b, timeout=120.0, label="attachment realized")
+        with sqlite3.connect(
+            f"file:{fleet.machines[1].db_path}?mode=ro&immutable=1", uri=True
+        ) as conn:
             file_path, stored_hash = conn.execute(
                 "SELECT file_path,hash FROM attachments WHERE id='shared-att'"
             ).fetchone()
