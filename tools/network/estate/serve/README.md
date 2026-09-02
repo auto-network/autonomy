@@ -10,10 +10,13 @@ demux (auto-ot0t7) for v1; caddy-l4 remains the path only if serve is ever
 consolidated back onto the shared IP or moved to anycast.
 
 The relay never sees plaintext (raw TLS passthrough → tunnel → the operator's
-local Caddy terminates with the persona wildcard cert). Known v1 limitation:
-the forwarder→ingress hop is loopback, so per-source abuse limiting on serving
-streams sees 127.0.0.1 until the ingress consumes PROXY v2 — documented,
-POC-acceptable, deferred with the registry-parser work.
+local Caddy terminates with the persona wildcard cert). The forwarder→ingress
+hop is loopback, but the forward prefixes each upstream connection with a
+PROXY protocol v2 header (auto-p20eb) carrying the real client address, and
+the registry trusts that header only from the loopback forward
+(`--stream-proxy-source 127.0.0.1`), so per-source accounting sees the true
+client rather than 127.0.0.1. A forward that predates PROXY v2 sends no header
+and is still parsed as TLS, so upgrade ordering is free.
 
 ## Pieces (all on registry-ash-1)
 - `serve_forward.py` + `autonomy-serve-forward.service` — the `:443`→`:8479`

@@ -19,15 +19,19 @@ WorkingDirectory=/opt/autonomy-registry
 # --base-url controls only the public URL returned for a minted grant. The
 # registry API remains on registry.auto.network; public viewers use the relay
 # hostname. Tokens themselves are hostname-independent.
-# --stream-ingress-port: the raw tls-stream ingress (auto-9z1xh),
-# loopback-only until the pinned public Caddy L4 (auto-ot0t7) fronts it —
-# enabled now so that rollout needs no registry restart.
+# --stream-ingress-port: the raw tls-stream ingress (auto-9z1xh). The serve
+# edge forward (serve_forward.py) reaches it over loopback, so
+# --stream-proxy-source 127.0.0.1 trusts a PROXY v2 header (real client
+# address, auto-p20eb) only from that hop; a header from any other peer is
+# dropped. A forward that predates PROXY v2 sends none and is still parsed
+# as TLS, so rollout ordering is free.
 ExecStart=/opt/autonomy-registry/venv/bin/python -m tools.network.registry \
     --db /var/lib/autonomy-registry/registry.db \
     --version-file /opt/autonomy-registry/REVISION.json \
     --host 127.0.0.1 --port 8477 \
     --base-url https://relay.auto.network \
-    --stream-ingress-port 8479
+    --stream-ingress-port 8479 \
+    --stream-proxy-source 127.0.0.1
 Restart=on-failure
 RestartSec=2
 
