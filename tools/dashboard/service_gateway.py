@@ -36,6 +36,44 @@ _NETWORK_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
+def _service_state_page(title: str, detail: str) -> str:
+    """Return the dependency-free Autonomy Service failure surface."""
+    return "".join(
+        (
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">",
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">",
+            "<meta name=\"robots\" content=\"noindex,nofollow\"><title>", title,
+            " · Autonomy</title><style>:root{color-scheme:dark}*{box-sizing:border-box}",
+            "html,body{height:100%;margin:0}body{display:grid;place-items:center;",
+            "padding:24px;background:#101014;color:#d6d6de;font:15px/1.5 system-ui,",
+            "-apple-system,sans-serif}.card{width:min(100%,520px);padding:30px;",
+            "border:1px solid #2b2b35;border-radius:18px;background:#17171d;",
+            "box-shadow:0 24px 80px #0006}.brand{color:#9da0ae;font-size:12px;",
+            "font-weight:700;letter-spacing:.08em;text-transform:uppercase}",
+            "h1{margin:18px 0 8px;color:#f1f1f5;font-size:24px;line-height:1.2}",
+            "p{margin:0;color:#a5a5b2;max-width:44ch}.status{display:inline-flex;",
+            "align-items:center;gap:8px;margin-top:22px;color:#c8c8d2;font-size:13px}",
+            ".dot{width:8px;height:8px;border-radius:50%;background:#e0a85b;",
+            "box-shadow:0 0 0 4px #e0a85b1f}</style></head><body><main class=\"card\">",
+            "<div class=\"brand\">Autonomy Service</div><h1>", title, "</h1><p>",
+            detail,
+            "</p><div class=\"status\"><span class=\"dot\"></span>",
+            "Temporary service state</div></main></body></html>",
+        )
+    )
+
+
+def _static_response(lines: list[str], title: str, detail: str, status: int) -> None:
+    """Append a branded HTML response using a Caddy-safe quoted token."""
+    lines.extend(
+        [
+            '\theader Content-Type "text/html; charset=utf-8"',
+            '\theader Cache-Control "no-store"',
+            f"\trespond {json.dumps(_service_state_page(title, detail))} {status}",
+        ]
+    )
+
+
 class ServiceGatewayControlError(RuntimeError):
     """The local Caddy admin socket refused or could not load a config."""
 
@@ -189,39 +227,45 @@ def render_caddyfile(
 
     for route in routes:
         cert_path, key_path = certificates[route.hostname]
-        lines.extend(
-            [
-                f"https://{route.hostname}:{LISTEN_PORT} {{",
-                f"\ttls {cert_path} {key_path}",
-                f"\treverse_proxy {route.upstream_ip}:{route.port} {{",
-                "\t\tflush_interval -1",
-                "\t}",
-                "}",
-                "",
-            ]
+        lines.extend([
+            f"https://{route.hostname}:{LISTEN_PORT} {{",
+            f"\ttls {cert_path} {key_path}",
+            f"\treverse_proxy {route.upstream_ip}:{route.port} {{",
+            "\t\tflush_interval -1",
+            "\t}",
+            "\thandle_errors {",
+        ])
+        _static_response(
+            lines,
+            "This service is temporarily unavailable",
+            "The published service is live, but its application is not responding. Try again shortly.",
+            502,
         )
+        lines.extend(["\t}", "}", ""])
     for hostname in paused_hosts:
         cert_path, key_path = certificates[hostname]
         lines.extend(
-            [
-                f"https://{hostname}:{LISTEN_PORT} {{",
-                f"\ttls {cert_path} {key_path}",
-                '\trespond "This service is temporarily paused by its operator." 503',
-                "}",
-                "",
-            ]
+            [f"https://{hostname}:{LISTEN_PORT} {{", f"\ttls {cert_path} {key_path}"]
         )
+        _static_response(
+            lines,
+            "This service is paused",
+            "Its owner has paused this publication. It may become available again later.",
+            503,
+        )
+        lines.extend(["}", ""])
     for hostname in unavailable_hosts:
         cert_path, key_path = certificates[hostname]
         lines.extend(
-            [
-                f"https://{hostname}:{LISTEN_PORT} {{",
-                f"\ttls {cert_path} {key_path}",
-                '\trespond "Service unavailable" 503',
-                "}",
-                "",
-            ]
+            [f"https://{hostname}:{LISTEN_PORT} {{", f"\ttls {cert_path} {key_path}"]
         )
+        _static_response(
+            lines,
+            "This service is not running",
+            "The publication still exists, but its application is not currently available.",
+            503,
+        )
+        lines.extend(["}", ""])
     return "\n".join(lines)
 
 

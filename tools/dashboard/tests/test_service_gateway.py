@@ -52,7 +52,10 @@ def test_unavailable_host_is_exact_and_never_falls_through_to_an_upstream():
     rendered = service_gateway.render_caddyfile([], unavailable_hosts=[HOSTNAME])
 
     assert f"https://{HOSTNAME}:9443" in rendered
-    assert 'respond "Service unavailable" 503' in rendered
+    assert "This service is not running" in rendered
+    assert "publication still exists" in rendered
+    assert 'header Content-Type "text/html; charset=utf-8"' in rendered
+    assert " 503" in rendered
     assert "reverse_proxy" not in rendered
     assert "*.serve.auto.network" not in rendered
 
@@ -61,12 +64,22 @@ def test_paused_host_explains_operator_pause_without_an_upstream():
     rendered = service_gateway.render_caddyfile([], paused_hosts=[HOSTNAME])
 
     assert f"https://{HOSTNAME}:9443" in rendered
-    assert (
-        'respond "This service is temporarily paused by its operator." 503'
-        in rendered
-    )
+    assert "This service is paused" in rendered
+    assert "owner has paused this publication" in rendered
+    assert "Autonomy Service" in rendered
     assert "reverse_proxy" not in rendered
-    assert "Service unavailable" not in rendered
+    assert "This service is not running" not in rendered
+
+
+def test_active_route_brands_transport_failure_without_changing_upstream():
+    rendered = service_gateway.render_caddyfile([_route()])
+
+    assert "reverse_proxy 172.16.0.42:8000" in rendered
+    assert "handle_errors" in rendered
+    assert "This service is temporarily unavailable" in rendered
+    assert "application is not responding" in rendered
+    assert 'header Cache-Control "no-store"' in rendered
+    assert " 502" in rendered
 
 
 def test_each_persona_hostname_uses_its_own_certificate_pair():

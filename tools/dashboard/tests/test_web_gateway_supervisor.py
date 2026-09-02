@@ -524,10 +524,8 @@ async def test_planner_builds_complete_active_and_paused_config(monkeypatch):
     assert [route.route_id for route in plan.routes] == [active_id, paused_id]
     assert f"reverse_proxy 172.16.0.42:8000" in plan.caddyfile
     assert f"https://{paused_host}:9443" in plan.caddyfile
-    assert (
-        'respond "This service is temporarily paused by its operator." 503'
-        in plan.caddyfile
-    )
+    assert "This service is paused" in plan.caddyfile
+    assert "owner has paused this publication" in plan.caddyfile
     assert released_id not in plan.caddyfile
 
 
@@ -621,7 +619,9 @@ async def test_planner_replaces_stale_active_target_with_unavailable_route(monke
 
     assert [route.route_id for route in plan.routes] == ["r1"]
     assert f"https://{hostname}:9443" in plan.caddyfile
-    assert 'respond "Service unavailable" 503' in plan.caddyfile
+    assert "This service is not running" in plan.caddyfile
+    assert "publication still exists" in plan.caddyfile
+    assert " 503" in plan.caddyfile
 
 
 @pytest.mark.asyncio
