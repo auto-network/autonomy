@@ -1588,6 +1588,12 @@ def restore_vault_across_hot_reload() -> bool:
             audited_private_hex, audited_public_hex
         )
         _install_personal_audited_delegate(private_hex, public_hex)
+        # Same step-3 ordering as post_unlock_vault_keys. The restore path is
+        # a real bring-up (every merge hot-reloads through here), and a warm
+        # process whose unlock predates the pepper's existence would otherwise
+        # never mint it — the browser only re-posts vault keys when the vault
+        # is actually cold.
+        _ensure_sealed_settings_pepper()
         return True
     except Exception:
         logger.exception(

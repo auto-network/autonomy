@@ -113,3 +113,36 @@ def test_ehyoh_can_store_the_operators_github_token(cold_vault):
 
 def _member(resolved):
     return {s.key: s for s in resolved}["github.token"]
+
+
+def test_sealed_settings_pepper_mints_once_and_only_once(cold_vault):
+    """`ensure_pepper_minted` (the bring-up step-3 hook) writes the shared
+    sealed-settings pepper exactly once. Presence in any state short-circuits
+    without a write: a re-mint would rotate the pepper and orphan every sealed
+    store's address."""
+    db = cold_vault
+    from tools.graph.sealed_settings import PEPPER_KEY, ensure_pepper_minted
+
+    private_hex, public_hex = derive_delegate_audited_recipient(bytes(range(32)))
+    with VaultStore(db) as store:
+        store.put_delegate_audited_recipient(public_hex)
+
+    assert ensure_pepper_minted() is True
+    assert ensure_pepper_minted() is False  # present -> untouched
+
+    # The minted value releases unattended once the delegate is warm, and is
+    # a well-formed 32-byte hex secret.
+    settings_ops.set_personal_delegate_audited_key(private_hex)
+    member = {s.key: s for s in settings_ops.read_set(
+        VAULT_AUDITED_SET_ID, org=None)}[PEPPER_KEY]
+    assert member.vault_error is None
+    assert len(bytes.fromhex(member.payload["value"])) == 32
+
+
+def test_sealed_settings_pepper_refuses_before_delegate_published(cold_vault):
+    """Ordering is load-bearing: before the audited delegate recipient is
+    published, the mint fails by name rather than writing anything."""
+    from tools.graph.sealed_settings import ensure_pepper_minted
+
+    with pytest.raises(VaultError, match="delegate recipient"):
+        ensure_pepper_minted()
