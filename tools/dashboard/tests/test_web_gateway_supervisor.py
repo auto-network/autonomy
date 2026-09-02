@@ -58,6 +58,192 @@ def desired(*routes, config="config", ready=True, reason=None):
     )
 
 
+class NoopLeaseReconciler:
+    async def reconcile(self):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_hostname_lease_reconciler_enrolls_once_and_replays_on_connector_restart():
+    calls = []
+    connector = ["connector-1"]
+
+    def control(_org, op, args):
+        calls.append((op, args))
+        if op == "connector-status":
+            return {
+                "ok": True,
+                "serving": True,
+                "connector_instance": connector[0],
+            }
+        return {"ok": True}
+
+    desired_leases = lambda: {"anchore": {"reservation-1": "app.example"}}
+    reconciler = sup.HostnameLeaseReconciler(
+        control_fn=control, desired_fn=desired_leases
+    )
+
+    await reconciler.reconcile()
+    await reconciler.reconcile()
+    connector[0] = "connector-2"
+    await reconciler.reconcile()
+
+    assert [call for call in calls if call[0] == "serve-host"] == [
+        (
+            "serve-host",
+            {"reservation": "reservation-1", "host": "app.example"},
+        ),
+        (
+            "serve-host",
+            {"reservation": "reservation-1", "host": "app.example"},
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_hostname_lease_reconciler_releases_removed_publication():
+    calls = []
+    desired = [{"anchore": {"reservation-1": "app.example"}}, {"anchore": {}}]
+
+    def control(_org, op, args):
+        calls.append((op, args))
+        if op == "connector-status":
+            return {
+                "ok": True,
+                "serving": True,
+                "connector_instance": "connector-1",
+            }
+        return {"ok": True}
+
+    reconciler = sup.HostnameLeaseReconciler(
+        control_fn=control, desired_fn=lambda: desired.pop(0)
+    )
+
+    await reconciler.reconcile()
+    await reconciler.reconcile()
+
+    assert ("release-host", {"reservation": "reservation-1"}) in calls
+
+
+@pytest.mark.asyncio
+async def test_hostname_lease_reconciler_retries_refused_enrollment():
+    attempts = []
+
+    def control(_org, op, args):
+        if op == "connector-status":
+            return {
+                "ok": True,
+                "serving": True,
+                "connector_instance": "connector-1",
+            }
+        attempts.append(args)
+        return {"ok": len(attempts) > 1}
+
+    reconciler = sup.HostnameLeaseReconciler(
+        control_fn=control,
+        desired_fn=lambda: {"anchore": {"reservation-1": "app.example"}},
+    )
+
+    await reconciler.reconcile()
+    await reconciler.reconcile()
+
+    assert len(attempts) == 2
+
+
+def test_desired_hostname_leases_come_only_from_targeted_live_settings(monkeypatch):
+    monkeypatch.setattr(sup, "_discover_orgs", lambda: ["anchore"])
+    monkeypatch.setattr(
+        sup.service_publication,
+        "list_reservations",
+        lambda _org: [
+            {"reservation_id": "active", "state": "active"},
+            {"reservation_id": "paused", "state": "paused"},
+            {"reservation_id": "released", "state": "released"},
+            {"reservation_id": "untargeted", "state": "active"},
+        ],
+    )
+    monkeypatch.setattr(
+        sup.service_publication,
+        "list_service_targets",
+        lambda _org: [
+            {"reservation_id": "active"},
+            {"reservation_id": "paused"},
+            {"reservation_id": "released"},
+        ],
+    )
+    monkeypatch.setattr(
+        sup.service_gateway,
+        "reservation_hostname",
+        lambda org, reservation: f"{reservation}.{org}.example",
+    )
+
+    assert sup._desired_hostname_leases() == {
+        "anchore": {
+            "active": "active.anchore.example",
+            "paused": "paused.anchore.example",
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_worker_reconciles_hostname_before_certificate_gated_plan():
+    order = []
+
+    class LeaseReconciler:
+        async def reconcile(self):
+            order.append("leases")
+
+    class Supervisor:
+        async def reconcile(self, plan):
+            order.append(("gateway", plan.reason))
+            return {"state": "stopped"}
+
+    async def planner():
+        order.append("plan")
+        return desired(ready=False, reason="certificate-unavailable")
+
+    worker = sup.GatewayReconcileWorker(
+        supervisor=Supervisor(),
+        planner=planner,
+        lease_reconciler=LeaseReconciler(),
+    )
+
+    await worker.reconcile_once()
+
+    assert order == [
+        "leases",
+        "plan",
+        ("gateway", "certificate-unavailable"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_lease_failure_does_not_skip_gateway_fail_closed_plan():
+    observed = []
+
+    class LeaseReconciler:
+        async def reconcile(self):
+            raise RuntimeError("settings unavailable")
+
+    class Supervisor:
+        async def reconcile(self, plan):
+            observed.append(plan.reason)
+            return {"state": "stopped"}
+
+    async def planner():
+        return desired(ready=False, reason="authority-unavailable")
+
+    worker = sup.GatewayReconcileWorker(
+        supervisor=Supervisor(),
+        planner=planner,
+        lease_reconciler=LeaseReconciler(),
+    )
+
+    await worker.reconcile_once()
+
+    assert observed == ["authority-unavailable"]
+
+
 def test_gateway_org_discovery_excludes_the_personal_store(monkeypatch):
     from tools.dashboard import link_serving_supervisor
     from tools.graph import org_ops
@@ -515,7 +701,11 @@ async def test_worker_reconciles_startup_and_relevant_events_only():
             self.unsubscribed = True
 
     bus = EventBus()
-    worker = sup.GatewayReconcileWorker(supervisor=Supervisor(), planner=planner)
+    worker = sup.GatewayReconcileWorker(
+        supervisor=Supervisor(),
+        planner=planner,
+        lease_reconciler=NoopLeaseReconciler(),
+    )
 
     assert worker.event_relevant(
         "setting.changed", {"set_id": sup.NAMESPACE_RESERVATION_SET_ID}
@@ -564,7 +754,11 @@ async def test_worker_watchdog_is_not_starved_by_unrelated_events(monkeypatch):
             pass
 
     bus = EventBus()
-    worker = sup.GatewayReconcileWorker(supervisor=Supervisor(), planner=planner)
+    worker = sup.GatewayReconcileWorker(
+        supervisor=Supervisor(),
+        planner=planner,
+        lease_reconciler=NoopLeaseReconciler(),
+    )
 
     async def flood_unrelated_events():
         while True:

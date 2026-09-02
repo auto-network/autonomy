@@ -108,6 +108,7 @@ def test_listener_reports_local_serving_state_without_forwarding(tmp_path):
         )
         assert down["ok"] is True
         assert down["serving"] is False
+        assert len(down["connector_instance"]) == 32
         assert down["accepted_caps"] == ["host-lease/1", "dns-01/1"]
         connector.connected.set()
         up = await asyncio.to_thread(
@@ -115,6 +116,7 @@ def test_listener_reports_local_serving_state_without_forwarding(tmp_path):
         )
         assert up["ok"] is True
         assert up["serving"] is True
+        assert up["connector_instance"] == down["connector_instance"]
         assert up["accepted_caps"] == ["host-lease/1", "dns-01/1"]
         assert connector.calls == []
 
