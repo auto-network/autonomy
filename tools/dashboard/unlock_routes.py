@@ -1284,6 +1284,12 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
         loaded = _bring_vault_up(decoded, delegate_hex)
         if audited_private is not None:
             _install_personal_audited_delegate(audited_private, audited_public)
+            # Certificate issuance may have failed before this first recipient
+            # existed. Wake it at the exact state transition that removes that
+            # blocker; do not depend on a later UI maintenance-report request.
+            from tools.dashboard import service_certificate_manager
+
+            service_certificate_manager.request_reconcile()
     except Exception as exc:  # noqa: BLE001 — one refusal shape to the caller
         logger.warning("vault bring-up failed", exc_info=True)
         return JSONResponse({"ok": False, "error": (
