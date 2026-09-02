@@ -637,6 +637,7 @@ def create_app(
     stream_proxy_sources: frozenset = frozenset(),
     metrics_port: Optional[int] = None,
     metrics_host: str = "127.0.0.1",
+    abuse_exempt_sources: frozenset = frozenset(),
 ) -> FastAPI:
     """Build the registry app.
 
@@ -664,7 +665,9 @@ def create_app(
     host_routes = HostRoutes(store, now_fn, metrics=metrics)
     metrics.bind_state(hub=hub, host_routes=host_routes, store=store)
     if abuse_limiter is None:
-        abuse_limiter = RelayAbuseLimiter()
+        abuse_limiter = RelayAbuseLimiter(
+            exempt_sources=frozenset(abuse_exempt_sources)
+        )
     witness_key = witness_key or KeyPair.generate()
     challenge_hub = ChallengeHub()
     build_info = dict(build_info or {

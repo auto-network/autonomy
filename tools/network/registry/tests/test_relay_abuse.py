@@ -510,3 +510,45 @@ def test_listener_attachment_failure_releases_channel_lease(monkeypatch):
         assert limiter.snapshot()["active_process"] == 0
 
     asyncio.run(run())
+
+
+# -- per-identity exempt override (auto-ejvzt seed / stress bypass) ---------
+
+def test_exempt_source_bypasses_every_scope_and_never_denies():
+    clock = _Clock()
+    # Tiny limits so a non-exempt source is denied almost immediately.
+    lim = RelayAbuseLimiter(
+        clock=clock, secret=b"s" * 32, exempt_sources=frozenset({"203.0.113.7"}),
+        admission_limits={**ADMISSION_LIMITS,
+                          "source": AdmissionLimit(1, 1),
+                          "process": AdmissionLimit(1, 1)},
+        active_limits={**ACTIVE_LIMITS, "source": 1, "process": 1},
+        byte_limits={**BYTE_LIMITS, "source": ByteLimit(1.0, 1.0),
+                     "channel": ByteLimit(1.0, 1.0)},
+    )
+    # A normal source is throttled fast: second admission denied by process.
+    assert lim.begin("198.51.100.9") is not None
+    assert lim.begin("198.51.100.9") is None
+    # The exempt source is admitted every time, ignoring the tiny caps.
+    leases = []
+    for _ in range(50):
+        t = lim.begin("203.0.113.7")
+        assert t is not None and t.exempt is True
+        r = lim.resolve(t, "any-token", "any-org")
+        assert r is not None and r.exempt is True
+        lease = lim.acquire(r)
+        assert lease is not None
+        # Byte charging never throttles the exempt lease, at any size.
+        assert lease.charge_bytes(10 * 1024 * 1024) is True
+        leases.append(lease)
+    for lease in leases:
+        lease.release()  # idempotent no-op for exempt leases
+
+
+def test_exempt_off_by_default_leaves_limits_intact():
+    lim = _limiter(_Clock(), admission={"source": AdmissionLimit(1, 1),
+                                        "process": AdmissionLimit(2, 2)})
+    assert lim.begin("203.0.113.7") is not None
+    # Same source again hits the source cap (burst 1) -> denied. Exempt is
+    # NOT configured, so nothing is bypassed.
+    assert lim.begin("203.0.113.7") is None

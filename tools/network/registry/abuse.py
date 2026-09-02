@@ -242,6 +242,13 @@ class _TokenBucket:
 class AdmissionTicket:
     source: bytes
     network: bytes
+    #: A designated identity (an exempt source today; a premium org later)
+    #: whose admission/byte limits are not charged. This is the principled
+    #: replacement for hardcoded one-off exemptions like the fleet:join
+    #: exempt_bytes special-case, and the seed of per-identity premium
+    #: budgets (auto-ejvzt). Off by default; only set for configured
+    #: identities.
+    exempt: bool = False
 
 
 @dataclass(frozen=True)
@@ -250,6 +257,7 @@ class ResolvedTicket:
     network: bytes
     link: bytes
     organization: bytes
+    exempt: bool = False
 
 
 class ChannelLease:
@@ -275,12 +283,16 @@ class ChannelLease:
     def charge_bytes(self, size: int) -> bool:
         if self._released:
             return False
+        if self._ticket.exempt:
+            return True  # designated identity: never throttled
         return self._limiter._charge_bytes(self, size)
 
     def release(self) -> None:
         if self._released:
             return
         self._released = True
+        if self._ticket.exempt:
+            return  # no active counts or buckets were taken
         self._limiter._release(self)
 
 
@@ -294,6 +306,7 @@ class RelayAbuseLimiter:
         *,
         clock: Callable[[], float] = time.monotonic,
         secret: bytes | None = None,
+        exempt_sources: "frozenset[str]" = frozenset(),
         admission_limits: Mapping[str, AdmissionLimit] = ADMISSION_LIMITS,
         active_limits: Mapping[str, int] = ACTIVE_LIMITS,
         byte_limits: Mapping[str, ByteLimit] = BYTE_LIMITS,
@@ -303,6 +316,10 @@ class RelayAbuseLimiter:
         slice_seconds: float = COUNT_MIN_SLICE_SECONDS,
     ) -> None:
         self._clock = clock
+        #: Raw source-host strings whose traffic bypasses every scope's
+        #: admission and byte limits (the per-identity override; see
+        #: AdmissionTicket.exempt). Compared before digesting.
+        self._exempt_sources = frozenset(exempt_sources)
         self._secret = secret or secrets.token_bytes(32)
         if len(self._secret) != 32:
             raise ValueError("limiter secret must be 32 bytes")
@@ -346,6 +363,17 @@ class RelayAbuseLimiter:
 
     def begin(self, source_host: str) -> AdmissionTicket | None:
         """Charge process/source/network before any token or SQLite lookup."""
+        if source_host in self._exempt_sources:
+            # Designated identity: bypass every scope, never denied, never
+            # shaped. Digests are still computed so the ticket is well-formed
+            # for downstream code, but no bucket is charged.
+            source_input, network_input = _source_inputs(source_host)
+            self._allow("exempt")
+            return AdmissionTicket(
+                self._digest("source", source_input),
+                self._digest("network", network_input),
+                exempt=True,
+            )
         now = self._clock()
         reason = self._process_admission.check_and_charge(
             now, self._admission_limits["process"]
@@ -376,6 +404,14 @@ class RelayAbuseLimiter:
         self, ticket: AdmissionTicket, bearer_token: str, organization: str
     ) -> ResolvedTicket | None:
         """Charge link then organization after the link resolves live."""
+        if ticket.exempt:
+            self._allow("exempt")
+            return ResolvedTicket(
+                ticket.source, ticket.network,
+                self._digest("link", bearer_token.encode("utf-8")),
+                self._digest("organization", organization.encode("utf-8")),
+                exempt=True,
+            )
         now = self._clock()
         link = self._digest("link", bearer_token.encode("utf-8"))
         reason = self._admission["link"].check_and_charge(
@@ -396,6 +432,11 @@ class RelayAbuseLimiter:
 
     def acquire(self, ticket: ResolvedTicket) -> ChannelLease | None:
         """Atomically acquire every exact active count and byte bucket."""
+        if ticket.exempt:
+            # No active-count cap, no byte bucket: an exempt identity's lease
+            # never denies acquisition and never throttles bytes.
+            self._allow("exempt")
+            return ChannelLease(self, ticket, None)
         now = self._clock()
         self._purge_buckets(now)
         if self._active_process >= self._active_limits["process"]:

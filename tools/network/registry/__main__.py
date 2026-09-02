@@ -108,6 +108,16 @@ def main() -> None:
         default="127.0.0.1",
         help="bind address for the private metrics listener",
     )
+    parser.add_argument(
+        "--abuse-exempt-source",
+        action="append",
+        default=[],
+        metavar="IP",
+        help="a source address whose traffic bypasses ALL relay abuse "
+             "admission and byte limits (the per-identity override; use for a "
+             "trusted/premium identity or a controlled stress test). Repeatable. "
+             "Off by default; every other source stays fully limited.",
+    )
     args = parser.parse_args()
     app = create_app(
         args.db,
@@ -120,6 +130,7 @@ def main() -> None:
         stream_proxy_sources=frozenset(args.stream_proxy_source),
         metrics_port=args.metrics_port,
         metrics_host=args.metrics_host,
+        abuse_exempt_sources=frozenset(args.abuse_exempt_source),
     )
     # Link tokens are bearer credentials and are part of the public route.
     # Uvicorn's HTTP access logger records the full path, while its WebSocket
