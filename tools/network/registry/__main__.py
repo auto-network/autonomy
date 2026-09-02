@@ -97,6 +97,17 @@ def main() -> None:
              "(the serve edge forward); repeatable. Any other peer's header "
              "is treated as protocol garbage and the connection is dropped.",
     )
+    parser.add_argument(
+        "--metrics-port",
+        type=int,
+        help="enable the PRIVATE bounded-cardinality metrics exposition on "
+             "this loopback port (auto-albp6.9). Never fronted publicly.",
+    )
+    parser.add_argument(
+        "--metrics-host",
+        default="127.0.0.1",
+        help="bind address for the private metrics listener",
+    )
     args = parser.parse_args()
     app = create_app(
         args.db,
@@ -107,6 +118,8 @@ def main() -> None:
         stream_ingress_host=args.stream_ingress_host,
         stream_idle_timeout=args.stream_idle_timeout,
         stream_proxy_sources=frozenset(args.stream_proxy_source),
+        metrics_port=args.metrics_port,
+        metrics_host=args.metrics_host,
     )
     # Link tokens are bearer credentials and are part of the public route.
     # Uvicorn's HTTP access logger records the full path, while its WebSocket

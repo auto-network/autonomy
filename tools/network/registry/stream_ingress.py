@@ -366,10 +366,14 @@ async def _peek_client_hello(reader, initial: bytes = b"") -> tuple[str, bytes]:
 async def handle_stream_connection(
     reader, writer, *, host_routes, abuse_limiter=None,
     idle_timeout: float = STREAM_IDLE_TIMEOUT,
-    proxy_sources: frozenset = frozenset(),
+    proxy_sources: frozenset = frozenset(), metrics=None,
 ) -> None:
     """One ingress connection, accept to teardown."""
     from tools.network.relaykit.frames import new_channel_id
+
+    def _refuse(reason: str) -> None:
+        if metrics is not None:
+            metrics.stream_refused(reason)
 
     abuse_lease = None
     peer = writer.get_extra_info("peername") or ("unknown",)
@@ -400,24 +404,31 @@ async def handle_stream_connection(
             sni, buffered = await asyncio.wait_for(
                 _peek_client_hello(reader, initial), STREAM_HANDSHAKE_TIMEOUT
             )
-        except (StreamProtocolError, asyncio.TimeoutError, OSError):
+        except (StreamProtocolError, asyncio.TimeoutError, OSError) as exc:
+            _refuse("no_sni" if isinstance(exc, StreamProtocolError)
+                    else "parse_error")
             return
         admission = None
         if abuse_limiter is not None:
             admission = abuse_limiter.begin(source)
             if admission is None:
+                _refuse("admission_denied")
                 return
         tunnel = host_routes.route(sni)
         if tunnel is None or CAP_TLS_STREAM not in tunnel.caps:
+            _refuse("unrouted" if tunnel is None else "not_capable")
             return
         if abuse_limiter is not None:
             resolved = abuse_limiter.resolve(admission, sni, tunnel.org)
             if resolved is None:
+                _refuse("admission_denied")
                 return
             abuse_lease = abuse_limiter.acquire(resolved)
             if abuse_lease is None:
+                _refuse("admission_denied")
                 return
         if len(tunnel.raw_streams) >= STREAM_MAX_PER_TUNNEL:
+            _refuse("stream_cap")
             return
         channel_id = new_channel_id()
         stream = RelayRawStream(
@@ -436,11 +447,15 @@ async def handle_stream_connection(
             credit = await asyncio.wait_for(
                 stream.open_ok, STREAM_HANDSHAKE_TIMEOUT
             )
-        except Exception:  # _Refused, timeout, or a dying tunnel send
+        except Exception as exc:  # _Refused, timeout, or a dying tunnel send
             # Pre-open-ok refusal/timeout: the buffered ClientHello is
             # discarded and the public socket closes (seam §4.1).
+            _refuse("open_timeout" if isinstance(exc, asyncio.TimeoutError)
+                    else "open_refused")
             await stream.teardown()
             return
+        if metrics is not None:
+            metrics.stream_opened(tunnel.org)
         stream.send_window.grant(credit)
         stream.send_credit_event.set()
         await stream.run(buffered)
@@ -454,13 +469,13 @@ async def handle_stream_connection(
 async def start_stream_ingress(
     host: str, port: int, *, host_routes, abuse_limiter=None,
     idle_timeout: float = STREAM_IDLE_TIMEOUT,
-    proxy_sources: frozenset = frozenset(),
+    proxy_sources: frozenset = frozenset(), metrics=None,
 ):
     async def handle(reader, writer):
         await handle_stream_connection(
             reader, writer, host_routes=host_routes,
             abuse_limiter=abuse_limiter, idle_timeout=idle_timeout,
-            proxy_sources=proxy_sources,
+            proxy_sources=proxy_sources, metrics=metrics,
         )
 
     server = await asyncio.start_server(handle, host, port)
