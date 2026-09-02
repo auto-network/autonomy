@@ -454,6 +454,12 @@ class SQLiteFleetSyncStore:
         if catalog is None:
             conn.close()
             raise WatermarkError("personal database fleet writers are not active")
+        # Remote batches carrying attachment rows realize from bytes this
+        # machine already holds; a digest no local file satisfies defers to
+        # quarantine instead of failing the batch.
+        from tools.network.fleet_sync.materialize import production_blob_store
+
+        catalog.blob_store = production_blob_store(self.path)
         return conn, catalog
 
     def next_transaction(
