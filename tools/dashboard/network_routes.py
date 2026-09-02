@@ -2144,6 +2144,12 @@ async def post_unlock_maintenance_report(request: Request) -> JSONResponse:
     _LAST_UNLOCK_MAINTENANCE.clear()
     _LAST_UNLOCK_MAINTENANCE.update(body)
     _LAST_UNLOCK_MAINTENANCE["received_at"] = int(time.time())
+    # Vault access and the serving DNS delegate are now warm regardless of
+    # which root factor proved the ceremony. Certificate convergence is one
+    # factor-agnostic post-unlock action and runs outside this HTTP response.
+    from tools.dashboard import service_certificate_manager
+
+    service_certificate_manager.request_reconcile()
     return JSONResponse({"ok": True})
 
 

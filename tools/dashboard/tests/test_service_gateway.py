@@ -38,10 +38,10 @@ def test_rendered_caddyfile_has_one_exact_route_and_no_http3_or_tcp_admin():
     assert "servers :9443" in rendered
     assert "protocols h1 h2" in rendered
     assert "strict_sni_host on" in rendered
-    assert f"host {HOSTNAME}" in rendered
+    assert f"https://{HOSTNAME}:9443" in rendered
     assert "reverse_proxy auto-0831-011653:8000" in rendered
     assert "tls /run/autonomy-service-gateway-certs/tls.crt /run/autonomy-service-gateway-certs/tls.key" in rendered
-    assert "abort" in rendered
+    assert "*.serve.auto.network" not in rendered
     assert "h3" not in rendered
     assert ":2019" not in rendered
     assert "docker.sock" not in rendered
@@ -50,10 +50,30 @@ def test_rendered_caddyfile_has_one_exact_route_and_no_http3_or_tcp_admin():
 def test_unavailable_host_is_exact_and_never_falls_through_to_an_upstream():
     rendered = service_gateway.render_caddyfile([], unavailable_hosts=[HOSTNAME])
 
-    assert f"host {HOSTNAME}" in rendered
+    assert f"https://{HOSTNAME}:9443" in rendered
     assert 'respond "Service unavailable" 503' in rendered
     assert "reverse_proxy" not in rendered
-    assert "abort" in rendered
+    assert "*.serve.auto.network" not in rendered
+
+
+def test_each_persona_hostname_uses_its_own_certificate_pair():
+    other = "app.persona-other.serve.auto.network"
+    rendered = service_gateway.render_caddyfile(
+        [_route(), _route(
+            reservation_id="d1fbc17d-527d-5c3c-b276-37e62963a693",
+            hostname=other,
+            session_id="auto-other",
+        )],
+        certificates={
+            HOSTNAME: ("/certs/persona-a.crt", "/certs/persona-a.key"),
+            other: ("/certs/persona-b.crt", "/certs/persona-b.key"),
+        },
+    )
+
+    assert f"https://{HOSTNAME}:9443" in rendered
+    assert "tls /certs/persona-a.crt /certs/persona-a.key" in rendered
+    assert f"https://{other}:9443" in rendered
+    assert "tls /certs/persona-b.crt /certs/persona-b.key" in rendered
 
 
 @pytest.mark.parametrize(

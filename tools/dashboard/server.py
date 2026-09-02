@@ -142,6 +142,7 @@ from tools.dashboard import network_routes
 from tools.dashboard import web_push, web_push_proof, web_push_routes, web_push_worker
 from tools.dashboard import image_build_worker
 from tools.dashboard import web_gateway_supervisor
+from tools.dashboard import service_certificate_manager
 from agents import image_builder
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao import mock as dao_beads
@@ -20728,6 +20729,8 @@ async def _on_startup():
         _mark("image_build_worker.start_worker")
         await web_gateway_supervisor.start_worker(event_bus)
         _mark("web_gateway_supervisor.start_worker")
+        await service_certificate_manager.start_worker(event_bus)
+        _mark("service_certificate_manager.start_worker")
         try:
             await web_push.reconcile_approval_attention(
                 approvals_routes.push_eligible_kind,
@@ -21148,6 +21151,10 @@ async def _on_shutdown():
         await image_build_worker.stop_worker()
     except Exception:
         logger.exception("error stopping the workspace image build worker")
+    try:
+        await service_certificate_manager.stop_worker()
+    except Exception:
+        logger.exception("error stopping the Service certificate manager")
     try:
         await web_gateway_supervisor.stop_worker()
     except Exception:

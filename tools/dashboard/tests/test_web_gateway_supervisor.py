@@ -63,6 +63,18 @@ class NoopLeaseReconciler:
         pass
 
 
+@pytest.fixture(autouse=True)
+def materialized_service_certificate(monkeypatch):
+    monkeypatch.setattr(
+        sup.service_certificate,
+        "active_gateway_pair",
+        lambda _org, _persona: (
+            "/run/autonomy-service-gateway-certs/personas/test/tls.crt",
+            "/run/autonomy-service-gateway-certs/personas/test/tls.key",
+        ),
+    )
+
+
 @pytest.mark.asyncio
 async def test_hostname_lease_reconciler_enrolls_once_and_replays_on_connector_restart():
     calls = []
@@ -462,7 +474,6 @@ async def test_planner_builds_complete_active_and_paused_config(monkeypatch):
     active_host = "app.persona-77827e972ba4c37d4215.serve.auto.network"
     paused_host = "paused.persona-77827e972ba4c37d4215.serve.auto.network"
     monkeypatch.setattr(sup, "_discover_orgs", lambda: ["autonomy"])
-    monkeypatch.setattr(sup, "_certificate_ready", lambda: True)
 
     async def connector_ready(org):
         return org == "autonomy"
@@ -472,9 +483,9 @@ async def test_planner_builds_complete_active_and_paused_config(monkeypatch):
         sup.service_publication,
         "list_reservations",
         lambda org: [
-            {"reservation_id": active_id, "state": "active"},
-            {"reservation_id": paused_id, "state": "paused"},
-            {"reservation_id": released_id, "state": "released"},
+            {"reservation_id": active_id, "state": "active", "persona_label": "persona-test"},
+            {"reservation_id": paused_id, "state": "paused", "persona_label": "persona-test"},
+            {"reservation_id": released_id, "state": "released", "persona_label": "persona-test"},
         ],
     )
     monkeypatch.setattr(
@@ -511,14 +522,34 @@ async def test_planner_builds_complete_active_and_paused_config(monkeypatch):
     assert plan.ready is True
     assert [route.route_id for route in plan.routes] == [active_id, paused_id]
     assert f"reverse_proxy auto-0831-171125:8000" in plan.caddyfile
-    assert f"host {paused_host}" in plan.caddyfile
+    assert f"https://{paused_host}:9443" in plan.caddyfile
     assert 'respond "Service unavailable" 503' in plan.caddyfile
     assert released_id not in plan.caddyfile
 
 
 @pytest.mark.asyncio
 async def test_planner_stays_dormant_without_certificate(monkeypatch):
-    monkeypatch.setattr(sup, "_certificate_ready", lambda: False)
+    monkeypatch.setattr(sup, "_discover_orgs", lambda: ["autonomy"])
+    monkeypatch.setattr(
+        sup.service_publication,
+        "list_reservations",
+        lambda _org: [
+            {"reservation_id": "r1", "state": "active", "persona_label": "persona-test"}
+        ],
+    )
+    monkeypatch.setattr(
+        sup.service_publication,
+        "list_service_targets",
+        lambda _org: [{"reservation_id": "r1"}],
+    )
+    monkeypatch.setattr(
+        sup.service_certificate, "active_gateway_pair", lambda _org, _persona: None
+    )
+
+    async def connector_ready(_org):
+        return True
+
+    monkeypatch.setattr(sup, "_connector_ready", connector_ready)
 
     plan = await sup.build_desired_state()
 
@@ -530,11 +561,10 @@ async def test_planner_stays_dormant_without_certificate(monkeypatch):
 @pytest.mark.asyncio
 async def test_planner_stays_dormant_until_connector_is_serving(monkeypatch):
     monkeypatch.setattr(sup, "_discover_orgs", lambda: ["autonomy"])
-    monkeypatch.setattr(sup, "_certificate_ready", lambda: True)
     monkeypatch.setattr(
         sup.service_publication,
         "list_reservations",
-        lambda org: [{"reservation_id": "r1", "state": "active"}],
+        lambda org: [{"reservation_id": "r1", "state": "active", "persona_label": "persona-test"}],
     )
     monkeypatch.setattr(
         sup.service_publication,
@@ -558,11 +588,10 @@ async def test_planner_stays_dormant_until_connector_is_serving(monkeypatch):
 async def test_planner_replaces_stale_active_target_with_unavailable_route(monkeypatch):
     hostname = "stale.persona-77827e972ba4c37d4215.serve.auto.network"
     monkeypatch.setattr(sup, "_discover_orgs", lambda: ["autonomy"])
-    monkeypatch.setattr(sup, "_certificate_ready", lambda: True)
     monkeypatch.setattr(
         sup.service_publication,
         "list_reservations",
-        lambda org: [{"reservation_id": "r1", "state": "active"}],
+        lambda org: [{"reservation_id": "r1", "state": "active", "persona_label": "persona-test"}],
     )
     monkeypatch.setattr(
         sup.service_publication,
@@ -587,14 +616,13 @@ async def test_planner_replaces_stale_active_target_with_unavailable_route(monke
     plan = await sup.build_desired_state()
 
     assert [route.route_id for route in plan.routes] == ["r1"]
-    assert f"host {hostname}" in plan.caddyfile
+    assert f"https://{hostname}:9443" in plan.caddyfile
     assert 'respond "Service unavailable" 503' in plan.caddyfile
 
 
 @pytest.mark.asyncio
 async def test_planner_failure_refuses_to_preserve_unverified_authority(monkeypatch):
     monkeypatch.setattr(sup, "_discover_orgs", lambda: ["autonomy"])
-    monkeypatch.setattr(sup, "_certificate_ready", lambda: True)
 
     def unreadable(_org):
         raise RuntimeError("settings unavailable")

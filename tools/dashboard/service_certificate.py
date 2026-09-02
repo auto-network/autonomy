@@ -1,9 +1,9 @@
-"""Issue and activate the node-local persona wildcard TLS certificate.
+"""Issue, persist, and activate node-local persona wildcard TLS certificates.
 
 The org root never enters this process.  DNS changes are signed by the
 existing serving child through its exact-scope ``serve:dns-01`` certificate;
-Certbot sees only one order-bound Unix socket.  The resulting TLS key remains
-in the node's protected ramfs and is atomically exposed to local Caddy.
+Certbot sees only one order-bound Unix socket. Verified production pairs are
+sealed in the audited vault and materialized into protected ramfs for Caddy.
 """
 
 from __future__ import annotations
@@ -22,6 +22,16 @@ import uuid
 from tools.dashboard.acme_dns01 import Dns01Authority, Dns01Client
 from tools.dashboard.acme_dns01_hook import Dns01HookServer
 from tools.dashboard.link_serving_supervisor import serve_cert_state
+from tools.graph import settings_ops
+from tools.graph.schemas.service_certificate import (
+    SERVICE_CERTIFICATE_REVISION,
+    SERVICE_CERTIFICATE_SET_ID,
+    ServiceCertificateV1,
+)
+from tools.graph.schemas.vault_credential import (
+    VAULT_AUDITED_SET_ID,
+    VAULT_CREDENTIAL_REVISION,
+)
 from tools.network.idkit import DelegationCert, KeyPair
 
 
@@ -29,6 +39,9 @@ ACME_ROOT = Path("/run/autonomy-keycache/service-acme")
 GATEWAY_CERT = Path("/run/autonomy-keycache/service-gateway/tls.crt")
 GATEWAY_KEY = Path("/run/autonomy-keycache/service-gateway/tls.key")
 STATUS_PATH = Path("/run/autonomy-keycache/service-gateway/tls-status.json")
+PERSONA_CERT_ROOT = Path("/run/autonomy-keycache/service-gateway/personas")
+CERTIFICATE_CHECK_INTERVAL_SECONDS = 6 * 3600
+RENEWAL_WINDOW_SECONDS = 30 * 24 * 3600
 _LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 
@@ -161,7 +174,234 @@ def _atomic_copy(source: Path, destination: Path, mode: int) -> None:
             temporary.unlink()
 
 
-async def issue(org: str, persona_label: str, *, staging: bool = False) -> dict:
+def certificate_key(org: str, persona_label: str) -> str:
+    return f"{org}:{persona_label}"
+
+
+def certificate_vault_key(org: str, persona_label: str, serial: str) -> str:
+    return f"service.tls.{org}.{persona_label}.{serial}"
+
+
+def _pair_directory(org: str, persona_label: str, serial: str) -> Path:
+    return PERSONA_CERT_ROOT / org / persona_label / serial
+
+
+def pair_paths(metadata: dict) -> tuple[Path, Path]:
+    directory = _pair_directory(
+        metadata["org"], metadata["persona_label"], metadata["serial"]
+    )
+    return directory / "tls.crt", directory / "tls.key"
+
+
+def gateway_pair_paths(metadata: dict) -> tuple[str, str]:
+    """Return the same ramfs pair in the Caddy container's mount frame."""
+    relative = _pair_directory(
+        metadata["org"], metadata["persona_label"], metadata["serial"]
+    ).relative_to(Path("/run/autonomy-keycache/service-gateway"))
+    root = Path("/run/autonomy-service-gateway-certs") / relative
+    return str(root / "tls.crt"), str(root / "tls.key")
+
+
+def _bundle_payload(cert_path: Path, key_path: Path, metadata: dict) -> dict:
+    value = json.dumps(
+        {
+            "fullchain_pem": cert_path.read_text(),
+            "private_key_pem": key_path.read_text(),
+            "org": metadata["org"],
+            "persona_label": metadata["persona_label"],
+            "serial": metadata["serial"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return {"value": value}
+
+
+def _read_bundle(vault_key: str) -> dict:
+    row = settings_ops.read_set_key(
+        VAULT_AUDITED_SET_ID, vault_key, org=None, peers=[]
+    )
+    if row is None or row.get("vault_error") is not None:
+        raise ServiceCertificateError("certificate vault bundle is unavailable")
+    payload = row.get("payload")
+    try:
+        bundle = json.loads(payload["value"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ServiceCertificateError("certificate vault bundle is invalid") from exc
+    if set(bundle) != {
+        "fullchain_pem", "private_key_pem", "org", "persona_label", "serial"
+    }:
+        raise ServiceCertificateError("certificate vault bundle has invalid fields")
+    return bundle
+
+
+def _write_bundle(cert_path: Path, key_path: Path, metadata: dict) -> str:
+    vault_key = certificate_vault_key(
+        metadata["org"], metadata["persona_label"], metadata["serial"]
+    )
+    settings_ops.write_by_key(
+        VAULT_AUDITED_SET_ID,
+        VAULT_CREDENTIAL_REVISION,
+        vault_key,
+        _bundle_payload(cert_path, key_path, metadata),
+        org=None,
+        state="raw",
+    )
+    return vault_key
+
+
+def _materialize_bundle(metadata: dict, bundle: dict) -> tuple[Path, Path]:
+    for name in ("org", "persona_label", "serial"):
+        if bundle.get(name) != metadata.get(name):
+            raise ServiceCertificateError("certificate bundle identity mismatch")
+    cert_path, key_path = pair_paths(metadata)
+    cert_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    candidate_cert = cert_path.parent / ".candidate.crt"
+    candidate_key = cert_path.parent / ".candidate.key"
+    try:
+        candidate_cert.write_text(bundle["fullchain_pem"])
+        candidate_key.write_text(bundle["private_key_pem"])
+        os.chmod(candidate_cert, 0o600)
+        os.chmod(candidate_key, 0o600)
+        verified = _verify_pair(candidate_cert, candidate_key, metadata["apex"])
+        if verified["serial"] != metadata["serial"]:
+            raise ServiceCertificateError("certificate serial does not match metadata")
+        _atomic_copy(candidate_cert, cert_path, 0o644)
+        _atomic_copy(candidate_key, key_path, 0o600)
+    finally:
+        for candidate in (candidate_cert, candidate_key):
+            with contextlib.suppress(FileNotFoundError):
+                candidate.unlink()
+    return cert_path, key_path
+
+
+def _retire_old_ramfs(metadata: dict) -> None:
+    root = PERSONA_CERT_ROOT / metadata["org"] / metadata["persona_label"]
+    keep = {metadata["serial"]}
+    previous = metadata.get("previous_serial")
+    if isinstance(previous, str):
+        keep.add(previous)
+    if not root.is_dir():
+        return
+    for child in root.iterdir():
+        if child.is_dir() and child.name not in keep:
+            # Bound secret lifetime explicitly. This is ramfs (no durable
+            # media), but overwrite each allocated file before unlink so an
+            # older private-key generation is not left readable in the live
+            # mount until memory reclamation happens to run.
+            for path in child.rglob("*"):
+                if path.is_symlink():
+                    path.unlink()
+                    continue
+                if not path.is_file():
+                    continue
+                with path.open("r+b", buffering=0) as handle:
+                    remaining = path.stat().st_size
+                    while remaining:
+                        chunk = min(remaining, 65536)
+                        handle.write(b"\0" * chunk)
+                        remaining -= chunk
+                    os.fsync(handle.fileno())
+            shutil.rmtree(child)
+
+
+def activate_pair(
+    org: str,
+    persona_label: str,
+    cert_path: Path,
+    key_path: Path,
+    metadata: dict,
+) -> dict:
+    """Seal, verify, materialize, then publish the active metadata pointer."""
+    current = certificate_metadata(org, persona_label)
+    value = dict(metadata)
+    value.update({"org": org, "persona_label": persona_label})
+    value["vault_key"] = _write_bundle(cert_path, key_path, value)
+    if current is not None and current.get("serial") != value["serial"]:
+        value["previous_serial"] = current["serial"]
+    ServiceCertificateV1.validate(value)
+    bundle = _read_bundle(value["vault_key"])
+    _materialize_bundle(value, bundle)
+    settings_ops.write_by_key(
+        SERVICE_CERTIFICATE_SET_ID,
+        SERVICE_CERTIFICATE_REVISION,
+        certificate_key(org, persona_label),
+        value,
+        org="machine",
+        state="raw",
+    )
+    _retire_old_ramfs(value)
+    return value
+
+
+def certificate_metadata(org: str, persona_label: str) -> dict | None:
+    row = settings_ops.read_set_key(
+        SERVICE_CERTIFICATE_SET_ID,
+        certificate_key(org, persona_label),
+        org="machine",
+        peers=[],
+    )
+    return dict(row["payload"]) if row is not None else None
+
+
+def materialize_active_pairs() -> list[dict]:
+    """Restore every active pair from the warm audited vault into ramfs."""
+    result = []
+    rows = settings_ops.read_owned_set(
+        SERVICE_CERTIFICATE_SET_ID,
+        org="machine",
+        target_revision=SERVICE_CERTIFICATE_REVISION,
+    ).members
+    for row in rows:
+        metadata = dict(row.payload)
+        bundle = _read_bundle(metadata["vault_key"])
+        _materialize_bundle(metadata, bundle)
+        _retire_old_ramfs(metadata)
+        result.append(metadata)
+    return result
+
+
+def active_gateway_pair(org: str, persona_label: object) -> tuple[str, str] | None:
+    """Return one verified materialized pair in the gateway mount frame."""
+    if not isinstance(persona_label, str):
+        return None
+    metadata = certificate_metadata(org, persona_label)
+    if metadata is None:
+        # One-time migration bridge for the certificate issued during the
+        # emergency launch. It is exact-identity and expiry checked, and the
+        # manager imports it into the audited vault as soon as that vault is
+        # warm. Without this bridge the deployment that introduces persistence
+        # would take the already-live site offline before import can run.
+        try:
+            legacy = json.loads(STATUS_PATH.read_text())
+        except Exception:
+            return None
+        if (
+            legacy.get("org") != org
+            or legacy.get("apex") != f"{persona_label}.serve.auto.network"
+            or int(legacy.get("not_after") or 0) <= int(time.time())
+            or not all(
+                path.is_file() and path.stat().st_size > 0
+                for path in (GATEWAY_CERT, GATEWAY_KEY)
+            )
+        ):
+            return None
+        return (
+            "/run/autonomy-service-gateway-certs/tls.crt",
+            "/run/autonomy-service-gateway-certs/tls.key",
+        )
+    if int(metadata.get("not_after") or 0) <= int(time.time()):
+        return None
+    cert_path, key_path = pair_paths(metadata)
+    if not all(path.is_file() and path.stat().st_size > 0 for path in (cert_path, key_path)):
+        return None
+    return gateway_pair_paths(metadata)
+
+
+async def obtain(
+    org: str, persona_label: str, *, staging: bool = False
+) -> tuple[dict, bytes, bytes]:
+    """Obtain and verify a candidate without activating it."""
     if not _LABEL_RE.fullmatch(persona_label):
         raise ServiceCertificateError("invalid persona label")
     client = load_dns01_client(org)
@@ -187,20 +427,32 @@ async def issue(org: str, persona_label: str, *, staging: bool = False) -> dict:
         cert_path = lineage / "fullchain.pem"
         key_path = lineage / "privkey.pem"
         metadata = _verify_pair(cert_path, key_path, apex)
-        _atomic_copy(cert_path, GATEWAY_CERT, 0o644)
-        _atomic_copy(key_path, GATEWAY_KEY, 0o600)
         metadata.update({"org": org, "staging": staging, "activated_at": int(time.time())})
-        status_tmp = STATUS_PATH.with_suffix(".tmp")
-        status_tmp.write_text(json.dumps(metadata, sort_keys=True) + "\n")
-        os.chmod(status_tmp, 0o600)
-        os.replace(status_tmp, STATUS_PATH)
-        return metadata
+        return metadata, cert_path.read_bytes(), key_path.read_bytes()
     finally:
         # Certbot's account, work, logs, and generated key are deliberately
         # ephemeral.  The verified pair has already moved to the gateway
         # ramfs; leave no second copy behind.
         for child in ("config", "work", "logs"):
             shutil.rmtree(ACME_ROOT / child, ignore_errors=True)
+
+
+async def issue(org: str, persona_label: str, *, staging: bool = False) -> dict:
+    metadata, cert_bytes, key_bytes = await obtain(
+        org, persona_label, staging=staging
+    )
+    candidate = ACME_ROOT / f"activate-{uuid.uuid4().hex}"
+    cert_path = candidate / "fullchain.pem"
+    key_path = candidate / "privkey.pem"
+    candidate.mkdir(parents=True, mode=0o700)
+    try:
+        cert_path.write_bytes(cert_bytes)
+        key_path.write_bytes(key_bytes)
+        os.chmod(cert_path, 0o600)
+        os.chmod(key_path, 0o600)
+        return activate_pair(org, persona_label, cert_path, key_path, metadata)
+    finally:
+        shutil.rmtree(candidate, ignore_errors=True)
 
 
 def status() -> dict:
@@ -221,7 +473,16 @@ def main() -> None:
     parser.add_argument("--persona-label", required=True)
     parser.add_argument("--staging", action="store_true")
     args = parser.parse_args()
-    print(json.dumps(asyncio.run(issue(args.org, args.persona_label, staging=args.staging))))
+    if args.staging:
+        metadata, cert_bytes, key_bytes = asyncio.run(
+            obtain(args.org, args.persona_label, staging=True)
+        )
+        # A staging run proves the complete DNS/CA path but can never replace
+        # a browser-trusted production pair.
+        del cert_bytes, key_bytes
+        print(json.dumps(metadata))
+        return
+    print(json.dumps(asyncio.run(issue(args.org, args.persona_label))))
 
 
 if __name__ == "__main__":

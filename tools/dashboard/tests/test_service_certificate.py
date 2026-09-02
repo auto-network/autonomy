@@ -1,4 +1,5 @@
 import json
+import sys
 
 from tools.dashboard import service_certificate as certs
 
@@ -48,3 +49,35 @@ def test_atomic_copy_never_overwrites_until_complete(tmp_path):
     assert destination.read_bytes() == b"new"
     assert destination.stat().st_mode & 0o777 == 0o600
     assert not list(tmp_path.glob(".destination.*.tmp"))
+
+
+def test_staging_cli_proves_issuance_without_activation(monkeypatch, capsys):
+    calls = []
+
+    async def obtain(org, persona, *, staging):
+        calls.append(("obtain", org, persona, staging))
+        return {"staging": True, "serial": "abc"}, b"cert", b"key"
+
+    async def issue(*_args, **_kwargs):
+        calls.append(("issue",))
+        return {}
+
+    monkeypatch.setattr(certs, "obtain", obtain)
+    monkeypatch.setattr(certs, "issue", issue)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "service_certificate",
+            "--org",
+            "anchore",
+            "--persona-label",
+            "persona-abc",
+            "--staging",
+        ],
+    )
+
+    certs.main()
+
+    assert calls == [("obtain", "anchore", "persona-abc", True)]
+    assert json.loads(capsys.readouterr().out)["staging"] is True
