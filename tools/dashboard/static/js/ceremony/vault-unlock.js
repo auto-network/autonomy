@@ -31,6 +31,7 @@
 
 import {
   canonicalJson,
+  deriveEncapsulationKeypair,
   importEd25519RootSigningKey,
 } from './primitives.js';
 import { buildEvent, derivePersona, signEvent } from './ledger-event.js';
@@ -46,6 +47,9 @@ export const DEFAULT_DELEGATE_TTL_MS = 12 * 60 * 60 * 1000;
 const GRANT_NONCE_BYTES = 32;
 const PERSONAL_ROOT_ANCHOR_ID = 'personal-root-default';
 const PERSONAL_ROOT_CLASS_NAME = 'Personal root vault';
+// Mirrors tools.vault.personal_object.DELEGATE_AUDITED_DERIVE_PURPOSE.
+const DELEGATE_AUDITED_DERIVE_PURPOSE =
+  'autonomy/vault/delegate-audited-recipient/v1';
 
 const textEncoder = new TextEncoder();
 const webCrypto = globalThis.crypto;
@@ -340,6 +344,14 @@ export async function wakeVault({
       authorityHeads: headIds,
       createdHlc: [now, 0],
     });
+  // A purpose-separated X25519 recipient lets audited personal Settings be
+  // written while cold and read unattended while this process remains warm.
+  // The browser is the only place holding the personal root: derive here,
+  // publish only the public half, and hand the private half to the same
+  // authenticated memory-key route as the other unlock material.
+  const auditedDelegate = await deriveEncapsulationKeypair(
+    personalRootSeed, DELEGATE_AUDITED_DERIVE_PURPOSE,
+  );
 
   const up = await fetchImpl('/api/identity/unlock/vault-keys', {
     method: 'POST',
@@ -350,6 +362,8 @@ export async function wakeVault({
       delegate_signing_key: delegateSigningKey,
       kem_credential: kemCredential,
       persona_kem_private_key: kemPrivateKey,
+      delegate_audited_private_key: auditedDelegate.privateKeyHex,
+      delegate_audited_public_key: auditedDelegate.publicKeyHex,
     }),
   });
   if (!up.ok) return { ready: false, reason: `vault-keys-${up.status}` };

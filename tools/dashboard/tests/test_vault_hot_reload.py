@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from tools.dashboard import unlock_routes as u
+from tools.graph import settings_ops
 from tools.network.idkit import KeyPair
 
 
@@ -31,16 +32,20 @@ def _ramfs(tmp_path, monkeypatch):
         lambda *a, **k: None,
     )
     u._VAULT_CACHE.clear()
+    settings_ops.set_personal_delegate_audited_key(None)
     yield
     u._VAULT_CACHE.clear()
+    settings_ops.set_personal_delegate_audited_key(None)
 
 
 def _warm(monkeypatch):
     """Install a warm vault (delegate + KEM key) and capture the re-derivation."""
     delegate = KeyPair.generate()
     kem_private = "e" * 64
+    audited_delegate = "d" * 64
     u._VAULT_CACHE["delegate"] = delegate
     u._VAULT_CACHE["kem_private"] = kem_private
+    u._VAULT_CACHE["audited_delegate"] = audited_delegate
 
     captured: dict = {}
 
@@ -57,11 +62,11 @@ def _warm(monkeypatch):
 
     monkeypatch.setattr("tools.vault.unlock.open_generation_keys", fake_open)
     monkeypatch.setattr(u, "_bring_vault_up", fake_bring_up)
-    return delegate, kem_private, captured
+    return delegate, kem_private, audited_delegate, captured
 
 
 def test_graceful_reload_re_warms_from_the_two_keys(tmp_path, monkeypatch):
-    delegate, kem_private, captured = _warm(monkeypatch)
+    delegate, kem_private, audited_delegate, captured = _warm(monkeypatch)
 
     assert u.save_vault_across_hot_reload() is True
     u._VAULT_CACHE.clear()  # the reload: the in-memory cache dies
@@ -73,10 +78,13 @@ def test_graceful_reload_re_warms_from_the_two_keys(tmp_path, monkeypatch):
     assert captured["generation_keys"] == {"a" * 64: b"\x01" * 32}
     # And the KEM key is retained for the NEXT reload.
     assert u._VAULT_CACHE.get("kem_private") == kem_private
+    assert u._VAULT_CACHE.get("audited_delegate") == audited_delegate
+    assert settings_ops._personal_delegate_audited_key == audited_delegate
 
     # The snapshot files are consumed on load — nothing lingers on ramfs.
     assert u._keycache_read(u._HOTRELOAD_DELEGATE) is None
     assert u._keycache_read(u._HOTRELOAD_KEM) is None
+    assert u._keycache_read(u._HOTRELOAD_AUDITED_DELEGATE) is None
 
 
 def test_a_crash_leaves_nothing_and_boots_locked(monkeypatch):
