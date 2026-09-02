@@ -1,0 +1,55 @@
+# Private Prometheus for the auto.network relay estate (auto-k9jxd).
+# File-provisioned, no click-config. Binds loopback only (see the systemd
+# unit): the estate firewall opens 22/80/443 (+53 on the relay host), so
+# nothing here is publicly reachable. The dashboard Operations plugin
+# (O0 decision graph://41195143-344) queries this over the operator-private
+# path; the browser never sees this address.
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+  external_labels:
+    estate: auto-network
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  # The registry's private metrics listener (auto-albp6.9).
+  - job_name: registry
+    static_configs:
+      - targets: ["127.0.0.1:9479"]
+
+  # The authoritative DNS process — its own listener, own crash domain.
+  - job_name: dns
+    static_configs:
+      - targets: ["127.0.0.1:9480"]
+
+  # Host health via node_exporter (deployed alongside; :9100 loopback).
+  - job_name: node
+    static_configs:
+      - targets: ["127.0.0.1:9100"]
+
+  # coturn's native Prometheus exporter (enable prometheus in turnserver.conf;
+  # binds :9641 loopback). Absent until TURN metrics are enabled — a down
+  # target here fires TargetDown, which is the intended "not yet wired" signal.
+  - job_name: coturn
+    static_configs:
+      - targets: ["127.0.0.1:9641"]
+
+  # Blackbox probe of the PUBLIC serve path end to end, including the served
+  # certificate's expiry (the cert lives in the operator's local Caddy, never
+  # the registry — so cert-expiry is observed here, not in registry metrics).
+  - job_name: blackbox_serve
+    metrics_path: /probe
+    params:
+      module: [https_2xx]
+    static_configs:
+      - targets:
+          - https://oss-insights.persona-b1dda5478ad0db53fc2d.serve.auto.network/
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: 127.0.0.1:9115   # blackbox_exporter, loopback
