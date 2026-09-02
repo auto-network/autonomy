@@ -55,11 +55,17 @@ class Step:
 class HarnessFleet:
     """Build, fault, and observe a local fleet of real sync processes."""
 
-    def __init__(self, root_dir: Path, size: int, *, seed: int = 7) -> None:
+    def __init__(
+        self, root_dir: Path, size: int, *, seed: int = 7,
+        org_scopes: tuple[str, ...] = (),
+        org_customize: "Callable[[int, str, Path], None] | None" = None,
+    ) -> None:
         if size < 2:
             raise ValueError("a fleet needs at least two machines")
         self.root_dir = Path(root_dir)
         self.size = size
+        self.org_scopes = org_scopes
+        self.org_customize = org_customize
         self.hub = ProxyHub(seed=seed)
         self.machines: list[Machine] = []
         self.evidence: dict = {"faults": [], "restarts": [], "writes": 0}
@@ -82,6 +88,20 @@ class HarnessFleet:
                 graph.activate_fleet_sync_writers(key.public_hex)
             finally:
                 graph.close()
+            for slug in self.org_scopes:
+                org_path = self.org_db_path(index, slug)
+                GraphDB(org_path).close()
+                # Customization runs before writer activation so a scenario
+                # can diverge one machine's schema while leaving that
+                # machine self-consistent (its capture triggers match its
+                # own schema; only the cross-machine digest differs).
+                if self.org_customize is not None:
+                    self.org_customize(index, slug, org_path)
+                org_graph = GraphDB(org_path)
+                try:
+                    org_graph.activate_fleet_sync_writers(key.public_hex)
+                finally:
+                    org_graph.close()
             self.machines.append(Machine(
                 index, key, db_path, self.root_dir / f"machine-{index}.json",
             ))
@@ -110,6 +130,10 @@ class HarnessFleet:
             "machine_private": machine.key.private_hex,
             "personal_db_path": str(machine.db_path),
             "peer_addresses": peer_addresses,
+            "sync_scopes": {
+                slug: str(self.org_db_path(machine.index, slug))
+                for slug in self.org_scopes
+            },
         }, sort_keys=True))
 
     # -- lifecycle --------------------------------------------------------
@@ -198,6 +222,27 @@ class HarnessFleet:
         self.set_pair_faults(a, b, partitioned=False)
 
     # -- workload and observation ----------------------------------------
+
+    def org_db_path(self, index: int, slug: str) -> Path:
+        org_dir = self.root_dir / f"machine-{index}-orgs"
+        org_dir.mkdir(parents=True, exist_ok=True)
+        return org_dir / f"{slug}.db"
+
+    def write_org(
+        self, index: int, slug: str, source_id: str, title: str
+    ) -> None:
+        graph = GraphDB(self.org_db_path(index, slug))
+        try:
+            graph.insert_source(Source(id=source_id, type="note", title=title))
+        finally:
+            graph.close()
+        self.evidence["writes"] += 1
+
+    def has_org(self, index: int, slug: str, source_id: str) -> bool:
+        with sqlite3.connect(self.org_db_path(index, slug)) as conn:
+            return conn.execute(
+                "SELECT 1 FROM sources WHERE id=?", (source_id,)
+            ).fetchone() is not None
 
     def write(self, index: int, source_id: str, title: str) -> None:
         graph = GraphDB(self.machines[index].db_path)

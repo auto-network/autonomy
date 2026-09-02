@@ -207,17 +207,26 @@ def _digest_of(path: Path) -> str:
             digest.update(chunk)
 
 
-def iter_blob_frames(db_path: Path, digests: list[str]) -> Iterator[bytes]:
+def iter_blob_frames(
+    db_paths: "Path | list[Path]", digests: list[str]
+) -> Iterator[bytes]:
     """Serve requested digests as a bounded frame stream.
 
-    Reads each file chunk by chunk — memory is bounded by one chunk
-    regardless of object size. Digests nothing local satisfies are reported
-    in the terminal frame rather than failing the stream.
+    Accepts one database path or several (every synchronized scope is a
+    candidate index — digests are self-certifying). Reads each file chunk
+    by chunk — memory is bounded by one chunk regardless of object size.
+    Digests nothing local satisfies are reported in the terminal frame
+    rather than failing the stream.
     """
+    paths = [db_paths] if isinstance(db_paths, Path) else list(db_paths)
     found: list[str] = []
     missing: list[str] = []
     for digest in digests:
-        path = locate_blob(db_path, digest)
+        path = None
+        for candidate in paths:
+            path = locate_blob(candidate, digest)
+            if path is not None:
+                break
         if path is None:
             missing.append(digest)
             continue

@@ -610,6 +610,43 @@ def check_sync_data(report: dict) -> None:
             pass
     except Exception as exc:
         _line("sync-data check", f"FAILED to run: {exc!r}", fail=True)
+    # Every synchronized scope beyond personal, named with its own state so
+    # a paused or lagging organization is visible at a glance.
+    try:
+        from tools.network.fleet_sync_scheduler import discover_org_sync_scopes
+
+        scopes = discover_org_sync_scopes()
+        report["org_sync_scopes"] = sorted(scopes)
+        if scopes:
+            _section("Organization sync scopes")
+        for slug, org_path in sorted(scopes.items()):
+            if not org_path.exists():
+                _line(f"scope {slug}", "database missing", warn=True)
+                continue
+            with sqlite3.connect(str(org_path)) as org_conn:
+                try:
+                    catalog_rows = org_conn.execute(
+                        "SELECT COUNT(*) FROM fleet_sync_catalog"
+                    ).fetchone()[0]
+                    backlog = org_conn.execute(
+                        "SELECT COUNT(*) FROM fleet_sync_quarantine"
+                    ).fetchone()[0] if org_conn.execute(
+                        "SELECT 1 FROM sqlite_master "
+                        "WHERE name='fleet_sync_quarantine'"
+                    ).fetchone() else 0
+                    _line(
+                        f"scope {slug}",
+                        f"{catalog_rows} catalog rows, "
+                        f"{backlog} quarantined",
+                    )
+                except sqlite3.OperationalError:
+                    _line(
+                        f"scope {slug}",
+                        "writers not yet activated (first sync pending)",
+                        warn=True,
+                    )
+    except Exception as exc:
+        _line("org-scope check", f"FAILED to run: {exc!r}", warn=True)
 
 
 def check_catalog_canary(report: dict) -> None:

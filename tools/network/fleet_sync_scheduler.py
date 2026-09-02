@@ -53,6 +53,7 @@ FLEET_SYNC_PROTOCOL_VERSION = 3
 _REQUEST_FIELDS = frozenset({
     "v", "op", "roster_epoch", "resume", "compat",
 })
+_REQUEST_FIELDS_SCOPED = _REQUEST_FIELDS | {"scope"}
 _REFUSAL_FIELDS = frozenset({"v", "kind", "digest"})
 _DONE_FIELDS = frozenset(
     {
@@ -171,12 +172,38 @@ class FleetSyncRuntimeConfig:
     min_backoff: float = 0.25
     max_backoff: float = 5.0
     telemetry_recorder: Callable[..., object] | None = None
-    #: Returns the locally stored resume breadcrumb trail for one peer —
-    #: each breadcrumb names one verified transaction (origin, transaction
-    #: id, timestamp), newest first — never row numbers.
+    #: Returns the locally stored resume breadcrumb trail for one
+    #: (peer, scope) — each breadcrumb names one verified transaction
+    #: (origin, transaction id, timestamp), newest first — never row
+    #: numbers.
     resume_cursor: Callable[
-        [str], Sequence[tuple[str, str, int]]
+        [str, str], Sequence[tuple[str, str, int]]
     ] | None = None
+    #: Organization databases synchronized beside the personal one, as
+    #: scope slug -> database path. The personal scope is implicit and
+    #: always first. Databases share the graph schema; each keeps its own
+    #: catalog, journal, peer state, and breadcrumb trails.
+    sync_scopes: Callable[[], Mapping[str, Path]] | None = None
+
+
+def discover_org_sync_scopes() -> dict[str, Path]:
+    """Organization databases present on this machine, by slug.
+
+    Resolved fresh on every round so an organization created mid-run joins
+    synchronization without a restart. The personal database is excluded —
+    it is the implicit first scope.
+    """
+    from tools.graph.db import _org_db_path
+
+    orgs_dir = Path(_org_db_path("personal")).parent / "orgs"
+    if not orgs_dir.is_dir():
+        return {}
+    scopes: dict[str, Path] = {}
+    for candidate in sorted(orgs_dir.glob("*.db")):
+        slug = candidate.stem
+        if slug and slug != "personal" and ":" not in slug:
+            scopes[slug] = candidate
+    return scopes
 
 
 def roster_epoch(entries: Iterable[RosterEntry], root_pub: str) -> str:
@@ -265,6 +292,7 @@ def encode_pull_request(
     *,
     compat: str,
     resume: Sequence[tuple[str, str, int]] = (),
+    scope: str = "personal",
 ) -> bytes:
     """Ask for every journal transaction after a content-addressed position.
 
@@ -276,23 +304,38 @@ def encode_pull_request(
     """
     if len(resume) > MAX_RESUME_BREADCRUMBS:
         raise FleetSyncProtocolError("fleet sync resume trail exceeds bound")
-    return canonical_json(
-        {
-            "v": FLEET_SYNC_PROTOCOL_VERSION,
-            "op": "pull",
-            "roster_epoch": epoch,
-            "compat": _require_hex64(compat, "fleet sync compat digest"),
-            "resume": [
-                encode_breadcrumb(breadcrumb) for breadcrumb in resume
-            ],
-        }
-    )
+    body = {
+        "v": FLEET_SYNC_PROTOCOL_VERSION,
+        "op": "pull",
+        "roster_epoch": epoch,
+        "compat": _require_hex64(compat, "fleet sync compat digest"),
+        "resume": [
+            encode_breadcrumb(breadcrumb) for breadcrumb in resume
+        ],
+    }
+    # The personal scope keeps the historical request bytes, so a fleet with
+    # mixed software versions synchronizes its personal database regardless;
+    # only organization-scope pulls carry the field an older server refuses.
+    if scope != "personal":
+        if not scope or not isinstance(scope, str) or ":" in scope:
+            raise FleetSyncProtocolError("fleet sync scope is malformed")
+        body["scope"] = scope
+    return canonical_json(body)
 
 
 def decode_pull_request(
     raw: bytes,
-) -> tuple[str, tuple[tuple[str, str, int], ...], str]:
-    value = _json_object(raw, _REQUEST_FIELDS, "fleet sync request")
+) -> tuple[str, tuple[tuple[str, str, int], ...], str, str]:
+    try:
+        value = _json_object(raw, _REQUEST_FIELDS, "fleet sync request")
+        scope = "personal"
+    except FleetSyncProtocolError:
+        value = _json_object(
+            raw, _REQUEST_FIELDS_SCOPED, "fleet sync request"
+        )
+        scope = value["scope"]
+        if not isinstance(scope, str) or not scope or ":" in scope:
+            raise FleetSyncProtocolError("fleet sync scope is malformed")
     if value["op"] != "pull":
         raise FleetSyncProtocolError("unsupported fleet sync operation")
     epoch = _require_hex64(value["roster_epoch"], "fleet sync roster_epoch")
@@ -303,7 +346,7 @@ def decode_pull_request(
     return epoch, tuple(
         decode_breadcrumb(entry, "fleet sync resume breadcrumb")
         for entry in resume
-    ), compat
+    ), compat, scope
 
 
 def encode_authored(item: AuthoredMutation, *, transaction_operations: int) -> bytes:
@@ -664,6 +707,7 @@ class FleetSyncScheduler:
         self._stopping = asyncio.Event()
         self._failures: dict[str, int] = {}
         self._next_attempt: dict[str, float] = {}
+        self._activated_scopes: set[Path] = set()
 
     @property
     def port(self) -> int:
@@ -705,6 +749,44 @@ class FleetSyncScheduler:
             self._roster_snapshot, self.config.personal_root_pub
         )
 
+    def _scope_paths(self) -> dict[str, Path]:
+        """Synchronized databases by scope slug, personal always first."""
+        scopes: dict[str, Path] = {
+            "personal": Path(self.config.personal_db_path)
+        }
+        if self.config.sync_scopes is not None:
+            for slug, path in self.config.sync_scopes().items():
+                if slug != "personal":
+                    scopes[str(slug)] = Path(path)
+        return scopes
+
+    def _store_for(self, scope: str) -> SQLiteFleetSyncStore:
+        """The scope's store, with its fleet writers activated once.
+
+        Organization databases share the graph schema, so the same policy
+        audit applies; activation fails closed on any unpoliced table.
+        """
+        paths = self._scope_paths()
+        if scope not in paths:
+            raise FleetSyncProtocolError(
+                f"unknown fleet sync scope: {scope!r}"
+            )
+        path = paths[scope]
+        if scope == "personal":
+            return self.store
+        if path not in self._activated_scopes:
+            from tools.graph.db import GraphDB
+
+            graph = GraphDB(path)
+            try:
+                graph.activate_fleet_sync_writers(
+                    self.authenticator.machine_pub
+                )
+            finally:
+                graph.close()
+            self._activated_scopes.add(path)
+        return SQLiteFleetSyncStore(path)
+
     async def _refresh_roster(self) -> None:
         while not self._stopping.is_set():
             try:
@@ -741,7 +823,10 @@ class FleetSyncScheduler:
 
         if peek_request_op(message) == "blob":
             return self._blob_response(message, peer_pub)
-        _requested_epoch, resume_trail, peer_digest = decode_pull_request(message)
+        _requested_epoch, resume_trail, peer_digest, scope = (
+            decode_pull_request(message)
+        )
+        store = await asyncio.to_thread(self._store_for, scope)
         epoch = self._current_epoch()
         record_here = telemetry_stats is None
         stats = telemetry_stats if telemetry_stats is not None else {}
@@ -767,7 +852,7 @@ class FleetSyncScheduler:
                 # ordinary poll loop resume once the lagging machine's own
                 # software applies the same migration locally.
                 local_digest = await asyncio.to_thread(
-                    self.store.compatibility_digest
+                    store.compatibility_digest
                 )
                 if peer_digest != local_digest:
                     refusal = encode_schema_refusal(digest=local_digest)
@@ -780,7 +865,7 @@ class FleetSyncScheduler:
                 # from backup re-serves its divergence window instead of
                 # honouring a cursor into journal rows that no longer exist.
                 cursor = await asyncio.to_thread(
-                    self.store.resume_ref, resume_trail
+                    store.resume_ref, resume_trail
                 )
                 # A resolvable trail is the peer's durable acknowledgement of
                 # this journal's prefix through that transaction. Record it
@@ -789,7 +874,7 @@ class FleetSyncScheduler:
                 if cursor > 0:
                     try:
                         await asyncio.to_thread(
-                            self.store.record_served_ack,
+                            store.record_served_ack,
                             peer_pub, epoch, cursor,
                         )
                     except Exception:
@@ -800,7 +885,7 @@ class FleetSyncScheduler:
                 while True:
                     self.authenticator.authorize(peer_pub)
                     page = await asyncio.to_thread(
-                        self.store.next_transaction, cursor
+                        store.next_transaction, cursor
                     )
                     if page is None:
                         break
@@ -821,7 +906,7 @@ class FleetSyncScheduler:
                 through_breadcrumb = None
                 if cursor:
                     through_breadcrumb = await asyncio.to_thread(
-                        self.store.breadcrumb, cursor
+                        store.breadcrumb, cursor
                     )
                 done = encode_done(
                     epoch=epoch,
@@ -850,7 +935,7 @@ class FleetSyncScheduler:
                         if pub != self.authenticator.machine_pub
                     ]
                     journal_rows, transaction_rows = await asyncio.to_thread(
-                        self.store.prune_acknowledged, others, epoch
+                        store.prune_acknowledged, others, epoch
                     )
                     if journal_rows or transaction_rows:
                         logger.info(
@@ -887,6 +972,7 @@ class FleetSyncScheduler:
                             started_at_ns=started_at_ns,
                             duration_ms=duration_ms,
                             error_code=error_code,
+                            scope=scope,
                             **stats,
                         )
 
@@ -900,10 +986,13 @@ class FleetSyncScheduler:
         )
 
         digests = decode_blob_request(message)
-        db_path = self.config.personal_db_path
+        # Digests are self-certifying, so every synchronized scope's store
+        # and attachment rows are legitimate candidates regardless of which
+        # scope's backlog asked.
+        db_paths = list(self._scope_paths().values())
 
         async def response():
-            frames = iter_blob_frames(db_path, digests)
+            frames = iter_blob_frames(db_paths, digests)
             while True:
                 self.authenticator.authorize(peer_pub)
                 frame = await asyncio.to_thread(next, frames, None)
@@ -914,7 +1003,8 @@ class FleetSyncScheduler:
         return response()
 
     async def _drain_attachment_backlog(
-        self, machine_pub: str, addresses: Sequence[str]
+        self, machine_pub: str, addresses: Sequence[str],
+        scope: str = "personal",
     ) -> None:
         """Best-effort post-pull drain of the attachment byte backlog."""
         from tools.network.fleet_sync.blob_transport import (
@@ -923,13 +1013,14 @@ class FleetSyncScheduler:
             MAX_BLOB_REQUEST_DIGESTS,
         )
 
-        entries = await asyncio.to_thread(self.store.attachment_backlog)
+        scope_store = await asyncio.to_thread(self._store_for, scope)
+        entries = await asyncio.to_thread(scope_store.attachment_backlog)
         if not entries:
             return
         digests = sorted({entry.digest for entry in entries})[
             :MAX_BLOB_REQUEST_DIGESTS
         ]
-        store = await asyncio.to_thread(self.store.blob_store_root)
+        store = await asyncio.to_thread(scope_store.blob_store_root)
         receiver = BlobReceiver(store)
         channel = None
         try:
@@ -960,7 +1051,7 @@ class FleetSyncScheduler:
                     "blob stream ended without terminal frame"
                 )
             cleared = await asyncio.to_thread(
-                self.store.drain_attachments, entries
+                scope_store.drain_attachments, entries
             )
             logger.info(
                 "fleet attachment drain: %d adopted, %d cleared, %d missing",
@@ -996,6 +1087,27 @@ class FleetSyncScheduler:
                 pass
 
     async def _sync_peer(self, machine_pub: str, addresses: Sequence[str]) -> None:
+        """Pull every synchronized scope from one peer, personal first.
+
+        A schema mismatch pauses only its own scope: the typed refusal is
+        recorded and the remaining scopes still sync. Any other failure is
+        transport-level and backs off the whole peer.
+        """
+        for scope in self._scope_paths():
+            try:
+                await self._pull_scope(machine_pub, addresses, scope)
+            except FleetSyncSchemaMismatch:
+                logger.info(
+                    "fleet sync scope %r paused on schema mismatch", scope
+                )
+                continue
+            except Exception:
+                return
+
+    async def _pull_scope(
+        self, machine_pub: str, addresses: Sequence[str], scope: str
+    ) -> None:
+        store = await asyncio.to_thread(self._store_for, scope)
         epoch = self._current_epoch()
         channel = None
         sent = 0
@@ -1022,6 +1134,7 @@ class FleetSyncScheduler:
                 "channel": "direct",
                 "direction": "pull",
                 "mode": "delta",
+                "scope": scope,
                 "outcome": outcome,
                 "started_at_ns": started_at_ns,
                 "duration_ms": duration_ms,
@@ -1064,18 +1177,18 @@ class FleetSyncScheduler:
                 raise last_error
 
             await asyncio.to_thread(
-                self.store.record_peer, machine_pub, epoch, online=True
+                store.record_peer, machine_pub, epoch, online=True
             )
             resume_trail: Sequence[tuple[str, str, int]] = ()
             if self.config.resume_cursor is not None:
                 resume_trail = tuple(await asyncio.to_thread(
-                    self.config.resume_cursor, machine_pub
+                    self.config.resume_cursor, machine_pub, scope
                 ))
             local_digest = await asyncio.to_thread(
-                self.store.compatibility_digest
+                store.compatibility_digest
             )
             request = encode_pull_request(
-                epoch, compat=local_digest, resume=resume_trail
+                epoch, compat=local_digest, resume=resume_trail, scope=scope
             )
             sent += len(request)
             await channel.send_message(request)
@@ -1091,7 +1204,7 @@ class FleetSyncScheduler:
 
             async def apply_pending(items: list[AuthoredMutation]) -> None:
                 nonlocal peer_watermark, transactions
-                won, _ignored = await asyncio.to_thread(self.store.apply, items)
+                won, _ignored = await asyncio.to_thread(store.apply, items)
                 if won == len(items):
                     _emit_settings_materialized(items)
                 elif won:
@@ -1106,7 +1219,7 @@ class FleetSyncScheduler:
                 )
                 if won:
                     await asyncio.to_thread(
-                        self.store.record_peer,
+                        store.record_peer,
                         machine_pub,
                         epoch,
                         online=True,
@@ -1180,7 +1293,7 @@ class FleetSyncScheduler:
                 raise FleetSyncProtocolError("fleet stream ended without summary")
 
             await asyncio.to_thread(
-                self.store.record_peer,
+                store.record_peer,
                 machine_pub,
                 epoch,
                 online=False,
@@ -1201,7 +1314,9 @@ class FleetSyncScheduler:
             # Best-effort: a drain failure never fails the pull that
             # preceded it, but it is logged rather than swallowed.
             try:
-                await self._drain_attachment_backlog(machine_pub, addresses)
+                await self._drain_attachment_backlog(
+                    machine_pub, addresses, scope
+                )
             except Exception:
                 logger.warning(
                     "fleet attachment drain failed", exc_info=True
@@ -1209,7 +1324,7 @@ class FleetSyncScheduler:
         except asyncio.CancelledError:
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(
-                    self.store.record_peer,
+                    store.record_peer,
                     machine_pub,
                     epoch,
                     online=False,
@@ -1230,7 +1345,7 @@ class FleetSyncScheduler:
             )
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(
-                    self.store.record_peer,
+                    store.record_peer,
                     machine_pub,
                     epoch,
                     online=False,
@@ -1241,10 +1356,16 @@ class FleetSyncScheduler:
                 )
             await record("failed", type(exc).__name__)
             logger.warning(
-                "fleet sync peer %s failed (%s)",
+                "fleet sync peer %s scope %r failed (%s)",
                 machine_pub[:12],
+                scope,
                 type(exc).__name__,
             )
+            # Re-raise so the scope loop distinguishes a per-scope schema
+            # pause (continue with the other scopes) from a transport
+            # failure (back off the whole peer). Recording and backoff
+            # already happened above.
+            raise
         finally:
             if channel is not None:
                 await channel.close()
