@@ -3309,6 +3309,34 @@ def _existing_base_id(
     return row["id"] if row else None
 
 
+def _apply_org_writeback(
+    set_id: str, key: str, org: "str | None"
+) -> "tuple[str, str | None]":
+    """Route an org caller's write to a personal-homed writeback set.
+
+    The write-side counterpart of the read-side org-namespace scoping
+    (:func:`_set_is_org_key_namespaced`): a personal-homed set that declares
+    an ``org_slug:*`` writeback strategy accepts an organization session's
+    write by deriving the bearer-prefixed key (``<org>:<suffix>``) and landing
+    it in the operator's own store. Until now this derivation lived only in
+    the two hand-written vault routes; keeping it here makes every such set
+    behave the same and closes the read/write asymmetry.
+
+    A no-op for every other case: an operator/browser caller (``org`` is
+    ``None`` / ``personal`` / ``machine``) writes unprefixed, and a set that
+    declares no writeback strategy is untouched. Because an org session's
+    generic write to a personal-homed set is refused today, this only ENABLES
+    a currently-blocked path — it cannot change a working one.
+    """
+    if not isinstance(org, str) or org in ("personal", "machine"):
+        return key, org
+    if schemas.declared_home(set_id) != "personal":
+        return key, org
+    if not schemas.declared_org_writeback_key_strategy(set_id):
+        return key, org
+    return schemas.derive_org_writeback_key(set_id, org, key), None
+
+
 def write_by_key(
     set_id: str,
     schema_revision: int,
@@ -3355,6 +3383,7 @@ def write_by_key(
     plaintext fallback on either path.
     """
     org = _resolve_org_arg(org)
+    key, org = _apply_org_writeback(set_id, key, org)
     append_only = _access_pattern_for(set_id, schema_revision) == "append_only_log"
     vaulted = schemas.declared_vault_tier(set_id) is not None
 

@@ -161,6 +161,17 @@ def hidden_address(pepper: bytes, store_name: str) -> str:
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
+def _bare_key(row_key: str) -> str:
+    """Strip an optional server-derived ``<org>:`` prefix to the logical key.
+
+    A row is stored either bare (``<tag>.<blind>``, operator/browser mint) or
+    org-prefixed (``<org>:<tag>.<blind>``, session mint). Neither the org
+    slug, the base64url tag, nor the blind index contains ``:``, so at most
+    one ``:`` is ever present and the logical key is the final segment.
+    """
+    return row_key.rsplit(":", 1)[-1]
+
+
 def blind_index(k_index: bytes, name: str) -> str:
     """The base64url HMAC-SHA-256 of a logical name — the row's hidden key.
 
@@ -286,6 +297,7 @@ class SealedSettings:
         _, k_meta = self._keys()
         items: list[SealedItem] = []
         for row_key, ciphertext in self._backend.list_rows(self._store_tag()):
+            # row_key may carry a server-derived <org>: prefix; _aad strips it.
             try:
                 items.append(self._open_item(k_meta, row_key, ciphertext))
             except (InvalidTag, ValueError, KeyError):
@@ -300,13 +312,22 @@ class SealedSettings:
 
     # -- internals ---------------------------------------------------------- #
     def _row_key(self, name: str) -> str:
+        # The LOGICAL (bare) row key: <store-tag>.<blind-index>. The '.'
+        # separator is outside base64url, so tag and blind index stay
+        # unambiguous and the whole compound is a legal org-writeback suffix.
+        # A session's write is stored under a server-derived <org>: prefix;
+        # this bare form is what the layer computes, seals against, and looks
+        # up by.
         k_index, _ = self._keys()
-        return f"{self._store_tag()}:{blind_index(k_index, name)}"
+        return f"{self._store_tag()}.{blind_index(k_index, name)}"
 
     def _aad(self, row_key: str) -> bytes:
         # Bind each ciphertext to its own row so a blob cannot be lifted into
-        # another key's row and still open.
-        return row_key.encode("utf-8")
+        # another key's row and still open. Always the BARE key: the writer
+        # cannot know the server-derived <org>: prefix at seal time, and the
+        # cross-org lift the prefix would otherwise guard against is already
+        # forbidden by the writeback namespace boundary.
+        return _bare_key(row_key).encode("utf-8")
 
     def _open_item(self, k_meta: bytes, row_key: str, ciphertext: str) -> SealedItem:
         payload = json.loads(_open(k_meta, ciphertext, self._aad(row_key)))
@@ -444,13 +465,21 @@ class ClientBackend:
         )
 
     def read_row(self, row_key: str) -> str | None:
+        # row_key is the bare logical key; the stored row may carry a
+        # server-derived <org>: prefix (a session mint). Match on the bare
+        # form so both resolve. The read is already org-scoped by the
+        # substrate (this set declares an org-writeback namespace), so a
+        # session sees only its own prefixed rows plus any bare ones.
         members = self._client.read_set(SEALED_ROW_SET_ID, org=None)
         for member in members.members:
-            if member.key == row_key:
+            if _bare_key(member.key) == row_key:
                 return (member.payload or {}).get("ciphertext")
         return None
 
     def write_row(self, row_key: str, ciphertext: str) -> None:
+        # Write the BARE key; the server derives this session's <org>: prefix
+        # for the personal-homed org-writeback set. The header is omitted so
+        # the bearer names the org (a "personal" header is refused).
         self._client.add_setting(
             SEALED_ROW_SET_ID, SEALED_ROW_REVISION, row_key,
             {"ciphertext": ciphertext}, state="raw", org=None,
@@ -466,7 +495,7 @@ class ClientBackend:
     def list_rows(self, prefix: str) -> Iterable[tuple[str, str]]:
         members = self._client.read_set(SEALED_ROW_SET_ID, org=None)
         for member in members.members:
-            if member.key.startswith(f"{prefix}:"):
+            if _bare_key(member.key).startswith(f"{prefix}."):
                 ciphertext = (member.payload or {}).get("ciphertext")
                 if isinstance(ciphertext, str):
                     yield member.key, ciphertext

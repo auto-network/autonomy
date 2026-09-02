@@ -825,16 +825,24 @@ def declared_org_writeback_key_strategy(set_id: str) -> str | None:
     return seen.pop()
 
 
+# Leading '-'/'_' are allowed because a base64url segment (a sealed store's
+# blind-index compound key) legitimately begins with either; ':' stays
+# forbidden — it is the org-prefix separator the derivation itself owns, and
+# the only character whose presence in a suffix could cross a namespace.
 _ORG_WRITEBACK_SUFFIX_RE = re.compile(
-    r"^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$"
+    r"^[A-Za-z0-9_-][A-Za-z0-9._-]{0,255}$"
 )
 
 
 def derive_org_writeback_key(set_id: str, org: str, suffix: str) -> str:
-    """Derive the only personal-store key an organization caller may name."""
-    if declared_org_writeback_key_strategy(set_id) != (
-        "org_slug:credential_name"
-    ):
+    """Derive the only personal-store key an organization caller may name.
+
+    Any set declaring an ``org_slug:<label>`` writeback strategy participates;
+    the ``<label>`` names the suffix's role for readers of the schema and does
+    not change the derivation, which always prepends the bearer's ``<org>:``.
+    """
+    strategy = declared_org_writeback_key_strategy(set_id)
+    if not strategy or not strategy.startswith("org_slug:"):
         raise SchemaValidationError(
             f"{set_id}: no organization-keyed writeback namespace is declared"
         )
