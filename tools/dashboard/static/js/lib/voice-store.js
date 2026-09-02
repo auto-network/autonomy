@@ -648,6 +648,9 @@
 
       openSheet() {
         if (!this.enabled || !this.boundSessionId) return false;
+        if (this.micMode === 'listening' || this.micMode === 'vad_paused') {
+          this.setMicMode('muted');
+        }
         this.sheetOpen = true;
         this.sheetMode = 'partial';
         this.sheetError = '';
@@ -655,11 +658,10 @@
         // synthesized click from the very tap that opened the sheet (the
         // original open-then-instantly-close flicker).
         this.sheetOpenedAt = (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0;
-        // Jeremy 2026-05-31: keep capturing while the sheet is open so the
-        // full transcript streams LIVE into the visible editor. This overrides
-        // the spec's "opening the sheet implicitly mutes capture" (state-matrix
-        // L127) — the operator wants to watch the whole message fill as they
-        // speak, not have the mic cut out when the text view is up.
+        // The keyboard has the same controls as the capsule, so opening it
+        // hides the capsule and starts muted. The operator may explicitly
+        // resume capture with the sheet's mic button; dismissing never changes
+        // that choice behind their back.
         this.sheetResumeListeningOnDismiss = false;
         return true;
       },
