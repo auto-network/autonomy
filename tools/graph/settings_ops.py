@@ -734,6 +734,20 @@ def set_vault_key_holder(holder: Callable[..., Any] | None) -> None:
     _vault_key_holder = holder
 
 
+# The warm audited delegate private key (64-hex X25519), set at unlock and
+# cleared at lock. A personal AUDITED read opens its CEK with this; when it is
+# None the vault is cold and the read fails closed as VAULT_NO_KEY_HOLDER — never
+# plaintext. The public half lives in the vault store so the WRITE stays cold;
+# only the READ needs this warm private half.
+_personal_delegate_audited_key: str | None = None
+
+
+def set_personal_delegate_audited_key(private_hex: "str | None") -> None:
+    """Register (or clear with ``None``) the warm audited delegate private key."""
+    global _personal_delegate_audited_key
+    _personal_delegate_audited_key = private_hex
+
+
 def _make_snapshot(
     set_id: str,
     schema_revision: int,
@@ -4496,8 +4510,8 @@ def _vault_key_control(org: str | None, set_id: str, cache: dict):
 
 
 def _unwrap_vault_locator(
-    locator, *, set_id: str, key: str, declared_tier: str, org: str | None,
-    cache: dict,
+    locator, *, set_id: str, key: str, setting_id: str, declared_tier: str,
+    org: str | None, cache: dict,
 ):
     """Step six for one member: the locator, resolved back to its value.
 
@@ -4521,28 +4535,59 @@ def _unwrap_vault_locator(
         )
 
     if personal_object.is_personal_locator(locator):
-        if declared_tier != "secured":
-            return refuse(
-                VAULT_TIER_MISMATCH,
-                "This record's release tier does not match the set's and "
-                "cannot be processed.",
-            )
-        try:
-            gated = personal_object.inspect_revision(
-                locator, set_id=set_id, key=key,
-            )
-        except SuiteError:
-            return refuse(
-                VAULT_UNKNOWN_SUITE,
-                "This record's encryption suite is unrecognized and cannot "
-                "be processed.",
-            )
-        except VaultError:
-            return refuse(
-                VAULT_DECRYPTION_FAILED,
-                "This record could not be verified and cannot be processed.",
-            )
-        return None, asdict(gated), None
+        if declared_tier == "secured":
+            try:
+                gated = personal_object.inspect_revision(
+                    locator, set_id=set_id, key=key,
+                )
+            except SuiteError:
+                return refuse(
+                    VAULT_UNKNOWN_SUITE,
+                    "This record's encryption suite is unrecognized and cannot "
+                    "be processed.",
+                )
+            except VaultError:
+                return refuse(
+                    VAULT_DECRYPTION_FAILED,
+                    "This record could not be verified and cannot be processed.",
+                )
+            return None, asdict(gated), None
+        if declared_tier == "audited":
+            # Audited releases unattended: the warm delegate private half opens
+            # the CEK inline. Cold, there is no private half and the read fails
+            # closed — never plaintext.
+            private_hex = _personal_delegate_audited_key
+            if private_hex is None:
+                return refuse(
+                    VAULT_NO_KEY_HOLDER,
+                    "The vault is locked in this process and only the operator "
+                    "can unlock it (sign-in or warm client).",
+                )
+            try:
+                payload = personal_object.open_audited_revision(
+                    locator,
+                    set_id=set_id,
+                    key=key,
+                    setting_id=setting_id,
+                    delegate_private_hex=private_hex,
+                )
+            except SuiteError:
+                return refuse(
+                    VAULT_UNKNOWN_SUITE,
+                    "This record's encryption suite is unrecognized and cannot "
+                    "be processed.",
+                )
+            except VaultError:
+                return refuse(
+                    VAULT_DECRYPTION_FAILED,
+                    "This record could not be verified and cannot be processed.",
+                )
+            return payload, None, None
+        return refuse(
+            VAULT_TIER_MISMATCH,
+            "This record's release tier does not match the set's and "
+            "cannot be processed.",
+        )
 
     if not vault_storage_object.is_vault_locator(locator):
         return refuse(
@@ -5141,6 +5186,7 @@ def read_set(
                 merged_payload,
                 set_id=set_id,
                 key=key,
+                setting_id=chosen_row["id"],
                 declared_tier=declared_tier,
                 org=chosen_org,
                 cache=key_control_cache,
