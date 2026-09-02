@@ -218,3 +218,70 @@ def test_dns_metrics_counts_rcodes_and_challenge_gauge():
     assert "dns_challenge_records 3" in out
     # No source-address label anywhere.
     assert "source" not in out and "addr" not in out
+
+
+# -- auto-7df7o: structured ops logs + operator readout --------------------
+
+def test_readout_shows_tunnels_and_loads_no_secrets():
+    from tools.network.registry.metrics import render_readout
+
+    class _T:
+        def __init__(self, org, persona, machine, ch, st, ver, caps, last):
+            self.org, self.persona_pub, self.machine = org, persona, machine
+            self.channels = list(range(ch))
+            self.raw_streams = {i: 0 for i in range(st)}
+            self.version, self.caps, self.last_control = ver, caps, last
+
+    class _Hub:
+        def __init__(self):
+            self._tunnels = {}
+
+    hub = _Hub()
+    hub._tunnels[ORG_A] = {
+        ("p1", "m1"): _T(ORG_A, "ab" * 32, "cd" * 32, 2, 1, 2,
+                         ("host-lease/1",), {"op": "host-register",
+                                             "result": "ok", "reason": None}),
+        ("p1", "m2"): _T(ORG_A, "ab" * 32, "ef" * 32, 0, 3, 2, (), None),
+    }
+    out = render_readout(hub, build_info={"commit": "abc123"})
+    assert out["build"]["commit"] == "abc123"
+    assert out["orgs"][ORG_A]["count"] == 2
+    tunnels = out["orgs"][ORG_A]["tunnels"]
+    assert {t["streams"] for t in tunnels} == {1, 3}
+    assert any(t["last_control"]["op"] == "host-register" for t in tunnels)
+    # Public ids are truncated; no full-length key, token, or address field.
+    import json
+    blob = json.dumps(out)
+    assert "ab" * 32 not in blob            # persona pub not emitted in full
+    assert "token" not in blob and "source" not in blob and "addr" not in blob
+
+
+def test_control_and_lifecycle_ops_logs_carry_no_secrets(caplog):
+    """A control result and a tunnel register/unregister emit structured ops
+    lines with org/op/result but never a token, address, or payload."""
+    import logging
+
+    from tools.network.registry import relay as relay_mod
+
+    ops = logging.getLogger("autonomy.registry.ops")
+    records: list = []
+
+    class _Cap(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    cap = _Cap(level=logging.INFO)
+    ops.addHandler(cap)
+    try:
+        relay_mod._ops("control", org="aaaaaaaa", op="host-register",
+                       id="f" * 32, result="ok", reason=None)
+        relay_mod._ops("tunnel.register", org="aaaaaaaa",
+                       persona="ab" * 8, machine="cd" * 8, version=2, pool=1)
+    finally:
+        ops.removeHandler(cap)
+    joined = "\n".join(records)
+    assert "control org=aaaaaaaa op=host-register" in joined
+    assert "result=ok" in joined
+    assert "tunnel.register" in joined and "pool=1" in joined
+    # None-valued fields (reason=None) are dropped, not rendered as "None".
+    assert "reason=None" not in joined
