@@ -57,6 +57,7 @@ class ServiceTargetDescriptor:
     session_id: str
     container_id: str
     network: str
+    network_ip: str
     port: int
     checked_at: str
     expires_at: str
@@ -389,6 +390,7 @@ async def resolve_service_target(org: str, key: str) -> ServiceTargetDescriptor:
         session_id=payload["session_id"],
         container_id=inspection.container_id,
         network=network,
+        network_ip=inspection.network_ip,
         port=payload["port"],
         checked_at=checked_at,
         expires_at=expires_at,
