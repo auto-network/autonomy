@@ -49,7 +49,12 @@ from tools.network.relaykit.direct import new_session_id
 
 logger = logging.getLogger(__name__)
 
-FLEET_SYNC_PROTOCOL_VERSION = 3
+FLEET_SYNC_PROTOCOL_VERSION = 4
+#: The server answers in the requester's declared version, so a v3 puller
+#: against a v4 server syncs unchanged. v3 repeats the full transaction
+#: header on every operation; v4 sends one transaction-header frame followed
+#: by bare operation frames.
+SUPPORTED_PROTOCOL_VERSIONS = frozenset({3, 4})
 _REQUEST_FIELDS = frozenset({
     "v", "op", "roster_epoch", "resume", "compat",
 })
@@ -65,6 +70,8 @@ _DONE_FIELDS = frozenset(
 _MUTATION_MAGIC = b"FST1"
 _DONE_MAGIC = b"FSD1"
 _REFUSAL_MAGIC = b"FSR1"
+_TRANSACTION_MAGIC = b"FSTX"
+_OPERATION_MAGIC = b"FSO1"
 _HEADER_LIMIT = 4096
 _SETTINGS_HINT_LIMIT = 256
 #: A resume trail carries the last few verified stream positions plus an
@@ -265,7 +272,7 @@ def _json_object(raw: bytes, fields: frozenset[str], what: str) -> dict:
         raise FleetSyncProtocolError(
             f"{what} must carry exactly {sorted(fields)}"
         )
-    if value["v"] != FLEET_SYNC_PROTOCOL_VERSION:
+    if value["v"] not in SUPPORTED_PROTOCOL_VERSIONS:
         raise FleetSyncProtocolError(
             f"unsupported {what} version: {value['v']!r}"
         )
@@ -308,10 +315,12 @@ def _require_hex64(value: object, what: str) -> str:
     return value
 
 
-def encode_schema_refusal(*, digest: str) -> bytes:
+def encode_schema_refusal(
+    *, digest: str, version: int = FLEET_SYNC_PROTOCOL_VERSION
+) -> bytes:
     return _REFUSAL_MAGIC + canonical_json(
         {
-            "v": FLEET_SYNC_PROTOCOL_VERSION,
+            "v": version,
             "kind": "schema-refused",
             "digest": _require_hex64(digest, "schema refusal digest"),
         }
@@ -383,6 +392,7 @@ def encode_pull_request(
     resume: Sequence[tuple[str, str, int]] = (),
     scope: str = "personal",
     bootstrap: bool = False,
+    version: int = FLEET_SYNC_PROTOCOL_VERSION,
 ) -> bytes:
     """Ask for every journal transaction after a content-addressed position.
 
@@ -394,8 +404,10 @@ def encode_pull_request(
     """
     if len(resume) > MAX_RESUME_BREADCRUMBS:
         raise FleetSyncProtocolError("fleet sync resume trail exceeds bound")
+    if version not in SUPPORTED_PROTOCOL_VERSIONS:
+        raise FleetSyncProtocolError("fleet sync request version is unsupported")
     body = {
-        "v": FLEET_SYNC_PROTOCOL_VERSION,
+        "v": version,
         "op": "pull",
         "roster_epoch": epoch,
         "compat": _require_hex64(compat, "fleet sync compat digest"),
@@ -417,7 +429,7 @@ def encode_pull_request(
 
 def decode_pull_request(
     raw: bytes,
-) -> tuple[str, tuple[tuple[str, str, int], ...], str, str, bool]:
+) -> tuple[str, tuple[tuple[str, str, int], ...], str, str, bool, int]:
     try:
         value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
@@ -433,8 +445,9 @@ def decode_pull_request(
             f"fleet sync request must carry {sorted(_REQUEST_FIELDS)} "
             f"plus only {sorted(_REQUEST_OPTIONAL_FIELDS)}"
         )
-    if value["v"] != FLEET_SYNC_PROTOCOL_VERSION:
+    if value["v"] not in SUPPORTED_PROTOCOL_VERSIONS:
         raise FleetSyncProtocolError("unsupported fleet sync request version")
+    version = int(value["v"])
     scope = value.get("scope", "personal")
     if not isinstance(scope, str) or not scope or ":" in scope:
         raise FleetSyncProtocolError("fleet sync scope is malformed")
@@ -451,7 +464,7 @@ def decode_pull_request(
     return epoch, tuple(
         decode_breadcrumb(entry, "fleet sync resume breadcrumb")
         for entry in resume
-    ), compat, scope, bootstrap
+    ), compat, scope, bootstrap, version
 
 
 def encode_authored(item: AuthoredMutation, *, transaction_operations: int) -> bytes:
@@ -515,6 +528,89 @@ def decode_authored(raw: bytes) -> tuple[AuthoredMutation, int]:
     return AuthoredMutation(origin, transaction, operation, mutation), operation_count
 
 
+def encode_transaction_header(
+    origin: str, transaction_id: str, operations: int
+) -> bytes:
+    """Protocol v4: one header frame opens a transaction group.
+
+    The origin, transaction id, and operation count are sent once here
+    instead of being repeated inside every operation frame — the wire
+    wrapper changes; mutation frame bytes, candidate hashes, and journal
+    storage are untouched.
+    """
+    header = canonical_json({
+        "origin": origin,
+        "transaction": transaction_id,
+        "operations": operations,
+    })
+    if len(header) > _HEADER_LIMIT:
+        raise FleetSyncProtocolError(
+            "fleet transaction header exceeds the channel bound"
+        )
+    return _TRANSACTION_MAGIC + header
+
+
+def decode_transaction_header(raw: bytes) -> tuple[str, str, int]:
+    if not raw.startswith(_TRANSACTION_MAGIC):
+        raise FleetSyncProtocolError("fleet transaction header has wrong magic")
+    try:
+        header = json.loads(raw[len(_TRANSACTION_MAGIC):])
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise FleetSyncProtocolError(
+            "fleet transaction header is not valid JSON"
+        ) from exc
+    if not isinstance(header, dict) or set(header) != {
+        "origin", "transaction", "operations"
+    }:
+        raise FleetSyncProtocolError("fleet transaction header has wrong fields")
+    origin = header["origin"]
+    transaction = header["transaction"]
+    operations = header["operations"]
+    if (
+        not isinstance(origin, str)
+        or len(origin) != 64
+        or any(ch not in "0123456789abcdef" for ch in origin)
+    ):
+        raise FleetSyncProtocolError("fleet transaction origin is malformed")
+    if not isinstance(transaction, str) or not transaction:
+        raise FleetSyncProtocolError("fleet transaction id is malformed")
+    if (
+        not isinstance(operations, int)
+        or isinstance(operations, bool)
+        or not 1 <= operations <= MAX_TRANSACTION_OPERATIONS
+    ):
+        raise FleetSyncProtocolError(
+            "fleet transaction operation count is malformed"
+        )
+    return origin, transaction, operations
+
+
+def encode_operation_frame(item: AuthoredMutation) -> bytes:
+    """Protocol v4: a bare operation — index plus canonical mutation bytes."""
+    frame = encode_mutation_frame(item.mutation)
+    message = (
+        _OPERATION_MAGIC
+        + struct.pack(">I", item.operation_index)
+        + frame
+    )
+    if len(message) > MAX_MESSAGE_SIZE:
+        raise FleetSyncProtocolError(
+            "authored mutation exceeds the fleet channel message bound"
+        )
+    return message
+
+
+def decode_operation_frame(raw: bytes):
+    if len(raw) < 9 or not raw.startswith(_OPERATION_MAGIC):
+        raise FleetSyncProtocolError("fleet operation frame has wrong magic")
+    operation = struct.unpack(">I", raw[4:8])[0]
+    try:
+        mutation = decode_mutation_frame(raw[8:])
+    except Exception as exc:
+        raise FleetSyncProtocolError("fleet mutation frame is malformed") from exc
+    return operation, mutation
+
+
 def encode_done(
     *,
     epoch: str,
@@ -522,6 +618,7 @@ def encode_done(
     digest: str,
     through_transaction_ref: int = 0,
     through_breadcrumb: tuple[str, str, int] | None = None,
+    version: int = FLEET_SYNC_PROTOCOL_VERSION,
 ) -> bytes:
     if (
         isinstance(through_transaction_ref, bool)
@@ -531,7 +628,7 @@ def encode_done(
         raise FleetSyncProtocolError("through_transaction_ref is malformed")
     return _DONE_MAGIC + canonical_json(
         {
-            "v": FLEET_SYNC_PROTOCOL_VERSION,
+            "v": version,
             "kind": "done",
             "roster_epoch": epoch,
             "message_count": count,
@@ -868,6 +965,11 @@ class FleetSyncScheduler:
         self._failures: dict[str, int] = {}
         self._next_attempt: dict[str, float] = {}
         self._activated_scopes: set[Path] = set()
+        #: Per-peer declared pull version. A peer whose server rejected a v4
+        #: request before serving any frame is retried at v3 for the rest of
+        #: this process (v3 works against every server); a restart re-probes
+        #: v4. Only wire efficiency rides on this, never correctness.
+        self._peer_protocol: dict[str, int] = {}
 
     @property
     def port(self) -> int:
@@ -1025,9 +1127,10 @@ class FleetSyncScheduler:
 
         if peek_request_op(message) == "blob":
             return self._blob_response(message, peer_pub)
-        _requested_epoch, resume_trail, peer_digest, scope, bootstrap = (
-            decode_pull_request(message)
-        )
+        (
+            _requested_epoch, resume_trail, peer_digest, scope, bootstrap,
+            protocol_version,
+        ) = decode_pull_request(message)
         store = await asyncio.to_thread(self._store_for, scope)
         epoch = self._current_epoch()
         record_here = telemetry_stats is None
@@ -1057,7 +1160,9 @@ class FleetSyncScheduler:
                     store.compatibility_digest
                 )
                 if peer_digest != local_digest:
-                    refusal = encode_schema_refusal(digest=local_digest)
+                    refusal = encode_schema_refusal(
+                        digest=local_digest, version=protocol_version
+                    )
                     stats["bytes_sent"] += len(refusal)
                     error_code = "schema_mismatch"
                     yield refusal
@@ -1113,7 +1218,7 @@ class FleetSyncScheduler:
                         ))
                         total = sum(path.stat().st_size for path in files)
                         begin = canonical_json({
-                            "v": FLEET_SYNC_PROTOCOL_VERSION,
+                            "v": protocol_version,
                             "kind": "checkpoint.begin",
                             "file_count": len(files),
                             "total_bytes": total,
@@ -1133,7 +1238,7 @@ class FleetSyncScheduler:
                             stats["checkpoint_bytes"] += len(encoded)
                             yield encoded
                         end = canonical_json({
-                            "v": FLEET_SYNC_PROTOCOL_VERSION,
+                            "v": protocol_version,
                             "kind": "checkpoint.end",
                             "file_count": len(files),
                             "total_bytes": total,
@@ -1167,10 +1272,28 @@ class FleetSyncScheduler:
                     cursor, items = page
                     stats["transactions"] += 1
                     operation_count = len(items)
+                    if protocol_version >= 4 and items:
+                        # v4: the origin, transaction id, and operation
+                        # count travel once in a header frame instead of
+                        # being repeated inside every operation. The digest
+                        # covers header and operation frames alike; the
+                        # summary count still counts operations only.
+                        opening = encode_transaction_header(
+                            items[0].origin_incarnation,
+                            items[0].transaction_id,
+                            operation_count,
+                        )
+                        _digest_add(digest, opening)
+                        stats["bytes_sent"] += len(opening)
+                        yield opening
                     for item in items:
                         self.authenticator.authorize(peer_pub)
-                        encoded = encode_authored(
-                            item, transaction_operations=operation_count
+                        encoded = (
+                            encode_operation_frame(item)
+                            if protocol_version >= 4
+                            else encode_authored(
+                                item, transaction_operations=operation_count
+                            )
                         )
                         _digest_add(digest, encoded)
                         count += 1
@@ -1194,6 +1317,7 @@ class FleetSyncScheduler:
                     digest=digest.hexdigest(),
                     through_transaction_ref=cursor,
                     through_breadcrumb=through_breadcrumb,
+                    version=protocol_version,
                 )
                 stats["bytes_sent"] += len(done)
                 yield done
@@ -1458,6 +1582,9 @@ class FleetSyncScheduler:
         started_at_ns = time.time_ns()
         started_monotonic_ns = time.monotonic_ns()
         peer_watermark: int | None = None
+        protocol_version = self._peer_protocol.get(
+            machine_pub, FLEET_SYNC_PROTOCOL_VERSION
+        )
 
         async def record(
             outcome: str,
@@ -1530,8 +1657,8 @@ class FleetSyncScheduler:
             )
             bootstrap = not await asyncio.to_thread(store.has_state)
             request = encode_pull_request(
-                epoch, compat=local_digest, resume=resume_trail, scope=scope,
-                bootstrap=bootstrap,
+                epoch, compat=local_digest, resume=resume_trail,
+                scope=scope, bootstrap=bootstrap, version=protocol_version,
             )
             sent += len(request)
             await channel.send_message(request)
@@ -1545,6 +1672,7 @@ class FleetSyncScheduler:
             pending: list[AuthoredMutation] = []
             pending_identity = None
             pending_count: int | None = None
+            transaction_group: tuple[str, str] | None = None
             saw_done = False
             through_transaction_ref = 0
             through_breadcrumb: tuple[str, str, int] | None = None
@@ -1620,6 +1748,37 @@ class FleetSyncScheduler:
                     break
                 if stream_final:
                     raise FleetSyncProtocolError("fleet mutation ended the stream")
+                if message.startswith(_TRANSACTION_MAGIC):
+                    # v4: the header opens a group; a previous group must be
+                    # complete before it applies, exactly like the v3
+                    # identity-change boundary.
+                    origin, transaction_id, operations = (
+                        decode_transaction_header(message)
+                    )
+                    if pending:
+                        validate_pending()
+                        await apply_pending(pending)
+                        pending = []
+                    pending_identity = None
+                    transaction_group = (origin, transaction_id)
+                    pending_count = operations
+                    _digest_add(digest, message)
+                    continue
+                if message.startswith(_OPERATION_MAGIC):
+                    if transaction_group is None:
+                        raise FleetSyncProtocolError(
+                            "fleet operation frame arrived before its "
+                            "transaction header"
+                        )
+                    operation, mutation = decode_operation_frame(message)
+                    pending.append(AuthoredMutation(
+                        transaction_group[0], transaction_group[1],
+                        operation, mutation,
+                    ))
+                    _digest_add(digest, message)
+                    message_count += 1
+                    mutation_frames += 1
+                    continue
                 if message.startswith(FILE_MAGIC):
                     if checkpoint_stage is None:
                         raise FleetSyncProtocolError(
@@ -1732,6 +1891,22 @@ class FleetSyncScheduler:
             await record("cancelled")
             raise
         except Exception as exc:
+            if (
+                protocol_version >= 4
+                and received == 0
+                and not isinstance(exc, FleetSyncSchemaMismatch)
+            ):
+                # The peer's server closed the pull without serving a single
+                # frame — the signature of pre-v4 software rejecting the
+                # declared request version. Retry this peer at v3 for the
+                # rest of the process; only wire efficiency rides on it,
+                # and a plain transport flake merely costs the same
+                # harmless downgrade.
+                self._peer_protocol[machine_pub] = 3
+                logger.info(
+                    "fleet sync peer %s: retrying at protocol v3",
+                    machine_pub[:12],
+                )
             failures = self._failures.get(machine_pub, 0) + 1
             self._failures[machine_pub] = failures
             delay = min(
