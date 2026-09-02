@@ -548,11 +548,13 @@ def _copy_quarantine(source: Path, catalog: MutationCatalog) -> int:
                 except WatermarkError:
                     pass
             catalog.conn.execute(
-                "INSERT INTO fleet_sync_quarantine VALUES(?,?,?,?,?,?,?)",
+                "INSERT INTO fleet_sync_quarantine VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (
                     row["address"], table, row["logical_address"],
                     row["reason"], row["watermark"],
                     row["quarantined_at_ns"], row.get("frame"),
+                    row.get("origin"), row.get("transaction_id"),
+                    row.get("operation_index"),
                 ),
             )
             carried += 1

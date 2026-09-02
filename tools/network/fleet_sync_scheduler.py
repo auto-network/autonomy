@@ -509,6 +509,31 @@ class SQLiteFleetSyncStore:
         finally:
             conn.close()
 
+    def attachment_backlog(self):
+        from tools.network.fleet_sync.blob_transport import (
+            pending_attachment_backlog,
+        )
+
+        conn, _catalog = self._open()
+        try:
+            return pending_attachment_backlog(conn)
+        finally:
+            conn.close()
+
+    def drain_attachments(self, entries) -> int:
+        from tools.network.fleet_sync.blob_transport import drain_backlog
+
+        conn, catalog = self._open()
+        try:
+            return drain_backlog(catalog, entries)
+        finally:
+            conn.close()
+
+    def blob_store_root(self):
+        from tools.network.fleet_sync.materialize import production_blob_store
+
+        return production_blob_store(self.path)
+
     def record_served_ack(
         self, machine_pub: str, epoch: str, acked_transaction_ref: int
     ) -> None:
@@ -699,6 +724,10 @@ class FleetSyncScheduler:
         telemetry_started_at_ns: int | None = None,
         telemetry_started_monotonic_ns: int | None = None,
     ):
+        from tools.network.fleet_sync.blob_transport import peek_request_op
+
+        if peek_request_op(message) == "blob":
+            return self._blob_response(message, peer_pub)
         _requested_epoch, resume_trail, peer_digest = decode_pull_request(message)
         epoch = self._current_epoch()
         record_here = telemetry_stats is None
@@ -849,6 +878,83 @@ class FleetSyncScheduler:
                         )
 
         return response()
+
+    def _blob_response(self, message: bytes, peer_pub: str):
+        """Serve requested attachment objects in bounded chunk frames."""
+        from tools.network.fleet_sync.blob_transport import (
+            decode_blob_request,
+            iter_blob_frames,
+        )
+
+        digests = decode_blob_request(message)
+        db_path = self.config.personal_db_path
+
+        async def response():
+            frames = iter_blob_frames(db_path, digests)
+            while True:
+                self.authenticator.authorize(peer_pub)
+                frame = await asyncio.to_thread(next, frames, None)
+                if frame is None:
+                    return
+                yield frame
+
+        return response()
+
+    async def _drain_attachment_backlog(
+        self, machine_pub: str, addresses: Sequence[str]
+    ) -> None:
+        """Best-effort post-pull drain of the attachment byte backlog."""
+        from tools.network.fleet_sync.blob_transport import (
+            BlobReceiver,
+            encode_blob_request,
+            MAX_BLOB_REQUEST_DIGESTS,
+        )
+
+        entries = await asyncio.to_thread(self.store.attachment_backlog)
+        if not entries:
+            return
+        digests = sorted({entry.digest for entry in entries})[
+            :MAX_BLOB_REQUEST_DIGESTS
+        ]
+        store = await asyncio.to_thread(self.store.blob_store_root)
+        receiver = BlobReceiver(store)
+        channel = None
+        try:
+            last_error: Exception | None = None
+            for address in addresses:
+                try:
+                    channel = await fleet_direct_connect(
+                        address,
+                        authenticator=self.authenticator,
+                        expected_machine_pub=machine_pub,
+                        session=new_session_id(),
+                        timeout=self.config.connect_timeout,
+                    )
+                    break
+                except Exception as exc:
+                    last_error = exc
+            if channel is None:
+                assert last_error is not None
+                raise last_error
+            await channel.send_message(encode_blob_request(digests))
+            async for frame, _final in channel.recv_message_stream():
+                self.authenticator.authorize(machine_pub)
+                await asyncio.to_thread(receiver.feed, frame)
+                if receiver.done:
+                    break
+            if not receiver.done:
+                raise FleetSyncProtocolError(
+                    "blob stream ended without terminal frame"
+                )
+            cleared = await asyncio.to_thread(
+                self.store.drain_attachments, entries
+            )
+            logger.info(
+                "fleet attachment drain: %d adopted, %d cleared, %d missing",
+                len(receiver.adopted), cleared, len(receiver.missing),
+            )
+        finally:
+            receiver.close()
 
     async def _run(self) -> None:
         while not self._stopping.is_set():
@@ -1079,6 +1185,14 @@ class FleetSyncScheduler:
                 acknowledged_transaction_ref=through_transaction_ref,
                 acknowledged_breadcrumb=through_breadcrumb,
             )
+            # Best-effort: a drain failure never fails the pull that
+            # preceded it, but it is logged rather than swallowed.
+            try:
+                await self._drain_attachment_backlog(machine_pub, addresses)
+            except Exception:
+                logger.warning(
+                    "fleet attachment drain failed", exc_info=True
+                )
         except asyncio.CancelledError:
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(

@@ -81,6 +81,26 @@ class ContentAddressedBlobStore:
                 os.unlink(temporary)
         return target
 
+    def adopt(
+        self, digest: str, size: int, filename: str, source: Path
+    ) -> Path:
+        """Verify a received temporary file and install it content-addressed.
+
+        The transfer layer streams into ``source`` chunk by chunk; adoption
+        is the single verification and atomic-placement step. Raises on any
+        mismatch and never leaves a partial file at the target.
+        """
+        source = Path(source)
+        if not self._valid(source, digest, size):
+            raise MaterializationError(
+                f"adopted attachment bytes do not match {digest}"
+            )
+        suffix = Path(filename).suffix[:16]
+        target = self.root / digest[:2] / f"{digest}{suffix}"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(source, target)
+        return target
+
     @staticmethod
     def _valid(path: Path, digest: str, size: int) -> bool:
         if path.stat().st_size != size:

@@ -75,8 +75,8 @@ def _unpack_journal(stored: bytes) -> bytes:
 
 
 def ensure_quarantine_table(conn: sqlite3.Connection) -> None:
-    """The unrealized-row backlog, upgraded in place when the frame column
-    is missing (the table predates it and is created lazily)."""
+    """The unrealized-row backlog, upgraded in place when newer columns are
+    missing (the table predates them and is created lazily)."""
     conn.execute(
         "CREATE TABLE IF NOT EXISTS fleet_sync_quarantine("
         "address BLOB PRIMARY KEY,"
@@ -85,17 +85,27 @@ def ensure_quarantine_table(conn: sqlite3.Connection) -> None:
         "reason TEXT NOT NULL,"
         "watermark INTEGER NOT NULL,"
         "quarantined_at_ns INTEGER NOT NULL,"
-        "frame BLOB)"
+        "frame BLOB,"
+        "origin TEXT,"
+        "transaction_id TEXT,"
+        "operation_index INTEGER)"
     )
     columns = {
         row[1] for row in conn.execute(
             "PRAGMA table_info(fleet_sync_quarantine)"
         )
     }
-    if "frame" not in columns:
-        conn.execute(
-            "ALTER TABLE fleet_sync_quarantine ADD COLUMN frame BLOB"
-        )
+    upgrades = {
+        "frame": "BLOB",
+        "origin": "TEXT",
+        "transaction_id": "TEXT",
+        "operation_index": "INTEGER",
+    }
+    for name, kind in upgrades.items():
+        if name not in columns:
+            conn.execute(
+                f"ALTER TABLE fleet_sync_quarantine ADD COLUMN {name} {kind}"
+            )
 
 
 def quarantine_unrealized(
@@ -103,7 +113,7 @@ def quarantine_unrealized(
     rows: list[tuple[str, tuple, str]],
     *,
     watermark: int,
-    frames: dict[bytes, bytes] | None = None,
+    replay: dict[bytes, tuple[bytes, str, str, int]] | None = None,
     commit: bool = True,
 ) -> None:
     """Retain rows the receiver could not realize, for observability and repair.
@@ -114,20 +124,25 @@ def quarantine_unrealized(
     ``attachment_bytes_unavailable`` (external content-addressed bytes not yet
     fetched — the row lands once blob transfer backfills it). Recording them
     keeps a durable, decodable backlog so a later repair or fetch can drain it.
-    ``frames`` optionally maps address blobs to the deferred canonical mutation
-    frame: a delta-deferred row is never re-served (the peer's trail advances
-    past it), so the drain re-materializes from the stored frame; checkpoint
-    entries leave it NULL because the next checkpoint carries the row again.
-    Rewritable per address: a later install that finally realizes the row makes
-    the entry stale, and the drain clears it.
+    ``replay`` optionally maps address blobs to the deferred mutation's
+    replay identity ``(frame, origin, transaction_id, operation_index)``: a
+    delta-deferred row is never re-served (the peer's trail advances past
+    it), so the drain rebuilds the authored mutation from the stored frame
+    and re-applies it through ordinary last-writer-wins; checkpoint entries
+    store NULLs because the next checkpoint carries the row again.
+    Rewritable per address: a later install that finally realizes the row
+    makes the entry stale, and the drain clears it.
     """
     ensure_quarantine_table(conn)
     now = time.time_ns()
     for table, address, reason in rows:
         address_blob = encode_value([table, list(address)])
+        frame, origin, transaction_id, operation_index = (
+            (replay or {}).get(address_blob) or (None, None, None, None)
+        )
         conn.execute(
             "INSERT OR REPLACE INTO fleet_sync_quarantine "
-            "VALUES(?,?,?,?,?,?,?)",
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
             (
                 address_blob,
                 table,
@@ -135,7 +150,10 @@ def quarantine_unrealized(
                 reason,
                 int(watermark),
                 now,
-                (frames or {}).get(address_blob),
+                frame,
+                origin,
+                transaction_id,
+                operation_index,
             ),
         )
     if commit:
@@ -1888,7 +1906,7 @@ class MutationCatalog:
                 )
             if deferred:
                 deferred_rows = []
-                frames: dict[bytes, bytes] = {}
+                replay: dict[bytes, tuple[bytes, str, str, int]] = {}
                 for authored, address_blob in winners:
                     if address_blob not in deferred:
                         continue
@@ -1900,10 +1918,15 @@ class MutationCatalog:
                     deferred_rows.append(
                         (mutation.table, tuple(mutation.address), reason)
                     )
-                    frames[address_blob] = encode_mutation_frame(mutation)
+                    replay[address_blob] = (
+                        encode_mutation_frame(mutation),
+                        authored.origin_incarnation,
+                        authored.transaction_id,
+                        authored.operation_index,
+                    )
                 quarantine_unrealized(
                     self.conn, deferred_rows,
-                    watermark=timestamp, frames=frames, commit=False,
+                    watermark=timestamp, replay=replay, commit=False,
                 )
             self.conn.execute(
                 "UPDATE fleet_sync_state SET last_timestamp="
