@@ -57,6 +57,17 @@ is the machine-readable copy the property test enforces):
   payload default owned by its schema, expressed as a ``timedelta`` in the
   schema's own vocabulary. Graph-side ADVERSARIAL gates (the settings
   window and allowance) consume this module's helpers instead.
+- ``registry/dns_responder.DATA_TTL`` / ``NS_TTL`` and
+  ``estate/namecheap_dns.SERVE_NS_TTL`` — DNS record TTLs: wire data the
+  zone serves to resolvers, not gates this process enforces.
+- ``registry/dns_challenges.DEFAULT_EXPIRY`` — ACME challenge row expiry
+  owned by the challenge-table contract; hygiene sweep, no refusal path
+  keyed on a signer's clock.
+- ``registry/relay.HOST_LEASE_TTL`` — the D19 serving-lease liveness
+  contract; both sides of the tunnel share it as protocol vocabulary.
+- ``fleet_relay_sync.DIRECT_FRESHNESS_WINDOW_S`` — channel-preference
+  heuristic (skip a redundant relay pull while direct is fresh); no
+  adversary, nothing refused, staleness merely resumes the relay.
 
 Units
 -----
@@ -212,6 +223,12 @@ DOMAIN_OWNED_EXCLUSIONS = (
     ("tools/network/relaykit/attachment_download.py", "WINDOW"),
     ("tools/network/relaykit/attachment_download.py", "LAST_IN_WINDOW"),
     ("tools/network/relaykit/connector.py", "_LIFECYCLE_LOG_WINDOW_S"),
+    ("tools/network/registry/dns_responder.py", "DATA_TTL"),
+    ("tools/network/registry/dns_responder.py", "NS_TTL"),
+    ("tools/network/estate/namecheap_dns.py", "SERVE_NS_TTL"),
+    ("tools/network/registry/dns_challenges.py", "DEFAULT_EXPIRY"),
+    ("tools/network/registry/relay.py", "HOST_LEASE_TTL"),
+    ("tools/network/fleet_relay_sync.py", "DIRECT_FRESHNESS_WINDOW_S"),
 )
 
 # -- Deliberate delays --------------------------------------------------------

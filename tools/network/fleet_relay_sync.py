@@ -61,6 +61,8 @@ logger = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = 1
 PULL_OP = "fleet.sync.pull"
+#: A direct-path success younger than this makes a relay pull redundant.
+DIRECT_FRESHNESS_WINDOW_S = 30.0
 BLOB_OP = "fleet.sync.blob"
 CONTROL_OP = "fleet-runtime"
 FILE_MAGIC = b"FSB1"
@@ -1008,6 +1010,33 @@ class DashboardFleetRelaySyncService:
                 route = await asyncio.to_thread(fleet_route.load, org="machine")
                 if route is None:
                     return
+                # Prefer the direct path: when a direct pull from this peer
+                # succeeded within the freshness window, this relay tick is
+                # redundant traffic through the public relay. Direct failure
+                # simply lets the window lapse, so relay resumes within one
+                # poll. The transition is logged once per flip, not per tick.
+                direct_fresh = await asyncio.to_thread(
+                    fleet_sync_telemetry.direct_pull_fresh,
+                    route.origin_machine_pub,
+                    window_s=DIRECT_FRESHNESS_WINDOW_S,
+                )
+                if direct_fresh != getattr(self, "_deferring_to_direct", False):
+                    self._deferring_to_direct = direct_fresh
+                    logger.info(
+                        "fleet relay sync %s: %s",
+                        route.origin_machine_pub[:12],
+                        "deferring to fresh direct path"
+                        if direct_fresh else "relay path active",
+                    )
+                if direct_fresh:
+                    self.last_result = {
+                        "outcome": "skipped",
+                        "reason": "direct-path-fresh",
+                        "at": time.time(),
+                    }
+                    delay = 0.5
+                    await asyncio.sleep(10.0)
+                    continue
                 include_checkpoint = not await asyncio.to_thread(
                     _has_local_sync_state,
                     route.origin_machine_pub,

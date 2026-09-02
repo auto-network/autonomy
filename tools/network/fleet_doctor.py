@@ -647,6 +647,45 @@ def check_sync_data(report: dict) -> None:
                     )
     except Exception as exc:
         _line("org-scope check", f"FAILED to run: {exc!r}", warn=True)
+    # Per-channel traffic: which path carried each peer's sync, with bytes,
+    # so "is direct actually being used" is answerable at a glance.
+    try:
+        from tools.network import fleet_sync_telemetry
+
+        rows = [
+            row for row in fleet_sync_telemetry.read_channel_rows()
+            if row["direction"] == "pull"
+        ]
+        if rows:
+            _section("Per-channel sync traffic (pull)")
+        by_peer: dict[str, list[dict]] = {}
+        for row in rows:
+            by_peer.setdefault(row["peer"], []).append(row)
+        for peer, peer_rows in sorted(by_peer.items()):
+            freshest = max(
+                (r for r in peer_rows
+                 if r["payload"].get("last_outcome") == "success"),
+                key=lambda r: r["payload"].get("last_success_at_ns") or 0,
+                default=None,
+            )
+            for row in sorted(
+                peer_rows, key=lambda r: (r["scope"], r["channel"])
+            ):
+                payload = row["payload"]
+                marker = (
+                    "  <- carried last sync" if row is freshest else ""
+                )
+                _line(
+                    f"{peer[:12]} {row['scope']}/{row['channel']}",
+                    f"last {payload.get('last_outcome', '?')}, "
+                    f"last {payload.get('last_bytes_received', 0):,}B in/"
+                    f"{payload.get('last_bytes_sent', 0):,}B out, "
+                    f"total {payload.get('total_bytes_received', 0):,}B in"
+                    f"{marker}",
+                )
+        report["per_channel_pull_rows"] = len(rows)
+    except Exception as exc:
+        _line("per-channel check", f"FAILED to run: {exc!r}", warn=True)
 
 
 def check_catalog_canary(report: dict) -> None:
