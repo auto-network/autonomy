@@ -194,3 +194,27 @@ def test_public_app_exposes_no_metrics_route():
     app = create_app(":memory:")
     with TestClient(app) as client:
         assert client.get("/metrics").status_code == 404
+
+
+# -- DNS-process metrics (separate scrape target) --------------------------
+
+def test_dns_metrics_counts_rcodes_and_challenge_gauge():
+    from tools.network.registry.metrics import DnsMetrics
+
+    m = DnsMetrics()
+    m.bind_challenge_count(lambda: 3)
+    m.query(0)   # noerror
+    m.query(0)
+    m.query(3)   # nxdomain
+    m.query(16)  # badvers
+    m.query(99)  # unknown -> other
+    m.dropped()
+    out = m.render()
+    assert 'dns_queries_total{rcode="noerror"} 2' in out
+    assert 'dns_queries_total{rcode="nxdomain"} 1' in out
+    assert 'dns_queries_total{rcode="badvers"} 1' in out
+    assert 'dns_queries_total{rcode="other"} 1' in out
+    assert 'dns_queries_total{rcode="dropped"} 1' in out
+    assert "dns_challenge_records 3" in out
+    # No source-address label anywhere.
+    assert "source" not in out and "addr" not in out

@@ -58,7 +58,7 @@ class RelayRawStream:
                  host: str, reader, writer, *, abuse_lease=None,
                  idle_timeout: float = STREAM_IDLE_TIMEOUT,
                  charge_starvation: float | None = None,
-                 source: str = "unknown"):
+                 source: str = "unknown", metrics=None):
         self.tunnel = tunnel
         self.channel_id = channel_id
         self.reservation = reservation
@@ -67,6 +67,8 @@ class RelayRawStream:
         #: socket peer) — the accounting/logging key, never paired with the
         #: link token or payload (auto-p20eb).
         self.source = source
+        self._metrics = metrics
+        self._org = getattr(tunnel, "org", "other")
         self.reader = reader
         self.writer = writer
         self.abuse_lease = abuse_lease
@@ -196,6 +198,8 @@ class RelayRawStream:
                     return
                 self.send_window.consume(len(chunk))
                 self._touch()
+                if self._metrics is not None:
+                    self._metrics.stream_bytes(self._org, "in", len(chunk))
                 await self.tunnel.send_frame(
                     FRAME_DATA, self.channel_id, chunk
                 )
@@ -218,6 +222,9 @@ class RelayRawStream:
                         return
                     self.granted_outstanding -= len(payload)
                     self._touch()
+                    if self._metrics is not None:
+                        self._metrics.stream_bytes(
+                            self._org, "out", len(payload))
                     self.writer.write(payload)
                     await self.writer.drain()
                     grant = self.replenish.consumed(len(payload))
@@ -434,7 +441,7 @@ async def handle_stream_connection(
         stream = RelayRawStream(
             tunnel, channel_id, host_routes.reservation_for(sni), sni,
             reader, writer, abuse_lease=abuse_lease,
-            idle_timeout=idle_timeout, source=source,
+            idle_timeout=idle_timeout, source=source, metrics=metrics,
         )
         abuse_lease = None  # owned by the stream now
         tunnel.raw_streams[channel_id] = stream
