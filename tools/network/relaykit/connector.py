@@ -592,15 +592,64 @@ class TunnelConnector:
 
     async def _maintain_host_leases(self) -> None:
         """Per-connection lease keeper: re-register every desired host on
-        this fresh tunnel, then renew each at half-life. A stale-generation
-        refusal re-registers; any other failure retries next tick."""
+        this fresh tunnel, then keep them all alive with ONE tunnel-wide
+        ``host-renew-all`` at roughly half the lease TTL (auto-ja0rf) —
+        renewal is a dead-man's switch for the whole connection, so it
+        carries no per-reservation state. A registry that predates the op
+        answers unknown-op and this keeper falls back to per-reservation
+        renewal for the life of the connection."""
         self._host_leases = {}
         for reservation, host in list(self._desired_hosts.items()):
             with contextlib.suppress(Exception):
                 await self._register_host(reservation, host)
+        renew_all_supported = True
+        # Jitter is fixed per connection so a fleet of connectors spreads
+        # its keepalives instead of thundering together after a relay
+        # restart: renew when the earliest lease is within margin of
+        # expiry (margin 240..300 s of the 600 s TTL → one op ~every
+        # 300-360 s).
+        renew_margin = 240 + random.random() * 60
         while True:
             await asyncio.sleep(15)
             now = time.time()
+            # Registration repair: desired hosts with no lease on this
+            # connection (registration raced the connect, or the registry
+            # dropped one) are re-registered before renewal is considered.
+            for reservation, host in list(self._desired_hosts.items()):
+                if reservation not in self._host_leases:
+                    with contextlib.suppress(Exception):
+                        await self._register_host(reservation, host)
+            if not self._host_leases:
+                continue
+            if renew_all_supported:
+                remaining = min(
+                    lease.get("expires_at", 0)
+                    for lease in self._host_leases.values()
+                ) - now
+                if remaining > renew_margin:
+                    continue
+                try:
+                    reply = await self.control("host-renew-all", {})
+                except Exception:
+                    continue  # tunnel churn: next tick (or reconnect) retries
+                if reply.get("ok") is True:
+                    expires_at = reply.get("expires_at")
+                    for reservation in list(self._host_leases):
+                        self._host_leases[reservation]["expires_at"] = expires_at
+                    if reply.get("renewed", 0) < len(self._host_leases):
+                        # The registry renewed fewer leases than we hold:
+                        # some expired server-side. Re-registering our own
+                        # live reservations is permitted, so repair all.
+                        for reservation, host in list(
+                            self._desired_hosts.items()
+                        ):
+                            with contextlib.suppress(Exception):
+                                await self._register_host(reservation, host)
+                elif "unknown control op" in str(reply.get("error", "")):
+                    renew_all_supported = False
+                continue
+            # Legacy path (pre-auto-ja0rf registry): renew each lease at
+            # its own half-life with the generation-fenced per-share op.
             for reservation, lease in list(self._host_leases.items()):
                 host = self._desired_hosts.get(reservation)
                 if host is None:
