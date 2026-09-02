@@ -1488,6 +1488,11 @@ async def _serve_control_listener(connector, ctl_path: str,
     import secrets as _secrets
 
     auth = _secrets.token_hex(16)
+    # Public, non-secret identity for this exact connector process.  The
+    # Dashboard uses it to recognize a reconnect/relaunch and replay the full
+    # Settings-derived hostname set once.  Do not use the control auth token as
+    # an identity: it is authority and must remain private to the descriptor.
+    instance = _secrets.token_hex(16)
 
     async def handle(reader, writer):
         try:
@@ -1512,6 +1517,7 @@ async def _serve_control_listener(connector, ctl_path: str,
                     reply = {
                         "ok": True,
                         "serving": connector.connected.is_set(),
+                        "connector_instance": instance,
                         # Capabilities accepted by the registry for this live
                         # tunnel. Local consumers must gate optional control
                         # operations on negotiation instead of interpreting a

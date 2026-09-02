@@ -1,9 +1,10 @@
-"""Desired-state lifecycle for the Compose-local Service gateway.
+"""Desired-state lifecycle for public Service publication on this node.
 
-The durable publication and certificate stores remain authoritative.  This
-module owns only runtime convergence: start the dormant Caddy service, load one
-complete config atomically, report routes only after that load succeeds, and
-stop the service when nothing remains authorized.
+The durable publication and certificate stores remain authoritative. This
+module converges their two local runtime projections: hostname leases on the
+serving connector and routes on the Compose-local Caddy. It starts the dormant
+Caddy service, loads one complete config atomically, reports routes only after
+that load succeeds, and stops the service when nothing remains authorized.
 """
 
 from __future__ import annotations
@@ -93,6 +94,113 @@ async def _connector_ready(org: str) -> bool:
     except Exception:
         return False
     return result.get("ok") is True and result.get("serving") is True
+
+
+def _desired_hostname_leases() -> dict[str, dict[str, str]]:
+    """Return the complete Settings-authorized hostname set per organization.
+
+    A reservation becomes a publication only once it has a target.  Paused
+    publications retain their hostname lease so the local gateway can return
+    its deliberate 503; released and removed publications are absent.
+    """
+    desired: dict[str, dict[str, str]] = {}
+    for org in _discover_orgs():
+        target_ids = {
+            row.get("reservation_id")
+            for row in service_publication.list_service_targets(org)
+            if isinstance(row, dict)
+        }
+        leases: dict[str, str] = {}
+        for row in service_publication.list_reservations(org):
+            if (
+                isinstance(row, dict)
+                and row.get("state") in {"active", "paused"}
+                and row.get("reservation_id") in target_ids
+            ):
+                reservation_id = row["reservation_id"]
+                leases[reservation_id] = service_gateway.reservation_hostname(
+                    org, reservation_id
+                )
+        desired[org] = leases
+    return desired
+
+
+class HostnameLeaseReconciler:
+    """Converge connector leases from Settings without owning renewal.
+
+    Applied state is only an optimization that prevents a per-publication call
+    every watchdog tick.  Settings remain authoritative.  A new connector
+    instance invalidates the optimization and receives the complete desired
+    set; the connector/registry own renewal after that enrollment.
+    """
+
+    def __init__(self, *, control_fn=None, desired_fn=None) -> None:
+        self._control = control_fn
+        self._desired = desired_fn or _desired_hostname_leases
+        self._applied: dict[str, tuple[str, dict[str, str]]] = {}
+
+    def _call(self, org: str, op: str, args: dict) -> dict:
+        if self._control is None:
+            from tools.dashboard.link_serving_supervisor import control
+
+            return control(org, op, args, timeout=2.0)
+        return self._control(org, op, args)
+
+    async def reconcile(self) -> None:
+        desired = self._desired()
+        for org, leases in desired.items():
+            try:
+                status = await asyncio.to_thread(
+                    self._call, org, "connector-status", {}
+                )
+            except Exception:
+                continue
+            marker = status.get("connector_instance")
+            if (
+                status.get("ok") is not True
+                or status.get("serving") is not True
+                or not isinstance(marker, str)
+                or not marker
+            ):
+                continue
+
+            previous_marker, previous = self._applied.get(org, ("", {}))
+            if previous_marker != marker:
+                previous = {}
+
+            next_applied = dict(previous)
+            for reservation_id in sorted(set(previous) - set(leases)):
+                try:
+                    reply = await asyncio.to_thread(
+                        self._call,
+                        org,
+                        "release-host",
+                        {"reservation": reservation_id},
+                    )
+                except Exception:
+                    continue
+                if reply.get("ok") is True:
+                    next_applied.pop(reservation_id, None)
+
+            for reservation_id, host in sorted(leases.items()):
+                if previous.get(reservation_id) == host:
+                    continue
+                try:
+                    reply = await asyncio.to_thread(
+                        self._call,
+                        org,
+                        "serve-host",
+                        {"reservation": reservation_id, "host": host},
+                    )
+                except Exception:
+                    continue
+                if reply.get("ok") is True:
+                    next_applied[reservation_id] = host
+
+            # Retain each successful idempotent operation independently so a
+            # failure for one publication does not cause calls for every
+            # healthy sibling to repeat on the next watchdog tick.
+            self._applied[org] = (marker, next_applied)
 
 
 def _route_fingerprint(value: dict) -> str:
@@ -353,9 +461,16 @@ class ComposeGatewayRuntime:
 class GatewayReconcileWorker:
     """Startup/event/watchdog driver around the pure reconciler."""
 
-    def __init__(self, *, supervisor, planner=build_desired_state) -> None:
+    def __init__(
+        self,
+        *,
+        supervisor,
+        planner=build_desired_state,
+        lease_reconciler=None,
+    ) -> None:
         self._supervisor = supervisor
         self._planner = planner
+        self._lease_reconciler = lease_reconciler or HostnameLeaseReconciler()
         self._task: asyncio.Task | None = None
 
     @staticmethod
@@ -370,6 +485,16 @@ class GatewayReconcileWorker:
         )
 
     async def reconcile_once(self) -> dict:
+        # Hostname registration must precede certificate readiness: the
+        # registry's persona-label binding is what DNS-01 uses to derive the
+        # challenge name on first issuance.
+        try:
+            await self._lease_reconciler.reconcile()
+        except Exception:
+            # Lease convergence and local gateway fail-closed behavior are
+            # independent.  An unreadable Settings fold must still reach the
+            # planner, which removes any previously loaded Caddy routes.
+            logger.warning("Hostname lease reconciliation failed", exc_info=True)
         return await self._supervisor.reconcile(await self._planner())
 
     async def _run(self, event_bus) -> None:
