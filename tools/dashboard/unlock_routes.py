@@ -1289,6 +1289,10 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": (
             f"the vault could not be brought up: {exc}"
         )}, status_code=500)
+    if audited_private is not None:
+        # Strictly after _install_personal_audited_delegate: the audited
+        # write is a cold delegate seal against the recipient just published.
+        _ensure_sealed_settings_pepper()
     return JSONResponse({"ok": True, "generations": loaded})
 
 
@@ -1328,6 +1332,25 @@ def _install_personal_audited_delegate(private_hex: str,
         store.put_delegate_audited_recipient(public_hex)
     settings_ops.set_personal_delegate_audited_key(private_hex)
     _VAULT_CACHE["audited_delegate"] = private_hex
+
+
+def _ensure_sealed_settings_pepper() -> None:
+    """Mint the shared sealed-settings pepper once the audited seam is warm.
+
+    Runs strictly AFTER :func:`_install_personal_audited_delegate` — the
+    audited write is a cold delegate seal that fails without the published
+    recipient. Best-effort by design: a failed mint leaves sealed stores
+    unaddressable until the next unlock retries it, and must never fail the
+    unlock itself. Presence in any state short-circuits inside
+    ``ensure_pepper_minted`` — re-minting would orphan every store address.
+    """
+    try:
+        from tools.graph.sealed_settings import ensure_pepper_minted
+
+        if ensure_pepper_minted():
+            logger.info("sealed-settings pepper minted at vault bring-up")
+    except Exception:  # noqa: BLE001 — provisioning is best-effort here
+        logger.warning("sealed-settings pepper mint failed", exc_info=True)
 
 
 def _assert_audited_recipient_compatible(public_hex: str) -> None:
