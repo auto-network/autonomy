@@ -56,6 +56,18 @@ def test_unavailable_host_is_exact_and_never_falls_through_to_an_upstream():
     assert "*.serve.auto.network" not in rendered
 
 
+def test_paused_host_explains_operator_pause_without_an_upstream():
+    rendered = service_gateway.render_caddyfile([], paused_hosts=[HOSTNAME])
+
+    assert f"https://{HOSTNAME}:9443" in rendered
+    assert (
+        'respond "This service is temporarily paused by its operator." 503'
+        in rendered
+    )
+    assert "reverse_proxy" not in rendered
+    assert "Service unavailable" not in rendered
+
+
 def test_each_persona_hostname_uses_its_own_certificate_pair():
     other = "app.persona-other.serve.auto.network"
     rendered = service_gateway.render_caddyfile(
