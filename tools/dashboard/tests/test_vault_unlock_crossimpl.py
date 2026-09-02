@@ -231,3 +231,34 @@ def test_the_credential_covers_every_input_on_both_sides():
         py = _py_credential(changed)
         assert py != base, f"python credential does not cover {field}"
         assert _js_credential(changed) == py, f"implementations differ on {field}"
+
+
+_AUDITED_DELEGATE_JS = r"""
+import { deriveEncapsulationKeypair } from 'file://__CEREMONY__/primitives.js';
+const root = Uint8Array.from(Buffer.from(process.env.ROOT_SEED, 'hex'));
+const pair = await deriveEncapsulationKeypair(
+  root, 'autonomy/vault/delegate-audited-recipient/v1');
+console.log(JSON.stringify(pair));
+"""
+
+
+def test_audited_delegate_derivation_is_byte_identical_across_impls():
+    """The browser handoff must name the same recipient Python seals to."""
+    from tools.vault.personal_object import derive_delegate_audited_recipient
+
+    root_hex = "42" * 32
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e",
+         _AUDITED_DELEGATE_JS.replace("__CEREMONY__", _CEREMONY)],
+        env={**os.environ, "ROOT_SEED": root_hex},
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    browser = json.loads(result.stdout)
+    private_hex, public_hex = derive_delegate_audited_recipient(
+        bytes.fromhex(root_hex)
+    )
+    assert browser == {
+        "privateKeyHex": private_hex,
+        "publicKeyHex": public_hex,
+    }

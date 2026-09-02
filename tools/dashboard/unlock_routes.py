@@ -1265,14 +1265,90 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
             "key as hex, or absent"
         )}, status_code=400)
 
+    audited_private = body.get("delegate_audited_private_key")
+    audited_public = body.get("delegate_audited_public_key")
+    try:
+        if (audited_private is None) != (audited_public is None):
+            raise ValueError("both private and public keys are required")
+        if audited_private is not None:
+            audited_private, audited_public = _validate_audited_delegate_pair(
+                audited_private, audited_public
+            )
+            _assert_audited_recipient_compatible(audited_public)
+    except Exception as exc:  # noqa: BLE001 — fail before any warm seam lands
+        return JSONResponse({"ok": False, "error": (
+            f"audited delegate recipient was refused: {exc}"
+        )}, status_code=400)
+
     try:
         loaded = _bring_vault_up(decoded, delegate_hex)
+        if audited_private is not None:
+            _install_personal_audited_delegate(audited_private, audited_public)
     except Exception as exc:  # noqa: BLE001 — one refusal shape to the caller
         logger.warning("vault bring-up failed", exc_info=True)
         return JSONResponse({"ok": False, "error": (
             f"the vault could not be brought up: {exc}"
         )}, status_code=500)
     return JSONResponse({"ok": True, "generations": loaded})
+
+
+def _validate_audited_delegate_pair(private_hex: object,
+                                    public_hex: object) -> tuple[str, str]:
+    """Return one canonical matching X25519 private/public pair."""
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+
+    if not isinstance(private_hex, str) or not isinstance(public_hex, str):
+        raise ValueError("keys must be lowercase hexadecimal strings")
+    try:
+        private = bytes.fromhex(private_hex)
+        public = bytes.fromhex(public_hex)
+    except ValueError as exc:
+        raise ValueError("keys must be lowercase hexadecimal strings") from exc
+    if len(private) != 32 or len(public) != 32 \
+            or private.hex() != private_hex or public.hex() != public_hex:
+        raise ValueError("keys must each be canonical 32-byte hexadecimal")
+    derived_public = (
+        X25519PrivateKey.from_private_bytes(private)
+        .public_key()
+        .public_bytes_raw()
+    )
+    if derived_public != public:
+        raise ValueError("public key does not match private key")
+    return private_hex, public_hex
+
+
+def _install_personal_audited_delegate(private_hex: str,
+                                       public_hex: str) -> None:
+    """Publish and warm a validated root-derived audited recipient."""
+    from tools.graph.schemas.vault_policy_class import VAULT_POLICY_CLASS_SET_ID
+    from tools.vault.key_holder import _scoped_db
+    from tools.vault.store import VaultStore
+
+    with VaultStore(_scoped_db(VAULT_POLICY_CLASS_SET_ID, None)) as store:
+        store.put_delegate_audited_recipient(public_hex)
+    settings_ops.set_personal_delegate_audited_key(private_hex)
+    _VAULT_CACHE["audited_delegate"] = private_hex
+
+
+def _assert_audited_recipient_compatible(public_hex: str) -> None:
+    """Refuse root-recipient drift before any process-warm seam changes."""
+    from tools.graph.schemas.vault_policy_class import VAULT_POLICY_CLASS_SET_ID
+    from tools.vault.errors import VaultError
+    from tools.vault.key_holder import _scoped_db
+    from tools.vault.store import VaultStore
+
+    with VaultStore(_scoped_db(VAULT_POLICY_CLASS_SET_ID, None)) as store:
+        try:
+            published = store.get_delegate_audited_recipient()
+        except VaultError as exc:
+            if "no audited delegate recipient is published" in str(exc):
+                return
+            raise
+    if published != public_hex:
+        raise VaultError(
+            "the audited delegate recipient belongs to a different root; "
+            "root rotation requires explicit re-provisioning"
+        )
 
 
 def _personal_store_has_generations() -> bool:
@@ -1407,22 +1483,27 @@ def _keycache_clear(name: str) -> None:
 
 _HOTRELOAD_DELEGATE = "vault.hotreload.delegate"
 _HOTRELOAD_KEM = "vault.hotreload.kem"
+_HOTRELOAD_AUDITED_DELEGATE = "vault.hotreload.audited-delegate"
 
 
 def save_vault_across_hot_reload() -> bool:
     """Shutdown hook: hand the warm vault to the next process, or do nothing.
 
-    Writes the delegate signing key and the persona KEM private key. Absent
-    either (a locked process, or an unlock that never supplied the KEM key)
-    it writes nothing, so a non-warm process reloads to locked.
+    Writes the delegate signing key, persona KEM private key, and audited
+    recipient private key. Absent any of them (a locked or partially warmed
+    process) it writes nothing, so a non-warm process reloads to locked.
     """
     delegate = _VAULT_CACHE.get("delegate")
     kem_private = _VAULT_CACHE.get("kem_private")
-    if delegate is None or not kem_private:
+    audited_delegate = _VAULT_CACHE.get("audited_delegate")
+    if delegate is None or not kem_private or not audited_delegate:
         return False
     try:
         _keycache_write(_HOTRELOAD_DELEGATE, delegate.private_hex.encode("ascii"))
         _keycache_write(_HOTRELOAD_KEM, kem_private.encode("ascii"))
+        _keycache_write(
+            _HOTRELOAD_AUDITED_DELEGATE, audited_delegate.encode("ascii")
+        )
         return True
     except Exception:
         logger.exception(
@@ -1430,13 +1511,14 @@ def save_vault_across_hot_reload() -> bool:
         )
         _keycache_clear(_HOTRELOAD_DELEGATE)
         _keycache_clear(_HOTRELOAD_KEM)
+        _keycache_clear(_HOTRELOAD_AUDITED_DELEGATE)
         return False
 
 
 def restore_vault_across_hot_reload() -> bool:
     """Startup hook: re-warm the vault from a graceful-shutdown snapshot.
 
-    Reads the two keys, RE-DERIVES the generation keys from the on-disk grants
+    Reads the three keys, RE-DERIVES the generation keys from the on-disk grants
     with the KEM key (the same server-side recovery an unlock runs), installs
     the delegate, and re-retains the KEM key for the next reload. The files are
     CLEARED once read. Missing files — a crash, or a cold boot — leave the
@@ -1444,7 +1526,13 @@ def restore_vault_across_hot_reload() -> bool:
     """
     delegate_raw = _keycache_read(_HOTRELOAD_DELEGATE)
     kem_raw = _keycache_read(_HOTRELOAD_KEM)
-    if not delegate_raw or not kem_raw:
+    audited_raw = _keycache_read(_HOTRELOAD_AUDITED_DELEGATE)
+    if not delegate_raw or not kem_raw or not audited_raw:
+        # Never leave a partial snapshot for a later process to mistake for a
+        # complete hand-off (including one written by the pre-recipient code).
+        _keycache_clear(_HOTRELOAD_DELEGATE)
+        _keycache_clear(_HOTRELOAD_KEM)
+        _keycache_clear(_HOTRELOAD_AUDITED_DELEGATE)
         return False
     try:
         from tools.network.storagekit.keycontrol import KeyControlStore
@@ -1459,6 +1547,18 @@ def restore_vault_across_hot_reload() -> bool:
             )
         _bring_vault_up(generation_keys, delegate_hex)
         _VAULT_CACHE["kem_private"] = kem_private_hex  # retain for the next reload
+        audited_private_hex = audited_raw.decode("ascii").strip()
+        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+        audited_public_hex = (
+            X25519PrivateKey.from_private_bytes(bytes.fromhex(audited_private_hex))
+            .public_key()
+            .public_bytes_raw()
+            .hex()
+        )
+        private_hex, public_hex = _validate_audited_delegate_pair(
+            audited_private_hex, audited_public_hex
+        )
+        _install_personal_audited_delegate(private_hex, public_hex)
         return True
     except Exception:
         logger.exception(
@@ -1468,6 +1568,7 @@ def restore_vault_across_hot_reload() -> bool:
     finally:
         _keycache_clear(_HOTRELOAD_DELEGATE)
         _keycache_clear(_HOTRELOAD_KEM)
+        _keycache_clear(_HOTRELOAD_AUDITED_DELEGATE)
 
 
 def _fold_for(slug):
