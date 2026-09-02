@@ -297,36 +297,37 @@ async def remove_vault_credential(request: Request):
     from tools.dashboard.vault_open_approvals import _setting_route
     principal = api_auth.principal_from_request(request)
     try:
-        routed_key, scope = _setting_route(
-            principal, set_id, name, op="vault_remove",
-        )
+        routed_key, scope = _setting_route(principal, set_id, name)
+        layers = settings_ops.layers_for(set_id, routed_key, org=scope)
+        base = layers.get("base") or {}
+        if not base.get("id"):
+            return JSONResponse(
+                {"error": (
+                    f"no sealed credential named {name!r} in your vault "
+                    "namespace"
+                )},
+                status_code=404,
+            )
+        if layers.get("shadowed_bases"):
+            return JSONResponse(
+                {"error": (
+                    f"{name!r} resolves to more than one live row; removal "
+                    "by name is ambiguous — name the setting id"
+                )},
+                status_code=409,
+            )
+        settings_ops.remove_setting(base["id"], org=scope)
     except PermissionError as exc:
         return JSONResponse({"error": str(exc)}, status_code=403)
-    except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-    layers = settings_ops.layers_for(set_id, routed_key, org=scope)
-    base = layers.get("base") or {}
-    if not base.get("id"):
-        return JSONResponse(
-            {"error": (
-                f"no sealed credential named {name!r} in your vault namespace"
-            )},
-            status_code=404,
-        )
-    if layers.get("shadowed_bases"):
-        return JSONResponse(
-            {"error": (
-                f"{name!r} resolves to more than one live row; removal by "
-                "name is ambiguous — name the setting id"
-            )},
-            status_code=409,
-        )
-    try:
-        settings_ops.remove_setting(base["id"], org=scope)
     except LookupError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
-    except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
+    except (ValueError, SchemaValidationError) as exc:
+        # _setting_route names the operation it was written for; this is the
+        # same derivation refusal, labelled for this verb.
+        message = str(exc)
+        if message.startswith("vault_open "):
+            message = "vault_remove " + message[len("vault_open "):]
+        return JSONResponse({"error": message}, status_code=400)
     logger.info(
         "vault_credential_removed caller_kind=%s caller=%s caller_org=%s "
         "set_id=%s key=%s setting_id=%s",
