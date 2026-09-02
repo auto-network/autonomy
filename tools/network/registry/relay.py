@@ -369,9 +369,15 @@ class Tunnel:
         signer_pub: str | None = None,
         machine: str = "",
         caps: tuple = (),
+        version: int = HELLO_VERSION_2,
     ):
         self.ws = ws
         self.org = org
+        #: Hello version this connection authenticated with (operator readout).
+        self.version = version
+        #: Last control-op outcome for the operator readout (auto-7df7o);
+        #: {op, result, reason} or None. Operational, never a token/payload.
+        self.last_control: Optional[dict] = None
         # Connection-memory routing facts only. None of these values is
         # written to link_sessions, node_hints, logs, metrics, or a
         # history table.
@@ -575,6 +581,11 @@ class TunnelHub:
         slots = self._tunnels.setdefault(tunnel.org, {})
         previous = slots.get(self._slot(tunnel))
         slots[self._slot(tunnel)] = tunnel
+        _ops("tunnel.register", org=tunnel.org[:8],
+             persona=(tunnel.persona_pub or "")[:16],
+             machine=(tunnel.machine or "")[:16],
+             version=tunnel.version, pool=len(slots),
+             replaced=1 if previous is not None else 0)
         return previous
 
     def unregister(self, tunnel: Tunnel) -> None:
@@ -583,6 +594,10 @@ class TunnelHub:
             return
         if slots.get(self._slot(tunnel)) is tunnel:
             del slots[self._slot(tunnel)]
+        _ops("tunnel.unregister", org=tunnel.org[:8],
+             persona=(tunnel.persona_pub or "")[:16],
+             machine=(tunnel.machine or "")[:16],
+             pool=len(slots))
         if not slots:
             del self._tunnels[tunnel.org]
 
@@ -1278,6 +1293,28 @@ if not _AUDIT_LOGGER.handlers:
     _AUDIT_LOGGER.addHandler(_audit_handler)
 
 
+#: Structured operational-events sink (auto-7df7o). Same reasoning as the
+#: audit sink: operational lifecycle/control events must be visible in
+#: production regardless of the service's WARNING threshold, so this owns its
+#: own handler and never propagates. It carries ONLY non-secret fields — org,
+#: public persona/machine ids, op names, results, counts — never a link
+#: token, source address, payload, or credential.
+_OPS_LOGGER = logging.getLogger("autonomy.registry.ops")
+_OPS_LOGGER.setLevel(logging.INFO)
+_OPS_LOGGER.propagate = False
+if not _OPS_LOGGER.handlers:
+    _ops_handler = logging.StreamHandler()
+    _ops_handler.setFormatter(logging.Formatter("%(asctime)s ops %(message)s"))
+    _OPS_LOGGER.addHandler(_ops_handler)
+
+
+def _ops(event: str, **fields) -> None:
+    """One structured operational line: ``event k=v k=v``. Callers pass only
+    non-secret fields (the sink carries no token/address/payload)."""
+    rendered = " ".join(f"{k}={v}" for k, v in fields.items() if v is not None)
+    _OPS_LOGGER.info("%s %s", event, rendered)
+
+
 def _dns01_audit(op: str, persona: str, args: dict, result: str) -> None:
     """One audit line per op: hashed order/value, never raw values, never
     key material. The uniform wire error keeps detail server-side."""
@@ -1450,6 +1487,17 @@ async def _handle_ctrl_frame(tunnel: "Tunnel", payload: bytes,
         # no internals leak — and keep serving.
         reply = {"id": correlation, "ok": False,
                  "error": "control op failed unexpectedly"}
+    # Structured control-result line + last-outcome for the operator readout
+    # (auto-7df7o). The op name and its result/reason are operational, not
+    # secret; the correlation id is the connector's own request id, never a
+    # link token. An unknown op is typed here as its literal op string.
+    outcome = "ok" if reply.get("ok") else "error"
+    reason = None if reply.get("ok") else reply.get("error")
+    _ops("control", org=tunnel.org[:8],
+         op=(op if isinstance(op, str) else "?"),
+         id=correlation, result=outcome, reason=reason)
+    tunnel.last_control = {"op": op if isinstance(op, str) else "?",
+                           "result": outcome, "reason": reason}
     await tunnel.send_frame(FRAME_CTRL, CTRL_CHANNEL_ID, canonical_json(reply))
 
 
@@ -1495,6 +1543,7 @@ async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
         signer_pub=verified.signer_pub,
         machine=verified.machine,
         caps=accepted_caps,
+        version=verified.version,
     )
     replaced = hub.register(tunnel)
     if replaced is not None:

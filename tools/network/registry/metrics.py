@@ -250,7 +250,33 @@ class DnsMetrics:
         return "\n".join(lines) + "\n"
 
 
-async def start_metrics_listener(host: str, port: int, metrics):
+def render_readout(hub, build_info=None) -> dict:
+    """The operator state readout (auto-7df7o): per-org, per-tunnel live
+    facts for diagnosing admission/control/tunnel failures without SSH. It
+    reads the live hub at call time so it can never disagree with reality.
+    Carries only NON-SECRET fields — public persona/machine ids (truncated),
+    hello version, negotiated caps, channel/stream counts, and the last
+    control outcome — never a link token, source address, payload, or
+    credential."""
+    orgs: dict = {}
+    for org, slots in hub._tunnels.items():
+        tunnels = []
+        for tunnel in slots.values():
+            tunnels.append({
+                "persona": (getattr(tunnel, "persona_pub", "") or "")[:16],
+                "machine": (getattr(tunnel, "machine", "") or "")[:16],
+                "version": getattr(tunnel, "version", None),
+                "caps": list(getattr(tunnel, "caps", ())),
+                "channels": len(getattr(tunnel, "channels", ())),
+                "streams": len(getattr(tunnel, "raw_streams", ())),
+                "last_control": getattr(tunnel, "last_control", None),
+            })
+        orgs[_san_org(org)] = {"count": len(tunnels), "tunnels": tunnels}
+    return {"build": dict(build_info or {}), "orgs": orgs}
+
+
+async def start_metrics_listener(host: str, port: int, metrics, *,
+                                 readout=None):
     """A minimal loopback HTTP/1.1 responder serving GET /metrics only —
     its own listener, never the public app. Stdlib asyncio, no framework, so
     it shares no route table, middleware, or auth surface with the public
@@ -270,6 +296,11 @@ async def start_metrics_listener(host: str, port: int, metrics):
                 body = metrics.render().encode("utf-8")
                 status = b"200 OK"
                 ctype = b"text/plain; version=0.0.4; charset=utf-8"
+            elif line.startswith("GET /readout") and readout is not None:
+                import json as _json
+                body = _json.dumps(readout()).encode("utf-8")
+                status = b"200 OK"
+                ctype = b"application/json"
             else:
                 body, status, ctype = b"", b"404 Not Found", b"text/plain"
             writer.write(

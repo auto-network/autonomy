@@ -2490,10 +2490,13 @@ def create_app(
         # enums only.
         from .metrics import start_metrics_listener
 
+        from .metrics import render_readout
+
         @app.on_event("startup")
         async def _start_metrics_listener():
             app.state.metrics_server = await start_metrics_listener(
                 metrics_host, metrics_port, metrics,
+                readout=lambda: render_readout(hub, build_info),
             )
 
         @app.on_event("shutdown")
