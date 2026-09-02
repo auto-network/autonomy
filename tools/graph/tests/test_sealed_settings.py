@@ -1,9 +1,10 @@
 """Unit tests for the SealedSettings crypto core + transparent surface.
 
 These drive the layer through a fake in-memory backend, so they exercise the
-key derivation, blind indexing, AEAD sealing, lazy get-or-create, and
-fail-closed listing WITHOUT any dashboard or database. The ClientBackend
-adapter is runtime-critical and is validated separately on a live run.
+key derivation, blind indexing, hidden (seal-all) addressing, AEAD sealing,
+lazy get-or-create, and fail-closed listing WITHOUT any dashboard or database.
+The ClientBackend adapter is runtime-critical and is validated separately on a
+live run.
 """
 
 from __future__ import annotations
@@ -14,30 +15,48 @@ import pytest
 
 from tools.graph.sealed_settings import (
     SealedSettings,
+    SealedSettingsError,
     VaultLocked,
     blind_index,
+    hidden_address,
 )
+
+PEPPER = bytes(range(32))
 
 
 class FakeBackend:
-    """In-memory SealedBackend. ``locked`` makes every root release raise."""
+    """In-memory SealedBackend.
 
-    def __init__(self):
-        self.roots: dict[str, bytes] = {}
+    ``locked`` makes every sealed-index release raise; ``pepper`` is ``None``
+    for never-minted and a :class:`VaultLocked` state string in
+    ``pepper_locked`` for present-but-unreleasable.
+    """
+
+    def __init__(self, pepper: bytes | None = PEPPER):
+        self.pepper = pepper
+        self.pepper_locked: str | None = None
+        self.sealed_indexes: dict[str, bytes] = {}
         self.rows: dict[str, str] = {}
         self.mint_calls = 0
         self.open_calls = 0
         self.locked: str | None = None
 
-    def read_root(self, secured_key, *, block):
+    def read_pepper(self):
+        if self.pepper_locked is not None:
+            raise VaultLocked(self.pepper_locked)
+        if self.pepper is None:
+            raise SealedSettingsError("the sealed-settings pepper was never minted")
+        return self.pepper
+
+    def read_sealed_index(self, address, *, block):
         self.open_calls += 1
         if self.locked is not None:
             raise VaultLocked(self.locked)
-        return self.roots.get(secured_key)
+        return self.sealed_indexes.get(address)
 
-    def mint_root(self, secured_key, value_hex):
+    def mint_sealed_index(self, address, value_hex):
         self.mint_calls += 1
-        self.roots.setdefault(secured_key, bytes.fromhex(value_hex))
+        self.sealed_indexes.setdefault(address, bytes.fromhex(value_hex))
 
     def read_row(self, row_key):
         return self.rows.get(row_key)
@@ -64,16 +83,52 @@ def test_get_absent_is_none():
     assert SealedSettings("pm", FakeBackend()).get("nope") is None
 
 
-def test_key_is_blind_indexed_never_plaintext():
+def test_nothing_stored_names_the_store_or_item():
     backend = FakeBackend()
     store = SealedSettings("pm", backend)
     store.put("Chase", {"secret_hint": "x"})
+    tag = hidden_address(PEPPER, "pm")
     (row_key,) = list(backend.rows)
-    assert row_key.startswith("pm:")
-    assert "Chase" not in row_key
-    # And the stored value carries no plaintext name/metadata either.
+    assert row_key.startswith(f"{tag}:")
+    # Seal-all: no key in either set opens with the plaintext store name or
+    # carries the item name or the scheme's own label. (Substring checks are
+    # limited to strings long enough not to occur in base64 by chance.)
+    for stored_key in list(backend.rows) + list(backend.sealed_indexes):
+        assert not stored_key.startswith("pm:")
+        assert "Chase" not in stored_key
+        assert "sealed-settings" not in stored_key
     (ciphertext,) = list(backend.rows.values())
     assert "Chase" not in ciphertext and "chase.com" not in ciphertext
+
+
+def test_sealed_index_lives_at_the_hidden_address():
+    backend = FakeBackend()
+    SealedSettings("pm", backend).put("a", {"v": 1})
+    assert set(backend.sealed_indexes) == {hidden_address(PEPPER, "pm")}
+
+
+def test_addresses_are_pepper_dependent():
+    assert hidden_address(PEPPER, "pm") != hidden_address(bytes(32), "pm")
+    a = FakeBackend()
+    b = FakeBackend(pepper=bytes(reversed(range(32))))
+    SealedSettings("pm", a).put("x", {"v": 1})
+    SealedSettings("pm", b).put("x", {"v": 1})
+    assert set(a.sealed_indexes) != set(b.sealed_indexes)
+    assert set(a.rows) != set(b.rows)
+
+
+def test_pepper_never_minted_is_a_clear_error():
+    with pytest.raises(SealedSettingsError, match="pepper"):
+        SealedSettings("pm", FakeBackend(pepper=None)).get("anything")
+
+
+def test_pepper_cold_raises_typed_lock():
+    backend = FakeBackend()
+    backend.pepper_locked = VaultLocked.COLD
+    with pytest.raises(VaultLocked) as exc:
+        SealedSettings("pm", backend).get("anything")
+    assert exc.value.state == VaultLocked.COLD
+    assert backend.mint_calls == 0
 
 
 def test_list_returns_names_and_metadata():
@@ -84,14 +139,14 @@ def test_list_returns_names_and_metadata():
     assert got == {"groceries": {"body": "milk"}, "todo": {"body": "ship it"}}
 
 
-def test_root_minted_once_then_cached():
+def test_sealed_index_minted_once_then_cached():
     backend = FakeBackend()
     store = SealedSettings("pm", backend)
     store.put("a", {"v": 1})
     store.put("b", {"v": 2})
     store.get("a")
     assert backend.mint_calls == 1
-    # Two read_root calls at first unlock (miss -> mint -> hit), none after.
+    # Two release calls at first unlock (miss -> mint -> hit), none after.
     assert backend.open_calls == 2
 
 
@@ -107,13 +162,14 @@ def test_domains_are_isolated():
     assert len(list(backend.rows)) == 2  # same logical name, two distinct rows
 
 
-def test_different_root_cannot_read_rows():
+def test_different_sealed_index_cannot_read_rows():
     backend = FakeBackend()
     SealedSettings("pm", backend).put("Chase", {"u": "me"})
-    # A second store forced onto a different root sees none of the rows.
+    # A second store sharing the pepper (same tag, same rows) but forced onto
+    # a different sealed index sees none of the rows.
     other = FakeBackend()
-    other.rows = backend.rows  # same storage...
-    other.roots = {}           # ...but its own (different) root will be minted
+    other.rows = backend.rows        # same storage, same hidden tag...
+    other.sealed_indexes = {}        # ...but its own sealed index gets minted
     assert SealedSettings("pm", other).list() == []
 
 
@@ -144,8 +200,9 @@ def test_aad_binds_ciphertext_to_its_row():
     store.put("A", {"v": "a"})
     store.put("B", {"v": "b"})
     k_index = store._keys()[0]
-    a_key = f"pm:{blind_index(k_index, 'A')}"
-    b_key = f"pm:{blind_index(k_index, 'B')}"
+    tag = hidden_address(PEPPER, "pm")
+    a_key = f"{tag}:{blind_index(k_index, 'A')}"
+    b_key = f"{tag}:{blind_index(k_index, 'B')}"
     # Move A's blob into B's row: the AAD (row key) no longer matches -> skipped.
     backend.rows[b_key] = backend.rows[a_key]
     assert {i.name for i in store.list()} == {"A"}
@@ -153,15 +210,18 @@ def test_aad_binds_ciphertext_to_its_row():
 
 def test_blind_index_is_deterministic_and_matches_row_key():
     store = SealedSettings("pm", FakeBackend())
-    store.put("Chase", {"v": 1})  # forces the root
+    store.put("Chase", {"v": 1})  # forces the sealed index
     k_index = store._keys()[0]
-    assert store.blind_index("Chase") == f"pm:{blind_index(k_index, 'Chase')}"
+    tag = hidden_address(PEPPER, "pm")
+    assert store.blind_index("Chase") == f"{tag}:{blind_index(k_index, 'Chase')}"
     assert blind_index(k_index, "Chase") == blind_index(k_index, "Chase")
 
 
-def test_domain_with_colon_rejected():
-    with pytest.raises(ValueError):
-        SealedSettings("bad:domain", FakeBackend())
+def test_hidden_address_is_opaque_base64url():
+    tag = hidden_address(PEPPER, "pm")
+    assert tag == hidden_address(PEPPER, "pm")
+    assert ":" not in tag and "=" not in tag
+    assert tag != hidden_address(PEPPER, "notes")
 
 
 def test_unicode_names_normalized():
