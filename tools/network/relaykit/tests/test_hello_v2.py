@@ -63,6 +63,16 @@ def test_domain_constants_are_exact():
         hello_mod.MACHINE_HELLO_DOMAIN
         == b"autonomy.network.tunnel.hello.machine.v1\n"
     )
+    # The per-org serving machine key signs under its own domain (auto-e2ufw),
+    # distinct from the fleet machine domain.
+    assert (
+        hello_mod.SERVING_MACHINE_HELLO_DOMAIN
+        == b"autonomy.network.tunnel.hello.serving-machine.v1\n"
+    )
+    assert (
+        hello_mod.SERVING_MACHINE_HELLO_DOMAIN
+        != hello_mod.MACHINE_HELLO_DOMAIN
+    )
     assert hello_mod.HELLO_VERSION_2 == 2
 
 

@@ -72,6 +72,7 @@ from .hello import (
     HELLO_VERSION_2,
     build_tunnel_hello,
     build_tunnel_hello_v2,
+    SERVING_MACHINE_HELLO_DOMAIN,
 )
 
 logger = logging.getLogger(__name__)
@@ -795,6 +796,7 @@ class TunnelConnector:
             await ws.send(build_tunnel_hello_v2(
                 self._key, self._cert, machine_key=self._machine_key,
                 org=self._org, ts=int(time.time()), caps=self._caps,
+                machine_hello_domain=SERVING_MACHINE_HELLO_DOMAIN,
             ))
             expected_version = HELLO_VERSION_2
         else:
