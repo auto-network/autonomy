@@ -401,26 +401,29 @@ class ClientBackend:
         # told apart from a denial, so decide absent-vs-locked WITHOUT the
         # ceremony. The row is present even while sealed.
         #
-        # Resolution is by SUFFIX: the vault-settings seam prefixes a
-        # session-minted row with the bearer's org (`autonomy:<address>`)
+        # Resolution is by SUFFIX: the vault-settings seam stores a
+        # session-minted row under the bearer's org (`autonomy:<address>`)
         # while operator/browser mints are unprefixed — an operator-ruled,
-        # declared leakage (which principal class minted the store), and the
-        # boundary that keeps org sessions out of the unprefixed space where
-        # secret vaults live. Both forms must resolve to the same store.
+        # declared leakage (which principal class minted the store). The
+        # rendezvous enforces the same boundary on release: an org bearer
+        # never addresses the personal store directly — it sends the BARE
+        # suffix and the server derives its own prefix. So an unprefixed
+        # (operator-minted) store is structurally unreachable from a session,
+        # and minting a shadow index beside it would split the store — fail
+        # loud instead.
         members = self._client.read_set(VAULT_SECURED_SET_ID, org=None)
-        candidates = [
-            m for m in members.members
-            if m.key == address or m.key.endswith(f":{address}")
-        ]
-        if not candidates:
+        keys = {m.key for m in members.members}
+        prefixed = any(k.endswith(f":{address}") for k in keys)
+        if not prefixed:
+            if address in keys:
+                raise SealedSettingsError(
+                    "this store's sealed index was minted by the operator "
+                    "(unprefixed) and cannot be released to an org session"
+                )
             return None
-        # More than one principal minted this address: first mint wins,
-        # deterministically — the same converge-on-authoritative rule the
-        # layer applies to its own re-read after minting.
-        row_key = min(candidates, key=lambda m: (m.created_at, m.key)).key
         try:
             receipt = self._client.request_vault_open(
-                VAULT_SECURED_SET_ID, row_key,
+                VAULT_SECURED_SET_ID, address,
                 org=None, ttl_seconds=self._ttl,
             )
         except PermissionError:
