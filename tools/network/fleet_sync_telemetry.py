@@ -76,7 +76,10 @@ def _thin_breadcrumbs(entries: list[dict], newest_seq: int) -> list[dict]:
     return kept[:MAX_RESUME_BREADCRUMBS]
 
 
-def telemetry_key(peer_machine_public_key: str, channel: str, direction: str) -> str:
+def telemetry_key(
+    peer_machine_public_key: str, channel: str, direction: str,
+    scope: str = "personal",
+) -> str:
     if (
         not isinstance(peer_machine_public_key, str)
         or len(peer_machine_public_key) != 64
@@ -87,7 +90,13 @@ def telemetry_key(peer_machine_public_key: str, channel: str, direction: str) ->
         raise ValueError("Fleet telemetry channel must be direct or relay")
     if direction not in _DIRECTIONS:
         raise ValueError("Fleet telemetry direction must be pull or serve")
-    return f"{channel}:{direction}:{peer_machine_public_key}"
+    if not isinstance(scope, str) or not scope or ":" in scope:
+        raise ValueError("Fleet telemetry scope must be a plain slug")
+    # The personal scope keeps the historical key shape so no existing trail
+    # or aggregate is orphaned; org scopes append their slug.
+    if scope == "personal":
+        return f"{channel}:{direction}:{peer_machine_public_key}"
+    return f"{channel}:{direction}:{peer_machine_public_key}:{scope}"
 
 
 def _zero_payload() -> dict:
@@ -138,9 +147,10 @@ def record_iteration(
     acknowledged_transaction_ref: int | None = None,
     acknowledged_breadcrumb: Mapping | None = None,
     org: str = "machine",
+    scope: str = "personal",
 ) -> dict:
     """Atomically advance one local telemetry aggregate and return its payload."""
-    key = telemetry_key(peer_machine_public_key, channel, direction)
+    key = telemetry_key(peer_machine_public_key, channel, direction, scope)
     if mode not in {"delta", "checkpoint"}:
         raise ValueError("Fleet telemetry mode must be delta or checkpoint")
     if outcome not in _OUTCOMES:
@@ -310,11 +320,12 @@ def read_acknowledged_transaction_ref(
     peer_machine_public_key: str,
     *,
     org: str = "machine",
+    scope: str = "personal",
 ) -> int:
     """Return the greatest locally acknowledged position for one source peer."""
     acknowledged = 0
     for channel in _CHANNELS:
-        key = telemetry_key(peer_machine_public_key, channel, "pull")
+        key = telemetry_key(peer_machine_public_key, channel, "pull", scope)
         row = settings_ops.read_set_key(
             FLEET_SYNC_TELEMETRY_SET_ID, key, org=org, peers=[]
         )
@@ -331,6 +342,7 @@ def read_resume_breadcrumbs(
     peer_machine_public_key: str,
     *,
     org: str = "machine",
+    scope: str = "personal",
 ) -> tuple[tuple[str, str, int], ...]:
     """The locally verified resume trail for one source peer, newest first.
 
@@ -343,7 +355,7 @@ def read_resume_breadcrumbs(
     """
     entries: list[dict] = []
     for channel in _CHANNELS:
-        key = telemetry_key(peer_machine_public_key, channel, "pull")
+        key = telemetry_key(peer_machine_public_key, channel, "pull", scope)
         row = settings_ops.read_set_key(
             FLEET_SYNC_TELEMETRY_SET_ID, key, org=org, peers=[]
         )

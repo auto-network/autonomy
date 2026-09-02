@@ -146,7 +146,7 @@ def test_two_schedulers_transfer_once_and_resume_after_reconnect(tmp_path: Path)
             min_backoff=0.01,
             max_backoff=0.05,
             telemetry_recorder=record,
-            resume_cursor=lambda peer: acknowledged.get(peer, []),
+            resume_cursor=lambda peer, scope="personal": acknowledged.get(peer, []),
         )
         _insert(right_path, "first-crossing", "first")
         left = FleetSyncScheduler(left_config)

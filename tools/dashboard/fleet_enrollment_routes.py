@@ -355,8 +355,14 @@ def _activate_runtime(
             personal_db_path=_org_db_path("personal"),
             telemetry_recorder=fleet_sync_telemetry.record_iteration,
             resume_cursor=(
-                fleet_sync_telemetry.read_resume_breadcrumbs
+                lambda peer, scope="personal":
+                    fleet_sync_telemetry.read_resume_breadcrumbs(
+                        peer, scope=scope
+                    )
             ),
+            # Every organization database on this machine synchronizes
+            # across the personal fleet beside the personal one.
+            sync_scopes=fleet_sync_scheduler.discover_org_sync_scopes,
         )
     )
     fleet_relay_sync.dashboard_relay_sync_service.configure(credential)

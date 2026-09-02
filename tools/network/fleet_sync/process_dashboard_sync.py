@@ -69,6 +69,12 @@ async def _worker(config_path: Path) -> int:
             roster_entries=lambda: entries,
             peer_addresses=lambda: payload["peer_addresses"],
             personal_db_path=Path(payload["personal_db_path"]),
+            sync_scopes=(
+                (lambda scopes: (lambda: {
+                    slug: Path(path) for slug, path in scopes.items()
+                }))(payload["sync_scopes"])
+                if payload.get("sync_scopes") else None
+            ),
             poll_interval=0.03,
             connect_timeout=3.0,
             min_backoff=0.02,
