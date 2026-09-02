@@ -253,15 +253,19 @@ body.sv-viewer-composer-active .voice-caption {
   }
 }
 
-/* Once iOS raises its software keyboard, this stops being a floating drawer:
-   the editor owns the complete visual viewport above the keyboard. It is fixed
-   directly to the viewport, so it must apply the device's top safe area itself. */
+/* Once iOS raises its software keyboard, this stops being a floating drawer.
+   JS pins it to the visual viewport while Safari pans that viewport around the
+   focused textarea. The sheet paints behind the status bar; padding keeps its
+   actual controls and text below the safe area. */
 .voice-sheet--keyboard.voice-sheet--full {
-  top: env(safe-area-inset-top, 0px);
+  top: 0;
   left: 0;
   right: 0;
   bottom: 0;
   height: auto;
+  padding-top: env(safe-area-inset-top, 0px);
+  box-sizing: border-box;
+  background: #030712;
   border: 0;
   border-radius: 0;
 }
