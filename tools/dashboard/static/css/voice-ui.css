@@ -254,11 +254,10 @@ body.sv-viewer-composer-active .voice-caption {
 }
 
 /* Once iOS raises its software keyboard, this stops being a floating drawer:
-   the editor owns the complete visual viewport above the keyboard. The parent
-   page has already applied the device safe area, so applying it again here
-   creates a large dead strip at the top. */
+   the editor owns the complete visual viewport above the keyboard. It is fixed
+   directly to the viewport, so it must apply the device's top safe area itself. */
 .voice-sheet--keyboard.voice-sheet--full {
-  top: 0;
+  top: env(safe-area-inset-top, 0px);
   left: 0;
   right: 0;
   bottom: 0;

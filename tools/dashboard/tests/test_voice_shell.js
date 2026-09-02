@@ -205,6 +205,8 @@ function loadVoiceShell(opts) {
     },
     sheetInput: {
       focusCalls: 0,
+      scrollTop: 123,
+      scrollHeight: 456,
       focus() {
         this.focusCalls += 1;
       },
@@ -749,6 +751,7 @@ describe('voice shell helpers', () => {
     assert.equal(h.component.keyboardVisible, true);
     assert.equal(h.component.effectiveSheetMode, 'full');
     assert.equal(Object.keys(h.component.sheetStyle).length, 0);
+    assert.equal(h.component.$refs.sheetInput.scrollTop, 0);
 
     h.document.activeElement = null;
     h.window.visualViewport.height = 844;
