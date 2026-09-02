@@ -287,6 +287,12 @@ async def _build_desired_state() -> GatewayDesiredState:
                 except Exception:
                     continue
                 unavailable_hosts.append(hostname)
+                # The unavailable page still terminates TLS for this exact
+                # hostname, so it needs the persona certificate just like an
+                # active or paused route. Omitting it made a mixed healthy +
+                # unavailable plan fail the renderer's exact-coverage check
+                # and tore down every Service route.
+                certificates[hostname] = pair
                 desired_routes.append(
                     DesiredRoute(
                         reservation_id,
