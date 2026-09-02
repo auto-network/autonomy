@@ -59,7 +59,11 @@ class FakeBackend:
         self.sealed_indexes.setdefault(address, bytes.fromhex(value_hex))
 
     def read_row(self, row_key):
-        return self.rows.get(row_key)
+        from tools.graph.sealed_settings import _bare_key
+        for k, v in self.rows.items():
+            if _bare_key(k) == row_key:
+                return v
+        return None
 
     def write_row(self, row_key, ciphertext):
         self.rows[row_key] = ciphertext
@@ -68,8 +72,9 @@ class FakeBackend:
         self.rows.pop(row_key, None)
 
     def list_rows(self, prefix):
+        from tools.graph.sealed_settings import _bare_key
         for key, value in self.rows.items():
-            if key.startswith(f"{prefix}:"):
+            if _bare_key(key).startswith(f"{prefix}."):
                 yield key, value
 
 
@@ -89,12 +94,12 @@ def test_nothing_stored_names_the_store_or_item():
     store.put("Chase", {"secret_hint": "x"})
     tag = hidden_address(PEPPER, "pm")
     (row_key,) = list(backend.rows)
-    assert row_key.startswith(f"{tag}:")
+    assert row_key.startswith(f"{tag}.")
     # Seal-all: no key in either set opens with the plaintext store name or
     # carries the item name or the scheme's own label. (Substring checks are
     # limited to strings long enough not to occur in base64 by chance.)
     for stored_key in list(backend.rows) + list(backend.sealed_indexes):
-        assert not stored_key.startswith("pm:")
+        assert not stored_key.startswith("pm.") and not stored_key.startswith("pm:")
         assert "Chase" not in stored_key
         assert "sealed-settings" not in stored_key
     (ciphertext,) = list(backend.rows.values())
@@ -201,8 +206,8 @@ def test_aad_binds_ciphertext_to_its_row():
     store.put("B", {"v": "b"})
     k_index = store._keys()[0]
     tag = hidden_address(PEPPER, "pm")
-    a_key = f"{tag}:{blind_index(k_index, 'A')}"
-    b_key = f"{tag}:{blind_index(k_index, 'B')}"
+    a_key = f"{tag}.{blind_index(k_index, 'A')}"
+    b_key = f"{tag}.{blind_index(k_index, 'B')}"
     # Move A's blob into B's row: the AAD (row key) no longer matches -> skipped.
     backend.rows[b_key] = backend.rows[a_key]
     assert {i.name for i in store.list()} == {"A"}
@@ -213,7 +218,7 @@ def test_blind_index_is_deterministic_and_matches_row_key():
     store.put("Chase", {"v": 1})  # forces the sealed index
     k_index = store._keys()[0]
     tag = hidden_address(PEPPER, "pm")
-    assert store.blind_index("Chase") == f"{tag}:{blind_index(k_index, 'Chase')}"
+    assert store.blind_index("Chase") == f"{tag}.{blind_index(k_index, 'Chase')}"
     assert blind_index(k_index, "Chase") == blind_index(k_index, "Chase")
 
 
@@ -285,3 +290,38 @@ def test_client_backend_resolves_org_prefixed_sealed_index():
     stub = StubClient(["autonomy:mac.ssh"])
     assert ClientBackend(stub).read_sealed_index(address, block=False) is None
     assert stub.opened_with is None
+
+
+def test_layer_reads_back_server_prefixed_rows():
+    """A session's item rows are stored under a server-derived <org>: prefix.
+    The layer writes bare keys but must resolve get/list against the prefixed
+    stored keys, and the seal's AAD (the bare key) must still verify."""
+    from tools.graph.sealed_settings import hidden_address
+
+    class PrefixingBackend(FakeBackend):
+        """Simulates the org-writeback seam: every written row key is stored
+        with an 'org:' prefix, exactly as the server derives it."""
+
+        def write_row(self, row_key, ciphertext):
+            self.rows["org:" + row_key] = ciphertext
+
+    backend = PrefixingBackend()
+    store = SealedSettings("pm", backend)
+    store.put("Chase", {"u": "me"})
+    store.put("Amex", {"u": "you"})
+
+    tag = hidden_address(PEPPER, "pm")
+    assert all(k.startswith(f"org:{tag}.") for k in backend.rows)
+
+    # get() (bare lookup) resolves the prefixed row and its AAD verifies.
+    assert store.get("Chase") == {"u": "me"}
+    # list() opens both prefixed rows.
+    assert {i.name: i.metadata for i in store.list()} == {
+        "Chase": {"u": "me"}, "Amex": {"u": "you"}}
+
+
+def test_bare_key_strips_optional_org_prefix():
+    from tools.graph.sealed_settings import _bare_key
+
+    assert _bare_key("tag.blind") == "tag.blind"
+    assert _bare_key("autonomy:tag.blind") == "tag.blind"
