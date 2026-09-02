@@ -509,6 +509,19 @@ class SQLiteFleetSyncStore:
         finally:
             conn.close()
 
+    def journal_gap(self) -> bool:
+        from tools.network.fleet_sync.catalog import journal_has_gap
+
+        import sqlite3 as _sqlite3
+
+        conn = _sqlite3.connect(f"file:{self.path}?mode=ro", uri=True)
+        try:
+            return journal_has_gap(conn)
+        except _sqlite3.Error:
+            return False
+        finally:
+            conn.close()
+
     def attachment_backlog(self):
         from tools.network.fleet_sync.blob_transport import (
             pending_attachment_backlog,

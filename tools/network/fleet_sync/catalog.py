@@ -74,6 +74,23 @@ def _unpack_journal(stored: bytes) -> bytes:
     raise WatermarkError("unsupported journal storage frame")
 
 
+def journal_has_gap(conn: sqlite3.Connection) -> bool:
+    """True when the retained journal cannot replay from the beginning.
+
+    Acknowledged pruning deletes journal frames while winner-pinned
+    transaction rows survive, and a checkpoint install writes winner
+    transactions with no journal at all — in both cases a peer without a
+    resolvable breadcrumb needs a checkpoint, not a journal replay, because
+    the replay would silently omit retired history.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM fleet_sync_transactions t WHERE NOT EXISTS("
+        "SELECT 1 FROM fleet_sync_journal j WHERE j.transaction_ref=t.id"
+        ") LIMIT 1"
+    ).fetchone()
+    return row is not None
+
+
 def ensure_quarantine_table(conn: sqlite3.Connection) -> None:
     """The unrealized-row backlog, upgraded in place when newer columns are
     missing (the table predates them and is created lazily)."""

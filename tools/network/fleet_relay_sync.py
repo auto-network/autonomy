@@ -378,6 +378,25 @@ class ConnectorFleetRuntime:
             scheduler.authenticator.accept_client(hello, session=token)
         )
         current_epoch = scheduler._current_epoch()
+        # Continuity decides the transfer, not the request alone: a
+        # resolvable breadcrumb trail proves the peer consumed this
+        # journal's prefix, so deltas suffice regardless of roster changes;
+        # an unresolvable trail against a gapped (pruned or
+        # checkpoint-installed) journal needs a checkpoint even when the
+        # peer did not ask, because a replay would silently omit retired
+        # history.
+        # An empty trail is position zero by definition — no store access,
+        # which also keeps a not-yet-activated serving store out of the
+        # decision path for first-contact pulls.
+        resume_position = 0
+        if resume_trail:
+            resume_position = await asyncio.to_thread(
+                scheduler.store.resume_ref, resume_trail
+            )
+        journal_gap = await asyncio.to_thread(scheduler.store.journal_gap)
+        serve_checkpoint = _serve_checkpoint_decision(
+            resume_position, include_checkpoint, journal_gap
+        )
         logger.warning(
             "fleet relay sync: accept_client ok, peer_pub=%s, entering stream",
             peer_pub[:16] if isinstance(peer_pub, str) else peer_pub,
@@ -406,7 +425,7 @@ class ConnectorFleetRuntime:
                 })
                 stats["bytes_sent"] += len(server_hello_frame)
                 yield server_hello_frame
-                if include_checkpoint:
+                if serve_checkpoint:
                     active = tuple(sorted(fleet_roster.resolve(
                         scheduler._roster_snapshot,
                         anchor_root_pub=scheduler.config.personal_root_pub,
@@ -466,7 +485,7 @@ class ConnectorFleetRuntime:
                     ),
                     peer_pub,
                     telemetry_channel="relay",
-                    telemetry_mode="checkpoint" if include_checkpoint else "delta",
+                    telemetry_mode="checkpoint" if serve_checkpoint else "delta",
                     telemetry_stats=stats,
                     telemetry_started_at_ns=started_at_ns,
                     telemetry_started_monotonic_ns=started_monotonic_ns,
@@ -503,7 +522,7 @@ class ConnectorFleetRuntime:
                             peer_pub,
                             channel="relay",
                             direction="serve",
-                            mode="checkpoint" if include_checkpoint else "delta",
+                            mode="checkpoint" if serve_checkpoint else "delta",
                             outcome=outcome,
                             started_at_ns=started_at_ns,
                             duration_ms=max(
@@ -766,8 +785,10 @@ async def pull_checkpoint_once(
             value = _json(raw, "checkpoint control")
             kind = value.get("kind")
             if kind == "checkpoint.begin":
-                if not include_checkpoint:
-                    raise FleetRelaySyncError("unexpected checkpoint on delta pull")
+                # A server may initiate a checkpoint this machine did not
+                # request: an unresolvable trail against a pruned journal
+                # makes a checkpoint the only honest recovery, and the
+                # stream below verifies it exactly like a requested one.
                 expected = {
                     "v", "kind", "file_count", "total_bytes",
                     "source_machine_pub", "roster_epoch",
@@ -988,7 +1009,7 @@ class DashboardFleetRelaySyncService:
                 if route is None:
                     return
                 include_checkpoint = not await asyncio.to_thread(
-                    _has_checkpoint,
+                    _has_local_sync_state,
                     route.origin_machine_pub,
                     credential.delegation_cert.org.removeprefix("personal:"),
                 )
@@ -1079,19 +1100,40 @@ class DashboardFleetRelaySyncService:
 dashboard_relay_sync_service = DashboardFleetRelaySyncService()
 
 
-def _has_checkpoint(machine_pub: str, root_pub: str) -> bool:
+def _serve_checkpoint_decision(
+    resume_position: int, requested: bool, journal_gap: bool
+) -> bool:
+    """A resolvable trail always means deltas; an unresolvable one means a
+    checkpoint when the peer asked or when replay would omit retired
+    history."""
+    return resume_position == 0 and (requested or journal_gap)
+
+
+def _has_local_sync_state(machine_pub: str, root_pub: str) -> bool:
+    """Whether this machine holds any applied sync state at all.
+
+    A machine with state syncs by deltas: its breadcrumb trail is
+    epoch-independent continuity proof, so a roster change must never force
+    a fleet-wide re-checkpoint (the old check keyed receipts on the current
+    epoch and did exactly that). State is a checkpoint receipt from ANY
+    epoch, or any applied/authored transaction. The peer arguments are kept
+    for call-site continuity; state is a property of this machine, not of
+    one peer.
+    """
+    del machine_pub, root_pub
     path = _org_db_path("personal")
     try:
-        entries = tuple(fleet_roster.load_entries(org=None))
-        epoch = roster_epoch(entries, root_pub)
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
-            row = conn.execute(
-                "SELECT 1 FROM fleet_sync_peer_state WHERE "
-                "machine_public_key=? AND roster_epoch=? "
-                "AND checkpoints_received>0 LIMIT 1",
-                (machine_pub, epoch),
+            receipt = conn.execute(
+                "SELECT 1 FROM fleet_sync_peer_state "
+                "WHERE checkpoints_received>0 LIMIT 1"
             ).fetchone()
-        return row is not None
+            if receipt is not None:
+                return True
+            applied = conn.execute(
+                "SELECT 1 FROM fleet_sync_transactions LIMIT 1"
+            ).fetchone()
+            return applied is not None
     except (OSError, sqlite3.Error, ValueError):
         return False
 
