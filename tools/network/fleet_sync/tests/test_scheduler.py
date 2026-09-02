@@ -149,6 +149,10 @@ def test_two_schedulers_transfer_once_and_resume_after_reconnect(tmp_path: Path)
             resume_cursor=lambda peer, scope="personal": acknowledged.get(peer, []),
         )
         _insert(right_path, "first-crossing", "first")
+        # A local authored row keeps this an established-peer DELTA test:
+        # bootstrap-by-checkpoint has its own coverage in
+        # test_direct_bootstrap.py.
+        _insert(left_path, "left-local-seed", "keeps the delta path")
         left = FleetSyncScheduler(left_config)
         await left.start()
         try:
@@ -230,6 +234,9 @@ def test_scheduler_retries_bad_candidate_then_uses_authenticated_peer(
         _prepare(left_path, left_key)
         _prepare(right_path, right_key)
         _insert(right_path, "after-retry", "arrived")
+        # A local authored row keeps this a delta test (see the sibling
+        # above); bootstrap-by-checkpoint is covered by the harness.
+        _insert(left_path, "left-retry-seed", "keeps the delta path")
         entries = [
             enroll(root, machine_pub=left_key.public_hex),
             enroll(root, machine_pub=right_key.public_hex),

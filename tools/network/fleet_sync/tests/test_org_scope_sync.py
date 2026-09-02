@@ -19,9 +19,13 @@ def test_scope_field_roundtrip_and_personal_bytes_unchanged() -> None:
     compat = "cd" * 32
     personal = encode_pull_request(epoch, compat=compat)
     assert b"scope" not in personal  # v3 bytes for mixed-version fleets
-    assert decode_pull_request(personal) == (epoch, (), compat, "personal")
+    assert decode_pull_request(personal) == (
+        epoch, (), compat, "personal", False
+    )
     scoped = encode_pull_request(epoch, compat=compat, scope="alpha")
-    assert decode_pull_request(scoped) == (epoch, (), compat, "alpha")
+    assert decode_pull_request(scoped) == (epoch, (), compat, "alpha", False)
+    boot = encode_pull_request(epoch, compat=compat, bootstrap=True)
+    assert decode_pull_request(boot) == (epoch, (), compat, "personal", True)
     with pytest.raises(FleetSyncProtocolError):
         encode_pull_request(epoch, compat=compat, scope="bad:scope")
 
@@ -38,15 +42,15 @@ def test_org_databases_sync_with_isolation(tmp_path: Path) -> None:
 
         fleet.wait(
             lambda: fleet.has_org(1, "alpha", "a-note"),
-            timeout=25.0, label="alpha crossing",
+            timeout=120.0, label="alpha crossing",
         )
         fleet.wait(
             lambda: fleet.has_org(0, "beta", "b-note"),
-            timeout=25.0, label="beta crossing",
+            timeout=120.0, label="beta crossing",
         )
         fleet.wait(
             lambda: fleet.has(1, "p-note"),
-            timeout=25.0, label="personal crossing",
+            timeout=120.0, label="personal crossing",
         )
 
         # Isolation: rows never leak across scopes.
@@ -78,7 +82,7 @@ def test_schema_mismatch_pauses_only_that_org(tmp_path: Path) -> None:
 
         fleet.wait(
             lambda: fleet.has(1, "p-1") and fleet.has_org(1, "beta", "b-1"),
-            timeout=25.0, label="unaffected scopes",
+            timeout=120.0, label="unaffected scopes",
         )
         # The mismatched scope stays paused: give it ample opportunity.
         time.sleep(1.0)

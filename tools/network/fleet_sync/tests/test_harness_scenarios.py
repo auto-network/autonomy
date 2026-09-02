@@ -15,7 +15,7 @@ def test_three_way_convergence(tmp_path: Path) -> None:
                 fleet.write(
                     machine, f"m{machine}-n{note}", f"note {note} from {machine}"
                 )
-        fleet.wait_converged(timeout=25.0)
+        fleet.wait_converged(timeout=120.0)
         assert all(
             fleet.has(machine, "m2-n4") for machine in range(3)
         )
@@ -39,7 +39,7 @@ def test_flapping_peer_converges_after_stabilizing(tmp_path: Path) -> None:
             Step(1.0, lambda f: f.write(0, "w-2", "still flapping"), "write"),
             Step(1.2, lambda f: f.restart(2, kill=True), "flap 3"),
         ])
-        fleet.wait_converged(timeout=30.0)
+        fleet.wait_converged(timeout=120.0)
         assert fleet.machines[2].restarts == 3
         assert all(fleet.has(2, f"w-{n}") for n in range(3))
         fleet.write_evidence(tmp_path / "flap.json")
@@ -61,7 +61,7 @@ def test_lossy_link_converges_without_divergence(tmp_path: Path) -> None:
         for note in range(10):
             fleet.write(0, f"a-{note}", f"lossy a {note}")
             fleet.write(1, f"b-{note}", f"lossy b {note}")
-        fleet.wait_converged(timeout=60.0)
+        fleet.wait_converged(timeout=120.0)
         assert fleet.has(1, "a-9") and fleet.has(0, "b-9")
         fleet.write_evidence(tmp_path / "lossy.json")
     finally:

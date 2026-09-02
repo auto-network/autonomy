@@ -115,6 +115,7 @@ def test_mismatched_schemas_pause_sync_then_resume_after_local_upgrade(tmp_path)
         # replicated column. The left machine is still on the old schema.
         _add_column(right_path, "thoughts", "compat_probe")
         _insert(right_path, "post-upgrade", "authored on the upgraded machine")
+        _insert(left_path, "left-seed-a", "keeps the delta path")
 
         right = FleetSyncScheduler(FleetSyncRuntimeConfig(
             machine_key=right_key,
@@ -189,6 +190,7 @@ def test_full_upgrade_lifecycle_pauses_then_converges(tmp_path, monkeypatch):
         right_path = tmp_path / "right.db"
         _prepare(left_path, left_key)
         _prepare(right_path, right_key)
+        _insert(left_path, "left-seed-b", "keeps the delta path")
         entries = [
             enroll(root, machine_pub=left_key.public_hex),
             enroll(root, machine_pub=right_key.public_hex),

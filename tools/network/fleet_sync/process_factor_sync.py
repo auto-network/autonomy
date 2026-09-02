@@ -37,6 +37,8 @@ from tools.vault.store import VaultStore
 from tools.network.fleet_sync.process_dashboard_sync import (
     _entry_dict,
     _peer_report,
+    _delete,
+    _insert,
     _prepare,
     _start_worker,
     _stop_worker,
@@ -99,6 +101,11 @@ def run_factor_process_acceptance(root_dir: Path) -> dict:
     receiver_db = root_dir / "receiver-personal.db"
     _prepare(source_db, source_key)
     _prepare(receiver_db, receiver_key)
+    # Authored-then-deleted local state keeps the receiver on the delta path
+    # this probe asserts (transactions_applied counters); checkpoint
+    # bootstrap has its own harness coverage.
+    _insert(receiver_db, "receiver-local-seed", "keeps the delta path")
+    _delete(receiver_db, "receiver-local-seed")
 
     factor_id = "personal-root-password"
     public_key = "f" * 64
