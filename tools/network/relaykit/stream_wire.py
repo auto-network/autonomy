@@ -14,15 +14,38 @@ Nothing here logs, retains, or interprets payload bytes.
 from __future__ import annotations
 
 import json
+import os
 import struct
 
 CAP_TLS_STREAM = "tls-stream/1"
 STREAM_OPEN_VERSION = 1
 
-STREAM_INITIAL_CREDIT = 256 * 1024
-STREAM_MAX_BUFFER = 512 * 1024
-STREAM_MAX_DATA = 64 * 1024
-STREAM_MAX_PER_TUNNEL = 128
+
+def _env_int(name: str, default: int) -> int:
+    """A capacity knob overridable by env for sweep/tuning (auto-7e4ix). The
+    default is the frozen production value; a valid positive override wins, an
+    invalid one is ignored so a typo never silently zeroes a limit."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+#: Per-stream flow-control credit window — the single biggest lever on a
+#: SINGLE stream's throughput (bytes in flight before the sender waits for a
+#: replenish grant). Env: AUTONOMY_STREAM_CREDIT.
+STREAM_INITIAL_CREDIT = _env_int("AUTONOMY_STREAM_CREDIT", 256 * 1024)
+#: Max buffered bytes per stream direction. Env: AUTONOMY_STREAM_BUFFER.
+STREAM_MAX_BUFFER = _env_int("AUTONOMY_STREAM_BUFFER", 512 * 1024)
+#: Max DATA frame payload. Env: AUTONOMY_STREAM_FRAME.
+STREAM_MAX_DATA = _env_int("AUTONOMY_STREAM_FRAME", 64 * 1024)
+#: Concurrent raw streams per tunnel — the concurrency ceiling a single
+#: tunnel imposes. Env: AUTONOMY_STREAM_MAX_PER_TUNNEL.
+STREAM_MAX_PER_TUNNEL = _env_int("AUTONOMY_STREAM_MAX_PER_TUNNEL", 128)
 #: Bounded ClientHello peek: bytes and seconds.
 SNI_PEEK_MAX_BYTES = 16 * 1024
 STREAM_HANDSHAKE_TIMEOUT = 10.0
