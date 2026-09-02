@@ -6546,6 +6546,10 @@ def main():
     from .set_cmd import attach_set_subparser
     attach_set_subparser(sub)
 
+    # vault — credential tiers, one verb layer (graph://83c92d72-0ed)
+    from .vault_cmd import attach_vault_subparser
+    attach_vault_subparser(sub)
+
     # org — org registry (graph://d970d946-f95)
     from .org_cmd import attach_org_subparser
     attach_org_subparser(sub)
