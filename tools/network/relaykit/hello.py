@@ -51,6 +51,12 @@ TUNNEL_HELLO_DOMAIN_V2 = b"autonomy.network.tunnel.hello.v2\n"
 #: Brand-new domain: its first version is v1 regardless of the hello
 #: version whose core it signs (the core itself carries the hello "v").
 MACHINE_HELLO_DOMAIN = b"autonomy.network.tunnel.hello.machine.v1\n"
+#: The per-(org, machine) SERVING key signs the same core under its OWN
+#: domain (auto-e2ufw, crypto ruling graph://a374b260-e4a): a distinctly
+#: derived key for a distinct purpose gets a distinct domain, so a
+#: signature minted for the serving key can never be evaluated in the fleet
+#: key's context. The serving connector passes this; nothing else flips.
+SERVING_MACHINE_HELLO_DOMAIN = b"autonomy.network.tunnel.hello.serving-machine.v1\n"
 HELLO_VERSION = 1
 HELLO_VERSION_2 = 2
 
@@ -126,8 +132,15 @@ def build_tunnel_hello_v2(
     org: str,
     ts: int,
     caps=(),
+    machine_hello_domain: bytes = MACHINE_HELLO_DOMAIN,
 ) -> str:
-    """Connector side: the v2 hello — machine identity + capabilities."""
+    """Connector side: the v2 hello — machine identity + capabilities.
+
+    *machine_hello_domain* selects the domain the machine key co-signs the
+    core under. It defaults to the fleet ``MACHINE_HELLO_DOMAIN`` so no
+    unrelated caller changes; the SERVING connector passes
+    ``SERVING_MACHINE_HELLO_DOMAIN`` with its per-org serving key
+    (auto-e2ufw)."""
     if cert.child_pub != key.public_hex:
         raise HelloError("cert does not delegate to the signing key")
     caps_list = sorted({str(cap) for cap in caps})
@@ -144,7 +157,7 @@ def build_tunnel_hello_v2(
             "org": org,
             "signer": key.public_hex,
             "machine": machine_key.public_hex,
-            "machine_sig": machine_key.sign_hex(MACHINE_HELLO_DOMAIN + core),
+            "machine_sig": machine_key.sign_hex(machine_hello_domain + core),
             "caps": caps_list,
             "ts": ts,
             "cert": cert.to_json().decode("ascii"),

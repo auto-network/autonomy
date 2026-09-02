@@ -99,7 +99,7 @@ class RegistryMetrics:
 
     # -- scrape-time gauges (read live state, cannot drift) -----------------
 
-    def bind_state(self, *, hub=None, host_routes=None) -> None:
+    def bind_state(self, *, hub=None, host_routes=None, store=None) -> None:
         """Register the live objects the gauge collectors read at scrape."""
         if hub is not None:
             self._gauges.append((
@@ -111,6 +111,16 @@ class RegistryMetrics:
                 "relay_active_leases",
                 "Live hostname leases, per organization.",
                 lambda: self._lease_gauge(host_routes),
+            ))
+        if store is not None:
+            # auto-e2ufw Option B condition 2: expose backfill progress so
+            # the serving-key transitional window is observable.
+            self._gauges.append((
+                "relay_orgs_with_serving_keys",
+                "Organizations that have registered at least one serving "
+                "machine key (backfill progress).",
+                lambda: {"relay_orgs_with_serving_keys":
+                         {(): store.count_orgs_with_serving_keys()}},
             ))
 
     @staticmethod
@@ -187,6 +197,9 @@ class RegistryMetrics:
                 ("Live raw streams, per organization.", ("org",)),
             "relay_active_leases":
                 ("Live hostname leases, per organization.", ("org",)),
+            "relay_orgs_with_serving_keys":
+                ("Organizations with at least one registered serving key.",
+                 ()),
         }
         rendered_gauges: dict = {}
         for _name, _help, collector in self._gauges:

@@ -662,7 +662,7 @@ def create_app(
     from .metrics import RegistryMetrics
     metrics = RegistryMetrics()
     host_routes = HostRoutes(store, now_fn, metrics=metrics)
-    metrics.bind_state(hub=hub, host_routes=host_routes)
+    metrics.bind_state(hub=hub, host_routes=host_routes, store=store)
     if abuse_limiter is None:
         abuse_limiter = RelayAbuseLimiter()
     witness_key = witness_key or KeyPair.generate()

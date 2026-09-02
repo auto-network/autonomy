@@ -59,6 +59,7 @@ def _tunnel(client, clock, root, *, persona=PERSONA, caps=CAPS):
     raw = hello_mod.build_tunnel_hello_v2(
         serve_key, _serve_cert(root, serve_key, persona),
         machine_key=machine_key, org=ORG, ts=clock.now, caps=caps,
+        machine_hello_domain=hello_mod.SERVING_MACHINE_HELLO_DOMAIN,
     )
     with client.websocket_connect(f"/t/{ORG}") as ws:
         ws.send_text(raw)

@@ -43,7 +43,8 @@ def _v2_hello(root, *, persona=PERSONA_A, machine_key=None, ts=NOW,
     machine_key = machine_key or KeyPair.generate()
     cert = _serve_cert(root, serve_key, persona)
     raw = hello_mod.build_tunnel_hello_v2(
-        serve_key, cert, machine_key=machine_key, org=ORG, ts=ts, caps=caps
+        serve_key, cert, machine_key=machine_key, org=ORG, ts=ts, caps=caps,
+        machine_hello_domain=hello_mod.SERVING_MACHINE_HELLO_DOMAIN,
     )
     return raw, serve_key, machine_key
 

@@ -68,7 +68,7 @@ from tools.network.relaykit.hello import (
     HELLO_FIELDS_V2,
     HELLO_VERSION,
     HELLO_VERSION_2,
-    MACHINE_HELLO_DOMAIN,
+    SERVING_MACHINE_HELLO_DOMAIN,
     TUNNEL_HELLO_DOMAIN_V2,
     HelloError,
     hello_core,
@@ -671,12 +671,12 @@ def _verify_tunnel_hello(
                 verify_signature(
                     data["machine"],
                     data["machine_sig"],
-                    MACHINE_HELLO_DOMAIN + core,
+                    SERVING_MACHINE_HELLO_DOMAIN + core,
                 )
             except Exception as exc:
                 raise HelloError(
                     "machine co-signature does not verify against the "
-                    "claimed machine key"
+                    "claimed serving machine key"
                 ) from exc
         else:
             verify_signature(
@@ -711,6 +711,26 @@ def _verify_tunnel_hello(
             )
     except (ChainVerifyError, MalformedError) as exc:
         raise HelloError(f"{type(exc).__name__}: {exc}") from exc
+    if is_v2:
+        # auto-e2ufw Option B (crypto ruling graph://a374b260-e4a): the
+        # serving-domain machine_sig above is verified UNCONDITIONALLY. The
+        # allow-set is the secondary registration/unlinkability binding —
+        # hard-enforced once the org has registered any serving key, and a
+        # bounded transitional ACCEPT (logged, counted) for a not-yet-
+        # backfilled org, whose persona is already authenticated by the
+        # root-issued tunnel:serve cert above.
+        allowed = store.registered_serving_keys(org)
+        if allowed:
+            if data["machine"] not in allowed:
+                raise HelloError(
+                    "serving machine key not registered for this org"
+                )
+        else:
+            _AUDIT_LOGGER.warning(
+                "serving-key transitional-accept org=%s machine=%s "
+                "(no registered serving-key set yet; backfill pending)",
+                org[:8], data["machine"][:16],
+            )
     if data["v"] not in (HELLO_VERSION, HELLO_VERSION_2):
         raise _ProtocolVersionMismatch(data["v"])
     return VerifiedTunnelHello(

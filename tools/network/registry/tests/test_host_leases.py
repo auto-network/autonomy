@@ -68,6 +68,7 @@ def _tunnel(client, clock, root, *, persona=PERSONA_A, machine_key=None,
     raw = hello_mod.build_tunnel_hello_v2(
         serve_key, cert, machine_key=machine_key, org=ORG,
         ts=clock.now, caps=caps,
+        machine_hello_domain=hello_mod.SERVING_MACHINE_HELLO_DOMAIN,
     )
     with client.websocket_connect(f"/t/{ORG}") as ws:
         ws.send_text(raw)
@@ -310,6 +311,7 @@ def test_revocation_drops_hostname_routes_before_socket_close(
     raw = hello_mod.build_tunnel_hello_v2(
         serve_key, cert, machine_key=machine_key, org=ORG,
         ts=clock.now, caps=("host-lease/1",),
+        machine_hello_domain=hello_mod.SERVING_MACHINE_HELLO_DOMAIN,
     )
     with client.websocket_connect(f"/t/{ORG}") as ws:
         ws.send_text(raw)
@@ -420,3 +422,68 @@ def test_renew_all_keepalive_spans_many_old_ttls(app, client, clock, root):
             clock.advance(relay_mod.HOST_LEASE_TTL // 2)
             assert _ctrl(ws, "host-renew-all", {})["renewed"] == 1
         assert app.state.host_routes.route(host) is not None
+
+
+# -- auto-e2ufw: serving machine key domain + Option B allow-set -----------
+
+
+def test_v2_hello_under_old_machine_domain_is_rejected(client, clock, root):
+    """The domain flip is hard: a v2 hello whose machine_sig is under the
+    retired fleet MACHINE_HELLO_DOMAIN no longer verifies."""
+    serve_key, machine_key = KeyPair.generate(), KeyPair.generate()
+    cert = _serve_cert(root, serve_key, PERSONA_A)
+    raw = hello_mod.build_tunnel_hello_v2(
+        serve_key, cert, machine_key=machine_key, org=ORG, ts=clock.now,
+        caps=("host-lease/1",),
+        machine_hello_domain=hello_mod.MACHINE_HELLO_DOMAIN,  # wrong domain
+    )
+    register(client, clock, root, org_uuid=ORG)
+    with client.websocket_connect(f"/t/{ORG}") as ws:
+        ws.send_text(raw)
+        ack = ws.receive_json()
+        assert ack["ok"] is False
+
+
+def test_empty_allowset_accepts_then_nonempty_enforces(
+    app, client, clock, root,
+):
+    register(client, clock, root, org_uuid=ORG)
+    store = app.state.store
+    assert store.registered_serving_keys(ORG) == set()  # un-backfilled
+
+    # Empty set: a valid serving-domain hello is accepted (transitional).
+    mk1 = KeyPair.generate()
+    with _tunnel(client, clock, root, machine_key=mk1) as (ws, _):
+        assert _ctrl(ws, "host-register", {
+            "reservation": _reservation(PERSONA_A, "docs"),
+            "host": _host("docs", PERSONA_A),
+        })["ok"] is True
+
+    # Backfill registers a DIFFERENT machine key for the org.
+    registered = KeyPair.generate()
+    store.register_serving_machine_key(
+        ORG, registered.public_hex, now=clock.now)
+    assert store.count_orgs_with_serving_keys() == 1
+
+    # Now the set is non-empty: an UNregistered serving machine (mk1) is
+    # rejected even though its serving-domain co-signature is valid.
+    unregistered = KeyPair.generate()
+    with client.websocket_connect(f"/t/{ORG}") as ws:
+        ws.send_text(_hello_for(root, clock, unregistered, mk1))
+        assert ws.receive_json()["ok"] is False
+
+    # The registered machine key is accepted.
+    with _tunnel(client, clock, root, machine_key=registered) as (ws, _):
+        assert _ctrl(ws, "host-register", {
+            "reservation": _reservation(PERSONA_A, "docs"),
+            "host": _host("docs", PERSONA_A),
+        })["ok"] is True
+
+
+def _hello_for(root, clock, serve_key, machine_key, persona=PERSONA_A):
+    return hello_mod.build_tunnel_hello_v2(
+        serve_key, _serve_cert(root, serve_key, persona),
+        machine_key=machine_key, org=ORG, ts=clock.now,
+        caps=("host-lease/1",),
+        machine_hello_domain=hello_mod.SERVING_MACHINE_HELLO_DOMAIN,
+    )

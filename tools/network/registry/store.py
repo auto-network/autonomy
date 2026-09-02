@@ -297,6 +297,18 @@ CREATE TABLE IF NOT EXISTS serve_labels (
     created_at  INTEGER NOT NULL
 );
 
+-- auto-e2ufw: the per-org allow-set of registered SERVING machine public
+-- keys. Onboarding/backfill registers the unlinkable serving-machine pubkey
+-- for each (org, machine); the tunnel hello verify hard-enforces membership
+-- once an org's set is non-empty (Option B, graph://a374b260-e4a). A pubkey
+-- is public and org-scoped: org A's row never reveals org B's serving key.
+CREATE TABLE IF NOT EXISTS serve_machine_keys (
+    org_uuid    TEXT NOT NULL,
+    machine_pub TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    PRIMARY KEY (org_uuid, machine_pub)
+);
+
 -- E1 session linking (spec §4.7, §4.8, §6.8) --------------------------------
 
 -- First-party auto.network viewing sessions. A row is created ANONYMOUS
@@ -1316,6 +1328,37 @@ class RegistryStore:
             (persona_pub,),
         ).fetchone()
         return row["label"] if row is not None else None
+
+    def registered_serving_keys(self, org: str) -> set:
+        """The org's allow-set of registered serving machine pubkeys
+        (auto-e2ufw). Empty until onboarding/backfill registers them."""
+        rows = self._conn.execute(
+            "SELECT machine_pub FROM serve_machine_keys WHERE org_uuid = ?",
+            (org,),
+        ).fetchall()
+        return {row["machine_pub"] for row in rows}
+
+    def count_orgs_with_serving_keys(self) -> int:
+        """How many orgs have at least one registered serving key — the
+        complement of the un-backfilled set, for the transitional metric."""
+        row = self._conn.execute(
+            "SELECT COUNT(DISTINCT org_uuid) AS n FROM serve_machine_keys"
+        ).fetchone()
+        return int(row["n"]) if row is not None else 0
+
+    @_locked
+    def register_serving_machine_key(
+        self, org: str, machine_pub: str, *, now: int
+    ) -> None:
+        """Idempotently add a serving machine pubkey to an org's allow-set
+        (onboarding and host-terminal backfill). Re-registration is a
+        no-op; it never re-keys or removes anything."""
+        self._conn.execute(
+            "INSERT OR IGNORE INTO serve_machine_keys"
+            " (org_uuid, machine_pub, created_at) VALUES (?, ?, ?)",
+            (org, machine_pub, now),
+        )
+        self._conn.commit()
 
     @_locked
     def bind_persona_label(
