@@ -31,7 +31,8 @@ ExecStart=/opt/autonomy-registry/venv/bin/python -m tools.network.registry \
     --host 127.0.0.1 --port 8477 \
     --base-url https://relay.auto.network \
     --stream-ingress-port 8479 \
-    --stream-proxy-source 127.0.0.1
+    --stream-proxy-source 127.0.0.1 \
+    --metrics-port 9479
 Restart=on-failure
 RestartSec=2
 

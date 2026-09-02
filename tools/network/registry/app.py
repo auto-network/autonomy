@@ -635,6 +635,8 @@ def create_app(
     stream_ingress_host: str = "127.0.0.1",
     stream_idle_timeout: Optional[float] = None,
     stream_proxy_sources: frozenset = frozenset(),
+    metrics_port: Optional[int] = None,
+    metrics_host: str = "127.0.0.1",
 ) -> FastAPI:
     """Build the registry app.
 
@@ -657,7 +659,10 @@ def create_app(
     now_fn = now_fn or (lambda: int(time.time()))
     now_ms_fn = now_ms_fn or (lambda: int(time.time() * 1000))
     hub = TunnelHub()
-    host_routes = HostRoutes(store, now_fn)
+    from .metrics import RegistryMetrics
+    metrics = RegistryMetrics()
+    host_routes = HostRoutes(store, now_fn, metrics=metrics)
+    metrics.bind_state(hub=hub, host_routes=host_routes)
     if abuse_limiter is None:
         abuse_limiter = RelayAbuseLimiter()
     witness_key = witness_key or KeyPair.generate()
@@ -670,6 +675,7 @@ def create_app(
     app.state.now_ms_fn = now_ms_fn
     app.state.tunnel_hub = hub
     app.state.host_routes = host_routes
+    app.state.metrics = metrics
     app.state.witness_key = witness_key
     app.state.challenge_hub = challenge_hub
     app.state.abuse_limiter = abuse_limiter
@@ -2468,11 +2474,31 @@ def create_app(
                 stream_ingress_host, stream_ingress_port,
                 host_routes=host_routes, abuse_limiter=abuse_limiter,
                 idle_timeout=idle, proxy_sources=stream_proxy_sources,
+                metrics=metrics,
             )
 
         @app.on_event("shutdown")
         async def _stop_stream_ingress():
             server = getattr(app.state, "stream_ingress", None)
+            if server is not None:
+                server.close()
+                await server.wait_closed()
+
+    if metrics_port is not None:
+        # Private metrics exposition (auto-albp6.9) on its OWN loopback
+        # listener — never the public app. Bounded cardinality: org + reason
+        # enums only.
+        from .metrics import start_metrics_listener
+
+        @app.on_event("startup")
+        async def _start_metrics_listener():
+            app.state.metrics_server = await start_metrics_listener(
+                metrics_host, metrics_port, metrics,
+            )
+
+        @app.on_event("shutdown")
+        async def _stop_metrics_listener():
+            server = getattr(app.state, "metrics_server", None)
             if server is not None:
                 server.close()
                 await server.wait_closed()

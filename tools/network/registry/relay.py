@@ -828,9 +828,10 @@ class HostRoutes:
     generation, so stale routes can never survive a tunnel loss.
     """
 
-    def __init__(self, store: RegistryStore, now_fn):
+    def __init__(self, store: RegistryStore, now_fn, metrics=None):
         self._store = store
         self._now_fn = now_fn
+        self._metrics = metrics
         self._leases: Dict[str, _HostLease] = {}
         self._by_host: Dict[str, str] = {}
 
@@ -839,6 +840,9 @@ class HostRoutes:
         if lease is None:
             return None
         if lease.expires_at < int(self._now_fn()):
+            if self._metrics is not None:
+                self._metrics.lease_event(
+                    getattr(lease.tunnel, "org", "other"), "expire")
             self._drop(reservation)
             return None
         return lease
@@ -915,6 +919,8 @@ class HostRoutes:
             tunnel, generation, expires_at, host
         )
         self._by_host[host] = reservation
+        if self._metrics is not None:
+            self._metrics.lease_event(tunnel.org, "register")
         return {"lease": {"generation": generation, "expires_at": expires_at}}
 
     def renew(self, tunnel: "Tunnel", reservation: str, generation) -> dict:
@@ -928,6 +934,8 @@ class HostRoutes:
             raise _CtrlError("stale-generation")
         expires_at = int(self._now_fn()) + HOST_LEASE_TTL
         self._leases[reservation] = lease._replace(expires_at=expires_at)
+        if self._metrics is not None:
+            self._metrics.lease_event(tunnel.org, "renew")
         return {"lease": {"generation": lease.generation,
                           "expires_at": expires_at}}
 
@@ -947,6 +955,8 @@ class HostRoutes:
                 continue
             self._leases[reservation] = lease._replace(expires_at=expires_at)
             renewed += 1
+        if self._metrics is not None and renewed:
+            self._metrics.lease_event(tunnel.org, "renew_all")
         return {"renewed": renewed, "expires_at": expires_at}
 
     def release(self, tunnel: "Tunnel", reservation: str) -> dict:
@@ -956,6 +966,8 @@ class HostRoutes:
         lease = self._live(reservation)
         if lease is not None and lease.tunnel is not tunnel:
             raise _CtrlError("lease-held")
+        if self._metrics is not None:
+            self._metrics.lease_event(tunnel.org, "release")
         self._drop(reservation)
         return {}
 
@@ -1313,7 +1325,7 @@ def _dns01_verify(tunnel: "Tunnel", op: str, args: dict,
 
 
 def _ctrl_dns01(tunnel: "Tunnel", op: str, args: dict,
-                store: RegistryStore, now: int) -> dict:
+                store: RegistryStore, now: int, metrics=None) -> dict:
     """serve.dns01.present / .cleanup — the record name is DERIVED from
     the tunnel persona's serving-label binding, never body-supplied.
     Every negative collapses to the uniform {"error": "refused"}."""
@@ -1342,8 +1354,12 @@ def _ctrl_dns01(tunnel: "Tunnel", op: str, args: dict,
         _dns01_audit(op, tunnel.persona_pub or "", args
                      if isinstance(args, dict) else {},
                      f"refused:{type(exc).__name__}")
+        if metrics is not None:
+            metrics.dns01_op("refused")
         raise _CtrlError("refused") from exc
     _dns01_audit(op, tunnel.persona_pub or "", args, "ok")
+    if metrics is not None:
+        metrics.dns01_op("ok")
     return result
 
 
@@ -1399,7 +1415,10 @@ async def _handle_ctrl_frame(tunnel: "Tunnel", payload: bytes,
         elif op in _HOST_OP_ARGS:
             result = _ctrl_host_op(tunnel, op, args, host_routes)
         elif op in _DNS01_ARGS:
-            result = _ctrl_dns01(tunnel, op, args, store, now)
+            result = _ctrl_dns01(
+                tunnel, op, args, store, now,
+                metrics=getattr(host_routes, "_metrics", None),
+            )
         else:
             raise _CtrlError(f"unknown control op: {op!r}")
         reply = {"id": correlation, "ok": True, **result}
