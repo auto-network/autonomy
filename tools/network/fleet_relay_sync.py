@@ -61,6 +61,7 @@ logger = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = 1
 PULL_OP = "fleet.sync.pull"
+BLOB_OP = "fleet.sync.blob"
 CONTROL_OP = "fleet-runtime"
 FILE_MAGIC = b"FSB1"
 MAX_CHECKPOINT_FILES = 4096
@@ -336,6 +337,8 @@ class ConnectorFleetRuntime:
             if self.first_locked_refusal_at is None:
                 self.first_locked_refusal_at = time.time()
             raise FleetRelaySyncError("serving machine is locked for Fleet sync")
+        if message.get("op") == BLOB_OP:
+            return await self._handle_blob(token, message)
         if set(message) != _REQUEST_FIELDS or message.get("v") != PROTOCOL_VERSION \
                 or message.get("op") != PULL_OP:
             raise FleetRelaySyncError("fleet sync pull has unknown fields")
@@ -511,6 +514,54 @@ class ConnectorFleetRuntime:
                             error_code=error_code,
                             **stats,
                         )
+
+        return stream()
+
+    async def _handle_blob(self, token: str, message: dict):
+        """Serve requested attachment objects over the relay channel."""
+        from tools.network.fleet_sync.blob_transport import (
+            MAX_BLOB_REQUEST_DIGESTS,
+            iter_blob_frames,
+        )
+
+        scheduler = self.scheduler
+        assert scheduler is not None
+        if set(message) != {"v", "op", "digests", "hello"} \
+                or message.get("v") != PROTOCOL_VERSION:
+            raise FleetRelaySyncError("fleet blob request has unknown fields")
+        digests = message.get("digests")
+        if (
+            not isinstance(digests, list)
+            or not digests
+            or len(digests) > MAX_BLOB_REQUEST_DIGESTS
+            or not all(
+                isinstance(item, str) and len(item) == 64
+                and all(ch in "0123456789abcdef" for ch in item)
+                for item in digests
+            )
+        ):
+            raise FleetRelaySyncError("fleet blob request digests are malformed")
+        hello = canonical_json(message.get("hello"))
+        peer_pub, _private, server_hello, _transcript = (
+            scheduler.authenticator.accept_client(hello, session=token)
+        )
+        current_epoch = scheduler._current_epoch()
+        db_path = scheduler.config.personal_db_path
+
+        async def stream():
+            yield canonical_json({
+                "v": PROTOCOL_VERSION,
+                "kind": "fleet.server-hello",
+                "hello": _json(server_hello, "fleet server hello"),
+                "roster_epoch": current_epoch,
+            })
+            frames = iter_blob_frames(db_path, list(digests))
+            while True:
+                scheduler.authenticator.authorize(peer_pub)
+                frame = await asyncio.to_thread(next, frames, None)
+                if frame is None:
+                    return
+                yield frame
 
         return stream()
 
@@ -773,9 +824,93 @@ async def pull_checkpoint_once(
             acknowledgements=1,
             success=True,
         )
+        # Best-effort: a drain failure never fails the pull that preceded
+        # it, but it is logged rather than swallowed.
+        try:
+            await _drain_attachments_via_relay(
+                route, auth, ws_base, token, envelope
+            )
+        except Exception:
+            logger.warning(
+                "fleet relay attachment drain failed", exc_info=True
+            )
     finally:
         shutil.rmtree(stage_root, ignore_errors=True)
     return metrics
+
+
+async def _drain_attachments_via_relay(
+    route, auth, ws_base: str, token: str, envelope: dict
+) -> None:
+    """Fetch quarantined attachment bytes from the serving peer and drain."""
+    from tools.network.fleet_sync.blob_transport import (
+        BlobReceiver,
+        MAX_BLOB_REQUEST_DIGESTS,
+    )
+
+    store_api = SQLiteFleetSyncStore(_org_db_path("personal"))
+    entries = await asyncio.to_thread(store_api.attachment_backlog)
+    if not entries:
+        return
+    digests = sorted({entry.digest for entry in entries})[
+        :MAX_BLOB_REQUEST_DIGESTS
+    ]
+    blob_store = await asyncio.to_thread(store_api.blob_store_root)
+    receiver = BlobReceiver(blob_store)
+    channel = await ViewerChannel.connect(
+        ws_base,
+        token,
+        root_pub=envelope["root_pub"],
+        org=envelope["org"],
+    )
+    try:
+        private, hello = auth.build_client_hello(token)
+        client_eph = _json(hello, "fleet client hello")["eph_pub"]
+        request = canonical_json({
+            "v": PROTOCOL_VERSION,
+            "op": BLOB_OP,
+            "digests": digests,
+            "hello": _json(hello, "fleet client hello"),
+        })
+        await channel.send_message(request)
+        saw_hello = False
+        async for raw, _final in channel.recv_message_stream():
+            if not saw_hello:
+                first = _json(raw, "fleet server hello envelope")
+                if first.get("kind") == "fleet.server-error":
+                    raise FleetRelaySyncError(
+                        f"fleet server refused: {first.get('error', 'unknown reason')}"
+                    )
+                if set(first) != {"v", "kind", "hello", "roster_epoch"} \
+                        or first.get("kind") != "fleet.server-hello":
+                    raise FleetRelaySyncError(
+                        "fleet server hello envelope is malformed"
+                    )
+                auth.verify_server(
+                    canonical_json(first["hello"]),
+                    session=token,
+                    client_eph=client_eph,
+                    expected_machine_pub=route.origin_machine_pub,
+                )
+                saw_hello = True
+                continue
+            await asyncio.to_thread(receiver.feed, raw)
+            if receiver.done:
+                break
+        if not receiver.done:
+            raise FleetRelaySyncError(
+                "fleet blob stream ended without terminal frame"
+            )
+        cleared = await asyncio.to_thread(
+            store_api.drain_attachments, entries
+        )
+        logger.info(
+            "fleet relay attachment drain: %d adopted, %d cleared, %d missing",
+            len(receiver.adopted), cleared, len(receiver.missing),
+        )
+    finally:
+        receiver.close()
+        await channel.close()
 
 
 #: Distinct, greppable classification for the last pull attempt -- the
