@@ -217,6 +217,7 @@ async def build_desired_state() -> GatewayDesiredState:
 
 async def _build_desired_state() -> GatewayDesiredState:
     active_routes: list[service_gateway.ServiceGatewayRoute] = []
+    paused_hosts: list[str] = []
     unavailable_hosts: list[str] = []
     certificates: dict[str, tuple[str, str]] = {}
     desired_routes: list[DesiredRoute] = []
@@ -262,7 +263,7 @@ async def _build_desired_state() -> GatewayDesiredState:
                     )
                 except Exception:
                     continue
-                unavailable_hosts.append(hostname)
+                paused_hosts.append(hostname)
                 certificates[hostname] = pair
                 desired_routes.append(
                     DesiredRoute(
@@ -322,6 +323,7 @@ async def _build_desired_state() -> GatewayDesiredState:
         return GatewayDesiredState(
             caddyfile=service_gateway.render_caddyfile(
                 active_routes,
+                paused_hosts=paused_hosts,
                 unavailable_hosts=unavailable_hosts,
                 certificates=certificates,
             ),

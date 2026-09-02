@@ -523,7 +523,10 @@ async def test_planner_builds_complete_active_and_paused_config(monkeypatch):
     assert [route.route_id for route in plan.routes] == [active_id, paused_id]
     assert f"reverse_proxy auto-0831-171125:8000" in plan.caddyfile
     assert f"https://{paused_host}:9443" in plan.caddyfile
-    assert 'respond "Service unavailable" 503' in plan.caddyfile
+    assert (
+        'respond "This service is temporarily paused by its operator." 503'
+        in plan.caddyfile
+    )
     assert released_id not in plan.caddyfile
 
 

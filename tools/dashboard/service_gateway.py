@@ -116,6 +116,7 @@ def _validate_unavailable_hostname(hostname: str) -> str:
 def render_caddyfile(
     routes: Sequence[ServiceGatewayRoute],
     *,
+    paused_hosts: Sequence[str] = (),
     unavailable_hosts: Sequence[str] = (),
     certificates: Mapping[str, tuple[str, str]] | None = None,
 ) -> str:
@@ -123,10 +124,14 @@ def render_caddyfile(
 
     The only upstream tokens come from validated ``ServiceGatewayRoute``
     instances. Unknown SNI/Host combinations hit ``abort`` and never reach an
-    upstream. ``unavailable_hosts`` is an exact-host tombstone used during the
-    Phase 1C removal proof; Phase 1D will derive the full desired set.
+    upstream. ``paused_hosts`` returns an explicit operator-paused response;
+    ``unavailable_hosts`` is the distinct fail-closed response for a missing
+    target. Neither state has an upstream handler.
     """
     routes = tuple(routes)
+    paused_hosts = tuple(
+        _validate_unavailable_hostname(host) for host in paused_hosts
+    )
     unavailable_hosts = tuple(
         _validate_unavailable_hostname(host) for host in unavailable_hosts
     )
@@ -135,8 +140,15 @@ def render_caddyfile(
         raise ValueError("duplicate active Service hostname")
     if len(unavailable_hosts) != len(set(unavailable_hosts)):
         raise ValueError("duplicate unavailable Service hostname")
-    if set(active_names) & set(unavailable_hosts):
-        raise ValueError("Service hostname cannot be active and unavailable")
+    if len(paused_hosts) != len(set(paused_hosts)):
+        raise ValueError("duplicate paused Service hostname")
+    state_sets = (set(active_names), set(paused_hosts), set(unavailable_hosts))
+    if any(
+        state_sets[left] & state_sets[right]
+        for left in range(3)
+        for right in range(left + 1, 3)
+    ):
+        raise ValueError("Service hostname cannot have multiple route states")
 
     lines = [
         "{",
@@ -152,9 +164,9 @@ def render_caddyfile(
     ]
     certificates = certificates or {
         hostname: (CERTIFICATE_PATH, PRIVATE_KEY_PATH)
-        for hostname in (*active_names, *unavailable_hosts)
+        for hostname in (*active_names, *paused_hosts, *unavailable_hosts)
     }
-    expected = set(active_names) | set(unavailable_hosts)
+    expected = set(active_names) | set(paused_hosts) | set(unavailable_hosts)
     if set(certificates) != expected:
         raise ValueError("certificate map must exactly cover Service hostnames")
     for hostname, pair in certificates.items():
@@ -174,6 +186,17 @@ def render_caddyfile(
                 f"\treverse_proxy {route.session_id}:{route.port} {{",
                 "\t\tflush_interval -1",
                 "\t}",
+                "}",
+                "",
+            ]
+        )
+    for hostname in paused_hosts:
+        cert_path, key_path = certificates[hostname]
+        lines.extend(
+            [
+                f"https://{hostname}:{LISTEN_PORT} {{",
+                f"\ttls {cert_path} {key_path}",
+                '\trespond "This service is temporarily paused by its operator." 503',
                 "}",
                 "",
             ]
