@@ -122,3 +122,43 @@ unprovable for any algorithm.
   model before an anycast deployment is claimed safe.
 - Jitter is nondeterminism, not probability. It can spread reconnect load but
   is not an ownership or admission correctness mechanism.
+
+## Served-ack journal retirement (`AckFloor.tla`)
+
+Models the fleet-sync journal floor shipped in `catalog.py`
+(`record_served_ack`, `acknowledged_journal_floor`, `prune_acknowledged`)
+together with the continuity decision in `fleet_relay_sync`. The safety
+chain: a resume trail resolves only while its transaction row exists, so a
+recorded acknowledgement never exceeds the peer's truly consumed prefix
+(`AckSoundness`); the prune floor is the minimum acknowledgement over the
+FULL active roster; therefore every peer's unconsumed suffix stays servable
+by retained deltas, or its absence is visible as a journal gap and the
+unresolvable trail is answered with a checkpoint (`Recoverable`). Fairness
+gives the liveness half: an authored frame is eventually retired
+(`EventuallyRetired`) — the journal is bounded when the roster keeps
+pulling.
+
+Three calibrations prove each mechanism is load-bearing, not incidental:
+
+- `calibration/TimestampPrune.cfg` — acknowledgements and the floor keyed
+  by authored timestamp instead of transaction ref. Remote imports
+  interleave low stamps behind high refs, so a timestamp floor retires an
+  unconsumed frame; on the direct path (no checkpoint fallback) the peer's
+  suffix becomes unservable. This is why `local_watermark` stores a ref.
+- `calibration/SoloPrune.cfg` — pruning without every active peer's
+  acknowledgement. A concurrently enrolled machine with nothing consumed
+  loses the replay it was owed. This is why an empty or partially
+  acknowledged roster yields no floor.
+- `calibration/NoAckResetOnInstall.cfg` — recorded acknowledgements kept
+  across a checkpoint install. The staging database renumbers the id
+  space, stale acks collide with fresh refs, and pruning retires new
+  frames and their rows together — no gap signal survives, so not even
+  the checkpoint rescue can see the loss. This is why `_copy_peer_state`
+  nulls `local_watermark`, and it is the one variant that fails silently.
+
+Deliberate abstractions: one serving machine's perspective (each machine
+runs this protocol symmetrically); checkpoint content is atomic and always
+available; the install's id renumbering is modeled as a clean restart of
+the ref space; restore-from-backup is subsumed by the install action (the
+same rewind shape with the same reset). Peer-side receipt bookkeeping and
+the transports are not modeled.

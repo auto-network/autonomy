@@ -20,11 +20,15 @@ HERE = Path(__file__).resolve().parent
 GREEN = [
     ("PoolGreen.cfg", "ScenRelay"),
     ("AnycastPoolGreen.cfg", "ScenRelay"),
+    ("AckFloorGreen.cfg", "AckFloor"),
 ]
 
 CALIBRATION = [
     ("CurrentLivelock.cfg", "ScenRelay", "EventuallyAllTunnelsRegistered"),
     ("calibration/RandomAdmission.cfg", "ScenRelay", "AdmissionUsesLeastLoad"),
+    ("calibration/TimestampPrune.cfg", "AckFloor", "DeltaAlwaysServable"),
+    ("calibration/SoloPrune.cfg", "AckFloor", "DeltaAlwaysServable"),
+    ("calibration/NoAckResetOnInstall.cfg", "AckFloor", "AckSoundness"),
 ]
 
 VIOLATION_MARKERS = (
