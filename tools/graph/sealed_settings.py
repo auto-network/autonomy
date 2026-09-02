@@ -352,9 +352,14 @@ class SealedSettings:
 # backend).
 # --------------------------------------------------------------------------- #
 class ClientBackend:
-    """A :class:`SealedBackend` over ``tools.graph.client`` (a container session)."""
+    """A :class:`SealedBackend` over ``tools.graph.client`` (a container session).
 
-    _PERSONAL = "personal"
+    Every settings call passes ``org=None``: the header is omitted and the
+    dashboard derives the caller's org from the session bearer. Passing
+    ``"personal"`` explicitly is REFUSED at the API boundary ("organization
+    mismatch" — the bearer names a real org); routing to the operator's
+    personal store comes from each set's declared home, not from the header.
+    """
 
     def __init__(self, client, *, ttl_seconds: int = 60):
         self._client = client
@@ -365,7 +370,7 @@ class ClientBackend:
         # member arrives with its plaintext payload; a vault that cannot open
         # it arrives with ``vault_error`` instead. Absence is a provisioning
         # failure (bring-up mints the pepper), not a lock state.
-        members = self._client.read_set(VAULT_AUDITED_SET_ID, org=self._PERSONAL)
+        members = self._client.read_set(VAULT_AUDITED_SET_ID, org=None)
         member = next((m for m in members.members if m.key == PEPPER_KEY), None)
         if member is None:
             raise SealedSettingsError(
@@ -388,13 +393,13 @@ class ClientBackend:
         # Existence probe first: opening a nonexistent secured key cannot be
         # told apart from a denial, so decide absent-vs-locked WITHOUT the
         # ceremony. The row is present even while sealed.
-        members = self._client.read_set(VAULT_SECURED_SET_ID, org=self._PERSONAL)
+        members = self._client.read_set(VAULT_SECURED_SET_ID, org=None)
         if address not in {m.key for m in members.members}:
             return None
         try:
             receipt = self._client.request_vault_open(
                 VAULT_SECURED_SET_ID, address,
-                org=self._PERSONAL, ttl_seconds=self._ttl,
+                org=None, ttl_seconds=self._ttl,
             )
         except PermissionError:
             raise VaultLocked(VaultLocked.DENIED)
@@ -414,7 +419,7 @@ class ClientBackend:
         )
 
     def read_row(self, row_key: str) -> str | None:
-        members = self._client.read_set(SEALED_ROW_SET_ID, org=self._PERSONAL)
+        members = self._client.read_set(SEALED_ROW_SET_ID, org=None)
         for member in members.members:
             if member.key == row_key:
                 return (member.payload or {}).get("ciphertext")
@@ -423,7 +428,7 @@ class ClientBackend:
     def write_row(self, row_key: str, ciphertext: str) -> None:
         self._client.add_setting(
             SEALED_ROW_SET_ID, SEALED_ROW_REVISION, row_key,
-            {"ciphertext": ciphertext}, state="raw", org=self._PERSONAL,
+            {"ciphertext": ciphertext}, state="raw", org=None,
         )
 
     def delete_row(self, row_key: str) -> None:
@@ -434,7 +439,7 @@ class ClientBackend:
         raise NotImplementedError("row deletion over the HTTP client is a follow-up")
 
     def list_rows(self, prefix: str) -> Iterable[tuple[str, str]]:
-        members = self._client.read_set(SEALED_ROW_SET_ID, org=self._PERSONAL)
+        members = self._client.read_set(SEALED_ROW_SET_ID, org=None)
         for member in members.members:
             if member.key.startswith(f"{prefix}:"):
                 ciphertext = (member.payload or {}).get("ciphertext")
@@ -463,15 +468,20 @@ def ensure_pepper_minted() -> bool:
     from tools.graph import settings_ops
 
     members = settings_ops.read_set(
-        VAULT_AUDITED_SET_ID, org=ClientBackend._PERSONAL, peers=[]
+        VAULT_AUDITED_SET_ID, org=None, peers=[]
     )
     if any(m.key == PEPPER_KEY for m in members.members):
         return False
-    settings_ops.upsert_by_key(
+    # add_setting, not upsert_by_key: vault rows are encrypted object
+    # revisions and the substrate refuses in-place rewrites of them. The
+    # ensure-if-absent check above is what makes this a first-write; any
+    # later change would be override_setting, which this function must never
+    # grow — a rotated pepper orphans every store address.
+    settings_ops.add_setting(
         VAULT_AUDITED_SET_ID,
         VAULT_CREDENTIAL_REVISION,
         PEPPER_KEY,
         {"value": secrets.token_bytes(_PEPPER_LEN).hex()},
-        org=ClientBackend._PERSONAL,
+        org=None,
     )
     return True
