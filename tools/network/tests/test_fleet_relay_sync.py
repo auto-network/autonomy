@@ -1,14 +1,400 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
+from types import SimpleNamespace
 
 import pytest
 
+from tools.graph.db import GraphDB
+from tools.graph.models import Source
 from tools.network import fleet_relay_sync, fleet_roster
 from tools.network.fleet_sync_channel import FleetAuthenticator
-from tools.network.fleet_sync_scheduler import decode_done, encode_done
+from tools.network.fleet_sync_scheduler import (
+    decode_done,
+    decode_pull_request,
+    encode_done,
+)
 from tools.network.idkit import KeyPair, Subject, issue_cert
+
+
+def _two_machine_fleet():
+    """Root + two enrolled machines with per-machine runtime payloads."""
+    root = KeyPair.from_private_hex("10" * 32)
+    server_machine = KeyPair.from_private_hex("20" * 32)
+    client_machine = KeyPair.from_private_hex("30" * 32)
+    server_id = "40" * 32
+    client_id = "50" * 32
+    entries = (
+        fleet_roster.enroll(
+            root, machine_id=server_id, machine_pub=server_machine.public_hex
+        ),
+        fleet_roster.enroll(
+            root, machine_id=client_id, machine_pub=client_machine.public_hex
+        ),
+    )
+    now = int(time.time())
+
+    def runtime(machine, machine_id, process_seed):
+        process = KeyPair.from_private_hex(process_seed)
+        cert = issue_cert(
+            machine,
+            process.public_hex,
+            scope=["fleet:sync"],
+            org=f"personal:{root.public_hex}",
+            subject=Subject(kind="machine", id=machine_id),
+            not_before=now - 30,
+            not_after=now + 300,
+        )
+        return process, cert, {
+            "machine_id": machine_id,
+            "machine_pub": machine.public_hex,
+            "process_private_seed": process.private_hex,
+            "delegation_cert": cert.to_dict(),
+        }
+
+    return SimpleNamespace(
+        root=root,
+        server_machine=server_machine,
+        client_machine=client_machine,
+        server_id=server_id,
+        client_id=client_id,
+        entries=entries,
+        runtime=runtime,
+    )
+
+
+def _prepare_org_db(path, origin_pub: str) -> None:
+    db = GraphDB(path)
+    try:
+        db.activate_fleet_sync_writers(origin_pub)
+    finally:
+        db.close()
+
+
+def _insert_note(path, source_id: str, title: str) -> None:
+    db = GraphDB(path)
+    try:
+        db.insert_source(Source(id=source_id, type="note", title=title))
+    finally:
+        db.close()
+
+
+def _has_note(path, source_id: str) -> bool:
+    if not path.exists():
+        return False
+    try:
+        with sqlite3.connect(
+            f"file:{path}?mode=ro&immutable=1", uri=True
+        ) as conn:
+            return conn.execute(
+                "SELECT 1 FROM sources WHERE id=?", (source_id,)
+            ).fetchone() is not None
+    except sqlite3.Error:
+        return False
+
+
+def _configure_relay_server(fleet, personal_path, monkeypatch):
+    monkeypatch.setattr(
+        "tools.network.fleet_tunnel_server._personal_root_pub",
+        lambda: fleet.root.public_hex,
+    )
+    monkeypatch.setattr(
+        fleet_relay_sync.fleet_roster,
+        "load_entries",
+        lambda *, org: list(fleet.entries),
+    )
+    monkeypatch.setattr(
+        fleet_relay_sync, "_org_db_path", lambda _org: personal_path
+    )
+    _server_process, _cert, payload = fleet.runtime(
+        fleet.server_machine, fleet.server_id, "60" * 32
+    )
+    server = fleet_relay_sync.ConnectorFleetRuntime()
+    assert server.configure(payload) == {
+        "ok": True, "machine_id": fleet.server_id,
+    }
+    return server
+
+
+def _client_hello(fleet, token: str):
+    process, cert, _payload = fleet.runtime(
+        fleet.client_machine, fleet.client_id, "70" * 32
+    )
+    auth = FleetAuthenticator(
+        process,
+        root_pub=fleet.root.public_hex,
+        roster_entries=lambda: fleet.entries,
+        roster_machine_pub=fleet.client_machine.public_hex,
+        delegation_cert=cert,
+        require_delegation=True,
+    )
+    private, hello = auth.build_client_hello(token)
+    return auth, private, hello
+
+
+@pytest.mark.asyncio
+async def test_scoped_pull_serves_checkpoint_from_the_scope_database(
+    tmp_path, monkeypatch
+):
+    fleet = _two_machine_fleet()
+    personal = tmp_path / "personal.db"
+    personal.touch()
+    alpha = tmp_path / "alpha.db"
+    _prepare_org_db(alpha, fleet.server_machine.public_hex)
+    _insert_note(alpha, "a-1", "org content")
+    server = _configure_relay_server(fleet, personal, monkeypatch)
+    monkeypatch.setattr(
+        server.scheduler, "_scope_paths",
+        lambda: {"personal": personal, "alpha": alpha},
+    )
+
+    class ScopeAlpha:
+        def __init__(self, path, origin):
+            assert path == alpha, "checkpoint must build from the scope DB"
+            assert origin == fleet.server_machine.public_hex
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def checkpoint(self, directory, **_kwargs):
+            directory.mkdir()
+            (directory / "alpha-manifest.json").write_bytes(b"manifest")
+
+    monkeypatch.setattr(fleet_relay_sync, "FleetSyncAlpha", ScopeAlpha)
+    delegated = []
+
+    async def fake_handle(_token, message, _peer_pub, **_telemetry):
+        delegated.append(message)
+
+        async def response():
+            yield encode_done(
+                epoch="ef" * 32,
+                count=0,
+                digest=__import__("hashlib").sha256().hexdigest(),
+            )
+        return response()
+
+    server.scheduler._handle = fake_handle
+
+    token = "ab" * 16
+    auth, private, hello = _client_hello(fleet, token)
+    from tools.network.fleet_sync_scheduler import SQLiteFleetSyncStore
+
+    stream = await server.handle(token, {
+        "v": 1,
+        "op": "fleet.sync.pull",
+        "roster_epoch": "cd" * 32,
+        "checkpoint": True,
+        "compat": SQLiteFleetSyncStore(alpha).compatibility_digest(),
+        "resume": [],
+        "hello": json.loads(hello),
+        "scope": "alpha",
+    })
+    frames = [frame async for frame in stream]
+    auth.verify_server(
+        fleet_relay_sync.canonical_json(json.loads(frames[0])["hello"]),
+        session=token,
+        client_eph=private.public_key().public_bytes_raw().hex(),
+        expected_machine_pub=fleet.server_machine.public_hex,
+    )
+    assert json.loads(frames[1])["kind"] == "checkpoint.begin"
+    assert json.loads(frames[-2])["kind"] == "checkpoint.end"
+    # The delegated delta phase carries the scope through to the scheduler.
+    assert len(delegated) == 1
+    assert decode_pull_request(delegated[0])[3] == "alpha"
+
+
+@pytest.mark.asyncio
+async def test_scoped_schema_mismatch_refuses_only_that_scope(
+    tmp_path, monkeypatch
+):
+    fleet = _two_machine_fleet()
+    personal = tmp_path / "personal.db"
+    personal.touch()
+    alpha = tmp_path / "alpha.db"
+    _prepare_org_db(alpha, fleet.server_machine.public_hex)
+    server = _configure_relay_server(fleet, personal, monkeypatch)
+    monkeypatch.setattr(
+        server.scheduler, "_scope_paths",
+        lambda: {"personal": personal, "alpha": alpha},
+    )
+
+    async def fake_handle(_token, _message, _peer_pub, **_telemetry):
+        async def response():
+            yield encode_done(
+                epoch="ef" * 32,
+                count=0,
+                digest=__import__("hashlib").sha256().hexdigest(),
+            )
+        return response()
+
+    server.scheduler._handle = fake_handle
+    token = "ab" * 16
+
+    def request(scope, compat):
+        _auth, _private, hello = _client_hello(fleet, token)
+        body = {
+            "v": 1,
+            "op": "fleet.sync.pull",
+            "roster_epoch": "cd" * 32,
+            "checkpoint": False,
+            "compat": compat,
+            "resume": [],
+            "hello": json.loads(hello),
+        }
+        if scope is not None:
+            body["scope"] = scope
+        return body
+
+    # A mismatched org digest refuses that scope's pull...
+    with pytest.raises(fleet_relay_sync.FleetRelaySyncError, match="schema mismatch"):
+        await server.handle(token, request("alpha", "ee" * 32))
+    # ...an unknown scope refuses with its own error...
+    with pytest.raises(fleet_relay_sync.FleetRelaySyncError, match="unknown fleet sync scope"):
+        await server.handle(token, request("nope", "ee" * 32))
+    # ...and the personal scope still serves afterwards.
+    stream = await server.handle(token, request(
+        None, server.scheduler.store.compatibility_digest()
+    ))
+    frames = [frame async for frame in stream]
+    assert json.loads(frames[0])["kind"] == "fleet.server-hello"
+    assert decode_done(frames[-1])[1] == 0
+
+
+@pytest.mark.asyncio
+async def test_org_write_crosses_the_relay_path_with_isolation(
+    tmp_path, monkeypatch
+):
+    """The acceptance shape of test_org_scope_sync, at the relay layer: an
+    org row crosses via a real scoped checkpoint + install while the
+    personal database and a second org stay untouched."""
+    fleet = _two_machine_fleet()
+    server_dir = tmp_path / "server"
+    client_dir = tmp_path / "client"
+    server_dir.mkdir()
+    client_dir.mkdir()
+    server_personal = server_dir / "personal.db"
+    server_personal.touch()
+    server_alpha = server_dir / "alpha.db"
+    server_beta = server_dir / "beta.db"
+    _prepare_org_db(server_alpha, fleet.server_machine.public_hex)
+    _prepare_org_db(server_beta, fleet.server_machine.public_hex)
+    _insert_note(server_alpha, "a-note", "alpha crossing")
+    _insert_note(server_beta, "b-note", "beta crossing")
+    client_personal = client_dir / "personal.db"
+    _prepare_org_db(client_personal, fleet.client_machine.public_hex)
+    client_alpha = client_dir / "alpha.db"
+    client_beta = client_dir / "beta.db"
+
+    server = _configure_relay_server(fleet, server_personal, monkeypatch)
+    server_paths = {
+        "personal": server_personal,
+        "alpha": server_alpha,
+        "beta": server_beta,
+    }
+    monkeypatch.setattr(
+        server.scheduler, "_scope_paths", lambda: dict(server_paths)
+    )
+
+    # Client side: repoint the module's path resolution at the client's
+    # databases. The server's paths were captured at configure time.
+    monkeypatch.setattr(
+        fleet_relay_sync, "_org_db_path", lambda _org: client_personal
+    )
+    monkeypatch.setattr(
+        fleet_relay_sync,
+        "discover_org_sync_scopes",
+        lambda: {"alpha": client_alpha, "beta": client_beta},
+    )
+    token = "ab" * 16
+    monkeypatch.setattr(
+        fleet_relay_sync, "_route_location",
+        lambda _rendezvous: ("https://relay", "wss://relay", token),
+    )
+
+    async def fake_envelope(_base, _token):
+        return {
+            "target_type": "fleet:join",
+            "root_pub": fleet.root.public_hex,
+            "org": "personal",
+        }
+
+    monkeypatch.setattr(fleet_relay_sync, "_fetch_envelope", fake_envelope)
+
+    class LoopbackChannel:
+        """Drives server.handle directly — the transport under test is the
+        fleet application protocol, not the WebSocket relay beneath it."""
+
+        def __init__(self):
+            self._stream = None
+
+        @classmethod
+        async def connect(cls, *_args, **_kwargs):
+            return cls()
+
+        async def send_message(self, raw):
+            message = json.loads(raw)
+            try:
+                self._stream = await server.handle(token, message)
+            except fleet_relay_sync.FleetRelaySyncError as exc:
+                async def refused():
+                    yield fleet_relay_sync.canonical_json({
+                        "kind": "fleet.server-error", "error": str(exc),
+                    })
+                self._stream = refused()
+
+        async def recv_message_stream(self):
+            async for frame in self._stream:
+                yield frame, False
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(fleet_relay_sync, "ViewerChannel", LoopbackChannel)
+    from tools.network import fleet_route, fleet_runtime
+
+    _process, _cert, payload = fleet.runtime(
+        fleet.client_machine, fleet.client_id, "70" * 32
+    )
+    credential = fleet_runtime.FleetRuntimeCredential.from_browser_payload(
+        payload,
+        personal_root_pub=fleet.root.public_hex,
+        roster_entries=fleet.entries,
+    )
+    route = fleet_route.FleetRoute(
+        rendezvous="https://relay/l/" + token,
+        origin_machine_pub=fleet.server_machine.public_hex,
+    )
+
+    await fleet_relay_sync.pull_checkpoint_once(
+        credential, route, include_checkpoint=True, scope="alpha",
+    )
+    assert _has_note(client_alpha, "a-note"), "org write must cross the relay"
+    assert not _has_note(client_personal, "a-note")
+    assert not _has_note(client_beta, "a-note")
+    assert not _has_note(client_beta, "b-note")
+
+    await fleet_relay_sync.pull_checkpoint_once(
+        credential, route, include_checkpoint=True, scope="beta",
+    )
+    assert _has_note(client_beta, "b-note")
+    assert not _has_note(client_alpha, "b-note")
+    assert not _has_note(client_personal, "b-note")
+
+    # Exactly one checkpoint receipt per scope: the install path records
+    # it; the client must not add a second (the 64963898 class).
+    with sqlite3.connect(
+        f"file:{client_alpha}?mode=ro&immutable=1", uri=True
+    ) as conn:
+        assert conn.execute(
+            "SELECT COALESCE(SUM(checkpoints_received),0) "
+            "FROM fleet_sync_peer_state"
+        ).fetchone()[0] == 1
 
 
 @pytest.mark.asyncio
@@ -90,6 +476,9 @@ async def test_connector_stream_requires_fleet_machine_hello_and_chunks_checkpoi
     assert server.configure(server_payload) == {
         "ok": True, "machine_id": server_id,
     }
+    # The serve decision now refuses to checkpoint an empty database; this
+    # test's store is a bare touched file standing in for real content.
+    monkeypatch.setattr(server.scheduler.store, "has_state", lambda: True)
     assert server.scheduler.authenticator.machine_key.public_hex \
         == server_process.public_hex
 
