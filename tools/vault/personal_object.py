@@ -139,9 +139,15 @@ def seal_revision(
     setting_id: str,
     payload,
     policy_class,
-    body_suite_id: str = suites.BODY_SUITE_DEFAULT,
+    body_suite_id: str = suites.BODY_SUITE_LARGE,
 ) -> str:
-    """Seal using public material only; no factor or warm key is consulted."""
+    """Seal using public material only; no factor or warm key is consulted.
+
+    Every object this function seals is `secured` (the envelope tier is fixed
+    below), so the body defaults to `BODY_SUITE_LARGE` (ChaCha20-Poly1305) — the
+    browser-openable suite a secured read needs; an `audited` body, sealed on its
+    own path, keeps the nonce-misuse-resistant `BODY_SUITE_DEFAULT`.
+    """
     object_id = object_id_for(set_id, key)
     revision_id = revision_id_for(setting_id)
     nonce = os.urandom(object_header.NONCE_LEN)
