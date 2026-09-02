@@ -7288,6 +7288,10 @@ async def api_session_turn_correction_suggest(request):
     session_uuid = session.get("session_uuid")
     jsonl_path = session.get("jsonl_path")
     if not session_uuid or not jsonl_path:
+        logger.warning(
+            "turn_correction suggest 409: session not linked to JSONL/UUID session=%s",
+            tmux_name,
+        )
         return JSONResponse(
             {"error": "session is not linked to a JSONL/session UUID"},
             status_code=409,
@@ -7296,6 +7300,11 @@ async def api_session_turn_correction_suggest(request):
     try:
         users = turn_corrections_mod.read_recent_canonical_user_turns(jsonl_path)
     except session_harness.TranscriptParseContextError as exc:
+        logger.warning(
+            "turn_correction suggest 409: transcript parse context unavailable "
+            "session=%s jsonl_path=%s error=%s",
+            tmux_name, jsonl_path, exc,
+        )
         return JSONResponse(
             {"error": "transcript parse context unavailable", "detail": str(exc)},
             status_code=409,
@@ -7314,6 +7323,11 @@ async def api_session_turn_correction_suggest(request):
         unavailable=_target_unavailable,
     )
     if target is None:
+        logger.warning(
+            "turn_correction suggest 409: no acceptable target session=%s "
+            "candidates=%d corrected_text=%r",
+            tmux_name, len(users), payload["corrected_text"][:120],
+        )
         return JSONResponse(
             {"error": "no acceptable recent user turn to correct"},
             status_code=409,
