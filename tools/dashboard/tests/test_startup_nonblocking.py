@@ -16,7 +16,11 @@ import time
 
 from starlette.testclient import TestClient
 
-from tools.dashboard import link_serving_supervisor, web_gateway_supervisor
+from tools.dashboard import (
+    link_serving_supervisor,
+    service_certificate_manager,
+    web_gateway_supervisor,
+)
 
 
 def test_lifespan_startup_does_not_block_on_bootstrap(
@@ -46,6 +50,8 @@ def test_lifespan_startup_does_not_block_on_bootstrap(
 
     monkeypatch.setattr(web_gateway_supervisor, "start_worker", start_gateway_worker)
     monkeypatch.setattr(web_gateway_supervisor, "stop_worker", stop_gateway_worker)
+    monkeypatch.setattr(service_certificate_manager, "start_worker", start_gateway_worker)
+    monkeypatch.setattr(service_certificate_manager, "stop_worker", stop_gateway_worker)
     monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
 
     try:

@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Protocol
 
-from tools.dashboard import service_gateway, service_publication
+from tools.dashboard import service_certificate, service_gateway, service_publication
 from tools.graph.schemas.namespace_reservation import NAMESPACE_RESERVATION_SET_ID
 from tools.graph.schemas.service_target import SERVICE_TARGET_SET_ID
 
@@ -75,13 +75,6 @@ def _discover_orgs() -> list[str]:
     from tools.graph import org_ops
 
     return sorted(ref.slug for ref in org_ops.list_orgs() if ref.type == "shared")
-
-
-def _certificate_ready() -> bool:
-    return all(
-        os.path.isfile(path) and os.path.getsize(path) > 0
-        for path in (CERT_SOURCE_PATH, KEY_SOURCE_PATH)
-    )
 
 
 async def _connector_ready(org: str) -> bool:
@@ -223,16 +216,13 @@ async def build_desired_state() -> GatewayDesiredState:
 
 
 async def _build_desired_state() -> GatewayDesiredState:
-    if not _certificate_ready():
-        return GatewayDesiredState(
-            caddyfile="", routes=(), ready=False, reason="certificate-unavailable"
-        )
-
     active_routes: list[service_gateway.ServiceGatewayRoute] = []
     unavailable_hosts: list[str] = []
+    certificates: dict[str, tuple[str, str]] = {}
     desired_routes: list[DesiredRoute] = []
     found_publication = False
     found_unready_connector = False
+    found_missing_certificate = False
 
     for org in _discover_orgs():
         reservations = service_publication.list_reservations(org)
@@ -260,6 +250,11 @@ async def _build_desired_state() -> GatewayDesiredState:
 
         for reservation in candidates:
             reservation_id = reservation["reservation_id"]
+            persona_label = reservation.get("persona_label")
+            pair = service_certificate.active_gateway_pair(org, persona_label)
+            if pair is None:
+                found_missing_certificate = True
+                continue
             if reservation["state"] == "paused":
                 try:
                     hostname = service_gateway.reservation_hostname(
@@ -268,6 +263,7 @@ async def _build_desired_state() -> GatewayDesiredState:
                 except Exception:
                     continue
                 unavailable_hosts.append(hostname)
+                certificates[hostname] = pair
                 desired_routes.append(
                     DesiredRoute(
                         reservation_id,
@@ -301,6 +297,7 @@ async def _build_desired_state() -> GatewayDesiredState:
                 continue
 
             active_routes.append(route)
+            certificates[route.hostname] = pair
             desired_routes.append(
                 DesiredRoute(
                     reservation_id,
@@ -312,6 +309,7 @@ async def _build_desired_state() -> GatewayDesiredState:
                             "container_id": route.container_id,
                             "network": route.network,
                             "port": route.port,
+                            "certificate": pair,
                         }
                     ),
                 )
@@ -323,14 +321,20 @@ async def _build_desired_state() -> GatewayDesiredState:
     if desired_routes:
         return GatewayDesiredState(
             caddyfile=service_gateway.render_caddyfile(
-                active_routes, unavailable_hosts=unavailable_hosts
+                active_routes,
+                unavailable_hosts=unavailable_hosts,
+                certificates=certificates,
             ),
             routes=tuple(desired_routes),
         )
     reason = (
         "connector-unavailable"
         if found_publication and found_unready_connector
-        else "no-publications"
+        else (
+            "certificate-unavailable"
+            if found_publication and found_missing_certificate
+            else "no-publications"
+        )
     )
     return GatewayDesiredState(caddyfile="", routes=(), ready=False, reason=reason)
 

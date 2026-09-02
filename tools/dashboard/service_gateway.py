@@ -15,7 +15,7 @@ import json
 import re
 import socket
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from tools.dashboard import service_publication
 from tools.graph.schemas.namespace_reservation import validate_reservation_key
@@ -117,6 +117,7 @@ def render_caddyfile(
     routes: Sequence[ServiceGatewayRoute],
     *,
     unavailable_hosts: Sequence[str] = (),
+    certificates: Mapping[str, tuple[str, str]] | None = None,
 ) -> str:
     """Render the complete fail-closed gateway config.
 
@@ -148,38 +149,46 @@ def render_caddyfile(
         "\t}",
         "}",
         "",
-        f":{LISTEN_PORT} {{",
-        f"\ttls {CERTIFICATE_PATH} {PRIVATE_KEY_PATH}",
     ]
-    for index, route in enumerate(routes):
+    certificates = certificates or {
+        hostname: (CERTIFICATE_PATH, PRIVATE_KEY_PATH)
+        for hostname in (*active_names, *unavailable_hosts)
+    }
+    expected = set(active_names) | set(unavailable_hosts)
+    if set(certificates) != expected:
+        raise ValueError("certificate map must exactly cover Service hostnames")
+    for hostname, pair in certificates.items():
+        if (
+            not isinstance(pair, tuple)
+            or len(pair) != 2
+            or not all(isinstance(path, str) and path.startswith("/") for path in pair)
+        ):
+            raise ValueError(f"invalid certificate paths for {hostname}")
+
+    for route in routes:
+        cert_path, key_path = certificates[route.hostname]
         lines.extend(
             [
-                f"\t@service_{index} host {route.hostname}",
-                f"\thandle @service_{index} {{",
-                f"\t\treverse_proxy {route.session_id}:{route.port} {{",
-                "\t\t\tflush_interval -1",
-                "\t\t}",
+                f"https://{route.hostname}:{LISTEN_PORT} {{",
+                f"\ttls {cert_path} {key_path}",
+                f"\treverse_proxy {route.session_id}:{route.port} {{",
+                "\t\tflush_interval -1",
                 "\t}",
+                "}",
+                "",
             ]
         )
-    for index, hostname in enumerate(unavailable_hosts):
+    for hostname in unavailable_hosts:
+        cert_path, key_path = certificates[hostname]
         lines.extend(
             [
-                f"\t@unavailable_{index} host {hostname}",
-                f"\thandle @unavailable_{index} {{",
-                '\t\trespond "Service unavailable" 503',
-                "\t}",
+                f"https://{hostname}:{LISTEN_PORT} {{",
+                f"\ttls {cert_path} {key_path}",
+                '\trespond "Service unavailable" 503',
+                "}",
+                "",
             ]
         )
-    lines.extend(
-        [
-            "\thandle {",
-            "\t\tabort",
-            "\t}",
-            "}",
-            "",
-        ]
-    )
     return "\n".join(lines)
 
 

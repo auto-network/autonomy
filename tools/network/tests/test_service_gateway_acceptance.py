@@ -1,4 +1,8 @@
-from tools.network.acceptance import service_gateway, service_gateway_lifecycle
+from tools.network.acceptance import (
+    service_certificate_rotation,
+    service_gateway,
+    service_gateway_lifecycle,
+)
 
 
 def test_acceptance_certificate_uses_full_hostname_only_in_san():
@@ -83,4 +87,21 @@ def test_lifecycle_status_observation_retains_transport_failures():
             "at": 456.0,
             "transport_error": "dashboard restarting",
         }
+    ]
+
+
+def test_rotation_driver_staging_command_cannot_activate():
+    command = service_certificate_rotation._certificate_command(
+        "anchore", "persona-abc", staging=True
+    )
+
+    assert command == [
+        "python3",
+        "-m",
+        "tools.dashboard.service_certificate",
+        "--org",
+        "anchore",
+        "--persona-label",
+        "persona-abc",
+        "--staging",
     ]
