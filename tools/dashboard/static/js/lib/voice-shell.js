@@ -335,6 +335,7 @@
         sheetDragging: false,
         keyboardVisible: false,
         _restingViewportHeight: 0,
+        _sheetWasOpen: false,
         _capsuleHoldTimer: null,
         _capsuleGesture: null,
         _capsuleMoveHandler: null,
@@ -378,17 +379,27 @@
             Alpine.effect(function () {
               document.body.classList.toggle('voice-caption-active', !!self.showCaption);
             });
-            // Keep the latest dictated text visible in the open sheet: as the
-            // transcript grows, scroll the editor to the bottom. Deferred via
-            // rAF so x-model has written the new value before we scroll.
+            // Start every newly opened editor at the beginning of its draft.
+            // After that, follow live dictation only while the textarea is not
+            // focused; native typing owns caret/scroll placement while editing.
             Alpine.effect(function () {
               var st = _voiceStore();
               if (!st) return;
               var _buf = st.bufferText;  // track the transcript for reactivity
-              if (!self.showSheet) return;
+              var sheetOpen = self.showSheet;
+              if (!sheetOpen) {
+                self._sheetWasOpen = false;
+                return;
+              }
+              var justOpened = !self._sheetWasOpen;
+              self._sheetWasOpen = true;
               if (typeof requestAnimationFrame !== 'function') return;
               requestAnimationFrame(function () {
                 var ta = self.$refs && self.$refs.sheetInput;
+                if (justOpened && ta) {
+                  ta.scrollTop = 0;
+                  return;
+                }
                 // WebKit can paint the caret outside a fixed textarea when JS
                 // changes scrollTop while that textarea owns focus. Native
                 // typing already keeps its caret visible; only follow dictated
@@ -677,6 +688,7 @@
         refreshViewport() {
           this.viewportWidth = _viewportWidth();
           this.viewportHeight = _viewportHeight();
+          var keyboardWasVisible = this.keyboardVisible;
           var inputFocused = !!(
             typeof document !== 'undefined' &&
             document.activeElement === (this.$refs && this.$refs.sheetInput)
@@ -690,6 +702,7 @@
             inputFocused &&
             this._restingViewportHeight - this.viewportHeight >= 100
           );
+          if (this.keyboardVisible && !keyboardWasVisible) this._scrollSheetToTop();
           if (!this.capsulePosition || !this.$refs || !this.$refs.capsule) return;
           var clamped = this._clampCapsulePosition(this.capsulePosition, this.$refs.capsule);
           if (clamped.x === this.capsulePosition.x && clamped.y === this.capsulePosition.y) return;
@@ -701,6 +714,16 @@
 
         refreshKeyboardLayout() {
           this.refreshViewport();
+        },
+
+        _scrollSheetToTop() {
+          var self = this;
+          var reset = function () {
+            var ta = self.$refs && self.$refs.sheetInput;
+            if (ta) ta.scrollTop = 0;
+          };
+          reset();
+          if (typeof requestAnimationFrame === 'function') requestAnimationFrame(reset);
         },
 
         onSheetInputBlur() {
@@ -1100,6 +1123,7 @@
             self._teardownSheetGesture();
             if (height >= gesture.maxHeight - 24) {
               self.sheetHeightPx = null;
+              self._scrollSheetToTop();
               if (self.voice && typeof self.voice.expandSheet === 'function') self.voice.expandSheet();
             } else if (height <= gesture.minHeight + 24) {
               self.sheetHeightPx = null;
