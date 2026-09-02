@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import json
 import re
 import subprocess
@@ -203,8 +204,45 @@ async def _inspect_session_container(
     attached = networks.get(network) if isinstance(networks, dict) else None
     ip = attached.get("IPAddress") if isinstance(attached, dict) else None
     if not isinstance(ip, str) or not ip:
-        raise ServicePublicationError("target_network_unavailable", 409)
+        network_mode = document.get("HostConfig", {}).get("NetworkMode")
+        if network_mode != "host":
+            raise ServicePublicationError("target_network_unavailable", 409)
+        ip = await _inspect_network_gateway(network)
     return ContainerInspection(container_id, ip)
+
+
+async def _inspect_network_gateway(network: str) -> str:
+    """Resolve the host as seen from one exact Docker bridge network.
+
+    Host-network session services bind in the host namespace, so a Caddy
+    container on the serving bridge reaches them through that bridge's
+    gateway.  The address is Docker-owned topology, never caller input.
+    """
+    def inspect() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["docker", "network", "inspect", network],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+
+    try:
+        result = await asyncio.to_thread(inspect)
+        documents = json.loads(result.stdout) if result.returncode == 0 else None
+        configs = documents[0].get("IPAM", {}).get("Config", [])
+        gateways = [
+            item.get("Gateway") for item in configs
+            if isinstance(item, dict) and item.get("Gateway")
+        ] if isinstance(configs, list) else []
+        gateway = gateways[0] if len(gateways) == 1 else None
+        address = ipaddress.ip_address(gateway) if isinstance(gateway, str) else None
+    except Exception as exc:
+        raise ServicePublicationError("compose_network_unavailable", 503) from exc
+    if address is None or address.is_unspecified or address.is_loopback \
+            or address.is_multicast:
+        raise ServicePublicationError("compose_network_unavailable", 503)
+    return str(address)
 
 
 async def _probe_tcp(ip: str, port: int) -> bool:

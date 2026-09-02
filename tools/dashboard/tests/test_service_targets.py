@@ -564,3 +564,72 @@ def test_container_inspection_refuses_a_container_outside_the_node_network(monke
         "target_network_unavailable",
         409,
     )
+
+
+def test_host_network_container_uses_exact_compose_network_gateway(monkeypatch):
+    from tools.dashboard import service_publication as service
+
+    seen = []
+
+    def run(argv, **kwargs):
+        seen.append(argv)
+        if argv == ["docker", "inspect", "session-a"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    [{
+                        "Id": CONTAINER_A,
+                        "State": {"Running": True},
+                        "HostConfig": {"NetworkMode": "host"},
+                        "NetworkSettings": {"Networks": {"host": {}}},
+                    }]
+                ),
+            )
+        assert argv == ["docker", "network", "inspect", "autonomy_default"]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                [{"IPAM": {"Config": [{"Gateway": "172.16.0.1"}]}}]
+            ),
+        )
+
+    monkeypatch.setattr(service.subprocess, "run", run)
+    result = asyncio.run(
+        service._inspect_session_container("session-a", "autonomy_default")
+    )
+    assert result == service.ContainerInspection(CONTAINER_A, "172.16.0.1")
+    assert seen == [
+        ["docker", "inspect", "session-a"],
+        ["docker", "network", "inspect", "autonomy_default"],
+    ]
+
+
+@pytest.mark.parametrize("config", [[], [{"Gateway": "127.0.0.1"}]])
+def test_host_network_container_refuses_unusable_compose_gateway(monkeypatch, config):
+    from tools.dashboard import service_publication as service
+
+    def run(argv, **kwargs):
+        if argv[:2] == ["docker", "inspect"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    [{
+                        "Id": CONTAINER_A,
+                        "State": {"Running": True},
+                        "HostConfig": {"NetworkMode": "host"},
+                        "NetworkSettings": {"Networks": {"host": {}}},
+                    }]
+                ),
+            )
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps([{"IPAM": {"Config": config}}]),
+        )
+
+    monkeypatch.setattr(service.subprocess, "run", run)
+    with pytest.raises(service.ServicePublicationError) as raised:
+        asyncio.run(service._inspect_session_container("session-a", "autonomy_default"))
+    assert (raised.value.code, raised.value.status_code) == (
+        "compose_network_unavailable",
+        503,
+    )
