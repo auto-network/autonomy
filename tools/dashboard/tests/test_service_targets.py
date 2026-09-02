@@ -604,6 +604,36 @@ def test_host_network_container_uses_exact_compose_network_gateway(monkeypatch):
     ]
 
 
+def test_host_network_container_derives_docker_gateway_when_ipam_omits_it(monkeypatch):
+    from tools.dashboard import service_publication as service
+
+    def run(argv, **kwargs):
+        if argv == ["docker", "inspect", "session-a"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    [{
+                        "Id": CONTAINER_A,
+                        "State": {"Running": True},
+                        "HostConfig": {"NetworkMode": "host"},
+                        "NetworkSettings": {"Networks": {"host": {}}},
+                    }]
+                ),
+            )
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                [{"IPAM": {"Config": [{"Subnet": "172.16.0.0/24"}]}}]
+            ),
+        )
+
+    monkeypatch.setattr(service.subprocess, "run", run)
+    result = asyncio.run(
+        service._inspect_session_container("session-a", "autonomy_default")
+    )
+    assert result == service.ContainerInspection(CONTAINER_A, "172.16.0.1")
+
+
 @pytest.mark.parametrize("config", [[], [{"Gateway": "127.0.0.1"}]])
 def test_host_network_container_refuses_unusable_compose_gateway(monkeypatch, config):
     from tools.dashboard import service_publication as service

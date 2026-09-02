@@ -231,12 +231,30 @@ async def _inspect_network_gateway(network: str) -> str:
         result = await asyncio.to_thread(inspect)
         documents = json.loads(result.stdout) if result.returncode == 0 else None
         configs = documents[0].get("IPAM", {}).get("Config", [])
-        gateways = [
-            item.get("Gateway") for item in configs
-            if isinstance(item, dict) and item.get("Gateway")
-        ] if isinstance(configs, list) else []
-        gateway = gateways[0] if len(gateways) == 1 else None
-        address = ipaddress.ip_address(gateway) if isinstance(gateway, str) else None
+        ipv4 = []
+        for item in configs if isinstance(configs, list) else []:
+            if not isinstance(item, dict):
+                continue
+            gateway = item.get("Gateway")
+            subnet_value = item.get("Subnet")
+            try:
+                subnet = (
+                    ipaddress.ip_network(subnet_value, strict=False)
+                    if isinstance(subnet_value, str)
+                    else None
+                )
+                if isinstance(gateway, str):
+                    address = ipaddress.ip_address(gateway)
+                elif subnet is not None and subnet.version == 4 \
+                        and subnet.num_addresses >= 4:
+                    address = subnet.network_address + 1
+                else:
+                    continue
+            except ValueError:
+                continue
+            if address.version == 4 and (subnet is None or address in subnet):
+                ipv4.append(address)
+        address = ipv4[0] if len(ipv4) == 1 else None
     except Exception as exc:
         raise ServicePublicationError("compose_network_unavailable", 503) from exc
     if address is None or address.is_unspecified or address.is_loopback \
