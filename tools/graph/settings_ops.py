@@ -3517,9 +3517,14 @@ def write_by_key(
             set_id, schema_revision, key, payload, org=org, state=state,
             vault_policy_class_id=vault_policy_class_id,
         )
+    # Reached only for a vaulted set with an existing base — a whole-value
+    # re-seal, own-org (after writeback). That is exactly the case where the
+    # prior override is dead weight, so write_by_key is the deliberate opt-in
+    # wrapper that collapses the fan; the cert bundle writer rides this path.
     return override_setting(
         existing, payload, org=org, state=state,
         vault_policy_class_id=vault_policy_class_id,
+        deprecate_previous=True,
     )
 
 
@@ -3530,6 +3535,7 @@ def override_setting(
     org: "str | None | _CallerOrgSentinel",
     state: str = "raw",
     vault_policy_class_id: str | None = None,
+    deprecate_previous: bool = False,
 ) -> str:
     """Create a Setting with ``supersedes=target_id`` and partial payload.
 
@@ -3546,6 +3552,21 @@ def override_setting(
     fresh revision of the same object, and stored as its own locator. A
     partial patch is not available there and would not be meaningful anyway:
     the writer cannot merge onto a plaintext it may hold no factor to open.
+
+    ``deprecate_previous`` (opt-in, default off) collapses the override fan in
+    the SAME transaction as the insert: every other live override this org
+    holds on the chosen base is deprecated with ``successor_id`` = the new row,
+    leaving exactly one live override (this one). It is opt-in, not the default,
+    for two reasons. First, only a **whole-value replacement** may discard the
+    prior override — a set that layers *compositional* patches (each override
+    setting different fields) would lose earlier layers; the caller asserts, by
+    opting in, that each write replaces the whole value (the vault case, where
+    the payload is one opaque locator). Second, it deprecates only rows in the
+    caller's OWN database, so a shared peer base overridden independently by
+    several orgs is never touched — each org's overrides live in its own store.
+    Off by default, the append-only behavior is byte-for-byte unchanged; the
+    read-side sweep (``graph set compact``) remains the cure for accumulation
+    that predates opt-in or comes from callers that do not opt in.
 
     ``org`` is **required** — see :func:`add_setting` for the contract.
     """
@@ -3640,6 +3661,22 @@ def override_setting(
              target["key"], json.dumps(stored_payload),
              state, target_id, now, now, expires_at),
         )
+        if deprecate_previous:
+            # Collapse the fan in-transaction: every OTHER live override this
+            # org holds on the chosen base (all share ``supersedes = base``)
+            # becomes deprecated, successor = the row just inserted. Scoped to
+            # this connection's own DB, so peer/other-org overrides on a shared
+            # base are never touched; ``id != sid`` spares the new row. read_set
+            # already excludes ``deprecated = 1`` rows, so this simply drops the
+            # stale layers the newest revision replaced.
+            db.conn.execute(
+                "UPDATE settings SET deprecated = 1, successor_id = ?, "
+                "updated_at = ?, expires_at = ? "
+                "WHERE set_id = ? AND key = ? AND supersedes = ? "
+                "  AND id != ? AND deprecated = 0",
+                (sid, now, expires_at, target["set_id"], target["key"],
+                 target_id, sid),
+            )
         db.conn.commit()
     finally:
         db.close()

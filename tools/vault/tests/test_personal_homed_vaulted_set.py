@@ -148,6 +148,73 @@ def test_audited_replacement_opens_with_the_revision_that_created_it(cold_vault)
     assert member.id != replacement_id, "the public identity remains the base row"
 
 
+def _live_override_rows(db):
+    with GraphDB(db) as gdb:
+        return gdb.conn.execute(
+            "SELECT id, supersedes, deprecated, successor_id FROM settings "
+            "WHERE set_id = ? AND key = ? "
+            "ORDER BY created_at, rowid",
+            (VAULT_AUDITED_SET_ID, "github.token"),
+        ).fetchall()
+
+
+def test_vault_reseal_collapses_the_override_fan_to_one_live(cold_vault):
+    """auto-2j6s0: sequential vault re-seals leave exactly one live override.
+
+    write_by_key opts a vault set into atomic write+deprecate, so each re-seal
+    deprecates the prior override (successor-linked) instead of stacking another
+    live layer the resolver must merge. The value still resolves to the newest.
+    """
+    db = cold_vault
+    private_hex, public_hex = derive_delegate_audited_recipient(bytes(range(32)))
+    with VaultStore(db) as store:
+        store.put_delegate_audited_recipient(public_hex)
+
+    for value in ("first", "second", "third", "fourth"):
+        settings_ops.write_by_key(
+            VAULT_AUDITED_SET_ID, VAULT_CREDENTIAL_REVISION,
+            "github.token", {"value": value}, org=None,
+        )
+
+    rows = _live_override_rows(db)
+    bases = [r for r in rows if r["supersedes"] is None]
+    overrides = [r for r in rows if r["supersedes"] is not None]
+    live_overrides = [r for r in overrides if not r["deprecated"]]
+    deprecated = [r for r in overrides if r["deprecated"]]
+
+    assert len(bases) == 1, "the base row is never deprecated"
+    assert len(live_overrides) == 1, "exactly one override survives after N writes"
+    assert len(deprecated) == 2, "the two earlier overrides are deprecated"
+    # Each deprecated override points at its successor — an audit chain, not orphans.
+    for row in deprecated:
+        assert row["successor_id"] is not None
+
+    settings_ops.set_personal_delegate_audited_key(private_hex)
+    member = _member(settings_ops.read_set(VAULT_AUDITED_SET_ID, org=None))
+    assert member.vault_error is None
+    assert member.payload == {"value": "fourth"}
+
+
+def test_default_override_stays_append_only(cold_vault):
+    """The opt-out path is unchanged: override_setting without the flag never
+    deprecates, so two direct overrides both stay live (the pre-existing shape)."""
+    db = cold_vault
+    _, public_hex = derive_delegate_audited_recipient(bytes(range(32)))
+    with VaultStore(db) as store:
+        store.put_delegate_audited_recipient(public_hex)
+
+    base_id = settings_ops.add_setting(
+        VAULT_AUDITED_SET_ID, VAULT_CREDENTIAL_REVISION,
+        "github.token", {"value": "base"}, org=None,
+    )
+    settings_ops.override_setting(base_id, {"value": "o1"}, org=None)
+    settings_ops.override_setting(base_id, {"value": "o2"}, org=None)
+
+    overrides = [r for r in _live_override_rows(db) if r["supersedes"] is not None]
+    live = [r for r in overrides if not r["deprecated"]]
+    assert len(live) == 2, "default override_setting appends without deprecating"
+
+
 def _member(resolved):
     return {s.key: s for s in resolved}["github.token"]
 
