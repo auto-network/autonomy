@@ -245,11 +245,6 @@
     return (viewport && viewport.height) || (typeof window !== 'undefined' && window.innerHeight) || 0;
   }
 
-  function _viewportOffsetTop() {
-    var viewport = (typeof window !== 'undefined' && window.visualViewport) || null;
-    return (viewport && viewport.offsetTop) || 0;
-  }
-
   function _sessionsStore() {
     try {
       if (typeof Alpine === 'undefined' || typeof Alpine.store !== 'function') return null;
@@ -333,7 +328,6 @@
       return {
         viewportWidth: _viewportWidth(),
         viewportHeight: _viewportHeight(),
-        viewportOffsetTop: _viewportOffsetTop(),
         capsulePosition: null,
         capsulePressedAction: '',
         capsulePttActive: false,
@@ -365,7 +359,6 @@
           window.addEventListener('resize', this._resizeHandler);
           if (window.visualViewport && typeof window.visualViewport.addEventListener === 'function') {
             window.visualViewport.addEventListener('resize', this._resizeHandler);
-            window.visualViewport.addEventListener('scroll', this._resizeHandler);
           }
           // Reflect caption visibility as a <body> class so scrollable page
           // content (.sv-entries) can reserve the bottom gutter the fixed
@@ -439,9 +432,9 @@
             window.removeEventListener('resize', this._resizeHandler);
             if (window.visualViewport && typeof window.visualViewport.removeEventListener === 'function') {
               window.visualViewport.removeEventListener('resize', this._resizeHandler);
-              window.visualViewport.removeEventListener('scroll', this._resizeHandler);
             }
           }
+          this._setKeyboardModal(false);
           this._teardownCapsuleGesture();
           this._teardownSheetGesture();
         },
@@ -554,7 +547,7 @@
         get sheetStyle() {
           if (this.keyboardVisible) {
             return {
-              top: Math.round(this.viewportOffsetTop) + 'px',
+              top: '0',
               bottom: 'auto',
               height: Math.round(this.viewportHeight) + 'px',
               transition: 'none',
@@ -703,10 +696,8 @@
 
         refreshViewport() {
           var previousViewportHeight = this.viewportHeight;
-          var previousViewportOffsetTop = this.viewportOffsetTop;
           this.viewportWidth = _viewportWidth();
           this.viewportHeight = _viewportHeight();
-          this.viewportOffsetTop = _viewportOffsetTop();
           var keyboardWasVisible = this.keyboardVisible;
           var inputFocused = !!(
             typeof document !== 'undefined' &&
@@ -723,8 +714,7 @@
           );
           if (this.keyboardVisible && (
             !keyboardWasVisible ||
-            previousViewportHeight !== this.viewportHeight ||
-            previousViewportOffsetTop !== this.viewportOffsetTop
+            previousViewportHeight !== this.viewportHeight
           )) this._scrollSheetToTop();
           if (!this.capsulePosition || !this.$refs || !this.$refs.capsule) return;
           var clamped = this._clampCapsulePosition(this.capsulePosition, this.$refs.capsule);
@@ -739,6 +729,23 @@
           this.refreshViewport();
         },
 
+        _setKeyboardModal(active) {
+          if (typeof document === 'undefined') return;
+          if (document.documentElement && document.documentElement.classList) {
+            document.documentElement.classList.toggle('voice-keyboard-modal', !!active);
+          }
+          if (document.body && document.body.classList) {
+            document.body.classList.toggle('voice-keyboard-modal', !!active);
+          }
+        },
+
+        onSheetInputFocus() {
+          // Lock the document before iOS begins its automatic focus pan. The
+          // textarea is the sole scroll surface while the keyboard is visible.
+          this._setKeyboardModal(true);
+          this.refreshKeyboardLayout();
+        },
+
         _scrollSheetToTop() {
           var self = this;
           var reset = function () {
@@ -751,7 +758,14 @@
 
         onSheetInputBlur() {
           var self = this;
-          setTimeout(function () { self.refreshViewport(); }, 80);
+          setTimeout(function () {
+            var stillFocused = !!(
+              typeof document !== 'undefined' &&
+              document.activeElement === (self.$refs && self.$refs.sheetInput)
+            );
+            if (!stillFocused) self._setKeyboardModal(false);
+            self.refreshViewport();
+          }, 80);
         },
 
         openVoiceFilePicker() {

@@ -107,8 +107,15 @@ function loadVoiceShell(opts) {
   Object.assign(flagsStore, (opts && opts.flagsStore) || {});
 
   const _bodyClasses = new Set();
+  const _htmlClasses = new Set();
   const document = {
     activeElement: null,
+    documentElement: {
+      classList: {
+        toggle: (c, on) => { if (on) _htmlClasses.add(c); else _htmlClasses.delete(c); },
+        contains: (c) => _htmlClasses.has(c),
+      },
+    },
     addEventListener(name, cb) {
       (docListeners[name] ||= []).push(cb);
     },
@@ -748,11 +755,10 @@ describe('voice shell helpers', () => {
     const h = loadVoiceShell({ voiceStore: { sheetOpen: true, sheetMode: 'partial' } });
     h.document.activeElement = h.component.$refs.sheetInput;
     h.window.visualViewport.height = 390;
-    h.window.visualViewport.offsetTop = 217;
     h.component.refreshKeyboardLayout();
     assert.equal(h.component.keyboardVisible, true);
     assert.equal(h.component.effectiveSheetMode, 'full');
-    assert.equal(h.component.sheetStyle.top, '217px');
+    assert.equal(h.component.sheetStyle.top, '0');
     assert.equal(h.component.sheetStyle.height, '390px');
     assert.equal(h.component.sheetStyle.bottom, 'auto');
     assert.equal(h.component.$refs.sheetInput.scrollTop, 0);
@@ -762,6 +768,19 @@ describe('voice shell helpers', () => {
     h.component.refreshKeyboardLayout();
     assert.equal(h.component.keyboardVisible, false);
     assert.equal(h.component.effectiveSheetMode, 'partial');
+  });
+
+  it('locks the background before focusing the keyboard editor and unlocks on blur', async () => {
+    const h = loadVoiceShell({ voiceStore: { sheetOpen: true } });
+    h.component.onSheetInputFocus();
+    assert.equal(h.document.body.classList.contains('voice-keyboard-modal'), true);
+    assert.equal(h.document.documentElement.classList.contains('voice-keyboard-modal'), true);
+
+    h.document.activeElement = null;
+    h.component.onSheetInputBlur();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(h.document.body.classList.contains('voice-keyboard-modal'), false);
+    assert.equal(h.document.documentElement.classList.contains('voice-keyboard-modal'), false);
   });
 
   it('resets the keyboard baseline after an unfocused orientation change', () => {

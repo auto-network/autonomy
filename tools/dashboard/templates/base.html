@@ -2684,7 +2684,7 @@
                   x-ref="sheetInput"
                   x-model="$store.voice.bufferText"
                   @input="onSheetInput()"
-                  @focus="refreshKeyboardLayout()"
+                  @focus="onSheetInputFocus()"
                   @blur="onSheetInputBlur()"
                   :placeholder="voiceoverMode ? 'Ask what this session is doing…' : ''"
                   spellcheck="false"></textarea>
