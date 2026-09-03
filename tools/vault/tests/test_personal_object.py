@@ -137,6 +137,41 @@ def test_personal_secured_setting_seals_cold_and_opens_only_with_factor(
     assert opened == {"value": SECRET}
 
 
+def test_personal_secured_replacement_opens_under_its_own_revision(personal_world):
+    db_path, policy_class, seed = personal_world
+    key = "autonomy:mac.ssh.disposable-proof"
+    base_id = settings_ops.write_by_key(
+        SET_ID,
+        1,
+        key,
+        {"value": "first"},
+        org=None,
+        vault_policy_class_id=policy_class.class_id,
+    )
+    replacement_id = settings_ops.write_by_key(
+        SET_ID,
+        1,
+        key,
+        {"value": "replacement"},
+        org=None,
+        vault_policy_class_id=policy_class.class_id,
+    )
+    assert replacement_id != base_id
+
+    member = settings_ops.read_set(SET_ID, org=None, peers=[]).members[0]
+    assert member.id == base_id, "the resolved Setting retains its stable base id"
+    digest = hashlib.sha256(canonical_json(member.sealed_content_key)).hexdigest()
+    opened = settings_ops.open_secured_setting(
+        SET_ID,
+        key,
+        setting_id=member.id,
+        sealed_content_key_digest=digest,
+        opener_seeds={"operator-password": seed},
+        org=None,
+    )
+    assert opened == {"value": "replacement"}
+
+
 def test_personal_locator_cannot_be_moved_to_another_setting(personal_world):
     db_path, policy_class, _seed = personal_world
     settings_ops.add_setting(

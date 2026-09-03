@@ -4697,7 +4697,7 @@ def _resolved_vault_locator(
     *,
     org: str | None,
 ):
-    """Return the opaque locator selected for one already-resolved member.
+    """Return ``(locator, row_id)`` for one already-resolved member.
 
     ``read_set`` deliberately replaces a secured member's locator with the
     factor-gated ``sealed_content_key`` view.  The operator ceremony needs the
@@ -4727,12 +4727,14 @@ def _resolved_vault_locator(
             f"the secured setting changed before approval ({set_id}/{key})"
         )
     locator = json.loads(base["payload"])
+    effective_row_id = base["id"]
     for row in sorted(
         (row for row in rows if row["supersedes"] == base_id),
         key=lambda row: (row["created_at"] or "", row["_rowid"]),
     ):
         locator = json_merge_patch(locator, json.loads(row["payload"]))
-    return locator
+        effective_row_id = row["id"]
+    return locator, effective_row_id
 
 
 def open_secured_setting(
@@ -4789,7 +4791,7 @@ def open_secured_setting(
             f"the secured setting changed before approval ({set_id}/{key})"
         )
 
-    locator = _resolved_vault_locator(
+    locator, effective_setting_id = _resolved_vault_locator(
         set_id, key, setting_id, org=org,
     )
     personal_direct = personal_object.is_personal_locator(locator)
@@ -4830,7 +4832,7 @@ def open_secured_setting(
             locator,
             set_id=set_id,
             key=key,
-            setting_id=setting_id,
+            setting_id=effective_setting_id,
             policy_class=policy_class,
             opener_seeds=opener_seeds,
         )
