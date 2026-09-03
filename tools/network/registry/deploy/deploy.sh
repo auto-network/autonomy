@@ -103,6 +103,34 @@ echo "==> import-closure preflight (fails before restart on a missing module)"
 ssh "$TARGET" "cd $APP_DIR && venv/bin/python \
     tools/network/registry/deploy/check_import_closure.py $APP_DIR"
 
+echo "==> serve floating IP binder (autonomy-registry.service Requires= it)"
+# Not previously scripted anywhere -- installed by hand when serve.auto.network
+# first shipped, which is exactly how it silently regressed on 2026-09-03: a
+# oneshot bound the address with a bare `ip address replace`, invisible to
+# systemd-networkd, wiped by the next networkd restart (routine
+# unattended-upgrades daemon-reexec did it). See graph://f93ab508-212.
+# bind-serve-ip.sh itself now also declares the address in netplan so a
+# FUTURE networkd restart reasserts rather than wipes it; this step's job is
+# only to make the binder + its unit + its env reproducible from a clean box.
+ssh "$TARGET" "mkdir -p /opt/autonomy-serve /etc/autonomy-serve"
+scp -q "$REPO_ROOT/tools/network/estate/serve/bind-serve-ip.sh" \
+    "$TARGET:/opt/autonomy-serve/bind-serve-ip.sh"
+scp -q "$REPO_ROOT/tools/network/estate/serve/autonomy-serve-ip.service" \
+    "$TARGET:/etc/systemd/system/autonomy-serve-ip.service"
+ssh "$TARGET" bash -s <<'EOF'
+set -euo pipefail
+chmod 0755 /opt/autonomy-serve/bind-serve-ip.sh
+chmod 0644 /etc/systemd/system/autonomy-serve-ip.service
+if [ ! -f /etc/autonomy-serve/serve.env ]; then
+    printf 'SERVE_BIND_IP=5.161.17.217\nSERVE_INTERFACE=eth0\n' >/etc/autonomy-serve/serve.env
+fi
+chmod 0644 /etc/autonomy-serve/serve.env
+systemctl daemon-reload
+systemctl enable --now autonomy-serve-ip.service
+systemctl restart autonomy-serve-ip.service
+ip -4 address show dev eth0 | grep -Fq 5.161.17.217/32
+EOF
+
 echo "==> systemd unit"
 scp -q "$REPO_ROOT/tools/network/registry/deploy/autonomy-registry.service" \
     "$TARGET:/etc/systemd/system/autonomy-registry.service"

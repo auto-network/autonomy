@@ -23,7 +23,12 @@ local Caddy terminates with the persona wildcard cert).
   `DynamicUser`, and it orders `After=`/`Requires=` the serve-ip unit below.
 - `bind-serve-ip.sh` + `autonomy-serve-ip.service` — persist the floating IP
   on the NIC at boot (Hetzner floating IPs aren't auto-configured); the
-  registry Requires it.
+  registry Requires it. Binds it two ways: `ip address replace` for immediate
+  effect, and a netplan drop-in so `systemd-networkd` itself knows the address
+  and reasserts it (rather than silently dropping it) on its own restarts --
+  e.g. from a routine `unattended-upgrades` daemon-reexec, which caused an
+  outage this way on 2026-09-03 (graph://f93ab508-212). Both bind scripts are
+  installed by their respective deploy.sh, so this is reproduced on redeploy.
 - DNS: the responder answers serve names → the floating IP via the DNS unit's
   `--relay-ip` (`DNS_RELAY_IP` in `/etc/autonomy-dns/dns.env`), set by
   `estate/dns/deploy.sh --relay-ip`.

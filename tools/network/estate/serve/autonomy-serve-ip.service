@@ -1,5 +1,12 @@
 [Unit]
 Description=Bind the serve.auto.network floating IPv4
+# RemainAfterExit=yes below means Requires= on this unit only checks systemd's
+# bookkeeping, not that the address is still actually bound -- this oneshot
+# does not re-run on its own if something else removes the address. That's
+# why bind-serve-ip.sh also declares the address in netplan (not just
+# `ip address replace`): if systemd-networkd itself restarts (an
+# unattended-upgrades daemon-reexec did on 2026-09-03 -- graph://f93ab508-212)
+# it reasserts the address from its own config instead of silently dropping it.
 Before=autonomy-registry.service
 Wants=network-online.target
 After=network-online.target
