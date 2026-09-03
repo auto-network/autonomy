@@ -13,7 +13,7 @@
   var root = window;
   var screens = [];
   var host = null;
-  var state = { slug: null, screenId: null, view: 'list' };
+  var state = { slug: null, screenId: null, view: 'list', identity: null };
 
   function el(tag, cls, text) {
     var node = root.document.createElement(tag);
@@ -34,7 +34,7 @@
   function close() {
     if (host && host.parentNode) host.parentNode.removeChild(host);
     host = null;
-    state = { slug: null, screenId: null, view: 'list' };
+    state = { slug: null, screenId: null, view: 'list', identity: null };
     root.document.removeEventListener('keydown', onKey);
     root.document.body.style.overflow = '';
   }
@@ -61,7 +61,33 @@
     state.screenId = id;
     show('detail');
     renderRail();
+    renderHeader();
     renderPane();
+  }
+
+  function renderHeader() {
+    var title = host && host.querySelector('.orgset-title');
+    if (!title) return;
+    var screen = screens.filter(function (s) { return s.id === state.screenId; })[0];
+    var identity = state.identity || {};
+    var name = identity.name || state.slug || '';
+    title.textContent = '';
+    var badge = el('span', 'orgset-org-badge');
+    if (identity.favicon) {
+      var image = el('img');
+      image.src = identity.favicon;
+      image.alt = '';
+      badge.appendChild(image);
+    } else {
+      badge.style.backgroundColor = identity.color || '#475569';
+      badge.appendChild(el('span', '', identity.initial || name.charAt(0).toUpperCase()));
+    }
+    title.appendChild(badge);
+    title.appendChild(el('span', '', name));
+    if (screen && screen.windowTitle) {
+      title.appendChild(el('span', 'orgset-title-separator', '–'));
+      title.appendChild(el('span', 'orgset-window-name', screen.windowTitle));
+    }
   }
 
   function renderRail() {
@@ -167,6 +193,17 @@
     root.document.addEventListener('keydown', onKey);
 
     renderRail();
+    if (typeof root.fetch === 'function') {
+      root.fetch('/api/orgs/' + encodeURIComponent(slug), {headers: {'Accept': 'application/json'}})
+        .then(function (res) { return res.ok ? res.json() : null; })
+        .then(function (body) {
+          if (!host || state.slug !== slug || !body) return;
+          state.identity = body.identity_resolved || null;
+          renderHeader();
+        })
+        .catch(function () {});
+    }
+    renderHeader();
     // Desktop wants a screen already showing; narrow wants the list, which
     // IS its first screen. Both start with the same selection so that
     // widening the window never lands on an empty pane.

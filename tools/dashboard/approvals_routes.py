@@ -81,7 +81,17 @@ def _org_for_approval(rid: str) -> str | None:
     try:
         from tools.dashboard.dao import dashboard_db
         from tools.dashboard.org_identity import session_org_slug
-        return session_org_slug(dashboard_db.get_session(session) or {}) or None
+        resolved = session_org_slug(dashboard_db.get_session(session) or {}) or None
+        if resolved:
+            return resolved
+        # Organization Settings is an operator-owned surface rather than an
+        # agent session. Its share controls still use the ordinary approval
+        # ceremony, whose stored request is the server-visible source of the
+        # selected organization. The operator remains the only decider.
+        if session == "dashboard-ui":
+            requested = (row.get("request") or {}).get("org")
+            return requested if isinstance(requested, str) and requested else None
+        return None
     except Exception:
         return None
 

@@ -47,7 +47,15 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 0.5625rem;
 }
+
+.orgset-org-badge { width: 1.5rem; height: 1.5rem; border-radius: 999px; overflow: hidden; flex: none; display: grid; place-items: center; font-size: .6875rem; }
+.orgset-org-badge img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.orgset-title-separator { color: #64748b; font-weight: 400; }
+.orgset-window-name { overflow: hidden; text-overflow: ellipsis; }
 
 .orgset-close,
 .orgset-back {

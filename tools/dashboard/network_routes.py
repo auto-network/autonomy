@@ -2243,6 +2243,94 @@ async def get_service_targets(request: Request) -> JSONResponse:
     return JSONResponse({"targets": service_publication.list_service_targets(org)})
 
 
+async def get_published_links(request: Request) -> JSONResponse:
+    """Project the selected org's durable Service and Share Settings for UI.
+
+    This is deliberately a read model.  Namespace reservations, targets, and
+    link grants remain owned by their existing schemas and lifecycle APIs.
+    """
+    org, refused = _service_publication_org(request)
+    if refused is not None:
+        return refused
+
+    from datetime import datetime, timezone
+    from tools.dashboard import link_approvals, service_publication
+    from tools.dashboard.dao import dashboard_db
+    from tools.graph.schemas.network_identity import (
+        NETWORK_LINK_GRANT_REVISION,
+        NETWORK_LINK_GRANT_SET_ID,
+    )
+
+    targets = {
+        row["reservation_id"]: row
+        for row in service_publication.list_service_targets(org)
+    }
+    services = []
+    for reservation in service_publication.list_reservations(org):
+        if reservation.get("state") == "released":
+            continue
+        target = targets.get(reservation["reservation_id"])
+        session = dashboard_db.get_session(target["session_id"]) if target else None
+        services.append({
+            **reservation,
+            "target": target,
+            "session_title": ((session or {}).get("label") or
+                              (target or {}).get("session_id") or "Target unavailable"),
+        })
+
+    shares = []
+    now = datetime.now(timezone.utc)
+    for member in settings_ops.read_owned_set(
+        NETWORK_LINK_GRANT_SET_ID,
+        org=org,
+        target_revision=NETWORK_LINK_GRANT_REVISION,
+    ).members:
+        payload = member.payload
+        if not isinstance(payload, dict) or payload.get("target_type") in {
+            "org:join", "fleet:join", "file",
+        }:
+            continue
+        resolved = link_approvals._resolve_target(
+            payload.get("target_type", ""), payload.get("target_uuid", ""), org,
+        )
+        meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+        expires_at = None
+        ttl = meta.get("ttl")
+        try:
+            issued = datetime.fromisoformat(payload["issued_at"].replace("Z", "+00:00"))
+            if type(ttl) is int and ttl > 0:
+                expires_at = int((issued.timestamp() + ttl))
+        except (KeyError, TypeError, ValueError):
+            expires_at = None
+        shares.append({
+            "token": payload.get("token"),
+            "target_uuid": payload.get("target_uuid"),
+            "type": payload.get("target_type"),
+            "title": resolved.get("title") or payload.get("target_uuid"),
+            "description": meta.get("label") or "",
+            "url": payload.get("url"),
+            "issued_at": payload.get("issued_at"),
+            "expires_at": expires_at,
+            "expired": expires_at is not None and expires_at <= int(now.timestamp()),
+        })
+
+    from tools.dashboard import service_certificate_manager
+    certificate_states = [
+        state for state in service_certificate_manager.certificate_states()
+        if state.get("org") == org and state.get("state") != "current"
+    ]
+    warning = None
+    if certificate_states and services:
+        state = certificate_states[0]
+        warning = state.get("reason") or "A Service certificate needs attention."
+
+    return JSONResponse({
+        "services": services,
+        "shares": shares,
+        "service_warning": warning,
+    })
+
+
 async def get_service_gateway(request: Request) -> JSONResponse:
     _org, refused = _service_publication_org(request)
     if refused is not None:
@@ -2332,6 +2420,7 @@ ROUTES = [
         methods=["PUT"],
     ),
     Route("/api/network/service-targets", get_service_targets, methods=["GET"]),
+    Route("/api/network/published-links", get_published_links, methods=["GET"]),
     Route("/api/network/service-gateway", get_service_gateway, methods=["GET"]),
     Route(
         "/api/network/service-targets/{reservation_id}",
