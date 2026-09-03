@@ -46,6 +46,11 @@ STREAM_MAX_DATA = _env_int("AUTONOMY_STREAM_FRAME", 64 * 1024)
 #: Concurrent raw streams per tunnel — the concurrency ceiling a single
 #: tunnel imposes. Env: AUTONOMY_STREAM_MAX_PER_TUNNEL.
 STREAM_MAX_PER_TUNNEL = _env_int("AUTONOMY_STREAM_MAX_PER_TUNNEL", 128)
+#: How often a degraded ingress retries binding its serve address. The edge is
+#: a feature, not a precondition: if the address is absent the registry API and
+#: relay keep serving and the edge self-heals when it returns.
+#: Env: AUTONOMY_STREAM_REBIND_SECONDS.
+STREAM_INGRESS_REBIND_SECONDS = _env_int("AUTONOMY_STREAM_REBIND_SECONDS", 15)
 #: Bounded ClientHello peek: bytes and seconds.
 SNI_PEEK_MAX_BYTES = 16 * 1024
 STREAM_HANDSHAKE_TIMEOUT = 10.0

@@ -9,8 +9,11 @@
 [Unit]
 Description=auto.network registry v1 (org bindings, share-link grants, revocations)
 After=network-online.target autonomy-serve-ip.service
-Wants=network-online.target
-Requires=autonomy-serve-ip.service
+# Wants, never Requires: the serve address is a feature dependency, not a
+# precondition. Requires= would refuse to start the registry API and relay
+# whenever the serve-ip unit failed — a failure path with no functional
+# justification (the ingress itself degrades and rebinds when it returns).
+Wants=network-online.target autonomy-serve-ip.service
 
 [Service]
 Type=simple
