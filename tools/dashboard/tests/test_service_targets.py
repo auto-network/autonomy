@@ -197,6 +197,11 @@ def target_api(tmp_path, monkeypatch):
                 network_routes.get_service_gateway,
                 methods=["GET"],
             ),
+            Route(
+                "/api/network/published-links",
+                network_routes.get_published_links,
+                methods=["GET"],
+            ),
         ],
         middleware=[
             Middleware(
@@ -262,6 +267,21 @@ def test_service_gateway_status_requires_operator_and_reports_runtime(
 
 
 class TestServiceTargetApiContract:
+    def test_published_links_projects_settings_and_session_title(self, target_api):
+        client, _events, *_ = target_api
+        _put(client)
+        response = client.get("/api/network/published-links", headers=_headers())
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["shares"] == []
+        active = next(
+            row for row in payload["services"]
+            if row["reservation_id"] == ACTIVE_ID
+        )
+        assert active["session_title"] == "session-a"
+        assert active["target"]["session_id"] == "session-a"
+        assert "container_id" not in active["target"]
+
     @pytest.mark.parametrize(
         ("headers", "cookies", "status"),
         [
