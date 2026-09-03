@@ -56,6 +56,14 @@ def _import_legacy_pair(org: str, persona_label: str) -> dict | None:
         for path in (service_certificate.GATEWAY_CERT, service_certificate.GATEWAY_KEY)
     ):
         return None
+    if not service_certificate.settings_ops.personal_delegate_audited_is_warm():
+        # A personal audited write is intentionally possible while cold, but
+        # this migration immediately reads it back before publishing metadata.
+        # Refuse before the write so periodic retries cannot accumulate sealed
+        # sibling rows while waiting for an operator unlock.
+        raise service_certificate.ServiceCertificateError(
+            "certificate vault is locked; unlock before importing the legacy pair"
+        )
     verified = service_certificate._verify_pair(
         service_certificate.GATEWAY_CERT,
         service_certificate.GATEWAY_KEY,

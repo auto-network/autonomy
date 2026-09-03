@@ -401,11 +401,26 @@ def activate_pair(
     current = certificate_metadata(org, persona_label)
     value = dict(metadata)
     value.update({"org": org, "persona_label": persona_label})
-    value["vault_key"] = _write_bundle(cert_path, key_path, value)
+    vault_key = certificate_vault_key(
+        value["org"], value["persona_label"], value["serial"]
+    )
+    expected_bundle = json.loads(_bundle_payload(cert_path, key_path, value)["value"])
+    existing = settings_ops.read_set_key(
+        VAULT_AUDITED_SET_ID, vault_key, org=None, peers=[]
+    )
+    if existing is None:
+        value["vault_key"] = _write_bundle(cert_path, key_path, value)
+        bundle = _read_bundle(value["vault_key"])
+    else:
+        bundle = _read_bundle(vault_key)
+        if bundle != expected_bundle:
+            raise ServiceCertificateError(
+                "existing certificate vault bundle conflicts with the verified pair"
+            )
+        value["vault_key"] = vault_key
     if current is not None and current.get("serial") != value["serial"]:
         value["previous_serial"] = current["serial"]
     ServiceCertificateV1.validate(value)
-    bundle = _read_bundle(value["vault_key"])
     _materialize_bundle(value, bundle)
     settings_ops.write_by_key(
         SERVICE_CERTIFICATE_SET_ID,
@@ -539,6 +554,13 @@ async def obtain(
 
 
 async def issue(org: str, persona_label: str, *, staging: bool = False) -> dict:
+    if not staging and not settings_ops.personal_delegate_audited_is_warm():
+        # A production order is useful only if its account state and verified
+        # pair can be read back and committed. Refuse before contacting ACME
+        # when this process cannot complete that transaction.
+        raise ServiceCertificateError(
+            "certificate vault is locked; unlock before issuing a certificate"
+        )
     metadata, cert_bytes, key_bytes = await obtain(
         org, persona_label, staging=staging
     )

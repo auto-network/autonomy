@@ -34,7 +34,13 @@ def test_activation_writes_public_pointer_only_after_bundle_materializes(
     candidate_key = tmp_path / "candidate.key"
     candidate_cert.write_text("cert")
     candidate_key.write_text("key")
+    monkeypatch.setattr(
+        certs.settings_ops, "personal_delegate_audited_is_warm", lambda: True
+    )
     monkeypatch.setattr(certs, "certificate_metadata", lambda *_args: None)
+    monkeypatch.setattr(
+        certs.settings_ops, "read_set_key", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr(
         certs,
         "_write_bundle",
@@ -63,6 +69,71 @@ def test_activation_writes_public_pointer_only_after_bundle_materializes(
 
     assert activated["vault_key"] == "service.tls.bundle"
     assert order == ["seal", "read", "materialize", "metadata", "retire"]
+
+
+def test_activation_reuses_matching_existing_bundle_without_another_write(
+    monkeypatch, tmp_path
+):
+    candidate_cert = tmp_path / "candidate.crt"
+    candidate_key = tmp_path / "candidate.key"
+    candidate_cert.write_text("cert")
+    candidate_key.write_text("key")
+    value = metadata()
+    expected = {
+        "fullchain_pem": "cert",
+        "private_key_pem": "key",
+        "org": "anchore",
+        "persona_label": "persona-abc",
+        "serial": "abc123",
+    }
+    monkeypatch.setattr(
+        certs.settings_ops, "personal_delegate_audited_is_warm", lambda: True
+    )
+    monkeypatch.setattr(certs, "certificate_metadata", lambda *_args: None)
+    monkeypatch.setattr(
+        certs.settings_ops,
+        "read_set_key",
+        lambda *_args, **_kwargs: {"payload": {"value": "sealed"}},
+    )
+    monkeypatch.setattr(certs, "_read_bundle", lambda _key: expected)
+    monkeypatch.setattr(
+        certs, "_write_bundle", lambda *_args: pytest.fail("rewrote bundle")
+    )
+    monkeypatch.setattr(certs, "_materialize_bundle", lambda *_args: None)
+    monkeypatch.setattr(certs, "_retire_old_ramfs", lambda *_args: None)
+    monkeypatch.setattr(
+        certs.settings_ops, "write_by_key", lambda *_args, **_kwargs: "id"
+    )
+
+    activated = certs.activate_pair(
+        "anchore", "persona-abc", candidate_cert, candidate_key, value
+    )
+
+    assert activated["vault_key"] == "service.tls.anchore.persona-abc.abc123"
+
+
+def test_legacy_import_refuses_cold_vault_before_writing(monkeypatch, tmp_path):
+    status = tmp_path / "tls-status.json"
+    cert_path = tmp_path / "tls.crt"
+    key_path = tmp_path / "tls.key"
+    status.write_text(
+        '{"org":"anchore","apex":"persona-abc.serve.auto.network"}'
+    )
+    cert_path.write_text("cert")
+    key_path.write_text("key")
+    monkeypatch.setattr(certs, "STATUS_PATH", status)
+    monkeypatch.setattr(certs, "GATEWAY_CERT", cert_path)
+    monkeypatch.setattr(certs, "GATEWAY_KEY", key_path)
+    monkeypatch.setattr(
+        certs.settings_ops, "personal_delegate_audited_is_warm", lambda: False
+    )
+    writes = []
+    monkeypatch.setattr(certs, "activate_pair", lambda *_args: writes.append(True))
+
+    with pytest.raises(certs.ServiceCertificateError, match="vault is locked"):
+        manager._import_legacy_pair("anchore", "persona-abc")
+
+    assert writes == []
 
 
 @pytest.mark.asyncio
