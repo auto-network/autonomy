@@ -32,6 +32,7 @@
 
       // Data
       id: '',
+      org: '',
       bead: null,
       primer: null,
 
@@ -48,6 +49,10 @@
 
       formatTs(ts) {
         return _formatTs(ts);
+      },
+
+      orgQuery() {
+        return this.org ? '?org=' + encodeURIComponent(this.org) : '';
       },
 
       creatorIcon(created_by) {
@@ -98,7 +103,7 @@
 
       async hydratePrimer() {
         try {
-          const primerRes = await fetch(`/api/primer/${this.id}`);
+          const primerRes = await fetch(`/api/primer/${this.id}${this.orgQuery()}`);
           const primerData = await primerRes.json();
           if (primerData && !primerData.error) {
             this.primer = primerData;
@@ -131,7 +136,7 @@
       async approve() {
         this.approving = true;
         try {
-          const res = await fetch(`/api/bead/${this.id}/approve`, { method: 'POST' });
+          const res = await fetch(`/api/bead/${this.id}/approve${this.orgQuery()}`, { method: 'POST' });
           const data = await res.json();
           if (data.ok) {
             this.isApproved = true;
@@ -147,6 +152,7 @@
 
       async init() {
         this.id = _beadIdFromPath();
+        this.org = new URLSearchParams(window.location.search).get('org') || '';
         if (!this.id) {
           this.state = 'notFound';
           return;
@@ -155,7 +161,7 @@
         try {
           // Primer is optional. Start it immediately, but do not block first paint on it.
           void this.hydratePrimer();
-          const beadRes = await fetch(`/api/dao/bead/${this.id}`);
+          const beadRes = await fetch(`/api/dao/bead/${this.id}${this.orgQuery()}`);
 
           if (beadRes.status === 404) {
             this.state = 'notFound';
@@ -189,7 +195,7 @@
 
           // Fetch dependency data (blockers + dependents)
           try {
-            const depRes = await fetch(`/api/bead/${this.id}/deps`);
+            const depRes = await fetch(`/api/bead/${this.id}/deps${this.orgQuery()}`);
             const depData = await depRes.json();
             this.depBlockers = (depData.blockers || []).filter(d => d.dependency_type !== 'parent-child');
             this.depDependents = (depData.dependents || []).filter(d => d.dependency_type !== 'parent-child');

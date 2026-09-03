@@ -71,7 +71,7 @@
             <div class="mb-3">
               <div class="text-xs text-gray-500 uppercase tracking-wide mb-2">Blocked by</div>
               <template x-for="dep in depBlockers" :key="dep.id">
-                <a :href="'/bead/' + dep.id"
+                <a :href="'/bead/' + dep.id + orgQuery()"
                    class="flex items-center gap-2 p-2 bg-gray-800 rounded border border-gray-700 hover:border-gray-500 no-underline mb-1">
                   <span class="w-2 h-2 rounded-full flex-shrink-0"
                         :class="dep.status === 'closed' ? 'bg-green-500' : 'bg-amber-500'"></span>
@@ -88,7 +88,7 @@
             <div>
               <div class="text-xs text-gray-500 uppercase tracking-wide mb-2">Blocks</div>
               <template x-for="dep in depDependents" :key="dep.id">
-                <a :href="'/bead/' + dep.id"
+                <a :href="'/bead/' + dep.id + orgQuery()"
                    class="flex items-center gap-2 p-2 bg-gray-800 rounded border border-gray-700 hover:border-gray-500 no-underline mb-1">
                   <span class="w-2 h-2 rounded-full flex-shrink-0"
                         :class="dep.status === 'closed' ? 'bg-green-500' : 'bg-amber-500'"></span>
@@ -258,7 +258,7 @@
           <h2 class="text-lg font-semibold text-gray-200 mb-3 border-b border-gray-700 pb-1">Children</h2>
           <div class="space-y-1">
             <template x-for="child in bead.children" :key="child.id">
-              <a :href="'/bead/' + child.id"
+              <a :href="'/bead/' + child.id + orgQuery()"
                  :data-bead-id="child.id"
                  class="block p-2 bg-gray-800 rounded border border-gray-700 hover:border-gray-500 no-underline">
                 <div class="flex items-center gap-2">
@@ -282,7 +282,7 @@
           <h2 class="text-lg font-semibold text-gray-200 mb-3 border-b border-gray-700 pb-1">Related Beads</h2>
           <div class="space-y-1">
             <template x-for="rb in primer.related_beads" :key="rb.bead_id || rb.id">
-              <a :href="'/bead/' + (rb.bead_id || rb.id)"
+              <a :href="'/bead/' + (rb.bead_id || rb.id) + orgQuery()"
                  :data-bead-id="rb.bead_id || rb.id"
                  class="block p-2 bg-gray-800 rounded border border-gray-700 hover:border-gray-500 no-underline">
                 <div class="flex items-center gap-2">

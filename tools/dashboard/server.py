@@ -619,10 +619,39 @@ async def api_beads_ready(request):
         return JSONResponse(dao_beads.get_open_beads())
     return JSONResponse(await run_cli_json(["bd", "ready", "--json"], empty=[]))
 
+def _beads_request_org(request):
+    """Return one selected tracker org without letting a bearer widen scope.
+
+    Tracker existence is checked by each route so an explicit unknown slug can
+    never degrade to ``org_beads_dir(None)`` and expose the default database.
+    """
+    requested_org = (request.query_params.get("org") or "").strip() or None
+    pinned_org = api_auth.organization_scope_from_request(request)
+    if pinned_org is not None:
+        if requested_org is not None and requested_org != pinned_org:
+            return None, JSONResponse(
+                {"error": "cross-org access to another org's resource is not permitted"},
+                status_code=403,
+            )
+        return pinned_org, None
+    return requested_org, None
+
+
 async def api_beads_list(request):
+    org, refused = _beads_request_org(request)
+    if refused is not None:
+        return refused
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse(dao_beads.get_open_beads(limit=100))
-    return JSONResponse(await run_cli_json(["bd", "list", "--json", "-n", "100", "--sort", "updated"], empty=[]))
+    from tools.data_paths import org_beads_dir
+    bd_dir = org_beads_dir(org)
+    if org is not None and bd_dir is None:
+        return JSONResponse([])
+    kwargs = {"beads_dir": bd_dir} if bd_dir is not None else {}
+    return JSONResponse(await run_cli_json(
+        ["bd", "list", "--json", "-n", "100", "--sort", "updated"],
+        empty=[], **kwargs,
+    ))
 
 async def api_bead_show(request):
     bead_id = request.path_params["id"]
@@ -643,11 +672,18 @@ async def api_bead_tree(request):
 async def api_bead_deps(request):
     """Return both blockers (down) and dependents (up) for a bead."""
     bead_id = request.path_params["id"]
+    org, refused = _beads_request_org(request)
+    if refused is not None:
+        return refused
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse(dao_beads.get_bead_deps(bead_id))
+    from tools.data_paths import org_beads_dir
+    bd_dir = org_beads_dir(org)
+    if org is not None and bd_dir is None:
+        return JSONResponse({"blockers": [], "dependents": []})
     down, up = await asyncio.gather(
-        run_cli_json(["bd", "dep", "list", bead_id, "--json"], empty=[]),
-        run_cli_json(["bd", "dep", "list", bead_id, "--direction=up", "--json"], empty=[]),
+        run_cli_json(["bd", "dep", "list", bead_id, "--json"], empty=[], beads_dir=bd_dir),
+        run_cli_json(["bd", "dep", "list", bead_id, "--direction=up", "--json"], empty=[], beads_dir=bd_dir),
     )
     blockers = down if isinstance(down, list) else []
     dependents = up if isinstance(up, list) else []
@@ -760,7 +796,7 @@ async def _send_dashboard_approval_nag(
     await tmux_send(session_id, envelope)
 
 
-async def _maybe_send_dashboard_approval_nag(bead_id: str) -> None:
+async def _maybe_send_dashboard_approval_nag(bead_id: str, org: str | None = None) -> None:
     """If ``bead_id`` was authored by a live terminal session, ping it.
 
     Best-effort: any DAO failure or unexpected exception is swallowed so a
@@ -768,7 +804,10 @@ async def _maybe_send_dashboard_approval_nag(bead_id: str) -> None:
     already succeeded by the time this runs.
     """
     try:
-        bead = await asyncio.to_thread(dao_beads.get_bead, bead_id)
+        if org is None:
+            bead = await asyncio.to_thread(dao_beads.get_bead, bead_id)
+        else:
+            bead = await asyncio.to_thread(dao_beads.get_bead, bead_id, org)
     except Exception:
         logger.exception(
             "dashboard approval nag: get_bead failed for %s (best-effort)",
@@ -815,13 +854,26 @@ async def api_bead_approve(request):
     "approval came via dashboard ⇒ a human did it."
     """
     bead_id = request.path_params["id"]
+    org, refused = _beads_request_org(request)
+    if refused is not None:
+        return refused
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse({"ok": True, "bead_id": bead_id})
-    stdout, stderr, rc = await run_cli(["bd", "set-state", bead_id, "readiness=approved",
-                                         "--reason", "dashboard: approved for dispatch"])
+    from tools.data_paths import org_beads_dir
+    bd_dir = org_beads_dir(org)
+    if org is not None and bd_dir is None:
+        return JSONResponse(
+            {"error": "organization has no bead tracker", "ok": False},
+            status_code=404,
+        )
+    kwargs = {"beads_dir": bd_dir} if bd_dir is not None else {}
+    stdout, stderr, rc = await run_cli(
+        ["bd", "set-state", bead_id, "readiness=approved",
+         "--reason", "dashboard: approved for dispatch"], **kwargs,
+    )
     if rc != 0:
         return JSONResponse({"error": stderr.strip(), "ok": False}, status_code=400)
-    await _maybe_send_dashboard_approval_nag(bead_id)
+    await _maybe_send_dashboard_approval_nag(bead_id, org)
     return JSONResponse({"ok": True, "bead_id": bead_id})
 
 async def api_pinned_beads(request):
@@ -4310,12 +4362,14 @@ async def api_session_startup_trace(request):
 
 async def api_primer(request):
     bead_id = request.path_params["id"]
+    org, refused = _beads_request_org(request)
+    if refused is not None:
+        return refused
     if os.environ.get("DASHBOARD_MOCK"):
         primer = dao_beads.get_primer(bead_id)
         if not primer:
             return JSONResponse({"error": "bead not found"}, status_code=404)
         return JSONResponse(primer)
-    org = api_auth.organization_scope_from_request(request)
     from tools.graph.primer import collect_primer_data, format_for_dashboard
     try:
         def _collect():
@@ -13119,6 +13173,10 @@ async def api_dao_bead(request):
         org = pinned_org
     else:
         org = requested_org
+    if not os.environ.get("DASHBOARD_MOCK") and org is not None:
+        from tools.data_paths import org_beads_dir
+        if org_beads_dir(org) is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
     bead = await asyncio.to_thread(dao_beads.get_bead, bead_id, org)
     if bead is not None:
         return JSONResponse(bead)
