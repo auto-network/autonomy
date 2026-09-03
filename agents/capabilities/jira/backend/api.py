@@ -74,23 +74,65 @@ class JiraConfig:
         base_url = (os.environ.get("JIRA_BASE_URL")
                     or installed.get("base_url", "")).rstrip("/")
         email = os.environ.get("JIRA_EMAIL") or installed.get("email", "")
-        token_file = Path(os.environ.get("JIRA_TOKEN_FILE")
-                          or installed.get("token_file", "")
-                          or str(Path.home() / ".jira_token")).expanduser()
-        token = ""
-        try:
-            token = token_file.read_text().strip()
-        except OSError:
-            pass
+        # The API token is the operator's PERSONAL Atlassian credential, sealed
+        # in their personal AUDITED vault under an org-writeback key
+        # (``<org>:jira_token``) — never in the org's shared store, and a read
+        # scoped to this org can only ever see this org's own slot. Audited
+        # releases inline/unattended: ``read_set`` opens the value in-process
+        # when the delegate is warm, or returns a ``vault_error`` when the vault
+        # is locked (fail closed — never fall through to plaintext). The env
+        # vars stay as explicit test/override seams; the old implicit
+        # ``~/.jira_token`` default is gone (it never survived a recreate).
+        token = os.environ.get("JIRA_TOKEN") or ""
+        env_file = os.environ.get("JIRA_TOKEN_FILE")
+        if not token and env_file:
+            try:
+                token = Path(env_file).expanduser().read_text().strip()
+            except OSError:
+                pass
+        vault_locked = False
+        if not token and org:
+            try:
+                from tools.graph import settings_ops
+                from tools.graph.schemas.vault_credential import (
+                    VAULT_AUDITED_SET_ID,
+                )
+                row = settings_ops.read_set_key(
+                    VAULT_AUDITED_SET_ID, f"{org}:jira_token",
+                    org=org, peers=[],
+                )
+            except Exception:
+                row = None
+            if row is not None and row.get("vault_error") is None:
+                # The vault stores exact bytes; a token file sealed with a
+                # trailing newline would otherwise reach Jira as "<token>\n"
+                # and 401. Tokens are single-line text — strip surrounding
+                # whitespace, exactly as the old token_file path did.
+                token = ((row.get("payload") or {}).get("value", "") or "").strip()
+            elif row is not None:
+                vault_locked = True
+        if not token and installed.get("token_file"):
+            try:
+                token = Path(installed["token_file"]).expanduser().read_text().strip()
+            except OSError:
+                pass
         missing = [name for name, val in
                    [("base_url", base_url), ("email", email),
-                    (f"token file {token_file}", token)] if not val]
+                    ("token", token)] if not val]
         if missing:
-            where = (f"set broker_config on the issue_tracker org install "
-                     f"Setting in {org!r}" if org else
-                     "no org was named, so no organization's install Setting "
-                     "was consulted -- name one, or set the environment "
-                     "overrides")
+            if "token" in missing and vault_locked:
+                where = (f"the Jira token is sealed at {org}:jira_token but the "
+                         "vault is locked — unlock the vault once to release it")
+            elif "token" in missing and org:
+                where = (f"seal it: graph vault seal jira_token --org {org} "
+                         "--tier audited --from-file <path>; set base_url/email "
+                         "on the issue_tracker org install Setting")
+            elif org:
+                where = ("set base_url/email on the issue_tracker org install "
+                         f"Setting in {org!r}")
+            else:
+                where = ("no org was named — name one, or set JIRA_BASE_URL / "
+                         "JIRA_EMAIL / JIRA_TOKEN[_FILE]")
             raise JiraError(
                 f"jira broker is not configured: missing "
                 f"{', '.join(missing)} ({where})")
