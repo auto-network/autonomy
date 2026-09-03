@@ -771,6 +771,122 @@ class ClientBackend:
 
 
 # --------------------------------------------------------------------------- #
+# In-process backend. For a dashboard plugin (voice-notes, PM) running INSIDE
+# the dashboard process, which reaches settings_ops directly rather than over
+# HTTP. It is the warm-server counterpart to ClientBackend:
+#
+#   - the AUDITED pepper and the sealed-row values are read/written warm via
+#     settings_ops, org-scoped to the caller (write_by_key derives the
+#     ``<org>:`` writeback prefix; read_set filters to it);
+#   - opening the store's SECURED sealed index needs the operator's factor and
+#     is NOT something the warm server can do alone — so it is INJECTED (the
+#     unlock ceremony, server-broker today / browser-local under auto-rhorp
+#     B-1, provides the released 32-byte index). This backend separates
+#     OPENING the store (the ceremony's job) from USING it (this class), so it
+#     never depends on how the open happens.
+# --------------------------------------------------------------------------- #
+class OpsBackend:
+    """A :class:`SealedBackend` over ``tools.graph.settings_ops`` (in-process).
+
+    ``org`` is the caller's trusted organization (from
+    ``organization_scope_from_request``); it scopes every read and derives the
+    writeback prefix on every write. ``sealed_index`` is the store's released
+    32-byte secret from the unlock ceremony — required to USE the store; the
+    open itself is external.
+    """
+
+    def __init__(self, org: str | None, *, sealed_index: bytes | None = None):
+        self._org = org
+        self._sealed_index = sealed_index
+
+    def _ops(self):
+        from tools.graph import settings_ops
+        return settings_ops
+
+    def read_pepper(self) -> bytes:
+        ops = self._ops()
+        pepper = self._read_pepper_row(ops)
+        if pepper is not None:
+            return pepper
+        # get-or-create for this scope; write_by_key derives the <org>: prefix
+        # and lands the audited cold seal in the operator's personal store.
+        ops.write_by_key(
+            VAULT_AUDITED_SET_ID, VAULT_CREDENTIAL_REVISION, PEPPER_KEY,
+            {"value": secrets.token_bytes(_PEPPER_LEN).hex()},
+            org=self._org, state="raw",
+        )
+        pepper = self._read_pepper_row(ops)
+        if pepper is None:
+            raise SealedSettingsError(
+                "the pepper is absent immediately after mint — the audited "
+                "delegate is not warm (vault bring-up / auto-rhorp A-1)"
+            )
+        return pepper
+
+    def _read_pepper_row(self, ops) -> bytes | None:
+        members = ops.read_set(VAULT_AUDITED_SET_ID, org=self._org, peers=[])
+        member = next(
+            (m for m in members.members if _bare_key(m.key) == PEPPER_KEY), None
+        )
+        if member is None:
+            return None
+        failure = getattr(member, "vault_error", None)
+        if failure is not None:
+            if getattr(failure, "reason", "") == "no_key_holder":
+                raise VaultLocked(VaultLocked.COLD)
+            raise SealedSettingsError(
+                f"the pepper could not be released: {getattr(failure, 'reason', '?')}"
+            )
+        value = (member.payload or {}).get("value")
+        if not isinstance(value, str):
+            raise SealedSettingsError("the pepper row carries no value")
+        return bytes.fromhex(value)
+
+    def read_sealed_index(self, address: str, *, block: bool) -> bytes | None:
+        # The warm server cannot open a SECURED credential without the
+        # operator's factor; the released index is injected by the unlock.
+        if self._sealed_index is None:
+            raise VaultLocked(VaultLocked.PENDING)
+        return self._sealed_index
+
+    def mint_sealed_index(self, address: str, value_hex: str) -> None:
+        # Store creation (a cold personal-secured seal + factor-gated open) is
+        # the unlock ceremony's job, not the warm server's.
+        raise NotImplementedError(
+            "creating a store's sealed index is the unlock ceremony's job"
+        )
+
+    def read_row(self, row_key: str) -> str | None:
+        ops = self._ops()
+        members = ops.read_set(SEALED_ROW_SET_ID, org=self._org, peers=[])
+        for m in members.members:
+            if _bare_key(m.key) == row_key:
+                return (m.payload or {}).get("ciphertext")
+        return None
+
+    def write_row(self, row_key: str, ciphertext: str) -> str:
+        ops = self._ops()
+        ops.write_by_key(
+            SEALED_ROW_SET_ID, SEALED_ROW_REVISION, row_key,
+            {"ciphertext": ciphertext}, org=self._org, state="raw",
+        )
+        resolved = self.read_row(row_key)
+        return resolved if resolved is not None else ciphertext
+
+    def delete_row(self, row_key: str) -> None:
+        raise NotImplementedError("row deletion is a follow-up (tombstone)")
+
+    def list_rows(self, prefix: str) -> Iterable[tuple[str, str]]:
+        ops = self._ops()
+        members = ops.read_set(SEALED_ROW_SET_ID, org=self._org, peers=[])
+        for m in members.members:
+            if _bare_key(m.key).startswith(f"{prefix}."):
+                ciphertext = (m.payload or {}).get("ciphertext")
+                if isinstance(ciphertext, str):
+                    yield m.key, ciphertext
+
+
+# --------------------------------------------------------------------------- #
 # Vault bring-up hook (in-process, dashboard side).
 # --------------------------------------------------------------------------- #
 def ensure_pepper_minted() -> bool:

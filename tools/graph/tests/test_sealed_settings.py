@@ -590,3 +590,43 @@ def test_client_backend_pepper_get_or_create_by_suffix(monkeypatch):
     assert list(stub.rows) == ["autonomy:" + PEPPER_KEY]
     p2 = cb.read_pepper()
     assert p2 == p1 and stub.minted == 1  # never rotates
+
+
+def test_ops_backend_in_process_roundtrip(monkeypatch):
+    """OpsBackend drives SealedSettings in-process via settings_ops: audited
+    pepper get-or-create, sealed-row put/get/list org-scoped, with the store's
+    sealed index injected (opening it is the ceremony's job)."""
+    import types
+    from tools.graph import sealed_settings as ss
+    from tools.graph.sealed_settings import OpsBackend, SealedSettings, PEPPER_KEY
+
+    # A tiny fake settings_ops: audited + sealed-row sets as dicts, with the
+    # server deriving the <org>: writeback prefix on write_by_key.
+    class FakeOps:
+        VAULT = "autonomy.vault.audited"
+        ROWS = "autonomy.sealed-settings.row"
+        def __init__(self):
+            self.store = {self.VAULT: {}, self.ROWS: {}}
+        def read_set(self, set_id, *, org, peers=None):
+            from types import SimpleNamespace
+            members = [SimpleNamespace(key=k, payload={"value": v} if set_id==self.VAULT
+                                       else {"ciphertext": v}, vault_error=None)
+                       for k, v in self.store[set_id].items()]
+            return SimpleNamespace(members=members)
+        def write_by_key(self, set_id, rev, key, payload, *, org, state):
+            derived = f"{org}:{key}" if org else key   # server derives prefix
+            self.store[set_id][derived] = payload.get("value") or payload.get("ciphertext")
+    fake = FakeOps()
+    monkeypatch.setattr(OpsBackend, "_ops", lambda self: fake)
+
+    idx = bytes(range(32))
+    store = SealedSettings("notes", OpsBackend("autonomy", sealed_index=idx))
+    store.put("n1", {"title": "hello"})
+    store.put("n2", {"title": "world"})
+    assert store.get("n1") == {"title": "hello"}
+    assert {i.name: i.metadata for i in store.list()} == {
+        "n1": {"title": "hello"}, "n2": {"title": "world"}}
+    # pepper was get-or-created under the org writeback prefix
+    assert any(k.startswith("autonomy:" + PEPPER_KEY) for k in fake.store[FakeOps.VAULT])
+    # item rows are stored org-prefixed too
+    assert all(k.startswith("autonomy:") for k in fake.store[FakeOps.ROWS])
