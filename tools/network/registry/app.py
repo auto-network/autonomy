@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import hmac
 import json
@@ -2463,7 +2464,10 @@ def create_app(
         # loop. In production it binds the serve floating IP's :443 directly
         # and is itself the public serve edge — the socket peer is the native
         # client, no forward and no PROXY header.
-        from tools.network.relaykit.stream_wire import STREAM_IDLE_TIMEOUT
+        from tools.network.relaykit.stream_wire import (
+            STREAM_IDLE_TIMEOUT, STREAM_INGRESS_REBIND_SECONDS,
+        )
+        from .relay import _ops
         from .stream_ingress import start_stream_ingress
 
         idle = (
@@ -2472,16 +2476,53 @@ def create_app(
             else STREAM_IDLE_TIMEOUT
         )
 
-        @app.on_event("startup")
-        async def _start_stream_ingress():
-            app.state.stream_ingress = await start_stream_ingress(
+        async def _bind_ingress():
+            return await start_stream_ingress(
                 stream_ingress_host, stream_ingress_port,
                 host_routes=host_routes, abuse_limiter=abuse_limiter,
                 idle_timeout=idle, metrics=metrics,
             )
 
+        async def _retry_bind_ingress():
+            """Keep trying until the serve address exists, then serve."""
+            while True:
+                await asyncio.sleep(STREAM_INGRESS_REBIND_SECONDS)
+                try:
+                    app.state.stream_ingress = await _bind_ingress()
+                except OSError:
+                    continue
+                return
+
+        @app.on_event("startup")
+        async def _start_stream_ingress():
+            # The serve edge is a FEATURE of this process, not a precondition
+            # for it: the registry API and the relay have NO functional
+            # dependency on the serve address. So a bind failure — floating IP
+            # detached, netplan recycled without it, a boot race — degrades
+            # instead of killing the process. Previously this raised out of
+            # startup, systemd restarted, and an absent serve IP took the whole
+            # registry and relay down with the serve edge (outage 2026-09-03).
+            app.state.stream_ingress = None
+            app.state.stream_ingress_rebind = None
+            try:
+                app.state.stream_ingress = await _bind_ingress()
+            except OSError as exc:
+                _ops("stream.ingress.bind-failed",
+                     host=stream_ingress_host, port=stream_ingress_port,
+                     error=type(exc).__name__,
+                     detail="serving degraded; registry API and relay "
+                            "unaffected; retrying")
+                app.state.stream_ingress_rebind = asyncio.create_task(
+                    _retry_bind_ingress()
+                )
+
         @app.on_event("shutdown")
         async def _stop_stream_ingress():
+            task = getattr(app.state, "stream_ingress_rebind", None)
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
             server = getattr(app.state, "stream_ingress", None)
             if server is not None:
                 server.close()
