@@ -35,6 +35,7 @@
   //: whose detail balloon is showing.
   var unlockState = null;
   var unlockStateError = false;
+  var unlockStateLoading = false;
   var openFlagId = null;
   // The restart button's in-flight guard: true from the moment the root
   // ceremony succeeds until the restore finishes and the flags are re-read.
@@ -201,6 +202,11 @@
 
   function togglePanel() {
     panelOpen = !panelOpen;
+    // The flag tray reports volatile process state.  A value retained from a
+    // previous opening can be actively misleading after a reload or lock, so
+    // every open gets a fresh snapshot. loadUnlockState's in-flight guard also
+    // covers the panel renderer's first-load call below.
+    if (panelOpen) loadUnlockState();
     render();
   }
 
@@ -580,10 +586,16 @@
     }
   }
   function loadUnlockState() {
-    fetch('/api/identity/unlock-state', { headers: { 'Accept': 'application/json' } })
+    if (unlockStateLoading) return;
+    unlockStateLoading = true;
+    fetch('/api/identity/unlock-state', {
+      credentials: 'same-origin', cache: 'no-store',
+      headers: { 'Accept': 'application/json' },
+    })
       .then(function (res) { if (!res.ok) throw new Error('HTTP ' + res.status); return res.json(); })
       .then(function (body) { unlockState = body || {}; unlockStateError = false; if (panelOpen) render(); })
-      .catch(function () { unlockState = null; unlockStateError = true; if (panelOpen) render(); });
+      .catch(function () { unlockState = null; unlockStateError = true; if (panelOpen) render(); })
+      .finally(function () { unlockStateLoading = false; });
   }
 
   function _escHtml(s) {
