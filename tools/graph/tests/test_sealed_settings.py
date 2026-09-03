@@ -37,6 +37,7 @@ class FakeBackend:
         self.pepper_locked: str | None = None
         self.sealed_indexes: dict[str, bytes] = {}
         self.rows: dict[str, str] = {}
+        self.concurrent_winner: dict[str, str] = {}
         self.mint_calls = 0
         self.open_calls = 0
         self.locked: str | None = None
@@ -66,7 +67,15 @@ class FakeBackend:
         return None
 
     def write_row(self, row_key, ciphertext):
-        self.rows[row_key] = ciphertext
+        # A concurrent winner may already occupy this key. The fake mirrors
+        # the substrate: last write is stored, and the AUTHORITATIVE (stored)
+        # ciphertext is returned so the caller can consume the write-result.
+        winner = self.concurrent_winner.pop(row_key, None)
+        if winner is not None:
+            self.rows[row_key] = winner
+        else:
+            self.rows[row_key] = ciphertext
+        return self.rows[row_key]
 
     def delete_row(self, row_key):
         self.rows.pop(row_key, None)
@@ -241,7 +250,7 @@ def test_unicode_names_normalized():
     assert len(list(store.list())) == 1
 
 
-def test_client_backend_resolves_org_prefixed_sealed_index():
+def test_client_backend_resolves_org_prefixed_sealed_index(monkeypatch):
     """The vault-settings seam stores session mints org-prefixed, and the
     vault_open rendezvous takes the BARE suffix (the server derives the org
     prefix). ClientBackend must detect the prefixed row, open with the bare
@@ -250,6 +259,10 @@ def test_client_backend_resolves_org_prefixed_sealed_index():
     from types import SimpleNamespace
 
     from tools.graph.sealed_settings import ClientBackend
+
+    # This test exercises the request path; neutralize the /run/secrets reuse
+    # so a real released index on the host cannot short-circuit it.
+    monkeypatch.setattr(ClientBackend, "_released_path", staticmethod(lambda _a: None))
 
     address = "gpZ0yFl8HO0uX63yAtFOtyMxp3HEgXrO1onEcTRUhCk"
 
@@ -304,6 +317,7 @@ def test_layer_reads_back_server_prefixed_rows():
 
         def write_row(self, row_key, ciphertext):
             self.rows["org:" + row_key] = ciphertext
+            return ciphertext
 
     backend = PrefixingBackend()
     store = SealedSettings("pm", backend)
@@ -355,3 +369,47 @@ def test_client_backend_reuses_released_sealed_index_without_reapproval(monkeypa
     got = ClientBackend(stub).read_sealed_index(address, block=False)
     assert got == bytes(32)
     assert stub.opened is False
+
+
+def test_put_returns_won_outcome_uncontended():
+    from tools.graph.sealed_settings import WriteOutcome
+
+    store = SealedSettings("pm", FakeBackend())
+    outcome = store.put("Chase", {"u": "me"})
+    assert isinstance(outcome, WriteOutcome)
+    assert outcome.won is True
+    assert outcome.value == {"u": "me"}
+
+
+def test_put_consumes_authoritative_value_when_it_loses():
+    """A concurrent writer's row is authoritative: put() reports won=False and
+    returns THAT value, so the loser converges without any timestamp logic."""
+    backend = FakeBackend()
+    store = SealedSettings("pm", backend)
+    store.put("Chase", {"u": "me"})  # establish the store + a first value
+
+    # Arrange a concurrent winner for the next write: seal a rival value under
+    # the same k_meta/row so it decrypts, and make the backend resolve to it.
+    from tools.graph.sealed_settings import _seal
+    k_meta = store._keys()[1]
+    row_key = store._row_key("Chase")
+    rival_ct = _seal(k_meta, __import__("json").dumps(
+        {"name": "Chase", "metadata": {"u": "rival"}},
+        sort_keys=True, separators=(",", ":")).encode(), row_key.encode())
+    backend.concurrent_winner[row_key] = rival_ct
+
+    outcome = store.put("Chase", {"u": "mine"})
+    assert outcome.won is False
+    assert outcome.value == {"u": "rival"}          # converged on the winner
+    assert store.get("Chase") == {"u": "rival"}     # and a read agrees
+
+
+def test_put_never_compares_timestamps():
+    """The outcome is derived from the returned authoritative ciphertext, so a
+    backend that provides no time ordering still yields a definite result."""
+    store = SealedSettings("notes", FakeBackend())
+    a = store.put("n", {"v": 1})
+    b = store.put("n", {"v": 2})  # overwrite
+    assert a.won and b.won
+    assert b.value == {"v": 2}
+    assert store.get("n") == {"v": 2}

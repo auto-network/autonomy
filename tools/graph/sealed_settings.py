@@ -35,6 +35,18 @@ Every address this layer writes is opaque (crib ``1e005d5c-c11`` §23/§24):
   incomputable from a cold dump. It is never re-minted — rotation would
   orphan every store address.
 
+## Per-row convergence, no central index
+
+There is no manifest to compare-and-swap: each item is an independent row, so
+concurrent edits never contend on one blob. A writer does not guess whether it
+won — :meth:`SealedSettings.put` returns a :class:`WriteOutcome` built by
+consuming the substrate's authoritative write-result (the value a read now
+resolves to), never by comparing timestamps or merging. Because every seal
+carries a fresh nonce, the authoritative ciphertext identifies the physical
+write: two racing writers converge on one value and each learns whether its
+own survived. A referenced row that has not yet replicated is *pending*, never
+*absent* — but the referencing mechanism (audience sets) is a separate layer.
+
 ## No new crypto
 
 Keys are derived from the 32-byte sealed index with HKDF-SHA-256 and values
@@ -229,8 +241,16 @@ class SealedBackend(Protocol):
     def read_row(self, row_key: str) -> str | None:
         """Return a row's ``ciphertext`` string, or ``None`` if absent."""
 
-    def write_row(self, row_key: str, ciphertext: str) -> None:
-        """Create-or-update a row's ``ciphertext``."""
+    def write_row(self, row_key: str, ciphertext: str) -> str:
+        """Create-or-update a row, and return the row's AUTHORITATIVE
+        ciphertext — the value a subsequent read resolves to.
+
+        This is how a writer consumes the substrate's write-result without
+        comparing timestamps or running conflict logic: when a concurrent
+        writer's row is the one that resolves, that writer's ciphertext is
+        returned here, not the one just passed in. In the uncontended case
+        the return equals the argument.
+        """
 
     def delete_row(self, row_key: str) -> None:
         """Remove a row (best-effort; absent is not an error)."""
@@ -250,6 +270,27 @@ class SealedItem:
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return f"SealedItem(name={self.name!r})"
+
+
+class WriteOutcome:
+    """What a :meth:`SealedSettings.put` actually resulted in.
+
+    ``won`` is whether the caller's own write is the one a read now resolves
+    to; ``value`` is the AUTHORITATIVE metadata either way — the caller's when
+    it won, a concurrent writer's when it lost. Both are derived by consuming
+    the substrate's authoritative write-result (the unique per-seal nonce
+    makes each physical write identifiable), never by comparing timestamps or
+    merging. A loser converges simply by keeping ``value``.
+    """
+
+    __slots__ = ("won", "value")
+
+    def __init__(self, won: bool, value):
+        self.won = won
+        self.value = value
+
+    def __repr__(self) -> str:  # pragma: no cover - debug aid
+        return f"WriteOutcome(won={self.won!r})"
 
 
 # --------------------------------------------------------------------------- #
@@ -280,14 +321,27 @@ class SealedSettings:
             return None
         return self._open_item(k_meta, self._row_key(name), ciphertext).metadata
 
-    def put(self, name: str, metadata) -> None:
+    def put(self, name: str, metadata) -> WriteOutcome:
+        """Store ``metadata`` under ``name`` and report the converged result.
+
+        Returns a :class:`WriteOutcome`: ``won`` says whether this write is
+        the one a read now resolves to, and ``value`` is the authoritative
+        metadata regardless (a concurrent writer's if this write lost). The
+        result is consumed from the substrate — the returned authoritative
+        ciphertext — not derived from any clock, so two racing writers
+        converge on one value and each learns whether its own write survived.
+        """
         _, k_meta = self._keys()
         row_key = self._row_key(name)
         payload = json.dumps(
             {"name": name, "metadata": metadata},
             sort_keys=True, separators=(",", ":"),
         ).encode("utf-8")
-        self._backend.write_row(row_key, _seal(k_meta, payload, self._aad(row_key)))
+        mine = _seal(k_meta, payload, self._aad(row_key))
+        authoritative = self._backend.write_row(row_key, mine)
+        won = authoritative == mine
+        value = self._open_item(k_meta, row_key, authoritative).metadata
+        return WriteOutcome(won, value)
 
     def delete(self, name: str) -> None:
         self._keys()  # ensure the store is unlocked before we mutate it
@@ -501,7 +555,7 @@ class ClientBackend:
                 return (member.payload or {}).get("ciphertext")
         return None
 
-    def write_row(self, row_key: str, ciphertext: str) -> None:
+    def write_row(self, row_key: str, ciphertext: str) -> str:
         # Write the BARE key; the server derives this session's <org>: prefix
         # for the personal-homed org-writeback set. The header is omitted so
         # the bearer names the org (a "personal" header is refused).
@@ -509,6 +563,12 @@ class ClientBackend:
             SEALED_ROW_SET_ID, SEALED_ROW_REVISION, row_key,
             {"ciphertext": ciphertext}, state="raw", org=None,
         )
+        # Consume the authoritative write-result: read the row back and return
+        # whatever resolves. A concurrent writer that committed after us makes
+        # its ciphertext authoritative, and returning it here is how put()
+        # learns it lost and converges — no timestamp compared, no merge done.
+        resolved = self.read_row(row_key)
+        return resolved if resolved is not None else ciphertext
 
     def delete_row(self, row_key: str) -> None:
         # No hard-delete on the HTTP surface; a tombstone write (empty payload
