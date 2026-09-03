@@ -41,9 +41,11 @@ async function main() {
   assert.equal(w.document.querySelector('.pl-expiry'),null,'non-expiring share rendered a badge');
   let viewed = null;
   w.navigateTo = (url) => { viewed = url; };
+  assert.equal(w.document.querySelector('[data-action="visit"]').getAttribute('aria-label'),'Open public link');
   w.document.querySelector('[data-action="view"]').click();
   assert.equal(viewed, '/graph/n1', 'View did not use the in-platform target');
-  assert.equal(w.document.querySelector('[data-action="visit"]').getAttribute('aria-label'),'Open public link');
+  assert.equal(w.document.querySelector('[data-testid="org-settings"]'), null,
+    'View left the Settings dialog covering its destination');
   console.log('PASS: approved Published Services & Links view state and transitions');
 }
 main().catch((e)=>{console.error(e);process.exit(1);});

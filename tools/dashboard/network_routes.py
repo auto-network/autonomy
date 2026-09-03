@@ -2248,7 +2248,10 @@ def _share_platform_url(target_type: object, target_uuid: object) -> str:
         "note": "/graph/",
         "design": "/design/",
         "present": "/present/",
-        "mission": "/mission/",
+        # Share grants still resolve through the legacy/freeform Mission store.
+        # Structured Mission Control uses /mission/, but those IDs are not what
+        # the current link-grant ceremony records.
+        "mission": "/missions/",
     }.get(target_type, "/graph/")
     return prefix + urllib.parse.quote(str(target_uuid or ""), safe="")
 
