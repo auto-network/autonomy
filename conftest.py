@@ -90,6 +90,30 @@ def _isolate_dashboard_browser_module(request):
             os.environ["AGENT_BROWSER_SESSION"] = previous
 
 
+@pytest.fixture(autouse=True)
+def _isolate_graph_connection_pool():
+    """Reset the process-global graph connection pool around every test.
+
+    pytest-xdist runs many tests per worker PROCESS. ``GraphDB`` keeps a
+    process-global pool of open connections keyed by db path (an efficiency
+    cache, correct for a long-lived server, wrong for a test process). Each
+    test already builds its own tmp db, but a pooled handle from a prior test
+    survives and gets reused — so a write lands in the wrong file (a later
+    assertion sees ``0 rows``) or collides with a prior test's rows
+    (``sqlite3.IntegrityError: UNIQUE constraint``). Clearing the pool before
+    and after each test stops the sharing without touching within-test use.
+    See the pitfall note graph://e4891727-d3b.
+    """
+    try:
+        from tools.graph.db import GraphDB
+    except Exception:
+        yield
+        return
+    GraphDB.close_all_pooled()
+    yield
+    GraphDB.close_all_pooled()
+
+
 # ── Baseline failure quarantine (2026-08-17) ─────────────────────────────────
 # Pre-existing failures on master are SKIPPED here so the suite runs green and
 # sessions stop re-running tests to decide "is this failure mine or the tree's?"

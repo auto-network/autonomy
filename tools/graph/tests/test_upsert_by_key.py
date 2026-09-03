@@ -27,6 +27,14 @@ from uuid import uuid4
 import pytest
 
 from tools.graph import settings_ops
+# Register the surface schemas (operator-activity, presence) at COLLECTION time,
+# in every xdist worker, before any test runs. These tests otherwise lazy-import
+# surface inside the test body; under parallel distribution that left a window
+# where a write validated against an unregistered schema — and _record_operator_
+# input swallows the resulting error, so the failure surfaced only as "0 rows" /
+# "unknown schema" rather than a clear traceback. (The connection-pool half of
+# this footgun is handled centrally by the root conftest autouse fixture.)
+import tools.graph.surface  # noqa: F401 — imported for its schema registrations
 from tools.graph.schemas.registry import (
     SCHEMAS,
     SchemaValidationError,
