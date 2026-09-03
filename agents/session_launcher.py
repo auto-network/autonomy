@@ -1717,15 +1717,26 @@ def launch_session(
     #     published, tailscale-bound 8080 does not answer;
     #  3. a dev-box node (host process) on the default bridge -> host.docker.internal
     #     + an --add-host entry so DNS resolves to the docker bridge gateway.
+    #  ``beads_dolt_host`` overrides where the container-local ``bd`` CLI reaches
+    #  the shared Dolt SQL server (honored var is BEADS_DOLT_SERVER_HOST; the Go
+    #  bd ignores DOLT_SQL_HOST/BEADS_DOLT_HOST/DOLT_HOST). The shared
+    #  ``.beads/config.yaml`` pins ``dolt.host: 172.17.0.1`` (docker0), reachable
+    #  from a host-netns or default-bridge container but NOT from the compose
+    #  netns — so a compose-networked session must be pointed at the Dolt
+    #  server's compose-network DNS name instead (auto f25941a6-a15). Never edit
+    #  the shared config: host-net sessions still need 172.17.0.1.
     if network_host:
         network_args = ["--network=host"]
         graph_api = "https://localhost:8080"
+        beads_dolt_host = None
     elif not _topo.is_host_process and _topo.network:
         network_args = ["--network", _topo.network]
         graph_api = "https://dashboard:8080"
+        beads_dolt_host = "dolt"
     else:
         network_args = ["--add-host=host.docker.internal:host-gateway"]
         graph_api = "https://host.docker.internal:8080"
+        beads_dolt_host = None
 
     # ── Assemble docker command ────────────────────────────────
     cmd: list[str] = [
@@ -1750,6 +1761,8 @@ def launch_session(
             (metadata or {}).get("graph_org")
             or (metadata or {}).get("org")
             or (metadata or {}).get("graph_project")),
+        *(["-e", f"BEADS_DOLT_SERVER_HOST={beads_dolt_host}"]
+          if beads_dolt_host else []),
         "-e", f"GRAPH_API={graph_api}",
         "-e", f"CROSSTALK_TOKEN={raw_token}",
         "-e", "CODEX_HOME=/home/agent/.codex",
