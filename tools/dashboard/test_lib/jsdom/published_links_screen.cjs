@@ -12,7 +12,7 @@ async function main() {
   const w = dom.window;
   w.matchMedia = () => ({matches:false,addListener(){},removeListener(){},addEventListener(){},removeEventListener(){}});
   const calls = [];
-  const data = {service_warning:'Automatic renewal failed; certificate expires in 2 days.',services:[{reservation_id:'r1',origin:'https://oss-insights.persona-long.serve.auto.network',persona_label:'persona-long',app_label:'oss-insights',state:'active',session_title:'OSS Insights UI — repository analytics dashboard',target:{session_id:'auto-1',port:3000}}],shares:[{token:'a'.repeat(32),target_uuid:'n1',type:'note',title:'Architecture',description:'Relay boundaries',url:'https://relay.test/l/a',expires_at:null,expired:false}]};
+  const data = {service_warning:'Automatic renewal failed; certificate expires in 2 days.',services:[{reservation_id:'r1',origin:'https://oss-insights.persona-long.serve.auto.network',persona_label:'persona-long',app_label:'oss-insights',state:'active',session_title:'OSS Insights UI — repository analytics dashboard',target:{session_id:'auto-1',port:3000}}],shares:[{token:'a'.repeat(32),target_uuid:'n1',type:'note',title:'Architecture',description:'Relay boundaries',url:'https://relay.test/l/a',platform_url:'/graph/n1',expires_at:null,expired:false}]};
   w.fetch = async (url, options={}) => {
     calls.push([url, options]);
     if (url === '/api/orgs/anchore') return {ok:true,json:async()=>({identity_resolved:{name:'Anchore',favicon:'/static/orgs/anchore.png'}})};
@@ -39,6 +39,11 @@ async function main() {
   w.document.querySelector('[data-tab="shares"]').click();
   assert.equal(w.document.querySelector('.pl-share-title').textContent,'Architecture');
   assert.equal(w.document.querySelector('.pl-expiry'),null,'non-expiring share rendered a badge');
+  let viewed = null;
+  w.navigateTo = (url) => { viewed = url; };
+  w.document.querySelector('[data-action="view"]').click();
+  assert.equal(viewed, '/graph/n1', 'View did not use the in-platform target');
+  assert.equal(w.document.querySelector('[data-action="visit"]').getAttribute('aria-label'),'Open public link');
   console.log('PASS: approved Published Services & Links view state and transitions');
 }
 main().catch((e)=>{console.error(e);process.exit(1);});

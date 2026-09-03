@@ -267,6 +267,20 @@ def test_service_gateway_status_requires_operator_and_reports_runtime(
 
 
 class TestServiceTargetApiContract:
+    @pytest.mark.parametrize(
+        ("target_type", "expected"),
+        [
+            ("note", "/graph/asset-id"),
+            ("design", "/design/asset-id"),
+            ("present", "/present/asset-id"),
+            ("mission", "/mission/asset-id"),
+        ],
+    )
+    def test_share_platform_url_uses_canonical_internal_route(
+        self, target_type, expected
+    ):
+        assert network_routes._share_platform_url(target_type, "asset-id") == expected
+
     def test_published_links_projects_settings_and_session_title(self, target_api):
         client, _events, *_ = target_api
         _put(client)
