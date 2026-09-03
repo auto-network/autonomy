@@ -2214,6 +2214,115 @@ def orphans_of(set_id: str, *, org: str) -> list[CheckFinding]:
     return findings
 
 
+@dataclass
+class CompactCandidate:
+    """One override row whose contribution is fully shadowed by a later
+    override on the same base -- read_set's field-by-field merge already
+    ignores it, so deprecating it changes nothing any resolve returns.
+
+    Not just "keep only the newest": json_merge_patch is field-level, so an
+    older override can still be the last word on a field a newer one never
+    touches. A row only qualifies here when every field it sets is also set
+    by something written after it in the same override group.
+    """
+    id: str
+    key: str
+    created_at: str
+    #: The row (in the same group) that renders every one of this row's
+    #: fields moot -- passed to deprecate_setting() as the successor.
+    shadowed_by: str
+    fields: tuple[str, ...]
+
+
+def compact_candidates(
+    set_id: str, *, key: str | None = None, org: str,
+) -> list[CompactCandidate]:
+    """Override rows in *set_id* safe to deprecate without changing any
+    resolved value -- the cleanup command's read-only survey.
+
+    Groups live (non-deprecated) overrides by the base they supersede, in
+    read_set's own apply order (created_at, then insertion order). A row
+    qualifies when every field name in its payload also appears in some
+    STRICTLY LATER row in its group; the newest row in a group never
+    qualifies, since nothing comes after it to shadow it. An unparseable
+    payload is left alone rather than guessed about.
+
+    Pure read -- makes no changes. Pass the result to compact_apply() to
+    actually deprecate them.
+    """
+    org = _resolve_org_arg(org)
+    db = _open(org, set_id, for_read=True)
+    try:
+        query = (
+            "SELECT rowid AS _rowid, * FROM settings WHERE set_id = ? "
+            "  AND supersedes IS NOT NULL AND deprecated = 0"
+        )
+        params: tuple = (set_id,)
+        if key is not None:
+            query += " AND key = ?"
+            params = (set_id, key)
+        rows = db.conn.execute(query, params).fetchall()
+    finally:
+        db.close()
+
+    def _payload_fields(payload_text: str) -> tuple[str, ...] | None:
+        # A vaulted row's payload is an opaque sealed-locator STRING (a
+        # whole-value token, not a JSON object) -- json.loads gives back a
+        # str, not a dict. There are no field names to compare; the entire
+        # sealed value is replaced whole by any later write in the group, so
+        # treat it as exactly one field under a fixed sentinel name. A plain
+        # settings payload decodes to a real dict, whose actual keys are
+        # compared field-by-field as usual.
+        try:
+            parsed = json.loads(payload_text)
+        except (TypeError, ValueError):
+            return None
+        if isinstance(parsed, dict):
+            return tuple(parsed.keys())
+        return ("__opaque_value__",)
+
+    groups: dict[tuple[str, str], list] = {}
+    for row in rows:
+        groups.setdefault((row["key"], row["supersedes"]), []).append(row)
+
+    candidates: list[CompactCandidate] = []
+    for (grp_key, _base_id), group_rows in groups.items():
+        ordered = sorted(
+            group_rows, key=lambda r: (r["created_at"] or "", r["_rowid"])
+        )
+        if len(ordered) < 2:
+            continue
+        for i, row in enumerate(ordered[:-1]):
+            fields = _payload_fields(row["payload"])
+            if fields is None:
+                continue
+            later_fields: set[str] = set()
+            for later in ordered[i + 1:]:
+                later_parsed = _payload_fields(later["payload"])
+                if later_parsed is not None:
+                    later_fields.update(later_parsed)
+            if fields and set(fields).issubset(later_fields):
+                candidates.append(CompactCandidate(
+                    id=row["id"], key=grp_key,
+                    created_at=row["created_at"] or "",
+                    shadowed_by=ordered[-1]["id"],
+                    fields=fields,
+                ))
+    return candidates
+
+
+def compact_apply(candidates: list[CompactCandidate], *, org: str) -> int:
+    """Deprecate every candidate compact_candidates() found.
+
+    Reversible (undeprecate_setting) -- payloads are untouched, only
+    publication_state's deprecated flag and successor_id change. Returns
+    the count deprecated.
+    """
+    for c in candidates:
+        deprecate_setting(c.id, successor_id=c.shadowed_by, org=org)
+    return len(candidates)
+
+
 def _assert_home(set_id: str | None, org: str | None) -> None:
     """Refuse a Setting routed to a database its schema does not live in.
 
