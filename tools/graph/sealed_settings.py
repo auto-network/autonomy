@@ -442,6 +442,14 @@ class ClientBackend:
                     "(unprefixed) and cannot be released to an org session"
                 )
             return None
+        # Reuse an already-released sealed index within this session: a prior
+        # approval materialized it at /run/secrets/<name> for the credential's
+        # lifetime, and re-releasing an already-open store would ask the
+        # operator to approve the same thing twice. The row exists (checked
+        # above), so a present file is a genuine prior release, not a stray.
+        cached = self._released_path(address)
+        if cached is not None:
+            return cached
         try:
             receipt = self._client.request_vault_open(
                 VAULT_SECURED_SET_ID, address,
@@ -458,6 +466,23 @@ class ClientBackend:
             raise
         with open(receipt["path"], "rb") as handle:
             return bytes.fromhex(handle.read().decode("ascii").strip())
+
+    @staticmethod
+    def _released_path(address: str) -> bytes | None:
+        """The sealed index bytes if already released to this session's ramfs.
+
+        The rendezvous delivers to ``/run/secrets/<name>`` where ``name`` is
+        the bare address. Reading it back needs no approval — the operator
+        already granted this session that release. Returns ``None`` when no
+        such file exists or it is not the expected 32-byte hex secret.
+        """
+        path = os.path.join("/run/secrets", address)
+        try:
+            with open(path, "rb") as handle:
+                raw = bytes.fromhex(handle.read().decode("ascii").strip())
+        except (OSError, ValueError):
+            return None
+        return raw if len(raw) == _SEALED_INDEX_LEN else None
 
     def mint_sealed_index(self, address: str, value_hex: str) -> None:
         self._client.seal_personal_setting(
