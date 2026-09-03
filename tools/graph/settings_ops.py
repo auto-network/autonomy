@@ -748,6 +748,11 @@ def set_personal_delegate_audited_key(private_hex: "str | None") -> None:
     _personal_delegate_audited_key = private_hex
 
 
+def personal_delegate_audited_is_warm() -> bool:
+    """Whether this process can open personal audited Setting payloads."""
+    return _personal_delegate_audited_key is not None
+
+
 def _make_snapshot(
     set_id: str,
     schema_revision: int,

@@ -1,6 +1,8 @@
 import json
 import sys
 
+import pytest
+
 from tools.dashboard import service_certificate as certs
 
 
@@ -144,3 +146,21 @@ def test_staging_cli_proves_issuance_without_activation(monkeypatch, capsys):
 
     assert calls == [("obtain", "anchore", "persona-abc", True)]
     assert json.loads(capsys.readouterr().out)["staging"] is True
+
+
+@pytest.mark.asyncio
+async def test_production_issue_refuses_cold_vault_before_contacting_acme(monkeypatch):
+    monkeypatch.setattr(
+        certs.settings_ops, "personal_delegate_audited_is_warm", lambda: False
+    )
+    calls = []
+
+    async def obtain(*_args, **_kwargs):
+        calls.append(True)
+
+    monkeypatch.setattr(certs, "obtain", obtain)
+
+    with pytest.raises(certs.ServiceCertificateError, match="vault is locked"):
+        await certs.issue("anchore", "persona-abc", staging=False)
+
+    assert calls == []
