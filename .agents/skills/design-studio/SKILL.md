@@ -16,12 +16,15 @@ iteration must pass the stable ID.
 Search the Design Studio library before creating anything:
 
 ```bash
-curl -sk 'https://localhost:8080/api/design-studio/designs?limit=500&sort=updated'
+graph ui-design --list
 ```
 
-Match the intended title exactly. If it exists, pull it down and append a
-revision. New exact-name designs are rejected. Use `--force` only when the
-duplicate is deliberate, never as a convenience after a conflict.
+Pass an optional query to narrow the listing, for example
+`graph ui-design --list "Exact display title"`. The CLI authenticates with the
+container session's CrossTalk token and the dashboard returns only that org's
+designs. Match the intended title exactly. If it exists, pull it down and
+append a revision. New exact-name designs are rejected. Use `--force` only
+when the duplicate is deliberate, never as a convenience after a conflict.
 
 ## Create or watch a design
 
@@ -50,22 +53,17 @@ behavior with Tailwind's `md:` breakpoint.
 
 ## Pull down and revise an existing design
 
-1. Read the design series and note `latest_revision_id`:
+1. Pull the latest revision of the stable design into a working directory:
 
    ```bash
-   curl -sk https://localhost:8080/api/design-studio/designs/<design_id>
+   graph ui-design --pull <design_id> /path/to/design-dir
    ```
 
-2. Fetch that revision, including HTML, fixture, and ordered revision IDs:
+   The CLI resolves the latest revision, writes each variant as
+   `<variants[].id>.html`, writes `fixture.json` when present, and prints the
+   exact append command.
 
-   ```bash
-   curl -sk https://localhost:8080/api/design/<latest_revision_id>/full
-   ```
-
-3. Save each `variants[].html` as `<variants[].id>.html` in a working
-   directory and save `fixture` when present.
-
-4. Publish back to the same stable design, preserving the display title unless
+2. Publish back to the same stable design, preserving the display title unless
    the design is intentionally being renamed:
 
    ```bash
