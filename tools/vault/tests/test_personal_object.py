@@ -54,6 +54,12 @@ def isolated_registry_and_seams():
 def personal_world(tmp_path, monkeypatch):
     db_path = tmp_path / "personal.db"
     monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
+    # personal.db roots beside the orgs tree (AUTONOMY_ORGS_DIR), not under
+    # AUTONOMY_DATA_ROOT. Pin it per-test so a sibling suite's per-worker
+    # AUTONOMY_ORGS_DIR (dashboard hermetic stores) can't share one settings db
+    # across the xdist worker (github.token collisions / stale reads).
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_API", raising=False)
     monkeypatch.setattr(key_holder, "_scoped_db", lambda _set_id, _org: db_path)
@@ -253,6 +259,7 @@ def test_personal_audited_setting_seals_cold_with_published_delegate(
 
     db_path = tmp_path / "personal.db"
     monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_API", raising=False)
     monkeypatch.setattr(key_holder, "_scoped_db", lambda _set_id, _org: db_path)
