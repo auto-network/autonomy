@@ -273,7 +273,7 @@ class TestServiceTargetApiContract:
             ("note", "/graph/asset-id"),
             ("design", "/design/asset-id"),
             ("present", "/present/asset-id"),
-            ("mission", "/mission/asset-id"),
+            ("mission", "/missions/asset-id"),
         ],
     )
     def test_share_platform_url_uses_canonical_internal_route(
