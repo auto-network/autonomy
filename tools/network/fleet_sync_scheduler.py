@@ -157,6 +157,32 @@ class FleetSyncSchemaMismatch(FleetSyncProtocolError):
     """
 
 
+class FleetSyncStreamSilence(FleetSyncProtocolError):
+    """The peer's stream went silent past the decided liveness bound.
+
+    This is the application-level liveness policy (auto-fzy8s), scoped to
+    the one class the transport cannot see: a serve wedged while its event
+    loop stays alive and keeps answering websocket pongs. Dead and frozen
+    peers are already handled beneath it — the direct channel's pinned
+    ping/pong breaks the socket and unblocks the receive in
+    ``ping_interval + ping_timeout + close_timeout`` (measured 50.0s), so
+    the inter-frame bound sits just above that. The exception type is the
+    telemetry error code, so a wedged peer is named on the money line
+    instead of sitting invisibly at ``online=1`` with zero deltas.
+    """
+
+
+class FleetSyncFirstFrameSilence(FleetSyncStreamSilence):
+    """No first frame within the pull's checkpoint-build allowance.
+
+    The one legitimately long silence in the protocol: a checkpoint serve
+    sends nothing between the pull request and ``checkpoint.begin`` for
+    the whole build (~60s/GB measured). The allowance is sized for that
+    phase; every later gap is a single bounded DB query or file read and
+    gets the much tighter inter-frame bound.
+    """
+
+
 @dataclass(frozen=True)
 class FleetSyncRuntimeConfig:
     """Runtime material the unlocked fleet-identity boundary must supply.
@@ -195,6 +221,16 @@ class FleetSyncRuntimeConfig:
     #: Bounded pulls per round; the stalest-first ranking below decides
     #: which peers fill the slots. Zero or negative means unbounded.
     max_concurrent_pulls: int = 3
+    #: Stream liveness policy (auto-fzy8s). The first frame of a pull may
+    #: lag for an entire server-side checkpoint build (~60s/GB measured),
+    #: so it gets its own allowance: 900s covers a ~15GB database, an
+    #: order of magnitude above today's production size. Every later gap
+    #: is structurally one DB query or one <=4MB file read; 60s is
+    #: generous under load and sits just above the transport keepalive's
+    #: measured 50s recovery, so a dead transport still surfaces as the
+    #: more diagnostic ConnectionClosed rather than a silence timeout.
+    pull_first_frame_allowance_s: float = 900.0
+    pull_stream_silence_limit_s: float = 60.0
 
 
 def discover_org_sync_scopes() -> dict[str, Path]:
@@ -680,6 +716,48 @@ def decode_done(raw: bytes) -> tuple[str, int, str, int, tuple[str, str, int] | 
 def _digest_add(digest, message: bytes) -> None:
     digest.update(len(message).to_bytes(8, "big"))
     digest.update(message)
+
+
+async def bounded_stream_frames(
+    channel, *, first_allowance_s: float, silence_limit_s: float
+):
+    """Yield ``recv_message_stream`` items, bounding each silent wait.
+
+    The timeout measures exactly the await for the peer's next frame —
+    the consumer's own work between frames (applying a transaction,
+    writing a checkpoint file) never counts against the peer. A first
+    silence past the bound raises :class:`FleetSyncFirstFrameSilence`
+    (the checkpoint-build allowance); any later one raises
+    :class:`FleetSyncStreamSilence`. On timeout the stream is abandoned,
+    never resumed — the caller tears the channel down.
+
+    One transport nuance: the serving channel holds a one-item
+    final-boundary lookahead (``_serve_channel_records``), so delivery
+    lags production by one frame. A serve wedged after producing exactly
+    one frame is therefore observed here as FIRST-frame silence and gets
+    the larger allowance — still bounded, just at the other constant.
+    """
+    stream = channel.recv_message_stream().__aiter__()
+    allowance = first_allowance_s
+    first = True
+    while True:
+        try:
+            item = await asyncio.wait_for(stream.__anext__(), allowance)
+        except StopAsyncIteration:
+            return
+        except asyncio.TimeoutError:
+            if first:
+                raise FleetSyncFirstFrameSilence(
+                    "peer served no frame within the "
+                    f"{allowance:.0f}s first-frame allowance"
+                ) from None
+            raise FleetSyncStreamSilence(
+                "peer stream went silent past the "
+                f"{allowance:.0f}s inter-frame bound"
+            ) from None
+        first = False
+        allowance = silence_limit_s
+        yield item
 
 
 class SQLiteFleetSyncStore:
@@ -1491,7 +1569,13 @@ class FleetSyncScheduler:
                 assert last_error is not None
                 raise last_error
             await channel.send_message(encode_blob_request(digests))
-            async for frame, _final in channel.recv_message_stream():
+            # Blob serves have no build phase; the inter-frame bound
+            # covers both positions.
+            async for frame, _final in bounded_stream_frames(
+                channel,
+                first_allowance_s=self.config.pull_stream_silence_limit_s,
+                silence_limit_s=self.config.pull_stream_silence_limit_s,
+            ):
                 self.authenticator.authorize(machine_pub)
                 await asyncio.to_thread(receiver.feed, frame)
                 if receiver.done:
@@ -1712,7 +1796,11 @@ class FleetSyncScheduler:
                         "fleet transaction is incomplete or out of order"
                     )
 
-            async for message, stream_final in channel.recv_message_stream():
+            async for message, stream_final in bounded_stream_frames(
+                channel,
+                first_allowance_s=self.config.pull_first_frame_allowance_s,
+                silence_limit_s=self.config.pull_stream_silence_limit_s,
+            ):
                 # A kick that lands after the hello revokes this live session
                 # before another application message is accepted.
                 self.authenticator.authorize(machine_pub)
@@ -1794,6 +1882,11 @@ class FleetSyncScheduler:
                 if message.startswith(b"{"):
                     control = _json_loose(message)
                     kind = control.get("kind")
+                    if kind == "keepalive":
+                        # Tolerated, never emitted (yet): a future server
+                        # may keep a long build phase live with these.
+                        # They are outside the summary digest and count.
+                        continue
                     if kind == "checkpoint.begin":
                         if checkpoint_stage is not None:
                             raise FleetSyncProtocolError(
@@ -1894,7 +1987,9 @@ class FleetSyncScheduler:
             if (
                 protocol_version >= 4
                 and received == 0
-                and not isinstance(exc, FleetSyncSchemaMismatch)
+                and not isinstance(
+                    exc, (FleetSyncSchemaMismatch, FleetSyncStreamSilence)
+                )
             ):
                 # The peer's server closed the pull without serving a single
                 # frame — the signature of pre-v4 software rejecting the

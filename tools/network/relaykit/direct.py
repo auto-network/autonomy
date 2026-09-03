@@ -97,8 +97,13 @@ class DirectChannelServer:
         return len(self._server.connections) if self._server is not None else 0
 
     async def start(self) -> int:
+        # ping/pong pinned, not defaulted: fleet sync's stream liveness
+        # policy (auto-fzy8s) counts on this layer to detect dead and
+        # frozen peers, so a websockets upgrade must never silently
+        # disable it.
         self._server = await websockets.serve(
-            self._handle, self._host, self._port, max_size=2**22, compression=None
+            self._handle, self._host, self._port, max_size=2**22,
+            compression=None, ping_interval=20, ping_timeout=20,
         )
         self._port = self._server.sockets[0].getsockname()[1]
         return self._port

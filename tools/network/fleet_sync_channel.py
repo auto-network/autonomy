@@ -457,8 +457,14 @@ async def fleet_direct_connect(
     """Open one mutually authenticated fleet channel over a direct address."""
 
     async def attempt() -> ViewerChannel:
+        # ping/pong pinned, not defaulted: the sync stream liveness policy
+        # (auto-fzy8s) counts on this layer to break the socket for dead
+        # and frozen peers — recv unblocks in ping_interval + ping_timeout
+        # + close_timeout (measured 50.0s) — leaving only wedged-but-
+        # responsive serves to the application-level silence bounds.
         ws = await websockets.connect(
-            addr, max_size=2**22, compression=None, open_timeout=timeout
+            addr, max_size=2**22, compression=None, open_timeout=timeout,
+            ping_interval=20, ping_timeout=20,
         )
         try:
             await ws.send(json.dumps({"v": DIRECT_VERSION, "session": session}))

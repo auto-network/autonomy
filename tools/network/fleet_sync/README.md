@@ -390,3 +390,40 @@ the exit status reflects benchmark errors only. `--only NAME` runs a
 subset without touching the baseline, `--output PATH` writes the raw
 result JSON, and the `compare A.json B.json` subcommand diffs any two
 retained results offline.
+
+## Stream liveness policy
+
+Liveness on the direct pull channel is layered, and each layer owns one
+failure class (decided in auto-fzy8s; defect and boundary both proven by
+experiment on 2026-09-03):
+
+- **Dead and frozen peers** belong to the transport. Both direct-channel
+  endpoints pin websocket `ping_interval=20, ping_timeout=20`; a peer that
+  stops answering pongs — killed, SIGSTOPped, or event-loop-starved —
+  breaks the socket and unblocks a pending receive in
+  `ping_interval + ping_timeout + close_timeout` (measured 50.0 s).
+- **Wedged-but-responsive serves** — a stream that stops producing frames
+  while its event loop keeps answering pongs — belong to the client's
+  silence bounds in `bounded_stream_frames`, configured on
+  `FleetSyncRuntimeConfig`. The first frame of a pull gets
+  `pull_first_frame_allowance_s` (default 900 s): a checkpoint serve is
+  legitimately silent for its whole build phase, ~60 s/GB measured, so the
+  default covers a ~15 GB database. Every later gap is structurally one
+  bounded DB query or one ≤4 MB file read and gets
+  `pull_stream_silence_limit_s` (default 60 s, just above the transport's
+  50 s so a dead transport still surfaces as the more diagnostic
+  `ConnectionClosed`). The blob drain uses the inter-frame bound in both
+  positions — blob serves have no build phase.
+
+A silence timeout raises `FleetSyncFirstFrameSilence` or
+`FleetSyncStreamSilence`; the type name is the recorded error code, so a
+wedged peer is named in peer state and telemetry instead of sitting at
+`online=1` with zero deltas forever (the pre-policy failure fingerprint).
+Silence never triggers the protocol-version downgrade — it is a liveness
+verdict, not a version one.
+
+Clients tolerate (ignore, outside digest and count) a
+`{"kind": "keepalive"}` control frame that no server emits yet: a future
+protocol revision may keep long build phases live with it, at which point
+the first-frame allowance can tighten without a mixed-fleet compatibility
+window.

@@ -966,6 +966,11 @@ async def pull_checkpoint_once(
                 continue
             value = _json(raw, "checkpoint control")
             kind = value.get("kind")
+            if kind == "keepalive":
+                # Tolerated, never emitted (yet): a future server may keep
+                # a long build phase live with these. Outside the summary
+                # digest and count.
+                continue
             if kind == "checkpoint.begin":
                 # A server may initiate a checkpoint this machine did not
                 # request: an unresolvable trail against a pruned journal
