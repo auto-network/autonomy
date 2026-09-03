@@ -502,3 +502,35 @@ def test_forged_membership_fails_closed():
     backend.rows[mk] = backend.rows[mk][:-4] + "AAAA"
     listing = store.discover("family")
     assert listing.items == [] and listing.pending == []
+
+
+def test_client_backend_pepper_get_or_create_by_suffix(monkeypatch):
+    """Per-org pepper: read matches by suffix (the row is stored <org>:PEPPER_KEY
+    for an org session), and mints get-or-create when the caller's scope has none."""
+    from types import SimpleNamespace
+    from tools.graph.sealed_settings import ClientBackend, PEPPER_KEY
+
+    class StubClient:
+        def __init__(self):
+            self.rows = {}          # key -> value hex
+            self.minted = 0
+
+        def read_set(self, set_id, *, org):
+            members = [SimpleNamespace(key=k, payload={"value": v}, vault_error=None)
+                       for k, v in self.rows.items()]
+            return SimpleNamespace(members=members)
+
+        def add_setting(self, set_id, rev, key, payload, *, state, org):
+            # Simulate the server deriving the caller's <org>: prefix on write.
+            self.minted += 1
+            self.rows["autonomy:" + key] = payload["value"]
+
+    stub = StubClient()
+    cb = ClientBackend(stub)
+    # First read: absent -> mints (get-or-create) -> returns 32 bytes.
+    p1 = cb.read_pepper()
+    assert len(p1) == 32 and stub.minted == 1
+    # Row was stored org-prefixed; a second read finds it by SUFFIX, no re-mint.
+    assert list(stub.rows) == ["autonomy:" + PEPPER_KEY]
+    p2 = cb.read_pepper()
+    assert p2 == p1 and stub.minted == 1  # never rotates
