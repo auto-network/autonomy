@@ -818,7 +818,68 @@ def resolve_source_strict(
     return None
 
 
+def _derive_attachment_disk_path(att: dict) -> str | None:
+    """Current-frame on-disk path for an attachment, from its content address.
+
+    Attachments are content-addressed: the file lives at
+    ``attachment_store_root(org)/<hash[:2]>/<hash><ext>`` (see
+    :func:`_store_attachment_db`). The stored ``file_path`` is whatever
+    absolute frame the writer observed — ``/app/data/…`` (a container),
+    ``/opt/autonomy/data/…`` (the host), or a pre-cutover ``/home/jeremy/…``
+    path — all naming the same file but each resolving only in that frame.
+    Rederiving from the hash makes the path correct in THIS process's frame no
+    matter who wrote it, so the read never depends on the stored value being
+    right (it is used only for its frame-independent extension).
+    """
+    h = att.get("hash")
+    if not h:
+        return att.get("file_path")
+    root = attachment_store_root(att.get("org") or None)
+    shard = root / h[:2]
+    # The extension is not in the hash; it lives in the frame-independent
+    # basename. Prefer the stored path's suffix, then the original filename's,
+    # so this keeps working if the file_path column is later dropped.
+    ext = (
+        Path(str(att.get("file_path") or "")).suffix
+        or Path(str(att.get("filename") or "")).suffix
+    )
+    candidate = shard / f"{h}{ext}"
+    if candidate.exists():
+        return str(candidate)
+    # Content-addressed fallback: find the blob by hash so an extension that
+    # does not match (or a dropped file_path column) never hides a present file.
+    try:
+        for match in sorted(shard.glob(f"{h}*")):
+            return str(match)
+    except OSError:
+        pass
+    return str(candidate)
+
+
 def get_attachment(
+    attachment_id: str,
+    *,
+    org: str | None = None,
+    peers: list[str] | None = None,
+) -> dict | None:
+    """Resolve an attachment row and re-root its ``file_path`` to this frame.
+
+    Thin wrapper over :func:`_get_attachment_row`: every consumer — the direct
+    ``/api/attachment`` endpoint, the relay share-link path (via
+    :func:`note_slot_attachments`), and :func:`download_attachment` — reads the
+    blob through this one function, so deriving the current-frame path here (see
+    :func:`_derive_attachment_disk_path`) fixes all of them at once, for
+    existing and future rows, with no data migration.
+    """
+    row = _get_attachment_row(attachment_id, org=org, peers=peers)
+    if isinstance(row, dict):
+        return {**row, "file_path": _derive_attachment_disk_path(row)}
+    if isinstance(row, list):
+        return [{**r, "file_path": _derive_attachment_disk_path(r)} for r in row]
+    return row
+
+
+def _get_attachment_row(
     attachment_id: str,
     *,
     org: str | None = None,
