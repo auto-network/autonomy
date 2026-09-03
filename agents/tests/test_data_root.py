@@ -28,10 +28,18 @@ def _run(code: str, *, data_root: str | None) -> str:
     the import-time constants are computed against a known value regardless of
     what the parent's test harness set.
     """
+    # Strip AUTONOMY_DATA_ROOT AND every explicit per-store env var, so the
+    # child computes each path from AUTONOMY_DATA_ROOT alone. Otherwise a
+    # sibling suite that pins a store env for the whole xdist worker (the
+    # dashboard hermetic-stores conftest sets AUTONOMY_ORGS_DIR,
+    # DASHBOARD_IDENTITY_SESSION_DB, … directly in os.environ) leaks in and a
+    # path follows that pin instead of the root under test.
+    from tools.data_paths import STORE_MANIFEST
+    _pins = {"AUTONOMY_DATA_ROOT"} | {s.env for s in STORE_MANIFEST if s.env}
     env = {
         k: v
         for k, v in __import__("os").environ.items()
-        if k != "AUTONOMY_DATA_ROOT"
+        if k not in _pins
     }
     if data_root is not None:
         env["AUTONOMY_DATA_ROOT"] = data_root

@@ -358,7 +358,7 @@ live one.
 | `mission_control.db` | `MISSION_CONTROL_DB` | Mission Control store (missions + site revisions) |
 | `mcp_relay.db` | `MCP_RELAY_DB` | MCP-relay peer store (per-openai-session org bindings + crosstalk grants) |
 | `dashboard_identity_sessions.db` | `DASHBOARD_IDENTITY_SESSION_DB` | identity unlock-session store |
-| `dashboard-session.secret` | *(rooted beside `dashboard_identity_sessions.db`)* | mode-0600 Dashboard session-token and local approval-result destination key |
+| `dashboard-session.secret` | roots with `DASHBOARD_IDENTITY_SESSION_DB` | mode-0600 Dashboard session-token and local access-result destination key; moves with the identity-session realm |
 | `pending_joins.db` | `AUTONOMY_PENDING_JOINS_DB` | restart-safe invite-join progress (identifiers and counts only) |
 | `vault_releases.db` | `VAULT_RELEASES_DB` | durable record of secret releases (paths + deadlines, never plaintext) |
 | `network`/ | `AUTONOMY_NETWORK_KEY_DIR` | mode-0600 auto.network tunnel-serving delegate keys |
