@@ -113,6 +113,41 @@ def test_ehyoh_can_store_the_operators_github_token(cold_vault):
     assert not (db.parent / "content").exists()
 
 
+def test_audited_replacement_opens_with_the_revision_that_created_it(cold_vault):
+    """A resolved Setting keeps the base id but opens the winning row's locator.
+
+    Audited locators bind their encryption to the physical row UUID. A
+    replacement is an override row with a new UUID, so authenticating its
+    locator as though the base row created it makes every update unreadable
+    despite the correct delegate being warm.
+    """
+    db = cold_vault
+    private_hex, public_hex = derive_delegate_audited_recipient(bytes(range(32)))
+    with VaultStore(db) as store:
+        store.put_delegate_audited_recipient(public_hex)
+
+    settings_ops.write_by_key(
+        VAULT_AUDITED_SET_ID,
+        VAULT_CREDENTIAL_REVISION,
+        "github.token",
+        {"value": "first"},
+        org=None,
+    )
+    replacement_id = settings_ops.write_by_key(
+        VAULT_AUDITED_SET_ID,
+        VAULT_CREDENTIAL_REVISION,
+        "github.token",
+        {"value": "replacement"},
+        org=None,
+    )
+
+    settings_ops.set_personal_delegate_audited_key(private_hex)
+    member = _member(settings_ops.read_set(VAULT_AUDITED_SET_ID, org=None))
+    assert member.vault_error is None
+    assert member.payload == {"value": "replacement"}
+    assert member.id != replacement_id, "the public identity remains the base row"
+
+
 def _member(resolved):
     return {s.key: s for s in resolved}["github.token"]
 

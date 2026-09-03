@@ -5204,6 +5204,13 @@ def read_set(
         # explicit order, two overrides patching the same key resolve by
         # whatever order SQLite happened to return rows in.
         merged_payload = json.loads(chosen_row["payload"])
+        # A vaulted locator authenticates the UUID of the physical row that
+        # created it. Overrides replace a vaulted payload whole, so once one
+        # wins the merge the effective locator belongs to that override—not
+        # to the base row whose identity the resolved Setting exposes. Keep
+        # those two identities distinct or every updated audited/secured
+        # value is opened against the base UUID and fails authentication.
+        effective_payload_row_id = chosen_row["id"]
         for (_, ov_row) in sorted(
             overrides.get(key, []),
             key=lambda om: (om[1]["created_at"] or "", om[1]["_rowid"]),
@@ -5211,6 +5218,7 @@ def read_set(
             if ov_row["supersedes"] == chosen_row["id"]:
                 ov_payload = json.loads(ov_row["payload"])
                 merged_payload = json_merge_patch(merged_payload, ov_payload)
+                effective_payload_row_id = ov_row["id"]
 
         resolved = _row_to_resolved(chosen_row, org=chosen_org)
 
@@ -5220,7 +5228,7 @@ def read_set(
                 merged_payload,
                 set_id=set_id,
                 key=key,
-                setting_id=chosen_row["id"],
+                setting_id=effective_payload_row_id,
                 declared_tier=declared_tier,
                 org=chosen_org,
                 cache=key_control_cache,
