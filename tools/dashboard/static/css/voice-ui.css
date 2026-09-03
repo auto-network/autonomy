@@ -245,6 +245,22 @@ body.voice-keyboard-modal {
   border: 1px solid rgba(71, 85, 105, 0.34);
 }
 
+@media (max-width: 767px),
+       (max-height: 500px) and (orientation: landscape) and (hover: none) and (pointer: coarse) {
+  .voice-sheet--full {
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    padding-top: env(safe-area-inset-top, 0px);
+    box-sizing: border-box;
+    background: #161a22;
+    border: 0;
+    border-radius: 0;
+    overflow: hidden;
+  }
+}
+
 @media (min-width: 768px) {
   body:not(.fullscreen-page):not(.session-overlay-active) .voice-sheet-backdrop {
     left: 14rem;
