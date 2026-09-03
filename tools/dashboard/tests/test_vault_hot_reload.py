@@ -65,12 +65,22 @@ def _warm(monkeypatch):
     return delegate, kem_private, audited_delegate, captured
 
 
-def test_graceful_reload_re_warms_from_the_two_keys(tmp_path, monkeypatch):
+def test_graceful_reload_re_warms_from_the_two_keys(tmp_path, monkeypatch, caplog):
+    import logging
+
     delegate, kem_private, audited_delegate, captured = _warm(monkeypatch)
 
     assert u.save_vault_across_hot_reload() is True
     u._VAULT_CACHE.clear()  # the reload: the in-memory cache dies
-    assert u.restore_vault_across_hot_reload() is True
+    with caplog.at_level(logging.INFO, logger=u.logger.name):
+        assert u.restore_vault_across_hot_reload() is True
+
+    # A successful re-warm announces itself, so a "cold key" diagnosis can be
+    # checked against whether a hot-reload actually succeeded (no false positive).
+    assert any(
+        "keys successfully hot-reloaded" in r.getMessage()
+        for r in caplog.records
+    )
 
     # The two keys crossed, and the KEM key drove the generation re-derivation.
     assert captured["delegate_hex"] == delegate.private_hex

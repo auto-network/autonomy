@@ -1594,6 +1594,13 @@ def restore_vault_across_hot_reload() -> bool:
         # never mint it — the browser only re-posts vault keys when the vault
         # is actually cold.
         _ensure_sealed_settings_pepper()
+        logger.info(
+            "vault keys successfully hot-reloaded: delegate + KEM + audited "
+            "delegate re-warmed from the ramfs snapshot and %d generation "
+            "key(s) re-derived from on-disk grants; vault is warm with no "
+            "key-holder present",
+            len(generation_keys),
+        )
         return True
     except Exception:
         logger.exception(
