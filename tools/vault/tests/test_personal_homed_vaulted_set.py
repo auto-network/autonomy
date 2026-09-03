@@ -35,6 +35,13 @@ def cold_vault(tmp_path, monkeypatch):
     """A cold vault over a fresh personal.db: no sealer, no key holder, no warm
     delegate. The vault store and the settings rows share the one file."""
     monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
+    # personal.db resolves via AUTONOMY_ORGS_DIR (it roots beside the orgs
+    # tree), NOT AUTONOMY_DATA_ROOT. Another suite's conftest may have pinned
+    # AUTONOMY_ORGS_DIR to a per-WORKER dir (dashboard hermetic stores), which
+    # would put this test's settings rows in a db shared across the worker —
+    # collisions and stale reads under xdist. Pin it per-test so personal.db is
+    # tmp_path/personal.db, matching the vault store below.
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_API", raising=False)
     db = tmp_path / "personal.db"
