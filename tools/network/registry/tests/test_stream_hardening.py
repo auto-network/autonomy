@@ -187,3 +187,39 @@ def test_source_is_native_socket_peer_no_proxy_header():
         abuse_limiter=limiter, metrics=RegistryMetrics(),
     ))
     assert limiter.seen == ["198.51.100.7"]
+
+
+def test_ingress_startup_line_survives_warning_level_service():
+    """The ingress binds the public serve edge; its startup confirmation must
+    reach production logs. Routed through the ops sink (its own handler,
+    propagate=False), it emits even with the root logger at WARNING — the same
+    pitfall class as the DNS-01 audit records (auto-dn6bo)."""
+    ops = logging.getLogger("autonomy.registry.ops")
+    assert ops.propagate is False and ops.handlers
+
+    records: list = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    capture = _Capture(level=logging.INFO)
+    ops.addHandler(capture)
+    root = logging.getLogger()
+    old = root.level
+    root.setLevel(logging.WARNING)
+
+    async def _run():
+        server = await si.start_stream_ingress(
+            "127.0.0.1", 0, host_routes=_NoRoute())
+        server.close()
+        await server.wait_closed()
+
+    try:
+        asyncio.run(_run())
+    finally:
+        ops.removeHandler(capture)
+        root.setLevel(old)
+
+    assert any("stream.ingress.listening" in m and "port=" in m
+               for m in records)

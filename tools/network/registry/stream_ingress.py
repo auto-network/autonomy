@@ -1,10 +1,12 @@
 """Relay-side raw-stream ingress (tls-stream/1, auto-9z1xh).
 
-A loopback TCP acceptor (fronted publicly by auto-ot0t7's pinned Caddy L4
-later — this bead ships no public edge): bounded ClientHello/SNI peek,
-hostname routing through the live lease table, abuse admission, then an
-OPEN toward the leased connector and bounded credit-governed pumps in both
-directions. Payload bytes are never inspected or logged.
+A TCP acceptor that in production binds the serve floating IP's :443
+directly and IS the public serve edge (the serve_forward loopback hop and
+its PROXY-v2 seam were removed): bounded ClientHello/SNI peek, hostname
+routing through the live lease table, abuse admission keyed on the native
+socket peer, then an OPEN toward the leased connector and bounded
+credit-governed pumps in both directions. Payload bytes are never inspected
+or logged.
 
 Every refusal — no SNI, parse failure, unknown/unrouted host, tunnel
 without the negotiated capability, admission denied, stream cap — closes
@@ -419,5 +421,10 @@ async def start_stream_ingress(
         )
 
     server = await asyncio.start_server(handle, host, port)
-    logger.info("stream ingress listening on %s:%d", host, port)
+    # Route the startup confirmation through the ops sink (auto-dn6bo class):
+    # the module logger propagates to root, which production runs at WARNING,
+    # so this line otherwise vanishes. The ops sink owns its handler and always
+    # emits — an operator can confirm the serve edge bound its port.
+    from tools.network.registry.relay import _ops
+    _ops("stream.ingress.listening", host=host, port=port)
     return server
