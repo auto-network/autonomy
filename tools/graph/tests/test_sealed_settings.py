@@ -325,3 +325,33 @@ def test_bare_key_strips_optional_org_prefix():
 
     assert _bare_key("tag.blind") == "tag.blind"
     assert _bare_key("autonomy:tag.blind") == "tag.blind"
+
+
+def test_client_backend_reuses_released_sealed_index_without_reapproval(monkeypatch):
+    """An already-released sealed index (at /run/secrets/<name> from a prior
+    approval this session) is reused directly — no second vault_open."""
+    from types import SimpleNamespace
+
+    from tools.graph.sealed_settings import ClientBackend
+
+    address = "gpZ0yFl8HO0uX63yAtFOtyMxp3HEgXrO1onEcTRUhCk"
+
+    class StubClient:
+        def __init__(self):
+            self.opened = False
+
+        def read_set(self, set_id, *, org):
+            return SimpleNamespace(members=[
+                SimpleNamespace(key="autonomy:" + address,
+                                payload=None, vault_error=None)])
+
+        def request_vault_open(self, *a, **k):
+            self.opened = True
+            raise AssertionError("must not re-request an already-released index")
+
+    stub = StubClient()
+    monkeypatch.setattr(ClientBackend, "_released_path",
+                        staticmethod(lambda addr: bytes(32) if addr == address else None))
+    got = ClientBackend(stub).read_sealed_index(address, block=False)
+    assert got == bytes(32)
+    assert stub.opened is False
