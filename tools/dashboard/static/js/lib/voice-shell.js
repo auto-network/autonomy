@@ -351,6 +351,7 @@
         _sheetUpHandler: null,
         _resizeHandler: null,
         _keyboardLayoutTimers: [],
+        _sheetTouchY: null,
 
         init() {
           var voice = _voiceStore();
@@ -760,6 +761,36 @@
               self.refreshKeyboardLayout();
             }, delay));
           });
+        },
+
+        onSheetTouchStart(event) {
+          var touch = event && event.touches && event.touches[0];
+          this._sheetTouchY = touch ? touch.clientY : null;
+        },
+
+        onSheetTouchMove(event) {
+          var touch = event && event.touches && event.touches[0];
+          var ta = this.$refs && this.$refs.sheetInput;
+          var target = event && event.target;
+          var insideEditor = !!(ta && (target === ta ||
+            (typeof ta.contains === 'function' && ta.contains(target))));
+          if (!touch || !insideEditor) {
+            if (event && typeof event.preventDefault === 'function') event.preventDefault();
+            return false;
+          }
+
+          var previousY = this._sheetTouchY;
+          this._sheetTouchY = touch.clientY;
+          if (previousY == null) return true;
+          var fingerDelta = touch.clientY - previousY;
+          var maxScroll = Math.max(0, (ta.scrollHeight || 0) - (ta.clientHeight || 0));
+          var escapesAtTop = (ta.scrollTop || 0) <= 0 && fingerDelta > 0;
+          var escapesAtBottom = (ta.scrollTop || 0) >= maxScroll && fingerDelta < 0;
+          if (maxScroll <= 1 || escapesAtTop || escapesAtBottom) {
+            if (event && typeof event.preventDefault === 'function') event.preventDefault();
+            return false;
+          }
+          return true;
         },
 
         _clearKeyboardLayoutTimers() {

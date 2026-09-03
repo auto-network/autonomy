@@ -216,6 +216,7 @@ function loadVoiceShell(opts) {
       focusCalls: 0,
       scrollTop: 123,
       scrollHeight: 456,
+      clientHeight: 200,
       focus() {
         this.focusCalls += 1;
       },
@@ -784,6 +785,39 @@ describe('voice shell helpers', () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
     assert.equal(h.document.body.classList.contains('voice-keyboard-modal'), false);
     assert.equal(h.document.documentElement.classList.contains('voice-keyboard-modal'), false);
+  });
+
+  it('contains short-editor and boundary touch gestures instead of rubber-banding the page', () => {
+    const h = loadVoiceShell({ voiceStore: { sheetOpen: true } });
+    const ta = h.component.$refs.sheetInput;
+    const gesture = (y) => {
+      let prevented = false;
+      const event = {
+        target: ta,
+        touches: [{ clientY: y }],
+        preventDefault() { prevented = true; },
+      };
+      return { event, prevented: () => prevented };
+    };
+
+    ta.clientHeight = 500;
+    h.component.onSheetTouchStart(gesture(100).event);
+    const shortMove = gesture(80);
+    assert.equal(h.component.onSheetTouchMove(shortMove.event), false);
+    assert.equal(shortMove.prevented(), true);
+
+    ta.clientHeight = 200;
+    ta.scrollTop = 40;
+    h.component.onSheetTouchStart(gesture(100).event);
+    const interiorMove = gesture(80);
+    assert.equal(h.component.onSheetTouchMove(interiorMove.event), true);
+    assert.equal(interiorMove.prevented(), false);
+
+    ta.scrollTop = 0;
+    h.component.onSheetTouchStart(gesture(100).event);
+    const topPull = gesture(120);
+    assert.equal(h.component.onSheetTouchMove(topPull.event), false);
+    assert.equal(topPull.prevented(), true);
   });
 
   it('resets the keyboard baseline after an unfocused orientation change', () => {

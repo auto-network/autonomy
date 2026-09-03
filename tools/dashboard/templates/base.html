@@ -2654,6 +2654,8 @@
          x-ref="sheet"
          x-show="showSheet"
          x-cloak
+         @touchstart="onSheetTouchStart($event)"
+         @touchmove="onSheetTouchMove($event)"
          :style="sheetStyle"
          :class="{
            'voice-sheet--partial': effectiveSheetMode === 'partial',
