@@ -35,6 +35,21 @@ Every address this layer writes is opaque (crib ``1e005d5c-c11`` §23/§24):
   incomputable from a cold dump. It is never re-minted — rotation would
   orphan every store address.
 
+## Audience discovery (append-to-hashed-sets)
+
+To enumerate items shared to an audience you cannot predict, :meth:`share`
+appends a membership row under an opaque set address
+``HMAC(K_aud_name, "set:"+class)`` whose value is the item's row key SEALED
+under a dedicated ``K_aud_seal`` (Approach B). :meth:`discover` resolves the
+set, decrypts each reference, and authorized-opens the item. Membership is a
+DISCOVERY HINT, never authorization — the vault seal decides access, so a
+forged or stale membership either fails to open or opens only what the reader
+could already open. Sealing the reference (not storing the item key in the
+clear) keeps a cold reader from joining audiences to items or to their store,
+and membership rows live in the SAME sealed-row set as items, so they are
+indistinguishable from items at rest. Cross-member sharing in an org (sealing
+the reference to a policy class's key instead) is the documented extension.
+
 ## Per-row convergence, no central index
 
 There is no manifest to compare-and-swap: each item is an independent row, so
@@ -104,6 +119,11 @@ from .schemas.sealed_row import SEALED_ROW_REVISION, SEALED_ROW_SET_ID
 _HKDF_SALT = b"autonomy.sealed-settings.v1"
 _INFO_INDEX = b"index"          # -> K_index, the blind-index HMAC key
 _INFO_METADATA = b"metadata"    # -> K_meta, the metadata AEAD key
+# Audience discovery uses two more subkeys, fully domain-separated from the
+# item keys above so an audience address can never collide with an item's
+# blind index and a cold reader cannot correlate the two.
+_INFO_AUD_NAME = b"audience-index"   # -> K_aud_name, HMAC key for set/member addresses
+_INFO_AUD_SEAL = b"audience-seal"    # -> K_aud_seal, AEAD key for member references
 _SEALED_INDEX_LEN = 32
 _NONCE_LEN = 12
 
@@ -293,6 +313,28 @@ class WriteOutcome:
         return f"WriteOutcome(won={self.won!r})"
 
 
+class AudienceListing:
+    """The result of :meth:`SealedSettings.discover`.
+
+    ``items`` are the shared items whose rows are present and open; ``pending``
+    are opaque member references that were discovered but whose rows are not
+    on this replica yet — reported as PENDING, never conflated with absence
+    (a referenced-but-unsynced row is a sync gap, not a deletion). Membership
+    is a discovery HINT, so both lists reflect what the vault seal actually
+    let the reader open: a forged or stale membership either fails to open
+    (dropped) or opens an item the reader was already authorized for.
+    """
+
+    __slots__ = ("items", "pending")
+
+    def __init__(self, items, pending):
+        self.items = items
+        self.pending = pending
+
+    def __repr__(self) -> str:  # pragma: no cover - debug aid
+        return f"AudienceListing(items={len(self.items)}, pending={len(self.pending)})"
+
+
 # --------------------------------------------------------------------------- #
 # The transparent surface.
 # --------------------------------------------------------------------------- #
@@ -364,6 +406,55 @@ class SealedSettings:
         """The domain-scoped blind index for ``name`` (for the audited-secret half)."""
         return self._row_key(name)
 
+    # -- audience discovery (append-to-hashed-sets) ------------------------- #
+    def share(self, name: str, audience_class: str) -> None:
+        """Make ``name`` discoverable to ``audience_class``.
+
+        Appends a membership row under the audience set's hidden address whose
+        SEALED value references the item's row. Idempotent per (class, item):
+        re-sharing rewrites the same membership row rather than duplicating it.
+        This is a discovery hint only — it does not grant access; the item's
+        vault seal remains the authorization.
+        """
+        k_meta, k_seal = self._keys()[1], self._audience_keys()[1]
+        row_key = self._member_key(audience_class, name)
+        # The sealed value is the item's own row key, so a discoverer can find
+        # the item; sealed under K_aud_seal (never K_meta) with AAD bound to
+        # this membership row, so it cannot be lifted into another set.
+        reference = self._row_key(name).encode("utf-8")
+        self._backend.write_row(row_key, _seal(k_seal, reference, self._aad(row_key)))
+
+    def discover(self, audience_class: str) -> AudienceListing:
+        """List the items shared to ``audience_class`` that this reader can open.
+
+        Resolves the audience set, decrypts each member reference, and
+        authorized-opens the item it names. An item whose row is not present on
+        this replica is reported as pending (its opaque row key), never as
+        absent. Members that fail to decrypt or open are dropped (fail closed).
+        """
+        k_meta, k_seal = self._keys()[1], self._audience_keys()[1]
+        set_name = self._audience_set_name(audience_class)
+        items: list[SealedItem] = []
+        pending: list[str] = []
+        seen: set[str] = set()
+        for member_key, ciphertext in self._backend.list_rows(set_name):
+            try:
+                item_key = _open(k_seal, ciphertext, self._aad(member_key)).decode("utf-8")
+            except (InvalidTag, ValueError):
+                continue  # not ours / tampered — a hint we cannot trust, drop it
+            if item_key in seen:
+                continue
+            seen.add(item_key)
+            item_ct = self._backend.read_row(item_key)
+            if item_ct is None:
+                pending.append(item_key)   # referenced but not replicated: PENDING
+                continue
+            try:
+                items.append(self._open_item(k_meta, item_key, item_ct))
+            except (InvalidTag, ValueError, KeyError):
+                continue  # authorized-open failed: fail closed, never plaintext
+        return AudienceListing(items, pending)
+
     # -- internals ---------------------------------------------------------- #
     def _row_key(self, name: str) -> str:
         # The LOGICAL (bare) row key: <store-tag>.<blind-index>. The '.'
@@ -394,6 +485,39 @@ class SealedSettings:
             _hkdf(self._sealed_index, _INFO_INDEX),
             _hkdf(self._sealed_index, _INFO_METADATA),
         )
+
+    def _audience_keys(self) -> tuple[bytes, bytes]:
+        if self._sealed_index is None:
+            self._sealed_index = self._get_or_create_sealed_index()
+        return (
+            _hkdf(self._sealed_index, _INFO_AUD_NAME),
+            _hkdf(self._sealed_index, _INFO_AUD_SEAL),
+        )
+
+    def _audience_set_name(self, audience_class: str) -> str:
+        # The opaque address prefix a class's members share. Domain-tagged
+        # ('set:') under K_aud_name so it cannot equal a member address or an
+        # item blind index. Members live in the shared sealed-row set, so a
+        # cold reader cannot even tell membership rows from item rows.
+        k_aud_name, _ = self._audience_keys()
+        digest = hmac.new(
+            k_aud_name, b"set:" + _canonical(audience_class), sha256
+        ).digest()
+        return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+    def _member_key(self, audience_class: str, name: str) -> str:
+        # <set-name>.<member-tag>, where member-tag is a SEPARATE HMAC over
+        # (class, item-name) — deterministic (so re-share is idempotent) but
+        # unequal to the item's own blind index, so a cold reader cannot
+        # correlate this membership row with the item row it references.
+        k_aud_name, _ = self._audience_keys()
+        member = hmac.new(
+            k_aud_name,
+            b"member:" + _canonical(audience_class) + b"\x00" + _canonical(name),
+            sha256,
+        ).digest()
+        tag = base64.urlsafe_b64encode(member).decode("ascii").rstrip("=")
+        return f"{self._audience_set_name(audience_class)}.{tag}"
 
     def _store_tag(self) -> str:
         """The store's one opaque on-disk name: its hidden address."""

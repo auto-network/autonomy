@@ -413,3 +413,92 @@ def test_put_never_compares_timestamps():
     assert a.won and b.won
     assert b.value == {"v": 2}
     assert store.get("n") == {"v": 2}
+
+
+def test_share_and_discover_roundtrip():
+    backend = FakeBackend()
+    store = SealedSettings("pm", backend)
+    store.put("Chase", {"u": "me"})
+    store.put("Amex", {"u": "you"})
+    store.put("Private", {"u": "secret"})
+
+    store.share("Chase", "family")
+    store.share("Amex", "family")
+
+    listing = store.discover("family")
+    names = {i.name for i in listing.items}
+    assert names == {"Chase", "Amex"}          # exactly the shared items
+    assert listing.pending == []
+    # Metadata comes through, opened via the item's own seal.
+    got = {i.name: i.metadata for i in listing.items}
+    assert got["Chase"] == {"u": "me"}
+    # An unshared item is not discoverable.
+    assert "Private" not in names
+    # An empty audience discovers nothing.
+    assert store.discover("nobody").items == []
+
+
+def test_share_is_idempotent():
+    backend = FakeBackend()
+    store = SealedSettings("pm", backend)
+    store.put("Chase", {"u": "me"})
+    store.share("Chase", "family")
+    store.share("Chase", "family")   # re-share must not duplicate
+    listing = store.discover("family")
+    assert [i.name for i in listing.items] == ["Chase"]
+
+
+def test_membership_rows_do_not_correlate_with_item_rows():
+    """Approach B: a cold reader must not be able to join a membership row to
+    the item row it references, nor to the store — the member address is a
+    separate HMAC and the reference value is sealed."""
+    import json as _json
+    backend = FakeBackend()
+    store = SealedSettings("pm", backend)
+    store.put("Chase", {"u": "me", "url": "chase.com"})
+    store.share("Chase", "family")
+
+    item_key = store._row_key("Chase")            # <tag>.<blind-index>
+    item_suffix = item_key.split(".", 1)[1]       # the item's blind index
+    member_key = store._member_key("family", "Chase")
+    # The membership row's address shares NO component with the item row.
+    assert item_suffix not in member_key
+    assert not member_key.startswith(store._store_tag())
+    # The membership VALUE is ciphertext, not the plaintext item key: the
+    # reference to the item never appears in clear in the membership row.
+    member_value = backend.rows[member_key]
+    assert item_key not in member_value
+    assert "chase.com" not in member_value and "Chase" not in member_value
+    # And no row's VALUE leaks the item name or a field value in clear.
+    for v in backend.rows.values():
+        assert "chase.com" not in v and "Chase" not in v
+
+
+def test_discover_reports_pending_for_unreplicated_rows():
+    """A membership referencing an item whose row is absent is PENDING, not
+    dropped and not conflated with 'no such item'."""
+    backend = FakeBackend()
+    store = SealedSettings("pm", backend)
+    store.put("Chase", {"u": "me"})
+    store.share("Chase", "family")
+    # Simulate the item row not having replicated to this reader: drop it,
+    # keep the membership.
+    del backend.rows[store._row_key("Chase")]
+    listing = store.discover("family")
+    assert listing.items == []
+    assert listing.pending == [store._row_key("Chase")]
+
+
+def test_forged_membership_fails_closed():
+    """A membership whose sealed reference cannot be opened (foreign key) is
+    dropped — a forged hint grants nothing."""
+    backend = FakeBackend()
+    store = SealedSettings("pm", backend)
+    store.put("Chase", {"u": "me"})
+    store.share("Chase", "family")
+    # Corrupt the membership ciphertext: discovery must skip it, not crash.
+    mk = store._member_key("family", "Chase")
+    # keys are stored bare in FakeBackend
+    backend.rows[mk] = backend.rows[mk][:-4] + "AAAA"
+    listing = store.discover("family")
+    assert listing.items == [] and listing.pending == []
