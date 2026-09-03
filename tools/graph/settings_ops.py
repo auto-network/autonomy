@@ -2844,8 +2844,16 @@ def add_setting(
     payload is validated first either way, so a vaulted set is held to its
     schema exactly as an ordinary one is — encryption is what happens to a
     value, not an excuse to stop checking it.
+
+    An organization's write to a personal-homed set that declares an
+    ``org_writeback`` strategy (the vault credential sets) is routed to the
+    bearer-derived ``<org>:key`` in the operator's own store — the same
+    derivation :func:`write_by_key` applies, so a direct ``add_setting`` (the
+    audited seal path) and a ``write_by_key`` land in the same place. A no-op
+    for every other set and for a personal/scopeless caller.
     """
     org = _resolve_org_arg(org)
+    key, org = _apply_org_writeback(set_id, key, org)
     _guard_protected_set(set_id)
     if state not in VALID_STATES:
         raise ValueError(f"invalid state {state!r}; valid: {VALID_STATES}")
@@ -5185,7 +5193,8 @@ def read_set(
     # side of the boundary the write side already enforces
     # (derive_org_writeback_key / the org-prefixed key strategy). Generic by
     # construction — it triggers on the declared key SHAPE, not on any set id
-    # (today: vault.secured, credential-file, workspace.image-build). An
+    # (today: vault.secured, vault.audited, credential-file,
+    # workspace.image-build). An
     # org-HOMED set needs no filter: its own per-org database already isolates
     # it, and its key is not org-prefixed. Values stay sealed regardless — a
     # @vaulted read returns ciphertext / a sealed locator, never plaintext.

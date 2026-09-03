@@ -148,6 +148,69 @@ def test_audited_replacement_opens_with_the_revision_that_created_it(cold_vault)
     assert member.id != replacement_id, "the public identity remains the base row"
 
 
+def test_org_writes_audited_cold_under_its_namespace_operator_reads(cold_vault):
+    """auto-zp01m: an org seals audited under <org>:name in the operator's own
+    store, cold to the delegate; the operator context reads it back warm. The
+    org scoping is a namespace on a personal-home row, not a second database."""
+    db = cold_vault
+    private_hex, public_hex = derive_delegate_audited_recipient(bytes(range(32)))
+    with VaultStore(db) as store:
+        store.put_delegate_audited_recipient(public_hex)
+
+    # An ORG (anchore) write — cold (no key holder), bearer-derived <org>:name.
+    assert settings_ops._vault_key_holder is None
+    sid = settings_ops.add_setting(
+        VAULT_AUDITED_SET_ID, VAULT_CREDENTIAL_REVISION,
+        "jira_token", {"value": "ghp_anchore"}, org="anchore",
+    )
+    assert isinstance(sid, str) and sid
+
+    # It landed under the org namespace in the operator's OWN db.
+    members = {m.key: m for m in settings_ops.read_set(VAULT_AUDITED_SET_ID, org=None)}
+    assert "anchore:jira_token" in members
+    assert "jira_token" not in members, "the bare name is not written; the org prefix is"
+    # Cold read fails closed — no warm delegate, no plaintext.
+    assert members["anchore:jira_token"].vault_error is not None
+
+    # Operator context (warm delegate) reads the org-namespaced value.
+    settings_ops.set_personal_delegate_audited_key(private_hex)
+    opened = {m.key: m for m in settings_ops.read_set(VAULT_AUDITED_SET_ID, org=None)}
+    assert opened["anchore:jira_token"].vault_error is None
+    assert opened["anchore:jira_token"].payload == {"value": "ghp_anchore"}
+
+
+def test_audited_org_read_is_isolated_to_its_own_namespace(cold_vault):
+    """SECURITY (auto-zp01m): an org session decrypts ONLY its <org>: audited
+    rows — never another org's, never the operator's unprefixed rows. The scope
+    filter is a pre-decrypt SQL WHERE, so an excluded row is never opened even
+    with the delegate warm. Without the @org_writeback decorator this whole set
+    was readable+decryptable by any session (cross-org plaintext exposure)."""
+    db = cold_vault
+    private_hex, public_hex = derive_delegate_audited_recipient(bytes(range(32)))
+    with VaultStore(db) as store:
+        store.put_delegate_audited_recipient(public_hex)
+
+    settings_ops.add_setting(VAULT_AUDITED_SET_ID, VAULT_CREDENTIAL_REVISION,
+                             "github.token", {"value": "OPERATOR"}, org=None)
+    settings_ops.add_setting(VAULT_AUDITED_SET_ID, VAULT_CREDENTIAL_REVISION,
+                             "jira_token", {"value": "ANCHORE"}, org="anchore")
+    settings_ops.add_setting(VAULT_AUDITED_SET_ID, VAULT_CREDENTIAL_REVISION,
+                             "jira_token", {"value": "AUTONOMY"}, org="autonomy")
+
+    settings_ops.set_personal_delegate_audited_key(private_hex)  # vault warm
+
+    auto = {m.key: m for m in settings_ops.read_set(VAULT_AUDITED_SET_ID, org="autonomy")}
+    assert set(auto) == {"autonomy:jira_token"}, "an org sees only its own namespace"
+    assert auto["autonomy:jira_token"].payload == {"value": "AUTONOMY"}
+
+    anchore = {m.key: m for m in settings_ops.read_set(VAULT_AUDITED_SET_ID, org="anchore")}
+    assert set(anchore) == {"anchore:jira_token"}
+    assert anchore["anchore:jira_token"].payload == {"value": "ANCHORE"}
+
+    operator = {m.key: m for m in settings_ops.read_set(VAULT_AUDITED_SET_ID, org=None)}
+    assert {"github.token", "anchore:jira_token", "autonomy:jira_token"} <= set(operator)
+
+
 def _live_override_rows(db):
     with GraphDB(db) as gdb:
         return gdb.conn.execute(
