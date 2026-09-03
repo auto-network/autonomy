@@ -39,12 +39,22 @@ The payload IS the secret, because ``@vaulted`` encrypts the whole payload and
 leaves the row holding an opaque scalar. Whatever can read the database file
 learns the credential's row identity and nothing about what its value says.
 
-## Why personal, and why raw
+## Why personal, and why org-namespaced within it
 
-Personal because they are the operator's credentials and not any
-organization's -- the failure this replaces was the operator's GitHub tokens
-sitting in plaintext in Anchore's shared org store, readable by every session
-that org could reach.
+The STORE is the operator's own -- the failure this replaces was the operator's
+GitHub tokens sitting in plaintext in Anchore's shared org store, readable by
+every session that org could reach. Living in the operator's database is what
+keeps them out of any organization's federated store.
+
+Within that one store the key namespace carries the scope: an unprefixed key
+(``github.token``) is the operator's, and an ``<org>:`` key
+(``anchore:jira_token``) is that organization's, written cold by an org session
+via ``@org_writeback_namespace`` and read back only within its own namespace.
+The read side is a pre-decrypt filter (``_set_is_org_key_namespaced`` /
+``key LIKE '<org>:%'``): an org session sees ONLY its own rows, never another
+org's and never the operator's unprefixed ones, and an excluded row is never
+even decrypted. So "personal store" and "org-scoped rows" are the same
+statement -- one operator-owned database, partitioned by the key.
 
 Banded ``raw`` so that is structural rather than habitual. A band is enforced
 at write, at promote, AND at the federated read, each failing independently;
@@ -105,6 +115,7 @@ SYNOPSIS = {
 @home("personal")
 @publication_band(max="raw")
 @keyed_per_entity(key_strategy="setting_name")
+@org_writeback_namespace(suffix="credential_name")
 @vaulted("audited")
 class VaultAuditedCredentialV1(SettingSchema):
     """A secret that releases to an authorized session with NO human present.
@@ -113,6 +124,12 @@ class VaultAuditedCredentialV1(SettingSchema):
     is not sitting at. The audit trail is the control: nothing is hidden from
     the record, but nothing waits on a person either.
 
+    An organization writes here the same way it writes the secured set: its
+    session seals under the bearer-derived ``<org>:credential_name`` key, cold
+    to the operator's audited delegate public key, landing in the operator's
+    own store. The org scoping is a namespace on a personal-home row, not a
+    second database — an organization holding its OWN audited key so its
+    sessions read unattended is a distinct, later capability.
     """
 
     set_id = VAULT_AUDITED_SET_ID
