@@ -65,8 +65,11 @@ own survived. A referenced row that has not yet replicated is *pending*, never
 ## No new crypto
 
 Keys are derived from the 32-byte sealed index with HKDF-SHA-256 and values
-sealed with ChaCha20-Poly1305 — both from ``cryptography``, the same
-primitives the vault already uses.
+sealed with AES-256-GCM — both from ``cryptography``, the same primitives the
+vault already uses. AES-GCM (not ChaCha) is deliberate: the browser holds the
+derived keys and only AES-GCM is in WebCrypto, so it can keep them
+non-extractable. See ``_seal``. (The vault's own sealed-index body is a
+separate cipher, unchanged.)
 
 ## Where sealing lands, and the one audit event
 
@@ -103,7 +106,7 @@ from typing import Iterable, Protocol
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from .schemas.vault_credential import (
@@ -214,16 +217,27 @@ def blind_index(k_index: bytes, name: str) -> str:
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
+# The layer's value seal is AES-256-GCM, NOT ChaCha, for one reason: the
+# browser holds K_meta (and K_aud_seal) and decrypts these values, and only
+# AES-GCM is in WebCrypto — so the browser can derive K_meta as a
+# NON-EXTRACTABLE key and decrypt via `subtle.decrypt`, keeping the key
+# unstealable (and holdable in IndexedDB) even under XSS. ChaCha would force
+# raw key bytes into JS (noble), which are exfiltratable. This is the layer's
+# OWN seal, independent of the vault body cipher (the sealed index's own body
+# stays ChaCha/A-2, decrypted once at open). AES-GCM is safe here because these
+# writes are single-owner and modest-volume with a fresh 96-bit nonce per seal
+# — nonce-misuse resistance (GCM-SIV) is load-bearing only for the vault's
+# unattended, multi-writer, fleet-synced AUDITED body, not for this layer.
 def _seal(k_meta: bytes, plaintext: bytes, aad: bytes) -> str:
     nonce = os.urandom(_NONCE_LEN)
-    blob = nonce + ChaCha20Poly1305(k_meta).encrypt(nonce, plaintext, aad)
+    blob = nonce + AESGCM(k_meta).encrypt(nonce, plaintext, aad)
     return base64.urlsafe_b64encode(blob).decode("ascii")
 
 
 def _open(k_meta: bytes, ciphertext: str, aad: bytes) -> bytes:
     blob = base64.urlsafe_b64decode(ciphertext.encode("ascii"))
     nonce, sealed = blob[:_NONCE_LEN], blob[_NONCE_LEN:]
-    return ChaCha20Poly1305(k_meta).decrypt(nonce, sealed, aad)
+    return AESGCM(k_meta).decrypt(nonce, sealed, aad)
 
 
 # --------------------------------------------------------------------------- #
