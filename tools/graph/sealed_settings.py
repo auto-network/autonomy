@@ -233,11 +233,15 @@ class SealedBackend(Protocol):
     """The substrate operations SealedSettings needs, per runtime context."""
 
     def read_pepper(self) -> bytes:
-        """Return the 32-byte shared pepper.
+        """Return the 32-byte pepper for the CALLER'S scope, minting if absent.
 
-        Raise :class:`VaultLocked` (``COLD``) when the pepper row exists but
-        the vault cannot release it now, and :class:`SealedSettingsError`
-        when it was never minted (vault bring-up has not run).
+        Peppers are per-scope: an org session gets its org's pepper, the
+        operator gets the personal one. The audited set is org-scoped on read
+        (an org session only sees its own ``<org>:`` rows), so the pepper is
+        stored org-writeback-keyed and this is get-or-create — read the
+        caller's pepper, or mint it (the server derives the ``<org>:`` prefix)
+        and read the winner. Raise :class:`VaultLocked` (``COLD``) when the
+        pepper exists but the vault cannot release it now.
         """
 
     def read_sealed_index(self, address: str, *, block: bool) -> bytes | None:
@@ -572,17 +576,44 @@ class ClientBackend:
         self._ttl = ttl_seconds
 
     def read_pepper(self) -> bytes:
-        # Audited tier: the warm dashboard opens the row unattended and the
-        # member arrives with its plaintext payload; a vault that cannot open
-        # it arrives with ``vault_error`` instead. Absence is a provisioning
-        # failure (bring-up mints the pepper), not a lock state.
-        members = self._client.read_set(VAULT_AUDITED_SET_ID, org=None)
-        member = next((m for m in members.members if m.key == PEPPER_KEY), None)
-        if member is None:
-            raise SealedSettingsError(
-                "the sealed-settings pepper was never minted — vault bring-up "
-                "has not run on this dashboard"
+        # Per-scope, get-or-create. The audited set is org-scoped on read
+        # (2b09456): an org session sees ONLY its own <org>: rows, so the
+        # pepper is matched by SUFFIX (its stored key is <org>:PEPPER_KEY for
+        # an org session, or the bare PEPPER_KEY for the operator). If the
+        # caller's scope has no pepper yet, mint one — the server derives the
+        # <org>: prefix on the audited write — and read the winner. Minting
+        # needs the audited delegate warm; a cold vault surfaces as COLD.
+        pepper = self._read_pepper_row()
+        if pepper is not None:
+            return pepper
+        try:
+            self._client.add_setting(
+                VAULT_AUDITED_SET_ID, VAULT_CREDENTIAL_REVISION, PEPPER_KEY,
+                {"value": secrets.token_bytes(_PEPPER_LEN).hex()},
+                state="raw", org=None,
             )
+        except Exception:
+            # A concurrent mint likely won the create-once race (or the
+            # audited write is refused); re-read and use whatever is
+            # authoritative, so peppers never rotate.
+            pass
+        pepper = self._read_pepper_row()
+        if pepper is None:
+            raise SealedSettingsError(
+                "the pepper is absent immediately after mint — the audited "
+                "delegate is not warm (vault bring-up / auto-rhorp A-1)"
+            )
+        return pepper
+
+    def _read_pepper_row(self) -> bytes | None:
+        # The audited read is org-scoped server-side, so this returns only the
+        # caller's own rows; the pepper is matched by suffix.
+        members = self._client.read_set(VAULT_AUDITED_SET_ID, org=None)
+        member = next(
+            (m for m in members.members if _bare_key(m.key) == PEPPER_KEY), None
+        )
+        if member is None:
+            return None
         failure = getattr(member, "vault_error", None)
         if failure is not None:
             if getattr(failure, "reason", "") == "no_key_holder":
@@ -719,21 +750,23 @@ def _looks_cold(exc: Exception) -> bool:
 # Vault bring-up hook (in-process, dashboard side).
 # --------------------------------------------------------------------------- #
 def ensure_pepper_minted() -> bool:
-    """Mint the shared pepper if it has never existed. Returns True on mint.
+    """Mint the OPERATOR-PERSONAL pepper at bring-up if absent. Returns True on mint.
 
-    Called once per unlock, AFTER the personal audited delegate recipient is
-    published (``unlock_routes._install_personal_audited_delegate``) — the
-    audited write is a cold delegate seal and fails before that. Presence in
-    ANY state short-circuits without writing: re-minting would rotate the
-    pepper and silently orphan every sealed store's address, so there is
-    deliberately no rotate path here.
+    This is the personal-scope pepper (org=None → unprefixed), for the
+    operator's own personal sealed stores. Per-ORG peppers are minted lazily
+    by :meth:`ClientBackend.read_pepper` (get-or-create) the first time an org
+    session uses a sealed store — bring-up runs as the operator and cannot
+    mint for orgs it does not yet know. Called once per unlock, AFTER the
+    personal audited delegate recipient is published. Presence short-circuits
+    without writing: re-minting would rotate the pepper and orphan every
+    store's address, so there is deliberately no rotate path.
     """
     from tools.graph import settings_ops
 
     members = settings_ops.read_set(
         VAULT_AUDITED_SET_ID, org=None, peers=[]
     )
-    if any(m.key == PEPPER_KEY for m in members.members):
+    if any(_bare_key(m.key) == PEPPER_KEY for m in members.members):
         return False
     # add_setting, not upsert_by_key: vault rows are encrypted object
     # revisions and the substrate refuses in-place rewrites of them. The
