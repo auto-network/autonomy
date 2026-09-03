@@ -206,6 +206,12 @@ body.sv-viewer-composer-active .voice-caption {
   display: none !important;
 }
 
+html.voice-keyboard-modal,
+body.voice-keyboard-modal {
+  overflow: hidden !important;
+  overscroll-behavior: none;
+}
+
 .voice-sheet {
   position: fixed;
   left: 0;
@@ -254,9 +260,9 @@ body.sv-viewer-composer-active .voice-caption {
 }
 
 /* Once iOS raises its software keyboard, this stops being a floating drawer.
-   JS pins it to the visual viewport while Safari pans that viewport around the
-   focused textarea. The sheet paints behind the status bar; padding keeps its
-   actual controls and text below the safe area. */
+   The locked document cannot pan behind it; JS supplies only the visible
+   viewport height. The sheet paints behind the status bar while padding keeps
+   its actual controls and text below the safe area. */
 .voice-sheet--keyboard.voice-sheet--full {
   top: 0;
   left: 0;
@@ -268,6 +274,7 @@ body.sv-viewer-composer-active .voice-caption {
   background: #161a22;
   border: 0;
   border-radius: 0;
+  overflow: hidden;
 }
 
 .voice-sheet--keyboard .voice-sheet__handle {
@@ -288,6 +295,10 @@ body.sv-viewer-composer-active .voice-caption {
 
 .voice-sheet--keyboard .voice-sheet__actions {
   padding-bottom: 4px;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 2;
+  background: #161a22;
 }
 
 .voice-sheet__handle {
@@ -411,6 +422,8 @@ body.sv-viewer-composer-active .voice-caption {
   border: 0;
   outline: none;
   background: transparent;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   color: #e5edf8;
   font: 500 16px/1.55 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
