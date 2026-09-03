@@ -245,6 +245,11 @@
     return (viewport && viewport.height) || (typeof window !== 'undefined' && window.innerHeight) || 0;
   }
 
+  function _viewportOffsetTop() {
+    var viewport = (typeof window !== 'undefined' && window.visualViewport) || null;
+    return (viewport && viewport.offsetTop) || 0;
+  }
+
   function _sessionsStore() {
     try {
       if (typeof Alpine === 'undefined' || typeof Alpine.store !== 'function') return null;
@@ -328,6 +333,7 @@
       return {
         viewportWidth: _viewportWidth(),
         viewportHeight: _viewportHeight(),
+        viewportOffsetTop: _viewportOffsetTop(),
         capsulePosition: null,
         capsulePressedAction: '',
         capsulePttActive: false,
@@ -344,6 +350,7 @@
         _sheetMoveHandler: null,
         _sheetUpHandler: null,
         _resizeHandler: null,
+        _keyboardLayoutTimers: [],
 
         init() {
           var voice = _voiceStore();
@@ -435,6 +442,7 @@
             }
           }
           this._setKeyboardModal(false);
+          this._clearKeyboardLayoutTimers();
           this._teardownCapsuleGesture();
           this._teardownSheetGesture();
         },
@@ -547,7 +555,7 @@
         get sheetStyle() {
           if (this.keyboardVisible) {
             return {
-              top: '0',
+              top: Math.round(this.viewportOffsetTop) + 'px',
               bottom: 'auto',
               height: Math.round(this.viewportHeight) + 'px',
               transition: 'none',
@@ -698,6 +706,7 @@
           var previousViewportHeight = this.viewportHeight;
           this.viewportWidth = _viewportWidth();
           this.viewportHeight = _viewportHeight();
+          this.viewportOffsetTop = _viewportOffsetTop();
           var keyboardWasVisible = this.keyboardVisible;
           var inputFocused = !!(
             typeof document !== 'undefined' &&
@@ -744,6 +753,20 @@
           // textarea is the sole scroll surface while the keyboard is visible.
           this._setKeyboardModal(true);
           this.refreshKeyboardLayout();
+          this._clearKeyboardLayoutTimers();
+          var self = this;
+          [60, 180, 360].forEach(function (delay) {
+            self._keyboardLayoutTimers.push(setTimeout(function () {
+              self.refreshKeyboardLayout();
+            }, delay));
+          });
+        },
+
+        _clearKeyboardLayoutTimers() {
+          (this._keyboardLayoutTimers || []).forEach(function (timer) {
+            clearTimeout(timer);
+          });
+          this._keyboardLayoutTimers = [];
         },
 
         _scrollSheetToTop() {
@@ -763,7 +786,10 @@
               typeof document !== 'undefined' &&
               document.activeElement === (self.$refs && self.$refs.sheetInput)
             );
-            if (!stillFocused) self._setKeyboardModal(false);
+            if (!stillFocused) {
+              self._setKeyboardModal(false);
+              self._clearKeyboardLayoutTimers();
+            }
             self.refreshViewport();
           }, 80);
         },

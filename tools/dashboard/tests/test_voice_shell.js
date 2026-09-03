@@ -140,6 +140,7 @@ function loadVoiceShell(opts) {
     width,
     height,
     offsetTop: 0,
+    offsetTop: 0,
     addEventListener(name, cb) {
       (winListeners['visual:' + name] ||= []).push(cb);
     },
@@ -753,12 +754,14 @@ describe('voice shell helpers', () => {
 
   it('uses full viewport keyboard layout while the focused editor shrinks the visual viewport', () => {
     const h = loadVoiceShell({ voiceStore: { sheetOpen: true, sheetMode: 'partial' } });
+    assert.equal((h.winListeners['visual:scroll'] || []).length, 0);
     h.document.activeElement = h.component.$refs.sheetInput;
     h.window.visualViewport.height = 390;
+    h.window.visualViewport.offsetTop = 217;
     h.component.refreshKeyboardLayout();
     assert.equal(h.component.keyboardVisible, true);
     assert.equal(h.component.effectiveSheetMode, 'full');
-    assert.equal(h.component.sheetStyle.top, '0');
+    assert.equal(h.component.sheetStyle.top, '217px');
     assert.equal(h.component.sheetStyle.height, '390px');
     assert.equal(h.component.sheetStyle.bottom, 'auto');
     assert.equal(h.component.$refs.sheetInput.scrollTop, 0);
