@@ -10,6 +10,10 @@
 // Pitfall: use $nextTick for post-render DOM work after reactive state changes.
 
 (function () {
+  function _beadHref(id) {
+    const org = new URLSearchParams(window.location.search).get('org');
+    return '/bead/' + encodeURIComponent(id) + (org ? '?org=' + encodeURIComponent(org) : '');
+  }
 
   // ── Helpers ─────────────────────────────────────────────────
 
@@ -268,7 +272,7 @@
       const borderCls = ns === 'blocked' ? 'border-red-500' : ns === 'ready' ? 'border-green-500' : ns === 'active' ? 'border-purple-500' : 'border-gray-600';
       const bgCls = ns === 'blocked' ? 'bg-red-950' : ns === 'ready' ? 'bg-green-950' : ns === 'active' ? 'bg-purple-950' : ns === 'closed' ? 'bg-gray-800 opacity-60' : 'bg-gray-800';
       const critCls = criticalPath.has(id) && ns !== 'closed' ? 'dag-node-critical' : '';
-      nodeHtml += `<a href="/bead/${_esc(id)}" data-bead-id="${_esc(id)}"
+      nodeHtml += `<a href="${_beadHref(id)}" data-bead-id="${_esc(id)}"
         class="dag-node absolute rounded-lg border-2 ${borderCls} ${bgCls} ${critCls} p-2 hover:brightness-125 transition-all overflow-hidden"
         style="left:${pos.x}px; top:${pos.y}px; width:${NODE_W}px; height:${NODE_H}px;"
         title="${_esc(bead.title || '')}">
@@ -292,7 +296,7 @@
     let isolatedHtml = '';
     if (isolated.length) {
       const cards = isolated.map(b => `
-        <a href="/bead/${_esc(b.id)}" data-bead-id="${_esc(b.id)}"
+        <a href="${_beadHref(b.id)}" data-bead-id="${_esc(b.id)}"
            class="p-2 bg-gray-800 rounded border border-gray-700 hover:border-gray-500 text-xs block">
           <div class="flex items-center gap-1.5">
             <span>${_typeIcon(b.issue_type)}</span>
@@ -349,7 +353,7 @@
         const sc = dep?.status === 'closed' ? 'text-green-400' : dep?.status === 'in_progress' ? 'text-purple-400' : 'text-yellow-400';
         return `<span class="inline-flex items-center gap-1 text-xs">
           <span class="text-gray-500">depends on</span>
-          <a href="/bead/${_esc(d.depends_on_id)}" class="${sc} hover:underline font-mono">${_esc(d.depends_on_id)}</a>
+          <a href="${_beadHref(d.depends_on_id)}" class="${sc} hover:underline font-mono">${_esc(d.depends_on_id)}</a>
           <span class="text-gray-500 truncate max-w-[150px]" title="${_esc(dep?.title||'')}">${_esc(dep?.title||'')}</span>
         </span>`;
       }).join('');
@@ -358,12 +362,12 @@
         const sc = child?.status === 'closed' ? 'text-green-400' : child?.status === 'in_progress' ? 'text-purple-400' : 'text-yellow-400';
         return `<span class="inline-flex items-center gap-1 text-xs">
           <span class="text-gray-500">blocks</span>
-          <a href="/bead/${_esc(childId)}" class="${sc} hover:underline font-mono">${_esc(childId)}</a>
+          <a href="${_beadHref(childId)}" class="${sc} hover:underline font-mono">${_esc(childId)}</a>
           <span class="text-gray-500 truncate max-w-[150px]" title="${_esc(child?.title||'')}">${_esc(child?.title||'')}</span>
         </span>`;
       }).join('');
       return `
-        <a href="/bead/${_esc(issue.id)}" data-bead-id="${_esc(issue.id)}"
+        <a href="${_beadHref(issue.id)}" data-bead-id="${_esc(issue.id)}"
            class="p-3 bg-gray-800 rounded-lg border-2 ${borderCls} hover:brightness-110 transition-all block">
           <div class="flex items-center gap-2 mb-2">
             <span>${_typeIcon(issue.issue_type)}</span>
@@ -378,7 +382,7 @@
 
     function simpleRowHtml(issue) {
       return `
-        <a href="/bead/${_esc(issue.id)}" data-bead-id="${_esc(issue.id)}"
+        <a href="${_beadHref(issue.id)}" data-bead-id="${_esc(issue.id)}"
            class="p-3 bg-gray-800 rounded-lg hover:bg-gray-750 border border-gray-700 block">
           <div class="flex items-center gap-2">
             <span>${_typeIcon(issue.issue_type)}</span>
@@ -407,6 +411,9 @@
       loading: true,
       query: '',
       view: localStorage.getItem('beads-view') || 'board',
+      orgs: [],
+      selectedOrg: '',
+      orgOpen: false,
 
       // Sort (list view)
       sortCol: 'updated_at',
@@ -467,10 +474,8 @@
         };
         if (gs) gs.addEventListener('input', this._searchHandler);
 
-        // Fetch bead data
-        const data = await fetch('/api/beads/list').then(r => r.json());
-        this.allBeads = Array.isArray(data) ? data : [];
-        this.loading = false;
+        await this._loadOrganizations();
+        await this._loadBeads();
 
         // Init tree open state
         this._initTreeOpen();
@@ -496,6 +501,7 @@
 
       _restoreFromURL() {
         const p = new URLSearchParams(window.location.search);
+        this.selectedOrg = p.get('org') || '';
         this.fPriority = p.get('priority') ? p.get('priority').split(',').map(Number) : [];
         this.fPhase = p.get('phase') ? p.get('phase').split(',') : [];
         this.fType = p.get('type') ? p.get('type').split(',') : [];
@@ -508,6 +514,7 @@
 
       _syncURL() {
         const p = new URLSearchParams();
+        if (this.selectedOrg) p.set('org', this.selectedOrg);
         if (this.view !== 'board') p.set('view', this.view);
         if (this.fPriority.length) p.set('priority', this.fPriority.join(','));
         if (this.fPhase.length) p.set('phase', this.fPhase.join(','));
@@ -526,6 +533,10 @@
       get hasFilters() {
         return this.fPriority.length || this.fPhase.length || this.fType.length ||
                this.fLabels.length || this.fEpic || this.fBlocked || this.fCreator;
+      },
+
+      get selectedOrgIdentity() {
+        return this.orgs.find(o => o.slug === this.selectedOrg) || null;
       },
 
       get filtered() {
@@ -714,6 +725,55 @@
 
       // ── Actions ───────────────────────────────────────────
 
+      _orgQuery() {
+        return this.selectedOrg ? '?org=' + encodeURIComponent(this.selectedOrg) : '';
+      },
+
+      async _loadOrganizations() {
+        try {
+          const data = await fetch('/api/orgs').then(r => r.ok ? r.json() : { orgs: [] });
+          this.orgs = (data.orgs || []).map(entry => {
+            const base = (entry && entry.org) || {};
+            const ident = (entry && entry.identity_resolved)
+              || (entry && entry.identity && entry.identity.payload) || {};
+            const slug = base.slug || ident.slug || '';
+            const name = ident.name || slug;
+            return {
+              slug,
+              name,
+              color: ident.color || '#64748b',
+              initial: ident.initial || (name ? name[0].toUpperCase() : '?'),
+            };
+          }).filter(o => o.slug && o.slug !== 'personal');
+        } catch (_) {
+          this.orgs = [];
+        }
+        if (!this.selectedOrg) {
+          this.selectedOrg = this.orgs.some(o => o.slug === 'autonomy')
+            ? 'autonomy' : ((this.orgs[0] || {}).slug || '');
+        }
+      },
+
+      async _loadBeads() {
+        this.loading = true;
+        const data = await fetch('/api/beads/list' + this._orgQuery()).then(r => r.json());
+        this.allBeads = Array.isArray(data) ? data : [];
+        this.loading = false;
+        this.selected = {};
+        this._initTreeOpen();
+      },
+
+      async setOrg(slug) {
+        if (!slug || slug === this.selectedOrg) {
+          this.orgOpen = false;
+          return;
+        }
+        this.selectedOrg = slug;
+        this.orgOpen = false;
+        this._syncURL();
+        await this._loadBeads();
+      },
+
       switchView(v) {
         if (this.view === v) return;
         this.view = v;
@@ -796,7 +856,7 @@
 
       clearSelection() { this.selected = {}; },
 
-      goToBead(id) { navigateTo('/bead/' + id); },
+      goToBead(id) { navigateTo('/bead/' + id + this._orgQuery()); },
 
       // Tree expand/collapse
       _initTreeOpen() {
@@ -842,11 +902,11 @@
         const ids = Object.keys(this.selected);
         if (!ids.length) return;
         const results = await Promise.all(
-          ids.map(id => fetch(`/api/bead/${id}/approve`, { method: 'POST' }).then(r => r.json()))
+          ids.map(id => fetch(`/api/bead/${id}/approve${this._orgQuery()}`, { method: 'POST' }).then(r => r.json()))
         );
         const failed = results.filter(r => !r.ok);
         if (failed.length) alert(`${failed.length} of ${ids.length} failed to approve`);
-        const fresh = await fetch('/api/beads/list').then(r => r.json());
+        const fresh = await fetch('/api/beads/list' + this._orgQuery()).then(r => r.json());
         this.allBeads = Array.isArray(fresh) ? fresh : [];
         this.selected = {};
       },
@@ -854,11 +914,11 @@
       // Approve a bead (board / list view inline button)
       async approveBead(id, btnEl) {
         if (btnEl) { btnEl.disabled = true; btnEl.textContent = '...'; }
-        const res = await fetch(`/api/bead/${id}/approve`, { method: 'POST' });
+        const res = await fetch(`/api/bead/${id}/approve${this._orgQuery()}`, { method: 'POST' });
         const data = await res.json();
         if (data.ok) {
           // Refresh data
-          const fresh = await fetch('/api/beads/list').then(r => r.json());
+          const fresh = await fetch('/api/beads/list' + this._orgQuery()).then(r => r.json());
           this.allBeads = Array.isArray(fresh) ? fresh : [];
         } else {
           if (btnEl) { btnEl.disabled = false; btnEl.textContent = 'Approve'; }

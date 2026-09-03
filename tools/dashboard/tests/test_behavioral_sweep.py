@@ -2657,6 +2657,27 @@ DISPATCH_PAGE_CHECKS = """
 BEADS_PAGE_CHECKS = """
     var bodyText = document.body.innerText;
 
+    // Organization selector is projected into the shell immediately before
+    // the persistent profile indicator, and the selected org survives links.
+    var orgSelect = document.querySelector('[data-testid="beads-org-select"]');
+    var profile = document.querySelector('[data-testid="identity-indicator"]');
+    r.org_selector_visible = !!(orgSelect && orgSelect.offsetParent !== null);
+    r.org_selector_before_profile = !!(orgSelect && profile &&
+      orgSelect.getBoundingClientRect().right <= profile.getBoundingClientRect().left);
+    var firstBeadLink = document.querySelector('a[href^="/bead/"]');
+    r.bead_link_keeps_org = !!(firstBeadLink && firstBeadLink.getAttribute('href').indexOf('org=autonomy') !== -1);
+    var beadsRoot = document.querySelector('[x-data="beadsPage()"]');
+    var beadsData = beadsRoot && Alpine.$data(beadsRoot);
+    if (beadsData) {
+      beadsData.orgs = [{slug:'autonomy',name:'Autonomy',initial:'A',color:'#6C63FF'},
+                        {slug:'anchore',name:'Anchore',initial:'A',color:'#2563EB'}];
+      beadsData.selectedOrg = 'anchore';
+      beadsData._syncURL();
+      r.selector_updates_url = window.location.search.indexOf('org=anchore') !== -1;
+    } else {
+      r.selector_updates_url = false;
+    }
+
     // View switcher tabs visible
     var tabs = document.querySelectorAll('[role="tab"]');
     var tabLabels = [];
@@ -3828,7 +3849,7 @@ class TestBeadsPageBehavior:
     @pytest.fixture(scope="class", autouse=True)
     @classmethod
     def checks(cls, browser, request):
-        result = _navigate_and_check("/beads", BEADS_PAGE_CHECKS, wait_ms=1000)
+        result = _navigate_and_check("/beads?org=autonomy", BEADS_PAGE_CHECKS, wait_ms=1000)
         request.cls._checks = result
 
     def test_view_tabs(self):
@@ -3838,6 +3859,20 @@ class TestBeadsPageBehavior:
         assert c.get("has_board_tab"), f"No 'Board' tab, got: {c.get('tab_labels')}"
         assert c.get("has_tree_tab"), f"No 'Tree' tab, got: {c.get('tab_labels')}"
         assert c.get("has_deps_tab"), f"No 'Deps' tab, got: {c.get('tab_labels')}"
+
+    def test_organization_selector_is_beside_profile(self):
+        """User sees the organization selector immediately before profile."""
+        c = self._checks
+        assert c.get("org_selector_visible"), "Organization selector is not visible"
+        assert c.get("org_selector_before_profile"), "Organization selector is not before profile"
+
+    def test_bead_navigation_keeps_selected_organization(self):
+        """Opening a listed bead retains the selected tracker."""
+        assert self._checks.get("bead_link_keeps_org"), "Bead link dropped org=autonomy"
+
+    def test_selecting_organization_updates_shareable_url(self):
+        """Selecting another organization immediately records it in the URL."""
+        assert self._checks.get("selector_updates_url"), "Organization selection did not update URL"
 
     def test_bead_rows(self):
         """User sees bead rows in the list view."""
