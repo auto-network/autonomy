@@ -305,6 +305,62 @@ def test_client_backend_resolves_org_prefixed_sealed_index(monkeypatch):
     assert stub.opened_with is None
 
 
+def test_cold_is_read_from_the_structured_reason_not_the_error_prose(monkeypatch):
+    """Cold must be decided by VaultReadFailure.reason, never by sniffing text.
+
+    The removed ``_looks_cold`` matched any message containing "no key", so an
+    UNRELATED failure was reported as a cold vault — the false positive that
+    sent an investigation after a lock that was not there. A genuine
+    ``no_key_holder`` reason still raises COLD; look-alike prose must not.
+    """
+    from types import SimpleNamespace
+
+    from tools.graph.client import GraphHttpError
+    from tools.graph.sealed_settings import ClientBackend
+    from tools.graph.settings_ops import VAULT_NO_KEY_HOLDER
+
+    monkeypatch.setattr(
+        ClientBackend, "_released_path", staticmethod(lambda _a: None))
+    address = "gpZ0yFl8HO0uX63yAtFOtyMxp3HEgXrO1onEcTRUhCk"
+    key = "autonomy:" + address
+
+    class StubClient:
+        def __init__(self, *, vault_error=None, raises=None):
+            self._member = SimpleNamespace(
+                key=key, payload=None, vault_error=vault_error)
+            self._raises = raises
+
+        def read_set(self, set_id, *, org):
+            return SimpleNamespace(members=[self._member])
+
+        def request_vault_open(self, set_id, k, *, org, ttl_seconds):
+            raise self._raises
+
+    # The structured reason IS the signal.
+    cold = StubClient(
+        vault_error=SimpleNamespace(reason=VAULT_NO_KEY_HOLDER, message="…"))
+    with pytest.raises(VaultLocked) as exc:
+        ClientBackend(cold).read_sealed_index(address, block=False)
+    assert exc.value.state == VaultLocked.COLD
+
+    # A DIFFERENT structured reason is not cold — it must not be swallowed as
+    # a lock state just because the prose is vault-flavoured.
+    other = StubClient(
+        vault_error=SimpleNamespace(
+            reason="policy_mismatch",
+            message="the vault is locked out of this policy class"))
+    with pytest.raises(SealedSettingsError) as exc:
+        ClientBackend(other).read_sealed_index(address, block=False)
+    assert not isinstance(exc.value, VaultLocked)
+
+    # THE REGRESSION: an unrelated error whose text happens to contain
+    # "no key" used to be classified COLD. It must now surface as itself.
+    noisy = StubClient(
+        raises=GraphHttpError("found no key at that address", 500, {}))
+    with pytest.raises(GraphHttpError):
+        ClientBackend(noisy).read_sealed_index(address, block=False)
+
+
 def test_layer_reads_back_server_prefixed_rows():
     """A session's item rows are stored under a server-derived <org>: prefix.
     The layer writes bare keys but must resolve get/list against the prefixed

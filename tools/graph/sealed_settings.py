@@ -641,7 +641,31 @@ class ClientBackend:
         # (operator-minted) store is structurally unreachable from a session,
         # and minting a shadow index beside it would split the store — fail
         # loud instead.
+        from tools.graph.settings_ops import VAULT_NO_KEY_HOLDER
+
         members = self._client.read_set(VAULT_SECURED_SET_ID, org=None)
+        # Cold is decided on the STRUCTURED reason the substrate already
+        # returned with this row — the same branch read_pepper() takes, and the
+        # contract VaultReadFailure states ("reason is what to branch on;
+        # message is the operator-facing detail"). It is never inferred from
+        # error prose: a substring probe classified any message containing
+        # "no key" as COLD, so unrelated failures were reported as a cold vault
+        # and sent operators chasing a lock that was not there.
+        failure = next(
+            (m.vault_error for m in members.members
+             if m.key.endswith(f":{address}") or m.key == address),
+            None,
+        )
+        # A secured row awaiting its ceremony carries sealed_content_key and NO
+        # vault_error, so this fires only on a genuine failure — and then a
+        # ceremony would be futile: the row cannot be opened at all.
+        if failure is not None:
+            reason = getattr(failure, "reason", "") or "?"
+            if reason == VAULT_NO_KEY_HOLDER:
+                raise VaultLocked(VaultLocked.COLD)
+            raise SealedSettingsError(
+                f"the sealed index could not be released: {reason}"
+            )
         keys = {m.key for m in members.members}
         prefixed = any(k.endswith(f":{address}") for k in keys)
         if not prefixed:
@@ -670,7 +694,12 @@ class ClientBackend:
             status = getattr(exc, "status", None) or getattr(exc, "status_code", None)
             if status == 408:
                 raise VaultLocked(VaultLocked.PENDING) from exc
-            if _looks_cold(exc):
+            # A structured reason, if the surface carried one — never a guess
+            # at the prose. Anything else raises AS ITSELF: a truthful error
+            # beats a confident mislabel, which is what sent the last
+            # investigation after a cold key that was actually warm.
+            if isinstance(getattr(exc, "body", None), dict) and \
+                    exc.body.get("reason") == VAULT_NO_KEY_HOLDER:
                 raise VaultLocked(VaultLocked.COLD) from exc
             raise
         with open(receipt["path"], "rb") as handle:
@@ -739,11 +768,6 @@ class ClientBackend:
                 ciphertext = (member.payload or {}).get("ciphertext")
                 if isinstance(ciphertext, str):
                     yield member.key, ciphertext
-
-
-def _looks_cold(exc: Exception) -> bool:
-    text = str(exc).lower()
-    return "no_key_holder" in text or "vault is locked" in text or "no key" in text
 
 
 # --------------------------------------------------------------------------- #
