@@ -173,3 +173,7 @@ docker-compose.override.yml
 
 # Stray pid file the native dolt unit drops in the checkout
 dolt-server.pid
+
+# Third-party skill (external Remotion framework) — operator-local, not autonomy source
+.agents/skills/remotion/
+.claude/skills/remotion
