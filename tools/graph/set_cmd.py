@@ -763,6 +763,37 @@ def cmd_set_orphans(args) -> None:
     sys.exit(1)
 
 
+def cmd_set_compact(args) -> None:
+    """Deprecate override rows fully shadowed by a later override on the
+    same base -- dead weight every resolve of that key pays to skip over
+    but that never changes the answer. Dry-run by default; --apply deprecates
+    (reversible via 'graph set undeprecate')."""
+    from tools.graph import settings_ops
+
+    set_id = args.set_at_rev.split("#", 1)[0]
+    org = _org(args) or "personal"
+    candidates = settings_ops.compact_candidates(set_id, key=args.key, org=org)
+    if not candidates:
+        scope = f"key={args.key!r} in " if args.key else ""
+        print(f"  ✓ {scope}{set_id} — nothing shadowed, nothing to compact")
+        return
+    by_key: dict[str, list] = {}
+    for c in candidates:
+        by_key.setdefault(c.key, []).append(c)
+    print(f"  {len(candidates)} shadowed override(s) across {len(by_key)} key(s) in {set_id}:\n")
+    for k, group in sorted(by_key.items()):
+        print(f"      key={k}  ({len(group)} shadowed)")
+        for c in group[:3]:
+            print(f"        {c.id[:11]}  fields={list(c.fields)}  -> shadowed by {c.shadowed_by[:11]}")
+        if len(group) > 3:
+            print(f"        … and {len(group) - 3} more")
+    if not args.apply:
+        print(f"\n  Dry run -- rerun with --apply to deprecate these {len(candidates)} row(s).")
+        return
+    n = settings_ops.compact_apply(candidates, org=org)
+    print(f"\n  ✓ Deprecated {n} row(s). Reversible: graph set undeprecate <id>")
+
+
 def cmd_set_band_audit(args) -> None:
     """Report every stored settings row whose publication_state is outside its
     schema's declared band — the estate-wide compliance sweep.
@@ -1733,6 +1764,23 @@ def attach_set_subparser(sub) -> None:
     p_orphans.add_argument("set_at_rev", metavar="set_id[#rev]")
     p_orphans.add_argument("--org", default=None, help="Organization to read as")
     p_orphans.set_defaults(func=cmd_set_orphans)
+
+    # compact — deprecate overrides fully shadowed by a later one
+    p_compact = set_sub.add_parser(
+        "compact",
+        help="Deprecate override rows fully shadowed by a later override on "
+             "the same base (dry-run by default; --apply to deprecate)",
+    )
+    p_compact.add_argument("set_at_rev", metavar="set_id[#rev]")
+    p_compact.add_argument(
+        "--key", default=None, help="Limit to one key instead of the whole set",
+    )
+    p_compact.add_argument("--org", default=None, help="Organization to read as")
+    p_compact.add_argument(
+        "--apply", action="store_true",
+        help="Actually deprecate the shadowed rows (default is dry-run)",
+    )
+    p_compact.set_defaults(func=cmd_set_compact)
 
     # band-audit — estate-wide publication-band compliance sweep
     p_band = set_sub.add_parser(
