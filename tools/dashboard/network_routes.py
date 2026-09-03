@@ -2243,6 +2243,16 @@ async def get_service_targets(request: Request) -> JSONResponse:
     return JSONResponse({"targets": service_publication.list_service_targets(org)})
 
 
+def _share_platform_url(target_type: object, target_uuid: object) -> str:
+    prefix = {
+        "note": "/graph/",
+        "design": "/design/",
+        "present": "/present/",
+        "mission": "/mission/",
+    }.get(target_type, "/graph/")
+    return prefix + urllib.parse.quote(str(target_uuid or ""), safe="")
+
+
 async def get_published_links(request: Request) -> JSONResponse:
     """Project the selected org's durable Service and Share Settings for UI.
 
@@ -2309,6 +2319,9 @@ async def get_published_links(request: Request) -> JSONResponse:
             "title": resolved.get("title") or payload.get("target_uuid"),
             "description": meta.get("label") or "",
             "url": payload.get("url"),
+            "platform_url": _share_platform_url(
+                payload.get("target_type"), payload.get("target_uuid")
+            ),
             "issued_at": payload.get("issued_at"),
             "expires_at": expires_at,
             "expired": expires_at is not None and expires_at <= int(now.timestamp()),
