@@ -117,6 +117,36 @@ describe('identity flag tray', () => {
       'tunnel flag stays dim when it does not');
   });
 
+  it('refreshes unlock state every time the tray is opened', async () => {
+    const { dom, w, ind } = boot({ certificates: { needs: false } });
+    var unlockFetches = 0;
+    var current = { certificates: { needs: false } };
+    const orig = w.fetch;
+    w.fetch = global.fetch = function (url, options) {
+      if (String(url).split('?')[0] === '/api/identity/unlock-state') {
+        unlockFetches += 1;
+        return Promise.resolve({ ok: true, status: 200,
+          json: function () { return Promise.resolve(current); } });
+      }
+      return orig(url, options);
+    };
+
+    await openPanel(dom, ind);
+    var d = dom.window.document;
+    assert.equal(unlockFetches, 1, 'first open fetches one snapshot');
+    assert.ok(!d.querySelector('[data-testid="identity-fl-cert"]').classList.contains('needs'));
+
+    d.querySelector('[data-testid="identity-trigger"]').click();
+    current = { certificates: { needs: true } };
+    d.querySelector('[data-testid="identity-trigger"]').click();
+    await tick();
+    await tick();
+
+    assert.equal(unlockFetches, 2, 'second open fetches a fresh snapshot');
+    assert.ok(d.querySelector('[data-testid="identity-fl-cert"]').classList.contains('needs'),
+      'the reopened tray renders the new process state');
+  });
+
   it('unknown (no unlock-state payload) renders every tile dim, never lit', async () => {
     const { dom, ind } = boot();   // routes return {} -> no flag needs
     await openPanel(dom, ind);
