@@ -144,17 +144,24 @@ def test_secured_write_uses_named_class_public_key_without_an_opener(world):
 
     control = build_key_holder(cache)(set_id="autonomy.vault.secured", org="acme")
     from tools.vault.errors import ClassOpenError
+    from tools.vault.testkit import content_key_for
 
+    # Since B-1 the class open is the browser's job (content_key_for here); an
+    # empty opener set fails closed there, and the server open applies only the
+    # resulting single-revision content key.
     with pytest.raises(ClassOpenError):
-        open_revision(
-            locator, holdings=control.holdings,
-            content_store=control.content_store,
-            policy_class=record, opener_seeds={},
+        content_key_for(
+            locator, record=record, seeds={},
+            holdings=control.holdings, content_store=control.content_store,
         )
+    content_key = content_key_for(
+        locator, record=record, seeds={"pw-1": seed},
+        holdings=control.holdings, content_store=control.content_store,
+    )
     assert open_revision(
         locator, holdings=control.holdings,
         content_store=control.content_store,
-        policy_class=record, opener_seeds={"pw-1": seed},
+        content_key=content_key,
     ) == secret
 
 

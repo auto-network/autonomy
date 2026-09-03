@@ -2270,6 +2270,7 @@
           open(self, r) {
             const req = r.request || {};
             const ceremony = r.ceremony;
+            const bundle = r.bundle;
             const setting = req.setting || {};
             const requester = req.requester || {};
             const legacyCeremony = ceremony && ceremony.v === 1 &&
@@ -2288,6 +2289,14 @@
                 !requester.workspace || req.operation !== 'read' ||
                 req.release_mode !== 'delivered') {
               throw new Error('vault open request has no complete server-frozen ceremony');
+            }
+            // B-1: the browser opens the policy class locally, so the server
+            // must have served the open bundle (frozen generation + sealed CEK
+            // + genesis/setting identifiers). Without it there is nothing to
+            // open without shipping seeds, which this flow no longer does.
+            if (!bundle || !bundle.generation || !bundle.sealed_cek ||
+                !bundle.class_id || !bundle.genesis_id || !bundle.setting_name) {
+              throw new Error('vault open request has no server-frozen open bundle');
             }
             const expiry = new Date(Number(req.expires_at) * 1000);
             const policyLabel = rootCeremony
@@ -2335,7 +2344,7 @@
                   ? 'Vault password (passkey also required)' : 'Vault password'),
               password: '',
               vaultOpen: {
-                ceremony, gathered: null, rootMethods, rootMethod,
+                ceremony, bundle, gathered: null, rootMethods, rootMethod,
                 selectMethod(method) {
                   if (!rootMethods.includes(method)) return;
                   this.rootMethod = method;
@@ -2357,12 +2366,23 @@
             self.approvalRequest = approval;
           },
           async decision(self, req) {
+            // B-1: gather the factor openers, then open THIS revision's content
+            // key locally in the browser. Only that one CEK crosses to the
+            // server — never the opener seeds or the class key, which would open
+            // the whole policy class.
             const vault = await import('../ceremony/open-vault.js');
+            const { openContentKey } = await import('../ceremony/policy-class-open.js');
             req.vaultOpen.gathered = await vault.gatherVaultOpeners(
               req.vaultOpen.ceremony, req.password,
               { rootMethod: req.vaultOpen.rootMethod },
             );
-            return { openers: req.vaultOpen.gathered.openers };
+            const contentKey = await openContentKey(
+              req.vaultOpen.bundle, req.vaultOpen.gathered.openers,
+            );
+            // Drop the seeds the instant the CEK is out; only content_key ships.
+            vault.clearVaultOpeners(req.vaultOpen.gathered);
+            req.vaultOpen.gathered = null;
+            return { content_key: contentKey };
           },
           async cleanup(self, req) {
             if (req.vaultOpen && req.vaultOpen.gathered) {

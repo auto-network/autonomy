@@ -40,6 +40,7 @@ from tools.network.idkit.root_factor_policy import (
 from tools.vault.policy_class import (
     create_root_reachable_class,
     extend_class,
+    open_cek,
     revoke_factor,
 )
 from tools.vault.root_anchor import create_root_anchor
@@ -212,6 +213,32 @@ def test_fake_ssh_key_is_sealed_approved_delivered_and_reclaimed_without_leak(
         bootstrap = ceremony.json()
         assert bootstrap["ceremony"]["policy"] == "password"
         assert bootstrap["ceremony"]["factors"][0]["armor"] == world.identity.armor
+
+        # B-1: the operator browser also receives the open bundle — the frozen
+        # generation, the sealed CEK, and the genesis/setting identifiers — so it
+        # can open THIS one revision's content key locally. It carries no opener
+        # seed and no class key.
+        bundle = bootstrap["bundle"]
+        assert bundle["class_id"] == world.policy_class.class_id
+        assert bundle["policy"] == "password"
+        assert bundle["generation"]["gen_id"]
+        assert bundle["generation"]["wraps"]
+        assert bundle["sealed_cek"]["format"] == "hpke-x25519-v1"
+        assert world.opener_seeds[world.identity.factor_id].hex() not in json.dumps(
+            bundle
+        )
+        # The browser opens the CEK from the bundle; only that one key crosses
+        # back. In Python the reference for that open is open_cek (the JS
+        # openContentKey mirrors it byte-for-byte; parity test lives in
+        # tools/dashboard/static/js/ceremony/tests/policy-class-open.test.mjs).
+        content_key_hex = open_cek(
+            world.policy_class,
+            world.opener_seeds,
+            bundle["sealed_cek"],
+            genesis_id=bundle["genesis_id"],
+            setting_name=bundle["setting_name"],
+            required_policy=bundle["policy"],
+        ).hex()
         assert "ceremony" not in client.get(
             f"/api/approvals/{rid}?wait=0"
         ).json()
@@ -246,26 +273,25 @@ def test_fake_ssh_key_is_sealed_approved_delivered_and_reclaimed_without_leak(
         assert other_org.status_code == 400
         assert "other-org:test.disposable" in other_org.text
 
-        # Neither the requesting bearer nor a malformed decline can smuggle
-        # opener material into the durable approval result.
+        # Neither the requesting bearer (no operator authority) nor a malformed
+        # decline that smuggles an extra field can decide this open.
         assert client.post(
             f"/api/approvals/{rid}/decision",
-            json={"approved": True, "openers": {"pw": "00" * 32}},
+            json={"approved": True, "content_key": content_key_hex},
         ).status_code == 401
         assert client.post(
             f"/api/approvals/{rid}/decision",
             headers={"x-test-operator": "1"},
-            json={"approved": False, "openers": {"pw": "00" * 32}},
+            json={"approved": False, "content_key": content_key_hex},
         ).status_code == 401
         assert ar.get(rid)["result"] is None
 
-        opener_hex = world.opener_seeds[world.identity.factor_id].hex()
         decided = client.post(
             f"/api/approvals/{rid}/decision",
             headers={"x-test-operator": "1"},
             json={
                 "approved": True,
-                "openers": {world.identity.factor_id: opener_hex},
+                "content_key": content_key_hex,
             },
         )
         assert decided.status_code == 200, decided.text
@@ -286,8 +312,12 @@ def test_fake_ssh_key_is_sealed_approved_delivered_and_reclaimed_without_leak(
     ramfs_raw = delivered_files[("auto-real", "test.disposable")].decode()
     assert hashlib.sha256(ramfs_raw.encode()).hexdigest() == expected_digest
     persisted = ar.get(rid)
-    assert "openers" not in json.dumps(persisted)
-    assert opener_hex not in json.dumps(persisted)
+    # The content key is consumed at execution and never persisted; no opener
+    # seed ever reached the server in the first place.
+    assert content_key_hex not in json.dumps(persisted)
+    assert world.opener_seeds[world.identity.factor_id].hex() not in json.dumps(
+        persisted
+    )
     assert secret not in json.dumps(persisted)
     assert persisted["result"] == delivered["result"]
     release = vault_releases.get(rid)
@@ -402,12 +432,24 @@ def test_root_reachable_fake_ssh_key_uses_personal_root_anchor(vault_open_env):
         assert ceremony["root"]["root_pub"] == root.public_hex
         assert ceremony["root"]["methods"] == ["password"]
 
+        # B-1: the browser opens the root-reachable class locally from the
+        # bundle (the anchor is the single wrap) and returns only this
+        # revision's content key. open_cek is the Python reference for that open.
+        bundle = review.json()["bundle"]
+        content_key_hex = open_cek(
+            root_class,
+            {anchor.anchor_id: anchor_seed},
+            bundle["sealed_cek"],
+            genesis_id=bundle["genesis_id"],
+            setting_name=bundle["setting_name"],
+            required_policy=bundle["policy"],
+        ).hex()
         decided = client.post(
             f"/api/approvals/{rid}/decision",
             headers={"x-test-operator": "1"},
             json={
                 "approved": True,
-                "openers": {anchor.anchor_id: anchor_seed.hex()},
+                "content_key": content_key_hex,
             },
         )
         assert decided.status_code == 200, decided.text
@@ -453,16 +495,13 @@ def test_vault_open_refuses_setting_drift(vault_open_env):
             org=None,
             vault_policy_class_id=world.policy_class.class_id,
         )
+        # The content key is well-formed but never applied: execute re-resolves
+        # the frozen setting, sees the override, and refuses before the key can
+        # touch the body. Drift detection does not depend on the key's value.
         client.post(
             f"/api/approvals/{rid}/decision",
             headers={"x-test-operator": "1"},
-            json={
-                "approved": True,
-                "openers": {
-                    world.identity.factor_id:
-                        world.opener_seeds[world.identity.factor_id].hex(),
-                },
-            },
+            json={"approved": True, "content_key": "00" * 32},
         )
         result = client.get(f"/api/approvals/{rid}?wait=10").json()["result"]
     assert result["execution"]["ok"] is False
