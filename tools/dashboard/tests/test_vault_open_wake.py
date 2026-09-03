@@ -7,8 +7,12 @@ once when the operator's decision is committed.
 
 from __future__ import annotations
 
+from starlette.applications import Starlette
+from starlette.testclient import TestClient
+
 from tools.dashboard import approvals_routes
 from tools.dashboard import session_notify
+from tools.dashboard.dao import approval_requests as ar
 from tools.dashboard.vault_open_approvals import notify_session
 
 
@@ -98,3 +102,36 @@ def test_finalize_decision_does_not_wake_a_kind_without_a_notifier(monkeypatch):
     )
     approvals_routes._finalize_decision("x", "commit_sign", "auto-test")
     assert calls == []
+
+
+def test_decision_route_delivers_the_wake_end_to_end(tmp_path, monkeypatch):
+    """The REAL /api/approvals/{id}/decision route reaches the session wake.
+
+    Proves the route -> _finalize_decision -> SESSION_NOTIFIERS -> deliver chain
+    A-5 depends on, not just _finalize_decision called in isolation.
+    """
+    monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approvals.db")
+    delivered: list[tuple] = []
+    monkeypatch.setitem(
+        approvals_routes.SESSION_NOTIFIERS, "wake_probe",
+        lambda row: {
+            "notification_id": f"probe:{row['id']}", "kind": "wake-probe",
+            "status": "done", "summary": f"probe {row['session']}", "body": "",
+        },
+    )
+    monkeypatch.setattr(
+        approvals_routes.session_notify, "deliver_task_notification_sync",
+        lambda session, nid, **kw: delivered.append((session, nid, kw)) or "accepted",
+    )
+    client = TestClient(Starlette(routes=approvals_routes.ROUTES))
+
+    rid = client.post("/api/approvals", json={
+        "kind": "wake_probe", "session": "auto-wake", "request": {"summary": "probe"},
+    }).json()["id"]
+    ok = client.post(f"/api/approvals/{rid}/decision", json={"approved": True})
+
+    assert ok.json() == {"ok": True}
+    assert len(delivered) == 1, "the decision route wakes the requester exactly once"
+    session, nid, _ = delivered[0]
+    assert session == "auto-wake"
+    assert nid == f"probe:{rid}"
