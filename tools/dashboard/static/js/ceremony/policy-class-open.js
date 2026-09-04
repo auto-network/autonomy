@@ -28,6 +28,10 @@ async function sha256Hex(bytes) {
 }
 
 const VAULT_FACTOR_PURPOSE = 'autonomy/vault-factor/v1';
+// A policy recipient that is NOT an interactive factor (the personal-root
+// anchor of a root-reachable class) derives its wrap keypair from this purpose
+// plus its recipient kind — mirroring Python recipients.recipient_keypair_from_seed.
+const POLICY_RECIPIENT_PURPOSE = 'autonomy/vault-policy-recipient/v1';
 const CLASS_WRAP_PURPOSE = 'autonomy/vault-policy-class/v1';
 const CLASS_SEAL_KEY_PURPOSE = 'autonomy/vault-policy-class/sealing-key/v1';
 const CEK_PUBLIC_SEAL_PURPOSE = 'autonomy/vault-policy-class/cek-hpke/v1';
@@ -61,9 +65,21 @@ async function cekPublicSealPurpose(classId, genId, genesisId, settingName, poli
   return `${CEK_PUBLIC_SEAL_PURPOSE}|${digest}`;
 }
 
+// The seed→private derivation depends on what the wrap recipient IS, exactly
+// as Python policy_class._open_wrap branches: an interactive password/passkey
+// factor derives under VAULT_FACTOR_PURPOSE; any other recipient kind (the
+// personal-root anchor of a root-reachable class) derives under the policy
+// recipient purpose plus its kind. Using the factor purpose for an anchor wrap
+// yields the wrong key and the wrap never opens.
+function wrapPrivPurpose(factorType) {
+  return (factorType === 'password' || factorType === 'passkey')
+    ? VAULT_FACTOR_PURPOSE
+    : `${POLICY_RECIPIENT_PURPOSE}|${factorType}`;
+}
+
 async function openWrap(wrap, seedHex, classId, genId, policy) {
   const { privateKeyHex } = await deriveEncapsulationKeypair(
-    hexToBytes(seedHex), VAULT_FACTOR_PURPOSE,
+    hexToBytes(seedHex), wrapPrivPurpose(wrap.factor_type),
   );
   return openWithEncapsulationPrivateKey(
     hexToBytes(wrap.wrapped),

@@ -229,8 +229,8 @@ def test_fake_ssh_key_is_sealed_approved_delivered_and_reclaimed_without_leak(
         )
         # The browser opens the CEK from the bundle; only that one key crosses
         # back. In Python the reference for that open is open_cek (the JS
-        # openContentKey mirrors it byte-for-byte; parity test lives in
-        # tools/dashboard/static/js/ceremony/tests/policy-class-open.test.mjs).
+        # openContentKey mirrors it byte-for-byte; crossimpl parity lives in
+        # tools/dashboard/tests/test_policy_class_open_crossimpl.py).
         content_key_hex = open_cek(
             world.policy_class,
             world.opener_seeds,

@@ -126,8 +126,8 @@ def test_personal_secured_setting_seals_cold_and_opens_only_with_factor(
     digest = hashlib.sha256(canonical_json(member.sealed_content_key)).hexdigest()
     # B-1: the browser opens the policy class locally and hands the server only
     # this one revision's CEK. Reproduce that here with the Python open_cek — the
-    # same computation the JS openContentKey mirrors (parity test in
-    # tools/dashboard/static/js/ceremony/tests/policy-class-open.test.mjs).
+    # same computation the JS openContentKey mirrors (crossimpl parity in
+    # tools/dashboard/tests/test_policy_class_open_crossimpl.py).
     from tools.vault.policy_class import open_cek
     from tools.vault import personal_object as pobj
     content_key = open_cek(
