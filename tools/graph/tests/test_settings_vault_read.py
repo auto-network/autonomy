@@ -500,24 +500,12 @@ def test_a_frozen_secured_setting_opens_to_plaintext_at_the_one_chokepoint(
         canonical_json(member.sealed_content_key)
     ).hexdigest()
 
-    # B-1: the operator's browser opens the policy class locally and hands the
-    # server only this one revision's CEK. Reproduce that with open_cek, then
-    # drive the one server-side chokepoint with the resulting content key.
-    content_key = open_cek(
-        vault.policy_class,
-        vault.opener_seeds,
-        member.sealed_content_key["sealed_cek"],
-        genesis_id=vault.genesis_id,
-        setting_name=object_id_for(vault.genesis_id, SECURED_SET, "default"),
-        required_policy=vault.policy_class.policy,
-    )
-
     assert settings_ops.open_secured_setting(
         SECURED_SET,
         "default",
         setting_id=setting_id,
         sealed_content_key_digest=digest,
-        content_key=content_key,
+        opener_seeds=vault.opener_seeds,
         org=None,
     ) == {"access_token": SECRET}
 
@@ -530,7 +518,7 @@ def test_a_frozen_secured_setting_opens_to_plaintext_at_the_one_chokepoint(
             "default",
             setting_id=setting_id,
             sealed_content_key_digest=digest,
-            content_key=content_key,
+            opener_seeds=vault.opener_seeds,
             org=None,
         )
 

@@ -719,16 +719,10 @@ def open_revision(
     *,
     holdings: Holdings,
     content_store,
-    content_key=None,
+    policy_class=None,
+    opener_seeds=None,
 ):
     """Resolve a locator back to the setting's payload.
-
-    The storage state (the org's warm generation) opens the OUTER object here;
-    the inner policy-class open — the human-factor step — happens in the
-    operator's browser (B-1), which hands over ``content_key``: this one
-    revision's already-unwrapped CEK, which opens nothing else. Opener seeds and
-    the class key never reach the server. Audited objects need no ``content_key``
-    (the storage state alone yields their plaintext).
 
     Raises :class:`VaultError` when the locator itself is unusable and lets
     the storage layer's own refusals through untouched — a reader who cannot
@@ -739,29 +733,39 @@ def open_revision(
     if reference["tier"] == AUDITED:
         return json.loads(opened)
 
-    if content_key is None:
+    if policy_class is None:
         raise VaultError(
             "this secret is secured: the storage state opened the object and "
-            "yielded the wrapped content key, which opens only in the browser"
+            "yielded the wrapped content key, which opens only through its "
+            "policy class"
+        )
+    if policy_class.class_id != reference["policy_class_id"]:
+        raise VaultError(
+            "the policy class offered is not the one this secret names"
         )
     envelope = json.loads(opened)
     if envelope.get("v") != _SECURED_ENVELOPE_VERSION:
         raise VaultError(f"unsupported secured envelope version {envelope.get('v')!r}")
-    content_key = bytearray(content_key)
+    # Keep the CEK in mutable storage for the shortest practical lifetime.
+    # ``open_cek`` necessarily returns one immutable bytes object from the
+    # cryptography library; converting immediately lets that temporary fall out
+    # of scope and gives this chokepoint a buffer it can reliably erase.
+    content_key = bytearray(
+        open_cek(
+            policy_class,
+            opener_seeds or {},
+            envelope["sealed_cek"],
+            genesis_id=reference["genesis_id"],
+            setting_name=reference["object_id"],
+            required_policy=reference["required_policy"],
+        )
+    )
     try:
         suites.require_suite(envelope["body_suite_id"], suites.BODY_SUITES)
         inner_header = _replace_body(header, envelope)
-        try:
-            plaintext = object_header.open_body(
-                inner_header, content_key, bytes.fromhex(envelope["ciphertext"])
-            )
-        except StorageError as exc:
-            # A wrong content key or a tampered body fails the body AEAD; report
-            # it at the vault boundary as a fail-closed VaultError, never as a
-            # bare storage fault or an empty value.
-            raise VaultError(
-                "secured vault body does not open with this content key"
-            ) from exc
+        plaintext = object_header.open_body(
+            inner_header, content_key, bytes.fromhex(envelope["ciphertext"])
+        )
     finally:
         content_key[:] = b"\x00" * len(content_key)
     return json.loads(plaintext)

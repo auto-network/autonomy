@@ -51,10 +51,6 @@ MAX_TTL_SECONDS = 86400
 DEFAULT_TTL_SECONDS = 0
 _ALLOWED_REQUEST_FIELDS = {"set_id", "key", "ttl_seconds"}
 _HEX_SEED_LEN = 64
-#: A content-encryption key is 32 bytes → 64 lowercase-hex chars. The browser
-#: (B-1) opens the policy class and returns this one revision's CEK; the server
-#: never sees opener seeds or the class key.
-_HEX_CEK_LEN = 64
 
 
 def _setting_route(
@@ -365,17 +361,7 @@ def _passkey_for_public_key(public_key: str) -> dict | None:
 
 
 def enrich_from_request(http_request: Request, row: dict) -> dict:
-    """Return factor armor/PRF bootstrap AND the open bundle to the operator.
-
-    B-1: the operator's browser opens the policy class locally, so besides the
-    factor ceremony it needs the inner-blob inputs that ``open_cek`` used to
-    consume server-side — the frozen factor ``generation`` (wraps + sealing
-    public key), the sealed CEK, and the genesis/setting identifiers the seal
-    binds. Nothing here opens more than this one revision: no content key, no
-    opener seed, and no class key ever appears. All of it is served only to the
-    operator cookie, and the generation is taken from the digest-frozen policy
-    snapshot so the browser opens exactly what the approval committed to.
-    """
+    """Return factor armor/PRF bootstrap only to the operator browser."""
     principal = api_auth.principal_from_request(http_request)
     if principal.kind is not api_auth.ApiPrincipalKind.OPERATOR_COOKIE:
         raise PermissionError("operator-cookie authority is required for vault factors")
@@ -386,21 +372,7 @@ def enrich_from_request(http_request: Request, row: dict) -> dict:
         _digest(ceremony), str(staged.get("factor_digest") or ""),
     ):
         raise VaultError("the vault factors changed before approval")
-
-    setting = (row.get("request") or {}).get("setting") or {}
-    bundle = settings_ops.secured_open_bundle(
-        setting.get("set_id"),
-        setting.get("key"),
-        setting_id=staged.get("setting_id"),
-        sealed_content_key_digest=staged.get("sealed_digest"),
-        org=staged.get("org"),
-    )
-    if bundle["class_id"] != snapshot.get("class_id"):
-        raise VaultError("the vault policy changed before approval")
-    # Serve the browser exactly the frozen generation the approval committed to.
-    bundle["generation"] = snapshot.get("generation")
-    bundle["policy"] = snapshot.get("policy")
-    return {"ceremony": ceremony, "bundle": bundle}
+    return {"ceremony": ceremony}
 
 
 def authorize_decision(
@@ -408,16 +380,7 @@ def authorize_decision(
     row: dict,
     decision: dict,
 ) -> str | None:
-    """The key-bearing decision is accepted only from the operator cookie.
-
-    B-1: the operator's browser opens the policy class locally and returns only
-    ``content_key`` — this one revision's already-unwrapped CEK. The server
-    receives no opener seeds and no class key, so there is no seed roster or
-    policy shape to re-check here: a content key that does not open the FROZEN
-    body fails closed at :func:`execute` (the object/revision AEAD binds the
-    identifiers, and the frozen digest is re-verified before the open). Authority
-    is the operator cookie; correctness is the crypto.
-    """
+    """The factor-bearing decision is accepted only from the operator cookie."""
     principal = api_auth.principal_from_request(http_request)
     if principal.kind is not api_auth.ApiPrincipalKind.OPERATOR_COOKIE:
         return "operator-cookie authority is required to open a secured Setting"
@@ -425,15 +388,49 @@ def authorize_decision(
         return None if set(decision) == {"approved"} else (
             "a declined vault_open decision must carry only approved"
         )
-    if set(decision) != {"approved", "content_key"}:
-        return "vault_open approval must carry only approved and content_key"
-    content_key = decision.get("content_key")
-    if (
-        not isinstance(content_key, str)
-        or len(content_key) != _HEX_CEK_LEN
-        or any(ch not in "0123456789abcdef" for ch in content_key)
+    if set(decision) != {"approved", "openers"}:
+        return "vault_open approval must carry only approved and openers"
+    openers = decision.get("openers")
+    if not isinstance(openers, dict) or not openers:
+        return "vault_open approval requires factor opener seeds"
+    if any(
+        not isinstance(factor_id, str)
+        or not isinstance(seed, str)
+        or len(seed) != _HEX_SEED_LEN
+        or any(ch not in "0123456789abcdef" for ch in seed)
+        for factor_id, seed in openers.items()
     ):
-        return "vault_open content_key must be a 32-byte lowercase hex key"
+        return "vault_open opener seeds must be 32-byte lowercase hex"
+    snapshot = (row.get("staged") or {}).get("class_snapshot") or {}
+    wraps = (snapshot.get("generation") or {}).get("wraps") or []
+    factor_types = {
+        wrap.get("factor_id"): wrap.get("factor_type")
+        for wrap in wraps
+        if isinstance(wrap, dict)
+    }
+    if not set(openers).issubset(factor_types):
+        return "vault_open contains an opener outside the frozen factor roster"
+    governance = snapshot.get("governance")
+    if isinstance(governance, dict) and governance.get("form") == ROOT_REACHABLE_FORM:
+        anchor_id = governance.get("anchor_id")
+        if set(openers) != {anchor_id}:
+            return "vault_open requires the frozen personal-root anchor opener"
+        if factor_types.get(anchor_id) != PERSONAL_ROOT_RECIPIENT:
+            return "vault_open personal-root anchor does not match the class"
+        return None
+
+    supplied_types = [factor_types[factor_id] for factor_id in openers]
+    policy = snapshot.get("policy")
+    satisfied = (
+        (policy == "password" and supplied_types == ["password"])
+        or (policy == "prf" and supplied_types == ["passkey"])
+        or (
+            policy == "both"
+            and sorted(supplied_types) == ["passkey", "password"]
+        )
+    )
+    if not satisfied:
+        return "vault_open requires one complete opener set for its frozen policy"
     return None
 
 
@@ -489,17 +486,19 @@ def _assert_frozen(row: dict) -> tuple[dict, dict]:
 
 
 async def execute(row: dict, decision: dict) -> dict:
-    """Decrypt the frozen body with the browser-supplied CEK; materialise only
-    in requester ramfs. The CEK opens this one revision and nothing else."""
+    """Open at the chokepoint and materialise only in requester ramfs."""
     req, staged = _assert_frozen(row)
-    content_key = bytearray.fromhex(decision.get("content_key") or "")
+    raw_openers = decision.get("openers") or {}
+    opener_buffers: dict[str, bytearray] = {}
     try:
+        for factor_id, seed_hex in raw_openers.items():
+            opener_buffers[factor_id] = bytearray.fromhex(seed_hex)
         payload = settings_ops.open_secured_setting(
             req["setting"]["set_id"],
             req["setting"]["key"],
             setting_id=staged["setting_id"],
             sealed_content_key_digest=staged["sealed_digest"],
-            content_key=content_key,
+            opener_seeds=opener_buffers,
             org=staged.get("org"),
         )
         try:
@@ -511,11 +510,14 @@ async def execute(row: dict, decision: dict) -> dict:
             # executor retains no payload object after this chokepoint.
             payload.clear()
     finally:
-        content_key[:] = b"\x00" * len(content_key)
-        # The parsed JSON body otherwise keeps the immutable hex string captured
-        # by the executor task until it exits; drop it at the earliest boundary.
-        if isinstance(decision, dict) and "content_key" in decision:
-            decision["content_key"] = ""
+        for seed in opener_buffers.values():
+            seed[:] = b"\x00" * len(seed)
+        # The parsed JSON body otherwise remains captured by the executor task
+        # until it exits.  Replace the immutable hex strings at the earliest
+        # possible boundary; approval result construction drops this field.
+        if isinstance(raw_openers, dict):
+            for factor_id in list(raw_openers):
+                raw_openers[factor_id] = ""
 
 
 def result(_row: dict, decision: dict, outcome: dict) -> dict:

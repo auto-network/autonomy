@@ -20,7 +20,6 @@ from tools.graph.schemas.registry import (
 )
 from tools.network.idkit.canonical import canonical_json
 from tools.vault import ClassOpenError, PASSWORD_POLICY, create_class
-from tools.vault.errors import VaultError
 from tools.vault.factors import create_password_factor, open_password_seed
 from tools.vault import key_holder
 from tools.vault.personal_object import LOCATOR_PREFIX, is_personal_locator
@@ -124,28 +123,13 @@ def test_personal_secured_setting_seals_cold_and_opens_only_with_factor(
     assert member.sealed_content_key["policy_class_id"] == policy_class.class_id
 
     digest = hashlib.sha256(canonical_json(member.sealed_content_key)).hexdigest()
-    # B-1: the browser opens the policy class locally and hands the server only
-    # this one revision's CEK. Reproduce that here with the Python open_cek — the
-    # same computation the JS openContentKey mirrors (parity test in
-    # tools/dashboard/static/js/ceremony/tests/policy-class-open.test.mjs).
-    from tools.vault.policy_class import open_cek
-    from tools.vault import personal_object as pobj
-    content_key = open_cek(
-        policy_class,
-        {"operator-password": seed},
-        _envelope["sealed_cek"],
-        genesis_id=pobj._GENESIS_ID,
-        setting_name=_envelope["object_id"],
-        required_policy=_envelope["required_policy"],
-    )
-    # A wrong content key fails closed at the body AEAD, never yields plaintext.
-    with pytest.raises(VaultError):
+    with pytest.raises(ClassOpenError):
         settings_ops.open_secured_setting(
             SET_ID,
             member.key,
             setting_id=setting_id,
             sealed_content_key_digest=digest,
-            content_key=b"\x00" * len(content_key),
+            opener_seeds={},
             org=None,
         )
     opened = settings_ops.open_secured_setting(
@@ -153,7 +137,7 @@ def test_personal_secured_setting_seals_cold_and_opens_only_with_factor(
         member.key,
         setting_id=setting_id,
         sealed_content_key_digest=digest,
-        content_key=content_key,
+        opener_seeds={"operator-password": seed},
         org=None,
     )
     assert opened == {"value": SECRET}
@@ -183,27 +167,12 @@ def test_personal_secured_replacement_opens_under_its_own_revision(personal_worl
     member = settings_ops.read_set(SET_ID, org=None, peers=[]).members[0]
     assert member.id == base_id, "the resolved Setting retains its stable base id"
     digest = hashlib.sha256(canonical_json(member.sealed_content_key)).hexdigest()
-    # B-1: server hands the browser the open bundle, the browser runs open_cek,
-    # only the resulting single-revision CEK returns to open_secured_setting.
-    from tools.vault.policy_class import open_cek
-    bundle = settings_ops.secured_open_bundle(
-        SET_ID, key, setting_id=member.id,
-        sealed_content_key_digest=digest, org=None,
-    )
-    content_key = open_cek(
-        policy_class,
-        {"operator-password": seed},
-        bundle["sealed_cek"],
-        genesis_id=bundle["genesis_id"],
-        setting_name=bundle["setting_name"],
-        required_policy=bundle["policy"],
-    )
     opened = settings_ops.open_secured_setting(
         SET_ID,
         key,
         setting_id=member.id,
         sealed_content_key_digest=digest,
-        content_key=content_key,
+        opener_seeds={"operator-password": seed},
         org=None,
     )
     assert opened == {"value": "replacement"}
