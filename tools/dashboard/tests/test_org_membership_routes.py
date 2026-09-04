@@ -42,7 +42,7 @@ def founded(tmp_path, monkeypatch):
         lambda request: None,
     )
     monkeypatch.setattr(org_membership_routes, "_member_profiles", lambda slug: {})
-    monkeypatch.setattr(org_membership_routes, "_join_urls", lambda slug: {})
+    monkeypatch.setattr(org_membership_routes, "_link_grants", lambda slug: {})
     from tools.graph import org_ops
 
     monkeypatch.setattr(org_ops, "persona_pub_for_org", lambda genesis: None)
@@ -134,12 +134,16 @@ def test_join_url_joins_by_invite_ref_and_carries_no_bearer(founded, monkeypatch
         hlc=(NOW_MS + 1_000, 0),
     )
     monkeypatch.setattr(
-        org_membership_routes, "_join_urls",
-        lambda slug: {live_id: "https://relay.example/l/" + "cd" * 16},
+        org_membership_routes, "_link_grants",
+        lambda slug: {live_id: {
+            "url": "https://relay.example/l/" + "cd" * 16,
+            "label": "Dean's invite",
+        }},
     )
     body = _client().get("/api/orgs/testorg/membership").json()
     invites = {row["invite_id"]: row for row in body["invites"]}
     assert invites[live_id]["join_url"] == "https://relay.example/l/" + "cd" * 16
+    assert invites[live_id]["label"] == "Dean's invite"
     # Mint-side secrecy: the bearer exists only in the minting browser. It
     # must never appear on invite rows (the pending-claim body is different:
     # a claimant SUBMITS its token to this operator, and countersignatures
@@ -178,6 +182,7 @@ def test_staged_bearer_claim_surfaces_progress_and_signed_profile(founded):
     body = _client().get("/api/orgs/testorg/membership").json()
     [pending] = body["pending_claims"]
     assert pending["persona_pub"] == joiner.public_hex
+    assert pending["invite_label"] is None
     assert pending["invite_ref"] == live_id
     assert pending["granted_role"] == "owner"
     assert pending["profile"] == {"display_name": "Dean"}
@@ -230,3 +235,28 @@ def test_multi_use_invite_reports_capacity(founded):
     }
     assert invites[multi_id]["status"] == "live"
     assert invites[multi_id]["uses"] == {"max_uses": 3, "used": 0, "remaining": 3}
+
+
+def test_pending_row_names_the_link_it_came_in_on(founded, monkeypatch):
+    store, record, founder = founded
+    live_id = _bearer_invite(
+        store, founder, expiry=int(time.time() * 1000) + 86_400_000,
+        hlc=(NOW_MS + 1_000, 0),
+    )
+    monkeypatch.setattr(
+        org_membership_routes, "_link_grants",
+        lambda slug: {live_id: {"url": "https://x/l/" + "cd" * 16, "label": "Dean's invite"}},
+    )
+    joiner = derive_persona(JOINER_SEED, record.genesis_id)
+    claim = make_event(
+        joiner,
+        {
+            "type": "member.claim", "invite_ref": live_id,
+            "persona_pub": joiner.public_hex, "profile": {},
+            "approvals": [], "token": BEARER,
+        },
+        list(store.heads()), HLC(NOW_MS + 3_000, 0),
+    )
+    store.stage_pending_claim(claim, now=int(time.time() * 1000))
+    [pending] = _client().get("/api/orgs/testorg/membership").json()["pending_claims"]
+    assert pending["invite_label"] == "Dean's invite"
