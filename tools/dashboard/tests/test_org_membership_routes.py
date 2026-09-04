@@ -41,7 +41,7 @@ def founded(tmp_path, monkeypatch):
         "require_global_api_authority",
         lambda request: None,
     )
-    monkeypatch.setattr(org_membership_routes, "_display_names", lambda slug: {})
+    monkeypatch.setattr(org_membership_routes, "_member_profiles", lambda slug: {})
     monkeypatch.setattr(org_membership_routes, "_join_urls", lambda slug: {})
     from tools.graph import org_ops
 
@@ -93,6 +93,8 @@ def test_founded_ledger_projects_members_roles_and_claimed_invite(founded):
     assert member["persona"] == record.founder_persona_pub
     assert member["roles"] == ["owner"]
     assert member["display_name"] is None
+    assert member["avatar"] is None
+    assert member["color"] is None
     [role] = body["role_defs"]
     assert role["name"] == "owner"
     assert role["claim_requires"] == "self"
@@ -194,3 +196,20 @@ def test_authority_refusal_short_circuits(founded, monkeypatch):
     )
     response = _client().get("/api/orgs/testorg/membership")
     assert response.status_code == 403
+
+
+def test_member_rows_carry_the_directory_presentation(founded, monkeypatch):
+    """Members pull display name, avatar, and color from the central
+    member-profile set, keyed by persona."""
+    _store, record, _founder = founded
+    monkeypatch.setattr(
+        org_membership_routes, "_member_profiles",
+        lambda slug: {record.founder_persona_pub: {
+            "display_name": "Jeremy", "avatar": "4fde3638-009",
+            "color": "#0f766e",
+        }},
+    )
+    [member] = _client().get("/api/orgs/testorg/membership").json()["members"]
+    assert member["display_name"] == "Jeremy"
+    assert member["avatar"] == "4fde3638-009"
+    assert member["color"] == "#0f766e"
