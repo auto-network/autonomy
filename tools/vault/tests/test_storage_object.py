@@ -40,7 +40,7 @@ from tools.vault.storage_object import (
     revision_id_for,
     seal_revision,
 )
-from tools.vault.testkit import make_test_identity
+from tools.vault.testkit import content_key_for, make_test_identity
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────
@@ -450,17 +450,23 @@ def test_a_secured_setting_needs_the_human_factor_on_top_of_membership(
     assert set(envelope) == {"v", "sealed_cek", "body_suite_id", "nonce", "ciphertext"}
     assert "sk-live-secured" not in json.dumps(envelope)
 
-    # 2. Opening that requires the class, which requires the factor.
+    # 2. Opening that requires the class, which requires the factor. Since B-1
+    #    the class open is the browser's job (simulated by content_key_for);
+    #    the server-side open_revision refuses without that content key, and an
+    #    empty opener set fails closed in the class open itself.
     with pytest.raises(VaultError):
         open_revision(sealed.locator, holdings=held, content_store=store)
     with pytest.raises(ClassOpenError):
-        open_revision(
-            sealed.locator,
-            holdings=held,
-            content_store=store,
-            policy_class=record,
-            opener_seeds={},
+        content_key_for(
+            sealed.locator, record=record, seeds={},
+            holdings=held, content_store=store,
         )
+    # The browser opens exactly this revision's content key; the server then
+    # applies it to the frozen body.
+    content_key = content_key_for(
+        sealed.locator, record=record, seeds=seeds,
+        holdings=held, content_store=store,
+    )
     captured_cek = []
     from tools.network.storagekit import object_header as object_header_mod
 
@@ -479,8 +485,7 @@ def test_a_secured_setting_needs_the_human_factor_on_top_of_membership(
         sealed.locator,
         holdings=held,
         content_store=store,
-        policy_class=record,
-        opener_seeds=seeds,
+        content_key=content_key,
     ) == payload
     assert captured_cek == [bytearray(32)]
 
@@ -536,7 +541,10 @@ def test_a_secured_key_does_not_open_another_setting_of_the_same_class(world, st
     )
     # It resolves to the second object's own payload rather than the first's —
     # never a blend, and never the first setting's plaintext.
+    held = holdings_of(world, author)
+    content_key = content_key_for(
+        spliced, record=record, seeds=seeds, holdings=held, content_store=store,
+    )
     assert open_revision(
-        spliced, holdings=holdings_of(world, author), content_store=store,
-        policy_class=record, opener_seeds=seeds,
+        spliced, holdings=held, content_store=store, content_key=content_key,
     ) == {"v": 2}
