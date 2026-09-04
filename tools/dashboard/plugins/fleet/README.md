@@ -1,8 +1,19 @@
 # Fleet Machines plugin
 
-The Fleet page is a read-only projection over existing runtime truth. It is
-launched from the Dashboard's generic Identity-menu plugin slot and is not an
-approval surface.
+The Fleet page renders one projection over existing runtime truth. It is
+launched from the Dashboard's generic Identity-menu plugin slot and hosts no
+approval decision surface: a pending admission row only opens the central
+approval overlay. The page's own writes are root-signed ceremonies (machine
+removal via the fleet-kick tombstone, connector unlock, invitation signing)
+plus one plain Settings write (machine rename).
+
+Status rendering is driven by ONE classifier (`machineState` in `page.js`):
+every machine resolves to a single state id whose display word and note come
+from a strings table. States without an honest server-side probe do not exist
+in the classifier. The local machine's operational facts ride in the
+projection's `localMachine` block (connector armed, code staleness, serving
+certificate), each null when its probe is unavailable — null renders nothing,
+never a guess.
 
 | Visible value | Projection field | Authoritative source |
 |---|---|---|

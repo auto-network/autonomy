@@ -770,9 +770,39 @@ async def kick_machine(request: Request) -> JSONResponse:
     })
 
 
+async def deactivate_invite(request: Request) -> JSONResponse:
+    """Disable the current invitation locally so no new admission request can
+    arrive. The caller separately posts a ``link_revoke`` approval to tear the
+    published rendezvous route down; this endpoint owns only the local flag."""
+    denied = _operator_required(request)
+    if denied is not None:
+        return denied
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "body must be JSON"}, status_code=400)
+    if not isinstance(body, dict) or set(body) != {"target_uuid"} \
+            or not isinstance(body.get("target_uuid"), str):
+        return JSONResponse(
+            {"ok": False, "error": "body must carry exactly ['target_uuid']"},
+            status_code=400,
+        )
+    store = fleet_enrollment_service.FleetEnrollmentStore()
+    deactivated = store.deactivate_invitation(body["target_uuid"])
+    if not deactivated:
+        return JSONResponse(
+            {"ok": False, "error": "no active invitation matches that target"},
+            status_code=404,
+        )
+    return JSONResponse({"ok": True})
+
+
 ROUTES = [
     Route("/api/fleet/invitations/register", register_invite, methods=["POST"]),
     Route("/api/fleet/machines/kick", kick_machine, methods=["POST"]),
+    Route(
+        "/api/fleet/invitations/deactivate", deactivate_invite, methods=["POST"]
+    ),
     Route("/api/fleet/enrollment/requests", pending_requests, methods=["GET"]),
     Route(
         "/api/fleet/enrollment/local-resume",

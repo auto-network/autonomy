@@ -39,6 +39,7 @@ def _inputs(
     *, entries=(), admissions=(), approvals=None, executing=(),
     invitation=None, machine_names=None, invitation_publication=None,
     publishing_org="autonomy", telemetry_rows=None,
+    local_verdict=None, serve_cert=None,
 ):
     root = ROOT
     return ProjectionInputs(
@@ -65,6 +66,8 @@ def _inputs(
         invitation_publication=invitation_publication,
         publishing_org=publishing_org,
         telemetry_rows=telemetry_rows or {},
+        local_verdict=local_verdict,
+        serve_cert=serve_cert,
     )
 
 
@@ -233,6 +236,9 @@ def test_active_invitation_projects_short_link_and_signed_bootstrap_value():
     assert value["bootstrapCode"] == "AUTONOMY_FLEET_INVITE=" + fleet_invite.encode(invite)
     assert value["publishedAt"] == NOW - 10_000
     assert value["expiresAt"] == NOW + 86_400_000
+    # The stable target id rides along so the browser can deactivate the
+    # invitation and post the matching link_revoke approval.
+    assert value["targetUuid"] == "11111111-1111-4111-8111-111111111111"
 
 
 def test_published_route_waits_for_browser_personal_signature():
@@ -308,4 +314,38 @@ def test_projection_and_markup_expose_no_fleet_decision_surface():
     assert ">Grant<" not in markup
     assert ">Decline<" not in markup
     assert "verification_code" not in markup + script
-    assert "confirmRemove" not in markup + script
+    # Machine removal exists, but only as a root-signed ceremony: the page
+    # must route it through openRoot + the kick ceremony, never a decision UI.
+    assert "signFleetKick" in script
+    assert "open-root.js" in script
+
+
+def test_local_machine_block_reports_probe_facts_or_stays_null():
+    """An unreadable probe yields nulls (the browser renders nothing), never a
+    guessed healthy/unhealthy claim."""
+    absent = project(_inputs(entries=(LOCAL_ENTRY,)))["localMachine"]
+    assert absent == {
+        "connectorArmed": None,
+        "runningStale": None,
+        "certStatus": None,
+        "certValidUntil": None,
+        "verdictTopLine": None,
+    }
+
+    view = project(_inputs(
+        entries=(LOCAL_ENTRY,),
+        local_verdict={
+            "top_line": "LOCKED",
+            "credential": {"configured": False},
+            "connector_version": {"status": "ok"},
+            "dashboard_version": {"status": "stale"},
+        },
+        serve_cert={"status": "ok", "not_after": 1_777_086_400},
+    ))["localMachine"]
+    assert view == {
+        "connectorArmed": False,
+        "runningStale": True,
+        "certStatus": "ok",
+        "certValidUntil": 1_777_086_400_000,
+        "verdictTopLine": "LOCKED",
+    }

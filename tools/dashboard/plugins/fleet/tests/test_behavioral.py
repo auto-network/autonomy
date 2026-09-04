@@ -193,12 +193,12 @@ class TestFleetPluginL2B:
             wait_ms=500,
         )
         assert result["rows"] == [
-            {"kind": "roster_machine", "standing": "authorized", "visible": True},
             {"kind": "pending_admission", "standing": "pending_approval", "visible": True},
             {"kind": "pending_admission", "standing": "admission_in_progress", "visible": True},
             {"kind": "pending_admission", "standing": "admission_failed", "visible": True},
+            {"kind": "roster_machine", "standing": "authorized", "visible": True},
         ]
-        assert "Pending approval" in result["text"]
+        assert "Awaiting approval" in result["text"]
         assert "Adding machine" in result["text"]
         assert "Admission failed" in result["text"]
         assert result["tunnel"]["value"] is True, result
@@ -214,7 +214,7 @@ class TestFleetPluginL2B:
             """
             r.text = document.querySelector('[data-testid="fleet-fragment-root"]').innerText;
             r.invite = document.querySelector('.fleet-invite-code').innerText;
-            r.connected = document.querySelectorAll('.fleet-summary-card')[1].innerText;
+            r.verdict = document.querySelector('.fleet-verdict').innerText;
             r.source_ids_visible = r.text.indexOf('fleet-one') !== -1
               || r.text.indexOf('fleet-two') !== -1
               || r.text.indexOf('fleet-three') !== -1;
@@ -222,5 +222,5 @@ class TestFleetPluginL2B:
             wait_ms=300,
         )
         assert result["invite"] == VIEW["invitation"]["url"]
-        assert "Not reported" in result["connected"]
+        assert "1 machine" in result["verdict"]
         assert result["source_ids_visible"] is False
