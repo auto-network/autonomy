@@ -196,6 +196,10 @@ def _machine_row(
         "entryId": entry.entry_id,
         "machineId": entry.machine_id,
         "machinePublicKey": entry.machine_pub,
+        # The current per-machine sequence — the kick ceremony mints seq+1 so
+        # its tombstone beats the entry it revokes (fleet-kick.js / the /kick
+        # route both rely on this being the resolved winner's seq).
+        "seq": entry.seq,
         "displayLabel": display_name or (
             "This dashboard" if local else "Untitled machine"
         ),

@@ -705,8 +705,74 @@ async def restore_fleet_serving(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "restarted": restarted, "failed": failed})
 
 
+async def kick_machine(request: Request) -> JSONResponse:
+    """Remove one machine from the fleet with a browser-signed tombstone.
+
+    The browser mints the KICK RosterEntry under the personal root (fleet-
+    kick.js); this route never sees a seed. It verifies the entry against the
+    stored personal root, then refuses anything the operator should not be able
+    to do from a single tap: kicking the machine they are on, kicking the
+    machine currently serving the tunnel, kicking a machine that is not active,
+    or a stale tombstone that does not beat the entry it revokes. Persisted via
+    the same raw settings store enrollment commits to; roster-epoch consumers
+    (the sync scheduler) drop the peer on their next re-resolve.
+    """
+    denied = _operator_required(request)
+    if denied is not None:
+        return denied
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "body must be JSON"}, status_code=400)
+    if not isinstance(body, dict) or set(body) != {"roster_entry"}:
+        return JSONResponse(
+            {"ok": False, "error": "body must carry exactly roster_entry"},
+            status_code=400,
+        )
+    try:
+        entry = fleet_roster.RosterEntry.from_dict(body["roster_entry"])
+        personal = identity_routes._personal_member()
+        anchor = (personal.payload if personal is not None else {}).get("root_pub")
+        if not isinstance(anchor, str) or not anchor:
+            raise ValueError("no personal root is enrolled to anchor this fleet")
+        fleet_roster.verify(entry, anchor_root_pub=anchor)
+        if entry.kind != fleet_roster.EntryKind.KICK:
+            raise ValueError("this route accepts only a kick tombstone")
+
+        entries = tuple(fleet_roster.load_entries(org=None))
+        active = fleet_roster.resolve(entries, anchor_root_pub=anchor)
+        target = active.get(entry.machine_pub)
+        if target is None:
+            raise ValueError("target machine is not currently active in the fleet")
+        # The tombstone must name the machine it revokes consistently — resolve
+        # binds the true machine_id to the public key, and the local/serving
+        # refusals below trust that id, not the entry's self-report.
+        if entry.machine_id != target.machine_id:
+            raise ValueError("kick machine_id does not match the active roster entry")
+        if entry.seq <= target.seq:
+            raise ValueError(
+                "kick seq does not beat the target's current roster entry"
+            )
+        if target.machine_id == machine_boot.machine_id(org="machine"):
+            raise ValueError("refusing to kick the machine you are using")
+        if target.machine_id == fleet_tunnel_server.state().selected_machine_id:
+            raise ValueError(
+                "refusing to kick the machine currently serving the tunnel; "
+                "select another server first"
+            )
+        fleet_roster.store_entry(entry, org=None)
+    except (ValueError, TypeError, fleet_roster.FleetRosterError) as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    return JSONResponse({
+        "ok": True,
+        "machine_id": entry.machine_id,
+        "entry_id": entry.entry_id,
+    })
+
+
 ROUTES = [
     Route("/api/fleet/invitations/register", register_invite, methods=["POST"]),
+    Route("/api/fleet/machines/kick", kick_machine, methods=["POST"]),
     Route("/api/fleet/enrollment/requests", pending_requests, methods=["GET"]),
     Route(
         "/api/fleet/enrollment/local-resume",
