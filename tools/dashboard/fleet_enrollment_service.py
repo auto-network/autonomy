@@ -356,6 +356,19 @@ class FleetEnrollmentStore:
             created_at=int(row["created_at"]),
         )
 
+    def deactivate_invitation(self, target_uuid: str) -> bool:
+        """Stop honouring an invitation locally: no new admission request can
+        arrive through it. The published rendezvous route is torn down
+        separately (a ``link_revoke`` approval); this row-level flag is what
+        the enrollment endpoints consult."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE fleet_enrollment_invites SET active=0 "
+                "WHERE target_uuid=? AND active=1",
+                (target_uuid,),
+            )
+            return cursor.rowcount > 0
+
     def get_request(self, request_id: str) -> PendingEnrollment | None:
         rid = _require_hex64(request_id, "request_id")
         with self._connect() as conn:

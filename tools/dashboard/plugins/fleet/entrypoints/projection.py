@@ -46,6 +46,8 @@ class ProjectionInputs:
     invitation_publication: Mapping | None = None
     publishing_org: str = "personal"
     telemetry_rows: Mapping[str, Mapping] = field(default_factory=dict)
+    local_verdict: Mapping | None = None
+    serve_cert: Mapping | None = None
 
 
 def _peer_rows(epoch: str | None) -> dict[str, dict]:
@@ -110,6 +112,23 @@ def _load_inputs(*, now_ms: int) -> ProjectionInputs:
         ),
         None,
     )
+    # The local machine's operational facts (connector armed, code staleness,
+    # serving certificate). Probes are best-effort: an unreadable probe leaves
+    # the field null and the browser shows nothing rather than a guess.
+    local_verdict = None
+    try:
+        from tools.network.fleet_verdict import compute_verdict
+
+        local_verdict = compute_verdict(None)
+    except Exception:
+        local_verdict = None
+    serve_cert = None
+    try:
+        from tools.dashboard.link_serving_supervisor import serve_cert_state
+
+        serve_cert = serve_cert_state(None)
+    except Exception:
+        serve_cert = None
     return ProjectionInputs(
         server_time=now_ms,
         root_pub=root_pub,
@@ -125,6 +144,8 @@ def _load_inputs(*, now_ms: int) -> ProjectionInputs:
         invitation_publication=invitation_publication,
         publishing_org="personal",
         telemetry_rows=fleet_sync_telemetry.read_peer_totals(org="machine"),
+        local_verdict=local_verdict,
+        serve_cert=serve_cert,
     )
 
 
@@ -387,6 +408,7 @@ def project(inputs: ProjectionInputs) -> dict:
     if invitation is not None:
         invitation_view = {
             "status": "active",
+            "targetUuid": invitation.target_uuid,
             "url": invitation.invite.rendezvous,
             "bootstrapCode": "AUTONOMY_FLEET_INVITE=" + fleet_invite.encode(invitation.invite),
             "publishedAt": invitation.created_at,
@@ -438,8 +460,30 @@ def project(inputs: ProjectionInputs) -> dict:
                         else "Invitation publication did not complete."
                     ),
                 }
+    verdict = inputs.local_verdict or {}
+    credential = verdict.get("credential") or {}
+    cert = inputs.serve_cert or {}
+    cert_not_after = cert.get("not_after")
+    local_machine = {
+        # False only when the probe positively reported an unconfigured
+        # credential; None (probe unavailable) renders nothing.
+        "connectorArmed": (
+            None if credential.get("configured") is None
+            else bool(credential.get("configured"))
+        ),
+        "runningStale": (
+            (verdict.get("connector_version") or {}).get("status") == "stale"
+            or (verdict.get("dashboard_version") or {}).get("status") == "stale"
+        ) if verdict else None,
+        "certStatus": cert.get("status"),
+        "certValidUntil": (
+            cert_not_after * 1000 if isinstance(cert_not_after, int) else None
+        ),
+        "verdictTopLine": verdict.get("top_line"),
+    }
     return {
         "serverTime": inputs.server_time,
+        "localMachine": local_machine,
         "summary": {
             "authorizedMachines": len(active),
             "connectedMachines": None,

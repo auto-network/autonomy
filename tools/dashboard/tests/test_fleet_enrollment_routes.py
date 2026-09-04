@@ -711,3 +711,33 @@ def test_current_generic_dialogue_owns_pin_and_browser_root_ceremony():
     assert "approval-fleet-pin" in template
     assert "Machine comparison code" in template
     assert "/api/fleet/enrollment/requests/" not in js
+
+
+def test_deactivate_invitation_stops_new_requests_locally(operator_api):
+    client, _root, invite, store = operator_api
+    _register(client, invite)
+    assert store.current_invitation(now_ms=NOW_MS) is not None
+
+    response = client.post(
+        "/api/fleet/invitations/deactivate",
+        json={"target_uuid": TARGET_UUID},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {"ok": True}
+    assert store.current_invitation(now_ms=NOW_MS) is None
+
+    # Idempotence is refused loudly: a second deactivation names the miss.
+    repeat = client.post(
+        "/api/fleet/invitations/deactivate",
+        json={"target_uuid": TARGET_UUID},
+    )
+    assert repeat.status_code == 404
+
+
+def test_deactivate_invitation_requires_exact_body(operator_api):
+    client, _root, _invite, _store = operator_api
+    response = client.post(
+        "/api/fleet/invitations/deactivate",
+        json={"target_uuid": TARGET_UUID, "extra": 1},
+    )
+    assert response.status_code == 400
