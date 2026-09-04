@@ -82,41 +82,6 @@ def make_test_genesis() -> str:
     return f"test-genesis-{secrets.token_hex(8)}"
 
 
-def content_key_for(locator, *, record, seeds, holdings, content_store) -> bytearray:
-    """Simulate the browser's B-1 policy-class open for an ORG secured revision.
-
-    Since B-1 the human-factor step runs in the operator's browser: it opens the
-    outer object with the storage state, recovers the sealed CEK envelope, and
-    runs :func:`open_cek` to yield this one revision's content key — which opens
-    nothing else. Headless tests drive ``storage_object.open_revision`` with the
-    ``content_key=`` this returns instead of shipping opener seeds to the server.
-    """
-    import json
-
-    from tools.network.storagekit import objects as objects_mod
-    from tools.vault.policy_class import open_cek
-    from tools.vault.storage_object import parse_locator
-
-    reference = parse_locator(locator)
-    header, body = content_store.get_object(
-        reference["object_id"], reference["revision_id"]
-    )
-    envelope = json.loads(
-        objects_mod.read_object(
-            header, body, holdings.secrets,
-            list(holdings.bridges), dict(holdings.descriptors),
-        )
-    )
-    return bytearray(
-        open_cek(
-            record, seeds, envelope["sealed_cek"],
-            genesis_id=reference["genesis_id"],
-            setting_name=reference["object_id"],
-            required_policy=reference["required_policy"],
-        )
-    )
-
-
 def enroll_test_anchor(store, *, anchor_id: str = "personal-root-default"):
     """Enroll a real root anchor into *store*; returns (anchor_seed, recipient).
 

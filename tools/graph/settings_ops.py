@@ -4891,29 +4891,35 @@ def _resolved_vault_locator(
     return locator, effective_row_id
 
 
-def _freeze_secured_locator(
+def open_secured_setting(
     set_id: str,
     key: str,
     *,
     setting_id: str,
     sealed_content_key_digest: str,
+    opener_seeds: dict[str, bytes],
     org: "str | None | _CallerOrgSentinel",
-):
-    """Re-resolve one frozen secured Setting to its factor-gated view.
+) -> dict:
+    """Open one frozen secured Setting through the human-factor chokepoint.
 
-    The single resolution both the browser-open bundle and the final open
-    share: it re-runs normal Settings resolution, refuses any drift from the
-    approval-time ``setting_id``/digest, and returns the immutable object's
-    ``SealedContentKey`` alongside what each caller needs to finish
-    (``locator``, whether the object is personal-direct, the org key control,
-    and the effective revision id).  Keeping it in one place is what guarantees
-    the bundle and the open agree on exactly one revision.
+    This is intentionally the only production seam that turns a
+    ``sealed_content_key`` outcome into plaintext.  The approval layer freezes
+    ``setting_id`` and a digest of the factor-gated view; this function re-runs
+    normal Settings resolution and refuses any drift before applying opener
+    material.  Future audit-before-open attribution belongs immediately above
+    the final ``open_revision`` call below.
+
+    The returned value is the Setting payload, never its content-encryption
+    key.  Callers own and must zero ``opener_seeds`` after this call.
     """
     import hashlib
 
     from tools.network.idkit.canonical import canonical_json
     from tools.vault import personal_object, storage_object as vault_storage_object
     from tools.vault.errors import VaultError
+    from tools.vault.key_holder import _scoped_db
+    from tools.vault.store import VaultStore
+    from tools.graph.schemas.vault_policy_class import VAULT_POLICY_CLASS_SET_ID
 
     org = _resolve_org_arg(org)
     if schemas.declared_vault_tier(set_id) != "secured":
@@ -4968,102 +4974,21 @@ def _freeze_secured_locator(
         raise VaultError(
             f"the secured setting changed before approval ({set_id}/{key})"
         )
-    return locator, gated, personal_direct, control, effective_setting_id
 
-
-def secured_open_bundle(
-    set_id: str,
-    key: str,
-    *,
-    setting_id: str,
-    sealed_content_key_digest: str,
-    org: "str | None | _CallerOrgSentinel",
-) -> dict:
-    """Return the inputs the browser needs to open this one revision's CEK.
-
-    B-1: the operator's browser runs the policy-class open locally, so the
-    server hands it exactly what ``open_cek`` would have consumed on the server
-    — the sealed CEK and the genesis/setting identifiers bound into its seal —
-    and nothing that opens any other revision.  No content key, no opener seed,
-    and no class key is produced or returned here; the frozen factor
-    generation (wraps + sealing public key) is supplied separately by the
-    approval layer from the digest-frozen policy snapshot.
-
-    The returned ``class_id``/``policy`` come from the immutable object's own
-    gated view, so the caller can confirm they match the frozen snapshot.
-    """
-    from tools.vault import personal_object, storage_object as vault_storage_object
-
-    _locator, gated, personal_direct, _control, _effective = _freeze_secured_locator(
-        set_id, key,
-        setting_id=setting_id,
-        sealed_content_key_digest=sealed_content_key_digest,
-        org=org,
-    )
-    if personal_direct:
-        genesis_id = personal_object._GENESIS_ID
-        setting_name = personal_object.object_id_for(set_id, key)
-    else:
-        reference = vault_storage_object.parse_locator(_locator)
-        genesis_id = reference["genesis_id"]
-        setting_name = reference["object_id"]
-    return {
-        "class_id": gated.policy_class_id,
-        "policy": gated.required_policy,
-        "genesis_id": genesis_id,
-        "setting_name": setting_name,
-        "sealed_cek": gated.sealed_cek,
-    }
-
-
-def open_secured_setting(
-    set_id: str,
-    key: str,
-    *,
-    setting_id: str,
-    sealed_content_key_digest: str,
-    content_key: bytes,
-    org: "str | None | _CallerOrgSentinel",
-) -> dict:
-    """Open one frozen secured Setting given its browser-unwrapped content key.
-
-    This is intentionally the only production seam that turns a
-    ``sealed_content_key`` outcome into plaintext.  The approval layer freezes
-    ``setting_id`` and a digest of the factor-gated view; this function re-runs
-    normal Settings resolution and refuses any drift before applying the key.
-
-    B-1: the operator's browser runs the policy-class open locally and hands
-    over only ``content_key`` — this one immutable revision's CEK, which decrypts
-    nothing else. Opener seeds and the class key never reach the server, so a
-    one-item approval can no longer export material that opens the whole class.
-    Future audit-before-open attribution belongs immediately above the final
-    ``open_revision`` call below.
-
-    The returned value is the Setting payload, never its content-encryption
-    key.  Callers own and must zero ``content_key`` after this call.
-    """
-    from tools.vault import personal_object, storage_object as vault_storage_object
-    from tools.vault.errors import VaultError
-
-    locator, _gated, personal_direct, control, effective_setting_id = (
-        _freeze_secured_locator(
-            set_id, key,
-            setting_id=setting_id,
-            sealed_content_key_digest=sealed_content_key_digest,
-            org=org,
-        )
-    )
+    with VaultStore(_scoped_db(VAULT_POLICY_CLASS_SET_ID, current.org)) as store:
+        policy_class = store.get_class(gated.policy_class_id)
 
     # The ONE mandatory future insertion point: write the attributed,
     # fail-closed audit event here, immediately before either storage shape can
-    # apply the key and yield plaintext.
+    # apply a factor and yield plaintext.
     if personal_direct:
         opened = personal_object.open_revision(
             locator,
             set_id=set_id,
             key=key,
             setting_id=effective_setting_id,
-            content_key=content_key,
+            policy_class=policy_class,
+            opener_seeds=opener_seeds,
         )
     else:
         assert control is not None
@@ -5071,7 +4996,8 @@ def open_secured_setting(
             locator,
             holdings=control.holdings,
             content_store=control.content_store,
-            content_key=content_key,
+            policy_class=policy_class,
+            opener_seeds=opener_seeds,
         )
     if not isinstance(opened, dict):
         raise VaultError(f"{set_id}/{key} opened to a non-object payload")

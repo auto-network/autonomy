@@ -22,10 +22,9 @@ from dataclasses import dataclass
 from tools.network.idkit import sealing
 from tools.network.idkit.canonical import canonical_json
 from tools.network.storagekit import object_header, suites
-from tools.network.storagekit.errors import StorageError
 
 from .errors import VaultError
-from .policy_class import seal_cek
+from .policy_class import open_cek, seal_cek
 from .storage_object import SealedContentKey
 
 
@@ -253,21 +252,26 @@ def open_revision(
     set_id: str,
     key: str,
     setting_id: str,
-    content_key: bytes,
+    policy_class,
+    opener_seeds: dict[str, bytes],
 ):
-    """Open one frozen personal revision given its already-unwrapped content key.
-
-    The content key is opened by the operator's browser (B-1: it runs the
-    policy-class open locally and hands over only this one revision's CEK) — so
-    this function never sees opener seeds or the class key, only a key that
-    decrypts nothing but this immutable revision. The body AEAD binds the
-    object/revision identifiers, so a wrong CEK or a tampered body fails closed.
-    """
+    """Open one frozen personal revision and return its JSON payload."""
     envelope = _parse(locator, set_id=set_id, key=key)
     if envelope["revision_id"] != revision_id_for(setting_id):
         raise VaultError("personal vault locator belongs to a different revision")
+    if envelope["policy_class_id"] != policy_class.class_id:
+        raise VaultError("the policy class offered is not the one this secret names")
     ciphertext = bytes.fromhex(envelope["ciphertext"])
-    content_key = bytearray(content_key)
+    content_key = bytearray(
+        open_cek(
+            policy_class,
+            opener_seeds,
+            envelope["sealed_cek"],
+            genesis_id=_GENESIS_ID,
+            setting_name=envelope["object_id"],
+            required_policy=envelope["required_policy"],
+        )
+    )
     try:
         header = _BodyHeader(
             version=object_header.OBJECT_HEADER_VERSION,
@@ -282,15 +286,7 @@ def open_revision(
                 "ascii"
             ),
         )
-        try:
-            plaintext = object_header.open_body(header, content_key, ciphertext)
-        except StorageError as exc:
-            # A wrong content key or a tampered body fails the body AEAD; report
-            # it at the vault boundary as a fail-closed VaultError, never as a
-            # bare storage fault or an empty value.
-            raise VaultError(
-                "personal vault body does not open with this content key"
-            ) from exc
+        plaintext = object_header.open_body(header, content_key, ciphertext)
     finally:
         content_key[:] = b"\x00" * len(content_key)
     try:
