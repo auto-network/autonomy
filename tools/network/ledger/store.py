@@ -385,6 +385,17 @@ class LedgerStore:
             "staged_at": row[8],
         }
 
+    def list_pending_claims(self) -> list:
+        """Every staged claim, oldest first — the membership surface's
+        pending-request list. Same row shape as :meth:`get_pending_claim`."""
+        keys = [
+            row[0] for row in self.db.execute(
+                "SELECT claim_key FROM ledger_pending_claims "
+                "ORDER BY staged_at, claim_key"
+            )
+        ]
+        return [self.get_pending_claim(key) for key in keys]
+
     def add_pending_approval(self, claim_key: str, entry: dict) -> list:
         """Merge one verified ``{key, sig}`` countersignature.
 
