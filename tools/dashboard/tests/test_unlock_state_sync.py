@@ -18,7 +18,7 @@ def client():
 
 
 def _stub_serving(monkeypatch, *, scopes, cert_status, replies, disk="c0ffee",
-                  designated=True):
+                  designated=True, tunnel_serving=True):
     """Stub the serving-scope reads get_unlock_state makes.
 
     scopes: list of org scopes (None == personal); cert_status: {scope: status};
@@ -50,9 +50,12 @@ def _stub_serving(monkeypatch, *, scopes, cert_status, replies, disk="c0ffee",
     monkeypatch.setattr(sup, "control", control)
     monkeypatch.setattr(build_version, "disk_head", lambda: disk)
     monkeypatch.setattr(service_certificate_manager, "certificate_states", lambda: [])
-    # Keep the tunnel probe from touching a real supervisor singleton.
-    monkeypatch.setattr(sup, "get_supervisor",
-                        lambda: type("S", (), {"serving": lambda self: True})())
+    # Keep the tunnel probe from touching a real supervisor singleton. The
+    # serving() value is a test parameter: hardcoding True here is what let the
+    # missing-serving()-method bug (permanent false-green) slip past every test.
+    monkeypatch.setattr(
+        sup, "get_supervisor",
+        lambda: type("S", (), {"serving": lambda self: tunnel_serving})())
 
 
 def test_sync_dim_when_every_connector_armed_and_current(client, monkeypatch):
@@ -279,3 +282,56 @@ def test_certificate_flag_projects_each_manager_state(
     assert cert["state"] == state
     assert reason in cert["detail"]
     assert cert["needs"] is (state != "current")
+
+
+def test_tunnel_lights_down_when_the_designated_server_is_not_serving(
+    client, monkeypatch
+):
+    """The false-green regression: a designated tunnel server whose connector
+    is dead must show the tunnel tile RED ('Down', needs=True) — not the old
+    swallowed 'Tunnel state is unavailable' dim tile. This is the exact state
+    the operator hit: home serving nothing, UI must say so."""
+    _stub_serving(
+        monkeypatch,
+        scopes=[None],
+        cert_status={None: "ok"},
+        replies={},          # personal connector unreachable
+        designated=True,
+        tunnel_serving=False,  # ServingSupervisor.serving() -> False (dead)
+    )
+    tunnel = client.get("/api/identity/unlock-state").json()["tunnel"]
+    assert tunnel["needs"] is True
+    assert tunnel["value"] == "Down"
+    assert "unavailable" not in tunnel["detail"].lower()
+
+
+def test_tunnel_up_when_the_designated_server_is_serving(client, monkeypatch):
+    _stub_serving(
+        monkeypatch,
+        scopes=[None],
+        cert_status={None: "ok"},
+        replies={None: {"fleet_runtime_configured": True, "process_commit": "c0ffee"}},
+        designated=True,
+        tunnel_serving=True,
+    )
+    tunnel = client.get("/api/identity/unlock-state").json()["tunnel"]
+    assert tunnel["needs"] is False
+    assert tunnel["value"] == "Up"
+
+
+def test_tunnel_quiet_on_a_non_designated_machine(client, monkeypatch):
+    """No false RED either: a machine that is not the designated tunnel server
+    runs no tunnel of its own, so a missing one is expected — quiet, never
+    lit (the operator's no-false-alarm rule, applied to the tunnel tile too)."""
+    _stub_serving(
+        monkeypatch,
+        scopes=[None],
+        cert_status={None: "ok"},
+        replies={},
+        designated=False,
+        tunnel_serving=False,
+    )
+    tunnel = client.get("/api/identity/unlock-state").json()["tunnel"]
+    assert tunnel["needs"] is False
+    assert tunnel["value"] == ""
+    assert "designated tunnel server" in tunnel["detail"]

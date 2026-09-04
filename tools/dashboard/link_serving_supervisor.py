@@ -1033,6 +1033,34 @@ class ServingSupervisor:
             watchdog.join(timeout=2)
         self._watchdog = None
 
+    def serving(self, scope: str | None = None) -> bool:
+        """Deterministic serving liveness for one scope (personal by default).
+
+        True ONLY when the scope's connector answers its control socket and
+        reports a completed tunnel handshake (``ok`` + ``serving``). Uses the
+        authoritative ``control`` probe, never ``self._procs``: a connector
+        reparented across a supervisor restart is invisible to ``_procs`` yet
+        still answers its ``.ctl`` listener, and an orphan ``.ctl`` descriptor
+        with no process behind it (the port refuses the connection) is
+        correctly False. Every unavailable or negative state — no serving
+        delegate, orphan descriptor, refused/timed-out/closed socket, no live
+        tunnel, or a reply that is not ``ok`` + ``serving`` — returns False.
+
+        NEVER raises. A liveness probe that can throw is exactly the defect
+        this method exists to remove: both callers did
+        ``bool(get_supervisor().serving())`` against a method that did not
+        exist on this class, so the ``AttributeError`` was swallowed by their
+        ``except`` and the tunnel indicator degraded to permanently silent —
+        the flag tray to "unavailable"/dim and the fleet page to a
+        fall-through green "Serving". A real connector-down state now reads as
+        Down on both surfaces.
+        """
+        try:
+            reply = control(scope, "connector-status", {}, timeout=1.0)
+        except Exception:
+            return False
+        return reply.get("ok") is True and reply.get("serving") is True
+
     def running_orgs(self) -> list:
         with self._lock:
             return [org for org, p in self._procs.items() if p.alive()]
