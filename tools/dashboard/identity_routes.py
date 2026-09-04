@@ -301,6 +301,7 @@ async def get_status(request: Request) -> JSONResponse:
                              "onboarding_needed": False,
                              "rp_id": None, "passkeys_for_host": 0,
                              "signed_in": False, "method": None,
+                             "session_credential_id": None,
                              "enforced": False,
                              "gate_disabled": disabled})
     rp_id, _origin, _rp_err = _rp_from_request(request)
@@ -311,6 +312,16 @@ async def get_status(request: Request) -> JSONResponse:
         return JSONResponse({"error": f"could not read identity settings: {e}"},
                             status_code=500)
     session = session_from_request(request)
+    # Which exact credential authenticated this session. The token claims
+    # carry only the method; the credential is in the durable session row.
+    session_credential_id = None
+    if session is not None:
+        from tools.dashboard.dao import identity_sessions
+        try:
+            row = identity_sessions.get_session(session["sid"], now=time.time())
+            session_credential_id = (row or {}).get("credential_id")
+        except Exception:
+            session_credential_id = None
     identity = None
     if personal is not None and personal.payload.get("armored_private_key"):
         identity = {
@@ -347,6 +358,9 @@ async def get_status(request: Request) -> JSONResponse:
         "passkeys_for_host": sum(1 for r in rows if r["rp_id"] == rp_id),
         "signed_in": session is not None,
         "method": (session or {}).get("method"),
+        # The passkey credential that opened this session (null for password
+        # sessions) — lets factor UIs mark "the one you are".
+        "session_credential_id": session_credential_id,
         "enforced": human_auth_enrolled() and not disabled,
         # DASHBOARD_AUTH kill-switch state — the indicator renders its
         # forced-open marker from this, never from probing the gate.

@@ -36,8 +36,12 @@ const STYLE = `
   padding:9px 12px;transition:border-color .25s ease,background .25s ease}
 .or-factor.done{border-color:#14532d;background:#0c1a12}
 .or-factor-row{display:flex;align-items:center;gap:10px;min-height:40px}
-.or-factor-ic{width:30px;height:30px;flex:0 0 30px;display:grid;place-items:center;border-radius:8px;
+.or-factor-ic{position:relative;width:30px;height:30px;flex:0 0 30px;display:grid;place-items:center;border-radius:8px;
   background:#1f2937;color:#38bdf8}
+.or-pin{position:absolute;top:-5px;right:-5px;width:15px;height:15px;border-radius:50%;
+  background:#5b57e8;color:#fff;display:grid;place-items:center;box-shadow:0 0 0 2px #161b26}
+.or-factor.done .or-pin{box-shadow:0 0 0 2px #0c1a12}
+.or-pin svg{width:9px;height:9px;fill:none;stroke:currentColor;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}
 .or-factor.done .or-factor-ic{background:#052e16;color:#34d399}
 .or-factor-ic svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
 .or-factor-name{font-size:13.5px;font-weight:600;color:#e5e7eb}
@@ -62,6 +66,7 @@ const ICONS = {
   password: '<svg viewBox="0 0 24 24"><rect x="4.5" y="10" width="15" height="9.5" rx="2"/><path d="M8 10V7.5a4 4 0 0 1 8 0V10"/><path d="M12 14v2.2"/></svg>',
   passkey: '<svg viewBox="0 0 24 24"><circle cx="10" cy="8.5" r="3.2"/><path d="M4.5 19c.6-3.2 2.9-5 5.5-5s4.9 1.8 5.5 5"/><path d="M17.5 9.5v4M15.6 11.5h3.8"/></svg>',
   check: '<svg viewBox="0 0 24 24"><path d="M5 12.5 10 17.5 19 7"/></svg>',
+  pin: '<svg viewBox="0 0 24 24"><path d="M12 21v-7M7 14l1.2-6.5h7.6L17 14ZM9.5 7.5V4h5v3.5"/></svg>',
 };
 
 const NO_ROOT_AUTHORITY =
@@ -98,6 +103,8 @@ async function loadModel() {
       rootPub: pj.root_pub || envelope.root_pub,
       rpId: st.rp_id || undefined,
       passkeys: st.passkeys || [],
+      sessionMethod: st.method || null,
+      sessionCredentialId: st.session_credential_id || null,
       v3: true,
       policyModule,
       envelope,
@@ -152,7 +159,11 @@ async function getPrf(model, credentialIds = null) {
 async function openRootPolicy(model, { title, detail }) {
   const policy = model.policyModule;
   const memberIds = new Set(policy.policyFactorIds(model.envelope.policy));
-  const factors = model.envelope.factors.filter((factor) => memberIds.has(factor.factor_id));
+  // Password grouping renders first regardless of armor order (stable sort
+  // keeps the relative order within each type).
+  const factors = model.envelope.factors
+    .filter((factor) => memberIds.has(factor.factor_id))
+    .sort((a, b) => (b.type === 'password' ? 1 : 0) - (a.type === 'password' ? 1 : 0));
   const views = Object.fromEntries((model.factorViews || []).map((row) => [row.factor_id, row]));
   const passwordCount = factors.filter((factor) => factor.type === 'password').length;
   const passkeyCount = factors.filter((factor) => factor.type === 'passkey').length;
@@ -181,8 +192,30 @@ async function openRootPolicy(model, { title, detail }) {
       return node;
     }
     function label(factor) {
-      return views[factor.factor_id]?.label
+      // The operator's renames live on the RECIPIENT metadata (that is what
+      // the credential-management pencil writes); the factor-level label is
+      // the stale enrollment-time default. Prefer the recipient names.
+      const view = views[factor.factor_id] || {};
+      const names = (view.recipients || []).map((r) => r.label).filter(Boolean);
+      return names.join(' · ') || view.label
         || (factor.type === 'password' ? 'Password' : 'Passkey');
+    }
+    // The factor this dashboard session signed in with gets a pin badge.
+    function isSessionFactor(factor) {
+      if (model.sessionMethod === 'password') {
+        return factor.type === 'password' && passwordCount === 1;
+      }
+      return model.sessionMethod === 'passkey' && !!factor.credential_id
+        && factor.credential_id === model.sessionCredentialId;
+    }
+    function factorIcon(markup, factor) {
+      const ic = el('span', 'or-factor-ic', markup);
+      if (isSessionFactor(factor)) {
+        const pin = el('span', 'or-pin', ICONS.pin);
+        pin.title = 'You signed in with this factor';
+        ic.appendChild(pin);
+      }
+      return ic;
     }
     // What the armor actually requires, stated up front. The policy is an
     // and/or expression; the two flat shapes cover every real armor today
@@ -290,7 +323,7 @@ async function openRootPolicy(model, { title, detail }) {
         if (seeds[factor.factor_id]) {
           const done = el('div', 'or-factor done');
           const row = el('div', 'or-factor-row');
-          row.appendChild(el('span', 'or-factor-ic', ICONS.check));
+          row.appendChild(factorIcon(ICONS.check, factor));
           row.appendChild(el('span', 'or-factor-name',
             factor.type === 'password' ? 'Password validated' : 'Passkey verified'));
           done.appendChild(row);
@@ -302,7 +335,7 @@ async function openRootPolicy(model, { title, detail }) {
         } else if (factor.type === 'password') {
           const grouping = el('div', 'or-factor');
           const row = el('div', 'or-factor-row');
-          row.appendChild(el('span', 'or-factor-ic', ICONS.password));
+          row.appendChild(factorIcon(ICONS.password, factor));
           const input = el('input', 'or-in-bare');
           input.type = 'password'; input.autocomplete = 'current-password';
           input.placeholder = passwordCount > 1 ? label(factor) : 'Enter your password';
@@ -320,7 +353,7 @@ async function openRootPolicy(model, { title, detail }) {
         } else {
           const button = el('button', 'or-factor or-factor-btn');
           button.type = 'button';
-          button.appendChild(el('span', 'or-factor-ic', ICONS.passkey));
+          button.appendChild(factorIcon(ICONS.passkey, factor));
           button.appendChild(el('span', 'or-factor-name',
             S.busy === factor.factor_id ? 'Waiting for your passkey…'
               : passkeyCount > 1 ? label(factor) : 'Select your passkey'));
