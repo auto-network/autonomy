@@ -52,11 +52,12 @@ def _member_profiles(slug: str) -> dict:
     return profiles
 
 
-def _join_urls(slug: str) -> dict:
-    """invite_ref -> published join URL from the org's own grant cache.
+def _link_grants(slug: str) -> dict:
+    """invite_ref -> {url, label} from the org's own grant cache.
 
     The cache row never contains the bearer (it rides only the minting
-    browser's URL fragment), so this join is safe to serve.
+    browser's URL fragment), so this join is safe to serve. The label is the
+    human name the operator gave the link at publish time (meta.label).
     """
     from tools.graph import settings_ops
     from tools.graph.schemas.network_identity import (
@@ -72,14 +73,18 @@ def _join_urls(slug: str) -> dict:
         ).members
     except Exception:
         return {}
-    urls = {}
+    grants = {}
     for member in members:
         payload = member.payload or {}
         invite_ref = payload.get("invite_ref")
         url = payload.get("url")
         if payload.get("target_type") == "org:join" and invite_ref and url:
-            urls[str(invite_ref)] = str(url)
-    return urls
+            label = (payload.get("meta") or {}).get("label")
+            grants[str(invite_ref)] = {
+                "url": str(url),
+                "label": str(label) if label else None,
+            }
+    return grants
 
 
 def _membership_view(slug: str) -> dict:
@@ -90,7 +95,7 @@ def _membership_view(slug: str) -> dict:
         return {"founded": False}
     now_ms = int(time.time() * 1000)
     profiles = _member_profiles(slug)
-    join_urls = _join_urls(slug)
+    grants = _link_grants(slug)
     with LedgerStore(path) as store:
         state = store.fold(now=now_ms)
         invite_uses = getattr(state, "invite_uses", {}) or {}
@@ -136,7 +141,8 @@ def _membership_view(slug: str) -> dict:
                 # {max_uses, used, remaining} — same keyset as the status map;
                 # used counts admitted members only (autonomy@f60c26a).
                 "uses": invite_uses.get(invite_id),
-                "join_url": join_urls.get(invite_id),
+                "join_url": (grants.get(invite_id) or {}).get("url"),
+                "label": (grants.get(invite_id) or {}).get("label"),
             })
         pending = []
         for record in store.list_pending_claims():
@@ -152,6 +158,10 @@ def _membership_view(slug: str) -> dict:
                 # Dean"). Self-reported: vouched only by possession of the
                 # invite the operator sent them.
                 "profile": profile if isinstance(profile, dict) else None,
+                # The human name of the link this request came in on.
+                "invite_label": (
+                    (grants.get(record["invite_ref"]) or {}).get("label")
+                ),
                 "granted_role": None,
                 "have": None,
                 "need": None,
