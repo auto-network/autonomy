@@ -126,6 +126,11 @@ function fleetPage() {
       };
     },
 
+    // A connected machine syncs at least every ~10s; minutes of silence IS
+    // disconnection. Without this, a peer that stops contacting us leaves no
+    // new evidence and the last stale success would render "Synced" forever.
+    AWAY_AFTER_MS: 5 * 60 * 1000,
+
     // ── the classifier (the design's, minus states with no honest probe) ──
     machineState(machine) {
       let id; let tone;
@@ -148,6 +153,8 @@ function fleetPage() {
           .includes(machine.lastErrorCode);
         id = connection ? 'away' : 'failing';
         tone = connection ? 'warn' : 'failed';
+      } else if (Date.now() - machine.lastSuccessfulSyncAt > this.AWAY_AFTER_MS) {
+        id = 'away'; tone = 'warn';
       } else {
         id = 'synced'; tone = 'good';
       }
