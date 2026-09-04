@@ -401,14 +401,32 @@ class FleetEnrollmentClient:
             "resume_token": frozen.resume_token,
         })
         base = {"v", "status", "request_id", "verification_code"}
-        if (
-            not isinstance(reply, dict)
-            or reply.get("v") != 1
-            or reply.get("request_id") != frozen.request_id
-            or reply.get("verification_code") != frozen.verification_code
-        ):
+        # Distinguish the failure the joiner can act on. The common one is a
+        # serving side that is not actually answering: an offline, locked, or
+        # stale-code home Dashboard returns a relay/gateway error rather than a
+        # fleet enrollment envelope, so the reply is not a well-formed
+        # response at all. A well-formed response whose ids differ is a real
+        # request mismatch (stale/duplicate, or a different invitation) — a
+        # separate, separately-actionable condition.
+        if not isinstance(reply, dict) or reply.get("v") != 1 or not base <= set(reply):
             raise FleetEnrollmentClientError(
-                "fleet resume response does not match the saved request"
+                "the other Dashboard did not return a valid enrollment "
+                "response. It is usually offline, locked, or running "
+                "outdated code that needs a restart. Restart and unlock the "
+                "other Dashboard; setup here continues on its own once it is "
+                "serving again."
+            )
+        if reply["request_id"] != frozen.request_id:
+            raise FleetEnrollmentClientError(
+                "the enrollment response is for a different request than this "
+                "machine sent (a stale or duplicate request). Start the join "
+                "again on this machine."
+            )
+        if reply["verification_code"] != frozen.verification_code:
+            raise FleetEnrollmentClientError(
+                "the enrollment response's verification code does not match "
+                "this request — the other Dashboard may be using a different "
+                "invitation. Mint a fresh invite and re-run the join."
             )
         status = reply.get("status")
         if status in {"pending", "declined"} and set(reply) == base:

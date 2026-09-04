@@ -273,3 +273,56 @@ async def test_expired_invite_discards_retry_state_without_reopening_channel(pat
     assert result.status == "expired"
     assert join_store.load(recovery.request_id) is None
     assert len(channels) == before
+
+
+@pytest.mark.asyncio
+async def test_resume_names_the_actionable_failure(path):
+    """The three resume failures a joiner can act on are distinct messages,
+    not one opaque "does not match" line (operator-reported 2026-09-04: a
+    stale/offline serving Dashboard surfaced only the cryptic mismatch)."""
+    _root, invite, _origin, join_store, client, _channels = path
+    recovery = await client.start(invite, machine_id="9c" * 32)
+
+    def _client_returning(reply):
+        async def connect(_base, _token, *, root_pub, org):
+            return HandlerChannel(lambda _message: reply)
+        return fleet_enrollment_client.FleetEnrollmentClient(
+            envelope_fetcher=client.envelope_fetcher,
+            channel_connector=connect,
+            state_store=join_store,
+            now_ms=lambda: NOW_MS,
+        )
+
+    # Offline / locked / stale-code serving side: a gateway-shaped object,
+    # not a fleet enrollment envelope.
+    not_serving = _client_returning({"error": "bad gateway", "code": 502})
+    with pytest.raises(
+        fleet_enrollment_client.FleetEnrollmentClientError,
+        match="did not return a valid enrollment response",
+    ):
+        await not_serving.resume(recovery)
+
+    # Well-formed envelope, but for a different request id.
+    wrong_request = _client_returning({
+        "v": 1, "status": "pending",
+        "request_id": "ff" * 32,
+        "verification_code": recovery.verification_code,
+    })
+    with pytest.raises(
+        fleet_enrollment_client.FleetEnrollmentClientError,
+        match="different request",
+    ):
+        await wrong_request.resume(recovery)
+
+    # Well-formed envelope, but the verification code differs (a different
+    # invitation on the serving side).
+    wrong_code = _client_returning({
+        "v": 1, "status": "pending",
+        "request_id": recovery.request_id,
+        "verification_code": "00" * 16,
+    })
+    with pytest.raises(
+        fleet_enrollment_client.FleetEnrollmentClientError,
+        match="different invitation",
+    ):
+        await wrong_code.resume(recovery)
