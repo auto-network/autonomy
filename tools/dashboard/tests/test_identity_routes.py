@@ -1038,3 +1038,22 @@ def test_passkey_device_recipient_changes_preserve_one_logical_leaf(env, root):
     assert {row["label"] for row in passkey_view["recipients"]} == {
         "iPhone", "MacBook",
     }
+
+
+def test_status_reports_the_session_credential(env, monkeypatch):
+    """The exact passkey that opened this session rides on status (null for
+    password sessions), so factor UIs can mark "the one you are"."""
+    from tools.dashboard import unlock_routes
+    from tools.dashboard.dao import identity_sessions
+
+    monkeypatch.setattr(
+        unlock_routes, "session_from_request",
+        lambda _request: {"sid": "s1", "method": "passkey"},
+    )
+    monkeypatch.setattr(
+        identity_sessions, "get_session",
+        lambda sid, *, now: {"sid": sid, "credential_id": "cred-abc"},
+    )
+    body = env.get("/api/identity/status").json()
+    assert body["method"] == "passkey"
+    assert body["session_credential_id"] == "cred-abc"
