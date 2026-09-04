@@ -27,8 +27,9 @@ from tools.dashboard import api_auth
 logger = logging.getLogger(__name__)
 
 
-def _display_names(slug: str) -> dict:
-    """persona_pub -> display_name from the self-authored directory set."""
+def _member_profiles(slug: str) -> dict:
+    """persona_pub -> chosen presentation from the self-authored directory set
+    (display_name, avatar — an attachment id or absolute URL — and color)."""
     from tools.graph import settings_ops
     from tools.graph.schemas.org_member_profile import MEMBER_PROFILE_SET_ID
 
@@ -38,12 +39,17 @@ def _display_names(slug: str) -> dict:
         ).members
     except Exception:
         return {}
-    names = {}
+    profiles = {}
     for member in members:
-        name = (member.payload or {}).get("display_name")
+        payload = member.payload or {}
+        name = payload.get("display_name")
         if isinstance(name, str) and name:
-            names[str(member.key)] = name
-    return names
+            profiles[str(member.key)] = {
+                "display_name": name,
+                "avatar": payload.get("avatar") or None,
+                "color": payload.get("color") or None,
+            }
+    return profiles
 
 
 def _join_urls(slug: str) -> dict:
@@ -83,14 +89,16 @@ def _membership_view(slug: str) -> dict:
     if not path.exists():
         return {"founded": False}
     now_ms = int(time.time() * 1000)
-    names = _display_names(slug)
+    profiles = _member_profiles(slug)
     join_urls = _join_urls(slug)
     with LedgerStore(path) as store:
         state = store.fold(now=now_ms)
         members = [
             {
                 "persona": persona,
-                "display_name": names.get(persona),
+                "display_name": (profiles.get(persona) or {}).get("display_name"),
+                "avatar": (profiles.get(persona) or {}).get("avatar"),
+                "color": (profiles.get(persona) or {}).get("color"),
                 "roles": list(view.roles),
                 "sponsor": view.sponsor,
                 "current_key": view.current_key,
