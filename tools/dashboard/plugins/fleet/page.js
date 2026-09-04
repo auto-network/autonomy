@@ -20,12 +20,13 @@ function fleetPage() {
     // A state with no honest server-side probe has no entry here.
     STRINGS: {
       word: {
-        serving: 'Serving', locked: 'Needs unlock',
+        serving: 'Serving', locked: 'Needs unlock', tunnel: 'Tunnel down',
         cert: 'Certificate expired', restart: 'Restart needed',
         paused: 'Paused', away: 'Disconnected', failing: 'Failing',
         first: 'Not synced yet', synced: 'Synced', idle: '',
       },
       note: {
+        tunnel: "Your other devices can't reach this dashboard from outside. Bringing the tunnel back needs your root key.",
         first: 'This machine has joined your fleet but has not synchronized with this dashboard yet. Syncing starts automatically once it comes online.',
         paused: 'This machine is running a different version of Autonomy. Synchronization will resume once the versions match.',
         away: 'Not responding — it may be asleep or offline. Syncing resumes automatically when it comes back.',
@@ -93,6 +94,7 @@ function fleetPage() {
       if (row.isLocalMachine) {
         const local = (this.view && this.view.localMachine) || {};
         adapted.connectorArmed = local.connectorArmed;
+        adapted.tunnelServing = local.tunnelServing;
         adapted.runningStale = local.runningStale === true;
         adapted.certStatus = local.certStatus || null;
         adapted.certValidUntil = local.certValidUntil;
@@ -130,6 +132,7 @@ function fleetPage() {
       if (machine.isLocalMachine) {
         const serving = this.servingMachineId === machine.entryId;
         if (serving && machine.connectorArmed === false) { id = 'locked'; tone = 'failed'; }
+        else if (serving && machine.tunnelServing === false) { id = 'tunnel'; tone = 'failed'; }
         else if (serving && this.certExpired(machine)) { id = 'cert'; tone = 'failed'; }
         else if (machine.runningStale) { id = 'restart'; tone = 'warn'; }
         else if (serving) { id = 'serving'; tone = 'good'; }

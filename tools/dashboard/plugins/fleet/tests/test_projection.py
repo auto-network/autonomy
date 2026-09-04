@@ -39,7 +39,7 @@ def _inputs(
     *, entries=(), admissions=(), approvals=None, executing=(),
     invitation=None, machine_names=None, invitation_publication=None,
     publishing_org="autonomy", telemetry_rows=None,
-    local_verdict=None, serve_cert=None,
+    local_verdict=None, serve_cert=None, tunnel_serving=None,
 ):
     root = ROOT
     return ProjectionInputs(
@@ -68,6 +68,7 @@ def _inputs(
         telemetry_rows=telemetry_rows or {},
         local_verdict=local_verdict,
         serve_cert=serve_cert,
+        tunnel_serving=tunnel_serving,
     )
 
 
@@ -329,6 +330,7 @@ def test_local_machine_block_reports_probe_facts_or_stays_null():
         "runningStale": None,
         "certStatus": None,
         "certValidUntil": None,
+        "tunnelServing": None,
         "verdictTopLine": None,
     }
 
@@ -341,11 +343,13 @@ def test_local_machine_block_reports_probe_facts_or_stays_null():
             "dashboard_version": {"status": "stale"},
         },
         serve_cert={"status": "ok", "not_after": 1_777_086_400},
+        tunnel_serving=False,
     ))["localMachine"]
     assert view == {
         "connectorArmed": False,
         "runningStale": True,
         "certStatus": "ok",
         "certValidUntil": 1_777_086_400_000,
+        "tunnelServing": False,
         "verdictTopLine": "LOCKED",
     }
