@@ -8,6 +8,7 @@ from tools.network.idkit import KeyPair, generate_token
 from tools.network.ledger import (
     INVITE_CLAIMED,
     INVITE_DEAD,
+    INVITE_EXHAUSTED,
     INVITE_EXPIRED,
     INVITE_LIVE,
     INVITE_REVOKED,
@@ -20,6 +21,7 @@ from tools.network.ledger.fold import (
     R_CLAIM_WRONG_KEY,
     R_INVITE_ALREADY_CLAIMED,
     R_INVITE_DEAD,
+    R_INVITE_EXHAUSTED,
     R_INVITE_EXPIRED,
     R_INVITE_NOT_IN_ANCESTRY,
     R_PERSONA_EXISTS,
@@ -121,6 +123,95 @@ class TestLifecycle:
         assert state.valid[second] is False
         assert state.reasons[second] == R_INVITE_ALREADY_CLAIMED
         assert p2.public_hex not in state.members
+
+    def test_multi_use_token_admits_up_to_the_bound(self):
+        """A max_uses=2 bearer invite admits two countersigned claims and
+        refuses the third; each claim is individually countersigned (B6)."""
+        sim, sponsor = org_with_member_role()
+        token = generate_token()
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        p1, p2, p3 = KeyPair.generate(), KeyPair.generate(), KeyPair.generate()
+        invite = sim.invite(sponsor, "member", token_hash=token_hash, max_uses=2)
+        c1 = sim.claim(invite, p1, p1, token=token, approvers=[sponsor])
+        c2 = sim.claim(invite, p2, p2, token=token, approvers=[sponsor])
+        c3 = sim.claim(invite, p3, p3, token=token, approvers=[sponsor])
+        state = fold(sim.ledger)
+        assert state.valid[c1] is True
+        assert state.valid[c2] is True
+        assert p1.public_hex in state.members
+        assert p2.public_hex in state.members
+        assert state.valid[c3] is False
+        assert state.reasons[c3] == R_INVITE_EXHAUSTED
+        assert p3.public_hex not in state.members
+
+    def test_multi_use_status_live_with_remaining_then_exhausted(self):
+        sim, sponsor = org_with_member_role()
+        token = generate_token()
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        p1, p2 = KeyPair.generate(), KeyPair.generate()
+        invite = sim.invite(sponsor, "member", token_hash=token_hash, max_uses=2)
+
+        # No claims yet: live, full capacity.
+        state = fold(sim.ledger)
+        assert state.invites[invite] == INVITE_LIVE
+        assert state.invite_uses[invite] == {"max_uses": 2, "used": 0, "remaining": 2}
+
+        # One admitted claim: STILL live, one use remaining.
+        sim.claim(invite, p1, p1, token=token, approvers=[sponsor])
+        state = fold(sim.ledger)
+        assert state.invites[invite] == INVITE_LIVE
+        assert state.invite_uses[invite] == {"max_uses": 2, "used": 1, "remaining": 1}
+
+        # Both uses admitted: terminal 'exhausted' (a multi-use bound reached),
+        # ranked where 'claimed' ranks — above revoked/expired.
+        sim.claim(invite, p2, p2, token=token, approvers=[sponsor])
+        state = fold(sim.ledger)
+        assert state.invites[invite] == INVITE_EXHAUSTED
+        assert state.invite_uses[invite]["remaining"] == 0
+
+    def test_single_use_status_and_capacity_unchanged(self):
+        """Byte-identical default: no max_uses -> single-use, status 'claimed'
+        at one member, capacity max_uses=1."""
+        sim, sponsor = org_with_member_role()
+        ik, p1 = KeyPair.generate(), KeyPair.generate()
+        invite = sim.invite(sponsor, "member", invite_key=ik)
+        assert fold(sim.ledger).invite_uses[invite] == {
+            "max_uses": 1, "used": 0, "remaining": 1,
+        }
+        sim.claim(invite, ik, p1)
+        state = fold(sim.ledger)
+        assert state.invites[invite] == INVITE_CLAIMED
+        assert state.invite_uses[invite] == {"max_uses": 1, "used": 1, "remaining": 0}
+
+    def test_max_uses_with_invite_pub_is_refused_by_the_validator(self):
+        """A key-bound invite is inherently single-use; max_uses is invalid."""
+        import pytest
+        from tools.network.ledger.events import SchemaError, validate_payload
+
+        with pytest.raises(SchemaError):
+            validate_payload({
+                "type": "invite",
+                "granted_role": "member",
+                "expiry": FAR,
+                "sponsor": KeyPair.generate().public_hex,
+                "invite_pub": KeyPair.generate().public_hex,
+                "max_uses": 2,
+            })
+
+    def test_max_uses_must_be_a_positive_int(self):
+        import pytest
+        from tools.network.ledger.events import SchemaError, validate_payload
+
+        base = {
+            "type": "invite",
+            "granted_role": "member",
+            "expiry": FAR,
+            "sponsor": KeyPair.generate().public_hex,
+            "token_hash": hashlib.sha256(b"t").hexdigest(),
+        }
+        for bad in (0, -1, True, 1.5, "2"):
+            with pytest.raises(SchemaError):
+                validate_payload({**base, "max_uses": bad})
 
     def test_persona_key_is_unique(self):
         sim, sponsor = org_with_member_role()

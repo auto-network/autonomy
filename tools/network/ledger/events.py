@@ -388,7 +388,7 @@ def _v_invite(p: dict) -> None:
         p,
         "invite",
         frozenset({"granted_role", "expiry", "sponsor"}),
-        frozenset({"invite_pub", "token_hash"}),
+        frozenset({"invite_pub", "token_hash", "max_uses"}),
     )
     has_pub = "invite_pub" in p
     has_token = "token_hash" in p
@@ -398,6 +398,16 @@ def _v_invite(p: dict) -> None:
         _require_key(p["invite_pub"], "invite.invite_pub")
     else:
         _require_hash(p["token_hash"], "invite.token_hash")
+    if "max_uses" in p:
+        # A key-bound invite is inherently single-use (one keypair, one claim);
+        # a use bound is meaningful only for a shareable token_hash link.
+        if has_pub:
+            raise SchemaError(
+                "invite.max_uses is valid only with token_hash, not invite_pub"
+            )
+        max_uses = p["max_uses"]
+        if isinstance(max_uses, bool) or not isinstance(max_uses, int) or max_uses < 1:
+            raise SchemaError("invite.max_uses must be an integer >= 1")
     _require_role_name(p["granted_role"], "invite.granted_role")
     _require_ts(p["expiry"], "invite.expiry")
     _require_key(p["sponsor"], "invite.sponsor")
