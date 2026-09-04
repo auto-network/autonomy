@@ -389,7 +389,18 @@ def emit(r: ResolvedMount, topo: NodeTopology) -> list:
         # A resolved workspace bind: `--mount type=bind` REFUSES a nonexistent
         # source, so a source that vanished between the resolver's check and now
         # fails the launch instead of `-v` fabricating an empty dir at it.
-        parts = ["type=bind", f"src={r.host_source}", f"dst={dest}"]
+        #
+        # bind-propagation=rslave: receive-only propagation from the host mount
+        # at r.host_source. If that host mount is itself `shared` (an operator/
+        # deploy concern, not this launcher's), a later host-side umount+mount
+        # there (e.g. an NFS version flip) reaches this bind live, no container
+        # restart needed. If the host mount is plain `private` (the common,
+        # unconfigured case — most deployments), this is a silent no-op and
+        # behavior is byte-identical to today. Never `shared` here: `slave` is
+        # one-directional (host -> container only), so nothing this container
+        # mounts can propagate back out to the host or to a sibling container.
+        parts = ["type=bind", f"src={r.host_source}", f"dst={dest}",
+                 "bind-propagation=rslave"]
         if readonly:
             parts.append("readonly")
         return ["--mount", ",".join(parts)]

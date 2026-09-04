@@ -177,7 +177,8 @@ def test_bind_refuse_missing_spec_emits_mount_bind_not_v():
     args = mp.mount_args(plan, topo)
     assert args == [
         "--mount",
-        "type=bind,src=/tmp/daemon-host-source/anchore/license.yaml,dst=/etc/x,readonly",
+        "type=bind,src=/tmp/daemon-host-source/anchore/license.yaml,dst=/etc/x,"
+        "bind-propagation=rslave,readonly",
     ]
     assert "-v" not in args
 
