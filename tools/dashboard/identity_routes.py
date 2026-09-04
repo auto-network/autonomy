@@ -1666,23 +1666,6 @@ async def get_unlock_state(request: Request) -> JSONResponse:
             )
         flags["certificates"] = cert
 
-    # tunnel — is the dashboard reachable from outside (best-effort live probe).
-    try:
-        from tools.dashboard.link_serving_supervisor import get_supervisor
-        serving = bool(get_supervisor().serving())
-        flags["tunnel"] = {
-            "needs": not serving,
-            "value": "Up" if serving else "Down",
-            "scopes": [] if serving else ["personal"],
-            "detail": ("The connection your other devices use to reach this "
-                       "dashboard." if serving
-                       else "Your other devices can't reach this dashboard from "
-                       "outside. Bringing the tunnel back needs your root key."),
-        }
-    except Exception:
-        flags["tunnel"] = {"needs": False, "value": "",
-                           "detail": "Tunnel state is unavailable."}
-
     # Only the fleet's DESIGNATED tunnel server ever holds a serving credential:
     # the relay does not yet support multi-homed tunnels, so exactly one machine
     # runs the tunnel and every other machine syncs THROUGH it, not with it. A
@@ -1694,6 +1677,7 @@ async def get_unlock_state(request: Request) -> JSONResponse:
     # problem, exactly as fleet_doctor was corrected to do for org scopes
     # (644c88d74). Only a MANAGED fleet has a designated leader; an unmanaged
     # (legacy single-node) install keeps the original serve-everywhere behavior.
+    # Computed BEFORE the tunnel/sync flags because both gate on it.
     tunnel_designated = True
     try:
         from tools.network import fleet_tunnel_server
@@ -1702,6 +1686,40 @@ async def get_unlock_state(request: Request) -> JSONResponse:
             tunnel_designated = False
     except Exception:
         pass
+
+    # tunnel — is THIS dashboard reachable from outside. Only the designated
+    # tunnel server runs a tunnel; a non-designated machine reaches the fleet
+    # THROUGH the server and has none of its own, so a missing tunnel there is
+    # expected, not a fault (same rule as the sync flag). For the designated
+    # server, serving() is a deterministic control-socket handshake: a dead
+    # connector reads Down, never a swallowed "unavailable". (Before
+    # ServingSupervisor.serving() existed this call AttributeError'd every
+    # time and the except below silently degraded the tile to "unavailable",
+    # so it could never show Down — the false-green root cause.)
+    if not tunnel_designated:
+        flags["tunnel"] = {
+            "needs": False, "value": "",
+            "detail": ("Your other devices reach the fleet through its "
+                       "designated tunnel server, not this machine — it runs "
+                       "no tunnel of its own, which is expected."),
+        }
+    else:
+        try:
+            from tools.dashboard.link_serving_supervisor import get_supervisor
+            serving = bool(get_supervisor().serving())
+            flags["tunnel"] = {
+                "needs": not serving,
+                "value": "Up" if serving else "Down",
+                "scopes": [] if serving else ["personal"],
+                "detail": ("The connection your other devices use to reach "
+                           "this dashboard." if serving
+                           else "Your other devices can't reach this dashboard "
+                           "from outside. Bringing the tunnel back needs your "
+                           "root key."),
+            }
+        except Exception:
+            flags["tunnel"] = {"needs": False, "value": "",
+                               "detail": "Tunnel state is unavailable."}
 
     # sync — can the fleet's other machines sync WITH this one. Lit when any
     # serving connector is unarmed (holds no credential — the memory-only one

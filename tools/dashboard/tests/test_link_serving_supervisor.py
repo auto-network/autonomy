@@ -1028,3 +1028,44 @@ def test_a_credential_days_from_death_is_renewed(env, tmp_path):
     decision = _renewal_decision(4)
     assert decision["required"] is True
     assert 3 < decision["days_remaining"] <= 4
+
+
+def test_serving_probe_is_deterministic_and_never_raises(monkeypatch):
+    """The tunnel/serving indicators call ``bool(get_supervisor().serving())``.
+
+    Before this method existed on ServingSupervisor, that call AttributeError'd
+    on every request and both consumers swallowed it in a broad ``except`` —
+    the flag tray degraded to a dim "Tunnel state is unavailable" tile that
+    could never show Down, and the fleet page fell through to a green
+    "Serving". (The old test_unlock_state_sync stub gave get_supervisor a fake
+    ``serving`` method, so the missing-method bug slipped past every test.)
+    serving() must EXIST, return a bool, and never raise: a dead connector
+    reads False (Down), a live handshaking one True.
+    """
+    s = sup.ServingSupervisor()
+
+    # No connector reachable (orphan .ctl descriptor / refused socket) — the
+    # exact live-dead state: control raises TunnelUnavailable.
+    monkeypatch.setattr(sup, "control", _raise(sup.TunnelUnavailable(
+        "no control listener", kind="no-listener")))
+    assert s.serving() is False
+
+    # A connector that answers but is not serving -> False.
+    monkeypatch.setattr(sup, "control", lambda *_a, **_k: {"ok": True, "serving": False})
+    assert s.serving() is False
+    # ok False -> False even if it claims serving.
+    monkeypatch.setattr(sup, "control", lambda *_a, **_k: {"ok": False, "serving": True})
+    assert s.serving() is False
+    # Only a live, handshaking connector -> True.
+    monkeypatch.setattr(sup, "control", lambda *_a, **_k: {"ok": True, "serving": True})
+    assert s.serving() is True
+
+    # Any unexpected probe error is still False, never propagated to callers.
+    monkeypatch.setattr(sup, "control", _raise(RuntimeError("unexpected")))
+    assert s.serving() is False
+
+
+def _raise(exc):
+    def _fn(*_a, **_k):
+        raise exc
+    return _fn
