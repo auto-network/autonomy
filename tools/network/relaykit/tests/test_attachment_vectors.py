@@ -1,10 +1,20 @@
-"""The attachment fixture freezes record bytes and application framing."""
+"""Attachment record/framing vectors: generated deterministically, hash-pinned.
+
+The vectors are large (~8 MB of hex, dominated by a real multi-MiB transfer that
+crosses the production 1 MiB application-chunk / 8 MiB window boundaries) but are
+fully deterministic — fixed keys and a patterned payload, no randomness. So they
+are generated on the fly via ``build_vectors()`` rather than committed to git.
+
+``CANONICAL_SHA256`` is the frozen drift sentinel that used to be the committed
+fixture: any change to the record framing or channel crypto flips it, failing
+``test_vectors_match_frozen_hash`` and forcing a conscious one-line update here.
+"""
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
-from pathlib import Path
 
 import pytest
 
@@ -15,7 +25,21 @@ from tools.network.relaykit.channel import (
 )
 from tools.network.relaykit.tests.generate_attachment_vectors import build_vectors
 
-FIXTURE = Path(__file__).with_name("fixtures") / "attachment_v1.json"
+CANONICAL_SHA256 = "dcfb89250c44276ed30d29f9c557198943744bbd13b0abb6479f0297ed1a2c1b"
+
+
+def _canonical_text():
+    """The canonical JSON serialization the fixture file used to hold."""
+    return (
+        json.dumps(build_vectors(), ensure_ascii=True, indent=2, sort_keys=True)
+        + "\n"
+    )
+
+
+@functools.lru_cache(maxsize=1)
+def _data():
+    """Parsed vectors — built once, read-only, shared across tests."""
+    return json.loads(_canonical_text())
 
 
 def _cryptos(data):
@@ -60,15 +84,16 @@ def _assert_decoded(message, decoded):
     assert hashlib.sha256(chunk).hexdigest() == decoded["chunk_sha256"]
 
 
-def test_fixture_is_canonical_generator_output():
-    expected = json.dumps(
-        build_vectors(), ensure_ascii=True, indent=2, sort_keys=True
-    ) + "\n"
-    assert FIXTURE.read_text(encoding="utf-8") == expected
+def test_vectors_match_frozen_hash():
+    digest = hashlib.sha256(_canonical_text().encode("ascii")).hexdigest()
+    assert digest == CANONICAL_SHA256, (
+        "attachment vectors changed (record framing or channel crypto). "
+        "If intentional, update CANONICAL_SHA256 to %s." % digest
+    )
 
 
 def test_positive_stream_steps_cross_record_application_boundary():
-    data = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    data = _data()
     assert data["schema"] == "autonomy.network.attachment.vectors.v1"
     client_receiver, server_receiver = _cryptos(data)
 
@@ -86,7 +111,7 @@ def test_positive_stream_steps_cross_record_application_boundary():
 
 
 def test_every_error_code_is_canonical_and_final():
-    data = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    data = _data()
     expected = {
         "not_found",
         "not_authorized",
@@ -106,7 +131,7 @@ def test_every_error_code_is_canonical_and_final():
 
 
 def test_cancel_message_is_canonical_and_final():
-    data = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    data = _data()
     _client, server_receiver = _cryptos(data)
     message, stream_final = _assert_step(data["cancel"], server_receiver)
     _assert_decoded(message, data["cancel"]["decoded"])
@@ -144,7 +169,7 @@ def _assembly_error(case, chunk_size):
 
 @pytest.mark.parametrize("case_index", range(5))
 def test_negative_assembly_vectors(case_index):
-    data = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    data = _data()
     case = data["negative"][case_index]
     assert _assembly_error(
         case, data["constants"]["application_chunk_size"]
