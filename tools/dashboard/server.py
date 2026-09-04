@@ -139,6 +139,7 @@ from tools.dashboard import unlock_routes
 from tools.dashboard import vault_routes
 from tools.dashboard import api_auth, route_policy
 from tools.dashboard import network_routes
+from tools.dashboard import org_membership_routes
 from tools.dashboard import web_push, web_push_proof, web_push_routes, web_push_worker
 from tools.dashboard import image_build_worker
 from tools.dashboard import web_gateway_supervisor
@@ -20513,6 +20514,7 @@ routes = [
 
     # Personal identity + passkey enrollment (Get started onboarding)
     *identity_routes.ROUTES,
+    *org_membership_routes.ROUTES,
     *fleet_enrollment_routes.ROUTES,
     *vault_routes.ROUTES,
 
