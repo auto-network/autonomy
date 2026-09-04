@@ -48,6 +48,7 @@ class ProjectionInputs:
     telemetry_rows: Mapping[str, Mapping] = field(default_factory=dict)
     local_verdict: Mapping | None = None
     serve_cert: Mapping | None = None
+    tunnel_serving: bool | None = None
 
 
 def _peer_rows(epoch: str | None) -> dict[str, dict]:
@@ -129,6 +130,16 @@ def _load_inputs(*, now_ms: int) -> ProjectionInputs:
         serve_cert = serve_cert_state(None)
     except Exception:
         serve_cert = None
+    # The same live handshake probe the profile panel's Tunnel indicator uses
+    # (unlock-state): True only when the connector child reports a completed
+    # tunnel handshake. None when the probe is unavailable.
+    tunnel_serving = None
+    try:
+        from tools.dashboard.link_serving_supervisor import get_supervisor
+
+        tunnel_serving = bool(get_supervisor().serving())
+    except Exception:
+        tunnel_serving = None
     return ProjectionInputs(
         server_time=now_ms,
         root_pub=root_pub,
@@ -146,6 +157,7 @@ def _load_inputs(*, now_ms: int) -> ProjectionInputs:
         telemetry_rows=fleet_sync_telemetry.read_peer_totals(org="machine"),
         local_verdict=local_verdict,
         serve_cert=serve_cert,
+        tunnel_serving=tunnel_serving,
     )
 
 
@@ -479,6 +491,7 @@ def project(inputs: ProjectionInputs) -> dict:
         "certValidUntil": (
             cert_not_after * 1000 if isinstance(cert_not_after, int) else None
         ),
+        "tunnelServing": inputs.tunnel_serving,
         "verdictTopLine": verdict.get("top_line"),
     }
     return {

@@ -11,9 +11,10 @@ Status rendering is driven by ONE classifier (`machineState` in `page.js`):
 every machine resolves to a single state id whose display word and note come
 from a strings table. States without an honest server-side probe do not exist
 in the classifier. The local machine's operational facts ride in the
-projection's `localMachine` block (connector armed, code staleness, serving
-certificate), each null when its probe is unavailable — null renders nothing,
-never a guess.
+projection's `localMachine` block (connector armed, live tunnel handshake —
+the same supervisor probe the profile panel's Tunnel indicator uses — code
+staleness, serving certificate), each null when its probe is unavailable —
+null renders nothing, never a guess.
 
 | Visible value | Projection field | Authoritative source |
 |---|---|---|
