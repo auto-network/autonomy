@@ -63,18 +63,18 @@ def _client() -> TestClient:
     return TestClient(Starlette(routes=org_membership_routes.ROUTES))
 
 
-def _bearer_invite(store, founder, *, expiry, hlc):
+def _bearer_invite(store, founder, *, expiry, hlc, max_uses=None):
+    payload = {
+        "type": "invite",
+        "granted_role": "owner",
+        "expiry": expiry,
+        "sponsor": founder.public_hex,
+        "token_hash": hashlib.sha256(BEARER.encode("utf-8")).hexdigest(),
+    }
+    if max_uses is not None:
+        payload["max_uses"] = max_uses
     return store.append(make_event(
-        founder,
-        {
-            "type": "invite",
-            "granted_role": "owner",
-            "expiry": expiry,
-            "sponsor": founder.public_hex,
-            "token_hash": hashlib.sha256(BEARER.encode("utf-8")).hexdigest(),
-        },
-        list(store.heads()),
-        HLC(*hlc),
+        founder, payload, list(store.heads()), HLC(*hlc),
     ))
 
 
@@ -103,6 +103,7 @@ def test_founded_ledger_projects_members_roles_and_claimed_invite(founded):
     assert invite["invite_id"] == record.founding_invite_id
     assert invite["status"] == "claimed"
     assert invite["binding"] == "key"
+    assert invite["uses"] == {"max_uses": 1, "used": 1, "remaining": 0}
     assert body["pending_claims"] == []
     assert body["viewer_persona"] is None
 
@@ -213,3 +214,19 @@ def test_member_rows_carry_the_directory_presentation(founded, monkeypatch):
     assert member["display_name"] == "Jeremy"
     assert member["avatar"] == "4fde3638-009"
     assert member["color"] == "#0f766e"
+
+
+def test_multi_use_invite_reports_capacity(founded):
+    """A max_uses invite stays live with remaining capacity exposed
+    (autonomy@f60c26a): the row renders "0 of 3 used" honestly."""
+    store, _record, founder = founded
+    multi_id = _bearer_invite(
+        store, founder, expiry=int(time.time() * 1000) + 86_400_000,
+        hlc=(NOW_MS + 1_000, 0), max_uses=3,
+    )
+    invites = {
+        row["invite_id"]: row
+        for row in _client().get("/api/orgs/testorg/membership").json()["invites"]
+    }
+    assert invites[multi_id]["status"] == "live"
+    assert invites[multi_id]["uses"] == {"max_uses": 3, "used": 0, "remaining": 3}

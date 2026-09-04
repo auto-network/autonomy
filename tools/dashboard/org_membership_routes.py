@@ -93,6 +93,7 @@ def _membership_view(slug: str) -> dict:
     join_urls = _join_urls(slug)
     with LedgerStore(path) as store:
         state = store.fold(now=now_ms)
+        invite_uses = getattr(state, "invite_uses", {}) or {}
         members = [
             {
                 "persona": persona,
@@ -132,6 +133,9 @@ def _membership_view(slug: str) -> dict:
                     None if not payload
                     else "key" if payload.get("invite_pub") else "bearer"
                 ),
+                # {max_uses, used, remaining} — same keyset as the status map;
+                # used counts admitted members only (autonomy@f60c26a).
+                "uses": invite_uses.get(invite_id),
                 "join_url": join_urls.get(invite_id),
             })
         pending = []
