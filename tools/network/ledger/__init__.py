@@ -40,6 +40,7 @@ from .events import (
 from .fold import (
     INVITE_CLAIMED,
     INVITE_DEAD,
+    INVITE_EXHAUSTED,
     INVITE_EXPIRED,
     INVITE_LIVE,
     INVITE_REVOKED,
@@ -157,6 +158,7 @@ __all__ = [
     "scope_role_grant",
     "INVITE_LIVE",
     "INVITE_CLAIMED",
+    "INVITE_EXHAUSTED",
     "INVITE_REVOKED",
     "INVITE_DEAD",
     "INVITE_EXPIRED",

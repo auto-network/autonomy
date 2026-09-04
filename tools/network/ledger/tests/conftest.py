@@ -138,7 +138,8 @@ class Sim:
             parents=parents,
         )
 
-    def invite(self, author, role, invite_key=None, token_hash=None, expiry=FAR, parents=None):
+    def invite(self, author, role, invite_key=None, token_hash=None, expiry=FAR,
+               parents=None, max_uses=None):
         payload = {
             "type": "invite",
             "granted_role": role,
@@ -149,6 +150,8 @@ class Sim:
             payload["token_hash"] = token_hash
         else:
             payload["invite_pub"] = key(invite_key)
+        if max_uses is not None:
+            payload["max_uses"] = max_uses
         return self.emit(author, payload, parents=parents)
 
     def claim(

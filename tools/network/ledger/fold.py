@@ -86,6 +86,7 @@ R_INVITE_NOT_IN_ANCESTRY = "invite-not-in-ancestry"
 R_INVITE_DEAD = "invite-dead"
 R_INVITE_EXPIRED = "invite-expired"
 R_INVITE_ALREADY_CLAIMED = "invite-already-claimed"
+R_INVITE_EXHAUSTED = "invite-exhausted"
 R_CLAIM_WRONG_KEY = "claim-wrong-key"
 R_CLAIM_BAD_TOKEN = "claim-bad-token"
 R_CLAIM_BAD_CREDENTIAL = "claim-bad-credential"
@@ -113,6 +114,10 @@ INVITE_CLAIMED = "claimed"
 INVITE_REVOKED = "revoked"
 INVITE_DEAD = "dead"
 INVITE_EXPIRED = "expired"
+#: A multi-use (max_uses > 1) invite whose surviving claims have reached its
+#: bound. Single-use invites keep INVITE_CLAIMED at their bound (byte-identical
+#: to pre-multi-use behavior); both are terminal and rank at the same tier.
+INVITE_EXHAUSTED = "exhausted"
 
 SCOPE_ROLE_DEFINE = "role:define"
 SCOPE_CHECKPOINT = "checkpoint"
@@ -221,6 +226,10 @@ class _Invite:
     token_hash: Optional[str]
     expiry: int
     by_root: bool
+    #: How many members this invite may admit. Absent on the event means 1
+    #: (every legacy invite is single-use, byte-identically). Only token_hash
+    #: invites may exceed 1 (the validator refuses max_uses with invite_pub).
+    max_uses: int = 1
 
 
 @dataclass(frozen=True)
@@ -322,6 +331,9 @@ class FoldState:
             if pid not in members
         }
         self.invites: Dict[str, str] = folder.invite_statuses(ctx)
+        #: Per-invite use accounting {id: {max_uses, used, remaining}} — how the
+        #: Membership projection renders remaining capacity of a multi-use link.
+        self.invite_uses: Dict[str, dict] = folder.invite_capacities(ctx)
         self.checkpoints: tuple = folder.checkpoints_at(ctx)
         self.loss_heads: tuple = folder.loss_heads_at(ctx)
         self.delegation_parents: Dict[str, tuple] = folder.delegation_parents_at(ctx)
@@ -798,6 +810,7 @@ class _Folder:
             token_hash=p.get("token_hash"),
             expiry=p["expiry"],
             by_root=by_root,
+            max_uses=p.get("max_uses", 1),
         )
         return None
 
@@ -825,12 +838,23 @@ class _Folder:
             ):
                 return R_CLAIM_BAD_TOKEN
 
-        # Single use: any surviving claim of this invite in the ancestry wins.
-        for claim in self.claims.values():
-            if claim.invite_ref == invite_id and claim.id in ctx and self._claim_alive(
-                claim, ctx, frozenset()
-            ):
-                return R_INVITE_ALREADY_CLAIMED
+        # Use bound: an invite admits up to max_uses members. Count the
+        # surviving claims of this invite in the ancestry; refuse once they
+        # reach the bound. max_uses defaults to 1, so a single-use invite
+        # refuses its second claim exactly as before (R_INVITE_ALREADY_CLAIMED),
+        # and only a genuine multi-use invite reports R_INVITE_EXHAUSTED.
+        used = sum(
+            1
+            for claim in self.claims.values()
+            if claim.invite_ref == invite_id
+            and claim.id in ctx
+            and self._claim_alive(claim, ctx, frozenset())
+        )
+        if used >= invite.max_uses:
+            return (
+                R_INVITE_ALREADY_CLAIMED if invite.max_uses == 1
+                else R_INVITE_EXHAUSTED
+            )
 
         members, _ = self.members_at(ctx)
         taken = set(members)
@@ -1276,10 +1300,16 @@ class _Folder:
             if claim.id in ctx and self._claim_alive(claim, ctx, extra):
                 alive_by_invite.setdefault(claim.invite_ref, []).append(claim)
 
-        # Surviving concurrent claims of one invite: lowest event hash wins.
+        # Surviving claims of one invite: the lowest event hashes win, up to the
+        # invite's max_uses. For a single-use invite (max_uses == 1) this is the
+        # min-hash winner, byte-identical to before; a multi-use invite admits
+        # its first max_uses claims and a concurrent overflow past the bound
+        # loses deterministically (highest hashes dropped).
         winners: List[_Claim] = []
         for invite_id in sorted(alive_by_invite):
-            winners.append(min(alive_by_invite[invite_id], key=lambda c: c.id))
+            bound = self.invites[invite_id].max_uses
+            ordered = sorted(alive_by_invite[invite_id], key=lambda c: c.id)
+            winners.extend(ordered[:bound])
 
         # Two concurrent winners binding the same persona key: lowest id wins.
         members: Dict[str, tuple] = {}
@@ -1477,13 +1507,23 @@ class _Folder:
 
     def invite_statuses(self, ctx: frozenset) -> Dict[str, str]:
         members, _ = self.members_at(ctx)
-        claimed = {rec[1].id for rec in members.values()}
+        # Admitted members per invite. members_at already caps this at each
+        # invite's max_uses, so an invite is at its bound exactly when its count
+        # reaches max_uses — single-use invites reach it at one member.
+        used_by_invite: Dict[str, int] = {}
+        for rec in members.values():
+            used_by_invite[rec[1].id] = used_by_invite.get(rec[1].id, 0) + 1
         statuses: Dict[str, str] = {}
         for iid, invite in self.invites.items():
             if iid not in ctx or not self.valid[iid]:
                 continue
-            if iid in claimed:
-                statuses[iid] = INVITE_CLAIMED
+            # Terminal at the bound (ranks where 'claimed' ranked, above
+            # revoked/expired/dead). A multi-use invite with remaining uses is
+            # NOT terminal here and falls through to the live/revoked/... ladder.
+            if used_by_invite.get(iid, 0) >= invite.max_uses:
+                statuses[iid] = (
+                    INVITE_CLAIMED if invite.max_uses == 1 else INVITE_EXHAUSTED
+                )
                 continue
             directly_revoked = any(
                 r.target_event == iid
@@ -1499,6 +1539,28 @@ class _Folder:
             else:
                 statuses[iid] = INVITE_LIVE
         return statuses
+
+    def invite_capacities(self, ctx: frozenset) -> Dict[str, dict]:
+        """Per-invite use accounting for presentation: id -> {max_uses, used,
+        remaining}. ``used`` is admitted members from the invite (members_at,
+        already capped at max_uses), so ``remaining`` never goes negative. Every
+        invite is single-use unless its event set max_uses, so a legacy invite
+        reports {max_uses: 1, used: 0|1, remaining: 1|0}."""
+        members, _ = self.members_at(ctx)
+        used_by_invite: Dict[str, int] = {}
+        for rec in members.values():
+            used_by_invite[rec[1].id] = used_by_invite.get(rec[1].id, 0) + 1
+        caps: Dict[str, dict] = {}
+        for iid, invite in self.invites.items():
+            if iid not in ctx or not self.valid[iid]:
+                continue
+            used = used_by_invite.get(iid, 0)
+            caps[iid] = {
+                "max_uses": invite.max_uses,
+                "used": used,
+                "remaining": max(0, invite.max_uses - used),
+            }
+        return caps
 
     def checkpoints_at(self, ctx: frozenset) -> tuple:
         return tuple(sorted(cid for cid in self.checkpoint_ids if cid in ctx and self.valid[cid]))

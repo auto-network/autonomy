@@ -59,6 +59,7 @@ function buildInviteBody({
   sponsorPub,
   invitePub = null,
   tokenHash = null,
+  maxUses = null,
 }) {
   if (!Number.isSafeInteger(expiry) || expiry < 0) {
     throw new Error('expiry must be a non-negative integer unix-ms timestamp');
@@ -79,6 +80,18 @@ function buildInviteBody({
     body.invite_pub = requireKey(invitePub, 'invitePub');
   } else {
     body.token_hash = requireKey(tokenHash, 'tokenHash');
+  }
+  // Optional multi-use bound. Absent means single-use (the event omits the
+  // field entirely, byte-identical to legacy invites). Only a shareable
+  // token_hash link may carry it; a key-bound invite is inherently single-use.
+  if (maxUses !== null && maxUses !== undefined) {
+    if (!Number.isSafeInteger(maxUses) || maxUses < 1) {
+      throw new Error('maxUses must be an integer >= 1');
+    }
+    if (hasInvitePub) {
+      throw new Error('maxUses is valid only with a bearer token, not invitePub');
+    }
+    body.max_uses = maxUses;
   }
   return body;
 }

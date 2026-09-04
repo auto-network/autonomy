@@ -172,6 +172,7 @@ async function issueInvitation({
   personalPassphrase,
   expiry = null,
   ttlSeconds = null,
+  maxUses = null,
   nowMs = Date.now(),
   fetchImpl = globalThis.fetch,
 }) {
@@ -226,6 +227,7 @@ async function issueInvitation({
     expiry: resolvedExpiry,
     sponsorPub: persona.publicHex,
     tokenHash,
+    maxUses,
   });
   const event = await signEvent(buildEvent({
     authorKey: persona.publicHex,
