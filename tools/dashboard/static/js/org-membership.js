@@ -79,6 +79,7 @@
     this.mintExpiryDays = '7';
     this.mintMaxUses = '1';
     this.mintResult = null;
+    this.pendingMint = null;
     this.busy = null;
     this.error = '';
     this.readyClaims = {};
@@ -243,6 +244,7 @@
       html += '</div></div>';
     }
     if (this.mintStep === 'form') html += this.mintFormHtml();
+    if (this.mintStep === 'publishing') html += this.publishingHtml();
     if (this.mintStep === 'show-once') html += this.showOnceHtml();
     html += '<div class="mem-section"><div class="mem-heading"><h2>Invitations</h2>'
       + (this.mintStep === null ? '<button type="button" class="mem-secondary" data-action="open-mint">Invite</button>' : '')
@@ -310,12 +312,23 @@
         return '<option value="' + pair[0] + '"' + (this.mintMaxUses === pair[0] ? ' selected' : '') + '>' + pair[1] + '</option>';
       }, this).join('')
       + '</select>'
+      + (this.error ? '<p class="mem-once" style="color:#fca5a5">' + esc(this.error) + '</p>' : '')
       + '<div class="mem-panel-actions">'
       + '<button type="button" class="mem-secondary" data-action="cancel-mint">Cancel</button>'
       + '<button type="button" class="mem-primary" data-action="mint"' + (this.busy === 'mint' ? ' disabled' : '') + '>'
       + (this.busy === 'mint' ? 'Creating' : 'Create invitation') + '</button>'
       + '</div></div></div>';
     return html;
+  };
+
+  Controller.prototype.publishingHtml = function () {
+    return '<div class="mem-section"><div class="mem-panel">'
+      + '<h3>Invitation signed</h3>'
+      + '<p>One step left: approve publishing its public join route. The request is in your approvals inbox' + (window.openApprovalOverlay ? ' — it should have just opened' : '') + '.</p>'
+      + (this.error ? '<p class="mem-once" style="color:#fca5a5">' + esc(this.error) + '</p>' : '')
+      + '<div class="mem-panel-actions">'
+      + '<button type="button" class="mem-secondary" data-action="finish-mint">Close</button>'
+      + '</div></div></div>';
   };
 
   Controller.prototype.showOnceHtml = function () {
@@ -507,80 +520,65 @@
     this.error = '';
     this.render();
     var opened = null;
-    var bearer = null;
-    var inviteId = null;
     var expiry = Date.now() + Number(this.mintExpiryDays) * 86400000;
     var maxUses = Number(this.mintMaxUses);
     Promise.all([
       this.openRoot('Invite to this organization', 'Unlock your personal root to sign this invitation.'),
-      import('/static/js/ceremony/ledger-event.js'),
-      import('/static/js/ceremony/invitation.js'),
-      import('/static/js/ceremony/primitives.js'),
+      import('/static/js/ceremony/org-invite.js'),
     ]).then(function (loaded) {
       opened = loaded[0];
       if (!opened) return null;
-      var ledger = loaded[1];
-      var invitation = loaded[2];
-      var primitives = loaded[3];
-      return ledger.derivePersona(new Uint8Array(opened.seed), self.view.genesis_id).then(function (persona) {
-        var token = invitation.generateBearerToken();
-        bearer = token.token;
-        var body = invitation.buildInviteBody({
-          grantedRole: role,
-          expiry: expiry,
-          sponsorPub: persona.publicHex,
-          tokenHash: token.tokenHash,
-          maxUses: maxUses > 1 ? maxUses : null,
-        });
-        var attempt = function (remaining) {
-          return request('/api/network/ledger/heads?org=' + encodeURIComponent(self.slug)).then(function (heads) {
-            var event = ledger.buildEvent({
-              authorKey: persona.publicHex,
-              parents: heads.heads,
-              hlc: [Date.now(), 0],
-              payload: body,
-            });
-            return ledger.signEvent(event, persona.signingKey).then(function (signed) {
-              return request('/api/network/ledger/invite', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ org: self.slug, event: primitives.canonicalJson(signed) }),
-              });
-            });
-          }).catch(function (error) {
-            if (error.status === 409 && remaining > 0) return attempt(remaining - 1);
-            throw error;
-          });
-        };
-        return attempt(2);
+      return loaded[1].mintOrgInvite({
+        fetchImpl: window.fetch.bind(window),
+        org: self.slug,
+        genesisId: self.view.genesis_id,
+        personalRootSeed: opened.seed,
+        role: role,
+        expiry: expiry,
+        maxUses: maxUses,
       });
-    }).then(function (posted) {
-      if (!posted) return null;
-      inviteId = posted.invite_id;
-      var label = self.mintLabel.trim();
-      return request('/api/approvals', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          kind: 'link_publish',
-          session: 'Organization membership',
-          request: {
-            org: self.slug,
-            target_uuid: self.view.org_uuid,
-            target_type: 'org:join',
-            invite_ref: inviteId,
-            expires_at: expiry,
-            meta: label ? { label: label } : {},
-          },
-        }),
-      });
+    }).then(function (minted) {
+      self.busy = null;
+      if (!minted) return self.render();
+      self.pendingMint = minted;
+      self.mintStep = 'publishing';
+      self.render();
+      return self.publishMint();
+    }).catch(function (error) {
+      self.busy = null;
+      self.error = (error && error.message) || String(error);
+      self.render();
+    }).finally(function () { zero(opened); });
+  };
+
+  Controller.prototype.publishMint = function () {
+    var self = this;
+    var minted = this.pendingMint;
+    if (!minted) return;
+    var label = this.mintLabel.trim();
+    var request_body = {
+      org: this.slug,
+      target_uuid: this.view.org_uuid,
+      target_type: 'org:join',
+      invite_ref: minted.inviteId,
+      expires_at: minted.expiry,
+      meta: label ? { label: label } : {},
+    };
+    return request('/api/approvals', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        kind: 'link_publish',
+        session: 'Organization membership',
+        request: request_body,
+      }),
     }).then(function (approval) {
-      if (!approval) return null;
       if (window.openApprovalOverlay) window.openApprovalOverlay(approval.id);
       var poll = function () {
+        if (self.mintStep !== 'publishing') return null;
         return request('/api/approvals/' + encodeURIComponent(approval.id) + '?wait=25').then(function (row) {
           var result = row.result || {};
-          if (result.approved === false) throw new Error('Publishing the invitation link was declined.');
+          if (result.approved === false) throw new Error('Publishing the invitation link was declined. The signed invitation stays active without a link; deactivate it if that was unintended.');
           var execution = result.execution;
           if (execution && execution.ok === false) {
             throw new Error(execution.error || 'Publishing the invitation link failed.');
@@ -591,17 +589,16 @@
       };
       return poll();
     }).then(function (url) {
-      if (!url) { self.busy = null; return self.render(); }
-      self.mintResult = { url: url, bearer: bearer };
-      bearer = null;
+      if (!url) return;
+      self.mintResult = { url: url, bearer: minted.bearer };
+      self.pendingMint = null;
       self.mintStep = 'show-once';
-      self.busy = null;
+      self.render();
       return self.refresh();
     }).catch(function (error) {
-      self.busy = null;
       self.error = (error && error.message) || String(error);
       self.render();
-    }).finally(function () { zero(opened); });
+    });
   };
 
   Controller.prototype.approve = function (claim) {
