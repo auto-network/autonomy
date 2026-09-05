@@ -70,8 +70,10 @@ from .stream_wire import CAP_TLS_STREAM
 from .hello import (
     HELLO_VERSION,
     HELLO_VERSION_2,
+    HELLO_VERSION_3,
     build_tunnel_hello,
     build_tunnel_hello_v2,
+    build_tunnel_hello_v3,
     SERVING_MACHINE_HELLO_DOMAIN,
 )
 
@@ -474,6 +476,7 @@ class TunnelConnector:
         stream_handler=None,
         on_reprove=None,
         link_key_for=None,
+        membership_proof_for=None,
     ):
         self._url = f"{relay_url.rstrip('/')}/t/{org}"
         self._org = org
@@ -513,6 +516,11 @@ class TunnelConnector:
         #: returns None) the connector does not answer, and the registry closes
         #: the tunnel at the re-prove deadline — correct for a removed member.
         self._on_reprove = on_reprove
+        #: async () -> membership_proof rider | None. When set (with a machine
+        #: key), the connector dials a v3 hello carrying the rider so the
+        #: registry authenticates the acting PERSONA by committed membership
+        #: (auto-tmers). None falls back to the v2/v1 hello unchanged.
+        self._membership_proof_for = membership_proof_for
         #: capability intersection the registry accepted on the live tunnel
         self.accepted_caps: tuple = ()
         #: reservation -> hostname this connector wants leased; re-registered
@@ -837,7 +845,21 @@ class TunnelConnector:
         """Authenticate a fresh tunnel. The peer-relay park connector
         (``peer.PeerParkConnector``) overrides this to first demand the
         relay's own ``relay:serve`` proof before presenting a hello."""
-        if self._machine_key is not None:
+        proof = None
+        if self._machine_key is not None and self._membership_proof_for is not None:
+            try:
+                proof = await self._membership_proof_for()
+            except Exception:
+                proof = None  # fall back to v2 if the proof can't be built
+        if proof is not None and self._machine_key is not None:
+            await ws.send(build_tunnel_hello_v3(
+                self._key, self._cert, machine_key=self._machine_key,
+                org=self._org, ts=int(time.time()), caps=self._caps,
+                membership_proof=proof,
+                machine_hello_domain=SERVING_MACHINE_HELLO_DOMAIN,
+            ))
+            expected_version = HELLO_VERSION_3
+        elif self._machine_key is not None:
             await ws.send(build_tunnel_hello_v2(
                 self._key, self._cert, machine_key=self._machine_key,
                 org=self._org, ts=int(time.time()), caps=self._caps,
