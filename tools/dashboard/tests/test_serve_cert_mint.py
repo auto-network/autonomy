@@ -1,16 +1,13 @@
 """Cross-language proof: the browser serve-cert mint is idkit-compatible.
 
 ``network-signon.mjs`` provisionServeCert mints the serving delegate in
-WebCrypto when a password-backed dashboard unlock finds that repair is
-required. This runs that REAL function in Node against a Python-generated org
-armor, captures the two certificates and their shared private key, and
-verifies both with the real idkit. The registry cert must carry the persona;
-the viewer cert must carry no persona-derived value.
-
-Minting a serving delegate is a ROOT-DIRECT constitutional act (design §8) —
-the org root ceremony is the only thing that binds a persona to a serving
-child. Sign-on does not reach it, and must not: sign-on opens the personal
-root only, and never an organization's key.
+WebCrypto. Since auto-55vwi (graph://da0dd9fb-e75) the credential is
+PERSONA-SIGNED: the persona derived from the PERSONAL armor signs the
+registry certificate and the dns01 certificate over one fresh serving
+child; there is no viewer certificate (viewers verify the per-link channel
+key, graph://807b4e11-3e9) and the ORG ROOT IS NEVER OPENED — which is what
+lets any member provision serving. This runs the REAL function in Node and
+verifies the products with the real idkit against the PERSONA anchor.
 """
 
 from __future__ import annotations
@@ -56,34 +53,30 @@ def test_browser_serve_cert_mint_is_idkit_compatible(mode):
     posted = json.loads(result.stdout)
 
     cert = DelegationCert.from_json(posted["cert"])
-    viewer_cert = DelegationCert.from_json(posted["viewer_cert"])
     dns01_cert = DelegationCert.from_json(posted["dns01_cert"])
-    # Exactly what the handshake / provision gate re-check: chains to the org
-    # root, tunnel:serve scope, right org.
+    persona = derive_persona(bytes.fromhex(personal.private_hex), genesis_id)
+    # Persona-signed: no viewer cert, no root anywhere in the products.
+    assert "viewer_cert" not in posted
+    assert posted["persona_pub"] == persona.public_hex
+    # Exactly what the v3 hello gate re-checks: chains to the PERSONA,
+    # tunnel:serve scope, right org, depth 1.
     now = (cert.not_before + cert.not_after) // 2
-    verify_chain(cert, root.public_hex, org=org_uuid, now=now,
+    verify_chain(cert, persona.public_hex, org=org_uuid, now=now,
                  required_scope="tunnel:serve")
     assert tuple(cert.scope) == ("tunnel:serve",)
     assert cert.org == org_uuid
     assert cert.subject.kind == "persona"
-    assert cert.subject.id == derive_persona(
-        bytes.fromhex(personal.private_hex), genesis_id).public_hex
-    verify_chain(viewer_cert, root.public_hex, org=org_uuid, now=now,
-                 required_scope="tunnel:serve")
-    verify_chain(dns01_cert, root.public_hex, org=org_uuid, now=now,
+    assert cert.subject.id == persona.public_hex
+    verify_chain(dns01_cert, persona.public_hex, org=org_uuid, now=now,
                  required_scope="serve:dns-01")
-    assert viewer_cert.child_pub == cert.child_pub
-    assert viewer_cert.org == cert.org
-    assert viewer_cert.scope == cert.scope
-    assert viewer_cert.not_before == cert.not_before
-    assert viewer_cert.not_after == cert.not_after
-    assert viewer_cert.subject.kind == "operator"
-    assert viewer_cert.subject.id == viewer_cert.child_pub
-    assert cert.subject.id not in posted["viewer_cert"]
     assert dns01_cert.child_pub == cert.child_pub
     assert dns01_cert.subject == cert.subject
     assert dns01_cert.not_before == cert.not_before
     assert dns01_cert.not_after == cert.not_after
+    # The root did NOT sign anything: the chain must refuse the root anchor.
+    with pytest.raises(Exception):
+        verify_chain(cert, root.public_hex, org=org_uuid, now=now,
+                     required_scope="tunnel:serve")
     # The exported private key is the one the cert delegates to.
     assert KeyPair.from_private_hex(posted["private_key"]).public_hex == cert.child_pub
     # A ~30-day delegate window (the operator's decision).
@@ -159,15 +152,11 @@ def test_browser_personal_tunnel_provision_is_idkit_compatible():
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
-def test_sign_on_checks_serving_but_cannot_mint_from_a_legacy_org_armor():
-    """Sign-on renews serving credentials, because the personal seed it holds
-    opens each organization's SEALED root without a second passphrase.
-
-    A legacy passphrase-armored organization key is the one case it cannot
-    open: that armor answers to the ORGANIZATION's own passphrase, which a
-    personal unlock does not have and must not prompt for. So the status is
-    checked, the key is read, nothing is minted, and the organization is
-    reported as ``legacy-org-armor`` rather than passing silently."""
+def test_sign_on_mints_persona_signed_even_for_a_legacy_org_armor():
+    """Sign-on renews serving credentials with the PERSONA the personal seed
+    derives (auto-55vwi) — the org key is never read, so the historical
+    legacy-armor dead-end (an org armor answering only to the organization's
+    own passphrase) no longer blocks serving at all."""
     root = KeyPair.generate()
     personal = KeyPair.generate()
     pw = "correct horse battery staple"
@@ -189,9 +178,12 @@ def test_sign_on_checks_serving_but_cannot_mint_from_a_legacy_org_armor():
         timeout=60,
     )
     assert result.returncode == 0, result.stdout + "\n" + result.stderr
-    assert json.loads(result.stdout) == {
-        "captured": None, "org_key_reads": 1, "serve_status_reads": 1,
-    }
+    out = json.loads(result.stdout)
+    assert out["org_key_reads"] == 0          # the org key is never consulted
+    assert out["serve_status_reads"] == 1
+    assert out["captured"] is not None        # a persona-signed credential POSTed
+    assert "viewer_cert" not in out["captured"]
+    assert "persona_pub" in out["captured"]
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")

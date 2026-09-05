@@ -423,6 +423,56 @@ var signRegistryRequestCore;
     return resp.json();
   }
 
+  // PERSONA-SIGNED serving credential (revision 3, auto-55vwi,
+  // graph://da0dd9fb-e75): the persona signs the registry certificate and
+  // the dns01 certificate over one fresh serving child. There is NO viewer
+  // certificate — viewers verify the per-link channel key from the link
+  // fragment (graph://807b4e11-3e9). The org root is never opened here,
+  // which is what lets any MEMBER provision serving.
+  async function _mintServeCredentialPersona(personaKey, orgUuid, personaPub) {
+    var delegate = await crypto.subtle.generateKey(
+      { name: 'Ed25519' }, true, ['sign', 'verify']);
+    var childPub = bytesToHex(new Uint8Array(
+      await crypto.subtle.exportKey('raw', delegate.publicKey)));
+    var pkcs8 = new Uint8Array(
+      await crypto.subtle.exportKey('pkcs8', delegate.privateKey));
+    var privateKeyHex = bytesToHex(pkcs8.slice(16, 48));
+    pkcs8.fill(0);
+
+    var now = _nowS();
+    var commonCert = {
+      v: 1,
+      child_pub: childPub,
+      scope: ['tunnel:serve'],
+      org: orgUuid,
+      subject: { kind: 'persona', id: personaPub },
+      not_before: now - NOT_BEFORE_SKEW_S,
+      not_after: now + MAX_TTL_S,
+    };
+    var dns01Payload = Object.assign({}, commonCert, {
+      scope: ['serve:dns-01'],
+    });
+    var registrySig = bytesToHex(new Uint8Array(await crypto.subtle.sign(
+      'Ed25519', personaKey,
+      _domainBytes(CERT_DOMAIN, canonicalJson(commonCert)))));
+    var dns01Sig = bytesToHex(new Uint8Array(await crypto.subtle.sign(
+      'Ed25519', personaKey,
+      _domainBytes(CERT_DOMAIN, canonicalJson(dns01Payload)))));
+    return {
+      childPub: childPub,
+      notAfter: commonCert.not_after,
+      body: {
+        cert: canonicalJson(Object.assign({}, commonCert, { sig: registrySig })),
+        dns01_cert: canonicalJson(Object.assign({}, dns01Payload, { sig: dns01Sig })),
+        persona_pub: personaPub,
+        private_key: privateKeyHex,
+      },
+    };
+  }
+
+  // LEGACY root-signed mint — retained ONLY for the personal-org bootstrap
+  // (fleet tunnel), which predates org personas; collaborative orgs mint
+  // persona-signed above. auto-tmers owns retiring this path.
   async function _mintServeCredential(rootKey, orgUuid, personaPub) {
     // One fresh exportable serving key, certified twice for two different
     // disclosure contexts. The registry certificate names the org-scoped
@@ -579,33 +629,26 @@ var signRegistryRequestCore;
   // sign-on -- every certificate still current -- opens no organization root.
   // A root is opened only for an organization actually due for renewal, and is
   // dropped at import.
-  async function _renewServeCredential(slug, binding, personaPub, personalSeed) {
+  async function _renewServeCredential(slug, binding, personaPub, personalSeed,
+                                       genesisId) {
     var state = await _serveCredentialRepairState(slug, binding);
     if (!state.required) {
       return { checked: true, renewed: false, rootOpened: false,
                status: state.status || 'ready' };
     }
-    var orgQ = slug ? ('?org=' + encodeURIComponent(slug)) : '';
-    var orgKey = await _fetchJson('/api/network/org-key' + orgQ, slug);
-    if (!orgKey || !orgKey.sealed_root_key) {
-      // An organization root is sealed to the personal root, so a personal
-      // unlock opens it. Anything else here is an organization with no usable
-      // signing key, which is reported rather than silently skipped.
-      return { checked: true, renewed: false, rootOpened: false,
-               status: 'no-sealed-org-key' };
-    }
-    var rootSeed = await openSealedArmor(orgKey, personalSeed);
-    var rootKey;
+    // PERSONA-SIGNED (auto-55vwi): the persona re-derives from the personal
+    // seed this sign-on already holds and signs the credential itself. The
+    // ORG ROOT IS NOT OPENED — serving provisioning is a member act now.
+    var persona = await derivePersona(personalSeed, genesisId);
+    var credential;
     try {
-      rootKey = await _importRootKey(rootSeed);
+      credential = await _mintServeCredentialPersona(
+        persona.signingKey, binding.org_uuid, persona.publicHex);
     } finally {
-      rootSeed.fill(0);                   // I1: root seed gone at import
+      persona.signingKey = null;
     }
-    var credential = await _mintServeCredential(
-      rootKey, binding.org_uuid, personaPub);
-    rootKey = null;                       // I1: last root reference dropped
     var posted = await _postServeCredential(credential, slug);
-    return { checked: true, renewed: true, rootOpened: true, status: 'renewed',
+    return { checked: true, renewed: true, rootOpened: false, status: 'renewed',
              notAfter: posted.notAfter };
   }
 
@@ -942,7 +985,7 @@ var signRegistryRequestCore;
         if (bound) {
           try {
             serve = await _renewServeCredential(
-              slug, binding, persona.publicHex, opened.seed);
+              slug, binding, persona.publicHex, opened.seed, genesisId);
             if (serve.rootOpened) orgRootsOpened += 1;
           } catch (e) {
             serve = { checked: true, renewed: false, status: 'failed',
@@ -1043,44 +1086,39 @@ var signRegistryRequestCore;
   // connector subprocess must sign SERVER_HELLO with it. The server re-verifies
   // the chain to the org's OWN bound root before storing the key 0600.
   async function provisionServeCert(passphrase, opts) {
+    // PERSONA-SIGNED (auto-55vwi, graph://da0dd9fb-e75): serving is a member
+    // act. The passphrase opens the PERSONAL armor, the persona derives from
+    // it, and the persona signs the credential. The org root and the org-key
+    // setting are not consulted — a member with no org armor provisions
+    // serving exactly like the owner.
     opts = opts || {};
     var orgUuid = opts.orgUuid;
     if (!orgUuid) throw new Error('serve-cert provisioning requires the org uuid');
     var orgSlug = opts.org || null;
-    var orgHeaders = orgSlug ? { 'X-Graph-Org': orgSlug } : {};
     var orgQ = orgSlug ? ('?org=' + encodeURIComponent(orgSlug)) : '';
 
-    var keyResp = await fetch('/api/network/org-key' + orgQ, { headers: orgHeaders });
-    if (!keyResp.ok) {
-      throw new Error('could not load the org signing key (' + keyResp.status + ')');
+    var heads = await _fetchJsonOrNull('/api/network/ledger/heads' + orgQ, orgSlug);
+    if (!heads || typeof heads.genesis_id !== 'string') {
+      throw new Error('this org has no founded ledger — serving needs a persona');
     }
-    var orgKey = await keyResp.json();
-    if (!orgKey.armored_private_key && !orgKey.sealed_root_key) {
-      throw new Error('this org has no signing key to mint a serving delegate');
+    var personal = await _fetchJson('/api/identity/personal');
+    if (!personal || !personal.armored_private_key) {
+      throw new Error('no personal identity is stored on this dashboard');
     }
-
-    var personaResolution = await _resolvePersonaSubject(
-      orgQ, orgSlug, passphrase);
-    if (!personaResolution.subject) {
-      throw new Error('serving persona could not be resolved: ' +
-        personaResolution.reason);
-    }
-    var personaPub = personaResolution.subject.id;
-    if (typeof personaPub !== 'string' ||
-        !/^[0-9a-f]{64}$/.test(personaPub)) {
-      throw new Error('serving persona is not a canonical public key');
-    }
-
-    var opened = await _openOrgRoot(orgKey, passphrase);
+    var openedPersonal = await openArmorWithPassword(
+      personal.armored_private_key, passphrase);
+    var persona = null;
     try {
-      var rootKey = await _importRootKey(opened.seed);
-      opened.seed.fill(0); opened.seed = null;   // I1: root seed gone at import
-
-      var credential = await _mintServeCredential(rootKey, orgUuid, personaPub);
-      rootKey = null;                        // I1: last root reference dropped
+      persona = await derivePersona(openedPersonal.seed, heads.genesis_id);
+    } finally {
+      openedPersonal.seed.fill(0); openedPersonal.seed = null;  // I1
+    }
+    try {
+      var credential = await _mintServeCredentialPersona(
+        persona.signingKey, orgUuid, persona.publicHex);
       return await _postServeCredential(credential, orgSlug);
     } finally {
-      if (opened && opened.seed) { opened.seed.fill(0); opened.seed = null; }
+      persona.signingKey = null;
     }
   }
 
@@ -1200,7 +1238,8 @@ var signRegistryRequestCore;
           }
           var persona = await derivePersona(personalRootSeed, heads.genesis_id);
           var result = await _renewServeCredential(
-            slug, binding, persona.publicHex, personalRootSeed);
+            slug, binding, persona.publicHex, personalRootSeed,
+            heads.genesis_id);
           if (result.renewed) repaired.push(slug);
           else ready.push(slug);
           try {

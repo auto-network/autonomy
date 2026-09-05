@@ -1781,6 +1781,99 @@ async def get_serve_cert_status(request: Request) -> JSONResponse:
     })
 
 
+async def _post_serve_cert_v3(request: Request, body: dict) -> JSONResponse:
+    """Store a PERSONA-signed serving credential (revision 3, auto-55vwi).
+
+    Body: ``{org?, cert, dns01_cert?, persona_pub, private_key}``. The
+    persona signed both certificates over one fresh serving child; the org
+    root was never opened. Field-level and cryptographic validation is the
+    NetworkServeCertV3 schema's, run by the settings write — this route only
+    handles key-file custody, cross-org child reuse, idempotent retry, and
+    the connector reconcile.
+    """
+    if not isinstance(body.get("cert"), str) \
+            or not isinstance(body.get("persona_pub"), str) \
+            or not isinstance(body.get("private_key"), str) \
+            or not (body.get("dns01_cert") is None
+                    or isinstance(body.get("dns01_cert"), str)):
+        return JSONResponse({"ok": False, "error": (
+            "a persona-signed provisioning carries 'cert', 'persona_pub', "
+            "'private_key', and optionally 'dns01_cert'"
+        )}, status_code=400)
+
+    org, refused = resolve_scoped_org(body.get("org"), request=request)
+    if refused is not None:
+        return refused
+    binding_member = _first_member(NETWORK_BINDING_SET_ID, org)
+    if binding_member is None:
+        return JSONResponse({"ok": False, "error": (
+            "this org is not registered on auto.network yet — register before "
+            "provisioning a serving delegate"
+        )}, status_code=409)
+    org_uuid = (binding_member.payload or {}).get("org_uuid")
+    if not isinstance(org_uuid, str):
+        return JSONResponse({"ok": False, "error": "the org's binding row is malformed"},
+                            status_code=500)
+
+    from tools.network.idkit import DelegationCert, KeyPair
+    try:
+        cert = DelegationCert.from_json(body["cert"])
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"serving cert does not parse: {e}"},
+                            status_code=400)
+    if cert.org != org_uuid:
+        return JSONResponse({"ok": False, "error": (
+            "cert org does not match the org's binding"
+        )}, status_code=400)
+    try:
+        if KeyPair.from_private_hex(body["private_key"].strip()).public_hex != cert.child_pub:
+            raise ValueError("public half does not match cert child_pub")
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": (
+            f"private_key does not match the cert's delegate key: {e}"
+        )}, status_code=400)
+    if _serve_child_used_by_another_local_org(cert.child_pub, org):
+        return JSONResponse({"ok": False, "error": (
+            "serving child keys are organization-scoped and cannot be reused "
+            "across local organizations"
+        )}, status_code=409)
+
+    previous_serve = _first_member(NETWORK_SERVE_CERT_SET_ID, org)
+    if previous_serve is not None and \
+            previous_serve.payload.get("cert") == body["cert"]:
+        return JSONResponse({"ok": True, "child_pub": cert.child_pub,
+                             "not_after": cert.not_after})
+
+    key_file = f"serve-{org_uuid}-{cert.child_pub}.key"
+    key_path = resolve_store("serving_keys") / key_file
+    try:
+        _write_serve_key(key_path, body["private_key"])
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"could not write the serve key file: {e}"},
+                            status_code=500)
+    write_org = "personal" if settings_ops._resolve_org_arg(org) is None else org
+    payload = {"cert": body["cert"], "key_path": key_file,
+               "persona_pub": body["persona_pub"], "not_after": cert.not_after}
+    if body.get("dns01_cert") is not None:
+        payload["dns01_cert"] = body["dns01_cert"]
+    try:
+        settings_ops.upsert_by_key(
+            NETWORK_SERVE_CERT_SET_ID, 3, "default", payload, org=write_org,
+        )
+    except Exception as e:
+        with contextlib.suppress(Exception):
+            key_path.unlink()
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+    try:
+        from tools.dashboard.link_serving_supervisor import get_supervisor
+        get_supervisor().ensure(org)
+    except Exception:
+        pass  # reconcile is best-effort; the watchdog retries
+    return JSONResponse({"ok": True, "child_pub": cert.child_pub,
+                         "not_after": cert.not_after})
+
+
 async def post_serve_cert(request: Request) -> JSONResponse:
     """Provision the org's tunnel serving delegate (§5.1).
 
@@ -1807,7 +1900,15 @@ async def post_serve_cert(request: Request) -> JSONResponse:
         body = await request.json()
     except Exception:
         return JSONResponse({"ok": False, "error": "body must be JSON"}, status_code=400)
-    if not isinstance(body, dict) or not isinstance(body.get("cert"), str) \
+    if not isinstance(body, dict):
+        return JSONResponse({"ok": False, "error": "body must be a JSON object"},
+                            status_code=400)
+    # PERSONA-SIGNED shape (revision 3, auto-55vwi): {org?, cert, dns01_cert?,
+    # persona_pub, private_key} — no viewer certificate (viewers verify the
+    # per-link channel key, graph://807b4e11-3e9), no root involvement.
+    if "persona_pub" in body:
+        return await _post_serve_cert_v3(request, body)
+    if not isinstance(body.get("cert"), str) \
             or not isinstance(body.get("viewer_cert"), str) \
             or not isinstance(body.get("dns01_cert"), str) \
             or not isinstance(body.get("private_key"), str):

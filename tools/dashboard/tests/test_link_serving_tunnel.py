@@ -168,6 +168,15 @@ def stack(tmp_path, monkeypatch):
         subject=Subject("persona", "ab" * 32),
         not_before=now - 300, not_after=now + 86_400,
     )
+    # Identity-neutral channel certificate, as the supervisor supplies in
+    # production: a persona-bearing certificate must never reach a viewer,
+    # and the connector refuses legacy serving without a neutral one.
+    channel_cert = issue_cert(
+        root, session_key.public_hex,
+        scope=("tunnel:serve",), org=ORG_UUID,
+        subject=Subject("operator", session_key.public_hex),
+        not_before=now - 300, not_after=now + 86_400,
+    )
 
     port = free_port()
     registry = start_registry(port, tmp_path / "registry.db", tmp_path / "registry.log")
@@ -184,6 +193,7 @@ def stack(tmp_path, monkeypatch):
         connector = TunnelConnector(
             f"ws://127.0.0.1:{port}", ORG_UUID, session_key, session_cert,
             handler=link_serving.make_grant_handler(ORG),
+            channel_cert=channel_cert,
             min_backoff=0.1, max_backoff=1.0,
         )
         yield {"port": port, "root": root, "root_pub": root.public_hex,

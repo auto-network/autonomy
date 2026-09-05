@@ -1655,7 +1655,7 @@ def main() -> None:
     parser.add_argument("--key-file", required=True, help="file holding the private key hex")
     parser.add_argument("--cert-file", required=True, help="file holding the cert wire JSON")
     parser.add_argument(
-        "--channel-cert-file", required=True,
+        "--channel-cert-file", required=False, default=None,
         help="identity-neutral cert used only in viewer SERVER_HELLO",
     )
     parser.add_argument("--graph-org", default=None,
@@ -1691,8 +1691,10 @@ def main() -> None:
         key = KeyPair.from_private_hex(fh.read().strip())
     with open(args.cert_file) as fh:
         cert = DelegationCert.from_json(fh.read().strip())
-    with open(args.channel_cert_file) as fh:
-        channel_cert = DelegationCert.from_json(fh.read().strip())
+    channel_cert = None
+    if args.channel_cert_file:
+        with open(args.channel_cert_file) as fh:
+            channel_cert = DelegationCert.from_json(fh.read().strip())
 
     # Re-arm the Fleet runtime from the warm ramfs cache BEFORE serving: a
     # connector that restarts (a crash, or the watchdog respawning it after its

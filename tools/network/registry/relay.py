@@ -737,9 +737,21 @@ def _verify_tunnel_hello(
         if cert.child_pub != data["signer"]:
             raise HelloError("cert does not delegate to the hello signer")
         store.purge_expired_revocations(now=now)
+        # Anchor selection (auto-55vwi, graph://da0dd9fb-e75): a v3 hello's
+        # serve cert is PERSONA-signed — the chain anchors at the persona the
+        # cert names, and the persona's standing comes from the membership
+        # rider verified below. v1/v2 hellos keep the root anchor until the
+        # migration cutoff (auto-tmers). Same scope and depth-1 law either way.
+        if is_v3:
+            anchor = cert.subject.id
+            if not isinstance(anchor, str) or _PERSONA_PUB_RE.fullmatch(anchor) is None:
+                raise HelloError(
+                    "serve cert subject must be a canonical organization persona")
+        else:
+            anchor = binding.root_pub
         verified = verify_chain(
             cert,
-            binding.root_pub,
+            anchor,
             org=org,
             now=now,
             revocations=store.revocation_set(org),
@@ -748,7 +760,9 @@ def _verify_tunnel_hello(
         if tuple(verified.scope) != ("tunnel:serve",):
             raise HelloError("serve cert scope must be exactly tunnel:serve")
         if verified.depth != 1:
-            raise HelloError("serve cert must be issued directly by the org root")
+            raise HelloError(
+                "serve cert must be issued directly by its anchor "
+                "(persona for v3, org root before)")
         if (
             verified.subject_kind != "persona"
             or _PERSONA_PUB_RE.fullmatch(verified.subject_id) is None
@@ -1487,15 +1501,21 @@ def _dns01_verify(tunnel: "Tunnel", op: str, args: dict,
         raise _CtrlError("no live binding")
     cert = DelegationCert.from_json(args["cert"])
     store.purge_expired_revocations(now=now)
+    # Same anchor rule as the hello (auto-55vwi): a v3-admitted tunnel's
+    # dns01 cert is persona-signed and anchors at the tunnel's own verified
+    # persona; earlier tunnels keep the root anchor until the cutoff.
+    dns_anchor = (tunnel.persona_pub
+                  if tunnel.version == HELLO_VERSION_3 and tunnel.persona_pub
+                  else binding.root_pub)
     verified = verify_chain(
-        cert, binding.root_pub, org=tunnel.org, now=now,
+        cert, dns_anchor, org=tunnel.org, now=now,
         revocations=store.revocation_set(tunnel.org),
         required_scope="serve:dns-01",
     )
     if tuple(verified.scope) != ("serve:dns-01",):
         raise _CtrlError("scope must be exactly serve:dns-01")
     if verified.depth != 1:
-        raise _CtrlError("dns01 cert must be root-issued")
+        raise _CtrlError("dns01 cert must be issued directly by its anchor")
     if verified.subject_kind != "persona" \
             or verified.subject_id != tunnel.persona_pub:
         raise _CtrlError("dns01 cert subject must be the tunnel persona")
