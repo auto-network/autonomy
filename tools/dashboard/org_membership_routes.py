@@ -158,18 +158,24 @@ def _membership_view(slug: str) -> dict:
                 # Dean"). Self-reported: vouched only by possession of the
                 # invite the operator sent them.
                 "profile": profile if isinstance(profile, dict) else None,
-                # The human name of the link this request came in on.
+                # Provenance: the human name of the link this request came in
+                # on, and the invite's binding (bearer link vs key-bound —
+                # crucial when an invitation was issued to a specific
+                # identity; email binding joins this vocabulary later).
                 "invite_label": (
                     (grants.get(record["invite_ref"]) or {}).get("label")
                 ),
+                "invite_binding": None,
                 "granted_role": None,
                 "have": None,
                 "need": None,
                 "ready": None,
             }
             try:
-                row["granted_role"] = (
-                    store.get(record["invite_ref"]).payload.get("granted_role")
+                invite_payload = store.get(record["invite_ref"]).payload
+                row["granted_role"] = invite_payload.get("granted_role")
+                row["invite_binding"] = (
+                    "key" if invite_payload.get("invite_pub") else "bearer"
                 )
             except Exception:
                 pass
