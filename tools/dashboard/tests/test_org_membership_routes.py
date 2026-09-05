@@ -183,6 +183,7 @@ def test_staged_bearer_claim_surfaces_progress_and_signed_profile(founded):
     [pending] = body["pending_claims"]
     assert pending["persona_pub"] == joiner.public_hex
     assert pending["invite_label"] is None
+    assert pending["invite_binding"] == "bearer"
     assert pending["invite_ref"] == live_id
     assert pending["granted_role"] == "owner"
     assert pending["profile"] == {"display_name": "Dean"}
