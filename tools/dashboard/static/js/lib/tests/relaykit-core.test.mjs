@@ -323,3 +323,64 @@ await assert.rejects(
 assert.equal(oversizeClosed, true);
 
 console.log('relaykit-core: all assertions passed');
+
+// Per-link handshake (graph://807b4e11-3e9): the serving side signs with the
+// link's channel private key; the viewer verifies against the public key it
+// decoded from the URL fragment. No certificate, no root pin, no registry
+// trust. The fake is only the byte transport — signatures, ECDH, HKDF real.
+{
+  const org = '00000000-0000-4000-8000-0000000000cc';
+  const token = 'c1'.repeat(16);
+  const link = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
+  const linkPub = hex(await crypto.subtle.exportKey('raw', link.publicKey));
+
+  const makeTransport = () => {
+    let serverHello;
+    return {
+      closed: false,
+      async send(bytes) {
+        const client = JSON.parse(new TextDecoder().decode(bytes));
+        const serverEph = await crypto.subtle.generateKey('X25519', true, ['deriveBits']);
+        const serverPub = hex(await crypto.subtle.exportKey('raw', serverEph.publicKey));
+        const signed = encoder.encode(
+          `autonomy.network.channel.handshake.v1\n${relaykit.canonicalJson({
+            v: 1, org, token, client_eph: client.eph_pub, server_eph: serverPub,
+          })}`,
+        );
+        const sig = hex(await crypto.subtle.sign('Ed25519', link.privateKey, signed));
+        serverHello = encoder.encode(relaykit.canonicalJson({
+          v: 1, eph_pub: serverPub, link_sig: sig,
+        }));
+      },
+      async recvBinary() { return serverHello; },
+      close() { this.closed = true; },
+    };
+  };
+
+  // Happy path: full handshake, real key derivation.
+  const channel = await relaykit.performHandshake(makeTransport(), {
+    org, token, linkPub,
+  });
+  assert.ok(channel instanceof relaykit.SecureChannel);
+
+  // Wrong fragment key: signature refuses.
+  const wrong = hex(await crypto.subtle.exportKey(
+    'raw',
+    (await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify'])).publicKey,
+  ));
+  const t2 = makeTransport();
+  await assert.rejects(
+    relaykit.performHandshake(t2, { org, token, linkPub: wrong }),
+    /signature does not verify/,
+  );
+  assert.equal(t2.closed, true);
+
+  // Missing fragment: a per-link hello with no linkPub fails closed with the
+  // operator-readable message, even when a root pin is present.
+  const t3 = makeTransport();
+  await assert.rejects(
+    relaykit.performHandshake(t3, { org, token, rootPub: 'b2'.repeat(32) }),
+    /missing its '#' fragment/,
+  );
+  assert.equal(t3.closed, true);
+}
