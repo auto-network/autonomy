@@ -344,10 +344,23 @@ def _approval_identities(org: str | None) -> dict:
 def _registry_payload(req: dict, binding: dict) -> dict:
     """The exact ``/v1/links`` payload the operator signs — built from the
     STORED request row + the org binding, in one place, so the enrichment
-    (what gets signed) and the executor (what gets forwarded) cannot drift."""
+    (what gets signed) and the executor (what gets forwarded) cannot drift.
+
+    An ``org:join`` link names the ORGANIZATION, and the registry law requires
+    ``target_uuid == org`` (both the org's REGISTERED/binding UUID). The
+    create-gate validates the request against the org's own LEDGER, whose
+    genesis UUID is the org's internal identity and may differ from the binding
+    for a legacy org (e.g. autonomy predates their unification). This staging is
+    the reconciliation point (auto-hzs4f): the published identity is always the
+    binding, so the signer (which follows the registry law) and this staging can
+    never disagree — an org:join approval is never predestined to fail at
+    execute, whether or not genesis == binding. Other target types name an asset
+    and keep their own ``target_uuid``.
+    """
+    is_org_join = req.get("target_type") == "org:join"
     payload = {
         "org": binding["org_uuid"],
-        "target_uuid": req["target_uuid"],
+        "target_uuid": binding["org_uuid"] if is_org_join else req["target_uuid"],
         "target_type": req["target_type"],
     }
     meta = req.get("meta") or {}
