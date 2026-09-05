@@ -11944,9 +11944,21 @@ async def page_network_join(request):
 async def page_unlock(request):
     """The Unlock screen (mockup d49be06b 'Unlock' state) — the one page
     the human gate never covers. Skips itself when there is nothing to
-    unlock (gate not enforced) or the session is already valid."""
-    if not unlock_routes.human_auth_enrolled() \
-            or unlock_routes.session_from_request(request) is not None:
+    unlock (gate not enforced) or the session is already valid.
+
+    EXCEPTION — a fleet completion (``?fleet=1``) is a ROOT ceremony, not a
+    login. Finishing a fleet join needs the root seed to seal/complete, which a
+    dashboard session does NOT provide. Skipping the ceremony just because a
+    session exists sends a signed-in operator back to ``next`` (/welcome), which
+    routes right back here — the exact loop between "log in" and "do the
+    ceremony". So when ``fleet=1`` asks for the ceremony, present it even with a
+    valid session; unlock.js runs the root ceremony + fleet completion."""
+    fleet_root = request.query_params.get("fleet") == "1"
+    if not unlock_routes.human_auth_enrolled():
+        return RedirectResponse(
+            url=unlock_routes.sanitize_next(request.query_params.get("next")))
+    if not fleet_root \
+            and unlock_routes.session_from_request(request) is not None:
         return RedirectResponse(
             url=unlock_routes.sanitize_next(request.query_params.get("next")))
     return HTMLResponse(_load_template("unlock.html"))

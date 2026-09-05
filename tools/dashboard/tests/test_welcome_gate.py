@@ -263,6 +263,41 @@ def test_post_enrollment_sync_state_is_one_compact_binary_row(test_client):
     assert 'ready && !fleetEnrollment && !fleetSync && step === 3' in r.text
 
 
+def test_unlock_presents_fleet_ceremony_even_with_a_session(test_client, monkeypatch):
+    """A fleet completion is a ROOT ceremony, not a login. ?fleet=1 must render
+    the unlock screen even when a session already exists -- otherwise a signed-in
+    operator is bounced to /welcome, which routes back to /unlock: an endless
+    loop between 'log in' and 'do the ceremony' that never finishes the join."""
+    from tools.dashboard import unlock_routes
+    monkeypatch.setattr(unlock_routes, "human_auth_enrolled", lambda: True)
+    monkeypatch.setattr(
+        unlock_routes, "session_from_request", lambda request: object()
+    )
+    r = test_client.get(
+        "/unlock?fleet=1&next=%2Fwelcome%3Ffleet_sync%3D1",
+        follow_redirects=False,
+    )
+    assert r.status_code == 200
+
+    # A plain login (no ceremony asked for) with a live session still
+    # short-circuits to next -- we do not re-prompt an already-signed-in user.
+    r2 = test_client.get("/unlock?next=%2F", follow_redirects=False)
+    assert r2.status_code in (302, 307)
+    assert r2.headers["location"] == "/"
+
+
+def test_unlock_redirects_when_nothing_is_enrolled(test_client, monkeypatch):
+    """No human auth at all -> nothing to unlock, even for a fleet ceremony."""
+    from tools.dashboard import unlock_routes
+    monkeypatch.setattr(unlock_routes, "human_auth_enrolled", lambda: False)
+    monkeypatch.setattr(
+        unlock_routes, "session_from_request", lambda request: None
+    )
+    r = test_client.get("/unlock?fleet=1&next=%2F", follow_redirects=False)
+    assert r.status_code in (302, 307)
+    assert r.headers["location"] == "/"
+
+
 def test_invitation_context_detected_and_carried():
     """Arrived-via-invitation: detect URL context, carry it to /network/join."""
     # detection mirrors network-join.js (search or hash present)
