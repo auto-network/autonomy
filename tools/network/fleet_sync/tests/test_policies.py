@@ -12,12 +12,27 @@ from tools.network.fleet_sync.policies import (
 
 def test_current_graph_schema_is_completely_classified(tmp_path: Path) -> None:
     db = GraphDB(tmp_path / "personal.db")
+    # The runtime personal DB (machine.db) is GraphDB's schema PLUS the vault
+    # store's tables — both live in the same file. Auditing GraphDB alone left
+    # the vault store's tables invisible to this guard, which is exactly how
+    # delegate_recipients shipped with no sync policy (commit e87bd7ae) and
+    # surfaced as an unclassified-table error on the operator's unlock screen.
+    # Apply the vault schema onto the same connection so any new vault table
+    # without a policy fails HERE, in CI, not at unlock.
+    from tools.vault.store import _SCHEMA as VAULT_SCHEMA
+    db.conn.executescript(VAULT_SCHEMA)
     try:
         classified = audit_schema(db.conn)
     finally:
         db.close()
 
     assert set(TABLE_POLICIES).issubset(classified)
+    # Classified LOCAL via a frozenset, deliberately NOT in TABLE_POLICIES, so
+    # a non-replicated table never enters the replication surface / compat
+    # digest (which would force a spurious fleet-wide sync pause).
+    assert classified["delegate_recipients"] is PolicyKind.LOCAL
+    from tools.network.fleet_sync.policies import _replication_surface
+    assert "delegate_recipients" not in _replication_surface()["policies"]
     assert classified["sources"] is PolicyKind.LWW
     assert classified["note_versions"] is PolicyKind.SPECIAL
     assert classified["attachments"] is PolicyKind.EXTERNAL_BLOB

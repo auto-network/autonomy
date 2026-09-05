@@ -245,6 +245,23 @@ LEDGER_TABLES: Final[frozenset[str]] = frozenset({
 })
 
 
+#: Personal-scope tables that are node-local by construction: each machine
+#: derives them itself and they are NEVER replicated, so they carry no wire
+#: policy and MUST stay out of the replication surface / compatibility digest
+#: (unlike a LOCAL entry in TABLE_POLICIES, which the digest still folds in).
+PERSONAL_LOCAL_TABLES: Final[frozenset[str]] = frozenset({
+    # The audited delegate recipient's X25519 PUBLIC half: deterministic from
+    # the operator's root seed and derived per-machine at unlock (auto-ie6yr),
+    # so every member independently reaches the identical value and nothing
+    # needs to go on the wire. INTERIM home: whether this pubkey should instead
+    # live as a Setting (the vault's "Setting resolution IS the release
+    # mechanism" model, graph://83c92d72-0ed) is still open on auto-ie6yr. It
+    # arrived as a bespoke table (commit e87bd7ae) with no policy at all, which
+    # surfaced as an unclassified-table error on the operator's unlock screen.
+    "delegate_recipients",
+})
+
+
 def classify_table(name: str) -> PolicyKind | None:
     """Return the explicit classification for *name*, or ``None``."""
 
@@ -256,6 +273,8 @@ def classify_table(name: str) -> PolicyKind | None:
     if name in LOCAL_SYNC_TABLES:
         return PolicyKind.LOCAL
     if name in LEDGER_TABLES:
+        return PolicyKind.LOCAL
+    if name in PERSONAL_LOCAL_TABLES:
         return PolicyKind.LOCAL
     return None
 
