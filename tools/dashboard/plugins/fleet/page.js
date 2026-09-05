@@ -24,10 +24,12 @@ function fleetPage() {
         cert: 'Certificate expired', restart: 'Restart needed',
         paused: 'Paused', away: 'Disconnected', failing: 'Failing',
         first: 'Not synced yet', synced: 'Synced', idle: '',
+        link_off: 'Invite link off',
       },
       note: {
         tunnel: "Your other devices can't reach this dashboard from outside. Bringing the tunnel back needs your root key.",
         first: 'This machine has joined your fleet but has not synchronized with this dashboard yet. Syncing starts automatically once it comes online.',
+        link_off: 'This machine was approved, but its invitation link is not active — reactivate the link on this dashboard to finish setup and start syncing.',
         paused: 'This machine is running a different version of Autonomy. Synchronization will resume once the versions match.',
         away: 'Not responding — it may be asleep or offline. Syncing resumes automatically when it comes back.',
         failing: 'Sync attempts are failing and will keep retrying. If this keeps happening, make sure both machines are up to date.',
@@ -126,6 +128,15 @@ function fleetPage() {
       };
     },
 
+    // The invitation link exists but is NOT serving joins: it was published
+    // then deactivated (or never signed), so it needs reactivation before any
+    // approved-but-unsynced machine can finish. 'awaiting_signature' is exactly
+    // the "Activate invitation — sign with your personal root" state. A machine
+    // blocked on this reads 'link_off', never the false-reassuring 'first'.
+    get inviteInactive() {
+      return this.invitation.status === 'awaiting_signature';
+    },
+
     // A connected machine syncs at least every ~10s; minutes of silence IS
     // disconnection. Without this, a peer that stops contacting us leaves no
     // new evidence and the last stale success would render "Synced" forever.
@@ -142,6 +153,13 @@ function fleetPage() {
         else if (machine.runningStale) { id = 'restart'; tone = 'warn'; }
         else if (serving) { id = 'serving'; tone = 'good'; }
         else { id = 'idle'; tone = 'good'; }
+      } else if (!machine.lastSuccessfulSyncAt && this.inviteInactive) {
+        // Approved, but the invitation link it joined through is not active
+        // (deactivated or never signed). The join CANNOT finish and syncing
+        // will NOT "start automatically" — it is blocked until the operator
+        // reactivates the link. Honest, deterministic (invitation.status),
+        // and ahead of the 'first' fallback that would otherwise lie.
+        id = 'link_off'; tone = 'warn';
       } else if (!machine.lastSuccessfulSyncAt) {
         // A machine we have never synced with is bootstrapping or absent;
         // failed attempts toward it are expected, not a connection LOST.
