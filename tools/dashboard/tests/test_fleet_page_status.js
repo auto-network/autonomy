@@ -112,3 +112,27 @@ describe('fleet card status derivation', () => {
     assert.equal(page.failingMachines, 1, 'only the failing machine is counted');
   });
 });
+
+// The false-reassuring "first" state was a lie for an approved machine whose
+// invitation link is deactivated: it read "has joined... syncing starts
+// automatically once it comes online" while the join could never finish
+// (invite active=0). link_off names the real fault + the fix. Operator-driven
+// 2026-09-05 (SJC stuck; home showed the reassuring note).
+describe('fleet card: an approved machine blocked by a deactivated invite', () => {
+  it('reads link_off (not first) when the invitation is awaiting reactivation', () => {
+    const page = boot();
+    page.view = { invitation: { status: 'awaiting_signature' } };
+    const machine = authorized({ isLocalMachine: false, lastSuccessfulSyncAt: null });
+    const state = page.machineState(machine);
+    assert.equal(state.id, 'link_off');
+    assert.equal(state.word, 'Invite link off');
+    assert.match(state.note, /invitation link is not active/);
+  });
+
+  it('still reads first (bootstrapping) when the invitation is active', () => {
+    const page = boot();
+    page.view = { invitation: { status: 'active' } };
+    const machine = authorized({ isLocalMachine: false, lastSuccessfulSyncAt: null });
+    assert.equal(page.machineState(machine).id, 'first');
+  });
+});
