@@ -57,14 +57,55 @@ MACHINE_HELLO_DOMAIN = b"autonomy.network.tunnel.hello.machine.v1\n"
 #: signature minted for the serving key can never be evaluated in the fleet
 #: key's context. The serving connector passes this; nothing else flips.
 SERVING_MACHINE_HELLO_DOMAIN = b"autonomy.network.tunnel.hello.serving-machine.v1\n"
+#: Version 3 (auto-3bhy3, graph://da0dd9fb-e75) adds the committed-membership
+#: proof rider INSIDE the signed core: ``membership_proof`` proves the serve
+#: cert's subject persona under the registry's verified ``members_root`` at
+#: ``checkpoint_seq``. The rider needs no signature of its own — it is a
+#: Merkle proof checked against state the registry verified independently —
+#: but riding the core means a middlebox cannot strip or swap it.
+TUNNEL_HELLO_DOMAIN_V3 = b"autonomy.network.tunnel.hello.v3\n"
 HELLO_VERSION = 1
 HELLO_VERSION_2 = 2
+HELLO_VERSION_3 = 3
 
 HELLO_FIELDS = frozenset({"v", "org", "signer", "ts", "cert", "sig"})
 HELLO_FIELDS_V2 = frozenset(
     {"v", "org", "signer", "machine", "machine_sig", "caps", "ts",
      "cert", "sig"}
 )
+HELLO_FIELDS_V3 = HELLO_FIELDS_V2 | {"membership_proof"}
+
+MEMBERSHIP_PROOF_FIELDS = frozenset({"v", "checkpoint_seq", "index", "path"})
+MEMBERSHIP_PROOF_VERSION = 1
+#: Matches membership_commitment.MAX_PROOF_DEPTH without importing ledger
+#: into the relay-kit (the registry enforces the real bound at verification).
+MAX_MEMBERSHIP_PROOF_PATH = 64
+
+
+def validate_membership_proof(value: object) -> dict:
+    """Structural check of a membership-proof rider; returns it normalized.
+
+    Cryptographic verification against the org's verified ``members_root``
+    is the registry's job — this only pins the wire shape."""
+    if not isinstance(value, dict) or set(value) != MEMBERSHIP_PROOF_FIELDS:
+        raise HelloError(
+            f"membership_proof must carry exactly {sorted(MEMBERSHIP_PROOF_FIELDS)}")
+    if value["v"] != MEMBERSHIP_PROOF_VERSION:
+        raise HelloError("unsupported membership_proof version")
+    if type(value["checkpoint_seq"]) is not int or value["checkpoint_seq"] < 0:
+        raise HelloError("membership_proof checkpoint_seq must be a non-negative int")
+    if type(value["index"]) is not int or value["index"] < 0:
+        raise HelloError("membership_proof index must be a non-negative int")
+    path = value["path"]
+    if (not isinstance(path, list) or len(path) > MAX_MEMBERSHIP_PROOF_PATH
+            or any(not isinstance(sib, str) or _HEX64_RE.match(sib) is None
+                   for sib in path)):
+        raise HelloError(
+            "membership_proof path must be a list of 64-hex siblings "
+            f"(at most {MAX_MEMBERSHIP_PROOF_PATH})")
+    return {"v": MEMBERSHIP_PROOF_VERSION,
+            "checkpoint_seq": value["checkpoint_seq"],
+            "index": value["index"], "path": list(path)}
 
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}\Z")
 _HEX128_RE = re.compile(r"^[0-9a-f]{128}\Z")
@@ -108,20 +149,27 @@ def hello_core(
     caps,
     ts: int,
     version: int = HELLO_VERSION_2,
+    membership_proof: dict | None = None,
 ) -> bytes:
-    """The canonical unsigned v2 hello core — exactly six fields, shared
-    by both domain-separated signatures. Excludes ``sig``, ``machine_sig``
-    and (as in v1) ``cert``, which is authenticated by chain verification."""
-    return canonical_json(
-        {
-            "v": version,
-            "org": org,
-            "signer": signer,
-            "machine": machine,
-            "caps": list(caps),
-            "ts": ts,
-        }
-    )
+    """The canonical unsigned hello core shared by both domain-separated
+    signatures. v2: exactly six fields. v3: the same six plus
+    ``membership_proof``. Excludes ``sig``, ``machine_sig`` and (as in v1)
+    ``cert``, which is authenticated by chain verification."""
+    core = {
+        "v": version,
+        "org": org,
+        "signer": signer,
+        "machine": machine,
+        "caps": list(caps),
+        "ts": ts,
+    }
+    if version == HELLO_VERSION_3:
+        if membership_proof is None:
+            raise HelloError("a v3 hello core requires membership_proof")
+        core["membership_proof"] = membership_proof
+    elif membership_proof is not None:
+        raise HelloError("membership_proof is a v3 core field")
+    return canonical_json(core)
 
 
 def build_tunnel_hello_v2(
@@ -166,10 +214,52 @@ def build_tunnel_hello_v2(
     )
 
 
+def build_tunnel_hello_v3(
+    key: KeyPair,
+    cert: DelegationCert,
+    *,
+    machine_key: KeyPair,
+    org: str,
+    ts: int,
+    membership_proof: dict,
+    caps=(),
+    machine_hello_domain: bytes = MACHINE_HELLO_DOMAIN,
+) -> str:
+    """Connector side: the v3 hello — v2 plus the committed-membership
+    proof rider inside the signed core (auto-3bhy3)."""
+    if cert.child_pub != key.public_hex:
+        raise HelloError("cert does not delegate to the signing key")
+    proof = validate_membership_proof(membership_proof)
+    caps_list = sorted({str(cap) for cap in caps})
+    core = hello_core(
+        org=org,
+        signer=key.public_hex,
+        machine=machine_key.public_hex,
+        caps=caps_list,
+        ts=ts,
+        version=HELLO_VERSION_3,
+        membership_proof=proof,
+    )
+    return json.dumps(
+        {
+            "v": HELLO_VERSION_3,
+            "org": org,
+            "signer": key.public_hex,
+            "machine": machine_key.public_hex,
+            "machine_sig": machine_key.sign_hex(machine_hello_domain + core),
+            "caps": caps_list,
+            "ts": ts,
+            "membership_proof": proof,
+            "cert": cert.to_json().decode("ascii"),
+            "sig": key.sign_hex(TUNNEL_HELLO_DOMAIN_V3 + core),
+        }
+    )
+
+
 def parse_tunnel_hello(raw, *, allow_version_mismatch: bool = False) -> dict:
     """Structural parse only — chain verification is the registry's job.
 
-    The strict field set is selected by the hello's own ``v``: 1 and 2
+    The strict field set is selected by the hello's own ``v``: 1, 2 and 3
     are known shapes; any other version must arrive v1-shaped so an
     authenticated typed version mismatch can still be produced (only
     meaningful with ``allow_version_mismatch``).
@@ -189,11 +279,18 @@ def parse_tunnel_hello(raw, *, allow_version_mismatch: bool = False) -> dict:
         raise HelloError("hello v must be an integer")
     version = data["v"]
     if not allow_version_mismatch and version not in (
-        HELLO_VERSION, HELLO_VERSION_2,
+        HELLO_VERSION, HELLO_VERSION_2, HELLO_VERSION_3,
     ):
         raise HelloError(f"unsupported hello version: {version!r}")
 
-    if version == HELLO_VERSION_2:
+    if version == HELLO_VERSION_3:
+        if set(data) != HELLO_FIELDS_V3:
+            raise HelloError(
+                f"v3 hello must carry exactly {sorted(HELLO_FIELDS_V3)}"
+            )
+        data["membership_proof"] = validate_membership_proof(
+            data["membership_proof"])
+    elif version == HELLO_VERSION_2:
         if set(data) != HELLO_FIELDS_V2:
             raise HelloError(
                 f"v2 hello must carry exactly {sorted(HELLO_FIELDS_V2)}"
@@ -208,7 +305,7 @@ def parse_tunnel_hello(raw, *, allow_version_mismatch: bool = False) -> dict:
     for field in ("org", "signer", "cert", "sig"):
         if not isinstance(data[field], str):
             raise HelloError(f"hello {field} must be a string")
-    if version == HELLO_VERSION_2:
+    if version in (HELLO_VERSION_2, HELLO_VERSION_3):
         if not isinstance(data["machine"], str) or _HEX64_RE.match(
             data["machine"]
         ) is None:

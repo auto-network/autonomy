@@ -66,14 +66,22 @@ from tools.network.relaykit.stream_wire import (
 )
 from tools.network.relaykit.hello import (
     HELLO_FIELDS_V2,
+    HELLO_FIELDS_V3,
     HELLO_VERSION,
     HELLO_VERSION_2,
+    HELLO_VERSION_3,
     SERVING_MACHINE_HELLO_DOMAIN,
     TUNNEL_HELLO_DOMAIN_V2,
+    TUNNEL_HELLO_DOMAIN_V3,
     HelloError,
     hello_core,
     hello_signing_input,
     parse_tunnel_hello,
+    validate_membership_proof,
+)
+from tools.network.ledger.membership_commitment import (
+    MembershipCommitmentError,
+    verify_inclusion,
 )
 
 from .abuse import ChannelLease, RelayAbuseLimiter
@@ -91,6 +99,14 @@ CLOSE_VIEWER_QUEUE_OVERFLOW = 4413
 # (auto-albp6.7) -- distinct from every other close code above, none of
 # which are true for it.
 CLOSE_LISTENER_FELL_BEHIND = 4416
+#: The tunnel's membership proof went stale past the re-prove grace window
+#: (auto-3bhy3): the org's verified checkpoint advanced and no fresh proof
+#: arrived. The connector reconnects with a fresh v3 hello.
+CLOSE_MEMBERSHIP_STALE = 4417
+
+#: Seconds a proven tunnel may keep operating after the registry adopts a
+#: NEWER checkpoint for its org, before it must re-prove or be closed.
+MEMBERSHIP_REPROVE_GRACE_S = 60
 
 # Stream (auto-albp6.7) retention, in precedence order -- the order is
 # load-bearing, see Stream._apply_retention.
@@ -370,6 +386,7 @@ class Tunnel:
         machine: str = "",
         caps: tuple = (),
         version: int = HELLO_VERSION_2,
+        proven_seq: "int | None" = None,
     ):
         self.ws = ws
         self.org = org
@@ -387,6 +404,10 @@ class Tunnel:
         self.machine = machine
         #: Accepted capability intersection for this connection.
         self.caps = caps
+        #: Membership checkpoint seq this connection proved (v3); None = v1/v2.
+        self.proven_seq = proven_seq
+        #: When the registry first saw this tunnel lag the adopted checkpoint.
+        self.membership_stale_since: "int | None" = None
         #: Relay-minted per-connection identity: lease generations and
         #: channel ids are fenced on it and never survive a reconnect.
         self.connection_id = new_channel_id().hex()
@@ -647,6 +668,10 @@ class VerifiedTunnelHello:
     #: what this registry supports.
     caps: tuple
     version: int
+    #: The membership checkpoint seq this hello proved its persona under
+    #: (v3); None for v1/v2 hellos, which are exempt from freshness during
+    #: the migration window (auto-tmers owns the cutoff).
+    proven_seq: "int | None" = None
 
 
 def _verify_tunnel_hello(
@@ -669,8 +694,9 @@ def _verify_tunnel_hello(
         raise HelloError("no live binding for org")
 
     is_v2 = data["v"] == HELLO_VERSION_2 and set(data) == HELLO_FIELDS_V2
+    is_v3 = data["v"] == HELLO_VERSION_3 and set(data) == HELLO_FIELDS_V3
     try:
-        if is_v2:
+        if is_v2 or is_v3:
             core = hello_core(
                 org=org,
                 signer=data["signer"],
@@ -678,9 +704,12 @@ def _verify_tunnel_hello(
                 caps=data["caps"],
                 ts=data["ts"],
                 version=data["v"],
+                membership_proof=data["membership_proof"] if is_v3 else None,
             )
             verify_signature(
-                data["signer"], data["sig"], TUNNEL_HELLO_DOMAIN_V2 + core
+                data["signer"], data["sig"],
+                (TUNNEL_HELLO_DOMAIN_V3 if is_v3 else TUNNEL_HELLO_DOMAIN_V2)
+                + core,
             )
             try:
                 verify_signature(
@@ -726,7 +755,7 @@ def _verify_tunnel_hello(
             )
     except (ChainVerifyError, MalformedError) as exc:
         raise HelloError(f"{type(exc).__name__}: {exc}") from exc
-    if is_v2:
+    if is_v2 or is_v3:
         # auto-e2ufw Option B (crypto ruling graph://a374b260-e4a): the
         # serving-domain machine_sig above is verified UNCONDITIONALLY. The
         # allow-set is the secondary registration/unlinkability binding —
@@ -746,14 +775,37 @@ def _verify_tunnel_hello(
                 "(no registered serving-key set yet; backfill pending)",
                 org[:8], data["machine"][:16],
             )
-    if data["v"] not in (HELLO_VERSION, HELLO_VERSION_2):
+    if data["v"] not in (HELLO_VERSION, HELLO_VERSION_2, HELLO_VERSION_3):
         raise _ProtocolVersionMismatch(data["v"])
+    proven_seq = None
+    if is_v3:
+        # The rider proves the serve cert's subject persona under the
+        # registry's OWN verified members_root (auto-3bhy3): the prover
+        # supplies only the path; the root it must land on was adopted by
+        # checkpoint induction, never taken from the prover.
+        proof = data["membership_proof"]
+        state = store.get_membership_state(org)
+        if state is None:
+            raise HelloError(
+                "no membership state for this org — publish the root-signed "
+                "seed checkpoint before a v3 hello")
+        if proof["checkpoint_seq"] != state.seq:
+            raise HelloError(
+                f"membership proof is stale: proven at seq "
+                f"{proof['checkpoint_seq']}, registry at seq {state.seq}")
+        try:
+            verify_inclusion(state.members_root, verified.subject_id,
+                             proof["index"], proof["path"])
+        except MembershipCommitmentError as exc:
+            raise HelloError(f"membership proof does not verify: {exc}")
+        proven_seq = state.seq
     return VerifiedTunnelHello(
         persona_pub=verified.subject_id,
         signer_pub=data["signer"],
-        machine=data["machine"] if is_v2 else "",
-        caps=tuple(data["caps"]) if is_v2 else (),
+        machine=data["machine"] if (is_v2 or is_v3) else "",
+        caps=tuple(data["caps"]) if (is_v2 or is_v3) else (),
         version=data["v"],
+        proven_seq=proven_seq,
     )
 
 
@@ -1037,6 +1089,65 @@ _CENTRAL_LINK_FIELDS = frozenset(
 class _CtrlError(Exception):
     """A control op that fails cleanly — replied as {ok: false}, tunnel
     stays up. (Distinct from a malformed FRAME payload, which drops it.)"""
+
+
+class _MembershipStaleError(Exception):
+    """A proven tunnel outlived the re-prove grace window after its org's
+    checkpoint advanced — the serve loop closes it with
+    CLOSE_MEMBERSHIP_STALE."""
+
+
+def _membership_freshness(tunnel: "Tunnel", store: RegistryStore, now: int) -> str:
+    """'fresh' | 'grace' | 'expired' for a tunnel's membership proof.
+
+    v1/v2 tunnels (``proven_seq`` None) are exempt during the migration
+    window — auto-tmers owns the cutoff that ends that exemption. A proven
+    tunnel goes stale the moment the registry adopts a NEWER checkpoint for
+    its org, gets MEMBERSHIP_REPROVE_GRACE_S to re-prove (the
+    re-prove-membership control op), and is expired after that."""
+    if tunnel.proven_seq is None:
+        return "fresh"
+    state = store.get_membership_state(tunnel.org)
+    if state is None or state.seq <= tunnel.proven_seq:
+        tunnel.membership_stale_since = None
+        return "fresh"
+    if tunnel.membership_stale_since is None:
+        tunnel.membership_stale_since = now
+        return "grace"
+    if now - tunnel.membership_stale_since <= MEMBERSHIP_REPROVE_GRACE_S:
+        return "grace"
+    return "expired"
+
+
+def _ctrl_reprove_membership(tunnel: "Tunnel", args: dict,
+                             store: RegistryStore, now: int) -> dict:
+    """Re-stamp a live tunnel's membership proof at the current checkpoint
+    (auto-3bhy3) — the no-reconnect freshness path. The proof must land the
+    tunnel's OWN persona under the currently adopted members_root."""
+    from tools.network.relaykit.hello import HelloError as _HE
+    if not isinstance(args, dict):
+        raise _CtrlError("args must be a JSON object")
+    try:
+        proof = validate_membership_proof(args)
+    except _HE as exc:
+        raise _CtrlError(str(exc))
+    if tunnel.persona_pub is None:
+        raise _CtrlError("this tunnel carries no persona to re-prove")
+    state = store.get_membership_state(tunnel.org)
+    if state is None:
+        raise _CtrlError("no membership state for this org")
+    if proof["checkpoint_seq"] != state.seq:
+        raise _CtrlError(
+            f"re-prove is stale: proof at seq {proof['checkpoint_seq']}, "
+            f"registry at seq {state.seq}")
+    try:
+        verify_inclusion(state.members_root, tunnel.persona_pub,
+                         proof["index"], proof["path"])
+    except MembershipCommitmentError as exc:
+        raise _CtrlError(f"membership proof does not verify: {exc}")
+    tunnel.proven_seq = state.seq
+    tunnel.membership_stale_since = None
+    return {"seq": state.seq}
 
 
 def _central_operation(
@@ -1462,11 +1573,18 @@ async def _handle_ctrl_frame(tunnel: "Tunnel", payload: bytes,
         raise FrameError("control id must be a 32-hex correlation id")
     op = msg.get("op")
     args = msg.get("args", {})
+    # Freshness gate (auto-3bhy3): a proven tunnel whose org checkpoint
+    # advanced past the grace window may do exactly one thing — re-prove.
+    if op != "re-prove-membership" and _membership_freshness(
+            tunnel, store, now) == "expired":
+        raise _MembershipStaleError()
     try:
         if op == "create-link":
             result = _ctrl_create_link(tunnel, args, store, base_url, now, witness_key)
         elif op == "revoke-link":
             result = _ctrl_revoke_link(tunnel, args, store, now, witness_key)
+        elif op == "re-prove-membership":
+            result = _ctrl_reprove_membership(tunnel, args, store, now)
         elif op == "issue-turn":
             result = _ctrl_issue_turn(tunnel, args, turn_issuer)
         elif op in _HOST_OP_ARGS:
@@ -1544,6 +1662,7 @@ async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
         machine=verified.machine,
         caps=accepted_caps,
         version=verified.version,
+        proven_seq=verified.proven_seq,
     )
     replaced = hub.register(tunnel)
     if replaced is not None:
@@ -1552,9 +1671,9 @@ async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
         if host_routes is not None:
             host_routes.drop_connection(replaced)
         await _close_quietly(replaced.ws, CLOSE_REPLACED)
-    if verified.version == HELLO_VERSION_2:
+    if verified.version in (HELLO_VERSION_2, HELLO_VERSION_3):
         await websocket.send_json({
-            "ok": True, "v": HELLO_VERSION_2, "caps": list(accepted_caps),
+            "ok": True, "v": verified.version, "caps": list(accepted_caps),
         })
     else:
         await websocket.send_json({"ok": True, "v": HELLO_VERSION})
@@ -1581,6 +1700,9 @@ async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
                         turn_issuer=turn_issuer, witness_key=witness_key,
                         host_routes=host_routes,
                     )
+                except _MembershipStaleError:
+                    await _close_quietly(websocket, CLOSE_MEMBERSHIP_STALE)
+                    break
                 except FrameError:
                     break
                 continue
@@ -1676,6 +1798,15 @@ async def viewer_endpoint(
             await _close_quietly(websocket, CLOSE_UNKNOWN_LINK)
             return
     tunnel = hub.get(link.org_uuid) if link is not None else None
+    if tunnel is not None and _membership_freshness(
+            tunnel, store, int(now_fn())) == "expired":
+        # Freshness enforcement on the serving side (auto-3bhy3): a stale
+        # tunnel stops being an admission target, its viewers close, and
+        # the connector reconnects with a fresh v3 hello.
+        hub.unregister(tunnel)
+        await _close_quietly(tunnel.ws, CLOSE_MEMBERSHIP_STALE)
+        await tunnel.close_all_viewers(CLOSE_MEMBERSHIP_STALE)
+        tunnel = None
     if link is None or tunnel is None:
         # The WebSocket uses one close code; the bootloader has already
         # resolved the envelope, so it can distinguish an invalid token from
