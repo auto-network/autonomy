@@ -122,22 +122,28 @@ def test_org_connectors_never_light_sync(client, monkeypatch):
     assert "unlock with your root" not in sync["detail"].lower()
 
 
-def test_sync_lights_when_the_personal_connector_is_stale(client, monkeypatch):
+def test_stale_connector_code_does_NOT_light_the_user_sync_flag(client, monkeypatch):
+    # Operator-directed 2026-09-05: "connector git commit != disk" is a
+    # developer deploy-hygiene probe (fleet_doctor's STALE-CODE), not a user
+    # sync fault — it fires on ANY code change, including a frontend edit that
+    # cannot affect sync. An ARMED connector running an older commit is serving
+    # fine; the user Sync flag must NOT light on it (real schema/version
+    # incompatibility is the compatibility digest's job, not a commit compare).
     _stub_serving(
         monkeypatch,
         scopes=[None],
         cert_status={None: "ok"},
         replies={
-            # armed, but running an older commit than what's on disk
+            # armed (has its credential), but running an older commit than disk
             None: {"fleet_runtime_configured": True, "process_commit": "0ld"},
         },
         disk="c0ffee",
     )
     sync = client.get("/api/identity/unlock-state").json()["sync"]
-    assert sync["needs"] is True
-    assert sync["value"] == "Stale"
-    assert sync["stale"] == ["personal"]
-    assert "older code" in sync["detail"]
+    assert sync["needs"] is False
+    assert sync["value"] != "Stale"
+    assert sync["stale"] == []
+    assert "older code" not in sync["detail"]
 
 
 def test_unreachable_personal_connector_counts_as_unarmed(client, monkeypatch):

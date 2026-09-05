@@ -1721,14 +1721,20 @@ async def get_unlock_state(request: Request) -> JSONResponse:
             flags["tunnel"] = {"needs": False, "value": "",
                                "detail": "Tunnel state is unavailable."}
 
-    # sync — can the fleet's other machines sync WITH this one. Lit when any
+    # sync — can the fleet's other machines sync WITH this one. Lit ONLY when a
     # serving connector is unarmed (holds no credential — the memory-only one
-    # that dies on restart) or stale (older code than what's installed). Both
-    # need the root ceremony; a stale one needs restarting first, which the
-    # tray's restart button does in the right order (bead auto-sdrsa). The
-    # scopeless (org=None) and "personal" scopes resolve to the SAME database,
-    # so a label appearing under both names is reported once (bead auto-9yp8r).
+    # that dies on restart), which the root ceremony fixes. It deliberately
+    # does NOT light on "the connector's git commit differs from disk": that is
+    # a developer deploy-hygiene probe (fleet_doctor's STALE-CODE top line),
+    # not a user sync fault — it fires on ANY code change, including a frontend
+    # edit that cannot affect sync at all, and actual schema/version
+    # incompatibility is guarded exactly and cross-machine by the
+    # compatibility digest (the "Paused" state), not by a local commit compare.
+    # The scopeless (org=None) and "personal" scopes resolve to the SAME
+    # database, so a label under both names is reported once (bead auto-9yp8r).
     unarmed_scopes = sorted(set(sync_unarmed))
+    # sync_stale (connector commit != disk) is intentionally NOT surfaced here;
+    # it remains a fleet_doctor developer diagnostic.
     stale_scopes = sorted(set(sync_stale))
     if not tunnel_designated:
         # This machine is not the designated tunnel server, so holding no serving
@@ -1746,7 +1752,7 @@ async def get_unlock_state(request: Request) -> JSONResponse:
             "since": None,
         }
     else:
-        sync_needs = bool(unarmed_scopes or stale_scopes)
+        sync_needs = bool(unarmed_scopes)
         if sync_needs:
             parts = ["Your other machines can't sync with this one."]
             if sync_refusals:
@@ -1755,22 +1761,14 @@ async def get_unlock_state(request: Request) -> JSONResponse:
                     f"{sync_refusals} request{plural} have been refused"
                     + _refused_since(sync_since) + "."
                 )
-            if unarmed_scopes:
-                parts.append(
-                    _oxford(unarmed_scopes)
-                    + (" holds" if len(unarmed_scopes) == 1 else " hold")
-                    + " no serving credential — unlock with your root to give "
-                    + ("it" if len(unarmed_scopes) == 1 else "them") + " a new one."
-                )
-            if stale_scopes:
-                parts.append(
-                    _oxford(stale_scopes)
-                    + (" is" if len(stale_scopes) == 1 else " are")
-                    + " running older code than what's installed and must be "
-                    "restarted."
-                )
+            parts.append(
+                _oxford(unarmed_scopes)
+                + (" holds" if len(unarmed_scopes) == 1 else " hold")
+                + " no serving credential — unlock with your root to give "
+                + ("it" if len(unarmed_scopes) == 1 else "them") + " a new one."
+            )
             sync_detail = " ".join(parts)
-            sync_value = "Locked" if unarmed_scopes else "Stale"
+            sync_value = "Locked"
         else:
             sync_detail = "Whether your other machines can sync with this one."
             sync_value = "Serving" if serving_setup else ""
@@ -1779,8 +1777,8 @@ async def get_unlock_state(request: Request) -> JSONResponse:
             "value": sync_value,
             "detail": sync_detail,
             "unarmed": unarmed_scopes,
-            "stale": stale_scopes,
-            "scopes": sorted(set(unarmed_scopes) | set(stale_scopes)),
+            "stale": [],
+            "scopes": unarmed_scopes,
             "count": sync_refusals,
             "since": sync_since,
         }
