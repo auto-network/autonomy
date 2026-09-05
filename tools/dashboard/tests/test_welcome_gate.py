@@ -123,6 +123,46 @@ def test_identity_without_org_serves_welcome(test_client, monkeypatch):
     assert "Welcome" in r.text
 
 
+def test_fleet_member_materialises_synced_orgs_and_skips_onboarding(test_client, monkeypatch):
+    """A joined fleet member must NOT be shown 'create/join an org' for orgs it
+    already belongs to via the synced roster. page_index materialises the org DB
+    stubs from the roster first, so the empty-state gate then sees a
+    collaborative org and drops to the board."""
+    from tools.dashboard import server
+    import tools.network.fleet_sync_scheduler as sched
+    monkeypatch.setattr(hb, "has_verified_harness", lambda: True)
+    monkeypatch.setattr(server, "_has_personal_identity", lambda: True)
+    monkeypatch.setattr(server, "_fleet_enrollment_first_render", lambda: None)
+    # No org DB yet...
+    state = {"has_org": False}
+    monkeypatch.setattr(server, "_has_collaborative_org", lambda: state["has_org"])
+
+    # ...until materialising the synced roster creates it.
+    def fake_materialize():
+        state["has_org"] = True
+        return ["autonomy"]
+    monkeypatch.setattr(sched, "materialize_org_scopes_from_roster", fake_materialize)
+
+    r = test_client.get("/", follow_redirects=False)
+    assert r.status_code in (302, 307)
+    assert r.headers["location"] == "/beads"
+
+
+def test_fresh_machine_with_empty_roster_still_onboards(test_client, monkeypatch):
+    """Materialisation is a no-op on a genuine fresh machine (empty roster), so
+    the create/join-org step still shows correctly."""
+    from tools.dashboard import server
+    import tools.network.fleet_sync_scheduler as sched
+    monkeypatch.setattr(hb, "has_verified_harness", lambda: True)
+    monkeypatch.setattr(server, "_has_personal_identity", lambda: True)
+    monkeypatch.setattr(server, "_has_collaborative_org", lambda: False)
+    monkeypatch.setattr(server, "_fleet_enrollment_first_render", lambda: None)
+    monkeypatch.setattr(sched, "materialize_org_scopes_from_roster", lambda: [])
+    r = test_client.get("/", follow_redirects=False)
+    assert r.status_code == 200
+    assert "Welcome" in r.text
+
+
 def test_complete_state_falls_through(test_client, monkeypatch):
     """Identity + a collaborative org → GET / falls through to the board."""
     from tools.dashboard import server
