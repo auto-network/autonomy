@@ -63,6 +63,7 @@ from .relay import (
     TunnelHub,
     _resolve_live_link,
     host_probe_endpoint,
+    push_reprove_and_enforce,
     tunnel_endpoint,
     viewer_endpoint,
 )
@@ -1086,6 +1087,14 @@ def create_app(
         except MembershipCommitmentError as exc:
             raise _forbidden(str(exc))
         store.advance_membership_state(org_uuid, record, now=t)
+        # Push a reprove-required message down each live tunnel of the org and
+        # close, after the silence budget, any that has not re-proven under the
+        # new set (relay.push_reprove_and_enforce). A removed member's tunnel
+        # fails to re-prove and is dropped; honest members are re-stamped in
+        # milliseconds without interruption. Runs in the background so the
+        # checkpoint submitter is not held for the deadline.
+        asyncio.create_task(
+            push_reprove_and_enforce(hub, store, org_uuid, record["seq"]))
         return {
             "org_uuid": org_uuid,
             "seq": record["seq"],
