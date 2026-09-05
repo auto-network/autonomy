@@ -197,6 +197,7 @@ def _membership_view(slug: str) -> dict:
                 row["ready"] = readiness.get("ready")
             pending.append(row)
         genesis_id = state.genesis_id
+        org_uuid = state.org
         heads = list(state.heads)
     from tools.graph import org_ops
 
@@ -208,6 +209,9 @@ def _membership_view(slug: str) -> dict:
     return {
         "founded": True,
         "genesis_id": genesis_id,
+        # The genesis event's org UUID — the link_publish target for
+        # publishing a join route (mint ceremony, auto-aopjw).
+        "org_uuid": org_uuid,
         "heads": heads,
         "members": members,
         "role_defs": role_defs,

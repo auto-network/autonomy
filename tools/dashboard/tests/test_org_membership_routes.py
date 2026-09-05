@@ -89,6 +89,7 @@ def test_founded_ledger_projects_members_roles_and_claimed_invite(founded):
     body = _client().get("/api/orgs/testorg/membership").json()
     assert body["founded"] is True
     assert body["genesis_id"] == record.genesis_id
+    assert body["org_uuid"] == "11111111-1111-4111-8111-111111111111"
     [member] = body["members"]
     assert member["persona"] == record.founder_persona_pub
     assert member["roles"] == ["owner"]
