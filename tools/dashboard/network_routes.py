@@ -1810,10 +1810,35 @@ async def _post_serve_cert_v3(request: Request, body: dict) -> JSONResponse:
             "this org is not registered on auto.network yet — register before "
             "provisioning a serving delegate"
         )}, status_code=409)
-    org_uuid = (binding_member.payload or {}).get("org_uuid")
+    binding_payload = binding_member.payload or {}
+    org_uuid = binding_payload.get("org_uuid")
     if not isinstance(org_uuid, str):
         return JSONResponse({"ok": False, "error": "the org's binding row is malformed"},
                             status_code=500)
+
+    # ROLLOUT GATE (auto-tmers owns removing it): a persona-signed credential
+    # only authenticates at a registry that (a) runs the v3 hello with
+    # membership riders and (b) has adopted this org's seed checkpoint.
+    # Storing one before then would strand serving at the next connector
+    # launch — the renewal window (10+ days) absorbs the refusal, the browser
+    # reports it per org, and the existing credential keeps serving.
+    registry_url = binding_payload.get("registry_url")
+    membership_ready = False
+    if isinstance(registry_url, str) and registry_url:
+        try:
+            async with httpx.AsyncClient(base_url=registry_url, verify=True,
+                                         timeout=8.0) as client:
+                probe = await client.get(f"/v1/orgs/{org_uuid}/membership")
+            membership_ready = probe.status_code == 200
+        except Exception:
+            membership_ready = False
+    if not membership_ready:
+        return JSONResponse({"ok": False, "error": (
+            "the registry has no verified membership state for this org yet — "
+            "a persona-signed serving credential cannot authenticate until the "
+            "seed checkpoint is published (migration bead auto-tmers); the "
+            "current credential keeps serving"
+        )}, status_code=409)
 
     from tools.network.idkit import DelegationCert, KeyPair
     try:
