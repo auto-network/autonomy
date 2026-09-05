@@ -817,11 +817,44 @@ async def deactivate_invite(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+async def reactivate_invite(request: Request) -> JSONResponse:
+    """Honour a previously deactivated invitation again by flipping the SAME
+    stored invite active. This never re-mints: the machine's in-flight join is
+    pinned to this invitation's id, so only the original invite can readmit it.
+    The rendezvous route is untouched here (deactivate's local flag is what the
+    enrollment endpoints consult); a route torn down by ``link_revoke`` is a
+    separate, terminal action and would be re-published on its own path."""
+    denied = _operator_required(request)
+    if denied is not None:
+        return denied
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "body must be JSON"}, status_code=400)
+    if not isinstance(body, dict) or set(body) != {"target_uuid"} \
+            or not isinstance(body.get("target_uuid"), str):
+        return JSONResponse(
+            {"ok": False, "error": "body must carry exactly ['target_uuid']"},
+            status_code=400,
+        )
+    store = fleet_enrollment_service.FleetEnrollmentStore()
+    reactivated = store.reactivate_invitation(body["target_uuid"])
+    if not reactivated:
+        return JSONResponse(
+            {"ok": False, "error": "no deactivated invitation matches that target"},
+            status_code=404,
+        )
+    return JSONResponse({"ok": True})
+
+
 ROUTES = [
     Route("/api/fleet/invitations/register", register_invite, methods=["POST"]),
     Route("/api/fleet/machines/kick", kick_machine, methods=["POST"]),
     Route(
         "/api/fleet/invitations/deactivate", deactivate_invite, methods=["POST"]
+    ),
+    Route(
+        "/api/fleet/invitations/reactivate", reactivate_invite, methods=["POST"]
     ),
     Route("/api/fleet/enrollment/requests", pending_requests, methods=["GET"]),
     Route(

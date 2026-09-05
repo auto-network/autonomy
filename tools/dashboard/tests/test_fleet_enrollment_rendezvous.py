@@ -369,7 +369,7 @@ def test_expired_or_rebound_invite_refuses(rendezvous):
         )
     with pytest.raises(
         fleet_enrollment_service.FleetEnrollmentChannelError,
-        match="different bytes",
+        match="reactivate the existing invitation",
     ):
         store.register_invite(
             target_uuid=grant["target_uuid"],
@@ -382,6 +382,36 @@ def test_expired_or_rebound_invite_refuses(rendezvous):
             ),
             now_ms=NOW_MS,
         )
+
+
+def test_deactivate_then_reactivate_flips_the_same_invite(rendezvous):
+    _root, invite, store, grant, _request = rendezvous
+    target = grant["target_uuid"]
+
+    # Signed and active out of the fixture.
+    assert store.current_invitation(now_ms=NOW_MS) is not None
+    assert store.deactivated_invitation(now_ms=NOW_MS) is None
+
+    # Deactivate: no usable invitation, but the SIGNED invite is still there.
+    assert store.deactivate_invitation(target) is True
+    assert store.current_invitation(now_ms=NOW_MS) is None
+    dormant = store.deactivated_invitation(now_ms=NOW_MS)
+    assert dormant is not None
+    assert dormant.target_uuid == target
+    assert dormant.invite.invite_id == invite.invite_id  # SAME invite, not a re-mint
+
+    # Reactivate: the SAME invite becomes usable again; nothing dormant remains.
+    assert store.reactivate_invitation(target) is True
+    reborn = store.current_invitation(now_ms=NOW_MS)
+    assert reborn is not None and reborn.invite.invite_id == invite.invite_id
+    assert store.deactivated_invitation(now_ms=NOW_MS) is None
+
+
+def test_reactivate_without_a_deactivated_invitation_is_a_no_op(rendezvous):
+    _root, _invite, store, grant, _request = rendezvous
+    # Active invite present, nothing deactivated -> nothing to flip.
+    assert store.reactivate_invitation(grant["target_uuid"]) is False
+    assert store.reactivate_invitation("00" * 16) is False
 
 
 @pytest.mark.asyncio

@@ -30,6 +30,8 @@ def test_fleet_page_uses_only_generic_publish_and_signed_invite_registration():
     assert script.count("/api/approvals") == 2
     assert script.count("/api/fleet/invitations/register") == 1
     assert script.count("/api/fleet/invitations/deactivate") == 1
+    # Reactivate flips the SAME stored invite back on; it must never re-mint.
+    assert script.count("/api/fleet/invitations/reactivate") == 1
     assert "mintFleetInvite" in script
     assert "/api/fleet/enrollment/requests" not in script
     assert "/decision" not in script

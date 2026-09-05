@@ -42,6 +42,7 @@ class ProjectionInputs:
     approvals: Mapping[str, Mapping | None]
     executing_approval_ids: frozenset[str]
     invitation: StoredFleetInvitation | None
+    deactivated_invitation: StoredFleetInvitation | None = None
     machine_names: Mapping[str, str] = field(default_factory=dict)
     invitation_publication: Mapping | None = None
     publishing_org: str = "personal"
@@ -156,6 +157,7 @@ def _load_inputs(*, now_ms: int) -> ProjectionInputs:
         approvals=approvals,
         executing_approval_ids=executing,
         invitation=store.current_invitation(now_ms=now_ms),
+        deactivated_invitation=store.deactivated_invitation(now_ms=now_ms),
         machine_names=fleet_machine_profile.names(org=None),
         invitation_publication=invitation_publication,
         publishing_org="personal",
@@ -433,6 +435,22 @@ def project(inputs: ProjectionInputs) -> dict:
             "bootstrapCode": "AUTONOMY_FLEET_INVITE=" + fleet_invite.encode(invitation.invite),
             "publishedAt": invitation.created_at,
             "expiresAt": invitation.invite.expires_at or None,
+            "publishingOrg": inputs.publishing_org,
+            "error": None,
+        }
+    elif inputs.deactivated_invitation is not None:
+        # Signed but deactivated. The route stands and the invite is intact;
+        # only the active flag is off. Offer Reactivate (flip THIS invite back
+        # on) rather than the fall-through 'awaiting_signature', which would
+        # re-mint and strand any machine pinned to this invitation.
+        deactivated = inputs.deactivated_invitation
+        invitation_view = {
+            "status": "inactive",
+            "targetUuid": deactivated.target_uuid,
+            "url": deactivated.invite.rendezvous,
+            "bootstrapCode": "AUTONOMY_FLEET_INVITE=" + fleet_invite.encode(deactivated.invite),
+            "publishedAt": deactivated.created_at,
+            "expiresAt": deactivated.invite.expires_at or None,
             "publishingOrg": inputs.publishing_org,
             "error": None,
         }
