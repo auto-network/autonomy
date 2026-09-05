@@ -1860,6 +1860,23 @@ const autonet = (() => {
     return destination;
   }
 
+  // The content link's channel public key rides the URL fragment
+  // (graph://807b4e11-3e9): 32 raw bytes, base64url, unpadded. Browsers
+  // never transmit fragments, so no server — registry included — ever sees
+  // it. Returns the 64-hex key, or throws on anything that is not exactly a
+  // 32-byte value.
+  function decodeFragmentKey(fragment) {
+    const b64 = fragment.replace(/-/g, "+").replace(/_/g, "/");
+    const pad = "=".repeat((4 - (b64.length % 4)) % 4);
+    const raw = atob(b64 + pad);
+    if (raw.length !== 32) throw new Error("fragment is not a 32-byte key");
+    let hexKey = "";
+    for (let i = 0; i < raw.length; i++) {
+      hexKey += raw.charCodeAt(i).toString(16).padStart(2, "0");
+    }
+    return hexKey;
+  }
+
   async function boot() {
     const token = location.pathname.split("/").pop();
     if (!/^[0-9a-f]{32}$/.test(token)) return showError("invalid");
@@ -1917,8 +1934,18 @@ const autonet = (() => {
       // (no serving tunnel dialed in) resolves to the offline error, not a hang.
       let channel;
       try {
+        let linkPub;
+        const rawFragment = (location.hash || "").replace(/^#/, "");
+        if (rawFragment) {
+          try {
+            linkPub = decodeFragmentKey(rawFragment);
+          } catch (fragErr) {
+            state.error = "link fragment is not a channel key";
+            return showError("invalid");
+          }
+        }
         channel = await withTimeout(performHandshake(transport, {
-          org: envelope.org, token, rootPub: envelope.root_pub,
+          org: envelope.org, token, rootPub: envelope.root_pub, linkPub,
         }), CONNECT_TIMEOUT_MS, "handshake", "disconnected");
       } catch (err) {
         try { transport.close(); } catch (_closeErr) { /* already closed */ }
