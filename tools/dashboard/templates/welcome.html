@@ -276,6 +276,16 @@ function welcomeApp() {
           method: 'POST', cache: 'no-store',
         });
         var body = await response.json().catch(function () { return {}; });
+        if (body.status === 'unavailable') {
+          // The home dashboard reached us and named the invitation fault
+          // (e.g. the link was deactivated). Show the exact cause + fix, and
+          // KEEP waiting — the moment the link is reactivated there, the next
+          // check finishes the join automatically. Do not throw a generic
+          // "check failed" for this: it is a specific, actionable state.
+          this.fleetEnrollment.error = body.message ||
+            'This invitation link is not active on the home dashboard — reactivate it there to finish setup.';
+          return;
+        }
         if (!response.ok || body.ok === false) {
           throw new Error(body.error || ('Enrollment check failed (' + response.status + ').'));
         }

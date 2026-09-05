@@ -38,6 +38,21 @@ class FleetEnrollmentChannelError(ValueError):
     """A fleet invitation channel request is invalid or unauthorized."""
 
 
+class FleetInviteUnavailable(FleetEnrollmentChannelError):
+    """The invite link is well-formed and authenticated by its token, but the
+    invitation itself is not currently usable — deactivated, unknown, or
+    expired. ``reason`` names which, so the joiner can tell the operator the
+    exact fault and the fix (e.g. reactivate the link) instead of an opaque
+    failure. Returned to the joiner as a structured reply, not a channel
+    error, because the token's entropy is sufficient authentication to say
+    this much (operator decision 2026-09-05)."""
+
+    #: one of: invite_inactive | invite_unknown | invite_expired
+    def __init__(self, reason: str, message: str | None = None) -> None:
+        super().__init__(message or f"fleet invitation is {reason}")
+        self.reason = reason
+
+
 @dataclass(frozen=True)
 class PendingEnrollment:
     request_id: str
@@ -620,10 +635,12 @@ class FleetEnrollmentStore:
             "SELECT * FROM fleet_enrollment_invites WHERE target_uuid = ?",
             (target_uuid,),
         ).fetchone()
-        if row is None or not row["active"]:
-            raise FleetEnrollmentChannelError("fleet invitation is unavailable")
+        if row is None:
+            raise FleetInviteUnavailable("invite_unknown")
+        if not row["active"]:
+            raise FleetInviteUnavailable("invite_inactive")
         if row["expires_at"] and now_ms >= row["expires_at"]:
-            raise FleetEnrollmentChannelError("fleet invitation has expired")
+            raise FleetInviteUnavailable("invite_expired")
         payload = json.loads(row["invite_json"])
         invite = fleet_invite.FleetInvite(**payload)
         fleet_invite.verify(invite)
@@ -676,12 +693,22 @@ def handle_request(
     if message.get("op") == "fleet.resume":
         if set(message) != {"v", "op", "request_id", "resume_token"}:
             raise FleetEnrollmentChannelError("fleet.resume has unknown fields")
-        pending = state.resume(
-            target_uuid=target_uuid,
-            request_id=message["request_id"],
-            resume_token=message["resume_token"],
-            now_ms=now_ms,
-        )
+        try:
+            pending = state.resume(
+                target_uuid=target_uuid,
+                request_id=message["request_id"],
+                resume_token=message["resume_token"],
+                now_ms=now_ms,
+            )
+        except FleetInviteUnavailable as unavailable:
+            # The link authenticated (valid token) but the invitation is not
+            # serving joins — return a STRUCTURED reason the joiner can act on,
+            # not a channel error that reads to it as an opaque gateway 502.
+            return {
+                "v": 1,
+                "status": "unavailable",
+                "reason": unavailable.reason,
+            }
         reply = {
             "v": 1,
             "status": pending.status,
