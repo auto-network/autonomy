@@ -26,7 +26,11 @@ async def _page(request):
 
 def _client():
     app = Starlette(
-        routes=[Route("/machines", _page)],
+        routes=[
+            Route("/machines", _page),
+            Route("/unlock", _page),
+            Route("/welcome", _page),
+        ],
         middleware=[Middleware(_FleetJoiningMiddleware)],
     )
     return TestClient(app)
@@ -54,3 +58,17 @@ def test_not_joining_without_identity_does_not_redirect(monkeypatch):
     monkeypatch.setattr(machine_boot, "is_joining", lambda **_: False)
     resp = _client().get("/machines", follow_redirects=False)
     assert resp.status_code == 200
+
+
+def test_unlock_and_welcome_are_reachable_mid_join(monkeypatch):
+    """The completion flow must not be funnelled home. Once enrollment delivers
+    the armor, the human gate sends '/' -> '/unlock' and the welcome page's own
+    button targets '/unlock' (next=/welcome); bouncing those to '/' deadlocks
+    the join. They are exempt even while genuinely joining with no identity."""
+    monkeypatch.setattr(machine_boot, "machine_id", lambda **_: None)
+    monkeypatch.setattr(machine_boot, "is_joining", lambda **_: True)
+    client = _client()
+    for path in ("/unlock", "/welcome"):
+        resp = client.get(path, follow_redirects=False)
+        assert resp.status_code == 200, path
+        assert resp.text == "machines page"

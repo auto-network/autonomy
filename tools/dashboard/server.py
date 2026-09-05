@@ -21410,6 +21410,15 @@ class _FleetJoiningMiddleware(BaseHTTPMiddleware):
             or path.startswith("/api/")
             or path.startswith("/static/")
             or path.startswith("/ws/")
+            # /unlock and /welcome ARE the join-completion flow, not stray
+            # navigations to funnel home. Once enrollment delivers the personal
+            # armor, the human gate flips on and sends "/" -> "/unlock"; the
+            # welcome page's own "Unlock to continue" also targets "/unlock"
+            # (next=/welcome?fleet_sync=1). Funnelling those two back to "/"
+            # bounced the operator between "/" and "/unlock" forever, so the
+            # join could never be finished. Let them through.
+            or path == "/unlock"
+            or path == "/welcome"
         ):
             return await call_next(request)
         try:
