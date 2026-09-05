@@ -124,6 +124,11 @@
     var parts = [roleWord([invite.granted_role]), remainingLabel(invite.expiry)];
     var uses = invite.uses;
     if (uses && uses.max_uses > 1) parts.push(uses.used + ' of ' + uses.max_uses + ' used');
+    if (!invite.join_url) {
+      // The bearer existed only in the minting browser; without a published
+      // link this invitation can never be redeemed.
+      parts.push('No link was published — unusable, deactivate it');
+    }
     return parts.filter(Boolean).join(' · ');
   };
   Controller.prototype.roleMemberCount = function (name) {
