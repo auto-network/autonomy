@@ -82,7 +82,14 @@ from .store import (
     validate_membership_advance,
 )
 from .witness import MAX_WITNESS_HEADS, sign_attestation
-from tools.network.ledger.membership_commitment import MembershipCommitmentError
+from tools.network.ledger.membership_commitment import (
+    MembershipCommitmentError,
+    verify_inclusion,
+)
+from tools.network.relaykit.hello import (
+    HelloError as RelayHelloError,
+    validate_membership_proof,
+)
 
 # Owned by tools.network.clock (validity intervals); re-exported here.
 from tools.network.clock import (
@@ -223,7 +230,11 @@ _BOOTLOADER_CSP = (
     "form-action 'none'; frame-ancestors 'none'"
 )
 
-_ENVELOPE_FIELDS = frozenset({"v", "signer", "ts", "payload", "cert", "sig"})
+_ENVELOPE_FIELDS = frozenset(
+    {"v", "signer", "ts", "payload", "cert", "sig", "membership_proof"})
+#: Optional envelope fields — absent means root-direct (cert) / no
+#: committed-membership rider (membership_proof).
+_ENVELOPE_OPTIONAL = frozenset({"cert", "membership_proof"})
 _LINK_META_FIELDS = frozenset({"ttl", "label", "require_auth"})
 
 # -- F3 ledger-sync topics (spec §6–7, L6) -----------------------------------
@@ -238,6 +249,8 @@ _LINK_META_FIELDS = frozenset({"ttl", "label", "require_auth"})
 # topic/scope string and un-ledgerable 65-char "hashes")
 _TOPIC_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}\Z")
 _HASH_RE = re.compile(r"^[0-9a-f]{64}\Z")
+#: A canonical org-scoped persona public key (64 lowercase hex).
+_PERSONA_RE = _HASH_RE
 
 BUNDLE_WIRE_VERSION = 1
 MAX_HINT_HEADS = 64
@@ -350,7 +363,7 @@ def _parse_envelope(body: dict) -> dict:
     unknown = set(body) - _ENVELOPE_FIELDS
     if unknown:
         raise _bad_request(f"envelope carries unknown fields: {sorted(unknown)}")
-    missing = _ENVELOPE_FIELDS - set(body) - {"cert"}
+    missing = _ENVELOPE_FIELDS - set(body) - _ENVELOPE_OPTIONAL
     if missing:
         raise _bad_request(f"envelope is missing fields: {sorted(missing)}")
     if body["v"] != ENVELOPE_VERSION:
@@ -361,6 +374,12 @@ def _parse_envelope(body: dict) -> dict:
         raise _bad_request("envelope payload must be a JSON object")
     if "cert" in body and not isinstance(body["cert"], str):
         raise _bad_request("envelope cert must be a canonical wire JSON string")
+    if "membership_proof" in body:
+        try:
+            body["membership_proof"] = validate_membership_proof(
+                body["membership_proof"])
+        except RelayHelloError as exc:
+            raise _bad_request(str(exc))
     return body
 
 
@@ -401,6 +420,7 @@ def _authorize(
     return _verify_signer_chain(
         envelope["signer"], envelope.get("cert"), binding, store, now,
         required_scope=required_scope, required_target_type=required_target_type,
+        membership_proof=envelope.get("membership_proof"),
     )
 
 
@@ -413,6 +433,7 @@ def _verify_signer_chain(
     *,
     required_scope: Optional[str] = None,
     required_target_type: Optional[str] = None,
+    membership_proof: Optional[dict] = None,
 ) -> AuthContext:
     """Chain a signer to the org's bound root — the shared half of the I4
     gate, used both for request envelopes (:func:`_authorize`) and for
@@ -430,6 +451,60 @@ def _verify_signer_chain(
     if cert.child_pub != signer:
         raise _forbidden("cert does not delegate to the signer")
 
+    if membership_proof is not None:
+        # Committed-membership path (auto-3bhy3, graph://da0dd9fb-e75): the
+        # chain anchors at the ACTING PERSONA the cert names — PIN 6b, the
+        # same anchor the dashboard's local verifier uses — and the rider
+        # proves that persona under the members_root this registry adopted
+        # by checkpoint induction. Standing comes from the proof, never
+        # from a chain to the constitutional root.
+        anchor = cert.subject.id
+        if not isinstance(anchor, str) or _PERSONA_RE.fullmatch(anchor) is None:
+            raise _forbidden(
+                "membership-proof envelopes require a persona-keyed cert subject")
+        if cert.subject.kind not in ("operator", "persona"):
+            raise _forbidden(
+                f"cert subject kind {cert.subject.kind!r} cannot ride a "
+                "membership proof")
+        try:
+            result = verify_chain(
+                cert,
+                anchor,
+                org=binding.org_uuid,
+                now=now,
+                revocations=store.revocation_set(binding.org_uuid),
+                required_scope=required_scope,
+                required_target_type=required_target_type,
+            )
+        except ChainVerifyError as exc:
+            raise _forbidden(f"{type(exc).__name__}: {exc}")
+        except MalformedError as exc:
+            raise _bad_request(str(exc))
+        # idkit narrowing constrains scope/org/validity but not subject
+        # continuity: every hop must name the anchor persona, or an
+        # intermediate issuer could swap the actor under the same proof.
+        for hop in cert.chain():
+            if hop.subject.id != anchor:
+                raise _forbidden(
+                    "membership-proof cert chain names more than one actor")
+        state = store.get_membership_state(binding.org_uuid)
+        if state is None:
+            raise _forbidden(
+                "no membership state for this org — publish the root-signed "
+                "seed checkpoint first")
+        if membership_proof["checkpoint_seq"] != state.seq:
+            raise _forbidden(
+                f"membership proof is stale: proven at seq "
+                f"{membership_proof['checkpoint_seq']}, registry at seq "
+                f"{state.seq}")
+        try:
+            verify_inclusion(state.members_root, anchor,
+                             membership_proof["index"],
+                             membership_proof["path"])
+        except MembershipCommitmentError as exc:
+            raise _forbidden(f"membership proof does not verify: {exc}")
+        return AuthContext(result.leaf_pub, "persona", anchor, cert)
+
     try:
         result = verify_chain(
             cert,
@@ -446,7 +521,9 @@ def _verify_signer_chain(
         raise _bad_request(str(exc))
 
     if result.subject_kind == "persona":
-        raise _rung2("persona subjects require viewer authn (Track E)")
+        raise _rung2(
+            "persona subjects require a membership_proof rider on the "
+            "envelope (committed membership, graph://da0dd9fb-e75)")
     return AuthContext(result.leaf_pub, result.subject_kind, result.subject_id, cert)
 
 
