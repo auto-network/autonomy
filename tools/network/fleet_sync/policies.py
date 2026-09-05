@@ -259,6 +259,17 @@ PERSONAL_LOCAL_TABLES: Final[frozenset[str]] = frozenset({
     # arrived as a bespoke table (commit e87bd7ae) with no policy at all, which
     # surfaced as an unclassified-table error on the operator's unlock screen.
     "delegate_recipients",
+    # Fleet-enrollment ceremony state, all node-local: the enrollment happens on
+    # a specific machine and does not replicate. invites/pending are the
+    # inviting node's published invites and the requests against them
+    # (fleet_enrollment_service); join_state is the joining node's own resume
+    # recovery + delivered armor (fleet_enrollment_client.FleetJoinStateStore).
+    # These are in machine.db, so the sync snapshot audits them, but none belong
+    # on the wire. (Cross-machine invite management would be a deliberate
+    # feature, not a default — flag it, do not silently replicate ceremony state.)
+    "fleet_enrollment_invites",
+    "fleet_enrollment_pending",
+    "fleet_enrollment_join_state",
 })
 
 
