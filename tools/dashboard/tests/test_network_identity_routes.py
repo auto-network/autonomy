@@ -1391,3 +1391,109 @@ def test_serve_cert_status_get_answers_without_a_500(env):
             "identity-invalid",
         ), body
         assert isinstance(body["required"], bool)
+
+
+# ── persona-signed serve-cert provisioning (revision 3, auto-55vwi) ────
+
+
+def _persona_serve_body(persona: KeyPair, *, org=ORG, org_uuid=ORG_UUID):
+    delegate = KeyPair.generate()
+    now = int(time.time())
+    cert = issue_cert(
+        persona, delegate.public_hex, scope=("tunnel:serve",), org=org_uuid,
+        subject=Subject("persona", persona.public_hex),
+        not_before=now - 300, not_after=now + 30 * 86400,
+    )
+    dns01 = issue_cert(
+        persona, delegate.public_hex, scope=("serve:dns-01",), org=org_uuid,
+        subject=Subject("persona", persona.public_hex),
+        not_before=cert.not_before, not_after=cert.not_after,
+    )
+    return delegate, {
+        "org": org,
+        "cert": cert.to_json().decode("ascii"),
+        "dns01_cert": dns01.to_json().decode("ascii"),
+        "persona_pub": persona.public_hex,
+        "private_key": delegate.private_hex,
+    }
+
+
+class _FakeMembershipProbe:
+    """Patches the v3 gate's registry probe: 200 when ready, 404 when not."""
+
+    def __init__(self, monkeypatch, ready: bool):
+        status = 200 if ready else 404
+
+        class _Resp:
+            status_code = status
+
+        class _Client:
+            def __init__(self, *a, **k): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def get(self, url): return _Resp()
+
+        import tools.dashboard.network_routes as nr
+        monkeypatch.setattr(nr.httpx, "AsyncClient", _Client)
+
+
+def test_persona_serve_cert_refused_until_membership_seeded(
+        env, root, tmp_path, monkeypatch):
+    """The rollout gate: no verified membership state at the registry means a
+    persona-signed credential cannot authenticate, so the POST is refused and
+    the existing credential keeps serving (auto-tmers removes the gate by
+    seeding)."""
+    _store_binding(root)
+    _serve_key_dir(monkeypatch, tmp_path)
+    _FakeMembershipProbe(monkeypatch, ready=False)
+    persona = KeyPair.generate()
+    _, body = _persona_serve_body(persona)
+    r = env.post("/api/network/serve-cert", json=body)
+    assert r.status_code == 409
+    assert "membership" in r.json()["error"]
+
+
+def test_persona_serve_cert_stored_when_membership_ready(
+        env, root, tmp_path, monkeypatch):
+    _store_binding(root)
+    _serve_key_dir(monkeypatch, tmp_path)
+    _FakeMembershipProbe(monkeypatch, ready=True)
+    persona = KeyPair.generate()
+    delegate, body = _persona_serve_body(persona)
+    r = env.post("/api/network/serve-cert", json=body)
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
+    assert r.json()["child_pub"] == delegate.public_hex
+    # Stored at revision 3, no viewer cert, persona anchor recorded.
+    members = settings_ops.read_owned_set(
+        NETWORK_SERVE_CERT_SET_ID, org=ORG, target_revision=3).members
+    rows = [m.payload for m in members]
+    assert rows and rows[0]["persona_pub"] == persona.public_hex
+    assert "viewer_cert" not in rows[0]
+    # The supervisor's dual-read resolves it as the org's credential.
+    from tools.dashboard.link_serving_supervisor import serve_cert_state
+    state = serve_cert_state(ORG)
+    assert state["status"] in ("ok", "key-missing", "key-invalid")
+
+
+def test_persona_serve_cert_wrong_signer_refused(env, root, tmp_path, monkeypatch):
+    """A cert signed by a DIFFERENT key than its subject persona must fail the
+    schema's persona-anchored chain verification."""
+    _store_binding(root)
+    _serve_key_dir(monkeypatch, tmp_path)
+    _FakeMembershipProbe(monkeypatch, ready=True)
+    persona, imposter = KeyPair.generate(), KeyPair.generate()
+    delegate = KeyPair.generate()
+    now = int(time.time())
+    cert = issue_cert(
+        imposter, delegate.public_hex, scope=("tunnel:serve",), org=ORG_UUID,
+        subject=Subject("persona", persona.public_hex),
+        not_before=now - 300, not_after=now + 30 * 86400,
+    )
+    r = env.post("/api/network/serve-cert", json={
+        "org": ORG, "cert": cert.to_json().decode("ascii"),
+        "persona_pub": persona.public_hex,
+        "private_key": delegate.private_hex,
+    })
+    assert r.status_code == 400
+    assert "chain" in r.json()["error"] or "persona" in r.json()["error"]
