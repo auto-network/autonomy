@@ -53,6 +53,8 @@ Invariants enforced here:
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
 import copy
 import re
 import time
@@ -71,6 +73,8 @@ from tools.graph.schemas.network_identity import (  # noqa: F401
     NETWORK_ORG_KEY_SET_ID,
     TARGET_TYPES,
 )
+
+logger = logging.getLogger("dashboard.link_approvals")
 
 _TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")  # 128-bit CSPRNG token shape (I2)
 MAX_LINK_TTL_S = 365 * 24 * 60 * 60
@@ -954,6 +958,34 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
     if not isinstance(token, str) or not _TOKEN_RE.match(token):
         return _fail("registry returned a malformed grant token — not caching it")
 
+    # Per-link channel key (graph://807b4e11-3e9): mint the keypair, vault the
+    # private seed org-wide, and carry the public key on the grant row. The
+    # shareable URL gains the key as a FRAGMENT — presentation-side only; the
+    # registry minted and stores the canonical url and never sees the key.
+    #
+    # BEST EFFORT during rollout: a mint that cannot run (the vault is cold)
+    # leaves the link keyless — a valid LEGACY link that serves under the old
+    # handshake. The fail-closed is on the VIEWER side (the handshake bead): a
+    # link opened without a fragment key fails closed. Making publish itself
+    # hard-depend on a warm vault before viewers consume the key would be a
+    # regression, so it does not.
+    from tools.dashboard.link_channel_key import (
+        CHANNEL_KEY_TARGET_TYPES,
+        ChannelKeyUnavailable,
+        fragment_url,
+        mint_channel_key,
+    )
+    channel_pub = None
+    share_url = url
+    if req["target_type"] in CHANNEL_KEY_TARGET_TYPES:
+        try:
+            channel_pub = mint_channel_key(token, org)
+            share_url = fragment_url(url, channel_pub)
+        except ChannelKeyUnavailable as exc:
+            logger.warning(
+                "link %s published without a channel key (legacy link): %s",
+                token[:8], exc)
+
     grant = {
         "token": token,
         "url": url,
@@ -963,6 +995,8 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
         "subject": subject,  # I6: the authenticated acting persona
         "issued_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    if channel_pub is not None:
+        grant["channel_pub"] = channel_pub
     settings_ops.upsert_by_key(
         NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION,
         token, grant, org=org,
@@ -971,7 +1005,7 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
     # construction — no separate probe needed on this path (register D19 B10).
     return {
         "ok": True,
-        "url": url,
+        "url": share_url,
         "token": token,
         "serving": {"live": True, "via": "tunnel-control"},
         "actor": _approval_identities(org)["actor_identity"],
@@ -1226,6 +1260,10 @@ async def _execute_link_revoke_http(row: dict, decision: dict) -> dict:
 
 
 def _drop_cached_grant(token: str, org: str | None) -> bool:
+    # Revocation's key half (graph://807b4e11-3e9): the vaulted channel seed
+    # dies with the grant row, so members stop holding the serving secret.
+    from tools.dashboard.link_channel_key import drop_channel_key
+    drop_channel_key(token, org)
     try:
         for m in settings_ops.read_owned_set(
             NETWORK_LINK_GRANT_SET_ID,
