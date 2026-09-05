@@ -417,3 +417,95 @@ def test_probe_reports_unreachable_when_no_connector(stack):
         assert verdict["status"] is None, verdict
 
     asyncio.run(run())
+
+
+def test_per_link_key_serves_end_to_end(stack, monkeypatch):
+    """The keystone loop for graph://807b4e11-3e9, on the REAL stack: a link
+    whose grant carries a channel key serves over the per-link handshake (the
+    viewer verifies the fragment key, no root pin), a legacy keyless link
+    keeps serving over the certificate path ON THE SAME CONNECTOR at the same
+    time, a fragment-less open of the keyed link fails closed, and revoking
+    the keyed link ends its serving."""
+    from tools.dashboard import link_channel_key as lck
+    from tools.network.idkit import KeyPair as _KP
+
+    binder_rev = design_db.create_design(
+        title="OSS Insights binder",
+        variants=[{"id": "v1", "html": BINDER_HTML}],
+    )
+    keyed = publish_link(stack["port"], stack["root"], binder_rev)
+    legacy = publish_link(stack["port"], stack["root"], binder_rev)
+
+    # The keyed link: grant row carries channel_pub; the private seed lives
+    # behind the link_channel_key settings seam (in-memory here — the vault
+    # sealing itself is the vault suite's proof; this test proves the loop).
+    link_key = _KP.generate()
+    cache_grant(keyed, binder_rev)
+    cache_grant(legacy, binder_rev)
+    seeds = {keyed: link_key.private_hex}
+    monkeypatch.setattr(
+        lck.settings_ops, "read_set_key",
+        lambda set_id, key, *, org=None, peers=None:
+            ({"payload": {"seed": seeds[key]}} if key in seeds else None))
+
+    # Wire the resolver exactly as link_serving wires it in production.
+    def resolver(token):
+        try:
+            return lck.channel_key_for(token, ORG)
+        except lck.ChannelKeyUnavailable:
+            return None
+    stack["connector"]._link_key_for = resolver
+
+    async def run():
+        connector = stack["connector"]
+        task = asyncio.create_task(connector.run())
+        try:
+            await asyncio.wait_for(connector.connected.wait(), timeout=15)
+
+            # 1. The keyed link serves against the FRAGMENT key — no root pin.
+            channel = await ViewerChannel.connect(
+                f"ws://127.0.0.1:{stack['port']}", keyed,
+                link_pub=link_key.public_hex, org=ORG_UUID,
+            )
+            await channel.send_message(json.dumps(
+                {"v": 1, "op": "fetch"}).encode())
+            served = await channel.recv_message()
+            header, _, body = served.partition(b"\n")
+            assert json.loads(header)["status"] == "ok"
+            assert body == BINDER_BYTES
+            await channel.close()
+
+            # 2. The legacy link still serves via the certificate path, on
+            #    the same connector, in the same breath — dual-mode proof.
+            legacy_served = await fetch_over_tunnel(
+                stack["port"], legacy, stack["root_pub"])
+            assert legacy_served.partition(b"\n")[2] == BINDER_BYTES
+
+            # 3. Opening the keyed link WITHOUT its fragment fails closed:
+            #    the server answers with link_sig, the root-pin viewer can't
+            #    verify it.
+            with pytest.raises(Exception) as excinfo:
+                await ViewerChannel.connect(
+                    f"ws://127.0.0.1:{stack['port']}", keyed,
+                    root_pub=stack["root_pub"], org=ORG_UUID,
+                )
+            assert "fragment" in str(excinfo.value)
+
+            # 4. Revoke: grant row and seed die; the keyed link stops serving
+            #    even for a viewer still holding the fragment.
+            for member in settings_ops.read_owned_set(
+                    NETWORK_LINK_GRANT_SET_ID, org=ORG,
+                    target_revision=NETWORK_LINK_GRANT_REVISION).members:
+                if member.key == keyed:
+                    settings_ops.remove_setting(member.id, org=ORG)
+            del seeds[keyed]
+            revoked = await fetch_over_tunnel(
+                stack["port"], keyed, stack["root_pub"])
+            assert revoked == link_serving.REFUSED
+        finally:
+            connector.stop()
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    asyncio.run(run())
