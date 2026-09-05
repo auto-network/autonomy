@@ -11,7 +11,8 @@ from tools.network.fleet_sync.policies import (
 
 
 def test_current_graph_schema_is_completely_classified(tmp_path: Path) -> None:
-    db = GraphDB(tmp_path / "personal.db")
+    db_path = tmp_path / "personal.db"
+    db = GraphDB(db_path)
     # The runtime personal DB (machine.db) is GraphDB's schema PLUS the vault
     # store's tables — both live in the same file. Auditing GraphDB alone left
     # the vault store's tables invisible to this guard, which is exactly how
@@ -21,6 +22,14 @@ def test_current_graph_schema_is_completely_classified(tmp_path: Path) -> None:
     # without a policy fails HERE, in CI, not at unlock.
     from tools.vault.store import _SCHEMA as VAULT_SCHEMA
     db.conn.executescript(VAULT_SCHEMA)
+    # Enrollment ceremony tables also land in machine.db (invites/pending from
+    # the enrollment service, join_state from the client). Each store creates
+    # its schema on construction; instantiate them against the same file so any
+    # new enrollment table without a policy fails HERE, not on a sync/unlock.
+    from tools.dashboard.fleet_enrollment_service import FleetEnrollmentStore
+    from tools.network.fleet_enrollment_client import FleetJoinStateStore
+    FleetEnrollmentStore(db_path)
+    FleetJoinStateStore(db_path)
     try:
         classified = audit_schema(db.conn)
     finally:
@@ -31,8 +40,18 @@ def test_current_graph_schema_is_completely_classified(tmp_path: Path) -> None:
     # a non-replicated table never enters the replication surface / compat
     # digest (which would force a spurious fleet-wide sync pause).
     assert classified["delegate_recipients"] is PolicyKind.LOCAL
+    assert classified["fleet_enrollment_invites"] is PolicyKind.LOCAL
+    assert classified["fleet_enrollment_pending"] is PolicyKind.LOCAL
+    assert classified["fleet_enrollment_join_state"] is PolicyKind.LOCAL
     from tools.network.fleet_sync.policies import _replication_surface
-    assert "delegate_recipients" not in _replication_surface()["policies"]
+    surface = _replication_surface()["policies"]
+    for local_table in (
+        "delegate_recipients",
+        "fleet_enrollment_invites",
+        "fleet_enrollment_pending",
+        "fleet_enrollment_join_state",
+    ):
+        assert local_table not in surface
     assert classified["sources"] is PolicyKind.LWW
     assert classified["note_versions"] is PolicyKind.SPECIAL
     assert classified["attachments"] is PolicyKind.EXTERNAL_BLOB
