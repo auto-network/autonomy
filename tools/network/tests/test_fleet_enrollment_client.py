@@ -326,3 +326,21 @@ async def test_resume_names_the_actionable_failure(path):
         match="different invitation",
     ):
         await wrong_code.resume(recovery)
+
+
+@pytest.mark.asyncio
+async def test_resume_surfaces_a_deactivated_invite_as_a_structured_reason(path):
+    """Operator-directed 2026-09-05: when the invite link is valid but the
+    invitation was deactivated on the home dashboard, the joiner must learn
+    the EXACT reason (so it can say 'reactivate the link'), not the opaque
+    'did not return a valid response'. The serving side answers with a
+    structured {status: unavailable, reason: invite_inactive}."""
+    _root, invite, origin, join_store, client, _channels = path
+    recovery = await client.start(invite, machine_id="9d" * 32)
+    assert origin.deactivate_invitation(TARGET_UUID) is True
+
+    result = await client.resume(recovery)
+    assert result.status == "unavailable"
+    assert result.reason == "invite_inactive"
+    # The saved request survives — reactivating the link lets it finish.
+    assert join_store.load(recovery.request_id) is not None

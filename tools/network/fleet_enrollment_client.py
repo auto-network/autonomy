@@ -99,6 +99,10 @@ class EnrollmentResult:
     personal_root_armor: str | None = None
     personal_root_created_at: str | None = None
     personal_root_updated_at: str | None = None
+    #: For status == "unavailable": which invitation fault the serving side
+    #: named — invite_inactive | invite_unknown | invite_expired — so the UI
+    #: can tell the operator the exact cause and fix.
+    reason: str | None = None
 
 
 class FleetJoinStateStore:
@@ -401,6 +405,19 @@ class FleetEnrollmentClient:
             "resume_token": frozen.resume_token,
         })
         base = {"v", "status", "request_id", "verification_code"}
+        # The serving side reached us and named a specific invitation fault
+        # (deactivated / unknown / expired). This is NOT a transport failure —
+        # home answered — so surface the reason for the UI to act on, rather
+        # than the generic "did not return a valid response" below.
+        if (
+            isinstance(reply, dict)
+            and reply.get("v") == 1
+            and reply.get("status") == "unavailable"
+        ):
+            return EnrollmentResult(
+                status="unavailable", recovery=frozen,
+                reason=reply.get("reason"),
+            )
         # Distinguish the failure the joiner can act on. The common one is a
         # serving side that is not actually answering: an offline, locked, or
         # stale-code home Dashboard returns a relay/gateway error rather than a

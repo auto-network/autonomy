@@ -492,6 +492,26 @@ async def resume_local_enrollment(request: Request) -> JSONResponse:
             return JSONResponse({"ok": True, "status": "declined"})
         if result.status == "expired":
             return JSONResponse({"ok": True, "status": "expired"})
+        if result.status == "unavailable":
+            # The home dashboard reached us and named a specific invitation
+            # fault. Give the joiner the exact cause + fix, not a generic 502.
+            messages = {
+                "invite_inactive": "Your invitation link was deactivated on "
+                    "the home dashboard. Reactivate it there to finish setup.",
+                "invite_expired": "Your invitation link has expired. Create a "
+                    "new invite on the home dashboard and install again.",
+                "invite_unknown": "The home dashboard no longer recognizes "
+                    "this invitation link. Create a new invite there.",
+            }
+            reason = result.reason or "invite_inactive"
+            return JSONResponse({
+                "ok": False, "status": "unavailable", "reason": reason,
+                "message": messages.get(
+                    reason,
+                    "This invitation link is not currently active on the home "
+                    "dashboard. Reactivate it there to finish setup.",
+                ),
+            })
         if result.status == "approved":
             if (
                 result.delivery is None
