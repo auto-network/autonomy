@@ -197,7 +197,9 @@ class FleetEnrollmentStore:
                 )
             elif row["grant_token"] != token or row["invite_json"] != wire:
                 raise FleetEnrollmentChannelError(
-                    "fleet invitation target is already bound to different bytes"
+                    "a different invitation is already bound to this machine; "
+                    "reactivate the existing invitation instead of registering "
+                    "a new one"
                 )
 
     def open_request(
@@ -383,6 +385,56 @@ class FleetEnrollmentStore:
                 (target_uuid,),
             )
             return cursor.rowcount > 0
+
+    def reactivate_invitation(self, target_uuid: str) -> bool:
+        """Undo deactivate_invitation: honour this invitation again.
+
+        Deactivation is not a one-way door. A join in flight is bound to THIS
+        invitation's id, so readmitting the machine flips the SAME row active
+        again -- never a re-mint. A freshly minted invite would carry different
+        bytes (colliding with the stored binding in register_invite) AND a new
+        invite id the joiner's pinned resume could never match, stranding it."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE fleet_enrollment_invites SET active=1 "
+                "WHERE target_uuid=? AND active=0",
+                (target_uuid,),
+            )
+            return cursor.rowcount > 0
+
+    def deactivated_invitation(
+        self, *, now_ms: int | None = None
+    ) -> StoredFleetInvitation | None:
+        """The newest signed-but-deactivated invitation, when no active one
+        shadows it. This is what lets the UI offer Reactivate (flip the SAME
+        invite back on) instead of the false "Finish/Activate" path that would
+        re-mint a fresh invite and strand any machine pinned to the old one."""
+        now = _now_ms(now_ms)
+        with self._connect() as conn:
+            if conn.execute(
+                "SELECT 1 FROM fleet_enrollment_invites "
+                "WHERE active=1 AND (expires_at=0 OR expires_at>?) LIMIT 1",
+                (now,),
+            ).fetchone() is not None:
+                return None
+            row = conn.execute(
+                "SELECT * FROM fleet_enrollment_invites "
+                "WHERE active=0 AND (expires_at=0 OR expires_at>?) "
+                "ORDER BY created_at DESC, target_uuid DESC LIMIT 1",
+                (now,),
+            ).fetchone()
+        if row is None:
+            return None
+        invite = fleet_invite.FleetInvite.from_dict(
+            json.loads(row["invite_json"])
+        )
+        fleet_invite.verify(invite)
+        return StoredFleetInvitation(
+            target_uuid=row["target_uuid"],
+            invite=invite,
+            active=bool(row["active"]),
+            created_at=int(row["created_at"]),
+        )
 
     def get_request(self, request_id: str) -> PendingEnrollment | None:
         rid = _require_hex64(request_id, "request_id")

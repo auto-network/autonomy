@@ -147,7 +147,7 @@
             <div class="fleet-side-title">
               <h2>Invitation</h2>
               <span :class="invitation.status === 'active' ? 'active' : ''"
-                    x-text="invitation.status === 'active' ? 'Active' : invitation.status === 'publishing' ? 'Waiting' : invitation.status === 'awaiting_signature' ? 'Finish' : 'Inactive'"></span>
+                    x-text="invitation.status === 'active' ? 'Active' : invitation.status === 'publishing' ? 'Waiting' : invitation.status === 'awaiting_signature' ? 'Finish' : invitation.status === 'inactive' ? 'Off' : 'Inactive'"></span>
             </div>
             <template x-if="invitation.status === 'active'">
               <div>
@@ -175,6 +175,16 @@
                 <button type="button" class="fleet-primary-action"
                         :disabled="inviteBusy" @click="finishInvitation()"
                         x-text="inviteBusy ? 'Signing…' : 'Activate invitation'"></button>
+              </div>
+            </template>
+            <template x-if="invitation.status === 'inactive'">
+              <div>
+                <p class="fleet-no-invite">This invitation is deactivated. Reactivate it to let a machine that already joined through it finish and start syncing.</p>
+                <button type="button" class="fleet-invite-code" @click="copyInvitation()"
+                        x-text="invitation.url" aria-label="Copy fleet invitation link"></button>
+                <button type="button" class="fleet-primary-action"
+                        :disabled="inviteBusy" @click="reactivateInvitation()"
+                        x-text="inviteBusy ? 'Reactivating…' : 'Reactivate invitation'"></button>
               </div>
             </template>
             <template x-if="invitation.status === 'none' || invitation.status === 'failed'">

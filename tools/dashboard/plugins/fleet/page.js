@@ -134,7 +134,11 @@ function fleetPage() {
     // the "Activate invitation — sign with your personal root" state. A machine
     // blocked on this reads 'link_off', never the false-reassuring 'first'.
     get inviteInactive() {
-      return this.invitation.status === 'awaiting_signature';
+      // Either the invite was signed then deactivated ('inactive') or never
+      // signed ('awaiting_signature'). Both mean the link is not serving joins,
+      // so an approved-but-unsynced machine is blocked until the operator acts.
+      return this.invitation.status === 'inactive'
+        || this.invitation.status === 'awaiting_signature';
     },
 
     // A connected machine syncs at least every ~10s; minutes of silence IS
@@ -527,6 +531,26 @@ function fleetPage() {
           opened.seed.fill(0);
           opened.seed = null;
         }
+        this.inviteBusy = false;
+      }
+    },
+
+    async reactivateInvitation() {
+      if (this.inviteBusy) return;
+      this.inviteBusy = true;
+      this.invitationError = null;
+      try {
+        const targetUuid = this.invitation.targetUuid;
+        if (!targetUuid) throw new Error('the invitation record is missing its target');
+        // Flip the SAME stored invite active again — no re-mint. A machine
+        // pinned to this invitation resumes and finishes on its next attempt.
+        await this._postJson('/api/fleet/invitations/reactivate', {
+          target_uuid: targetUuid,
+        });
+        await this.load({ quiet: true });
+      } catch (error) {
+        this.invitationError = (error && error.message) || String(error);
+      } finally {
         this.inviteBusy = false;
       }
     },

@@ -37,7 +37,8 @@ def _admission(approval_id: str, *, status="pending", error=None, offset=0):
 
 def _inputs(
     *, entries=(), admissions=(), approvals=None, executing=(),
-    invitation=None, machine_names=None, invitation_publication=None,
+    invitation=None, deactivated_invitation=None,
+    machine_names=None, invitation_publication=None,
     publishing_org="autonomy", telemetry_rows=None,
     local_verdict=None, serve_cert=None, tunnel_serving=None,
 ):
@@ -62,6 +63,7 @@ def _inputs(
         approvals=approvals or {},
         executing_approval_ids=frozenset(executing),
         invitation=invitation,
+        deactivated_invitation=deactivated_invitation,
         machine_names=machine_names or {},
         invitation_publication=invitation_publication,
         publishing_org=publishing_org,
@@ -240,6 +242,48 @@ def test_active_invitation_projects_short_link_and_signed_bootstrap_value():
     # The stable target id rides along so the browser can deactivate the
     # invitation and post the matching link_revoke approval.
     assert value["targetUuid"] == "11111111-1111-4111-8111-111111111111"
+
+
+def test_deactivated_invitation_projects_inactive_for_reactivation():
+    # A signed-but-deactivated invite must read 'inactive' (offer Reactivate),
+    # NOT fall through to 'awaiting_signature' — which would re-mint and strand
+    # a machine pinned to this invitation. The still-present publication record
+    # must not win over the dormant signed invite.
+    invite = fleet_invite.mint(
+        ROOT,
+        rendezvous="https://primary.example.test/links/token-2",
+        invite_id="44" * 32,
+        expires_at=NOW + 86_400_000,
+    )
+    dormant = StoredFleetInvitation(
+        target_uuid="22222222-2222-4222-8222-222222222222",
+        invite=invite,
+        active=False,
+        created_at=NOW - 10_000,
+    )
+    publication = {
+        "id": "publish-two",
+        "created_at": (NOW - 10_000) / 1000,
+        "request": {
+            "org": "autonomy",
+            "target_uuid": "22222222-2222-4222-8222-222222222222",
+            "target_type": "fleet:join",
+            "meta": {"ttl": 604800},
+        },
+        "result": {
+            "approved": True,
+            "execution": {"ok": True, "url": invite.rendezvous, "token": "44" * 16},
+        },
+    }
+    value = project(_inputs(
+        entries=(LOCAL_ENTRY,),
+        deactivated_invitation=dormant,
+        invitation_publication=publication,
+    ))["invitation"]
+    assert value["status"] == "inactive"
+    assert value["url"] == invite.rendezvous
+    assert value["bootstrapCode"] == "AUTONOMY_FLEET_INVITE=" + fleet_invite.encode(invite)
+    assert value["targetUuid"] == "22222222-2222-4222-8222-222222222222"
 
 
 def test_published_route_waits_for_browser_personal_signature():
