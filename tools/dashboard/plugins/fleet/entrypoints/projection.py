@@ -67,10 +67,15 @@ def _peer_rows(epoch: str | None) -> dict[str, dict]:
         ).fetchone()
         if exists is None:
             return {}
+        cols = {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(fleet_sync_peer_state)")
+        }
+        built = ",peer_built_at" if "peer_built_at" in cols else ""
         rows = conn.execute(
             "SELECT machine_public_key,last_success_ns,bytes_sent,"
             "bytes_received,transactions_applied,retries,last_error_code,"
-            "updated_at_ns FROM fleet_sync_peer_state WHERE roster_epoch=?",
+            f"updated_at_ns{built} FROM fleet_sync_peer_state WHERE roster_epoch=?",
             (epoch,),
         ).fetchall()
         return {str(row["machine_public_key"]): dict(row) for row in rows}
@@ -198,6 +203,9 @@ def _observation(peer: Mapping | None, telemetry: Mapping | None = None) -> dict
         ),
         "retryCount": int(peer.get("retries") or 0),
         "lastErrorCode": peer.get("last_error_code"),
+        # The peer's build (committer date), learned from a schema refusal, so a
+        # version-mismatch ("Paused") row can name WHICH build the peer runs.
+        "peerBuiltAt": peer.get("peer_built_at"),
         "syncIterations": int(telemetry.get("iterations") or 0),
         "successfulIterations": int(
             telemetry.get("successful_iterations") or 0
@@ -494,9 +502,13 @@ def project(inputs: ProjectionInputs) -> dict:
         "tunnelServing": inputs.tunnel_serving,
         "verdictTopLine": verdict.get("top_line"),
     }
+    from tools.network import build_version
     return {
         "serverTime": inputs.server_time,
         "localMachine": local_machine,
+        # This machine's build (committer date), so a version-mismatch row can
+        # read "this build … / peer's build …" instead of an opaque digest.
+        "localBuiltAt": build_version.disk_built_at(),
         "summary": {
             "authorizedMachines": len(active),
             "connectedMachines": None,

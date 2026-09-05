@@ -352,26 +352,43 @@ def _require_hex64(value: object, what: str) -> str:
 
 
 def encode_schema_refusal(
-    *, digest: str, version: int = FLEET_SYNC_PROTOCOL_VERSION
+    *, digest: str, version: int = FLEET_SYNC_PROTOCOL_VERSION,
+    built_at: str | None = None,
 ) -> bytes:
-    return _REFUSAL_MAGIC + canonical_json(
-        {
-            "v": version,
-            "kind": "schema-refused",
-            "digest": _require_hex64(digest, "schema refusal digest"),
-        }
-    )
+    body = {
+        "v": version,
+        "kind": "schema-refused",
+        "digest": _require_hex64(digest, "schema refusal digest"),
+    }
+    # built_at is the serving side's build timestamp — informational, so the
+    # puller can tell the operator WHICH build the incompatible peer runs, not
+    # just that a hash differs. Optional: an older peer omits it and the digest
+    # comparison (the authoritative compatibility key) is unchanged.
+    if built_at is not None:
+        body["built_at"] = str(built_at)
+    return _REFUSAL_MAGIC + canonical_json(body)
 
 
-def decode_schema_refusal(raw: bytes) -> str:
+def decode_schema_refusal(raw: bytes) -> tuple[str, str | None]:
+    """Return ``(digest, built_at)`` — built_at is None from an older peer."""
     if not raw.startswith(_REFUSAL_MAGIC):
         raise FleetSyncProtocolError("fleet sync refusal has wrong magic")
-    value = _json_object(
-        raw[len(_REFUSAL_MAGIC):], _REFUSAL_FIELDS, "fleet sync refusal"
-    )
-    if value["kind"] != "schema-refused":
-        raise FleetSyncProtocolError("fleet sync refusal has wrong kind")
-    return _require_hex64(value["digest"], "fleet sync refusal digest")
+    try:
+        value = json.loads(raw[len(_REFUSAL_MAGIC):])
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
+        raise FleetSyncProtocolError("fleet sync refusal is not valid JSON") from exc
+    if (
+        not isinstance(value, dict)
+        or not _REFUSAL_FIELDS <= set(value)
+        or not set(value) <= (_REFUSAL_FIELDS | {"built_at"})
+        or value["v"] not in SUPPORTED_PROTOCOL_VERSIONS
+        or value["kind"] != "schema-refused"
+    ):
+        raise FleetSyncProtocolError("fleet sync refusal is malformed")
+    built_at = value.get("built_at")
+    if built_at is not None and not isinstance(built_at, str):
+        raise FleetSyncProtocolError("fleet sync refusal built_at is malformed")
+    return _require_hex64(value["digest"], "fleet sync refusal digest"), built_at
 
 
 def encode_checkpoint_file(relative: str, body: bytes) -> bytes:
@@ -961,6 +978,7 @@ class SQLiteFleetSyncStore:
         peer_watermark: int | None = None,
         error: str | None = None,
         success: bool = False,
+        peer_built_at: str | None = None,
     ) -> None:
         conn, _catalog = self._open()
         now = time.time_ns()
@@ -970,10 +988,15 @@ class SQLiteFleetSyncStore:
                 "machine_public_key,roster_epoch,online,last_success_ns,"
                 "peer_watermark,bytes_sent,bytes_received,checkpoints_received,"
                 "deltas_received,transactions_applied,acknowledgements,retries,"
-                "last_error_code,updated_at_ns) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "last_error_code,peer_built_at,updated_at_ns) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(machine_public_key,roster_epoch) DO UPDATE SET "
                 "online=excluded.online,"
+                # A pull that isn't a schema refusal carries no peer build, so
+                # keep the last one we learned rather than nulling it.
+                "peer_built_at=CASE WHEN excluded.peer_built_at IS NULL THEN "
+                "fleet_sync_peer_state.peer_built_at "
+                "ELSE excluded.peer_built_at END,"
                 "last_success_ns=CASE WHEN ? THEN excluded.updated_at_ns "
                 "ELSE fleet_sync_peer_state.last_success_ns END,"
                 "peer_watermark=CASE "
@@ -1000,7 +1023,8 @@ class SQLiteFleetSyncStore:
                     machine_pub, epoch, int(online), now if success else None,
                     peer_watermark, bytes_sent, bytes_received,
                     checkpoints_received, deltas_received, transactions_applied,
-                    acknowledgements, retries, error, now, int(success),
+                    acknowledgements, retries, error, peer_built_at, now,
+                    int(success),
                 ),
             )
             conn.commit()
@@ -1238,8 +1262,10 @@ class FleetSyncScheduler:
                     store.compatibility_digest
                 )
                 if peer_digest != local_digest:
+                    from tools.network import build_version
                     refusal = encode_schema_refusal(
-                        digest=local_digest, version=protocol_version
+                        digest=local_digest, version=protocol_version,
+                        built_at=build_version.disk_built_at(),
                     )
                     stats["bytes_sent"] += len(refusal)
                     error_code = "schema_mismatch"
@@ -1806,7 +1832,18 @@ class FleetSyncScheduler:
                 self.authenticator.authorize(machine_pub)
                 received += len(message)
                 if message.startswith(_REFUSAL_MAGIC):
-                    decode_schema_refusal(message)
+                    # Capture — do NOT discard — the peer's digest and build
+                    # timestamp, so the fleet view can name WHICH build the
+                    # incompatible peer runs, not just that a hash differs.
+                    peer_refusal_digest, peer_built_at = decode_schema_refusal(
+                        message
+                    )
+                    with contextlib.suppress(Exception):
+                        await asyncio.to_thread(
+                            store.record_peer, machine_pub, epoch,
+                            online=False, error="schema_mismatch",
+                            peer_built_at=peer_built_at,
+                        )
                     raise FleetSyncSchemaMismatch(
                         "peer replicated schema differs; synchronization "
                         "pauses until this machine applies the same migration"

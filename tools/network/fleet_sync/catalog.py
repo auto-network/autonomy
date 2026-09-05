@@ -664,6 +664,7 @@ class MutationCatalog:
                 retries INTEGER NOT NULL DEFAULT 0 CHECK(retries>=0),
                 lag_ns INTEGER,
                 last_error_code TEXT,
+                peer_built_at TEXT,
                 updated_at_ns INTEGER NOT NULL DEFAULT 0 CHECK(updated_at_ns>=0),
                 PRIMARY KEY(machine_public_key,roster_epoch)
             ) WITHOUT ROWID""",
@@ -679,6 +680,20 @@ class MutationCatalog:
         )
         for statement in statements:
             self.conn.execute(statement)
+        # Migrate an existing peer-state table to carry the peer's build
+        # timestamp (learned from a schema-refusal), so a version mismatch can
+        # name WHICH build the incompatible peer runs. Local, non-replicated
+        # column; a plain additive ALTER, guarded so it runs once.
+        peer_columns = {
+            str(row[1])
+            for row in self.conn.execute(
+                "PRAGMA table_info(fleet_sync_peer_state)"
+            )
+        }
+        if "peer_built_at" not in peer_columns:
+            self.conn.execute(
+                "ALTER TABLE fleet_sync_peer_state ADD COLUMN peer_built_at TEXT"
+            )
 
     def _ensure_state(self) -> tuple[bool, bool]:
         """Create or safely upgrade the singleton catalog identity row."""
