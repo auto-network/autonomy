@@ -163,6 +163,7 @@ async def direct_connect(
     *,
     org: str,
     root_pub: str,
+    link_pub: "str | None" = None,
     session: str,
     now: Optional[int] = None,
     timeout: float = 3.0,
@@ -186,7 +187,7 @@ async def direct_connect(
                 raise HandshakeError("expected binary SERVER_HELLO")
             server_hello = read_viewer_record(server_hello)
             server_eph, transcript_hash = verify_server_hello(
-                server_hello, root_pub=root_pub, org=org, token=session,
+                server_hello, root_pub=root_pub, link_pub=link_pub, org=org, token=session,
                 client_eph=client_eph, now=now,
             )
             return ViewerChannel(ws, ChannelCrypto.client(eph_priv, server_eph,

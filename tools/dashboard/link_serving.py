@@ -1333,6 +1333,20 @@ def _make_ice_serving_connector(
             "caps": ("host-lease/1", "tls-stream/1", "dns-01/1"),
             "stream_handler": LocalCaddyStreamHandler(graph_org),
         }
+    # Per-link serving (graph://807b4e11-3e9): resolve the link's channel
+    # signing key from the vault so the handshake is authenticated by that key
+    # instead of the org-root serve cert. A link with no channel key (legacy,
+    # or a cold vault at publish) resolves to None and serves the old way.
+    def _link_key_for(token):
+        from tools.dashboard.link_channel_key import (
+            ChannelKeyUnavailable,
+            channel_key_for,
+        )
+        try:
+            return channel_key_for(token, graph_org)
+        except ChannelKeyUnavailable:
+            return None
+
     connector = factory(
         relay,
         org,
@@ -1343,6 +1357,7 @@ def _make_ice_serving_connector(
         min_backoff=min_backoff,
         max_backoff=max_backoff,
         publisher=publisher,
+        link_key_for=_link_key_for,
         **stream_kwargs,
     )
     return connector
