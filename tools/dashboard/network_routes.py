@@ -1151,6 +1151,126 @@ async def post_ledger_invite(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "invite_id": invite_id})
 
 
+async def post_ledger_revoke(request: Request) -> JSONResponse:
+    """Append one client-signed revoke that deactivates an invitation.
+
+    The browser mints and signs the revoke (Membership screen, auto-j1833);
+    this route verifies the signature, gates on current heads, TRIAL-FOLDS the
+    event so an unauthorized revoke is refused rather than appended as an
+    invalid row, and restricts targets to invite events — claims, delegations,
+    and keys are revoked through their own surfaces.
+    """
+    if _mock_mode():
+        return JSONResponse(
+            {"ok": False, "error": "mock dashboard has no authority ledger"},
+            status_code=502,
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(
+            {"ok": False, "error": "body must be JSON"},
+            status_code=400,
+        )
+    if not isinstance(body, dict):
+        return JSONResponse(
+            {"ok": False, "error": "body must be a JSON object"},
+            status_code=400,
+        )
+    requested_org = body.get("org")
+    if not isinstance(requested_org, str) or not requested_org:
+        return JSONResponse(
+            {"ok": False, "error": "body must carry the local org slug"},
+            status_code=400,
+        )
+    _org, refused = resolve_scoped_org(requested_org, request=request)
+    if refused is not None:
+        return refused
+    wire = body.get("event")
+    if not isinstance(wire, str):
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "body must carry an event canonical wire string",
+            },
+            status_code=400,
+        )
+
+    from tools.network.ledger import (
+        Event,
+        Ledger,
+        LedgerError,
+        LedgerStore,
+        org_ledger_db_path,
+    )
+    from tools.network.ledger.fold import fold
+
+    try:
+        event = Event.from_json(wire)
+        if event.type != "revoke":
+            raise ValueError("event type must be revoke")
+        if "target_event" not in event.payload:
+            raise ValueError("invitation deactivation revokes by target_event")
+        event.verify_sig()
+    except (LedgerError, ValueError, TypeError) as exc:
+        return JSONResponse(
+            {"ok": False, "error": f"revocation rejected: {exc}"},
+            status_code=400,
+        )
+
+    store_path = org_ledger_db_path(requested_org)
+    if not store_path.exists():
+        return JSONResponse(
+            {"ok": False, "error": "organization ledger is not founded"},
+            status_code=404,
+        )
+    try:
+        with LedgerStore(store_path) as store:
+            current_heads = store.heads()
+            if event.parents != current_heads:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": "authority ledger advanced; refresh and retry",
+                    },
+                    status_code=409,
+                )
+            try:
+                target = store.get(event.payload["target_event"])
+            except Exception:
+                target = None
+            if target is None or target.type != "invite":
+                return JSONResponse(
+                    {"ok": False, "error": "target is not an invitation"},
+                    status_code=400,
+                )
+            # Trial-fold before appending: an unauthorized revoke must be a
+            # refusal, never an invalid row in every replica forever.
+            scratch = Ledger()
+            scratch.ingest(store.ledger.events())
+            scratch.add(event)
+            verdict = fold(scratch)
+            if not verdict.valid.get(event.event_id, False):
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": (
+                            "revocation refused: "
+                            + verdict.reasons.get(event.event_id, "invalid")
+                        ),
+                    },
+                    status_code=403,
+                )
+            revoke_id = store.append(event)
+            store.refresh_projections()
+    except (LedgerError, OSError) as exc:
+        return JSONResponse(
+            {"ok": False, "error": f"could not append revocation: {exc}"},
+            status_code=400,
+        )
+    return JSONResponse({"ok": True, "revoke_id": revoke_id})
+
+
 async def post_sealed_org_key(request: Request) -> JSONResponse:
     """Persist an org root key the BROWSER sealed (I1, auto-jdba4).
 
@@ -2461,6 +2581,7 @@ ROUTES = [
     Route("/api/network/ledger/heads", get_ledger_heads, methods=["GET"]),
     Route("/api/network/ledger/delegate", post_ledger_delegate, methods=["POST"]),
     Route("/api/network/ledger/invite", post_ledger_invite, methods=["POST"]),
+    Route("/api/network/ledger/revoke", post_ledger_revoke, methods=["POST"]),
     Route("/api/network/ledger/claim", post_ledger_claim, methods=["POST"]),
     Route(
         "/api/network/ledger/claim/context",
