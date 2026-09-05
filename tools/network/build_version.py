@@ -28,14 +28,42 @@ def _git_rev(ref: str = "HEAD") -> str | None:
     return out.stdout.strip() if out.returncode == 0 else None
 
 
+def _git_commit_date(ref: str = "HEAD") -> str | None:
+    """The committer date of *ref* as an ISO-8601 string, or None.
+
+    A human-readable build identifier — "which build is this" — until real
+    version labels exist. The image also stamps this into /app/VERSION at
+    build time (deploy/Dockerfile), so it survives even after the git remote
+    is stripped, and it is deterministic per commit.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(_REPO_ROOT), "show", "-s", "--format=%cI", ref],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return None
+    return (out.stdout.strip() or None) if out.returncode == 0 else None
+
+
 #: Captured once, at import time, in this process. Compare against
 #: disk_head() to detect a process still running pre-deploy code.
 PROCESS_COMMIT: str | None = _git_rev("HEAD")
+
+#: The committer date of the commit THIS process loaded — the human-facing
+#: "build" identifier peers exchange so a version mismatch names which build
+#: each side runs, not just that a hash differs.
+PROCESS_BUILT_AT: str | None = _git_commit_date("HEAD")
 
 
 def disk_head() -> str | None:
     """The commit checked out right now -- a fresh call, not cached."""
     return _git_rev("HEAD")
+
+
+def disk_built_at() -> str | None:
+    """The committer date of the commit checked out right now (fresh)."""
+    return _git_commit_date("HEAD")
 
 
 def is_stale(*, disk_commit: str | None = None) -> bool | None:

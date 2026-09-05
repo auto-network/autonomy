@@ -575,3 +575,30 @@ def test_dashboard_checkpoint_handoff_resumes_late_row_and_tombstone_deltas(
         assert right.server.connection_count == 0
 
     asyncio.run(run())
+
+
+def test_record_peer_persists_the_peer_build_timestamp(tmp_path: Path) -> None:
+    # A schema refusal now carries the peer's build timestamp so the fleet view
+    # can name WHICH build the incompatible peer runs. record_peer stores it,
+    # and a later ordinary pull (no build in hand) must KEEP the learned value.
+    key = KeyPair.generate()
+    path = tmp_path / "peer.db"
+    _prepare(path, key)
+    store = SQLiteFleetSyncStore(path)
+    peer = "aa" * 32
+    epoch = "cd" * 32
+    store.record_peer(peer, epoch, online=False, error="schema_mismatch",
+                      peer_built_at="2026-09-03T12:00:00+00:00")
+    with sqlite3.connect(path) as conn:
+        built, err = conn.execute(
+            "SELECT peer_built_at,last_error_code FROM fleet_sync_peer_state "
+            "WHERE machine_public_key=?", (peer,)).fetchone()
+    assert built == "2026-09-03T12:00:00+00:00"
+    assert err == "schema_mismatch"
+    # A later successful pull carries no build timestamp; the learned one stays.
+    store.record_peer(peer, epoch, online=True, success=True)
+    with sqlite3.connect(path) as conn:
+        built = conn.execute(
+            "SELECT peer_built_at FROM fleet_sync_peer_state "
+            "WHERE machine_public_key=?", (peer,)).fetchone()[0]
+    assert built == "2026-09-03T12:00:00+00:00"

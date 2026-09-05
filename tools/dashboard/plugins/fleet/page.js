@@ -179,8 +179,35 @@ function fleetPage() {
       return {
         id, tone,
         word: this.STRINGS.word[id] || '',
-        note: this.STRINGS.note[id] || '',
+        note: this.noteFor(id, machine),
       };
+    },
+
+    // A build's committer date, formatted for humans (null if absent/invalid).
+    buildLabel(iso) {
+      if (!iso) return null;
+      const when = new Date(iso);
+      if (isNaN(when.getTime())) return null;
+      return when.toLocaleDateString([], {
+        year: 'numeric', month: 'short', day: 'numeric',
+      });
+    },
+
+    // The note for a state; for a version mismatch ("paused") it names WHICH
+    // build each side runs (the digest stays the internal comparison key), so
+    // the operator sees a real "this build … / their build …", not an opaque
+    // "different version".
+    noteFor(id, machine) {
+      let base = this.STRINGS.note[id] || '';
+      if (id === 'paused') {
+        const mine = this.buildLabel(this.view && this.view.localBuiltAt);
+        const theirs = this.buildLabel(machine && machine.peerBuiltAt);
+        if (mine || theirs) {
+          base += ' This machine’s build: ' + (mine || 'unknown')
+            + '; the other machine’s build: ' + (theirs || 'unknown') + '.';
+        }
+      }
+      return base;
     },
 
     certExpired(machine) {
