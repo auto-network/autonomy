@@ -363,6 +363,35 @@ CREATE TABLE IF NOT EXISTS link_view_attributions (
     viewed_at    INTEGER NOT NULL,
     PRIMARY KEY (session_id, token)
 );
+
+-- Committed membership (graph://da0dd9fb-e75, auto-1wxet): the registry's
+-- ONE verified tuple per org — adopted by checkpoint induction from a
+-- root-signed seed, never by folding a ledger. `checkpoint` stores the full
+-- signed record so the induction can continue and replay can compare.
+CREATE TABLE IF NOT EXISTS membership_state (
+    org_uuid           TEXT PRIMARY KEY,
+    seq                INTEGER NOT NULL,
+    members_root       TEXT NOT NULL,
+    checkpointers_root TEXT NOT NULL,
+    ledger_head        TEXT NOT NULL,
+    checkpoint         TEXT NOT NULL,
+    verified_at        INTEGER NOT NULL
+);
+
+-- Append-only history of every ACCEPTED checkpoint — the evidence and
+-- replay plane. The records are themselves hash-chained and signed, so the
+-- table needs no witness envelope; insertion order is adoption order (a
+-- root-signed reset may re-anchor at a lower seq than a superseded fork,
+-- so seq alone is not the key).
+CREATE TABLE IF NOT EXISTS membership_checkpoints (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_uuid    TEXT NOT NULL,
+    seq         INTEGER NOT NULL,
+    record      TEXT NOT NULL,
+    accepted_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_membership_ckpt_org
+    ON membership_checkpoints (org_uuid, id);
 """
 
 
@@ -378,6 +407,57 @@ class OrgBinding:
     endpoint_hints: Optional[list]
     policy_epoch: int = 0
     binding_generation: str = ""
+
+
+@dataclass(frozen=True)
+class MembershipState:
+    """The registry's verified membership commitment for one org."""
+
+    org_uuid: str
+    seq: int
+    members_root: str
+    checkpointers_root: str
+    ledger_head: str
+    checkpoint: dict
+    verified_at: int
+
+
+def validate_membership_advance(
+    stored_record: Optional[dict], record: object, root_pub: str
+) -> None:
+    """The one adoption rule, shared by the submission route and replay.
+
+    Delegates record validation to
+    :func:`tools.network.ledger.membership_commitment.validate_checkpoint`
+    (schema, signatures, seq+1 linkage, the signer's inclusion proof under
+    the previous ``checkpointers_root``), then adds the registry's two
+    adoption rules: a member-signed record needs an adopted state to chain
+    from, and a ROOT-SIGNED record must strictly advance the stored seq —
+    "valid at any seq" (graph://da0dd9fb-e75) means seed-and-reset, not
+    replaying an old captured reset to roll membership back.
+
+    Raises ``MembershipCommitmentError`` naming the failed rule.
+    """
+    from tools.network.ledger.membership_commitment import (
+        MembershipCommitmentError,
+        validate_checkpoint,
+    )
+
+    if not isinstance(record, dict):
+        raise MembershipCommitmentError("checkpoint must be a JSON object")
+    root_signed = record.get("signer") == root_pub
+    if root_signed:
+        validate_checkpoint(record, root_pub=root_pub)
+        if stored_record is not None and record.get("seq") <= stored_record["seq"]:
+            raise MembershipCommitmentError(
+                "a root-signed checkpoint must advance the stored seq — "
+                "an old seed or reset cannot replay")
+    else:
+        if stored_record is None:
+            raise MembershipCommitmentError(
+                "no membership state for this org — a root-signed seed "
+                "checkpoint must be adopted first")
+        validate_checkpoint(record, root_pub=root_pub, prev_record=stored_record)
 
 
 @dataclass(frozen=True)
@@ -1722,6 +1802,77 @@ class RegistryStore:
             },
             "entry_id": row["entry_id"],
         }
+
+    # -- committed membership (graph://da0dd9fb-e75, auto-1wxet) ---------------
+
+    @_locked
+    def get_membership_state(self, org_uuid: str) -> Optional[MembershipState]:
+        row = self._conn.execute(
+            "SELECT * FROM membership_state WHERE org_uuid = ?", (org_uuid,)
+        ).fetchone()
+        if row is None:
+            return None
+        return MembershipState(
+            org_uuid=row["org_uuid"],
+            seq=row["seq"],
+            members_root=row["members_root"],
+            checkpointers_root=row["checkpointers_root"],
+            ledger_head=row["ledger_head"],
+            checkpoint=json.loads(row["checkpoint"]),
+            verified_at=row["verified_at"],
+        )
+
+    @_locked
+    def advance_membership_state(self, org_uuid: str, record: dict, *, now: int) -> None:
+        """Adopt an ALREADY-VALIDATED checkpoint: upsert the verified tuple
+        and append the evidence row in one transaction. Callers run
+        :func:`validate_membership_advance` first — this method persists,
+        it does not judge."""
+        self._conn.execute(
+            "INSERT INTO membership_state (org_uuid, seq, members_root,"
+            " checkpointers_root, ledger_head, checkpoint, verified_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT (org_uuid) DO UPDATE SET seq=excluded.seq,"
+            " members_root=excluded.members_root,"
+            " checkpointers_root=excluded.checkpointers_root,"
+            " ledger_head=excluded.ledger_head,"
+            " checkpoint=excluded.checkpoint,"
+            " verified_at=excluded.verified_at",
+            (org_uuid, record["seq"], record["members_root"],
+             record["checkpointers_root"], record["ledger_head"],
+             json.dumps(record, sort_keys=True, separators=(",", ":")), now),
+        )
+        self._conn.execute(
+            "INSERT INTO membership_checkpoints (org_uuid, seq, record,"
+            " accepted_at) VALUES (?, ?, ?, ?)",
+            (org_uuid, record["seq"],
+             json.dumps(record, sort_keys=True, separators=(",", ":")), now),
+        )
+        self._conn.commit()
+
+    @_locked
+    def membership_checkpoint_history(self, org_uuid: str, limit: int = 100_000) -> list:
+        """Every accepted checkpoint record, in adoption order — the replay
+        source :meth:`rebuild_membership_state` consumes."""
+        rows = self._conn.execute(
+            "SELECT record FROM membership_checkpoints WHERE org_uuid = ?"
+            " ORDER BY id LIMIT ?",
+            (org_uuid, limit),
+        ).fetchall()
+        return [json.loads(r["record"]) for r in rows]
+
+    def rebuild_membership_state(self, org_uuid: str, root_pub: str) -> Optional[dict]:
+        """Replay the accepted-checkpoint history through the SAME adoption
+        rule the submission route runs, returning the final record — the
+        deploy runbook's recovery check: the result must equal the stored
+        ``membership_state`` checkpoint exactly. Raises on a history that no
+        longer validates (evidence of tampering, not a recoverable state).
+        Read-only: it never writes."""
+        state: Optional[dict] = None
+        for record in self.membership_checkpoint_history(org_uuid):
+            validate_membership_advance(state, record, root_pub)
+            state = record
+        return state
 
     @_locked
     def witness_tip(self, org_uuid: str, topic: str) -> Optional[dict]:
