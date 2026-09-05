@@ -245,14 +245,92 @@ def test_require_auth_is_rung2_refused(client, clock, root):
         assert ok["ok"] is True
 
 
-def test_org_join_refused_on_control_channel(client, clock, root):
-    """org:join keeps the envelope endpoint (its own transport) — it is
-    not carried as a share-link control op."""
+_ORG_JOIN_INVITE = "ab" * 32  # 64 lowercase hex — an invite event id
+_ORG_JOIN_EXPIRY = 1_900_000_000_000  # absolute unix-ms, the invitation's expiry
+
+
+def test_org_join_create_link_over_tunnel(client, clock, root, app):
+    """auto-qol1v: org:join now rides the control channel and mints a grant
+    identical to the HTTP path — invite_ref + absolute expiry, org-tunnel
+    attribution. The tunnel is authenticated by its serve-cert, so a
+    genesis≠binding org (the autonomy shape) publishes here with no per-request
+    root chain: target_uuid just has to be the tunnel's own org."""
     with _open_tunnel(client, clock, root) as ws:
-        reply = _ctrl(ws, "4" * 32, "create-link",
-                      {"target_uuid": ORG, "target_type": "org:join"})
+        reply = _ctrl(ws, "4" * 32, "create-link", {
+            "target_uuid": ORG, "target_type": "org:join",
+            "invite_ref": _ORG_JOIN_INVITE, "expires_at": _ORG_JOIN_EXPIRY,
+            "meta": {"label": "Join us"},
+        })
+    assert reply["ok"] is True
+    token = reply["token"]
+    assert len(token) == 32 and int(token, 16) >= 0
+    assert reply["url"].endswith(f"/l/{token}")
+    assert reply["expires_at"] == _ORG_JOIN_EXPIRY
+    grant = app.state.store.get_link(token)
+    assert grant is not None
+    assert grant.org_uuid == ORG
+    assert grant.target_type == "org:join"
+    assert grant.invite_ref == _ORG_JOIN_INVITE
+    assert grant.expires_at_ms == _ORG_JOIN_EXPIRY
+    assert grant.subject_kind == "org-tunnel" and grant.signer_pub is None
+
+
+def test_org_join_bad_invite_ref_refused(client, clock, root):
+    with _open_tunnel(client, clock, root) as ws:
+        reply = _ctrl(ws, "5" * 32, "create-link", {
+            "target_uuid": ORG, "target_type": "org:join",
+            "invite_ref": "not-hex", "expires_at": _ORG_JOIN_EXPIRY,
+        })
     assert reply["ok"] is False
-    assert "org:join" in reply["error"]
+    assert "invite_ref" in reply["error"]
+
+
+def test_org_join_target_uuid_must_equal_tunnel_org(client, clock, root):
+    with _open_tunnel(client, clock, root) as ws:
+        reply = _ctrl(ws, "6" * 32, "create-link", {
+            "target_uuid": TARGET, "target_type": "org:join",
+            "invite_ref": _ORG_JOIN_INVITE, "expires_at": _ORG_JOIN_EXPIRY,
+        })
+    assert reply["ok"] is False
+    assert "organization UUID" in reply["error"]
+
+
+def test_org_join_meta_admits_only_label(client, clock, root):
+    """An org:join grant's lifetime is the invitation's, so meta.ttl is refused
+    (meta admits only label) — the ttl/expires_at conflict is unrepresentable."""
+    with _open_tunnel(client, clock, root) as ws:
+        reply = _ctrl(ws, "7" * 32, "create-link", {
+            "target_uuid": ORG, "target_type": "org:join",
+            "invite_ref": _ORG_JOIN_INVITE, "expires_at": _ORG_JOIN_EXPIRY,
+            "meta": {"ttl": 3600},
+        })
+    assert reply["ok"] is False
+    assert "only label" in reply["error"]
+
+
+def test_invite_ref_refused_on_non_org_join(client, clock, root):
+    with _open_tunnel(client, clock, root) as ws:
+        reply = _ctrl(ws, "8" * 32, "create-link", {
+            "target_uuid": TARGET, "target_type": "present",
+            "invite_ref": _ORG_JOIN_INVITE,
+        })
+    assert reply["ok"] is False
+    assert "only valid for target_type org:join" in reply["error"]
+
+
+def test_org_join_revoke_over_tunnel(client, clock, root, app):
+    """org:join revoke rides the same org-ownership-checked path as any link."""
+    with _open_tunnel(client, clock, root) as ws:
+        created = _ctrl(ws, "9" * 32, "create-link", {
+            "target_uuid": ORG, "target_type": "org:join",
+            "invite_ref": _ORG_JOIN_INVITE, "expires_at": _ORG_JOIN_EXPIRY,
+        })
+        token = created["token"]
+        assert app.state.store.get_link(token) is not None
+        revoked = _ctrl(ws, "0" * 32, "revoke-link", {"token": token})
+    assert revoked["ok"] is True
+    assert revoked["token"] == token
+    assert revoked["revoked_at"] == clock.now
 
 
 def test_malformed_control_payload_is_a_protocol_violation():
