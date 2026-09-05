@@ -253,6 +253,52 @@ def discover_org_sync_scopes() -> dict[str, Path]:
     return scopes
 
 
+def materialize_org_scopes_from_roster() -> list[str]:
+    """Create the local ``orgs/<slug>.db`` stub for every org in the SYNCED
+    org roster that this machine does not yet have, so ``discover_org_sync_scopes``
+    finds it and the org-DB sync fills it.
+
+    This is the receiver-side bootstrap that closes the org chicken-and-egg: a
+    fresh fleet member learns its orgs from the ``autonomy.fleet.org-roster``
+    record (carried by the personal-scope sync), not from whichever DB files
+    happen to exist locally. The stub is created with the roster's recorded
+    ``org_id`` so it is the SAME org as home's, not merely the same slug.
+    Idempotent: an org whose DB already exists is left untouched, and one
+    malformed entry never aborts the rest. Returns the slugs newly created.
+    """
+    from tools.graph.db import GraphDB, _org_db_path
+    from tools.network import fleet_org_roster
+
+    try:
+        roster = fleet_org_roster.current_orgs()
+    except Exception:
+        return []
+    if not roster:
+        return []
+    orgs_dir = Path(_org_db_path("personal")).parent / "orgs"
+    created: list[str] = []
+    for slug, entry in sorted(roster.items()):
+        if not slug or slug == "personal" or ":" in slug:
+            continue
+        path = orgs_dir / f"{slug}.db"
+        if path.exists():
+            continue
+        try:
+            GraphDB.create_org_db(
+                slug, type_="shared", org_id=entry.org_id, path=path,
+            ).close()
+            created.append(slug)
+        except FileExistsError:
+            # Raced with another round or a concurrent create — the file is
+            # there now, which is all we needed.
+            continue
+        except Exception:
+            # A single bad entry (unwritable path, bad id) must not stop the
+            # rest of the fleet's orgs from bootstrapping.
+            continue
+    return created
+
+
 def rank_peers(
     candidates: Sequence[str],
     last_success_ns: Mapping[str, int],

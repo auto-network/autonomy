@@ -48,6 +48,7 @@ from tools.network.fleet_sync_scheduler import (
     decode_operation_frame,
     decode_transaction_header,
     discover_org_sync_scopes,
+    materialize_org_scopes_from_roster,
     encode_pull_request,
     encode_breadcrumb,
     FLEET_SYNC_PROTOCOL_VERSION,
@@ -66,6 +67,26 @@ from tools.network.relaykit.viewer import ViewerChannel
 
 
 logger = logging.getLogger(__name__)
+
+
+def _materialize_then_discover_org_scopes():
+    """materialize_org_scopes_from_roster() then discover_org_sync_scopes().
+
+    The scheduler's ``sync_scopes`` callback: a fresh member first creates the
+    org DB stubs its synced org roster names, so discovery returns them and the
+    org databases actually synchronise (they are never created by the sync
+    layer). Idempotent; on home it creates nothing."""
+    try:
+        newly = materialize_org_scopes_from_roster()
+        if newly:
+            logger.info(
+                "fleet org roster: materialised %d org scope(s): %s",
+                len(newly), ", ".join(newly),
+            )
+    except Exception:
+        logger.exception("materialize_org_scopes_from_roster failed; continuing")
+    return discover_org_sync_scopes()
+
 
 PROTOCOL_VERSION = 1
 PULL_OP = "fleet.sync.pull"
@@ -277,7 +298,11 @@ class ConnectorFleetRuntime:
             peer_addresses=lambda: {},
             personal_db_path=_org_db_path("personal"),
             telemetry_recorder=fleet_sync_telemetry.record_iteration,
-            sync_scopes=discover_org_sync_scopes,
+            # Materialise org DB stubs from the synced org roster before
+            # discovery, so the direct/tunnel scheduler (like the relay pull)
+            # bootstraps a fresh member's org scopes rather than only seeing
+            # whatever files already exist.
+            sync_scopes=_materialize_then_discover_org_scopes,
         )
         scheduler = FleetSyncScheduler(config)
         scheduler._roster_snapshot = entries
@@ -1338,6 +1363,15 @@ class DashboardFleetRelaySyncService:
         """
         import time
 
+        # Bootstrap: materialise org DB stubs from the synced org roster BEFORE
+        # discovery, so a fresh member's org scopes actually appear (they are
+        # never created by the sync layer — it requires the file to exist).
+        newly = await asyncio.to_thread(materialize_org_scopes_from_roster)
+        if newly:
+            logger.info(
+                "fleet org roster: materialised %d org scope(s) from roster: %s",
+                len(newly), ", ".join(newly),
+            )
         for scope in sorted(await asyncio.to_thread(discover_org_sync_scopes)):
             started_at_ns = time.time_ns()
             started_monotonic_ns = time.monotonic_ns()

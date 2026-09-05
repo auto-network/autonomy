@@ -20793,6 +20793,21 @@ async def _on_startup():
         except Exception:
             logger.exception("ensure_bootstrap_orgs() failed; continuing startup")
         _mark("org_ops.ensure_bootstrap_orgs")
+        # Ensure every local shared org is in the fleet ORG roster so it syncs
+        # to the whole fleet (the org-membership record; unsigned personal.db
+        # state, no seed). Idempotent; backfills orgs that predate the roster.
+        try:
+            published = org_ops.publish_local_orgs_to_roster()
+            if published:
+                logger.info(
+                    "fleet org roster: published %d org(s): %s",
+                    len(published), ", ".join(published),
+                )
+        except Exception:
+            logger.exception(
+                "publish_local_orgs_to_roster() failed; continuing startup"
+            )
+        _mark("org_ops.publish_local_orgs_to_roster")
         await web_push.start_worker()
         _mark("web_push.start_worker")
         await web_push_worker.start_worker()
