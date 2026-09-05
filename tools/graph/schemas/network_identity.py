@@ -52,6 +52,7 @@ from .registry import (
     home,
     keyed_per_entity,
     singleton,
+    vaulted,
 )
 
 
@@ -79,7 +80,7 @@ GENESIS_ID_HEX_LEN = 64
 #: into existence either by founding an org or by claiming membership.
 PERSONA_SOURCES = ("found", "join")
 NETWORK_LINK_GRANT_SET_ID = "autonomy.network.link-grant"
-NETWORK_LINK_GRANT_REVISION = 3
+NETWORK_LINK_GRANT_REVISION = 4
 NETWORK_PUBLIC_LINK_BASE_URL = "https://relay.auto.network"
 NETWORK_SERVE_CERT_SET_ID = "autonomy.network.serve-cert"
 NETWORK_SERVE_CERT_REVISION = 2
@@ -668,10 +669,10 @@ class NetworkLinkGrantV2(NetworkLinkGrantV1):
 
 
 class NetworkLinkGrantV3(NetworkLinkGrantV2):
-    """Current share-link grant, including invitation join context."""
+    """Share-link grant with invitation join context (superseded by V4)."""
 
     set_id = NETWORK_LINK_GRANT_SET_ID
-    schema_revision = NETWORK_LINK_GRANT_REVISION
+    schema_revision = 3
 
     invite_ref: str = field(
         required=False,
@@ -702,6 +703,106 @@ class NetworkLinkGrantV3(NetworkLinkGrantV2):
     @classmethod
     def upconvert_from_prev(cls, payload: dict) -> dict:
         return dict(payload)
+
+
+class NetworkLinkGrantV4(NetworkLinkGrantV3):
+    """Current share-link grant, including the per-link channel public key.
+
+    The channel keypair is the viewer-authentication mechanism ruled in
+    graph://807b4e11-3e9: the PUBLIC key rides the link's URL fragment
+    (presentation-side only — the stored ``url`` stays canonical and the
+    registry never receives the fragment), and the PRIVATE seed lives in the
+    org-vaulted ``autonomy.network.link-channel-key`` row under the same
+    token. ``channel_pub`` here lets the dashboard re-render the full
+    shareable URL without opening the vault. A row without it is a LEGACY
+    link (pre-ruling): it keeps serving under the old handshake until
+    re-minted; nothing upconverts a legacy row into a keyed one.
+    """
+
+    set_id = NETWORK_LINK_GRANT_SET_ID
+    schema_revision = NETWORK_LINK_GRANT_REVISION
+
+    channel_pub: str = field(
+        required=False,
+        description=(
+            "The link's channel PUBLIC key: raw Ed25519, 64 lowercase hex. "
+            "Shared with viewers via the URL fragment; verifies the serving "
+            "handshake. Absent on legacy rows minted before the per-link-key "
+            "ruling."
+        ),
+    )
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        super().validate(payload)
+        if not isinstance(payload, dict):
+            return
+        if "channel_pub" in payload:
+            _require_hex(
+                payload, "channel_pub", cls.__name__,
+                length=NETWORK_PUB_HEX_LEN,
+            )
+
+    @classmethod
+    def upconvert_from_prev(cls, payload: dict) -> dict:
+        return dict(payload)  # absent channel_pub == legacy link, by design
+
+
+# ── autonomy.network.link-channel-key ─────────────────────────
+
+
+NETWORK_LINK_CHANNEL_KEY_SET_ID = "autonomy.network.link-channel-key"
+NETWORK_LINK_CHANNEL_KEY_REVISION = 1
+
+_NETWORK_LINK_CHANNEL_KEY_TOPIC = {
+    "description": (
+        "Per-link channel PRIVATE seeds (graph://807b4e11-3e9): the "
+        "org-synchronized half of a share link's channel keypair. Holding "
+        "this seed is what authorizes an endpoint to serve the link; the "
+        "viewer verifies against the public half carried in the link's URL "
+        "fragment. Audited vault tier: any authorized member session reads "
+        "it unattended and every read is on the record. Custody narrows to "
+        "a chartered subgroup (graph://fe4499fa-0e9) by re-sealing — the "
+        "row and its key never move."
+    ),
+    "nouns": [
+        "share link", "channel key", "fragment", "serving", "vault",
+        "audited", "link secret",
+    ],
+    "related_set_ids": [NETWORK_LINK_GRANT_SET_ID],
+}
+
+
+@home("organization")
+@publication_band(max="raw")
+@keyed_per_entity(key_strategy="grant_token")
+@vaulted("audited")
+class NetworkLinkChannelKeyV1(SettingSchema):
+    """A share link's channel private seed, org-vaulted.
+
+    One row per link, keyed by the same grant token as the link-grant row.
+    The payload is the secret (``@vaulted`` encrypts it whole); the stored
+    row holds only the opaque locator. Deleted when the link is revoked, so
+    members stop being able to serve it.
+    """
+
+    set_id = NETWORK_LINK_CHANNEL_KEY_SET_ID
+    schema_revision = NETWORK_LINK_CHANNEL_KEY_REVISION
+
+    seed: str = field(
+        required=True,
+        description=(
+            "The Ed25519 private seed, 64 lowercase hex (32 bytes). Its "
+            "public key equals the grant row's channel_pub."
+        ),
+    )
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        super().validate(payload)
+        if not isinstance(payload, dict):
+            return
+        _require_hex(payload, "seed", cls.__name__, length=NETWORK_PUB_HEX_LEN)
 
 
 # ── autonomy.network.serve-cert ───────────────────────────────
