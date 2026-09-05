@@ -1094,9 +1094,9 @@ _UUID_RE = _re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
     r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z"
 )
-#: The meta fields a tunnel create-link accepts — the org:join fields
-#: (invite_ref / expires_at) never ride this path; org:join keeps the
-#: envelope endpoint until its own transport lands.
+#: The meta fields a NON-org:join tunnel create-link accepts. org:join now
+#: rides this path too (auto-qol1v) but carries invite_ref / expires_at as
+#: top-level args and restricts meta to {label} — see _ctrl_create_link.
 _CTRL_LINK_META_FIELDS = frozenset({"ttl", "label", "require_auth"})
 _CENTRAL_LINK_FIELDS = frozenset(
     {"operation_id", "receipt", "signature", "origin_proof"}
@@ -1239,18 +1239,50 @@ def _ctrl_create_link(tunnel: "Tunnel", args: dict, store: RegistryStore,
     target_type = args.get("target_type")
     if not isinstance(target_type, str) or not target_type:
         raise _CtrlError("target_type must be a non-empty string")
+    # org:join rides the control channel now (auto-qol1v). The org:join branch
+    # of the registry HTTP create_link is ported here VERBATIM so both
+    # transports mint identical grants; invite_ref/expires_at are top-level and
+    # valid ONLY for org:join.
+    invite_ref = args.get("invite_ref")
+    absolute_expires_at = args.get("expires_at")
     if target_type == "org:join":
-        raise _CtrlError("org:join is not carried on the control channel")
+        if (
+            not isinstance(invite_ref, str)
+            or _re.fullmatch(r"[0-9a-f]{64}", invite_ref) is None
+        ):
+            raise _CtrlError(
+                "org:join invite_ref must be a 64-char lowercase hex event id"
+            )
+        if target_uuid != tunnel.org:
+            raise _CtrlError("org:join target_uuid must equal the organization UUID")
+        if absolute_expires_at is not None and (
+            type(absolute_expires_at) is not int
+            or absolute_expires_at < 0
+            or absolute_expires_at > 9_007_199_254_740_991
+        ):
+            raise _CtrlError(
+                "org:join expires_at must be a non-negative safe unix-ms integer"
+            )
+    elif invite_ref is not None or absolute_expires_at is not None:
+        raise _CtrlError(
+            "invite_ref and expires_at are only valid for target_type org:join"
+        )
     meta = args.get("meta", {})
     if not isinstance(meta, dict):
         raise _CtrlError("meta must be a JSON object")
-    if not set(meta).issubset(_CTRL_LINK_META_FIELDS):
+    if target_type == "org:join":
+        # An org:join grant's lifetime is the invitation's; meta admits only label.
+        if not set(meta).issubset({"label"}):
+            raise _CtrlError("org:join meta admits only label")
+    elif not set(meta).issubset(_CTRL_LINK_META_FIELDS):
         raise _CtrlError("meta carries unsupported fields")
     if meta.get("require_auth"):
         raise _CtrlError("require_auth grants need viewer authn (Track E + ledger)")
     link_ttl = meta.get("ttl")
     if link_ttl is not None and (type(link_ttl) is not int or link_ttl <= 0):
         raise _CtrlError("meta.ttl must be a positive integer of seconds")
+    if absolute_expires_at is not None and link_ttl is not None:
+        raise _CtrlError("org:join expires_at and meta.ttl are mutually exclusive")
 
     central = _central_operation(tunnel, args, store, witness_key)
     if central is not None:
@@ -1314,9 +1346,11 @@ def _ctrl_create_link(tunnel: "Tunnel", args: dict, store: RegistryStore,
             org_uuid=tunnel.org,
             target_uuid=target_uuid,
             target_type=target_type,
+            invite_ref=invite_ref,
             meta=meta,
             created_at=now,
             expires_at=now + link_ttl if link_ttl is not None else None,
+            expires_at_ms=absolute_expires_at,
             revoked_at=None,
             # D19: no persona ever crosses the tunnel — the grant is an act
             # of the org, attributed to the tunnel and nothing finer.
@@ -1325,7 +1359,10 @@ def _ctrl_create_link(tunnel: "Tunnel", args: dict, store: RegistryStore,
             subject_id=None,
         )
     )
-    return {"token": token, "url": f"{base_url}/l/{token}"}
+    result = {"token": token, "url": f"{base_url}/l/{token}"}
+    if absolute_expires_at is not None:
+        result["expires_at"] = absolute_expires_at
+    return result
 
 
 def _ctrl_revoke_link(tunnel: "Tunnel", args: dict, store: RegistryStore,
