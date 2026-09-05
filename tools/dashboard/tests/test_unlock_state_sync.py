@@ -210,10 +210,13 @@ def test_scopeless_and_personal_scope_reported_once(client, monkeypatch):
     )
     sync = client.get("/api/identity/unlock-state").json()["sync"]
     assert sync["needs"] is True
+    # The dedup guard lives on the FIELDS (a single 'personal', not two).
     assert sync["unarmed"] == ["personal"]
     assert sync["scopes"] == ["personal"]
-    assert "personal and personal" not in sync["detail"]
-    assert "personal holds no serving credential" in sync["detail"]
+    # The user message names no scope at all now (2026-09-05: the 'personal'
+    # label is jargon), so it trivially cannot read "personal and personal".
+    assert "personal" not in sync["detail"]
+    assert "fleet connection has no serving credential" in sync["detail"]
 
 
 def test_certificate_lights_for_a_lapsed_serving_scope(client, monkeypatch):

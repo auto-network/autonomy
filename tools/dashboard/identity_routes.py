@@ -1761,11 +1761,12 @@ async def get_unlock_state(request: Request) -> JSONResponse:
                     f"{sync_refusals} request{plural} have been refused"
                     + _refused_since(sync_since) + "."
                 )
+            # Only the personal fleet connector serves sync, so name it in plain
+            # words — never the internal scope label ("personal"), which is
+            # jargon to the operator.
             parts.append(
-                _oxford(unarmed_scopes)
-                + (" holds" if len(unarmed_scopes) == 1 else " hold")
-                + " no serving credential — unlock with your root to give "
-                + ("it" if len(unarmed_scopes) == 1 else "them") + " a new one."
+                "This dashboard's fleet connection has no serving credential — "
+                "unlock with your root to restore it."
             )
             sync_detail = " ".join(parts)
             sync_value = "Locked"
