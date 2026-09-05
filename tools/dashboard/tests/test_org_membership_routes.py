@@ -186,7 +186,7 @@ def test_staged_bearer_claim_surfaces_progress_and_signed_profile(founded):
     assert pending["invite_binding"] == "bearer"
     assert pending["invite_ref"] == live_id
     assert pending["granted_role"] == "owner"
-    assert pending["profile"] == {"display_name": "Dean"}
+    assert pending["introduction"] == {"display_name": "Dean"}
     assert pending["have"] == 0
     assert pending["need"] == 1
     assert pending["ready"] is False
