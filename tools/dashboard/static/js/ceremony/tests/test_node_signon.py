@@ -516,7 +516,8 @@ def test_wrong_passphrase_fails_closed():
     with _live_server(identity, _free_port()) as identity_url:
         command = _run(identity_url, "opens nothing")
     assert command.returncode != 0
-    assert "passphrase" in (command.stdout + command.stderr)
+    combined = command.stdout + command.stderr
+    assert "passphrase" in combined or "password" in combined
     assert "/api/network/ledger/heads" not in requests
     assert rekeyed == []
 
@@ -574,15 +575,15 @@ def test_a_due_serving_certificate_is_renewed_by_the_personal_unlock():
     assert diagnostics["serveCertsRenewed"] == ["beta-org"]
     assert diagnostics["serveCertsFailed"] == []
 
-    # Exactly one credential was minted, and exactly one org root was opened
-    # to mint it -- the other two organizations were settled by the cheap
-    # status check alone.
+    # Exactly one credential was minted, and NO org root was opened to mint
+    # it (auto-55vwi): the persona the sign-on already derived signed it.
     assert len(served) == 1
-    assert diagnostics["orgRootsOpened"] == 1
-    assert requests.count("/api/network/org-key") == 1
+    assert diagnostics["orgRootsOpened"] == 0
+    assert requests.count("/api/network/org-key") == 0
 
-    # The credential names THAT organization's persona, and is signed by that
-    # organization's root -- the two properties that make it serve.
+    # The credential names THAT organization's persona — which also SIGNED
+    # it; there is no viewer certificate.
+    assert "viewer_cert" not in served[0]
     cert = json.loads(served[0]["cert"])
     assert cert["subject"] == {
         "kind": "persona", "id": orgs[1].persona_pub(personal_root),

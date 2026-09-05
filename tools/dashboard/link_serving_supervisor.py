@@ -166,15 +166,23 @@ This is the cheap pre-unlock check: every organization-root sign-on mints a
 fresh serving credential iff the status is anything but ``ok``.
     """
     now = time.time() if now is None else now
-    try:
-        members = settings_ops.read_owned_set(
-            NETWORK_SERVE_CERT_SET_ID,
-            org=org,
-            target_revision=NETWORK_SERVE_CERT_REVISION,
-        ).members
-    except Exception:
-        return {"status": "missing"}
-    rows = [m.payload for m in members if isinstance(m.payload, dict)]
+    # Dual-read for the migration window (auto-55vwi/auto-tmers): a
+    # PERSONA-signed revision-3 credential is preferred; a root-signed
+    # revision-2 row keeps serving until repair replaces it. Reading each
+    # revision separately is deliberate — revision 3 has no upconvert from 2.
+    rows = []
+    for revision in (3, NETWORK_SERVE_CERT_REVISION):
+        try:
+            members = settings_ops.read_owned_set(
+                NETWORK_SERVE_CERT_SET_ID,
+                org=org,
+                target_revision=revision,
+            ).members
+        except Exception:
+            continue
+        rows.extend(m.payload for m in members if isinstance(m.payload, dict))
+        if rows:
+            break
     if not rows:
         return {"status": "missing"}
     # The keyed set keeps one credential per org. If corrupt storage contains
@@ -183,6 +191,38 @@ fresh serving credential iff the status is anything but ``ok``.
     not_after = row.get("not_after")
     if not isinstance(not_after, int) or now >= not_after:
         return {"status": "expired", "row": row}
+
+    if isinstance(row.get("persona_pub"), str):
+        # Revision 3: persona-signed, no viewer certificate by design.
+        try:
+            from tools.network.idkit import DelegationCert
+            cert = DelegationCert.from_json(row.get("cert"))
+        except Exception as exc:
+            return {"status": "identity-invalid", "row": row,
+                    "error": f"serve cert does not parse: {exc}"}
+        if (
+            tuple(cert.scope) != (SERVE_CERT_SCOPE,)
+            or cert.parent_cert is not None
+            or cert.subject.kind != "persona"
+            or cert.subject.id != row.get("persona_pub")
+        ):
+            return {"status": "identity-invalid", "row": row,
+                    "error": ("serve cert must be a direct persona-signed "
+                              "tunnel:serve delegate; reprovision serving")}
+        key_path, key_error = _resolve_key_path(row.get("key_path"))
+        if key_error is not None:
+            return {"status": "key-invalid", "row": row, "error": key_error}
+        if not os.path.isfile(key_path):
+            return {"status": "key-missing", "row": row}
+        return {
+            "status": "ok",
+            "row": row,
+            "cert": row.get("cert"),
+            "viewer_cert": None,
+            "key_path": key_path,
+            "not_after": not_after,
+        }
+
     if not isinstance(row.get("viewer_cert"), str):
         return {
             "status": "identity-invalid",
@@ -341,7 +381,8 @@ def _verify_key_matches(cert_wire: str, viewer_cert_wire: str,
         return False, f"serve key file unreadable ({key_path}): {e}"
     try:
         cert = DelegationCert.from_json(cert_wire)
-        viewer_cert = DelegationCert.from_json(viewer_cert_wire)
+        viewer_cert = (None if viewer_cert_wire is None
+                       else DelegationCert.from_json(viewer_cert_wire))
     except Exception as e:
         return False, f"serve cert does not parse: {e}"
     if tuple(cert.scope) != (SERVE_CERT_SCOPE,):
@@ -355,6 +396,8 @@ def _verify_key_matches(cert_wire: str, viewer_cert_wire: str,
         return False, "serve cert does not carry a canonical persona subject"
     if key.public_hex != cert.child_pub:
         return False, "serve key does not match the cert's child_pub"
+    if viewer_cert is None:
+        return True, "ok"   # revision 3: no viewer certificate by design
     if (
         viewer_cert.child_pub != cert.child_pub
         or tuple(viewer_cert.scope) != (SERVE_CERT_SCOPE,)
@@ -470,17 +513,23 @@ def _materialize_cert(key_path: str, cert_wire: str) -> str:
 
 
 def _connector_command(binding: dict, org: str | None, key_path: str,
-                       cert_path: str, viewer_cert_path: str) -> tuple[list, dict]:
-    """The argv + env to launch the serving connector against *binding*."""
+                       cert_path: str,
+                       viewer_cert_path: "str | None") -> tuple[list, dict]:
+    """The argv + env to launch the serving connector against *binding*.
+
+    *viewer_cert_path* is None for a revision-3 (persona-signed) credential:
+    viewers verify the per-link channel key, so no channel certificate file
+    exists and the connector serves per-link links only."""
     argv = [
         sys.executable, "-m", "tools.dashboard.link_serving",
         "--relay", registry_to_relay_ws(binding["registry_url"]),
         "--org", binding["org_uuid"],
         "--key-file", key_path,
         "--cert-file", cert_path,
-        "--channel-cert-file", viewer_cert_path,
         "--control-file", _control_path_for(key_path),
     ]
+    if viewer_cert_path is not None:
+        argv += ["--channel-cert-file", viewer_cert_path]
     if org:
         argv += ["--graph-org", org]
     # Inherit the environment so the subprocess reads the SAME GRAPH_DB (its
@@ -899,11 +948,17 @@ class ServingSupervisor:
         self._reap_strays(org)
         try:
             cert_path = _materialize_cert(state["key_path"], state["cert"])
-            viewer_cert_path = _viewer_cert_path_for(state["key_path"])
-            viewer_tmp = viewer_cert_path + ".tmp"
-            with open(viewer_tmp, "w") as fh:
-                fh.write(state["viewer_cert"])
-            os.replace(viewer_tmp, viewer_cert_path)
+            # Revision-3 (persona-signed) credentials carry no viewer
+            # certificate: viewers verify the per-link channel key
+            # (graph://807b4e11-3e9), so the connector serves per-link links
+            # only and gets no --channel-cert-file.
+            viewer_cert_path = None
+            if state.get("viewer_cert"):
+                viewer_cert_path = _viewer_cert_path_for(state["key_path"])
+                viewer_tmp = viewer_cert_path + ".tmp"
+                with open(viewer_tmp, "w") as fh:
+                    fh.write(state["viewer_cert"])
+                os.replace(viewer_tmp, viewer_cert_path)
             ctl_path = _control_path_for(state["key_path"])
             # A stale descriptor from a previous killed connector would
             # mislead control() until the new connector rewrites it; clear it

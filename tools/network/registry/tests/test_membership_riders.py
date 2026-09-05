@@ -89,10 +89,12 @@ def _rider(member_pubs, persona_pub, seq):
     return {"v": 1, "checkpoint_seq": seq, "index": index, "path": path}
 
 
-def _persona_serve_cert(root, serve_key, persona_pub):
+def _persona_serve_cert(persona, serve_key):
+    """The v3 shape (auto-55vwi): the PERSONA signs its own serving child;
+    the chain anchors at the persona and standing comes from the rider."""
     return issue_cert(
-        root, serve_key.public_hex, scope=("tunnel:serve",), org=ORG,
-        subject=Subject("persona", persona_pub),
+        persona, serve_key.public_hex, scope=("tunnel:serve",), org=ORG,
+        subject=Subject("persona", persona.public_hex),
         not_before=NOW - 100, not_after=NOW + 30 * DAY)
 
 
@@ -100,7 +102,7 @@ def _persona_serve_cert(root, serve_key, persona_pub):
 def _open_v3_tunnel(client, clock, root, persona, member_pubs, seq,
                     *, rider=None):
     serve_key, machine_key = KeyPair.generate(), KeyPair.generate()
-    cert = _persona_serve_cert(root, serve_key, persona.public_hex)
+    cert = _persona_serve_cert(persona, serve_key)
     hello = build_tunnel_hello_v3(
         serve_key, cert, machine_key=machine_key, org=ORG, ts=clock.now,
         membership_proof=rider or _rider(member_pubs, persona.public_hex, seq),
