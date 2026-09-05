@@ -154,10 +154,12 @@ def _membership_view(slug: str) -> dict:
                 "invite_ref": record["invite_ref"],
                 "submitted_at": record["staged_at"],
                 "body": body,
-                # The claimant's persona-SIGNED self-description ("I am
-                # Dean"). Self-reported: vouched only by possession of the
-                # invite the operator sent them.
-                "profile": profile if isinstance(profile, dict) else None,
+                # The claimant's persona-signed self-introduction ("I am
+                # Dean" + optional avatar). Interim source: the claim body's
+                # vestigial profile field; auto-zxcvr moves it to the
+                # detached staging-row packet without changing this contract
+                # (ledger-purity ruling, graph://9282a825-4ce comments).
+                "introduction": profile if isinstance(profile, dict) else None,
                 # Provenance: the human name of the link this request came in
                 # on, and the invite's binding (bearer link vs key-bound —
                 # crucial when an invitation was issued to a specific
