@@ -468,6 +468,7 @@ class TunnelConnector:
         machine_key: KeyPair | None = None,
         caps: tuple = (),
         stream_handler=None,
+        on_reprove=None,
     ):
         self._url = f"{relay_url.rstrip('/')}/t/{org}"
         self._org = org
@@ -494,6 +495,14 @@ class TunnelConnector:
         #: async (host, reservation) -> (reader, writer) | None — the
         #: dashboard's dial-only raw-stream seam (stream_adapter.py).
         self._stream_handler = stream_handler
+        #: async (seq) -> membership_proof rider | None. Called when the
+        #: registry PUSHES a reprove-required control frame after adopting a
+        #: newer membership checkpoint (auto-3bhy3). The dashboard supplies a
+        #: responder that builds a fresh inclusion proof from its fold; the
+        #: connector then sends re-prove-membership. Without it (or when it
+        #: returns None) the connector does not answer, and the registry closes
+        #: the tunnel at the re-prove deadline — correct for a removed member.
+        self._on_reprove = on_reprove
         #: capability intersection the registry accepted on the live tunnel
         self.accepted_caps: tuple = ()
         #: reservation -> hostname this connector wants leased; re-registered
@@ -670,15 +679,41 @@ class TunnelConnector:
                     continue  # tunnel churn: the next tick (or reconnect) retries
 
     def _resolve_ctrl_reply(self, payload: bytes) -> None:
-        """Deliver a FRAME_CTRL reply to its waiting control() caller."""
+        """Route an inbound FRAME_CTRL: a server-initiated op (carries ``op``)
+        is dispatched; otherwise it is a reply delivered to its waiting
+        control() caller (carries ``id``)."""
         try:
-            reply = json.loads(payload.decode("utf-8"))
-            correlation = reply["id"]
-        except (ValueError, KeyError, TypeError):
-            return  # unparseable reply: the caller times out honestly
+            msg = json.loads(payload.decode("utf-8"))
+        except (ValueError, TypeError):
+            return  # unparseable: a pending caller times out honestly
+        if isinstance(msg, dict) and msg.get("op") == "reprove-required":
+            self._dispatch_reprove(msg.get("args") or {})
+            return
+        correlation = msg.get("id") if isinstance(msg, dict) else None
+        if correlation is None:
+            return
         future = self._pending.get(correlation)
         if future is not None and not future.done():
-            future.set_result(reply)
+            future.set_result(msg)
+
+    def _dispatch_reprove(self, args: dict) -> None:
+        """Answer a pushed reprove-required as a background task — never inline,
+        because building and sending the re-prove awaits a reply that only this
+        same receive loop can deliver."""
+        seq = args.get("seq")
+        if self._on_reprove is None or type(seq) is not int:
+            return
+        asyncio.create_task(self._reprove(seq))
+
+    async def _reprove(self, seq: int) -> None:
+        try:
+            rider = await self._on_reprove(seq)
+        except Exception:
+            return  # a responder failure leaves the deadline to enforce
+        if rider is None:
+            return
+        with contextlib.suppress(Exception):
+            await self.control("re-prove-membership", rider)
 
     async def run(self) -> None:
         """Dial, serve, and re-dial until :meth:`stop`."""

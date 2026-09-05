@@ -2,7 +2,7 @@
 
 Drives the registry's tunnel and HTTP gates with committed-membership
 riders against a seeded org: admission with a valid proof, every refusal,
-the re-prove control op, the grace-window close (CLOSE_MEMBERSHIP_STALE),
+the re-prove control op, the push-then-deadline close (CLOSE_MEMBERSHIP_STALE),
 the v1/v2 migration exemption, and the envelope path that replaces the old
 rung-2 refusal for persona subjects.
 """
@@ -22,10 +22,42 @@ from tools.network.relaykit.hello import (
     SERVING_MACHINE_HELLO_DOMAIN,
     build_tunnel_hello_v3,
 )
-from tools.network.registry.relay import CLOSE_MEMBERSHIP_STALE, CLOSE_UNAUTHENTICATED
+import asyncio as _asyncio
+from tools.network.registry.relay import (
+    CLOSE_MEMBERSHIP_STALE,
+    push_reprove_and_enforce,
+    _tunnel_behind,
+)
 
 from .conftest import DAY, NOW, ORG, register, sign_request
 from .test_tunnel_control import _ctrl, _open_tunnel
+from tools.network.relaykit.frames import decode_frame
+
+
+def _ctrl_await(ws, correlation, op, args):
+    """Send a control op and return ITS reply, skipping any server-pushed
+    frames (e.g. reprove-required) that arrive first — those carry a
+    different id and no reply correlation."""
+    import json as _json
+    from tools.network.relaykit.frames import CTRL_CHANNEL_ID, FRAME_CTRL, encode_frame
+    ws.send_bytes(encode_frame(
+        FRAME_CTRL, CTRL_CHANNEL_ID,
+        _json.dumps({"id": correlation, "op": op, "args": args}).encode("utf-8")))
+    for _ in range(8):
+        frame = decode_frame(ws.receive_bytes())
+        msg = _json.loads(frame.payload.decode("utf-8"))
+        if msg.get("id") == correlation:
+            return msg
+    raise AssertionError("no reply for correlation id")
+
+
+def _drain_push(ws):
+    """Read one server-pushed reprove-required frame; return its seq."""
+    import json as _json
+    frame = decode_frame(ws.receive_bytes())
+    msg = _json.loads(frame.payload.decode("utf-8"))
+    assert msg.get("op") == "reprove-required"
+    return msg["args"]["seq"]
 
 GENESIS = "aa" * 32
 CKPT_PATH = f"/v1/orgs/{ORG}/membership-checkpoints"
@@ -127,7 +159,58 @@ class TestHelloV3:
             assert ack["ok"] is False and "seed" in ack["error"]
 
 
-class TestFreshness:
+class _FakeTunnel:
+    def __init__(self, org, proven_seq):
+        self.org = org
+        self.proven_seq = proven_seq
+        self.persona_pub = "p"
+        self.sent = []
+        self.closed = None
+        self.viewers_closed = None
+        self.ws = self
+
+    async def send_frame(self, ftype, chan, payload):
+        self.sent.append(payload)
+
+    async def close_all_viewers(self, code):
+        self.viewers_closed = code
+
+    async def close(self, code=1000):
+        self.closed = code
+
+
+class _FakeHub:
+    def __init__(self, tunnels):
+        self._t = tunnels
+        self.unregistered = []
+
+    def tunnels_for(self, org):
+        return list(self._t)
+
+    def unregister(self, tunnel):
+        self.unregistered.append(tunnel)
+
+
+class _FakeState:
+    def __init__(self, seq):
+        self.seq = seq
+
+
+class _FakeStore:
+    def __init__(self, seq):
+        self._seq = seq
+
+    def get_membership_state(self, org):
+        return _FakeState(self._seq)
+
+    def set_seq(self, seq):
+        self._seq = seq
+
+
+class TestReproveOp:
+    """The re-prove control op re-stamps a live tunnel and its ops continue —
+    a checkpoint advance never blocks the tunnel."""
+
     def test_reprove_restamps_and_ops_continue(self, client, clock, root, founder):
         register(client, clock, root)
         seed = _seed(client, root, [founder.public_hex])
@@ -137,15 +220,18 @@ class TestFreshness:
             joiner = KeyPair.generate()
             members = sorted([founder.public_hex, joiner.public_hex])
             _advance(client, founder, seed, members, [founder.public_hex])
-            reply = _ctrl(ws, "2" * 32, "re-prove-membership",
-                          _rider(members, founder.public_hex, 1))
+            # The registry pushes reprove-required down the live tunnel.
+            assert _drain_push(ws) == 1
+            # The tunnel keeps serving even while behind (no op-blocking gate).
+            still = _ctrl_await(ws, "1" * 32, "create-link",
+                                {"target_uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                                 "target_type": "present"})
+            assert still["ok"] is True
+            reply = _ctrl_await(ws, "2" * 32, "re-prove-membership",
+                                _rider(members, founder.public_hex, 1))
             assert reply["ok"] is True and reply["seq"] == 1
-            ok = _ctrl(ws, "3" * 32, "create-link",
-                       {"target_uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-                        "target_type": "present"})
-            assert ok["ok"] is True
 
-    def test_stale_past_grace_closes_typed(self, client, clock, root, founder):
+    def test_reprove_stale_rider_soft_refused(self, client, clock, root, founder):
         register(client, clock, root)
         seed = _seed(client, root, [founder.public_hex])
         with _open_v3_tunnel(client, clock, root, founder,
@@ -153,51 +239,77 @@ class TestFreshness:
             assert ws.receive_json()["ok"] is True
             _advance(client, founder, seed, [founder.public_hex],
                      [founder.public_hex])
-            # First op after the advance: grace begins, the op still runs.
-            grace = _ctrl(ws, "4" * 32, "create-link",
-                          {"target_uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-                           "target_type": "present"})
-            assert grace["ok"] is True
-            clock.advance(120)  # past MEMBERSHIP_REPROVE_GRACE_S
-            request = {"id": "5" * 32, "op": "create-link", "args": {
-                "target_uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-                "target_type": "present"}}
-            ws.send_bytes(encode_frame(
-                FRAME_CTRL, CTRL_CHANNEL_ID,
-                json.dumps(request).encode("utf-8")))
-            with pytest.raises(WebSocketDisconnect) as excinfo:
-                ws.receive_bytes()
-            assert excinfo.value.code == CLOSE_MEMBERSHIP_STALE
-
-    def test_reprove_allowed_even_when_expired(self, client, clock, root, founder):
-        register(client, clock, root)
-        seed = _seed(client, root, [founder.public_hex])
-        with _open_v3_tunnel(client, clock, root, founder,
-                             [founder.public_hex], 0) as ws:
-            assert ws.receive_json()["ok"] is True
-            _advance(client, founder, seed, [founder.public_hex],
-                     [founder.public_hex])
-            grace = _ctrl(ws, "6" * 32, "create-link",
-                          {"target_uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-                           "target_type": "present"})
-            assert grace["ok"] is True
-            clock.advance(120)
-            reply = _ctrl(ws, "7" * 32, "re-prove-membership",
-                          _rider([founder.public_hex], founder.public_hex, 1))
-            assert reply["ok"] is True and reply["seq"] == 1
+            assert _drain_push(ws) == 1
+            reply = _ctrl_await(ws, "3" * 32, "re-prove-membership",
+                                _rider([founder.public_hex], founder.public_hex, 0))
+            # A stale re-prove is a soft {ok:false}, not a close — the connector
+            # retries with a fresh proof.
+            assert reply["ok"] is False and "stale" in reply["error"]
 
     def test_v1_tunnel_exempt_during_migration(self, client, clock, root, founder):
-        # A v1 hello (no rider) keeps working even as checkpoints advance —
-        # the migration window; auto-tmers owns the cutoff.
         with _open_tunnel(client, clock, root) as ws:
             seed = _seed(client, root, [founder.public_hex])
             _advance(client, founder, seed, [founder.public_hex],
                      [founder.public_hex])
-            clock.advance(120)
             reply = _ctrl(ws, "8" * 32, "create-link",
                           {"target_uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
                            "target_type": "present"})
             assert reply["ok"] is True
+
+
+class TestPushAndDeadline:
+    """push_reprove_and_enforce: push to behind tunnels, close only those
+    still behind at the deadline; never touch fresh or exempt tunnels."""
+
+    def _run(self, hub, store, org, seq, deadline=0):
+        import tools.network.registry.relay as relay
+        orig = relay.MEMBERSHIP_REPROVE_DEADLINE_S
+        relay.MEMBERSHIP_REPROVE_DEADLINE_S = deadline
+        try:
+            _asyncio.run(push_reprove_and_enforce(hub, store, org, seq))
+        finally:
+            relay.MEMBERSHIP_REPROVE_DEADLINE_S = orig
+
+    def test_behind_tunnel_pushed_then_closed(self):
+        behind = _FakeTunnel("o", proven_seq=0)
+        hub, store = _FakeHub([behind]), _FakeStore(1)
+        self._run(hub, store, "o", 1)
+        assert behind.sent, "a reprove-required frame was pushed"
+        assert behind.closed == CLOSE_MEMBERSHIP_STALE or behind in hub.unregistered
+        assert behind.viewers_closed == CLOSE_MEMBERSHIP_STALE
+
+    def test_tunnel_that_reproves_before_deadline_survives(self):
+        # An honest member answers the push immediately: model that by having
+        # send_frame catch proven_seq up to the pushed set. At the deadline the
+        # tunnel is no longer behind, so it is not closed.
+        member = _FakeTunnel("o", proven_seq=0)
+
+        async def respond(ftype, chan, payload):
+            member.sent.append(payload)
+            member.proven_seq = 1
+
+        member.send_frame = respond
+        hub, store = _FakeHub([member]), _FakeStore(1)
+        self._run(hub, store, "o", 1)
+        assert member.sent  # pushed
+        assert member not in hub.unregistered  # NOT closed
+        assert member.viewers_closed is None
+
+    def test_fresh_and_exempt_tunnels_untouched(self):
+        fresh = _FakeTunnel("o", proven_seq=1)
+        exempt = _FakeTunnel("o", proven_seq=None)
+        hub, store = _FakeHub([fresh, exempt]), _FakeStore(1)
+        self._run(hub, store, "o", 1)
+        assert not fresh.sent and not exempt.sent
+        assert hub.unregistered == []
+
+
+class TestBehindPredicate:
+    def test_predicate(self):
+        store = _FakeStore(2)
+        assert _tunnel_behind(_FakeTunnel("o", 1), store) is True
+        assert _tunnel_behind(_FakeTunnel("o", 2), store) is False
+        assert _tunnel_behind(_FakeTunnel("o", None), store) is False
 
 
 class TestEnvelopeRider:
@@ -263,40 +375,3 @@ class TestEnvelopeRider:
         response = self._renew(client, clock, session_key, cert, rider)
         assert response.status_code == 403
         assert "does not verify" in response.json()["detail"]
-
-
-class TestFreshnessStateMachine:
-    """_membership_freshness unit coverage — the same function gates the
-    control dispatch and viewer admission."""
-
-    def _tunnel(self, proven_seq):
-        class T:
-            org = ORG
-        t = T()
-        t.proven_seq = proven_seq
-        t.membership_stale_since = None
-        return t
-
-    def test_transitions(self, client, clock, root, founder, app):
-        from tools.network.registry.relay import (
-            MEMBERSHIP_REPROVE_GRACE_S,
-            _membership_freshness,
-        )
-        register(client, clock, root)
-        store = app.state.store
-        exempt = self._tunnel(None)
-        assert _membership_freshness(exempt, store, clock.now) == "fresh"
-        seed = _seed(client, root, [founder.public_hex])
-        proven = self._tunnel(0)
-        assert _membership_freshness(proven, store, clock.now) == "fresh"
-        _advance(client, founder, seed, [founder.public_hex],
-                 [founder.public_hex])
-        assert _membership_freshness(proven, store, clock.now) == "grace"
-        assert _membership_freshness(
-            proven, store, clock.now + MEMBERSHIP_REPROVE_GRACE_S) == "grace"
-        assert _membership_freshness(
-            proven, store, clock.now + MEMBERSHIP_REPROVE_GRACE_S + 1) == "expired"
-        # Re-stamp clears staleness.
-        proven.proven_seq = 1
-        assert _membership_freshness(proven, store, clock.now) == "fresh"
-        assert proven.membership_stale_since is None

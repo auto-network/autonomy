@@ -104,9 +104,14 @@ CLOSE_LISTENER_FELL_BEHIND = 4416
 #: arrived. The connector reconnects with a fresh v3 hello.
 CLOSE_MEMBERSHIP_STALE = 4417
 
-#: Seconds a proven tunnel may keep operating after the registry adopts a
-#: NEWER checkpoint for its org, before it must re-prove or be closed.
-MEMBERSHIP_REPROVE_GRACE_S = 60
+#: After the registry adopts a newer checkpoint it PUSHES a reprove-required
+#: control message down each affected tunnel; a current member answers with a
+#: fresh proof in milliseconds and is re-stamped without interruption. This is
+#: only the silence budget: a tunnel that has not re-proven to the new set
+#: within it is closed. It bounds how long a removed member can keep serving,
+#: not how long an honest member may take. The tunnel keeps serving data for
+#: the whole budget; nothing blocks.
+MEMBERSHIP_REPROVE_DEADLINE_S = 5
 
 # Stream (auto-albp6.7) retention, in precedence order -- the order is
 # load-bearing, see Stream._apply_retention.
@@ -406,8 +411,6 @@ class Tunnel:
         self.caps = caps
         #: Membership checkpoint seq this connection proved (v3); None = v1/v2.
         self.proven_seq = proven_seq
-        #: When the registry first saw this tunnel lag the adopted checkpoint.
-        self.membership_stale_since: "int | None" = None
         #: Relay-minted per-connection identity: lease generations and
         #: channel ids are fenced on it and never survive a reconnect.
         self.connection_id = new_channel_id().hex()
@@ -1091,32 +1094,43 @@ class _CtrlError(Exception):
     stays up. (Distinct from a malformed FRAME payload, which drops it.)"""
 
 
-class _MembershipStaleError(Exception):
-    """A proven tunnel outlived the re-prove grace window after its org's
-    checkpoint advanced — the serve loop closes it with
-    CLOSE_MEMBERSHIP_STALE."""
-
-
-def _membership_freshness(tunnel: "Tunnel", store: RegistryStore, now: int) -> str:
-    """'fresh' | 'grace' | 'expired' for a tunnel's membership proof.
-
-    v1/v2 tunnels (``proven_seq`` None) are exempt during the migration
-    window — auto-tmers owns the cutoff that ends that exemption. A proven
-    tunnel goes stale the moment the registry adopts a NEWER checkpoint for
-    its org, gets MEMBERSHIP_REPROVE_GRACE_S to re-prove (the
-    re-prove-membership control op), and is expired after that."""
+def _tunnel_behind(tunnel: "Tunnel", store: RegistryStore) -> bool:
+    """Whether *tunnel* has not yet proven its membership under the org's
+    currently adopted checkpoint. v1/v2 tunnels (``proven_seq`` None) are
+    exempt during the migration window (auto-tmers owns the cutoff)."""
     if tunnel.proven_seq is None:
-        return "fresh"
+        return False
     state = store.get_membership_state(tunnel.org)
-    if state is None or state.seq <= tunnel.proven_seq:
-        tunnel.membership_stale_since = None
-        return "fresh"
-    if tunnel.membership_stale_since is None:
-        tunnel.membership_stale_since = now
-        return "grace"
-    if now - tunnel.membership_stale_since <= MEMBERSHIP_REPROVE_GRACE_S:
-        return "grace"
-    return "expired"
+    return state is not None and state.seq > tunnel.proven_seq
+
+
+async def push_reprove_and_enforce(hub: "TunnelHub", store: RegistryStore,
+                                   org: str, seq: int) -> None:
+    """Called when the registry adopts checkpoint *seq* for *org*.
+
+    Pushes a ``reprove-required`` control message down every live tunnel of
+    the org that has not yet proven under the new set, then, after the
+    silence budget, closes any that still have not. A current member answers
+    the push in milliseconds and is re-stamped by ``_ctrl_reprove_membership``
+    without interruption; a removed member cannot produce a valid proof, so
+    it is closed at the deadline. Data transfer is never blocked or paused —
+    the tunnel serves throughout the budget.
+    """
+    behind = [t for t in hub.tunnels_for(org) if _tunnel_behind(t, store)]
+    if not behind:
+        return
+    frame = canonical_json({"op": "reprove-required", "args": {"seq": seq}})
+    for tunnel in behind:
+        with contextlib.suppress(Exception):
+            await tunnel.send_frame(FRAME_CTRL, CTRL_CHANNEL_ID, frame)
+    await asyncio.sleep(MEMBERSHIP_REPROVE_DEADLINE_S)
+    for tunnel in behind:
+        # Re-read at fire time: an honest tunnel has re-proven and is no
+        # longer behind; only a tunnel still behind the adopted set is closed.
+        if _tunnel_behind(tunnel, store):
+            hub.unregister(tunnel)
+            await _close_quietly(tunnel.ws, CLOSE_MEMBERSHIP_STALE)
+            await tunnel.close_all_viewers(CLOSE_MEMBERSHIP_STALE)
 
 
 def _ctrl_reprove_membership(tunnel: "Tunnel", args: dict,
@@ -1146,7 +1160,6 @@ def _ctrl_reprove_membership(tunnel: "Tunnel", args: dict,
     except MembershipCommitmentError as exc:
         raise _CtrlError(f"membership proof does not verify: {exc}")
     tunnel.proven_seq = state.seq
-    tunnel.membership_stale_since = None
     return {"seq": state.seq}
 
 
@@ -1573,11 +1586,9 @@ async def _handle_ctrl_frame(tunnel: "Tunnel", payload: bytes,
         raise FrameError("control id must be a 32-hex correlation id")
     op = msg.get("op")
     args = msg.get("args", {})
-    # Freshness gate (auto-3bhy3): a proven tunnel whose org checkpoint
-    # advanced past the grace window may do exactly one thing — re-prove.
-    if op != "re-prove-membership" and _membership_freshness(
-            tunnel, store, now) == "expired":
-        raise _MembershipStaleError()
+    # No freshness gate here: a checkpoint advance does not block a tunnel's
+    # operations. Enforcement is push-then-deadline in push_reprove_and_enforce
+    # — the tunnel keeps serving until it is either re-proven or closed.
     try:
         if op == "create-link":
             result = _ctrl_create_link(tunnel, args, store, base_url, now, witness_key)
@@ -1700,9 +1711,6 @@ async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
                         turn_issuer=turn_issuer, witness_key=witness_key,
                         host_routes=host_routes,
                     )
-                except _MembershipStaleError:
-                    await _close_quietly(websocket, CLOSE_MEMBERSHIP_STALE)
-                    break
                 except FrameError:
                     break
                 continue
@@ -1797,16 +1805,12 @@ async def viewer_endpoint(
             )
             await _close_quietly(websocket, CLOSE_UNKNOWN_LINK)
             return
+    # No freshness check at viewer admission: a tunnel behind the latest
+    # checkpoint is still a valid target during its re-prove deadline (the
+    # accepted removal latency). Closing it here would interrupt an honest
+    # member who has not yet answered the push. Enforcement is the deadline
+    # in push_reprove_and_enforce, which closes only a still-behind tunnel.
     tunnel = hub.get(link.org_uuid) if link is not None else None
-    if tunnel is not None and _membership_freshness(
-            tunnel, store, int(now_fn())) == "expired":
-        # Freshness enforcement on the serving side (auto-3bhy3): a stale
-        # tunnel stops being an admission target, its viewers close, and
-        # the connector reconnects with a fresh v3 hello.
-        hub.unregister(tunnel)
-        await _close_quietly(tunnel.ws, CLOSE_MEMBERSHIP_STALE)
-        await tunnel.close_all_viewers(CLOSE_MEMBERSHIP_STALE)
-        tunnel = None
     if link is None or tunnel is None:
         # The WebSocket uses one close code; the bootloader has already
         # resolved the envelope, so it can distinguish an invalid token from
