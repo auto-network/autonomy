@@ -1255,13 +1255,16 @@ def _ctrl_create_link(tunnel: "Tunnel", args: dict, store: RegistryStore,
             )
         if target_uuid != tunnel.org:
             raise _CtrlError("org:join target_uuid must equal the organization UUID")
-        if absolute_expires_at is not None and (
+        # expires_at is REQUIRED for org:join (host deploy-gate): an org:join
+        # grant must never carry a None expiry. Resolution is fold-authoritative
+        # (_serve_join), but the grant-level guard is closed here too.
+        if (
             type(absolute_expires_at) is not int
             or absolute_expires_at < 0
             or absolute_expires_at > 9_007_199_254_740_991
         ):
             raise _CtrlError(
-                "org:join expires_at must be a non-negative safe unix-ms integer"
+                "org:join requires expires_at as a non-negative safe unix-ms integer"
             )
     elif invite_ref is not None or absolute_expires_at is not None:
         raise _CtrlError(
