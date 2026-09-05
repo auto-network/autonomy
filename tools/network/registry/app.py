@@ -74,8 +74,15 @@ from .signing import (
     request_signing_input,
     sign_link_operation_receipt,
 )
-from .store import LinkGrant, LinkOperation, OrgBinding, RegistryStore
+from .store import (
+    LinkGrant,
+    LinkOperation,
+    OrgBinding,
+    RegistryStore,
+    validate_membership_advance,
+)
 from .witness import MAX_WITNESS_HEADS, sign_attestation
+from tools.network.ledger.membership_commitment import MembershipCommitmentError
 
 # Owned by tools.network.clock (validity intervals); re-exported here.
 from tools.network.clock import (
@@ -973,6 +980,63 @@ def create_app(
             "recovery_policy": new_policy,
             "recovery_pub": new_recovery_pub,
             "policy_epoch": epoch,
+        }
+
+    # -- committed membership (graph://da0dd9fb-e75, auto-1wxet) ----------------
+
+    @app.post("/v1/orgs/{org_uuid}/membership-checkpoints", status_code=201)
+    async def submit_membership_checkpoint(org_uuid: str, request: Request):
+        """Adopt one membership checkpoint by induction.
+
+        The body IS the signed record — no request envelope, because the
+        record is self-authenticating: a root-signed seed/reset verifies
+        against the bound root, and a member-signed record verifies against
+        the checkpointer commitment of the state this registry has already
+        adopted (``validate_membership_advance``). Whoever delivers it
+        changes nothing about whether it is true.
+        """
+        t = now()
+        binding = _require_binding(store, org_uuid, t)
+        record = await _read_json(request)
+        if record.get("org") != org_uuid:
+            raise _bad_request("checkpoint org must match the path org")
+        stored = store.get_membership_state(org_uuid)
+        try:
+            validate_membership_advance(
+                stored.checkpoint if stored is not None else None,
+                record, binding.root_pub,
+            )
+        except MembershipCommitmentError as exc:
+            raise _forbidden(str(exc))
+        store.advance_membership_state(org_uuid, record, now=t)
+        return {
+            "org_uuid": org_uuid,
+            "seq": record["seq"],
+            "members_root": record["members_root"],
+            "checkpointers_root": record["checkpointers_root"],
+        }
+
+    @app.get("/v1/orgs/{org_uuid}/membership")
+    async def get_membership_state(org_uuid: str):
+        """The registry's current verified membership tuple — what a member
+        node reads to build a proof rider (checkpoint_seq) and what the
+        sign-on ceremony probes to learn whether a seed exists yet."""
+        t = now()
+        _require_binding(store, org_uuid, t)
+        state = store.get_membership_state(org_uuid)
+        if state is None:
+            raise HTTPException(
+                status_code=404,
+                detail="no membership state — a root-signed seed checkpoint "
+                       "has not been adopted for this org",
+            )
+        return {
+            "org_uuid": state.org_uuid,
+            "seq": state.seq,
+            "members_root": state.members_root,
+            "checkpointers_root": state.checkpointers_root,
+            "ledger_head": state.ledger_head,
+            "verified_at": state.verified_at,
         }
 
     # -- §4.4 links ------------------------------------------------------------
