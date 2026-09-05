@@ -73,6 +73,15 @@ def _args(invite_ref):
     )
 
 
+@pytest.mark.skip(
+    reason="org:join HTTP mint retired (auto-qol1v): org:join now publishes "
+    "over the tunnel control transport, which requires a serving credential "
+    "(the pre-sign guard) and never uses POST /v1/links. This integration test "
+    "exercises the retired HTTP mint; its tunnel migration is auto-rwbja. "
+    "Bearer-safety and expiry-alignment on the tunnel path are covered by "
+    "test_link_publish_tunnel.py::test_org_join_* (only invite_ref, never the "
+    "token, crosses)."
+)
 def test_authorized_client_mints_exact_expiry_join_link_without_bearer_leak(
     tmp_path,
     monkeypatch,

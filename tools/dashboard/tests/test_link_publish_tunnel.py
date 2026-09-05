@@ -595,3 +595,172 @@ def test_root_signed_certificate_is_refused(
     assert "does not chain to its acting persona" in result["execution"]["error"]
     assert recorder.calls == []
     assert _cached_grants() == {}
+
+
+# ── org:join over the tunnel (auto-qol1v) ──────────────────────
+
+
+def _mint_bearer_invite(persona, expiry_ms, granted_role="owner"):
+    """Append a live bearer invite signed by the founder persona (owner scope
+    covers invite:<role>); returns (invite_ref, token)."""
+    import hashlib
+    from tools.network.ledger import HLC, make_event
+
+    token = "5a" * 32
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    with LedgerStore(org_ledger_db_path(ORG)) as store:
+        head = store.heads()[0]
+        last = store.get(head).hlc
+        invite_ref = store.append(make_event(
+            persona,
+            {"type": "invite", "granted_role": granted_role,
+             "expiry": expiry_ms, "sponsor": persona.public_hex,
+             "token_hash": token_hash},
+            [head], HLC(last.ts, last.count + 1)))
+    return invite_ref, token
+
+
+def _create_org_join(client, invite_ref, expiry_ms, meta=None):
+    r = client.post("/api/approvals", json={
+        "kind": "link_publish", "session": SESSION,
+        "request": {
+            "org": ORG, "target_uuid": ORG_UUID, "target_type": "org:join",
+            "invite_ref": invite_ref, "expires_at": expiry_ms,
+            "meta": meta or {},
+        },
+    })
+    return r
+
+
+def _serving_ok(monkeypatch, status="ok"):
+    monkeypatch.setattr(
+        link_serving_supervisor, "serve_cert_state",
+        lambda org, **k: {"status": status})
+
+
+def test_org_join_publish_over_tunnel_caches_invite_grant(
+    env, founder_persona, session_key, session_cert, monkeypatch,
+):
+    """org:join now rides the tunnel: the frame carries invite_ref + the
+    invitation-aligned expiry, target_uuid reconciled to the binding, and the
+    cached grant keeps invite_ref."""
+    _serving_ok(monkeypatch)
+    expiry = int(time.time() * 1000) + 30 * 86400 * 1000
+    invite_ref, _token = _mint_bearer_invite(founder_persona, expiry)
+    token = "d0d0face" * 4
+    recorder = _ControlRecorder(reply={
+        "ok": True, "token": token,
+        "url": f"{PUBLIC_LINK_URL}/l/{token}", "expires_at": expiry,
+    })
+    _install_control(monkeypatch, recorder)
+
+    r = _create_org_join(env, invite_ref, expiry, meta={"label": "Join us"})
+    assert r.status_code == 200, r.text
+    envelope = _tunnel_envelope(
+        session_key, session_cert, "/control/create-link",
+        payload={"target_uuid": ORG_UUID, "target_type": "org:join"})
+    execution = _decide_and_wait(env, r.json()["id"], envelope)["execution"]
+
+    assert execution["ok"] is True, execution
+    org, op, args = recorder.calls[0]
+    assert (org, op) == (ORG, "create-link")
+    assert args["target_type"] == "org:join"
+    # target_uuid reconciled to the binding (== ORG_UUID here; for a legacy
+    # genesis!=binding org this is the REGISTERED uuid the relay keys on).
+    assert args["target_uuid"] == ORG_UUID
+    assert args["invite_ref"] == invite_ref
+    assert args["expires_at"] == expiry
+    assert args.get("meta") == {"label": "Join us"}
+    grants = _cached_grants()
+    assert grants[token]["invite_ref"] == invite_ref
+    assert grants[token]["target_type"] == "org:join"
+
+
+def test_org_join_publish_refused_on_expiry_mismatch(
+    env, founder_persona, session_key, session_cert, monkeypatch,
+):
+    _serving_ok(monkeypatch)
+    expiry = int(time.time() * 1000) + 30 * 86400 * 1000
+    invite_ref, _token = _mint_bearer_invite(founder_persona, expiry)
+    token = "beadfeed" * 4
+    # Relay echoes a DIFFERENT expiry — the dashboard must refuse to cache.
+    recorder = _ControlRecorder(reply={
+        "ok": True, "token": token,
+        "url": f"{PUBLIC_LINK_URL}/l/{token}", "expires_at": expiry + 1,
+    })
+    _install_control(monkeypatch, recorder)
+
+    r = _create_org_join(env, invite_ref, expiry)
+    assert r.status_code == 200, r.text
+    envelope = _tunnel_envelope(
+        session_key, session_cert, "/control/create-link",
+        payload={"target_uuid": ORG_UUID, "target_type": "org:join"})
+    execution = _decide_and_wait(env, r.json()["id"], envelope)["execution"]
+
+    assert execution["ok"] is False
+    assert "invitation-aligned expiry" in execution["error"]
+    assert _cached_grants() == {}
+
+
+def test_org_join_publish_refused_without_serving_credential(
+    env, founder_persona, monkeypatch,
+):
+    """Pre-sign guard: with no serving credential, the publish is refused at
+    CREATE (before the operator signs), naming the fault."""
+    _serving_ok(monkeypatch, status="missing")
+    expiry = int(time.time() * 1000) + 30 * 86400 * 1000
+    invite_ref, _token = _mint_bearer_invite(founder_persona, expiry)
+
+    r = _create_org_join(env, invite_ref, expiry)
+    assert r.status_code == 400
+    assert "no serving credential" in r.text
+
+
+def test_org_join_publish_refused_meta_ttl(
+    env, founder_persona, monkeypatch,
+):
+    """org:join's lifetime is the invitation's; a duration/ttl is refused at
+    create (_org_join_request forbids meta.ttl)."""
+    _serving_ok(monkeypatch)
+    expiry = int(time.time() * 1000) + 30 * 86400 * 1000
+    invite_ref, _token = _mint_bearer_invite(founder_persona, expiry)
+
+    r = _create_org_join(env, invite_ref, expiry, meta={"ttl": 3600})
+    assert r.status_code == 400
+    assert "ttl" in r.text.lower()
+
+
+def test_org_join_revoke_over_tunnel(
+    env, founder_persona, session_key, session_cert, monkeypatch,
+):
+    _serving_ok(monkeypatch)
+    expiry = int(time.time() * 1000) + 30 * 86400 * 1000
+    invite_ref, _token = _mint_bearer_invite(founder_persona, expiry)
+    token = "0ddba11c" * 4
+    recorder = _ControlRecorder(reply={
+        "ok": True, "token": token,
+        "url": f"{PUBLIC_LINK_URL}/l/{token}", "expires_at": expiry,
+    })
+    _install_control(monkeypatch, recorder)
+    r = _create_org_join(env, invite_ref, expiry)
+    pub = _decide_and_wait(env, r.json()["id"], _tunnel_envelope(
+        session_key, session_cert, "/control/create-link",
+        payload={"target_uuid": ORG_UUID, "target_type": "org:join"}))["execution"]
+    assert pub["ok"] is True
+
+    # Revoke rides the tunnel too; the cached org:join grant classifies it.
+    rev_req = client_post_revoke(env, token)
+    assert rev_req.status_code == 200, rev_req.text
+    envelope = _tunnel_envelope(
+        session_key, session_cert, "/control/revoke-link",
+        payload={"token": token})
+    execution = _decide_and_wait(env, rev_req.json()["id"], envelope)["execution"]
+    assert execution["ok"] is True
+    assert ("netorg", "revoke-link", {"token": token}) in recorder.calls
+
+
+def client_post_revoke(client, token):
+    return client.post("/api/approvals", json={
+        "kind": "link_revoke", "session": SESSION,
+        "request": {"org": ORG, "token": token},
+    })

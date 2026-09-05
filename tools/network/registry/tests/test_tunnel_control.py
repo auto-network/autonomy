@@ -285,6 +285,18 @@ def test_org_join_bad_invite_ref_refused(client, clock, root):
     assert "invite_ref" in reply["error"]
 
 
+def test_org_join_requires_expires_at(client, clock, root):
+    """An org:join grant must never carry a None expiry — a frame omitting
+    expires_at is refused at the relay (host deploy-gate)."""
+    with _open_tunnel(client, clock, root) as ws:
+        reply = _ctrl(ws, "1" * 32, "create-link", {
+            "target_uuid": ORG, "target_type": "org:join",
+            "invite_ref": _ORG_JOIN_INVITE,
+        })
+    assert reply["ok"] is False
+    assert "expires_at" in reply["error"]
+
+
 def test_org_join_target_uuid_must_equal_tunnel_org(client, clock, root):
     with _open_tunnel(client, clock, root) as ws:
         reply = _ctrl(ws, "6" * 32, "create-link", {

@@ -235,10 +235,38 @@ def _org_join_request(request: dict) -> dict:
         raise ValueError("invite_ref is not in the organization ledger")
 
 
+def _require_startable_serving(org: str | None) -> None:
+    """Refuse an org:join publish that could never ride the tunnel.
+
+    org:join now publishes as a control frame on the org's serving tunnel, so a
+    serving credential must exist for the frame to authenticate. Without one the
+    publish is doomed at execute — after the operator has already signed — so we
+    refuse it here at planning time (the auto-hzs4f pre-sign-guard precedent). A
+    ``missing`` serve-cert is the unstartable case; an existing-but-stale cert
+    (expired/key-missing) is re-minted at the next org-root unlock and start.
+    """
+    from tools.dashboard.link_serving_supervisor import serve_cert_state
+
+    if (serve_cert_state(org) or {}).get("status") == "missing":
+        raise ValueError(
+            "this organization has no serving credential yet — unlock the "
+            "organization root once to provision serving, then publish the "
+            "invitation link"
+        )
+
+
 def prepare_create(_session: str, request: dict) -> tuple[dict, None]:
-    """Fail closed before persisting an invalid org:join publish request."""
+    """Fail closed before persisting a doomed publish request.
+
+    For org:join, both halves of a doomed publish are caught here, BEFORE the
+    operator signs (auto-hzs4f): ``_org_join_request`` re-validates the invite
+    (live, bearer, and expires_at == the invitation's own expiry), and
+    ``_require_startable_serving`` refuses when no serving credential exists to
+    carry the tunnel control frame.
+    """
     if request.get("target_type") == "org:join":
         _org_join_request(request)
+        _require_startable_serving(request.get("org"))
     return copy.deepcopy(request), None
 
 
@@ -858,15 +886,16 @@ def _registry_error(resp: httpx.Response) -> str:
 
 async def _execute_link_publish(row: dict, decision: dict) -> dict:
     req = row["request"]
-    org = req.get("org")
-    # org:join invitations keep the HTTP publish path (option A): their
-    # transport is a separate concern from D19's share-link tunnel move.
+    # org:join now rides the same authenticated org tunnel every other link
+    # type uses (auto-qol1v): its persona-signed authority is proven LOCALLY,
+    # and only an org-attributed control frame crosses — never a persona-signed
+    # envelope to a registry HTTP gate. Its invitation-scoped fields
+    # (invite_ref, expires_at) are re-validated here before the frame is built.
     if req.get("target_type") == "org:join":
         try:
             _org_join_request(req)
         except ValueError as exc:
             return _fail(str(exc))
-        return await _execute_link_publish_http(row, decision)
     return await _execute_share_link_publish_tunnel(row, decision)
 
 
@@ -936,6 +965,19 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
     wire_meta = {k: v for k, v in meta.items() if k not in _LOCAL_ONLY_META}
     if wire_meta:
         args["meta"] = wire_meta
+    # org:join carries its invitation binding as TOP-LEVEL control args (not
+    # meta), mirroring the registry create_link payload law. The relay refuses
+    # these fields for any other target type and requires expires_at here.
+    if req.get("target_type") == "org:join":
+        # Reconcile the target_uuid to the BINDING (auto-hzs4f): the relay keys
+        # the org by its REGISTERED uuid (== tunnel.org), which for a legacy org
+        # differs from the ledger genesis uuid that _org_join_request validated
+        # the request against. The published link names the binding; the invite
+        # still lives in the genesis ledger (a joiner reaches it via
+        # root_pub/relay), so naming the binding here is correct and safe.
+        args["target_uuid"] = binding["org_uuid"]
+        args["invite_ref"] = req["invite_ref"]
+        args["expires_at"] = req["expires_at"]
     # First publish is chicken-and-egg: the serving tunnel only runs while a
     # link is live, but the very first link is created BY riding the tunnel.
     # Start serving now (an earlier org-root sign-on provisioned the serving
@@ -957,6 +999,17 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
     token, url = reply.get("token"), reply.get("url")
     if not isinstance(token, str) or not _TOKEN_RE.match(token):
         return _fail("registry returned a malformed grant token — not caching it")
+    # org:join's lifetime is the invitation's: the relay must echo the exact
+    # expiry we sent, or the link would outlive/undercut the invite. Refuse to
+    # cache on any mismatch (mirrors the retired HTTP path's guard).
+    if (
+        req.get("target_type") == "org:join"
+        and reply.get("expires_at") != req.get("expires_at")
+    ):
+        return _fail(
+            "registry did not preserve the invitation-aligned expiry — "
+            "not caching the link"
+        )
 
     # Per-link channel key (graph://807b4e11-3e9): mint the keypair, vault the
     # private seed org-wide, and carry the public key on the grant row. The
@@ -997,6 +1050,8 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
     }
     if channel_pub is not None:
         grant["channel_pub"] = channel_pub
+    if req.get("target_type") == "org:join":
+        grant["invite_ref"] = req["invite_ref"]
     settings_ops.upsert_by_key(
         NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION,
         token, grant, org=org,
@@ -1037,6 +1092,19 @@ def _tunnel_link_meta(req: dict, decision: dict) -> tuple[dict, str | None]:
     meta key means adding it here too; that is the cost of an allowlist
     and it is the right cost, since an unknown key must never reach a
     grant."""
+    if req.get("target_type") == "org:join":
+        # An org:join link's lifetime is the invitation's (carried as the
+        # top-level expires_at); it never takes a duration, and its meta admits
+        # only label. _org_join_request already forbids meta.ttl on the request.
+        base = req.get("meta") or {}
+        if not isinstance(base, dict):
+            return {}, "request metadata is malformed"
+        if decision.get("ttl") is not None or "ttl" in base:
+            return {}, (
+                "an org:join link's lifetime is fixed to the invitation; "
+                "it takes no duration"
+            )
+        return ({"label": base["label"]} if "label" in base else {}), None
     base = req.get("meta")
     if base is not None and not isinstance(base, dict):
         return {}, "request metadata is malformed"
@@ -1173,21 +1241,17 @@ async def _execute_link_revoke(row: dict, decision: dict) -> dict:
     req = row["request"]
     org = req.get("org")
     token = req.get("token", "")
-    # Route by the cached grant's type: a KNOWN share-link goes over the
-    # tunnel; org:join AND any token we cannot positively classify go over
-    # HTTP. Defaulting the unknown/cache-miss case to the tunnel (the prior
-    # behaviour) let an uncached org:join token reach the tunnel revoke,
-    # violating option A's "org:join never rides the tunnel" (Codex D19
-    # finding #5). HTTP is the safe default: the registry's DELETE revokes
-    # any token by id, so an uncached share link still revokes correctly,
-    # and an org:join token never crosses to the tunnel.
+    # Every revoke rides the org tunnel now (auto-qol1v): org:join no longer
+    # has a separate HTTP path. A token whose grant is not in this dashboard's
+    # cache cannot be classified or attributed, so it is refused with the fault
+    # named — never a silent fallback to a retired HTTP route.
     grant = _cached_grant(token, org)
-    is_share_link = bool(
-        grant and grant.get("target_type")
-        and grant.get("target_type") != "org:join")
-    if is_share_link:
-        return await _execute_share_link_revoke_tunnel(row, decision)
-    return await _execute_link_revoke_http(row, decision)
+    if not grant or not grant.get("target_type"):
+        return _fail(
+            "cannot revoke this link: its grant is not in this dashboard's "
+            "cache, so it can't be classified — refresh the link list and retry"
+        )
+    return await _execute_share_link_revoke_tunnel(row, decision)
 
 
 async def _execute_share_link_revoke_tunnel(row: dict, decision: dict) -> dict:
