@@ -805,6 +805,59 @@ class NetworkLinkChannelKeyV1(SettingSchema):
         _require_hex(payload, "seed", cls.__name__, length=NETWORK_PUB_HEX_LEN)
 
 
+# ── autonomy.network.membership-checkpoint (local adopted cache) ──
+
+
+NETWORK_CHECKPOINT_CACHE_SET_ID = "autonomy.network.membership-checkpoint"
+NETWORK_CHECKPOINT_CACHE_REVISION = 1
+
+
+@home("organization")
+@publication_band(min="raw", max="raw")
+@singleton(key="default")
+class NetworkMembershipCheckpointV1(SettingSchema):
+    """The last membership checkpoint this node knows the registry adopted.
+
+    A local optimization cache (auto-tmers, graph://da0dd9fb-e75): sign-on
+    decides whether a fresh checkpoint is due by comparing the current fold's
+    roots to THIS row, never by calling the registry. Written when a POST
+    succeeds; a stale row costs at most one refused POST (the registry's
+    seq+1 rule is the real gate, so correctness never depends on this being
+    current). Holds the full signed record so the next checkpoint can
+    hash-link ``prev`` to it and prove the signer under its
+    ``checkpointers_root``.
+    """
+
+    set_id = NETWORK_CHECKPOINT_CACHE_SET_ID
+    schema_revision = NETWORK_CHECKPOINT_CACHE_REVISION
+
+    seq: int = field(
+        required=True,
+        description="Sequence number of the adopted checkpoint this row caches.",
+    )
+    record: dict = field(
+        required=True,
+        description=(
+            "The full signed checkpoint record (the membership_commitment "
+            "checkpoint schema), from which seq/roots/ledger_head/prev derive."
+        ),
+    )
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        super().validate(payload)
+        if not isinstance(payload, dict):
+            return
+        if type(payload.get("seq")) is not int or payload["seq"] < 0:
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'seq' must be a non-negative integer")
+        record = payload.get("record")
+        if not isinstance(record, dict) or record.get("seq") != payload["seq"]:
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'record' must be the checkpoint object whose "
+                "seq matches this row")
+
+
 # ── autonomy.network.serve-cert ───────────────────────────────
 
 
