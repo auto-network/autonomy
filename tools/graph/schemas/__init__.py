@@ -116,6 +116,7 @@ from . import secure_setting  # noqa: F401 — autonomy.secure.setting#1
 from . import commit_signing_key  # noqa: F401 — autonomy.commit.signing-key#1
 from . import credential_file  # noqa: F401 — autonomy.credential-file#1
 from . import fleet_roster  # noqa: F401 — autonomy.fleet.roster#2
+from . import fleet_org_roster  # noqa: F401 — autonomy.fleet.org-roster#1
 from . import machine_identity  # noqa: F401 — autonomy.machine.identity#1
 from . import service_target  # noqa: F401 — autonomy.network.service-target#1
 from . import service_certificate  # noqa: F401 — autonomy.network.service-certificate#1
