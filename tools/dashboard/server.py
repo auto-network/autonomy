@@ -11830,6 +11830,21 @@ async def page_index(request):
     # operator who wants it; it just no longer intercepts the front page on a
     # detection that cannot be true here.
     #
+    # A fleet member's collaborative orgs arrive as SYNCED roster entries, not
+    # local creations. Materialise any org DB stub the synced org roster names
+    # but this machine has not built yet, BEFORE the empty-state gate — so a
+    # joined member lands on its (syncing) dashboard instead of being asked to
+    # "create or join an organization" for orgs it already belongs to. Local +
+    # idempotent (no network); a genuine fresh machine has an empty roster, so
+    # this is a no-op and the create/join step still shows correctly.
+    if _has_personal_identity():
+        try:
+            from tools.network.fleet_sync_scheduler import (
+                materialize_org_scopes_from_roster,
+            )
+            materialize_org_scopes_from_roster()
+        except Exception:
+            logger.exception("org scope materialisation failed; continuing to gate")
     # Empty-state gate (bead auto-inpkd): once the harness is set up but the
     # machine still lacks an identity or an organization, the Welcome shell
     # renders — same server-side-decision pattern, one layer up.
