@@ -485,25 +485,6 @@ def create_org(
             )
     finally:
         db.close()
-    # Publish into the fleet ORG roster so every fleet machine learns this org
-    # and materialises its DB (the org-membership record the machine roster is
-    # for machines). Shared orgs only — "personal" is the implicit sync scope,
-    # never a roster org. Unsigned personal.db state, server-side, no seed.
-    #
-    # GUARDED on personal.db already existing: the roster lives in personal.db,
-    # and the first-launch bootstrap creates the shared org BEFORE the personal
-    # store (ensure_bootstrap_orgs order). Reading/writing the roster here would
-    # otherwise create an empty, un-bootstrapped personal.db and wedge the very
-    # next _ensure_org("personal"). When personal.db is not ready yet, the
-    # startup backfill (publish_local_orgs_to_roster, run after bootstrap)
-    # publishes it. Best-effort + idempotent regardless.
-    if type_ == "shared" and _slug_db_path("personal").exists():
-        try:
-            from tools.network import fleet_org_roster
-
-            fleet_org_roster.publish_org(info["slug"], info["id"])
-        except Exception:
-            pass
     return OrgRef(
         id=info["id"], slug=info["slug"], type=info["type"],
         created_at=info["created_at"], db_path=str(path),
@@ -700,35 +681,6 @@ def create_org_with_identity(
         except Exception:
             pass
         raise
-
-
-def publish_local_orgs_to_roster(*, now: int | None = None) -> list[str]:
-    """Ensure every local SHARED org has an entry in the fleet ORG roster.
-
-    Server-side, no seed: the org roster is unsigned personal.db state (it rides
-    the already-authenticated personal-scope sync), so publishing is a plain
-    idempotent write. ``create_org`` publishes each org as it is created; this
-    backfills orgs that predate the roster, so a home that already has orgs makes
-    them visible to the fleet. Idempotent — an org already resolved in the roster
-    is left alone. Returns the slugs newly published.
-    """
-    from tools.network import fleet_org_roster
-
-    # The roster lives in personal.db; never create it here (a read would make
-    # an empty, un-bootstrapped file). Callers run this after ensure_bootstrap_orgs,
-    # so it exists — but guard anyway.
-    if not _slug_db_path("personal").exists():
-        return []
-    published: list[str] = []
-    for ref in list_orgs():
-        if ref.type != "shared" or not ref.slug:
-            continue
-        try:
-            if fleet_org_roster.publish_org(ref.slug, ref.id, now_ms=now):
-                published.append(ref.slug)
-        except Exception:
-            continue
-    return published
 
 
 def _record_persona_setting(
