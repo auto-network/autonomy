@@ -267,15 +267,19 @@ async def _serve_channel_records(
                 await result
 
 
-async def serve_channel(key: KeyPair, cert: DelegationCert, *, org: str, token: str,
-                        recv, send, handler) -> None:
-    """Authenticate an org-delegated peer, then serve its record exchanges."""
+async def serve_channel(key: KeyPair, cert: DelegationCert = None, *, org: str,
+                        token: str, recv, send, handler,
+                        link_key: "KeyPair | None" = None) -> None:
+    """Authenticate to a viewer, then serve its record exchanges.
+
+    With *link_key* the server authenticates by the per-link keypair
+    (graph://807b4e11-3e9); otherwise by the org-delegated *cert* (legacy)."""
     first = await recv()
     if first is None:
         return
     client_eph = parse_client_hello(first)
     eph_priv, server_hello, transcript_hash = build_server_hello(
-        key, cert, org=org, token=token, client_eph=client_eph
+        key, cert, org=org, token=token, client_eph=client_eph, link_key=link_key
     )
     await send(tag_viewer_message(VIEWER_KIND_RECORD, server_hello))
     crypto = ChannelCrypto.server(eph_priv, client_eph, transcript_hash)
@@ -469,6 +473,7 @@ class TunnelConnector:
         caps: tuple = (),
         stream_handler=None,
         on_reprove=None,
+        link_key_for=None,
     ):
         self._url = f"{relay_url.rstrip('/')}/t/{org}"
         self._org = org
@@ -495,6 +500,11 @@ class TunnelConnector:
         #: async (host, reservation) -> (reader, writer) | None — the
         #: dashboard's dial-only raw-stream seam (stream_adapter.py).
         self._stream_handler = stream_handler
+        #: (token) -> KeyPair | None: the per-link channel signing key for a
+        #: served link (graph://807b4e11-3e9). Supplied by the dashboard, which
+        #: resolves it from the vault; None (or an unset callback) means legacy
+        #: certificate serving for that link.
+        self._link_key_for = link_key_for
         #: async (seq) -> membership_proof rider | None. Called when the
         #: registry PUSHES a reprove-required control frame after adopting a
         #: newer membership checkpoint (auto-3bhy3). The dashboard supplies a
@@ -1002,12 +1012,19 @@ class TunnelConnector:
     async def _serve_channel(self, channel_id: bytes, token: str,
                              queue: asyncio.Queue, send_frame, drop) -> None:
         """One viewer channel: handshake, then request/response messages."""
+        link_key = None
+        if self._link_key_for is not None:
+            try:
+                link_key = self._link_key_for(token)
+            except Exception:
+                link_key = None  # a resolver fault falls back to legacy serving
         try:
             await serve_channel(
                 self._key, self._channel_cert, org=self._org, token=token,
                 recv=queue.get,
                 send=lambda data: send_frame(FRAME_DATA, channel_id, data),
                 handler=self._handler,
+                link_key=link_key,
             )
         except Exception:  # HandshakeError, RecordError, transport failures
             with contextlib.suppress(Exception):

@@ -796,3 +796,112 @@ async def test_serve_channel_deadline_closes_silent_signaling_peer(
     with pytest.raises(asyncio.TimeoutError):
         await task
     assert capacity.active == 0
+
+
+class TestPerLinkHandshake:
+    """graph://807b4e11-3e9: the serving side signs with the link's private
+    key and the viewer verifies against the public key from the URL fragment.
+    No certificate, no org root, no registry trust."""
+
+    def _client(self):
+        eph_priv, client_hello = build_client_hello()
+        return eph_priv, parse_client_hello(client_hello)
+
+    def test_round_trip_encrypts_both_directions(self):
+        link = KeyPair.generate()
+        _, client_eph = self._client()
+        eph_priv, hello, th = build_server_hello(
+            None, org=ORG, token=TOKEN, client_eph=client_eph, link_key=link)
+        server_eph, thv = verify_server_hello(
+            hello, link_pub=link.public_hex, org=ORG, token=TOKEN,
+            client_eph=client_eph)
+        assert thv == th  # both ends derived the same transcript
+
+    def test_wrong_fragment_key_fails(self):
+        link = KeyPair.generate()
+        _, client_eph = self._client()
+        _, hello, _ = build_server_hello(
+            None, org=ORG, token=TOKEN, client_eph=client_eph, link_key=link)
+        with pytest.raises(HandshakeError):
+            verify_server_hello(
+                hello, link_pub=KeyPair.generate().public_hex, org=ORG,
+                token=TOKEN, client_eph=client_eph)
+
+    def test_missing_fragment_fails_closed(self):
+        link = KeyPair.generate()
+        _, client_eph = self._client()
+        _, hello, _ = build_server_hello(
+            None, org=ORG, token=TOKEN, client_eph=client_eph, link_key=link)
+        with pytest.raises(HandshakeError, match="fragment"):
+            verify_server_hello(
+                hello, org=ORG, token=TOKEN, client_eph=client_eph)
+
+    def test_legacy_cert_hello_still_verifies(self, root, session_key, session_cert):
+        _, client_eph = self._client()
+        _, hello, _ = build_server_hello(
+            session_key, session_cert, org=ORG, token=TOKEN, client_eph=client_eph)
+        server_eph, _ = verify_server_hello(
+            hello, root_pub=root.public_hex, org=ORG, token=TOKEN,
+            client_eph=client_eph)
+        assert server_eph
+
+    def test_link_hello_not_accepted_as_cert_and_vice_versa(
+            self, root, session_key, session_cert):
+        _, client_eph = self._client()
+        link = KeyPair.generate()
+        _, link_hello, _ = build_server_hello(
+            None, org=ORG, token=TOKEN, client_eph=client_eph, link_key=link)
+        # A link hello handed only a root pin: it has no cert to chain, and the
+        # link path refuses without a fragment key.
+        with pytest.raises(HandshakeError):
+            verify_server_hello(
+                link_hello, root_pub=root.public_hex, org=ORG, token=TOKEN,
+                client_eph=client_eph)
+        # A cert hello handed only a link pin: cert-shape needs the root.
+        _, cert_hello, _ = build_server_hello(
+            session_key, session_cert, org=ORG, token=TOKEN, client_eph=client_eph)
+        with pytest.raises(HandshakeError, match="root"):
+            verify_server_hello(
+                cert_hello, link_pub=link.public_hex, org=ORG, token=TOKEN,
+                client_eph=client_eph)
+
+    @pytest.mark.asyncio
+    async def test_serve_channel_link_key_end_to_end(self):
+        link = KeyPair.generate()
+        server_key = KeyPair.generate()  # the serving tunnel key; unused for auth here
+
+        async def handler(token, message):
+            return b"echo:" + message
+
+        c2s, s2c = asyncio.Queue(), asyncio.Queue()
+
+        async def server():
+            await serve_channel(
+                server_key, None, org=ORG, token=TOKEN,
+                recv=c2s.get, send=s2c.put, handler=handler, link_key=link)
+
+        srv = asyncio.create_task(server())
+        channel = await ViewerChannel.authenticate(
+            _QueueTransport(s2c, c2s), TOKEN,
+            link_pub=link.public_hex, org=ORG)
+        await channel.send_message(b"hi")
+        assert await channel.recv_message() == b"echo:hi"
+        await c2s.put(None)
+        await srv
+
+
+class _QueueTransport:
+    """A minimal in-memory transport pairing two queues for the handshake +
+    record round-trip test."""
+
+    def __init__(self, recv_q, send_q):
+        self._recv_q, self._send_q = recv_q, send_q
+
+    async def send(self, data):
+        await self._send_q.put(data)
+
+    async def recv(self):
+        return await self._recv_q.get()
+
+    async def close(self):
+        pass

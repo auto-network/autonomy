@@ -128,7 +128,8 @@ class ViewerChannel:
         transport,
         token: str,
         *,
-        root_pub: str,
+        root_pub: Optional[str] = None,
+        link_pub: Optional[str] = None,
         org: str,
         now: Optional[int] = None,
     ) -> "ViewerChannel":
@@ -149,6 +150,7 @@ class ViewerChannel:
             server_eph, transcript_hash = verify_server_hello(
                 server_hello,
                 root_pub=root_pub,
+                link_pub=link_pub,
                 org=org,
                 token=token,
                 client_eph=client_eph,
@@ -169,7 +171,8 @@ class ViewerChannel:
         relay_url: str,
         token: str,
         *,
-        root_pub: str,
+        root_pub: Optional[str] = None,
+        link_pub: Optional[str] = None,
         org: str,
         now: Optional[int] = None,
         open_timeout: float = 10.0,
@@ -181,7 +184,7 @@ class ViewerChannel:
             compression=None,
         )
         return await cls.authenticate(
-            ws, token, root_pub=root_pub, org=org, now=now
+            ws, token, root_pub=root_pub, link_pub=link_pub, org=org, now=now
         )
 
     async def send_message(self, data: bytes) -> None:

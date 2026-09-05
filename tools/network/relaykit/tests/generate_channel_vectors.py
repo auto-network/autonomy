@@ -129,7 +129,7 @@ def _build_handshake(name: str, *, chain: str):
 
     client_hello = _client_hello_bytes(client_pub)
     server_hello = _server_hello_bytes(server_pub, cert_wire, sig)
-    transcript = _transcript_hash(ORG, TOKEN, client_pub, server_pub, cert_wire)
+    transcript = _transcript_hash(ORG, TOKEN, client_pub, server_pub, cert_wire=cert_wire)
 
     # ECDH + HKDF, exactly as the real handshake derives them.
     shared = client_priv.exchange(server_priv.public_key())

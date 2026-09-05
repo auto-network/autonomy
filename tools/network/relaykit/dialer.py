@@ -122,6 +122,7 @@ async def dial_via_peer_relay(
     *,
     org: str,
     root_pub: str,
+    link_pub: "str | None" = None,
     target_pub: str,
     session: str,
     now: Optional[int] = None,
@@ -161,7 +162,7 @@ async def dial_via_peer_relay(
         # relayed path: serve_channel is transport-agnostic.
         server_hello = read_viewer_record(server_hello)
         server_eph, transcript_hash = verify_server_hello(
-            server_hello, root_pub=root_pub, org=org, token=session,
+            server_hello, root_pub=root_pub, link_pub=link_pub, org=org, token=session,
             client_eph=client_eph, now=now,
         )
         return ViewerChannel(ws, ChannelCrypto.client(eph_priv, server_eph,
@@ -176,6 +177,7 @@ async def dial_peer(
     *,
     org: str,
     root_pub: str,
+    link_pub: "str | None" = None,
     target_pub: str,
     direct_addrs: Optional[list] = None,
     relays: Optional[list] = None,
@@ -203,7 +205,7 @@ async def dial_peer(
     for addr in direct_addrs or []:
         try:
             channel = await direct_connect(
-                addr, org=org, root_pub=root_pub, session=session,
+                addr, org=org, root_pub=root_pub, link_pub=link_pub, session=session,
                 now=now, timeout=attempt_timeout,
             )
             return DialResult(channel, PATH_DIRECT, addr, attempts)
@@ -216,7 +218,7 @@ async def dial_peer(
         url = relay["relay_url"] if isinstance(relay, dict) else relay
         try:
             channel = await dial_via_peer_relay(
-                url, org=org, root_pub=root_pub, target_pub=target_pub,
+                url, org=org, root_pub=root_pub, link_pub=link_pub, target_pub=target_pub,
                 session=session, now=now, timeout=attempt_timeout,
             )
             return DialResult(channel, PATH_PEER_RELAY, url, attempts)
@@ -229,7 +231,7 @@ async def dial_peer(
         relay_url, token = floor
         try:
             channel = await ViewerChannel.connect(
-                relay_url, token, root_pub=root_pub, org=org, now=now,
+                relay_url, token, root_pub=root_pub, link_pub=link_pub, org=org, now=now,
                 open_timeout=attempt_timeout,
             )
             return DialResult(channel, PATH_FLOOR, relay_url, attempts)
