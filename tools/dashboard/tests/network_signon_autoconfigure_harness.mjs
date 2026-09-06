@@ -145,9 +145,10 @@ async function browserMode() {
     process.env.AUTONOMY_PASSPHRASE,
     { org: 'module-load-org', ttlSeconds: 3600 },
   );
+  // The tunnel PoP bytes every link publish signs (D19/auto-qol1v).
   const envelope = await window.AutonomyNetworkSigner.signRegistryRequest(
-    'POST',
-    '/v1/links',
+    'TUNNEL',
+    '/control/create-link',
     {
       org: binding.org_uuid,
       target_uuid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
@@ -173,7 +174,7 @@ async function nodeMode() {
   const module = await import(moduleUrl);
   let rejection = null;
   try {
-    await module.signRegistryRequest('POST', '/v1/links', {});
+    await module.signRegistryRequest('TUNNEL', '/control/create-link', {});
   } catch (error) {
     rejection = error.message || String(error);
   }

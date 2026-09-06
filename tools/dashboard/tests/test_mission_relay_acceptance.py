@@ -225,15 +225,12 @@ def stack(tmp_path_factory):
     )
     guest = mcdb.create_visitor_token("Priya (data partner)", db_path=mission_db)
 
-    # Publish the link at the registry now that the mission id exists.
-    with httpx.Client(base_url=f"http://127.0.0.1:{registry_port}") as client:
-        r = client.post("/v1/links", json=sign_request(
-            root, "POST", "/v1/links",
-            {"org": ORG_UUID, "target_uuid": mission_id, "target_type": "mission"},
-            ts=int(time.time()),
-        ))
-        assert r.status_code == 201, r.text
-        token = r.json()["token"]
+    # Seed the link at the registry store now that the mission id exists
+    # (publish rides the org tunnel in production; the subject here is
+    # mission serving over the relay).
+    from tools.network.registry.testkit import mint_link_at
+    token = mint_link_at(registry_db, ORG_UUID, mission_id,
+                         target_type="mission")
 
     settings_ops.add_setting(
         NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION, token,

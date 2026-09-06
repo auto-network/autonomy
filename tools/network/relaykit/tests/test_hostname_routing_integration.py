@@ -71,7 +71,8 @@ def _serve_cert(root: KeyPair, serve_key: KeyPair, persona: str = PERSONA):
     )
 
 
-def _register_org_and_link(port: int, root: KeyPair) -> str:
+def _register_org_and_link(port: int, db, root: KeyPair) -> str:
+    from tools.network.registry.testkit import mint_link_at
     with httpx.Client(base_url=f"http://127.0.0.1:{port}") as client:
         ts = int(time.time())
         response = client.post("/v1/orgs", json=sign_request(
@@ -81,13 +82,9 @@ def _register_org_and_link(port: int, root: KeyPair) -> str:
             ts=ts,
         ))
         assert response.status_code == 201, response.text
-        response = client.post("/v1/links", json=sign_request(
-            root, "POST", "/v1/links",
-            {"org": ORG, "target_uuid": TARGET, "target_type": "present"},
-            ts=ts,
-        ))
-        assert response.status_code == 201, response.text
-        return response.json()["token"]
+    # Publish rides the org tunnel in production; this stack's subject is
+    # hostname routing, so seed the grant at the store.
+    return mint_link_at(db, ORG, TARGET)
 
 
 class _Node:
@@ -160,7 +157,7 @@ def stack(tmp_path_factory, root):
     env = {**os.environ, "PYTHONPATH": str(REPO)}
     registry = start_registry(port, tmp / "registry.db", env,
                               tmp / "registry.log")
-    token = _register_org_and_link(port, root)
+    token = _register_org_and_link(port, tmp / "registry.db", root)
     state = {"port": port, "token": token, "root": root,
              "registry": registry}
     yield state

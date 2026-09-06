@@ -1,12 +1,17 @@
 """Shared fixtures: a registry app on a fake clock + a full key hierarchy.
 
-Every test drives the service through the HTTP surface (FastAPI
-TestClient) exactly the way the dashboard will: signed envelopes built
-with ``signing.sign_request``. The clock is injected so binding TTLs,
-grant expiry, and the I7 purge horizon are all deterministic.
+Every test drives the service the way the dashboard does: signed HTTP
+envelopes (``signing.sign_request``) for the surviving signed routes, and
+control frames on the org's authenticated serving tunnel for link
+create/revoke (``open_tunnel`` / ``ctrl`` / ``mint_link``). The clock is
+injected so binding TTLs, grant expiry, and the I7 purge horizon are all
+deterministic.
 """
 
 from __future__ import annotations
+
+import contextlib
+import json
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,6 +19,13 @@ from fastapi.testclient import TestClient
 from tools.network.idkit import KeyPair, Subject, issue_cert
 from tools.network.registry.app import create_app
 from tools.network.registry.signing import sign_request
+from tools.network.relaykit.frames import (
+    CTRL_CHANNEL_ID,
+    FRAME_CTRL,
+    decode_frame,
+    encode_frame,
+)
+from tools.network.relaykit.hello import HELLO_VERSION, build_tunnel_hello
 
 NOW = 1_800_000_000
 HOUR = 3600
@@ -160,12 +172,71 @@ def register(client, clock, root, org_uuid=ORG, policy="none", recovery_pub=None
     return signed(client, "POST", "/v1/orgs", root, payload, clock)
 
 
-def publish_link(client, clock, key, cert=None, org=ORG, target=TARGET,
-                 target_type="present", meta=None):
-    payload = {"org": org, "target_uuid": target, "target_type": target_type}
+def serve_cert(root, serve_key, org=ORG):
+    """A tunnel:serve credential: root -> serve key, the connector's identity."""
+    return issue_cert(
+        root,
+        serve_key.public_hex,
+        scope=("tunnel:serve",),
+        org=org,
+        subject=Subject("persona", "ab" * 32),
+        not_before=NOW - 100,
+        not_after=NOW + 30 * DAY,
+    )
+
+
+@contextlib.contextmanager
+def open_tunnel(client, clock, root, org=ORG, *, register_org=False):
+    """Connect the org's serving tunnel, complete the hello, and yield the
+    open websocket (already past the {ok: true} ack). The org must already
+    be bound (e.g. via the ``bound_org`` fixture) unless *register_org*."""
+    if register_org:
+        register(client, clock, root, org_uuid=org)
+    serve_key = KeyPair.generate()
+    cert = serve_cert(root, serve_key, org)
+    hello = build_tunnel_hello(serve_key, cert, org=org, ts=clock.now)
+    with client.websocket_connect(f"/t/{org}") as ws:
+        ws.send_text(hello)
+        ack = ws.receive_json()
+        assert ack == {"ok": True, "v": HELLO_VERSION}, ack
+        yield ws
+
+
+def ctrl(ws, correlation, op, args):
+    """Send one control frame on an open tunnel; return the decoded reply."""
+    request = {"id": correlation, "op": op, "args": args}
+    ws.send_bytes(encode_frame(
+        FRAME_CTRL, CTRL_CHANNEL_ID, json.dumps(request).encode("utf-8")))
+    frame = decode_frame(ws.receive_bytes())
+    assert frame.type == FRAME_CTRL
+    assert frame.channel_id == CTRL_CHANNEL_ID
+    return json.loads(frame.payload.decode("utf-8"))
+
+
+def mint_link(client, clock, root, org=ORG, target=TARGET,
+              target_type="present", meta=None, invite_ref=None,
+              expires_at=None):
+    """Mint a link the production way — a create-link control frame on the
+    org's authenticated tunnel — and return the reply ({token, url, ...})."""
+    args = {"target_uuid": target, "target_type": target_type}
     if meta is not None:
-        payload["meta"] = meta
-    return signed(client, "POST", "/v1/links", key, payload, clock, cert=cert)
+        args["meta"] = meta
+    if invite_ref is not None:
+        args["invite_ref"] = invite_ref
+    if expires_at is not None:
+        args["expires_at"] = expires_at
+    with open_tunnel(client, clock, root, org) as ws:
+        reply = ctrl(ws, "0" * 32, "create-link", args)
+    assert reply.get("ok") is True, reply
+    return reply
+
+
+def revoke_link(client, clock, root, token, org=ORG):
+    """Revoke a link over the org tunnel; return the reply."""
+    with open_tunnel(client, clock, root, org) as ws:
+        reply = ctrl(ws, "1" * 32, "revoke-link", {"token": token})
+    assert reply.get("ok") is True, reply
+    return reply
 
 
 @pytest.fixture

@@ -10,7 +10,8 @@ notes, attachments, and grants in a tmp GRAPH_DB. Covers:
 * seek-not-whole-file: a second-window fetch serves only that window;
 * the D4 authorization attack set — each serves zero body bytes and a typed
   error: unknown/forged ref, another note's attachment, a non-attachment
-  ref, out-of-range offset, a path-traversal file_path, and a non-note grant;
+  ref, out-of-range offset, and a non-note grant — plus a poisoned
+  file_path row, which the content-addressed read ignores entirely;
 * malformed requests are hard bad requests; cancel is accepted; a zero-byte
   attachment yields one empty EOF frame.
 """
@@ -261,10 +262,17 @@ def test_out_of_range_offset_refused(env, tmp_path):
     _assert_error(_fetch(token, ref, 8 * CHUNK), "out_of_range")
 
 
-def test_path_traversal_file_path_refused(env, tmp_path):
+def test_poisoned_file_path_cannot_redirect_the_read(env, tmp_path):
+    """A tampered ``file_path`` row must never exfiltrate an arbitrary host
+    file. Since b0e46358 the read side is content-addressed — the disk path
+    is rederived from the attachment's hash inside the managed store and the
+    stored ``file_path`` is consulted only for its extension — so the poison
+    is simply ignored: the fetch still serves the ORIGINAL bytes and the
+    escape file's content never appears on the wire."""
     from tools.graph.db import GraphDB
 
-    note, ref = _note_with_attachment(tmp_path, os.urandom(CHUNK))
+    data = os.urandom(CHUNK)
+    note, ref = _note_with_attachment(tmp_path, data)
     escape = tmp_path / "outside.secret"
     escape.write_bytes(b"SECRET")
     db = GraphDB(os.environ["GRAPH_DB"])
@@ -279,8 +287,9 @@ def test_path_traversal_file_path_refused(env, tmp_path):
     token = _token(14)
     put_grant(token, note["id"], "note")
     msgs = _fetch(token, ref, 0)
-    _assert_error(msgs, "not_found")
-    assert b"SECRET" not in b"".join(msgs)
+    served = b"".join(_decode_body(m)[2] for m in msgs)
+    assert served == data
+    assert b"SECRET" not in served
 
 
 def test_non_note_grant_refused(env, tmp_path):

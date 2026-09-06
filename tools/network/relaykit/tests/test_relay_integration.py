@@ -79,8 +79,11 @@ def start_registry(port: int, db: Path, env: dict, log: Path) -> subprocess.Pope
     raise RuntimeError(f"registry did not come up; log: {log.read_text()[-2000:]}")
 
 
-def register_org_and_link(port: int, root: KeyPair, org: str) -> str:
-    """Register *org* (root-direct) and publish one link; returns the token."""
+def register_org_and_link(port: int, db, root: KeyPair, org: str) -> str:
+    """Register *org* (root-direct) over HTTP, then seed one grant at the
+    store (publish rides the org tunnel in production; this stack's subject
+    is relaying, not minting). Returns the token."""
+    from tools.network.registry.testkit import mint_link_at
     with httpx.Client(base_url=f"http://127.0.0.1:{port}") as client:
         ts = int(time.time())
         response = client.post("/v1/orgs", json=sign_request(
@@ -89,13 +92,7 @@ def register_org_and_link(port: int, root: KeyPair, org: str) -> str:
             ts=ts,
         ))
         assert response.status_code == 201, response.text
-        response = client.post("/v1/links", json=sign_request(
-            root, "POST", "/v1/links",
-            {"org": org, "target_uuid": TARGET, "target_type": "present"},
-            ts=ts,
-        ))
-        assert response.status_code == 201, response.text
-        return response.json()["token"]
+    return mint_link_at(db, org, TARGET)
 
 
 @pytest.fixture(scope="module")
@@ -106,7 +103,7 @@ def stack(tmp_path_factory, root, session_key, session_cert):
     env = {**os.environ, "PYTHONPATH": str(REPO)}
 
     registry = start_registry(registry_port, db, env, tmp / "registry.log")
-    token = register_org_and_link(registry_port, root, ORG)
+    token = register_org_and_link(registry_port, db, root, ORG)
 
     c2s, s2c = tmp / "c2s.bin", tmp / "s2c.bin"
     tap = subprocess.Popen(
@@ -220,7 +217,8 @@ class TestRelayStack:
         the SAME code — a prober can't tell them apart (§5.3)."""
         offline_org = "66666666-6666-4666-8666-666666666666"
         offline_root = KeyPair.generate()
-        offline_token = register_org_and_link(stack["registry_port"], offline_root, offline_org)
+        offline_token = register_org_and_link(
+            stack["registry_port"], stack["db"], offline_root, offline_org)
 
         async def run():
             unknown = await close_code_for(stack, "0" * 32)

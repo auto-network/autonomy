@@ -5,7 +5,15 @@ from __future__ import annotations
 from tools.network.idkit import KeyPair, Subject, issue_cert, issue_revocation
 from tools.network.registry.relay import Tunnel
 
-from .conftest import DAY, NOW, ORG, publish_link, signed
+from .conftest import DAY, NOW, ORG, signed
+
+
+def renew(client, clock, key, cert=None):
+    """The revocation observable: renew is the weakest signed mutation
+    (any valid chain, no scope), so a 403 here is the chain itself being
+    rejected — the same ``_authorize`` gate every signed mutation shares."""
+    return signed(client, "POST", f"/v1/orgs/{ORG}/renew", key, {}, clock,
+                  cert=cert).status_code
 
 
 def post_revocation(client, record, revoked_cert, org=ORG):
@@ -63,7 +71,7 @@ class TestRevocationAuthority:
 
     def test_root_signed_revocation_kills_chain(self, client, clock, root, bound_org,
                                                 session_key, session_cert):
-        assert publish_link(client, clock, session_key, cert=session_cert).status_code == 201
+        assert renew(client, clock, session_key, session_cert) == 200
         record = issue_revocation(
             root, session_key.public_hex, org=ORG,
             revoked_at=clock.now, expires_at=clock.now + DAY,
@@ -71,7 +79,7 @@ class TestRevocationAuthority:
         )
         assert post_revocation(client, record, session_cert).status_code == 201
         # The revoked key's chain is now rejected on every mutation (I4+§4.5).
-        assert publish_link(client, clock, session_key, cert=session_cert).status_code == 403
+        assert renew(client, clock, session_key, session_cert) == 403
 
     def test_revocation_rejects_descendant_chains(self, client, clock, root, bound_org,
                                                   session_key, session_cert,
@@ -84,7 +92,7 @@ class TestRevocationAuthority:
             revoked_cert=session_cert,
         )
         assert post_revocation(client, record, session_cert).status_code == 201
-        assert publish_link(client, clock, agent_key, cert=agent_cert).status_code == 403
+        assert renew(client, clock, agent_key, agent_cert) == 403
 
     def test_ancestor_signed_revocation(self, client, clock, bound_org,
                                         session_key, session_cert,
@@ -97,9 +105,9 @@ class TestRevocationAuthority:
             issuer_cert=session_cert, revoked_cert=agent_cert,
         )
         assert post_revocation(client, record, agent_cert).status_code == 201
-        assert publish_link(client, clock, agent_key, cert=agent_cert).status_code == 403
+        assert renew(client, clock, agent_key, agent_cert) == 403
         # The session key itself is untouched.
-        assert publish_link(client, clock, session_key, cert=session_cert).status_code == 201
+        assert renew(client, clock, session_key, session_cert) == 200
 
     def test_non_ancestor_cannot_revoke(self, client, clock, bound_org,
                                         session_key, session_cert,
@@ -160,7 +168,7 @@ class TestRetentionI7:
 
         store = app.state.store
         assert store.get_revocation(ORG, key.public_hex) is not None
-        assert publish_link(client, clock, key, cert=cert).status_code == 403
+        assert renew(client, clock, key, cert) == 403
 
         # Sweep strictly past T.
         clock.advance(2 * DAY + 1)
@@ -169,7 +177,7 @@ class TestRetentionI7:
         assert store.get_revocation(ORG, key.public_hex) is None
         # The key is gone with it: its cert expired naturally at T, so the
         # chain still fails — just with ExpiredError instead of RevokedError.
-        assert publish_link(client, clock, key, cert=cert).status_code == 403
+        assert renew(client, clock, key, cert) == 403
 
     def test_purge_runs_lazily_on_mutations(self, app, client, clock, root, bound_org,
                                             session_key, session_cert):

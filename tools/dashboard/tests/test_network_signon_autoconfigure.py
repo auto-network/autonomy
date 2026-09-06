@@ -88,8 +88,8 @@ def test_browser_module_load_configures_real_signon_path():
         envelope["signer"],
         envelope["sig"],
         request_signing_input(
-            "POST",
-            "/v1/links",
+            "TUNNEL",
+            "/control/create-link",
             envelope["ts"],
             envelope["signer"],
             envelope["payload"],

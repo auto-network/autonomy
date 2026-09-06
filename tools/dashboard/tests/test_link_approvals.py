@@ -3,24 +3,24 @@
 Drives the generalized approval primitive exactly the way the pieces do in
 production: the CLI's request shape on POST /api/approvals, the browser's
 enrichment GET (resolved target title, staged registry request), and a
-decision carrying a session-key-signed envelope. The registry is the REAL
-B1 FastAPI app mounted in-process through httpx.ASGITransport — grants are
-issued by actual chain verification, not a stub — and the grant cache is
-real Settings rows in a tmp GRAPH_DB.
+decision carrying a session-key-signed envelope. Execution rides the org
+tunnel (D19/auto-qol1v) and is covered in test_link_publish_tunnel.py; here
+the refusal seams short of the tunnel are what's under test, and the grant
+cache is real Settings rows in a tmp GRAPH_DB.
 
-Invariant coverage: I6 (cached grant records the issuing cert subject;
-root-direct refused), I2 (only CSPRNG-shaped tokens enter the cache),
-staged-request integrity (tampered envelope payload refused), and the C2
-seam (no envelope → clean error, nothing published).
+Invariant coverage: I6 (root-direct envelopes refused — a grant must trace
+to a named subject), staged-request freezing (the operator always reviews
+the frozen destination, with drift flagged), enrichment trust (titles and
+previews come from local stores the requester cannot spoof), and the C2
+seam (no envelope → clean error, nothing published). Token shape (I2) and
+grant caching are pinned on the tunnel path in test_link_publish_tunnel.py.
 """
 
 from __future__ import annotations
 
 import json
-import copy
 import time
 
-import httpx
 import pytest
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
@@ -36,7 +36,6 @@ from tools.graph.schemas.network_identity import (
 from tools.network.idkit import KeyPair, Subject, issue_cert
 from tools.network.ledger import HLC, LedgerStore, make_event, org_ledger_db_path
 from tools.network.ledger.found import found_org_ledger
-from tools.network.registry.app import create_app as create_registry_app
 from tools.network.registry.signing import sign_request
 
 ORG = "netorg"  # dashboard-side org slug (Settings scope)
@@ -44,7 +43,6 @@ ORG_UUID = "11111111-1111-4111-8111-111111111111"
 TARGET = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 SESSION = "auto-agent-1"
 REGISTRY_URL = "http://registry.test"
-PUBLIC_LINK_URL = "https://relay.auto.network"
 
 SESSION_SCOPE = ("delegate:agent", "link:publish", "link:revoke",
                  "tunnel:serve", "viewer:identify")
@@ -87,9 +85,9 @@ def _persona_cert(
 ):
     """Session cert naming the acting persona in ``subject.id``.
 
-    The current HTTP registry transport still accepts operator subjects only.
-    D19 replaces it with an org-authenticated tunnel, at which point the
-    persona remains local and no certificate subject crosses that boundary.
+    Publish rides the org-authenticated tunnel (D19): the persona is
+    authenticated locally and no certificate subject ever crosses to the
+    registry.
     """
     now = int(time.time())
     return issue_cert(
@@ -108,25 +106,8 @@ def session_cert(root, session_key, founded_org):
 
 
 @pytest.fixture
-def registry_app(root):
-    """The real B1 registry with our org bound to *root*."""
-    app = create_registry_app(":memory:", base_url=PUBLIC_LINK_URL,
-                              secure_cookies=False)
-    rc = TestClient(app)
-    envelope = sign_request(
-        root, "POST", "/v1/orgs",
-        {"org_uuid": ORG_UUID, "root_pub": root.public_hex,
-         "recovery_policy": "none"},
-        ts=int(time.time()),
-    )
-    r = rc.post("/v1/orgs", json=envelope)
-    assert r.status_code == 201, r.json()
-    return app
-
-
-@pytest.fixture
-def env(tmp_path, monkeypatch, registry_app, root, founded_org):
-    """Approvals app + tmp Settings DB + registry routed through ASGI."""
+def env(tmp_path, monkeypatch, root, founded_org):
+    """Approvals app + tmp Settings DB + a bound-org binding row."""
     from tools.graph.db import GraphDB
 
     monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approvals.db")
@@ -146,12 +127,6 @@ def env(tmp_path, monkeypatch, registry_app, root, founded_org):
         org=ORG,
     )
 
-    def fake_registry_client(base_url):
-        return httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=registry_app), base_url=base_url)
-
-    monkeypatch.setattr(link_approvals, "_registry_client", fake_registry_client)
-
     with TestClient(Starlette(routes=approvals_routes.ROUTES)) as client:
         yield client
     GraphDB.close_all_pooled()
@@ -166,28 +141,6 @@ def _create_publish(client, meta=None):
     })
     assert r.status_code == 200, r.text
     return r.json()["id"]
-
-
-def _signed_envelope(session_key, session_cert, rr):
-    """What the browser's C2 signer produces for the staged request."""
-    return sign_request(
-        session_key, rr["method"], rr["path"], rr["payload"],
-        ts=int(time.time()), cert=session_cert,
-    )
-
-
-def _registry_request_with_ttl(rr, ttl):
-    adjusted = copy.deepcopy(rr)
-    meta = dict(adjusted["payload"].get("meta") or {})
-    if ttl is None:
-        meta.pop("ttl", None)
-    else:
-        meta["ttl"] = ttl
-    if meta:
-        adjusted["payload"]["meta"] = meta
-    else:
-        adjusted["payload"].pop("meta", None)
-    return adjusted
 
 
 def _decide_and_wait(client, rid, body):
@@ -263,8 +216,14 @@ def _approve_body(envelope, rr=None):
     return {"approved": True, "envelope": envelope}
 
 
-def test_load_binding_ignores_other_orgs_published_binding(tmp_path, monkeypatch, root):
-    """An unbound org must not inherit a binding from the peer-composed view."""
+def test_load_binding_ignores_other_orgs_binding(tmp_path, monkeypatch, root):
+    """An unbound org must not inherit a binding from another org.
+
+    Two layers now enforce this. Structurally, the binding set's publication
+    band is raw-only, so the old contaminant — a canonical (peer-visible)
+    binding row — cannot even be written. And behaviorally, with a raw
+    binding present in ORG, an unregistered org still resolves no binding.
+    """
     from tools.graph.db import GraphDB
 
     GraphDB.close_all_pooled()
@@ -277,41 +236,34 @@ def test_load_binding_ignores_other_orgs_published_binding(tmp_path, monkeypatch
     monkeypatch.delenv("GRAPH_ORG", raising=False)
     GraphDB.create_org_db(ORG, root=orgs_dir).close()
     GraphDB.create_org_db("unregorg", root=orgs_dir).close()
+    payload = {
+        "org_uuid": ORG_UUID,
+        "root_pub": root.public_hex,
+        "registry_url": REGISTRY_URL,
+        "recovery_policy": {"mode": "none"},
+        "binding_expires_at": "2030-01-01T00:00:00Z",
+    }
+    # The structural guard: a peer-visible binding row is unwritable.
+    with pytest.raises(ValueError, match="publication band"):
+        settings_ops.add_setting(
+            NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "registry.test",
+            payload, org=ORG, state="canonical",
+        )
     settings_ops.add_setting(
         NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "registry.test",
-        {
-            "org_uuid": ORG_UUID,
-            "root_pub": root.public_hex,
-            "registry_url": REGISTRY_URL,
-            "recovery_policy": {"mode": "none"},
-            "binding_expires_at": "2030-01-01T00:00:00Z",
-        },
-        org=ORG,
-        state="canonical",
+        payload, org=ORG,
     )
 
-    # The generic Settings view demonstrates the old failure: unregorg has
-    # no row of its own, yet sees netorg's public binding through peers.
+    # unregorg sees nothing of ORG's raw row, composed or otherwise.
     composed = settings_ops.read_set(
         NETWORK_BINDING_SET_ID, org="unregorg",
     ).members
-    assert len(composed) == 1
-    assert composed[0].org == ORG
+    assert composed == []
 
     binding, error = link_approvals._load_binding("unregorg")
     assert binding is None
     assert "not registered on auto.network" in error
     GraphDB.close_all_pooled()
-
-
-def _publish(client, session_key, session_cert, meta=None):
-    """Full happy path: create → enrich → sign → approve → executed result."""
-    rid = _create_publish(client, meta=meta)
-    enriched = client.get(f"/api/approvals/{rid}").json()
-    rr = enriched["registry_request"]
-    envelope = _signed_envelope(session_key, session_cert, rr)
-    result = _decide_and_wait(client, rid, _approve_body(envelope, rr))
-    return rid, enriched, result
 
 
 def test_enrichment_renders_target_and_ttl(env, tmp_path, monkeypatch):
@@ -476,11 +428,12 @@ def _seed_org_key_sealed(org, root):
 
 
 def _isolated_orgs_with_peer_binding(tmp_path, monkeypatch, root, *test_orgs):
-    """Own-DB-per-org isolation + a PEER (canonical) binding published by ORG.
+    """Own-DB-per-org isolation + ORG's own (raw) binding present.
 
-    The peer binding is the contaminant: owning-scope reads (P2) must not
-    let *test_orgs* inherit it. Mirrors
-    ``test_load_binding_ignores_other_orgs_published_binding``.
+    ORG's binding is the would-be contaminant: owning-scope reads (P2) must
+    not let *test_orgs* inherit it. (The binding set's publication band is
+    raw-only, so raw is the strongest representable state — see
+    ``test_load_binding_ignores_other_orgs_binding``.)
     """
     from tools.graph.db import GraphDB
 
@@ -505,7 +458,6 @@ def _isolated_orgs_with_peer_binding(tmp_path, monkeypatch, root, *test_orgs):
             "binding_expires_at": "2030-01-01T00:00:00Z",
         },
         org=ORG,
-        state="canonical",
     )
 
 

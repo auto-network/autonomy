@@ -90,14 +90,11 @@ def _seed_checkpoint(port: int, sim: Sim, *, seq=0, ts=None):
     return record
 
 
-def _publish(port: int, root: KeyPair) -> str:
-    with httpx.Client(base_url=f"http://127.0.0.1:{port}") as client:
-        r = client.post("/v1/links", json=sign_request(
-            root, "POST", "/v1/links",
-            {"org": ORG_UUID, "target_uuid": ORG_UUID, "target_type": "note"},
-            ts=int(time.time())))
-        assert r.status_code == 201, r.text
-        return r.json()["token"]
+def _publish(db) -> str:
+    # Publish rides the org tunnel in production; this stack's subject is
+    # member cross-serving, so seed the grant at the store.
+    from tools.network.registry.testkit import mint_link_at
+    return mint_link_at(db, ORG_UUID, ORG_UUID, target_type="note")
 
 
 # ── a member's serving dashboard, as an independent identity ───
@@ -166,6 +163,7 @@ def federation(tmp_path):
     _seed_checkpoint(port, sim, seq=0)
     try:
         yield {"port": port, "sim": sim, "root": sim.root,
+               "db": tmp_path / "registry.db",
                "founder": founder, "members": members}
     finally:
         reg.terminate()
@@ -178,7 +176,7 @@ def test_two_members_cross_serve_a_published_link(federation):
     viewer fetches the content through a member's tunnel (not the owner's)."""
     f = federation
     link_key = KeyPair.generate()
-    token = _publish(f["port"], f["root"])
+    token = _publish(f["db"])
     memberB, memberC = f["members"]
 
     connB = _member_connector(f["port"], f["root"], f["sim"], memberB,
@@ -286,7 +284,7 @@ def test_viewer_without_fragment_fails_closed(federation):
     per-link handshake — a member is serving, but the viewer fails closed."""
     f = federation
     link_key = KeyPair.generate()
-    token = _publish(f["port"], f["root"])
+    token = _publish(f["db"])
     connB = _member_connector(f["port"], f["root"], f["sim"], f["members"][0],
                               link_token=token, link_key=link_key, seq=0)
 

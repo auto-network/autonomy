@@ -78,15 +78,11 @@ def start_registry(port: int, db: Path, log: Path) -> subprocess.Popen:
     raise RuntimeError(f"registry did not start; log: {log.read_text()[-2000:]}")
 
 
-def publish_note_link(port: int, root: KeyPair, note_id: str) -> str:
-    with httpx.Client(base_url=f"http://127.0.0.1:{port}") as client:
-        response = client.post("/v1/links", json=sign_request(
-            root, "POST", "/v1/links",
-            {"org": ORG_UUID, "target_uuid": note_id, "target_type": "note"},
-            ts=int(time.time()),
-        ))
-        assert response.status_code == 201, response.text
-        return response.json()["token"]
+def publish_note_link(db, note_id: str) -> str:
+    # Publish rides the org tunnel in production; this stack's subject is
+    # attachment serving, so seed the grant at the store (registry testkit).
+    from tools.network.registry.testkit import mint_link_at
+    return mint_link_at(db, ORG_UUID, note_id, target_type="note")
 
 
 def cache_note_grant(token: str, note_id: str) -> None:
@@ -151,7 +147,7 @@ def stack(tmp_path, monkeypatch):
             min_backoff=0.1, max_backoff=1.0,
         )
         yield {"port": port, "root": root, "root_pub": root.public_hex,
-               "connector": connector}
+               "db": tmp_path / "registry.db", "connector": connector}
     finally:
         registry.terminate()
         registry.wait(timeout=5)
@@ -221,7 +217,7 @@ async def _stop(connector, task):
 def test_end_to_end_download_reconstructs_and_hashes(stack, tmp_path):
     data = os.urandom(9 * 1024 * 1024 + 4242)  # spans two 8 MiB windows
     note_id, _ = _note_with_attachment(tmp_path, data)
-    token = publish_note_link(stack["port"], stack["root"], note_id)
+    token = publish_note_link(stack["db"], note_id)
     cache_note_grant(token, note_id)
 
     async def run():
@@ -259,7 +255,7 @@ def test_end_to_end_download_reconstructs_and_hashes(stack, tmp_path):
 def test_end_to_end_disconnect_then_resume(stack, tmp_path):
     data = os.urandom(9 * 1024 * 1024 + 17)
     note_id, _ = _note_with_attachment(tmp_path, data)
-    token = publish_note_link(stack["port"], stack["root"], note_id)
+    token = publish_note_link(stack["db"], note_id)
     cache_note_grant(token, note_id)
 
     async def run():
@@ -308,7 +304,7 @@ def test_end_to_end_unauthorized_ref_serves_zero_bytes(stack, tmp_path):
     # A note the viewer is NOT granted, with its own attachment.
     other_id, other_ref = _note_with_attachment(tmp_path, os.urandom(1024))
     note_id, _ = _note_with_attachment(tmp_path, os.urandom(1024))
-    token = publish_note_link(stack["port"], stack["root"], note_id)
+    token = publish_note_link(stack["db"], note_id)
     cache_note_grant(token, note_id)
 
     async def run():

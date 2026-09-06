@@ -206,16 +206,16 @@ def test_revocation_end_to_end(env, root, registry_app):
     cert = _session_cert(root, session_key)
     now = int(time.time())
 
-    # Before revocation the session key publishes fine.
+    # Before revocation the session key's chain passes the registry's I4
+    # gate (renew is the weakest chain-verified mutation — link publish
+    # rides the org tunnel and no longer exercises this gate).
     rc = TestClient(registry_app)
-    publish = sign_request(
-        session_key, "POST", "/v1/links",
-        {"org": ORG_UUID, "target_uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-         "target_type": "note"},
+    renew = sign_request(
+        session_key, "POST", f"/v1/orgs/{ORG_UUID}/renew", {},
         ts=now, cert=cert,
     )
-    r = rc.post("/v1/links", json=publish)
-    assert r.status_code == 201, r.json()
+    r = rc.post(f"/v1/orgs/{ORG_UUID}/renew", json=renew)
+    assert r.status_code == 200, r.json()
 
     record = issue_revocation(
         root, session_key.public_hex, org=ORG_UUID,
@@ -234,13 +234,11 @@ def test_revocation_end_to_end(env, root, registry_app):
     assert body["revoked_key_id"] == session_key.public_hex
 
     # The revoked key's chain is now dead at the registry.
-    publish2 = sign_request(
-        session_key, "POST", "/v1/links",
-        {"org": ORG_UUID, "target_uuid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-         "target_type": "note"},
+    renew2 = sign_request(
+        session_key, "POST", f"/v1/orgs/{ORG_UUID}/renew", {},
         ts=int(time.time()), cert=cert,
     )
-    r2 = rc.post("/v1/links", json=publish2)
+    r2 = rc.post(f"/v1/orgs/{ORG_UUID}/renew", json=renew2)
     assert r2.status_code == 403
     assert "Revoked" in r2.json()["detail"]
 
@@ -290,8 +288,13 @@ class _CannedRegistry:
     RESPONSE, not the request echo."""
 
     def __init__(self, org_uuid, root_pub, expires_at=1900000000):
+        # The full authoritative-binding shape _validated_binding_response
+        # requires (Central substrate): a short body is refused as malformed.
         self._body = {"org_uuid": org_uuid, "root_pub": root_pub,
-                      "expires_at": expires_at}
+                      "expires_at": expires_at,
+                      "binding_generation": "ab" * 32,
+                      "recovery_policy": {"mode": "none"},
+                      "outcome": "claimed"}
 
     async def __aenter__(self):
         return self
@@ -318,9 +321,23 @@ def _registration_envelope(root, org_uuid):
     )
 
 
-def test_register_persists_registry_uuid_not_caller_echo(env, root, monkeypatch):
-    """The persisted binding's org_uuid comes from the registry's 201, not the
-    caller's signed request (registry owns the namespace / authoritative claim)."""
+def test_register_persists_exact_confirmed_coordinates(env, root, monkeypatch):
+    """Happy path: the registry's 201 confirms exactly the signed claim, and
+    THAT authoritative response is what gets persisted."""
+    _store_org_key(root, mint_password_armor(root, PASSPHRASE, iterations=10_000))
+    monkeypatch.setattr(network_routes, "_registry_client",
+                        lambda _base: _CannedRegistry(ORG_UUID, root.public_hex))
+    r = env.post("/api/network/register", json={
+        "org": ORG, "envelope": _registration_envelope(root, ORG_UUID)})
+    assert r.status_code == 200, r.json()
+    binding = r.json()["binding"]
+    assert binding["org_uuid"] == ORG_UUID
+    assert binding["root_pub"] == root.public_hex
+
+
+def test_register_refuses_registry_uuid_differing_from_claim(env, root, monkeypatch):
+    """A 201 binding a DIFFERENT uuid than the signed claim is refused — the
+    dashboard never persists authority coordinates it did not prove."""
     _store_org_key(root, mint_password_armor(root, PASSPHRASE, iterations=10_000))
     caller_uuid = "11111111-1111-4111-8111-111111111111"
     registry_uuid = "99999999-9999-4999-8999-999999999999"
@@ -328,11 +345,8 @@ def test_register_persists_registry_uuid_not_caller_echo(env, root, monkeypatch)
                         lambda _base: _CannedRegistry(registry_uuid, root.public_hex))
     r = env.post("/api/network/register", json={
         "org": ORG, "envelope": _registration_envelope(root, caller_uuid)})
-    assert r.status_code == 200, r.json()
-    binding = r.json()["binding"]
-    assert binding["org_uuid"] == registry_uuid       # authoritative 201
-    assert binding["org_uuid"] != caller_uuid          # NOT the request echo
-    assert binding["root_pub"] == root.public_hex
+    assert r.status_code == 502
+    assert "different UUID/root coordinates" in r.json()["error"]
 
 
 def test_register_refuses_registry_binding_a_foreign_root(env, root, monkeypatch):
@@ -345,4 +359,4 @@ def test_register_refuses_registry_binding_a_foreign_root(env, root, monkeypatch
     r = env.post("/api/network/register", json={
         "org": ORG, "envelope": _registration_envelope(root, ORG_UUID)})
     assert r.status_code == 502
-    assert "different root" in r.json()["error"]
+    assert "different UUID/root coordinates" in r.json()["error"]

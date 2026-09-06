@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from tools.network.idkit import KeyPair, Subject, issue_cert
-from tools.network.registry.signing import sign_recovery_succession
+from tools.network.registry.signing import sign_recovery_succession, sign_request
 
 from .conftest import DAY, HOUR, NOW, ORG, ORG_NONE, SESSION_SCOPE, register, signed
 
@@ -105,6 +105,58 @@ class TestRenew:
             "/v1/orgs/99999999-9999-4999-8999-999999999999/renew", root, {}, clock,
         )
         assert response.status_code == 404
+
+
+# -- I4: the signed-envelope gate every mutation shares --------------------------
+
+class TestEnvelopeGateI4:
+    """Generic properties of ``_authorize`` (envelope signature + chain to
+    the bound root), pinned on renew — deliberately the weakest mutation,
+    so nothing here depends on a scope. The chain law itself (scope and
+    target_type narrowing, expired hops, revoked hops, tampering) is unit-
+    tested in ``tools/network/idkit/tests/test_chain_verify.py``; scoped-
+    route enforcement is pinned per route (topics, link-operation
+    receipts)."""
+
+    def test_fake_chain_to_foreign_root_403(self, client, clock, bound_org):
+        """A key with NO relationship to the org — even wrapping itself in a
+        self-signed 'chain' to its own fake root — gets 403."""
+        fake_root, fake_leaf = KeyPair.generate(), KeyPair.generate()
+        fake_cert = issue_cert(
+            fake_root, fake_leaf.public_hex, scope=SESSION_SCOPE, org=ORG,
+            subject=Subject("operator", "mallory"),
+            not_before=NOW - 10, not_after=NOW + DAY,
+        )
+        assert signed(client, "POST", f"/v1/orgs/{ORG}/renew", fake_leaf, {},
+                      clock, cert=fake_cert).status_code == 403
+
+    def test_expired_cert_403(self, client, clock, bound_org, session_key, session_cert):
+        short = KeyPair.generate()
+        short_cert = issue_cert(
+            session_key, short.public_hex, scope=("link:publish",), org=ORG,
+            subject=Subject("agent", "sess-short"),
+            not_before=NOW - 10, not_after=NOW + DAY,
+            parent_cert=session_cert,
+        )
+        assert signed(client, "POST", f"/v1/orgs/{ORG}/renew", short, {},
+                      clock, cert=short_cert).status_code == 200
+        clock.advance(2 * DAY)  # past the cert, well inside the 30d binding TTL
+        assert signed(client, "POST", f"/v1/orgs/{ORG}/renew", short, {},
+                      clock, cert=short_cert).status_code == 403
+
+    def test_envelope_not_replayable_across_endpoints(self, client, clock, root, bound_org):
+        """The signature binds method+path: a valid renew envelope replayed
+        against another signed route fails."""
+        envelope = sign_request(root, "POST", f"/v1/orgs/{ORG}/renew", {},
+                                ts=clock.now)
+        assert client.post(f"/v1/orgs/{ORG}/renew", json=envelope).status_code == 200
+        replayed = client.post(f"/v1/orgs/{ORG}/policy", json=envelope)
+        assert replayed.status_code in (400, 403)  # payload shape + signature both fail
+
+    def test_stale_envelope_403(self, client, clock, root, bound_org):
+        envelope = sign_request(root, "POST", f"/v1/orgs/{ORG}/renew", {},
+                                ts=clock.now - HOUR)
+        assert client.post(f"/v1/orgs/{ORG}/renew", json=envelope).status_code == 403
 
 
 # -- §4.3 rebind (I3: no path outside declared policy) --------------------------

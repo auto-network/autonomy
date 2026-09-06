@@ -729,7 +729,7 @@ def create_app(
     *now_fn* is the clock (unix seconds); *now_ms_fn* is the independent
     trusted millisecond clock used for source deadlines. Both are injectable
     so expiry behavior is deterministic under test. *base_url* prefixes the
-    share-link URLs returned by ``POST /v1/links``. *witness_key* is the
+    share-link URLs minted by the tunnel create-link op. *witness_key* is the
     Ed25519 key the equivocation witness (F4) signs its head-set
     attestations with; a fresh one is generated when omitted, but a
     persistent deployment must pass a stable key — clients *pin* the
@@ -1532,121 +1532,6 @@ def create_app(
             "completed_at": completed.completed_at,
             "revoked_at": completed.completed_at if completed.state == "succeeded" else None,
         }
-
-    @app.post("/v1/links", status_code=201)
-    async def create_link(request: Request):
-        envelope = _parse_envelope(await _read_json(request))
-        payload = envelope["payload"]
-        _require_fields(
-            payload,
-            allowed=frozenset(
-                {
-                    "org",
-                    "target_uuid",
-                    "target_type",
-                    "invite_ref",
-                    "expires_at",
-                    "meta",
-                }
-            ),
-            required=frozenset({"org", "target_uuid", "target_type"}),
-            what="link payload",
-        )
-        org_uuid = _require_uuid(payload["org"], "org")
-        target_uuid = _require_uuid(payload["target_uuid"], "target_uuid")
-        target_type = payload["target_type"]
-        if not isinstance(target_type, str) or not target_type:
-            raise _bad_request("target_type must be a non-empty string")
-        invite_ref = payload.get("invite_ref")
-        absolute_expires_at = payload.get("expires_at")
-        if target_type == "org:join":
-            if (
-                not isinstance(invite_ref, str)
-                or not _HASH_RE.fullmatch(invite_ref)
-            ):
-                raise _bad_request(
-                    "org:join invite_ref must be a 64-char lowercase hex event id"
-                )
-            if target_uuid != org_uuid:
-                raise _bad_request(
-                    "org:join target_uuid must equal the organization UUID"
-                )
-            if absolute_expires_at is not None and (
-                type(absolute_expires_at) is not int
-                or absolute_expires_at < 0
-                or absolute_expires_at > 9_007_199_254_740_991
-            ):
-                raise _bad_request(
-                    "org:join expires_at must be a non-negative safe "
-                    "unix-ms integer"
-                )
-        elif invite_ref is not None or absolute_expires_at is not None:
-            raise _bad_request(
-                "invite_ref and expires_at are only valid for target_type org:join"
-            )
-        meta = payload.get("meta", {})
-        if not isinstance(meta, dict):
-            raise _bad_request("meta must be a JSON object")
-        _require_fields(meta, allowed=_LINK_META_FIELDS, required=frozenset(), what="link meta")
-        if meta.get("require_auth"):
-            raise _rung2("require_auth grants need viewer authn (Track E + ledger)")
-        link_ttl = meta.get("ttl")
-        if link_ttl is not None and (type(link_ttl) is not int or link_ttl <= 0):
-            raise _bad_request("meta.ttl must be a positive integer of seconds")
-        if absolute_expires_at is not None and link_ttl is not None:
-            raise _bad_request(
-                "org:join expires_at and meta.ttl are mutually exclusive"
-            )
-
-        t = now()
-        binding = _require_binding(store, org_uuid, t)
-        auth = _authorize(
-            envelope, "POST", str(request.url.path), binding, store, t,
-            required_scope="link:publish", required_target_type=target_type,
-        )
-
-        # I2: the token is pure CSPRNG output — generate_token() takes no
-        # inputs, so it cannot be derived from the target.
-        token = generate_token()
-        store.create_link(
-            LinkGrant(
-                token=token,
-                org_uuid=org_uuid,
-                target_uuid=target_uuid,
-                target_type=target_type,
-                invite_ref=invite_ref,
-                meta=meta,
-                created_at=t,
-                expires_at=t + link_ttl if link_ttl is not None else None,
-                expires_at_ms=absolute_expires_at,
-                revoked_at=None,
-                signer_pub=auth.signer_pub,
-                subject_kind=auth.subject_kind,
-                subject_id=auth.subject_id,
-            )
-        )
-        result = {"token": token, "url": f"{base_url}/l/{token}"}
-        if absolute_expires_at is not None:
-            result["expires_at"] = absolute_expires_at
-        return result
-
-    @app.delete("/v1/links/{token}")
-    async def revoke_link(token: str, request: Request):
-        envelope = _parse_envelope(await _read_json(request))
-        _require_fields(
-            envelope["payload"], allowed=frozenset(), required=frozenset(), what="revoke payload"
-        )
-        t = now()
-        link = store.get_link(token)
-        if link is None:
-            raise HTTPException(status_code=404, detail="unknown link")
-        binding = _require_binding(store, link.org_uuid, t)
-        _authorize(
-            envelope, "DELETE", str(request.url.path), binding, store, t,
-            required_scope="link:revoke",
-        )
-        revoked_at = store.revoke_link(token, now=t)
-        return {"token": token, "revoked_at": revoked_at}
 
     # -- §4.5 revocations --------------------------------------------------------
 

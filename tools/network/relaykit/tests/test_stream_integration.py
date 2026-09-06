@@ -75,7 +75,7 @@ def stack(tmp_path_factory, root):
     else:
         registry.kill()
         raise RuntimeError((tmp / "registry.log").read_text()[-2000:])
-    token = _register_org_and_link(port, root)
+    token = _register_org_and_link(port, tmp / "registry.db", root)
     yield {"port": port, "ingress": ingress_port, "token": token,
            "root": root, "registry": registry, "tmp": tmp}
     with contextlib.suppress(Exception):
