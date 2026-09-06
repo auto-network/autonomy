@@ -540,9 +540,9 @@ def _connector_command(binding: dict, org: str | None, key_path: str,
 # ── the managed subprocess ────────────────────────────────────
 
 
-def _probe_ctl_serving(ctl_path: str) -> bool:
+def _probe_ctl_status(ctl_path: str) -> dict | None:
     """One authenticated connector-status round-trip via the control
-    descriptor. False on any failure — never raises."""
+    descriptor. The full reply dict, or None on any failure — never raises."""
     try:
         with open(ctl_path) as fh:
             descriptor = json.load(fh)
@@ -563,9 +563,15 @@ def _probe_ctl_serving(ctl_path: str) -> bool:
                     break
                 buf += chunk
         reply = json.loads(buf.split(b"\n", 1)[0].decode("utf-8"))
-        return reply.get("ok") is True and reply.get("serving") is True
+        return reply if isinstance(reply, dict) else None
     except (OSError, ValueError, KeyError, TypeError):
-        return False
+        return None
+
+
+def _probe_ctl_serving(ctl_path: str) -> bool:
+    reply = _probe_ctl_status(ctl_path)
+    return bool(reply) and reply.get("ok") is True \
+        and reply.get("serving") is True
 
 
 class _AdoptedProc:
@@ -1008,7 +1014,28 @@ class ServingSupervisor:
             if not org_uuid:
                 return None
             ctl_path = _control_path_for(state["key_path"])
-            if not _probe_ctl_serving(ctl_path):
+            status = _probe_ctl_status(ctl_path)
+            if not status or status.get("ok") is not True \
+                    or status.get("serving") is not True:
+                return None
+            # CODE CURRENCY GATE. A serving incumbent running a stale code
+            # generation must be REPLACED, not adopted — observed live
+            # 2026-09-06: a pre-fix connector kept crashing every fleet stream
+            # while answering serving=True, and adoption immortalised it.
+            # boot_commit is captured at the connector's main() entry (the
+            # honest generation marker; process_commit can postdate stale
+            # imports). Absent boot_commit = a pre-gate connector = stale by
+            # definition; falling through to _reap_strays retires it.
+            from tools.network import build_version
+
+            disk = build_version.disk_head()
+            boot = status.get("boot_commit")
+            if disk is not None and boot != disk:
+                _log.warning(
+                    "not adopting incumbent connector for org=%s: stale code "
+                    "generation (boot_commit=%s, disk=%s) — replacing",
+                    org, (boot or "unknown")[:12], disk[:12],
+                )
                 return None
             pid = None
             for candidate in _iter_connector_pids(org_uuid):
