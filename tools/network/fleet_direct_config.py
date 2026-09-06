@@ -12,6 +12,13 @@ necessarily know" which of its interfaces a peer can reach, so with
 detected non-loopback IPv4 address at the listen port -- tailnet first,
 then private LAN, then the rest -- and the peer tries the candidates in
 order. Announcing an address grants nothing; the roster handshake does.
+
+Containers: a dashboard running inside a compose container sees only the
+container's bridge address (live 2026-09-06: auto-detect found 172.16.0.2
+on both home and SJC), so the host's tailnet address must be given
+explicitly in ``advertise_addrs`` and the compose port mapping must bind
+it. Auto-detect still adds the bridge, which is harmless: a peer that
+cannot reach it fails that candidate in 3s and tries the next.
 """
 
 from __future__ import annotations

@@ -14,12 +14,15 @@ envelope signer, so a machine can only ever announce itself.
 
 from __future__ import annotations
 
+import logging
 import time as _time
 from typing import Iterable, Mapping, Optional, Sequence
 
 from tools.network.idkit import KeyPair
 from tools.network.idkit.certs import DelegationCert
 from tools.network.registry.signing import sign_request
+
+logger = logging.getLogger(__name__)
 
 
 def _send(client, registry_url, method, path, key, payload, cert, ts, timeout):
@@ -173,6 +176,13 @@ class ReachabilityCache:
         self._peers: dict = {}
         self._hints: dict = {}
         self._last: Optional[float] = None
+        # Log on CHANGE only: the cache refreshes every 45s for the life of
+        # the process, and a silent failure here left two machines with
+        # open ports and no idea why neither ever dialed the other
+        # (2026-09-06). One line per state transition, not per tick.
+        self._logged: dict = {}      # slot -> last logged state
+        self._logged_error: Optional[str] = None
+        self._logged_peers: Optional[str] = None
         #: (monotonic, addrs) of the last successful announce, for status.
         self.last_announce: Optional[tuple[float, list]] = None
 
@@ -221,11 +231,25 @@ class ReachabilityCache:
         key = self._machine_key_getter()
         cert = self._cert_getter()
         if not binding or key is None or cert is None:
+            self._state(
+                "cred", "inactive:no-credential",
+                "fleet reachability inactive: %s -- direct-tier discovery "
+                "cannot announce or look up peers until the personal org is "
+                "registered and an unlock delivers the reachability cert",
+                "no registry binding" if not binding
+                else "credential carries no reachability key/cert",
+            )
             return
         registry_url = binding.get("registry_url")
         org_uuid = binding.get("org_uuid")
         if not registry_url or not org_uuid:
+            self._state(
+                "cred", "inactive:no-org",
+                "fleet reachability inactive: binding has no registry_url/org_uuid",
+            )
             return
+        self._state("cred", "active", "fleet reachability active: registry=%s org=%s",
+                    registry_url, org_uuid[:8])
 
         advertise = self.advertised_addrs()
         relay_url = self.announced_relay_url()
@@ -235,19 +259,55 @@ class ReachabilityCache:
                          ttl=self._ttl, relay_url=relay_url, ts=self._ts,
                          timeout=self._timeout, client=self._client)
                 self.last_announce = (now, list(advertise))
-            except Exception:
-                pass  # keep serving the last map; retry next interval
+                self._error(None)
+                self._state(
+                    "announce",
+                    "announced:" + ",".join(advertise) + "|" + (relay_url or ""),
+                    "fleet reachability announced addrs=%s relay_route=%s",
+                    advertise, bool(relay_url),
+                )
+            except Exception as exc:
+                # keep serving the last map; retry next interval
+                self._error(f"announce failed: {exc!r}")
+        else:
+            self._state("announce", "nothing",
+                        "fleet reachability: nothing to announce (no advertised "
+                        "addresses, no standing route) -- peers cannot dial this "
+                        "machine directly")
 
         try:
             own = key.public_hex
             pubs = [p for p in self._roster_getter() if p != own]
-        except Exception:
+        except Exception as exc:
+            self._error(f"roster read failed: {exc!r}")
             return
         try:
             hints = lookup_hints(registry_url, org_uuid, key, cert, pubs,
                                  ts=self._ts, timeout=self._timeout,
                                  client=self._client)
-        except Exception:
+        except Exception as exc:
+            self._error(f"lookup failed: {exc!r}")
             return
         self._hints = hints
         self._peers = {pub: h["addrs"] for pub, h in hints.items() if h["addrs"]}
+        summary = "; ".join(
+            f"{pub[:12]} addrs={h['addrs']} relay_route={bool(h.get('relay_url'))}"
+            for pub, h in sorted(hints.items())
+        ) or "none"
+        if summary != self._logged_peers:
+            self._logged_peers = summary
+            logger.info(
+                "fleet reachability resolved %d of %d roster peer(s): %s",
+                len(hints), len(pubs), summary,
+            )
+
+    def _state(self, slot: str, state: str, message: str, *args) -> None:
+        if self._logged.get(slot) != state:
+            self._logged[slot] = state
+            logger.info(message, *args)
+
+    def _error(self, error: Optional[str]) -> None:
+        if error != self._logged_error:
+            self._logged_error = error
+            if error is not None:
+                logger.warning("fleet reachability %s", error)
