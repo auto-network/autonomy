@@ -1662,6 +1662,15 @@ _BOOT_COMMIT: str | None = None
 
 
 def main() -> None:
+    # UTC-timestamped lines: this file is append-mode and shared across
+    # connector generations, so without wall-clock stamps a post-incident
+    # read cannot even tell which generation wrote a line (bit us live
+    # 2026-09-06 diagnosing the 02d833fd build wedge).
+    logging.basicConfig(
+        format="%(asctime)s.%(msecs)03dZ %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
+    logging.Formatter.converter = time.gmtime
     global _BOOT_COMMIT
     from tools.network import build_version
     _BOOT_COMMIT = build_version.disk_head()

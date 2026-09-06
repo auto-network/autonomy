@@ -24,6 +24,7 @@ import sqlite3
 import shutil
 import struct
 import tempfile
+import threading
 import time
 import urllib.parse
 from pathlib import Path, PurePosixPath
@@ -61,7 +62,7 @@ from tools.network.fleet_sync_scheduler import (
     dashboard_fleet_sync_service,
     roster_epoch,
 )
-from tools.network.fleet_sync.sync import FleetSyncAlpha
+from tools.network.fleet_sync.sync import CheckpointAborted, FleetSyncAlpha
 from tools.network.idkit import canonical_json
 from tools.network.relaykit.viewer import ViewerChannel
 
@@ -278,6 +279,13 @@ class ConnectorFleetRuntime:
         #: — a fresh arm starts a new "since".
         self.locked_refusals: int = 0
         self.first_locked_refusal_at: float | None = None
+        #: One checkpoint build per scope at a time. A client that retries
+        #: while its previous build is still running must queue behind it,
+        #: not stack another full-database build beside it — N stacked
+        #: builds GIL-starve each other so NONE finishes inside the client
+        #: deadline, and the retry cadence turns that into a permanent
+        #: 100%-CPU wedge (observed live 2026-09-06).
+        self._checkpoint_build_locks: dict[str, asyncio.Lock] = {}
 
     def configure(self, payload: object) -> dict:
         from tools.dashboard.link_approvals import _load_binding
@@ -503,19 +511,58 @@ class ConnectorFleetRuntime:
                         anchor_root_pub=scheduler.config.personal_root_pub,
                     )))
                     scope_path = scheduler._scope_paths()[scope]
+                    # asyncio cancellation abandons a running thread but
+                    # cannot stop it; this event is how the thread learns
+                    # the client is gone and exits within one row instead
+                    # of finishing a full-database build for nobody.
+                    abort_build = threading.Event()
 
                     def create_checkpoint():
-                        with FleetSyncAlpha(
-                            scope_path,
-                            scheduler.authenticator.machine_pub,
-                        ) as alpha:
-                            alpha.checkpoint(
-                                checkpoint,
-                                roster_epoch=current_epoch,
-                                active_roster=active,
-                            )
+                        try:
+                            with FleetSyncAlpha(
+                                scope_path,
+                                scheduler.authenticator.machine_pub,
+                            ) as alpha:
+                                alpha.checkpoint(
+                                    checkpoint,
+                                    roster_epoch=current_epoch,
+                                    active_roster=active,
+                                    should_abort=abort_build.is_set,
+                                )
+                        except CheckpointAborted:
+                            # Only reachable after the awaiting generator
+                            # was already cancelled below — nobody is left
+                            # to retrieve this exception, so exit quietly
+                            # (checkpoint() already removed its staging).
+                            pass
 
-                    await asyncio.to_thread(create_checkpoint)
+                    build_lock = self._checkpoint_build_locks.setdefault(
+                        scope, asyncio.Lock()
+                    )
+                    queued_at = time.monotonic()
+                    async with build_lock:
+                        build_started_at = time.monotonic()
+                        logger.warning(
+                            "fleet relay sync: checkpoint build started "
+                            "scope=%s queued=%.1fs",
+                            scope, build_started_at - queued_at,
+                        )
+                        try:
+                            await asyncio.to_thread(create_checkpoint)
+                        except BaseException:
+                            abort_build.set()
+                            logger.warning(
+                                "fleet relay sync: checkpoint build abandoned "
+                                "scope=%s after=%.1fs (client gone; build "
+                                "thread told to abort)",
+                                scope, time.monotonic() - build_started_at,
+                            )
+                            raise
+                        logger.warning(
+                            "fleet relay sync: checkpoint build completed "
+                            "scope=%s in=%.1fs",
+                            scope, time.monotonic() - build_started_at,
+                        )
                     files = tuple(sorted(
                         path for path in checkpoint.rglob("*") if path.is_file()
                     ))

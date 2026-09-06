@@ -20,7 +20,7 @@ import shutil
 import sqlite3
 import tempfile
 import time
-from typing import Iterator
+from typing import Callable, Iterator
 
 from tools.graph.db import GraphDB
 from raptorq import Decoder
@@ -34,6 +34,7 @@ from .materialize import ContentAddressedBlobStore
 from .policies import PolicyKind, TABLE_POLICIES
 from .streaming import (
     BaseCatalog,
+    CheckpointAborted,
     ensure_streaming_indexes,
     materialize_catalog,
     stream_snapshot_to_chunks,
@@ -47,6 +48,13 @@ from .winners import (
 ALPHA_VERSION = "1.0-alpha.1"
 
 _log = logging.getLogger(__name__)
+
+
+def _abort_guard(items, should_abort: Callable[[], bool] | None):
+    for item in items:
+        if should_abort is not None and should_abort():
+            raise CheckpointAborted("checkpoint winner build aborted")
+        yield item
 
 
 class AlphaError(RuntimeError):
@@ -335,6 +343,7 @@ class FleetSyncAlpha:
         roster_epoch: int | str,
         active_roster: tuple[str, ...],
         target_chunk_bytes: int = 4 * 1024 * 1024,
+        should_abort: Callable[[], bool] | None = None,
     ) -> AlphaCheckpoint:
         if directory.exists():
             raise AlphaError("checkpoint directory already exists")
@@ -352,11 +361,14 @@ class FleetSyncAlpha:
                 base = stream_snapshot_to_chunks(
                     cut.reader, stage / "base",
                     target_chunk_bytes=target_chunk_bytes,
+                    should_abort=should_abort,
                 )
                 winners = stream_winners_to_chunks(
                     # Payload is already in the key-ordered base.  This
                     # carries only replication metadata and tombstones.
-                    self.catalog.iter_winner_metadata(cut), stage / "winners",
+                    _abort_guard(
+                        self.catalog.iter_winner_metadata(cut), should_abort
+                    ), stage / "winners",
                     through_watermark=cut.watermark,
                     target_chunk_bytes=target_chunk_bytes,
                 )

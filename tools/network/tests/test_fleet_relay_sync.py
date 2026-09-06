@@ -569,3 +569,162 @@ def test_publish_connector_runtime_org_none_is_the_scopeless_target_not_unspecif
     seen.clear()
     fleet_relay_sync.publish_connector_runtime({"x": 1})
     assert seen == ["anchore"], "an omitted org must still fall back to shell_default_org()"
+
+
+def _pull_message(fleet, alpha_path, hello, scope="alpha"):
+    from tools.network.fleet_sync_scheduler import SQLiteFleetSyncStore
+    return {
+        "v": 1,
+        "op": "fleet.sync.pull",
+        "roster_epoch": "cd" * 32,
+        "checkpoint": True,
+        "compat": SQLiteFleetSyncStore(alpha_path).compatibility_digest(),
+        "resume": [],
+        "hello": json.loads(hello),
+        "scope": scope,
+    }
+
+
+def _fake_delta_handle(server):
+    async def fake_handle(_token, _message, _peer_pub, **_telemetry):
+        async def response():
+            yield encode_done(
+                epoch="ef" * 32,
+                count=0,
+                digest=__import__("hashlib").sha256().hexdigest(),
+            )
+        return response()
+    server.scheduler._handle = fake_handle
+
+
+@pytest.mark.asyncio
+async def test_abandoned_pull_aborts_its_checkpoint_build(tmp_path, monkeypatch):
+    """When the puller disconnects mid-build, the build thread must observe
+    should_abort and exit — not finish a full-database build for nobody
+    (the 2026-09-06 100%-CPU wedge)."""
+    import asyncio
+    import threading
+    from tools.network.fleet_sync.sync import CheckpointAborted
+
+    fleet = _two_machine_fleet()
+    personal = tmp_path / "personal.db"
+    personal.touch()
+    alpha = tmp_path / "alpha.db"
+    _prepare_org_db(alpha, fleet.server_machine.public_hex)
+    _insert_note(alpha, "a-1", "org content")
+    server = _configure_relay_server(fleet, personal, monkeypatch)
+    monkeypatch.setattr(
+        server.scheduler, "_scope_paths",
+        lambda: {"personal": personal, "alpha": alpha},
+    )
+    _fake_delta_handle(server)
+
+    build_started = threading.Event()
+    build_finished = threading.Event()
+    observed = {}
+
+    class BlockingAlpha:
+        def __init__(self, _path, _origin):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def checkpoint(self, _directory, *, should_abort=None, **_kwargs):
+            build_started.set()
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if should_abort is not None and should_abort():
+                    observed["aborted"] = True
+                    build_finished.set()
+                    raise CheckpointAborted("test abort")
+                time.sleep(0.01)
+            build_finished.set()
+            raise AssertionError("abort was never observed by the build")
+
+    monkeypatch.setattr(fleet_relay_sync, "FleetSyncAlpha", BlockingAlpha)
+    token = "ab" * 16
+    _auth, _private, hello = _client_hello(fleet, token)
+    stream = await server.handle(token, _pull_message(fleet, alpha, hello))
+    await stream.__anext__()  # server-hello arrives before the build
+    puller = asyncio.ensure_future(stream.__anext__())
+    assert await asyncio.to_thread(build_started.wait, 5)
+    puller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await puller
+    assert await asyncio.to_thread(build_finished.wait, 5)
+    assert observed.get("aborted") is True
+
+
+@pytest.mark.asyncio
+async def test_concurrent_pulls_hold_one_build_slot_per_scope(
+    tmp_path, monkeypatch
+):
+    """Two pulls for the same scope must serialize their checkpoint builds:
+    stacked concurrent builds starve each other so none finishes inside the
+    client's patience."""
+    import asyncio
+    import threading
+
+    fleet = _two_machine_fleet()
+    personal = tmp_path / "personal.db"
+    personal.touch()
+    alpha = tmp_path / "alpha.db"
+    _prepare_org_db(alpha, fleet.server_machine.public_hex)
+    _insert_note(alpha, "a-1", "org content")
+    server = _configure_relay_server(fleet, personal, monkeypatch)
+    monkeypatch.setattr(
+        server.scheduler, "_scope_paths",
+        lambda: {"personal": personal, "alpha": alpha},
+    )
+    _fake_delta_handle(server)
+
+    starts: list[float] = []
+    release = threading.Event()
+
+    class SlowAlpha:
+        def __init__(self, _path, _origin):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def checkpoint(self, directory, *, should_abort=None, **_kwargs):
+            starts.append(time.monotonic())
+            assert release.wait(5), "first build was never released"
+            directory.mkdir()
+            (directory / "alpha-manifest.json").write_bytes(b"manifest")
+
+    monkeypatch.setattr(fleet_relay_sync, "FleetSyncAlpha", SlowAlpha)
+
+    async def run_pull(token_hex):
+        _auth, _private, hello = _client_hello(fleet, token_hex)
+        stream = await server.handle(
+            token_hex, _pull_message(fleet, alpha, hello)
+        )
+        return [frame async for frame in stream]
+
+    first = asyncio.ensure_future(run_pull("ab" * 16))
+    second = asyncio.ensure_future(run_pull("ba" * 16))
+    deadline = time.monotonic() + 5
+    while not starts and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+    assert len(starts) == 1, "one build must start promptly"
+    await asyncio.sleep(0.3)
+    assert len(starts) == 1, "second build must queue, not stack"
+    release.set()
+    frames_first = await first
+    frames_second = await second
+    assert len(starts) == 2
+    for frames in (frames_first, frames_second):
+        kinds = [
+            json.loads(frame).get("kind") for frame in frames
+            if frame[:1] in ("{", b"{")  # file frames are binary (FSB1)
+        ]
+        assert "checkpoint.begin" in kinds and "checkpoint.end" in kinds
