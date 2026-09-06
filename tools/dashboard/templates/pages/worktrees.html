@@ -878,6 +878,18 @@
                        x-markdown="selectedCommit.commit.body"></div>
                 </template>
 
+                <template x-if="selectedCommit.commit.provenance">
+                  <div class="mb-6 max-w-4xl">
+                    <a :href="selectedCommit.commit.provenance.session_href"
+                       data-testid="worktree-commit-provenance"
+                       class="inline-flex items-center gap-1.5 rounded-full border border-indigo-300/30 bg-indigo-300/10 px-3 py-1 text-xs font-medium text-indigo-200 transition hover:bg-indigo-300/20"
+                       :title="selectedCommit.commit.provenance.locator">
+                      <span class="text-indigo-300/70">provenance</span>
+                      <span x-text="selectedCommit.commit.provenance.session + (selectedCommit.commit.provenance.turn != null ? ' · turn ' + selectedCommit.commit.provenance.turn : '')"></span>
+                    </a>
+                  </div>
+                </template>
+
                 <template x-if="isPrReview() && selectedCommit.commit.stale">
                   <div class="mb-6 max-w-4xl rounded-2xl border border-amber-300/30 bg-amber-300/10 px-4 py-3 text-sm leading-6 text-amber-100"
                        data-testid="review-pr-stale-banner">

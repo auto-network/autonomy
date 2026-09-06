@@ -7585,6 +7585,97 @@ def _validate_turn_correction_suggestion(
     }, None
 
 
+def _org_operator_persona(org: str | None) -> str | None:
+    """The operator's member persona public key in *org* — one settings call.
+
+    Mirrors the mission plugin's ``_operator_persona``
+    (tools/dashboard/plugins/mission/entrypoints/api.py): the
+    ``autonomy.network.persona`` row written at the found/join ceremony,
+    keyed by the persona public key. Storing THIS (never a resolved label)
+    is the final form — display resolves from the member directory at
+    render time.
+    """
+    if not org:
+        return None
+    try:
+        rows = list(graph_ops.read_set(
+            "autonomy.network.persona", org=org, peers=[]))
+        if len(rows) == 1:
+            return rows[0].key
+        for m in rows:
+            if (m.payload or {}).get("source") in ("found", "join"):
+                return m.key
+    except Exception:
+        pass
+    return None
+
+
+def _session_current_turn(jsonl_path: str | None) -> int | None:
+    """Canonical turn number the session's transcript is on right now.
+
+    Runs the graph ingest extractor for the transcript's harness over the
+    full JSONL, so the number matches ``graph context <session> <turn>``
+    by construction — never a reimplementation of the numbering rules.
+    ``None`` when the transcript is missing or unparseable.
+    """
+    if not jsonl_path:
+        return None
+    try:
+        from tools.graph import ingest as graph_ingest
+        path = Path(jsonl_path)
+        if not path.exists():
+            return None
+        fmt = graph_ingest.detect_session_format(path)
+        parser = (
+            graph_ingest.parse_codex_session
+            if fmt == "codex"
+            else graph_ingest.parse_claude_code_session
+        )
+        _meta, turns = parser(path)
+        if turns:
+            return int(turns[-1]["turn_number"])
+    except Exception:
+        logger.exception(
+            "provenance stamp: turn resolution failed for %s", jsonl_path)
+    return None
+
+
+async def api_session_provenance_stamp(request):
+    """GET /api/session/provenance-stamp — mint this session's commit locator.
+
+    The caller's session is derived from the bearer SESSION_TOKEN (never a
+    URL or body — identity is stamped at the API boundary). The locator is
+    ``autonomy://<persona>/<session>/<turn>``: the org member persona public
+    key (``operator`` when no persona ceremony is recorded), the tmux
+    session name, and the canonical graph turn number the transcript is on
+    right now (``-`` when unresolvable). The worktree commit-msg hook
+    consumes ``?format=locator`` (bare text/plain locator) with a single
+    ``curl`` and appends it as an ``Autonomy-Provenance:`` trailer, which
+    the fast-forward merge then carries to master unchanged.
+    """
+    identity, err = authenticate_session_request(request)
+    if err is not None:
+        return err
+    tmux_name, org = identity
+    session = dashboard_db.get_session(tmux_name)
+    jsonl_path = session.get("jsonl_path") if session else None
+    turn = await asyncio.to_thread(_session_current_turn, jsonl_path)
+    persona = _org_operator_persona(org) or "operator"
+    locator = (
+        f"autonomy://{persona}/{tmux_name}/{turn if turn is not None else '-'}"
+    )
+    if request.query_params.get("format") == "locator":
+        return PlainTextResponse(locator)
+    return JSONResponse({
+        "persona": persona,
+        "session": tmux_name,
+        "org": org,
+        "turn": turn,
+        "locator": locator,
+        "trailer": f"Autonomy-Provenance: {locator}",
+    })
+
+
 async def api_session_turn_correction_suggest(request):
     """POST /api/session/turn-corrections/suggest
 
@@ -12321,6 +12412,34 @@ def _worktree_file_json(file: GitFileChange) -> dict:
         "is_dir": file.is_dir,
     }
 
+_PROVENANCE_TRAILER_RE = re.compile(
+    r"^Autonomy-Provenance:\s*autonomy://([^/\s]+)/([^/\s]+)/(\d+|-)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _parse_commit_provenance(body: str | None) -> dict | None:
+    """Parse the ``Autonomy-Provenance:`` trailer stamped by the session
+    worktree commit-msg hook: ``autonomy://<persona>/<session>/<turn>``,
+    where persona and turn may be ``-`` (the hook's degraded offline stamp).
+    Returns the structured locator plus a session-viewer href, or ``None``
+    when the commit carries no stamp.
+    """
+    if not body:
+        return None
+    m = _PROVENANCE_TRAILER_RE.search(body)
+    if not m:
+        return None
+    persona, session, turn = m.group(1), m.group(2), m.group(3)
+    return {
+        "persona": None if persona == "-" else persona,
+        "session": session,
+        "turn": int(turn) if turn.isdigit() else None,
+        "locator": f"autonomy://{persona}/{session}/{turn}",
+        "session_href": f"/session/{url_quote(session, safe='')}",
+    }
+
+
 def _worktree_commit_json(commit: WorktreeCommit, *, include_patch: bool = False) -> dict:
     additions = sum(file.additions for file in commit.files)
     deletions = sum(file.deletions for file in commit.files)
@@ -12338,6 +12457,9 @@ def _worktree_commit_json(commit: WorktreeCommit, *, include_patch: bool = False
             "deletions": deletions,
         },
     }
+    provenance = _parse_commit_provenance(commit.body)
+    if provenance is not None:
+        data["provenance"] = provenance
     if include_patch:
         data["patch"] = commit.patch or ""
     return data
@@ -20793,6 +20915,11 @@ routes = [
     Route("/api/session/{tmux_name}/nag", api_session_nag, methods=["PUT"]),
     Route("/api/session/{tmux_name}/nag", api_session_nag_delete, methods=["DELETE"]),
     Route("/api/session/{tmux_name}/dispatch-nag", api_session_dispatch_nag, methods=["PUT"]),
+    Route(
+        "/api/session/provenance-stamp",
+        api_session_provenance_stamp,
+        methods=["GET"],
+    ),
     Route(
         "/api/session/turn-corrections/suggest",
         api_session_turn_correction_suggest,
