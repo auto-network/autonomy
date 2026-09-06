@@ -324,6 +324,13 @@ def test_generic_approval_commits_exact_request(operator_api, monkeypatch):
         "configure_dashboard_fleet_sync",
         lambda config: configured.update(config=config),
     )
+    # The machine-local fleet-direct row decides where the direct listener
+    # binds and what it advertises; activation must read it.
+    from tools.network import fleet_direct_config
+
+    fleet_direct_config.store(fleet_direct_config.FleetDirectConfig(
+        "0.0.0.0", 9410, ("wss://sjc.example:9410",)
+    ))
     completed = client.post(
         "/api/fleet/enrollment/local-completion",
         json={
@@ -343,6 +350,11 @@ def test_generic_approval_commits_exact_request(operator_api, monkeypatch):
     assert configured["config"].machine_key.private_hex == process.private_hex
     assert configured["config"].roster_machine_pub == machine_key.public_hex
     assert configured["config"].require_delegation is True
+    assert configured["config"].listen_host == "0.0.0.0"
+    assert configured["config"].listen_port == 9410
+    assert fleet_enrollment_routes._reachability_cache.advertised_addrs() == [
+        "wss://sjc.example:9410"
+    ]
 
     # The same process-only handoff is reminted after every later unlock.
     runtime_context = client.get("/api/fleet/runtime")

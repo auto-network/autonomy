@@ -61,7 +61,7 @@ def announce(
     return resp.json()
 
 
-def lookup(
+def lookup_hints(
     registry_url: str,
     org_uuid: str,
     machine_key: KeyPair,
@@ -72,10 +72,12 @@ def lookup(
     timeout: float = 10.0,
     client=None,
 ) -> dict:
-    """node:lookup each pub -> ``{machine_pub: [ws candidate urls]}``.
+    """node:lookup each pub -> ``{machine_pub: {"addrs": [...], "relay_url": ...}}``.
 
-    Best-effort per peer: a peer that is unreachable, unannounced, or errors is
-    simply omitted, so one bad peer never blocks discovery of the others.
+    ``addrs`` are direct-dial candidates; ``relay_url`` is the peer's own
+    standing relay route (None when it announced none). Best-effort per
+    peer: a peer that is unreachable, unannounced, or errors is simply
+    omitted, so one bad peer never blocks discovery of the others.
     """
     out: dict = {}
     path = f"/v1/orgs/{org_uuid}/reachability/query"
@@ -88,13 +90,34 @@ def lookup(
         except Exception:
             continue
         cands = []
+        relay_url = None
         for hint in hints:
             for addr in (hint.get("addrs") or []):
                 if isinstance(addr, str) and addr:
                     cands.append(addr)
-        if cands:
-            out[pub] = cands
+            candidate = hint.get("relay_url")
+            if isinstance(candidate, str) and candidate and relay_url is None:
+                relay_url = candidate
+        if cands or relay_url:
+            out[pub] = {"addrs": cands, "relay_url": relay_url}
     return out
+
+
+def lookup(
+    registry_url: str,
+    org_uuid: str,
+    machine_key: KeyPair,
+    cert: DelegationCert,
+    node_pubs: Iterable[str],
+    *,
+    ts: Optional[int] = None,
+    timeout: float = 10.0,
+    client=None,
+) -> dict:
+    """node:lookup each pub -> ``{machine_pub: [ws candidate urls]}`` (direct only)."""
+    hints = lookup_hints(registry_url, org_uuid, machine_key, cert, node_pubs,
+                         ts=ts, timeout=timeout, client=client)
+    return {pub: h["addrs"] for pub, h in hints.items() if h["addrs"]}
 
 
 class ReachabilityCache:
@@ -119,6 +142,7 @@ class ReachabilityCache:
         cert_getter,
         roster_getter,
         advertise_addrs,
+        relay_url=None,
         ttl: int = 300,
         interval: float = 45.0,
         timeout: float = 3.0,
@@ -130,7 +154,16 @@ class ReachabilityCache:
         self._machine_key_getter = machine_key_getter
         self._cert_getter = cert_getter
         self._roster_getter = roster_getter
-        self._advertise_addrs = list(advertise_addrs or [])
+        # A list is frozen at construction; a callable is re-read at every
+        # refresh, so an operator who sets the advertised URLs after unlock
+        # is announced on the next interval without re-arming the runtime.
+        self._advertise_addrs = (
+            advertise_addrs if callable(advertise_addrs)
+            else list(advertise_addrs or [])
+        )
+        #: This machine's standing relay route to announce beside its direct
+        #: addresses: a string, a callable re-read each refresh, or None.
+        self._relay_url = relay_url
         self._ttl = ttl
         self._interval = interval
         self._timeout = timeout
@@ -138,11 +171,45 @@ class ReachabilityCache:
         self._clock = clock or _time.monotonic
         self._client = client
         self._peers: dict = {}
+        self._hints: dict = {}
         self._last: Optional[float] = None
+        #: (monotonic, addrs) of the last successful announce, for status.
+        self.last_announce: Optional[tuple[float, list]] = None
+
+    def advertised_addrs(self) -> list:
+        """The URLs this machine currently advertises (fresh if a getter)."""
+        try:
+            value = (
+                self._advertise_addrs() if callable(self._advertise_addrs)
+                else self._advertise_addrs
+            )
+        except Exception:
+            return []
+        return [a for a in (value or []) if isinstance(a, str) and a]
 
     def peers(self) -> dict:
         self._maybe_refresh()
         return dict(self._peers)
+
+    def snapshot(self) -> dict:
+        """The last resolved peer map WITHOUT triggering a refresh (status)."""
+        return dict(self._peers)
+
+    def relay_routes(self) -> dict:
+        """``{machine_pub: relay_url}`` for peers that announced a standing
+        relay route (refreshing on the same throttle as :meth:`peers`)."""
+        self._maybe_refresh()
+        return {
+            pub: h["relay_url"] for pub, h in self._hints.items()
+            if h.get("relay_url")
+        }
+
+    def announced_relay_url(self) -> Optional[str]:
+        try:
+            value = self._relay_url() if callable(self._relay_url) else self._relay_url
+        except Exception:
+            return None
+        return value if isinstance(value, str) and value else None
 
     def _maybe_refresh(self) -> None:
         now = self._clock()
@@ -160,11 +227,14 @@ class ReachabilityCache:
         if not registry_url or not org_uuid:
             return
 
-        if self._advertise_addrs:
+        advertise = self.advertised_addrs()
+        relay_url = self.announced_relay_url()
+        if advertise or relay_url:
             try:
-                announce(registry_url, org_uuid, key, cert, self._advertise_addrs,
-                         ttl=self._ttl, ts=self._ts, timeout=self._timeout,
-                         client=self._client)
+                announce(registry_url, org_uuid, key, cert, advertise,
+                         ttl=self._ttl, relay_url=relay_url, ts=self._ts,
+                         timeout=self._timeout, client=self._client)
+                self.last_announce = (now, list(advertise))
             except Exception:
                 pass  # keep serving the last map; retry next interval
 
@@ -174,8 +244,10 @@ class ReachabilityCache:
         except Exception:
             return
         try:
-            self._peers = lookup(registry_url, org_uuid, key, cert, pubs,
+            hints = lookup_hints(registry_url, org_uuid, key, cert, pubs,
                                  ts=self._ts, timeout=self._timeout,
                                  client=self._client)
         except Exception:
-            pass
+            return
+        self._hints = hints
+        self._peers = {pub: h["addrs"] for pub, h in hints.items() if h["addrs"]}

@@ -887,6 +887,65 @@ async def test_puller_connects_with_a_bulk_safe_ping_timeout(monkeypatch):
     assert captured["ping_interval"] == 20.0, "keep pinging; only the deadline widens"
 
 
+def test_route_location_accepts_the_wss_hint_spelling():
+    token = "ab" * 16
+    assert fleet_relay_sync._route_location(f"wss://relay.example/l/{token}") == (
+        "https://relay.example", "wss://relay.example", token,
+    )
+    assert fleet_relay_sync.canonical_rendezvous(
+        f"wss://relay.example/l/{token}"
+    ) == f"https://relay.example/l/{token}"
+    with pytest.raises(fleet_relay_sync.FleetRelaySyncError):
+        fleet_relay_sync._route_location("wss://relay.example/v1/links/x/channel")
+
+
+def test_expired_route_is_classified_distinctly():
+    exc = fleet_relay_sync.FleetRelaySyncError("stored Fleet route is unavailable")
+    assert fleet_relay_sync._classify_pull_failure(exc) == "route_unavailable"
+
+
+def test_discovered_standing_route_rotates_the_stored_bootstrap_route(monkeypatch):
+    """The stored route is the invitation from enrollment; once the origin
+    publishes a standing route, the puller follows it and rotates the row.
+    Unknown or malformed discovery leaves the stored route alone."""
+    from tools.network import fleet_route
+
+    origin = "11" * 32
+    invite = fleet_route.FleetRoute("https://relay.example/l/" + "aa" * 16, origin)
+    stored: list = []
+    monkeypatch.setattr(fleet_route, "store", lambda route, org="machine": stored.append(route))
+
+    monkeypatch.setattr(fleet_relay_sync, "standing_route_resolver", None)
+    assert fleet_relay_sync.rotate_route_if_discovered(invite) is invite
+
+    monkeypatch.setattr(fleet_relay_sync, "standing_route_resolver", lambda pub: None)
+    assert fleet_relay_sync.rotate_route_if_discovered(invite) is invite
+
+    monkeypatch.setattr(
+        fleet_relay_sync, "standing_route_resolver", lambda pub: "https://relay.example/nope",
+    )
+    assert fleet_relay_sync.rotate_route_if_discovered(invite) is invite
+    assert stored == []
+
+    seen = []
+
+    def resolver(pub):
+        seen.append(pub)
+        return "wss://relay.example/l/" + "bb" * 16
+
+    monkeypatch.setattr(fleet_relay_sync, "standing_route_resolver", resolver)
+    rotated = fleet_relay_sync.rotate_route_if_discovered(invite)
+    assert seen == [origin]
+    assert rotated == fleet_route.FleetRoute(
+        "https://relay.example/l/" + "bb" * 16, origin,
+    )
+    assert stored == [rotated]
+
+    # Already on the discovered route: no write.
+    assert fleet_relay_sync.rotate_route_if_discovered(rotated) is rotated
+    assert stored == [rotated]
+
+
 def test_redelivery_window_escalates_and_caps():
     w = fleet_relay_sync._redelivery_window_s
     base = fleet_relay_sync.REDELIVERY_GUARD_S

@@ -81,6 +81,42 @@ def test_a_cert_without_node_scope_cannot_announce(env):
                     ts=NOW, client=client)
 
 
+def test_lookup_hints_carries_the_peer_standing_relay_route(env):
+    """A machine announces its own standing relay route beside (or instead
+    of) direct addresses; peers read it through lookup_hints. lookup() stays
+    direct-only, so the scheduler never tries to direct-dial a relay URL."""
+    client, root = env
+    a_key, a_cert = _machine(root, "A")
+    b_key, b_cert = _machine(root, "B")
+    relay_route = "wss://relay.example/l/" + "ab" * 16
+    fr.announce("http://testserver", ORG, b_key, b_cert, [],
+                relay_url=relay_route, ts=NOW, client=client)
+
+    hints = fr.lookup_hints("http://testserver", ORG, a_key, a_cert,
+                            [b_key.public_hex], ts=NOW, client=client)
+    assert hints[b_key.public_hex] == {"addrs": [], "relay_url": relay_route}
+    assert fr.lookup("http://testserver", ORG, a_key, a_cert,
+                     [b_key.public_hex], ts=NOW, client=client) == {}
+
+    t = [1000.0]
+    cache = fr.ReachabilityCache(
+        binding_getter=lambda: {"registry_url": "http://testserver", "org_uuid": ORG},
+        machine_key_getter=lambda: a_key,
+        cert_getter=lambda: a_cert,
+        roster_getter=lambda: [a_key.public_hex, b_key.public_hex],
+        advertise_addrs=[], relay_url=lambda: "wss://relay.example/l/" + "cd" * 16,
+        interval=45.0, ts=NOW, clock=lambda: t[0], client=client)
+    assert cache.relay_routes() == {b_key.public_hex: relay_route}
+    assert cache.peers() == {}
+    # A announced its own standing route (with no direct addresses)
+    got = client.request(
+        "POST", f"http://testserver/v1/orgs/{ORG}/reachability/query",
+        json=sign_request(root, "POST", f"/v1/orgs/{ORG}/reachability/query",
+                          {"node": a_key.public_hex}, ts=NOW)).json()["hints"]
+    assert got[0]["relay_url"] == "wss://relay.example/l/" + "cd" * 16
+    assert got[0]["addrs"] == []
+
+
 def test_reachability_cache_announces_discovers_and_throttles(env):
     client, root = env
     a_key, a_cert = _machine(root, "A")
@@ -113,3 +149,38 @@ def test_reachability_cache_announces_discovers_and_throttles(env):
     # past the interval: refresh picks up the new address
     t[0] += 50.0
     assert cache.peers()[b_key.public_hex] == ["ws://b-NEW:8443"]
+    # snapshot() reports without refreshing
+    t[0] += 50.0
+    assert cache.snapshot()[b_key.public_hex] == ["ws://b-NEW:8443"]
+    assert cache.last_announce is not None
+
+
+def test_reachability_cache_reads_a_callable_advertise_list_each_refresh(env):
+    """An operator who sets the advertised URLs after unlock is announced on
+    the next refresh -- the runtime is not re-armed for it."""
+    client, root = env
+    a_key, a_cert = _machine(root, "A")
+    advertised = {"addrs": []}
+    t = [1000.0]
+    cache = fr.ReachabilityCache(
+        binding_getter=lambda: {"registry_url": "http://testserver", "org_uuid": ORG},
+        machine_key_getter=lambda: a_key,
+        cert_getter=lambda: a_cert,
+        roster_getter=lambda: [a_key.public_hex],
+        advertise_addrs=lambda: list(advertised["addrs"]),
+        interval=45.0, ts=NOW, clock=lambda: t[0], client=client)
+
+    def hints():
+        return client.request(
+            "POST", f"http://testserver/v1/orgs/{ORG}/reachability/query",
+            json=sign_request(root, "POST", f"/v1/orgs/{ORG}/reachability/query",
+                              {"node": a_key.public_hex}, ts=NOW)).json()["hints"]
+
+    cache.peers()
+    assert hints() == []            # nothing advertised, nothing announced
+    assert cache.last_announce is None
+    advertised["addrs"] = ["wss://a.example:9410"]
+    t[0] += 50.0
+    cache.peers()
+    assert hints()[0]["addrs"] == ["wss://a.example:9410"]
+    assert cache.last_announce[1] == ["wss://a.example:9410"]

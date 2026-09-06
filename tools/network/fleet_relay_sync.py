@@ -29,6 +29,7 @@ import threading
 import time
 import urllib.parse
 from pathlib import Path, PurePosixPath
+from typing import Callable
 
 from tools.graph.db import _org_db_path
 from tools.network import (
@@ -938,17 +939,89 @@ connector_runtime = ConnectorFleetRuntime()
 
 
 def _route_location(rendezvous: str) -> tuple[str, str, str]:
+    """(https base, wss base, token) of a fleet route.
+
+    Accepts the stored ``https://host/l/<token>`` form and the ``wss://``
+    spelling a reachability hint carries (the registry admits only ws/wss
+    URLs as hints); both name the same relay and token.
+    """
     parsed = urllib.parse.urlsplit(rendezvous)
     parts = parsed.path.split("/")
     token = parts[-1] if len(parts) == 3 and parts[1] == "l" else ""
     if (
-        parsed.scheme != "https"
+        parsed.scheme not in ("https", "wss")
         or not parsed.netloc
         or len(token) != 32
         or any(char not in "0123456789abcdef" for char in token)
     ):
         raise FleetRelaySyncError("stored Fleet route is not an exact HTTPS link")
     return f"https://{parsed.netloc}", f"wss://{parsed.netloc}", token
+
+
+def canonical_rendezvous(url: str) -> str:
+    """The stored (https) spelling of a route URL; raises on a malformed one."""
+    http_base, _ws_base, token = _route_location(url)
+    return f"{http_base}/l/{token}"
+
+
+#: Resolves a peer machine's CURRENT standing route (a rendezvous URL) from
+#: discovery -- reachability hints today -- or None when nothing is known.
+#: Installed by the dashboard at runtime activation; None in processes that
+#: have no discovery (tests, the connector).
+standing_route_resolver: "Callable[[str], str | None] | None" = None
+
+
+def rotate_route_if_discovered(route: fleet_route.FleetRoute) -> fleet_route.FleetRoute:
+    """Prefer the origin machine's discovered standing route over the stored one.
+
+    The stored route is bootstrap state: at enrollment it is the invitation
+    link, which expires. A machine that has since published its own standing
+    route (through the signed reachability hints only roster machines can
+    read) is followed here, and the stored row is rotated so the next boot
+    needs no discovery. Anything malformed or unknown leaves the stored route
+    untouched -- discovery can only improve on it, never break it.
+    """
+    resolver = standing_route_resolver
+    if resolver is None:
+        return route
+    try:
+        discovered = resolver(route.origin_machine_pub)
+    except Exception:
+        logger.debug("fleet route discovery failed", exc_info=True)
+        return route
+    if not isinstance(discovered, str) or not discovered:
+        return route
+    try:
+        rendezvous = canonical_rendezvous(discovered)
+    except FleetRelaySyncError:
+        logger.warning(
+            "fleet route discovery for %s returned a malformed route; ignoring",
+            route.origin_machine_pub[:12],
+        )
+        return route
+    if rendezvous == route.rendezvous:
+        return route
+    rotated = fleet_route.FleetRoute(rendezvous, route.origin_machine_pub)
+    try:
+        fleet_route.store(rotated, org="machine")
+    except Exception:
+        logger.warning("fleet route rotation could not be stored", exc_info=True)
+        return rotated
+    logger.info(
+        "fleet route rotated for %s: now %s (was %s)",
+        route.origin_machine_pub[:12], _redact_route(rendezvous),
+        _redact_route(route.rendezvous),
+    )
+    return rotated
+
+
+def _redact_route(rendezvous: str) -> str:
+    """Log a route by relay host and token prefix only -- it is a bearer URL."""
+    try:
+        http_base, _ws, token = _route_location(rendezvous)
+    except FleetRelaySyncError:
+        return "<malformed>"
+    return f"{http_base}/l/{token[:8]}…"
 
 
 async def _fetch_envelope(base: str, token: str) -> dict:
@@ -961,7 +1034,7 @@ async def _fetch_envelope(base: str, token: str) -> dict:
     value = response.json()
     if (
         not isinstance(value, dict)
-        or value.get("target_type") != "fleet:join"
+        or value.get("target_type") not in fleet_route.FLEET_SYNC_TARGET_TYPES
         or not isinstance(value.get("root_pub"), str)
         or not isinstance(value.get("org"), str)
     ):
@@ -1461,6 +1534,12 @@ def _classify_pull_failure(exc: BaseException) -> str:
             return "attachment_bytes_unavailable"
         return "alpha_error"
     if isinstance(exc, FleetRelaySyncError):
+        if "stored Fleet route is unavailable" in text:
+            # The relay answered 404 for the stored route: expired,
+            # revoked, or unknown link -- the invitation ran out and no
+            # standing route has been discovered yet. Distinct so the
+            # verdict says ROUTE, not a generic protocol failure.
+            return "route_unavailable"
         if "schema mismatch" in text:
             return "schema_mismatch"
         if "locked" in text:
@@ -1519,6 +1598,10 @@ class DashboardFleetRelaySyncService:
                         "fleet relay sync: no fleet route stored; puller exiting"
                     )
                     return
+                # The stored route may be the (expiring) invitation from
+                # enrollment; follow the origin's published standing route
+                # when discovery knows one, rotating the stored row.
+                route = await asyncio.to_thread(rotate_route_if_discovered, route)
                 # Prefer the direct path: when a direct pull from this peer
                 # succeeded within the freshness window, this relay tick is
                 # redundant traffic through the public relay. Direct failure

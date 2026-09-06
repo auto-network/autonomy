@@ -194,13 +194,40 @@ def _reachability_binding():
 
 
 def _fleet_advertise_addrs():
-    """This machine's externally-reachable sync-listener URLs, from env.
+    """This machine's externally-reachable sync-listener URLs.
 
-    ``AUTONOMY_FLEET_ADVERTISE_ADDRS`` is a comma-separated list of ws/wss URLs.
-    A machine on a public address advertises it so roster peers can dial it.
+    The ``autonomy.machine.fleet-direct`` row is the durable source; the
+    ``AUTONOMY_FLEET_ADVERTISE_ADDRS`` environment variable (comma-separated
+    ws/wss URLs) is still unioned in. Read fresh on every reachability
+    refresh, so a row written after unlock is announced within one interval.
     """
-    raw = os.environ.get("AUTONOMY_FLEET_ADVERTISE_ADDRS", "")
-    return [u.strip() for u in raw.split(",") if u.strip()]
+    from tools.network import fleet_direct_config
+
+    return fleet_direct_config.advertise_addrs()
+
+
+#: The live ReachabilityCache of the most recent runtime activation, kept so
+#: the fleet verdict can report announce/discovery state without forcing a
+#: registry round trip.
+_reachability_cache = None
+
+
+def _own_standing_route_hint():
+    """This machine's own standing relay route in the ws spelling the
+    registry admits as a hint, or None when it has none to announce."""
+    from tools.network import fleet_route
+
+    try:
+        own = fleet_route.load_self(org="machine")
+    except Exception:
+        return None
+    if own is None:
+        return None
+    try:
+        _http, ws_base, token = fleet_relay_sync._route_location(own.rendezvous)
+    except fleet_relay_sync.FleetRelaySyncError:
+        return None
+    return f"{ws_base}/l/{token}"
 
 
 def _fleet_env_peers():
@@ -235,6 +262,7 @@ def _reachability_peer_addresses(credential, root_pub):
     reachability cert). When those are absent (org unregistered) the cache yields
     {}; AUTONOMY_FLEET_PEERS is unioned on top either way.
     """
+    global _reachability_cache
     from tools.network import fleet_reachability
 
     cache = fleet_reachability.ReachabilityCache(
@@ -246,7 +274,14 @@ def _reachability_peer_addresses(credential, root_pub):
                 fleet_roster.load_entries(org=None), anchor_root_pub=root_pub
             ).keys()
         ),
-        advertise_addrs=_fleet_advertise_addrs(),
+        advertise_addrs=_fleet_advertise_addrs,
+        relay_url=_own_standing_route_hint,
+    )
+    _reachability_cache = cache
+    # The relay puller follows the origin's published standing route over the
+    # stored bootstrap (invitation) route; discovery is this same cache.
+    fleet_relay_sync.standing_route_resolver = (
+        lambda origin_pub: cache.relay_routes().get(origin_pub)
     )
 
     def peers():
@@ -337,6 +372,13 @@ def _activate_runtime(
     with contextlib.suppress(Exception):
         _dashboard_runtime_cache().store(payload)
     _ensure_fleet_catalog(credential.machine_pub)
+    from tools.network import fleet_direct_config
+
+    # The direct tier binds where the machine-local fleet-direct row says.
+    # Default (no row) is the historical loopback ephemeral listener, which
+    # no peer can dial; a fixed port on a reachable interface plus advertised
+    # URLs is what makes direct pulls happen instead of relay pulls.
+    direct = fleet_direct_config.load()
     fleet_sync_scheduler.configure_dashboard_fleet_sync(
         fleet_sync_scheduler.FleetSyncRuntimeConfig(
             machine_key=credential.process_key,
@@ -345,6 +387,8 @@ def _activate_runtime(
             require_delegation=True,
             personal_root_pub=root_pub,
             roster_entries=lambda: fleet_roster.load_entries(org=None),
+            listen_host=direct.listen_host,
+            listen_port=direct.listen_port,
             # Relay-discovered peer channels: a throttled ReachabilityCache
             # announces this machine (its reachability cert + machine key) and
             # resolves roster peers via node:announce/node:lookup. When the
