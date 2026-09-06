@@ -236,7 +236,7 @@
                 </div>
                 <template x-if="cardPresentation(id) === 'transcript'">
                   <div class="sb-card-body session-viewer" data-mode="panel"
-                       x-data="sessionViewerPage({mode:'panel', dictationTile:true, pageSignals:false})"
+                       x-data="sessionViewerPage({mode:'panel', dictationTile:true, pageSignals:false, tailEntries:40})"
                        x-init="$nextTick(() => configure(panelConfig(id)))">
                     <template x-if="state === 'loading'"><div class="sb-empty">Loading session…</div></template>
                     <template x-if="state === 'error'"><div class="sb-empty" x-text="errorMsg"></div></template>
