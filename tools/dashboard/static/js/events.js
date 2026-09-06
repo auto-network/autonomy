@@ -619,20 +619,39 @@
       restartStatus: null,
       restartNowMs: Date.now(),
       dismissRestart: _dismissRestart,
+      restartCause: function() {
+        // What triggered this restart: the merged session + commit headline,
+        // or a direct host file edit. Server-computed (server.py
+        // _restart_attribution); the client only formats it.
+        var status = this.restartStatus;
+        var attr = status && status.attribution;
+        if (!attr) return '';
+        if (attr.summary) return attr.summary;
+        if (attr.trigger === 'direct-edit' && attr.files && attr.files.length) {
+          return 'host terminal · direct file edit · ' + attr.files.join(', ');
+        }
+        if (attr.trigger === 'merge') {
+          var who = attr.session || 'a session';
+          return attr.commit_headline ? (who + ' · ' + attr.commit_headline) : who;
+        }
+        return '';
+      },
       restartMessage: function() {
         var status = this.restartStatus;
         if (!status) return '';
         var now = this.restartNowMs || Date.now();
+        var cause = this.restartCause();
+        var suffix = cause ? ' — ' + cause : '';
         if (status.phase === 'countdown') {
           var left = Math.max(0, Math.ceil(((status.countdown_ends_at_ms || now) - now) / 1000));
-          return 'Server restarting in ' + left + '…';
+          return 'Server restarting in ' + left + '…' + suffix;
         }
         if (status.phase === 'complete') {
-          return 'Restart complete in ' + ((status.duration_ms || 0) / 1000).toFixed(1) + 's';
+          return 'Restart complete in ' + ((status.duration_ms || 0) / 1000).toFixed(1) + 's' + suffix;
         }
         if (status.phase === 'recovered') return 'Server just restarted';
         var elapsed = Math.max(0, now - (status.started_at_ms || now));
-        return 'Server is restarting · ' + Math.floor(elapsed / 1000) + 's elapsed';
+        return 'Server is restarting · ' + Math.floor(elapsed / 1000) + 's elapsed' + suffix;
       },
       restartProgress: function() {
         var status = this.restartStatus;
