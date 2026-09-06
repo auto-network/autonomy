@@ -191,7 +191,9 @@ async def get_summary(request: Request) -> JSONResponse:
     summary = summarize(runs, _rows(DRILL_SET_ID), config)
     try:
         from tools.dashboard.plugins.backup import credentials
-        _, cred_status = credentials.offsite_env(config)
+        # cached_status only: offsite_env decrypts (seconds of crypto)
+        # and belongs to the background cycle, never the request path.
+        cred_status = credentials.cached_status()
     except Exception:
         cred_status = None
     summary["destinations"] = destinations(runs, config, cred_status)

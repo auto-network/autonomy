@@ -264,6 +264,14 @@ def run_cycle(now: datetime | None = None) -> dict:
         drill_mod.finalize_abandoned()
     except Exception:
         logger.exception("abandoned-drill finalization failed")
+    try:
+        # Refresh the cached credential status here, in the worker
+        # thread — the vault decrypt cost lives in this cycle so the
+        # request path never pays it.
+        from tools.dashboard.plugins.backup import credentials
+        credentials.offsite_env(_read_config())
+    except Exception:
+        logger.exception("credential status refresh failed")
     runs = _rows(RUN_SET_ID)
     conditions = derive_conditions(runs, _read_config(), now=now)
     outcome = publish_conditions(attention_routes._runtime.index, conditions)
