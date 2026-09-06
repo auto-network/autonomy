@@ -555,10 +555,38 @@ class ConnectorFleetRuntime:
                             "scope=%s queued=%.1fs",
                             scope, build_started_at - queued_at,
                         )
+                        # The build phase emits no data frames — the next
+                        # frame after the server-hello is checkpoint.begin,
+                        # AFTER the build. A build longer than the client's
+                        # 60s frame-silence limit is therefore killed
+                        # mid-flight while the server builds on for nobody
+                        # (observed live 2026-09-06: contention pushed a
+                        # 28s build to 200s and SJC bailed at ~60s). Emit a
+                        # keepalive on a sub-limit cadence so no build
+                        # duration can out-silence the client; the client
+                        # already tolerates and ignores these frames.
+                        build_future = asyncio.ensure_future(
+                            asyncio.to_thread(create_checkpoint)
+                        )
                         try:
-                            await asyncio.to_thread(create_checkpoint)
+                            while True:
+                                try:
+                                    await asyncio.wait_for(
+                                        asyncio.shield(build_future),
+                                        BUILD_KEEPALIVE_INTERVAL_S,
+                                    )
+                                    break
+                                except asyncio.TimeoutError:
+                                    keepalive = canonical_json({
+                                        "v": PROTOCOL_VERSION,
+                                        "kind": "keepalive",
+                                    })
+                                    stats["bytes_sent"] += len(keepalive)
+                                    yield keepalive
                         except BaseException:
                             abort_build.set()
+                            with contextlib.suppress(BaseException):
+                                await build_future
                             logger.warning(
                                 "fleet relay sync: checkpoint build abandoned "
                                 "scope=%s after=%.1fs (client gone; build "
@@ -747,6 +775,11 @@ class ConnectorFleetRuntime:
 #: silence limit and above a healthy ~28s build, so a healthy stream never
 #: dumps and a pathological one self-reports where it is stuck.
 STREAM_STALL_DUMP_S = 45.0
+
+#: Keepalive cadence during the frame-silent checkpoint build phase. Well
+#: under the client's 60s frame-silence limit so even a badly contended
+#: multi-minute build never trips it; the client ignores keepalive frames.
+BUILD_KEEPALIVE_INTERVAL_S = 20.0
 
 _stall_dump_lock = threading.Lock()
 _stall_dump_active = 0

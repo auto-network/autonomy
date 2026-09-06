@@ -728,3 +728,60 @@ async def test_concurrent_pulls_hold_one_build_slot_per_scope(
             if frame[:1] in ("{", b"{")  # file frames are binary (FSB1)
         ]
         assert "checkpoint.begin" in kinds and "checkpoint.end" in kinds
+
+
+@pytest.mark.asyncio
+async def test_slow_build_emits_keepalives_before_checkpoint_begin(
+    tmp_path, monkeypatch
+):
+    """A build longer than the keepalive interval must emit keepalive frames
+    BEFORE checkpoint.begin, so the client's 60s frame-silence limit never
+    trips mid-build (the 2026-09-06 200s-build delivery failure)."""
+    import asyncio
+
+    monkeypatch.setattr(fleet_relay_sync, "BUILD_KEEPALIVE_INTERVAL_S", 0.05)
+    fleet = _two_machine_fleet()
+    personal = tmp_path / "personal.db"
+    personal.touch()
+    alpha = tmp_path / "alpha.db"
+    _prepare_org_db(alpha, fleet.server_machine.public_hex)
+    _insert_note(alpha, "a-1", "org content")
+    server = _configure_relay_server(fleet, personal, monkeypatch)
+    monkeypatch.setattr(
+        server.scheduler, "_scope_paths",
+        lambda: {"personal": personal, "alpha": alpha},
+    )
+    _fake_delta_handle(server)
+
+    class SlowAlpha:
+        def __init__(self, _path, _origin):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def checkpoint(self, directory, *, should_abort=None, **_kwargs):
+            time.sleep(0.25)  # ~5 keepalive intervals
+            directory.mkdir()
+            (directory / "alpha-manifest.json").write_bytes(b"manifest")
+
+    monkeypatch.setattr(fleet_relay_sync, "FleetSyncAlpha", SlowAlpha)
+    token = "ab" * 16
+    _auth, _private, hello = _client_hello(fleet, token)
+    stream = await server.handle(token, _pull_message(fleet, alpha, hello))
+
+    kinds = []
+    async for frame in stream:
+        if frame[:1] in ("{", b"{"):
+            kinds.append(json.loads(frame).get("kind"))
+        else:
+            kinds.append("<file>")
+
+    assert "keepalive" in kinds, "a slow build must emit keepalives"
+    # Every keepalive precedes checkpoint.begin (build is before the begin).
+    first_begin = kinds.index("checkpoint.begin")
+    assert kinds[:first_begin].count("keepalive") >= 1
+    assert "checkpoint.end" in kinds, "build still completes and delivers"
