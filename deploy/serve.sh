@@ -37,6 +37,7 @@ exec python3 -m tools.dashboard.reload_with_notice tools.dashboard.server:app \
     --reload \
     --reload-dir tools/dashboard \
     --reload-dir tools/graph \
+    --reload-dir tools/network \
     --reload-dir agents \
     --reload-exclude 'tools/dashboard/tests/*' \
     --reload-exclude 'tools/graph/tests/*' \
