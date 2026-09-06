@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
@@ -273,6 +274,23 @@ class LedgerStore:
                 "DELETE FROM ledger_heads WHERE event_id = ?", [(p,) for p in event.parents]
             )
             self.db.execute("INSERT INTO ledger_heads(event_id) VALUES (?)", (event.event_id,))
+        # Bead auto-dqemk: the event also rides the org's replicated Settings
+        # set (autonomy.org.ledger-event#1) so peers can rebuild their ledger
+        # from rows. Best-effort by contract — a transport-row write must
+        # never fail a ledger append; settings_bridge.reconcile repairs
+        # anything missed.
+        try:
+            from .settings_bridge import publish_event
+
+            publish_event(
+                Path(self.path).stem, event.event_id,
+                event.to_json().decode("utf-8"),
+            )
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "ledger-event row publish hook failed for %s",
+                self.path, exc_info=True,
+            )
         return event.event_id
 
     def append_wire(self, raw) -> str:
