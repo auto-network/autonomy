@@ -265,7 +265,7 @@ async def put_config(request: Request) -> JSONResponse:
     merged.update(body)
     from tools.graph import settings_ops
     try:
-        settings_ops.add_setting(
+        settings_ops.write_by_key(
             CONFIG_SET_ID, SCHEMA_REVISION, CONFIG_KEY, merged, org=MACHINE)
     except SchemaValidationError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)

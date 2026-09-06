@@ -75,7 +75,8 @@ def parse_events(output: str) -> tuple[list[dict], str, str]:
 
 def _upsert(stamp: str, payload: dict) -> None:
     from tools.graph import settings_ops
-    settings_ops.add_setting(
+    # write_by_key: the running row and its finalization share one key.
+    settings_ops.write_by_key(
         DRILL_SET_ID, SCHEMA_REVISION, stamp, payload, org="machine")
 
 
@@ -164,7 +165,7 @@ def finalize_abandoned(now=None) -> list[str]:
             started = None
         if started is not None and (now - started).total_seconds() < limit_s:
             continue
-        settings_ops.add_setting(
+        settings_ops.write_by_key(
             DRILL_SET_ID, SCHEMA_REVISION, stamp, {
                 "verdict": "fail",
                 "trigger": row.get("trigger", "manual"),

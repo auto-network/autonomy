@@ -48,7 +48,7 @@ def store(monkeypatch):
     rows: dict[str, dict] = {}
     counter = iter(range(10_000))
 
-    def add_setting(set_id, rev, key, payload, *, org, **kw):
+    def write_by_key(set_id, rev, key, payload, *, org, **kw):
         assert set_id == RUN_SET_ID and rev == SCHEMA_REVISION
         assert org == "machine"
         validate_payload(set_id, rev, payload)
@@ -71,7 +71,7 @@ def store(monkeypatch):
         raise KeyError(setting_id)
 
     import tools.graph.settings_ops as settings_ops
-    monkeypatch.setattr(settings_ops, "add_setting", add_setting)
+    monkeypatch.setattr(settings_ops, "write_by_key", write_by_key)
     monkeypatch.setattr(settings_ops, "read_set_key", read_set_key)
     monkeypatch.setattr(settings_ops, "read_set", read_set)
     monkeypatch.setattr(settings_ops, "remove_setting", remove_setting)

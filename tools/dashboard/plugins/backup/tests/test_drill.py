@@ -60,7 +60,7 @@ def store(monkeypatch):
     captured attention index built from the real production registry."""
     rows: dict[str, dict] = {}
 
-    def add_setting(set_id, rev, key, payload, *, org, **kw):
+    def write_by_key(set_id, rev, key, payload, *, org, **kw):
         validate_payload(set_id, rev, payload)
         assert org == "machine"
         rows[key] = payload
@@ -70,7 +70,7 @@ def store(monkeypatch):
                 for key, payload in rows.items()]
 
     import tools.graph.settings_ops as settings_ops
-    monkeypatch.setattr(settings_ops, "add_setting", add_setting)
+    monkeypatch.setattr(settings_ops, "write_by_key", write_by_key)
     monkeypatch.setattr(settings_ops, "read_set", read_set)
     monkeypatch.setattr(settings_ops, "remove_setting",
                         lambda sid, *, org: rows.pop(sid, None))

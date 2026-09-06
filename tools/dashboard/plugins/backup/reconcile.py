@@ -116,7 +116,11 @@ def reconcile(report_root: Path | str | None = None,
             continue  # idempotent: nothing new (offsite verdict updates
             #           re-upsert because the payload differs)
         try:
-            settings_ops.add_setting(
+            # write_by_key, never add_setting: the reconciler UPSERTS —
+            # the offsite verdict lands as a second write to the same key,
+            # and add_setting is insert-only (IntegrityError, found live
+            # 2026-09-06 after the first stamped re-ingest).
+            settings_ops.write_by_key(
                 RUN_SET_ID, SCHEMA_REVISION, key, report, org="machine")
         except SchemaValidationError as exc:
             probe_errors[tier] = f"report refused by schema: {exc}"
