@@ -391,3 +391,30 @@ test('board cards never write the page-global voice signals that pick the capsul
   assert.ok(html.includes('dictationTile:true'));
   assert.match(viewer, /if \(this\._dictationTile && this\._localDictationText\) return true;/);
 });
+
+
+test('a moved card is never in two columns: the operator\'s move outranks a stale groupId until the record agrees', () => {
+  const grp = (slug) => ({ slug, name: slug, color: '', why: '' });
+  const sessions = {
+    s1: { isLive: true, groupId: 'a', group: grp('a'), entries: [{}] },
+    s2: { isLive: true, groupId: 'b', group: grp('b'), entries: [{}] },
+  };
+  const { board } = makeBoard({ rows: ['s1', 's2'], sessions });
+  board.refresh({ columns: [{ id: 'a', members: [] }, { id: 'b', members: [] }], widths: {} });
+  assert.deepEqual(ids(board.columns), ['a:s1', 'b:s2']);
+  // The operator drops s1 into b. The server write is in flight, so the store
+  // still says groupId 'a' — a registry broadcast must NOT undo the move.
+  board._pending.s1 = 'b';
+  board.refresh({ columns: [{ id: 'a', members: [] }, { id: 'b', members: [] }], widths: {} });
+  const seen = {};
+  board.columns.forEach((c) => c.members.forEach((m) => {
+    assert.ok(!seen[m], m + ' appears in more than one column');
+    seen[m] = true;
+  }));
+  assert.deepEqual(ids(board.columns), ['b:s2,s1']);
+  // Once the record agrees the pending intent is dropped.
+  sessions.s1.groupId = 'b'; sessions.s1.group = grp('b');
+  board.refresh({ columns: [{ id: 'b', members: [] }], widths: {} });
+  assert.deepEqual(ids(board.columns), ['b:s2,s1']);
+  assert.deepEqual(plain(board._pending), {});
+});

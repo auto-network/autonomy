@@ -139,6 +139,12 @@
       organize: { state: 'idle', status: '', runId: '' }, commitTick: 0,
       menuFor: '', menuActions: [],
       commits: {}, workspaces: {},
+      // session -> column slug the operator just moved it to, held until the
+      // store's groupId agrees. Without it a registry broadcast that lands
+      // between the drop and the server write re-derives columns from the
+      // STALE groupId, so the card snaps back to its old column and then
+      // forward again — the operator saw it in two places at once.
+      _pending: {},
       _dragSource: null, _provisional: null, _frame: null, _drag: null,
       _resourceTipOpen: null, _diskRefreshing: {}, resumeError: {}, resuming: {}, resumed: {},
       _workspaceStatusByTmux: {},
@@ -223,6 +229,18 @@
       // Columns = the store's group membership. Previous columns (or the saved
       // layout on first paint) contribute only order, width, focus and the
       // arranged order of members inside a column; membership itself is server truth.
+      // The column a session belongs to right now: the operator's un-acked
+      // move if there is one, else the shared record.
+      _groupOf(id) {
+        var pend = this._pending[id];
+        var store = Alpine.store('sessions')[id];
+        var actual = (store && store.groupId) || null;
+        if (pend !== undefined) {
+          if (pend === actual || (pend === null && !actual)) { delete this._pending[id]; return actual; }
+          return pend;
+        }
+        return actual;
+      },
       columnsFromStore(saved) {
         var all = Alpine.store('sessions'), self = this;
         var prev = this.columns.length ? this.columns : ((saved && saved.columns) ? saved.columns : []);
@@ -230,7 +248,7 @@
         var byId = {}; prev.forEach(function (c) { byId[c.id] = c; });
         var groups = {};
         this.rows.forEach(function (r) {
-          var st = all[r.id]; var gid = st && st.groupId; if (!gid) return;
+          var st = all[r.id]; var gid = self._groupOf(r.id); if (!gid) return;
           var g = (st && st.group) || {};
           var col = groups[gid];
           if (!col) {
@@ -272,9 +290,14 @@
       commitMembership(id) {
         var self = this, col = this.columnOf(id);
         var body = (!col || col.id === 'solo') ? { group: null } : { group: col.id, joined_by: 'operator' };
+        this._pending[id] = body.group;   // authoritative until the record agrees
         var ready = (col && col.id !== 'solo') ? this.ensureGroup(col) : Promise.resolve();
         return ready.then(function () { return self._put('/api/session/' + encodeURIComponent(id) + '/group', body); })
-          .catch(function (e) { console.warn('[board] membership write failed', e.message); self.refresh(); });
+          .catch(function (e) {
+            delete self._pending[id];      // the move did not happen; show the truth
+            console.warn('[board] membership write failed', e.message);
+            self.refresh();
+          });
       },
 
       // ── rows: the same projection the Sessions page hands the card partial ──
