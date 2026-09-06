@@ -540,6 +540,70 @@ def _connector_command(binding: dict, org: str | None, key_path: str,
 # ── the managed subprocess ────────────────────────────────────
 
 
+def _probe_ctl_serving(ctl_path: str) -> bool:
+    """One authenticated connector-status round-trip via the control
+    descriptor. False on any failure — never raises."""
+    try:
+        with open(ctl_path) as fh:
+            descriptor = json.load(fh)
+        request = json.dumps({
+            "auth": descriptor["auth"],
+            "op": "connector-status",
+            "args": {},
+        }) + "\n"
+        with socket.create_connection(
+            ("127.0.0.1", int(descriptor["port"])), timeout=0.5
+        ) as sock:
+            sock.sendall(request.encode("utf-8"))
+            sock.settimeout(0.5)
+            buf = b""
+            while b"\n" not in buf:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+        reply = json.loads(buf.split(b"\n", 1)[0].decode("utf-8"))
+        return reply.get("ok") is True and reply.get("serving") is True
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+class _AdoptedProc:
+    """A healthy connector inherited from a previous dashboard incarnation.
+
+    Hot reloads replace the dashboard process but deliberately no longer kill
+    the connector (see ``_default_spawn``); the successor supervisor adopts the
+    survivor through its control descriptor instead of reaping it and severing
+    every in-flight fleet-sync stream. Same duck-type as ``_Proc``; liveness by
+    signal-0, teardown by the shared terminate helper."""
+
+    def __init__(self, pid: int, ctl_path: str | None = None):
+        self._pid = pid
+        self._ctl_path = ctl_path
+
+    def pid(self) -> int | None:
+        return self._pid
+
+    def alive(self) -> bool:
+        try:
+            os.kill(self._pid, 0)
+            return True
+        except OSError:
+            return False
+
+    def serving(self) -> bool:
+        if not self.alive() or not self._ctl_path:
+            return False
+        return _probe_ctl_serving(self._ctl_path)
+
+    def stop(self) -> None:
+        with contextlib.suppress(Exception):
+            _terminate_pid(self._pid)
+        if self._ctl_path:
+            with contextlib.suppress(OSError):
+                os.remove(self._ctl_path)
+
+
 class _Proc:
     """A spawned connector process plus its authenticated serving readiness.
 
@@ -563,29 +627,7 @@ class _Proc:
         """True only when the child reports a completed tunnel handshake."""
         if not self.alive() or not self._ctl_path:
             return False
-        try:
-            with open(self._ctl_path) as fh:
-                descriptor = json.load(fh)
-            request = json.dumps({
-                "auth": descriptor["auth"],
-                "op": "connector-status",
-                "args": {},
-            }) + "\n"
-            with socket.create_connection(
-                ("127.0.0.1", int(descriptor["port"])), timeout=0.5
-            ) as sock:
-                sock.sendall(request.encode("utf-8"))
-                sock.settimeout(0.5)
-                buf = b""
-                while b"\n" not in buf:
-                    chunk = sock.recv(4096)
-                    if not chunk:
-                        break
-                    buf += chunk
-            reply = json.loads(buf.split(b"\n", 1)[0].decode("utf-8"))
-            return reply.get("ok") is True and reply.get("serving") is True
-        except (OSError, ValueError, KeyError, TypeError):
-            return False
+        return _probe_ctl_serving(self._ctl_path)
 
     def stop(self) -> None:
         try:
@@ -641,10 +683,17 @@ def _default_spawn(argv: list, env: dict, *, log_path: str | None = None,
     try:
         popen = subprocess.Popen(
             argv, env=child_env, stdout=out, stderr=out,
-            # Tie the connector's life to this dashboard's: the kernel signals
-            # it whenever the parent dies, so a crash/SIGKILL/reload can no
-            # longer leave it orphaned and fighting for the relay slot.
-            preexec_fn=_make_pdeathsig_preexec(os.getpid()),
+            # DELIBERATELY DETACHED — the connector must SURVIVE dashboard
+            # worker deaths. The previous PR_SET_PDEATHSIG tie meant every
+            # hot reload (uvicorn --reload fires on every code merge) SIGTERMed
+            # the serving connector MID-STREAM: a fleet member pulling a large
+            # checkpoint lost its transfer on every merge and re-pulled from
+            # scratch, forever (observed live 2026-09-05: repeated connector
+            # instances, 3.7GB transferred for a 217MB database, sync never
+            # completing during active development). Orphan protection moves to
+            # where it already exists: the per-org ownership lock + adoption of
+            # a healthy incumbent in _launch, with _reap_strays for the sick.
+            start_new_session=True,
         )
     finally:
         if out is not subprocess.DEVNULL:
@@ -822,6 +871,11 @@ class ServingSupervisor:
                     and now - self._started_at.get(org, 0.0) < self._grace_s):
                 return {"running": True, "reason": "fresh-grace"}
             if proc is not None:
+                _log.warning(
+                    "stopping serving connector for org=%s: should_run false "
+                    "(cert=%s, live_grant/publication/fleet gates all cold)",
+                    org, state["status"],
+                )
                 proc.stop()
                 self._procs.pop(org, None)
                 self._credentials.pop(org, None)
@@ -849,6 +903,11 @@ class ServingSupervisor:
                 # before the startup deadline.  Replace this genuinely wedged
                 # process; a connector observed serving once owns its normal
                 # reconnect lifecycle and is not churned here.
+                _log.warning(
+                    "replacing wedged serving connector for org=%s "
+                    "(alive but never served / unreachable past deadline)",
+                    org,
+                )
                 proc.stop()
                 self._procs.pop(org, None)
                 self._credentials.pop(org, None)
@@ -858,6 +917,10 @@ class ServingSupervisor:
             # process alive would leave it presenting the superseded cert
             # forever, because ensure() otherwise treats any live PID as
             # healthy. Stop and relaunch on the exact new credential.
+            _log.warning(
+                "restarting serving connector for org=%s: credential rotated",
+                org,
+            )
             proc.stop()
             self._procs.pop(org, None)
             self._credentials.pop(org, None)
@@ -883,6 +946,11 @@ class ServingSupervisor:
         """Stop local ownership when another roster machine is selected."""
         proc = self._procs.pop(org, None)
         if proc is not None:
+            _log.warning(
+                "stopping serving connector for org=%s: fleet assignment "
+                "(%s, selected=%s)", org, eligibility.reason,
+                eligibility.selected_machine_id,
+            )
             with contextlib.suppress(Exception):
                 proc.stop()
         self._credentials.pop(org, None)
@@ -922,6 +990,49 @@ class ServingSupervisor:
             return {"running": True, "reason": "starting"}
         return None
 
+    def _adopt_incumbent(self, org: str | None, state: dict) -> dict | None:
+        """Adopt a live, serving connector left by a previous dashboard
+        incarnation instead of killing it. None -> no healthy incumbent.
+
+        Trade accepted: the incumbent's cert cannot be interrogated, so we
+        record the CURRENT tuple; a rotation that happened during the exact
+        reload window is served stale until the next real rotation event.
+        Rotations are rare (hours-stable) and reloads are constant (every code
+        merge) — severing every in-flight fleet-sync stream on every merge was
+        the far worse trade (observed live 2026-09-05)."""
+        try:
+            binding, binding_error = _load_binding(org)
+            if binding_error or not binding:
+                return None
+            org_uuid = binding.get("org_uuid")
+            if not org_uuid:
+                return None
+            ctl_path = _control_path_for(state["key_path"])
+            if not _probe_ctl_serving(ctl_path):
+                return None
+            pid = None
+            for candidate in _iter_connector_pids(org_uuid):
+                if candidate != os.getpid():
+                    pid = candidate
+                    break
+            if pid is None:
+                return None
+            self._procs[org] = _AdoptedProc(pid, ctl_path=ctl_path)
+            self._credentials[org] = (
+                state["cert"], state["viewer_cert"], state["key_path"])
+            self._started_at[org] = self._now()
+            self._last_served[org] = self._now()
+            _log.info(
+                "adopted surviving serving connector pid=%s for org=%s "
+                "(previous dashboard incarnation; streams preserved)",
+                pid, org_uuid,
+            )
+            return {"running": True, "reason": "adopted"}
+        except Exception:
+            _log.warning("incumbent adoption failed for org=%s", org,
+                         exc_info=True)
+            return None
+
     def _launch(self, org: str | None, state: dict) -> dict:
         """Spawn the connector for *org* (``state`` must be an ``ok``
         serve-cert state) and record its launch time for the fresh-tunnel
@@ -941,6 +1052,15 @@ class ServingSupervisor:
         # cross-container isolation; mock dashboards never bootstrap serving.
         if not self._acquire_lock(org, state["key_path"]):
             return {"running": True, "reason": "owned-by-other-dashboard"}
+        # ADOPT a healthy survivor before considering anything a stray. A hot
+        # reload replaces this dashboard process but no longer kills the
+        # connector (see _default_spawn); the incumbent may be mid-serve for a
+        # fleet member. Killing it severed every in-flight sync stream on every
+        # code merge. If it answers its control socket as serving, it is ours
+        # now — record it and walk away.
+        adopted = self._adopt_incumbent(org, state)
+        if adopted is not None:
+            return adopted
         # We hold the per-org ownership lock, so every OTHER connector for this
         # org is a stray — an orphan a dead dashboard left behind (a live sibling
         # would still hold this lock). Reap them before spawning ours, so the new
