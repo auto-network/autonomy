@@ -380,14 +380,28 @@ def build_production_runtime() -> AttentionRouteRuntime:
     dashboard_attention_runtime = dashboard_access_central.build_attention_runtime(
         approvals,
     )
+    runtimes = {
+        (
+            dashboard_access_central.KIND,
+            dashboard_access_central.APPLICATION_SCOPE,
+        ): dashboard_attention_runtime,
+    }
+    # The backup plugin's non-approval publication runtimes (auto-fnydv).
+    # The registry rows are closed substrate code; the plugin supplies
+    # only projection/evidence translation. Import failure degrades to
+    # class_disabled for the backup classes, never a boot failure.
+    try:
+        from tools.dashboard.plugins.backup.attention import (
+            publication_runtimes as backup_publication_runtimes,
+        )
+        runtimes.update(backup_publication_runtimes())
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "backup attention runtimes unavailable; backup classes stay "
+            "disabled")
     attention_registry = build_production_attention_registry(
         approval_registry=approval_registry,
-        runtimes={
-            (
-                dashboard_access_central.KIND,
-                dashboard_access_central.APPLICATION_SCOPE,
-            ): dashboard_attention_runtime,
-        },
+        runtimes=runtimes,
     )
     index = AttentionIndexService(registry=attention_registry)
     consumer = dashboard_access_central.DashboardAccessResultConsumer()

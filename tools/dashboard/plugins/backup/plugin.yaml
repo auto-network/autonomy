@@ -26,6 +26,10 @@ skill: SKILL.md
 entrypoints:
   api: tools.dashboard.plugins.backup.entrypoints.api:routes
   cli: tools.dashboard.plugins.backup.entrypoints.cli:register
+  # The deriver loop: reconcile run reports, derive failure/staleness,
+  # publish to Central attention. Lifespan-owned by the substrate's
+  # PluginBackgroundSupervisor; runs only while the plugin is enabled.
+  background: tools.dashboard.plugins.backup.entrypoints.background:tasks
   schemas:
     - tools.dashboard.plugins.backup.entrypoints.schemas:BackupConfigV1
     - tools.dashboard.plugins.backup.entrypoints.schemas:BackupRunV1
