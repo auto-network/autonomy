@@ -109,6 +109,13 @@ def _ensure_descriptors(size: int) -> dict:
 
 def run(args: argparse.Namespace) -> dict:
     out = Path(args.out)
+    if (out / "fleet").exists():
+        # A crashed run's databases poison the next one ("fleet-sync writer
+        # identity does not match activated catalog"); refuse, do not clean.
+        raise SystemExit(
+            f"precondition: {out}/fleet already exists from a previous run; "
+            "use a fresh --out directory"
+        )
     out.mkdir(parents=True, exist_ok=True)
     limits = _ensure_descriptors(args.size)
     fleet = HarnessFleet(
@@ -234,6 +241,15 @@ def run(args: argparse.Namespace) -> dict:
             "app_bytes_received": sum(int(p.get("bytes_received") or 0) for p in ok),
             "error_codes": sorted({str(p.get("error_code")) for p in pulls
                                    if p.get("outcome") == "failed"}),
+            "quiescence_collisions": sum(
+                1 for p in pulls if p.get("outcome") == "failed"
+                and "Quiescence" in str(p.get("error_code"))
+            ),
+            "checkpoint_pulls": sum(1 for p in ok if (p.get("checkpoint_bytes") or 0) > 0),
+            "delta_pulls_with_frames": sum(
+                1 for p in ok if (p.get("mutation_frames") or 0) > 0
+                and not (p.get("checkpoint_bytes") or 0)
+            ),
         }
         evidence["machines"] = machines
         evidence["total_bytes_on_wire"] = total
@@ -314,7 +330,12 @@ def main(argv: list[str] | None = None) -> int:
         "size", "writes", "converged", "settle_s", "total_bytes_on_wire",
         "unique_payload_bytes", "efficiency_ratio", "copies_per_write_per_machine",
         "snapshots_served", "snapshots_received", "transactions_duplication",
-    ) if k in evidence}, sort_keys=True))
+    ) if k in evidence} | {
+        "quiescence_collisions": evidence["pulls"]["quiescence_collisions"],
+        "failed_pulls": evidence["pulls"]["failed"],
+        "checkpoint_pulls": evidence["pulls"]["checkpoint_pulls"],
+        "delta_pulls_with_frames": evidence["pulls"]["delta_pulls_with_frames"],
+    } if "pulls" in evidence else {k: evidence[k] for k in ("size", "converged") if k in evidence}, sort_keys=True))
     return 0 if evidence.get("converged") else 1
 
 
