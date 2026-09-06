@@ -77,21 +77,63 @@ def _machine_counters(db_path: Path, own_pub: str) -> dict:
     }
 
 
+def _ensure_descriptors(size: int) -> dict:
+    """Raise RLIMIT_NOFILE to what N machines need, or name the shortfall.
+
+    A fleet of N opens N*(N-1) proxy listeners plus their connections; at
+    N=50 that is ~2,450 listeners, above the usual 1024 soft limit, and the
+    failure surfaced as "could not bind on any address" (sjc-4, 2026-09-06)
+    -- a network-looking error for a descriptor precondition.
+    """
+    import resource
+
+    needed = size * (size - 1) * 4 + 512
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft >= needed:
+        return {"nofile_soft": soft, "nofile_needed": needed}
+    target = needed if hard == resource.RLIM_INFINITY else min(hard, needed)
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    except (ValueError, OSError) as exc:
+        raise SystemExit(
+            f"precondition: RLIMIT_NOFILE soft={soft} hard={hard}, this run needs "
+            f"~{needed}; raise the limit (ulimit -n {needed}) and retry ({exc})"
+        )
+    if target < needed:
+        raise SystemExit(
+            f"precondition: RLIMIT_NOFILE hard limit {hard} is below the ~{needed} "
+            f"descriptors a {size}-machine fleet needs"
+        )
+    return {"nofile_soft": target, "nofile_needed": needed}
+
+
 def run(args: argparse.Namespace) -> dict:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    limits = _ensure_descriptors(args.size)
     fleet = HarnessFleet(
         out / "fleet", size=args.size, seed=args.seed,
         poll_interval=args.poll_interval,
     )
-    fleet.build()
     late = args.size - 1 if args.late_join_at is not None else None
     evidence: dict = {
         "size": args.size, "writers": args.writers, "rate": args.rate,
         "duration_s": args.duration, "late_join_at_s": args.late_join_at,
         "poll_interval_s": args.poll_interval,
-        "started_at": time.time(),
+        "started_at": time.time(), **limits,
     }
+    try:
+        fleet.build()
+    except Exception as exc:  # noqa: BLE001 -- a build failure is still a result
+        evidence["converged"] = False
+        evidence["build_error"] = f"{type(exc).__name__}: {exc}"[:500]
+        (out / "evidence.json").write_text(json.dumps(evidence, indent=1, sort_keys=True))
+        (out / "report.md").write_text(
+            f"# Scale run: {args.size} machines — fleet build FAILED\n\n{evidence['build_error']}\n"
+        )
+        with __import__("contextlib").suppress(Exception):
+            fleet.shutdown()
+        return evidence
     try:
         for index in range(args.size):
             if index != late:
