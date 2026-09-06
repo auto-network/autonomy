@@ -136,15 +136,16 @@ def test_default_spawn_forces_unbuffered_connector_output(tmp_path):
         proc.stop()
 
 
-def test_connector_dies_with_its_parent_via_pdeathsig(tmp_path):
-    """A spawned connector is signalled when its dashboard dies, however it
-    dies — the leak this bead exists to fix.
+def test_connector_survives_its_parent_death(tmp_path):
+    """INVERTED CONTRACT (2026-09-06): a spawned connector must SURVIVE its
+    dashboard's death.
 
-    A stand-in "dashboard" process spawns a long-lived child through the real
-    ``_default_spawn`` (which arms ``PR_SET_PDEATHSIG``), reports the child pid,
-    then is SIGKILLed — the crash path ``stop_all()`` never covers. The kernel
-    must reap the orphan; without the death signal it would survive, reparented
-    to init, exactly as the five leaked generations did.
+    The old PR_SET_PDEATHSIG tie meant every hot reload (fired by every code
+    merge) SIGTERMed the serving connector mid-stream — a fleet member pulling
+    a checkpoint lost its transfer on every merge and re-pulled from scratch,
+    forever. The connector now detaches (start_new_session); orphan protection
+    is the successor supervisor's job: adopt a healthy incumbent
+    (_adopt_incumbent), reap only the genuinely sick (_reap_strays).
     """
     parent_src = (
         "import os, sys, time\n"
@@ -162,20 +163,49 @@ def test_connector_dies_with_its_parent_via_pdeathsig(tmp_path):
     try:
         child_pid = int(parent.stdout.readline().decode().strip())
         assert _alive(child_pid)
-        parent.kill()  # SIGKILL: the shutdown hook never runs
+        parent.kill()  # SIGKILL: like a hot reload, no shutdown hook runs
         parent.wait(timeout=10)
-        deadline = time.time() + 10
-        while time.time() < deadline and _alive(child_pid):
-            time.sleep(0.05)
-        assert not _alive(child_pid), (
-            "orphaned connector survived its parent's death — PDEATHSIG did "
-            "not fire"
+        time.sleep(1.0)
+        assert _alive(child_pid), (
+            "connector died with its parent — a hot reload would sever every "
+            "in-flight fleet-sync stream again"
         )
     finally:
         with contextlib.suppress(ProcessLookupError):
             parent.kill()
         with contextlib.suppress(Exception):
             os.kill(child_pid, signal.SIGKILL)
+
+
+def test_launch_adopts_a_healthy_incumbent_instead_of_reaping(env, monkeypatch):
+    """A serving connector from a previous dashboard incarnation is adopted —
+    recorded as owned, streams preserved — never killed and relaunched."""
+    from tools.dashboard import link_serving_supervisor as sup
+
+    _provision_serve_cert(env)
+    state = sup.serve_cert_state(ORG)
+    assert state["status"] == "ok", state
+    supervisor = sup.ServingSupervisor(spawn=_refusing_spawn)
+    incumbent_pid = os.getpid() + 100000  # sentinel; alive() not exercised
+    monkeypatch.setattr(sup, "_probe_ctl_serving", lambda ctl: True)
+    monkeypatch.setattr(
+        sup, "_iter_connector_pids", lambda org_uuid: iter([incumbent_pid])
+    )
+    reaped = []
+    monkeypatch.setattr(
+        supervisor, "_reap_strays", lambda org: reaped.append(org)
+    )
+    result = supervisor._launch(ORG, state)
+    assert result == {"running": True, "reason": "adopted"}
+    assert reaped == [], "adoption must preclude the reap"
+    handle = supervisor._procs[ORG]
+    assert handle.pid() == incumbent_pid
+    assert supervisor._credentials[ORG] == (
+        state["cert"], state["viewer_cert"], state["key_path"])
+
+
+def _refusing_spawn(*args, **kwargs):
+    raise AssertionError("spawn must not run when an incumbent is adopted")
 
 
 def _alive(pid: int) -> bool:
