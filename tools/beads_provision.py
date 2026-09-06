@@ -11,6 +11,22 @@ So there is no admin password to generate, store, back up, rotate, or lose,
 and no bootstrap step. The only secrets created are the per-org SQL users,
 whose credentials land in ``/app/data`` — inside the one volume the deployment
 already says to back up.
+
+**The config.yaml host convention (auto-7iw4r).** A tracker dir is read from
+two perspectives with one file: compose-network processes (dashboard,
+dispatcher) and host processes (cron, host bd). The DAO order is env →
+config.yaml → default, and docker-compose.yml already hands every compose
+consumer ``DOLT_SQL_HOST=dolt`` in its environment — so ``config.yaml``
+carries the HOST-reachable address (the Dolt container's published port
+binding, discovered at provisioning time), and the compose DNS name never
+lands in a file a host process will read. Writing ``host: dolt`` here was
+exactly the 2026-09-01 blindhash defect: the first contract-correct backup
+run failed its dump with "Unknown MySQL server host 'dolt'" from the host.
+A Dolt container with no published binding gets no ``dolt:`` block at all —
+consumers' environments and defaults decide, instead of a name that is a
+lie in one of the two perspectives. Repair an existing row with
+``python -m tools.beads_provision repair-config <slug>`` (run it inside the
+node container: it needs the Docker socket and the data volume).
 """
 from __future__ import annotations
 
@@ -80,6 +96,65 @@ def _dolt_container() -> str:
     return found[0]
 
 
+def _dolt_host_binding(container: str) -> "tuple[str, int] | None":
+    """The Dolt server's HOST-reachable (ip, port), or None.
+
+    Read from the container's published port bindings — the address a
+    host process actually dials (172.17.0.1:3306 on this deployment).
+    A binding published on all interfaces reports 0.0.0.0; loopback is
+    the honest host-side name for that.
+    """
+    raw = _docker(
+        "inspect", "--format", "{{json .NetworkSettings.Ports}}", container,
+    )
+    try:
+        ports = json.loads(raw or "{}") or {}
+    except ValueError:
+        return None
+    for binding in ports.get("3306/tcp") or []:
+        host_ip = (binding or {}).get("HostIp") or ""
+        host_port = (binding or {}).get("HostPort") or ""
+        if not host_port:
+            continue
+        if host_ip in ("", "0.0.0.0", "::"):
+            host_ip = "127.0.0.1"
+        try:
+            return host_ip, int(host_port)
+        except ValueError:
+            continue
+    return None
+
+
+def _config_yaml_text(slug: str, binding: "tuple[str, int] | None") -> str:
+    """The tracker's config.yaml — host-reachable address, never the
+    compose DNS name (module docstring: the config.yaml host convention)."""
+    head = (
+        f"# {slug} org tracker: its own database on the node's Dolt server.\n"
+        "no-git-ops: true\n"
+        "image: autonomy-session-platform\n"
+    )
+    if binding is None:
+        return head + (
+            "# No published Dolt port binding at provisioning time: no\n"
+            "# host-reachable address exists, so none is recorded. Compose\n"
+            "# consumers carry DOLT_SQL_HOST in their environment.\n"
+        )
+    host, port = binding
+    return head + f"dolt:\n  host: {host}\n  port: {port}\n"
+
+
+def repair_config(slug: str, orgs_root=None) -> str:
+    """Rewrite an existing tracker's config.yaml to the current
+    convention, discovering the host binding live. Returns the new text."""
+    root = orgs_root if orgs_root is not None else _orgs_root()
+    tracker = root / slug
+    if not (tracker / "metadata.json").is_file():
+        raise BeadsProvisionError(f"no provisioned tracker for {slug!r}")
+    text = _config_yaml_text(slug, _dolt_host_binding(_dolt_container()))
+    (tracker / "config.yaml").write_text(text)
+    return text
+
+
 def dolt_sql(*statements: str) -> None:
     """Run each statement as the container's local superuser."""
     container = _dolt_container()
@@ -124,13 +199,15 @@ def ensure_org_beads_dir(slug: str, orgs_root=None):
         "dolt_mode": "server",
         "dolt_database": slug,
     }, indent=2) + "\n")
+    # Two-phase config: `bd migrate` below runs INSIDE the compose
+    # network, where the service DNS name is the reachable address — so
+    # the staged dir migrates against `dolt`, and the PUBLISHED file
+    # carries the host-reachable binding per the module docstring's
+    # convention. The compose-DNS transient never survives the rename.
     (tmp / "config.yaml").write_text(
-        f"# {slug} org tracker: its own database on the node's Dolt server.\n"
-        "no-git-ops: true\n"
-        "image: autonomy-session-platform\n"
-        "dolt:\n"
-        "  host: dolt\n"
-        "  port: 3306\n"
+        f"# staged for schema migration — rewritten before publication\n"
+        f"no-git-ops: true\n"
+        f"dolt:\n  host: dolt\n  port: 3306\n"
     )
     creds = tmp / "credentials.env"
     creds.write_text(
@@ -149,6 +226,9 @@ def ensure_org_beads_dir(slug: str, orgs_root=None):
         f"VALUES ('issue_prefix', '{slug}')"
     )
 
+    (tmp / "config.yaml").write_text(
+        _config_yaml_text(slug, _dolt_host_binding(_dolt_container()))
+    )
     os.rename(tmp, final)
     return final
 
@@ -177,3 +257,32 @@ def beads_dir_for_write(org: str | None):
         )
         return None
     return ensure_org_beads_dir(str(org))
+
+
+def main(argv=None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="tools.beads_provision",
+        description="Org bead-tracker provisioning maintenance",
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    repair = sub.add_parser(
+        "repair-config",
+        help="Rewrite an existing tracker's config.yaml to the "
+             "host-reachable convention (run inside the node container)",
+    )
+    repair.add_argument("slug")
+    args = parser.parse_args(argv)
+    if args.cmd == "repair-config":
+        try:
+            text = repair_config(args.slug)
+        except BeadsProvisionError as exc:
+            print(f"repair-config: {exc}", file=__import__("sys").stderr)
+            return 1
+        print(text, end="")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
