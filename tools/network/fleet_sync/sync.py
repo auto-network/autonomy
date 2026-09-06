@@ -31,6 +31,7 @@ from .codec import encode_value
 from .compaction import WatermarkError
 from .delta import DeltaCatalog, read_delta_catalog, stream_delta_to_chunks
 from .materialize import ContentAddressedBlobStore
+from .policies import LOCAL_SYNC_TABLES, PolicyKind, classify_table
 from .policies import PolicyKind, TABLE_POLICIES
 from .streaming import (
     BaseCatalog,
@@ -508,6 +509,123 @@ def _copy_local_state(source: Path, target: sqlite3.Connection) -> None:
         local.close()
 
 
+#: Tables _copy_local_state already carries by name.
+_LEGACY_LOCAL_COPY = frozenset({
+    "orgs", "keycontrol_meta", "keycontrol_pending", "keycontrol_pending_usage",
+})
+
+#: Node-local tables with foreign keys between them: parents before children.
+_NODE_LOCAL_ORDER = (
+    "ledger_meta", "ledger_events", "ledger_parents", "ledger_heads",
+    "ledger_projections", "ledger_pending_claims",
+)
+
+
+def _node_local_tables(conn: sqlite3.Connection) -> list[str]:
+    """Every table in *conn* the sync policy classifies as node-local and
+    that the install would otherwise drop: ledger tables, personal-local
+    tables, and any LOCAL policy entry -- excluding fleet-sync bookkeeping
+    (rebuilt or carried by its own helpers) and the legacy copy list."""
+    names = [
+        str(row[0]) for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%'"
+        )
+    ]
+    chosen = [
+        name for name in names
+        if classify_table(name) == PolicyKind.LOCAL
+        and name not in LOCAL_SYNC_TABLES
+        and name not in _LEGACY_LOCAL_COPY
+    ]
+    order = {name: index for index, name in enumerate(_NODE_LOCAL_ORDER)}
+    return sorted(chosen, key=lambda name: (order.get(name, len(order)), name))
+
+
+def _copy_node_local_tables(source: Path, target: sqlite3.Connection) -> dict[str, int]:
+    """Carry every node-local table (schema + rows) from the receiver's
+    current database into the staged one.
+
+    The policy declares the ledger tables and the personal-local tables
+    node-local and never replicated, so a checkpoint never carries them --
+    and until 2026-09-06 nothing copied them either, so a checkpoint
+    install onto a store holding a founded ledger rebuilt the file without
+    it. Returns ``{table: rows_copied}``.
+    """
+    copied: dict[str, int] = {}
+    if not source.exists():
+        return copied
+    local = sqlite3.connect(source)
+    local.row_factory = sqlite3.Row
+    try:
+        existing = {
+            str(row[0]) for row in target.execute(
+                "SELECT name FROM sqlite_master WHERE type IN ('table','index')"
+            )
+        }
+        for table in _node_local_tables(local):
+            if table not in existing:
+                ddl = local.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,),
+                ).fetchone()
+                if ddl is None or not ddl[0]:
+                    continue
+                target.execute(ddl[0])
+                for index_row in local.execute(
+                    "SELECT name, sql FROM sqlite_master WHERE type='index' "
+                    "AND tbl_name=? AND sql IS NOT NULL", (table,),
+                ):
+                    if str(index_row[0]) not in existing:
+                        target.execute(index_row[1])
+            count = 0
+            for raw in local.execute(f'SELECT * FROM "{table}"'):
+                row = dict(raw)
+                columns = sorted(row)
+                target.execute(
+                    f'INSERT OR IGNORE INTO "{table}"('
+                    + ",".join(f'"{column}"' for column in columns)
+                    + ") VALUES(" + ",".join("?" for _ in columns) + ")",
+                    [row[column] for column in columns],
+                )
+                count += 1
+            copied[table] = count
+        target.commit()
+    finally:
+        local.close()
+    return copied
+
+
+def founded_ledger_rows(path: Path) -> int:
+    """Rows in the receiver's own ledger (events + heads), 0 when none/absent.
+
+    A founded ledger is the one thing a member's checkpoint can never
+    supply: the policy keeps it node-local. Its presence means this store
+    is an ORIGIN of authority, not a joiner, and an install here is a
+    rebase of the operator's own record."""
+    if not Path(path).exists():
+        return 0
+    try:
+        conn = sqlite3.connect(f"file:{Path(path)}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return 0
+    try:
+        tables = {
+            str(row[0]) for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        total = 0
+        for table in ("ledger_events", "ledger_heads"):
+            if table in tables:
+                total += int(conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+        return total
+    except sqlite3.Error:
+        return 0
+    finally:
+        conn.close()
+
+
 def _copy_peer_state(source: Path, target: sqlite3.Connection) -> None:
     """Carry machine-local scheduler evidence across database publication."""
     if not source.exists():
@@ -713,8 +831,17 @@ def install_checkpoint(
     blob_store: ContentAddressedBlobStore | None = None,
     merge_existing: bool = False,
     checkpoint_source_machine: str | None = None,
+    allow_founded_ledger_rebase: bool = False,
 ) -> AlphaCheckpoint:
     """Validate and realize a checkpoint, then atomically publish its DB file.
+
+    Refuses outright when the receiver already holds a FOUNDED ledger
+    (``founded_ledger_rows`` > 0) unless ``allow_founded_ledger_rebase`` is
+    passed explicitly: a checkpoint never carries ledger history, so that
+    store has strictly more authority than the incoming copy, and replacing
+    it is never a sync outcome (live 2026-09-06, auto-ekwbp incident). No
+    production caller passes the flag; it exists for an operator-directed,
+    audited rebase and for tests.
 
     ``expected_active_roster`` is retained on the signature for caller symmetry
     (every caller resolves and passes its own active roster), but it no longer
@@ -722,6 +849,14 @@ def install_checkpoint(
     does not require the receiver's exact active set. ``expected_roster_epoch``
     is still recorded on the peer-state receipt, whose primary key includes it.
     """
+    founded = founded_ledger_rows(target_path)
+    if founded and not allow_founded_ledger_rebase:
+        raise AlphaError(
+            "refusing to install a checkpoint over a store with a founded "
+            f"ledger ({founded} ledger row(s) at {target_path.name}): a "
+            "checkpoint never carries ledger history, so this store holds "
+            "more authority than the incoming copy; sync it by delta"
+        )
     body, manifest_digest = _read_manifest(checkpoint_directory)
     if body.get("alpha_version") != ALPHA_VERSION:
         raise AlphaError("unsupported alpha checkpoint version")
@@ -763,6 +898,13 @@ def install_checkpoint(
         stage = GraphDB(stage_path)
         try:
             _copy_local_state(target_path, stage.conn)
+            carried = _copy_node_local_tables(target_path, stage.conn)
+            if any(carried.values()):
+                _log.info(
+                    "fleet checkpoint install carried node-local tables across "
+                    "the swap: %s",
+                    {table: rows for table, rows in carried.items() if rows},
+                )
             install_stats: dict = {}
             report = materialize_catalog(
                 stage.conn, checkpoint_directory / "base", base,
