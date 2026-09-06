@@ -350,11 +350,31 @@ def test_generic_approval_commits_exact_request(operator_api, monkeypatch):
     assert configured["config"].machine_key.private_hex == process.private_hex
     assert configured["config"].roster_machine_pub == machine_key.public_hex
     assert configured["config"].require_delegation is True
-    assert configured["config"].listen_host == "0.0.0.0"
-    assert configured["config"].listen_port == 9410
+    # serve_in defaults to the connector: the dashboard binds only loopback-
+    # ephemeral, while it still advertises the machine's addresses.
+    assert configured["config"].listen_host == "127.0.0.1"
+    assert configured["config"].listen_port == 0
     assert fleet_enrollment_routes._reachability_cache.advertised_addrs() == [
         "wss://sjc.example:9410"
     ]
+    # With serve_in=dashboard the dashboard binds the configured address.
+    fleet_direct_config.store(fleet_direct_config.FleetDirectConfig(
+        "0.0.0.0", 9410, ("wss://sjc.example:9410",), advertise_auto=False,
+        serve_in="dashboard",
+    ))
+    activated_direct = client.post("/api/fleet/runtime", json=runtime_payload)
+    assert activated_direct.status_code == 200, activated_direct.text
+    assert configured["config"].listen_host == "0.0.0.0"
+    assert configured["config"].listen_port == 9410
+    # pull_direct=False keeps discovery alive but hands the scheduler no peers.
+    fleet_direct_config.store(fleet_direct_config.FleetDirectConfig(
+        "0.0.0.0", 9410, ("wss://sjc.example:9410",), advertise_auto=False,
+        pull_direct=False,
+    ))
+    monkeypatch.setenv("AUTONOMY_FLEET_PEERS", '{"%s": ["ws://peer:9410"]}' % ("ee" * 32))
+    assert client.post("/api/fleet/runtime", json=runtime_payload).status_code == 200
+    assert configured["config"].peer_addresses() == {}
+    monkeypatch.delenv("AUTONOMY_FLEET_PEERS")
 
     # The same process-only handoff is reminted after every later unlock.
     runtime_context = client.get("/api/fleet/runtime")

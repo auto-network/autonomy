@@ -32,6 +32,7 @@ FLEET_DIRECT_REVISION = 1
 FLEET_DIRECT_KEY = "self"
 
 MAX_ADVERTISE_ADDRS = 8
+SERVE_IN = ("connector", "dashboard")
 MAX_ADDR_LEN = 512
 
 SYNOPSIS = {
@@ -82,6 +83,24 @@ class FleetDirectV1(SettingSchema):
             "most 8. Empty means this machine is not dialable directly."
         ),
     )
+    serve_in: str = field(
+        required=False,
+        description=(
+            "Which process hosts the direct listener: 'connector' (default; "
+            "the serving connector subprocess, which already builds and "
+            "streams checkpoints for relay serves and carries no operator "
+            "UI) or 'dashboard' (the dashboard process itself)."
+        ),
+    )
+    pull_direct: bool = field(
+        required=False,
+        description=(
+            "Whether THIS machine's dashboard dials roster peers' direct "
+            "addresses to pull (default true). False keeps announcing and "
+            "serving but never pulls over direct -- the pull receives and "
+            "installs inside the dashboard process."
+        ),
+    )
     advertise_auto: bool = field(
         required=False,
         description=(
@@ -113,10 +132,16 @@ class FleetDirectV1(SettingSchema):
             raise SchemaValidationError(
                 f"{cls.__name__}: 'listen_port' must be an integer 0-65535"
             )
-        auto = payload.get("advertise_auto")
-        if auto is not None and not isinstance(auto, bool):
+        for flag in ("advertise_auto", "pull_direct"):
+            value = payload.get(flag)
+            if value is not None and not isinstance(value, bool):
+                raise SchemaValidationError(
+                    f"{cls.__name__}: '{flag}' must be a boolean"
+                )
+        serve_in = payload.get("serve_in")
+        if serve_in is not None and serve_in not in SERVE_IN:
             raise SchemaValidationError(
-                f"{cls.__name__}: 'advertise_auto' must be a boolean"
+                f"{cls.__name__}: 'serve_in' must be one of {SERVE_IN}"
             )
         addrs = payload.get("advertise_addrs")
         if addrs is not None:

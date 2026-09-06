@@ -58,6 +58,13 @@ class FleetDirectConfig:
     listen_port: int = 0
     advertise_addrs: tuple[str, ...] = field(default_factory=tuple)
     advertise_auto: bool = True
+    #: Which process binds the listener. The connector subprocess by default:
+    #: a direct serve builds and streams gigabytes, and doing that on the
+    #: dashboard's event loop made the operator's UI unreachable for minutes
+    #: (2026-09-06). The dashboard process only ever installs.
+    serve_in: str = "connector"
+    #: Whether this machine's dashboard pulls over direct at all.
+    pull_direct: bool = True
 
     @property
     def enabled(self) -> bool:
@@ -199,6 +206,9 @@ def load(*, org: str = "machine", detect=None) -> FleetDirectConfig:
     listen_port = int(payload.get("listen_port") or 0)
     auto = payload.get("advertise_auto")
     advertise_auto = True if auto is None else bool(auto)
+    serve_in = payload.get("serve_in") or "connector"
+    pull = payload.get("pull_direct")
+    pull_direct = True if pull is None else bool(pull)
     addrs: list[str] = []
     sources = list(payload.get("advertise_addrs") or [])
     if advertise_auto and listen_port > 0 and listen_host != DEFAULT_LISTEN_HOST:
@@ -212,6 +222,8 @@ def load(*, org: str = "machine", detect=None) -> FleetDirectConfig:
         listen_port=listen_port,
         advertise_addrs=tuple(addrs[:MAX_ADVERTISE_ADDRS]),
         advertise_auto=advertise_auto,
+        serve_in=serve_in,
+        pull_direct=pull_direct,
     )
 
 
@@ -221,6 +233,8 @@ def store(config: FleetDirectConfig, *, org: str = "machine") -> None:
         "listen_port": int(config.listen_port),
         "advertise_addrs": list(config.advertise_addrs),
         "advertise_auto": bool(config.advertise_auto),
+        "serve_in": config.serve_in,
+        "pull_direct": bool(config.pull_direct),
     }
     FleetDirectV1.validate(payload)
     settings_ops.upsert_by_key(
@@ -230,6 +244,15 @@ def store(config: FleetDirectConfig, *, org: str = "machine") -> None:
         payload,
         org=org,
     )
+
+
+def listener_bind(config: FleetDirectConfig, role: str) -> tuple[str, int]:
+    """(host, port) the process in *role* ('connector'/'dashboard') should
+    bind: the configured bind when it hosts the listener, else the
+    historical loopback-ephemeral one nobody can dial."""
+    if config.enabled and config.serve_in == role:
+        return config.listen_host, config.listen_port
+    return DEFAULT_LISTEN_HOST, 0
 
 
 def advertise_addrs(*, org: str = "machine") -> list[str]:

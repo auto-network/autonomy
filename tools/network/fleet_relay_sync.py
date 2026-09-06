@@ -319,6 +319,10 @@ class ConnectorFleetRuntime:
         #: until the transport fix lands (2026-09-06).
         self._recent_checkpoint_delivery: dict[
             tuple[str, str], tuple[float, int]] = {}
+        #: Listeners of replaced schedulers, stopped on the next ensure pass.
+        self._retired_listeners: list = []
+        #: (host, port) the direct listener is bound to right now, or None.
+        self.direct_listener: tuple[str, int] | None = None
 
     def _touch_stream_activity(self) -> None:
         self.last_stream_activity = time.monotonic()
@@ -351,6 +355,17 @@ class ConnectorFleetRuntime:
             roster_entries=entries,
             org_uuid=org_uuid,
         )
+        # The direct listener lives HERE by default (fleet-direct row
+        # serve_in=connector): this process already builds and streams
+        # checkpoints for relay serves and carries no operator UI. The
+        # listener itself is bound by ensure_direct_listener() on the
+        # connector's loop, never in this synchronous configure().
+        from tools.network import fleet_direct_config
+
+        direct = fleet_direct_config.load()
+        listen_host, listen_port = fleet_direct_config.listener_bind(
+            direct, "connector"
+        )
         config = FleetSyncRuntimeConfig(
             machine_key=credential.process_key,
             roster_machine_pub=credential.machine_pub,
@@ -360,6 +375,8 @@ class ConnectorFleetRuntime:
             roster_entries=lambda: fleet_roster.load_entries(org=None),
             peer_addresses=lambda: {},
             personal_db_path=_org_db_path("personal"),
+            listen_host=listen_host,
+            listen_port=listen_port,
             telemetry_recorder=fleet_sync_telemetry.record_iteration,
             # Materialise org DB stubs from the synced org roster before
             # discovery, so the direct/tunnel scheduler (like the relay pull)
@@ -370,7 +387,12 @@ class ConnectorFleetRuntime:
         scheduler = FleetSyncScheduler(config)
         scheduler._roster_snapshot = entries
         scheduler.authenticator.authorize(credential.machine_pub)
+        previous = self.scheduler
         self.scheduler = scheduler
+        if previous is not None and previous.server.running:
+            # A re-arm replaces the scheduler; the old listener must go so
+            # the new one can take the port on the next ensure pass.
+            self._retired_listeners.append(previous.server)
         self.machine_key = credential.machine_key
         self.serving_machine_key = credential.serving_machine_key
         # A fresh credential means this process is no longer refusing — start a
@@ -391,6 +413,59 @@ class ConnectorFleetRuntime:
                     "fleet runtime warm-cache write failed; connector is armed "
                     "but will not survive a restart", exc_info=True)
         return {"ok": True, "machine_id": credential.machine_id}
+
+    async def ensure_direct_listener(self) -> tuple[str, int] | None:
+        """Bind, rebind, or stop this process's direct listener to match the
+        armed scheduler's configured bind. Idempotent; called from the
+        connector's loop at startup and on a slow cadence, so a row written
+        after arming or a re-arm takes effect without a restart. Returns the
+        live (host, port) or None."""
+        for server in list(self._retired_listeners):
+            with contextlib.suppress(Exception):
+                await server.stop()
+            self._retired_listeners.remove(server)
+        scheduler = self.scheduler
+        if scheduler is None:
+            self.direct_listener = None
+            return None
+        server = scheduler.server
+        wanted_port = scheduler.config.listen_port
+        if wanted_port <= 0:
+            if server.running:
+                await server.stop()
+                logger.info("fleet direct listener stopped (bind disabled)")
+            self.direct_listener = None
+            return None
+        if server.running:
+            self.direct_listener = (server.host, server.port)
+            return self.direct_listener
+        try:
+            port = await server.start()
+        except OSError as exc:
+            logger.warning(
+                "fleet direct listener could not bind %s:%d: %s",
+                scheduler.config.listen_host, wanted_port, exc,
+            )
+            self.direct_listener = None
+            return None
+        self.direct_listener = (scheduler.config.listen_host, port)
+        logger.info(
+            "fleet direct listener bound %s:%d in the connector "
+            "(roster-authenticated; serves checkpoints and deltas here, "
+            "never on the dashboard loop)",
+            scheduler.config.listen_host, port,
+        )
+        return self.direct_listener
+
+    async def direct_listener_loop(self, interval_s: float = 15.0) -> None:
+        """Keep the direct listener matched to config for the process life."""
+        while True:
+            try:
+                await self.ensure_direct_listener()
+            except Exception:
+                logger.warning("fleet direct listener maintenance failed",
+                               exc_info=True)
+            await asyncio.sleep(interval_s)
 
     def attach_warm_cache(self, cache: "FleetRuntimeWarmCache | None") -> None:
         """Bind a ramfs warm cache so configure() persists the credential and
