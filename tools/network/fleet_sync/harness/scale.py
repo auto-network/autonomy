@@ -80,12 +80,16 @@ def _machine_counters(db_path: Path, own_pub: str) -> dict:
 def run(args: argparse.Namespace) -> dict:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    fleet = HarnessFleet(out / "fleet", size=args.size, seed=args.seed)
+    fleet = HarnessFleet(
+        out / "fleet", size=args.size, seed=args.seed,
+        poll_interval=args.poll_interval,
+    )
     fleet.build()
     late = args.size - 1 if args.late_join_at is not None else None
     evidence: dict = {
         "size": args.size, "writers": args.writers, "rate": args.rate,
         "duration_s": args.duration, "late_join_at_s": args.late_join_at,
+        "poll_interval_s": args.poll_interval,
         "started_at": time.time(),
     }
     try:
@@ -144,6 +148,30 @@ def run(args: argparse.Namespace) -> dict:
             machines.append(counters)
             unique_payload += counters["authored_payload_bytes"]
             snapshots_served += counters["checkpoints_sent"]
+        # Per-pull ledger: frames and bytes per terminal pull, per machine.
+        pulls: list[dict] = []
+        for machine in fleet.machines:
+            log = fleet.root_dir / f"machine-{machine.index}-pulls.jsonl"
+            if log.exists():
+                for line in log.read_text().splitlines():
+                    try:
+                        entry = json.loads(line)
+                    except ValueError:
+                        continue
+                    entry["machine"] = machine.index
+                    pulls.append(entry)
+        ok = [p for p in pulls if p.get("outcome") == "success"]
+        evidence["pulls"] = {
+            "total": len(pulls),
+            "success": len(ok),
+            "failed": sum(1 for p in pulls if p.get("outcome") == "failed"),
+            "with_frames": sum(1 for p in ok if (p.get("mutation_frames") or 0) > 0),
+            "frames_received": sum(int(p.get("mutation_frames") or 0) for p in ok),
+            "transactions_received": sum(int(p.get("transactions") or 0) for p in ok),
+            "app_bytes_received": sum(int(p.get("bytes_received") or 0) for p in ok),
+            "error_codes": sorted({str(p.get("error_code")) for p in pulls
+                                   if p.get("outcome") == "failed"}),
+        }
         evidence["machines"] = machines
         evidence["total_bytes_on_wire"] = total
         evidence["unique_payload_bytes"] = unique_payload
@@ -152,6 +180,12 @@ def run(args: argparse.Namespace) -> dict:
         evidence["efficiency_ratio"] = round(total / minimum, 3) if minimum else None
         evidence["snapshots_served"] = snapshots_served
         evidence["snapshots_received"] = sum(m["checkpoints_received"] for m in machines)
+        unique_tx = sum(m["authored_transactions"] for m in machines)
+        evidence["unique_transactions"] = unique_tx
+        evidence["transactions_duplication"] = (
+            round(evidence["pulls"]["transactions_received"] / (unique_tx * (args.size - 1)), 3)
+            if unique_tx else None
+        )
         evidence["copies_per_write_per_machine"] = (
             round(total / unique_payload / (args.size - 1), 3) if unique_payload else None
         )
@@ -173,6 +207,10 @@ def _report(e: dict) -> str:
         f"- efficiency ratio (wire / minimum): {e['efficiency_ratio']}",
         f"- copies per write per receiving machine: {e['copies_per_write_per_machine']}  (1.0 = N-1 total, "
         f"{n-1} = (N-1)^2)",
+        f"- pulls: {e['pulls']['total']} total, {e['pulls']['success']} ok, {e['pulls']['failed']} failed, "
+        f"{e['pulls']['with_frames']} carried data; transactions received {e['pulls']['transactions_received']:,} "
+        f"vs unique {e['unique_transactions']:,} x (N-1) -> duplication {e['transactions_duplication']}x; "
+        f"app bytes received {e['pulls']['app_bytes_received']:,}",
         f"- snapshots served: {e['snapshots_served']}  received: {e['snapshots_received']}"
         + (f"  (late join at {e['late_joined_at_s']:.1f}s)" if e.get('late_joined_at_s') else ""),
         "",
@@ -201,6 +239,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--duration", type=float, default=30.0)
     parser.add_argument("--late-join-at", type=float, default=None)
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--poll-interval", type=float, default=1.0,
+                        help="seconds between pull rounds per machine (production: 10)")
     parser.add_argument("--out", required=True)
     args = parser.parse_args(argv)
     if args.writers is None:
@@ -210,7 +250,7 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps({k: evidence[k] for k in (
         "size", "writes", "converged", "settle_s", "total_bytes_on_wire",
         "unique_payload_bytes", "efficiency_ratio", "copies_per_write_per_machine",
-        "snapshots_served", "snapshots_received",
+        "snapshots_served", "snapshots_received", "transactions_duplication",
     ) if k in evidence}, sort_keys=True))
     return 0 if evidence.get("converged") else 1
 

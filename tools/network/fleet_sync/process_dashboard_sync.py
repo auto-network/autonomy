@@ -69,6 +69,8 @@ async def _worker(config_path: Path) -> int:
     # once and resumes.
     acknowledged: dict[tuple[str, str], list] = {}
 
+    pull_log = os.environ.get("AUTONOMY_HARNESS_PULL_LOG")
+
     def record(peer, **values):
         breadcrumb = values.get("acknowledged_breadcrumb")
         if breadcrumb is not None and values.get("outcome") == "success":
@@ -77,6 +79,16 @@ async def _worker(config_path: Path) -> int:
                 breadcrumb["transaction"],
                 breadcrumb["timestamp"],
             )]
+        if pull_log:
+            # One JSON line per terminal pull attempt: the scale driver
+            # aggregates frames/bytes per pull to separate payload
+            # duplication from protocol overhead.
+            entry = {k: v for k, v in values.items()
+                     if isinstance(v, (int, float, str)) or v is None}
+            entry["peer"] = peer[:12]
+            entry["at"] = time.time()
+            with open(pull_log, "a") as handle:
+                handle.write(json.dumps(entry, sort_keys=True) + "\n")
 
     scheduler = FleetSyncScheduler(
         FleetSyncRuntimeConfig(
