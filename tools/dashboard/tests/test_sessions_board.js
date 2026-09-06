@@ -386,7 +386,10 @@ test('board cards never write the page-global voice signals that pick the capsul
   // Both writers are gated, so a card mount cannot claim body.dataset.svComposerSession —
   // which voice-shell reads to retarget delivery.
   assert.match(viewer, /_syncTilePresent\(\) \{\s*\n\s*if \(!this\._pageSignals\) return;/);
-  assert.match(viewer, /_syncComposerSignal\(\) \{\s*\n\s*if \(!this\._pageSignals\) return;/);
+  // _syncComposerSignal returns early for board cards, but only AFTER running
+  // the outbox mirror — that one is not a page-global write and every surface
+  // needs it to stage a capturing tile.
+  assert.match(viewer, /if \(!this\._pageSignals\) \{\s*\n\s*if \(shell0 && typeof shell0\.syncViewerOutboxCapture === 'function'\) shell0\.syncViewerOutboxCapture\(\);\s*\n\s*return;\s*\n\s*\}/);
   // And the target card renders the live buffer even before an outbox is staged.
   assert.ok(html.includes('dictationTile:true'));
   assert.match(viewer, /if \(this\._dictationTile && this\._localDictationText\) return true;/);
@@ -438,4 +441,18 @@ test('a CrossTalk sender link reveals the session on the board instead of naviga
   // One without a card here is left to the link.
   assert.equal(board.revealSession('not-on-this-board'), false);
   assert.equal(board.revealSession(''), false);
+});
+
+test('the tile Send points delivery at its own card before sending, and reports failure', () => {
+  const viewer = fs.readFileSync(path.join(REPO_ROOT, 'tools/dashboard/static/js/pages/session-viewer.js'), 'utf8');
+  // sendBuffer reads ONLY deliverySessionId; the tile can render off bound.
+  assert.match(viewer, /voice\.deliverySessionId !== me && typeof voice\.retargetDelivery === 'function'/);
+  // A failure must not be silent: the capsule's sheetError is not visible on a board.
+  assert.match(viewer, /if \(!ok\) this\.sendTileError = voice\.sheetError \|\| 'Send failed\.'/);
+});
+
+test('revealing a session scrolls only the board, never an ancestor', () => {
+  const js = fs.readFileSync(BOARD_JS, 'utf8');
+  assert.ok(!/\.scrollIntoView\(/.test(js), 'scrollIntoView scrolls any scrollable ancestor and shifted the shell under the nav');
+  assert.match(js, /board\.scrollTo\(\{ left: Math\.max\(0, Math\.min\(want, max\)\)/);
 });

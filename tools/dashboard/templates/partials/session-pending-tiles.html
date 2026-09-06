@@ -43,6 +43,11 @@
           <span>Send</span>
         </button>
       </template>
+      {# A failed send must be visible HERE: voice.sheetError only surfaces in
+         the capsule sheet, which is exactly what the operator cannot find. #}
+      <template x-if="_dictationTile && sendTileError">
+        <span class="sv-send-error" x-text="sendTileError"></span>
+      </template>
 
     </div>
     <div class="sv-pending-content"
@@ -91,6 +96,11 @@
           </svg>
           <span>Send</span>
         </button>
+      </template>
+      {# A failed send must be visible HERE: voice.sheetError only surfaces in
+         the capsule sheet, which is exactly what the operator cannot find. #}
+      <template x-if="_dictationTile && sendTileError">
+        <span class="sv-send-error" x-text="sendTileError"></span>
       </template>
     </div>
     <div class="sv-pending-content"
