@@ -62,4 +62,5 @@ GET  /api/backup/drills      # ?limit=
 GET  /api/backup/config
 PUT  /api/backup/config      # operator authority
 POST /api/backup/reconcile   # operator authority; bounded disk probe
+POST /api/backup/drill       # operator authority; single-flight (409 if running)
 ```

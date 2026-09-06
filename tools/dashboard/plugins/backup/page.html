@@ -82,8 +82,15 @@
       </div>
 
       <!-- Does restore actually work -->
-      <h2>Restore drill</h2>
+      <h2>
+        Restore drill
+        <button class="bk-tier-btn ml-2" data-testid="backup-drill-run"
+                :disabled="!!summary.running_drill"
+                @click="runDrill()">run drill</button>
+      </h2>
       <div class="bk-card" data-testid="backup-drill-panel">
+        <div x-show="drillMessage" class="text-sm bk-warn mb-1"
+             x-text="drillMessage"></div>
         <template x-if="summary.running_drill">
           <div class="text-sm bk-warn">
             Drill running since

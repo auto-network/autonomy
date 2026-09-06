@@ -53,6 +53,28 @@ function backupPage() {
       if (this._timer) clearInterval(this._timer);
     },
 
+    drillMessage: '',
+
+    // Start an on-demand restore drill; 409 = one already running.
+    async runDrill() {
+      this.drillMessage = '';
+      try {
+        const res = await fetch('/api/backup/drill', { method: 'POST' });
+        if (res.status === 409) {
+          this.drillMessage = 'A drill is already running.';
+        } else if (res.status === 403) {
+          this.drillMessage = 'Drills need operator authority.';
+        } else if (!res.ok) {
+          this.drillMessage = 'Could not start the drill.';
+        } else {
+          this.drillMessage = 'Drill started — restoring the latest snapshot…';
+        }
+      } catch (e) {
+        this.drillMessage = 'Could not start the drill.';
+      }
+      await this.refresh();
+    },
+
     // The operator's refresh also ingests the latest on-disk run
     // reports first (bounded server-side); a 403 (non-operator) or a
     // reconcile fault must never block rendering the stored state.
