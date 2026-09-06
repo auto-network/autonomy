@@ -1916,6 +1916,8 @@ class FleetSyncScheduler:
         started_at_ns = time.time_ns()
         started_monotonic_ns = time.monotonic_ns()
         peer_watermark: int | None = None
+        #: The candidate that actually connected -- the tier-used readout.
+        connected_address: str | None = None
         protocol_version = self._peer_protocol.get(
             machine_pub, FLEET_SYNC_PROTOCOL_VERSION
         )
@@ -1946,6 +1948,11 @@ class FleetSyncScheduler:
                 "transactions": transactions,
                 "error_code": error_code,
             }
+            if connected_address is not None:
+                from tools.network.fleet_direct_config import path_class as _pc
+
+                values["address"] = connected_address
+                values["path_class"] = _pc(connected_address)
             if acknowledged_transaction_ref is not None:
                 values["acknowledged_transaction_ref"] = (
                     acknowledged_transaction_ref
@@ -1971,6 +1978,7 @@ class FleetSyncScheduler:
                         session=new_session_id(),
                         timeout=self.config.connect_timeout,
                     )
+                    connected_address = address
                     break
                 except Exception as exc:
                     last_error = exc

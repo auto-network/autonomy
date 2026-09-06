@@ -150,6 +150,40 @@ def _detect_ipv4_addresses() -> list[str]:
     return found
 
 
+PATH_CLASSES = ("tailnet", "private", "public", "loopback", "named", "relay", "turn")
+
+
+def path_class(url_or_addr: str | None) -> str | None:
+    """Classify a dialed/announced address for the tier-used readout.
+
+    ``ws://100.x:9410`` -> tailnet, RFC1918 -> private, other IPs ->
+    public, 127/::1 -> loopback, a DNS name -> named (a relay's host is
+    classified by its caller as "relay"). None for garbage."""
+    if not isinstance(url_or_addr, str) or not url_or_addr:
+        return None
+    host = url_or_addr
+    if "://" in host:
+        from urllib.parse import urlsplit
+
+        try:
+            host = urlsplit(host).hostname or ""
+        except ValueError:
+            return None
+    if not host:
+        return None
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return "named"
+    if ip.is_loopback:
+        return "loopback"
+    if ip.version == 4 and ip in TAILNET:
+        return "tailnet"
+    if ip.is_private:
+        return "private"
+    return "public"
+
+
 def _rank(addr: str) -> int:
     ip = ipaddress.ip_address(addr)
     if ip in TAILNET:

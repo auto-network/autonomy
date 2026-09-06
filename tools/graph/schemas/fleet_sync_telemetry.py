@@ -80,6 +80,11 @@ class FleetSyncTelemetryV1(SettingSchema):
     last_started_at_ns: int = field(required=True, description="Wall-clock nanoseconds when the newest attempt started.")
     last_finished_at_ns: int = field(required=True, description="Wall-clock nanoseconds when the newest attempt finished.")
     last_success_at_ns: int = field(required=True, description="Wall-clock nanoseconds of the newest successful attempt.")
+    last_address: str = field(required=False, description="Address (dialed URL or relay host) of the newest attempt: the tier-used readout.")
+    last_path_class: str = field(required=False, description="Path class of the newest attempt: tailnet, private, public, named, loopback, relay, or turn.")
+    last_success_address: str = field(required=False, description="Address of the newest successful attempt.")
+    last_success_path_class: str = field(required=False, description="Path class of the newest successful attempt.")
+    bytes_by_path_class: dict = field(required=False, description="Cumulative application bytes (sent + received) of successful attempts, keyed by path class.")
 
     @classmethod
     def validate(cls, payload: Any) -> None:
@@ -97,6 +102,26 @@ class FleetSyncTelemetryV1(SettingSchema):
             "last_started_at_ns", "last_finished_at_ns", "last_success_at_ns",
         ):
             _counter(payload, name)
+        for name in ("last_address", "last_success_address"):
+            value = payload.get(name)
+            if value is not None and (not isinstance(value, str) or len(value) > 256):
+                raise SchemaValidationError(f"{name} must be a string of at most 256 chars")
+        for name in ("last_path_class", "last_success_path_class"):
+            value = payload.get(name)
+            if value is not None and (not isinstance(value, str) or not value or len(value) > 32):
+                raise SchemaValidationError(f"{name} must be a short non-empty string")
+        by_class = payload.get("bytes_by_path_class")
+        if by_class is not None:
+            if not isinstance(by_class, dict) or len(by_class) > 16:
+                raise SchemaValidationError("bytes_by_path_class must be a small object")
+            for key, value in by_class.items():
+                if (
+                    not isinstance(key, str) or not key or len(key) > 32
+                    or isinstance(value, bool) or not isinstance(value, int) or value < 0
+                ):
+                    raise SchemaValidationError(
+                        "bytes_by_path_class entries must be class -> non-negative integer"
+                    )
         breadcrumbs = payload.get("resume_breadcrumbs")
         if breadcrumbs is not None:
             if not isinstance(breadcrumbs, list) or len(breadcrumbs) > 64:

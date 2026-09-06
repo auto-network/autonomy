@@ -1115,6 +1115,15 @@ def rotate_route_if_discovered(route: fleet_route.FleetRoute) -> fleet_route.Fle
     return rotated
 
 
+def _relay_address(route) -> str | None:
+    """The relay host a pull rode, for the tier-used readout (never the token)."""
+    try:
+        http_base, _ws, _token = _route_location(route.rendezvous)
+    except Exception:
+        return None
+    return http_base
+
+
 def _redact_route(rendezvous: str) -> str:
     """Log a route by relay host and token prefix only -- it is a bearer URL."""
     try:
@@ -1775,6 +1784,8 @@ class DashboardFleetRelaySyncService:
                         direction="pull",
                         mode="checkpoint" if include_checkpoint else "delta",
                         outcome="success",
+                        address=_relay_address(route),
+                        path_class="relay",
                         started_at_ns=started_at_ns,
                         duration_ms=duration_ms,
                         **metrics,
@@ -1826,6 +1837,8 @@ class DashboardFleetRelaySyncService:
                             direction="pull",
                             mode="checkpoint" if include_checkpoint else "delta",
                             outcome="failed",
+                            address=_relay_address(route),
+                            path_class="relay",
                             started_at_ns=started_at_ns,
                             duration_ms=max(
                                 0,

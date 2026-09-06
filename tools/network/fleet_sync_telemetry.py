@@ -148,8 +148,16 @@ def record_iteration(
     acknowledged_breadcrumb: Mapping | None = None,
     org: str = "machine",
     scope: str = "personal",
+    address: str | None = None,
+    path_class: str | None = None,
 ) -> dict:
-    """Atomically advance one local telemetry aggregate and return its payload."""
+    """Atomically advance one local telemetry aggregate and return its payload.
+
+    ``address``/``path_class`` name WHICH path carried this attempt (the
+    dialed URL and its class: tailnet/private/public/named/relay/turn) --
+    the tier-used readout (auto-wryex). Recorded on every attempt; bytes
+    are accumulated per class on success.
+    """
     key = telemetry_key(peer_machine_public_key, channel, direction, scope)
     if mode not in {"delta", "checkpoint"}:
         raise ValueError("Fleet telemetry mode must be delta or checkpoint")
@@ -211,6 +219,18 @@ def record_iteration(
         })
         if outcome == "success":
             payload["last_success_at_ns"] = payload["last_finished_at_ns"]
+        if isinstance(address, str) and address:
+            payload["last_address"] = address[:256]
+        if isinstance(path_class, str) and path_class:
+            payload["last_path_class"] = path_class[:32]
+            if outcome == "success":
+                by_class = dict(payload.get("bytes_by_path_class") or {})
+                by_class[path_class[:32]] = int(by_class.get(path_class[:32], 0)) + (
+                    bytes_sent + bytes_received
+                )
+                payload["bytes_by_path_class"] = by_class
+                payload["last_success_path_class"] = path_class[:32]
+                payload["last_success_address"] = (address or "")[:256]
         breadcrumb = _validated_breadcrumb(acknowledged_breadcrumb)
         if breadcrumb is not None and outcome == "success":
             # A verified stream summary REPLACES the position outright: after
