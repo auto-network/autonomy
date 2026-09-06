@@ -303,6 +303,13 @@ class ConnectorFleetRuntime:
         #: rebuild fails identically after a full scan (156s on a 1.5GB store,
         #: live 2026-09-06) — so refuse the scope for a backoff instead.
         self._integrity_failed: dict[str, tuple[float, str]] = {}
+        #: (scope, peer_pub) -> monotonic of the last checkpoint this process
+        #: delivered to that peer with outcome=success. A fresh first-contact
+        #: request (empty trail) for the same scope shortly after that means
+        #: the RECEIVER failed to install what it fully received — rebuilding
+        #: cannot help, only burn (2.27GB per 3.5min, live 2026-09-06 when
+        #: SJC ran a pre-fix install invariant).
+        self._recent_checkpoint_delivery: dict[tuple[str, str], float] = {}
 
     def _touch_stream_activity(self) -> None:
         self.last_stream_activity = time.monotonic()
@@ -502,6 +509,35 @@ class ConnectorFleetRuntime:
         serve_checkpoint = server_has_content and _serve_checkpoint_decision(
             resume_position, include_checkpoint, journal_gap
         )
+        # Refusals decided here, BEFORE the stream: the client logs them as
+        # 'fleet server refused: <reason>' instead of a mid-stream failure.
+        if serve_checkpoint:
+            if not resume_trail:
+                delivered = self._recent_checkpoint_delivery.get(
+                    (scope, peer_pub))
+                if delivered is not None and (
+                    time.monotonic() - delivered < REDELIVERY_GUARD_S
+                ):
+                    raise FleetRelaySyncError(
+                        f"scope {scope!r}: checkpoint refused — this "
+                        "peer received a complete checkpoint "
+                        f"{time.monotonic() - delivered:.0f}s ago and "
+                        "is asking for a fresh one with no resume "
+                        "trail, so it failed to install it; fix or "
+                        "update the receiver (rebuilding cannot help)"
+                    )
+            failed = self._integrity_failed.get(scope)
+            if failed is not None:
+                failed_at, reason = failed
+                if (time.monotonic() - failed_at
+                        < INTEGRITY_FAILURE_BACKOFF_S):
+                    raise FleetRelaySyncError(
+                        f"scope {scope!r}: checkpoint refused — last "
+                        f"build failed integrity ({reason}); repair "
+                        "the store (fleet_doctor --repair-catalog) "
+                        "before it can be served"
+                    )
+                self._integrity_failed.pop(scope, None)
         logger.warning(
             "fleet relay sync: accept_client ok, peer_pub=%s, entering stream",
             peer_pub[:16] if isinstance(peer_pub, str) else peer_pub,
@@ -535,18 +571,6 @@ class ConnectorFleetRuntime:
                 yield server_hello_frame
                 resume_floor_ref = None
                 if serve_checkpoint:
-                    failed = self._integrity_failed.get(scope)
-                    if failed is not None:
-                        failed_at, reason = failed
-                        if (time.monotonic() - failed_at
-                                < INTEGRITY_FAILURE_BACKOFF_S):
-                            raise FleetRelaySyncError(
-                                f"scope {scope!r}: checkpoint refused — last "
-                                f"build failed integrity ({reason}); repair "
-                                "the store (fleet_doctor --repair-catalog) "
-                                "before it can be served"
-                            )
-                        self._integrity_failed.pop(scope, None)
                     # Journal position BEFORE the checkpoint cut; the delta
                     # phase below starts here instead of replaying the
                     # whole journal the checkpoint already carries. A store
@@ -724,6 +748,9 @@ class ConnectorFleetRuntime:
                     self._touch_stream_activity()
                     yield frame
                 outcome = "success"
+                if serve_checkpoint:
+                    self._recent_checkpoint_delivery[(scope, peer_pub)] = (
+                        time.monotonic())
                 error_code = ""
             except asyncio.CancelledError:
                 outcome = "cancelled"
@@ -863,6 +890,11 @@ BUILD_KEEPALIVE_INTERVAL_S = 20.0
 #: that scope's checkpoints for this long before trying once more (the store
 #: may have been repaired meanwhile). Only that scope is affected.
 INTEGRITY_FAILURE_BACKOFF_S = 600.0
+
+#: A peer that fully received a checkpoint and immediately asks for another
+#: with no resume trail failed to install it; refuse that scope for this long
+#: rather than rebuild the same multi-GB artifact every pull.
+REDELIVERY_GUARD_S = 600.0
 
 connector_runtime = ConnectorFleetRuntime()
 
