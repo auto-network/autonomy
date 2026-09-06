@@ -85,12 +85,21 @@ def _cached_adopted(org: str) -> Optional[dict]:
 
 
 def checkpoint_due(org: str, persona_pub: str, *, ts: int,
-                   genesis_id: str) -> CheckpointDecision:
+                   genesis_id: str,
+                   org_uuid: Optional[str] = None) -> CheckpointDecision:
     """The sign-on decision for one org. Pure of network and signing.
+
+    *org* is the local ledger slug (it names the ledger DB); *org_uuid* is the
+    org's registry identity and is what the assembled ``record["org"]`` must
+    carry, because the registry — and the dashboard forward route — reject a
+    record whose org is not the path uuid. When *org_uuid* is omitted the slug
+    stands in, which only holds where slug and uuid coincide (the unit fold
+    fixtures); a registered org must pass its uuid.
 
     *persona_pub* is this node's persona in the org; *genesis_id* anchors a
     seed's ``prev``. *ts* stamps an assembled record.
     """
+    record_org = org_uuid or org
     state, _heads = _fold_state(org)
     members_root = mc.members_root(state)
     checkpointers_root = mc.checkpointers_root(state)
@@ -115,7 +124,7 @@ def checkpoint_due(org: str, persona_pub: str, *, ts: int,
         # one-time read to populate the cache, then re-evaluates.
         record = {
             "v": mc.CHECKPOINT_VERSION,
-            "org": org,
+            "org": record_org,
             "seq": 0,
             "prev": genesis_id,
             "ledger_head": ledger_head,
@@ -141,7 +150,7 @@ def checkpoint_due(org: str, persona_pub: str, *, ts: int,
     index, path = mc.inclusion_proof(prev_checkpointers, persona_pub)
     record = {
         "v": mc.CHECKPOINT_VERSION,
-        "org": org,
+        "org": record_org,
         "seq": cached["seq"] + 1,
         "prev": mc.checkpoint_hash(cached),
         "ledger_head": ledger_head,
