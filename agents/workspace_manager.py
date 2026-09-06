@@ -677,33 +677,70 @@ def configure_commit_signing(
         for key, value in cfg:
             _run_git(["config", key, value], cwd=worktree)
         if signoff_required:
-            _install_signoff_hook(worktree)
+            _install_commit_msg_hook(worktree)
         return True
     except Exception:
         logger.exception("configure_commit_signing failed for %s", worktree)
         return False
 
 
-# commit-msg hook: auto-append Signed-off-by when the policy requires it, so the
-# agent never has to remember --signoff. Idempotent (interpret-trailers), gated on
-# the same autonomy.sign.requireSignoff flag the shim enforces, and self-marked so
-# we never clobber a repo's own commit-msg hook.
-_SIGNOFF_HOOK_MARKER = "# autonomy-signoff-hook"
-_SIGNOFF_HOOK = f"""#!/usr/bin/env bash
-{_SIGNOFF_HOOK_MARKER} — auto-append Signed-off-by when the commit policy requires it.
-set -euo pipefail
-[ "$(git config --get autonomy.sign.requireSignoff 2>/dev/null || true)" = "true" ] || exit 0
-name="$(git config user.name 2>/dev/null || true)"
-email="$(git config user.email 2>/dev/null || true)"
-[ -n "$email" ] || exit 0
+# commit-msg hook: session-worktree commit hygiene, two independent self-gated
+# steps. (1) Auto-append Signed-off-by when the commit policy requires it, so
+# the agent never has to remember --signoff — gated on the same
+# autonomy.sign.requireSignoff flag the shim enforces. (2) Stamp an
+# Autonomy-Provenance trailer (the persona/session/turn locator minted by the
+# dashboard) so the fast-forward merge carries per-commit session provenance to
+# master — gated on the worktree being a session worktree (session/* branch or
+# AUTONOMY_SESSION). Both steps are idempotent (interpret-trailers), best-effort
+# (no failure ever blocks a commit — an unreachable dashboard degrades the
+# stamp to a session-only locator), and the hook is self-marked so we never
+# clobber a repo's own commit-msg hook. The hooks path is shared by every
+# linked worktree of a managed clone (graph note c95f4a28-010), which is safe
+# precisely because both steps gate on per-worktree state, not hook identity.
+_COMMIT_MSG_HOOK_MARKER = "# autonomy-commit-msg-hook"
+_LEGACY_SIGNOFF_HOOK_MARKER = "# autonomy-signoff-hook"
+_COMMIT_MSG_HOOK = f"""#!/usr/bin/env bash
+{_COMMIT_MSG_HOOK_MARKER} — Signed-off-by (policy-gated) + Autonomy-Provenance stamp.
+set -uo pipefail
+
+if [ "$(git config --get autonomy.sign.requireSignoff 2>/dev/null || true)" = "true" ]; then
+  name="$(git config user.name 2>/dev/null || true)"
+  email="$(git config user.email 2>/dev/null || true)"
+  if [ -n "$email" ]; then
+    git interpret-trailers --if-exists doNothing \\
+      --trailer "Signed-off-by: ${{name}} <${{email}}>" --in-place "$1" || true
+  fi
+fi
+
+session="${{AUTONOMY_SESSION:-}}"
+if [ -z "$session" ]; then
+  branch="$(git branch --show-current 2>/dev/null || true)"
+  case "$branch" in session/*) session="${{branch#session/}}" ;; esac
+fi
+[ -n "$session" ] || exit 0
+if git interpret-trailers --parse "$1" 2>/dev/null | grep -qi '^Autonomy-Provenance:'; then
+  exit 0
+fi
+stamp=""
+if [ -n "${{CROSSTALK_TOKEN:-}}" ]; then
+  stamp="$(curl -ks -m 5 -H "Authorization: Bearer ${{CROSSTALK_TOKEN}}" \\
+    "${{GRAPH_API:-https://localhost:8080}}/api/session/provenance-stamp?format=locator" \\
+    2>/dev/null | tr -d '[:space:]' || true)"
+fi
+case "$stamp" in autonomy://*) ;; *) stamp="autonomy://-/${{session}}/-" ;; esac
 git interpret-trailers --if-exists doNothing \\
-  --trailer "Signed-off-by: ${{name}} <${{email}}>" --in-place "$1"
+  --trailer "Autonomy-Provenance: ${{stamp}}" --in-place "$1" || true
+exit 0
 """
 
 
-def _install_signoff_hook(worktree: Path) -> bool:
-    """Install the auto-append Signed-off-by commit-msg hook. Best-effort — the
-    shim enforces the trailer regardless, so a failure here is non-fatal."""
+def _install_commit_msg_hook(worktree: Path) -> bool:
+    """Install the combined commit-msg hook (signoff + provenance stamp).
+
+    Best-effort — signing correctness is enforced by the shim and provenance
+    degrades gracefully, so a failure here is non-fatal. Refuses to clobber a
+    repo's own commit-msg hook; overwrites autonomy-managed revisions
+    (current marker or the legacy signoff-only marker)."""
     try:
         rc, out, _ = _git_output(["rev-parse", "--git-path", "hooks"], cwd=worktree)
         if rc != 0 or not out.strip():
@@ -712,14 +749,18 @@ def _install_signoff_hook(worktree: Path) -> bool:
         hooks_dir = Path(raw) if os.path.isabs(raw) else (Path(worktree) / raw)
         hooks_dir.mkdir(parents=True, exist_ok=True)
         hook = hooks_dir / "commit-msg"
-        # Don't clobber a repo's own commit-msg hook; the shim still enforces.
-        if hook.exists() and _SIGNOFF_HOOK_MARKER not in hook.read_text(errors="ignore"):
-            return False
-        hook.write_text(_SIGNOFF_HOOK)
+        if hook.exists():
+            existing = hook.read_text(errors="ignore")
+            if (
+                _COMMIT_MSG_HOOK_MARKER not in existing
+                and _LEGACY_SIGNOFF_HOOK_MARKER not in existing
+            ):
+                return False
+        hook.write_text(_COMMIT_MSG_HOOK)
         hook.chmod(0o755)
         return True
     except Exception:
-        logger.exception("signoff hook install failed for %s", worktree)
+        logger.exception("commit-msg hook install failed for %s", worktree)
         return False
 
 
@@ -831,6 +872,9 @@ def prepare_session_mounts(
                 workspace_id=getattr(workspace, "workspace_id", None)
                 or getattr(workspace, "id", None),
             )
+            # Every session commit gets an Autonomy-Provenance trailer so the
+            # fast-forward merge carries persona/session/turn to master.
+            _install_commit_msg_hook(worktree)
             mounts[str(worktree)] = repo.mount
             # Worktree's .git file points at an absolute host path inside the
             # managed clone — mount the clone at that same path (rw) so the

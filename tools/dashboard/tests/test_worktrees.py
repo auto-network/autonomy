@@ -1243,7 +1243,10 @@ class TestWorktreePage:
         # only when the cached type is a non-org:join) signs the tunnel bytes.
         assert "const isShareLink = !isOrgJoin" in js
         assert "req.targetType && req.targetType !== 'org:join'" in js
-        assert "signer.signRegistryRequest(signMethod, signPath, payload)" in js
+        # Vault B-1 (01b5e75d) added the org option and wrapped the call, so
+        # match the argument list rather than one exact source line.
+        assert "signer.signRegistryRequest(" in js
+        assert "signMethod, signPath, payload, { org: req.orgSlug }" in js
 
     def test_template_uses_required_status_labels(self):
         template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
@@ -5702,3 +5705,144 @@ class TestDeclareReviewBindingHelper:
         assert "gh pr view" in text
         assert "derive" in text.lower()
         assert "baseRefOid" in text
+
+
+# ── commit provenance (Autonomy-Provenance trailer) ────────────────
+
+class TestCommitProvenance:
+    def test_parse_full_stamp(self):
+        from tools.dashboard import server
+
+        body = (
+            "Explain the change.\n\n"
+            "Autonomy-Provenance: autonomy://PERSONAKEY/auto-0905-213828/42\n"
+        )
+        parsed = server._parse_commit_provenance(body)
+        assert parsed == {
+            "persona": "PERSONAKEY",
+            "session": "auto-0905-213828",
+            "turn": 42,
+            "locator": "autonomy://PERSONAKEY/auto-0905-213828/42",
+            "session_href": "/session/auto-0905-213828",
+        }
+
+    def test_parse_degraded_offline_stamp(self):
+        from tools.dashboard import server
+
+        parsed = server._parse_commit_provenance(
+            "body\n\nAutonomy-Provenance: autonomy://-/auto-x/-\n")
+        assert parsed["persona"] is None
+        assert parsed["session"] == "auto-x"
+        assert parsed["turn"] is None
+        assert parsed["locator"] == "autonomy://-/auto-x/-"
+
+    def test_parse_absent_or_malformed(self):
+        from tools.dashboard import server
+
+        assert server._parse_commit_provenance(None) is None
+        assert server._parse_commit_provenance("") is None
+        assert server._parse_commit_provenance("plain body") is None
+        assert server._parse_commit_provenance(
+            "Autonomy-Provenance: https://not-a-locator") is None
+        assert server._parse_commit_provenance(
+            "prefix Autonomy-Provenance: autonomy://p/s/1") is None
+
+    def test_worktree_commit_json_emits_provenance(self):
+        from tools.dashboard import server
+
+        commit = _commit()
+        stamped = replace(
+            commit,
+            body="Body.\n\nAutonomy-Provenance: autonomy://PK/auto-y/7",
+        )
+        assert "provenance" not in server._worktree_commit_json(commit)
+        data = server._worktree_commit_json(stamped)
+        assert data["provenance"]["session"] == "auto-y"
+        assert data["provenance"]["turn"] == 7
+        assert data["provenance"]["session_href"] == "/session/auto-y"
+
+    def test_session_current_turn_matches_graph_extractor(self, tmp_path):
+        from tools.dashboard import server
+
+        jsonl = tmp_path / "session.jsonl"
+        lines = [
+            {"type": "user", "uuid": "u1", "timestamp": "2026-09-06T00:00:00Z",
+             "message": {"role": "user", "content": "please fix the login bug"}},
+            {"type": "assistant", "uuid": "a1", "parentUuid": "u1",
+             "timestamp": "2026-09-06T00:00:01Z",
+             "message": {"role": "assistant",
+                         "content": [{"type": "text",
+                                      "text": "Looking at the login flow now."}]}},
+            {"type": "user", "uuid": "u2", "timestamp": "2026-09-06T00:00:02Z",
+             "message": {"role": "user", "content": "thanks, also update the docs"}},
+        ]
+        jsonl.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+
+        from tools.graph.ingest import parse_claude_code_session
+        _meta, turns = parse_claude_code_session(jsonl)
+        expected = turns[-1]["turn_number"] if turns else None
+        assert expected is not None
+
+        assert server._session_current_turn(str(jsonl)) == expected
+
+    def test_session_current_turn_missing_or_empty(self, tmp_path):
+        from tools.dashboard import server
+
+        assert server._session_current_turn(None) is None
+        assert server._session_current_turn(str(tmp_path / "nope.jsonl")) is None
+
+    def test_provenance_stamp_endpoint(self, monkeypatch):
+        from tools.dashboard import server
+
+        monkeypatch.setattr(
+            server, "authenticate_session_request",
+            lambda request: (("auto-sess-1", "autonomy"), None))
+        monkeypatch.setattr(
+            server.dashboard_db, "get_session",
+            lambda name: {"jsonl_path": "/tmp/whatever.jsonl"})
+        monkeypatch.setattr(server, "_session_current_turn", lambda path: 42)
+        monkeypatch.setattr(
+            server, "_org_operator_persona", lambda org: "PERSONAKEY")
+
+        class _Req:
+            query_params = {}
+
+        resp = asyncio.run(server.api_session_provenance_stamp(_Req()))
+        data = json.loads(resp.body)
+        assert data["locator"] == "autonomy://PERSONAKEY/auto-sess-1/42"
+        assert data["trailer"] == (
+            "Autonomy-Provenance: autonomy://PERSONAKEY/auto-sess-1/42")
+        assert data["session"] == "auto-sess-1"
+        assert data["turn"] == 42
+
+        class _ReqLocator:
+            query_params = {"format": "locator"}
+
+        resp = asyncio.run(server.api_session_provenance_stamp(_ReqLocator()))
+        assert resp.body.decode() == "autonomy://PERSONAKEY/auto-sess-1/42"
+
+    def test_provenance_stamp_endpoint_degrades(self, monkeypatch):
+        """No session row, no persona, unparseable transcript → still a
+        well-formed locator with the operator fallback and '-' turn."""
+        from tools.dashboard import server
+
+        monkeypatch.setattr(
+            server, "authenticate_session_request",
+            lambda request: (("auto-sess-2", None), None))
+        monkeypatch.setattr(
+            server.dashboard_db, "get_session", lambda name: None)
+
+        class _Req:
+            query_params = {"format": "locator"}
+
+        resp = asyncio.run(server.api_session_provenance_stamp(_Req()))
+        assert resp.body.decode() == "autonomy://operator/auto-sess-2/-"
+
+    def test_templates_render_provenance_chip(self):
+        page = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
+        overlay = (
+            TEMPLATE_DIR / "partials" / "worktree-review-overlays.html"
+        ).read_text()
+        for html in (page, overlay):
+            assert "selectedCommit.commit.provenance" in html
+            assert "provenance.session_href" in html
