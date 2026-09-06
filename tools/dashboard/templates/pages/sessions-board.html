@@ -6,10 +6,12 @@
    files the Sessions page and the session viewer render — nothing here formats
    a turn or restyles a card. #}
 <style>
-  /* Full-bleed to the right, but never flush against the nav rail: the left
-     edge keeps 8px of its own so the toolbar text cannot sit on the nav. */
-  .sb-shell { display: flex; flex-direction: column; height: calc(100vh - 3.5rem - 1.5rem); min-height: 0; margin: 0 -1.5rem 0 -1rem; }
-  .sb-bar { display: flex; align-items: center; gap: 10px; padding: 8px 16px; border-bottom: 1px solid #1f2937; background: #0f172a; flex: 0 0 auto; flex-wrap: wrap; }
+  /* Full-bleed to the RIGHT only. A negative left margin put the shell 16px
+     UNDER the nav rail, clipping the leftmost column (the operator could see
+     only the "U" of its CPU label); the left edge now starts at the content
+     box and the board adds 8px of its own. */
+  .sb-shell { display: flex; flex-direction: column; height: calc(100vh - 3.5rem - 1.5rem); min-height: 0; margin: 0 -1.5rem 0 0; }
+  .sb-bar { display: flex; align-items: center; gap: 10px; padding: 8px 16px 8px 8px; border-bottom: 1px solid #1f2937; background: #0f172a; flex: 0 0 auto; flex-wrap: wrap; }
   .sb-bar .sb-sub { font-size: 11px; color: #64748b; }
   .sb-seg { display: inline-flex; padding: 2px; border: 1px solid #293548; border-radius: 8px; background: #0b1220; }
   .sb-seg button { min-height: 28px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #8b9bb4; font-size: 11px; font-weight: 700; cursor: pointer; }
@@ -26,7 +28,7 @@
   .sb-auto-status { font-size: 11px; color: #a5b4fc; }
   .sb-hint { font-size: 11px; color: #4b5b73; }
 
-  .sb-board { flex: 1; min-height: 0; display: flex; align-items: stretch; gap: 14px; padding: 14px 16px 18px; overflow-x: auto; overflow-y: hidden; background: #0b1220; }
+  .sb-board { flex: 1; min-height: 0; display: flex; align-items: stretch; gap: 14px; padding: 14px 16px 18px 8px; overflow-x: auto; overflow-y: hidden; background: #0b1220; }
   .sb-col { position: relative; flex: 0 0 auto; display: flex; flex-direction: column; min-width: 340px; border: 1px solid #1e293b; border-radius: 12px; background: #0f172a; }
   .sb-col.solo { background: transparent; border-style: dashed; }
   .sb-col-resize { position: absolute; top: 0; right: -9px; width: 14px; height: 100%; cursor: col-resize; z-index: 3; }
