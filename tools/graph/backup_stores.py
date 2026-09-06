@@ -58,7 +58,7 @@ Modes (one per argv[1], TAB-separated rows on stdout):
     drill, 2026-09-06). One ``path<TAB>ok`` line per database; exit 1
     if any database fails.
 
-``beads``
+``beads [--with-passwords]``
     ``database  host  port  user  password`` per Dolt database, mirroring
     the DAO contract (tools/dashboard/dao/beads.py:_conn_params):
     ``DOLT_SQL_*`` env → the beads dir's config.yaml / credentials.env /
@@ -66,7 +66,10 @@ Modes (one per argv[1], TAB-separated rows on stdout):
     database ``auto``). One row for the shared tracker plus one per
     provisioned org dir (``<beads root>/orgs/<slug>/metadata.json``).
     Prints nothing when the deployment has no beads root at all — the
-    supported no-beads state.
+    supported no-beads state. The password column is MASKED unless
+    ``--with-passwords`` is passed: bare stdout otherwise ends up in
+    logs and crosstalk pastes (host caution, 2026-09-06). backup-all.sh
+    passes the flag; humans diagnosing get the shape without the secret.
 
 Required-ness: every manifest store is required except the legacy /
 proof-only VAPID keys; ``AUTONOMY_BACKUP_OPTIONAL_STORES`` (space-separated
@@ -347,7 +350,7 @@ def _conn_row(beads_dir: Path) -> tuple[str, str, int, str, str]:
     )
 
 
-def cmd_beads() -> None:
+def cmd_beads(with_passwords: bool = False) -> None:
     base = Path(os.environ.get("BEADS_DIR") or DATA_ROOT / ".beads")
     if not base.is_dir():
         return  # no beads in this deployment — the supported empty state
@@ -359,7 +362,8 @@ def cmd_beads() -> None:
         rows.setdefault(db, (host, port, user, pw))
     for db in sorted(rows):
         host, port, user, pw = rows[db]
-        print(f"{db}\t{host}\t{port}\t{user}\t{pw}")
+        shown = pw if with_passwords else ("***" if pw else "")
+        print(f"{db}\t{host}\t{port}\t{user}\t{shown}")
 
 
 def main() -> int:
@@ -378,11 +382,13 @@ def main() -> int:
                   "PATH [PATH...]", file=sys.stderr)
             return 2
         return cmd_report_offsite(sys.argv[2], sys.argv[3], sys.argv[4:])
+    if mode == "beads":
+        cmd_beads(with_passwords="--with-passwords" in sys.argv[2:])
+        return 0
     commands = {
         "stores": cmd_stores,
         "offsite-data": cmd_offsite_data,
         "extra-dbs": cmd_extra_dbs,
-        "beads": cmd_beads,
     }
     if mode not in commands:
         print(f"usage: backup_stores.py {{{'|'.join(commands)}|integrity"
