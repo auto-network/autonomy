@@ -68,7 +68,9 @@ backup_sqlite() {
     local rel="$1" dbpath="$2"
     mkdir -p "$(dirname "${DEST}/${rel}")"
     if "$SQLITE3" "$dbpath" ".backup '${DEST}/${rel}'"; then
-        echo "  ${rel}: $(du -h "${DEST}/${rel}" | cut -f1)"
+        # stat, not du: on the NFS backup root du reports allocated
+        # blocks before the NAS flushes (everything looked like "512").
+        echo "  ${rel}: $(stat -c %s "${DEST}/${rel}") bytes"
         STORE_COUNT=$((STORE_COUNT + 1))
     else
         fail "${rel}: FAILED (sqlite .backup error from ${dbpath})"
@@ -164,7 +166,7 @@ if [[ -d "$BEADS_ROOT" ]]; then
                 --databases "$db" \
                 > "${DEST}/beads/${db}.sql" 2>"${DEST}/beads/${db}.err"; then
                 rm -f "${DEST}/beads/${db}.err"
-                echo "  beads/${db}.sql: $(du -h "${DEST}/beads/${db}.sql" | cut -f1)"
+                echo "  beads/${db}.sql: $(stat -c %s "${DEST}/beads/${db}.sql") bytes"
                 BEADS_COUNT=$((BEADS_COUNT + 1))
             else
                 fail "beads/${db}: FAILED ($(head -1 "${DEST}/beads/${db}.err" 2>/dev/null || echo mysqldump error))"
