@@ -392,6 +392,14 @@
       // side gates caption-suppression on this so the caption only hands off
       // once the tile is truly in the DOM (contract cbb8497c-a1f). Guarded so
       // it only clears its own sid.
+      // Send the live voice buffer to this session. Used by the dictation
+      // tile's Send on composer-less surfaces; the capsule's own Send runs the
+      // same store method.
+      _sendDictation() {
+        var voice = this.getVoiceStore();
+        if (voice && typeof voice.sendBuffer === 'function') voice.sendBuffer();
+      },
+
       _syncTilePresent() {
         if (!this._pageSignals) return;
         if (typeof document === 'undefined' || !document.body) return;
