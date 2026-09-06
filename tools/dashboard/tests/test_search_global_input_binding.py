@@ -376,6 +376,9 @@ class TestCompactGlobalSearchChrome:
                 profile_visible: profile.offsetParent !== null,
                 profile_in_sidebar: profile.parentElement &&
                     profile.parentElement.id === 'identity-sidebar-slot',
+                sidebar_overflow: getComputedStyle(
+                    document.getElementById('sidebar')
+                ).overflow,
                 icon_visible: icon.offsetParent !== null,
                 no_overflow: document.documentElement.scrollWidth <= window.innerWidth + 1,
             };
@@ -383,6 +386,7 @@ class TestCompactGlobalSearchChrome:
         assert state == {
             "profile_visible": True,
             "profile_in_sidebar": True,
+            "sidebar_overflow": "visible",
             "icon_visible": True,
             "no_overflow": True,
         }
