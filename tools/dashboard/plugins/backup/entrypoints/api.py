@@ -222,8 +222,28 @@ async def put_config(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "config": merged})
 
 
+async def post_reconcile(request: Request) -> JSONResponse:
+    """Explicit refresh: ingest the tier latest-report.json files into
+    run rows. The ONE route that (boundedly, via worker thread + hard
+    timeout) touches the backup destination — state reads never do.
+    Operator authority: a hung NAS makes this an expensive probe, so
+    worker sessions cannot hammer it."""
+    principal = principal_from_request(request)
+    if not principal.global_authority:
+        return JSONResponse(
+            {"error": "backup reconcile requires operator authority"},
+            status_code=403)
+    from tools.dashboard.plugins.backup import reconcile as reconcile_mod
+    try:
+        result = reconcile_mod.reconcile()
+    except Exception:
+        return JSONResponse({"error": "reconcile failed"}, status_code=500)
+    return JSONResponse(result)
+
+
 routes: list = [
     Route("/api/backup/summary", get_summary, methods=["GET"]),
+    Route("/api/backup/reconcile", post_reconcile, methods=["POST"]),
     Route("/api/backup/runs", get_runs, methods=["GET"]),
     Route("/api/backup/drills", get_drills, methods=["GET"]),
     Route("/api/backup/config", get_config, methods=["GET"]),

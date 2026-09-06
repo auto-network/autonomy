@@ -60,7 +60,7 @@
                :class="statusClass(summary.overall === 'ok' ? 'ok' : summary.overall)"
                data-testid="backup-overall"
                x-text="overallLabel()"></div>
-          <button class="bk-tier-btn" @click="refresh()">refresh</button>
+          <button class="bk-tier-btn" @click="refreshFromDisk()">refresh</button>
         </div>
         <div class="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
           <template x-for="tier in summary.tiers" :key="tier.tier">
