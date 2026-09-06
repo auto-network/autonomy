@@ -306,3 +306,22 @@ test('the org glyph opens an inline desktop menu, never the phone action sheet',
   board.bindDictation({}, 's1');
   assert.equal(board.menuFor, '');
 });
+
+test('sparklines share one fleet-wide scale, so a quiet column cannot look as busy as a loud one', () => {
+  const resources = {
+    quiet: { cpu_pct: 1, history: [[1, 0.5, 0], [2, 1.4, 0], [3, 0.7, 0]] },
+    loud: { cpu_pct: 437, history: [[1, 200, 0], [2, 437, 0], [3, 300, 0]] },
+  };
+  const { board } = makeBoard({ rows: ['quiet', 'loud'] });
+  board.resources = resources;
+  board.columns = board.normalise([{ id: 'a', title: 'A', members: ['quiet'] }, { id: 'b', title: 'B', members: ['loud'] }]);
+  assert.equal(board.fleetCpuMax(), 437);
+  const y = (pts) => pts.split(' ').map((p) => parseFloat(p.split(',')[1]));
+  const quiet = y(board.colSpark(board.columns.filter((c) => c.id === 'a')[0]));
+  const loud = y(board.colSpark(board.columns.filter((c) => c.id === 'b')[0]));
+  // 19 is the baseline; smaller y means taller. The quiet lane must stay near the floor.
+  assert.ok(Math.min.apply(null, quiet) > 18.8, 'a 1.4% lane draws flat against a 437% ceiling');
+  assert.ok(Math.min.apply(null, loud) < 2.5, 'the 437% lane reaches the top');
+  assert.ok(Math.min.apply(null, quiet) > Math.min.apply(null, loud));
+  assert.match(board.colSparkTitle(board.columns.filter((c) => c.id === 'a')[0]), /peak 1.4% of 437% fleet max/);
+});
