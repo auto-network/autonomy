@@ -858,7 +858,7 @@ async def test_fresh_checkpoint_request_right_after_a_delivery_is_refused(
 
     _auth2, _private2, hello2 = _client_hello(fleet, "cd" * 16)
     with pytest.raises(
-        fleet_relay_sync.FleetRelaySyncError, match="failed to install"
+        fleet_relay_sync.FleetRelaySyncError, match="failed to keep it"
     ):
         await server.handle("cd" * 16, _pull_message(fleet, alpha, hello2))
 
@@ -885,3 +885,45 @@ async def test_puller_connects_with_a_bulk_safe_ping_timeout(monkeypatch):
     assert captured["ping_timeout"] == fleet_relay_sync.PULL_PING_TIMEOUT_S
     assert captured["ping_timeout"] > 60.0, "must exceed the 60s frame-silence rule"
     assert captured["ping_interval"] == 20.0, "keep pinging; only the deadline widens"
+
+
+def test_redelivery_window_escalates_and_caps():
+    w = fleet_relay_sync._redelivery_window_s
+    base = fleet_relay_sync.REDELIVERY_GUARD_S
+    assert [w(0), w(1), w(2), w(3)] == [base, 2 * base, 4 * base, 8 * base]
+    assert w(50) == fleet_relay_sync.REDELIVERY_GUARD_MAX_S
+
+
+@pytest.mark.asyncio
+async def test_repeated_unkept_deliveries_widen_the_refusal(tmp_path, monkeypatch):
+    """Second unkept delivery → strike 1 → the refusal window doubles; a
+    request with a resolvable trail clears the strikes."""
+    import asyncio
+
+    monkeypatch.setattr(fleet_relay_sync, "REDELIVERY_GUARD_S", 0.2)
+    fleet = _two_machine_fleet()
+    personal = tmp_path / "personal.db"
+    personal.touch()
+    alpha = tmp_path / "alpha.db"
+    _prepare_org_db(alpha, fleet.server_machine.public_hex)
+    _insert_note(alpha, "a-1", "org content")
+    server = _configure_relay_server(fleet, personal, monkeypatch)
+    monkeypatch.setattr(
+        server.scheduler, "_scope_paths",
+        lambda: {"personal": personal, "alpha": alpha},
+    )
+
+    async def fresh_pull(token_hex):
+        _a, _p, hello = _client_hello(fleet, token_hex)
+        stream = await server.handle(token_hex, _pull_message(fleet, alpha, hello))
+        return [f async for f in stream]
+
+    await fresh_pull("ab" * 16)                       # delivery #1, strikes 0
+    key = next(iter(server._recent_checkpoint_delivery))
+    assert server._recent_checkpoint_delivery[key][1] == 0
+    await asyncio.sleep(0.25)                         # window(0)=0.2s elapsed
+    await fresh_pull("cd" * 16)                       # delivery #2 → strike 1
+    assert server._recent_checkpoint_delivery[key][1] == 1
+    await asyncio.sleep(0.25)                         # < window(1)=0.4s
+    with pytest.raises(fleet_relay_sync.FleetRelaySyncError, match="strike 2"):
+        await fresh_pull("ef" * 16)

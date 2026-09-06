@@ -309,7 +309,15 @@ class ConnectorFleetRuntime:
         #: the RECEIVER failed to install what it fully received — rebuilding
         #: cannot help, only burn (2.27GB per 3.5min, live 2026-09-06 when
         #: SJC ran a pre-fix install invariant).
-        self._recent_checkpoint_delivery: dict[tuple[str, str], float] = {}
+        #: value = (monotonic of that delivery, strikes) where strikes counts
+        #: deliveries this peer has already failed to keep; the refusal
+        #: window doubles per strike (see _redelivery_window_s) and resets
+        #: when a request finally carries a resolvable trail. Without the
+        #: escalation a 600s window still meant 2.27 GB rebuilt and uploaded
+        #: every ten minutes all night (≈13 GB/h) with no chance of success
+        #: until the transport fix lands (2026-09-06).
+        self._recent_checkpoint_delivery: dict[
+            tuple[str, str], tuple[float, int]] = {}
 
     def _touch_stream_activity(self) -> None:
         self.last_stream_activity = time.monotonic()
@@ -509,23 +517,30 @@ class ConnectorFleetRuntime:
         serve_checkpoint = server_has_content and _serve_checkpoint_decision(
             resume_position, include_checkpoint, journal_gap
         )
+        # A request carrying a resolvable trail proves the peer kept what it
+        # received: clear any redelivery strikes for this scope.
+        if resume_trail and resume_position > 0:
+            self._recent_checkpoint_delivery.pop((scope, peer_pub), None)
         # Refusals decided here, BEFORE the stream: the client logs them as
         # 'fleet server refused: <reason>' instead of a mid-stream failure.
         if serve_checkpoint:
             if not resume_trail:
-                delivered = self._recent_checkpoint_delivery.get(
+                record = self._recent_checkpoint_delivery.get(
                     (scope, peer_pub))
-                if delivered is not None and (
-                    time.monotonic() - delivered < REDELIVERY_GUARD_S
-                ):
-                    raise FleetRelaySyncError(
-                        f"scope {scope!r}: checkpoint refused — this "
-                        "peer received a complete checkpoint "
-                        f"{time.monotonic() - delivered:.0f}s ago and "
-                        "is asking for a fresh one with no resume "
-                        "trail, so it failed to install it; fix or "
-                        "update the receiver (rebuilding cannot help)"
-                    )
+                if record is not None:
+                    delivered_at, strikes = record
+                    window = _redelivery_window_s(strikes)
+                    age = time.monotonic() - delivered_at
+                    if age < window:
+                        raise FleetRelaySyncError(
+                            f"scope {scope!r}: checkpoint refused — this "
+                            f"peer received a complete checkpoint {age:.0f}s "
+                            "ago and is asking for a fresh one with no "
+                            "resume trail, so it failed to keep it "
+                            f"(strike {strikes + 1}; next attempt allowed "
+                            f"after {window:.0f}s); fix the receiver or "
+                            "the transport, rebuilding cannot help"
+                        )
             failed = self._integrity_failed.get(scope)
             if failed is not None:
                 failed_at, reason = failed
@@ -749,8 +764,13 @@ class ConnectorFleetRuntime:
                     yield frame
                 outcome = "success"
                 if serve_checkpoint:
+                    prior = self._recent_checkpoint_delivery.get(
+                        (scope, peer_pub))
+                    # A prior record still present means the peer never came
+                    # back with a trail after that delivery: one more strike.
+                    strikes = prior[1] + 1 if prior is not None else 0
                     self._recent_checkpoint_delivery[(scope, peer_pub)] = (
-                        time.monotonic())
+                        time.monotonic(), strikes)
                 error_code = ""
             except asyncio.CancelledError:
                 outcome = "cancelled"
@@ -895,6 +915,16 @@ INTEGRITY_FAILURE_BACKOFF_S = 600.0
 #: with no resume trail failed to install it; refuse that scope for this long
 #: rather than rebuild the same multi-GB artifact every pull.
 REDELIVERY_GUARD_S = 600.0
+#: Ceiling for the escalating window (see _redelivery_window_s).
+REDELIVERY_GUARD_MAX_S = 6 * 3600.0
+
+
+def _redelivery_window_s(strikes: int) -> float:
+    """Refusal window after a delivery the peer failed to keep: doubles per
+    prior strike (600s, 1200s, 2400s, …) up to REDELIVERY_GUARD_MAX_S, so a
+    receiver that can never keep a checkpoint costs a handful of rebuilds,
+    not one every ten minutes all night."""
+    return min(REDELIVERY_GUARD_S * (2 ** max(0, strikes)), REDELIVERY_GUARD_MAX_S)
 
 #: Websocket pong deadline for the PULLER's relay connection. Under a bulk
 #: checkpoint receive the relay's pong queues behind data frames, so the
