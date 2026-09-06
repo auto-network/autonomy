@@ -4,6 +4,8 @@
 #   deploy/quickstart.sh --first-org myorg                     # found a new identity's org
 #   deploy/quickstart.sh --fleet-invite "$FLEET_INVITATION"    # join the operator's personal fleet
 #   deploy/quickstart.sh --org-invite "$INVITATION"            # join an existing organization
+#   deploy/quickstart.sh --bare                                # boot with no role; claim an
+#                                                              # invitation later in the browser
 #
 # Options:
 #   --source URL|PATH        git source to clone (default: the checkout this script is in)
@@ -30,6 +32,7 @@ while [[ $# -gt 0 ]]; do
         --first-org) ROLE_KIND=first-org; ROLE_VALUE="$2"; shift 2 ;;
         --fleet-invite) ROLE_KIND=fleet; ROLE_VALUE="$2"; shift 2 ;;
         --org-invite) ROLE_KIND=org; ROLE_VALUE="$2"; shift 2 ;;
+        --bare) ROLE_KIND=bare; ROLE_VALUE=""; shift ;;
         --source) SOURCE="$2"; shift 2 ;;
         --dir) DIR="$2"; shift 2 ;;
         --data-root) DATA_ROOT="$2"; shift 2 ;;
@@ -42,7 +45,7 @@ while [[ $# -gt 0 ]]; do
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
-[[ -n "$ROLE_KIND" ]] || { echo "one of --first-org / --fleet-invite / --org-invite is required" >&2; exit 2; }
+[[ -n "$ROLE_KIND" ]] || { echo "one of --first-org / --fleet-invite / --org-invite / --bare is required" >&2; exit 2; }
 
 confirm() {
     [[ $YES -eq 1 ]] && return 0
@@ -127,6 +130,7 @@ case "$ROLE_KIND" in
     first-org) AUTONOMY_FIRST_ORG="$ROLE_VALUE" "${COMPOSE[@]}" up -d ;;
     fleet)     AUTONOMY_FLEET_INVITE="$ROLE_VALUE" "${COMPOSE[@]}" up -d ;;
     org)       AUTONOMY_INVITE="$ROLE_VALUE" "${COMPOSE[@]}" up -d ;;
+    bare)      "${COMPOSE[@]}" up -d ;;
 esac
 
 # ── 6. Health ────────────────────────────────────────────────────────────────
@@ -154,4 +158,5 @@ case "$ROLE_KIND" in
     first-org) echo "  Create the identity for org '$ROLE_VALUE' (password) on the welcome page; the token in ~/.claude/.setup-token serves inference." ;;
     fleet)     echo "  The page shows the machine comparison code; approve it from the parent dashboard's inbox. Settings, credentials, and inference config arrive by fleet sync." ;;
     org)       echo "  Create this machine's own identity (password), then the org invitation completes; approval may be asynchronous." ;;
+    bare)      echo "  No role yet. Fleet: paste the fleet invitation at /network/join. Org: create an identity, then paste the org invitation." ;;
 esac
