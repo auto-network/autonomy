@@ -82,6 +82,16 @@ class FleetDirectV1(SettingSchema):
             "most 8. Empty means this machine is not dialable directly."
         ),
     )
+    advertise_auto: bool = field(
+        required=False,
+        description=(
+            "Also advertise every detected non-loopback IPv4 interface at "
+            "listen_port (tailnet first, then private LAN). Default true "
+            "when listen_port is set: a multi-homed machine cannot know "
+            "which of its interfaces a peer can reach, so it offers them "
+            "all and the peer tries them in order."
+        ),
+    )
 
     @classmethod
     def validate(cls, payload: Any) -> None:
@@ -102,6 +112,11 @@ class FleetDirectV1(SettingSchema):
         ):
             raise SchemaValidationError(
                 f"{cls.__name__}: 'listen_port' must be an integer 0-65535"
+            )
+        auto = payload.get("advertise_auto")
+        if auto is not None and not isinstance(auto, bool):
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'advertise_auto' must be a boolean"
             )
         addrs = payload.get("advertise_addrs")
         if addrs is not None:

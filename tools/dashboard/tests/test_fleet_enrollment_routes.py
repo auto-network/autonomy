@@ -329,7 +329,7 @@ def test_generic_approval_commits_exact_request(operator_api, monkeypatch):
     from tools.network import fleet_direct_config
 
     fleet_direct_config.store(fleet_direct_config.FleetDirectConfig(
-        "0.0.0.0", 9410, ("wss://sjc.example:9410",)
+        "0.0.0.0", 9410, ("wss://sjc.example:9410",), advertise_auto=False,
     ))
     completed = client.post(
         "/api/fleet/enrollment/local-completion",
