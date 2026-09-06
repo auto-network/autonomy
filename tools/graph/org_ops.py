@@ -310,6 +310,10 @@ def show_org(slug: str, *, root: Path | str | None = None) -> dict | None:
             "    WHEN 'published' THEN 1 "
             "    WHEN 'curated' THEN 2 "
             "    ELSE 3 END, "
+            # Same-rung tie: a higher schema revision wins (the resolver's
+            # own order) — a rev-2 charter edit outranks the rev-1 founding
+            # seed even when both writes land in the same second.
+            "  schema_revision DESC, "
             "  created_at DESC LIMIT 1",
             (ORG_IDENTITY_SET_ID, slug),
         ).fetchone()
