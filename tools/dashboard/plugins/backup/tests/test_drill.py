@@ -173,6 +173,25 @@ def test_single_flight(store, tmp_path):
     assert D.running_stamp() is None
 
 
+def test_abandoned_running_row_finalizes(store, monkeypatch):
+    """A hot-reload mid-drill must not leave an eternal 'running' row
+    pinning the run button (found live 2026-09-06)."""
+    from datetime import datetime, timedelta, timezone
+    old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    store.rows["20260906-055554"] = {
+        "verdict": "running", "trigger": "scheduled", "started_at": old}
+    finalized = D.finalize_abandoned()
+    assert finalized == ["20260906-055554"]
+    row = store.rows["20260906-055554"]
+    assert row["verdict"] == "fail"
+    assert "abandoned" in row["checks"][0]["detail"]
+    # A FRESH running row (this process could still own it) is left alone.
+    recent = datetime.now(timezone.utc).isoformat()
+    store.rows["20260906-090000"] = {
+        "verdict": "running", "trigger": "manual", "started_at": recent}
+    assert D.finalize_abandoned() == []
+
+
 def test_exit_zero_without_pass_verdict_is_a_fail(store, tmp_path):
     # A script that dies before @verdict must not read as success.
     script = _script(tmp_path,
