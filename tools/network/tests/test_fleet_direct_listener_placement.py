@@ -123,3 +123,70 @@ async def test_real_listener_binds_in_the_connector_runtime_on_loopback():
     rt.scheduler.config.listen_port = 0
     assert await rt.ensure_direct_listener() is None
     assert server.running is False
+
+
+async def test_direct_serves_count_as_connector_streams_through_the_build(monkeypatch):
+    """The supervisor drains a connector only for streams it can see: a
+    direct serve must register at begin, keep activity fresh through a
+    silent build, and deregister on completion or consumer cancel."""
+    import asyncio
+
+    from tools.network import fleet_sync_scheduler as fss
+    from tools.network import fleet_relay_sync as frs
+
+    monkeypatch.setattr(fss, "DIRECT_STREAM_HEARTBEAT_S", 0.05)
+    rt = frs.ConnectorFleetRuntime()
+    observer = frs._DirectStreamObserver(rt)
+
+    async def slow_serve():
+        await asyncio.sleep(0.3)        # the "build": silent but alive
+        yield b"frame-1"
+        yield b"frame-2"
+
+    got = []
+    assert rt.active_streams == 0
+    async for frame in fss._observe_stream(slow_serve(), observer):
+        assert rt.active_streams == 1
+        assert rt.stream_activity_age_s() < 0.2   # heartbeats kept it fresh
+        got.append(frame)
+    assert got == [b"frame-1", b"frame-2"]
+    assert rt.active_streams == 0
+
+    # consumer disconnects mid-build: inner generator closed, count restored
+    closed = []
+
+    async def build_forever():
+        try:
+            await asyncio.sleep(60)
+            yield b"never"
+        finally:
+            closed.append(True)
+
+    agen = fss._observe_stream(build_forever(), observer)
+    first = asyncio.ensure_future(agen.__anext__())
+    await asyncio.sleep(0.15)
+    assert rt.active_streams == 1
+    first.cancel()
+    with __import__("contextlib").suppress(BaseException):
+        await first
+    await agen.aclose()
+    assert closed == [True]
+    assert rt.active_streams == 0
+
+
+async def test_relay_serves_are_not_double_counted(monkeypatch):
+    from types import SimpleNamespace
+    from tools.network import fleet_sync_scheduler as fss
+
+    calls = []
+    observer = SimpleNamespace(begin=lambda: calls.append("b"), touch=lambda: None,
+                               end=lambda: calls.append("e"))
+    sched = SimpleNamespace(stream_observer=observer)
+
+    async def gen():
+        yield b"x"
+
+    relay = fss.FleetSyncScheduler._observed(sched, gen(), "relay")
+    assert [f async for f in relay] == [b"x"] and calls == []
+    direct = fss.FleetSyncScheduler._observed(sched, gen(), "direct")
+    assert [f async for f in direct] == [b"x"] and calls == ["b", "e"]

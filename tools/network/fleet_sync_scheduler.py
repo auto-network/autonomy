@@ -1082,6 +1082,50 @@ class SQLiteFleetSyncStore:
 #: full checkpoint and still failed (mirrors the relay redelivery guard).
 CHECKPOINT_FAILURE_BACKOFF_S = 600.0
 
+#: While a direct serve is silent (a checkpoint build sends nothing for
+#: minutes), the observer is touched this often so the supervisor's
+#: activity window sees a LIVE stream, not a stuck counter.
+DIRECT_STREAM_HEARTBEAT_S = 10.0
+
+
+async def _observe_stream(stream, observer):
+    """Yield *stream*'s frames while reporting begin/touch/end to *observer*.
+
+    ``touch`` fires on every frame AND every DIRECT_STREAM_HEARTBEAT_S of
+    silence while the inner stream is still working (the build phase), so
+    activity age stays fresh for as long as the serve is genuinely alive.
+    Consumer cancellation (the peer disconnected) cancels the pending inner
+    step and closes the inner generator; ``end`` always fires exactly once.
+    """
+    observer.begin()
+    iterator = stream.__aiter__()
+    pending = None
+    try:
+        while True:
+            pending = asyncio.ensure_future(iterator.__anext__())
+            while True:
+                try:
+                    frame = await asyncio.wait_for(
+                        asyncio.shield(pending), DIRECT_STREAM_HEARTBEAT_S
+                    )
+                    break
+                except asyncio.TimeoutError:
+                    observer.touch()
+                except StopAsyncIteration:
+                    pending = None
+                    return
+            pending = None
+            observer.touch()
+            yield frame
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
+            with contextlib.suppress(BaseException):
+                await pending
+        with contextlib.suppress(BaseException):
+            await stream.aclose()
+        observer.end()
+
 
 async def _install_personal_handoff(installer, stage: Path, source_machine_pub: str) -> None:
     """Run the service installer for a direct-path personal checkpoint and
@@ -1151,6 +1195,13 @@ class FleetSyncScheduler:
         #: pauses this scheduler, quiesces, installs, and resumes -- the same
         #: path the relay puller uses. None (connector, tests) installs inline.
         self.personal_checkpoint_installer = None
+        #: Optional ``begin()/touch()/end()`` observer for DIRECT-path serves
+        #: (the connector installs one). It is how a serving connector's
+        #: supervisor learns a direct stream is live: relay streams already
+        #: count in the connector's active_streams, direct ones did not, and
+        #: the currency watchdog recycled a connector 61s into SJC's 2.27 GB
+        #: direct autonomy build -- twice (2026-09-06 20:18Z).
+        self.stream_observer = None
 
     @property
     def port(self) -> int:
@@ -1596,7 +1647,7 @@ class FleetSyncScheduler:
                             **stats,
                         )
 
-        return response()
+        return self._observed(response(), telemetry_channel)
 
     def _blob_response(self, message: bytes, peer_pub: str):
         """Serve requested attachment objects in bounded chunk frames."""
@@ -1620,7 +1671,16 @@ class FleetSyncScheduler:
                     return
                 yield frame
 
-        return response()
+        return self._observed(response(), telemetry_channel)
+
+    def _observed(self, stream, telemetry_channel: str):
+        """Wrap a direct-path serve stream with the stream observer, if any.
+        Relay serves count themselves in the connector runtime; wrapping
+        them too would double-count."""
+        observer = self.stream_observer
+        if observer is None or telemetry_channel != "direct":
+            return stream
+        return _observe_stream(stream, observer)
 
     async def _install_direct_checkpoint(
         self, stage: Path, scope: str, source_machine_pub: str, epoch: str
