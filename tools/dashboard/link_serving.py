@@ -1105,8 +1105,10 @@ def make_grant_handler(org: str | None = None, *, now=None):
             return REFUSED
 
     async def _fleet_sync(token: str, request: dict):
+        from tools.network.fleet_route import FLEET_SYNC_TARGET_TYPES
+
         grant = await asyncio.to_thread(check_grant, token, org=org, now=clock())
-        if grant is None or grant["target_type"] != "fleet:join":
+        if grant is None or grant["target_type"] not in FLEET_SYNC_TARGET_TYPES:
             return REFUSED
         try:
             from tools.network.fleet_relay_sync import connector_runtime

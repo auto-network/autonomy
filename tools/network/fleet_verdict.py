@@ -107,6 +107,52 @@ def _data_check(org: str | None) -> dict:
         return {"detail": f"could not read local store: {exc!r}"}
 
 
+def _direct_check() -> dict:
+    """The direct tier, as THIS process sees it: what the machine-local
+    fleet-direct row asks for, what the listener actually bound, what was
+    last announced to the registry, and which roster peers resolved to a
+    dialable address. ``enabled`` false with a loopback/ephemeral bind is
+    the historical default -- every pull rides the relay."""
+    out: dict = {}
+    try:
+        from tools.network import fleet_direct_config
+
+        cfg = fleet_direct_config.load()
+        out.update({
+            "enabled": cfg.enabled,
+            "listen_host": cfg.listen_host,
+            "listen_port": cfg.listen_port,
+            "advertise_addrs": list(cfg.advertise_addrs),
+        })
+    except Exception as exc:
+        out["detail"] = f"could not read fleet-direct config: {exc!r}"
+    try:
+        from tools.network.fleet_sync_scheduler import dashboard_fleet_sync_service
+
+        scheduler = dashboard_fleet_sync_service.scheduler
+        out["listener_bound_port"] = (
+            scheduler.port if scheduler is not None and scheduler.running else None
+        )
+    except Exception:
+        out["listener_bound_port"] = None
+    try:
+        from tools.dashboard import fleet_enrollment_routes as fer
+
+        cache = fer._reachability_cache
+        if cache is not None:
+            peers = cache.snapshot()
+            out["announced"] = cache.last_announce is not None
+            out["discovered_peers"] = {
+                pub[:12]: list(addrs) for pub, addrs in peers.items()
+            }
+        else:
+            out["announced"] = False
+            out["discovered_peers"] = {}
+    except Exception:
+        pass
+    return out
+
+
 def compute_verdict(org: str | None = None) -> dict:
     """Everything fleet_doctor's top line and /api/fleet/status need,
     in one call. org=None is the personal/scopeless sync scope."""
@@ -115,6 +161,7 @@ def compute_verdict(org: str | None = None) -> dict:
     cred = _cred_check(org)
     last_pull = _last_pull_check()
     data = _data_check(org)
+    direct = _direct_check()
 
     stale = connector_version.get("status") == "stale" \
         or dashboard_version.get("status") == "stale"
@@ -137,4 +184,5 @@ def compute_verdict(org: str | None = None) -> dict:
         "credential": cred,
         "last_pull": last_pull,
         "data": data,
+        "direct": direct,
     }

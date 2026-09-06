@@ -1941,7 +1941,10 @@ async def viewer_endpoint(
     try:
         relay_channel = tunnel.add_viewer(
             channel_id, websocket, abuse_lease=abuse_lease,
-            exempt_bytes=link.target_type == "fleet:join",
+            # Fleet sync traffic (the invitation link during bootstrap, a
+            # machine's standing fleet:sync afterwards) is roster-peer
+            # bulk, not viewer traffic; the byte-rate lease does not apply.
+            exempt_bytes=link.target_type in ("fleet:join", "fleet:sync"),
         )
     except Exception:
         if abuse_lease is not None:
