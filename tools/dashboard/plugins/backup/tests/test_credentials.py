@@ -98,6 +98,18 @@ def test_newline_only_password_is_unsealed(vault):
     assert env is None and status == C.STATUS_UNSEALED
 
 
+def test_offsite_env_refreshes_the_request_path_cache(vault):
+    """Request handlers read cached_status only (vault decrypt stalled
+    the event loop, 2026-09-06); every offsite_env call refreshes it."""
+    C._cached_status["status"] = None
+    assert C.cached_status() is None
+    C.offsite_env(CONFIG)
+    assert C.cached_status() == C.STATUS_OK
+    vault["warm"] = False
+    C.offsite_env(CONFIG)
+    assert C.cached_status() == C.STATUS_VAULT_COLD
+
+
 def test_config_schema_carries_provider_and_bucket():
     from tools.graph.schemas.registry import validate_payload
     from tools.dashboard.plugins.backup.entrypoints import schemas as S

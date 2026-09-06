@@ -49,6 +49,19 @@ STATUS_UNSEALED = "unsealed"
 STATUS_DISABLED = "disabled"
 STATUS_UNCONFIGURED = "unconfigured"
 
+#: Last status offsite_env() computed, for request-path readers. Vault
+#: reads decrypt — seconds of synchronous crypto — so a request handler
+#: must NEVER call offsite_env directly (it stalled the event loop and
+#: every queued request with it, found live 2026-09-06 as 15s summary
+#: responses). The deriver cycle refreshes this every ~2 minutes.
+_cached_status: dict = {"status": None}
+
+
+def cached_status() -> str | None:
+    """The most recent offsite_env status — no vault touch, no crypto.
+    None until the first background cycle has run."""
+    return _cached_status["status"]
+
 
 def offsite_env(config: dict | None = None) -> tuple[dict | None, str]:
     """(environment for the capture/drill subprocess, status).
@@ -56,7 +69,17 @@ def offsite_env(config: dict | None = None) -> tuple[dict | None, str]:
     The environment is complete (provider + bucket + all three secrets)
     or ``None`` — a partial credential set must not reach restic, where
     it would fail with a misleading provider error.
+
+    Call ONLY from background threads (the deriver cycle, the drill
+    runner): the sealed reads decrypt, which costs seconds. Request
+    handlers read :func:`cached_status`.
     """
+    env, status = _offsite_env(config)
+    _cached_status["status"] = status
+    return env, status
+
+
+def _offsite_env(config: dict | None = None) -> tuple[dict | None, str]:
     from tools.graph import settings_ops
     from tools.graph.schemas.vault_credential import VAULT_AUDITED_SET_ID
 
