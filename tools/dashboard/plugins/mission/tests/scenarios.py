@@ -155,20 +155,19 @@ def full() -> Store:
            {"by": "auto-relay", "at": _t(9),
             "text": "Reconnect fixed; rerunning the flow."})
 
-    # bead payload (bridge output shape)
+    # bead payload (bridge SUMMARY shape — the screen carries no
+    # description, close reason or comments; the jsdom harness serves
+    # those from a stubbed /api/mission/tasks/<m>/detail, see
+    # TASK_DETAIL below)
     st.beads = {"relay": [
         {"id": "auto-run1", "title": "Distinct close codes",
-         "state": "running", "desc": "## Spec\n- code table", "deps": [],
-         "comments": [{"by": "terminal:auto-relay", "at": _t(15),
-                       "text": "clarified in chat"}]},
+         "state": "running", "deps": [], "comment_count": 1},
         {"id": "auto-done1", "title": "Tunnel routing",
-         "state": "complete", "desc": "", "evidence": "landed abc123",
-         "deps": []},
+         "state": "complete", "deps": []},
         {"id": "auto-spec1", "title": "Vault the serving key",
-         "state": "specified", "desc": "", "deps": ["auto-run1"]},
+         "state": "specified", "deps": ["auto-run1"]},
         {"id": "auto-epic1", "title": "Relay epic",
-         "state": "defined", "epic": True, "desc": "",
-         "deps": ["auto-run1", "auto-spec1"]},
+         "state": "defined", "epic": True, "deps": ["auto-run1", "auto-spec1"]},
     ]}
     return st
 
@@ -179,3 +178,19 @@ def empty() -> Store:
     st.put(S.MISSION_SET_ID, MID, {"name": "Empty Mission"})
     st.put(S.PILLAR_SET_ID, f"{MID}:solo", {"name": "Solo Pillar"})
     return st
+
+
+
+#: What the detail route answers for the full scenario's beads — the
+#: jsdom harness installs it as window.fetch so the lazy task sheet and
+#: criterion close reasons are exercised without a server.
+TASK_DETAIL = {
+    "auto-run1": {"id": "auto-run1", "title": "Distinct close codes",
+                  "state": "running", "deps": [], "comment_count": 1,
+                  "desc": "## Spec\n- code table", "evidence": "",
+                  "comments": [{"by": "terminal:auto-relay", "at": _t(15),
+                                "text": "clarified in chat"}]},
+    "auto-done1": {"id": "auto-done1", "title": "Tunnel routing",
+                   "state": "complete", "deps": [], "desc": "",
+                   "evidence": "landed abc123", "comments": []},
+}

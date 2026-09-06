@@ -742,9 +742,28 @@
       var b3 = el("div","body3"); mdInto(b3, it.body); body.appendChild(b3);
     }
     var evs = (it.evidence || []);
-    var beadEv = linked.filter(function (b) { return b.state === "complete" && b.evidence; });
-    if (evs.length || beadEv.length){
-      body.appendChild(el("div","sh3","Evidence"));
+    var doneBeads = linked.filter(function (b) { return b.state === "complete"; });
+    var evHead = null, evHost = el("div","evhost");
+    function evHeader(){
+      if (!evHead){ evHead = el("div","sh3","Evidence"); body.insertBefore(evHead, evHost); }
+    }
+    body.appendChild(evHost);
+    function renderBeadEv(){
+      doneBeads.forEach(function (b) {
+        if (!b.evidence || b._evShown) return;
+        b._evShown = true;
+        evHeader();
+        var e3 = el("div","evblock");
+        e3.appendChild(el("div","evprov", b.id + " \u00b7 close reason"));
+        var tx2 = el("div","body3");
+        tx2.appendChild(document.createTextNode(b.evidence));
+        e3.appendChild(tx2);
+        evHost.appendChild(e3);
+      });
+    }
+    doneBeads.forEach(function (b) { b._evShown = false; });
+    if (evs.length){
+      evHeader();
       evs.forEach(function (e2) {
         var entry = (typeof e2 === "string") ? {text: e2} : (e2 || {});
         var e4 = el("div","evblock");
@@ -763,17 +782,13 @@
         }
         var tx = el("div","body3"); mdInto(tx, entry.text || "");
         e4.appendChild(tx);
-        body.appendChild(e4);
-      });
-      beadEv.forEach(function (b) {
-        var e3 = el("div","evblock");
-        e3.appendChild(el("div","evprov", b.id + " \u00b7 close reason"));
-        var tx2 = el("div","body3");
-        tx2.appendChild(document.createTextNode(b.evidence));
-        e3.appendChild(tx2);
-        body.appendChild(e3);
+        evHost.appendChild(e4);
       });
     }
+    renderBeadEv();
+    loadTaskDetail(doneBeads, function (ok) {
+      if (ok && page.isConnected) renderBeadEv();
+    });
     if (linked.length){
       body.appendChild(el("div","sh3","Tasks"));
       linked.forEach(function (b) {
@@ -840,20 +855,24 @@
       b.state + " \u00b7 " + b.id
       + (b.epic ? " \u00b7 final acceptance for this pillar" : "")));
     body.appendChild(meta);
-    if (b.desc){
-      body.appendChild(el("div","sh3","Specification"));
-      var d3 = el("div","body3"); mdInto(d3, b.desc); body.appendChild(d3);
-    }
-    if (b.evidence){
-      body.appendChild(el("div","sh3","Evidence"));
-      var e3 = el("div","evblock");
-      e3.appendChild(el("div","evprov", "close reason"));
-      var tx = el("div","body3"); mdInto(tx, b.evidence);
-      e3.appendChild(tx);
-      body.appendChild(e3);
-    }
-    if ((b.comments || []).length){
-      body.appendChild(el("div","sh3","Comments"));
+    var det = el("div","tdetail");
+    body.appendChild(det);
+    function fillDetail(){
+      det.textContent = "";
+      if (b.desc){
+        det.appendChild(el("div","sh3","Specification"));
+        var d3 = el("div","body3"); mdInto(d3, b.desc); det.appendChild(d3);
+      }
+      if (b.evidence){
+        det.appendChild(el("div","sh3","Evidence"));
+        var e3 = el("div","evblock");
+        e3.appendChild(el("div","evprov", "close reason"));
+        var tx = el("div","body3"); mdInto(tx, b.evidence);
+        e3.appendChild(tx);
+        det.appendChild(e3);
+      }
+      if (!(b.comments || []).length) return;
+      det.appendChild(el("div","sh3","Comments"));
       b.comments.forEach(function (c) {
         var en = el("div","qe");
         var wh = el("div","qwho");
@@ -868,7 +887,19 @@
         en.appendChild(wh);
         var tx = el("div","qtx"); mdInto(tx, c.text);
         en.appendChild(tx);
-        body.appendChild(en);
+        det.appendChild(en);
+      });
+    }
+    if (detailLoaded(b)) fillDetail();
+    else {
+      det.appendChild(el("div","meta3",
+        "Loading detail" + (b.comment_count
+          ? " \u00b7 " + b.comment_count + " comment"
+            + (b.comment_count === 1 ? "" : "s") : "") + "\u2026"));
+      loadTaskDetail([b], function (ok) {
+        if (!page.isConnected) return;
+        if (ok) fillDetail();
+        else det.textContent = "Task detail unavailable right now.";
       });
     }
     if ((b.deps || []).length){
@@ -1334,6 +1365,36 @@
   function beadById(sid, id){
     var list = beadsFor(sid) || [];
     return list.filter(function (b) { return b.id === id; })[0] || null;
+  }
+
+  // Task DETAIL — the description, a closed bead's close reason, the bd
+  // comments — is not baked into the screen. It is fetched when a sheet
+  // opens and cached on the bead object, so a document with 150 tasks
+  // carries 150 titles, not 150 specifications. A bead that arrived
+  // with its detail (older payloads, fixtures) counts as loaded.
+  function detailLoaded(b){
+    return !!(b && (b._detail || b.desc !== undefined));
+  }
+  function loadTaskDetail(beads, cb){
+    var need = beads.filter(function (b) { return b && !detailLoaded(b); });
+    if (!need.length){ cb(true); return; }
+    if (typeof fetch !== "function"){ cb(false); return; }
+    var ids = need.map(function (b) { return b.id; }).join(",");
+    fetch("/api/mission/tasks/" + MID + "/detail?ids=" + encodeURIComponent(ids))
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) {
+        if (!j) throw new Error("detail unavailable");
+        var got = j.tasks || {};
+        need.forEach(function (b) {
+          var d = got[b.id] || {};
+          b.desc = d.desc || "";
+          b.evidence = d.evidence || "";
+          b.comments = d.comments || [];
+          b._detail = true;
+        });
+        cb(true);
+      })
+      .catch(function () { cb(false); });
   }
 
   function band(color){

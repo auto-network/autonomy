@@ -1,5 +1,5 @@
 """The bead bridge (bridge.py): membership, mapping, ladder, epics,
-comments, and containment when bd is absent or empty.
+the summary/detail split, and containment when bd is absent or empty.
 
 ``_bd`` is stubbed with canned bd JSON; the live path is exercised by
 the CLI coverage verb and, at cutover, the real mission render.
@@ -45,38 +45,67 @@ def test_mapping_ladder_epic_and_deps(monkeypatch):
         _row("a-open"),
         _row("a-spec", acceptance_criteria="must do X"),
         _row("a-run", status="in_progress"),
-        _row("a-done", status="closed", close_reason="landed abc123"),
+        _row("a-done", status="closed", close_reason="landed abc123",
+             comment_count=2),
         _row("a-epic", issue_type="epic",
              labels=[f"mission:{MID}", "pillar:platform-core"],
              dependencies=[{"id": "a-run", "dependency_type": "parent-child"}]),
         _row("a-stray", labels=[f"mission:{MID}", "pillar:unmapped"]),
     ]
-    _stub(monkeypatch, rows, rows)
+    calls = _stub(monkeypatch, rows, rows)
     out = bridge.load_beads(MID, PILLARS)
     relay = {b["id"]: b for b in out["relay"]}
     assert relay["a-open"]["state"] == "defined"
     assert relay["a-spec"]["state"] == "specified"
     assert relay["a-run"]["state"] == "running"
     assert relay["a-done"]["state"] == "complete"
-    assert relay["a-done"]["evidence"] == "landed abc123"
     epic = out["platform"][0]
     assert epic["epic"] is True and epic["deps"] == ["a-run"]
     # unmapped pillar labels are excluded, not misfiled
     assert all("a-stray" != b["id"] for bl in out.values() for b in bl)
     assert "empty" not in out
+    # the SCREEN shape: summary only — no description, no close reason,
+    # no comments; the count says whether a detail fetch has anything
+    assert relay["a-done"]["comment_count"] == 2
+    assert "comment_count" not in relay["a-open"]
+    for b in relay.values():
+        assert not {"desc", "evidence", "comments"} & set(b)
+    # ONE bd invocation for the whole screen: the list. No show, no
+    # per-bead comments — that was the seven-second render.
+    assert [c[0] for c in calls] == ["list"]
 
 
-def test_comments_ride_along_only_when_present(monkeypatch):
-    rows = [_row("a-c", comment_count=1), _row("a-quiet")]
-    calls = _stub(monkeypatch, rows, rows, comments={
+def test_detail_batches_show_and_comments(monkeypatch):
+    rows = [_row("a-c", comment_count=1, description="spec text"),
+            _row("a-quiet"),
+            _row("a-done", status="closed", close_reason="landed abc123"),
+            _row("a-foreign", labels=["mission:other", "pillar:relay-network"])]
+    calls = _stub(monkeypatch, [], rows, comments={
         "a-c": [{"author": "terminal:auto-1", "created_at": "2026-08-24T00:00:00Z",
                  "text": "clarified in chat"}]})
-    out = bridge.load_beads(MID, PILLARS)
-    byid = {b["id"]: b for b in out["relay"]}
-    assert byid["a-c"]["comments"][0]["by"] == "terminal:auto-1"
-    assert "comments" not in byid["a-quiet"]
-    # exactly one comments invocation — the quiet bead cost nothing
+    out = bridge.load_task_detail(
+        MID, ["a-c", "a-quiet", "a-c", " ", "a-done", "a-foreign"])
+    assert out["a-c"]["desc"] == "spec text"
+    assert out["a-c"]["comments"][0]["by"] == "terminal:auto-1"
+    assert out["a-quiet"]["comments"] == [] and out["a-quiet"]["evidence"] == ""
+    assert out["a-done"]["evidence"] == "landed abc123"
+    # a bead outside the mission is not served through it
+    assert "a-foreign" not in out
+    # one show for the batch (ids deduped, blanks dropped), and exactly
+    # one comments invocation — the quiet beads cost nothing
+    shows = [c for c in calls if c[0] == "show"]
+    assert shows == [["show", "a-c", "a-quiet", "a-done", "a-foreign"]]
     assert sum(1 for c in calls if c[0] == "comments") == 1
+
+
+def test_detail_is_bounded_and_empty_safe(monkeypatch):
+    calls = _stub(monkeypatch, [], [])
+    assert bridge.load_task_detail(MID, []) == {}
+    assert bridge.load_task_detail(MID, ["", "  "]) == {}
+    assert calls == []
+    ids = [f"b-{i}" for i in range(bridge.DETAIL_LIMIT + 10)]
+    bridge.load_task_detail(MID, ids)
+    assert len(calls[-1]) - 1 == bridge.DETAIL_LIMIT
 
 
 def test_no_labels_or_no_beads_short_circuits(monkeypatch):
@@ -89,6 +118,7 @@ def test_no_labels_or_no_beads_short_circuits(monkeypatch):
 def test_bd_failure_is_contained(monkeypatch):
     monkeypatch.setattr(bridge, "_bd", lambda args, org=None: None)
     assert bridge.load_beads(MID, PILLARS) == {}
+    assert bridge.load_task_detail(MID, ["a-c"]) == {}
 
 
 def test_beads_env_routes_to_org_tracker(monkeypatch, tmp_path):

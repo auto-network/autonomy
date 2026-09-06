@@ -177,6 +177,26 @@ async def list_tasks(request: Request) -> JSONResponse:
         {"tasks": compose.load_beads(org, mission_id, pillars)})
 
 
+async def task_detail(request: Request) -> JSONResponse:
+    """Detail for the beads a reader opened: ``?ids=a,b,c``.
+
+    The screen bakes only the task summary; description, close reason
+    and bd comments come from here, per sheet. The bd subprocesses run
+    off the event loop so a slow tracker never stalls other requests.
+    """
+    mission_id = request.path_params["mission_id"]
+    ids = [s.strip() for s in (request.query_params.get("ids") or "")
+           .split(",") if s.strip()]
+    org = _owning_org(request, mission_id) if ids else None
+    if not org:
+        return JSONResponse({"tasks": {}})
+    from starlette.concurrency import run_in_threadpool
+    from tools.dashboard.plugins.mission import bridge
+    detail = await run_in_threadpool(
+        bridge.load_task_detail, mission_id, ids, org)
+    return JSONResponse({"tasks": detail})
+
+
 async def get_chat(request: Request) -> JSONResponse:
     """One pillar's chat log: ``{entries: [...]}``."""
     pp = request.path_params
@@ -480,6 +500,8 @@ routes: list = [
     Route("/api/mission/pillars/{mission_id}", list_pillars, methods=["GET"]),
     Route("/api/mission/items/{mission_id}", list_items, methods=["GET"]),
     Route("/api/mission/tasks/{mission_id}", list_tasks, methods=["GET"]),
+    Route("/api/mission/tasks/{mission_id}/detail", task_detail,
+          methods=["GET"]),
     Route("/api/mission/chat/{mission_id}/{pillar_id}", get_chat,
           methods=["GET"]),
     Route(_ITEM, put_item, methods=["PUT"]),

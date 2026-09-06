@@ -8,9 +8,9 @@
 const fs = require("fs");
 const { JSDOM } = require("jsdom");
 
-const [, , docPath, scenario] = process.argv;
+const [, , docPath, scenario, detailPath] = process.argv;
 if (!docPath || !scenario) {
-  console.error("usage: mission_viewer.cjs <document.html> <scenario>");
+  console.error("usage: mission_viewer.cjs <document.html> <scenario> [task-detail.json]");
   process.exit(2);
 }
 
@@ -34,6 +34,22 @@ const dom = new JSDOM(html, {
 const { window } = dom;
 const { document } = window;
 
+// The screen bakes only task summaries; the viewer fetches a task's
+// description / close reason / comments from the detail route when a
+// sheet opens. jsdom has no fetch, so the harness serves the scenario's
+// canned detail and records what was asked for.
+const DETAIL = detailPath ? JSON.parse(fs.readFileSync(detailPath, "utf8")) : {};
+const fetched = [];
+window.fetch = (url) => {
+  fetched.push(String(url));
+  const m = /\/api\/mission\/tasks\/[^/]+\/detail\?ids=(.*)$/.exec(String(url));
+  if (!m) return Promise.resolve({ok: false, json: () => Promise.resolve({})});
+  const tasks = {};
+  decodeURIComponent(m[1]).split(",").forEach((id) => { if (DETAIL[id]) tasks[id] = DETAIL[id]; });
+  return Promise.resolve({ok: true, json: () => Promise.resolve({tasks})});
+};
+const tick = () => new Promise((r) => setTimeout(r, 0));
+
 function openPillar(name) {
   document.getElementById("tab-pillars").click();
   const btn = document.querySelector(".mc-psel-btn");
@@ -45,7 +61,7 @@ function openPillar(name) {
 }
 
 const SCENARIOS = {
-  full() {
+  async full() {
     // ── chrome: the five mission tabs ──
     check("top tabs", texts(document, ".mc-tabs button").join("|") ===
       "Activity|Pillars|Blockers|Feed|Chat");
@@ -127,15 +143,44 @@ const SCENARIOS = {
       (r) => r.textContent.includes("auto-run1"));
     beadRow.click();
     page = document.getElementById("mc-critpage");
+    // the sheet opens at once from the summary; detail is on its way
+    check("task page opens before detail arrives",
+      page.querySelector(".hd3").textContent.includes("Distinct close codes")
+      && page.querySelector(".tdetail").textContent.includes("Loading detail")
+      && page.querySelector(".tdetail").textContent.includes("1 comment"));
+    check("task pager", page.querySelector(".cpos").textContent
+      .startsWith("task"));
+    await tick(); await tick();
+    check("detail fetched for the opened task only",
+      fetched.some((u) => /\/api\/mission\/tasks\/.+\/detail\?ids=auto-run1$/.test(u)));
     check("task page sections",
       texts(page, ".sh3").join("|").includes("Specification") &&
       texts(page, ".sh3").join("|").includes("Comments"));
     check("bd comment attributed",
       page.textContent.includes("clarified in chat") &&
       !page.textContent.includes("terminal:"));
-    check("task pager", page.querySelector(".cpos").textContent
-      .startsWith("task"));
     page.remove();
+    // reopening costs nothing: the detail is cached on the bead
+    const before = fetched.length;
+    beadRow.click();
+    page = document.getElementById("mc-critpage");
+    check("cached detail renders synchronously",
+      texts(page, ".sh3").join("|").includes("Specification")
+      && fetched.length === before);
+    page.remove();
+
+    // ── criterion page: a linked closed bead's close reason loads lazily ──
+    v._showSection("Delivery");
+    const critDone = Array.from(v.querySelectorAll(".mc-crit")).find(
+      (r) => r.textContent.includes("revoked machine"));
+    critDone.click();
+    page = document.getElementById("mc-critpage");
+    check("close reason not baked", !page.textContent.includes("landed abc123"));
+    await tick(); await tick();
+    check("close reason arrives from detail route",
+      page.textContent.includes("landed abc123")
+      && texts(page, ".sh3").includes("Evidence"));
+    page.querySelector(".cback").click();
 
     // ── questions: three-way legend, blocking first + stop icon ──
     v._showSection("Questions");
@@ -282,14 +327,13 @@ if (!run) {
   console.error("unknown scenario: " + scenario);
   process.exit(2);
 }
-try {
-  run();
-} catch (err) {
+Promise.resolve().then(() => run()).catch((err) => {
   failures += 1;
   console.error("FAIL (exception): " + (err && err.stack || err));
-}
-if (failures) {
-  console.error(failures + " assertion(s) failed");
-  process.exit(1);
-}
-console.log("PASS " + scenario);
+}).then(() => {
+  if (failures) {
+    console.error(failures + " assertion(s) failed");
+    process.exit(1);
+  }
+  console.log("PASS " + scenario);
+});

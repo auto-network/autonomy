@@ -12,14 +12,20 @@ derives the per-pillar task lists the viewer bakes in:
   ``in_progress`` → running (the visible proxy for approved-for-
   dispatch), design or acceptance criteria filled → specified, else
   defined;
-* an epic (``issue_type: epic``) is the pillar's final-acceptance task;
-* the bead's conversation — bd comments — rides along, so chat-born
-  clarifications recorded with ``bd comment`` render on the task page.
+* an epic (``issue_type: epic``) is the pillar's final-acceptance task.
 
-Two batched ``bd`` invocations per render (list, then show for the
-detail fields the list omits), plus one comments call per bead that
-actually has comments.
+Two payloads, two costs. The SCREEN carries only what its lists and
+arcs read — id, title, ladder state, dependency ids, the epic flag and
+a comment count — from ONE batched ``bd list`` (which already returns
+every issue field). Everything a reader opens a task to see — the
+description, a closed bead's close reason, the bd comments — is the
+DETAIL, fetched per task from ``/api/mission/tasks/<m>/detail`` when a
+sheet opens. Before this split the render ran ``bd show`` over every
+id (linear, and each dependency inlined whole) plus one ``bd comments``
+subprocess per commented bead: seven to nine seconds and 300KB baked
+into the document for a 158-bead mission, almost none of it ever read.
 """
+
 from __future__ import annotations
 
 import json
@@ -29,7 +35,7 @@ import subprocess
 from tools.data_paths import beads_client_env, org_beads_dir
 
 _TIMEOUT_S = 30
-_DESC_LIMIT = 1400
+_DESC_LIMIT = 8000
 
 
 def _beads_env(org: str | None) -> dict:
@@ -73,9 +79,34 @@ def _trim(text: str) -> str:
     return text[:_DESC_LIMIT].rsplit("\n", 1)[0] + "\n…"
 
 
+def _pillar_of(row: dict, label_map: dict[str, str]) -> str | None:
+    return next((label_map[lb] for lb in row.get("labels") or []
+                 if lb in label_map), None)
+
+
+def _summary(row: dict) -> dict:
+    """The screen's view of one bead — what lists, arcs and ranks read."""
+    task = {
+        "id": row["id"],
+        "title": row.get("title") or "",
+        "state": _ladder(row),
+        "deps": [d.get("id") for d in row.get("dependencies") or []
+                 if isinstance(d, dict) and d.get("id")],
+    }
+    if row.get("issue_type") == "epic":
+        task["epic"] = True
+    if row.get("comment_count"):
+        task["comment_count"] = int(row["comment_count"])
+    return task
+
+
 def load_beads(mission_id: str, pillars: list[dict],
                org: str | None = None) -> dict[str, list[dict]]:
-    """``{pillar_id: [task, ...]}`` for every pillar with mapped beads."""
+    """``{pillar_id: [task, ...]}`` for every pillar with mapped beads.
+
+    One ``bd list`` — its rows already carry every issue field, so no
+    per-bead follow-up is needed for the summary shape.
+    """
     label_map: dict[str, str] = {}
     for p in pillars:
         for lb in p.get("bead_labels") or []:
@@ -86,37 +117,68 @@ def load_beads(mission_id: str, pillars: list[dict],
                org=org)
     if not isinstance(rows, list) or not rows:
         return {}
-    ids = [r["id"] for r in rows if r.get("id")]
-    full_rows = _bd(["show", *ids], org=org) or []
-    if isinstance(full_rows, dict):
-        full_rows = [full_rows]
-    full = {r["id"]: r for r in full_rows if isinstance(r, dict) and r.get("id")}
-
     out: dict[str, list[dict]] = {}
     for row in rows:
-        detail = full.get(row.get("id")) or row
-        pillar_id = next(
-            (label_map[lb] for lb in detail.get("labels") or []
-             if lb in label_map), None)
+        if not isinstance(row, dict) or not row.get("id"):
+            continue
+        pillar_id = _pillar_of(row, label_map)
         if pillar_id is None:
             continue
-        task = {
-            "id": detail["id"],
-            "title": detail.get("title") or "",
-            "state": _ladder(detail),
-            "desc": _trim(detail.get("description") or ""),
-            "evidence": (detail.get("close_reason") or "").strip()
-                        if detail.get("status") == "closed" else "",
-            "deps": [d.get("id") for d in detail.get("dependencies") or []
-                     if isinstance(d, dict) and d.get("id")],
-        }
-        if detail.get("issue_type") == "epic":
-            task["epic"] = True
-        if detail.get("comment_count"):
-            comments = _bd(["comments", detail["id"]], org=org) or []
-            task["comments"] = [
-                {"by": c.get("author") or "", "at": c.get("created_at") or "",
-                 "text": c.get("text") or ""}
-                for c in comments if isinstance(c, dict)]
-        out.setdefault(pillar_id, []).append(task)
+        out.setdefault(pillar_id, []).append(_summary(row))
+    return out
+
+
+#: Detail requests are bounded: a sheet opens one task, a criterion page
+#: a handful of linked beads. Anything larger is a screen, not a detail.
+DETAIL_LIMIT = 40
+
+
+def load_task_detail(mission_id: str, bead_ids: list[str],
+                     org: str | None = None) -> dict[str, dict]:
+    """``{bead_id: detail}`` for the beads a reader opened.
+
+    Membership is re-checked against the mission label so the route
+    cannot be used to read arbitrary beads through a mission it names.
+    One ``bd show`` for the batch, then ``bd comments`` — concurrently —
+    for the beads that actually have comments.
+    """
+    ids = []
+    for bid in bead_ids:
+        bid = (bid or "").strip()
+        if bid and bid not in ids:
+            ids.append(bid)
+    ids = ids[:DETAIL_LIMIT]
+    if not ids:
+        return {}
+    rows = _bd(["show", *ids], org=org)
+    if isinstance(rows, dict):
+        rows = [rows]
+    if not isinstance(rows, list):
+        return {}
+    wanted = f"mission:{mission_id}"
+    rows = [r for r in rows if isinstance(r, dict) and r.get("id") in ids
+            and wanted in (r.get("labels") or [])]
+
+    def _comments(bid: str) -> list[dict]:
+        got = _bd(["comments", bid], org=org) or []
+        return [
+            {"by": c.get("author") or "", "at": c.get("created_at") or "",
+             "text": c.get("text") or ""}
+            for c in got if isinstance(c, dict)]
+
+    commented = [r["id"] for r in rows if r.get("comment_count")]
+    comments: dict[str, list[dict]] = {}
+    if commented:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(8, len(commented))) as ex:
+            for bid, got in zip(commented, ex.map(_comments, commented)):
+                comments[bid] = got
+    out: dict[str, dict] = {}
+    for r in rows:
+        detail = _summary(r)
+        detail["desc"] = _trim(r.get("description") or "")
+        detail["evidence"] = ((r.get("close_reason") or "").strip()
+                              if r.get("status") == "closed" else "")
+        detail["comments"] = comments.get(r["id"], [])
+        out[r["id"]] = detail
     return out
