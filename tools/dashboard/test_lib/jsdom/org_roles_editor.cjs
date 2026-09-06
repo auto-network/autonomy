@@ -195,11 +195,14 @@ async function main() {
     m.w.document.querySelector('[data-tab="roles"]').click();
     await settle();
     const p = m.w.document.querySelector('.org-membership');
-    assert.ok(p.querySelector('[data-action="starter-roles"]'));
+    assert.match(p.querySelector('[data-action="starter-roles"]').textContent, /Add the member role/);
     p.querySelector('[data-action="starter-roles"]').click();
     await settle(); await settle(); await settle(); await settle();
-    assert.deepEqual(m.ceremony.defines.map((d) => d.name), ['member', 'admin']);
-    assert.deepEqual(arr(m.ceremony.defines[1].scopeSet), ['invite:member', 'role:grant:member', 'link:publish', 'link:revoke']);
+    // The starter action signs exactly the ruled set: Member alone today.
+    assert.deepEqual(m.ceremony.defines.map((d) => d.name), ['member']);
+    assert.deepEqual(arr(m.ceremony.defines[0].scopeSet), []);
+    assert.equal(m.ceremony.defines[0].claimRequires, 'admin-ack');
+    assert.equal(m.ceremony.defines[0].approverThreshold, 1);
     // With one inviteable role the picker hides but the sentence is composed.
     m.w.document.querySelector('[data-tab="invites"]').click();
     await settle();
