@@ -63,6 +63,37 @@
   function roleWord(roles) {
     return (roles || []).map(function (role) { return ROLE_WORDS[role] || role; }).join(' · ');
   }
+  // The scope catalog (static/js/scope-catalog.js) names every enforced
+  // scope in plain words; a scope it does not know renders raw, never hidden.
+  function catalog() { return window.AutonomyScopeCatalog || null; }
+  function describeScope(scope) {
+    if (SCOPE_WORDS[scope]) return { scope: scope, label: SCOPE_WORDS[scope], unknown: false };
+    var cat = catalog();
+    return cat ? cat.describeScope(scope) : { scope: scope, label: scope, unknown: true };
+  }
+  function scopeLabel(scope) { var d = describeScope(scope); return d.unknown ? scope : d.label; }
+  // Recommended starter set (roles design R-S1); an operator ruling or a
+  // Setting can replace it by assigning window.AutonomyStarterRoles.
+  var STARTER_ROLES = window.AutonomyStarterRoles || [
+    { name: 'member', scopeSet: [], claimRequires: 'admin-ack', approverThreshold: 1 },
+    { name: 'admin', scopeSet: ['invite:member', 'role:grant:member', 'link:publish', 'link:revoke'],
+      claimRequires: 'admin-ack', approverThreshold: 1 },
+  ];
+  // jsdom seam: tests replace the ceremonies (which need a real root and
+  // real modules) without touching the rendering they assert on.
+  function hooks() { return window.AutonomyMembershipTestHooks || {}; }
+  // Coverage order of the scope lattice (scopes.py pattern_covers), so the
+  // editor can say what a narrower version takes away from holders.
+  function covers(parent, child) {
+    if (parent === '*') return true;
+    if (parent.slice(-2) === ':*') return child.indexOf(parent.slice(0, -1)) === 0 || child === parent;
+    return child === parent;
+  }
+  function lostScopes(oldSet, newSet) {
+    return (oldSet || []).filter(function (scope) {
+      return !(newSet || []).some(function (p) { return covers(p, scope); });
+    });
+  }
 
   function Controller(slug, root, view) {
     this.slug = slug;
@@ -83,6 +114,9 @@
     this.busy = null;
     this.error = '';
     this.readyClaims = {};
+    this.roleStep = null;      // null | 'define' | 'version'
+    this.roleDraft = null;     // {name, scopes, requires, threshold, baseVersion, baseScopes}
+    this.mintRole = null;      // the picker's current choice
   }
 
   Controller.prototype.liveInvites = function () {
@@ -137,9 +171,23 @@
     }).length;
   };
   function scopeSummary(role) {
-    return (role.scope_set || []).map(function (scope) {
-      return SCOPE_WORDS[scope] || scope;
-    }).join(', ');
+    if (!(role.scope_set || []).length) return 'No organization authority';
+    return (role.scope_set || []).map(scopeLabel).join(', ');
+  }
+  function scopeChipsHtml(scopes) {
+    if (!(scopes || []).length) return '<span class="mem-cap mem-cap-none">No organization authority</span>';
+    return scopes.map(function (scope) {
+      var d = describeScope(scope);
+      return d.unknown
+        ? '<span class="mem-cap mono" title="Not in the catalog">' + esc(scope) + '</span>'
+        : '<span class="mem-cap" title="' + esc(scope) + '">' + esc(d.label) + '</span>';
+    }).join('');
+  }
+  function joinSentence(role) {
+    if (role.claim_requires === 'self') return 'Joins immediately on a direct invitation.';
+    if (role.claim_requires === 'sponsor') return 'Joins once the inviter approves.';
+    var n = role.approver_threshold || 1;
+    return 'Joins after ' + n + (n === 1 ? ' approval.' : ' approvals.');
   }
   function joinPolicyLine(role) {
     if (role.claim_requires === 'self') return 'A direct invitation admits immediately';
@@ -213,7 +261,7 @@
           + '</dl><div class="mem-detail-actions">'
           + '<button type="button" class="mem-secondary" data-action="message">Message</button>'
           + '<button type="button" class="mem-secondary" data-action="profile">View profile</button>'
-          + '</div></div>';
+          + '</div>' + self.roleActionsHtml(member) + '</div>';
       }
       return '<div><div class="mem-trow" role="button" tabindex="0" data-member="' + esc(member.persona) + '">'
         + avatarHtml(member, name, member.online)
@@ -285,12 +333,42 @@
     return html;
   };
 
+  Controller.prototype.inviteableRoles = function () {
+    return (this.view.role_defs || []).filter(function (role) {
+      return role.minter_may_invite !== false;
+    });
+  };
+  Controller.prototype.defaultMintRole = function () {
+    var roles = this.inviteableRoles();
+    if (!roles.length) return null;
+    return roles.slice().sort(function (a, b) {
+      var sa = (a.scope_set || []).length, sb = (b.scope_set || []).length;
+      // "*" outranks any list; then fewer capabilities first; then name.
+      var wa = (a.scope_set || []).indexOf('*') !== -1 ? 1e6 : sa;
+      var wb = (b.scope_set || []).indexOf('*') !== -1 ? 1e6 : sb;
+      return wa - wb || a.name.localeCompare(b.name);
+    })[0].name;
+  };
+  function authoritySentence(role, soleRole) {
+    var name = roleWord([role.name]);
+    var caps = role.scope_set || [];
+    var what = caps.indexOf('*') !== -1
+      ? name + ': full authority' + (soleRole ? ' — the only role this organization defines today' : '') + '.'
+      : caps.length
+        ? name + ': ' + caps.map(scopeLabel).join(', ').toLowerCase() + '.'
+        : name + ': no organization authority.';
+    return 'This invitation grants ' + what + ' ' + joinSentence(role);
+  }
   Controller.prototype.mintFormHtml = function () {
-    var roles = this.view.role_defs || [];
+    var roles = this.inviteableRoles();
     var only = roles.length === 1 ? roles[0] : null;
-    var authority = only && only.scope_set && only.scope_set.indexOf('*') !== -1
-      ? 'This invitation grants full ' + roleWord([only.name]).toLowerCase() + ' authority — the only role this organization defines today.'
-      : 'This invitation grants the selected role.';
+    if (!this.mintRole || !roles.some(function (r) { return r.name === this.mintRole; }, this)) {
+      this.mintRole = this.defaultMintRole();
+    }
+    var chosen = roles.find(function (r) { return r.name === this.mintRole; }, this) || only;
+    var authority = chosen
+      ? authoritySentence(chosen, (this.view.role_defs || []).length === 1)
+      : 'You hold no authority to invite for any role this organization defines.';
     var html = '<div class="mem-section"><div class="mem-panel">'
       + '<h3>Invite someone to this organization</h3>'
       + '<p>' + esc(authority) + ' Whoever opens the link can ask to join; you approve each request before they become a member.</p>'
@@ -298,10 +376,12 @@
       + '<label for="mem-label" style="margin-top:0">Name this invitation</label>'
       + '<input id="mem-label" type="text" maxlength="80" data-mint-label value="' + esc(this.mintLabel) + '" placeholder="Dean\'s invite">'
       + '</div>';
-    if (!only) {
+    if (roles.length > 1) {
+      var current = this.mintRole;
       html += '<label for="mem-role">Role</label><select id="mem-role" data-mint-role>';
       roles.forEach(function (role) {
-        html += '<option value="' + esc(role.name) + '">' + esc(roleWord([role.name])) + '</option>';
+        html += '<option value="' + esc(role.name) + '"' + (role.name === current ? ' selected' : '') + '>'
+          + esc(roleWord([role.name])) + '</option>';
       });
       html += '</select>';
     }
@@ -349,14 +429,129 @@
       + '</div></div></div>';
   };
 
+  Controller.prototype.roleActionsHtml = function (member) {
+    var self = this;
+    var grantable = (this.view.role_defs || []).filter(function (role) { return role.viewer_may_grant; });
+    if (!grantable.length) return '';
+    var held = member.roles || [];
+    var html = '<div class="mem-detail-actions" style="margin-top:.45rem;flex-wrap:wrap">';
+    grantable.forEach(function (role) {
+      var has = held.indexOf(role.name) !== -1;
+      var key = (has ? 'revoke:' : 'grant:') + member.persona + ':' + role.name;
+      html += '<button type="button" class="mem-secondary" data-action="' + (has ? 'revoke-role' : 'grant-role') + '"'
+        + ' data-role-name="' + esc(role.name) + '" data-persona="' + esc(member.persona) + '"'
+        + (self.busy === key ? ' disabled' : '') + '>'
+        + (self.busy === key ? (has ? 'Revoking ' : 'Granting ') : (has ? 'Revoke ' : 'Grant ')) + esc(roleWord([role.name]))
+        + '</button>';
+    });
+    return html + '</div>';
+  };
+
+  Controller.prototype.knownRoleNames = function () {
+    var names = (this.view.role_defs || []).map(function (r) { return r.name; });
+    if (this.roleDraft && this.roleDraft.name && names.indexOf(this.roleDraft.name) === -1) names.push(this.roleDraft.name);
+    return names;
+  };
+  // Every capability the editor can offer: the catalog's exact entries, and
+  // its templated families expanded once per known role.
+  Controller.prototype.capabilityChoices = function () {
+    var cat = catalog();
+    var names = this.knownRoleNames();
+    var groups = [];
+    if (!cat) return groups;
+    cat.families().forEach(function (fam) {
+      var entries = [];
+      fam.entries.forEach(function (entry) {
+        if (entry.pattern.indexOf('{role}') === -1) {
+          entries.push({ scope: entry.pattern, label: entry.label, sentence: entry.sentence });
+        } else {
+          names.forEach(function (name) {
+            var scope = entry.pattern.replace('{role}', name);
+            entries.push({ scope: scope, label: entry.label.replace('{role}', name), sentence: entry.sentence.replace('{role}', name) });
+          });
+        }
+      });
+      groups.push({ family: fam.family, entries: entries });
+    });
+    return groups;
+  };
+
+  Controller.prototype.roleFormHtml = function () {
+    var d = this.roleDraft;
+    var isVersion = this.roleStep === 'version';
+    var preview = {
+      name: d.name || 'New role', scope_set: d.scopes, claim_requires: d.requires,
+      approver_threshold: Number(d.threshold) || 1,
+    };
+    var lost = isVersion ? lostScopes(d.baseScopes, d.scopes) : [];
+    var html = '<div class="mem-section"><div class="mem-panel mem-form" data-testid="role-editor">'
+      + '<h3>' + (isVersion ? 'New version of ' + esc(roleWord([d.name])) : 'Define a role') + '</h3>'
+      + '<p>' + (isVersion
+        ? 'Version ' + (d.baseVersion + 1) + ' replaces version ' + d.baseVersion + ' for everyone who holds it, on the next fold.'
+        : 'A role is a named set of capabilities, defined once and granted by name. Defining it signs a ledger event with the organization root.')
+      + '</p>'
+      + '<label for="mem-role-name" style="margin-top:0">Name</label>'
+      + '<input id="mem-role-name" type="text" maxlength="64" data-role-name-input value="' + esc(d.name) + '"'
+      + (isVersion ? ' readonly' : ' placeholder="reviewer"') + '>'
+      + '<p class="mem-hint">Letters, digits, dots, dashes and underscores.</p>';
+    html += '<label>Capabilities</label>';
+    var groups = this.capabilityChoices();
+    if (!groups.length) html += '<p class="mem-hint">The capability catalog is not loaded; raw scopes cannot be edited here.</p>';
+    groups.forEach(function (group) {
+      html += '<div class="mem-cap-group"><div class="mem-cap-family">' + esc(group.family) + '</div>';
+      group.entries.forEach(function (entry) {
+        var on = d.scopes.indexOf(entry.scope) !== -1;
+        html += '<label class="mem-cap-choice"><input type="checkbox" data-role-scope="' + esc(entry.scope) + '"' + (on ? ' checked' : '') + '> '
+          + '<span>' + esc(entry.label) + '</span><small>' + esc(entry.sentence) + '</small></label>';
+      });
+      html += '</div>';
+    });
+    html += '<label for="mem-role-requires">Joining</label>'
+      + '<select id="mem-role-requires" data-role-requires>'
+      + [['admin-ack', 'After approval'], ['sponsor', 'When the inviter approves'], ['self', 'Immediately, on a direct invitation']].map(function (pair) {
+        return '<option value="' + pair[0] + '"' + (d.requires === pair[0] ? ' selected' : '') + '>' + pair[1] + '</option>';
+      }).join('')
+      + '</select>';
+    if (d.requires === 'admin-ack') {
+      html += '<label for="mem-role-threshold">Approvals needed</label>'
+        + '<input id="mem-role-threshold" type="number" min="1" max="32" data-role-threshold value="' + esc(d.threshold) + '">';
+    }
+    html += '<p class="mem-hint" data-testid="role-preview">' + esc(authoritySentence(preview, false).replace('This invitation grants ', '')) + '</p>';
+    if (lost.length) {
+      html += '<p class="mem-hint mem-loss" data-testid="role-loss">Removing ' + esc(lost.map(scopeLabel).join(', ').toLowerCase())
+        + ' from everyone who holds ' + esc(roleWord([d.name])) + '. Storage records this as a contraction.</p>';
+    }
+    html += '<div class="mem-panel-actions">'
+      + '<button type="button" class="mem-secondary" data-action="role-cancel">Cancel</button>'
+      + '<button type="button" class="mem-primary" data-action="role-submit"' + (this.busy === 'role' || !d.name ? ' disabled' : '') + '>'
+      + (this.busy === 'role' ? 'Signing' : (isVersion ? 'Sign version ' + (d.baseVersion + 1) : 'Define role')) + '</button>'
+      + '</div></div></div>';
+    return html;
+  };
+
   Controller.prototype.rolesHtml = function () {
     var self = this;
-    var html = '<div class="mem-section"><div class="mem-table" data-testid="membership-roles">';
-    (this.view.role_defs || []).forEach(function (role) {
+    var defs = this.view.role_defs || [];
+    var html = '';
+    if (this.roleStep) html += this.roleFormHtml();
+    var onlyOwner = defs.length === 1 && defs[0].name === 'owner';
+    html += '<div class="mem-section"><div class="mem-heading"><h2>Roles</h2><span class="mem-actions-row">'
+      + (onlyOwner && !this.roleStep
+        ? '<button type="button" class="mem-secondary" data-action="starter-roles"' + (this.busy === 'starter' ? ' disabled' : '') + '>'
+          + (this.busy === 'starter' ? 'Adding' : 'Add starter roles') + '</button>'
+        : '')
+      + (!this.roleStep ? '<button type="button" class="mem-secondary" data-action="open-define">Define role</button>' : '')
+      + '</span></div>';
+    html += '<div class="mem-table" data-testid="membership-roles">';
+    defs.forEach(function (role) {
       var count = self.roleMemberCount(role.name);
       var expanded = self.expandedRole === role.name;
+      var warning = role.threshold_warning;
       html += '<div><div class="mem-trow" role="button" tabindex="0" data-role="' + esc(role.name) + '">'
-        + '<div class="mem-tname"><strong>' + esc(roleWord([role.name])) + '</strong></div>'
+        + '<div class="mem-tname"><strong>' + esc(roleWord([role.name])) + '</strong>'
+        + (role.version ? '<small class="mem-version">v' + esc(role.version) + '</small>' : '')
+        + (warning ? '<span class="mem-chip mem-chip-warn" title="Needs ' + esc(warning.approver_threshold) + ' approvers; fewer can approve today">Approvers short</span>' : '')
+        + '</div>'
         + '<button type="button" class="mem-count-btn" data-action="filter-role" aria-label="Show members with the ' + esc(roleWord([role.name])) + ' role">'
         + count + (count === 1 ? ' member' : ' members') + '</button>'
         + '</div>'
@@ -364,10 +559,15 @@
           ? '<div class="mem-detail" style="padding-left:.65rem"><dl>'
             + '<div><dt>Can</dt><dd>' + esc(scopeSummary(role)) + '</dd></div>'
             + '<div><dt>Joining</dt><dd>' + esc(joinPolicyLine(role)) + '</dd></div>'
-            + '</dl></div>'
+            + '</dl><div class="mem-caps" data-testid="role-caps">' + scopeChipsHtml(role.scope_set) + '</div>'
+            + (warning ? '<p class="mem-hint mem-loss">Needs ' + esc(warning.approver_threshold) + ' approvers, and only '
+              + esc((warning.admission_authority_holders || []).length) + ' could approve today. Admission waits until enough exist.</p>' : '')
+            + (!self.roleStep ? '<div class="mem-detail-actions"><button type="button" class="mem-secondary" data-action="open-version" data-role-name="' + esc(role.name) + '">New version</button></div>' : '')
+            + '</div>'
           : '')
         + '</div>';
     });
+    if (!defs.length) html += '<div class="mem-empty" style="border:0">This organization defines no roles.</div>';
     html += '</div></div>';
     return html;
   };
@@ -441,6 +641,65 @@
     });
     var mintLabel = this.root.querySelector('[data-mint-label]');
     if (mintLabel) mintLabel.oninput = function () { self.mintLabel = mintLabel.value; };
+    var mintRole = this.root.querySelector('[data-mint-role]');
+    if (mintRole) mintRole.onchange = function () { self.mintRole = mintRole.value; self.render(); };
+    // ── the roles editor ──
+    this.root.querySelectorAll('[data-action="open-define"]').forEach(function (button) {
+      button.onclick = function () {
+        self.roleStep = 'define';
+        self.roleDraft = { name: '', scopes: [], requires: 'admin-ack', threshold: '1', baseVersion: 0, baseScopes: [] };
+        self.render();
+      };
+    });
+    this.root.querySelectorAll('[data-action="open-version"]').forEach(function (button) {
+      button.onclick = function () {
+        var role = (self.view.role_defs || []).find(function (r) { return r.name === button.dataset.roleName; });
+        if (!role) return;
+        self.roleStep = 'version';
+        self.roleDraft = {
+          name: role.name, scopes: (role.scope_set || []).slice(), requires: role.claim_requires,
+          threshold: String(role.approver_threshold || 1), baseVersion: role.version || 1,
+          baseScopes: (role.scope_set || []).slice(),
+        };
+        self.render();
+      };
+    });
+    this.root.querySelectorAll('[data-action="role-cancel"]').forEach(function (button) {
+      button.onclick = function () { self.roleStep = null; self.roleDraft = null; self.render(); };
+    });
+    this.root.querySelectorAll('[data-action="role-submit"]').forEach(function (button) {
+      button.onclick = function () { self.submitRole(); };
+    });
+    this.root.querySelectorAll('[data-action="starter-roles"]').forEach(function (button) {
+      button.onclick = function () { self.addStarterRoles(); };
+    });
+    var nameInput = this.root.querySelector('[data-role-name-input]');
+    if (nameInput) nameInput.oninput = function () {
+      self.roleDraft.name = nameInput.value.trim();
+      var submit = self.root.querySelector('[data-action="role-submit"]');
+      if (submit) submit.disabled = !self.roleDraft.name || self.busy === 'role';
+    };
+    this.root.querySelectorAll('[data-role-scope]').forEach(function (box) {
+      box.onchange = function () {
+        var scope = box.dataset.roleScope;
+        var idx = self.roleDraft.scopes.indexOf(scope);
+        if (box.checked && idx === -1) self.roleDraft.scopes.push(scope);
+        if (!box.checked && idx !== -1) self.roleDraft.scopes.splice(idx, 1);
+        self.roleDraft.scopes.sort();
+        self.render();
+      };
+    });
+    var requires = this.root.querySelector('[data-role-requires]');
+    if (requires) requires.onchange = function () { self.roleDraft.requires = requires.value; self.render(); };
+    var threshold = this.root.querySelector('[data-role-threshold]');
+    if (threshold) threshold.oninput = function () { self.roleDraft.threshold = threshold.value; };
+    this.root.querySelectorAll('[data-action="grant-role"],[data-action="revoke-role"]').forEach(function (button) {
+      button.onclick = function (event) {
+        event.stopPropagation();
+        self.changeRole(button.dataset.action === 'grant-role' ? 'grant' : 'revoke',
+          button.dataset.persona, button.dataset.roleName);
+      };
+    });
     var mintExpiry = this.root.querySelector('[data-mint-expiry]');
     if (mintExpiry) mintExpiry.onchange = function () { self.mintExpiryDays = mintExpiry.value; };
     var mintUses = this.root.querySelector('[data-mint-uses]');
@@ -506,6 +765,7 @@
   // ── ceremonies ──────────────────────────────────────────────────────
 
   Controller.prototype.openRoot = function (title, detail) {
+    if (hooks().openRoot) return Promise.resolve(hooks().openRoot({ title: title, detail: detail }));
     return import('/static/js/ceremony/open-root.js').then(function (module) {
       return module.openRoot({ title: title, detail: detail });
     });
@@ -552,6 +812,125 @@
     }).catch(function (error) {
       self.busy = null;
       self.error = (error && error.message) || String(error);
+      self.render();
+    }).finally(function () { zero(opened); });
+  };
+
+  Controller.prototype.loadRoleCeremony = function () {
+    if (hooks().roleCeremony) return Promise.resolve(hooks().roleCeremony);
+    return import('/static/js/ceremony/org-role.js');
+  };
+
+  Controller.prototype.submitRole = function () {
+    var self = this;
+    var d = this.roleDraft;
+    if (this.busy || !d || !d.name) return;
+    var isVersion = this.roleStep === 'version';
+    this.busy = 'role';
+    this.error = '';
+    this.render();
+    var opened = null;
+    Promise.all([
+      this.openRoot(isVersion ? 'Sign version ' + (d.baseVersion + 1) + ' of ' + roleWord([d.name]) : 'Define the ' + d.name + ' role',
+        'Unlock your personal root to open the organization root and sign the definition.'),
+      this.loadRoleCeremony(),
+    ]).then(function (loaded) {
+      opened = loaded[0];
+      if (!opened) return null;
+      return loaded[1].defineRole({
+        fetchImpl: window.fetch.bind(window),
+        org: self.slug,
+        personalRootSeed: opened.seed,
+        name: d.name,
+        scopeSet: d.scopes.slice(),
+        claimRequires: d.requires,
+        version: isVersion ? d.baseVersion + 1 : null,
+        approverThreshold: d.requires === 'admin-ack' ? (Number(d.threshold) || 1) : null,
+      });
+    }).then(function (result) {
+      self.busy = null;
+      if (!result) return self.render();
+      self.roleStep = null;
+      self.roleDraft = null;
+      self.expandedRole = d.name;
+      return self.refresh();
+    }).catch(function (error) {
+      self.busy = null;
+      self.error = (error && error.reason)
+        ? 'The organization refused this definition: ' + error.reason + '.'
+        : ((error && error.message) || String(error));
+      self.render();
+    }).finally(function () { zero(opened); });
+  };
+
+  Controller.prototype.addStarterRoles = function () {
+    var self = this;
+    if (this.busy) return;
+    var existing = (this.view.role_defs || []).map(function (r) { return r.name; });
+    var missing = STARTER_ROLES.filter(function (r) { return existing.indexOf(r.name) === -1; });
+    if (!missing.length) return;
+    this.busy = 'starter';
+    this.error = '';
+    this.render();
+    var opened = null;
+    Promise.all([
+      this.openRoot('Add the starter roles', 'Unlock your personal root to open the organization root and sign '
+        + missing.map(function (r) { return roleWord([r.name]); }).join(' and ') + '.'),
+      this.loadRoleCeremony(),
+    ]).then(function (loaded) {
+      opened = loaded[0];
+      if (!opened) return null;
+      var ceremony = loaded[1];
+      return missing.reduce(function (chain, role) {
+        return chain.then(function () {
+          return ceremony.defineRole({
+            fetchImpl: window.fetch.bind(window), org: self.slug, personalRootSeed: opened.seed,
+            name: role.name, scopeSet: role.scopeSet.slice(), claimRequires: role.claimRequires,
+            version: null, approverThreshold: role.approverThreshold,
+          });
+        });
+      }, Promise.resolve()).then(function () { return true; });
+    }).then(function (done) {
+      self.busy = null;
+      if (!done) return self.render();
+      return self.refresh();
+    }).catch(function (error) {
+      self.busy = null;
+      self.error = (error && error.message) || String(error);
+      self.render();
+    }).finally(function () { zero(opened); });
+  };
+
+  Controller.prototype.changeRole = function (action, persona, role) {
+    var self = this;
+    if (this.busy || !persona || !role) return;
+    var member = this.members().find(function (m) { return m.persona === persona; });
+    var who = member ? memberName(member) : 'this member';
+    this.busy = action + ':' + persona + ':' + role;
+    this.error = '';
+    this.render();
+    var opened = null;
+    Promise.all([
+      this.openRoot((action === 'grant' ? 'Grant ' : 'Revoke ') + roleWord([role]) + (action === 'grant' ? ' to ' : ' from ') + who,
+        'Unlock your personal root to sign the change.'),
+      this.loadRoleCeremony(),
+    ]).then(function (loaded) {
+      opened = loaded[0];
+      if (!opened) return null;
+      var run = action === 'grant' ? loaded[1].grantRole : loaded[1].revokeRole;
+      return run({
+        fetchImpl: window.fetch.bind(window), org: self.slug, genesisId: self.view.genesis_id,
+        personalRootSeed: opened.seed, persona: persona, role: role,
+      });
+    }).then(function (result) {
+      self.busy = null;
+      if (!result) return self.render();
+      return self.refresh();
+    }).catch(function (error) {
+      self.busy = null;
+      self.error = (error && error.reason)
+        ? 'The organization refused this change: ' + error.reason + '.'
+        : ((error && error.message) || String(error));
       self.render();
     }).finally(function () { zero(opened); });
   };
@@ -724,7 +1103,7 @@
         controller.render();
         var timer = setInterval(function () {
           if (!root.isConnected) { clearInterval(timer); return; }
-          if (controller.busy || controller.mintStep) return;
+          if (controller.busy || controller.mintStep || controller.roleStep) return;
           controller.refresh();
         }, 5000);
         return root;
