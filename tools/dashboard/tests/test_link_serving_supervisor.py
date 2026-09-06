@@ -1222,3 +1222,60 @@ def test_lame_duck_is_replaced_at_the_drain_deadline(env, monkeypatch):
         assert len(spawn.calls) == 1
     finally:
         sleeper.kill()
+
+
+def _running_connector(env, monkeypatch, *, disk):
+    """A launched FakeProc connector under a reconcile that is eligible and
+    has a live grant; ``disk`` is a mutable dict the disk-head stub reads."""
+    from tools.dashboard import link_serving_supervisor as sup
+    from tools.network import build_version
+
+    _provision_serve_cert(env)
+    state = sup.serve_cert_state(ORG)
+    assert state["status"] == "ok", state
+    monkeypatch.setattr(build_version, "disk_head", lambda: disk["head"])
+    monkeypatch.setattr(
+        sup.ServingSupervisor, "_fleet_eligibility",
+        staticmethod(lambda: SimpleNamespace(
+            allowed=True, active_machine_count=0, reason="",
+            selected_machine_id=None,
+        )),
+    )
+    monkeypatch.setattr(sup, "_has_live_grant", lambda org, now: True)
+    monkeypatch.setattr(sup, "_iter_connector_pids", lambda org_uuid: iter([]))
+    spawn = FakeSpawn()
+    supervisor = sup.ServingSupervisor(spawn=spawn)
+    monkeypatch.setattr(supervisor, "_reap_strays", lambda org: None)
+    assert supervisor.ensure(ORG)["reason"] == "launched"
+    assert supervisor._boot_commit[ORG] == disk["head"]
+    return sup, supervisor, spawn
+
+
+def test_watchdog_replaces_an_idle_connector_when_the_disk_head_moves(env, monkeypatch):
+    """A tools/network-only merge never hot-reloads the dashboard; the
+    watchdog itself must notice the code generation moved (2026-09-06)."""
+    disk = {"head": "a" * 40}
+    sup, supervisor, spawn = _running_connector(env, monkeypatch, disk=disk)
+    monkeypatch.setattr(sup, "_probe_ctl_status",
+                        lambda ctl: {"ok": True, "serving": True, "active_streams": 0})
+    assert supervisor.ensure(ORG)["reason"] == "already-running"
+    assert len(spawn.calls) == 1, "unchanged disk head: leave it alone"
+    disk["head"] = "b" * 40
+    assert supervisor.ensure(ORG)["reason"] == "launched"
+    assert len(spawn.calls) == 2, "moved disk head + idle: replaced"
+    assert spawn.procs[0].alive() is False
+    assert supervisor._boot_commit[ORG] == "b" * 40
+
+
+def test_watchdog_lame_ducks_a_streaming_connector_when_the_disk_head_moves(env, monkeypatch):
+    disk = {"head": "a" * 40}
+    sup, supervisor, spawn = _running_connector(env, monkeypatch, disk=disk)
+    probe = {"ok": True, "serving": True, "active_streams": 1}
+    monkeypatch.setattr(sup, "_probe_ctl_status", lambda ctl: dict(probe))
+    disk["head"] = "b" * 40
+    assert supervisor.ensure(ORG)["reason"] == "lame-duck-draining"
+    assert len(spawn.calls) == 1, "mid-stream: drained, not severed"
+    assert spawn.procs[0].alive() is True
+    probe["active_streams"] = 0
+    assert supervisor.ensure(ORG)["reason"] == "launched"
+    assert len(spawn.calls) == 2, "drained: replaced on the new generation"

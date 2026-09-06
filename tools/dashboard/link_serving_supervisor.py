@@ -804,6 +804,12 @@ class ServingSupervisor:
         # org -> when a STALE incumbent was adopted mid-stream to drain; the
         # watchdog replaces it at zero active streams or the drain deadline.
         self._lame_duck_since: dict = {}
+        # org -> the code generation (disk head) the running connector booted
+        # on. The watchdog re-checks it against the current disk head every
+        # pass: a merge touching only tools/network never hot-reloads the
+        # dashboard, so adoption-time currency alone left connectors on stale
+        # code indefinitely (live 2026-09-06, twelve minutes on a fix).
+        self._boot_commit: dict = {}
         self._locks: dict = {}       # org -> open file holding flock ownership
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -851,6 +857,7 @@ class ServingSupervisor:
                 self._credentials.pop(org, None)
                 self._last_served.pop(org, None)
                 self._lame_duck_since.pop(org, None)
+                self._boot_commit.pop(org, None)
             self._procs.pop(org, None)
             state = serve_cert_state(org, now=self._now())
             if state["status"] != "ok":
@@ -906,6 +913,7 @@ class ServingSupervisor:
             self._started_at.pop(org, None)
             self._last_served.pop(org, None)
             self._lame_duck_since.pop(org, None)
+            self._boot_commit.pop(org, None)
             self._release_lock(org)
             reason = state["status"] if state["status"] != "ok" else "no-live-grants"
             return {"running": False, "reason": reason}
@@ -914,6 +922,43 @@ class ServingSupervisor:
             if self._credentials.get(org) == (
                 state["cert"], state["viewer_cert"], state["key_path"]
             ):
+                # CODE CURRENCY, every pass — not only at adoption. A merge
+                # that touches only tools/network never hot-reloads the
+                # dashboard, so without this a connector served stale code
+                # until some unrelated merge happened to reload (live
+                # 2026-09-06: twelve minutes on the prune fix). Same
+                # treatment as a stale incumbent: drain if mid-stream,
+                # otherwise replace now.
+                booted = self._boot_commit.get(org)
+                if booted is not None and org not in self._lame_duck_since:
+                    from tools.network import build_version
+                    disk = build_version.disk_head()
+                    if disk is not None and disk != booted:
+                        status = _probe_ctl_status(
+                            _control_path_for(state["key_path"]))
+                        streams = (status or {}).get("active_streams")
+                        if isinstance(streams, int) and streams > 0:
+                            self._lame_duck_since[org] = now
+                            _log.warning(
+                                "serving connector for org=%s is on stale "
+                                "code (boot=%s, disk=%s) but mid-stream "
+                                "(active_streams=%s) — draining as a lame "
+                                "duck before replacement",
+                                org, booted[:12], disk[:12], streams,
+                            )
+                            return {"running": True,
+                                    "reason": "lame-duck-draining"}
+                        _log.warning(
+                            "replacing serving connector for org=%s: stale "
+                            "code (boot=%s, disk=%s), idle",
+                            org, booted[:12], disk[:12],
+                        )
+                        proc.stop()
+                        self._procs.pop(org, None)
+                        self._credentials.pop(org, None)
+                        self._last_served.pop(org, None)
+                        self._boot_commit.pop(org, None)
+                        return self._launch(org, state)
                 ducked = self._lame_duck_since.get(org)
                 if ducked is not None:
                     # A stale incumbent adopted mid-stream: replace it the
@@ -936,6 +981,7 @@ class ServingSupervisor:
                         self._credentials.pop(org, None)
                         self._last_served.pop(org, None)
                         self._lame_duck_since.pop(org, None)
+                        self._boot_commit.pop(org, None)
                         return self._launch(org, state)
                     return {"running": True, "reason": "lame-duck-draining"}
                 current = self._live_process_state(org, proc)
@@ -955,6 +1001,7 @@ class ServingSupervisor:
                 self._credentials.pop(org, None)
                 self._last_served.pop(org, None)
                 self._lame_duck_since.pop(org, None)
+                self._boot_commit.pop(org, None)
                 return self._launch(org, state)
             # Provisioning replaced this org's credential. Keeping the old
             # process alive would leave it presenting the superseded cert
@@ -969,6 +1016,7 @@ class ServingSupervisor:
             self._credentials.pop(org, None)
             self._last_served.pop(org, None)
             self._lame_duck_since.pop(org, None)
+            self._boot_commit.pop(org, None)
         # A dead handle: drop it and relaunch below.
         self._procs.pop(org, None)
         self._credentials.pop(org, None)
@@ -1001,6 +1049,7 @@ class ServingSupervisor:
         self._started_at.pop(org, None)
         self._last_served.pop(org, None)
         self._lame_duck_since.pop(org, None)
+        self._boot_commit.pop(org, None)
         self._release_lock(org)
         result = {"running": False, "reason": eligibility.reason}
         if eligibility.selected_machine_id is not None:
@@ -1088,6 +1137,7 @@ class ServingSupervisor:
             if pid is None:
                 return None
             self._procs[org] = _AdoptedProc(pid, ctl_path=ctl_path)
+            self._boot_commit[org] = boot
             self._credentials[org] = (
                 state["cert"], state["viewer_cert"], state["key_path"])
             self._started_at[org] = self._now()
@@ -1187,6 +1237,11 @@ class ServingSupervisor:
         self._started_at[org] = self._now()
         self._last_served.pop(org, None)
         self._lame_duck_since.pop(org, None)
+        self._boot_commit.pop(org, None)
+        # The child imports whatever is on disk right now; that is its code
+        # generation until the watchdog sees the disk head move.
+        from tools.network import build_version
+        self._boot_commit[org] = build_version.disk_head()
         return {"running": True, "reason": "launched"}
 
     def _owned_pids(self) -> set[int]:
@@ -1345,6 +1400,7 @@ class ServingSupervisor:
             self._credentials.pop(org, None)
             self._last_served.pop(org, None)
             self._lame_duck_since.pop(org, None)
+            self._boot_commit.pop(org, None)
             self._started_at.pop(org, None)
             self._managed.add(org)
             return self._reconcile(org)
