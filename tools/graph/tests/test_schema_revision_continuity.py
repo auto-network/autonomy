@@ -50,6 +50,22 @@ RETIRED_REVISIONS: dict[str, dict[int, str]] = {
             "every store after all three organizations re-minted."
         ),
     },
+    "autonomy.fleet.roster": {
+        1: (
+            "Retired 2026-08-21 by 963bd609 ('Bind fleet approval to "
+            "browser-held personal authority'), which bumped the roster to "
+            "revision 2 and dropped the revision-1 class without this entry. "
+            "No conversion exists: a revision-1 row is unverifiable under the "
+            "rebinding, so it could only ever be re-approved, never migrated. "
+            "Audited 2026-09-06 (host-0905-234432, for auto-5q5q1) by reading "
+            "every store on both fleet machines directly: home -- personal, "
+            "machine, graph and seven org stores (2d4b90cb, anchore, autonomy, "
+            "blindhash, dynbench, enterprise-ng, jira) -- holds 8 roster rows, "
+            "all in personal.db, all at revision 2; SJC -- personal, machine "
+            "and four org stores -- holds 8, all in personal.db, all at "
+            "revision 2. Zero rows at roster revision 1 anywhere."
+        ),
+    },
 }
 
 MAX_REVISION_PROBE = 12
