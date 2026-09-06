@@ -1271,6 +1271,167 @@ async def post_ledger_revoke(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "revoke_id": revoke_id})
 
 
+
+# -- role events: define / grant / revoke ----------------------------------
+#
+# Three client-signed append routes for the ledger's role vocabulary
+# (roles design of record graph://d1b3db8f-879, bead auto-7l0ku). They share
+# one core with the invite and revoke routes: the browser signs, this process
+# verifies the signature, gates on the current heads, TRIAL-FOLDS the event so
+# an unauthorized or malformed change is a refusal that names the fold's
+# reason rather than an invalid row replicated forever, then appends. The
+# route contributes no signatures and inspects no secret. Who may define a
+# role is the fold's rule alone: the org root passes; anyone else needs held
+# ``role:define`` and a delegable closure covering the set, and role-held
+# scopes are never delegable, so in practice a define is root-signed.
+
+_ROLE_EVENT_KINDS = ("role.define", "role.grant", "role.revoke")
+
+
+async def _append_role_event(request: Request, kind: str) -> JSONResponse:
+    if kind not in _ROLE_EVENT_KINDS:  # pragma: no cover - programming error
+        raise ValueError(kind)
+    if _mock_mode():
+        return JSONResponse(
+            {"ok": False, "error": "mock dashboard has no authority ledger"},
+            status_code=502,
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(
+            {"ok": False, "error": "body must be JSON"}, status_code=400,
+        )
+    if not isinstance(body, dict):
+        return JSONResponse(
+            {"ok": False, "error": "body must be a JSON object"}, status_code=400,
+        )
+    requested_org = body.get("org")
+    if not isinstance(requested_org, str) or not requested_org:
+        return JSONResponse(
+            {"ok": False, "error": "body must carry the local org slug"},
+            status_code=400,
+        )
+    _org, refused = resolve_scoped_org(requested_org, request=request)
+    if refused is not None:
+        return refused
+    wire = body.get("event")
+    if not isinstance(wire, str):
+        return JSONResponse(
+            {"ok": False, "error": "body must carry an event canonical wire string"},
+            status_code=400,
+        )
+
+    from tools.network.ledger import (
+        Event,
+        Ledger,
+        LedgerError,
+        LedgerStore,
+        org_ledger_db_path,
+    )
+    from tools.network.ledger.fold import fold
+
+    noun = kind.split(".", 1)[1]
+    try:
+        event = Event.from_json(wire)
+        if event.type != kind:
+            raise ValueError(f"event type must be {kind}, got {event.type!r}")
+        event.verify_sig()
+    except (LedgerError, ValueError, TypeError) as exc:
+        return JSONResponse(
+            {"ok": False, "error": f"role {noun} rejected: {exc}"},
+            status_code=400,
+        )
+
+    store_path = org_ledger_db_path(requested_org)
+    if not store_path.exists():
+        return JSONResponse(
+            {"ok": False, "error": "organization ledger is not founded"},
+            status_code=404,
+        )
+    try:
+        with LedgerStore(store_path) as store:
+            current_heads = store.heads()
+            if event.parents != current_heads:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": "authority ledger advanced; refresh and retry",
+                    },
+                    status_code=409,
+                )
+            state = store.fold(heads=current_heads)
+            if kind == "role.define":
+                # Versions are contiguous per name: the fold resolves a name
+                # to its highest version, so a gap or a replay would either
+                # silently lose to the current definition or shadow one the
+                # author never saw. The browser computes max+1 from the same
+                # projection; this re-check keeps a stale client honest.
+                current = state.role_defs.get(event.payload["name"])
+                expected = (current.version + 1) if current is not None else 1
+                if event.payload["version"] != expected:
+                    return JSONResponse(
+                        {
+                            "ok": False,
+                            "error": (
+                                f"role definition version must be {expected}"
+                                f" for {event.payload['name']!r}"
+                            ),
+                            "expected_version": expected,
+                        },
+                        status_code=400,
+                    )
+            elif event.payload["role"] not in state.role_defs:
+                return JSONResponse(
+                    {"ok": False, "error": "role is not defined"},
+                    status_code=400,
+                )
+            # Trial-fold before appending: an unauthorized role change must be
+            # a refusal carrying the fold's reason, never an invalid row.
+            scratch = Ledger()
+            scratch.ingest(store.ledger.events())
+            scratch.add(event)
+            verdict = fold(scratch)
+            if not verdict.valid.get(event.event_id, False):
+                reason = verdict.reasons.get(event.event_id, "invalid")
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": f"role {noun} refused: {reason}",
+                        "reason": reason,
+                    },
+                    status_code=403,
+                )
+            event_id = store.append(event)
+            store.refresh_projections()
+    except (LedgerError, OSError) as exc:
+        return JSONResponse(
+            {"ok": False, "error": f"could not append role {noun}: {exc}"},
+            status_code=400,
+        )
+    return JSONResponse({"ok": True, "event_id": event_id})
+
+
+async def post_ledger_role_define(request: Request) -> JSONResponse:
+    """Append one client-signed ``role.define`` (a new role, or a new version
+    of an existing one). The fold decides authority; this route additionally
+    requires the version to be exactly one past the current definition."""
+    return await _append_role_event(request, "role.define")
+
+
+async def post_ledger_role_grant(request: Request) -> JSONResponse:
+    """Append one client-signed ``role.grant`` conferring a defined role on a
+    persona. Authority is ``role:grant:<role>`` held by the signer, or root."""
+    return await _append_role_event(request, "role.grant")
+
+
+async def post_ledger_role_revoke(request: Request) -> JSONResponse:
+    """Append one client-signed ``role.revoke`` stripping a role from a
+    persona. Authority is root, the persona itself (self-renounce), or a
+    holder of ``role:grant:<role>``."""
+    return await _append_role_event(request, "role.revoke")
+
+
 async def post_sealed_org_key(request: Request) -> JSONResponse:
     """Persist an org root key the BROWSER sealed (I1, auto-jdba4).
 
@@ -2792,6 +2953,9 @@ ROUTES = [
     Route("/api/network/ledger/delegate", post_ledger_delegate, methods=["POST"]),
     Route("/api/network/ledger/invite", post_ledger_invite, methods=["POST"]),
     Route("/api/network/ledger/revoke", post_ledger_revoke, methods=["POST"]),
+    Route("/api/network/ledger/role-define", post_ledger_role_define, methods=["POST"]),
+    Route("/api/network/ledger/role-grant", post_ledger_role_grant, methods=["POST"]),
+    Route("/api/network/ledger/role-revoke", post_ledger_role_revoke, methods=["POST"]),
     Route("/api/network/ledger/claim", post_ledger_claim, methods=["POST"]),
     Route(
         "/api/network/ledger/claim/context",
