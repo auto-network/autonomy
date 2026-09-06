@@ -1,0 +1,28 @@
+id: backup
+api_version: 1
+org: autonomy
+
+# Ships dormant while the epic builds (auto-qyirn); the operator flips
+# the dashboard.plugin row when the state surface is worth watching.
+default_enabled: false
+
+paths:
+  - /backup
+
+assets:
+  template: page.html
+  script: page.js
+
+nav:
+  label: Backup
+
+frontend:
+  alpine_root: backupPage
+
+entrypoints:
+  api: tools.dashboard.plugins.backup.entrypoints.api:routes
+  cli: tools.dashboard.plugins.backup.entrypoints.cli:register
+  schemas:
+    - tools.dashboard.plugins.backup.entrypoints.schemas:BackupConfigV1
+    - tools.dashboard.plugins.backup.entrypoints.schemas:BackupRunV1
+    - tools.dashboard.plugins.backup.entrypoints.schemas:BackupDrillV1
