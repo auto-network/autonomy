@@ -47,6 +47,17 @@ MAX_TRANSACTION_FRAME_BYTES = 128 * 1024 * 1024
 PRUNE_BUDGET_S = 1.0
 PRUNE_BATCH_REFS = 2_000
 PRUNE_YIELD_S = 0.005
+
+#: Computed once per process by MutationCatalog.expected_schema_object_names.
+_EXPECTED_SCHEMA_OBJECTS: frozenset[str] | None = None
+
+
+class _SchemaScratch:
+    """Duck-typed stand-in exposing only ``.conn`` for running the schema
+    statements against a scratch connection (see expected_schema_object_names)."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
 _table_columns: dict[str, tuple[str, ...]] = {}
 _MUTATING_TABLE = re.compile(
     r'^\s*(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|'
@@ -611,6 +622,65 @@ class MutationCatalog:
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
             (table,),
         ).fetchone() is not None
+
+    @staticmethod
+    def expected_schema_object_names() -> frozenset[str]:
+        """Names of every local table/index install() creates, derived by
+        running the very same statements against a scratch in-memory
+        connection — so a rollforward can never disagree with install().
+
+        Deliberately NOT a scratch MutationCatalog: __init__ rewrites the
+        module-level ``_table_columns`` from its connection's tables, and a
+        scratch database would blank the live catalog's column knowledge.
+        """
+        global _EXPECTED_SCHEMA_OBJECTS
+        if _EXPECTED_SCHEMA_OBJECTS is None:
+            scratch = sqlite3.connect(":memory:")
+            try:
+                MutationCatalog._create_schema_objects(
+                    _SchemaScratch(scratch))  # type: ignore[arg-type]
+                _EXPECTED_SCHEMA_OBJECTS = frozenset(
+                    str(r[0]) for r in scratch.execute(
+                        "SELECT name FROM sqlite_master "
+                        "WHERE type IN ('table','index') "
+                        "AND name NOT LIKE 'sqlite_%'"
+                    )
+                )
+            finally:
+                scratch.close()
+        return _EXPECTED_SCHEMA_OBJECTS
+
+    def ensure_schema_objects(self) -> bool:
+        """Roll an already-activated store forward to the current set of
+        local schema objects. Read-only when nothing is missing (no write
+        lock taken); otherwise runs install()'s idempotent statements in one
+        short IMMEDIATE transaction. Returns True iff anything was created.
+
+        install() runs once at activation and never again; every later open
+        attaches without it, so an object added to _create_schema_objects
+        afterwards never reached production stores (live 2026-09-06: the
+        prune index shipped in code while personal.db kept only its
+        autoindexes and the quadratic prune went on starving the dashboard).
+        """
+        expected = self.expected_schema_object_names()
+        present = {
+            str(r[0]) for r in self.conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        if expected <= present:
+            return False
+        if self.conn.in_transaction:
+            self.conn.commit()
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._create_schema_objects()
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return True
 
     def _create_schema_objects(self) -> None:
         """Create local catalog/state objects inside the caller transaction."""
@@ -2087,6 +2157,12 @@ def attach_active_production_catalog(
     if row is None:
         raise WatermarkError("fleet-sync triggers exist without catalog identity")
     catalog = MutationCatalog(conn, str(row[0]))
+    # Schema rollforward for already-activated stores: install() runs once
+    # at activation and never again, so a local object added to
+    # _create_schema_objects later (an index, a state table) otherwise never
+    # reaches production — live 2026-09-06, the prune index shipped but the
+    # personal store still had only autoindexes.
+    catalog.ensure_schema_objects()
     refreshed = catalog.refresh_triggers_for_current_schema()
     if not catalog.triggers_active():
         raise WatermarkError("fleet-sync capture triggers are only partially active")
