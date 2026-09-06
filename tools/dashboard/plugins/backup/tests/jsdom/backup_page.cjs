@@ -1,9 +1,10 @@
 // Backup page fragment sweep (jsdom + vendored Alpine).
 //
-// Renders page.html + page.js with mocked APIs and asserts the §0
-// ordering promises: the hero states the verdict, failures pin to the
-// top of the run stream, the store table shows the newest run's rows,
-// and a never-drilled deployment says so instead of showing nothing.
+// Reworked with the operator's 2026-09-06 design review: asserts the
+// plain-language promises — a tier table with headers, an overall
+// explanation in words, the destinations panel with credential state,
+// one contents table from the newest complete run, config fields with
+// descriptions, and the topbar claimed as "Backup".
 "use strict";
 const fs = require("fs");
 const path = require("path");
@@ -27,18 +28,29 @@ const FIXTURES = {
     overall: "failing",
     tiers: [
       { tier: "hourly", status: "failing", age_seconds: 4200,
-        stale_after_seconds: 10800, last_success_key: "hourly:20260906-001110",
-        offsite: "complete", total_bytes: 2612312145 },
+        stale_after_seconds: 10800, last_success_key: "hourly:20260906-020000",
+        offsite: "complete", total_bytes: 2612312145,
+        last_run: { key: "hourly:20260906-030000", verdict: "failed",
+                    failures: ["beads/blindhash: Unknown MySQL server host 'dolt'"] } },
       { tier: "daily", status: "ok", age_seconds: 32000,
         stale_after_seconds: 259200, last_success_key: "daily:20260906-030000",
-        offsite: "complete", total_bytes: 2612312145 },
+        offsite: "complete", total_bytes: 2612312145, last_run: null },
     ],
     last_drill: null,
     running_drill: null,
-    config: { staleness_multiple: 3.0, schedule_owner: "cron" },
+    config: { staleness_multiple: 3.0 },
+    destinations: {
+      local_root: "/opt/autonomy/data/backups",
+      data_root: "/opt/autonomy/data",
+      provider: "b2", bucket: "autonomy",
+      repository: "rclone:b2:autonomy/restic",
+      credentials: "ok",
+      repo_bytes: 48318382080,
+      vault_rows: ["backup.restic-password"],
+    },
   },
   "/api/backup/runs": { runs: [
-    { key: "hourly:20260906-020000", verdict: "complete", store_count: 24,
+    { key: "hourly:20260906-020000", verdict: "complete", store_count: 32,
       beads_databases: 3, total_bytes: 2612312145, offsite: "complete",
       origin: "host", failures: [],
       stores: [
@@ -46,13 +58,25 @@ const FIXTURES = {
           bytes: 1557696512 },
         { name: "tls.key", action: "copy", status: "ok", bytes: 241 },
       ]},
-    { key: "hourly:20260906-030000", verdict: "failed", store_count: 23,
+    { key: "hourly:20260906-030000", verdict: "failed", store_count: 31,
       beads_databases: 2, total_bytes: 1054615633, offsite: "unknown",
       origin: "host",
       failures: ["beads/blindhash: Unknown MySQL server host 'dolt'"],
       stores: [] },
   ]},
   "/api/backup/drills": { drills: [] },
+  "/api/backup/config": {
+    config: { staleness_multiple: 3.0, offsite_provider: "b2" },
+    fields: {
+      staleness_multiple: {
+        description: "A tier is stale when age exceeds this multiple",
+        type: "number" },
+      offsite_provider: {
+        description: "Offsite provider", type: "string",
+        enum: ["", "b2", "r2", "s3"] },
+    },
+    editable: true,
+  },
 };
 
 const html = `<!doctype html><html><head></head><body>
@@ -84,46 +108,73 @@ setTimeout(() => {
     check("fragment mounted", !!root);
     const comp = window.Alpine.$data(root);
 
-    // Hero answers "am I safe now" with the worst verdict.
+    // Topbar claimed with the app name, never someone else's leftovers.
+    check("topbar claimed",
+      d.querySelector("header").classList.contains("app-topbar-active"));
+    check("topbar titled Backup",
+      d.querySelector("#app-topbar-slot").textContent.includes("Backup"));
+
+    // Hero: verdict + a WHY in words.
     const overall = d.querySelector('[data-testid="backup-overall"]');
     check("hero shows FAILING", overall
       && overall.textContent.trim() === "FAILING");
+    const why = d.querySelector('[data-testid="backup-overall-why"]');
+    check("hero explains why", why
+      && why.textContent.includes("hourly:")
+      && why.textContent.includes("blindhash"));
 
-    // Both tiers render with their own status marks.
-    check("hourly tier row", !!d.querySelector(
-      '[data-testid="backup-tier-hourly"]'));
-    check("daily tier row", !!d.querySelector(
-      '[data-testid="backup-tier-daily"]'));
+    // Tier table with headers and one labeled row per schedule.
+    const tierTable = d.querySelector('[data-testid="backup-tier-table"]');
+    check("tier table has headers", tierTable
+      && tierTable.textContent.includes("Last good backup")
+      && tierTable.textContent.includes("Offsite copy"));
+    check("hourly row", !!d.querySelector('[data-testid="backup-tier-hourly"]'));
+    check("daily row", !!d.querySelector('[data-testid="backup-tier-daily"]'));
 
-    // Failures pin first in the run stream despite being newer/older.
+    // Destinations: where, credentials state, provider size.
+    const dest = d.querySelector('[data-testid="backup-destinations"]');
+    check("local destination shown", dest
+      && dest.textContent.includes("/opt/autonomy/data/backups"));
+    check("repository shown", dest
+      && dest.textContent.includes("rclone:b2:autonomy/restic"));
+    check("provider total shown", dest
+      && dest.textContent.includes("total stored"));
+    check("credentials in words",
+      d.querySelector('[data-testid="backup-credentials"]')
+        .textContent.includes("sealed in the vault"));
+
+    // Failures pinned first with the reason rendered.
     check("failed run pinned first",
-      comp.runStream.length === 2
-      && comp.runStream[0].verdict === "failed");
-    const stream = d.querySelector('[data-testid="backup-run-stream"]');
-    check("failure reason rendered", stream
-      && stream.textContent.includes("Unknown MySQL server host"));
+      comp.runStream.length === 2 && comp.runStream[0].verdict === "failed");
+    check("failure reason rendered",
+      d.querySelector('[data-testid="backup-run-stream"]')
+        .textContent.includes("Unknown MySQL server host"));
 
-    // Store table serves the NEWEST hourly run (the failed one has no
-    // stores; newest by stamp is 030000 which is the failed one — its
-    // empty stores fall through to the placeholder).
-    check("store table exists", !!d.querySelector(
-      '[data-testid="backup-store-table"]'));
-    comp.storeTier = "daily";
-    check("tier toggle empties table for absent tier",
-      comp.storeRows.length === 0);
-    comp.storeTier = "hourly";
-    check("newest hourly run selected for stores",
-      comp.storeRows.length === 0);  // 030000 (failed, no stores) is newest
+    // One contents table from the newest COMPLETE run — no tier toggle.
+    check("contents from newest complete run",
+      comp.latestContents().key === "hourly:20260906-020000");
+    check("contents table lists stores",
+      d.querySelector('[data-testid="backup-store-table"]')
+        .textContent.includes("orgs/autonomy.db"));
+    check("no tier toggle survives", !d.querySelector(".bk-tier-btn"));
 
-    // Never drilled: the panel says so, in words.
-    const drill = d.querySelector('[data-testid="backup-drill-panel"]');
-    check("undrilled state is explicit", drill
-      && drill.textContent.includes("Never drilled"));
+    // Drill: explained, runnable, honest when never run.
+    check("drill explained in words",
+      d.body.textContent.includes("proof the backups can"));
+    check("run drill button enabled",
+      !d.querySelector('[data-testid="backup-drill-run"]').disabled);
+    check("undrilled state explicit",
+      d.querySelector('[data-testid="backup-drill-panel"]')
+        .textContent.includes("Never drilled"));
 
-    // Config renders the policy in force.
+    // Config: descriptions + editable controls.
     const config = d.querySelector('[data-testid="backup-config"]');
-    check("config lists staleness_multiple", config
-      && config.textContent.includes("staleness_multiple"));
+    check("config field described", config
+      && config.textContent.includes("stale when age exceeds"));
+    check("config enum renders select",
+      !!config.querySelector("select#bk-cfg-offsite_provider"));
+    check("config save button",
+      !!d.querySelector('[data-testid="backup-config-save"]'));
 
     if (failures === 0) console.log("PASS backup_page");
     process.exit(failures === 0 ? 0 : 1);

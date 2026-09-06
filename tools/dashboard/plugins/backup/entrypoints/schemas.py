@@ -184,6 +184,15 @@ class BackupRunV1(SettingSchema):
         default="",
         description="The AUTONOMY_DATA_ROOT the run resolved (the "
                     "2026-09-06 incident was exactly this being wrong)")
+    backup_root: str = field(
+        default="",
+        description="Where this run wrote its capture — evidence of the "
+                    "actual destination, so the page never guesses")
+    offsite_repo_bytes: int = field(
+        default=0,
+        description="Cumulative unique bytes in the offsite restic "
+                    "repository after this run's push (restic stats "
+                    "raw-data); 0 = not measured")
     stores: list = field(
         default_factory=list, element=_STORE_ELEMENT,
         description="Per-store outcomes, in capture order")

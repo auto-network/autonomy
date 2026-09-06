@@ -1,31 +1,29 @@
-// Backup plugin — frontend Alpine factory (bead auto-x6f7z).
+// Backup plugin — frontend Alpine factory.
 //
-// The page answers, in order: am I safe now (tier health hero), when
-// was the last good copy (run stream, failures pinned), what exactly
-// was captured (per-store table), does restore actually work (drill
-// panel) — the §0 viewer analysis in graph://7c45a180-345.
+// Reworked 2026-09-06 from the operator's live design review: plain
+// language everywhere, a real status table with headers, a "where do
+// backups go" panel with credential state and provider size, one
+// contents table (hourly/daily capture the same stores — a toggle
+// implied a difference that doesn't exist), and an editable
+// configuration form with the schema's own descriptions.
 //
-// Reads (plain same-origin fetch; the API serves persisted Settings
-// only — no request ever touches the backup destination):
-//   GET /api/backup/summary
-//   GET /api/backup/runs?tier=&limit=
-//   GET /api/backup/drills
-//
-// Polling, not SSE, for the scaffold: run rows change at most once an
-// hour; a 60 s poll is honest and cheap. The run-report reconciler
-// bead (auto-yj2wa) owns any move to setting.changed events.
+// Reads: GET /api/backup/summary (now incl. destinations),
+//        /api/backup/runs, /api/backup/drills, /api/backup/config
+// Writes (operator authority): POST /api/backup/reconcile,
+//        POST /api/backup/drill, PUT /api/backup/config
 
 function backupRelativeAge(seconds) {
   if (seconds === null || seconds === undefined) return 'never';
   const s = Math.max(0, Math.floor(seconds));
   if (s < 90) return 'just now';
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 172800) return `${(s / 3600).toFixed(1)}h ago`;
-  return `${(s / 86400).toFixed(1)}d ago`;
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 172800) return `${(s / 3600).toFixed(1)} hours ago`;
+  return `${(s / 86400).toFixed(1)} days ago`;
 }
 
 function backupBytes(n) {
   let v = Number(n || 0);
+  if (!v) return '—';
   for (const unit of ['B', 'KB', 'MB', 'GB', 'TB']) {
     if (v < 1024 || unit === 'TB') {
       return unit === 'B' ? `${v.toFixed(0)} B` : `${v.toFixed(1)} ${unit}`;
@@ -42,10 +40,16 @@ function backupPage() {
     summary: null,
     runs: [],
     drills: [],
-    storeTier: 'hourly',
+    configMeta: { config: {}, fields: {}, editable: false },
+    configDraft: {},
+    configMessage: '',
+    drillMessage: '',
     _timer: null,
 
     async init() {
+      document.title = 'Backup — Autonomy';
+      const header = document.querySelector('header');
+      if (header) header.classList.add('app-topbar-active');
       await this.refresh();
       this._timer = setInterval(() => this.refresh(), 60_000);
     },
@@ -53,9 +57,37 @@ function backupPage() {
       if (this._timer) clearInterval(this._timer);
     },
 
-    drillMessage: '',
+    async refresh() {
+      try {
+        const [summary, runs, drills, configMeta] = await Promise.all([
+          fetch('/api/backup/summary').then((r) => r.json()),
+          fetch('/api/backup/runs?limit=30').then((r) => r.json()),
+          fetch('/api/backup/drills?limit=10').then((r) => r.json()),
+          fetch('/api/backup/config').then((r) => r.json()),
+        ]);
+        this.summary = summary;
+        this.runs = runs.runs || [];
+        this.drills = drills.drills || [];
+        this.configMeta = configMeta;
+        if (!Object.keys(this.configDraft).length) {
+          this.configDraft = { ...(configMeta.config || {}) };
+        }
+        this.error = '';
+      } catch (e) {
+        this.error = 'Could not load backup state.';
+      } finally {
+        this.loading = false;
+      }
+    },
 
-    // Start an on-demand restore drill; 409 = one already running.
+    // Ingest the newest on-disk reports first, then re-read.
+    async refreshFromDisk() {
+      try {
+        await fetch('/api/backup/reconcile', { method: 'POST' });
+      } catch (e) { /* stored state still renders */ }
+      await this.refresh();
+    },
+
     async runDrill() {
       this.drillMessage = '';
       try {
@@ -75,38 +107,104 @@ function backupPage() {
       await this.refresh();
     },
 
-    // The operator's refresh also ingests the latest on-disk run
-    // reports first (bounded server-side); a 403 (non-operator) or a
-    // reconcile fault must never block rendering the stored state.
-    async refreshFromDisk() {
-      try {
-        await fetch('/api/backup/reconcile', { method: 'POST' });
-      } catch (e) { /* stored state still renders */ }
-      await this.refresh();
-    },
-
-    async refresh() {
-      try {
-        const [summary, runs, drills] = await Promise.all([
-          fetch('/api/backup/summary').then((r) => r.json()),
-          fetch('/api/backup/runs?limit=30').then((r) => r.json()),
-          fetch('/api/backup/drills?limit=10').then((r) => r.json()),
-        ]);
-        this.summary = summary;
-        this.runs = runs.runs || [];
-        this.drills = drills.drills || [];
-        this.error = '';
-      } catch (e) {
-        this.error = 'Could not load backup state.';
-      } finally {
-        this.loading = false;
+    async saveConfig() {
+      this.configMessage = '';
+      const changed = {};
+      for (const [key, value] of Object.entries(this.configDraft)) {
+        if (value !== (this.configMeta.config || {})[key]) {
+          const meta = (this.configMeta.fields || {})[key] || {};
+          changed[key] = (meta.type === 'integer') ? parseInt(value, 10)
+            : (meta.type === 'number') ? parseFloat(value)
+            : (meta.type === 'boolean') ? (value === true || value === 'true')
+            : value;
+        }
       }
+      if (!Object.keys(changed).length) {
+        this.configMessage = 'Nothing changed.';
+        return;
+      }
+      try {
+        const res = await fetch('/api/backup/config', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(changed),
+        });
+        const body = await res.json();
+        this.configMessage = res.ok ? 'Saved.'
+          : (body.error || 'Save failed.');
+      } catch (e) {
+        this.configMessage = 'Save failed.';
+      }
+      await this.refresh();
     },
 
     age: backupRelativeAge,
     fmtBytes: backupBytes,
 
-    // Failures pinned first, then newest first — the stream's rule.
+    tierRows() {
+      return ((this.summary || {}).tiers || []).map((tier) => {
+        const last = tier.last_run || {};
+        return {
+          tier: tier.tier,
+          status: tier.status,
+          mark: { ok: '✓', stale: '⚠', failing: '✗' }[tier.status] || '?',
+          lastGood: this.age(tier.age_seconds),
+          size: this.fmtBytes(tier.total_bytes),
+          offsite: this.offsiteLabel(tier.offsite, tier.age_seconds),
+          reason: this.tierReason(tier, last),
+        };
+      });
+    },
+
+    offsiteLabel(verdict, ageSeconds) {
+      if (verdict === 'complete') return '✓ pushed';
+      if (verdict === 'failed') return '✗ failed';
+      if (verdict === 'skipped') return 'off';
+      if (ageSeconds !== null && ageSeconds !== undefined
+          && ageSeconds < 900) return 'pushing…';
+      return 'unverified';
+    },
+
+    tierReason(tier, lastRun) {
+      if (tier.status === 'failing') {
+        return ((lastRun.failures || [])[0]) || 'last backup failed';
+      }
+      if (tier.status === 'stale') {
+        return tier.age_seconds === null || tier.age_seconds === undefined
+          ? 'no backup has completed yet'
+          : `nothing since ${this.age(tier.age_seconds)} (limit `
+            + `${(tier.stale_after_seconds / 3600).toFixed(0)}h)`;
+      }
+      return '';
+    },
+
+    overallLabel() {
+      const overall = (this.summary || {}).overall || 'unknown';
+      return { ok: 'PROTECTED', stale: 'ATTENTION', failing: 'FAILING' }[overall]
+        || overall.toUpperCase();
+    },
+
+    overallExplanation() {
+      const problems = this.tierRows()
+        .filter((row) => row.reason)
+        .map((row) => `${row.tier}: ${row.reason}`);
+      if (!problems.length) {
+        return 'Both tiers are backing up on schedule.';
+      }
+      return problems.join(' · ');
+    },
+
+    credentialsLabel() {
+      const status = ((this.summary || {}).destinations || {}).credentials;
+      return {
+        ok: 'sealed in the vault · releasable now (vault is unlocked)',
+        'vault-cold': 'sealed in the vault · will release when the vault is unlocked',
+        unsealed: 'NOT sealed yet — offsite cannot authenticate',
+        disabled: 'offsite pushes are switched off',
+        unconfigured: 'no offsite provider configured',
+      }[status] || 'unknown';
+    },
+
     get runStream() {
       const key = (r) => (r.key || '').split(':').pop();
       const failed = this.runs.filter((r) => r.verdict === 'failed');
@@ -116,40 +214,26 @@ function backupPage() {
       return [...failed, ...ok];
     },
 
-    // The per-store table shows the newest run of the selected tier.
-    get storeRows() {
-      const run = this.runs
-        .filter((r) => (r.key || '').startsWith(`${this.storeTier}:`))
-        .sort((a, b) => (b.key || '').localeCompare(a.key || ''))[0];
-      return run ? (run.stores || []) : [];
-    },
-
-    tierByName(name) {
-      return ((this.summary || {}).tiers || []).find((t) => t.tier === name)
-        || { tier: name, status: 'stale', age_seconds: null };
-    },
-
-    overallLabel() {
-      const overall = (this.summary || {}).overall || 'unknown';
-      return { ok: 'PROTECTED', stale: 'STALE', failing: 'FAILING' }[overall]
-        || overall.toUpperCase();
+    // Hourly and daily capture the SAME stores; one table, labeled
+    // with the run it came from.
+    latestContents() {
+      const complete = this.runs
+        .filter((r) => r.verdict === 'complete' && (r.stores || []).length)
+        .sort((a, b) => (b.key || '').split(':').pop()
+          .localeCompare((a.key || '').split(':').pop()));
+      return complete[0] || null;
     },
 
     statusClass(status) {
       return {
-        ok: 'bk-ok',
-        complete: 'bk-ok',
-        pass: 'bk-ok',
-        stale: 'bk-warn',
-        skipped: 'bk-warn',
-        unknown: 'bk-warn',
-        running: 'bk-warn',
-        failing: 'bk-bad',
-        failed: 'bk-bad',
-        fail: 'bk-bad',
-        timeout: 'bk-bad',
-        missing: 'bk-bad',
-        error: 'bk-bad',
+        ok: 'bk-ok', complete: 'bk-ok', pass: 'bk-ok',
+        '✓ pushed': 'bk-ok',
+        stale: 'bk-warn', skipped: 'bk-warn', unknown: 'bk-warn',
+        running: 'bk-warn', 'pushing…': 'bk-warn', unverified: 'bk-warn',
+        off: 'bk-muted',
+        failing: 'bk-bad', failed: 'bk-bad', fail: 'bk-bad',
+        timeout: 'bk-bad', missing: 'bk-bad', error: 'bk-bad',
+        '✗ failed': 'bk-bad',
       }[status] || 'bk-warn';
     },
   };

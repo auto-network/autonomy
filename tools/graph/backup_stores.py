@@ -189,6 +189,7 @@ def cmd_report() -> int:
         "duration_seconds": float(env("REPORT_DURATION", "0")),
         "origin": env("REPORT_ORIGIN", "host"),
         "data_root": env("REPORT_DATA_ROOT", ""),
+        "backup_root": env("REPORT_BACKUP_ROOT", ""),
         "stores": stores,
         "store_count": int(env("REPORT_STORES", "0")),
         "beads_databases": int(env("REPORT_BEADS", "0")),
@@ -204,6 +205,13 @@ def cmd_report() -> int:
 
 def cmd_report_offsite(verdict: str, exit_code: str,
                        paths: list[str]) -> int:
+    repo_bytes = None
+    if paths and paths[0].startswith("--repo-bytes="):
+        try:
+            repo_bytes = int(paths[0].split("=", 1)[1])
+        except ValueError:
+            pass
+        paths = paths[1:]
     status = 0
     for raw in paths:
         path = Path(raw)
@@ -211,6 +219,8 @@ def cmd_report_offsite(verdict: str, exit_code: str,
             report = json.loads(path.read_text())
             report["offsite"] = verdict
             report["exit_code"] = int(exit_code)
+            if repo_bytes is not None:
+                report["offsite_repo_bytes"] = repo_bytes
             path.write_text(json.dumps(report, indent=1) + "\n")
         except (OSError, ValueError) as exc:
             print(f"report-offsite: {path}: {exc}", file=sys.stderr)
