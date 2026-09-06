@@ -64,12 +64,19 @@ RUN curl -fsSL -o /tmp/dolt.tgz \
     && install -m 0755 /tmp/dolt-linux-amd64/bin/dolt /usr/local/bin/dolt \
     && rm -rf /tmp/dolt.tgz /tmp/dolt-linux-amd64
 
-# ── Claude Code CLI — official published installer (was: COPY bin/claude).
-#    NOTE: the installer fetches the current release; pinning claude to a
-#    version+checksum is the remaining reproducibility step (tracked).
-RUN curl -fsSL https://claude.ai/install.sh | bash \
+# ── Claude Code CLI — official published installer, pinned to the version
+#    build.sh reads off the host binary (`bash -s -- <version>`). The ARG must
+#    be declared BEFORE this RUN: with no version in the command line the layer
+#    never changed and Docker served the cached install forever — the image sat
+#    on 2.1.237 through two "rebuilds" whose LABEL claimed newer (2026-09-06).
+#    Declaring it here makes the version part of the layer's cache key, so a
+#    host bump rebuilds exactly this step and the label cannot lie.
+ARG CLAUDE_VERSION=latest
+RUN curl -fsSL https://claude.ai/install.sh | bash -s -- "${CLAUDE_VERSION}" \
     && ( install -m 0755 "$(readlink -f /root/.local/bin/claude)" /usr/local/bin/claude \
-         || ln -sf /root/.local/bin/claude /usr/local/bin/claude )
+         || ln -sf /root/.local/bin/claude /usr/local/bin/claude ) \
+    && [ "${CLAUDE_VERSION}" = latest ] \
+       || /usr/local/bin/claude --version | grep -qF "${CLAUDE_VERSION}"
 
 # Commit-signing shim (git gpg.program). Worktree setup points gpg.program
 # here when a workspace's policy requires a GPG signature; needs python3 + curl
@@ -141,11 +148,12 @@ ENV NODE_PATH=/usr/lib/node_modules
 # The harness versions this image was built with, recorded on the image
 # itself. CODEX_VERSION is the same variable that installed the binary two
 # lines above, so the label cannot disagree with what is installed.
-# CLAUDE_VERSION is passed by build.sh from the binary it copies into the
-# build context. The launcher reads these with `docker image inspect` and
-# stamps them into each session's .session_meta.json, so a reader that
-# starts mid-log never has to guess which record format the session writes.
-ARG CLAUDE_VERSION=unknown
+# CLAUDE_VERSION is declared above the installer step (it pins what gets
+# installed) and re-declared here so the label sees it. The launcher reads
+# these with `docker image inspect` and stamps them into each session's
+# .session_meta.json, so a reader that starts mid-log never has to guess
+# which record format the session writes.
+ARG CLAUDE_VERSION
 LABEL codex.version=$CODEX_VERSION claude.version=$CLAUDE_VERSION
 
 # ── Pre-configure agent-browser for container use ──
