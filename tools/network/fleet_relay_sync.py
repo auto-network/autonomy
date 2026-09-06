@@ -94,7 +94,15 @@ PROTOCOL_VERSION = 1
 #: pull attempt so a peer that accepts and never answers cannot hang the puller
 #: forever; the run loop's backoff retries after a timeout. Mid-transfer
 #: inactivity is the stream liveness policy's job — this is the outer floor.
-PULL_DEADLINE_S = 600.0
+#:
+#: 30 minutes, not less: the serving side builds the full checkpoint BEFORE the
+#: first content frame, and over a tombstone-bloated catalog (708k rows, ~half
+#: uncollected tombstones — semantic GC unimplemented, auto-yl0r6) that build
+#: alone exceeded 600s on real hardware (2026-09-06, home pid at 107% CPU).
+#: Timing out mid-build is the worst outcome: the receiver walks away, retries,
+#: and STACKS another build on the server. The deadline must comfortably exceed
+#: one honest build+transfer; shrinking the catalog (GC) is the real cure.
+PULL_DEADLINE_S = 1800.0
 PULL_OP = "fleet.sync.pull"
 #: A direct-path success younger than this makes a relay pull redundant.
 DIRECT_FRESHNESS_WINDOW_S = 30.0
