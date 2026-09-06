@@ -72,12 +72,12 @@
     return cat ? cat.describeScope(scope) : { scope: scope, label: scope, unknown: true };
   }
   function scopeLabel(scope) { var d = describeScope(scope); return d.unknown ? scope : d.label; }
-  // Recommended starter set (roles design R-S1); an operator ruling or a
-  // Setting can replace it by assigning window.AutonomyStarterRoles.
+  // The starter set is exactly what the operator has ruled (2026-09-06:
+  // "Yes, of course you can add a plain member role"). Admin and the other
+  // R-S1 roles join this list as each is ruled; window.AutonomyStarterRoles
+  // overrides it for a Setting-driven set later.
   var STARTER_ROLES = window.AutonomyStarterRoles || [
     { name: 'member', scopeSet: [], claimRequires: 'admin-ack', approverThreshold: 1 },
-    { name: 'admin', scopeSet: ['invite:member', 'role:grant:member', 'link:publish', 'link:revoke'],
-      claimRequires: 'admin-ack', approverThreshold: 1 },
   ];
   // jsdom seam: tests replace the ceremonies (which need a real root and
   // real modules) without touching the rendering they assert on.
@@ -538,7 +538,7 @@
     html += '<div class="mem-section"><div class="mem-heading"><h2>Roles</h2><span class="mem-actions-row">'
       + (onlyOwner && !this.roleStep
         ? '<button type="button" class="mem-secondary" data-action="starter-roles"' + (this.busy === 'starter' ? ' disabled' : '') + '>'
-          + (this.busy === 'starter' ? 'Adding' : 'Add starter roles') + '</button>'
+          + (this.busy === 'starter' ? 'Adding' : (STARTER_ROLES.length === 1 ? 'Add the ' + roleWord([STARTER_ROLES[0].name]) + ' role' : 'Add starter roles')) + '</button>'
         : '')
       + (!this.roleStep ? '<button type="button" class="mem-secondary" data-action="open-define">Define role</button>' : '')
       + '</span></div>';
