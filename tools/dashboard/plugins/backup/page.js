@@ -188,6 +188,14 @@ function backupPage() {
       const problems = this.tierRows()
         .filter((row) => row.reason)
         .map((row) => `${row.tier}: ${row.reason}`);
+      const lastDrill = (this.summary || {}).last_drill;
+      if (lastDrill && lastDrill.verdict !== 'pass') {
+        problems.push('the last restore drill did not pass');
+      }
+      const hourly = this.tierRows().find((r) => r.tier === 'hourly');
+      if (hourly && hourly.offsite === '✗ failed') {
+        problems.push('the last offsite push failed');
+      }
       if (!problems.length) {
         return 'Both tiers are backing up on schedule.';
       }
