@@ -391,7 +391,7 @@ class TestCompactGlobalSearchChrome:
             "no_overflow": True,
         }
 
-    def test_app_owned_and_session_routes_keep_profile_visible(self, harness):
+    def test_mobile_session_modes_hide_shell_profile_from_viewer_header(self, harness):
         _open("/sessions")
         state = ab_eval("""
             var header = document.querySelector('header[data-app-chrome]');
@@ -405,11 +405,17 @@ class TestCompactGlobalSearchChrome:
             return route().then(function() {
                 return new Promise(function(resolve) {
                   setTimeout(function() {
+                    var fullscreenProfileHidden =
+                        document.getElementById('identity-indicator').offsetParent === null;
+                    document.body.classList.remove('fullscreen-page');
+                    document.body.classList.add('session-overlay-active');
                     resolve({
                         app_owned: appOwned,
                         route_immersive: document.body.classList.contains('route-immersive'),
                         search_hidden: document.getElementById('global-search-control').offsetParent === null,
-                        profile_hidden: document.getElementById('identity-indicator').offsetParent === null,
+                        fullscreen_profile_hidden: fullscreenProfileHidden,
+                        overlay_profile_hidden:
+                            document.getElementById('identity-indicator').offsetParent === null,
                         header_present: !!header,
                     });
                   }, 100);
@@ -422,7 +428,8 @@ class TestCompactGlobalSearchChrome:
         }
         assert state["route_immersive"] is True
         assert state["search_hidden"] is True
-        assert state["profile_hidden"] is False
+        assert state["fullscreen_profile_hidden"] is True
+        assert state["overlay_profile_hidden"] is True
         assert state["header_present"] is True
 
 
