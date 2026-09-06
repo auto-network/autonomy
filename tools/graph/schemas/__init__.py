@@ -71,6 +71,7 @@ from .registry import (
 # calls ``register_schema`` at import time.
 from . import org  # noqa: F401
 from . import org_member_profile  # noqa: F401 — autonomy.org.member-profile#1
+from . import org_ledger_event  # noqa: F401 — autonomy.org.ledger-event#1
 from . import workspace  # noqa: F401
 from . import workspace_artifact  # noqa: F401 — autonomy.workspace.artifact#1
 from . import dispatch_limits  # noqa: F401 — autonomy.dispatch.limits#1

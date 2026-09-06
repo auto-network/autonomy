@@ -1850,6 +1850,20 @@ class FleetSyncScheduler:
                 continue
             except Exception:
                 return
+            # Bead auto-dqemk: a pulled scope may carry ledger-event rows
+            # (autonomy.org.ledger-event#1); absorb them into this store's
+            # ledger and publish any local events the set lacks. A store
+            # with no genesis ignores the rows — founding arrives via the
+            # join flow, never from replicated rows.
+            try:
+                from tools.network.ledger.settings_bridge import reconcile
+
+                await asyncio.to_thread(reconcile, scope)
+            except Exception:
+                logger.debug(
+                    "ledger-event reconcile skipped for scope %r",
+                    scope, exc_info=True,
+                )
 
     async def _pull_scope(
         self, machine_pub: str, addresses: Sequence[str], scope: str
