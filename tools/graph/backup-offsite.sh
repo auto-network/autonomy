@@ -148,4 +148,15 @@ restic forget --prune \
     --keep-monthly "${RESTIC_KEEP_MONTHLY:-12}" \
     --host "${HOST}"
 
+# Cumulative repository size (the operator's "how much is on the
+# provider"): raw-data mode = unique bytes stored after dedup. Emitted
+# in a stable grep-able line; backup-all.sh forwards it into the
+# run-report's offsite stamp.
+PYTHON_BE="${REPO_ROOT}/.venv/bin/python3"
+[[ -x "$PYTHON_BE" ]] || PYTHON_BE="$(command -v python3)"
+REPO_BYTES="$(restic stats --json --mode raw-data 2>/dev/null \
+    | "$PYTHON_BE" -c 'import json,sys; print(int(json.load(sys.stdin).get("total_size", 0)))' \
+    2>/dev/null || echo 0)"
+echo "offsite: repository raw size ${REPO_BYTES} bytes"
+
 echo "offsite: snapshot complete ${STAMP} tier=${TIER}"

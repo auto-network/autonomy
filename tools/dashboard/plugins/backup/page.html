@@ -2,9 +2,11 @@
      data-testid="backup-fragment-root"
      class="bk-page max-w-3xl mx-auto px-3 md:px-6 pb-12">
 
+<template x-teleport="#app-topbar-slot">
+  <div class="text-sm font-semibold text-slate-200">Backup</div>
+</template>
+
 <style>
-  /* Scoped tokens: calm slate surface, verdict colors reserved for
-     verdicts only, so a wall of green never hides one red line. */
   .bk-page { color: rgb(226 232 240); }
   .bk-page .bk-card {
     background: rgb(15 23 42 / 0.6);
@@ -22,22 +24,47 @@
   .bk-page .bk-muted { color: rgb(148 163 184); }
   .bk-page h2 {
     font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase;
-    color: rgb(148 163 184); margin: 22px 0 8px;
+    color: rgb(148 163 184); margin: 22px 0 2px;
+  }
+  .bk-page .bk-sub {
+    font-size: 12px; color: rgb(100 116 139); margin: 0 0 8px;
   }
   .bk-page table { width: 100%; border-collapse: collapse; font-size: 13px; }
   .bk-page td, .bk-page th {
-    padding: 5px 8px; text-align: left;
+    padding: 6px 8px; text-align: left;
     border-bottom: 1px solid rgb(30 41 59);
   }
-  .bk-page th { color: rgb(148 163 184); font-weight: 500; }
+  .bk-page th {
+    color: rgb(148 163 184); font-weight: 500; font-size: 11px;
+    text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .bk-page tr:last-child td { border-bottom: none; }
   .bk-page .bk-num { text-align: right; font-variant-numeric: tabular-nums; }
-  .bk-page .bk-tier-btn {
-    padding: 3px 10px; border-radius: 8px; font-size: 12px;
-    border: 1px solid rgb(51 65 85); color: rgb(148 163 184);
+  .bk-page .bk-btn {
+    padding: 4px 14px; border-radius: 8px; font-size: 13px;
+    border: 1px solid rgb(99 102 241); color: rgb(165 180 252);
+    background: rgb(49 46 129 / 0.3); cursor: pointer;
   }
-  .bk-page .bk-tier-btn.bk-active {
-    color: rgb(226 232 240); background: rgb(30 41 59);
+  .bk-page .bk-btn:hover { background: rgb(49 46 129 / 0.6); }
+  .bk-page .bk-btn:disabled {
+    border-color: rgb(51 65 85); color: rgb(100 116 139);
+    cursor: default; background: transparent;
   }
+  .bk-page .bk-field { margin-bottom: 10px; }
+  .bk-page .bk-field label {
+    display: block; font-size: 12px; color: rgb(203 213 225);
+    font-family: ui-monospace, monospace;
+  }
+  .bk-page .bk-field .bk-desc {
+    font-size: 11px; color: rgb(100 116 139); margin: 1px 0 3px;
+  }
+  .bk-page .bk-field input, .bk-page .bk-field select {
+    width: 100%; max-width: 340px; padding: 4px 8px; font-size: 13px;
+    background: rgb(2 6 23); color: rgb(226 232 240);
+    border: 1px solid rgb(51 65 85); border-radius: 6px;
+  }
+  .bk-page dt { color: rgb(148 163 184); font-size: 12px; }
+  .bk-page dd { margin: 0 0 8px; font-size: 13px; }
 </style>
 
   <template x-if="loading">
@@ -60,41 +87,72 @@
                :class="statusClass(summary.overall === 'ok' ? 'ok' : summary.overall)"
                data-testid="backup-overall"
                x-text="overallLabel()"></div>
-          <button class="bk-tier-btn" @click="refreshFromDisk()">refresh</button>
+          <button class="bk-btn" @click="refreshFromDisk()">refresh</button>
         </div>
-        <div class="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
-          <template x-for="tier in summary.tiers" :key="tier.tier">
-            <div class="flex items-center justify-between gap-2 text-sm"
-                 :data-testid="'backup-tier-' + tier.tier">
-              <span>
-                <span :class="statusClass(tier.status)"
-                      x-text="{ok:'✓', stale:'⚠', failing:'✗'}[tier.status] || '?'"></span>
-                <span class="ml-1" x-text="tier.tier"></span>
-              </span>
-              <span class="bk-muted">
-                <span x-text="age(tier.age_seconds)"></span>
-                <span class="ml-2" x-text="fmtBytes(tier.total_bytes)"></span>
-                <span class="ml-2 bk-mono" x-text="'offsite:' + (tier.offsite || '?')"></span>
-              </span>
-            </div>
-          </template>
-        </div>
+        <div class="bk-sub mt-1" data-testid="backup-overall-why"
+             x-text="overallExplanation()"></div>
+        <table class="mt-2" data-testid="backup-tier-table">
+          <thead><tr>
+            <th>Schedule</th><th>Last good backup</th>
+            <th class="bk-num">Size</th><th>Offsite copy</th>
+          </tr></thead>
+          <tbody>
+            <template x-for="row in tierRows()" :key="row.tier">
+              <tr :data-testid="'backup-tier-' + row.tier">
+                <td>
+                  <span :class="statusClass(row.status)" x-text="row.mark"></span>
+                  <span class="ml-1" x-text="row.tier"></span>
+                </td>
+                <td x-text="row.lastGood"></td>
+                <td class="bk-num" x-text="row.size"></td>
+                <td><span :class="statusClass(row.offsite)"
+                          x-text="row.offsite"></span></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Where backups go -->
+      <h2>Where backups go</h2>
+      <p class="bk-sub">Every backup is written to the local destination,
+        then pushed to the encrypted offsite repository.</p>
+      <div class="bk-card" data-testid="backup-destinations">
+        <dl>
+          <dt>Local destination (NAS)</dt>
+          <dd class="bk-mono"
+              x-text="(summary.destinations || {}).local_root || 'not yet reported by a backup run'"></dd>
+          <dt>Offsite repository</dt>
+          <dd>
+            <span class="bk-mono"
+                  x-text="(summary.destinations || {}).repository || 'not configured'"></span>
+            <template x-if="(summary.destinations || {}).repo_bytes">
+              <span class="bk-muted ml-2"
+                    x-text="'· total stored: ' + fmtBytes(summary.destinations.repo_bytes)"></span>
+            </template>
+          </dd>
+          <dt>Offsite credentials</dt>
+          <dd data-testid="backup-credentials" x-text="credentialsLabel()"></dd>
+        </dl>
       </div>
 
       <!-- Does restore actually work -->
       <h2>
         Restore drill
-        <button class="bk-tier-btn ml-2" data-testid="backup-drill-run"
+        <button class="bk-btn ml-2" data-testid="backup-drill-run"
                 :disabled="!!summary.running_drill"
-                @click="runDrill()">run drill</button>
+                @click="runDrill()">run drill now</button>
       </h2>
+      <p class="bk-sub">A drill restores the newest offsite snapshot to a
+        scratch area and verifies every database — proof the backups can
+        actually be restored, not just written.</p>
       <div class="bk-card" data-testid="backup-drill-panel">
         <div x-show="drillMessage" class="text-sm bk-warn mb-1"
              x-text="drillMessage"></div>
         <template x-if="summary.running_drill">
           <div class="text-sm bk-warn">
-            Drill running since
-            <span x-text="summary.running_drill.started_at"></span>
+            Drill in progress (started
+            <span x-text="summary.running_drill.started_at"></span>)
           </div>
         </template>
         <template x-if="!summary.running_drill && summary.last_drill">
@@ -103,8 +161,6 @@
                   x-text="summary.last_drill.verdict.toUpperCase()"></span>
             <span class="bk-muted ml-2"
                   x-text="summary.last_drill.finished_at || summary.last_drill.started_at"></span>
-            <span class="bk-muted ml-2"
-                  x-text="(summary.last_drill.checks || []).length + ' checks'"></span>
             <div class="mt-1 space-y-0.5">
               <template x-for="check in summary.last_drill.checks || []" :key="check.name">
                 <div class="bk-mono">
@@ -122,11 +178,13 @@
         </template>
       </div>
 
-      <!-- When was the last good copy -->
-      <h2>Capture runs</h2>
+      <!-- When did backups run -->
+      <h2>Backup runs</h2>
+      <p class="bk-sub">One row per backup attempt, newest first;
+        failures pin to the top with their reason.</p>
       <div class="bk-card" data-testid="backup-run-stream">
         <template x-if="!runStream.length">
-          <div class="text-sm bk-muted">No capture runs recorded yet.</div>
+          <div class="text-sm bk-muted">No backup runs recorded yet.</div>
         </template>
         <div class="space-y-1">
           <template x-for="run in runStream" :key="run.key">
@@ -136,10 +194,8 @@
               <span class="bk-mono ml-1" x-text="run.key"></span>
               <span class="bk-muted ml-2"
                     x-text="run.store_count + ' stores · '
-                            + run.beads_databases + ' beads dbs · '
                             + fmtBytes(run.total_bytes)
-                            + ' · offsite:' + run.offsite
-                            + ' · ' + run.origin"></span>
+                            + ' · offsite ' + offsiteLabel(run.offsite, 0)"></span>
               <template x-for="reason in run.failures || []" :key="reason">
                 <div class="bk-bad bk-mono ml-5" x-text="'! ' + reason"></div>
               </template>
@@ -148,26 +204,19 @@
         </div>
       </div>
 
-      <!-- What exactly was captured -->
-      <h2>
-        Stores
-        <span class="ml-2">
-          <button class="bk-tier-btn" :class="{'bk-active': storeTier === 'hourly'}"
-                  @click="storeTier = 'hourly'">hourly</button>
-          <button class="bk-tier-btn ml-1" :class="{'bk-active': storeTier === 'daily'}"
-                  @click="storeTier = 'daily'">daily</button>
-        </span>
-      </h2>
-      <div class="bk-card" data-testid="backup-store-table">
-        <template x-if="!storeRows.length">
-          <div class="text-sm bk-muted">No per-store detail for this tier yet
-            (run reports land with bead auto-yj2wa).</div>
-        </template>
-        <table x-show="storeRows.length">
-          <thead><tr><th>store</th><th>action</th><th>status</th>
-            <th class="bk-num">bytes</th></tr></thead>
+      <!-- What exactly is protected -->
+      <h2>What the latest backup contains</h2>
+      <p class="bk-sub" x-text="latestContents()
+          ? 'Every store captured by ' + latestContents().key
+            + ' — hourly and daily backups protect the same data.'
+          : 'Per-store detail appears after the next backup run.'"></p>
+      <div class="bk-card" data-testid="backup-store-table"
+           x-show="latestContents()">
+        <table>
+          <thead><tr><th>Store</th><th>Method</th><th>Status</th>
+            <th class="bk-num">Size</th></tr></thead>
           <tbody>
-            <template x-for="row in storeRows" :key="row.name">
+            <template x-for="row in (latestContents() || {}).stores || []" :key="row.name">
               <tr>
                 <td class="bk-mono" x-text="row.name"></td>
                 <td class="bk-muted" x-text="row.action"></td>
@@ -182,11 +231,37 @@
 
       <!-- Policy in force -->
       <h2>Configuration</h2>
-      <div class="bk-card bk-mono text-xs" data-testid="backup-config">
-        <template x-for="key in Object.keys(summary.config || {}).sort()" :key="key">
-          <div>
-            <span class="bk-muted" x-text="key + ' = '"></span>
-            <span x-text="summary.config[key]"></span>
+      <p class="bk-sub"
+         x-text="configMeta.editable
+           ? 'Change a value and save — the schedule and alert thresholds take effect without a restart.'
+           : 'Read-only: configuration changes need operator authority.'"></p>
+      <div class="bk-card" data-testid="backup-config">
+        <template x-for="key in Object.keys(configMeta.fields || {}).sort()" :key="key">
+          <div class="bk-field">
+            <label :for="'bk-cfg-' + key" x-text="key"></label>
+            <div class="bk-desc"
+                 x-text="(configMeta.fields[key] || {}).description"></div>
+            <template x-if="configMeta.editable && (configMeta.fields[key] || {}).enum">
+              <select :id="'bk-cfg-' + key" x-model="configDraft[key]">
+                <template x-for="option in configMeta.fields[key].enum" :key="option">
+                  <option :value="option"
+                          x-text="option === '' ? '(none)' : option"></option>
+                </template>
+              </select>
+            </template>
+            <template x-if="configMeta.editable && !(configMeta.fields[key] || {}).enum">
+              <input :id="'bk-cfg-' + key" x-model="configDraft[key]">
+            </template>
+            <template x-if="!configMeta.editable">
+              <div class="bk-mono" x-text="(configMeta.config || {})[key]"></div>
+            </template>
+          </div>
+        </template>
+        <template x-if="configMeta.editable">
+          <div class="mt-2">
+            <button class="bk-btn" data-testid="backup-config-save"
+                    @click="saveConfig()">save configuration</button>
+            <span class="bk-muted ml-2 text-sm" x-text="configMessage"></span>
           </div>
         </template>
       </div>

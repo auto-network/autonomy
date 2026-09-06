@@ -128,6 +128,34 @@ def tier_health(runs: list[dict], config: dict, tier: str,
     }
 
 
+def destinations(runs: list[dict], config: dict,
+                 credentials_status: str | None = None) -> dict:
+    """Where backups actually go — from run evidence plus config.
+
+    ``credentials_status`` is injected by the route (it consults the
+    vault); pure callers/tests pass it explicitly.
+    """
+    newest = max((r for r in runs if r.get("backup_root")),
+                 key=_run_sort_key, default=None)
+    repo_rows = [r for r in runs if r.get("offsite_repo_bytes")]
+    newest_repo = max(repo_rows, key=_run_sort_key, default=None)
+    provider = (config.get("offsite_provider") or "").strip()
+    bucket = (config.get("offsite_bucket") or "").strip()
+    return {
+        "local_root": newest.get("backup_root") if newest else None,
+        "data_root": newest.get("data_root") if newest else None,
+        "provider": provider or None,
+        "bucket": bucket or None,
+        "repository": (f"rclone:{provider}:{bucket}/restic"
+                       if provider and bucket else None),
+        "credentials": credentials_status,
+        "repo_bytes": (newest_repo.get("offsite_repo_bytes")
+                       if newest_repo else None),
+        "vault_rows": ["backup.restic-password", "backup.b2-key-id",
+                       "backup.b2-application-key"],
+    }
+
+
 def summarize(runs: list[dict], drills: list[dict], config: dict,
               now: datetime | None = None) -> dict:
     """The whole page's answer, in the page's order: am I safe now,
@@ -158,8 +186,16 @@ def summarize(runs: list[dict], drills: list[dict], config: dict,
 
 
 async def get_summary(request: Request) -> JSONResponse:
-    return JSONResponse(summarize(
-        _rows(RUN_SET_ID), _rows(DRILL_SET_ID), _read_config()))
+    runs = _rows(RUN_SET_ID)
+    config = _read_config()
+    summary = summarize(runs, _rows(DRILL_SET_ID), config)
+    try:
+        from tools.dashboard.plugins.backup import credentials
+        _, cred_status = credentials.offsite_env(config)
+    except Exception:
+        cred_status = None
+    summary["destinations"] = destinations(runs, config, cred_status)
+    return JSONResponse(summary)
 
 
 async def get_runs(request: Request) -> JSONResponse:
@@ -191,7 +227,21 @@ async def get_drills(request: Request) -> JSONResponse:
 
 
 async def get_config(request: Request) -> JSONResponse:
-    return JSONResponse({"config": _read_config()})
+    """Config values plus their schema descriptions, so the page can
+    explain every field instead of dumping variable names."""
+    fields = {}
+    for name, meta in (BackupConfigV1._field_metadata or {}).items():
+        fields[name] = {
+            "description": meta.get("description", ""),
+            "type": meta.get("type", "string"),
+        }
+        if meta.get("enum"):
+            fields[name]["enum"] = meta["enum"]
+    return JSONResponse({
+        "config": _read_config(),
+        "fields": fields,
+        "editable": principal_from_request(request).global_authority,
+    })
 
 
 async def put_config(request: Request) -> JSONResponse:

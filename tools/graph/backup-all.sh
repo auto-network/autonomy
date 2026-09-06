@@ -49,6 +49,20 @@ if [[ ! -d "$BACKUP_ROOT" ]]; then
     exit 1
 fi
 
+# ── Whole-run serialization ───────────────────────────────────────────
+# The hourly and daily crons fire in the SAME minute at the daily hour,
+# racing two restic pushes on one locking repo (surfaced 2026-09-06:
+# offsite verdicts stuck at "unknown" from a wedged push). One run at a
+# time, machine-wide: the second waits its turn rather than fighting.
+LOCK_FILE="${DATA_ROOT}/backup-reports/.backup-all.lock"
+mkdir -p "$(dirname "$LOCK_FILE")"
+exec 9>"$LOCK_FILE"
+if ! flock -w 3300 9; then
+    echo "FATAL: another backup run held the lock for 55 minutes —" \
+         "refusing to stack a third; investigate the wedged run" >&2
+    exit 1
+fi
+
 STAMP=$(date +%Y%m%d-%H%M%S)
 DEST="${BACKUP_ROOT}/${TIER}/${STAMP}"
 umask 077   # key material lands in here; nothing needs to be group-readable
@@ -88,7 +102,7 @@ write_report() {  # $1 verdict  $2 exit_code  $3 offsite  $4 dir
     REPORT_STARTED_AT="$STARTED_AT" REPORT_FINISHED_AT="$(date -Iseconds)" \
     REPORT_DURATION="$(( $(date +%s) - START_EPOCH ))" \
     REPORT_ORIGIN="${AUTONOMY_BACKUP_ORIGIN:-host}" \
-    REPORT_DATA_ROOT="$DATA_ROOT" \
+    REPORT_DATA_ROOT="$DATA_ROOT" REPORT_BACKUP_ROOT="$BACKUP_ROOT" \
     REPORT_STORES="$STORE_COUNT" REPORT_BEADS="$BEADS_COUNT" \
     REPORT_OFFSITE="$3" REPORT_EXIT_CODE="$2" \
     REPORT_FAILURES_FILE="$FAILS_TXT" \
@@ -266,8 +280,10 @@ OFFSITE_LOG="$(mktemp)"
 if "${SCRIPT_DIR}/backup-offsite.sh" "$TIER" 2>&1 | tee "$OFFSITE_LOG"; then
     if grep -q "skipping" "$OFFSITE_LOG"; then OFFSITE_VERDICT=skipped
     else OFFSITE_VERDICT=complete; fi
+    REPO_BYTES="$(sed -n 's/^offsite: repository raw size \([0-9]*\) bytes$/\1/p' "$OFFSITE_LOG" | tail -1)"
     rm -f "$OFFSITE_LOG"
     "$PYTHON" "$STORES_HELPER" report-offsite "$OFFSITE_VERDICT" 0 \
+        ${REPO_BYTES:+--repo-bytes=$REPO_BYTES} \
         "${DEST}/run-report.json" \
         "${REPORT_DIR}/${TIER}-latest.json" || true
 else
