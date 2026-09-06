@@ -4271,6 +4271,15 @@ async def api_session_board_layout_put(request):
         if body["presentation"] not in ("transcript", "stats"):
             return JSONResponse({"error": "presentation must be transcript or stats"}, status_code=400)
         fields["presentation"] = body["presentation"]
+    if "presentations" in body:
+        v = body["presentations"]
+        if not isinstance(v, dict) or not all(x in ("transcript", "stats") for x in v.values()):
+            return JSONResponse({"error": "presentations must map session names to transcript or stats"}, status_code=400)
+        fields["presentations"] = {str(k): x for k, x in list(v.items())[:500]}
+    if "focus_session" in body:
+        if not isinstance(body["focus_session"], str):
+            return JSONResponse({"error": "focus_session must be a session name or empty"}, status_code=400)
+        fields["focus_session"] = body["focus_session"][:128]
     if "column_order" in body:
         if not isinstance(body["column_order"], list) or not all(isinstance(x, str) for x in body["column_order"]):
             return JSONResponse({"error": "column_order must be a list of slugs"}, status_code=400)

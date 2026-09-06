@@ -134,7 +134,7 @@
   document.addEventListener('alpine:init', function () {
     Alpine.data('sessionsBoard', function () { return {
       rows: [], columns: [], presentation: 'transcript',
-      cardPresentations: {}, cardHeights: {}, resources: {},
+      cardPresentations: {}, cardHeights: {}, resources: {}, _focusSession: '',
       boundId: '', dragId: '', dragging: false, movingCol: '', viewportTick: 0,
       organize: { state: 'idle', status: '', runId: '' }, commitTick: 0,
       menuFor: '', menuActions: [],
@@ -182,6 +182,8 @@
           var layout = r[1] || {};
           if (layout.presentation === 'stats' || layout.presentation === 'transcript') self.presentation = layout.presentation;
           self.cardHeights = layout.heights || {};
+          self.cardPresentations = layout.presentations || {};
+          self._focusSession = layout.focus_session || '';
           self._ready = true;
           self.refresh({ columns: (layout.column_order || []).map(function (id) { return { id: id, members: [] }; }), widths: layout.widths || {} });
         });
@@ -208,6 +210,13 @@
         this._refreshPending = false;
         this.rows = this.rowsFromStore();
         this.columns = this.normalise(this.columnsFromStore(saved));
+        // A full-height card survives a refresh: re-seat the saved focus on
+        // whichever column now holds that session.
+        if (this._focusSession) {
+          var want = this._focusSession;
+          this.columns.forEach(function (c) { c.focus = c.members.indexOf(want) !== -1 ? want : null; });
+          if (!this.columns.some(function (c) { return c.focus; })) this._focusSession = '';
+        }
         var voice = Alpine.store('voice');
         if (voice) this.boundId = voice.boundSessionId || '';
       },
@@ -326,7 +335,7 @@
       // members move to a new column on its right that keeps the group's title.
       focusCard(id) {
         var col = this.columnOf(id); if (!col) return;
-        if (col.focus === id) { col.focus = null; return; }
+        if (col.focus === id) { col.focus = null; this._focusSession = ''; this.persist(); return; }
         var self = this, idx = this.columns.indexOf(col), target = col;
         var others = col.members.filter(function (m) { return m !== id; });
         if (col.id === 'solo') {
@@ -350,7 +359,9 @@
         if (!target) return;
         this.columns.forEach(function (c) { if (c !== target) c.focus = null; });
         target.focus = id;
+        this._focusSession = id;
         this.cardPresentations[id] = 'transcript';
+        this.persist();
       },
       // Remove from wherever it is, insert at `idx` among the target's members.
       placeCard(id, colId, idx) {
@@ -675,8 +686,11 @@
         });
       },
       layoutPayload() {
-        var widths = {}; this.columns.forEach(function (c) { if (c._sized) widths[c.id] = c.width; });
-        return { presentation: this.presentation, column_order: this.columns.map(function (c) { return c.id; }), widths: widths, heights: this.cardHeights };
+        var widths = {}, focus = '';
+        this.columns.forEach(function (c) { if (c._sized) widths[c.id] = c.width; if (c.focus) focus = c.focus; });
+        return { presentation: this.presentation, presentations: this.cardPresentations,
+                 column_order: this.columns.map(function (c) { return c.id; }), widths: widths,
+                 heights: this.cardHeights, focus_session: focus };
       },
       persist() {
         if (!this._ready || this._suppressPersist) return;   // never write a pre-roster or echoed layout
@@ -699,17 +713,33 @@
         if (r.session_type === 'host' && (!store || !store.entries || !store.entries.length)) return 'stats';
         return this.presentation;
       },
-      togglePresentation(id) { this.cardPresentations[id] = this.cardPresentation(id) === 'transcript' ? 'stats' : 'transcript'; },
+      togglePresentation(id) {
+        this.cardPresentations[id] = this.cardPresentation(id) === 'transcript' ? 'stats' : 'transcript';
+        this.persist();
+      },
 
       // ── dictation: click binds through the standard voice path, never navigates ──
+      // Click a card to talk to it. On the board the cards ARE the targets and
+      // they are all on screen, so the click is itself the confirmation: a
+      // switch takes effect immediately (the voice store preserves the buffer,
+      // so in-flight dictation cuts over rather than being stranded). The
+      // full-page viewer keeps its confirm prompt, where the target you would
+      // be switching away from is not visible.
       bindDictation(ev, id) {
         this.menuFor = '';
-        var ui = window.Autonomy && window.Autonomy.voice && window.Autonomy.voice.ui;
-        if (!ui || typeof ui.onClick !== 'function') return;
-        var row = this.rowFor(id);
-        ui.onClick(ev, ui.voiceBindKey(row), { isLive: !!row.is_live });
         var voice = Alpine.store('voice');
-        this.boundId = voice ? (voice.boundSessionId || '') : '';
+        var ui = window.Autonomy && window.Autonomy.voice && window.Autonomy.voice.ui;
+        if (!ui || typeof ui.onClick !== 'function' || !voice) return;
+        var row = this.rowFor(id);
+        var key = ui.voiceBindKey(row);
+        var already = voice.boundSessionId;
+        if (already && already !== key && row.is_live && typeof voice.bindSession === 'function') {
+          voice.bindSession(key);          // explicit switch, no second prompt
+          voice.pendingRebindTarget = '';
+        } else {
+          ui.onClick(ev, key, { isLive: !!row.is_live });
+        }
+        this.boundId = voice.boundSessionId || '';
       },
       isBound(id) { var voice = Alpine.store('voice'); return !!(voice && voice.boundSessionId === id); },
 

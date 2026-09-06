@@ -70,12 +70,17 @@ class TestGroupRecord:
 
     def test_layout_round_trip(self, board_settings):
         s = board_settings
-        assert s.read_layout() == {"presentation": "transcript", "column_order": [], "widths": {}, "heights": {}, "updated_at": 0}
+        assert s.read_layout() == {"presentation": "transcript", "presentations": {}, "column_order": [],
+                                   "widths": {}, "heights": {}, "focus_session": "", "updated_at": 0}
         s.write_layout({"column_order": ["deploy", "solo"], "widths": {"deploy": 700}})
         s.write_layout({"presentation": "stats", "heights": {"auto-a": 540}})
+        s.write_layout({"presentations": {"auto-a": "stats"}, "focus_session": "auto-b"})
         got = s.read_layout()
         assert got["column_order"] == ["deploy", "solo"] and got["widths"] == {"deploy": 700}
         assert got["presentation"] == "stats" and got["heights"] == {"auto-a": 540} and got["updated_at"] > 0
+        # The card face and the full-height card are part of the member: a
+        # refresh must put the screen back exactly as the operator left it.
+        assert got["presentations"] == {"auto-a": "stats"} and got["focus_session"] == "auto-b"
 
 
 # ── HTTP API ─────────────────────────────────────────────────────────────

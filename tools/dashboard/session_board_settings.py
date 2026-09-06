@@ -97,10 +97,12 @@ class SessionBoardLayoutV1(SettingSchema):
     set_id = LAYOUT_SET_ID
     schema_revision = SCHEMA_REVISION
 
-    presentation: str = field(default="transcript", enum=["transcript", "stats"], description="Default card presentation.")
+    presentation: str = field(default="transcript", enum=["transcript", "stats"], description="Default card presentation for cards the operator has not set individually.")
+    presentations: dict = field(default_factory=dict, description="Per-card face by session name: 'transcript' or 'stats'. Only cards the operator flipped individually.")
     column_order: list = field(default_factory=list, element=str, description="Group slugs left to right; 'solo' is the Ungrouped column.")
     widths: dict = field(default_factory=dict, description="Column width in CSS px by slug, only for columns the operator resized.")
     heights: dict = field(default_factory=dict, description="Card height in CSS px by session name, only for cards the operator resized.")
+    focus_session: str = field(default="", description="The session shown full height in its column, or empty. Its column is wherever that session sits.")
     updated_at: float = field(default=0.0, description="Unix time of the last write.")
 
 
@@ -227,7 +229,7 @@ def session_group_index() -> dict[str, dict]:
 
 # ── Layout ──────────────────────────────────────────────────────────────
 
-_LAYOUT_FIELDS = ("presentation", "column_order", "widths", "heights")
+_LAYOUT_FIELDS = ("presentation", "presentations", "column_order", "widths", "heights", "focus_session")
 
 
 def read_layout(key: str = LAYOUT_KEY) -> dict:
@@ -235,9 +237,11 @@ def read_layout(key: str = LAYOUT_KEY) -> dict:
     payload = dict((row or {}).get("payload") or {})
     return {
         "presentation": payload.get("presentation") or "transcript",
+        "presentations": dict(payload.get("presentations") or {}),
         "column_order": list(payload.get("column_order") or []),
         "widths": dict(payload.get("widths") or {}),
         "heights": dict(payload.get("heights") or {}),
+        "focus_session": payload.get("focus_session") or "",
         "updated_at": payload.get("updated_at") or 0,
     }
 
