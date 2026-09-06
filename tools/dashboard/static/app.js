@@ -2286,6 +2286,10 @@ async function route() {
 //     route-agnostic.
 //   - On /beads: the Alpine component listens to native input events on
 //     #global-search directly.
+//   - On /sessions: the page listens to native input events directly (it
+//     narrows the card lists as you type) and Enter dispatches
+//     ``global-search:enter`` so it can run the on-screen transcript
+//     search. Enter never leaves the page.
 //   - Anywhere else: Enter navigates to /search?q=…
 globalSearch.addEventListener('input', () => {
   if (window.location.pathname === '/search') {
@@ -2335,6 +2339,13 @@ globalSearch.addEventListener('keydown', (e) => {
   }
   if (path === '/' || path === '/beads') {
     // On beads page: Alpine component reacts to input events — no extra action needed
+    closeGlobalSearch();
+    return;
+  }
+  if (path === '/sessions') {
+    window.dispatchEvent(new CustomEvent('global-search:enter', {
+      detail: { value: globalSearch.value },
+    }));
     closeGlobalSearch();
     return;
   }

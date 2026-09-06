@@ -137,6 +137,58 @@
 }
 .active-sort-direction.is-ascending svg { transform: rotate(180deg); }
 
+/* On-screen search chip (sessions page). Its own row under the toolbar so
+   it never competes with the toolbar's three fixed mobile tracks. */
+.sessions-search-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin: -6px 0 14px;
+  padding: 5px 6px 5px 10px;
+  border: 1px solid #2f3b4c;
+  border-radius: 999px;
+  background: #151c26;
+  color: #cbd5e1;
+  font-size: 12px;
+  width: fit-content;
+  max-width: 100%;
+}
+.sessions-search-chip-icon { display: inline-flex; color: #7dd3fc; flex-shrink: 0; }
+.sessions-search-chip-query {
+  font-weight: 600;
+  color: #e2e8f0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sessions-search-chip-summary {
+  color: #94a3b8;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sessions-search-chip-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-left: 2px;
+  border: 0;
+  border-radius: 999px;
+  background: #243041;
+  color: #e2e8f0;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.sessions-search-chip-clear:hover { background: #33425a; }
+.sessions-search-chip-clear:focus-visible { outline: 2px solid #7dd3fc; outline-offset: 1px; }
+
 /* Mobile (≤767px): the trigger sits left-of-center in section headers,
    so right:0 would push the menu past the left edge of the viewport.
    Anchor to the left instead and cap width to keep the menu on-screen. */

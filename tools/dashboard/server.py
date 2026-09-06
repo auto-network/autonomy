@@ -2857,6 +2857,11 @@ async def api_dispatch_trace(request):
 
 _SEARCH_VALID_ORDERS = ("relevance", "recent")
 _SEARCH_VALID_RANKERS = ("legacy", "smart")
+# Upper bound on ``?source_ids=`` — the sessions page sends every card on
+# screen, which is tens of ids, never hundreds. A larger list is a bug
+# (or a URL someone hand-built), so refuse rather than fan out unbounded
+# per-source refreshes.
+_SEARCH_MAX_SOURCE_IDS = 200
 _SEARCH_VALID_SESSION_TYPES = (
     "terminal", "chatwith", "dispatch", "librarian", "agentic",
 )
@@ -2909,12 +2914,40 @@ async def api_search(request):
             )
         session_type = raw
 
+    # ``source_ids`` — comma-separated graph source ids; restricts the
+    # search to exactly those sources (the sessions page's "search only
+    # the cards on screen" mode). ``None`` (absent) disables it; present-
+    # but-empty is a 400 for the same reason as ``session_type``: a
+    # malformed restriction must never widen to the whole graph.
+    source_ids_param = request.query_params.get("source_ids")
+    source_ids: list[str] | None
+    if source_ids_param is None:
+        source_ids = None
+    else:
+        source_ids = []
+        for raw_id in source_ids_param.split(","):
+            raw_id = raw_id.strip()
+            if raw_id and raw_id not in source_ids:
+                source_ids.append(raw_id)
+        if not source_ids:
+            return JSONResponse(
+                {"error": "source_ids must list at least one source id"},
+                status_code=400,
+            )
+        if len(source_ids) > _SEARCH_MAX_SOURCE_IDS:
+            return JSONResponse(
+                {"error": f"source_ids lists {len(source_ids)} ids; "
+                          f"maximum is {_SEARCH_MAX_SOURCE_IDS}"},
+                status_code=400,
+            )
+
     if os.environ.get("DASHBOARD_MOCK"):
         limit = int(request.query_params.get("limit", "20"))
         project = request.query_params.get("project")
         results = dao_beads.search(
             q, limit=limit, project=project,
             order=order, session_type=session_type,
+            source_ids=source_ids,
         )
         if request.query_params.get("group"):
             results = _group_search_results(results, order=order)
@@ -2937,6 +2970,13 @@ async def api_search(request):
     excluded_source_types: list[str] | None = None
     if request.query_params.get("include_aux"):
         excluded_source_types = []
+    if source_ids:
+        # A live session's graph index only advances on demand (an ingest
+        # sweep, a source page load, session death). Restricting to a
+        # named set of sessions is the one search whose caller expects
+        # the *current* transcript, so catch each one up first — the
+        # refresh is a file-size check per idle session.
+        await _refresh_graph_session_sources(source_ids, org=org)
     results = await asyncio.to_thread(
         graph_ops.search,
         q, org=org, peers=peers, only_org=only_org,
@@ -2944,6 +2984,7 @@ async def api_search(request):
         states=states, include_raw=include_raw,
         excluded_source_types=excluded_source_types,
         order=order, session_type=session_type, ranker=ranker,
+        only_source_ids=source_ids,
     )
     if request.query_params.get("group"):
         results = _group_search_results(results, order=order)
@@ -16390,6 +16431,39 @@ async def _refresh_graph_session_source(source: dict) -> dict:
                 source.get("id", "?")[:12],
             )
             return source
+
+
+async def _refresh_graph_session_sources(
+    source_ids: list[str], *, org: str | None,
+) -> None:
+    """Catch up the graph index for each listed session source, best-effort.
+
+    One lock acquisition and one worker thread for the whole batch —
+    ``refresh_session_source`` short-circuits on an unchanged JSONL size,
+    so a screenful of idle sessions costs a stat() each. Ids that do not
+    resolve (a peer's raw session, a card with no source yet) are skipped;
+    a failure on one source never blocks the others or the search itself.
+    """
+    if not source_ids:
+        return
+    async with _ingest_lock:
+        def _run_batch() -> None:
+            from tools.graph.ingest import refresh_session_source
+            for source_id in source_ids:
+                try:
+                    source = graph_ops.get_source(source_id, org=org)
+                    if source and source.get("type") == "session":
+                        refresh_session_source(source)
+                except Exception:
+                    logger.debug(
+                        "[graph] session refresh skipped for %s",
+                        source_id[:12], exc_info=True,
+                    )
+
+        try:
+            await asyncio.to_thread(_run_batch)
+        except Exception:
+            logger.exception("[graph] batched session refresh failed")
 
 
 async def api_graph_sessions(request):
