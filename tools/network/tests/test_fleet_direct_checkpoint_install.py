@@ -157,3 +157,33 @@ async def test_ordinary_failure_keeps_the_short_backoff(direct):
         await sched._pull_scope(server_pub, ["ws://peer:9410"], "personal")
     wait = sched._next_attempt[server_pub] - asyncio.get_running_loop().time()
     assert wait <= sched.config.max_backoff
+
+
+async def test_founded_ledger_refuses_the_checkpoint_at_the_offer(direct, caplog):
+    """An origin store never accepts a peer's checkpoint: the refusal lands
+    on checkpoint.begin, before any chunk is staged, and backs off long so
+    the peer is not asked to rebuild the base every round."""
+    import sqlite3
+    from tools.network.ledger import store as ledger_store
+
+    sched, server_pub, channel = direct
+    conn = sqlite3.connect(sched.config.personal_db_path)
+    try:
+        conn.executescript(ledger_store._SCHEMA)
+        conn.execute(
+            "INSERT INTO ledger_events(event_id,event_type,author_key,hlc_ts,hlc_count,wire)"
+            " VALUES('ev-1',?, 'ab', 1, 0, x'00')", (sorted(ledger_store.EVENT_TYPES)[0],),
+        )
+        conn.execute("INSERT INTO ledger_heads(event_id) VALUES('ev-1')")
+        conn.commit()
+    finally:
+        conn.close()
+    staged = []
+    sched._install_direct_checkpoint = lambda *a: staged.append(a)
+
+    with pytest.raises(fss.FleetSyncFoundedLedgerRefusal):
+        await sched._pull_scope(server_pub, ["ws://peer:9410"], "personal")
+    assert staged == []
+    assert not list(sched.config.personal_db_path.parent.glob("fleet-direct-received-*"))
+    wait = sched._next_attempt[server_pub] - asyncio.get_running_loop().time()
+    assert wait >= fss.CHECKPOINT_FAILURE_BACKOFF_S - 1

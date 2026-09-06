@@ -65,7 +65,11 @@ from tools.network.fleet_sync_scheduler import (
     dashboard_fleet_sync_service,
     roster_epoch,
 )
-from tools.network.fleet_sync.sync import CheckpointAborted, FleetSyncAlpha
+from tools.network.fleet_sync.sync import (
+    CheckpointAborted,
+    FleetSyncAlpha,
+    founded_ledger_rows,
+)
 from tools.network.idkit import canonical_json
 from tools.network.relaykit.viewer import ViewerChannel
 
@@ -1448,6 +1452,18 @@ async def pull_checkpoint_once(
                 # digest and count.
                 continue
             if kind == "checkpoint.begin":
+                # Refuse at the offer when this store holds a founded
+                # ledger: the install would refuse it (ca33ba7) and the
+                # transfer would be wasted. An origin syncs by delta only.
+                founded = await asyncio.to_thread(
+                    founded_ledger_rows, _scope_db_path(scope)
+                )
+                if founded:
+                    raise FleetRelaySyncError(
+                        f"peer offered a checkpoint for scope {scope!r} but "
+                        f"this store holds a founded ledger ({founded} rows); "
+                        "refusing before transfer"
+                    )
                 # A server may initiate a checkpoint this machine did not
                 # request: an unresolvable trail against a pruned journal
                 # makes a checkpoint the only honest recovery, and the
@@ -1630,6 +1646,8 @@ def _classify_pull_failure(exc: BaseException) -> str:
             return "attachment_bytes_unavailable"
         return "alpha_error"
     if isinstance(exc, FleetRelaySyncError):
+        if "founded ledger" in text:
+            return "founded_ledger_refusal"
         if "stored Fleet route is unavailable" in text:
             # The relay answered 404 for the stored route: expired,
             # revoked, or unknown link -- the invitation ran out and no
