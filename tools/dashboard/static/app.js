@@ -997,6 +997,20 @@ async function renderSessionsFragment() {
   _currentContentPath = '/sessions';
 }
 
+async function renderSessionsBoardFragment() {
+  pageTitle.textContent = 'Session Board';
+  let html;
+  if (_fragmentCache.has('/pages/sessions/board')) {
+    html = _fragmentCache.get('/pages/sessions/board');
+  } else {
+    const res = await fetch('/pages/sessions/board');
+    html = await res.text();
+    _fragmentCache.set('/pages/sessions/board', html);
+  }
+  _replaceFragment(content, html);
+  _currentContentPath = '/sessions/board';
+}
+
 async function renderWorktreesFragment() {
   pageTitle.textContent = 'Worktrees';
   let html;
@@ -2198,7 +2212,7 @@ async function route() {
 
   // Update global search placeholder based on page
   globalSearch.placeholder = (path === '/' || path === '/beads') ? 'Search beads...'
-    : path === '/sessions' ? 'Search sessions...'
+    : (path === '/sessions' || path === '/sessions/board') ? 'Search sessions...'
     : path === '/worktrees' ? 'Search worktrees...'
     : path === '/streams' ? 'Search streams...'
     : 'Search graph...';
@@ -2237,6 +2251,8 @@ async function route() {
     renderBeadDetailFragment(path.split('/bead/')[1]);
   } else if (path === '/timeline' || path === '/activity') {
     renderTimelineFragment();
+  } else if (path === '/sessions/board') {
+    renderSessionsBoardFragment();
   } else if (path === '/sessions') {
     renderSessionsFragment();
   } else if (path === '/worktrees') {

@@ -12046,6 +12046,13 @@ async def page_sessions_fragment(request):
     """Return the Sessions page as an HTML fragment for SPA injection."""
     return templates.TemplateResponse(request, "pages/sessions.html")
 
+async def page_sessions_board(request):
+    return HTMLResponse(_load_template("base.html"))
+
+async def page_sessions_board_fragment(request):
+    """Return the Session Board (wide-viewport sessions surface) as an HTML fragment."""
+    return templates.TemplateResponse(request, "pages/sessions-board.html")
+
 async def page_worktrees(request):
     return HTMLResponse(_load_template("base.html"))
 
@@ -20315,6 +20322,8 @@ routes = [
     Route("/pages/dispatch", page_dispatch_fragment),
     Route("/sessions", page_sessions),
     Route("/pages/sessions", page_sessions_fragment),
+    Route("/sessions/board", page_sessions_board),
+    Route("/pages/sessions/board", page_sessions_board_fragment),
     Route("/worktrees", page_worktrees),
     Route("/pages/worktrees", page_worktrees_fragment),
     Route("/pages/bead", page_bead_fragment),
