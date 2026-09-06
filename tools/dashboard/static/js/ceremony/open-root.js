@@ -135,13 +135,16 @@ async function getPrf(model, credentialIds = null) {
     .map((p) => ({ type: 'public-key', id: b64u(p.credential_id) }));
   let asrt;
   try {
-    asrt = await navigator.credentials.get({
+    const operation = () => navigator.credentials.get({
       publicKey: {
         challenge: crypto.getRandomValues(new Uint8Array(32)),
         rpId, allowCredentials: allow, userVerification: 'required',
         extensions: prfEvalExtension(),
       },
     });
+    const bracket = window.Autonomy && window.Autonomy.systemAuth;
+    asrt = await (bracket && typeof bracket.run === 'function'
+      ? bracket.run(operation) : operation());
   } catch (e) {
     if (e && e.name === 'NotAllowedError') throw new Error('Passkey was cancelled — try again');
     throw e;

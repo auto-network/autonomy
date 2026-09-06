@@ -270,8 +270,8 @@ function makeHarness(options = {}) {
     api: windowObj.Autonomy.voiceCapture,
     flush, advance, frame, verifyFlow,
     runEffects() { for (const effect of effects) effect(); },
-    fireWindow(type) {
-      for (const callback of windowListeners[type] || []) callback({ type });
+    fireWindow(type, detail) {
+      for (const callback of windowListeners[type] || []) callback({ type, detail });
     },
   };
 }
@@ -285,6 +285,54 @@ async function startRestored(h) {
 }
 
 describe('verified dictation health coordinator', () => {
+  it('preserves the exact capture through a long system-authentication interruption', async () => {
+    const h = makeHarness();
+    await startRestored(h);
+    h.verifyFlow();
+    const stream = h.stream;
+    const context = h.contexts.at(-1);
+    const worklet = h.worklets.at(-1);
+    const socket = h.socket;
+    const captureGen = h.api._state.captureGen;
+    const micRequests = h.logs.filter((entry) => entry === 'get-user-media').length;
+
+    h.fireWindow('autonomy:system-auth-change', { active: true, depth: 1, reason: 'webauthn' });
+    stream.track.fire('mute');
+    context.state = 'interrupted';
+    context.onstatechange();
+    await h.advance(30000);
+    h.api._audioWatchdogTick();
+    stream.track.fire('unmute');
+    context.state = 'running';
+    context.onstatechange();
+    h.frame();
+    h.fireWindow('autonomy:system-auth-change', { active: false, depth: 0, reason: 'webauthn' });
+    await h.flush();
+
+    assert.equal(h.stream, stream);
+    assert.equal(h.contexts.at(-1), context);
+    assert.equal(h.worklets.at(-1), worklet);
+    assert.equal(h.socket, socket);
+    assert.equal(h.api._state.captureGen, captureGen);
+    assert.equal(h.logs.filter((entry) => entry === 'get-user-media').length, micRequests);
+    assert.equal(h.voice.actionRequiredReason, null);
+  });
+
+  it('records an ended track during system authentication without automatic acquisition', async () => {
+    const h = makeHarness();
+    await startRestored(h);
+    const stream = h.stream;
+    const requests = h.logs.filter((entry) => entry === 'get-user-media').length;
+    h.fireWindow('autonomy:system-auth-change', { active: true, depth: 1, reason: 'webauthn' });
+    stream.track.fire('ended');
+    assert.equal(h.voice.captureStatus, 'interrupted');
+    h.fireWindow('autonomy:system-auth-change', { active: false, depth: 0, reason: 'webauthn' });
+    await h.flush();
+    assert.equal(h.voice.actionRequiredReason, 'mic_gesture');
+    assert.equal(h.stream, stream);
+    assert.equal(h.logs.filter((entry) => entry === 'get-user-media').length, requests);
+  });
+
   it('keeps restored intent checking until current capture and server flow agree', async () => {
     const h = makeHarness();
     await startRestored(h);
@@ -303,7 +351,7 @@ describe('verified dictation health coordinator', () => {
     assert.equal(h.api._state.lastForwarded, 1, 'stale connection evidence is ignored');
   });
 
-  it('gives a temporary track mute grace, then spends one shared capture repair', async () => {
+  it('gives a temporary track mute grace, then requires an explicit resume without rebuilding', async () => {
     const h = makeHarness();
     await startRestored(h);
     h.verifyFlow();
@@ -319,15 +367,15 @@ describe('verified dictation health coordinator', () => {
 
     h.stream.track.fire('mute');
     await h.advance(1000);
-    assert.equal(h.streams.length, initialStreams + 1);
-    assert.equal(h.voice.recoveryIncident.captureAttempts, 1);
+    assert.equal(h.streams.length, initialStreams);
+    assert.equal(h.voice.actionRequiredReason, 'mic_gesture');
     h.api._audioWatchdogTick();
     h.fireWindow('focus');
     await h.flush();
-    assert.equal(h.streams.length, initialStreams + 1, 'concurrent triggers join the incident');
+    assert.equal(h.streams.length, initialStreams, 'concurrent triggers never rebuild capture');
   });
 
-  it('repairs a worklet that never emits its first frame', async () => {
+  it('requires a gesture when a worklet never emits its first frame', async () => {
     const h = makeHarness();
     h.socket.open();
     await h.flush();
@@ -335,11 +383,11 @@ describe('verified dictation health coordinator', () => {
     await h.advance(4001);
     h.api._audioWatchdogTick();
     await h.flush();
-    assert.equal(h.voice.recoveryIncident.captureAttempts, 1);
-    assert.equal(h.streams.length, before + 1);
+    assert.equal(h.voice.actionRequiredReason, 'mic_gesture');
+    assert.equal(h.streams.length, before);
   });
 
-  it('bounds a failed incident and requires a gesture without restart storms', async () => {
+  it('reports ended capture immediately without automatic restart storms', async () => {
     const h = makeHarness();
     await startRestored(h);
     h.verifyFlow();
@@ -347,39 +395,29 @@ describe('verified dictation health coordinator', () => {
 
     h.stream.track.fire('ended');
     await h.flush();
-    assert.equal(h.voice.effectiveState, 'repairing');
-    assert.equal(h.streams.length, before + 1);
-    await h.advance(8000);
-    assert.equal(h.voice.actionRequiredReason, 'recovery_failed');
+    assert.equal(h.streams.length, before);
+    assert.equal(h.voice.actionRequiredReason, 'mic_gesture');
     assert.equal(h.voice.effectiveState, 'enable_required');
     h.api._audioWatchdogTick();
     await h.advance(5000);
-    assert.equal(h.streams.length, before + 1, 'automatic repair stops after its one attempt');
+    assert.equal(h.streams.length, before, 'automatic repair never starts');
   });
 
-  it('does not accept an in-flight old flow acknowledgement as proof of rebuilt capture', async () => {
+  it('does not replace the socket or clear capture loss when an old flow acknowledgement arrives', async () => {
     const h = makeHarness();
     await startRestored(h);
     h.verifyFlow('connection-current', 1);
     const oldSocket = h.socket;
     h.stream.track.fire('ended');
     await h.flush();
-    const rebuiltSocket = h.socket;
-    assert.notEqual(rebuiltSocket, oldSocket, 'capture repair establishes a fresh wire boundary');
+    assert.equal(h.socket, oldSocket, 'capture loss leaves transport untouched');
 
     oldSocket.deliver({
       type: 'audio_flow', connection_id: 'connection-current',
       received: 2, forwarded: 2, ts_ms: 1001,
     });
-    assert.equal(h.voice.effectiveState, 'repairing');
-    assert.ok(h.voice.recoveryIncident);
-
-    rebuiltSocket.open();
-    await h.advance(100);
-    h.frame();
-    h.verifyFlow('connection-rebuilt', 1);
-    assert.equal(h.voice.effectiveState, 'listening');
-    assert.equal(h.voice.recoveryIncident, null);
+    assert.equal(h.voice.effectiveState, 'enable_required');
+    assert.equal(h.voice.actionRequiredReason, 'mic_gesture');
   });
 
   it('keeps a late old acquisition from replacing a newer session binding', async () => {
@@ -444,7 +482,7 @@ describe('verified dictation health coordinator', () => {
     assert.equal(h.voice.effectiveState, 'listening');
   });
 
-  it('invalidates a pending capture start when its repair deadline fails', async () => {
+  it('does not start an automatic acquisition after an ended track', async () => {
     const micRequests = [];
     const h = makeHarness({ micRequests });
     h.socket.open();
@@ -455,19 +493,9 @@ describe('verified dictation health coordinator', () => {
 
     h.stream.track.fire('ended');
     await h.flush();
-    const pendingSocket = h.socket;
-    pendingSocket.open();
-    assert.equal(micRequests.length, 2);
-    await h.advance(8000);
-    assert.equal(h.voice.effectiveState, 'enable_required');
-    assert.equal(pendingSocket.readyState, 3, 'failed recovery socket is closed');
-
-    micRequests[1].resolve();
-    await h.flush();
-    await h.advance(5000);
+    assert.equal(micRequests.length, 1);
     assert.equal(h.voice.effectiveState, 'enable_required');
     assert.equal(h.api._state.talkActive, false);
-    assert.equal(micRequests[1].stream.track.readyState, 'ended', 'late capture is discarded');
   });
 
   it('does not treat an intentional reset boundary as a flow stall', async () => {
@@ -561,6 +589,10 @@ describe('verified dictation health coordinator', () => {
     h.socket.open();
     await h.flush();
     h.frame();
+    const stream = h.stream;
+    const context = h.contexts.at(-1);
+    const worklet = h.worklets.at(-1);
+    const socket = h.socket;
 
     h.voice.setMicMode('muted');
     h.runEffects();
@@ -570,8 +602,19 @@ describe('verified dictation health coordinator', () => {
     h.voice.setMicMode('listening');
     h.runEffects();
     assert.equal(h.voice.effectiveState, 'checking');
+    h.socket.deliver({
+      type: 'voice_state', connection_id: 'connection-current',
+      fsm_state: 'listening', upstream: 'ready', epoch: 0,
+    });
+    assert.equal(h.voice.connState, 'ok', 'healthy post-unmute verification is not a disconnect');
     await h.advance(22000);
     assert.equal(h.voice.effectiveState, 'enable_required', 'unacknowledged resume is bounded');
+    assert.equal(h.stream, stream);
+    assert.equal(h.contexts.at(-1), context);
+    assert.equal(h.worklets.at(-1), worklet);
+    assert.equal(h.socket, socket, 'verification timeout preserves the exact capture and current socket object');
+    assert.equal(stream.track.readyState, 'live');
+    assert.equal(context.state, 'running');
   });
 
   it('bounds a server-muted state that disagrees with listening intent', async () => {
@@ -595,7 +638,7 @@ describe('verified dictation health coordinator', () => {
     assert.equal(h.voice.effectiveState, 'enable_required');
   });
 
-  it('spends the unused capture repair after a transport-first incident', async () => {
+  it('does not let a transport incident mask ended capture', async () => {
     const h = makeHarness();
     await startRestored(h);
     h.verifyFlow('connection-current', 1);
@@ -610,9 +653,9 @@ describe('verified dictation health coordinator', () => {
 
     originalStream.track.fire('ended');
     await h.flush();
-    assert.equal(h.voice.recoveryIncident.captureAttempts, 1);
-    assert.notEqual(h.socket, transportReplacement, 'capture repair gets its own fresh proof boundary');
-    assert.equal(h.streams.length, 2);
+    assert.equal(h.voice.actionRequiredReason, 'mic_gesture');
+    assert.equal(h.socket, transportReplacement, 'capture loss does not replace transport');
+    assert.equal(h.streams.length, 1);
   });
 
   it('lets a gesture wake request supersede an older pending request safely', async () => {

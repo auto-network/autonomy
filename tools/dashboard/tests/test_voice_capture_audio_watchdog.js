@@ -63,24 +63,23 @@ function makeListening(h, lastFrameAgoMs) {
 }
 
 describe('#17 audio-stall watchdog', () => {
-  it('restarts capture + shows reconnecting when no frame for >stall window', () => {
+  it('reports an explicit resume action without rebuilding when frames stall', () => {
     const h = makeHarness();
     const beforeGen = h.state.captureGen;
     makeListening(h, 9000);            // 9s since last frame → stalled
     h.tick();
-    assert.equal(h.voice.connState, 'reconnecting', 'shows the recovery state');
-    assert.ok(h.state.captureGen > beforeGen, 'a fresh capture generation was started');
-    assert.equal(h.state.incident.captureAttempts, 1);
+    assert.equal(h.voice.actionRequiredReason, 'mic_gesture');
+    assert.equal(h.state.captureGen, beforeGen, 'capture identity is preserved');
   });
 
-  it('restarts when the mic track has ENDED even if frames still flow (iOS mic off)', () => {
+  it('requires a gesture when the mic track has ENDED without rebuilding it', () => {
     const h = makeHarness();
     makeListening(h, 200);             // frames fresh — frame-presence alone would miss this
     h.state.stream = { getTracks: () => [{ readyState: 'ended' }] };
     const beforeGen = h.state.captureGen;
     h.tick();
-    assert.equal(h.voice.connState, 'reconnecting', 'recovery state on a dead track');
-    assert.ok(h.state.captureGen > beforeGen, 'restarted despite fresh frames');
+    assert.equal(h.voice.actionRequiredReason, 'mic_gesture');
+    assert.equal(h.state.captureGen, beforeGen, 'no automatic replacement');
   });
 
   it('does NOT fire while frames are still flowing', () => {
