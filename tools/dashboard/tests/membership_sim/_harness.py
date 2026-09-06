@@ -62,8 +62,9 @@ class Registry:
     def __init__(self, tmp_path, org: str = ORG_UUID):
         self.org = org
         self.port = free_port()
+        self._db = tmp_path / "registry.db"
         self._proc = start_registry(
-            self.port, tmp_path / "registry.db", tmp_path / "registry.log")
+            self.port, self._db, tmp_path / "registry.log")
 
     @property
     def http(self) -> str:
@@ -111,15 +112,13 @@ class Registry:
             r = client.get(f"/v1/orgs/{self.org}/membership")
             return r.json() if r.status_code == 200 else None
 
-    def publish(self, root: KeyPair, target_type: str = "note") -> str:
-        """Publish a share link as the org root; returns its token."""
-        with httpx.Client(base_url=self.http) as client:
-            r = client.post("/v1/links", json=sign_request(
-                root, "POST", "/v1/links",
-                {"org": self.org, "target_uuid": self.org, "target_type": target_type},
-                ts=int(time.time())))
-            assert r.status_code == 201, r.text
-            return r.json()["token"]
+    def mint_link(self, *, target_type: str = "note") -> str:
+        """Mint a share link directly in the registry DB the subprocess serves,
+        returning its token. HTTP publish is retired (D19) — publishing rides
+        the org tunnel; ``mint_link_at`` opens a second store on the same
+        SQLite file, which serializes against the server's connection."""
+        from tools.network.registry.testkit import mint_link_at
+        return mint_link_at(self._db, self.org, self.org, target_type=target_type)
 
 
 # ── the org under test ────────────────────────────────────────
