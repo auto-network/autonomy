@@ -132,4 +132,4 @@ def test_manifest_loads_dormant():
     assert {r.path for r in loaded[0].routes} == {
         "/api/backup/summary", "/api/backup/runs",
         "/api/backup/drills", "/api/backup/config",
-        "/api/backup/reconcile"}
+        "/api/backup/reconcile", "/api/backup/drill"}

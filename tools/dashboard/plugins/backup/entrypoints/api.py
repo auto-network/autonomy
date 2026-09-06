@@ -241,9 +241,44 @@ async def post_reconcile(request: Request) -> JSONResponse:
     return JSONResponse(result)
 
 
+_drill_task = None  # keeps the fire-and-forget drill task referenced
+
+
+async def post_drill(request: Request) -> JSONResponse:
+    """Start an on-demand restore drill. Operator authority: a drill
+    restores multi-GB snapshots and holds the restic repo. A second
+    POST while one runs returns the in-flight stamp instead of
+    queueing."""
+    global _drill_task
+    principal = principal_from_request(request)
+    if not principal.global_authority:
+        return JSONResponse(
+            {"error": "restore drills require operator authority"},
+            status_code=403)
+    import asyncio
+
+    from tools.dashboard.plugins.backup import drill as drill_mod
+    in_flight = drill_mod.running_stamp()
+    if in_flight:
+        return JSONResponse({"running": in_flight}, status_code=409)
+
+    async def _run() -> None:
+        try:
+            await asyncio.to_thread(drill_mod.run_drill, "manual")
+        except drill_mod.DrillAlreadyRunning:
+            pass
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception("on-demand drill failed")
+
+    _drill_task = asyncio.create_task(_run(), name="backup-drill:manual")
+    return JSONResponse({"started": True})
+
+
 routes: list = [
     Route("/api/backup/summary", get_summary, methods=["GET"]),
     Route("/api/backup/reconcile", post_reconcile, methods=["POST"]),
+    Route("/api/backup/drill", post_drill, methods=["POST"]),
     Route("/api/backup/runs", get_runs, methods=["GET"]),
     Route("/api/backup/drills", get_drills, methods=["GET"]),
     Route("/api/backup/config", get_config, methods=["GET"]),
