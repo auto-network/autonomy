@@ -896,6 +896,14 @@ INTEGRITY_FAILURE_BACKOFF_S = 600.0
 #: rather than rebuild the same multi-GB artifact every pull.
 REDELIVERY_GUARD_S = 600.0
 
+#: Websocket pong deadline for the PULLER's relay connection. Under a bulk
+#: checkpoint receive the relay's pong queues behind data frames, so the
+#: library default (20s) closed a 2.27GB transfer at minute 3.5 with 1011
+#: 'keepalive ping timeout' while frames were still arriving (SJC log,
+#: 2026-09-06). The 60s frame-silence rule remains the liveness check for a
+#: receiving stream; this only stops pong latency from killing it.
+PULL_PING_TIMEOUT_S = 90.0
+
 connector_runtime = ConnectorFleetRuntime()
 
 
@@ -1052,6 +1060,7 @@ async def pull_checkpoint_once(
         token,
         root_pub=envelope["root_pub"],
         org=envelope["org"],
+        ping_timeout=PULL_PING_TIMEOUT_S,
     )
     stage_root = Path(tempfile.mkdtemp(prefix="fleet-received-checkpoint-"))
     checkpoint = stage_root / "checkpoint"
@@ -1348,6 +1357,7 @@ async def _drain_attachments_via_relay(
         token,
         root_pub=envelope["root_pub"],
         org=envelope["org"],
+        ping_timeout=PULL_PING_TIMEOUT_S,
     )
     try:
         private, hello = auth.build_client_hello(token)
