@@ -187,7 +187,12 @@ def test_launch_adopts_a_healthy_incumbent_instead_of_reaping(env, monkeypatch):
     assert state["status"] == "ok", state
     supervisor = sup.ServingSupervisor(spawn=_refusing_spawn)
     incumbent_pid = os.getpid() + 100000  # sentinel; alive() not exercised
-    monkeypatch.setattr(sup, "_probe_ctl_serving", lambda ctl: True)
+    from tools.network import build_version
+    monkeypatch.setattr(
+        sup, "_probe_ctl_status",
+        lambda ctl: {"ok": True, "serving": True,
+                     "boot_commit": build_version.disk_head()},
+    )
     monkeypatch.setattr(
         sup, "_iter_connector_pids", lambda org_uuid: iter([incumbent_pid])
     )
@@ -206,6 +211,32 @@ def test_launch_adopts_a_healthy_incumbent_instead_of_reaping(env, monkeypatch):
 
 def _refusing_spawn(*args, **kwargs):
     raise AssertionError("spawn must not run when an incumbent is adopted")
+
+
+def test_stale_incumbent_is_replaced_not_adopted(env, monkeypatch):
+    """A serving incumbent on an old code generation (boot_commit != disk head,
+    or absent = pre-gate connector) must be REPLACED: observed live 2026-09-06,
+    a pre-fix connector crashed every fleet stream while answering
+    serving=True, and adoption immortalised it."""
+    from tools.dashboard import link_serving_supervisor as sup
+
+    _provision_serve_cert(env)
+    state = sup.serve_cert_state(ORG)
+    assert state["status"] == "ok", state
+    spawn = FakeSpawn()
+    supervisor = sup.ServingSupervisor(spawn=spawn)
+    monkeypatch.setattr(
+        sup, "_probe_ctl_status",
+        lambda ctl: {"ok": True, "serving": True, "boot_commit": "0" * 40},
+    )
+    reaped = []
+    monkeypatch.setattr(
+        supervisor, "_reap_strays", lambda org: reaped.append(org)
+    )
+    result = supervisor._launch(ORG, state)
+    assert result == {"running": True, "reason": "launched"}
+    assert reaped == [ORG], "stale incumbent must fall through to the reap"
+    assert len(spawn.calls) == 1, "a fresh connector must replace it"
 
 
 def _alive(pid: int) -> bool:

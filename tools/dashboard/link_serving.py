@@ -1551,6 +1551,12 @@ async def _serve_control_listener(connector, ctl_path: str,
                         # a stale-code worker looks identical to a correctly
                         # -configured one on every check above this line.
                         "process_commit": build_version.PROCESS_COMMIT,
+                        # The disk HEAD at process boot — the honest "which
+                        # code generation is this process" answer (see
+                        # _BOOT_COMMIT; process_commit can postdate stale
+                        # imports). The supervisor adopts an incumbent only
+                        # when this matches the current disk head.
+                        "boot_commit": _BOOT_COMMIT,
                         # How many sync pulls this process has turned away while
                         # unarmed, and when the first was -- the profile sync
                         # flag's "764 requests refused since 8pm". Zero on a
@@ -1644,7 +1650,21 @@ async def _run_connector_with_control(connector, ctl_path: str | None,
                 await task
 
 
+#: The git HEAD on disk when THIS connector process booted. Captured at main()
+#: entry — before the serving stack imports — so it names the code generation
+#: this process actually loaded. PROCESS_COMMIT cannot serve this purpose: it is
+#: captured at build_version's own (possibly late) import and can report a
+#: NEWER commit than the modules this process runs (observed live 2026-09-06: a
+#: pre-fix connector reporting the post-fix commit). The supervisor's adoption
+#: check compares boot_commit against current disk head and replaces stale
+#: survivors instead of adopting them.
+_BOOT_COMMIT: str | None = None
+
+
 def main() -> None:
+    global _BOOT_COMMIT
+    from tools.network import build_version
+    _BOOT_COMMIT = build_version.disk_head()
     from tools.network.idkit import DelegationCert, KeyPair
 
     parser = argparse.ArgumentParser(
