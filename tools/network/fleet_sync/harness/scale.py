@@ -139,15 +139,36 @@ def run(args: argparse.Namespace) -> dict:
         evidence["bytes_matrix"] = matrix
         total = sum(sum(row) for row in matrix)
         machines = []
-        unique_payload = 0
         snapshots_served = 0
+        # Unique payload: every distinct (author, transaction) in the fleet,
+        # with its frame bytes taken from any machine that still holds the
+        # journal frames -- a checkpoint install rebuilds a machine's own
+        # journal, so the author's copy is not always the surviving one.
+        distinct: dict[tuple[str, str], int] = {}
         for machine in fleet.machines:
             counters = _machine_counters(machine.db_path, machine.key.public_hex)
             counters.update(_proc_stats(machine.process.pid if machine.process else None))
             counters["index"] = machine.index
             machines.append(counters)
-            unique_payload += counters["authored_payload_bytes"]
             snapshots_served += counters["checkpoints_sent"]
+            conn = sqlite3.connect(f"file:{machine.db_path}?mode=ro", uri=True)
+            try:
+                for origin, tx, size in conn.execute(
+                    "SELECT o.incarnation, t.transaction_id,"
+                    " COALESCE(SUM(LENGTH(j.frame)),0) FROM fleet_sync_transactions t"
+                    " JOIN fleet_sync_origins o ON o.id=t.origin_id"
+                    " LEFT JOIN fleet_sync_journal j ON j.transaction_ref=t.id"
+                    " GROUP BY o.incarnation, t.transaction_id"
+                ):
+                    key = (origin, tx)
+                    if size and size > distinct.get(key, 0):
+                        distinct[key] = size
+                    else:
+                        distinct.setdefault(key, size or 0)
+            finally:
+                conn.close()
+        unique_payload = sum(distinct.values())
+        unique_tx_distinct = len(distinct)
         # Per-pull ledger: frames and bytes per terminal pull, per machine.
         pulls: list[dict] = []
         for machine in fleet.machines:
@@ -180,7 +201,7 @@ def run(args: argparse.Namespace) -> dict:
         evidence["efficiency_ratio"] = round(total / minimum, 3) if minimum else None
         evidence["snapshots_served"] = snapshots_served
         evidence["snapshots_received"] = sum(m["checkpoints_received"] for m in machines)
-        unique_tx = sum(m["authored_transactions"] for m in machines)
+        unique_tx = unique_tx_distinct
         evidence["unique_transactions"] = unique_tx
         evidence["transactions_duplication"] = (
             round(evidence["pulls"]["transactions_received"] / (unique_tx * (args.size - 1)), 3)
