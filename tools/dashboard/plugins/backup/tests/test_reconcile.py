@@ -80,9 +80,8 @@ def store(monkeypatch):
 
 
 def _write(root, tier, report):
-    tier_dir = root / tier
-    tier_dir.mkdir(parents=True, exist_ok=True)
-    (tier_dir / "latest-report.json").write_text(json.dumps(report))
+    root.mkdir(parents=True, exist_ok=True)
+    (root / f"{tier}-latest.json").write_text(json.dumps(report))
 
 
 def test_ingests_and_strips_key_segments(store, tmp_path):
@@ -119,9 +118,8 @@ def test_absent_report_is_absence_not_error(store, tmp_path):
 
 
 def test_malformed_report_marks_probe_stale(store, tmp_path):
-    tier_dir = tmp_path / "hourly"
-    tier_dir.mkdir(parents=True)
-    (tier_dir / "latest-report.json").write_text("{not json")
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "hourly-latest.json").write_text("{not json")
     assert "hourly" in R.reconcile(tmp_path)["probe_errors"]
 
 
@@ -146,9 +144,7 @@ def test_retention_prunes_oldest_per_tier(store, tmp_path):
 
 
 def test_blocking_read_times_out_not_hangs(store, tmp_path):
-    tier_dir = tmp_path / "hourly"
-    tier_dir.mkdir(parents=True)
-    fifo = tier_dir / "latest-report.json"
+    fifo = tmp_path / "hourly-latest.json"
     os.mkfifo(fifo)  # a read blocks forever: the NFS-hang stand-in
     start = time.monotonic()
     result = R.reconcile(tmp_path, timeout=1.0)

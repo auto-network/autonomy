@@ -223,11 +223,9 @@ async def put_config(request: Request) -> JSONResponse:
 
 
 async def post_reconcile(request: Request) -> JSONResponse:
-    """Explicit refresh: ingest the tier latest-report.json files into
-    run rows. The ONE route that (boundedly, via worker thread + hard
-    timeout) touches the backup destination — state reads never do.
-    Operator authority: a hung NAS makes this an expensive probe, so
-    worker sessions cannot hammer it."""
+    """Explicit refresh: ingest the per-tier report files (on the data
+    volume) into run rows — bounded worker-thread reads, and the only
+    route that touches the filesystem at all. Operator authority."""
     principal = principal_from_request(request)
     if not principal.global_authority:
         return JSONResponse(
