@@ -90,3 +90,18 @@ data-view) — the rail is the list step, the pane is the detail step. */
 .mem-row { flex-wrap: wrap; }
 .mem-row .mem-primary, .mem-row .mem-secondary { margin-left: auto; }
 }
+/* Roles editor (auto-l05o7, roles design graph://d1b3db8f-879). */
+.mem-version { margin-left: .35rem; color: #6b7280; font-size: .56rem; font-weight: 650; }
+.mem-chip.mem-chip-warn { color: #fcd34d; background: rgba(120,53,15,.45); }
+.mem-caps { display: flex; flex-wrap: wrap; gap: .3rem; margin: .1rem 0 .55rem; }
+.mem-cap { display: inline-flex; align-items: center; padding: .16rem .45rem; border: 1px solid #374151; border-radius: 999px; background: rgba(3,7,18,.5); color: #c7d2fe; font-size: .58rem; font-weight: 600; }
+.mem-cap.mono { color: #fbbf24; border-color: rgba(180,83,9,.6); }
+.mem-cap-none { color: #9ca3af; font-weight: 500; }
+.mem-cap-group { margin: .25rem 0 .5rem; padding: .4rem .5rem; border: 1px solid #374151; border-radius: .45rem; background: rgba(3,7,18,.35); }
+.mem-cap-family { margin: 0 0 .25rem; color: #6b7280; font-size: .54rem; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; }
+/* Outranks .mem-form label, which styles field captions (uppercase, muted). */
+.mem-form .mem-cap-choice { display: grid; grid-template-columns: auto 1fr; gap: 0 .45rem; align-items: baseline; margin: .22rem 0; color: #e5e7eb; font-size: .66rem; font-weight: 600; letter-spacing: 0; text-transform: none; cursor: pointer; }
+.mem-form .mem-cap-choice span { color: #e5e7eb; }
+.mem-form .mem-cap-choice small { grid-column: 2; color: #6b7280; font-size: .56rem; font-weight: 500; line-height: .85rem; }
+.mem-form .mem-cap-choice input { margin: 0; align-self: center; }
+.mem-loss { color: #fcd34d; }
