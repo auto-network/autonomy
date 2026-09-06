@@ -387,6 +387,9 @@ class ConnectorFleetRuntime:
         scheduler = FleetSyncScheduler(config)
         scheduler._roster_snapshot = entries
         scheduler.authenticator.authorize(credential.machine_pub)
+        # Direct serves count as this connector's live streams, so the
+        # supervisor drains (lame duck) instead of recycling mid-transfer.
+        scheduler.stream_observer = _DirectStreamObserver(self)
         previous = self.scheduler
         self.scheduler = scheduler
         if previous is not None and previous.server.running:
@@ -1009,6 +1012,24 @@ def _redelivery_window_s(strikes: int) -> float:
 #: 2026-09-06). The 60s frame-silence rule remains the liveness check for a
 #: receiving stream; this only stops pong latency from killing it.
 PULL_PING_TIMEOUT_S = 90.0
+
+class _DirectStreamObserver:
+    """Bridges direct-path serves into the connector's stream accounting."""
+
+    def __init__(self, runtime: "ConnectorFleetRuntime"):
+        self._runtime = runtime
+
+    def begin(self) -> None:
+        self._runtime.active_streams += 1
+        self._runtime._touch_stream_activity()
+
+    def touch(self) -> None:
+        self._runtime._touch_stream_activity()
+
+    def end(self) -> None:
+        self._runtime.active_streams = max(0, self._runtime.active_streams - 1)
+        self._runtime._touch_stream_activity()
+
 
 connector_runtime = ConnectorFleetRuntime()
 
