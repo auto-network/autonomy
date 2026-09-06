@@ -35,8 +35,11 @@ case "$TIER" in
     *) echo "Usage: $0 {hourly|daily}" >&2; exit 1 ;;
 esac
 
-if [[ ! -f "$ENV_FILE" ]]; then
-    echo "offsite: no $ENV_FILE — skipping (run tools/graph/backup-setup.sh to enable)"
+# Configured = vault-released environment credentials (the intended
+# path, auto-uy896) OR the deprecated agents/backup.env fallback.
+# backup-all.sh greps this "skipping" line to stamp offsite=skipped.
+if [[ -z "${BACKUP_PROVIDER:-}" || -z "${BACKUP_BUCKET:-}" ]] && [[ ! -f "$ENV_FILE" ]]; then
+    echo "offsite: not configured (no vault-released environment, no $ENV_FILE) — skipping"
     exit 0
 fi
 

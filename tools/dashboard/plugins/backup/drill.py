@@ -155,6 +155,22 @@ def run_drill(trigger: str = "manual", *, timeout_s: float | None = None,
             "started_at": started.isoformat(),
         })
         run_env = {**os.environ, **(env or {})}
+        if env is None:
+            # Vault-released offsite credentials (auto-uy896): injected
+            # while the vault is warm so the drill's restic reaches the
+            # repo without agents/backup.env. When unavailable the drill
+            # still runs — the script's own credential resolution states
+            # what is missing, which is the honest evidence.
+            try:
+                from tools.dashboard.plugins.backup import credentials
+                vault_env, status = credentials.offsite_env()
+                if vault_env:
+                    run_env.update(vault_env)
+                else:
+                    logger.info("drill running without vault credentials "
+                                "(%s)", status)
+            except Exception:
+                logger.exception("vault credential injection failed")
         # Popen + killpg, not subprocess.run: a timeout must kill the
         # whole process GROUP — the drill's restic/python grandchildren
         # would survive a kill aimed at bash alone and keep holding the
