@@ -177,3 +177,83 @@ def test_malformed_ack_is_refused(tmp_path: Path) -> None:
                 catalog.record_served_ack(PEER, EPOCH, bad)
     finally:
         db.close()
+
+
+def _write_history(catalog: MutationCatalog, conn) -> None:
+    """20 inserts (their transactions stay cited by current winners) plus
+    40 updates of one row (each supersedes the previous winner, so those
+    transactions become retirable)."""
+    for i in range(20):
+        with catalog.transaction(1_000 + i, f"ins{i:02d}"):
+            _insert_source(conn, f"s-{i}", f"t-{i}")
+    for i in range(40):
+        with catalog.transaction(2_000 + i, f"upd{i:02d}"):
+            conn.execute("UPDATE sources SET title=? WHERE id='s-0'", (f"v{i}",))
+
+
+def _remaining(conn) -> tuple[list, int]:
+    ids = [int(r[0]) for r in conn.execute(
+        "SELECT id FROM fleet_sync_transactions ORDER BY id")]
+    journal = int(conn.execute(
+        "SELECT COUNT(*) FROM fleet_sync_journal").fetchone()[0])
+    return ids, journal
+
+
+def test_incremental_prune_converges_to_the_one_shot_result(tmp_path: Path, monkeypatch) -> None:
+    """Small budget + small batches, called repeatedly, must retire exactly
+    what one unbounded prune retires — nothing more, nothing less — while
+    each call stays short (the live-DB lock-hold fix, 2026-09-06)."""
+    import tools.network.fleet_sync.catalog as catalog_module
+    monkeypatch.setattr(catalog_module, "PRUNE_YIELD_S", 0.0)
+    dbs = {}
+    for name in ("oneshot", "incremental"):
+        graph = GraphDB(tmp_path / f"{name}.db")
+        client = GraphDB(tmp_path / f"{name}-client.db")
+        server = MutationCatalog(graph.conn, "a" * 64)
+        peer = MutationCatalog(client.conn, "b" * 64)
+        server.install(); peer.install()
+        _write_history(server, graph.conn)
+        cursor = _pull_all(server, peer, 0)
+        server.record_served_ack(PEER, EPOCH, cursor)
+        dbs[name] = (graph, client, server)
+    try:
+        one_graph, _, one_server = dbs["oneshot"]
+        one_journal, one_tx = one_server.prune_acknowledged([PEER], EPOCH)
+        assert one_journal == 60 and one_tx > 0
+
+        inc_graph, _, inc_server = dbs["incremental"]
+        totals = [0, 0]
+        calls = 0
+        # A budget that admits exactly one batch per call: the first
+        # within_budget() check passes, the post-batch yield ends it.
+        while True:
+            j, t = inc_server.prune_acknowledged(
+                [PEER], EPOCH, budget_s=1e-9, batch=7,
+            )
+            calls += 1
+            totals[0] += j; totals[1] += t
+            if (j, t) == (0, 0) or calls > 200:
+                break
+        assert calls > 3, "the budget must have split the work across calls"
+        assert tuple(totals) == (one_journal, one_tx)
+        assert _remaining(inc_graph.conn) == _remaining(one_graph.conn)
+    finally:
+        for graph, client, _ in dbs.values():
+            graph.close(); client.close()
+
+
+def test_prune_transaction_check_probes_an_index_not_the_catalog(tmp_path: Path) -> None:
+    graph = GraphDB(tmp_path / "plan.db")
+    try:
+        MutationCatalog(graph.conn, "a" * 64).install()
+        plan = " | ".join(str(tuple(r)) for r in graph.conn.execute(
+            "EXPLAIN QUERY PLAN SELECT MIN(id) FROM fleet_sync_transactions "
+            "WHERE id>=? AND id<? "
+            "AND NOT EXISTS(SELECT 1 FROM fleet_sync_journal j "
+            "WHERE j.transaction_ref=fleet_sync_transactions.id) "
+            "AND NOT EXISTS(SELECT 1 FROM fleet_sync_catalog c "
+            "WHERE c.transaction_ref=fleet_sync_transactions.id)", (0, 10)))
+        assert "SCAN c" not in plan and "SCAN fleet_sync_catalog" not in plan, plan
+        assert "idx_fleet_sync_catalog_transaction_ref" in plan, plan
+    finally:
+        graph.close()
