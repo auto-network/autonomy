@@ -118,6 +118,7 @@
       rows: [], columns: [], presentation: 'transcript',
       cardPresentations: {}, cardHeights: {}, resources: {},
       boundId: '', dragId: '', dragging: false, movingCol: '', viewportTick: 0,
+      organize: { state: 'idle', status: '', runId: '' },
       _dragSource: null, _provisional: null, _frame: null, _drag: null,
       _resourceTipOpen: null, _diskRefreshing: {}, resumeError: {}, resuming: {}, resumed: {},
       _workspaceStatusByTmux: {},
@@ -338,6 +339,59 @@
         if (cur && cur.id === colId && cur.members.indexOf(id) < idx) idx--;
         this.placeCard(id, colId, idx);
         if (!this.dragging) this.commitMembership(id);
+      },
+
+      // ── Auto-organize: one click dispatches a librarian ──
+      // The digest is the run's custom_input: every live session's identity,
+      // title, role, topics, current group, and the last 10 turns — the same
+      // tail the cards render. It lands verbatim in the librarian's first
+      // turn through the asset-less agent-actions dispatch
+      // (member_key session.auto-organize). The librarian writes groups with
+      // `graph group`; they come back to the board through the registry
+      // broadcast like any other agent write. The board never invents groups.
+      organizeDigest() {
+        var all = Alpine.store('sessions'), self = this;
+        return this.rows.map(function (r) {
+          var store = all[r.id];
+          var tail = (store && store.entries ? store.entries : []).filter(function (e) { return !e.internal && (e.content || '').trim(); }).slice(-10)
+            .map(function (e) { return { type: e.type, role: e.role, sender: e.sender || undefined, text: String(e.content || '').slice(0, 400) }; });
+          return { session: r.id, org: r.org && r.org.slug, harness: r.harness, model: r.model, role: r.role,
+                   title: r.label, topics: r.topics, group: (store && store.groupId) || undefined, tail: tail };
+        });
+      },
+      autoOrganize() {
+        if (this.organize.state === 'running') return;
+        var self = this, digest = this.organizeDigest();
+        if (!digest.length) { this.organize = { state: 'idle', status: 'no live sessions', runId: '' }; return; }
+        this.organize = { state: 'running', status: 'librarian reading ' + digest.length + ' session' + (digest.length === 1 ? '' : 's') + '…', runId: '' };
+        fetch('/api/agent-actions/dispatch', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ member_key: 'session.auto-organize', custom_input: JSON.stringify(digest) }) })
+          .then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status)); return d; }); })
+          .then(function (d) {
+            self.organize = { state: 'running', status: 'run ' + (d.run_id || '?') + ' — groups land as the librarian writes them', runId: d.run_id || '' };
+            self._watchOrganizeRun(d.run_id || '', Date.now());
+          })
+          .catch(function (e) { self.organize = { state: 'idle', status: 'dispatch failed: ' + e.message, runId: '' }; });
+      },
+      _watchOrganizeRun(runId, startedAt) {
+        var self = this;
+        if (!runId) return;
+        var tick = function () {
+          if (self.organize.runId !== runId) return;
+          fetch('/api/dispatch/runs?limit=50', { credentials: 'same-origin' }).then(function (r) { return r.ok ? r.json() : []; }).then(function (rows) {
+            var row = (rows || []).filter(function (x) { return String(x.dir || '').indexOf(runId) !== -1 || x.run_id === runId; })[0];
+            var status = row && row.status;
+            if (status === 'DONE' || status === 'FAILED') {
+              var groups = self.columns.filter(function (c) { return c.id !== 'solo'; }).length;
+              self.organize = { state: status === 'DONE' ? 'done' : 'idle', status: status === 'DONE' ? (self.rows.length + ' sessions → ' + groups + ' groups') : 'librarian run failed', runId: '' };
+              if (status === 'DONE') setTimeout(function () { if (self.organize.state === 'done') self.organize = { state: 'idle', status: '', runId: '' }; }, 8000);
+              return;
+            }
+            if (Date.now() - startedAt > 15 * 60 * 1000) { self.organize = { state: 'idle', status: 'librarian run still going (run ' + runId + ')', runId: '' }; return; }
+            setTimeout(tick, 5000);
+          }).catch(function () { setTimeout(tick, 8000); });
+        };
+        setTimeout(tick, 5000);
       },
 
       // ── column move (desktop pointer; the column header row is the handle) ──

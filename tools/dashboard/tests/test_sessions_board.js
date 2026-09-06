@@ -252,3 +252,23 @@ test('nothing is derived or persisted before the roster and the layout member ar
   board.persist();
   assert.equal(board._persistTimer, undefined);   // no write scheduled before ready
 });
+
+test('organizeDigest carries identity, title, topics, current group and at most 10 non-internal turns per session, well under the input cap', () => {
+  const entries = [];
+  for (let i = 0; i < 40; i++) entries.push({ type: i % 2 ? 'assistant_text' : 'user', role: i % 2 ? 'assistant' : 'user', content: 'turn ' + i + ' ' + 'x'.repeat(600), internal: i % 7 === 0 });
+  const sessions = {};
+  const rows = [];
+  for (let n = 0; n < 40; n++) {
+    const id = 'auto-' + n;
+    sessions[id] = { entries, groupId: n % 3 ? 'lane' : null, group: null };
+    rows.push({ id, session_id: id, tmux_session: id, label: 'Session ' + n, role: 'Builder', topics: ['t1', 't2'], org: { slug: 'autonomy' }, harness: 'claude', model: 'claude-sonnet-5', is_live: true, session_type: 'interactive', project: 'p' });
+  }
+  const { board } = makeBoard({ rows, sessions });
+  const digest = plain(board.organizeDigest());
+  assert.equal(digest.length, 40);
+  assert.deepEqual(Object.keys(digest[1]).sort(), ['group', 'harness', 'model', 'org', 'role', 'session', 'tail', 'title', 'topics'].sort());
+  assert.equal(digest[1].group, 'lane');
+  assert.equal(digest[0].tail.length, 10);
+  assert.ok(digest[0].tail.every((t) => t.text.length <= 400 && !t.internal));
+  assert.ok(JSON.stringify(digest).length < 512 * 1024, 'digest for 40 sessions stays under the 512 KB custom_input cap');
+});
