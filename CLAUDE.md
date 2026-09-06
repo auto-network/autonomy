@@ -192,7 +192,7 @@ labels** — there is no per-bead flag on `graph dispatch approve` (see
 - **Model** — selected with an optional `model:<name>` label so a simple bead
   can run cheap and a complex one expensive. Precedence, highest first:
   1. **bead label** — `model:opus`, `model:sonnet`, `model:haiku`, `model:opus-5`,
-     `model:sonnet-5`, `model:fable-5`, `model:haiku-4-5`, `model:opus-4-8`,
+     `model:sonnet-5`, `model:fable-5`, `model:fable-5-1`, `model:haiku-4-5`, `model:opus-4-8`,
      `model:sonnet-4-6`, or a full model id. Family aliases are pinned to a
      version and deliberately not repointed on a new release. Wins over
      everything.

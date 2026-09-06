@@ -97,6 +97,7 @@ MODEL_ALIASES: dict[str, str] = {
     "opus-5": "claude-opus-5",
     "sonnet-5": "claude-sonnet-5",
     "fable-5": "claude-fable-5",
+    "fable-5-1": "claude-fable-5-1",
     "haiku-4-5": "claude-haiku-4-5-20251001",
     # Prior generation, still nameable now that the bare aliases are pinned.
     "opus-4-8": DEFAULT_OPUS_MODEL,
