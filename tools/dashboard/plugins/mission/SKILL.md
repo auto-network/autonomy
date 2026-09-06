@@ -335,6 +335,7 @@ GET  /api/mission/missions
 GET  /api/mission/pillars/{mission_id}
 GET  /api/mission/items/{mission_id}[?pillar=]
 GET  /api/mission/tasks/{mission_id}
+GET  /api/mission/tasks/{mission_id}/detail?ids=a,b   description, close reason, bd comments — fetched per opened task
 GET  /api/mission/screen/{mission_id}[?pillar=]
 GET  /api/mission/chat/{mission_id}/{pillar_id}
 POST /api/mission/chat/{mission_id}/{pillar_id}        {"text": ...}

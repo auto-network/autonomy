@@ -12,6 +12,7 @@ tools/dashboard/tests/test_jsdom_smoke.py.
 """
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -23,16 +24,20 @@ from tools.dashboard.plugins.mission.tests import scenarios
 _HARNESS = Path(__file__).parent / "jsdom" / "mission_viewer.cjs"
 
 
-def _run_scenario(monkeypatch, tmp_path, name: str, store) -> None:
+def _run_scenario(monkeypatch, tmp_path, name: str, store,
+                  detail: dict | None = None) -> None:
     node = shutil.which("node")
     if node is None:
         pytest.skip("node not available")
     doc = store.render(monkeypatch)
     path = tmp_path / f"{name}.html"
     path.write_text(doc, encoding="utf-8")
-    proc = subprocess.run(
-        [node, str(_HARNESS), str(path), name],
-        capture_output=True, text=True, timeout=120)
+    argv = [node, str(_HARNESS), str(path), name]
+    if detail is not None:
+        dpath = tmp_path / f"{name}.detail.json"
+        dpath.write_text(json.dumps(detail), encoding="utf-8")
+        argv.append(str(dpath))
+    proc = subprocess.run(argv, capture_output=True, text=True, timeout=120)
     combined = (proc.stdout or "") + (proc.stderr or "")
     if "MODULE_NOT_FOUND" in combined or "Cannot find module 'jsdom'" in combined:
         pytest.skip("jsdom not resolvable")
@@ -59,7 +64,8 @@ def test_homepage_fragment_sweep():
 
 
 def test_full_mission_renders_every_screen(monkeypatch, tmp_path):
-    _run_scenario(monkeypatch, tmp_path, "full", scenarios.full())
+    _run_scenario(monkeypatch, tmp_path, "full", scenarios.full(),
+                  detail=scenarios.TASK_DETAIL)
 
 
 def test_empty_mission_degrades_gracefully(monkeypatch, tmp_path):
