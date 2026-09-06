@@ -4254,6 +4254,32 @@ def _layout_dao():
     return dao_sessions if os.environ.get("DASHBOARD_MOCK") else session_board_settings
 
 
+async def api_session_models(request):
+    """GET /api/session-models?harness=claude — the models a session can switch to.
+
+    The list is the dispatcher's own alias table, so the dashboard offers
+    exactly the names a bead's ``model:`` label accepts and nothing invented
+    here. Only harnesses whose in-session switch command is known are
+    answered; anything else returns an empty list so a caller shows no menu
+    rather than typing an unverified command into a live agent.
+    """
+    harness = (request.query_params.get("harness") or "").strip().lower()
+    if harness != "claude":
+        return JSONResponse({"harness": harness, "command": None, "models": []})
+    try:
+        from agents.dispatcher import MODEL_ALIASES
+    except Exception as exc:
+        logger.warning("session models unavailable: %s", exc)
+        return JSONResponse({"harness": harness, "command": None, "models": []})
+    seen, models = set(), []
+    for alias, model_id in MODEL_ALIASES.items():
+        if model_id in seen:
+            continue
+        seen.add(model_id)
+        models.append({"alias": alias, "model": model_id})
+    return JSONResponse({"harness": "claude", "command": "/model", "models": models})
+
+
 async def api_session_board_layout_get(request):
     """GET /api/session-board/layout — the operator's board arrangement (dashboard.session.board.layout)."""
     return JSONResponse({"layout": _layout_dao().read_layout()})
@@ -21042,6 +21068,7 @@ routes = [
     Route("/api/groups/{slug}", api_groups_get, methods=["GET"]),
     Route("/api/groups/{slug}", api_groups_update, methods=["PUT"]),
     Route("/api/groups/{slug}", api_groups_delete, methods=["DELETE"]),
+    Route("/api/session-models", api_session_models, methods=["GET"]),
     Route("/api/session-board/layout", api_session_board_layout_get, methods=["GET"]),
     Route("/api/session-board/layout", api_session_board_layout_put, methods=["PUT"]),
     Route("/api/session/{tmux_name}/startup-trace", api_session_startup_trace, methods=["GET"]),

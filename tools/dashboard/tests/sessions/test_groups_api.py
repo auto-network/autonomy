@@ -183,3 +183,23 @@ class TestGroupCrossTalkLog:
         auth_db.insert_message("s1", "S1", "s2", None, None, "direct", time.time())
         msgs = auth_db.get_messages(limit=10, session="group:lane")
         assert [m["message"] for m in msgs] == ["hello lane"]
+
+
+class TestSessionModelsApi:
+    """The model switcher's list comes from the dispatcher's own alias table."""
+
+    def test_claude_lists_deduped_aliases_and_the_command(self, test_client):
+        body = test_client.get("/api/session-models?harness=claude").json()
+        assert body["harness"] == "claude" and body["command"] == "/model"
+        aliases = [m["alias"] for m in body["models"]]
+        assert "opus" in aliases and "sonnet" in aliases and "fable-5-1" in aliases
+        # One entry per distinct model id: opus-4-8 collapses into opus.
+        ids = [m["model"] for m in body["models"]]
+        assert len(ids) == len(set(ids))
+        from agents.dispatcher import MODEL_ALIASES
+        assert set(ids) == set(MODEL_ALIASES.values())
+
+    def test_unknown_harness_offers_nothing(self, test_client):
+        for harness in ("codex", "", "made-up"):
+            body = test_client.get(f"/api/session-models?harness={harness}").json()
+            assert body["models"] == [] and body["command"] is None

@@ -48,7 +48,8 @@ function makeBoard(opts) {
     localStorage,
   };
   const sandbox = {
-    window, document, Alpine, localStorage, console, fetch() { return Promise.resolve({ ok: false }); },
+    window, document, Alpine, localStorage, console,
+    fetch: opts.fetchImpl || function () { return Promise.resolve({ ok: false }); },
     setTimeout, clearTimeout, requestAnimationFrame(cb) { return setTimeout(cb, 0); }, cancelAnimationFrame: clearTimeout,
     Date, Math, Object, Array, JSON, Promise,
   };
@@ -466,4 +467,45 @@ test('a board card opens on a small tail; the full-page viewer keeps its own', (
   assert.match(viewer, /_initialTailUrl\(\) \{\s*\n\s*return this\._tailUrl \+ '\?tail_entries=' \+ this\._tailEntries;/);
   // Scroll-back is unaffected: older pages still use the full window.
   assert.match(viewer, /_olderTailUrl\(cursor\) \{[\s\S]*?tail_entries=' \+ FAST_OPEN_TAIL_LINES/);
+});
+
+test('the model badge switches a live session by typing the harness command', async () => {
+  const calls = [];
+  const fetchImpl = (url, opts) => {
+    calls.push({ url: String(url), body: opts && opts.body });
+    if (String(url).indexOf('/api/session-models') !== -1) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({
+        harness: 'claude', command: '/model',
+        models: [{ alias: 'opus', model: 'claude-opus-4-8' }, { alias: 'sonnet', model: 'claude-sonnet-4-6' }],
+      }) });
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+  };
+  const rows = [{ id: 's1', session_id: 's1', tmux_session: 's1', label: 'S1', is_live: true, topics: [],
+                  org: null, session_type: 'interactive', project: 'p', harness: 'claude', model: 'claude-opus-4-8' }];
+  const { board } = makeBoard({ rows, fetchImpl });
+  await board.openModelMenu('s1');
+  assert.equal(board.modelMenuFor, 's1');
+  assert.deepEqual(plain(board.modelOptions).map((m) => m.alias), ['opus', 'sonnet']);
+  // The model it is already running is marked and not selectable.
+  assert.equal(plain(board.modelOptions)[0].current, true);
+  assert.equal(plain(board.modelOptions)[1].current, false);
+  // Choosing one types the harness's own command into that session.
+  await board.chooseModel('s1', 'sonnet');
+  const send = calls.filter((c) => c.url.indexOf('/api/session/send') !== -1)[0];
+  assert.deepEqual(JSON.parse(send.body), { tmux_session: 's1', message: '/model sonnet' });
+  assert.equal(board.modelMenuFor, '');
+});
+
+test('a harness with no known switch command gets no model menu', async () => {
+  const fetchImpl = () => Promise.resolve({ ok: true, json: () => Promise.resolve({ harness: 'codex', command: null, models: [] }) });
+  const rows = [{ id: 'c1', session_id: 'c1', tmux_session: 'c1', label: 'C1', is_live: true, topics: [],
+                  org: null, session_type: 'interactive', project: 'p', harness: 'codex', model: 'gpt-5.6-sol' }];
+  const { board } = makeBoard({ rows, fetchImpl });
+  await board.openModelMenu('c1');
+  assert.equal(board.modelMenuFor, '', 'never types an unverified command into a live agent');
+  // A dead session is not switchable either.
+  rows[0].is_live = false; rows[0].harness = 'claude';
+  await board.openModelMenu('c1');
+  assert.equal(board.modelMenuFor, '');
 });
