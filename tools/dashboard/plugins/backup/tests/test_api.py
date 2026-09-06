@@ -172,7 +172,7 @@ class TestRoutes:
             written.update(set_id=set_id, key=key, payload=payload, org=org)
 
         import tools.graph.settings_ops as settings_ops
-        monkeypatch.setattr(settings_ops, "add_setting", fake_add)
+        monkeypatch.setattr(settings_ops, "write_by_key", fake_add)
         response = _call(api.put_config,
                          _request("PUT", body={"staleness_multiple": 2.0}))
         assert response.status_code == 200
