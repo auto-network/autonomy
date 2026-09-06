@@ -697,3 +697,37 @@ def test_preexisting_untracked_rows_fail_checkpoint_closed(tmp_path: Path) -> No
                 target_chunk_bytes=4096,
             )
     assert not checkpoint.exists()
+
+
+def test_checkpoint_abort_leaves_no_artifact_or_staging(tmp_path: Path) -> None:
+    """A withdrawn consumer stops the build cooperatively: CheckpointAborted
+    surfaces, no checkpoint directory appears, no staging dir leaks."""
+    from tools.network.fleet_sync.sync import CheckpointAborted
+
+    with FleetSyncAlpha(tmp_path / "origin.db", "machine-a") as origin:
+        with origin.author(100, "tx-1"):
+            _source(origin.graph.conn, "row-1", "one")
+            _source(origin.graph.conn, "row-2", "two")
+        with pytest.raises(CheckpointAborted):
+            origin.checkpoint(
+                tmp_path / "checkpoint", roster_epoch=7,
+                active_roster=("machine-a",), should_abort=lambda: True,
+            )
+    assert not (tmp_path / "checkpoint").exists()
+    assert not [
+        p for p in tmp_path.iterdir()
+        if p.name.startswith(".fleet-sync-checkpoint-")
+    ]
+
+
+def test_checkpoint_quiet_abort_callable_builds_normally(tmp_path: Path) -> None:
+    """should_abort that never fires must not change the build's result."""
+    with FleetSyncAlpha(tmp_path / "origin.db", "machine-a") as origin:
+        with origin.author(100, "tx-1"):
+            _source(origin.graph.conn, "live", "carried")
+        checkpoint = origin.checkpoint(
+            tmp_path / "checkpoint", roster_epoch=7,
+            active_roster=("machine-a",), should_abort=lambda: False,
+        )
+    assert checkpoint.watermark == 100
+    assert (tmp_path / "checkpoint").exists()

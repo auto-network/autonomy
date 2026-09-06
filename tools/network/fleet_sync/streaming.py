@@ -16,7 +16,7 @@ import os
 from pathlib import Path
 import sqlite3
 import struct
-from typing import Iterator
+from typing import Callable, Iterator
 
 from .codec import (
     MAX_FRAME_BYTES,
@@ -68,6 +68,16 @@ def _audit_base_order() -> None:
 
 class StreamingCodecError(ValueError):
     pass
+
+
+class CheckpointAborted(RuntimeError):
+    """The consumer of a checkpoint build withdrew (client disconnected).
+
+    Cooperative cancel for builds running in a worker thread: asyncio
+    cancellation abandons the thread but cannot stop it, so without this
+    check every abandoned pull left a full-core build running to completion
+    for nobody — stacking into CPU saturation under client retries
+    (observed live 2026-09-06, home 02d833fd connector)."""
 
 
 def _sha256_text(value: object) -> str:
@@ -314,6 +324,7 @@ def stream_snapshot_to_chunks(
     *,
     target_chunk_bytes: int = 4 * 1024 * 1024,
     start_after: tuple[str, tuple[object, ...]] | None = None,
+    should_abort: "Callable[[], bool] | None" = None,
 ) -> BaseCatalog:
     if target_chunk_bytes < 4096:
         raise ValueError("target_chunk_bytes is too small")
@@ -329,6 +340,8 @@ def stream_snapshot_to_chunks(
         for mutation in iter_indexed_snapshot_mutations(
             conn, start_after=start_after
         ):
+            if should_abort is not None and should_abort():
+                raise CheckpointAborted("checkpoint base build aborted")
             frame = encode_mutation_frame(mutation)
             if writer.records and writer.size + 4 + len(frame) > target_chunk_bytes:
                 entries.append(writer.finish())
