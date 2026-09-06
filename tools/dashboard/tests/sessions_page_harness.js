@@ -18,13 +18,16 @@ function makeLocalStorage() {
   };
 }
 
-function makeSessionsPage() {
+function makeSessionsPage(overrides) {
+  overrides = overrides || {};
   const listeners = {};
   const components = {};
   const localStorage = makeLocalStorage();
   const document = {
     body: { classList: { add() {}, remove() {} } },
     addEventListener(name, callback) { (listeners[name] ||= []).push(callback); },
+    removeEventListener() {},
+    getElementById() { return null; },
   };
   const Alpine = {
     data(name, factory) { components[name] = factory; },
@@ -41,11 +44,11 @@ function makeSessionsPage() {
       return true;
     },
   };
-  const sandbox = {
+  const sandbox = Object.assign({
     window, document, Alpine, localStorage,
     console, fetch() {}, setTimeout, clearTimeout, setInterval, clearInterval,
-    Date, Math, Object, Array, JSON, URLSearchParams,
-  };
+    Date, Math, Object, Array, JSON, URLSearchParams, encodeURIComponent,
+  }, overrides);
   window.localStorage = localStorage;
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(SESSIONS_JS, 'utf8'), sandbox, { filename: SESSIONS_JS });

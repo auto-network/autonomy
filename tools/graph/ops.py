@@ -299,6 +299,7 @@ def search(
     session_type: list[str] | None = None,
     source_type: list[str] | None = None,
     ranker: str = "legacy",
+    only_source_ids: list[str] | None = None,
 ) -> list[dict]:
     """Full-text search across the graph with cross-org RRF merge.
 
@@ -326,8 +327,19 @@ def search(
     ``session_type`` filters strictly on ``metadata.session_type`` —
     ``None`` disables the filter; ``[]`` returns zero rows; rows with
     NULL session_type never match a non-empty list.
+
+    ``only_source_ids`` restricts every DB's candidate set to the listed
+    ids (the sessions-page "search only the cards on screen" knob). On
+    own-surface DBs the ids are also folded into ``session_source_ids``
+    so raw live sessions are searchable; peer DBs keep their public-
+    surface clamp, so a listed peer session that is still raw simply
+    yields no hits.
     """
     resolved_org = _resolve_org(org)
+    if only_source_ids:
+        merged = list(session_source_ids or [])
+        merged.extend(i for i in only_source_ids if i not in merged)
+        session_source_ids = merged
 
     if _global_scope_active(resolved_org, only_org):
         # GLOBAL caller: search every org as own-surface, no peer filter.
@@ -338,9 +350,11 @@ def search(
             rows = slug_db.search(
                 q, limit=limit, or_mode=or_mode, tag=tag,
                 states=states, include_raw=include_raw,
+                session_source_ids=session_source_ids,
+                session_author_pattern=session_author_pattern,
                 excluded_source_types=excluded_source_types,
                 order=order, session_type=session_type, source_type=source_type,
-                ranker=ranker,
+                ranker=ranker, only_source_ids=only_source_ids,
             )
             for r in rows:
                 r["org"] = slug
@@ -371,7 +385,7 @@ def search(
                     session_author_pattern=session_author_pattern,
                     excluded_source_types=excluded_source_types,
                     order=order, session_type=session_type, source_type=source_type,
-                    ranker=ranker,
+                    ranker=ranker, only_source_ids=only_source_ids,
                 )
             finally:
                 db.close()
@@ -387,7 +401,7 @@ def search(
             states=list(PEER_VISIBLE_STATES), include_raw=False,
             excluded_source_types=excluded_source_types,
             order=order, session_type=session_type, source_type=source_type,
-            ranker=ranker,
+            ranker=ranker, only_source_ids=only_source_ids,
         )
         for r in rows:
             r.setdefault("org", only_org)
@@ -403,7 +417,7 @@ def search(
             session_author_pattern=session_author_pattern,
             excluded_source_types=excluded_source_types,
             order=order, session_type=session_type, source_type=source_type,
-            ranker=ranker,
+            ranker=ranker, only_source_ids=only_source_ids,
         )
 
     def fetch_peer(db: GraphDB, _slug: str) -> list[dict]:
@@ -412,7 +426,7 @@ def search(
             states=list(PEER_VISIBLE_STATES), include_raw=False,
             excluded_source_types=excluded_source_types,
             order=order, session_type=session_type, source_type=source_type,
-            ranker=ranker,
+            ranker=ranker, only_source_ids=only_source_ids,
         )
 
     org_lists = run_across_orgs(

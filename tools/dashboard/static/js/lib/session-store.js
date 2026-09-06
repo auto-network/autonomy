@@ -115,6 +115,7 @@ document.addEventListener('alpine:init', function() {
         var s = data[i];
         var store = window.getSessionStore(s.session_id);
         store.project = s.project || '';
+        store.graphSourceId = s.graph_source_id || '';
         store.sessionType = s.type || '';
         store.label = s.label || '';
         if (s.role) store.role = s.role;

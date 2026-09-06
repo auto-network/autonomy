@@ -646,6 +646,125 @@
         });
       },
 
+      // --- On-screen search (header search box, bound while on /sessions) ---
+      // Typing narrows Launching + Active + Recent to cards whose visible
+      // metadata contains every query token. Enter upgrades the same query
+      // to a transcript search: /api/search restricted to the graph source
+      // ids of the cards on screen (``source_ids=``), and a card then also
+      // matches when its transcript hit. Cards render unchanged — this is
+      // a filter, not a results view; the /search page shows the excerpts.
+      searchQuery: '',
+      searchFts: { query: '', ids: {}, pending: false, error: '', count: 0 },
+
+      _searchTokens() {
+        return this.searchQuery.toLowerCase().split(/\s+/).filter(Boolean);
+      },
+
+      _searchHaystack(s) {
+        var org = s.org && typeof s.org === 'object'
+          ? [s.org.slug, s.org.name]
+          : [s.org];
+        var parts = [
+          s.label, s.tmux_session, s.session_id, s.project, s.role, s.latest,
+          s.bead_id, s.harness, s.model, s.session_type,
+        ].concat(Array.isArray(s.topics) ? s.topics : [], org);
+        return parts.filter(function(v) { return v != null && v !== ''; })
+          .join('\n').toLowerCase();
+      },
+
+      _matchesSearch(s) {
+        var tokens = this._searchTokens();
+        if (tokens.length === 0) return true;
+        var fts = this.searchFts;
+        if (fts.query === this.searchQuery) {
+          var sid = s.graph_source_id || s.id;
+          if (sid && fts.ids[sid]) return true;
+        }
+        var hay = this._searchHaystack(s);
+        for (var i = 0; i < tokens.length; i++) {
+          if (hay.indexOf(tokens[i]) === -1) return false;
+        }
+        return true;
+      },
+
+      get searchActive() {
+        return this._searchTokens().length > 0;
+      },
+
+      // Cards eligible for the transcript search: everything the org /
+      // type / since filters leave on screen, BEFORE the search narrows it.
+      _searchableSourceIds() {
+        var self = this;
+        var ids = [];
+        var seen = {};
+        function add(id) {
+          if (id && !seen[id]) { seen[id] = true; ids.push(id); }
+        }
+        this.interactive.forEach(function(s) {
+          if (self._matchesOrg(s)) add(s.graph_source_id);
+        });
+        this._recentBase().forEach(function(s) { add(s.id); });
+        return ids;
+      },
+
+      setSearchQuery(value) {
+        var next = String(value || '').trim();
+        if (next === this.searchQuery) return;
+        this.searchQuery = next;
+        // Transcript hits belong to the query that produced them; a new
+        // query (or none) starts from a clean, non-pending state.
+        this.searchFts = { query: '', ids: {}, pending: false, error: '', count: 0 };
+      },
+
+      clearSearch() {
+        var gs = document.getElementById('global-search');
+        if (gs) gs.value = '';
+        this.setSearchQuery('');
+      },
+
+      async runTranscriptSearch() {
+        var q = this.searchQuery;
+        if (!q) return;
+        var ids = this._searchableSourceIds();
+        if (ids.length === 0) {
+          this.searchFts = { query: q, ids: {}, pending: false, error: '', count: 0 };
+          return;
+        }
+        this.searchFts = { query: q, ids: {}, pending: true, error: '', count: 0 };
+        var url = '/api/search?q=' + encodeURIComponent(q)
+          + '&group=1&limit=' + ids.length
+          + '&source_ids=' + encodeURIComponent(ids.join(','));
+        try {
+          var res = await fetch(url);
+          if (!res.ok) throw new Error('search failed (' + res.status + ')');
+          var rows = await res.json();
+          if (this.searchQuery !== q) return;  // superseded while in flight
+          var hits = {};
+          var count = 0;
+          (Array.isArray(rows) ? rows : []).forEach(function(r) {
+            var sid = r && (r.source_id || r.id);
+            if (sid && !hits[sid]) { hits[sid] = true; count += 1; }
+          });
+          this.searchFts = { query: q, ids: hits, pending: false, error: '', count: count };
+        } catch (err) {
+          if (this.searchQuery !== q) return;
+          this.searchFts = {
+            query: q, ids: {}, pending: false,
+            error: (err && err.message) || 'search failed', count: 0,
+          };
+        }
+      },
+
+      get searchSummary() {
+        var visible = this.launching.length + this.activeInteractive.length + this.filtered.length;
+        var fts = this.searchFts;
+        var text = visible + (visible === 1 ? ' session' : ' sessions');
+        if (fts.query !== this.searchQuery) return text + ' · Enter searches transcripts';
+        if (fts.pending) return text + ' · searching transcripts…';
+        if (fts.error) return text + ' · transcript search failed';
+        return text + ' · ' + fts.count + (fts.count === 1 ? ' transcript hit' : ' transcript hits');
+      },
+
       // --- Org filter (toolbar dropdown, between zoom + launch button) ---
       // '' means "All orgs" (default). Filters both the Active and Recent
       // sections by comparing against the resolved s.org.slug already
@@ -750,13 +869,17 @@
       },
       get launching() {
         var self = this;
-        var arr = this.interactive.filter(function(s) { return self._isLaunching(s) && self._matchesOrg(s); });
+        var arr = this.interactive.filter(function(s) {
+          return self._isLaunching(s) && self._matchesOrg(s) && self._matchesSearch(s);
+        });
         arr.sort(function(a, b) { return (b.created_at || 0) - (a.created_at || 0); });
         return arr;
       },
       get activeInteractive() {
         var self = this;
-        return this.interactive.filter(function(s) { return !self._isLaunching(s) && self._matchesOrg(s); });
+        return this.interactive.filter(function(s) {
+          return !self._isLaunching(s) && self._matchesOrg(s) && self._matchesSearch(s);
+        });
       },
 
       _currentLaunchingSessionIds() {
@@ -919,12 +1042,19 @@
         localStorage.setItem('recentSessionFilter', f);
       },
 
-      get filtered() {
+      // Recent rows after the type chip + org filter, before the search and
+      // the Since window. Shared by ``filtered`` and the transcript search.
+      _recentBase() {
         var self = this;
         var base = this.recentFilter === 'all'
           ? this.recent
           : this.recent.filter(function(s) { return self._matchesFilter(s, self.recentFilter); });
-        base = base.filter(function(s) { return self._matchesOrg(s); });
+        return base.filter(function(s) { return self._matchesOrg(s); });
+      },
+
+      get filtered() {
+        var self = this;
+        var base = this._recentBase().filter(function(s) { return self._matchesSearch(s); });
         var windowed = base.filter(function(s) { return self._matchesRecentSince(s); });
         // A selected organization is guaranteed its 10 most-recent sessions
         // regardless of the Since window. The server ships an age-independent
@@ -1002,7 +1132,13 @@
           '1d': ' in the last day',
           '1w': ' in the last week',
         }[this.recentSince] || '';
-        return 'No ' + chip + 'sessions' + org + since;
+        var query = this.searchActive ? ' matching \u201c' + this.searchQuery + '\u201d' : '';
+        return 'No ' + chip + 'sessions' + query + org + since;
+      },
+
+      activeEmptyMessage() {
+        if (!this.searchActive) return 'No active sessions';
+        return 'No active sessions matching \u201c' + this.searchQuery + '\u201d';
       },
 
       async resumeSession(s, $event) {
@@ -1106,6 +1242,27 @@
         this._updateFromStore();
         this.refreshActiveOrder();
         var self = this;
+
+        // Bind the shell's header search box (same pattern as the beads
+        // page): input narrows the lists, Enter (relayed by app.js as
+        // ``global-search:enter``) runs the transcript search.
+        var gs = document.getElementById('global-search');
+        this.setSearchQuery(gs ? gs.value : '');
+        this._onSearchInput = function() {
+          clearTimeout(self._searchTimer);
+          self._searchTimer = setTimeout(function() {
+            var el = document.getElementById('global-search');
+            self.setSearchQuery(el ? el.value : '');
+          }, 200);
+        };
+        if (gs) gs.addEventListener('input', this._onSearchInput);
+        this._onSearchEnter = function(e) {
+          clearTimeout(self._searchTimer);
+          var value = e && e.detail && e.detail.value != null ? e.detail.value : (gs ? gs.value : '');
+          self.setSearchQuery(value);
+          self.runTranscriptSearch();
+        };
+        window.addEventListener('global-search:enter', this._onSearchEnter);
         this._onStoreChanged = function() { self._scheduleStoreSync(); };
         window.addEventListener('sessions:store-changed', this._onStoreChanged);
 
@@ -1402,6 +1559,10 @@
             type: s.sessionType || 'terminal',
             session_type: _deriveSessionType(s),
             tmux_session: id,
+            // Graph source id (when the JSONL has been ingested at least
+            // once). The on-screen transcript search restricts /api/search
+            // to exactly these ids.
+            graph_source_id: s.graphSourceId || '',
             bead_id: s.beadId || '',
             entry_count: s.entryCount || s.entries.length,
             context_tokens: s.contextTokens || 0,
@@ -1668,6 +1829,16 @@
           this._resourceHandler = null;
         }
         if (this._onCreateTerminal) window.removeEventListener('create-terminal', this._onCreateTerminal);
+        clearTimeout(this._searchTimer);
+        if (this._onSearchInput) {
+          var gs = document.getElementById('global-search');
+          if (gs) gs.removeEventListener('input', this._onSearchInput);
+          this._onSearchInput = null;
+        }
+        if (this._onSearchEnter) {
+          window.removeEventListener('global-search:enter', this._onSearchEnter);
+          this._onSearchEnter = null;
+        }
       },
     }));
   });

@@ -1729,6 +1729,7 @@ class GraphDB:
         session_author_pattern: str | None,
         *,
         alias: str = "s",
+        only_source_ids: list[str] | None = None,
     ) -> tuple[str, list]:
         """Build a SQL predicate and params for filtering by publication_state.
 
@@ -1738,6 +1739,14 @@ class GraphDB:
           - Else if `include_raw` is True, no filter is applied.
           - Else (default): exclude raw sources unless the row belongs to the
             current session (by id membership or metadata.author match).
+
+        ``only_source_ids`` is an orthogonal *restriction* layered on top of
+        whichever branch applies: ``None`` leaves the candidate set alone,
+        ``[]`` matches nothing (an explicit empty list never silently widens
+        to "everything"), and a non-empty list keeps only rows whose
+        ``id`` is in it. It narrows, never widens — a raw peer row that the
+        state branch hides stays hidden even when its id is listed. This
+        is what lets the sessions page search *only* the cards on screen.
 
         Returns ("", []) when no filter should be applied.
 
@@ -1749,11 +1758,25 @@ class GraphDB:
         unfiltered here; explicit-ID lookups (``_search_source_id``) never
         call this helper at all, so a withdrawn source still resolves directly.
         """
+        restrict_clause = ""
+        restrict_params: list = []
+        if only_source_ids is not None:
+            if not only_source_ids:
+                restrict_clause = " AND 0"
+            else:
+                ph = ",".join("?" for _ in only_source_ids)
+                restrict_clause = f" AND {alias}.id IN ({ph})"
+                restrict_params = list(only_source_ids)
+
         if states:
             placeholders = ",".join("?" for _ in states)
-            return f" AND {alias}.publication_state IN ({placeholders}) AND {alias}.deprecated = 0", list(states)
+            return (
+                f" AND {alias}.publication_state IN ({placeholders})"
+                f" AND {alias}.deprecated = 0" + restrict_clause,
+                list(states) + restrict_params,
+            )
         if include_raw:
-            return "", []
+            return restrict_clause, restrict_params
         # Default: hide raw from other sessions; keep raw from current session.
         clauses = [f"{alias}.publication_state != 'raw'"]
         params: list = []
@@ -1764,7 +1787,11 @@ class GraphDB:
         if session_author_pattern:
             clauses.append(f"json_extract({alias}.metadata, '$.author') LIKE ?")
             params.append(session_author_pattern)
-        return " AND (" + " OR ".join(clauses) + f") AND {alias}.deprecated = 0", params
+        return (
+            " AND (" + " OR ".join(clauses) + f") AND {alias}.deprecated = 0"
+            + restrict_clause,
+            params + restrict_params,
+        )
 
     # ── Search ───────────────────────────────────────────────
 
@@ -1824,7 +1851,8 @@ class GraphDB:
                order: str = "relevance",
                session_type: list[str] | None = None,
                source_type: list[str] | None = None,
-               ranker: str = "legacy") -> list[dict]:
+               ranker: str = "legacy",
+               only_source_ids: list[str] | None = None) -> list[dict]:
         """Full-text search across thoughts and derivations, scoped to this DB.
 
         Org scoping is which database this method runs against — callers
@@ -1854,6 +1882,13 @@ class GraphDB:
         whose JSON ``session_type`` is NULL or absent are NEVER returned
         when the filter is active. ``None`` disables the filter; ``[]``
         returns zero rows.
+
+        ``only_source_ids`` restricts every FTS stream to the listed source
+        ids (``None`` = no restriction, ``[]`` = zero rows). It composes
+        with — never overrides — the publication-state filter, so pass the
+        same ids through ``session_source_ids`` when raw own-org sessions
+        should be searchable. Explicit-ID queries (a hex prefix) ignore it,
+        as they ignore every other filter.
 
         Round 7l: ``LIMIT`` applies to **distinct sources**, not raw FTS
         rows. A 30-hit session contributes one source-row to the result
@@ -1889,6 +1924,7 @@ class GraphDB:
                 session_author_pattern=session_author_pattern,
                 excluded_source_types=excluded_source_types,
                 session_type=session_type, source_type=source_type,
+                only_source_ids=only_source_ids,
             )
 
         fts_query = _sanitize_fts_query(query, or_mode=or_mode)
@@ -1901,6 +1937,7 @@ class GraphDB:
 
         state_clause, state_params = self._build_state_filter(
             states, include_raw, session_source_ids, session_author_pattern,
+            only_source_ids=only_source_ids,
         )
 
         excl_clause, excl_params = self._build_excluded_types_clause(excluded_source_types)
@@ -2159,6 +2196,7 @@ class GraphDB:
         excluded_source_types: list[str] | None,
         session_type: list[str] | None,
         source_type: list[str] | None,
+        only_source_ids: list[str] | None = None,
     ) -> list[dict]:
         """Fuse whole-query and per-term legacy rankings at source level.
 
@@ -2209,6 +2247,7 @@ class GraphDB:
                 session_type=session_type,
                 source_type=source_type,
                 ranker="legacy",
+                only_source_ids=only_source_ids,
             )
             groups: dict[str, list[dict]] = {}
             positions: dict[str, int] = {}

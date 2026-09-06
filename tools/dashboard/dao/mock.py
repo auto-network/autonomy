@@ -1376,11 +1376,17 @@ def search(
     project: str | None = None,
     order: str = "relevance",
     session_type: list[str] | None = None,
+    source_ids: list[str] | None = None,
 ) -> list[dict]:
     data = _load()
     results = [_fill(r, SEARCH_RESULT_DEFAULTS) for r in data.get("search_results", [])]
     if project:
         results = [r for r in results if r.get("project") == project]
+    # Restrict-to-sources knob (sessions page). Mirrors db.search: ``None``
+    # disables, ``[]`` returns nothing, a list keeps only listed sources.
+    if source_ids is not None:
+        wanted = set(source_ids)
+        results = [r for r in results if r.get("source_id") in wanted]
     if query:
         # Behavioural sweep relies on the no-match branch to drive the
         # empty-state UI. Production FTS is full-text; here we approximate
