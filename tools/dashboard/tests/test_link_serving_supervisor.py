@@ -1130,3 +1130,95 @@ def _raise(exc):
     def _fn(*_a, **_k):
         raise exc
     return _fn
+
+
+def _lame_duck_fixture(env, monkeypatch, *, now=None):
+    """Provision + adopt a STALE incumbent that reports one active stream.
+
+    Returns (supervisor, spawn, sleeper, probe) where probe is a mutable
+    dict later reconcile passes read active_streams from."""
+    from tools.dashboard import link_serving_supervisor as sup
+
+    _provision_serve_cert(env)
+    state = sup.serve_cert_state(ORG)
+    assert state["status"] == "ok", state
+    spawn = FakeSpawn()
+    supervisor = sup.ServingSupervisor(spawn=spawn, now=now)
+    # A real process so _AdoptedProc.alive() holds during later reconciles.
+    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    probe = {"ok": True, "serving": True, "boot_commit": "0" * 40,
+             "active_streams": 1}
+    # A killed duck's control socket goes silent — mirror that, or the
+    # re-launch after replacement would re-adopt the corpse forever.
+    monkeypatch.setattr(
+        sup, "_probe_ctl_status",
+        lambda ctl: dict(probe) if sleeper.poll() is None else None,
+    )
+    monkeypatch.setattr(
+        sup, "_iter_connector_pids", lambda org_uuid: iter([sleeper.pid])
+    )
+    reaped = []
+    monkeypatch.setattr(
+        supervisor, "_reap_strays", lambda org: reaped.append(org)
+    )
+    # Reconcile gates that are out of scope here: eligible + live grant.
+    monkeypatch.setattr(
+        sup.ServingSupervisor, "_fleet_eligibility",
+        staticmethod(lambda: SimpleNamespace(
+            allowed=True, active_machine_count=0, reason="",
+            selected_machine_id=None,
+        )),
+    )
+    monkeypatch.setattr(sup, "_has_live_grant", lambda org, now: True)
+    return supervisor, spawn, sleeper, probe, reaped, state
+
+
+def test_stale_incumbent_mid_stream_is_adopted_as_lame_duck(env, monkeypatch):
+    """A stale-code incumbent WITH an active stream drains instead of dying:
+    recycling on every /app commit killed every first-contact fleet transfer
+    (~66s generations vs a multi-minute 325MiB pull, live 2026-09-06)."""
+    supervisor, spawn, sleeper, _probe, reaped, state = _lame_duck_fixture(
+        env, monkeypatch)
+    try:
+        result = supervisor._launch(ORG, state)
+        assert result == {"running": True, "reason": "lame-duck-draining"}
+        assert reaped == [], "a draining duck must not be reaped"
+        assert spawn.calls == [], "no replacement until the duck drains"
+        assert ORG in supervisor._lame_duck_since
+    finally:
+        sleeper.kill()
+
+
+def test_lame_duck_is_replaced_once_streams_drain(env, monkeypatch):
+    supervisor, spawn, sleeper, probe, _reaped, state = _lame_duck_fixture(
+        env, monkeypatch)
+    try:
+        assert supervisor._launch(ORG, state)["reason"] == "lame-duck-draining"
+        assert supervisor.ensure(ORG)["reason"] == "lame-duck-draining"
+        probe["active_streams"] = 0
+        result = supervisor.ensure(ORG)
+        assert result["reason"] == "launched"
+        assert len(spawn.calls) == 1, "drained duck must be replaced"
+        assert ORG not in supervisor._lame_duck_since
+    finally:
+        sleeper.kill()
+
+
+def test_lame_duck_is_replaced_at_the_drain_deadline(env, monkeypatch):
+    from tools.dashboard import link_serving_supervisor as sup
+
+    clock = {"t": 1000.0}
+    supervisor, spawn, sleeper, _probe, _reaped, state = _lame_duck_fixture(
+        env, monkeypatch, now=lambda: clock["t"])
+    try:
+        assert supervisor._launch(ORG, state)["reason"] == "lame-duck-draining"
+        clock["t"] += sup.LAME_DUCK_DRAIN_DEADLINE_S - 1
+        assert supervisor.ensure(ORG)["reason"] == "lame-duck-draining"
+        clock["t"] += 2
+        result = supervisor.ensure(ORG)
+        assert result["reason"] == "launched", (
+            "streams still active, but the deadline bounds stale serving"
+        )
+        assert len(spawn.calls) == 1
+    finally:
+        sleeper.kill()
