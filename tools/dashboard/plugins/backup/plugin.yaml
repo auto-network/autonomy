@@ -19,6 +19,10 @@ nav:
 frontend:
   alpine_root: backupPage
 
+# Agent-facing doctrine + verbs; embedded into session primers while
+# enabled and served at GET /api/plugins/backup/skill.
+skill: SKILL.md
+
 entrypoints:
   api: tools.dashboard.plugins.backup.entrypoints.api:routes
   cli: tools.dashboard.plugins.backup.entrypoints.cli:register
