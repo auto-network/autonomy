@@ -392,6 +392,7 @@ async def post_unlock_passkey_options(request: Request) -> JSONResponse:
     try:
         body = await request.json() if await request.body() else {}
     except Exception:
+        logger.warning("vault bring-up refused (body-not-json)")
         return JSONResponse({"ok": False, "error": "body must be JSON"},
                             status_code=400)
     if not isinstance(body, dict):
@@ -1165,24 +1166,31 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
                             status_code=400)
     keys = body.get("generation_keys") if isinstance(body, dict) else None
     if not isinstance(keys, dict):
+        logger.warning("vault bring-up refused (generation-keys-shape)")
         return JSONResponse({"ok": False, "error": (
             "body must carry 'generation_keys' as {state_id: hex}"
         )}, status_code=400)
     decoded: dict[str, bytes] = {}
     for state_id, hexed in keys.items():
         if not isinstance(state_id, str) or not isinstance(hexed, str):
+            logger.warning("vault bring-up refused (generation-keys-entry-shape)")
             return JSONResponse({"ok": False, "error": (
                 "generation_keys must map a state id to a hex secret"
             )}, status_code=400)
         try:
             raw = bytes.fromhex(hexed)
         except ValueError:
+            logger.warning(
+                "vault bring-up refused (generation-key-not-hex): %s", state_id)
             return JSONResponse({"ok": False, "error": (
                 f"generation key for {state_id} is not hex"
             )}, status_code=400)
         if len(raw) != 32:
             # Refuse rather than cache a wrong-length secret: it would fail
             # later, at a read, looking like a key-agreement problem.
+            logger.warning(
+                "vault bring-up refused (generation-key-wrong-length): %s "
+                "is %d bytes", state_id, len(raw))
             return JSONResponse({"ok": False, "error": (
                 f"generation key for {state_id} is {len(raw)} bytes, not 32"
             )}, status_code=400)
@@ -1204,6 +1212,8 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
             with KeyControlStore(vault_db_path_for(None)) as kc:
                 kc.accept_credential(kem_credential)
         except Exception as exc:
+            logger.warning(
+                "vault bring-up refused (kem-credential): %s", exc)
             return JSONResponse({"ok": False, "error": (
                 f"kem_credential was refused: {exc}"
             )}, status_code=400)
@@ -1217,6 +1227,7 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
     kem_private_hex = body.get("persona_kem_private_key")
     if kem_private_hex is not None:
         if not isinstance(kem_private_hex, str):
+            logger.warning("vault bring-up refused (persona-kem-key-shape)")
             return JSONResponse({"ok": False, "error": (
                 "persona_kem_private_key must be the persona's KEM private "
                 "key as hex, or absent"
@@ -1244,6 +1255,10 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
         _VAULT_CACHE["kem_private"] = kem_private_hex
 
     if not decoded and _personal_store_has_generations():
+        logger.warning(
+            "vault bring-up refused (no-generation-keys): caller sent none "
+            "and grant recovery produced none, but the store holds sealed "
+            "content")
         # Refusing empty is right for a store that HAS sealed content: neither
         # the caller nor grant recovery produced a single generation key, so
         # bringing the vault up would answer every read with a missing-key
@@ -1260,6 +1275,8 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
 
     delegate_hex = body.get("delegate_signing_key")
     if delegate_hex is not None and not isinstance(delegate_hex, str):
+        logger.warning(
+            "vault bring-up refused (delegate-signing-key-shape)")
         return JSONResponse({"ok": False, "error": (
             "delegate_signing_key must be the attenuated delegate's private "
             "key as hex, or absent"
@@ -1276,6 +1293,8 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
             )
             _assert_audited_recipient_compatible(audited_public)
     except Exception as exc:  # noqa: BLE001 — fail before any warm seam lands
+        logger.warning(
+            "vault bring-up refused (audited-recipient): %s", exc)
         return JSONResponse({"ok": False, "error": (
             f"audited delegate recipient was refused: {exc}"
         )}, status_code=400)

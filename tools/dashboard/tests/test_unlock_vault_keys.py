@@ -243,3 +243,69 @@ def test_an_unlock_without_the_audited_recipient_still_fails_closed(
             "autonomy.vault.audited", 1, "github.token",
             {"value": "x" * 40}, org=None,
         )
+
+
+# ── every refusal names its gate in the log (auto-uhdxm) ─────────────
+#
+# The 2026-09-06 incident: a bring-up refusal left no server trace at all,
+# so a completed sign-in with a dead vault was undiagnosable for an hour.
+# Each pre-seat 400 must emit a warning naming its gate.
+
+
+def _refusal_log(caplog):
+    return [r.getMessage() for r in caplog.records
+            if "vault bring-up refused" in r.getMessage()]
+
+
+def test_wrong_length_refusal_is_logged(client, unlocked, caplog):
+    with caplog.at_level("WARNING", logger="tools.dashboard.unlock_routes"):
+        client.post("/api/identity/unlock/vault-keys",
+                    json={"generation_keys": {"state-1": "ab" * 16}})
+    assert any("generation-key-wrong-length" in m for m in _refusal_log(caplog))
+
+
+def test_non_hex_refusal_is_logged(client, unlocked, caplog):
+    with caplog.at_level("WARNING", logger="tools.dashboard.unlock_routes"):
+        client.post("/api/identity/unlock/vault-keys",
+                    json={"generation_keys": {"state-1": "zz" * 32}})
+    assert any("generation-key-not-hex" in m for m in _refusal_log(caplog))
+
+
+def test_body_shape_refusals_are_logged(client, unlocked, caplog):
+    with caplog.at_level("WARNING", logger="tools.dashboard.unlock_routes"):
+        client.post("/api/identity/unlock/vault-keys", json={"generation_keys": []})
+        client.post("/api/identity/unlock/vault-keys",
+                    json={"generation_keys": {"state-1": 7}})
+        client.post("/api/identity/unlock/vault-keys",
+                    json={"generation_keys": {},
+                          "persona_kem_private_key": 12})
+        client.post("/api/identity/unlock/vault-keys",
+                    json={"generation_keys": {},
+                          "delegate_signing_key": 12})
+    messages = _refusal_log(caplog)
+    assert any("generation-keys-shape" in m for m in messages)
+    assert any("generation-keys-entry-shape" in m for m in messages)
+    assert any("persona-kem-key-shape" in m for m in messages)
+    assert any("delegate-signing-key-shape" in m for m in messages)
+
+
+def test_audited_recipient_refusal_is_logged(client, unlocked, caplog):
+    with caplog.at_level("WARNING", logger="tools.dashboard.unlock_routes"):
+        response = client.post(
+            "/api/identity/unlock/vault-keys",
+            json={"generation_keys": _keys(),
+                  "delegate_audited_private_key": "ab" * 32})
+    assert response.status_code == 400
+    assert any("audited-recipient" in m for m in _refusal_log(caplog))
+
+
+def test_empty_set_with_sealed_content_refusal_is_logged(
+    client, unlocked, monkeypatch, caplog,
+):
+    monkeypatch.setattr(unlock_routes, "_personal_store_has_generations",
+                        lambda: True)
+    with caplog.at_level("WARNING", logger="tools.dashboard.unlock_routes"):
+        response = client.post("/api/identity/unlock/vault-keys",
+                               json={"generation_keys": {}})
+    assert response.status_code == 400
+    assert any("no-generation-keys" in m for m in _refusal_log(caplog))

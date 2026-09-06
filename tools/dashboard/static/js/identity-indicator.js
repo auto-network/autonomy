@@ -741,6 +741,17 @@
     if (state !== 'bootstrap' && state !== 'error') {
       panel.appendChild(flagTray());
       if (unlockState === null && !unlockStateError) loadUnlockState();
+      // A failed vault wake leaves its operator-legible message under this
+      // key (ceremony/vault-unlock.js reportWakeOutcome); the next
+      // successful wake clears it. Render it here — the shell is the one
+      // surface that survives the unlock page's post-sign-in navigation,
+      // so the failure is visible without DevTools (auto-uhdxm).
+      try {
+        var wakeFailed = sessionStorage.getItem('autonomy.vault.wake-failed');
+        if (wakeFailed) {
+          panel.appendChild(el('div', 'identity-panel-error', wakeFailed));
+        }
+      } catch (e) { /* storage unavailable — nothing to render */ }
     }
 
     if (state === 'gate-off') {
