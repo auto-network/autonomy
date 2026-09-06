@@ -71,7 +71,7 @@ def test_success_report_matches_accounting(synthetic):
     root, backups, fakebin = synthetic
     proc = _run(root, backups, fakebin)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    report = json.loads((backups / "hourly" / "latest-report.json").read_text())
+    report = json.loads((root / "backup-reports" / "hourly-latest.json").read_text())
     assert report["verdict"] == "complete"
     assert report["failures"] == []
     # Offsite is unconfigured in the fixture: stamped skipped, never
@@ -96,7 +96,7 @@ def test_failed_run_reports_with_reasons(synthetic):
     (root / "auth.db").unlink()
     proc = _run(root, backups, fakebin)
     assert proc.returncode == 1
-    report = json.loads((backups / "hourly" / "latest-report.json").read_text())
+    report = json.loads((root / "backup-reports" / "hourly-latest.json").read_text())
     assert report["verdict"] == "failed"
     assert report["exit_code"] == 1
     assert any("auth" in reason for reason in report["failures"])

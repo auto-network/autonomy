@@ -13,7 +13,7 @@ failing and why", in that order, from persisted state only.
 - A **capture run** is one execution of the capture engine
   (tools/graph/backup-all.sh on the host; the node rolling mode when it
   lands). It writes `.backup-complete` + `run-report.json` beside the
-  captured stores and a copy at `<backup root>/<tier>/latest-report.json`.
+  captured stores and a copy at `<data root>/backup-reports/<tier>-latest.json` (on the shared data volume, so a containerized node sees it without the NAS mount).
   A run is `complete` only when every required store of
   tools/data_paths.STORE_MANIFEST was captured — a missing required
   store is a failed run with reasons, never a quiet skip.

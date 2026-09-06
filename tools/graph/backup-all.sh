@@ -76,7 +76,14 @@ fail() {
     FAILURES=$((FAILURES + 1))
 }
 
+# The tier-level report copy lives on the DATA VOLUME, not the backup
+# root: the dashboard (possibly a container that cannot see the NAS
+# mount at all — the /app/data volume is the one filesystem host and
+# node share) ingests from here, so its probe never touches NFS.
+REPORT_DIR="${DATA_ROOT}/backup-reports"
+
 write_report() {  # $1 verdict  $2 exit_code  $3 offsite  $4 dir
+    mkdir -p "$REPORT_DIR"
     REPORT_TIER="$TIER" REPORT_STAMP="$STAMP" REPORT_VERDICT="$1" \
     REPORT_STARTED_AT="$STARTED_AT" REPORT_FINISHED_AT="$(date -Iseconds)" \
     REPORT_DURATION="$(( $(date +%s) - START_EPOCH ))" \
@@ -87,7 +94,7 @@ write_report() {  # $1 verdict  $2 exit_code  $3 offsite  $4 dir
     REPORT_FAILURES_FILE="$FAILS_TXT" \
         "$PYTHON" "$STORES_HELPER" report < "$ROWS_TSV" \
         > "$4/run-report.json" \
-        && cp "$4/run-report.json" "${BACKUP_ROOT}/${TIER}/latest-report.json"
+        && cp "$4/run-report.json" "${REPORT_DIR}/${TIER}-latest.json"
 }
 
 backup_sqlite() {
@@ -226,7 +233,7 @@ if [[ $FAILURES -gt 0 ]]; then
     echo "$(date -Iseconds) ${TIER} backup FAILED: ${FAILURES} store(s) missing or errored — NO offsite push" >&2
     # Failed runs report too (the reconciler must see the failure, not
     # infer it from silence); the report travels with the -FAILED dir
-    # and the tier-level latest-report.json points at it.
+    # and the data-volume tier report points at it.
     write_report failed 1 unknown "$DEST" || true
     mv "$DEST" "${DEST}-FAILED" 2>/dev/null || true
     exit 1
@@ -262,12 +269,12 @@ if "${SCRIPT_DIR}/backup-offsite.sh" "$TIER" 2>&1 | tee "$OFFSITE_LOG"; then
     rm -f "$OFFSITE_LOG"
     "$PYTHON" "$STORES_HELPER" report-offsite "$OFFSITE_VERDICT" 0 \
         "${DEST}/run-report.json" \
-        "${BACKUP_ROOT}/${TIER}/latest-report.json" || true
+        "${REPORT_DIR}/${TIER}-latest.json" || true
 else
     rm -f "$OFFSITE_LOG"
     "$PYTHON" "$STORES_HELPER" report-offsite failed 2 \
         "${DEST}/run-report.json" \
-        "${BACKUP_ROOT}/${TIER}/latest-report.json" || true
+        "${REPORT_DIR}/${TIER}-latest.json" || true
     echo "$(date -Iseconds) WARN: ${TIER} offsite push failed (local backup is intact)" >&2
     exit 2
 fi

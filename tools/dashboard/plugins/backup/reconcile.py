@@ -1,18 +1,19 @@
 """Run-report ingestion: capture ground truth → backup.run rows.
 
 The capture engine writes run-report.json beside each capture and a
-copy at ``<backup root>/<tier>/latest-report.json`` (auto-yj2wa). This
-module is the ONLY dashboard code that touches the backup destination,
-and every touch is bounded: the backup root is an NFS hard mount that
-has hung this host before (driver S7, graph://7c45a180-345), so reads
-run on a worker thread with a hard timeout and a hang marks the tier's
-probe stale instead of blocking anything. Request handlers never call
-into the filesystem directly — they read the Settings rows this module
-maintains.
+copy at ``<data root>/backup-reports/<tier>-latest.json`` (auto-yj2wa).
+The tier copy lives on the DATA VOLUME, not the backup destination: a
+containerized node cannot see the host's NAS mount at all (the
+dangling-symlink lesson, 2026-09-06 — reconcile read "no reports"
+forever), and the data volume is the one filesystem host and node
+share. The bounded worker-thread read stays anyway (driver S7,
+graph://7c45a180-345): it costs nothing on a local volume and keeps the
+probe honest if an operator ever points the report dir somewhere
+remote. Request handlers never call into the filesystem directly —
+they read the Settings rows this module maintains.
 
-The tier-level latest-report.json is deliberately the whole probe
-surface: one small known path per tier, never a directory listing of
-the NAS tree.
+The per-tier latest file is deliberately the whole probe surface: one
+small known path per tier, never a directory listing.
 """
 from __future__ import annotations
 
@@ -35,11 +36,9 @@ _logger = logging.getLogger(__name__)
 PROBE_TIMEOUT_S = 15.0
 
 
-def default_backup_root() -> Path:
-    import os
+def default_report_root() -> Path:
     from tools.data_paths import DATA_ROOT
-    return Path(os.environ.get("AUTONOMY_BACKUP_ROOT")
-                or DATA_ROOT / "backups")
+    return DATA_ROOT / "backup-reports"
 
 
 def _read_json_bounded(path: Path, timeout: float):
@@ -83,18 +82,18 @@ def _run_retention() -> int:
         return 50
 
 
-def reconcile(backup_root: Path | str | None = None,
+def reconcile(report_root: Path | str | None = None,
               timeout: float = PROBE_TIMEOUT_S) -> dict:
     """One reconcile pass. Returns what happened, for the caller to
     surface: ``{"ingested": [keys], "probe_errors": {tier: reason},
     "pruned": n}``."""
     from tools.graph import settings_ops
-    root = Path(backup_root) if backup_root else default_backup_root()
+    root = Path(report_root) if report_root else default_report_root()
     ingested: list[str] = []
     probe_errors: dict[str, str] = {}
     pruned = 0
     for tier in TIERS:
-        path = root / tier / "latest-report.json"
+        path = root / f"{tier}-latest.json"
         try:
             report = _read_json_bounded(path, timeout)
         except (TimeoutError, OSError, ValueError) as exc:
