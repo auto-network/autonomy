@@ -56,12 +56,21 @@
   .sb-col-body { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 10px; display: flex; flex-direction: column; gap: 10px; }
   .sb-card { position: relative; display: flex; flex-direction: column; border-radius: 10px; background: #111a2b; border: 1px solid #1e293b; overflow: hidden; flex: 0 0 auto; }
   .sb-card.moving { width: 75%; margin: 0 auto; box-shadow: 0 14px 34px rgba(0,0,0,.45); }
-  /* Bound (dictation target): one pixel, bright enough to find at a glance. */
-  .sb-card.bound { border-color: #a5b4fc; }
-  .sb-card.bound .sb-card-head { box-shadow: inset 0 -1px 0 #4f46e5; }
+  /* Bound (dictation target): a ring rather than a fatter border, so the card
+     is unmistakable from across a 3800px screen without its contents shifting
+     by a pixel when it takes or loses the target. */
+  .sb-card.bound { border-color: #a5b4fc; box-shadow: 0 0 0 2px #818cf8, 0 0 18px rgba(129,140,248,.35); }
+  .sb-card.bound .sb-card-head { box-shadow: inset 0 -1px 0 #6366f1; }
   /* The card's own dictation tiles (shared partial) sit under the transcript. */
   .sb-card-body .sv-pending { flex: 0 0 auto; padding: 6px 8px 8px; border-top: 1px solid #1e293b; }
   .sb-card-body .sv-pending-content { max-height: 120px; overflow-y: auto; }
+  /* The violet "your dictation is going to ANOTHER session" tile is a
+     full-page-viewer affordance: there you see one session and cannot tell
+     where your words are going. On the board every card is a viewer, so it
+     rendered on every card except the target — the operator saw "USER ·
+     DICTATING" everywhere. Here the target card is on screen and highlighted,
+     so the warning is noise. Only the target speaks. */
+  .sb-card-body .sv-pending--cross { display: none !important; }
   /* Desktop session-actions menu: an inline popover under the org glyph, never
      the mobile action sheet (this surface does not exist below 900px). */
   .sb-menu { position: absolute; top: 32px; right: 8px; z-index: 30; min-width: 186px; padding: 5px; border-radius: 10px; border: 1px solid #334155; background: #111b2b; box-shadow: 0 16px 34px rgba(0,0,0,.5); }
@@ -217,7 +226,7 @@
                 </div>
                 <template x-if="cardPresentation(id) === 'transcript'">
                   <div class="sb-card-body session-viewer" data-mode="panel"
-                       x-data="sessionViewerPage({mode:'panel'})"
+                       x-data="sessionViewerPage({mode:'panel', dictationTile:true, pageSignals:false})"
                        x-init="$nextTick(() => configure(panelConfig(id)))">
                     <template x-if="state === 'loading'"><div class="sb-empty">Loading session…</div></template>
                     <template x-if="state === 'error'"><div class="sb-empty" x-text="errorMsg"></div></template>

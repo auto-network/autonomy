@@ -32,6 +32,16 @@
 
       // ── Mode ────────────────────────────────────────────────────
       _mode: (opts && opts.mode) || 'page',
+      // Render the live voice buffer as a tile (no composer on this surface).
+      _dictationTile: !!(opts && opts.dictationTile),
+      // Page-global voice signals (body classes, body.dataset.svComposerSession,
+      // voice.setViewedSession) describe "the viewer on this page" and assume
+      // there is exactly one. A surface that mounts MANY viewers — the Session
+      // Board, one per card — must not write them: every mount overwrote the
+      // last, and the capsule reads that dataset to pick a retarget target
+      // (voice-shell _capsuleClaimTarget → retargetDelivery), so the most
+      // recently mounted card silently stole the microphone.
+      _pageSignals: !(opts && opts.pageSignals === false),
       // Panel mode only: whether the design chat overlay is open. Driven by
       // design.js (off its chatOpen). Gates _composerActive so a collapsed
       // chat yields the passive caption instead of the active composer/tile.
@@ -313,6 +323,14 @@
       },
       get _showLocalDictationMirror() {
         var o = this.outbox;
+        // Surfaces with no composer (the Session Board's cards) have nowhere
+        // else to show the live buffer: the outbox is only staged at SEND
+        // time, so while the operator is still speaking the target had
+        // nothing to render while every OTHER session rendered the violet
+        // "dictating elsewhere" tile off the same buffer. Opt in with
+        // sessionViewerPage({dictationTile: true}) and the target mirrors its
+        // own buffer. The page viewer is unchanged: its composer shows it.
+        if (this._dictationTile && this._localDictationText) return true;
         return !!(this._localDictationText && o && o.state !== 'capturing');
       },
       get _crossSessionTargetTitle() {
@@ -375,6 +393,7 @@
       // once the tile is truly in the DOM (contract cbb8497c-a1f). Guarded so
       // it only clears its own sid.
       _syncTilePresent() {
+        if (!this._pageSignals) return;
         if (typeof document === 'undefined' || !document.body) return;
         var sid = this._tmuxSession || '';
         if (this._composerActive && this.outbox) {
@@ -1614,6 +1633,7 @@
       // signal (class + dataset sid). Guarded so we only clear the flag when
       // it's ours, never stomping another mounted viewer's signal.
       _syncComposerSignal() {
+        if (!this._pageSignals) return;
         if (typeof document === 'undefined' || !document.body) return;
         var sid = this._tmuxSession || '';
         if (this._composerActive) {

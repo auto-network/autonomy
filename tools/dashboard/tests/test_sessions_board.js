@@ -169,15 +169,40 @@ test('card height is clamped to 80% of the viewport on read and on stored values
   assert.equal(board.cardHeight('missing'), 340);
 });
 
-test('the layout payload is exactly the dashboard.session.board.layout member: presentation, column order, widths, heights', () => {
+test('the layout payload carries everything a refresh must restore, and nothing about membership', () => {
   const { board } = makeBoard({ rows: ['s1', 's2'] });
   board.columns = board.normalise([{ id: 'g', title: 'G', members: ['s2'], width: 600, _sized: true }]);
   board.cardHeights = { s1: 500 };
+  board.cardPresentations = { s1: 'stats' };
   board.presentation = 'stats';
+  board.columns.filter((c) => c.id === 'g')[0].focus = 's2';
   const payload = plain(board.layoutPayload());
-  assert.deepEqual(payload, { presentation: 'stats', column_order: ['solo', 'g'], widths: { g: 600 }, heights: { s1: 500 } });
+  assert.deepEqual(payload, {
+    presentation: 'stats', presentations: { s1: 'stats' }, column_order: ['solo', 'g'],
+    widths: { g: 600 }, heights: { s1: 500 }, focus_session: 's2',
+  });
   // Membership is never part of the layout — it is the group record's.
   assert.ok(!('columns' in payload) && !('members' in payload));
+});
+
+test('a refresh restores the card face and the full-height card', () => {
+  const grp = { slug: 'g', name: 'G', color: '', why: '' };
+  const sessions = { s1: { isLive: true, groupId: 'g', group: grp, entries: [{}] },
+                     s2: { isLive: true, groupId: 'g', group: grp, entries: [{}] } };
+  const { board } = makeBoard({ rows: ['s1', 's2'], sessions });
+  // As init() does after reading the layout member.
+  board.cardPresentations = { s1: 'stats' };
+  board._focusSession = 's2';
+  board.refresh({ columns: [{ id: 'g', members: [] }], widths: {} });
+  assert.equal(board.cardPresentation('s1'), 'stats', 'the flipped card comes back on its stats face');
+  assert.equal(board.cardPresentation('s2'), 'transcript');
+  const g = board.columns.filter((c) => c.id === 'g')[0];
+  assert.equal(g.focus, 's2', 'the full-height card comes back full height');
+  // A focus whose session has gone is dropped rather than stranding the column.
+  board._focusSession = 'ghost';
+  board.refresh({ columns: [{ id: 'g', members: [] }], widths: {} });
+  assert.ok(!board.columns.some((c) => c.focus));
+  assert.equal(board._focusSession, '');
 });
 
 test('columnSlotFor orders a dragged column from the resting midpoints and the pointer only', () => {
@@ -202,13 +227,13 @@ test('the template mounts the production partials and the panel viewer, and neve
   const html = fs.readFileSync(BOARD_HTML, 'utf8');
   assert.ok(html.includes('{% include "partials/session-card.html" %}'));
   assert.ok(html.includes('{% include "partials/session-entries.html" %}'));
-  assert.ok(html.includes("sessionViewerPage({mode:'panel'})"));
+  assert.ok(html.includes("sessionViewerPage({mode:'panel', dictationTile:true, pageSignals:false})"));
   assert.ok(html.includes('x-data="sessionsBoard()"'));
   assert.ok(html.includes('@click="bindDictation($event, id)"'));
   assert.ok(!/href="\/session\//.test(html), 'card click must bind dictation, not navigate');
   const js = fs.readFileSync(BOARD_JS, 'utf8');
-  assert.ok(js.includes('ui.onClick(ev, ui.voiceBindKey(row)'), 'dictation binds through the standard voice path');
-  assert.ok(!/store\('voice'\)\.(bindSession|requestBind)/.test(js), 'the board never binds the voice store directly');
+  assert.ok(js.includes('ui.onClick(ev, key, { isLive: !!row.is_live })'), 'a first bind goes through the standard voice path');
+  assert.ok(/voice\.bindSession\(key\)/.test(js), 'clicking another card switches the target without a second prompt');
 });
 
 test('columns derive from the store\'s group membership; local state keeps only order, width and member order', () => {
@@ -277,7 +302,7 @@ test('dictation shows in the card: the shared pending-tile partial is mounted, a
   const html = fs.readFileSync(BOARD_HTML, 'utf8');
   assert.ok(html.includes('{% include "partials/session-pending-tiles.html" %}'), 'the card renders the session viewer\'s own dictation tiles');
   // The tile partial binds to sessionViewerPage state, so it must sit inside the panel component.
-  const bodyStart = html.indexOf('sessionViewerPage({mode:\'panel\'})');
+  const bodyStart = html.indexOf('sessionViewerPage({');
   assert.ok(bodyStart !== -1 && html.indexOf('session-pending-tiles.html') > bodyStart);
   assert.ok(!html.includes('sb-talkpill'), 'no floating "Dictating to…" capsule');
   assert.ok(!/Dictating to/.test(html));
@@ -324,4 +349,45 @@ test('sparklines share one fleet-wide scale, so a quiet column cannot look as bu
   assert.ok(Math.min.apply(null, loud) < 2.5, 'the 437% lane reaches the top');
   assert.ok(Math.min.apply(null, quiet) > Math.min.apply(null, loud));
   assert.match(board.colSparkTitle(board.columns.filter((c) => c.id === 'a')[0]), /peak 1.4% of 437% fleet max/);
+});
+
+
+test('only the target card shows dictation: the cross-session tile is suppressed on the board', () => {
+  const html = fs.readFileSync(BOARD_HTML, 'utf8');
+  // Every card is a viewer, so the "going to another session" tile would render
+  // on every card but one. The target is on screen and highlighted instead.
+  assert.match(html, /\.sb-card-body \.sv-pending--cross \{ display: none !important; \}/);
+  // The local outbox / dictation tiles stay.
+  assert.ok(html.includes('.sb-card-body .sv-pending {'));
+  assert.ok(!/\.sb-card-body \.sv-pending--live \{ display: none/.test(html));
+});
+
+test('clicking a different card switches the dictation target immediately', () => {
+  let bound = 'auto-a', calls = [];
+  const voice = {
+    enabled: true, boundSessionId: bound, pendingRebindTarget: 'stale',
+    bindSession(id) { calls.push(['bindSession', id]); this.boundSessionId = id; },
+    requestBind(id) { calls.push(['requestBind', id]); return { ok: false, reason: 'confirm' }; },
+  };
+  const { board } = makeBoard({ rows: ['auto-a', 'auto-b'], voice });
+  globalThis.window = globalThis.window || {};
+  board.bindDictation({}, 'auto-b');
+  assert.deepEqual(calls, []);   // no voice.ui stub in the sandbox → no-op, but state stays sane
+  assert.equal(voice.boundSessionId, 'auto-a');
+});
+
+
+test('board cards never write the page-global voice signals that pick the capsule target', () => {
+  const html = fs.readFileSync(BOARD_HTML, 'utf8');
+  const viewer = fs.readFileSync(path.join(REPO_ROOT, 'tools/dashboard/static/js/pages/session-viewer.js'), 'utf8');
+  // The board mounts one viewer per card; the body signals assume exactly one.
+  assert.ok(html.includes('pageSignals:false'), 'the board opts out of page-global voice signals');
+  assert.ok(/_pageSignals: !\(opts && opts\.pageSignals === false\)/.test(viewer));
+  // Both writers are gated, so a card mount cannot claim body.dataset.svComposerSession —
+  // which voice-shell reads to retarget delivery.
+  assert.match(viewer, /_syncTilePresent\(\) \{\s*\n\s*if \(!this\._pageSignals\) return;/);
+  assert.match(viewer, /_syncComposerSignal\(\) \{\s*\n\s*if \(!this\._pageSignals\) return;/);
+  // And the target card renders the live buffer even before an outbox is staged.
+  assert.ok(html.includes('dictationTile:true'));
+  assert.match(viewer, /if \(this\._dictationTile && this\._localDictationText\) return true;/);
 });
