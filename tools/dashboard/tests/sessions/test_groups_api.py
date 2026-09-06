@@ -26,11 +26,30 @@ from tools.dashboard import session_board_settings  # noqa: E402
 
 @pytest.fixture
 def board_settings(tmp_path, monkeypatch):
-    """session_board_settings against an isolated personal store (beside a temp orgs dir)."""
+    """session_board_settings against an isolated personal store (beside a temp orgs dir).
+
+    tools.graph.db pools open handles in a module-level dict keyed by path, so
+    a handle opened against this temp store outlives the fixture and the next
+    module in the same xdist worker keeps reading a directory that is gone.
+    Drop anything this test pooled on the way out.
+    """
+    from tools.graph import db as graph_db
+    before = set(graph_db._CONNECTION_POOL)
     orgs = tmp_path / "orgs"
     orgs.mkdir()
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
-    return session_board_settings
+    try:
+        yield session_board_settings
+    finally:
+        for key in list(graph_db._CONNECTION_POOL):
+            if key in before:
+                continue
+            handle = graph_db._CONNECTION_POOL.pop(key, None)
+            try:
+                if handle is not None and hasattr(handle, "close"):
+                    handle.close()
+            except Exception:
+                pass
 
 
 class TestGroupRecord:
