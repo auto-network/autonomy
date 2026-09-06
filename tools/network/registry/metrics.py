@@ -57,6 +57,7 @@ class RegistryMetrics:
         # counter_name -> Counter over a label tuple (org, *enums)
         self._stream_opens: Counter = Counter()      # (org,)
         self._stream_closes: Counter = Counter()     # (org, reason) orderly enums
+        self._viewer_closes: Counter = Counter()     # (org, code) relay-initiated viewer closes
         self._stream_refusals: Counter = Counter()   # (reason,) pre-org-resolve
         self._stream_bytes: Counter = Counter()      # (org, direction)
         self._lease_events: Counter = Counter()      # (org, event)
@@ -73,6 +74,13 @@ class RegistryMetrics:
         reason = reason if reason in {"orderly", "reset", "timeout",
                                       "byte_budget"} else "other"
         self._stream_closes[(_san_org(org), reason)] += 1
+
+    def viewer_close(self, org: str, code: int) -> None:
+        """A viewer channel the RELAY closed (queue overflow, listener fell
+        behind). Silent before 2026-09-06; a multi-GB fleet checkpoint died
+        on that path and could only be inferred."""
+        with self._lock:
+            self._viewer_closes[(_san_org(org), str(int(code)))] += 1
 
     def stream_refused(self, reason: str) -> None:
         # Pre-routing refusals have no resolved org; count by reason only.
@@ -173,6 +181,9 @@ class RegistryMetrics:
         emit("relay_stream_closes_total",
              "Raw streams closed, by orderly/reset/timeout/byte_budget.",
              "counter", self._stream_closes, ("org", "reason"))
+        emit("relay_viewer_closes_total",
+             "Viewer channels closed by the relay itself, by close code",
+             "counter", self._viewer_closes, ("org", "code"))
         emit("relay_stream_refusals_total",
              "Ingress connections refused before routing, by reason.",
              "counter", self._stream_refusals, ("reason",))

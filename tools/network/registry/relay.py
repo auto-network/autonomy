@@ -395,6 +395,9 @@ class Tunnel:
     ):
         self.ws = ws
         self.org = org
+        #: RelayMetrics, attached by the tunnel handler at admission; None in
+        #: unit tests. Records relay-initiated viewer closes by code.
+        self.metrics = None
         #: Hello version this connection authenticated with (operator readout).
         self.version = version
         #: Last control-op outcome for the operator readout (auto-7df7o);
@@ -455,6 +458,19 @@ class Tunnel:
             return
         if self.channels.get(channel_id) is channel:
             del self.channels[channel_id]
+        # This close was silent (no log, no counter) — a multi-GB fleet
+        # checkpoint died here on 2026-09-06 and could only be inferred.
+        # One line per kill: who, how far behind, and how big the frame that
+        # tipped it, so a runtime failure is provable from the journal.
+        logger.warning(
+            "relay viewer channel closed (%d slow-viewer queue overflow): "
+            "org=%s channel=%s queued_bytes=%d payload_bytes=%d cap=%d",
+            CLOSE_VIEWER_QUEUE_OVERFLOW, self.org, channel_id.hex()[:16],
+            channel.queued_bytes, len(payload), channel.max_queued_bytes,
+        )
+        metrics = getattr(self, "metrics", None)
+        if metrics is not None:
+            metrics.viewer_close(self.org, CLOSE_VIEWER_QUEUE_OVERFLOW)
         channel.start_close(CLOSE_VIEWER_QUEUE_OVERFLOW)
         self._notify_dashboard_closed(channel_id)
 
@@ -503,6 +519,15 @@ class Tunnel:
         for channel_id, channel in fallen_behind:
             if self.channels.get(channel_id) is channel:
                 del self.channels[channel_id]
+            logger.warning(
+                "relay viewer channel closed (%d listener fell behind): "
+                "org=%s channel=%s stream=%s",
+                CLOSE_LISTENER_FELL_BEHIND, self.org, channel_id.hex()[:16],
+                token,
+            )
+            metrics = getattr(self, "metrics", None)
+            if metrics is not None:
+                metrics.viewer_close(self.org, CLOSE_LISTENER_FELL_BEHIND)
             channel.start_close(CLOSE_LISTENER_FELL_BEHIND)
             self._notify_dashboard_closed(channel_id)
         if not stream.listeners:
@@ -1735,6 +1760,9 @@ async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
         version=verified.version,
         proven_seq=verified.proven_seq,
     )
+    # Same RelayMetrics the lease events use; None only when the process runs
+    # without host routes (tests). Lets relay-initiated viewer closes count.
+    tunnel.metrics = getattr(host_routes, "_metrics", None)
     replaced = hub.register(tunnel)
     if replaced is not None:
         # Same (persona, machine) reconnect: the replaced connection's
