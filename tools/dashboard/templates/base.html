@@ -2509,7 +2509,7 @@
               x-text="$store.app.restartStatus && $store.app.restartStatus.commit_headline ? 'Now running: ' + $store.app.restartStatus.commit_headline : ''"></span>
       </div>
       <div class="sse-banner-actions flex gap-2 ml-4">
-        <button @click="$store.app.sseInterrupted = false; $store.app.restartStatus = null"
+        <button @click="$store.app.dismissRestart()"
                 class="px-3 py-1 bg-amber-600 hover:bg-amber-500 rounded text-xs font-medium">
           Continue
         </button>

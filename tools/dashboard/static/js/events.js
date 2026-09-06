@@ -32,6 +32,8 @@
   var _lastSeenTs = Date.now();   // last SSE message of ANY kind (event or heartbeat)
   var _watchdogTimer = null;
   var _restartTicker = null;
+  var _restartDismissTimer = null;
+  var _lastFinishedRestartStartedAt = 0;
 
   function _dispatch(topic, data) {
     var set = _handlers[topic];
@@ -86,31 +88,66 @@
           now >= (app.restartStatus.countdown_ends_at_ms || now)) {
         app.restartStatus.phase = 'restarting';
       }
-      // Auto-close once the reboot is DONE (operator directive): if the
-      // banner still says "restarting" but the event stream is alive
-      // again (events flowing after the restart began — e.g. the phone
-      // slept through the completion event), flip to recovered and let
-      // it clear itself shortly. Nobody should have to dismiss a banner
-      // for a restart that already finished.
-      if (app.restartStatus &&
-          (app.restartStatus.phase === 'restarting' ||
-           app.restartStatus.phase === 'countdown') &&
-          _lastSeenTs > (app.restartStatus.started_at_ms || 0) + 3000 &&
-          (now - _lastSeenTs) < 3000 &&
-          (now - (app.restartStatus.started_at_ms || now)) > 5000) {
-        var done = app.restartStatus;
-        done.phase = 'recovered';
-        setTimeout(function() {
-          try {
-            var current = Alpine.store('app').restartStatus;
-            if (current === done) {
-              Alpine.store('app').restartStatus = null;
-              Alpine.store('app').sseInterrupted = false;
-            }
-          } catch (e) { /* page may have navigated */ }
-        }, 4000);
-      }
       app.restartNowMs = now;
+    } catch (e) { /* Alpine not initialised yet */ }
+  }
+
+  // The browser reconnecting to the new SSE epoch is the one user-facing
+  // definition of "done": it proves this tab can talk to the successor.
+  // Server completion frames only enrich that lifecycle.  Keeping one object
+  // and one cancellable timer prevents reordered/replayed frames from
+  // dismissing and then resurrecting the banner.
+  function _finishRestart(payload) {
+    if (!window.Alpine) return;
+    try {
+      var app = Alpine.store('app');
+      var current = app.restartStatus;
+      var startedAt = Number(payload && payload.started_at_ms) ||
+        Number(current && current.started_at_ms) || Date.now();
+
+      if (startedAt <= _lastFinishedRestartStartedAt) return;
+      if (current && current.started_at_ms &&
+          Number(current.started_at_ms) !== startedAt) {
+        // A late completion for another restart must not replace the active one.
+        return;
+      }
+      if (!current) {
+        current = {
+          phase: 'complete',
+          started_at_ms: startedAt,
+          expected_ms: 30000,
+        };
+        app.restartStatus = current;
+      }
+      if (payload) Object.assign(current, payload);
+      current.phase = 'complete';
+      app.sseInterrupted = false;
+
+      if (_restartDismissTimer) clearTimeout(_restartDismissTimer);
+      _restartDismissTimer = setTimeout(function() {
+        try {
+          var finishApp = Alpine.store('app');
+          if (finishApp.restartStatus === current) {
+            _dismissRestart();
+          }
+        } catch (e) { /* page may have navigated */ }
+        _restartDismissTimer = null;
+      }, 2000);
+    } catch (e) { /* Alpine not initialised yet */ }
+  }
+
+  function _dismissRestart() {
+    if (!window.Alpine) return;
+    try {
+      var app = Alpine.store('app');
+      var startedAt = Number(app.restartStatus && app.restartStatus.started_at_ms) || 0;
+      _lastFinishedRestartStartedAt = Math.max(
+        _lastFinishedRestartStartedAt, startedAt
+      );
+      if (_restartDismissTimer) clearTimeout(_restartDismissTimer);
+      _restartDismissTimer = null;
+      app.restartStatus = null;
+      app.sseInterrupted = false;
     } catch (e) { /* Alpine not initialised yet */ }
   }
 
@@ -118,20 +155,23 @@
     if (!payload || typeof payload !== 'object' || !window.Alpine) return;
     try {
       var app = Alpine.store('app');
+      var startedAt = Number(payload.started_at_ms) || 0;
+      if (startedAt && startedAt <= _lastFinishedRestartStartedAt) return;
+      if (payload.phase === 'complete' || payload.phase === 'recovered') {
+        _finishRestart(payload);
+        return;
+      }
       app.sseInterrupted = false;
-      app.restartStatus = payload;
+      if (app.restartStatus && startedAt &&
+          Number(app.restartStatus.started_at_ms) === startedAt) {
+        Object.assign(app.restartStatus, payload);
+      } else {
+        if (_restartDismissTimer) clearTimeout(_restartDismissTimer);
+        _restartDismissTimer = null;
+        app.restartStatus = payload;
+      }
       _restartTick();
       if (!_restartTicker) _restartTicker = setInterval(_restartTick, 250);
-      // Completion is kept visible briefly as useful timing evidence, then
-      // clears itself without forcing the operator to dismiss a banner.
-      if (payload.phase === 'complete' || payload.phase === 'recovered') {
-        setTimeout(function() {
-          try {
-            var current = Alpine.store('app').restartStatus;
-            if (current === payload) Alpine.store('app').restartStatus = null;
-          } catch (e) { /* page may have navigated */ }
-        }, 8000);
-      }
     } catch (e) {
       console.warn('[EventBus] restart notice could not be shown', e);
     }
@@ -154,13 +194,10 @@
         if (epoch > 0 && _serverEpoch !== null && epoch !== _serverEpoch) {
           console.warn('[EventBus] server restarted, epoch ' + _serverEpoch + ' → ' + epoch);
           _onInterruption('Server restarted');
-          // An abrupt restart has no graceful countdown. Use the same rich
-          // restart notice instead of reviving a second plain-text banner.
-          _showRestart({
-            phase: 'recovered',
-            started_at_ms: Date.now(),
-            expected_ms: 30000,
-          });
+          // Receiving a frame from the new epoch proves this browser has
+          // re-established connectivity. Complete the existing countdown, or
+          // synthesize one brief result for an abrupt restart.
+          _finishRestart(appRestartPayload());
           // The restart (uvicorn hot-reload) also dropped the voice audio WS.
           // Re-establish it the moment the server is confirmed back, rather than
           // letting the voice backoff blindly guess — buffer recovery is automatic.
@@ -194,6 +231,14 @@
         console.warn('[EventBus] parse error for topic', topic, err);
       }
     });
+  }
+
+  function appRestartPayload() {
+    try {
+      var status = Alpine.store('app').restartStatus;
+      if (status) return { started_at_ms: status.started_at_ms };
+    } catch (e) { /* store not initialised yet */ }
+    return { started_at_ms: Date.now(), expected_ms: 30000 };
   }
 
   async function _replayGap(fromSeq, toSeq) {
@@ -573,6 +618,7 @@
       sseInterrupted: false,
       restartStatus: null,
       restartNowMs: Date.now(),
+      dismissRestart: _dismissRestart,
       restartMessage: function() {
         var status = this.restartStatus;
         if (!status) return '';
