@@ -272,3 +272,37 @@ test('organizeDigest carries identity, title, topics, current group and at most 
   assert.ok(digest[0].tail.every((t) => t.text.length <= 400 && !t.internal));
   assert.ok(JSON.stringify(digest).length < 512 * 1024, 'digest for 40 sessions stays under the 512 KB custom_input cap');
 });
+
+test('dictation shows in the card: the shared pending-tile partial is mounted, and the floating capsule is gone', () => {
+  const html = fs.readFileSync(BOARD_HTML, 'utf8');
+  assert.ok(html.includes('{% include "partials/session-pending-tiles.html" %}'), 'the card renders the session viewer\'s own dictation tiles');
+  // The tile partial binds to sessionViewerPage state, so it must sit inside the panel component.
+  const bodyStart = html.indexOf('sessionViewerPage({mode:\'panel\'})');
+  assert.ok(bodyStart !== -1 && html.indexOf('session-pending-tiles.html') > bodyStart);
+  assert.ok(!html.includes('sb-talkpill'), 'no floating "Dictating to…" capsule');
+  assert.ok(!/Dictating to/.test(html));
+});
+
+test('the org glyph opens an inline desktop menu, never the phone action sheet', () => {
+  const html = fs.readFileSync(BOARD_HTML, 'utf8');
+  const js = fs.readFileSync(BOARD_JS, 'utf8');
+  assert.ok(html.includes('class="sb-menu"'), 'the menu is inline in the card');
+  assert.ok(!/actionSheet/.test(js), 'the board never calls the global action sheet');
+  const { board } = makeBoard({ rows: ['s1'] });
+  const row = board.rowFor('s1');
+  row.is_live = true; row.nag_enabled = false;
+  const actions = plain(board.sessionActions(row));
+  assert.deepEqual(actions.map((a) => a.label),
+    ['Enable nag (15m)', 'Open full viewer', 'Copy session name', 'Restart session', 'Close session']);
+  assert.ok(actions.every((a) => a.icon), 'every action carries an icon');
+  assert.equal(actions[actions.length - 1].style, 'destructive');
+  // Toggling: showing the same card's menu twice closes it.
+  board.showSessionActions(row);
+  assert.equal(board.menuFor, 's1');
+  board.showSessionActions(row);
+  assert.equal(board.menuFor, '');
+  // Binding dictation closes an open menu.
+  board.showSessionActions(row);
+  board.bindDictation({}, 's1');
+  assert.equal(board.menuFor, '');
+});
