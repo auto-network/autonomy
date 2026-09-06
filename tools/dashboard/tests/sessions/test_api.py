@@ -402,7 +402,10 @@ class TestSessionsBoardHTML:
         # The production card partial and the production viewer partial, not copies.
         assert 'class="session-card-wrap"' in html
         assert "displayEntries" in html
-        assert "sessionViewerPage({mode:'panel'})" in html
+        # The board mounts the production viewer in panel mode. Options are
+        # asserted in test_sessions_board.js; this only pins that it IS the
+        # shared component rather than a copy.
+        assert "sessionViewerPage({" in html and "mode:'panel'" in html
 
     def test_sessions_fragment_is_unchanged_by_the_board(self, test_client):
         # The board is its own surface: the Sessions fragment carries none of it.
