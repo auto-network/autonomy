@@ -731,3 +731,50 @@ def test_checkpoint_quiet_abort_callable_builds_normally(tmp_path: Path) -> None
         )
     assert checkpoint.watermark == 100
     assert (tmp_path / "checkpoint").exists()
+
+
+def test_checkpoint_tolerates_duplicate_key_rows(tmp_path: Path) -> None:
+    """note_versions' policy key (source_id, created_at, content_hash) is not
+    the table's uniqueness (source_id, version): two versions with identical
+    content and timestamp share one catalog address. The base streams both
+    rows, the catalog holds one winner, and the coverage guard must net the
+    duplicate out instead of refusing the whole store (live 2026-09-06: 3
+    such March-era rows made a 2.8M-row checkpoint fail on every build)."""
+    origin_path = tmp_path / "origin.db"
+    target_path = tmp_path / "target.db"
+    _identity(target_path, "target-secret")
+    with FleetSyncAlpha(origin_path, "machine-a") as origin:
+        _author_identity(origin, "origin-secret", 90)
+        with origin.author(100, "tx-1"):
+            _source(origin.graph.conn, "note-1", "a note")
+        for version in (1, 2, 3):
+            with origin.author(100 + version, f"tx-v{version}"):
+                origin.graph.conn.execute(
+                    "INSERT INTO note_versions(source_id,version,content,"
+                    "created_at) VALUES(?,?,?,?)",
+                    ("note-1", version, "same body", "2026-03-30T16:07:29Z"),
+                )
+        checkpoint = origin.checkpoint(
+            tmp_path / "checkpoint", roster_epoch=7,
+            active_roster=("machine-a", "machine-b"), target_chunk_bytes=4096,
+        )
+    # identity + source + 3 version rows streamed; 2 of them duplicate-key
+    assert checkpoint.base_records == 5
+    installed = install_checkpoint(
+        tmp_path / "checkpoint", target_path,
+        target_origin_incarnation="machine-b", expected_roster_epoch=7,
+        expected_active_roster=("machine-a", "machine-b"),
+    )
+    assert installed.manifest_sha256 == checkpoint.manifest_sha256
+    with sqlite3.connect(target_path) as conn:
+        # The receiver realizes ONE row per logical address: duplicate-key
+        # source rows (identical content and timestamp) collapse to their
+        # logical row, exactly one winner tracks it, and nothing is lost —
+        # the source keeps its redundant copies, which are inert.
+        rows = conn.execute(
+            "SELECT content FROM note_versions WHERE source_id='note-1'"
+        ).fetchall()
+        assert [r[0] for r in rows] == ["same body"]
+        assert conn.execute(
+            "SELECT COUNT(*) FROM fleet_sync_catalog WHERE tombstone=0"
+        ).fetchone()[0] == 3  # identity + source + the one version address

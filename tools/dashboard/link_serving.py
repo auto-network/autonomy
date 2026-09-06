@@ -1564,6 +1564,12 @@ async def _serve_control_listener(connector, ctl_path: str,
                         # first-contact fleet pull needs minutes in one
                         # connector generation (2026-09-06 merge churn).
                         "active_streams": connector_runtime.active_streams,
+                        # Seconds since any stream last yielded a frame; the
+                        # supervisor honors a lame duck only when this is
+                        # recent (a stuck counter is not a stream).
+                        "stream_activity_age_s": (
+                            connector_runtime.stream_activity_age_s()
+                        ),
                         # How many sync pulls this process has turned away while
                         # unarmed, and when the first was -- the profile sync
                         # flag's "764 requests refused since 8pm". Zero on a
@@ -1668,6 +1674,42 @@ async def _run_connector_with_control(connector, ctl_path: str | None,
 _BOOT_COMMIT: str | None = None
 
 
+#: CPU-gated stack sampler: every window, if this process burned more than
+#: the threshold share of one core, dump every thread's Python stack to the
+#: log. Names a long CPU-bound job that runs OUTSIDE a serve stream (where
+#: the stream stall dump never arms) — tonight's activation/reconcile-class
+#: burners were invisible for hours because py-spy needs SYS_PTRACE the
+#: container lacks. Idle processes never dump.
+CPU_SAMPLER_WINDOW_S = 30.0
+CPU_SAMPLER_THRESHOLD = 0.8
+
+
+def _start_cpu_stack_sampler() -> None:
+    import faulthandler
+    import sys
+    import threading
+
+    def run() -> None:
+        last_cpu = time.process_time()
+        last_wall = time.monotonic()
+        while True:
+            time.sleep(CPU_SAMPLER_WINDOW_S)
+            cpu, wall = time.process_time(), time.monotonic()
+            share = (cpu - last_cpu) / max(1e-9, wall - last_wall)
+            last_cpu, last_wall = cpu, wall
+            if share >= CPU_SAMPLER_THRESHOLD:
+                logger.warning(
+                    "cpu sampler: process at %.0f%% of one core over the last "
+                    "%.0fs — dumping all thread stacks", share * 100,
+                    CPU_SAMPLER_WINDOW_S,
+                )
+                sys.stderr.flush()
+                faulthandler.dump_traceback(all_threads=True)
+                sys.stderr.flush()
+
+    threading.Thread(target=run, name="cpu-stack-sampler", daemon=True).start()
+
+
 def main() -> None:
     # UTC-timestamped lines: this file is append-mode and shared across
     # connector generations, so without wall-clock stamps a post-incident
@@ -1678,6 +1720,19 @@ def main() -> None:
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
     logging.Formatter.converter = time.gmtime
+    # The fleet-sync loggers' INFO lines ARE the operational record of this
+    # process (pull succeeded, journal pruned, attach/reconcile/backfill
+    # progress); third-party loggers stay at WARNING.
+    for name in ("tools.network.fleet_sync", "tools.network.fleet_relay_sync",
+                 "tools.network.fleet_sync_scheduler"):
+        logging.getLogger(name).setLevel(logging.INFO)
+    _start_cpu_stack_sampler()
+    # `kill -USR1 <pid>` dumps every thread's Python stack into this log —
+    # the on-demand answer to "what is this process doing" with no ptrace,
+    # no sudo, no restart (the container lacks SYS_PTRACE for py-spy).
+    import faulthandler
+    import signal as _signal
+    faulthandler.register(_signal.SIGUSR1, all_threads=True)
     global _BOOT_COMMIT
     from tools.network import build_version
     _BOOT_COMMIT = build_version.disk_head()

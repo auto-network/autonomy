@@ -325,7 +325,16 @@ def stream_snapshot_to_chunks(
     target_chunk_bytes: int = 4 * 1024 * 1024,
     start_after: tuple[str, tuple[object, ...]] | None = None,
     should_abort: "Callable[[], bool] | None" = None,
+    stats: dict | None = None,
 ) -> BaseCatalog:
+    """``stats`` (optional, caller-owned) receives ``duplicate_records``: the
+    number of streamed rows whose (table, logical key) repeats the previous
+    row's. The snapshot is key-ordered per table, so duplicate-key rows are
+    adjacent and this costs O(1) memory. The catalog keeps ONE winner per
+    address, so a coverage check must compare against distinct addresses,
+    not records (3 duplicate note_versions rows tripped it live 2026-09-06).
+    Kept out of the BaseCatalog manifest so older receivers keep validating.
+    """
     if target_chunk_bytes < 4096:
         raise ValueError("target_chunk_bytes is too small")
     directory.mkdir(parents=True, exist_ok=True)
@@ -336,12 +345,18 @@ def stream_snapshot_to_chunks(
     entries: list[ChunkEntry] = []
     writer = _ChunkWriter(directory, 0, digest_hex)
     total_records = 0
+    duplicate_records = 0
+    previous_key: tuple | None = None
     try:
         for mutation in iter_indexed_snapshot_mutations(
             conn, start_after=start_after
         ):
             if should_abort is not None and should_abort():
                 raise CheckpointAborted("checkpoint base build aborted")
+            key = (mutation.table, mutation.address)
+            if key == previous_key:
+                duplicate_records += 1
+            previous_key = key
             frame = encode_mutation_frame(mutation)
             if writer.records and writer.size + 4 + len(frame) > target_chunk_bytes:
                 entries.append(writer.finish())
@@ -361,6 +376,8 @@ def stream_snapshot_to_chunks(
     finally:
         if owns_snapshot:
             conn.rollback()
+    if stats is not None:
+        stats["duplicate_records"] = duplicate_records
     root = hashlib.sha256(json.dumps(
         [entry.sha256 for entry in entries], separators=(",", ":")
     ).encode()).hexdigest()
@@ -450,8 +467,14 @@ def materialize_catalog(
     *,
     batch_records: int = 1024,
     blob_store: ContentAddressedBlobStore | None = None,
+    stats: dict | None = None,
 ) -> MaterializationReport:
     """Incrementally realize a base into a staging GraphDB.
+
+    ``stats`` (optional, caller-owned) receives ``duplicate_records`` — base
+    records whose (table, key) repeats the previous record's, i.e. rows that
+    share one catalog address (see stream_snapshot_to_chunks). The receiver's
+    winner-coverage invariant nets them out exactly like the sender's guard.
 
     The target database is not published until its caller has validated the
     complete catalog root.  Batches are dependency-safe because the canonical
@@ -478,7 +501,13 @@ def materialize_catalog(
         skipped.extend(report.skipped_orphans)
         batch.clear()
 
+    duplicate_records = 0
+    previous_key: tuple | None = None
     for mutation in iter_catalog_mutations(directory, catalog):
+        key = (mutation.table, mutation.address)
+        if key == previous_key:
+            duplicate_records += 1
+        previous_key = key
         rank = ranks[mutation.table]
         if rank < current_rank:
             raise StreamingCodecError("base records are not in dependency order")
@@ -487,6 +516,8 @@ def materialize_catalog(
             current_rank = rank
         batch.append(mutation)
     flush()
+    if stats is not None:
+        stats["duplicate_records"] = duplicate_records
     return MaterializationReport(
         applied, deleted, tuple(sorted(pending)), tuple(skipped)
     )

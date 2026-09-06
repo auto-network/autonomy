@@ -94,6 +94,32 @@ CONNECTOR_RECONNECT_TIMEOUT_S = 600.0
 #: stream count — is the staleness guarantee.
 LAME_DUCK_DRAIN_DEADLINE_S = 600.0
 
+#: A lame duck is honored only while its connector reports stream activity
+#: this recent. active_streams alone kept a stale-code connector alive for
+#: 5+ minutes with NO stream (a generator abandoned mid-yield never ran its
+#: finally, live 2026-09-06); activity age is the liveness proof, the count
+#: is not.
+LAME_DUCK_ACTIVITY_WINDOW_S = 60.0
+
+#: Control-socket probe timeout. Generous on purpose: the probe is a health
+#: signal, and a slow answer from a busy connector must not become a kill.
+CTL_PROBE_TIMEOUT_S = 3.0
+
+
+def _status_is_streaming(status: dict | None) -> bool:
+    """True iff a connector-status reply proves a stream is genuinely in
+    flight: a positive active_streams AND recent frame activity."""
+    if not status:
+        return False
+    streams = status.get("active_streams")
+    if not (isinstance(streams, int) and streams > 0):
+        return False
+    age = status.get("stream_activity_age_s")
+    return (
+        isinstance(age, (int, float)) and not isinstance(age, bool)
+        and 0 <= age <= LAME_DUCK_ACTIVITY_WINDOW_S
+    )
+
 _log = logging.getLogger(__name__)
 
 #: ``prctl`` option number (``linux/prctl.h``): send a signal when the parent
@@ -558,11 +584,13 @@ def _probe_ctl_status(ctl_path: str) -> dict | None:
             "op": "connector-status",
             "args": {},
         }) + "\n"
+        # A connector mid-checkpoint-build pegs the GIL and answers slowly;
+        # 0.5s misread a busy, healthy process as unreachable (2026-09-06).
         with socket.create_connection(
-            ("127.0.0.1", int(descriptor["port"])), timeout=0.5
+            ("127.0.0.1", int(descriptor["port"])), timeout=CTL_PROBE_TIMEOUT_S
         ) as sock:
             sock.sendall(request.encode("utf-8"))
-            sock.settimeout(0.5)
+            sock.settimeout(CTL_PROBE_TIMEOUT_S)
             buf = b""
             while b"\n" not in buf:
                 chunk = sock.recv(4096)
@@ -852,6 +880,19 @@ class ServingSupervisor:
                     current = self._live_process_state(org, proc)
                     if current is not None:
                         return current
+                    why = "live-state judged it replaceable (see preceding line)"
+                else:
+                    why = (
+                        f"serve-cert status={state['status']}"
+                        if state["status"] != "ok"
+                        else "credential rotated"
+                    )
+                # Every stop is a decision and every decision is logged: this
+                # path stopped connectors silently (2026-09-06).
+                _log.warning(
+                    "stopping serving connector for org=%s in start(): %s",
+                    org, why,
+                )
                 proc.stop()
                 self._procs.pop(org, None)
                 self._credentials.pop(org, None)
@@ -937,7 +978,10 @@ class ServingSupervisor:
                         status = _probe_ctl_status(
                             _control_path_for(state["key_path"]))
                         streams = (status or {}).get("active_streams")
-                        if isinstance(streams, int) and streams > 0:
+                        # A failed probe is UNKNOWN, not idle: drain it
+                        # (bounded by the deadline) rather than kill a
+                        # possibly-busy connector.
+                        if status is None or _status_is_streaming(status):
                             self._lame_duck_since[org] = now
                             _log.warning(
                                 "serving connector for org=%s is on stale "
@@ -964,10 +1008,14 @@ class ServingSupervisor:
                     # A stale incumbent adopted mid-stream: replace it the
                     # moment its streams drain, or when the drain deadline
                     # bounds how long stale code may keep serving.
-                    ctl_path = getattr(proc, "_ctl_path", None)
-                    status = _probe_ctl_status(ctl_path) if ctl_path else None
+                    ctl_path = (getattr(proc, "_ctl_path", None)
+                                or _control_path_for(state["key_path"]))
+                    status = _probe_ctl_status(ctl_path)
                     streams = (status or {}).get("active_streams")
-                    drained = not (isinstance(streams, int) and streams > 0)
+                    # Unknown (probe timed out under load) is NOT drained;
+                    # only a reachable connector reporting no live stream
+                    # is. The deadline still bounds the unreachable case.
+                    drained = status is not None and not _status_is_streaming(status)
                     expired = now - ducked > LAME_DUCK_DRAIN_DEADLINE_S
                     if drained or expired:
                         _log.warning(
@@ -1070,18 +1118,47 @@ class ServingSupervisor:
         unbounded, it made "alive and permanently unable to serve" the one
         state nothing recovered from.
         """
-        if proc.serving():
+        # Tri-state, not a bool: UNREACHABLE (probe timed out — a busy
+        # connector mid-build) is not "not serving". Only a reachable reply
+        # that says serving=False counts against it; an unreachable one is
+        # kept within the same bounds and logged when those run out.
+        ctl_path = getattr(proc, "_ctl_path", None)
+        if ctl_path:
+            status = _probe_ctl_status(ctl_path)
+            reachable = status is not None
+            serving_now = bool(
+                reachable and status.get("ok") is True
+                and status.get("serving") is True
+            )
+        else:
+            # Handles without a control path (test doubles) keep the
+            # boolean contract; a real connector always has one.
+            reachable = True
+            serving_now = bool(proc.serving())
+        if serving_now:
             self._last_served[org] = self._now()
             return {"running": True, "reason": "already-running"}
         last_served = self._last_served.get(org)
         if last_served is not None:
             if self._now() - last_served < CONNECTOR_RECONNECT_TIMEOUT_S:
-                return {"running": True, "reason": "reconnecting"}
-            # Served once, then stopped and stayed stopped past every window
-            # its own reconnect loop should have needed. Treat it as wedged.
+                return {"running": True,
+                        "reason": "reconnecting" if reachable else "unreachable"}
+            # Served once, then stopped (or stayed unreachable) past every
+            # window its own reconnect loop should have needed: wedged.
+            _log.warning(
+                "serving connector for org=%s judged wedged: %s for %.0fs "
+                "since it last served", org,
+                "not serving" if reachable else "control probe unreachable",
+                self._now() - last_served,
+            )
             return None
         if self._now() - self._started_at.get(org, 0.0) < self._grace_s:
             return {"running": True, "reason": "starting"}
+        _log.warning(
+            "serving connector for org=%s never served within the %.0fs "
+            "startup deadline (%s)", org, self._grace_s,
+            "reachable, not serving" if reachable else "control probe unreachable",
+        )
         return None
 
     def _adopt_incumbent(self, org: str | None, state: dict) -> dict | None:
@@ -1103,8 +1180,39 @@ class ServingSupervisor:
                 return None
             ctl_path = _control_path_for(state["key_path"])
             status = _probe_ctl_status(ctl_path)
-            if not status or status.get("ok") is not True \
-                    or status.get("serving") is not True:
+            if status is None and not os.path.exists(ctl_path):
+                # No control descriptor at all: an unmanageable orphan (a
+                # dead dashboard's leftover) — the reap path is right.
+                return None
+            if status is None:
+                # UNREACHABLE is not DEAD. A connector mid-build pegs the GIL
+                # and misses the probe; reaping it here (as this did) killed
+                # the 1.5GB autonomy-scope checkpoint build nine times in one
+                # night. Adopt it provisionally as a lame duck: the watchdog
+                # keeps probing, and the drain deadline bounds a truly wedged
+                # process.
+                pid = None
+                for candidate in _iter_connector_pids(org_uuid):
+                    if candidate != os.getpid() and _pid_alive(candidate):
+                        pid = candidate
+                        break
+                if pid is None:
+                    return None
+                self._procs[org] = _AdoptedProc(pid, ctl_path=ctl_path)
+                self._boot_commit[org] = None
+                self._credentials[org] = (
+                    state["cert"], state["viewer_cert"], state["key_path"])
+                self._started_at[org] = self._now()
+                self._last_served[org] = self._now()
+                self._lame_duck_since[org] = self._now()
+                _log.warning(
+                    "adopting UNREACHABLE incumbent connector pid=%s for "
+                    "org=%s provisionally as a lame duck (control probe timed "
+                    "out — likely busy, e.g. a checkpoint build); not reaping",
+                    pid, org_uuid,
+                )
+                return {"running": True, "reason": "lame-duck-unreachable"}
+            if status.get("ok") is not True or status.get("serving") is not True:
                 return None
             # CODE CURRENCY GATE. A serving incumbent running a stale code
             # generation must be REPLACED, not adopted — observed live
@@ -1120,9 +1228,7 @@ class ServingSupervisor:
             boot = status.get("boot_commit")
             stale = disk is not None and boot != disk
             active_streams = status.get("active_streams")
-            if stale and not (
-                isinstance(active_streams, int) and active_streams > 0
-            ):
+            if stale and not _status_is_streaming(status):
                 _log.warning(
                     "not adopting incumbent connector for org=%s: stale code "
                     "generation (boot_commit=%s, disk=%s) — replacing",
