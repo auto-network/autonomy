@@ -60,6 +60,7 @@ class HarnessFleet:
         org_scopes: tuple[str, ...] = (),
         org_customize: "Callable[[int, str, Path], None] | None" = None,
         max_concurrent_pulls: int = 3,
+        poll_interval: float = 0.06,
     ) -> None:
         if size < 2:
             raise ValueError("a fleet needs at least two machines")
@@ -68,6 +69,10 @@ class HarnessFleet:
         self.org_scopes = org_scopes
         self.org_customize = org_customize
         self.max_concurrent_pulls = max_concurrent_pulls
+        #: Scenario tests poll fast to finish in seconds; production polls
+        #: every 10s. The scale driver sets a realistic value so idle-poll
+        #: protocol bytes do not swamp the payload-duplication measurement.
+        self.poll_interval = poll_interval
         self.hub = ProxyHub(seed=seed)
         self.machines: list[Machine] = []
         self.evidence: dict = {"faults": [], "restarts": [], "writes": 0}
@@ -128,7 +133,7 @@ class HarnessFleet:
                 f"ws://{link.host}:{link.port}"
             ]
         machine.config_path.write_text(json.dumps({
-            "poll_interval": 0.06,
+            "poll_interval": self.poll_interval,
             "max_concurrent_pulls": self.max_concurrent_pulls,
             "personal_root_pub": self._root_key.public_hex,
             "roster_entries": [entry.to_dict() for entry in self._entries],
@@ -153,7 +158,12 @@ class HarnessFleet:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            env={
+                **os.environ, "PYTHONUNBUFFERED": "1",
+                "AUTONOMY_HARNESS_PULL_LOG": str(
+                    self.root_dir / f"machine-{index}-pulls.jsonl"
+                ),
+            },
         )
         assert process.stdout is not None
         ready, _, _ = select.select([process.stdout], [], [], 15.0)
