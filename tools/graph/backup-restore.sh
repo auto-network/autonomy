@@ -11,6 +11,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+PYTHON="${REPO_ROOT}/.venv/bin/python3"
+[[ -x "$PYTHON" ]] || PYTHON="$(command -v python3)"
 
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/backup-env.sh"
@@ -44,6 +47,9 @@ case "$CMD" in
         # checks.  Fails loudly if any DB is corrupt or unreadable.
         TARGET="/tmp/autonomy-restore-drill-$(date +%s)"
         mkdir -p "$TARGET"
+        # A 2.9 GB scratch restore must never outlive the drill, pass
+        # or fail (it did on the 2026-09-06 false-negative FAIL).
+        trap 'rm -rf "$TARGET"' EXIT
         echo "drill: restoring latest db snapshot to ${TARGET}"
         restic restore latest --tag "kind=db" --target "$TARGET"
 
@@ -54,15 +60,16 @@ case "$CMD" in
         fi
         echo "drill: capture marker: $(tr '\n' ' ' < "$MARKER")"
 
-        # Every restored SQLite DB must pass integrity_check.
-        DB_COUNT=0
-        while IFS= read -r db; do
-            DB_COUNT=$((DB_COUNT + 1))
-            if ! sqlite3 "$db" "PRAGMA integrity_check" | grep -q "^ok$"; then
-                echo "drill: FAIL — integrity check failed on ${db}" >&2
-                exit 1
-            fi
-        done < <(find "$TARGET" -name "*.db")
+        # Every restored SQLite DB must pass integrity_check. Through
+        # python with the app-defined SQL functions registered — the
+        # bare sqlite3 CLI cannot evaluate personal.db's
+        # fleet_sha256_text() expression index and false-negatives.
+        if ! INTEGRITY="$("$PYTHON" "${SCRIPT_DIR}/backup_stores.py" integrity "$TARGET")"; then
+            echo "$INTEGRITY"
+            echo "drill: FAIL — integrity check failed" >&2
+            exit 1
+        fi
+        DB_COUNT="$(printf '%s\n' "$INTEGRITY" | grep -c $'\tok$' || true)"
         echo "drill: ${DB_COUNT} SQLite databases passed integrity_check"
         if [[ "$DB_COUNT" -lt 1 ]]; then
             echo "drill: FAIL — no SQLite databases in restored snapshot" >&2
@@ -92,8 +99,7 @@ case "$CMD" in
             exit 1
         fi
 
-        echo "drill: PASS — cleaning up $TARGET"
-        rm -rf "$TARGET"
+        echo "drill: PASS"
         ;;
 
     *)
