@@ -168,6 +168,21 @@
         window.addEventListener('resize', this._onResize);
         this._onDocClick = function (e) { if (self.menuFor && !e.target.closest('.sb-menu, .sc-org')) self.menuFor = ''; };
         document.addEventListener('click', this._onDocClick, true);
+        // A CrossTalk message names its sender as a link to that session's
+        // full-page viewer. On the board the sender is usually a card already
+        // on screen, so the link reveals it instead of leaving the board:
+        // flip it to its transcript, make it the dictation target, bring it
+        // into view. Bubbles to us before app.js's document-level router, so
+        // stopping here keeps the SPA from navigating. A sender with no card
+        // (dead, or filtered out) navigates normally.
+        this._onSenderClick = function (e) {
+          var a = e.target.closest('a.sc-ct-sender'); if (!a) return;
+          var m = String(a.getAttribute('href') || '').match(/^\/session\/[^/]+\/([^/?#]+)/);
+          if (!m) return;
+          if (!self.revealSession(decodeURIComponent(m[1]))) return;
+          e.preventDefault(); e.stopPropagation();
+        };
+        this.$refs.board.addEventListener('click', this._onSenderClick);
         this._resourceHandler = function (d) { if (d && typeof d === 'object') self._applyResourceRows(d.sessions || d); };
         if (window.registerHandler) window.registerHandler('resources', this._resourceHandler);
         this._hydrateResources();
@@ -201,6 +216,7 @@
       },
       destroy() {
         document.removeEventListener('click', this._onDocClick, true);
+        if (this.$refs.board && this._onSenderClick) this.$refs.board.removeEventListener('click', this._onSenderClick);
         if (this._offGroupChange) this._offGroupChange();
         if (this._offLayoutChange) this._offLayoutChange();
         window.removeEventListener('sessions:store-changed', this._onStoreChanged);
@@ -331,6 +347,21 @@
         return { id: id, session_id: id, label: id, tmux_session: id, is_live: true, topics: [], org: null, harness_state: {} };
       },
       labelFor(id) { var r = this.rowFor(id); return r.label || id; },
+      // Show a session on the board rather than navigating to it. Returns
+      // false when it has no card here, so the caller can fall back to the link.
+      revealSession(name) {
+        if (!name || !this.columnOf(name)) return false;
+        this.cardPresentations[name] = 'transcript';
+        this.persist();
+        var self = this;
+        this.$nextTick(function () {
+          var el = self.$refs.board.querySelector('.sb-card[data-session="' + (window.CSS && CSS.escape ? CSS.escape(name) : name) + '"]');
+          if (!el) return;
+          el.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
+          self.bindDictation({ target: el }, name);
+        });
+        return true;
+      },
       orgColorFor(id) { return orgColor(this.rowFor(id)); },
       panelConfig(id) { var r = this.rowFor(id); return { sessionId: id, project: r.project || 'default', tmuxSession: id, _isLive: true }; },
       columnOf(id) { return this.columns.filter(function (c) { return c.members.indexOf(id) !== -1; })[0] || null; },

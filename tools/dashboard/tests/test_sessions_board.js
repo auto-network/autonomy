@@ -418,3 +418,24 @@ test('a moved card is never in two columns: the operator\'s move outranks a stal
   assert.deepEqual(ids(board.columns), ['b:s2,s1']);
   assert.deepEqual(plain(board._pending), {});
 });
+
+
+test('a CrossTalk sender link reveals the session on the board instead of navigating away', () => {
+  const js = fs.readFileSync(BOARD_JS, 'utf8');
+  // It must intercept before app.js's document-level router, and only for
+  // /session/<project>/<tmux> hrefs.
+  assert.match(js, /a\.sc-ct-sender/);
+  assert.match(js, /e\.preventDefault\(\); e\.stopPropagation\(\);/);
+  const sessions = { s1: { isLive: true, groupId: 'g', group: { slug: 'g', name: 'G', color: '', why: '' }, entries: [{}] } };
+  const { board } = makeBoard({ rows: ['s1'], sessions });
+  board.refresh({ columns: [{ id: 'g', members: [] }], widths: {} });
+  board.$nextTick = (fn) => fn();
+  board.$refs = { board: { querySelector: () => null } };
+  // A session with a card is revealed: flipped to its transcript face.
+  board.cardPresentations = { s1: 'stats' };
+  assert.equal(board.revealSession('s1'), true);
+  assert.equal(board.cardPresentation('s1'), 'transcript');
+  // One without a card here is left to the link.
+  assert.equal(board.revealSession('not-on-this-board'), false);
+  assert.equal(board.revealSession(''), false);
+});

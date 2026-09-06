@@ -27,6 +27,23 @@
           <span class="txt">Not confirmed</span>
         </template>
       </span>
+      {# Send, for surfaces with no composer (the Session Board). The operator
+         is looking at the card they are dictating to; the capsule is somewhere
+         else on a very wide screen. Renders only when dictationTile is on. #}
+      <template x-if="_dictationTile">
+        <button class="sv-send-now" type="button" data-testid="sv-send-now"
+                :disabled="!_localDictationText"
+                :title="_localDictationText ? 'Send to this session' : 'Nothing to send yet'"
+                @click.stop="_sendDictation()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="22" y1="2" x2="11" y2="13"></line>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+          </svg>
+          <span>Send</span>
+        </button>
+      </template>
+
     </div>
     <div class="sv-pending-content"
          x-text="outbox ? outbox.text : ''"
@@ -59,6 +76,22 @@
     <div class="sv-pending-head">
       <span class="sv-pending-label">USER · DICTATING</span>
       <span class="sv-pending-status"><span class="txt">Listening</span></span>
+      {# Send, for surfaces with no composer (the Session Board). The operator
+         is looking at the card they are dictating to; the capsule is somewhere
+         else on a very wide screen. Renders only when dictationTile is on. #}
+      <template x-if="_dictationTile">
+        <button class="sv-send-now" type="button" data-testid="sv-send-now"
+                :disabled="!_localDictationText"
+                :title="_localDictationText ? 'Send to this session' : 'Nothing to send yet'"
+                @click.stop="_sendDictation()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="22" y1="2" x2="11" y2="13"></line>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+          </svg>
+          <span>Send</span>
+        </button>
+      </template>
     </div>
     <div class="sv-pending-content"
          x-text="_localDictationText"
