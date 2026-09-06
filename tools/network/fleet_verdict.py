@@ -164,6 +164,29 @@ def _connector_direct_listener(org: str | None):
         return None
 
 
+def _paths_check() -> dict:
+    """Per peer and channel: which path carried the newest attempt and the
+    newest success, and cumulative bytes by path class (auto-wryex)."""
+    try:
+        from tools.network.fleet_sync_telemetry import read_channel_rows
+
+        out: dict = {}
+        for row in read_channel_rows():
+            payload = row["payload"]
+            entry = out.setdefault(row["peer"][:12], {})
+            entry[f"{row['channel']}/{row['direction']}/{row['scope']}"] = {
+                "last_path_class": payload.get("last_path_class"),
+                "last_address": payload.get("last_address"),
+                "last_success_path_class": payload.get("last_success_path_class"),
+                "last_success_address": payload.get("last_success_address"),
+                "bytes_by_path_class": payload.get("bytes_by_path_class") or {},
+                "last_outcome": payload.get("last_outcome"),
+            }
+        return out
+    except Exception as exc:
+        return {"detail": f"could not read telemetry: {exc!r}"}
+
+
 def compute_verdict(org: str | None = None) -> dict:
     """Everything fleet_doctor's top line and /api/fleet/status need,
     in one call. org=None is the personal/scopeless sync scope."""
@@ -197,4 +220,5 @@ def compute_verdict(org: str | None = None) -> dict:
         "last_pull": last_pull,
         "data": data,
         "direct": direct,
+        "paths": _paths_check(),
     }

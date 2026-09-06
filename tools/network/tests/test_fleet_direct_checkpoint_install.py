@@ -187,3 +187,20 @@ async def test_founded_ledger_refuses_the_checkpoint_at_the_offer(direct, caplog
     assert not list(sched.config.personal_db_path.parent.glob("fleet-direct-received-*"))
     wait = sched._next_attempt[server_pub] - asyncio.get_running_loop().time()
     assert wait >= fss.CHECKPOINT_FAILURE_BACKOFF_S - 1
+
+
+async def test_direct_pull_records_the_connected_address_and_path(direct):
+    """The telemetry row for a pull names the candidate that connected."""
+    from dataclasses import replace
+
+    sched, server_pub, channel = direct
+    seen = []
+    sched.config = replace(sched.config, telemetry_recorder=lambda peer, **v: seen.append((peer, v)))
+    channel.frames = []   # connect succeeds, stream ends without a summary
+    with pytest.raises(Exception):
+        await sched._pull_scope(server_pub, ["ws://100.122.70.30:9410"], "personal")
+    (peer, values), = seen
+    assert peer == server_pub
+    assert values["address"] == "ws://100.122.70.30:9410"
+    assert values["path_class"] == "tailnet"
+    assert values["outcome"] == "failed"
