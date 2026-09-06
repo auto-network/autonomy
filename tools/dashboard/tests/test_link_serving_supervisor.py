@@ -1147,7 +1147,7 @@ def _lame_duck_fixture(env, monkeypatch, *, now=None):
     # A real process so _AdoptedProc.alive() holds during later reconciles.
     sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     probe = {"ok": True, "serving": True, "boot_commit": "0" * 40,
-             "active_streams": 1}
+             "active_streams": 1, "stream_activity_age_s": 1.0}
     # A killed duck's control socket goes silent — mirror that, or the
     # re-launch after replacement would re-adopt the corpse forever.
     monkeypatch.setattr(
@@ -1270,7 +1270,8 @@ def test_watchdog_replaces_an_idle_connector_when_the_disk_head_moves(env, monke
 def test_watchdog_lame_ducks_a_streaming_connector_when_the_disk_head_moves(env, monkeypatch):
     disk = {"head": "a" * 40}
     sup, supervisor, spawn = _running_connector(env, monkeypatch, disk=disk)
-    probe = {"ok": True, "serving": True, "active_streams": 1}
+    probe = {"ok": True, "serving": True, "active_streams": 1,
+             "stream_activity_age_s": 1.0}
     monkeypatch.setattr(sup, "_probe_ctl_status", lambda ctl: dict(probe))
     disk["head"] = "b" * 40
     assert supervisor.ensure(ORG)["reason"] == "lame-duck-draining"
@@ -1279,3 +1280,25 @@ def test_watchdog_lame_ducks_a_streaming_connector_when_the_disk_head_moves(env,
     probe["active_streams"] = 0
     assert supervisor.ensure(ORG)["reason"] == "launched"
     assert len(spawn.calls) == 2, "drained: replaced on the new generation"
+
+
+def test_stale_incumbent_with_a_stuck_stream_counter_is_replaced(env, monkeypatch):
+    """active_streams=1 with NO recent activity is a leaked counter, not a
+    stream (held 5+ min live 2026-09-06): the stale connector is replaced,
+    never kept as a lame duck."""
+    from tools.dashboard import link_serving_supervisor as sup
+
+    _provision_serve_cert(env)
+    state = sup.serve_cert_state(ORG)
+    spawn = FakeSpawn()
+    supervisor = sup.ServingSupervisor(spawn=spawn)
+    monkeypatch.setattr(
+        sup, "_probe_ctl_status",
+        lambda ctl: {"ok": True, "serving": True, "boot_commit": "0" * 40,
+                     "active_streams": 1, "stream_activity_age_s": 900.0},
+    )
+    reaped = []
+    monkeypatch.setattr(supervisor, "_reap_strays", lambda org: reaped.append(org))
+    assert supervisor._launch(ORG, state)["reason"] == "launched"
+    assert reaped == [ORG] and len(spawn.calls) == 1
+    assert ORG not in supervisor._lame_duck_since

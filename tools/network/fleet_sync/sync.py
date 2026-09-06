@@ -358,11 +358,14 @@ class FleetSyncAlpha:
         stage.mkdir()
         try:
             with self.catalog.freeze_cut() as cut:
+                base_stats: dict = {}
                 base = stream_snapshot_to_chunks(
                     cut.reader, stage / "base",
                     target_chunk_bytes=target_chunk_bytes,
                     should_abort=should_abort,
+                    stats=base_stats,
                 )
+                duplicate_records = int(base_stats.get("duplicate_records", 0))
                 winners = stream_winners_to_chunks(
                     # Payload is already in the key-ordered base.  This
                     # carries only replication metadata and tombstones.
@@ -377,10 +380,35 @@ class FleetSyncAlpha:
                     "WHERE tombstone=0 AND timestamp_ns<=?",
                     (cut.watermark,),
                 ).fetchone()[0])
-                if tracked_live != base.total_records:
+                # Coverage guard: every live ADDRESS must have a winner. The
+                # catalog keeps one winner per address while the base streams
+                # one record per row, so duplicate-key rows (legal — e.g.
+                # note_versions' policy key is not the table's uniqueness)
+                # must be netted out: comparing raw records refused a healthy
+                # 2.8M-row store forever over 3 duplicate rows (2026-09-06).
+                distinct_live = base.total_records - duplicate_records
+                if duplicate_records:
+                    _log.warning(
+                        "checkpoint base for %s: %d duplicate-key records "
+                        "share a catalog address with a previous row "
+                        "(streamed=%d, distinct=%d)",
+                        self.path.name, duplicate_records,
+                        base.total_records, distinct_live,
+                    )
+                if tracked_live != distinct_live:
+                    _log.warning(
+                        "checkpoint coverage mismatch for %s: tracked_live=%d "
+                        "(catalog, tombstone=0, timestamp<=%d) vs streamed=%d "
+                        "records / %d distinct addresses (%d duplicate-key)",
+                        self.path.name, tracked_live, cut.watermark,
+                        base.total_records, distinct_live, duplicate_records,
+                    )
                     raise AlphaError(
-                        "checkpoint contains untracked logical rows; bootstrap "
-                        "the mutation catalog before checkpointing"
+                        "checkpoint contains untracked logical rows "
+                        f"(tracked_live={tracked_live}, distinct_live="
+                        f"{distinct_live}, streamed={base.total_records}, "
+                        f"duplicate_key_records={duplicate_records}); run "
+                        "the catalog verifier for this store"
                     )
             body: dict[str, object] = {
                 "alpha_version": ALPHA_VERSION,
@@ -735,9 +763,11 @@ def install_checkpoint(
         stage = GraphDB(stage_path)
         try:
             _copy_local_state(target_path, stage.conn)
+            install_stats: dict = {}
             report = materialize_catalog(
                 stage.conn, checkpoint_directory / "base", base,
                 batch_records=1024, blob_store=blob_store,
+                stats=install_stats,
             )
             # Rows the receiver cannot fully realize right now are skipped
             # rather than aborting the whole checkpoint, then quarantined. Two
@@ -781,8 +811,17 @@ def install_checkpoint(
             installed_live = int(stage.conn.execute(
                 "SELECT COUNT(*) FROM fleet_sync_catalog WHERE tombstone=0"
             ).fetchone()[0])
-            if installed_live != base.total_records - skip_count:
-                raise AlphaError("winner metadata does not cover the exact base")
+            duplicate_records = int(install_stats.get("duplicate_records", 0))
+            # One winner per ADDRESS; duplicate-key rows (legal, e.g. two
+            # note_versions with identical key columns) are base records
+            # without their own winner — net them out, as the sender does.
+            if installed_live != base.total_records - skip_count - duplicate_records:
+                raise AlphaError(
+                    "winner metadata does not cover the exact base "
+                    f"(installed_live={installed_live}, base_records="
+                    f"{base.total_records}, skipped={skip_count}, "
+                    f"duplicate_key_records={duplicate_records})"
+                )
             if unrealized:
                 quarantine_unrealized(
                     stage.conn, unrealized,

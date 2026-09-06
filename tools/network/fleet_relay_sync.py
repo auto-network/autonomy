@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import faulthandler
 import hashlib
 import json
 import logging
@@ -293,6 +292,25 @@ class ConnectorFleetRuntime:
         #: the supervisor can DRAIN a stale-code incumbent (wait for zero, or
         #: a deadline) instead of severing mid-transfer on every merge.
         self.active_streams: int = 0
+        #: monotonic() at the last frame any stream yielded. The supervisor
+        #: honors a lame duck only when this is RECENT: active_streams alone
+        #: proved unreliable (a generator abandoned mid-yield held the count
+        #: at 1 for 5+ minutes with no stream, live 2026-09-06), and a stuck
+        #: counter must not keep a stale-code connector alive.
+        self.last_stream_activity: float | None = None
+        #: scope -> (monotonic, reason) of the last checkpoint build that
+        #: failed the untracked-rows integrity check. Until repaired, every
+        #: rebuild fails identically after a full scan (156s on a 1.5GB store,
+        #: live 2026-09-06) — so refuse the scope for a backoff instead.
+        self._integrity_failed: dict[str, tuple[float, str]] = {}
+
+    def _touch_stream_activity(self) -> None:
+        self.last_stream_activity = time.monotonic()
+
+    def stream_activity_age_s(self) -> float | None:
+        if self.last_stream_activity is None:
+            return None
+        return max(0.0, time.monotonic() - self.last_stream_activity)
 
     def configure(self, payload: object) -> dict:
         from tools.dashboard.link_approvals import _load_binding
@@ -491,6 +509,7 @@ class ConnectorFleetRuntime:
 
         async def stream():
             self.active_streams += 1
+            self._touch_stream_activity()
             _arm_stall_dump()
             started_at_ns = time.time_ns()
             started_monotonic_ns = time.monotonic_ns()
@@ -516,6 +535,18 @@ class ConnectorFleetRuntime:
                 yield server_hello_frame
                 resume_floor_ref = None
                 if serve_checkpoint:
+                    failed = self._integrity_failed.get(scope)
+                    if failed is not None:
+                        failed_at, reason = failed
+                        if (time.monotonic() - failed_at
+                                < INTEGRITY_FAILURE_BACKOFF_S):
+                            raise FleetRelaySyncError(
+                                f"scope {scope!r}: checkpoint refused — last "
+                                f"build failed integrity ({reason}); repair "
+                                "the store (fleet_doctor --repair-catalog) "
+                                "before it can be served"
+                            )
+                        self._integrity_failed.pop(scope, None)
                     # Journal position BEFORE the checkpoint cut; the delta
                     # phase below starts here instead of replaying the
                     # whole journal the checkpoint already carries. A store
@@ -596,8 +627,9 @@ class ConnectorFleetRuntime:
                                         "kind": "keepalive",
                                     })
                                     stats["bytes_sent"] += len(keepalive)
+                                    self._touch_stream_activity()
                                     yield keepalive
-                        except BaseException:
+                        except asyncio.CancelledError:
                             abort_build.set()
                             with contextlib.suppress(BaseException):
                                 await build_future
@@ -607,6 +639,27 @@ class ConnectorFleetRuntime:
                                 "thread told to abort)",
                                 scope, time.monotonic() - build_started_at,
                             )
+                            raise
+                        except Exception as exc:
+                            # The BUILD failed — not the client. This branch
+                            # used to share the "client gone" line above and
+                            # mislabeled a deterministic integrity failure
+                            # as an abandonment for two hours (2026-09-06).
+                            abort_build.set()
+                            logger.warning(
+                                "fleet relay sync: checkpoint build FAILED "
+                                "scope=%s after=%.1fs: %s: %s",
+                                scope, time.monotonic() - build_started_at,
+                                type(exc).__name__, exc,
+                            )
+                            if "untracked logical rows" in str(exc):
+                                # Deterministic until the store is repaired;
+                                # rebuilding every pull just burns a full
+                                # scan per attempt. Refuse this scope's
+                                # checkpoints for a while (see the check
+                                # before the build) and say why.
+                                self._integrity_failed[scope] = (
+                                    time.monotonic(), str(exc))
                             raise
                         logger.warning(
                             "fleet relay sync: checkpoint build completed "
@@ -637,6 +690,7 @@ class ConnectorFleetRuntime:
                         )
                         stats["bytes_sent"] += len(encoded_file)
                         stats["checkpoint_bytes"] += path.stat().st_size
+                        self._touch_stream_activity()
                         yield encoded_file
                     end = canonical_json({
                         "v": PROTOCOL_VERSION,
@@ -667,6 +721,7 @@ class ConnectorFleetRuntime:
                     resume_floor_ref=resume_floor_ref,
                 )
                 async for frame in deltas:
+                    self._touch_stream_activity()
                     yield frame
                 outcome = "success"
                 error_code = ""
@@ -690,6 +745,7 @@ class ConnectorFleetRuntime:
                 raise
             finally:
                 self.active_streams -= 1
+                self._touch_stream_activity()
                 _disarm_stall_dump()
                 shutil.rmtree(root, ignore_errors=True)
                 # One greppable delivery line per stream: "build completed"
@@ -775,52 +831,38 @@ class ConnectorFleetRuntime:
                     frame = await asyncio.to_thread(next, frames, None)
                     if frame is None:
                         return
+                    self._touch_stream_activity()
                     yield frame
             finally:
                 self.active_streams -= 1
+                self._touch_stream_activity()
 
         return stream()
 
 
-#: Auto-dump every thread's Python stack to the connector log when a serve
-#: stream spends longer than this in any single phase. py-spy is unavailable
-#: in the serving container (no SYS_PTRACE, and granting it needs a restart
-#: that wipes the warm keycache), so this is the ONLY way to name a CPU-bound
-#: build/transfer hotspot in production. Set below the client's 60s frame-
-#: silence limit and above a healthy ~28s build, so a healthy stream never
-#: dumps and a pathological one self-reports where it is stuck.
-STREAM_STALL_DUMP_S = 45.0
+#: (Removed 2026-09-06.) A periodic faulthandler.dump_traceback_later here
+#: correlated with two connector deaths mid-dump: that watchdog dumps from a C
+#: thread WITHOUT the GIL while asyncio.to_thread workers are created and torn
+#: down under a checkpoint build — the case CPython documents as unsafe. The
+#: CPU-gated sampler in link_serving (synchronous dump, GIL held) and the
+#: SIGUSR1 on-demand dump replace it.
+def _arm_stall_dump() -> None:
+    return None
+
+
+def _disarm_stall_dump() -> None:
+    return None
+
 
 #: Keepalive cadence during the frame-silent checkpoint build phase. Well
 #: under the client's 60s frame-silence limit so even a badly contended
 #: multi-minute build never trips it; the client ignores keepalive frames.
 BUILD_KEEPALIVE_INTERVAL_S = 20.0
 
-_stall_dump_lock = threading.Lock()
-_stall_dump_active = 0
-
-
-def _arm_stall_dump() -> None:
-    """Refcounted arm of the process-global stack-dump timer, so concurrent
-    scope streams keep it armed until the last one finishes."""
-    global _stall_dump_active
-    with _stall_dump_lock:
-        _stall_dump_active += 1
-        if _stall_dump_active == 1:
-            with contextlib.suppress(Exception):
-                faulthandler.dump_traceback_later(
-                    STREAM_STALL_DUMP_S, repeat=True, file=sys.stderr
-                )
-
-
-def _disarm_stall_dump() -> None:
-    global _stall_dump_active
-    with _stall_dump_lock:
-        _stall_dump_active = max(0, _stall_dump_active - 1)
-        if _stall_dump_active == 0:
-            with contextlib.suppress(Exception):
-                faulthandler.cancel_dump_traceback_later()
-
+#: After a checkpoint build fails the untracked-rows integrity check, refuse
+#: that scope's checkpoints for this long before trying once more (the store
+#: may have been repaired meanwhile). Only that scope is affected.
+INTEGRITY_FAILURE_BACKOFF_S = 600.0
 
 connector_runtime = ConnectorFleetRuntime()
 

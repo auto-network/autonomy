@@ -243,14 +243,15 @@ def _winner_predicate() -> str:
 
 
 def _capture_statement(
-    table: str, prefix: str, tombstone: int, *, condition: str | None = None
+    table: str, columns: tuple[str, ...], prefix: str, tombstone: int, *,
+    condition: str | None = None,
 ) -> str:
     if condition is None:
         values_open, values_close = "VALUES(", ")"
     else:
         values_open, values_close = "SELECT ", f" WHERE {condition}"
     frame_arguments = ",".join(
-        f"{prefix}.{_quote(column)}" for column in _table_columns[table]
+        f"{prefix}.{_quote(column)}" for column in columns
     )
     return f"""
         INSERT INTO fleet_sync_journal(transaction_ref,operation_index,frame)
@@ -273,11 +274,11 @@ def _capture_statement(
     """
 
 
-def _trigger_sql(table: str) -> tuple[str, str, str]:
+def _trigger_sql(table: str, columns: tuple[str, ...]) -> tuple[str, str, str]:
     capture = "fleet_sync_capture_enabled()=1"
     insert = f"""
         CREATE TRIGGER fleet_sync_{table}_insert AFTER INSERT ON {_quote(table)}
-        WHEN {capture} BEGIN {_capture_statement(table, 'NEW', 0)} END
+        WHEN {capture} BEGIN {_capture_statement(table, columns, 'NEW', 0)} END
     """
     policy = TABLE_POLICIES[table]
     if policy.kind is PolicyKind.IMMUTABLE:
@@ -292,7 +293,7 @@ def _trigger_sql(table: str) -> tuple[str, str, str]:
         return insert, update, delete
     if policy.kind is PolicyKind.IMMUTABLE_PRUNABLE:
         stable_columns = [
-            column for column in _table_columns[table] if column != "wire"
+            column for column in columns if column != "wire"
         ]
         stable = " AND ".join(
             f"OLD.{_quote(column)} IS NEW.{_quote(column)}"
@@ -307,7 +308,7 @@ def _trigger_sql(table: str) -> tuple[str, str, str]:
             BEGIN
                 SELECT CASE WHEN NOT ({stable} AND {wire_transition})
                     THEN RAISE(ABORT, 'fleet-sync immutable row has invalid update') END;
-                {_capture_statement(table, 'NEW', 0, condition=capture)}
+                {_capture_statement(table, columns, 'NEW', 0, condition=capture)}
             END
         """
         delete = f"""
@@ -321,15 +322,14 @@ def _trigger_sql(table: str) -> tuple[str, str, str]:
         insert = f"""
             CREATE TRIGGER fleet_sync_{table}_insert AFTER INSERT ON {_quote(table)}
             WHEN {capture} AND {new_live} BEGIN
-                {_capture_statement(table, 'NEW', 0)}
+                {_capture_statement(table, columns, 'NEW', 0)}
             END
         """
         update = f"""
             CREATE TRIGGER fleet_sync_{table}_update AFTER UPDATE ON {_quote(table)}
             WHEN {capture} BEGIN
-                {_capture_statement(table, 'NEW', 0, condition=new_live)}
-                {_capture_statement(
-                    table, 'OLD', 1,
+                {_capture_statement(table, columns, 'NEW', 0, condition=new_live)}
+                {_capture_statement(table, columns, 'OLD', 1,
                     condition=(
                         f"{old_live} AND (NOT {new_live} OR "
                         f"{_sql_key('OLD', table)} != {_sql_key('NEW', table)})"
@@ -340,18 +340,17 @@ def _trigger_sql(table: str) -> tuple[str, str, str]:
         delete = f"""
             CREATE TRIGGER fleet_sync_{table}_delete AFTER DELETE ON {_quote(table)}
             WHEN {capture} AND {old_live} BEGIN
-                {_capture_statement(table, 'OLD', 1)}
+                {_capture_statement(table, columns, 'OLD', 1)}
             END
         """
         return insert, update, delete
     delete = f"""
         CREATE TRIGGER fleet_sync_{table}_delete AFTER DELETE ON {_quote(table)}
-        WHEN {capture} BEGIN {_capture_statement(table, 'OLD', 1)} END
+        WHEN {capture} BEGIN {_capture_statement(table, columns, 'OLD', 1)} END
     """
     update_body = f"""
-        {_capture_statement(table, 'NEW', 0)}
-        {_capture_statement(
-            table, 'OLD', 1,
+        {_capture_statement(table, columns, 'NEW', 0)}
+        {_capture_statement(table, columns, 'OLD', 1,
             condition=f"{_sql_key('OLD', table)} != {_sql_key('NEW', table)}",
         )}
     """
@@ -426,8 +425,10 @@ class MutationCatalog:
         # set by the owning store/scheduler after attach. Absent, attachment
         # rows defer to quarantine instead of realizing.
         self.blob_store: ContentAddressedBlobStore | None = None
-        global _table_columns
-        _table_columns = {
+        # Per store, never module-global: the previous global was rewritten by
+        # every open, so a process serving two stores regenerated each one's
+        # trigger SQL from whichever store it opened LAST.
+        self._table_columns: dict[str, tuple[str, ...]] = {
             table: tuple(str(row[1]) for row in self.conn.execute(
                 f"PRAGMA table_info({_quote(table)})"
             ))
@@ -451,7 +452,7 @@ class MutationCatalog:
             "fleet_sync_capture_enabled", 0,
             self._capture_enabled,
         )
-        for table, columns in _table_columns.items():
+        for table, columns in self._table_columns.items():
             self.conn.create_function(
                 f"fleet_sync_frame_{table}", -1,
                 lambda tombstone, *values, table=table, columns=columns:
@@ -826,11 +827,14 @@ class MutationCatalog:
         for table, policy in TABLE_POLICIES.items():
             if policy.kind in {PolicyKind.LOCAL, PolicyKind.DERIVED}:
                 continue
+            columns = self._table_columns.get(table, ())
             for operation in ("insert", "update", "delete"):
                 self.conn.execute(
                     f"DROP TRIGGER IF EXISTS fleet_sync_{table}_{operation}"
                 )
-            for sql in _trigger_sql(table):
+            if not columns:
+                continue  # policy table absent from THIS store: no trigger
+            for sql in _trigger_sql(table, columns):
                 self.conn.execute(sql)
 
     def _trigger_count(self) -> int:
@@ -855,8 +859,12 @@ class MutationCatalog:
         for table, policy in TABLE_POLICIES.items():
             if policy.kind in {PolicyKind.LOCAL, PolicyKind.DERIVED}:
                 continue
+            columns = self._table_columns.get(table, ())
+            if not columns:
+                continue  # absent from this store: nothing expected
             for operation, sql in zip(
-                ("insert", "update", "delete"), _trigger_sql(table), strict=True,
+                ("insert", "update", "delete"), _trigger_sql(table, columns),
+                strict=True,
             ):
                 expected[f"fleet_sync_{table}_{operation}"] = (
                     self._normalized_trigger_sql(sql)
@@ -909,7 +917,8 @@ class MutationCatalog:
     def triggers_active(self) -> bool:
         replicated = sum(
             policy.kind not in {PolicyKind.LOCAL, PolicyKind.DERIVED}
-            for policy in TABLE_POLICIES.values()
+            and bool(self._table_columns.get(table))
+            for table, policy in TABLE_POLICIES.items()
         )
         return self._trigger_count() == replicated * 3
 
