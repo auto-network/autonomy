@@ -20,19 +20,24 @@ def test_scope_field_roundtrip_and_personal_bytes_unchanged() -> None:
     personal = encode_pull_request(epoch, compat=compat)
     assert b"scope" not in personal  # request shape shared with v3 fleets
     assert decode_pull_request(personal) == (
-        epoch, (), compat, "personal", False, 4
+        epoch, (), compat, "personal", False, 4, True
     )
     scoped = encode_pull_request(epoch, compat=compat, scope="alpha")
     assert decode_pull_request(scoped) == (
-        epoch, (), compat, "alpha", False, 4
+        epoch, (), compat, "alpha", False, 4, True
     )
     boot = encode_pull_request(epoch, compat=compat, bootstrap=True)
     assert decode_pull_request(boot) == (
-        epoch, (), compat, "personal", True, 4
+        epoch, (), compat, "personal", True, 4, True
+    )
+    origin = encode_pull_request(epoch, compat=compat, accept_checkpoint=False)
+    assert b"accept_checkpoint" in origin
+    assert decode_pull_request(origin) == (
+        epoch, (), compat, "personal", False, 4, False
     )
     legacy = encode_pull_request(epoch, compat=compat, version=3)
     assert decode_pull_request(legacy) == (
-        epoch, (), compat, "personal", False, 3
+        epoch, (), compat, "personal", False, 3, True
     )
     with pytest.raises(FleetSyncProtocolError):
         encode_pull_request(epoch, compat=compat, scope="bad:scope")

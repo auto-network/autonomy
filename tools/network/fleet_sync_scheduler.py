@@ -58,7 +58,7 @@ SUPPORTED_PROTOCOL_VERSIONS = frozenset({3, 4})
 _REQUEST_FIELDS = frozenset({
     "v", "op", "roster_epoch", "resume", "compat",
 })
-_REQUEST_OPTIONAL_FIELDS = frozenset({"scope", "bootstrap"})
+_REQUEST_OPTIONAL_FIELDS = frozenset({"scope", "bootstrap", "accept_checkpoint"})
 FILE_MAGIC = b"FSB1"
 _REFUSAL_FIELDS = frozenset({"v", "kind", "digest"})
 _DONE_FIELDS = frozenset(
@@ -501,8 +501,17 @@ def encode_pull_request(
     scope: str = "personal",
     bootstrap: bool = False,
     version: int = FLEET_SYNC_PROTOCOL_VERSION,
+    accept_checkpoint: bool = True,
 ) -> bytes:
     """Ask for every journal transaction after a content-addressed position.
+
+    ``accept_checkpoint=False`` (sent only when False, so the historical
+    request bytes are unchanged) tells the server this store holds a
+    founded ledger and will refuse any checkpoint: when the trail does not
+    resolve, replay the retained journal from its start instead. That is
+    how an ORIGIN receives a member's writes -- the member's retained
+    journal is everything it authored or received since its own install,
+    and deterministic merge makes rows the origin already holds inert.
 
     ``resume`` is the puller's verified breadcrumb trail, newest first.  It
     names transactions, never the serving database's private row numbers,
@@ -532,12 +541,15 @@ def encode_pull_request(
         body["scope"] = scope
     if bootstrap:
         body["bootstrap"] = True
+    if not accept_checkpoint:
+        body["accept_checkpoint"] = False
     return canonical_json(body)
 
 
 def decode_pull_request(
     raw: bytes,
-) -> tuple[str, tuple[tuple[str, str, int], ...], str, str, bool, int]:
+) -> tuple[str, tuple[tuple[str, str, int], ...], str, str, bool, int, bool]:
+    """-> (epoch, resume trail, compat, scope, bootstrap, version, accept_checkpoint)."""
     try:
         value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
@@ -562,6 +574,9 @@ def decode_pull_request(
     bootstrap = value.get("bootstrap", False)
     if not isinstance(bootstrap, bool):
         raise FleetSyncProtocolError("fleet sync bootstrap flag must be bool")
+    accept_checkpoint = value.get("accept_checkpoint", True)
+    if not isinstance(accept_checkpoint, bool):
+        raise FleetSyncProtocolError("fleet sync accept_checkpoint flag must be bool")
     if value["op"] != "pull":
         raise FleetSyncProtocolError("unsupported fleet sync operation")
     epoch = _require_hex64(value["roster_epoch"], "fleet sync roster_epoch")
@@ -572,7 +587,7 @@ def decode_pull_request(
     return epoch, tuple(
         decode_breadcrumb(entry, "fleet sync resume breadcrumb")
         for entry in resume
-    ), compat, scope, bootstrap, version
+    ), compat, scope, bootstrap, version, accept_checkpoint
 
 
 def encode_authored(item: AuthoredMutation, *, transaction_operations: int) -> bytes:
@@ -1382,7 +1397,7 @@ class FleetSyncScheduler:
             return self._blob_response(message, peer_pub)
         (
             _requested_epoch, resume_trail, peer_digest, scope, bootstrap,
-            protocol_version,
+            protocol_version, accept_checkpoint,
         ) = decode_pull_request(message)
         store = await asyncio.to_thread(self._store_for, scope)
         epoch = self._current_epoch()
@@ -1441,9 +1456,23 @@ class FleetSyncScheduler:
                 # generator would make it generator-local (unbound on the
                 # no-checkpoint path).
                 floor_ref = resume_floor_ref
-                if allow_checkpoint and server_has_content and (
-                    serve_checkpoint_decision(cursor, bootstrap, journal_gap)
-                ):
+                wants_checkpoint = serve_checkpoint_decision(
+                    cursor, bootstrap, journal_gap
+                )
+                if wants_checkpoint and not accept_checkpoint:
+                    # A founded origin never installs a checkpoint; give it
+                    # the retained journal from the start. Rows it already
+                    # holds merge inert; the retired prefix before this
+                    # journal's floor is, for a member, the origin's own
+                    # checkpoint content.
+                    logger.warning(
+                        "fleet sync peer %s scope %r refuses checkpoints "
+                        "(founded origin); replaying the retained journal "
+                        "from position %d instead (journal_gap=%s)",
+                        peer_pub[:12], scope, cursor, journal_gap,
+                    )
+                    wants_checkpoint = False
+                if allow_checkpoint and server_has_content and wants_checkpoint:
                     served_checkpoint = True
                     import shutil as _shutil
                     import tempfile as _tempfile
@@ -1961,9 +1990,15 @@ class FleetSyncScheduler:
                 store.compatibility_digest
             )
             bootstrap = not await asyncio.to_thread(store.has_state)
+            from tools.network.fleet_sync.sync import founded_ledger_rows
+
+            founded_rows = await asyncio.to_thread(
+                founded_ledger_rows, self._scope_paths()[scope]
+            )
             request = encode_pull_request(
                 epoch, compat=local_digest, resume=resume_trail,
                 scope=scope, bootstrap=bootstrap, version=protocol_version,
+                accept_checkpoint=founded_rows == 0,
             )
             sent += len(request)
             await channel.send_message(request)
@@ -2136,11 +2171,7 @@ class FleetSyncScheduler:
                         # this store holds a founded ledger, so the install
                         # would refuse anyway (ca33ba7); receiving hundreds
                         # of MB first only to fail is the loop we had.
-                        from tools.network.fleet_sync.sync import founded_ledger_rows
-
-                        founded = await asyncio.to_thread(
-                            founded_ledger_rows, self._scope_paths()[scope]
-                        )
+                        founded = founded_rows
                         if founded:
                             checkpoint_offered = True
                             raise FleetSyncFoundedLedgerRefusal(

@@ -832,6 +832,58 @@ async def test_first_contact_delta_starts_at_the_checkpoint_floor(
 
 
 @pytest.mark.asyncio
+async def test_founded_origin_gets_the_retained_journal_not_a_checkpoint(
+    tmp_path, monkeypatch
+):
+    """A puller that refuses checkpoints (founded ledger) is served the
+    retained journal from position 0 through the REAL scheduler._handle,
+    even when the server's decision would otherwise be a checkpoint."""
+    from tools.network.fleet_sync_scheduler import (
+        _DONE_MAGIC, _MUTATION_MAGIC, _OPERATION_MAGIC, encode_pull_request,
+        SQLiteFleetSyncStore,
+    )
+
+    fleet = _two_machine_fleet()
+    alpha = tmp_path / "alpha.db"
+    _prepare_org_db(alpha, fleet.server_machine.public_hex)
+    for i in range(7):
+        _insert_note(alpha, f"a-{i}", f"org content {i}")
+    personal = tmp_path / "personal.db"
+    personal.touch()
+    server = _configure_relay_server(fleet, personal, monkeypatch)
+    monkeypatch.setattr(
+        server.scheduler, "_scope_paths",
+        lambda: {"personal": personal, "alpha": alpha},
+    )
+    compat = SQLiteFleetSyncStore(alpha).compatibility_digest()
+
+    async def frames_for(accept: bool):
+        request = encode_pull_request(
+            "cd" * 32, compat=compat, resume=(), scope="alpha",
+            bootstrap=True, accept_checkpoint=accept,
+        )
+        stream = await server.scheduler._handle(
+            "tok", request, fleet.client_machine.public_hex,
+        )
+        return [frame async for frame in stream]
+
+    kinds = lambda frames: [  # noqa: E731
+        json.loads(f).get("kind") for f in frames if f[:1] in ("{", b"{")
+    ]
+    plain = await frames_for(True)
+    assert "checkpoint.begin" in kinds(plain)        # the ordinary bootstrap
+
+    origin = await frames_for(False)
+    assert "checkpoint.begin" not in kinds(origin)
+    replayed = [
+        f for f in origin
+        if f.startswith(_OPERATION_MAGIC) or f.startswith(_MUTATION_MAGIC)
+    ]
+    assert replayed, "the retained journal must be replayed instead"
+    assert any(f.startswith(_DONE_MAGIC) for f in origin)
+
+
+@pytest.mark.asyncio
 async def test_fresh_checkpoint_request_right_after_a_delivery_is_refused(
     tmp_path, monkeypatch
 ):
