@@ -39,6 +39,14 @@ JOURNAL_STORAGE_VERSION = 2
 _JOURNAL_STORAGE_ZLIB = 1
 MAX_TRANSACTION_OPERATIONS = 16_384
 MAX_TRANSACTION_FRAME_BYTES = 128 * 1024 * 1024
+
+#: prune_acknowledged() lock-hold bounds: stop after this much wall time
+#: (the scheduler calls it again next pass), delete at most this many
+#: transaction ids per write transaction, and yield between them so a
+#: waiting dashboard writer can take personal.db.
+PRUNE_BUDGET_S = 1.0
+PRUNE_BATCH_REFS = 2_000
+PRUNE_YIELD_S = 0.005
 _table_columns: dict[str, tuple[str, ...]] = {}
 _MUTATING_TABLE = re.compile(
     r'^\s*(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|'
@@ -677,6 +685,15 @@ class MutationCatalog:
             """DROP INDEX IF EXISTS idx_fleet_sync_catalog_order""",
             """CREATE INDEX IF NOT EXISTS idx_fleet_sync_peer_state_online
                 ON fleet_sync_peer_state(roster_epoch,online,machine_public_key)""",
+            # prune_acknowledged retires a transaction only when no winner
+            # still cites it: without this index that check is a full
+            # catalog scan per candidate transaction — 83k × 709k rows inside
+            # one IMMEDIATE transaction, holding personal.db >45s per attempt
+            # and starving every dashboard writer (live 2026-09-06). Single
+            # integer column plus the address key per row; not part of the
+            # compatibility digest (table_info only).
+            """CREATE INDEX IF NOT EXISTS idx_fleet_sync_catalog_transaction_ref
+                ON fleet_sync_catalog(transaction_ref)""",
         )
         for statement in statements:
             self.conn.execute(statement)
@@ -1731,7 +1748,9 @@ class MutationCatalog:
         return min(int(floor) for floor in floors)
 
     def prune_acknowledged(
-        self, machine_public_keys: Sequence[str], roster_epoch: str
+        self, machine_public_keys: Sequence[str], roster_epoch: str,
+        *, budget_s: float = PRUNE_BUDGET_S,
+        batch: int = PRUNE_BATCH_REFS,
     ) -> tuple[int, int]:
         """Retire journal frames every active peer has acknowledged.
 
@@ -1742,7 +1761,16 @@ class MutationCatalog:
         resolving it.  Rows from other roster epochs in
         ``fleet_sync_peer_state`` are dropped in the same pass — every
         reader keys on the current epoch, so they are dead weight.
-        Returns ``(journal_rows_deleted, transaction_rows_deleted)``.
+
+        INCREMENTAL and lock-bounded: work proceeds in ``batch``-sized id
+        ranges, each its own short write transaction, and stops once
+        ``budget_s`` has elapsed — the caller's next pass continues where
+        this one left off.  This database is the live personal graph; the
+        first prune after a fleet member's first acknowledgement retires
+        the ENTIRE journal, and doing that in one transaction held
+        personal.db for >45s per attempt and starved every dashboard writer
+        (live 2026-09-06).  Returns ``(journal_rows_deleted,
+        transaction_rows_deleted)`` for THIS pass.
         """
         if self._context is not None or self.conn.in_transaction:
             raise WatermarkError("cannot prune journal inside a transaction")
@@ -1751,29 +1779,75 @@ class MutationCatalog:
         )
         if floor is None or floor <= 0:
             return (0, 0)
+        deadline = time.monotonic() + budget_s
+        journal_rows = 0
+        transaction_rows = 0
+
+        def within_budget() -> bool:
+            return time.monotonic() < deadline
+
+        # Journal frames, lowest transaction first, one id range per
+        # transaction. The PK (transaction_ref, operation_index) makes both
+        # the MIN probe and the range delete index-bound. Each loop does at
+        # least one batch before consulting the budget, so every call makes
+        # progress however small the budget.
+        while True:
+            row = self.conn.execute(
+                "SELECT MIN(transaction_ref) FROM fleet_sync_journal "
+                "WHERE transaction_ref<=?", (floor,),
+            ).fetchone()
+            if row is None or row[0] is None:
+                break
+            low = int(row[0])
+            high = min(low + batch - 1, floor)
+            with self.conn:
+                journal_rows += int(self.conn.execute(
+                    "DELETE FROM fleet_sync_journal "
+                    "WHERE transaction_ref BETWEEN ? AND ?", (low, high),
+                ).rowcount)
+            time.sleep(PRUNE_YIELD_S)  # let a waiting writer take the lock
+            if not within_budget():
+                break
+        # Superseded transactions: current winners keep a foreign key to
+        # their authoring transaction as provenance, so only transactions
+        # referenced by neither the journal nor any winner retire — both
+        # checks are index probes (journal PK, idx_..._transaction_ref).
+        # Retained rows are bounded by live-address count, not history.
+        retirable = (
+            "NOT EXISTS(SELECT 1 FROM fleet_sync_journal j "
+            "WHERE j.transaction_ref=fleet_sync_transactions.id) "
+            "AND NOT EXISTS(SELECT 1 FROM fleet_sync_catalog c "
+            "WHERE c.transaction_ref=fleet_sync_transactions.id)"
+        )
+        cursor = 0
+        while cursor < floor:
+            # Jump to the next retirable id rather than sweeping fixed
+            # ranges from 0: retained (still-cited) rows below the floor
+            # would otherwise be re-swept every pass and a small budget
+            # could never reach the ranges behind them.
+            row = self.conn.execute(
+                "SELECT MIN(id) FROM fleet_sync_transactions "
+                f"WHERE id>=? AND id<? AND {retirable}", (cursor, floor),
+            ).fetchone()
+            if row is None or row[0] is None:
+                break
+            low = int(row[0])
+            high = min(low + batch, floor)
+            with self.conn:
+                transaction_rows += int(self.conn.execute(
+                    "DELETE FROM fleet_sync_transactions "
+                    f"WHERE id>=? AND id<? AND {retirable}", (low, high),
+                ).rowcount)
+            cursor = high
+            time.sleep(PRUNE_YIELD_S)
+            if not within_budget():
+                break
         with self.conn:
-            journal = self.conn.execute(
-                "DELETE FROM fleet_sync_journal WHERE transaction_ref<=?",
-                (floor,),
-            )
-            # Current winners keep a foreign key to their authoring
-            # transaction as provenance, so only superseded transactions
-            # (referenced by neither the journal nor any winner) retire.
-            # Retained rows are therefore bounded by live-address count,
-            # not by write history.
-            transactions = self.conn.execute(
-                "DELETE FROM fleet_sync_transactions WHERE id<? "
-                "AND NOT EXISTS(SELECT 1 FROM fleet_sync_journal j "
-                "WHERE j.transaction_ref=fleet_sync_transactions.id) "
-                "AND NOT EXISTS(SELECT 1 FROM fleet_sync_catalog c "
-                "WHERE c.transaction_ref=fleet_sync_transactions.id)",
-                (floor,),
-            )
             self.conn.execute(
                 "DELETE FROM fleet_sync_peer_state WHERE roster_epoch<>?",
                 (roster_epoch,),
             )
-        return (int(journal.rowcount), int(transactions.rowcount))
+        return (journal_rows, transaction_rows)
 
     def apply_remote(self, authored: AuthoredMutation) -> bool:
         """Merge one trusted remote mutation atomically; return winner status."""
