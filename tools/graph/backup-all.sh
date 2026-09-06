@@ -57,34 +57,68 @@ mkdir -p "$DEST"
 FAILURES=0
 STORE_COUNT=0
 BEADS_COUNT=0
+STARTED_AT="$(date -Iseconds)"
+START_EPOCH="$(date +%s)"
+ROWS_TSV="$(mktemp)"
+FAILS_TXT="$(mktemp)"
+trap 'rm -f "$ROWS_TSV" "$FAILS_TXT"' EXIT
+
+# One row per store outcome — the run-report.json the dashboard's
+# reconciler ingests (auto-yj2wa) is assembled from the SAME accounting
+# the log lines come from, never re-derived.
+row() {  # $1 name  $2 action  $3 status  $4 bytes  $5 reason
+    printf 'store\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" >> "$ROWS_TSV"
+}
 
 fail() {
     echo "  $*" >&2
+    echo "$*" | sed 's/^ *//' >> "$FAILS_TXT"
     FAILURES=$((FAILURES + 1))
+}
+
+write_report() {  # $1 verdict  $2 exit_code  $3 offsite  $4 dir
+    REPORT_TIER="$TIER" REPORT_STAMP="$STAMP" REPORT_VERDICT="$1" \
+    REPORT_STARTED_AT="$STARTED_AT" REPORT_FINISHED_AT="$(date -Iseconds)" \
+    REPORT_DURATION="$(( $(date +%s) - START_EPOCH ))" \
+    REPORT_ORIGIN="${AUTONOMY_BACKUP_ORIGIN:-host}" \
+    REPORT_DATA_ROOT="$DATA_ROOT" \
+    REPORT_STORES="$STORE_COUNT" REPORT_BEADS="$BEADS_COUNT" \
+    REPORT_OFFSITE="$3" REPORT_EXIT_CODE="$2" \
+    REPORT_FAILURES_FILE="$FAILS_TXT" \
+        "$PYTHON" "$STORES_HELPER" report < "$ROWS_TSV" \
+        > "$4/run-report.json" \
+        && cp "$4/run-report.json" "${BACKUP_ROOT}/${TIER}/latest-report.json"
 }
 
 backup_sqlite() {
     # $1 = destination path relative to $DEST, $2 = source db path
-    local rel="$1" dbpath="$2"
+    local rel="$1" dbpath="$2" size
     mkdir -p "$(dirname "${DEST}/${rel}")"
     if "$SQLITE3" "$dbpath" ".backup '${DEST}/${rel}'"; then
         # stat, not du: on the NFS backup root du reports allocated
         # blocks before the NAS flushes (everything looked like "512").
-        echo "  ${rel}: $(stat -c %s "${DEST}/${rel}") bytes"
+        size="$(stat -c %s "${DEST}/${rel}")"
+        echo "  ${rel}: ${size} bytes"
+        row "$rel" sqlite ok "$size" ""
         STORE_COUNT=$((STORE_COUNT + 1))
     else
         fail "${rel}: FAILED (sqlite .backup error from ${dbpath})"
+        row "$rel" sqlite error 0 "sqlite .backup error from ${dbpath}"
     fi
 }
 
 backup_copy() {
-    local rel="$1" src="$2"
+    local rel="$1" src="$2" size
     mkdir -p "$(dirname "${DEST}/${rel}")"
     if cp -a "$src" "${DEST}/${rel}"; then
-        echo "  ${rel}: copied"
+        # Sized at the SOURCE (local disk): accurate, and no NFS stat.
+        size="$(du -sb "$src" 2>/dev/null | cut -f1 || echo 0)"
+        echo "  ${rel}: copied (${size} bytes)"
+        row "$rel" copy ok "$size" ""
         STORE_COUNT=$((STORE_COUNT + 1))
     else
         fail "${rel}: FAILED (copy error from ${src})"
+        row "$rel" copy error 0 "copy error from ${src}"
     fi
 }
 
@@ -101,8 +135,10 @@ while IFS=$'\t' read -r key kind action required rel resolved; do
     if [[ ! -e "$resolved" ]]; then
         if [[ "$required" == "required" ]]; then
             fail "${key}: MISSING required store (${resolved})"
+            row "$key" "$action" missing 0 "not found at ${resolved}"
         else
             echo "  ${key}: absent (optional)"
+            row "$key" "$action" absent-optional 0 ""
         fi
         continue
     fi
@@ -117,6 +153,7 @@ while IFS=$'\t' read -r key kind action required rel resolved; do
             shopt -u nullglob
             if [[ ${#org_dbs[@]} -eq 0 ]]; then
                 fail "${key}: MISSING — ${resolved} contains no *.db"
+                row "$key" "$action" missing 0 "${resolved} contains no *.db"
                 continue
             fi
             for org_db in "${org_dbs[@]}"; do
@@ -124,9 +161,11 @@ while IFS=$'\t' read -r key kind action required rel resolved; do
             done ;;
         verify)
             echo "  ${key}: present (content captured by offsite kind=data)"
+            row "$key" verify ok 0 ""
             STORE_COUNT=$((STORE_COUNT + 1)) ;;
         *)
-            fail "${key}: unknown backup action '${action}'" ;;
+            fail "${key}: unknown backup action '${action}'"
+            row "$key" "$action" error 0 "unknown backup action" ;;
     esac
 done <<< "$MANIFEST"
 
@@ -166,10 +205,14 @@ if [[ -d "$BEADS_ROOT" ]]; then
                 --databases "$db" \
                 > "${DEST}/beads/${db}.sql" 2>"${DEST}/beads/${db}.err"; then
                 rm -f "${DEST}/beads/${db}.err"
-                echo "  beads/${db}.sql: $(stat -c %s "${DEST}/beads/${db}.sql") bytes"
+                DUMP_SIZE="$(stat -c %s "${DEST}/beads/${db}.sql")"
+                echo "  beads/${db}.sql: ${DUMP_SIZE} bytes"
+                row "beads/${db}.sql" dump ok "$DUMP_SIZE" ""
                 BEADS_COUNT=$((BEADS_COUNT + 1))
             else
-                fail "beads/${db}: FAILED ($(head -1 "${DEST}/beads/${db}.err" 2>/dev/null || echo mysqldump error))"
+                DUMP_ERR="$(head -1 "${DEST}/beads/${db}.err" 2>/dev/null || echo mysqldump error)"
+                fail "beads/${db}: FAILED (${DUMP_ERR})"
+                row "beads/${db}.sql" dump error 0 "$DUMP_ERR"
                 rm -f "${DEST}/beads/${db}.sql"
             fi
         done <<< "$BEADS_ROWS"
@@ -181,6 +224,10 @@ fi
 # ── Verdict ───────────────────────────────────────────────────────────
 if [[ $FAILURES -gt 0 ]]; then
     echo "$(date -Iseconds) ${TIER} backup FAILED: ${FAILURES} store(s) missing or errored — NO offsite push" >&2
+    # Failed runs report too (the reconciler must see the failure, not
+    # infer it from silence); the report travels with the -FAILED dir
+    # and the tier-level latest-report.json points at it.
+    write_report failed 1 unknown "$DEST" || true
     mv "$DEST" "${DEST}-FAILED" 2>/dev/null || true
     exit 1
 fi
@@ -193,6 +240,10 @@ fi
     echo "beads_databases=${BEADS_COUNT}"
 } > "${DEST}/.backup-complete"
 
+write_report complete 0 unknown "$DEST" || {
+    echo "$(date -Iseconds) WARN: run-report.json emission failed" >&2
+}
+
 # ── Prune old backups (successful runs only) ──────────────────────────
 TIER_DIR="${BACKUP_ROOT}/${TIER}"
 ls -1dt "${TIER_DIR}"/*/ 2>/dev/null | tail -n +$((KEEP + 1)) | xargs -r rm -rf
@@ -201,8 +252,22 @@ echo "$(date -Iseconds) ${TIER} backup complete: ${DEST} (${STORE_COUNT} stores,
 
 # ── Offsite push (architecture note graph://34507c98-af7) ─────────────
 # Refuses any tier dir without the .backup-complete marker, so a failed
-# capture can never be pushed even when invoked standalone.
-if ! "${SCRIPT_DIR}/backup-offsite.sh" "$TIER"; then
+# capture can never be pushed even when invoked standalone. The report's
+# offsite verdict is stamped from the outcome: complete, skipped (not
+# configured), or failed.
+OFFSITE_LOG="$(mktemp)"
+if "${SCRIPT_DIR}/backup-offsite.sh" "$TIER" 2>&1 | tee "$OFFSITE_LOG"; then
+    if grep -q "skipping" "$OFFSITE_LOG"; then OFFSITE_VERDICT=skipped
+    else OFFSITE_VERDICT=complete; fi
+    rm -f "$OFFSITE_LOG"
+    "$PYTHON" "$STORES_HELPER" report-offsite "$OFFSITE_VERDICT" 0 \
+        "${DEST}/run-report.json" \
+        "${BACKUP_ROOT}/${TIER}/latest-report.json" || true
+else
+    rm -f "$OFFSITE_LOG"
+    "$PYTHON" "$STORES_HELPER" report-offsite failed 2 \
+        "${DEST}/run-report.json" \
+        "${BACKUP_ROOT}/${TIER}/latest-report.json" || true
     echo "$(date -Iseconds) WARN: ${TIER} offsite push failed (local backup is intact)" >&2
     exit 2
 fi

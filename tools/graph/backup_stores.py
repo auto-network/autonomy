@@ -36,6 +36,18 @@ Modes (one per argv[1], TAB-separated rows on stdout):
     captures these too — manifest drift must widen coverage, never
     silently narrow it.
 
+``report``
+    Assemble a run-report.json (auto-yj2wa) from ``REPORT_*`` environment
+    variables plus per-store TSV rows on stdin
+    (``store<TAB>name<TAB>action<TAB>status<TAB>bytes<TAB>reason``).
+    The JSON is the BackupRunV1 payload the dashboard reconciler upserts,
+    plus ``tier``/``stamp`` for keying (key segments are never payload).
+
+``report-offsite VERDICT EXIT_CODE PATH [PATH...]``
+    Rewrite the offsite verdict and exit code of already-written
+    run-report.json files — the offsite push finishes after the capture
+    report is first written.
+
 ``integrity PATH [PATH...]``
     Walk each path (a directory of restored stores, or single ``.db``
     files) and run ``PRAGMA integrity_check`` on every SQLite database,
@@ -138,6 +150,69 @@ def cmd_extra_dbs() -> None:
     for path in sorted(DATA_ROOT.glob("*.db")):
         if path not in covered:
             print(path)
+
+
+def cmd_report() -> int:
+    env = os.environ.get
+    stores = []
+    total_bytes = 0
+    for line in sys.stdin:
+        line = line.rstrip("\n")
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) != 6 or parts[0] != "store":
+            print(f"report: malformed row: {line!r}", file=sys.stderr)
+            return 1
+        _, name, action, status, size, reason = parts
+        size_int = int(size or 0)
+        row = {"name": name, "action": action, "status": status,
+               "bytes": size_int}
+        if reason:
+            row["reason"] = reason
+        stores.append(row)
+        total_bytes += size_int
+    failures = []
+    failures_file = env("REPORT_FAILURES_FILE")
+    if failures_file and Path(failures_file).exists():
+        failures = [ln for ln in
+                    Path(failures_file).read_text().splitlines() if ln]
+    report = {
+        "tier": env("REPORT_TIER", ""),
+        "stamp": env("REPORT_STAMP", ""),
+        "verdict": env("REPORT_VERDICT", "failed"),
+        "started_at": env("REPORT_STARTED_AT", ""),
+        "finished_at": env("REPORT_FINISHED_AT", ""),
+        "duration_seconds": float(env("REPORT_DURATION", "0")),
+        "origin": env("REPORT_ORIGIN", "host"),
+        "data_root": env("REPORT_DATA_ROOT", ""),
+        "stores": stores,
+        "store_count": int(env("REPORT_STORES", "0")),
+        "beads_databases": int(env("REPORT_BEADS", "0")),
+        "total_bytes": total_bytes,
+        "offsite": env("REPORT_OFFSITE", "unknown"),
+        "failures": failures,
+        "exit_code": int(env("REPORT_EXIT_CODE", "0")),
+    }
+    json.dump(report, sys.stdout, indent=1)
+    sys.stdout.write("\n")
+    return 0
+
+
+def cmd_report_offsite(verdict: str, exit_code: str,
+                       paths: list[str]) -> int:
+    status = 0
+    for raw in paths:
+        path = Path(raw)
+        try:
+            report = json.loads(path.read_text())
+            report["offsite"] = verdict
+            report["exit_code"] = int(exit_code)
+            path.write_text(json.dumps(report, indent=1) + "\n")
+        except (OSError, ValueError) as exc:
+            print(f"report-offsite: {path}: {exc}", file=sys.stderr)
+            status = 1
+    return status
 
 
 def _register_app_sql_functions(conn) -> None:
@@ -295,6 +370,14 @@ def main() -> int:
                   file=sys.stderr)
             return 2
         return cmd_integrity(sys.argv[2:])
+    if mode == "report":
+        return cmd_report()
+    if mode == "report-offsite":
+        if len(sys.argv) < 5:
+            print("usage: backup_stores.py report-offsite VERDICT EXIT_CODE "
+                  "PATH [PATH...]", file=sys.stderr)
+            return 2
+        return cmd_report_offsite(sys.argv[2], sys.argv[3], sys.argv[4:])
     commands = {
         "stores": cmd_stores,
         "offsite-data": cmd_offsite_data,
@@ -302,8 +385,8 @@ def main() -> int:
         "beads": cmd_beads,
     }
     if mode not in commands:
-        print(f"usage: backup_stores.py {{{'|'.join(commands)}|integrity}}",
-              file=sys.stderr)
+        print(f"usage: backup_stores.py {{{'|'.join(commands)}|integrity"
+              f"|report|report-offsite}}", file=sys.stderr)
         return 2
     commands[mode]()
     return 0

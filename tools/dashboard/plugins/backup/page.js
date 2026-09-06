@@ -53,6 +53,16 @@ function backupPage() {
       if (this._timer) clearInterval(this._timer);
     },
 
+    // The operator's refresh also ingests the latest on-disk run
+    // reports first (bounded server-side); a 403 (non-operator) or a
+    // reconcile fault must never block rendering the stored state.
+    async refreshFromDisk() {
+      try {
+        await fetch('/api/backup/reconcile', { method: 'POST' });
+      } catch (e) { /* stored state still renders */ }
+      await this.refresh();
+    },
+
     async refresh() {
       try {
         const [summary, runs, drills] = await Promise.all([
