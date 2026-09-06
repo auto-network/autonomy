@@ -63,6 +63,9 @@ _PUSH_SERVICE_HOSTS = (
 _BUDGET_LIMITS = {
     "operator_approval": 12,  # one attention event, not one device/attempt
     "operator_diagnostic": 3,
+    "system_health": 6,       # backup/infrastructure alerts (auto-e4e66):
+                              # their own pool, so a failing backup can
+                              # neither starve nor spend approval pushes
 }
 
 SCHEMA = """

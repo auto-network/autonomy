@@ -54,6 +54,15 @@ EXPECTED_APPLICATIONS = {
     "relay": "Relay",
     "fleet": "Fleet",
     "dropbox": "Dropbox",
+    "backup": "Backup",
+}
+
+# Non-approval classes (auto-e4e66): kind -> (application, class).
+EXPECTED_NON_APPROVAL_KIND_CLASS = {
+    "backup.failed": ("backup", "backup_failed"),
+    "backup.stale": ("backup", "backup_stale"),
+    "backup.drill_failed": ("backup", "restore_drill_failed"),
+    "backup.offsite_unreachable": ("backup", "offsite_unreachable"),
 }
 
 EXPECTED_KIND_CLASS = {
@@ -186,7 +195,9 @@ def test_production_registry_has_exact_apps_kinds_and_uniform_policy():
     assert {row.application_scope: row.label for row in registry.applications} == (
         EXPECTED_APPLICATIONS
     )
-    assert set(registry.kind_bindings) == set(EXPECTED_KIND_CLASS)
+    assert set(registry.kind_bindings) == (
+        set(EXPECTED_KIND_CLASS) | set(EXPECTED_NON_APPROVAL_KIND_CLASS)
+    )
     assert "demo_ack" not in registry.kind_bindings
     for kind, (application, notification_class) in EXPECTED_KIND_CLASS.items():
         binding = registry.kind_bindings[kind]
@@ -196,6 +207,15 @@ def test_production_registry_has_exact_apps_kinds_and_uniform_policy():
         assert binding.review_renderer_id == f"approval.{kind}.review"
         assert binding.surface_category == "approvals"
         assert binding.policy == AttentionClassPolicy.approval_phase_one()
+        assert binding.runtime is None
+    for kind, (application, notification_class) in (
+            EXPECTED_NON_APPROVAL_KIND_CLASS.items()):
+        binding = registry.kind_bindings[kind]
+        assert (binding.application_scope, binding.notification_class) == (
+            application, notification_class,
+        )
+        assert binding.surface_category == "apps"
+        assert binding.policy == AttentionClassPolicy.backup_phase_one()
         assert binding.runtime is None
     assert all(not row.enabled for row in registry.application_records())
 
@@ -336,9 +356,9 @@ def test_attention_runtime_cannot_activate_an_unmigrated_approval_kind():
 def test_registration_sync_writes_exact_personal_rows_and_is_idempotent():
     store = InMemoryAttentionIndexStore()
     service = _service(store=store)
-    assert service.sync_registrations() == 9
+    assert service.sync_registrations() == 10
     assert service.sync_registrations() == 0
-    assert len(store.application_writes) == 9
+    assert len(store.application_writes) == 10
     assert set(store.applications) == set(EXPECTED_APPLICATIONS)
 
 
