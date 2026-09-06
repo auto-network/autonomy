@@ -328,15 +328,11 @@
     header[data-app-chrome] > #identity-indicator {
       order: 5;
     }
-    /* The immersive/session topbar hides the global search + profile only on
-       MOBILE, where the session's own app-topbar-slot needs the whole row.
-       At desktop the profile (and search) stay in the top-right corner on
-       every route, including the session viewer. */
+    /* Immersive mobile routes give their title the row, but identity remains
+       persistent shell chrome at the right edge. */
     @media (max-width: 767px) {
       header.app-topbar-active #global-search-control,
-      header.app-topbar-active #identity-indicator,
-      body.route-immersive header[data-app-chrome] #global-search-control,
-      body.route-immersive header[data-app-chrome] #identity-indicator {
+      body.route-immersive header[data-app-chrome] #global-search-control {
         display: none;
       }
     }
@@ -2208,6 +2204,7 @@
     </div>
     <div class="identity-brand-row">
       <h1 class="identity-brand-name text-lg font-bold text-indigo-400">Autonomy</h1>
+      <div id="identity-sidebar-slot" data-testid="identity-sidebar-slot"></div>
     </div>
     <div class="sidebar-main">
       <div class="space-y-1">
