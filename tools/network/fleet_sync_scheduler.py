@@ -1918,6 +1918,12 @@ class FleetSyncScheduler:
         peer_watermark: int | None = None
         #: The candidate that actually connected -- the tier-used readout.
         connected_address: str | None = None
+        # Initialized BEFORE the try: the except/finally paths read them,
+        # and a pull that fails at connect never reaches the in-try inits
+        # (a bad candidate stopped being recorded as a retry, 2026-09-06).
+        checkpoint_stage: Path | None = None
+        checkpoint_offered = False
+        checkpoint_seen = [0, 0]
         protocol_version = self._peer_protocol.get(
             machine_pub, FLEET_SYNC_PROTOCOL_VERSION
         )

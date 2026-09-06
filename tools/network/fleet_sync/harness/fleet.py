@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import select
+import selectors
 import sqlite3
 import subprocess
 import sys
@@ -166,7 +166,16 @@ class HarnessFleet:
             },
         )
         assert process.stdout is not None
-        ready, _, _ = select.select([process.stdout], [], [], 15.0)
+        # selectors (epoll on Linux) instead of select(): select() is capped
+        # at FD_SETSIZE=1024 regardless of RLIMIT_NOFILE, and a 50-machine
+        # fleet's proxy listeners push the worker's stdout descriptor past
+        # it ("filedescriptor out of range in select()", sjc-4 2026-09-06).
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ)
+        try:
+            ready = selector.select(15.0)
+        finally:
+            selector.close()
         if not ready:
             process.kill()
             _out, err = process.communicate()
