@@ -227,7 +227,7 @@ test('the template mounts the production partials and the panel viewer, and neve
   const html = fs.readFileSync(BOARD_HTML, 'utf8');
   assert.ok(html.includes('{% include "partials/session-card.html" %}'));
   assert.ok(html.includes('{% include "partials/session-entries.html" %}'));
-  assert.ok(html.includes("sessionViewerPage({mode:'panel', dictationTile:true, pageSignals:false})"));
+  assert.ok(html.includes("sessionViewerPage({mode:'panel', dictationTile:true, pageSignals:false, tailEntries:40})"));
   assert.ok(html.includes('x-data="sessionsBoard()"'));
   assert.ok(html.includes('@click="bindDictation($event, id)"'));
   assert.ok(!/href="\/session\//.test(html), 'card click must bind dictation, not navigate');
@@ -455,4 +455,15 @@ test('revealing a session scrolls only the board, never an ancestor', () => {
   const js = fs.readFileSync(BOARD_JS, 'utf8');
   assert.ok(!/\.scrollIntoView\(/.test(js), 'scrollIntoView scrolls any scrollable ancestor and shifted the shell under the nav');
   assert.match(js, /board\.scrollTo\(\{ left: Math\.max\(0, Math\.min\(want, max\)\)/);
+});
+
+test('a board card opens on a small tail; the full-page viewer keeps its own', () => {
+  const html = fs.readFileSync(BOARD_HTML, 'utf8');
+  const viewer = fs.readFileSync(path.join(REPO_ROOT, 'tools/dashboard/static/js/pages/session-viewer.js'), 'utf8');
+  // Every card pays the opening read at once; a card shows ~10 turns.
+  assert.ok(html.includes('tailEntries:40'));
+  assert.match(viewer, /_tailEntries: \(opts && opts\.tailEntries > 0\) \? opts\.tailEntries : FAST_OPEN_TAIL_LINES/);
+  assert.match(viewer, /_initialTailUrl\(\) \{\s*\n\s*return this\._tailUrl \+ '\?tail_entries=' \+ this\._tailEntries;/);
+  // Scroll-back is unaffected: older pages still use the full window.
+  assert.match(viewer, /_olderTailUrl\(cursor\) \{[\s\S]*?tail_entries=' \+ FAST_OPEN_TAIL_LINES/);
 });

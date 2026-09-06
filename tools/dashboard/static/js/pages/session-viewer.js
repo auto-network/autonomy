@@ -42,6 +42,11 @@
       // (voice-shell _capsuleClaimTarget → retargetDelivery), so the most
       // recently mounted card silently stole the microphone.
       _pageSignals: !(opts && opts.pageSignals === false),
+      // Entries pulled on first open. 200 suits a full-page viewer the operator
+      // scrolls back through; a board card shows ~10 turns in a few hundred
+      // pixels, and every card pays this at once. Scroll-back still pages more
+      // through _olderTailUrl, so a smaller opening read costs nothing.
+      _tailEntries: (opts && opts.tailEntries > 0) ? opts.tailEntries : FAST_OPEN_TAIL_LINES,
       // Panel mode only: whether the design chat overlay is open. Driven by
       // design.js (off its chatOpen). Gates _composerActive so a collapsed
       // chat yields the passive caption instead of the active composer/tile.
@@ -2228,7 +2233,7 @@
       },
 
       _initialTailUrl() {
-        return this._tailUrl + '?tail_entries=' + FAST_OPEN_TAIL_LINES;
+        return this._tailUrl + '?tail_entries=' + this._tailEntries;
       },
 
       _olderTailUrl(cursor) {
