@@ -346,7 +346,15 @@ class FleetEnrollmentClient:
         try:
             self._verify_live_invite(invite)
         except FleetInvitationExpired:
-            if existing is not None and existing.invite == invite:
+            # Drop only an UNDELIVERED retry record. A row that already holds
+            # the delivered armor is a completed-but-unfinished join; deleting
+            # it destroys the machine's path to finishing and forces a ghost
+            # re-enrollment under a fresh identity.
+            if (
+                existing is not None
+                and existing.invite == invite
+                and self.state_store.load_delivery(existing.request_id) is None
+            ):
                 self.state_store.delete(existing.request_id)
             raise
         if existing is not None:

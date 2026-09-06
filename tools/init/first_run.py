@@ -292,12 +292,38 @@ def _run_fleet_join(report: InitReport, invitation, *, client=None) -> None:
     durable local identity row, root armor, derived machine key, and roster
     authority do not exist on the joining node until verified completion.
     """
+    from tools.network import machine_boot
     from tools.network.fleet_enrollment_client import (
         FleetEnrollmentClient,
         FleetEnrollmentClientError,
     )
 
+    # BOOTSTRAP-ONCE. init re-runs on EVERY container boot with the invite
+    # still in the environment, but the ceremony must run at most once per
+    # machine. Without these guards a restart AFTER a completed join re-ran the
+    # ceremony against home, read the already-consumed request's reply as
+    # terminal-negative, DELETED the saved join state (armor included), and a
+    # subsequent pass minted a brand-new machine identity — a ghost 'new
+    # machine awaiting approval' duplicating an already-enrolled node
+    # (observed live on SJC 2026-09-05 20:23, request 3866d32c).
+    if machine_boot.has_identity():
+        report.add(
+            "fleet-enrollment", EXISTS,
+            "machine already enrolled; ceremony not re-run",
+        )
+        return
     enrollment_client = client or FleetEnrollmentClient()
+    saved = enrollment_client.state_store.latest_any()
+    if saved is not None and \
+            enrollment_client.state_store.load_delivery(saved.request_id) is not None:
+        # Approved and delivered — only the browser completion remains.
+        # Touch nothing; re-resuming a consumed request risks state loss.
+        report.add(
+            "fleet-enrollment:approved", PENDING,
+            "approved; unlock this Dashboard with the personal password "
+            "to finish machine enrollment",
+        )
+        return
     try:
         recovery = asyncio.run(enrollment_client.start_or_recover(invitation))
         result = asyncio.run(enrollment_client.resume(recovery))
@@ -305,6 +331,9 @@ def _run_fleet_join(report: InitReport, invitation, *, client=None) -> None:
         report.add("fleet-enrollment", FAILED, str(exc))
         raise
     if result.status == "declined":
+        # A decline ends THIS request, but never silently destroys a join
+        # that already delivered armor (guarded above). Deleting only the
+        # undelivered retry record is safe: nothing irreplaceable is in it.
         enrollment_client.state_store.delete(recovery.request_id)
         report.add(
             "fleet-enrollment:declined",
