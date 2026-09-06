@@ -1332,30 +1332,6 @@
       body.session-overlay-active #page-stack { height: 100dvh; }
       body.session-overlay-active main#content { overflow: hidden; }
 
-      /* The session viewer owns the full viewport, but identity must remain a
-         reachable shell control. Restore the header as a zero-layout overlay,
-         hide every sibling control, and leave only the profile interactive. */
-      body.fullscreen-page > .flex-1 > header,
-      body.session-overlay-active > .flex-1 > header {
-        position: fixed;
-        inset: 0 0 auto auto;
-        z-index: 110;
-        display: flex;
-        width: auto;
-        border: 0;
-        background: transparent;
-        padding: max(0.75rem, env(safe-area-inset-top)) 0.75rem 0 0;
-        pointer-events: none;
-      }
-      body.fullscreen-page > .flex-1 > header > :not(#identity-indicator),
-      body.session-overlay-active > .flex-1 > header > :not(#identity-indicator) {
-        display: none !important;
-      }
-      body.fullscreen-page #identity-indicator,
-      body.session-overlay-active #identity-indicator {
-        display: flex;
-        pointer-events: auto;
-      }
     }
     @media (min-width: 768px) {
       body.fullscreen-page main#content { padding: 0 !important; overflow: hidden; }
