@@ -149,6 +149,24 @@ def test_first_run_runs_the_join_ceremony_when_a_transport_is_given(volume, tmp_
     assert CLAIM_TOKEN not in repr(report)
 
 
+class _FakeJoinStateStore:
+    """Only what _run_fleet_join's bootstrap-once guards consult."""
+
+    def __init__(self, saved=None, delivery=None):
+        self._saved = saved
+        self._delivery = delivery
+        self.deleted = []
+
+    def latest_any(self):
+        return self._saved
+
+    def load_delivery(self, request_id):
+        return self._delivery
+
+    def delete(self, request_id):
+        self.deleted.append(request_id)
+
+
 def test_fleet_invite_submits_one_public_machine_request(volume):
     class Recovery:
         verification_code = "A1B2 C3D4 E5F6 0718 192A 3B4C"
@@ -156,6 +174,7 @@ def test_fleet_invite_submits_one_public_machine_request(volume):
     class FakeFleetClient:
         def __init__(self):
             self.invites = []
+            self.state_store = _FakeJoinStateStore()
 
         async def start_or_recover(self, invitation):
             self.invites.append(invitation)

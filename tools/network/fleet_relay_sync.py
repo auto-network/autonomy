@@ -89,6 +89,12 @@ def _materialize_then_discover_org_scopes():
 
 
 PROTOCOL_VERSION = 1
+
+#: Whole-pull completion deadline. Bounds connect+authenticate+transfer of one
+#: pull attempt so a peer that accepts and never answers cannot hang the puller
+#: forever; the run loop's backoff retries after a timeout. Mid-transfer
+#: inactivity is the stream liveness policy's job — this is the outer floor.
+PULL_DEADLINE_S = 600.0
 PULL_OP = "fleet.sync.pull"
 #: A direct-path success younger than this makes a relay pull redundant.
 DIRECT_FRESHNESS_WINDOW_S = 30.0
@@ -1229,6 +1235,12 @@ class DashboardFleetRelaySyncService:
             try:
                 route = await asyncio.to_thread(fleet_route.load, org="machine")
                 if route is None:
+                    # Without this line the puller's death was indistinguishable
+                    # from "quietly working" — an armed machine that just never
+                    # pulled again.
+                    logger.warning(
+                        "fleet relay sync: no fleet route stored; puller exiting"
+                    )
                     return
                 # Prefer the direct path: when a direct pull from this peer
                 # succeeded within the freshness window, this relay tick is
@@ -1262,12 +1274,22 @@ class DashboardFleetRelaySyncService:
                     route.origin_machine_pub,
                     credential.delegation_cert.org.removeprefix("personal:"),
                 )
-                await pull_checkpoint_once(
-                    credential,
-                    route,
-                    include_checkpoint=include_checkpoint,
-                    metrics=metrics,
-                )
+                # HARD DEADLINE. pull_checkpoint_once had none, so a peer (or
+                # relay hop) that accepts the connection and then never answers
+                # left this task hung FOREVER on an established socket — armed,
+                # connected, transferring nothing, logging nothing (observed
+                # live on SJC 2026-09-06: 474 B/s keepalive trickle, zero pull
+                # lines). A bounded pull dies loudly instead and the loop's
+                # existing backoff retries it. Generous bound: a full checkpoint
+                # is hundreds of MB; ten minutes of NO COMPLETION with the
+                # in-stream liveness policy handling mid-transfer stalls.
+                async with asyncio.timeout(PULL_DEADLINE_S):
+                    await pull_checkpoint_once(
+                        credential,
+                        route,
+                        include_checkpoint=include_checkpoint,
+                        metrics=metrics,
+                    )
                 duration_ms = max(
                     0, (time.monotonic_ns() - started_monotonic_ns) // 1_000_000
                 )
@@ -1393,13 +1415,16 @@ class DashboardFleetRelaySyncService:
                     credential.delegation_cert.org.removeprefix("personal:"),
                     _scope_db_path(scope),
                 )
-                await pull_checkpoint_once(
-                    credential,
-                    route,
-                    include_checkpoint=include_checkpoint,
-                    metrics=metrics,
-                    scope=scope,
-                )
+                # Same hard deadline as the personal pull: a hung org-scope
+                # pull must fail this scope loudly, not hang the whole loop.
+                async with asyncio.timeout(PULL_DEADLINE_S):
+                    await pull_checkpoint_once(
+                        credential,
+                        route,
+                        include_checkpoint=include_checkpoint,
+                        metrics=metrics,
+                        scope=scope,
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
