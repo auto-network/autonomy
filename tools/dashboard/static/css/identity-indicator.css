@@ -49,7 +49,10 @@
  * nav's existing overflow behavior. */
 @media (min-width: 768px) {
   #sidebar {
-    overflow: visible;
+    /* base.html's unlayered #sidebar overflow-y rule is emitted after this
+       stylesheet. Important is intentional here: both selectors have equal
+       specificity, and the desktop drawer must escape the nav's paint box. */
+    overflow: visible !important;
   }
 }
 
