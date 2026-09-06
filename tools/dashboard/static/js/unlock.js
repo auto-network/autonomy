@@ -21,6 +21,11 @@
 (function () {
   'use strict';
 
+  function withSystemAuth(operation) {
+    var bracket = window.Autonomy && window.Autonomy.systemAuth;
+    return bracket && typeof bracket.run === 'function' ? bracket.run(operation) : operation();
+  }
+
   var UNLOCK_DOMAIN = 'autonomy.identity.unlock.v1\n';
 
   var U = {
@@ -255,7 +260,9 @@
     } catch (e) { /* PRF is an optional enhancement; access unlock proceeds */ }
     var cred;
     try {
-      cred = await navigator.credentials.get({ publicKey: pk });
+      cred = await withSystemAuth(function () {
+        return navigator.credentials.get({ publicKey: pk });
+      });
     } catch (e) {
       if (e && e.name === 'NotAllowedError') {
         throw new Error('unlock was cancelled or timed out — try again');
@@ -444,13 +451,13 @@
       .map(function (p) { return { type: 'public-key', id: b64uToBytes(p.credential_id) }; });
     var asrt;
     try {
-      asrt = await navigator.credentials.get({ publicKey: {
+      asrt = await withSystemAuth(function () { return navigator.credentials.get({ publicKey: {
         challenge: crypto.getRandomValues(new Uint8Array(32)),
         rpId: U.rpId || undefined,
         allowCredentials: allow,
         userVerification: 'required',
         extensions: enroll.prfEvalExtension(),
-      } });
+      } }); });
     } catch (e) {
       if (e && e.name === 'NotAllowedError') {
         throw new Error('Face ID was cancelled or timed out — try again');

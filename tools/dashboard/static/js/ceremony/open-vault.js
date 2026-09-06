@@ -52,6 +52,11 @@ function rpMatchesHost(rpId, hostname) {
   return !rpId || rpId === hostname || hostname.endsWith(`.${rpId}`);
 }
 
+function withSystemAuth(operation) {
+  const bracket = globalThis.Autonomy && globalThis.Autonomy.systemAuth;
+  return bracket && typeof bracket.run === 'function' ? bracket.run(operation) : operation();
+}
+
 async function passkeySeed(factors, credentials, cryptoApi, currentHostname) {
   if (!credentials || typeof credentials.get !== 'function') {
     throw new Error('This browser cannot use a passkey.');
@@ -64,7 +69,7 @@ async function passkeySeed(factors, credentials, cryptoApi, currentHostname) {
   if (rpIds.length > 1) throw new Error('This vault class spans incompatible passkey sites.');
   let assertion;
   try {
-    assertion = await credentials.get({
+    assertion = await withSystemAuth(() => credentials.get({
       publicKey: {
         challenge: cryptoApi.getRandomValues(new Uint8Array(32)),
         ...(rpIds[0] ? { rpId: rpIds[0] } : {}),
@@ -77,7 +82,7 @@ async function passkeySeed(factors, credentials, cryptoApi, currentHostname) {
         userVerification: 'required',
         extensions: prfEvalExtension(),
       },
-    });
+    }));
   } catch (error) {
     if (error && error.name === 'NotAllowedError') {
       throw new Error('Passkey was cancelled — try again.');
@@ -106,7 +111,7 @@ async function rootPasskeyPrf(root, credentials, cryptoApi, currentHostname) {
   if (rpIds.length > 1) throw new Error('Your root passkeys span incompatible sites.');
   let assertion;
   try {
-    assertion = await credentials.get({
+    assertion = await withSystemAuth(() => credentials.get({
       publicKey: {
         challenge: cryptoApi.getRandomValues(new Uint8Array(32)),
         ...(rpIds[0] ? { rpId: rpIds[0] } : {}),
@@ -119,7 +124,7 @@ async function rootPasskeyPrf(root, credentials, cryptoApi, currentHostname) {
         userVerification: 'required',
         extensions: prfEvalExtension(),
       },
-    });
+    }));
   } catch (error) {
     if (error && error.name === 'NotAllowedError') {
       throw new Error('Passkey was cancelled — try again.');

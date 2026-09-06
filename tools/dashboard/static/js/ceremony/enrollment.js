@@ -183,6 +183,10 @@ async function enrollPasskey({
   fetchImpl = (typeof fetch !== 'undefined' ? fetch : null),
   now = Date.now(),
 }) {
+  const bracket = globalThis.Autonomy && globalThis.Autonomy.systemAuth;
+  const withSystemAuth = (operation) => (
+    bracket && typeof bracket.run === 'function' ? bracket.run(operation) : operation()
+  );
   const post = (path, body) => fetchImpl(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -198,11 +202,11 @@ async function enrollPasskey({
   (pk.excludeCredentials || []).forEach((c) => { c.id = base64UrlToBytes(c.id); });
   pk.extensions = prfEvalExtension();
 
-  const cred = await credentials.create({ publicKey: pk });
+  const cred = await withSystemAuth(() => credentials.create({ publicKey: pk }));
   if (!cred) throw new Error('enrollment was cancelled');
 
   const prfOutput = await evaluatePrf(cred.getClientExtensionResults(), async () => {
-    const asrt = await credentials.get({
+    const asrt = await withSystemAuth(() => credentials.get({
       publicKey: {
         // Throwaway: the PRF output is a function of the salt and the
         // credential, not the challenge, and this assertion is never sent to
@@ -213,7 +217,7 @@ async function enrollPasskey({
         userVerification: 'required',
         extensions: prfEvalExtension(),
       },
-    });
+    }));
     return asrt.getClientExtensionResults();
   });
 

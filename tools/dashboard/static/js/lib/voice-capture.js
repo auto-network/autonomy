@@ -86,7 +86,14 @@
     traceOn: false,
     traceExpiresAt: 0,
     traceDumpTimer: null,
+    systemAuthDepth: 0,
+    deferredCaptureReason: '',
   };
+  try {
+    if (window.Autonomy && window.Autonomy.systemAuth && window.Autonomy.systemAuth.active) {
+      s.systemAuthDepth = window.Autonomy.systemAuth.depth || 1;
+    }
+  } catch (_e) {}
 
   var RECOVERY_VERIFY_MS = 8000;
   var RECOVERY_COOLDOWN_MS = 30000;
@@ -178,6 +185,16 @@
   }
 
   function _requireAction(reason) {
+    if (reason !== 'recovery_failed') {
+      s.talkActive = false;
+      _setCapture(s.stream ? 'interrupted' : 'absent');
+      _setAction(reason || 'mic_gesture');
+      var captureStore = store();
+      if (captureStore && !captureStore.sheetError) {
+        captureStore.sheetError = 'Microphone needs to be resumed.';
+      }
+      return;
+    }
     _clearIncidentTimer();
     _clearVerificationTimer();
     if (s.reconnectTimer) { clearTimeout(s.reconnectTimer); s.reconnectTimer = null; }
@@ -189,7 +206,6 @@
     s.actionCooldownUntil = _nowMs() + RECOVERY_COOLDOWN_MS;
     s.requiresReconnect = true;
     s.talkActive = false;
-    s.startGen++;
     s.starting = false;
     var failedSocket = s.ws;
     s.ws = null;
@@ -197,13 +213,13 @@
     s.started = false;
     s.connectionId = '';
     try { if (failedSocket) failedSocket.close(1000, 'action-required'); } catch (_e) {}
-    _disposeCapturePipeline();
-    _releaseWakeLock();
     _setAction(reason || 'recovery_failed');
     _setTransport('disconnected');
     _setConn('disconnected');
     var st = store();
-    if (st && !st.sheetError) st.sheetError = 'Microphone needs to be enabled again.';
+    if (st && !st.sheetError) {
+      st.sheetError = 'Voice connection needs to be retried.';
+    }
   }
 
   function _verifyHealthyFlow() {
@@ -448,19 +464,15 @@
     var st = store();
     var bind = s.bind || (st && st.boundSessionId) || '';
     if (!bind) return false;
-    var incident = _joinIncident(reason);
-    // A cumulative audio_flow acknowledgement on the same socket cannot prove
-    // that PCM came from the rebuilt browser capture rather than the old one.
-    // Spend the incident's single capture AND transport repair together so the
-    // new capture is verified only on a fresh, independently identified socket.
-    if (!incident || incident.captureAttempts > 0) return false;
-    incident.captureAttempts += 1;
-    if (incident.transportAttempts === 0) incident.transportAttempts = 1;
-    _publishIncident();
-    _setCapture('acquiring');
-    _disposeCapturePipeline();
-    _setCapture('acquiring');
-    _replaceVoiceSocket(reason);
+    if (s.systemAuthDepth > 0) {
+      s.deferredCaptureReason = reason || 'interrupted';
+      _setCapture('interrupted');
+      return true;
+    }
+    // Capture ownership is operator-controlled. Automatic health handling may
+    // report interruption, but only an explicit gesture may replace the stream.
+    _setCapture('interrupted');
+    _requireAction('mic_gesture');
     return true;
   }
 
@@ -504,7 +516,7 @@
     var st = store();
     if (!st || st.micMode !== 'listening') return;       // only while actively capturing
     if (!s.talkActive || !s.ctx || s.starting) return;   // not streaming / mid-(re)start
-    if (st.actionRequiredReason || (s.incident && s.incident.active)) return;
+    if (st.actionRequiredReason) return;
     // Two silent-death modes: (a) the worklet stops posting frames (AudioContext
     // suspended/died), and (b) the mic TRACK ends but the context keeps posting
     // silent buffers — iOS turned the mic OFF (no notch indicator) while the app
@@ -764,6 +776,26 @@
     document.addEventListener('visibilitychange', _onWake);
     window.addEventListener('focus', _onWake);
     window.addEventListener('pageshow', _onWake);
+    window.addEventListener('autonomy:system-auth-change', function (event) {
+      var detail = (event && event.detail) || {};
+      s.systemAuthDepth = detail.active ? Math.max(1, Number(detail.depth) || 1) : 0;
+      if (s.systemAuthDepth > 0) {
+        if (s.trackMuteTimer) clearTimeout(s.trackMuteTimer);
+        s.trackMuteTimer = null;
+        return;
+      }
+      if (document.visibilityState !== 'visible') return;
+      var st = store();
+      if (!st || !st.boundSessionId || st.micMode !== 'listening') return;
+      s.deferredCaptureReason = '';
+      if (!s.stream) {
+        startListening(st.boundSessionId);
+        return;
+      }
+      // Resume the already-granted pipeline. _onWake reports an ended or
+      // persistently interrupted track through the explicit gesture path.
+      _onWake();
+    });
   }
 
   // Silent console-only trace. The earlier on-screen overlay was removed —
@@ -984,7 +1016,7 @@
           // Start/unmute is only control-plane truth. Stay unverified until a
           // later audio_flow proves current PCM crossed the data plane too.
           _setTransport('connecting');
-          _setConn('reconnecting');
+          _setConn((s.incident && s.incident.active) || s.requiresReconnect ? 'reconnecting' : 'ok');
         } else {
           _boundListeningDisagrees();
         }
@@ -1274,6 +1306,12 @@
   function startListening(bind) {
     bind = String(bind || '');
     if (!bind) return;
+    if (s.systemAuthDepth > 0 && !s.stream) {
+      s.bind = bind;
+      s.desiredBind = bind;
+      _setCapture('interrupted');
+      return;
+    }
     if (s.starting && s.desiredBind === bind) return;
     // A bind change is a privacy boundary. Invalidate the pending acquisition
     // before starting the new target so a late getUserMedia/addModule result for
@@ -1290,6 +1328,12 @@
     _setConn('reconnecting');
     if (!s.ws) attachSocket(new WebSocket(wsUrl(bind)), bind);
     var startSocket = s.ws;
+    var startStore = store();
+    if (startStore && (startStore.actionRequiredReason === 'mic_gesture' ||
+                       startStore.actionRequiredReason === 'mic_denied')) {
+      s.starting = false;
+      return;
+    }
     ensureMicReady(myStartGen, bind).then(function () {
       if (myStartGen !== s.startGen || bind !== s.desiredBind || startSocket !== s.ws) return;
       // wait briefly for the socket to open, then start the upstream
@@ -1316,7 +1360,7 @@
       if (e === STALE_START || (e && e.staleStart)) return;
       if (myStartGen !== s.startGen || bind !== s.desiredBind) return;
       s.starting = false;
-      _setCapture('interrupted');
+      _setCapture(s.stream ? 'interrupted' : 'absent');
       var code = e && e.name === 'NotAllowedError' ? 'mic_denied' : 'mic_gesture';
       _requireAction(code);
       var st = store();

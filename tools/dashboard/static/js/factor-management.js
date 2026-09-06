@@ -27,6 +27,11 @@ import {
   prfEvalExtension, prfOutputFromResults, evaluatePrf, attestedCredential,
   deriveProvisioningKey, mintEnrollmentStatement,
 } from './ceremony/enrollment.js';
+
+function withSystemAuth(operation) {
+  const bracket = globalThis.Autonomy && globalThis.Autonomy.systemAuth;
+  return bracket && typeof bracket.run === 'function' ? bracket.run(operation) : operation();
+}
 import {
   FACTOR_RECIPIENT_PURPOSE, canonicalExpression, policyFactorIds,
   policySatisfied, policyWithFactorGranted, createPasswordFactor,
@@ -1253,13 +1258,13 @@ export function credentialsPanel() {
         const pkFactors = this.envelope.factors.filter((f) => f.type === 'passkey'
           && needed.has(f.factor_id));
         const allow = pkFactors.map((f) => ({ type: 'public-key', id: b64uToBytes(f.credential_id) }));
-        const asrt = await navigator.credentials.get({ publicKey: {
+        const asrt = await withSystemAuth(() => navigator.credentials.get({ publicKey: {
           challenge: crypto.getRandomValues(new Uint8Array(32)),
           rpId: this.currentRpId || undefined,
           allowCredentials: allow,
           userVerification: 'required',
           extensions: prfEvalExtension(),
-        } });
+        } }));
         const prf = prfOutputFromResults(asrt.getClientExtensionResults());
         if (!prf) throw new Error('this passkey has no PRF and cannot authorize your root');
         const rec = await primitives.deriveEncapsulationKeypair(prf, FACTOR_RECIPIENT_PURPOSE);
@@ -1349,13 +1354,13 @@ export function credentialsPanel() {
     // +Add pivot, AND the commit ceremony when the staged ending state needs
     // a slot this factor doesn't have yet.
     async _mintSlotFor(k) {
-      const asrt = await navigator.credentials.get({ publicKey: {
+      const asrt = await withSystemAuth(() => navigator.credentials.get({ publicKey: {
         challenge: crypto.getRandomValues(new Uint8Array(32)),
         rpId: this.currentRpId || undefined,
         allowCredentials: [{ type: 'public-key', id: b64uToBytes(k.credId) }],
         userVerification: 'required',
         extensions: prfEvalExtension(),
-      } }).catch((e) => { if (e && e.name === 'NotAllowedError') return null; throw e; });
+      } })).catch((e) => { if (e && e.name === 'NotAllowedError') return null; throw e; });
       if (!asrt) return null;
       const prf = prfOutputFromResults(asrt.getClientExtensionResults());
       if (!prf) throw new Error('this passkey has no PRF and cannot hold a device slot');
@@ -1433,17 +1438,17 @@ export function credentialsPanel() {
       pk.user.id = b64uToBytes(pk.user.id);
       (pk.excludeCredentials || []).forEach((c) => { c.id = b64uToBytes(c.id); });
       pk.extensions = prfEvalExtension();
-      const cred = await navigator.credentials.create({ publicKey: pk });
+      const cred = await withSystemAuth(() => navigator.credentials.create({ publicKey: pk }));
       if (!cred) throw new Error('enrollment was cancelled');
       const createResults = (cred.getClientExtensionResults && cred.getClientExtensionResults()) || {};
       const prf = await evaluatePrf(createResults, async () => {
-        const asrt = await navigator.credentials.get({ publicKey: {
+        const asrt = await withSystemAuth(() => navigator.credentials.get({ publicKey: {
           challenge: crypto.getRandomValues(new Uint8Array(32)),
           rpId: minted.rp_id,
           allowCredentials: [{ type: 'public-key', id: cred.rawId }],
           userVerification: 'required',
           extensions: prfEvalExtension(),
-        } });
+        } }));
         return asrt.getClientExtensionResults();
       });
       const authData = new Uint8Array(cred.response.getAuthenticatorData());
