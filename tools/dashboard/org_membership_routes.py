@@ -236,6 +236,48 @@ async def get_membership(request: Request) -> JSONResponse:
     return JSONResponse(view)
 
 
+async def put_charter(request: Request) -> JSONResponse:
+    """PUT /api/orgs/{slug}/charter — write the org identity Setting.
+
+    The Charter screen's one write (auto-bkoe6): validates the whole
+    payload against ``autonomy.org#2`` (name required; byline capped at
+    60; the revision-2 ``description`` capped at 4000) and upserts the
+    org's own ``autonomy.org`` base row at canonical state, so the
+    charter edit outranks the founding seed everywhere the identity
+    cascade reads. ``GET /api/orgs/{slug}`` already returns the resolved
+    identity; this is the missing half of the round trip.
+    """
+    refusal = api_auth.require_global_api_authority(request)
+    if refusal is not None:
+        return refusal
+    slug = request.path_params.get("slug") or ""
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"error": "body must be JSON"}, status_code=400)
+    if not isinstance(payload, dict):
+        return JSONResponse({"error": "body must be an object"}, status_code=400)
+
+    def _write() -> str:
+        from tools.graph import org_ops, settings_ops
+        if org_ops.get_org(slug) is None:
+            raise LookupError(slug)
+        return settings_ops.upsert_by_key(
+            "autonomy.org", 2, slug, payload, org=slug, state="canonical",
+        )
+
+    try:
+        setting_id = await asyncio.to_thread(_write)
+    except LookupError:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    except Exception as exc:
+        # SchemaValidationError carries the field-level message the form
+        # renders verbatim; anything else is a 400 with its text too.
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse({"ok": True, "setting_id": setting_id})
+
+
 ROUTES = [
     Route("/api/orgs/{slug}/membership", get_membership, methods=["GET"]),
+    Route("/api/orgs/{slug}/charter", put_charter, methods=["PUT"]),
 ]

@@ -151,3 +151,36 @@ class OrgV1(SettingSchema):
                 f"{cls.__name__}: 'type' must be one of {VALID_ORG_TYPES}, "
                 f"got {payload['type']!r}"
             )
+
+
+class OrgV2(OrgV1):
+    """Revision 2 adds the optional ``description`` — the org's long-form
+    charter text, shown on the Charter screen and anywhere a full
+    introduction of the org belongs. Everything else is revision 1
+    unchanged; a revision-1 row is a valid revision-2 row as-is.
+    """
+
+    set_id = ORG_SET_ID
+    schema_revision = 2
+
+    _optional_types = {**OrgV1._optional_types, "description": str}
+
+    _field_metadata = {
+        **OrgV1._field_metadata,
+        "description": {
+            "type": "string",
+            # Long-form, but bounded: 4000 characters is several paragraphs,
+            # and an unbounded field invites pasted documents into a row
+            # every org-list consumer loads.
+            "max_length": 4000,
+            "description": (
+                "Long-form charter text: what the org is, in the org's own "
+                "words. Optional; rendered on the Charter screen."
+            ),
+        },
+    }
+
+    @classmethod
+    def upconvert_from_prev(cls, payload: dict) -> dict:
+        # description is optional; a rev-1 payload is a valid rev-2 payload.
+        return dict(payload)
