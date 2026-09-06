@@ -145,6 +145,14 @@ behavior, different storage backing.
 
 ## 4. Install and start the node
 
+**One command (wraps everything in this section, same behavior):**
+`deploy/quickstart.sh --first-org myorg`, `--fleet-invite "$FLEET_INVITATION"`,
+or `--org-invite "$INVITATION"`; add `--data-root PATH` for host-path data,
+`--direct-advertise ws://<reachable-ip>:9410` on a fleet machine, and
+`--claude-token-file FILE` for a new identity's inference token. It pauses
+for consent before the mutating steps unless `--yes` is given.
+
+
 **Path A — build from source you chose (the default sovereign path):**
 
 ```bash
