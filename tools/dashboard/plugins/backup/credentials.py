@@ -91,5 +91,17 @@ def offsite_env(config: dict | None = None) -> tuple[dict | None, str]:
         value = payload.get("value")
         if not value:
             return None, STATUS_UNSEALED
+        if variable == "RESTIC_PASSWORD":
+            # The row was sealed from the legacy password FILE, whose
+            # trailing newline restic's --password-file reader strips
+            # (first line only) — but the RESTIC_PASSWORD environment
+            # variable is used VERBATIM, so releasing the raw bytes
+            # would fail every repo unlock. Match restic's own file
+            # semantics exactly.
+            value = value.splitlines()[0] if value.splitlines() else ""
+            if not value:
+                return None, STATUS_UNSEALED
+        else:
+            value = value.rstrip("\r\n")
         env[variable] = value
     return env, STATUS_OK

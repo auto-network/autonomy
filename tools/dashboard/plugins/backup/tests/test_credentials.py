@@ -79,6 +79,25 @@ def test_disabled_and_unconfigured_short_circuit(vault):
     assert status == C.STATUS_DISABLED
 
 
+def test_restic_password_matches_password_file_semantics(vault):
+    """The row was sealed from agents/.restic.pw byte-for-byte, trailing
+    newline included; restic's env variable is verbatim while its file
+    reader takes the first line — release must match the file reader."""
+    vault["rows"]["backup.restic-password"] = {
+        "payload": {"value": "the-real-password\n"}}
+    vault["rows"]["backup.b2-key-id"] = {"payload": {"value": "kid\n"}}
+    env, status = C.offsite_env(CONFIG)
+    assert status == C.STATUS_OK
+    assert env["RESTIC_PASSWORD"] == "the-real-password"
+    assert env["B2_KEY_ID"] == "kid"
+
+
+def test_newline_only_password_is_unsealed(vault):
+    vault["rows"]["backup.restic-password"] = {"payload": {"value": "\n"}}
+    env, status = C.offsite_env(CONFIG)
+    assert env is None and status == C.STATUS_UNSEALED
+
+
 def test_config_schema_carries_provider_and_bucket():
     from tools.graph.schemas.registry import validate_payload
     from tools.dashboard.plugins.backup.entrypoints import schemas as S
