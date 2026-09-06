@@ -4,6 +4,12 @@
 #
 # Usage:   tools/graph/backup-offsite.sh [hourly|daily]
 #
+# Data-root contract (auto-iwct5): loose-file paths come from the store
+# manifest via backup_stores.py (AUTONOMY_DATA_ROOT-aware), never from this
+# checkout's own data/. The kind=db snapshot pushes the newest local tier
+# dir and REFUSES one without backup-all.sh's .backup-complete marker — a
+# failed or partial capture is never shipped offsite.
+#
 # Auto-behavior on first run:
 #   - installs rclone + restic via apt (prompts for sudo)
 #   - generates agents/.restic.pw (random 32 bytes, 600 perms)
@@ -17,7 +23,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 ENV_FILE="${REPO_ROOT}/agents/backup.env"
-PW_FILE="${REPO_ROOT}/agents/.restic.pw"
+PYTHON="${REPO_ROOT}/.venv/bin/python3"
+[[ -x "$PYTHON" ]] || PYTHON="$(command -v python3)"
+
+DATA_ROOT="${AUTONOMY_DATA_ROOT:-${REPO_ROOT}/data}"
+BACKUP_ROOT="${AUTONOMY_BACKUP_ROOT:-${DATA_ROOT}/backups}"
 
 TIER="${1:-hourly}"
 case "$TIER" in
@@ -28,6 +38,18 @@ esac
 if [[ ! -f "$ENV_FILE" ]]; then
     echo "offsite: no $ENV_FILE — skipping (run tools/graph/backup-setup.sh to enable)"
     exit 0
+fi
+
+# ── The local capture to ship: newest tier dir, marker-gated ──────────
+LATEST_TIER_DIR="$(ls -1dt "${BACKUP_ROOT}/${TIER}"/*/ 2>/dev/null | head -1 || true)"
+if [[ -z "${LATEST_TIER_DIR}" ]]; then
+    echo "offsite: no local ${TIER} backup under ${BACKUP_ROOT} — run backup-all.sh ${TIER} first" >&2
+    exit 1
+fi
+if [[ ! -f "${LATEST_TIER_DIR%/}/.backup-complete" ]]; then
+    echo "offsite: ${LATEST_TIER_DIR%/} has no .backup-complete marker" \
+         "(failed, partial, or pre-contract capture) — refusing to push it" >&2
+    exit 1
 fi
 
 # Install deps if missing (one-time)
@@ -50,38 +72,30 @@ fi
 STAMP="$(date -Iseconds)"
 HOST="$(hostname -s)"
 
-LATEST_TIER_DIR="$(ls -1dt "${REPO_ROOT}/data/backups/${TIER}"/*/ 2>/dev/null | head -1)"
-if [[ -z "${LATEST_TIER_DIR}" ]]; then
-    echo "offsite: no local ${TIER} backup — run backup-all.sh ${TIER} first" >&2
-    exit 1
-fi
-
 echo "offsite: snapshot start ${STAMP} tier=${TIER} provider=${BACKUP_PROVIDER}"
 
-# ── DB dumps ──────────────────────────────────────────────────────────
+# ── DB dumps + key material (the marker-verified tier dir) ────────────
 restic backup \
     --quiet \
     --tag "tier=${TIER}" --tag "kind=db" \
     --host "${HOST}" \
     "${LATEST_TIER_DIR%/}"
 
-# ── Loose-file repo data ──────────────────────────────────────────────
-restic backup \
-    --quiet \
-    --tag "tier=${TIER}" --tag "kind=data" \
-    --host "${HOST}" \
-    --exclude "*.log" --exclude "*.pid" --exclude "*-wal" --exclude "*-shm" \
-    --exclude "data/backups" \
-    "${REPO_ROOT}/data/agent-runs" \
-    "${REPO_ROOT}/data/attachments" \
-    "${REPO_ROOT}/data/uploads" \
-    "${REPO_ROOT}/data/experiments" \
-    "${REPO_ROOT}/data/chatgpt" \
-    "${REPO_ROOT}/data/claude" \
-    "${REPO_ROOT}/data/tls.crt" \
-    "${REPO_ROOT}/data/tls.key" 2>/dev/null || true
+# ── Loose-file data dirs (manifest verify-dirs + legacy extras) ───────
+mapfile -t DATA_PATHS < <("$PYTHON" "${SCRIPT_DIR}/backup_stores.py" offsite-data)
+if [[ ${#DATA_PATHS[@]} -gt 0 ]]; then
+    restic backup \
+        --quiet \
+        --tag "tier=${TIER}" --tag "kind=data" \
+        --host "${HOST}" \
+        --exclude "*.log" --exclude "*.pid" --exclude "*-wal" --exclude "*-shm" \
+        --exclude "${BACKUP_ROOT}" \
+        "${DATA_PATHS[@]}"
+else
+    echo "offsite: WARN — no loose-file data dirs found under ${DATA_ROOT}" >&2
+fi
 
-# ── Host Claude Code state ────────────────────────────────────────────
+# ── Host Claude Code state (host-only, best-effort) ───────────────────
 restic backup \
     --quiet \
     --tag "tier=${TIER}" --tag "kind=claude" \
@@ -118,7 +132,7 @@ crontab -l 2>/dev/null | restic backup \
 
 # ── Retention ─────────────────────────────────────────────────────────
 # Group by tags, NOT the default host,paths. The db snapshot's path carries a
-# per-run timestamp (data/backups/<tier>/<stamp>), so default grouping puts
+# per-run timestamp (<backup root>/<tier>/<stamp>), so default grouping puts
 # every db snapshot in its own group of one and the keep-policy never thins
 # them. Grouping by host+tags (tier=,kind=) lets all db snapshots share a
 # group so retention actually applies. See graph backup-retention pitfall.
