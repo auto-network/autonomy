@@ -285,14 +285,91 @@ export async function ensurePersonalRootVault({
   return { ready: true, created: true, reason: null };
 }
 
+//: Key under which a failed wake leaves its operator-legible message for the
+//: shell (identity-indicator) to render. Cleared by the next successful wake.
+export const WAKE_FAILED_STORAGE_KEY = 'autonomy.vault.wake-failed';
+
+const WAKE_REASON_PHRASES = [
+  ['anchor-inventory', 'the vault anchor inventory could not be read'],
+  ['personal-root-public-key', 'the personal identity record has no root public key'],
+  ['personal-root', 'the personal identity record could not be read'],
+  ['anchor-race', 'the vault anchor inventory changed mid-ceremony'],
+  ['anchor-enroll', 'the root anchor could not be enrolled'],
+  ['root-class', 'the root policy class could not be created'],
+  ['ledger-no-genesis', 'the personal ledger database is present but holds no'
+    + ' genesis — the wrong store may be resolving, or the data is damaged;'
+    + ' do NOT re-found'],
+  ['not-founded', 'this identity’s personal ledger is not founded, so nothing can be delegated'],
+  ['heads', 'the personal ledger heads could not be read'],
+  ['delegate', 'the storage delegate grant was refused by the ledger'],
+  ['vault-keys', 'the dashboard refused the vault key material'],
+];
+
+/** One operator-legible sentence for a wake failure reason slug. */
+export function describeWakeFailure(reason) {
+  const slug = String(reason || 'unknown');
+  const match = WAKE_REASON_PHRASES.find(([prefix]) => slug.startsWith(prefix));
+  const phrase = match ? match[1] : 'an unexpected step failed';
+  const status = /-(\d{3})$/.exec(slug);
+  return 'The vault did not come up: ' + phrase
+    + (status ? ' (HTTP ' + status[1] + ')' : '')
+    + '. Secrets stay locked until a sign-in completes this step'
+    + ' [' + slug + '].';
+}
+
+/**
+ * Make a wake outcome VISIBLE. A failed vault wake used to vanish: callers
+ * ignored the returned reason, nothing logged, and the operator saw a
+ * completed sign-in with a dead vault (2026-09-06 incident, auto-uhdxm).
+ * Every failure now lands in three places — the console, the capped
+ * client-error log, and a storage flag the shell renders — and a later
+ * successful wake clears the flag.
+ */
+function reportWakeOutcome(result, fetchImpl) {
+  const storage = (typeof sessionStorage !== 'undefined') ? sessionStorage : null;
+  try {
+    if (result && result.ready) {
+      if (storage) storage.removeItem(WAKE_FAILED_STORAGE_KEY);
+      return;
+    }
+    const reason = (result && result.reason) || 'unknown';
+    const message = describeWakeFailure(reason);
+    if (typeof console !== 'undefined' && console.error) {
+      console.error('vault wake failed:', message);
+    }
+    if (storage) storage.setItem(WAKE_FAILED_STORAGE_KEY, message);
+    Promise.resolve(fetchImpl('/api/identity/ceremony-error', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ceremony: 'vault-wake',
+        action: reason,
+        name: 'VaultWakeFailure',
+        message,
+        stack: '',
+        context: {},
+      }),
+    })).catch(() => {});
+  } catch (e) { /* diagnostics must never break the unlock */ }
+}
+
 /**
  * Bring the vault up for this unlock. Call it AFTER the session exists.
  *
  * Returns `{ ready, reason }`. It never throws for an expected cold-start
  * condition: a vault that failed to wake must leave the dashboard usable and
- * say so, not break the sign-in that just succeeded.
+ * say so, not break the sign-in that just succeeded. "Say so" is enforced
+ * centrally here: every outcome passes through reportWakeOutcome, so no
+ * caller can silently drop a failure again.
  */
-export async function wakeVault({
+export async function wakeVault(options) {
+  const result = await _wakeVaultInner(options);
+  reportWakeOutcome(result, options.fetchImpl || fetch);
+  return result;
+}
+
+async function _wakeVaultInner({
   personalRootSeed, generationKeys = {}, fetchImpl = fetch, now = Date.now(),
 }) {
   const personalVault = await ensurePersonalRootVault({
@@ -305,11 +382,16 @@ export async function wakeVault({
     { headers: personalHeaders(), credentials: 'same-origin' },
   );
   if (heads.status === 409) {
-    // Not founded. Founding is a once-ever ceremony and deliberately NOT done
-    // here: it needs its own confirmation, and doing it silently on a failed
-    // read is how an identity acquires a second genesis.
-    return { ready: false, reason: 'not-founded' };
+    // 409 is NOT "never founded" — the server sends it when the ledger
+    // database EXISTS but carries no genesis. On a founded identity that is
+    // an alarm (wrong store resolved, or damaged data), and collapsing it
+    // into "not founded" is the signal everyone missed in the 2026-09-06
+    // incident. Founding stays a once-ever explicit ceremony either way:
+    // doing it silently on a failed read is how an identity acquires a
+    // second genesis.
+    return { ready: false, reason: 'ledger-no-genesis' };
   }
+  if (heads.status === 404) return { ready: false, reason: 'not-founded' };
   if (!heads.ok) return { ready: false, reason: `heads-${heads.status}` };
   const { genesis_id: genesisId, heads: headIds } = await body(heads);
 
