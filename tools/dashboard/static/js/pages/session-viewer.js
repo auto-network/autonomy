@@ -395,10 +395,25 @@
       // Send the live voice buffer to this session. Used by the dictation
       // tile's Send on composer-less surfaces; the capsule's own Send runs the
       // same store method.
-      _sendDictation() {
+      async _sendDictation() {
         var voice = this.getVoiceStore();
-        if (voice && typeof voice.sendBuffer === 'function') voice.sendBuffer();
+        if (!voice || typeof voice.sendBuffer !== 'function') return false;
+        // Delivery and bound can disagree (retargetDelivery moves one without
+        // the other). The tile renders off either, but sendBuffer reads ONLY
+        // deliverySessionId and returns false with an error that surfaces in
+        // the capsule sheet — invisible on a board. Point delivery at the card
+        // whose Send was pressed, then send.
+        var me = this._tmuxSession || '';
+        if (me && voice.deliverySessionId !== me && typeof voice.retargetDelivery === 'function') {
+          voice.retargetDelivery(me);
+        }
+        this.sendTileError = '';
+        var ok = false;
+        try { ok = await voice.sendBuffer(); } catch (e) { ok = false; }
+        if (!ok) this.sendTileError = voice.sheetError || 'Send failed.';
+        return ok;
       },
+      sendTileError: '',
 
       _syncTilePresent() {
         if (!this._pageSignals) return;
@@ -1641,7 +1656,15 @@
       // signal (class + dataset sid). Guarded so we only clear the flag when
       // it's ours, never stomping another mounted viewer's signal.
       _syncComposerSignal() {
-        if (!this._pageSignals) return;
+        // The shell mirrors the live buffer into the delivery session's outbox
+        // so the capturing tile renders. That is NOT a page-global write, so it
+        // runs on every surface — gating it with the body signals below stopped
+        // board cards from ever staging a capture tile.
+        var shell0 = window.Autonomy && window.Autonomy.voice && window.Autonomy.voice.shell;
+        if (!this._pageSignals) {
+          if (shell0 && typeof shell0.syncViewerOutboxCapture === 'function') shell0.syncViewerOutboxCapture();
+          return;
+        }
         if (typeof document === 'undefined' || !document.body) return;
         var sid = this._tmuxSession || '';
         if (this._composerActive) {

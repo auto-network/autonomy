@@ -355,9 +355,17 @@
         this.persist();
         var self = this;
         this.$nextTick(function () {
-          var el = self.$refs.board.querySelector('.sb-card[data-session="' + (window.CSS && CSS.escape ? CSS.escape(name) : name) + '"]');
+          var board = self.$refs.board;
+          var el = board.querySelector('.sb-card[data-session="' + (window.CSS && CSS.escape ? CSS.escape(name) : name) + '"]');
           if (!el) return;
-          el.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
+          // scrollIntoView walks up and scrolls ANY scrollable ancestor, which
+          // dragged the page shell sideways under the nav rail and left the
+          // first column clipped once the operator scrolled back. Move only the
+          // board's own horizontal scroll, clamped to its real range.
+          var r = el.getBoundingClientRect(), br = board.getBoundingClientRect();
+          var want = board.scrollLeft + (r.left + r.width / 2) - (br.left + br.width / 2);
+          var max = Math.max(0, board.scrollWidth - board.clientWidth);
+          board.scrollTo({ left: Math.max(0, Math.min(want, max)), behavior: 'smooth' });
           self.bindDictation({ target: el }, name);
         });
         return true;
