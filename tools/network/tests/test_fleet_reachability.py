@@ -155,6 +155,40 @@ def test_reachability_cache_announces_discovers_and_throttles(env):
     assert cache.last_announce is not None
 
 
+def test_reachability_cache_logs_state_changes_once_not_per_tick(env, caplog):
+    """The logs alone must say whether discovery is inactive, announcing,
+    and what it resolved -- once per change, never per 45s tick."""
+    import logging
+    client, root = env
+    a_key, a_cert = _machine(root, "A")
+    b_key, b_cert = _machine(root, "B")
+    fr.announce("http://testserver", ORG, b_key, b_cert, ["ws://b:8443"],
+                ts=NOW, client=client)
+    cred = {"key": None, "cert": None}
+    t = [1000.0]
+    cache = fr.ReachabilityCache(
+        binding_getter=lambda: {"registry_url": "http://testserver", "org_uuid": ORG},
+        machine_key_getter=lambda: cred["key"],
+        cert_getter=lambda: cred["cert"],
+        roster_getter=lambda: [a_key.public_hex, b_key.public_hex],
+        advertise_addrs=["ws://a:8443"], interval=45.0, ts=NOW,
+        clock=lambda: t[0], client=client)
+    with caplog.at_level(logging.INFO, logger="tools.network.fleet_reachability"):
+        cache.peers(); t[0] += 50; cache.peers(); t[0] += 50; cache.peers()
+        inactive = [r for r in caplog.records if "inactive" in r.getMessage()]
+        assert len(inactive) == 1, [r.getMessage() for r in caplog.records]
+        assert "reachability cert" in inactive[0].getMessage()
+
+        cred.update(key=a_key, cert=a_cert)
+        t[0] += 50; cache.peers(); t[0] += 50; cache.peers()
+        messages = [r.getMessage() for r in caplog.records]
+        assert sum("reachability active" in m for m in messages) == 1
+        assert sum("announced addrs=['ws://a:8443']" in m for m in messages) == 1
+        resolved = [m for m in messages if "resolved 1 of 1 roster peer" in m]
+        assert len(resolved) == 1 and b_key.public_hex[:12] in resolved[0]
+        assert "addrs=['ws://b:8443']" in resolved[0]
+
+
 def test_reachability_cache_reads_a_callable_advertise_list_each_refresh(env):
     """An operator who sets the advertised URLs after unlock is announced on
     the next refresh -- the runtime is not re-armed for it."""
