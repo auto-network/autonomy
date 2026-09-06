@@ -50,6 +50,18 @@
     return n + 'B';
   }
   function orgColor(row) { return (row && row.org && row.org.color) || '#334155'; }
+  // git log dates arrive as "YYYY-MM-DD HH:MM" in the host's local time.
+  function _commitTime(text) {
+    if (!text) return 0;
+    var t = Date.parse(String(text).replace(' ', 'T'));
+    return isNaN(t) ? 0 : t;
+  }
+  function _ago(ms) {
+    var m = Math.round(ms / 60000);
+    if (m < 1) return 'just now';
+    if (m < 60) return m + 'm ago';
+    return Math.round(m / 60) + 'h ago';
+  }
   function helper(name) {
     var h = window.sessionCardHelpers;
     return function () { return h && h[name] ? h[name].apply(h, arguments) : ''; };
@@ -124,8 +136,9 @@
       rows: [], columns: [], presentation: 'transcript',
       cardPresentations: {}, cardHeights: {}, resources: {},
       boundId: '', dragId: '', dragging: false, movingCol: '', viewportTick: 0,
-      organize: { state: 'idle', status: '', runId: '' },
+      organize: { state: 'idle', status: '', runId: '' }, commitTick: 0,
       menuFor: '', menuActions: [],
+      commits: {}, workspaces: {},
       _dragSource: null, _provisional: null, _frame: null, _drag: null,
       _resourceTipOpen: null, _diskRefreshing: {}, resumeError: {}, resuming: {}, resumed: {},
       _workspaceStatusByTmux: {},
@@ -152,6 +165,13 @@
         this._resourceHandler = function (d) { if (d && typeof d === 'object') self._applyResourceRows(d.sessions || d); };
         if (window.registerHandler) window.registerHandler('resources', this._resourceHandler);
         this._hydrateResources();
+        // Commits land on the card that made them: /api/worktrees carries each
+        // branch's session_name and its commits, and the collector re-broadcasts
+        // on the 'worktrees' topic whenever a tree changes.
+        this._worktreeHandler = function () { self._hydrateWorktrees(); };
+        if (window.registerHandler) window.registerHandler('worktrees', this._worktreeHandler);
+        this._hydrateWorktrees();
+        this._commitTimer = setInterval(function () { self.commitTick++; }, 60000);
         var voice = Alpine.store('voice');
         if (voice) this.boundId = voice.boundSessionId || '';
         this.$watch('columns', function () { self.persist(); }, { deep: true });
@@ -179,6 +199,8 @@
         window.removeEventListener('sessions:registry-changed', this._onStoreChanged);
         window.removeEventListener('resize', this._onResize);
         if (window.unregisterHandler && this._resourceHandler) window.unregisterHandler('resources', this._resourceHandler);
+        if (window.unregisterHandler && this._worktreeHandler) window.unregisterHandler('worktrees', this._worktreeHandler);
+        clearInterval(this._commitTimer);
       },
       refresh(saved) {
         if (!this._ready) return;
@@ -720,18 +742,94 @@
         }
         this.resources = next;
       },
+      // ── commits: what this session landed, on its own card ──
+      async _hydrateWorktrees() {
+        try {
+          var res = await fetch('/api/worktrees', { credentials: 'same-origin' });
+          if (!res.ok) return;
+          var data = await res.json();
+          var rows = Array.isArray(data) ? data : (data.worktrees || data.rows || []);
+          var commits = {}, workspaces = {};
+          rows.forEach(function (r) {
+            var name = r.session_name; if (!name) return;
+            workspaces[name] = { hasChanges: !!(r.is_dirty || r.dirty_count > 0 || r.commits_ahead > 0),
+                                 dirty: r.dirty_count || 0, ahead: r.commits_ahead || 0 };
+            var list = r.commits || []; if (!list.length) return;
+            var newest = null, newestAt = 0;
+            list.forEach(function (c) {
+              var at = _commitTime(c.date);
+              if (at && at > newestAt) { newestAt = at; newest = c; }
+            });
+            if (!newest) return;
+            var prev = commits[name];
+            if (prev && prev.at >= newestAt) return;
+            var stats = newest.stats || {};
+            commits[name] = {
+              at: newestAt, sha: newest.short_sha || (newest.sha || '').slice(0, 9),
+              subject: newest.subject || '', branch: r.branch || '',
+              files: (newest.files || []).length || stats.files || 0,
+              additions: stats.additions || (newest.files || []).reduce(function (n, f) { return n + (f.additions || 0); }, 0),
+              deletions: stats.deletions || (newest.files || []).reduce(function (n, f) { return n + (f.deletions || 0); }, 0),
+            };
+          });
+          this.commits = commits;
+          this.workspaces = workspaces;
+        } catch (e) { /* the strip is decoration; never break the board over it */ }
+      },
+      // The card's most recent commit, only while it is fresh (one hour).
+      commitFor(id) {
+        var t = this.commitTick;   // reactive: re-evaluates as the hour ages out
+        var c = this.commits[id];
+        if (!c) return null;
+        var age = Date.now() - c.at;
+        if (age < 0 || age > 3600000) return null;
+        return Object.assign({}, c, { ago: _ago(age) });
+      },
       res(id) { return this.resources[id] || null; },
       colCpu(col) { var t = 0, n = 0, self = this; col.members.forEach(function (m) { var r = self.res(m); if (r && r.cpu_pct != null) { t += r.cpu_pct; n++; } }); return n ? t.toFixed(t >= 10 ? 0 : 1) + '%' : '—'; },
       colMem(col) { var t = 0, n = 0, self = this; col.members.forEach(function (m) { var r = self.res(m); if (r && r.mem_bytes) { t += r.mem_bytes; n++; } }); return n ? fmtBytes(t) : '—'; },
       colDisk(col) { var t = 0, n = 0, self = this; col.members.forEach(function (m) { var r = self.res(m); if (r && r.disk && r.disk.total) { t += r.disk.total; n++; } }); return n ? fmtBytes(t) : '—'; },
-      colSpark(col) {
+      // A column's summed CPU over time, as points.
+      _colSeries(col) {
         var self = this, series = [];
         col.members.forEach(function (m) { var r = self.res(m); if (r && r.history && r.history.length) series.push(r.history); });
-        if (!series.length) return '0,19 90,19';
+        if (!series.length) return [];
         var len = Math.max.apply(null, series.map(function (h) { return h.length; }));
-        var pts = [], max = 1;
-        for (var i = 0; i < len; i++) { var sum = 0; series.forEach(function (h) { var p = h[h.length - len + i]; if (p) sum += (p[1] || 0); }); pts.push(sum); if (sum > max) max = sum; }
-        return pts.map(function (v, i) { return (i * (90 / Math.max(1, len - 1))).toFixed(1) + ',' + (19 - (v / max) * 17).toFixed(1); }).join(' ');
+        var pts = [];
+        for (var i = 0; i < len; i++) {
+          var sum = 0;
+          series.forEach(function (h) { var p = h[h.length - len + i]; if (p) sum += (p[1] || 0); });
+          pts.push(sum);
+        }
+        return pts;
+      },
+      // ONE scale for every sparkline on the board. Scaling each column to its
+      // own peak made a lane idling at 1% look exactly as busy as a lane at
+      // 437%; the shapes are only comparable against a shared ceiling.
+      fleetCpuMax() {
+        var self = this, max = 0;
+        this.columns.forEach(function (c) {
+          self._colSeries(c).forEach(function (v) { if (v > max) max = v; });
+        });
+        return max;
+      },
+      colSpark(col) {
+        var pts = this._colSeries(col);
+        if (!pts.length) return '0,19 90,19';
+        var max = this.fleetCpuMax();
+        if (!(max > 0)) return '0,19 90,19';
+        var len = pts.length;
+        return pts.map(function (v, i) {
+          return (i * (90 / Math.max(1, len - 1))).toFixed(1) + ',' + (19 - Math.min(1, v / max) * 17).toFixed(1);
+        }).join(' ');
+      },
+      // The shared ceiling, named on the busiest column so the scale is legible.
+      colSparkTitle(col) {
+        var max = this.fleetCpuMax();
+        if (!(max > 0)) return 'cpu';
+        var mine = this._colSeries(col);
+        var peak = mine.length ? Math.max.apply(null, mine) : 0;
+        return 'peak ' + peak.toFixed(peak >= 10 ? 0 : 1) + '% of ' + max.toFixed(max >= 10 ? 0 : 1) + '% fleet max';
       },
       attnClass(id) {
         var store = Alpine.store('sessions')[id]; var a = (store && (store.attention || store.activityState)) || 'idle';
@@ -788,8 +886,18 @@
       diskStr(s) { var r = this.resourceFor(s); return (r && r.disk && r.disk.total != null) ? fmtBytes(r.disk.total) : '—'; },
       diskDetail(s) { var r = this.resourceFor(s); return (r && r.disk && r.disk.components) ? Object.keys(r.disk.components).map(function (k) { return [k, fmtBytes(r.disk.components[k])]; }) : []; },
       sparkSvg() { return ''; },
-      hasWorkspaceChanges() { return false; },
-      workspaceStatusTooltip() { return ''; },
+      hasWorkspaceChanges(s) {
+        var w = this.workspaces[(s && (s.tmux_session || s.id)) || ''];
+        return !!(w && w.hasChanges);
+      },
+      workspaceStatusTooltip(s) {
+        var w = this.workspaces[(s && (s.tmux_session || s.id)) || ''];
+        if (!w || !w.hasChanges) return '';
+        var bits = [];
+        if (w.ahead) bits.push(w.ahead + ' commit' + (w.ahead === 1 ? '' : 's') + ' to review');
+        if (w.dirty) bits.push(w.dirty + ' uncommitted file' + (w.dirty === 1 ? '' : 's'));
+        return bits.join(' · ');
+      },
       whenLine() { return ''; },
       refreshDisk() {},
       resumeSession() {},
