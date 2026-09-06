@@ -7641,7 +7641,7 @@ def _session_current_turn(jsonl_path: str | None) -> int | None:
 
 
 async def api_session_provenance_stamp(request):
-    """GET /api/session/provenance-stamp — mint this session's commit locator.
+    """GET /api/provenance-stamp — mint this session's commit locator.
 
     The caller's session is derived from the bearer SESSION_TOKEN (never a
     URL or body — identity is stamped at the API boundary). The locator is
@@ -20915,8 +20915,12 @@ routes = [
     Route("/api/session/{tmux_name}/nag", api_session_nag, methods=["PUT"]),
     Route("/api/session/{tmux_name}/nag", api_session_nag_delete, methods=["DELETE"]),
     Route("/api/session/{tmux_name}/dispatch-nag", api_session_dispatch_nag, methods=["PUT"]),
+    # NOT under /api/session/ on purpose: the session comes from the bearer
+    # token, not the path, and a single-segment /api/session/<x> would be
+    # shadowed by the /api/session/{tmux_name} param route (matched first,
+    # 404s in the session lookup).
     Route(
-        "/api/session/provenance-stamp",
+        "/api/provenance-stamp",
         api_session_provenance_stamp,
         methods=["GET"],
     ),

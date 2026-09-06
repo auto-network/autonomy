@@ -724,7 +724,7 @@ fi
 stamp=""
 if [ -n "${{CROSSTALK_TOKEN:-}}" ]; then
   stamp="$(curl -ks -m 5 -H "Authorization: Bearer ${{CROSSTALK_TOKEN}}" \\
-    "${{GRAPH_API:-https://localhost:8080}}/api/session/provenance-stamp?format=locator" \\
+    "${{GRAPH_API:-https://localhost:8080}}/api/provenance-stamp?format=locator" \\
     2>/dev/null | tr -d '[:space:]' || true)"
 fi
 case "$stamp" in autonomy://*) ;; *) stamp="autonomy://-/${{session}}/-" ;; esac
