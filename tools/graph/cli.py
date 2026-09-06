@@ -2332,6 +2332,134 @@ def cmd_crosstalk_send(args):
         sys.exit(1)
 
 
+# ── Session groups (Session Board columns) ───────────────────────────────
+
+def _dashboard_json(method: str, path: str, payload: dict | None = None):
+    """Authenticated JSON call to the dashboard; prints the API's error sentence on failure."""
+    import ssl
+    import urllib.error
+    import urllib.request
+
+    api_base = os.environ.get("GRAPH_API", "https://localhost:8080")
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    req = urllib.request.Request(
+        f"{api_base}{path}",
+        data=json.dumps(payload).encode() if payload is not None else None,
+        method=method,
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {_resolve_crosstalk_token()}"},
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=15, context=ctx)
+        return json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        try:
+            msg = json.loads(e.read()).get("error", str(e))
+        except Exception:
+            msg = str(e)
+        print(f"  \u2717 {msg}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(f"  \u2717 Cannot reach dashboard: {e.reason}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _group_slugify(text: str) -> str:
+    import re as _re
+    return _re.sub(r"[^a-z0-9]+", "-", (text or "").strip().lower()).strip("-")[:40]
+
+
+def cmd_group_create(args):
+    payload = {"name": " ".join(args.name)}
+    if args.short:
+        payload["slug"] = _group_slugify(args.short)
+        payload["short"] = args.short
+    if args.color:
+        payload["color"] = args.color
+    if args.purpose:
+        payload["purpose"] = args.purpose
+    if args.why:
+        payload["why"] = args.why
+    if args.ref:
+        payload["refs"] = list(args.ref)
+    if args.join:
+        payload["members"] = [_get_session_name()]
+    out = _dashboard_json("POST", "/api/groups", payload)
+    g = out.get("group", {})
+    print(f"  \u2713 Group {g.get('slug')}: {g.get('name')}" + (f" \u2014 joined as {_get_session_name()}" if args.join else ""))
+    print(f"    join it:  graph group join {g.get('slug')}   \u00b7  message it:  graph crosstalk send group:{g.get('slug')} \"...\"")
+
+
+def cmd_group_join(args):
+    session = args.session or _get_session_name()
+    payload = {"group": args.slug, "tab": args.tab or "", "joined_by": "self" if not args.session else _get_session_name()}
+    _dashboard_json("PUT", f"/api/session/{session}/group", payload)
+    print(f"  \u2713 {session} joined group {args.slug}" + (f" as \"{args.tab}\"" if args.tab else ""))
+
+
+def cmd_group_leave(args):
+    session = args.session or _get_session_name()
+    _dashboard_json("PUT", f"/api/session/{session}/group", {"group": None})
+    print(f"  \u2713 {session} left its group")
+
+
+def cmd_group_list(args):
+    out = _dashboard_json("GET", "/api/groups")
+    groups = out.get("groups", [])
+    if not groups:
+        print("  (no session groups)")
+        return
+    for g in groups:
+        members = g.get("members", [])
+        print(f"  {g['slug']:<18} {g['name']:<36} {len(members)} member(s)")
+        if g.get("why"):
+            print(f"  {'':<18} \u2726 {g['why']}")
+
+
+def cmd_group_show(args):
+    out = _dashboard_json("GET", f"/api/groups/{args.slug}")
+    g = out.get("group", {})
+    print(f"  {g.get('slug')}: {g.get('name')}")
+    for k in ("short", "color", "purpose", "why", "coordinator_session"):
+        if g.get(k):
+            print(f"    {k:<20} {g[k]}")
+    if g.get("refs"):
+        print(f"    {'refs':<20} {', '.join(g['refs'])}")
+    members = g.get("members", [])
+    if not members:
+        print("    members             (none live)")
+        return
+    # Attention and titles from the live roster, so the lane reads at a glance.
+    roster = {s.get("session_id") or s.get("tmux_session"): s for s in _dashboard_json("GET", "/api/dao/active_sessions") or []}
+    for m in members:
+        s = roster.get(m, {})
+        attn = s.get("attention") or s.get("activity_state") or "?"
+        tab = s.get("group_tab") or ""
+        label = (s.get("label") or "")[:60]
+        print(f"    {m:<24} {attn:<12} {('[' + tab + '] ') if tab else ''}{label}")
+
+
+def cmd_group_rename(args):
+    out = _dashboard_json("PUT", f"/api/groups/{args.slug}", {"name": " ".join(args.name)})
+    print(f"  \u2713 Group {args.slug} is now \"{out.get('group', {}).get('name')}\" (members notified)")
+
+
+def cmd_group_dissolve(args):
+    out = _dashboard_json("DELETE", f"/api/groups/{args.slug}")
+    print(f"  \u2713 Group {args.slug} dissolved; {out.get('released', 0)} session(s) ungrouped")
+
+
+def cmd_group_invite(args):
+    g = _dashboard_json("GET", f"/api/groups/{args.slug}").get("group", {})
+    text = (f"You are invited to session group \"{g.get('name')}\" ({args.slug})"
+            + (f": {g.get('purpose')}" if g.get("purpose") else "")
+            + f". Accept with: graph group join {args.slug} --tab <short-name>")
+    _dashboard_json("POST", "/api/crosstalk/send", {"target": args.target, "message": text})
+    print(f"  \u2713 Invited {args.target} to {args.slug}")
+
+
 def _session_put(endpoint_suffix: str, payload: dict):
     """PUT JSON to /api/session/{name}/{suffix}. Used by set-label, set-topics, etc."""
     import ssl
@@ -5205,6 +5333,8 @@ def cmd_crosstalk(args):
         query = {"limit": args.limit}
         if args.session:
             query["session"] = args.session
+        if getattr(args, "group", None):
+            query["group"] = args.group
         if args.since:
             query["since"] = args.since
         url = f"{api_base}/api/crosstalk/log?{urllib.parse.urlencode(query)}"
@@ -5831,6 +5961,32 @@ def main():
     p.set_defaults(func=cmd_set_topics)
 
     # set-role
+    # group — session groups, the Session Board's columns (auto-q9y6e.2)
+    p_g = sub.add_parser("group", help="Session groups: the lanes on /sessions/board")
+    p_g.set_defaults(func=lambda _a: p_g.print_help())
+    g_sub = p_g.add_subparsers(dest="group_subcmd")
+    pg = g_sub.add_parser("create", help="Create a group (slug derives from --short or the name)")
+    pg.add_argument("name", nargs="+", help="Group title, in the operator's words")
+    pg.add_argument("--short", help="Short name (\u226412 chars); also the slug")
+    pg.add_argument("--color", help="Hex color for the column swatch")
+    pg.add_argument("--purpose", help="One sentence: what the lane delivers")
+    pg.add_argument("--why", help="One sentence of rationale (shown under the column title)")
+    pg.add_argument("--ref", action="append", help="Reference such as bead:auto-xxxx or mission:<uuid> (repeatable)")
+    pg.add_argument("--join", action="store_true", help="Join the new group as this session")
+    pg.set_defaults(func=cmd_group_create)
+    pg = g_sub.add_parser("join", help="Join a group (this session, or --session <name>)")
+    pg.add_argument("slug"); pg.add_argument("--tab", help="This session's short name inside the group (\u226412 chars)")
+    pg.add_argument("--session", help="Place another session instead of this one")
+    pg.set_defaults(func=cmd_group_join)
+    pg = g_sub.add_parser("leave", help="Leave the current group")
+    pg.add_argument("--session", help="Remove another session instead of this one")
+    pg.set_defaults(func=cmd_group_leave)
+    pg = g_sub.add_parser("list", help="List groups with member counts"); pg.set_defaults(func=cmd_group_list)
+    pg = g_sub.add_parser("show", help="A group's members with attention and titles"); pg.add_argument("slug"); pg.set_defaults(func=cmd_group_show)
+    pg = g_sub.add_parser("rename", help="Rename a group (members are told)"); pg.add_argument("slug"); pg.add_argument("name", nargs="+"); pg.set_defaults(func=cmd_group_rename)
+    pg = g_sub.add_parser("dissolve", help="Dissolve a group; members become ungrouped"); pg.add_argument("slug"); pg.set_defaults(func=cmd_group_dissolve)
+    pg = g_sub.add_parser("invite", help="Invite a session to a group over CrossTalk"); pg.add_argument("slug"); pg.add_argument("target"); pg.set_defaults(func=cmd_group_invite)
+
     p = sub.add_parser("set-role", help="Set the session role")
     p.add_argument("role", nargs="+", help="Role name (joined if multiple words)")
     p.set_defaults(func=cmd_set_role)
@@ -6423,13 +6579,14 @@ def main():
     # crosstalk — subcommands: send, broadcast, log
     p_ct = sub.add_parser("crosstalk", help="CrossTalk messaging between sessions")
     p_ct.add_argument("--session", help="Filter by sender or target session")
+    p_ct.add_argument("--group", help="A session group's channel (messages sent to group:<slug>)")
     p_ct.add_argument("--since", help="Duration filter, e.g. 1h, 30m, 2d")
     p_ct.add_argument("--limit", type=int, default=30, help="Max messages (default: 30)")
     p_ct.set_defaults(func=cmd_crosstalk)
     ct_sub = p_ct.add_subparsers(dest="ct_subcmd")
 
     p_ct_send = ct_sub.add_parser("send", help="Send message to a session")
-    p_ct_send.add_argument("target", help="Target session name")
+    p_ct_send.add_argument("target", help="Target session name, or group:<slug> to reach a whole session group")
     p_ct_send.add_argument("message", nargs="*", help="Message text")
     p_ct_send.add_argument("-c", dest="content_stdin", nargs="?", const="-", default=None,
                            help="Read message from stdin")
@@ -6445,6 +6602,7 @@ def main():
 
     p_ct_log = ct_sub.add_parser("log", help="View message log")
     p_ct_log.add_argument("--session", help="Filter by sender or target session")
+    p_ct_log.add_argument("--group", help="A session group's channel (messages sent to group:<slug>)")
     p_ct_log.add_argument("--since", help="Duration filter, e.g. 1h, 30m, 2d")
     p_ct_log.add_argument("--limit", type=int, default=30, help="Max messages (default: 30)")
     p_ct_log.set_defaults(func=cmd_crosstalk)

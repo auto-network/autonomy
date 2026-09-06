@@ -15,17 +15,24 @@
  * standard voice path (window.Autonomy.voice.ui.onClick) and that the org
  * glyph's actions go through the shared window.actionSheet.
  *
- * State ownership. Membership (which session sits in which column) is kept
- * per browser under localStorage `sessions.board.layout` until the shared
- * session-group record lands (bead auto-q9y6e.2), when columns derive from
- * the store's groupId instead. Layout (widths, heights, order) stays local.
+ * State ownership. Membership (which session sits in which column) is the
+ * shared session-group record: the store carries groupId / groupTab / group
+ * from the registry broadcast, and the board derives its columns from them
+ * on every registry event. Operator drags and ⤢ write back through
+ * PUT /api/session/{name}/group and POST/PUT /api/groups — the same records
+ * agents write with `graph group`. Layout (column order and width, card
+ * height, presentation) is the operator's dashboard.session.board.layout
+ * Settings member, read and written through /api/session-board/layout, so
+ * the same board appears on every desktop. Nothing durable lives in the
+ * browser.
  *
  * Depends on: session-store.js (Alpine.store('sessions'), sessionStoreReady,
  * getSessionStore), sessions.js (window.sessionCardHelpers), lifecycle.js,
  * voice-ui.js, events.js (registerHandler for the 'resources' topic).
  */
 (function () {
-  var LAYOUT_KEY = 'sessions.board.layout';
+  var LAYOUT_URL = '/api/session-board/layout';
+  var GROUP_SET_ID = 'dashboard.session.group', LAYOUT_SET_ID = 'dashboard.session.board.layout';
   var MIN_COL = 340, MIN_CARD = 160, DEFAULT_CARD = 340, DEFAULT_COL = 520, STACK_GAP = 10;
   var SPARK_SAMPLES = 100;
 
@@ -92,13 +99,25 @@
     return out.filter(function (c) { return c.id !== 'solo' || c.members.length > 0 || out.length === 1 || keepAlive.solo; });
   }
 
-  window.SessionBoardLogic = { slotFor: slotFor, normaliseColumns: normaliseColumns };
+  /**
+   * Pure column-order math — exported for the node tests. `mids` are the
+   * resting horizontal midpoints of every OTHER column (the row as it would
+   * be with the moving column lifted out), left to right; the answer is the
+   * index the moving column takes for a pointer at `x`.
+   */
+  function columnSlotFor(mids, x) {
+    var idx = 0;
+    for (var i = 0; i < mids.length; i++) if (x > mids[i]) idx++;
+    return idx;
+  }
+
+  window.SessionBoardLogic = { slotFor: slotFor, normaliseColumns: normaliseColumns, columnSlotFor: columnSlotFor };
 
   document.addEventListener('alpine:init', function () {
     Alpine.data('sessionsBoard', function () { return {
       rows: [], columns: [], presentation: 'transcript',
       cardPresentations: {}, cardHeights: {}, resources: {},
-      boundId: '', dragId: '', dragging: false, viewportTick: 0,
+      boundId: '', dragId: '', dragging: false, movingCol: '', viewportTick: 0,
       _dragSource: null, _provisional: null, _frame: null, _drag: null,
       _resourceTipOpen: null, _diskRefreshing: {}, resumeError: {}, resuming: {}, resumed: {},
       _workspaceStatusByTmux: {},
@@ -106,10 +125,15 @@
       // ── lifecycle ──
       init() {
         var self = this;
-        var saved = this.loadLayout();
-        if (saved && (saved.presentation === 'stats' || saved.presentation === 'transcript')) this.presentation = saved.presentation;
-        if (saved && saved.heights) this.cardHeights = saved.heights;
-        this.refresh(saved);
+        var saved = null;
+        try { localStorage.removeItem('sessions.board.layout'); } catch (e) {}   // pre-Settings key from the first release
+        // Nothing is derived or persisted until the session store has its
+        // first roster. Deriving earlier saw zero live sessions, collapsed
+        // every saved column as empty, and wrote that empty layout back over
+        // the operator's arrangement — the "refresh and everything is gone"
+        // bug reported on 2026-09-06.
+        this._ready = false;
+        this._saved = saved;
         this._onStoreChanged = function () { self.refresh(); };
         window.addEventListener('sessions:store-changed', this._onStoreChanged);
         window.addEventListener('sessions:registry-changed', this._onStoreChanged);
@@ -121,22 +145,94 @@
         var voice = Alpine.store('voice');
         if (voice) this.boundId = voice.boundSessionId || '';
         this.$watch('columns', function () { self.persist(); }, { deep: true });
+        // The layout member and the first store roster both have to be in
+        // before anything is derived (or written back).
         var ready = window.sessionStoreReady || Promise.resolve();
-        ready.then(function () { self.refresh(); });
+        Promise.all([ready, this.loadLayout()]).then(function (r) {
+          var layout = r[1] || {};
+          if (layout.presentation === 'stats' || layout.presentation === 'transcript') self.presentation = layout.presentation;
+          self.cardHeights = layout.heights || {};
+          self._ready = true;
+          self.refresh({ columns: (layout.column_order || []).map(function (id) { return { id: id, members: [] }; }), widths: layout.widths || {} });
+        });
+        // Group or layout writes from any session, tab or node land here.
+        if (window.dashboardEvents && window.dashboardEvents.onSettingChanged) {
+          this._offGroupChange = window.dashboardEvents.onSettingChanged(GROUP_SET_ID, function () { self.refresh(); });
+          this._offLayoutChange = window.dashboardEvents.onSettingChanged(LAYOUT_SET_ID, function () { self.reloadLayout(); });
+        }
       },
       destroy() {
+        if (this._offGroupChange) this._offGroupChange();
+        if (this._offLayoutChange) this._offLayoutChange();
         window.removeEventListener('sessions:store-changed', this._onStoreChanged);
         window.removeEventListener('sessions:registry-changed', this._onStoreChanged);
         window.removeEventListener('resize', this._onResize);
         if (window.unregisterHandler && this._resourceHandler) window.unregisterHandler('resources', this._resourceHandler);
       },
       refresh(saved) {
+        if (!this._ready) return;
+        if (this.dragging) { this._refreshPending = true; return; }
+        this._refreshPending = false;
         this.rows = this.rowsFromStore();
-        var cols = this.columns.length ? this.columns : ((saved && saved.columns) ? saved.columns.map(function (c) { return Object.assign({}, c, { members: (c.members || []).slice() }); }) : []);
-        if (saved && saved.widths) cols.forEach(function (c) { if (saved.widths[c.id]) { c.width = saved.widths[c.id]; c._sized = true; } });
-        this.columns = this.normalise(cols);
+        this.columns = this.normalise(this.columnsFromStore(saved));
         var voice = Alpine.store('voice');
         if (voice) this.boundId = voice.boundSessionId || '';
+      },
+      // Columns = the store's group membership. Previous columns (or the saved
+      // layout on first paint) contribute only order, width, focus and the
+      // arranged order of members inside a column; membership itself is server truth.
+      columnsFromStore(saved) {
+        var all = Alpine.store('sessions'), self = this;
+        var prev = this.columns.length ? this.columns : ((saved && saved.columns) ? saved.columns : []);
+        var order = prev.map(function (c) { return c.id; });
+        var byId = {}; prev.forEach(function (c) { byId[c.id] = c; });
+        var groups = {};
+        this.rows.forEach(function (r) {
+          var st = all[r.id]; var gid = st && st.groupId; if (!gid) return;
+          var g = (st && st.group) || {};
+          var col = groups[gid];
+          if (!col) {
+            var was = byId[gid] || {};
+            col = { id: gid, title: g.name || was.title || gid, color: g.color || was.color || orgColor(r), why: g.why || '',
+                    width: was.width || DEFAULT_COL, _sized: !!was._sized, focus: was.focus || null, members: [], _synced: true };
+            if (saved && saved.widths && saved.widths[gid]) { col.width = saved.widths[gid]; col._sized = true; }
+            groups[gid] = col;
+          }
+          col.members.push(r.id);
+        });
+        Object.keys(groups).forEach(function (gid) {
+          var was = byId[gid]; if (!was || !was.members) return;
+          var kept = was.members.filter(function (m) { return groups[gid].members.indexOf(m) !== -1; });
+          groups[gid].members = kept.concat(groups[gid].members.filter(function (m) { return kept.indexOf(m) === -1; }));
+        });
+        var cols = order.filter(function (id) { return groups[id]; }).map(function (id) { return groups[id]; })
+          .concat(Object.keys(groups).filter(function (id) { return order.indexOf(id) === -1; }).map(function (id) { return groups[id]; }));
+        var solo = byId.solo ? Object.assign({}, byId.solo, { members: (byId.solo.members || []).slice() }) : null;
+        if (solo) {
+          if (saved && saved.widths && saved.widths.solo) { solo.width = saved.widths.solo; solo._sized = true; }
+          cols.splice(Math.max(0, Math.min(order.indexOf('solo'), cols.length)), 0, solo);
+        }
+        return cols;
+      },
+
+      // ── writes: the same records agents write with `graph group` ──
+      _put(url, body, method) {
+        return fetch(url, { method: method || 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+          .then(function (r) { if (!r.ok) return r.json().catch(function () { return {}; }).then(function (e) { throw new Error(e.error || ('HTTP ' + r.status)); }); return r.json(); });
+      },
+      ensureGroup(col) {
+        if (!col || col.id === 'solo' || col._synced) return Promise.resolve();
+        col._synced = true;
+        return this._put('/api/groups', { slug: col.id, name: col.title, color: col.color || '' }, 'POST')
+          .catch(function (e) { col._synced = false; console.warn('[board] group create failed', e.message); });
+      },
+      // Commit a session's current column to the shared record.
+      commitMembership(id) {
+        var self = this, col = this.columnOf(id);
+        var body = (!col || col.id === 'solo') ? { group: null } : { group: col.id, joined_by: 'operator' };
+        var ready = (col && col.id !== 'solo') ? this.ensureGroup(col) : Promise.resolve();
+        return ready.then(function () { return self._put('/api/session/' + encodeURIComponent(id) + '/group', body); })
+          .catch(function (e) { console.warn('[board] membership write failed', e.message); self.refresh(); });
       },
 
       // ── rows: the same projection the Sessions page hands the card partial ──
@@ -189,6 +285,9 @@
         title = (title || '').trim();
         if (!title || col.id === 'solo') return;
         col.title = title;
+        var self = this;
+        this.ensureGroup(col).then(function () { return self._put('/api/groups/' + encodeURIComponent(col.id), { name: title }); })
+          .catch(function (e) { console.warn('[board] rename failed', e.message); });
       },
       // ⤢ Full height: the column becomes this one session, in place. Other
       // members move to a new column on its right that keeps the group's title.
@@ -198,18 +297,22 @@
         var self = this, idx = this.columns.indexOf(col), target = col;
         var others = col.members.filter(function (m) { return m !== id; });
         if (col.id === 'solo') {
+          // An ungrouped session becomes a one-session group titled by its label, in Ungrouped's slot.
           target = { id: 'g-' + Date.now().toString(36), title: this.labelFor(id), color: orgColor(this.rowFor(id)), width: Math.max(col.width, 640), _sized: true, members: [] };
           this.columns.splice(idx, 0, target);
           this.placeCard(id, target.id, 0);
           target = this.columns.filter(function (c) { return c.id === target.id; })[0];
+          this.commitMembership(id);
         } else if (others.length) {
+          // The focused session keeps the group; the others move to a new group to its right that keeps the title.
           var spill = { id: 'g-' + Date.now().toString(36), title: col.title, color: col.color, width: col.width, _sized: col._sized, members: [] };
           this.columns.splice(idx + 1, 0, spill);
           others.forEach(function (m) { self.placeCard(m, spill.id, 1e9); });
           target = this.columns.filter(function (c) { return c.id === col.id; })[0] || target;
-          target.title = this.labelFor(id); target.width = Math.max(target.width, 640); target._sized = true;
+          target.width = Math.max(target.width, 640); target._sized = true;
+          this.ensureGroup(spill).then(function () { others.forEach(function (m) { self.commitMembership(m); }); });
         } else {
-          target.title = this.labelFor(id); target.width = Math.max(target.width, 640); target._sized = true;
+          target.width = Math.max(target.width, 640); target._sized = true;
         }
         if (!target) return;
         this.columns.forEach(function (c) { if (c !== target) c.focus = null; });
@@ -234,6 +337,70 @@
         var cur = this.columnOf(id);
         if (cur && cur.id === colId && cur.members.indexOf(id) < idx) idx--;
         this.placeCard(id, colId, idx);
+        if (!this.dragging) this.commitMembership(id);
+      },
+
+      // ── column move (desktop pointer; the column header row is the handle) ──
+      // Press on a column header (not its title field), move 6 px, and the
+      // column follows the pointer left or right while the others slide out
+      // of the way; order is decided from a frame snapshotted at drag start.
+      onColHeadPointerDown(ev, col) {
+        if (ev.button !== 0) return;
+        if (ev.target.closest('button, a, input, select, textarea, [contenteditable="true"]')) return;
+        var self = this, sx = ev.clientX, sy = ev.clientY, started = false, ghost = null, raf = 0, last = null, frame = null;
+        var onMove = function (e) {
+          last = e;
+          if (!started) {
+            if (Math.abs(e.clientX - sx) + Math.abs(e.clientY - sy) < 6) return;
+            started = true;
+            frame = self.snapshotColumnFrame(col.id);
+            self.movingCol = col.id;
+            ghost = self.makeColumnGhost(col);
+            document.body.classList.add('sb-moving');
+          }
+          if (!raf) raf = requestAnimationFrame(function () {
+            raf = 0; if (!last) return;
+            ghost.style.transform = 'translate(' + (last.clientX + 14) + 'px,' + (last.clientY - 12) + 'px)';
+            var idx = columnSlotFor(frame.mids, last.clientX + (self.$refs.board.scrollLeft - frame.scrollLeft0));
+            var cur = self.columns.indexOf(col);
+            if (cur === -1 || cur === idx) return;
+            var cols = self.columns.slice(); cols.splice(cur, 1); cols.splice(idx, 0, col);
+            self.columns = cols;
+          });
+        };
+        var onUp = function () {
+          window.removeEventListener('pointermove', onMove, true);
+          window.removeEventListener('pointerup', onUp, true);
+          window.removeEventListener('pointercancel', onUp, true);
+          window.removeEventListener('blur', onUp);
+          if (raf) cancelAnimationFrame(raf);
+          if (!started) return;
+          if (ghost) ghost.remove();
+          document.body.classList.remove('sb-moving');
+          self.movingCol = '';
+          self.persist();
+        };
+        window.addEventListener('pointermove', onMove, true);
+        window.addEventListener('pointerup', onUp, true);
+        window.addEventListener('pointercancel', onUp, true);
+        window.addEventListener('blur', onUp);
+      },
+      snapshotColumnFrame(colId) {
+        var board = this.$refs.board, cols = board.querySelectorAll('.sb-col'), mids = [], shift = 0;
+        for (var i = 0; i < cols.length; i++) {
+          var r = cols[i].getBoundingClientRect();
+          if (cols[i].dataset.col === colId) { shift = r.width + 14; continue; }   // column + board gap
+          mids.push((r.left + r.right) / 2 - shift);
+        }
+        return { mids: mids, scrollLeft0: board.scrollLeft };
+      },
+      makeColumnGhost(col) {
+        var g = document.createElement('div');
+        g.className = 'sb-ghost';
+        var t = document.createElement('div'); t.className = 't'; t.textContent = col.title; g.appendChild(t);
+        var d = document.createElement('div'); d.className = 'topic'; d.textContent = col.members.length + ' session' + (col.members.length === 1 ? '' : 's'); g.appendChild(d);
+        document.body.appendChild(g);
+        return g;
       },
 
       // ── move (desktop pointer; the card header is the handle) ──
@@ -315,6 +482,7 @@
           if (!this._provisional) {
             var col = { id: 'g-' + Date.now().toString(36), title: 'New group', color: orgColor(this.rowFor(id)), width: DEFAULT_COL, members: [] };
             this.columns.push(col); this._provisional = col.id;
+            this.ensureGroup(col);
           }
           if ((this.columnOf(id) || {}).id !== this._provisional) this.placeCard(id, this._provisional, 0);
           return;
@@ -329,6 +497,8 @@
         this.dragId = ''; this.dragging = false;
         var prov = this._provisional; this._provisional = null; this._dragSource = null; this._frame = null;
         this.columns = this.normalise(this.columns);
+        var self = this;
+        this.commitMembership(id).then(function () { if (self._refreshPending) self.refresh(); });
         if (prov && this.columns.some(function (c) { return c.id === prov; })) {
           setTimeout(function () {
             var input = document.querySelector('.sb-col[data-col="' + prov + '"] .sb-col-title');
@@ -394,16 +564,44 @@
         return h + '--org:' + this.orgColorFor(id) + (t < 0 ? '' : '');
       },
 
-      // ── persistence (per browser; a per-persona Settings row is a later bead) ──
-      loadLayout() { try { return JSON.parse(localStorage.getItem(LAYOUT_KEY) || 'null'); } catch (e) { return null; } },
-      persist() {
-        var widths = {}; this.columns.forEach(function (c) { if (c._sized) widths[c.id] = c.width; });
-        var columns = this.columns.filter(function (c) { return c.id !== 'solo'; }).map(function (c) {
-          return { id: c.id, title: c.title, color: c.color, width: c.width, _sized: !!c._sized, members: c.members.slice(), focus: c.focus || null };
+      // ── persistence: the operator's layout member (dashboard.session.board.layout) ──
+      loadLayout() {
+        return fetch(LAYOUT_URL, { credentials: 'same-origin' })
+          .then(function (r) { return r.ok ? r.json() : {}; })
+          .then(function (d) { return (d && d.layout) || {}; })
+          .catch(function () { return {}; });
+      },
+      reloadLayout() {
+        var self = this;
+        if (this.dragging || this._drag) return;
+        this.loadLayout().then(function (layout) {
+          if (!layout || !self._ready) return;
+          if (layout.presentation === 'stats' || layout.presentation === 'transcript') self.presentation = layout.presentation;
+          self.cardHeights = layout.heights || {};
+          var order = layout.column_order || [];
+          var byId = {}; self.columns.forEach(function (c) { byId[c.id] = c; });
+          var cols = order.filter(function (id) { return byId[id]; }).map(function (id) { return byId[id]; })
+            .concat(self.columns.filter(function (c) { return order.indexOf(c.id) === -1; }));
+          cols.forEach(function (c) { if (layout.widths && layout.widths[c.id]) { c.width = layout.widths[c.id]; c._sized = true; } });
+          self._suppressPersist = true;
+          self.columns = self.normalise(cols);
+          self._suppressPersist = false;
         });
-        var solo = this.columns.filter(function (c) { return c.id === 'solo'; })[0];
-        if (solo) columns.splice(Math.min(this.columns.indexOf(solo), columns.length), 0, { id: 'solo', title: 'Ungrouped', color: '#334155', width: solo.width, _sized: !!solo._sized, members: solo.members.slice() });
-        try { localStorage.setItem(LAYOUT_KEY, JSON.stringify({ widths: widths, heights: this.cardHeights, columns: columns, presentation: this.presentation })); } catch (e) {}
+      },
+      layoutPayload() {
+        var widths = {}; this.columns.forEach(function (c) { if (c._sized) widths[c.id] = c.width; });
+        return { presentation: this.presentation, column_order: this.columns.map(function (c) { return c.id; }), widths: widths, heights: this.cardHeights };
+      },
+      persist() {
+        if (!this._ready || this._suppressPersist) return;   // never write a pre-roster or echoed layout
+        var self = this, payload = JSON.stringify(this.layoutPayload());
+        if (payload === this._lastPersisted) return;
+        clearTimeout(this._persistTimer);
+        this._persistTimer = setTimeout(function () {
+          self._lastPersisted = payload;
+          fetch(LAYOUT_URL, { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: payload })
+            .catch(function (e) { console.warn('[board] layout write failed', e.message); });
+        }, 250);
       },
 
       // ── presentation ──

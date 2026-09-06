@@ -82,6 +82,7 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph mission <verb>` | Drive a structured Mission Control mission: `list/status/items/add/update/state/retire/style` (stdin via `--body -`) | `graph mission state relay checkpoint-e proven --note "…"` |
 | `graph dropbox list` / `graph dropbox get <id>` | List/materialize the global iPhone screenshot dropbox — the operator's phone drops a screenshot in (org-unscoped, time-correlated); any session lists the newest and pulls one by id or unique prefix | `graph dropbox get a19dc43e --output-dir /workspace/output` |
 | `graph set-label "text"` | Set a working title for the current session | `graph set-label "Passkey auth design"` |
+| `graph group create\|join\|leave\|list\|show\|rename\|invite\|dissolve` | Session groups — the Session Board's columns (`/sessions/board`). A session joins its lane in writing; `graph crosstalk send group:<slug>` messages the whole lane | `graph group join deploy --tab crypto` |
 | `graph notes --since <dur>` | List notes by recency with duration filter | `graph notes --since 1h --tags pitfall` |
 | `graph crosstalk` | CrossTalk message log (default) | `graph crosstalk --since 1h --session auto-0323-022132` |
 | `graph crosstalk send <target> "msg"` | Send message to a session | `graph crosstalk send auto-0325-123456 "check this"` |
