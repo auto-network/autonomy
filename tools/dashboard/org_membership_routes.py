@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from typing import Optional
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -87,7 +88,29 @@ def _link_grants(slug: str) -> dict:
     return grants
 
 
+def _org_key_owner_kem_pub(slug: str) -> Optional[str]:
+    """The ``owner_kem_pub`` of the org's sealed root key, or None when the
+    org has no revision-2 armor (password-armored roots carry none)."""
+    from tools.graph import settings_ops
+    from tools.graph.schemas.network_identity import NETWORK_ORG_KEY_SET_ID
+
+    try:
+        members = settings_ops.read_owned_set(
+            NETWORK_ORG_KEY_SET_ID, org=slug,
+        ).members
+    except Exception:
+        return None
+    for member in members:
+        value = (member.payload or {}).get("owner_kem_pub")
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 def _membership_view(slug: str) -> dict:
+    from tools.graph import org_ops as org_ops_module
+    from tools.network.ledger.fold import scope_invite, scope_role_grant
+    from tools.network.ledger.projections import unassemblable_thresholds
     from tools.network.ledger.store import LedgerStore, org_ledger_db_path
 
     path = org_ledger_db_path(slug)
@@ -111,12 +134,51 @@ def _membership_view(slug: str) -> dict:
             }
             for persona, view in sorted(state.members.items())
         ]
+        # The viewer's authority, read from the same fold as everything
+        # else: which roles they may invite for or grant. A viewer who is not
+        # a member (or whose persona cannot be resolved) may do neither.
+        viewer_key = None
+        try:
+            viewer_lookup = org_ops_module.persona_pub_for_org(state.genesis_id)
+        except Exception:
+            viewer_lookup = None
+        if viewer_lookup and viewer_lookup in state.members:
+            viewer_key = state.members[viewer_lookup].current_key
+        holders_by_role: dict[str, list[str]] = {}
+        for persona, view in state.members.items():
+            for role_name in view.roles:
+                holders_by_role.setdefault(role_name, []).append(persona)
+        bare_by_role: dict[str, list[str]] = {}
+        for key, roles in state.bare_roles.items():
+            if key in state.members:
+                continue
+            for role_name in roles:
+                bare_by_role.setdefault(role_name, []).append(key)
+        warnings = {
+            warning["role"]: warning
+            for warning in unassemblable_thresholds(state)
+        }
         role_defs = [
             {
                 "name": name,
+                "version": role.version,
                 "claim_requires": role.claim_requires,
                 "approver_threshold": role.approver_threshold,
                 "scope_set": list(role.scope_set),
+                # Personas holding the role (members), and any bare keys a
+                # role.grant named that never claimed membership.
+                "holders": sorted(holders_by_role.get(name, [])),
+                "bare_holders": sorted(bare_by_role.get(name, [])),
+                # What the VIEWER may do with this role, decided by the fold.
+                "minter_may_invite": bool(
+                    viewer_key and state.holds(viewer_key, scope_invite(name))
+                ),
+                "viewer_may_grant": bool(
+                    viewer_key and state.holds(viewer_key, scope_role_grant(name))
+                ),
+                # Present when the admission threshold exceeds the members
+                # who could approve — legal and dormant, but worth a chip.
+                "threshold_warning": warnings.get(name),
             }
             for name, role in sorted(state.role_defs.items())
         ]
@@ -218,6 +280,11 @@ def _membership_view(slug: str) -> dict:
         "invites": invites,
         "pending_claims": pending,
         "viewer_persona": viewer_persona,
+        # The encapsulation key the org root is sealed to. The browser
+        # compares it with the key it derives from the operator's personal
+        # root to decide whether "Define role" can run here; the server
+        # never decides that, because it never holds the personal root.
+        "org_key_owner_kem_pub": _org_key_owner_kem_pub(slug),
     }
 
 
