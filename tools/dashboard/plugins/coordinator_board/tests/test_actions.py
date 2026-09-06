@@ -78,8 +78,9 @@ def graph_db_env(tmp_path, monkeypatch):
     A GRAPH_DB pin collapses every org to one file and, under the
     fail-loud resolver, conflicts with the explicit-org reads these
     actions make. Use the orgs tree: no pin, both org DBs created, no
-    GRAPH_ORG override so the seeds' CALLER_ORG writes and org=None reads
-    both resolve to the personal store.
+    GRAPH_ORG override; decisions and operator messages are written and
+    dispatched with an explicit org (the sets are organization-homed, so
+    ambient writes are refused under the no-default-scope law).
     """
     from tools.graph.db import GraphDB
     orgs = tmp_path / "orgs"
@@ -362,7 +363,7 @@ def _decision_event(key: str) -> dict:
         "set_id": COORDINATOR_DECISION_SET_ID,
         "schema_revision": 1,
         "key": key,
-        "org": None,
+        "org": "autonomy",
         "publication_state": "raw",
         "deprecated": False,
         "operation": "write",
@@ -374,7 +375,7 @@ def _operator_message_event(key: str) -> dict:
         "set_id": OPERATOR_MESSAGE_SET_ID,
         "schema_revision": 1,
         "key": key,
-        "org": None,
+        "org": "autonomy",
         "publication_state": "raw",
         "deprecated": False,
         "operation": "write",
@@ -405,7 +406,7 @@ async def test_dispatch_thumb_yes_end_to_end(
             "tile_id": "t1",
             "target_session": "auto-foo",
         },
-        org=ops.CALLER_ORG,
+        org="autonomy",
     )
 
     await _dispatch_event(_decision_event(key), services_capture)
@@ -436,7 +437,7 @@ async def test_dispatch_only_matching_predicate_handler_fires(
             "choice": "approve",
             "target_session": "auto-target",
         },
-        org=ops.CALLER_ORG,
+        org="autonomy",
     )
 
     await _dispatch_event(_decision_event(key), services_capture)
@@ -467,7 +468,7 @@ async def test_dispatch_operator_message_routes_to_bound_coordinator(
         OPERATOR_MESSAGE_SET_ID, 1,
         "default",
         {"text": "are you there", "sentAt": None},
-        org=ops.CALLER_ORG,
+        org="autonomy",
     )
 
     await _dispatch_event(_operator_message_event("default"), services_capture)
@@ -493,7 +494,7 @@ async def test_dispatch_operator_message_no_coordinator_drops(
         OPERATOR_MESSAGE_SET_ID, 1,
         "default",
         {"text": "are you there", "sentAt": None},
-        org=ops.CALLER_ORG,
+        org="autonomy",
     )
 
     await _dispatch_event(_operator_message_event("default"), services_capture)

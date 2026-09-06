@@ -30,6 +30,20 @@ from .registry import (
 LINK_APPROVAL_INTENT_SET_ID = "autonomy.network.link-approval-intent"
 LINK_APPROVAL_INTENT_REVISION = 1
 LINK_APPROVAL_RESULT_SET_ID = "autonomy.network.link-approval-result"
+
+SYNOPSIS = {
+    "summary": (
+        "Organization-homed Link approval records: the frozen approval input "
+        "(intent) and the durable execution result, keyed by the Central "
+        "approval id."
+    ),
+    "nouns": [
+        "link approval", "approval intent", "approval result",
+        "central approval", "link operation",
+    ],
+    "related_set_ids": ["autonomy.network.link-grant#3"],
+}
+
 LINK_APPROVAL_RESULT_REVISION = 1
 
 _HEX32_RE = re.compile(r"^[0-9a-f]{32}$")

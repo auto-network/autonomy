@@ -673,7 +673,7 @@ def seed_workspace_policy(
             "override_mode": "none",
         },
         org=org,
-        state="canonical",
+        state="curated",
     )
     return True
 

@@ -370,6 +370,11 @@ class TestLaunchSessionMetaAndEnv:
             return completed
 
         monkeypatch.setattr(session_launcher.subprocess, "run", fake_run)
+        from agents import launch_preflight
+        # The source-existence preflight (7f7dbcd9) is not this
+        # test's subject: its fake mounts have no on-disk sources.
+        monkeypatch.setattr(launch_preflight, "preflight",
+                            lambda **_kw: [])
         return calls
 
     def test_end_to_end_meta_and_env(

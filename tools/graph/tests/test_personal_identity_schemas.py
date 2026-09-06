@@ -42,6 +42,26 @@ def _personal_payload() -> dict:
     }
 
 
+def _statement() -> dict:
+    # A real root-signed enrollment statement (912a2b78): the schema layer
+    # re-parses it structurally on every validate, so the fixture mints a
+    # genuine one rather than hand-rolling a dict.
+    from tools.network.idkit import enrollment
+
+    return enrollment.mint(
+        root=_ROOT,
+        credential_id="5Zzp7Y0aFRDV3v0eZkGmvKyVLp0",
+        credential_public_key="a1" * 20,
+        rp_id="localhost",
+        origin="https://localhost:8080",
+        nonce="ab" * 32,
+        created_hlc=(1, 0),
+        initial_sign_count=0,
+        label="This device",
+        transports=("internal", "hybrid"),
+    ).to_dict()
+
+
 def _passkey_payload() -> dict:
     return {
         "credential_id": "5Zzp7Y0aFRDV3v0eZkGmvKyVLp0",
@@ -53,6 +73,7 @@ def _passkey_payload() -> dict:
         "label": "This device",
         "transports": ["internal", "hybrid"],
         "created_at": "2026-07-19T00:00:00Z",
+        "statement": _statement(),
     }
 
 
@@ -102,9 +123,11 @@ def test_personal_rejects_smuggled_armor_field():
     import base64
     import json
 
-    from tools.network.idkit.armor import ARMOR_BEGIN, ARMOR_END, parse_armor
+    # v3 armor facade (f5f5b7f8) exposes no public dict parse; the smuggle
+    # test needs the raw body to tamper with, so it decodes it directly.
+    from tools.network.idkit.armor import ARMOR_BEGIN, ARMOR_END
 
-    data = parse_armor(_ARMOR)
+    data = json.loads(base64.b64decode("".join(_ARMOR.split("\n")[1:-1])))
     data["private_hex"] = _ROOT.private_hex
     body = base64.b64encode(json.dumps(data).encode()).decode()
     payload = _personal_payload()

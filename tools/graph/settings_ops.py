@@ -4603,6 +4603,14 @@ def _set_is_org_key_namespaced(set_id: str) -> bool:
     """
     if schemas.declared_org_writeback_key_strategy(set_id):
         return True
+    # Org-HOMED sets are isolated by their own per-org database — the
+    # docstring's promise, enforced here. Without this check, a set like
+    # ``autonomy.org.primer`` (org-homed, key ``org_slug[:block_name]``)
+    # was misread as namespaced and its bare-slug base row filtered out of
+    # every read — org primer overlays silently vanished from rendered
+    # session primers (2026-09-06 regression).
+    if schemas.declared_home(set_id) == "organization":
+        return False
     for revision in range(1, 12):
         cls = schemas.get_schema(set_id, revision)
         if cls is None:
@@ -4610,11 +4618,15 @@ def _set_is_org_key_namespaced(set_id: str) -> bool:
         strategy = getattr(cls, "_key_strategy", "") or ""
         # Compound only: the org must be a PREFIX of a larger key, not the
         # whole key. A bare 'org_slug' (the org's own identity) has no
-        # <org>:<suffix> shape to isolate on.
+        # <org>:<suffix> shape to isolate on. A bracketed OPTIONAL suffix
+        # (``org_slug[:block_name]``) admits the bare key too, so it cannot
+        # be prefix-filtered either.
         if ":" not in strategy:
             return False
-        first = strategy.split(":", 1)[0].strip("[]")
-        return first in ("org", "org_slug")
+        first, rest = strategy.split(":", 1)
+        if first.endswith("[") or rest.startswith("["):
+            return False
+        return first.strip("[]") in ("org", "org_slug")
     return False
 
 

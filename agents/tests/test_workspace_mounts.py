@@ -621,5 +621,7 @@ def test_containerized_workspace_bind_emits_mount_not_v(monkeypatch, tmp_path):
     assert getattr(result["/tmp/daemon-host-source/anchore/x"], "bind_refuse_missing", False)
     args = _emit_result_through_plan(result, topo)
     assert args == [
-        "--mount", "type=bind,src=/tmp/daemon-host-source/anchore/x,dst=/opt/x,readonly"]
+        "--mount",
+        "type=bind,src=/tmp/daemon-host-source/anchore/x,dst=/opt/x,"
+        "bind-propagation=rslave,readonly"]
     assert "-v" not in args

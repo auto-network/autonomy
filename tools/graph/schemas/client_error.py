@@ -22,6 +22,20 @@ from tools.graph.schemas.registry import (
 )
 
 CLIENT_ERROR_SET_ID = "autonomy.identity.client-error"
+
+SYNOPSIS = {
+    "summary": (
+        "Personal-scoped capped log of client-side ceremony failures: browser "
+        "crypto errors (factor/unlock ceremonies) captured for diagnosis, "
+        "never secrets."
+    ),
+    "nouns": [
+        "client error", "ceremony failure", "browser error log",
+        "unlock failure", "factor error",
+    ],
+    "related_set_ids": ["autonomy.identity.personal#1"],
+}
+
 CLIENT_ERROR_REVISION = 1
 
 # Fields that are free text, with their maximum retained length.

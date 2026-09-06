@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import re
 import yaml
 
 
@@ -29,7 +30,14 @@ def _compose():
 # ── the three volumes ──────────────────────────────────────────────────────
 def test_dashboard_mounts_the_three_volumes_at_the_locked_destinations():
     svc = _compose()["services"]["dashboard"]
-    mounts = {entry.split(":")[0]: entry.split(":")[1] for entry in svc["volumes"]}
+    # volumes mixes short "src:dst[:opts]" strings with long-form dicts
+    # (e.g. the rslave keycache bind); only the short named-volume entries
+    # are candidates for the three locked mounts.
+    mounts = {}
+    for entry in svc["volumes"]:
+        if isinstance(entry, str) and ":" in entry:
+            src, dst = entry.split(":")[:2]
+            mounts[src] = dst
     for vol, dest in EXPECTED_MOUNTS.items():
         assert mounts.get(vol) == dest, f"{vol} must mount at {dest}, got {mounts.get(vol)}"
 
@@ -74,13 +82,18 @@ def test_dockerfile_self_stamps_commit_and_date_and_drops_git():
     df = DOCKERFILE.read_text(encoding="utf-8")
     # multi-stage: a named builder stage, and the runtime /app comes from it.
     assert "AS appsrc" in df, "expected a builder stage that reads .git"
-    assert "COPY --from=appsrc /app /app" in df, "runtime /app must come from the builder"
+    assert re.search(
+        r"COPY (--chown=\S+ )?--from=appsrc /app /app", df
+    ), "runtime /app must come from the builder"
     # reads BOTH the commit hash and the commit date from the checkout.
     assert "rev-parse HEAD" in df
     assert "show -s --format=%cI HEAD" in df
     assert "commit=%s" in df and "commit_date=%s" in df
-    # drops .git so the final image ships bare files, and never takes a version arg.
-    assert "rm -rf /app/.git" in df
+    # KEEPS .git (the launcher clones REPO_ROOT for session worktrees —
+    # NODE-VOLUME-MODEL.md) but severs the remote so the node never phones
+    # home, and never takes a version arg.
+    assert "remote remove origin" in df
+    assert "rm -rf /app/.git" not in df
     assert "ARG AUTONOMY_VERSION" not in df
     assert "ARG AUTONOMY_BUILD_TIME" not in df
     # The runtime (last) stage must not `COPY . /app` — that would drag .git back
@@ -88,7 +101,9 @@ def test_dockerfile_self_stamps_commit_and_date_and_drops_git():
     # comes only from the cleaned builder stage.
     runtime_stage = "FROM " + df.split("\nFROM ")[-1]
     assert "COPY . /app" not in runtime_stage, "runtime stage must not COPY the raw context"
-    assert "COPY --from=appsrc /app /app" in runtime_stage
+    assert re.search(
+        r"COPY (--chown=\S+ )?--from=appsrc /app /app", runtime_stage
+    ), "runtime /app must come from the cleaned builder stage"
 
 
 def test_no_build_wrapper_script_remains():

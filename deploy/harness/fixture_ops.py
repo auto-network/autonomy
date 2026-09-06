@@ -56,11 +56,11 @@ def _setting_payload(set_id: str, org: str | None, key: str = "default") -> dict
 
 def _personal_seed(password: str) -> bytes:
     from tools.graph.schemas.personal_identity import PERSONAL_IDENTITY_SET_ID
-    from tools.network.idkit.armor import decrypt_root_key
+    from tools.network.idkit.root_factor_policy import open_armor_with_password
 
     row = _setting_payload(PERSONAL_IDENTITY_SET_ID, None)
     return bytes.fromhex(
-        decrypt_root_key(row["armored_private_key"], password).private_hex
+        open_armor_with_password(row["armored_private_key"], password).private_hex
     )
 
 
@@ -158,7 +158,7 @@ def found_node(payload: dict) -> dict:
     )
     from tools.graph.schemas.personal_identity import PERSONAL_IDENTITY_SET_ID
     from tools.network.idkit import KeyPair, Subject, derive_persona, issue_cert
-    from tools.network.idkit.armor import encrypt_root_key
+    from tools.network.idkit.root_factor_policy import mint_password_armor
     from tools.network.idkit.sealing import derive_encapsulation_keypair, seal
     from tools.network.ledger import HLC, LedgerStore, make_event, org_ledger_db_path
     from tools.network.ledger.found import found_org_ledger
@@ -192,7 +192,7 @@ def found_node(payload: dict) -> dict:
             1,
             "default",
             {
-                "armored_private_key": encrypt_root_key(personal, password),
+                "armored_private_key": mint_password_armor(personal, password),
                 "root_pub": personal.public_hex,
                 "display_name": "Harness operator",
                 "created_at": time.strftime(ISO, time.gmtime()),

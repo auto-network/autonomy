@@ -120,7 +120,7 @@ def cmd_commit_policy_seed(args: Any) -> None:
                 "override_mode": "none",
             },
             org=org,
-            state="canonical",
+            state="curated",
         )
         action = "inserted"
     print(

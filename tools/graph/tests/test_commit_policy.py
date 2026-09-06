@@ -534,7 +534,7 @@ def test_commit_policy_seed_uses_client_settings(monkeypatch, capsys):
                 "override_mode": "none",
             },
             ops.CALLER_ORG,
-            "canonical",
+            "curated",
         )
     ]
 
