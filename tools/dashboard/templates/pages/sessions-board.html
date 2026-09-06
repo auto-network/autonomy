@@ -1,0 +1,201 @@
+{# Session Board — /sessions/board (wide viewports).
+   Columns are groups; live session cards stack top-to-bottom; every card hosts
+   the production session viewer in panel mode. Design of record: Design Studio
+   2c31c67a-ca7d-4f92-aee3-e3e2a15de87d (graph://e61d916d-34b). Behaviour lives
+   in static/js/pages/sessions-board.js. The two partials below are the same
+   files the Sessions page and the session viewer render — nothing here formats
+   a turn or restyles a card. #}
+<style>
+  .sb-shell { display: flex; flex-direction: column; height: calc(100vh - 3.5rem - 1.5rem); min-height: 0; margin: 0 -1.5rem 0; }
+  .sb-bar { display: flex; align-items: center; gap: 10px; padding: 8px 16px; border-bottom: 1px solid #1f2937; background: #0f172a; flex: 0 0 auto; flex-wrap: wrap; }
+  .sb-bar .sb-sub { font-size: 11px; color: #64748b; }
+  .sb-seg { display: inline-flex; padding: 2px; border: 1px solid #293548; border-radius: 8px; background: #0b1220; }
+  .sb-seg button { min-height: 28px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #8b9bb4; font-size: 11px; font-weight: 700; cursor: pointer; }
+  .sb-seg button[aria-pressed="true"] { background: #283052; color: #dcd9ff; }
+  .sb-bar .sb-spacer { flex: 1; }
+  .sb-hint { font-size: 11px; color: #4b5b73; }
+
+  .sb-board { flex: 1; min-height: 0; display: flex; align-items: stretch; gap: 14px; padding: 14px 16px 18px; overflow-x: auto; overflow-y: hidden; background: #0b1220; }
+  .sb-col { position: relative; flex: 0 0 auto; display: flex; flex-direction: column; min-width: 340px; border: 1px solid #1e293b; border-radius: 12px; background: #0f172a; }
+  .sb-col.solo { background: transparent; border-style: dashed; }
+  .sb-col-resize { position: absolute; top: 0; right: -9px; width: 14px; height: 100%; cursor: col-resize; z-index: 3; }
+  .sb-col-resize::after { content: ""; position: absolute; top: 12px; bottom: 12px; left: 6px; width: 2px; border-radius: 2px; background: transparent; transition: background .15s; }
+  .sb-col-resize:hover::after, .sb-col-resize.active::after { background: #6366f1; }
+
+  .sb-col-head { flex: 0 0 auto; padding: 10px 12px 8px; border-bottom: 1px solid #1e293b; border-radius: 12px 12px 0 0; }
+  .sb-col-title-row { display: flex; align-items: center; gap: 8px; }
+  .sb-col-swatch { width: 10px; height: 10px; border-radius: 3px; flex: 0 0 auto; }
+  .sb-col-title { flex: 1; min-width: 0; font-size: 13px; font-weight: 700; color: #f1f5f9; background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 2px 6px; margin-left: -6px; outline: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sb-col-title:hover { border-color: #293548; }
+  .sb-col-title:focus { border-color: #6366f1; background: #0b1220; }
+  .sb-col-count { font-size: 11px; color: #64748b; font-variant-numeric: tabular-nums; }
+  .sb-col-attn { display: inline-flex; gap: 3px; align-items: center; }
+  .sb-col-attn i { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #334155; }
+  .sb-col-attn i.working { background: #4ade80; box-shadow: 0 0 6px rgba(74,222,128,.6); }
+  .sb-col-attn i.thinking { background: #a78bfa; }
+  .sb-col-meta { display: flex; align-items: center; gap: 12px; margin-top: 6px; font-size: 10px; color: #7c8aa0; }
+  .sb-col-meta b { color: #cbd5e1; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .sb-col-meta .lab { color: #55657d; margin-right: 3px; text-transform: uppercase; letter-spacing: .04em; font-size: 9px; }
+  .sb-col-meta svg { margin-left: auto; }
+
+  .sb-col-body { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 10px; display: flex; flex-direction: column; gap: 10px; }
+  .sb-card { position: relative; display: flex; flex-direction: column; border-radius: 10px; background: #111a2b; border: 1px solid #1e293b; overflow: hidden; flex: 0 0 auto; }
+  .sb-card.moving { width: 75%; margin: 0 auto; box-shadow: 0 14px 34px rgba(0,0,0,.45); }
+  .sb-card.bound { border-color: #6366f1; }
+  .sb-card-head { flex: 0 0 auto; cursor: grab; }
+  .sb-card-head:active { cursor: grabbing; }
+  .sb-card-head .session-card-wrap { border-radius: 0; }
+  .sb-card-head .session-card { cursor: inherit; }
+  /* Transcript presentation: stats OR transcript, never both. The card keeps
+     only its icon rail and title; the transcript follows. Stats presentation
+     keeps the production card untouched. */
+  .sb-card[data-presentation="transcript"] .sc-t3,
+  .sb-card[data-presentation="transcript"] .sc-footer,
+  .sb-card[data-presentation="transcript"] .sc-meta2,
+  .sb-card[data-presentation="transcript"] .sc-when,
+  .sb-card[data-presentation="transcript"] .sc-message,
+  .sb-card[data-presentation="transcript"] .sc-topics { display: none !important; }
+  .sb-card[data-presentation="transcript"] .session-card { padding-bottom: 6px; border-left-width: 0 !important; background: transparent; }
+  .sb-card[data-presentation="transcript"] .sb-card-head { background: color-mix(in srgb, var(--org, #334155) 9%, #111a2b); }
+  .sb-card[data-presentation="transcript"].bound .sb-card-head { background: color-mix(in srgb, #6366f1 14%, #111a2b); }
+  /* ⤢ and the mode toggle sit LEFT of the production org glyph, which stays the session-actions menu. */
+  .sb-card-tools { position: absolute; top: 7px; right: 42px; z-index: 2; display: flex; gap: 3px; }
+  .sb-card-tools button { width: 20px; height: 20px; border-radius: 5px; border: 1px solid transparent; background: transparent; color: #64748b; font-size: 11px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+  .sb-card-tools button:hover { color: #e2e8f0; border-color: #334155; background: #0b1220aa; }
+  .sb-card.bound .sb-card-tools button { color: #a5b4fc; }
+  .sb-card-body { flex: 1; min-height: 0; display: flex; flex-direction: column; border-top: 1px solid #1e293b; }
+  /* The page stylesheet sizes .sv-entries for the full-page viewer (height:100%,
+     overscroll contain, hidden scrollbar); inside a card the transcript must
+     chain wheel scrolling to the column and show a thin scrollbar. */
+  .sb-card-body .sv-entries { flex: 1; min-height: 0; height: auto !important; overflow-y: auto; overscroll-behavior: auto !important; scroll-behavior: auto !important; padding: 6px 8px !important; font-size: 12px; background: transparent !important; }
+  .sb-empty { padding: 14px 10px; font-size: 11px; color: #55657d; font-style: italic; }
+  .sb-card-resize { flex: 0 0 auto; height: 8px; cursor: row-resize; background: linear-gradient(to bottom, transparent, #0b1220); position: relative; }
+  .sb-card-resize::after { content: ""; position: absolute; left: 50%; top: 3px; width: 34px; height: 2px; margin-left: -17px; border-radius: 2px; background: #293548; }
+  .sb-card-resize:hover::after, .sb-card-resize.active::after { background: #6366f1; }
+
+  /* Focused column: one session, full height; its head is the column title. */
+  .sb-col.focused .sb-col-head { display: none; }
+  .sb-col.focused .sb-col-body { padding: 0; overflow: hidden; }
+  .sb-col.focused .sb-col-body > div { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+  .sb-col.focused .sb-card { flex: 1 1 auto; min-height: 0; height: auto !important; border-radius: 12px; border-color: #24304a; }
+  .sb-col.focused .sb-card-head .session-card { padding: 12px 14px 8px; }
+  .sb-col.focused .sb-card-head .sc-title { font-size: 15px; }
+  .sb-col.focused .sb-card-resize { display: none; }
+  .sb-col.focused .sb-card-body .sv-entries { font-size: 13px; padding: 10px 14px !important; }
+
+  .sb-col-new { flex: 0 0 auto; width: 220px; border: 2px dashed #1e293b; border-radius: 12px; display: flex; align-items: center; justify-content: center; color: #475569; font-size: 12px; text-align: center; padding: 20px; }
+  .sb-board.dragging .sb-col-new { color: #a5b4fc; }
+
+  .sb-ghost { position: fixed; left: 0; top: 0; z-index: 60; width: 320px; padding: 8px 10px; border-radius: 10px; background: #182238; border: 1px solid #334155; box-shadow: 0 16px 40px rgba(0,0,0,.55); pointer-events: none; will-change: transform; }
+  .sb-ghost .t { font-size: 12.5px; font-weight: 700; color: #f1f5f9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sb-ghost .topic { font-size: 10.5px; color: #8fa0b8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+  body.sb-moving, body.sb-moving * { user-select: none !important; cursor: grabbing !important; }
+  body.sb-resizing, body.sb-resizing * { user-select: none !important; }
+  body.sb-resizing-col, body.sb-resizing-col * { cursor: col-resize !important; }
+  body.sb-resizing-row, body.sb-resizing-row * { cursor: row-resize !important; }
+
+  .sb-board, .sb-col-body, .sb-card-body .sv-entries { scrollbar-width: thin; scrollbar-color: #2b3648 transparent; }
+  .sb-board::-webkit-scrollbar, .sb-col-body::-webkit-scrollbar, .sb-card-body .sv-entries::-webkit-scrollbar { width: 6px; height: 6px; }
+  .sb-board::-webkit-scrollbar-track, .sb-col-body::-webkit-scrollbar-track, .sb-card-body .sv-entries::-webkit-scrollbar-track { background: transparent; }
+  .sb-board::-webkit-scrollbar-thumb, .sb-col-body::-webkit-scrollbar-thumb, .sb-card-body .sv-entries::-webkit-scrollbar-thumb { background: #2b3648; border-radius: 3px; border: 0; }
+  .sb-col-body:hover::-webkit-scrollbar-thumb, .sb-card-body .sv-entries:hover::-webkit-scrollbar-thumb { background: #3b4a63; }
+
+  .sb-talkpill { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 20; display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-radius: 999px; background: #1e1b4b; border: 1px solid #6366f1; color: #e0e7ff; font-size: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.5); }
+  .sb-talkpill .micdot { width: 8px; height: 8px; border-radius: 50%; background: #f87171; box-shadow: 0 0 8px #f87171; }
+
+  /* The board is a wide-screen surface. Narrow viewports get one sentence. */
+  .sb-narrow { display: none; padding: 24px; color: #94a3b8; font-size: 14px; }
+  @media (max-width: 899px) {
+    .sb-shell { display: none; }
+    .sb-narrow { display: block; }
+  }
+</style>
+
+<div class="sb-narrow">The Session Board needs a wide screen. <a href="/sessions" class="text-indigo-400 underline">Open Sessions</a> instead.</div>
+
+<div class="sb-shell" x-data="sessionsBoard()" data-testid="sessions-board">
+  <div class="sb-bar">
+    <span class="sb-sub" x-text="rows.length + ' live session' + (rows.length === 1 ? '' : 's') + ' · ' + (columns.length - (columns.some(c => c.id === 'solo') ? 1 : 0)) + ' group' + ((columns.length - (columns.some(c => c.id === 'solo') ? 1 : 0)) === 1 ? '' : 's')"></span>
+    <div class="sb-seg" role="group" aria-label="Card presentation">
+      <button type="button" @click="setPresentation('transcript')" :aria-pressed="String(presentation === 'transcript')">Transcript</button>
+      <button type="button" @click="setPresentation('stats')" :aria-pressed="String(presentation === 'stats')">Stats</button>
+    </div>
+    <span class="sb-spacer"></span>
+    <span class="sb-hint">click a card → dictate · drag header → move · drag right → new column · ⤢ → full height</span>
+  </div>
+
+  <div class="sb-board" :class="dragging ? 'dragging' : ''" x-ref="board">
+    <template x-for="col in columns" :key="col.id">
+      <section class="sb-col" :class="[col.id === 'solo' ? 'solo' : '', col.focus ? 'focused' : '']" :style="'width:' + col.width + 'px'" :data-col="col.id">
+        <header class="sb-col-head">
+          <div class="sb-col-title-row">
+            <span class="sb-col-swatch" :style="'background:' + (col.color || '#334155')"></span>
+            <input class="sb-col-title" type="text" :value="col.title" :readonly="col.id === 'solo'"
+                   :aria-label="'Group title for ' + col.title"
+                   @change="renameColumn(col, $event.target.value)" @keydown.enter="$event.target.blur()">
+            <span class="sb-col-count" x-text="col.members.length"></span>
+            <span class="sb-col-attn" :title="attnTitle(col)">
+              <template x-for="m in col.members" :key="m"><i :class="attnClass(m)"></i></template>
+            </span>
+          </div>
+          <div class="sb-col-meta">
+            <span><span class="lab">cpu</span><b x-text="colCpu(col)"></b></span>
+            <span><span class="lab">mem</span><b x-text="colMem(col)"></b></span>
+            <span><span class="lab">disk</span><b x-text="colDisk(col)"></b></span>
+            <svg width="90" height="20" viewBox="0 0 90 20" preserveAspectRatio="none" aria-hidden="true">
+              <polyline :points="colSpark(col)" fill="none" stroke="#4bd99a" stroke-width="1.4"/>
+            </svg>
+          </div>
+        </header>
+
+        <div class="sb-col-body">
+          <template x-for="id in col.members" :key="id">
+            <div>
+              <article class="sb-card" :class="[isBound(id) ? 'bound' : '', dragId === id ? 'moving' : '']"
+                       :data-presentation="cardPresentation(id)" :data-session="id" data-testid="session-board-card"
+                       :style="cardStyle(id)"
+                       @click="bindDictation($event, id)">
+                <div class="sb-card-tools">
+                  <button type="button" :title="col.focus === id ? 'Restore card height' : 'Full height — this column becomes this session'"
+                          @click.stop="focusCard(id)" x-text="col.focus === id ? '⤡' : '⤢'"></button>
+                  <button type="button" :title="cardPresentation(id) === 'transcript' ? 'Show stats' : 'Show transcript'"
+                          @click.stop="togglePresentation(id)" x-text="cardPresentation(id) === 'transcript' ? '☰' : '¶'"></button>
+                </div>
+                <div class="sb-card-head" x-data="{ s: rowFor(id) }" x-effect="s = rowFor(id)"
+                     @pointerdown="onHeadPointerDown($event, id)">
+                  {% include "partials/session-card.html" %}
+                </div>
+                <template x-if="cardPresentation(id) === 'transcript'">
+                  <div class="sb-card-body session-viewer" data-mode="panel"
+                       x-data="sessionViewerPage({mode:'panel'})"
+                       x-init="$nextTick(() => configure(panelConfig(id)))">
+                    <template x-if="state === 'loading'"><div class="sb-empty">Loading session…</div></template>
+                    <template x-if="state === 'error'"><div class="sb-empty" x-text="errorMsg"></div></template>
+                    <template x-if="state === 'ready'">
+                      <div class="sv-entries" x-ref="entriesContainer" @scroll="onScroll()">
+                        <template x-if="entries.length === 0"><div class="sb-empty">No transcript — terminal session.</div></template>
+                        {% include "partials/session-entries.html" %}
+                      </div>
+                    </template>
+                  </div>
+                </template>
+                <div class="sb-card-resize" x-show="cardPresentation(id) === 'transcript'" title="Drag to resize"
+                     @pointerdown.stop="startCardResize($event, id)" @click.stop></div>
+              </article>
+            </div>
+          </template>
+        </div>
+        <div class="sb-col-resize" @pointerdown="startColResize($event, col)" title="Drag to resize column"></div>
+      </section>
+    </template>
+
+    <div class="sb-col-new" x-show="!dragging || canStartGroup(dragId)">
+      <span x-text="dragging ? 'Release here to start a new group' : 'Drag a card here to create a group'"></span>
+    </div>
+  </div>
+
+  <div class="sb-talkpill" x-show="boundId" x-cloak>
+    <span class="micdot"></span>
+    <span>Dictating to <b x-text="labelFor(boundId)"></b> — click another card to switch</span>
+  </div>
+</div>

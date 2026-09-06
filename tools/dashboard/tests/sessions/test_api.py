@@ -386,3 +386,26 @@ class TestSessionsJSWiring:
         close = self.sessions_js.index("label: 'Close Session'")
         assert restart < close
         assert "encodeURIComponent(tmux) + '/restart'" in self.sessions_js
+
+class TestSessionsBoardHTML:
+    """/sessions/board returns the page shell; /pages/sessions/board mounts the board."""
+
+    def test_board_returns_200(self, test_client):
+        resp = test_client.get("/sessions/board")
+        assert resp.status_code == 200
+
+    def test_board_fragment_mounts_component_and_partials(self, test_client):
+        resp = test_client.get("/pages/sessions/board")
+        assert resp.status_code == 200
+        html = resp.text
+        assert 'x-data="sessionsBoard()"' in html
+        # The production card partial and the production viewer partial, not copies.
+        assert 'class="session-card-wrap"' in html
+        assert "displayEntries" in html
+        assert "sessionViewerPage({mode:'panel'})" in html
+
+    def test_sessions_fragment_is_unchanged_by_the_board(self, test_client):
+        # The board is its own surface: the Sessions fragment carries none of it.
+        html = test_client.get("/pages/sessions").text
+        assert "sessionsBoard" not in html
+        assert "sb-board" not in html
