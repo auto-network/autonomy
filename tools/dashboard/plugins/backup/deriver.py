@@ -259,6 +259,11 @@ def run_cycle(now: datetime | None = None) -> dict:
     from tools.dashboard.plugins.backup.entrypoints.schemas import RUN_SET_ID
 
     reconciled = reconcile_mod.reconcile()
+    try:
+        from tools.dashboard.plugins.backup import drill as drill_mod
+        drill_mod.finalize_abandoned()
+    except Exception:
+        logger.exception("abandoned-drill finalization failed")
     runs = _rows(RUN_SET_ID)
     conditions = derive_conditions(runs, _read_config(), now=now)
     outcome = publish_conditions(attention_routes._runtime.index, conditions)

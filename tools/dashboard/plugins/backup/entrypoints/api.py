@@ -284,8 +284,15 @@ async def post_reconcile(request: Request) -> JSONResponse:
     from tools.dashboard.plugins.backup import reconcile as reconcile_mod
     try:
         result = reconcile_mod.reconcile()
-    except Exception:
-        return JSONResponse({"error": "reconcile failed"}, status_code=500)
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).exception("backup reconcile failed")
+        # The caller is already operator-authority; the class+message is
+        # diagnosis, not a secret (a swallowed bare 500 cost a live
+        # debugging loop on 2026-09-06).
+        return JSONResponse(
+            {"error": f"reconcile failed: {type(exc).__name__}: {exc}"},
+            status_code=500)
     return JSONResponse(result)
 
 

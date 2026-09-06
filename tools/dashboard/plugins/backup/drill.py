@@ -130,6 +130,56 @@ def _publish_outcome(verdict: str, stamp: str, checks: list[dict]) -> None:
         logger.exception("drill attention publish failed")
 
 
+def finalize_abandoned(now=None) -> list[str]:
+    """Close out ``running`` rows whose process died under them.
+
+    A drill runs inside the dashboard process; a hot-reload or crash
+    mid-drill leaves its row ``running`` forever — which reads as an
+    eternal in-flight drill and pins the run button disabled (found
+    live 2026-09-06: a row said "running" 75 minutes after its process
+    was restarted). Any running row older than twice the configured
+    timeout, and not this process's own in-flight drill, finalizes as
+    ``fail`` with the honest reason. Called by the deriver cycle."""
+    from datetime import datetime, timezone
+
+    from tools.graph import settings_ops
+    from tools.dashboard.plugins.backup.entrypoints.api import (
+        _read_config,
+        _rows,
+    )
+    now = now or datetime.now(timezone.utc)
+    limit_s = float(_read_config().get("drill_timeout_minutes", 30)) * 60 * 2
+    finalized = []
+    for row in _rows(DRILL_SET_ID):
+        if row.get("verdict") != "running":
+            continue
+        stamp = row.get("key", "")
+        if stamp == _running_stamp:
+            continue  # genuinely in flight in this process
+        try:
+            started = datetime.fromisoformat(row.get("started_at", ""))
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+        except ValueError:
+            started = None
+        if started is not None and (now - started).total_seconds() < limit_s:
+            continue
+        settings_ops.add_setting(
+            DRILL_SET_ID, SCHEMA_REVISION, stamp, {
+                "verdict": "fail",
+                "trigger": row.get("trigger", "manual"),
+                "started_at": row.get("started_at", ""),
+                "finished_at": now.isoformat(),
+                "checks": [{"name": "runtime", "status": "fail",
+                            "detail": "abandoned — the dashboard process "
+                                      "restarted mid-drill"}],
+                "evidence": "",
+            }, org="machine")
+        finalized.append(stamp)
+        logger.warning("finalized abandoned drill %s", stamp)
+    return finalized
+
+
 def run_drill(trigger: str = "manual", *, timeout_s: float | None = None,
               script: Path | None = None, env: dict | None = None) -> dict:
     """Run one drill to completion and return its recorded row payload.
