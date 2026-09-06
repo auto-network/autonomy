@@ -130,7 +130,7 @@ def test_dashboard_locator_is_used_when_reachable(session_repo, tmp_path):
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
-            assert self.path == "/api/session/provenance-stamp?format=locator"
+            assert self.path == "/api/provenance-stamp?format=locator"
             if self.headers.get("Authorization") == "Bearer tok123":
                 payload = b"autonomy://PERSONAKEY/auto-x/42\n"
             else:
