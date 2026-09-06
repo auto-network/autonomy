@@ -14,6 +14,7 @@ function loadVoiceStore(opts) {
   const sessionStorageData = Object.assign({}, (opts && opts.sessionStorage) || {});
   const fetchCalls = [];
   const spoken = [];
+  const sessionStores = {};
 
   const document = {
     addEventListener(name, cb) {
@@ -56,6 +57,10 @@ function loadVoiceStore(opts) {
       },
     },
     SpeechSynthesisUtterance: function(text) { this.text = text; },
+    getSessionStore(sessionId) {
+      if (!sessionStores[sessionId]) sessionStores[sessionId] = { isLive: true, outbox: null };
+      return sessionStores[sessionId];
+    },
   };
   const fetchImpl = (opts && opts.fetchImpl) || (async function() {
     throw new Error('unexpected fetch');
@@ -125,6 +130,7 @@ describe('voice store substrate', () => {
     assert.ok(h.store);
     for (const field of [
       'boundSessionId',
+      'deliverySessionId',
       'micMode',
       'bufferText',
       'capsulePosition',
@@ -153,6 +159,55 @@ describe('voice store substrate', () => {
     assert.equal(h.store.voiceoverEnabled, false);
     assert.equal(h.store.voiceoverBusy, false);
     assert.equal(h.store.voiceoverReply, '');
+  });
+
+  it('retargets only delivery and sends the retained buffer to that live session', async () => {
+    const h = loadVoiceStore({ initialStores: { flags: { get() { return true; } } } });
+    const staged = [];
+    h.window.stageOutboxSend = (sessionId, outbox, options) => staged.push({ sessionId, outbox, options });
+    h.store.requestBind('session-a', { isLive: true });
+    h.store.setBufferText('retained exactly');
+    const before = {
+      bound: h.store.boundSessionId,
+      mode: h.store.micMode,
+      capture: h.store.captureStatus,
+      transport: h.store.transportStatus,
+      text: h.store.bufferText,
+    };
+
+    assert.equal(h.store.retargetDelivery('session-b'), true);
+    assert.equal(h.store.deliverySessionId, 'session-b');
+    assert.deepEqual({
+      bound: h.store.boundSessionId,
+      mode: h.store.micMode,
+      capture: h.store.captureStatus,
+      transport: h.store.transportStatus,
+      text: h.store.bufferText,
+    }, before);
+    assert.equal(await h.store.sendBuffer(), true);
+    assert.equal(staged.length, 1);
+    assert.equal(staged[0].sessionId, 'session-b');
+    assert.equal(staged[0].outbox.text, 'retained exactly');
+    assert.equal(staged[0].options.tmuxSession, 'session-b');
+  });
+
+  it('preserves target and draft when retarget is unsafe or the selected target ends', async () => {
+    const h = loadVoiceStore({ initialStores: { flags: { get() { return true; } } } });
+    h.store.requestBind('session-a', { isLive: true });
+    h.store.setBufferText('do not lose me');
+    h.store.attachments = [{ id: 1, path: '/tmp/a-only.png' }];
+    assert.equal(h.store.retargetDelivery('session-b'), false);
+    assert.equal(h.store.deliverySessionId, 'session-a');
+    assert.equal(h.store.bufferText, 'do not lose me');
+    assert.equal(h.store.attachments.length, 1);
+
+    h.store.attachments = [];
+    assert.equal(h.store.retargetDelivery('session-b'), true);
+    h.window.getSessionStore('session-b').isLive = false;
+    assert.equal(await h.store.sendBuffer(), false);
+    assert.equal(h.store.deliverySessionId, 'session-b');
+    assert.equal(h.store.bufferText, 'do not lose me');
+    assert.match(h.store.sheetError, /no longer available/i);
   });
 
   it('asks Voiceover about the viewed session, speaks the answer, and does not stage attachments', async () => {

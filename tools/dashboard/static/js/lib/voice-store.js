@@ -357,6 +357,7 @@
     var resumeIntent = _readResumeIntent();
     return {
       boundSessionId: resumeIntent ? resumeIntent.sessionId : '',
+      deliverySessionId: resumeIntent ? resumeIntent.sessionId : '',
       micMode: resumeIntent ? resumeIntent.micMode : 'idle',
       // micMode is the persisted operator intent kept for API compatibility.
       // These fields are current-document observations and are never persisted.
@@ -465,6 +466,7 @@
         // stranded. Do NOT reset bufferText here — only a full unbind clears it.
         var priorActionRequired = this.boundSessionId ? this.actionRequiredReason : null;
         this.boundSessionId = sessionId || '';
+        this.deliverySessionId = this.boundSessionId;
         this.pendingRebindTarget = '';
         this.awayEventSessionId = '';
         this.micMode = this.boundSessionId ? 'listening' : 'idle';
@@ -473,6 +475,29 @@
         this.actionRequiredReason = priorActionRequired || null;
         this.recoveryIncident = null;
         _writeResumeIntent(this.boundSessionId, this.micMode);
+      },
+
+      retargetDelivery(sessionId) {
+        sessionId = String(sessionId || '');
+        if (!sessionId) return false;
+        if (sessionId === this.deliverySessionId) return true;
+        var target = _getSessionStore(sessionId);
+        if (!target || target.isLive === false) {
+          this.sheetError = 'Send failed. Session is no longer available.';
+          return false;
+        }
+        if (this.attachments.length) {
+          this.sheetError = 'Remove attachments before switching the send target.';
+          return false;
+        }
+        var priorStore = _getSessionStore(this.deliverySessionId);
+        if (priorStore && priorStore.outbox && priorStore.outbox.source === 'voice' &&
+            priorStore.outbox.state === 'capturing') {
+          priorStore.outbox = null;
+        }
+        this.deliverySessionId = sessionId;
+        this.sheetError = '';
+        return true;
       },
 
       confirmRebind() {
@@ -609,6 +634,7 @@
 
       endSession() {
         this.boundSessionId = '';
+        this.deliverySessionId = '';
         this.pendingRebindTarget = '';
         this.setBufferText('', { update: 'end' });
         this.micMode = 'idle';
@@ -696,8 +722,8 @@
       // path and container sessions to a docker-cp'd /tmp path), passing the
       // bound session so the file lands where that agent can open it.
       addAttachmentFiles(fileList) {
-        if (!fileList || !this.boundSessionId) return;
-        var tmux = this.boundSessionId;
+        if (!fileList || !this.deliverySessionId) return;
+        var tmux = this.deliverySessionId;
         var self = this;
         for (var i = 0; i < fileList.length; i++) {
           var file = fileList[i];
@@ -774,7 +800,13 @@
       },
 
       async sendBuffer() {
-        if (!this.boundSessionId) {
+        var deliverySessionId = this.deliverySessionId;
+        if (!deliverySessionId) {
+          this.sheetError = 'Send failed. Session is no longer available.';
+          return false;
+        }
+        var deliveryStore = _getSessionStore(deliverySessionId);
+        if (!deliveryStore || deliveryStore.isLive === false) {
           this.sheetError = 'Send failed. Session is no longer available.';
           return false;
         }
@@ -790,7 +822,7 @@
           return false;
         }
         try {
-          var sessionStore = _getSessionStore(this.boundSessionId);
+          var sessionStore = deliveryStore;
           var existing = sessionStore && sessionStore.outbox;
           if (existing && (typeof existing.text !== 'string' || !existing.text.trim())) {
             sessionStore.outbox = null;
@@ -801,17 +833,17 @@
             return false;
           }
           var baseOutbox = existing || {
-            localId: _newOutboxId(this.boundSessionId),
+            localId: _newOutboxId(deliverySessionId),
             source: 'voice',
             ts: (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0,
           };
-          window.stageOutboxSend(this.boundSessionId, {
+          window.stageOutboxSend(deliverySessionId, {
             localId: baseOutbox.localId,
             state: 'sending',
             source: 'voice',
             text: body,
             ts: baseOutbox.ts || ((typeof Date !== 'undefined' && Date.now) ? Date.now() : 0),
-          }, { tmuxSession: this.boundSessionId });
+          }, { tmuxSession: deliverySessionId });
           _resetVoiceCaptureEpoch('send');
           this.setBufferText('', { update: 'send' });
           this.clearAttachments();

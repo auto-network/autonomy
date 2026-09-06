@@ -295,8 +295,9 @@
       // send fill + the "→ ‹target›" tile so it can't be mistaken for local input.
       get _crossSessionDictation() {
         var voice = this.getVoiceStore();
-        return !!(this._composerActive && voice && voice.enabled && voice.boundSessionId &&
-                  voice.boundSessionId !== this._tmuxSession);
+        var delivery = voice && (voice.deliverySessionId || voice.boundSessionId);
+        return !!(this._composerActive && voice && voice.enabled && delivery &&
+                  delivery !== this._tmuxSession);
       },
       get _crossSessionText() {
         var voice = this.getVoiceStore();
@@ -304,8 +305,9 @@
       },
       get _localDictationText() {
         var voice = this.getVoiceStore();
-        if (!this._composerActive || !voice || !voice.enabled || !voice.boundSessionId) return '';
-        if (voice.boundSessionId !== this._tmuxSession) return '';
+        var delivery = voice && (voice.deliverySessionId || voice.boundSessionId);
+        if (!this._composerActive || !voice || !voice.enabled || !delivery) return '';
+        if (delivery !== this._tmuxSession) return '';
         var text = typeof voice.bufferText === 'string' ? voice.bufferText : '';
         return text.trim() ? text : '';
       },
@@ -315,7 +317,7 @@
       },
       get _crossSessionTargetTitle() {
         var voice = this.getVoiceStore();
-        var bound = voice && voice.boundSessionId;
+        var bound = voice && (voice.deliverySessionId || voice.boundSessionId);
         if (!bound) return '';
         var sessions = Alpine.store('sessions') || {};
         var s = sessions[bound];
