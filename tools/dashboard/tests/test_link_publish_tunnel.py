@@ -461,25 +461,15 @@ def test_non_operator_subject_kind_is_refused(env, root, session_key,
     assert _cached_grants() == {}
 
 
-def test_uncached_token_revoke_never_reaches_the_tunnel(
+def test_uncached_token_revoke_is_refused_naming_the_fault(
     env, root, session_key, session_cert, monkeypatch,
 ):
-    """Finding #5: a token not classifiable as a share link (cache miss, as
-    an org:join token would be if uncached) must NOT be routed to the tunnel
-    revoke. It goes to the HTTP path instead; the tunnel control seam is
-    never called."""
+    """A token whose grant is not in this dashboard's cache cannot be
+    classified or attributed, so the revoke is REFUSED with the fault named
+    (auto-qol1v: the HTTP fallback is retired) — and the tunnel control
+    seam is never called for it."""
     recorder = _ControlRecorder()
     _install_control(monkeypatch, recorder)
-    forwarded = []
-
-    async def fake_http(staged, envelope):
-        forwarded.append(staged)
-        # Emulate the registry accepting the revoke over HTTP.
-        class _Resp:
-            status_code = 200
-        return _Resp(), None
-
-    monkeypatch.setattr(link_approvals, "_forward_to_registry", fake_http)
 
     created = env.post("/api/approvals", json={
         "kind": "link_revoke", "session": SESSION,
@@ -488,7 +478,10 @@ def test_uncached_token_revoke_never_reaches_the_tunnel(
     rid = created.json()["id"]
     envelope = _tunnel_envelope(session_key, session_cert,
                                "/control/revoke-link", payload={})
-    _decide_and_wait(env, rid, envelope)
+    result = _decide_and_wait(env, rid, envelope)
+    execution = result["execution"]
+    assert execution["ok"] is False
+    assert "not in this dashboard's cache" in execution["error"]
     # The tunnel control seam was never used for an unclassifiable token.
     assert recorder.calls == []
 

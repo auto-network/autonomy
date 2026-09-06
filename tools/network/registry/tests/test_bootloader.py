@@ -9,36 +9,32 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .conftest import HOUR, ORG, TARGET, publish_link, register, signed
+from .conftest import HOUR, ORG, TARGET, mint_link, register, revoke_link
 
 
-def _publish(client, clock, root, recovery, session_key, session_cert):
+def _publish(client, clock, root, recovery):
     register(client, clock, root, policy="recovery-key", recovery_pub=recovery.public_hex)
-    return publish_link(client, clock, session_key, cert=session_cert).json()["token"]
+    return mint_link(client, clock, root)["token"]
 
 
 class TestBootloaderBytes:
-    def test_shell_carries_no_identifiers(self, client, clock, root, recovery,
-                                          session_key, session_cert):
-        token = _publish(client, clock, root, recovery, session_key, session_cert)
+    def test_shell_carries_no_identifiers(self, client, clock, root, recovery):
+        token = _publish(client, clock, root, recovery)
         body = client.get(f"/l/{token}").text
         # Nothing org-, target-, key-, or even token-identifying may appear
         # in the served page (§5.3: the URL is a pure network pointer).
-        for needle in (ORG, TARGET, root.public_hex, session_key.public_hex, token, "present"):
+        for needle in (ORG, TARGET, root.public_hex, token, "present"):
             assert needle not in body
 
-    def test_shell_bytes_identical_across_tokens(self, client, clock, root, recovery,
-                                                 session_key, session_cert):
+    def test_shell_bytes_identical_across_tokens(self, client, clock, root, recovery):
         """Live, revoked, expired, and invented tokens all serve the SAME
         bytes — only the status code (mirroring envelope liveness) differs."""
-        live = _publish(client, clock, root, recovery, session_key, session_cert)
+        live = _publish(client, clock, root, recovery)
 
-        revoked = publish_link(client, clock, session_key, cert=session_cert).json()["token"]
-        signed(client, "DELETE", f"/v1/links/{revoked}", session_key, {}, clock,
-               cert=session_cert, expect=200)
+        revoked = mint_link(client, clock, root)["token"]
+        revoke_link(client, clock, root, revoked)
 
-        expiring = publish_link(client, clock, session_key, cert=session_cert,
-                                meta={"ttl": HOUR}).json()["token"]
+        expiring = mint_link(client, clock, root, meta={"ttl": HOUR})["token"]
 
         live_resp = client.get(f"/l/{live}")
         bodies = {
@@ -51,16 +47,14 @@ class TestBootloaderBytes:
         bodies["expired"] = client.get(f"/l/{expiring}").content
         assert len(set(bodies.values())) == 1  # one byte sequence, always
 
-    def test_status_mirrors_envelope_liveness(self, client, clock, root, recovery,
-                                              session_key, session_cert):
-        live = _publish(client, clock, root, recovery, session_key, session_cert)
+    def test_status_mirrors_envelope_liveness(self, client, clock, root, recovery):
+        live = _publish(client, clock, root, recovery)
         assert client.get(f"/l/{live}").status_code == 200
         for dead in ("0" * 32, "not-a-token"):
             assert client.get(f"/l/{dead}").status_code == 404
 
-    def test_security_headers(self, client, clock, root, recovery,
-                              session_key, session_cert):
-        token = _publish(client, clock, root, recovery, session_key, session_cert)
+    def test_security_headers(self, client, clock, root, recovery):
+        token = _publish(client, clock, root, recovery)
         headers = client.get(f"/l/{token}").headers
         csp = headers["content-security-policy"]
         assert "default-src 'none'" in csp
@@ -123,13 +117,11 @@ class TestBootloaderBytes:
         assert 'id="error-view"' not in shell
         assert "This page needs to be refreshed" not in shell
 
-    def test_no_org_enumeration_via_status(self, client, clock, root, recovery,
-                                           session_key, session_cert):
+    def test_no_org_enumeration_via_status(self, client, clock, root, recovery):
         """A revoked token and an unknown token are indistinguishable from
         the /l/ endpoint — same status, same bytes."""
-        token = _publish(client, clock, root, recovery, session_key, session_cert)
-        signed(client, "DELETE", f"/v1/links/{token}", session_key, {}, clock,
-               cert=session_cert, expect=200)
+        token = _publish(client, clock, root, recovery)
+        revoke_link(client, clock, root, token)
         revoked = client.get(f"/l/{token}")
         unknown = client.get(f"/l/{'a' * 32}")
         assert revoked.status_code == unknown.status_code == 404

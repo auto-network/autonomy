@@ -11,11 +11,13 @@ split the same way:
   below resolves the target's real title and preview from trusted local
   stores — the requesting agent cannot spoof them), unlocks the existing
   browser signer on demand, and posts the signed envelope in the decision;
-* the **executor** below forwards that envelope to the auto.network
-  registry (``POST /v1/links`` / ``DELETE /v1/links/{token}``, spec §4.4),
-  caches the issued grant to ``autonomy.network.link-grant`` (the I9
-  serving cache), and returns the share URL through the approval result to
-  the waiting CLI.
+* the **executor** below verifies the envelope LOCALLY — the persona is
+  authenticated against the org's bound root and the authority ledger
+  grants the scope — then publishes/revokes the grant as a control frame
+  on the org's authenticated serving tunnel (register D19 / auto-qol1v;
+  the registry's HTTP write routes are retired). It caches the issued
+  grant to ``autonomy.network.link-grant`` (the I9 serving cache) and
+  returns the share URL through the approval result to the waiting CLI.
 
 Session-key seam (C2 dependency): the browser-side signature comes from
 ``window.AutonomyNetworkSigner`` (see ``pages/worktrees.js``). Until the C2
@@ -36,18 +38,16 @@ Invariants enforced here:
 * staged-request integrity — the envelope's payload must equal the payload
   derived from the *stored* request row; what the operator saw is exactly
   what gets published.
-* audience freezing (confused-deputy guard) — the registry envelope binds
-  only method/path/payload, not the destination host. So the FIRST render
-  of the dialog freezes the full staged request server-side (method, path,
-  payload, ``registry_url``, and a binding snapshot incl. ``root_pub``)
-  onto the approval row, write-once. Execution takes its destination from
-  that frozen snapshot ONLY — never from the decision body (client-
-  controlled: a compromised browser could claim any audience) and never
-  from a re-read of the mutable binding — and additionally REFUSES when
-  the current binding has drifted from the snapshot (registry_url,
-  org_uuid, or root_pub), so a swap between render and approval surfaces
-  as a "re-run the publish", never as a silent redirect. What the operator
-  was shown is exactly what executes.
+* audience freezing (confused-deputy guard) — the FIRST render of the
+  dialog freezes the full staged request server-side (payload plus a
+  binding snapshot incl. ``root_pub``) onto the approval row, write-once.
+  Every later render shows that frozen snapshot and flags drift against
+  the live binding, so a binding swap between render and approval is
+  visible to the operator, never silent. Execution itself has no
+  client-controllable destination: the control frame goes to this org's
+  own serving tunnel (keyed by the org slug from the stored request row,
+  never from the decision body), and the persona's authority is verified
+  locally before any frame is emitted.
 """
 
 from __future__ import annotations
@@ -406,11 +406,12 @@ def _registry_payload(req: dict, binding: dict) -> dict:
 
 # ── GET enrichment (what the operator reviews) ────────────────
 #
-# The first render FREEZES the staged registry request onto the approval
-# row (write-once, server-side). Every later render — and the execution —
-# reads the frozen snapshot, so a binding change after first render can
-# never move the destination out from under the operator; it can only
-# surface as a drift warning here and a refusal at execute.
+# The first render FREEZES the staged request onto the approval row
+# (write-once, server-side). Every later render reads the frozen snapshot,
+# so a binding change after first render cannot move what the operator is
+# shown out from under them; it surfaces as a drift warning here. The
+# tunnel executor has no client-controllable destination to protect — the
+# frame goes to this org's own serving tunnel.
 
 
 def _staged_registry_request(row: dict, build) -> tuple[dict | None, str | None, bool]:
@@ -591,10 +592,6 @@ def _cached_grant(token: str, org: str | None) -> dict | None:
 # ── post-approval executors ───────────────────────────────────
 
 
-def _registry_client(base_url: str) -> httpx.AsyncClient:
-    """Factory seam: tests swap this for an ASGITransport-backed client
-    pointed at an in-process registry app."""
-    return httpx.AsyncClient(base_url=base_url, timeout=15.0)
 
 
 def _fail(error: str) -> dict:
@@ -624,19 +621,6 @@ def _binding_drift_error(staged: dict, binding: dict) -> str | None:
     return None
 
 
-def _frozen_staged(row: dict) -> tuple[dict | None, str | None]:
-    """The server-frozen staged request an execution is allowed to use.
-
-    Nothing client-supplied substitutes for it: if the request was never
-    rendered (so never frozen), the execution refuses outright."""
-    staged = row.get("staged")
-    if not isinstance(staged, dict) or not staged.get("registry_url"):
-        return None, (
-            "this request was never staged — the dialog render freezes the "
-            "exact registry request server-side, and execution refuses to "
-            "proceed without that snapshot (confused-deputy guard)"
-        )
-    return staged, None
 
 
 def _publish_payload_for_decision(staged: dict, decision: dict) -> tuple[dict | None, str | None]:
@@ -864,24 +848,8 @@ def _authorization_refusal(
     return None
 
 
-async def _forward_to_registry(staged: dict, envelope: dict) -> tuple[httpx.Response | None, str | None]:
-    """Forward the signed envelope to the FROZEN destination — method, path,
-    and registry_url all come from the server-side snapshot, never from the
-    decision body or a re-read binding."""
-    try:
-        async with _registry_client(staged["registry_url"]) as client:
-            resp = await client.request(staged["method"], staged["path"], json=envelope)
-        return resp, None
-    except httpx.HTTPError as e:
-        return None, f"could not reach the registry at {staged['registry_url']}: {e}"
 
 
-def _registry_error(resp: httpx.Response) -> str:
-    try:
-        detail = resp.json().get("detail", resp.text)
-    except Exception:
-        detail = resp.text
-    return f"registry refused the request ({resp.status_code}): {detail}"
 
 
 async def _execute_link_publish(row: dict, decision: dict) -> dict:
@@ -1129,101 +1097,11 @@ def _tunnel_link_meta(req: dict, decision: dict) -> tuple[dict, str | None]:
     return meta, None
 
 
-async def _execute_link_publish_http(row: dict, decision: dict) -> dict:
-    """The pre-D19 HTTP publish path, retained for org:join invitations
-    (option A): the signed envelope is forwarded to the registry, which
-    verifies the chain and mints the grant."""
-    req = row["request"]
-    org = req.get("org")
-    envelope, subject, err = _envelope_and_subject(decision)
-    if err:
-        return _fail(err)
-    acting_persona_pub = subject["id"]
-    refusal = _authorization_refusal(
-        org, acting_persona_pub, "link:publish", "publish share links",
-    )
-    if refusal:
-        return _fail(refusal)
-    staged, err = _frozen_staged(row)
-    if err:
-        return _fail(err)
-    binding, binding_error = _load_binding(org)
-    if binding_error:
-        return _fail(binding_error)
-    drift_error = _binding_drift_error(staged, binding)
-    if drift_error:
-        return _fail(drift_error)
-    final_payload, payload_error = _publish_payload_for_decision(staged, decision)
-    if payload_error:
-        return _fail(payload_error)
-    if envelope.get("payload") != final_payload:
-        # What was staged (and displayed) is exactly what an approval applies to.
-        return _fail("signed payload does not match the staged request — refusing to publish")
-    resp, err = await _forward_to_registry(staged, envelope)
-    if err:
-        return _fail(err)
-    if resp.status_code != 201:
-        return _fail(_registry_error(resp))
-    body = resp.json()
-    token, url = body.get("token"), body.get("url")
-    if not isinstance(token, str) or not _TOKEN_RE.match(token):
-        # I2 tripwire: only a CSPRNG-shaped opaque token enters the cache.
-        return _fail("registry returned a malformed grant token — not caching it")
-    if (
-        req.get("target_type") == "org:join"
-        and body.get("expires_at") != req.get("expires_at")
-    ):
-        return _fail(
-            "registry did not preserve the invitation-aligned expiry — "
-            "not caching the link"
-        )
-    grant = {
-        "token": token,
-        "url": url,
-        "target_uuid": req["target_uuid"],
-        "target_type": req["target_type"],
-        "meta": final_payload.get("meta") or {},
-        "subject": subject,  # I6: the issuing cert's subject
-        "issued_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
-    if req.get("target_type") == "org:join":
-        grant["invite_ref"] = req["invite_ref"]
-    settings_ops.upsert_by_key(
-        NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION,
-        token, grant, org=org,
-    )
-    # Post-publish trigger: reconcile the serving connector now that a live
-    # grant exists (starts it if a serve-cert is provisioned and it isn't
-    # already running). Non-fatal and best-effort — a launch failure is not an
-    # exception into the publish; the probe below reports the real state, and
-    # the watchdog keeps reconciling. Off the event loop: it reads settings,
-    # verifies the key, and may spawn a process.
-    try:
-        from tools.dashboard.link_serving_supervisor import get_supervisor
-        await asyncio.to_thread(get_supervisor().ensure, org)
-    except Exception:
-        pass
-    # Final step: prove the link actually serves before reporting success.
-    # The grant is already minted (the link exists) — the probe never
-    # un-publishes it; it walks the viewer's real path (relay handshake +
-    # object HEAD) so the result honestly says whether the tunnel is live,
-    # the grant is dead, or the tunnel is unreachable, without transferring
-    # the artifact. A down tunnel is a backend concern that self-heals; the
-    # publish reports it, it does not fail on it.
-    serving = await _probe_serving(binding, token)
-    return {
-        "ok": True,
-        "url": url,
-        "token": token,
-        "serving": serving,
-        "actor": _approval_identities(org)["actor_identity"],
-    }
-
-
 async def _probe_serving(binding: dict, token: str) -> dict:
     """End-to-end liveness probe of a freshly published link. Never raises —
     a probe that cannot run is reported as not-live, never an exception into
-    the publish result (the grant is already cached)."""
+    the publish result (the grant is already cached). Shared with Link Central
+    (link_central.py), which probes serving after a central publish."""
     from tools.dashboard.link_probe import probe_link, registry_to_relay_ws
     try:
         return await probe_link(
@@ -1286,41 +1164,6 @@ async def _execute_share_link_revoke_tunnel(row: dict, decision: dict) -> dict:
             "cache_removed": removed}
 
 
-async def _execute_link_revoke_http(row: dict, decision: dict) -> dict:
-    """The pre-D19 HTTP revoke path, retained for org:join grants."""
-    req = row["request"]
-    org = req.get("org")
-    token = req.get("token", "")
-    envelope, subject, err = _envelope_and_subject(decision)
-    if err:
-        return _fail(err)
-    acting_persona_pub = subject["id"]
-    refusal = _authorization_refusal(
-        org, acting_persona_pub, "link:revoke", "revoke share links",
-    )
-    if refusal:
-        return _fail(refusal)
-    staged, err = _frozen_staged(row)
-    if err:
-        return _fail(err)
-    binding, binding_error = _load_binding(org)
-    if binding_error:
-        return _fail(binding_error)
-    drift_error = _binding_drift_error(staged, binding)
-    if drift_error:
-        return _fail(drift_error)
-    if envelope.get("payload") != {}:
-        return _fail("revoke envelopes carry an empty payload — refusing to forward")
-    resp, err = await _forward_to_registry(staged, envelope)
-    if err:
-        return _fail(err)
-    # 404 = the registry never had (or already dropped) it; the local cache
-    # row must still die so the dashboard stops serving the target (I9).
-    if resp.status_code not in (200, 404):
-        return _fail(_registry_error(resp))
-    removed = _drop_cached_grant(token, org)
-    return {"ok": True, "token": token,
-            "registry_status": resp.status_code, "cache_removed": removed}
 
 
 def _drop_cached_grant(token: str, org: str | None) -> bool:

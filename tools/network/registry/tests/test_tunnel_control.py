@@ -15,13 +15,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from tools.network.idkit import KeyPair, Subject, issue_cert
-from tools.network.relaykit.frames import (
-    CTRL_CHANNEL_ID,
-    FRAME_CTRL,
-    decode_frame,
-    encode_frame,
-)
+from tools.network.idkit import KeyPair
 from tools.network.relaykit.hello import (
     HELLO_VERSION,
     HELLO_VERSION_2,
@@ -36,44 +30,15 @@ from tools.network.registry.app import create_app
 from tools.network.registry.turn_credentials import TurnCredentialIssuer
 from starlette.websockets import WebSocketDisconnect
 
-from .conftest import DAY, NOW, ORG, ORG_NONE, TARGET, register
-
-
-def _serve_cert(root: KeyPair, serve_key: KeyPair, org: str = ORG):
-    return issue_cert(
-        root,
-        serve_key.public_hex,
-        scope=("tunnel:serve",),
-        org=org,
-        subject=Subject("persona", "ab" * 32),
-        not_before=NOW - 100,
-        not_after=NOW + 30 * DAY,
-    )
+from .conftest import NOW, ORG, ORG_NONE, TARGET, ctrl as _ctrl, register
+from .conftest import open_tunnel, serve_cert as _serve_cert
 
 
 @contextlib.contextmanager
 def _open_tunnel(client, clock, root, org=ORG):
-    """Register the org, connect its tunnel, complete the hello, and yield
-    the open websocket (already past the {ok: true} ack)."""
-    register(client, clock, root, org_uuid=org)
-    serve_key = KeyPair.generate()
-    cert = _serve_cert(root, serve_key, org)
-    hello = build_tunnel_hello(serve_key, cert, org=org, ts=clock.now)
-    with client.websocket_connect(f"/t/{org}") as ws:
-        ws.send_text(hello)
-        ack = ws.receive_json()
-        assert ack == {"ok": True, "v": HELLO_VERSION}, ack
+    """Register the org, then open its tunnel (shared conftest helper)."""
+    with open_tunnel(client, clock, root, org, register_org=True) as ws:
         yield ws
-
-
-def _ctrl(ws, correlation, op, args):
-    request = {"id": correlation, "op": op, "args": args}
-    ws.send_bytes(encode_frame(
-        FRAME_CTRL, CTRL_CHANNEL_ID, json.dumps(request).encode("utf-8")))
-    frame = decode_frame(ws.receive_bytes())
-    assert frame.type == FRAME_CTRL
-    assert frame.channel_id == CTRL_CHANNEL_ID
-    return json.loads(frame.payload.decode("utf-8"))
 
 
 def _hello_with_version(serve_key, cert, *, org, ts, version):

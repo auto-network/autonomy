@@ -6358,7 +6358,8 @@ def test_org_join_approval_signs_fixed_absolute_expiry(browser):
         "meta": {"label": "Member invitation"},
     }
     assert checks["signed"] == {
-        "method": "POST", "path": "/v1/links", "payload": expected_payload,
+        "method": "TUNNEL", "path": "/control/create-link",
+        "payload": expected_payload,
     }
     assert checks["decision"] == {
         "approved": True,
@@ -14593,7 +14594,7 @@ _NETWORK_SIGNON_JS = r"""
     r.preconfigure_sign_error = null;
     try {
         await window.AutonomyNetworkSigner.signRegistryRequest(
-            'POST', '/v1/links', {});
+            'TUNNEL', '/control/create-link', {});
     } catch (e) { r.preconfigure_sign_error = String(e.message || e); }
 
     let invalidLoadAttempts = 0;
@@ -14695,7 +14696,7 @@ _NETWORK_SIGNON_JS = r"""
         // the C3 seam: a signed registry envelope, acting as this
         // organization's persona
         r.envelope = await window.AutonomyNetworkSigner.signRegistryRequest(
-            'POST', '/v1/links',
+            'TUNNEL', '/control/create-link',
             {org: BINDING.org_uuid,
              target_uuid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
              target_type: 'note', meta: {ttl: 3600, label: 'sweep'}},
@@ -14877,7 +14878,7 @@ class TestNetworkSignOn:
 
     def test_wrong_passphrase_clean_error(self):
         c = self._checks
-        assert "wrong passphrase" in (c["wrong_pass"] or "")
+        assert "does not open with that password" in (c["wrong_pass"] or "")
         assert c["wrong_pass_signed_in"] is False
 
     # ── acceptance: after authority unlock the signer becomes available ──
@@ -14899,14 +14900,16 @@ class TestNetworkSignOn:
         root is opened to sign on — the persona is exactly HKDF over the
         genesis id, idkit's own derivation, byte for byte.
 
-        The organization key is read once, and for one reason only: this
-        fixture's serving certificate is due, so sign-on offers to renew it.
-        The fixture stores no sealed root key, so there is nothing to open
-        and the organization is reported rather than silently skipped."""
+        The organization key is never even READ: serving credentials are
+        persona-signed (auto-55vwi) and this fixture's binding is current,
+        so nothing at sign-on needs the org root at all."""
         c = self._checks
-        assert c["org_key_reads_at_signon"] == 1
+        assert c["org_key_reads_at_signon"] == 0
         assert c["signon"]["diagnostics"]["orgRootsOpened"] == 0
-        assert c["signon"]["orgs"][0]["serveCert"]["status"] == "no-sealed-org-key"
+        # The serve-cert check runs and is REPORTED (never silently skipped):
+        # the mock dashboard stores no serve certs, so it reports failed.
+        assert c["signon"]["orgs"][0]["serveCert"]["checked"] is True
+        assert c["signon"]["orgs"][0]["serveCert"]["status"] == "failed"
         assert c["signon"]["diagnostics"]["personaCount"] == 1
         assert c["signon"]["personalRootPub"] == NETWORK_PERSONAL_ROOT.public_hex
         entry = c["signon"]["orgs"][0]
@@ -14946,7 +14949,7 @@ class TestNetworkSignOn:
         assert cert.child_pub == env["signer"]
         verify_signature(
             env["signer"], env["sig"],
-            request_signing_input("POST", "/v1/links", env["ts"],
+            request_signing_input("TUNNEL", "/control/create-link", env["ts"],
                                   env["signer"], env["payload"]),
         )
 

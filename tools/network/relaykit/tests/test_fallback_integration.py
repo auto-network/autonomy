@@ -125,7 +125,8 @@ def stack(tmp_path_factory):
     registry_port = free_port()
     registry = start_registry(registry_port, tmp / "registry.db", env,
                               tmp / "registry.log")
-    floor_token = register_org_and_link(registry_port, root, ORG)
+    floor_token = register_org_and_link(
+        registry_port, tmp / "registry.db", root, ORG)
 
     relay_port, listen_port = free_port(), free_port()
     node_kf, node_cf = _write_identity(tmp, "node", node_key, node_cert)

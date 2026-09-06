@@ -9,8 +9,12 @@ target_uuid = org = binding.
 
 The fix (ruling b): the org:join staging reconciles to the binding UUID, so the
 published identity is always the binding. These tests assert that reconciliation
-AND drive the REAL browser signer against the REAL staged payload — the exact
-payload equality the executor enforces — with genesis != binding. The earlier
+AND drive the REAL browser signer against the REAL staged payload with
+genesis != binding: the browser rebuilds its signed payload from the staged
+request (worktrees.js), so any rebuild divergence would make the operator sign
+something other than what the dialog showed. (Execution itself now rides the
+org tunnel — auto-qol1v — and the executor independently reconciles
+target_uuid to the binding; this pins the render/sign coherence.) The earlier
 Python harness signed the staged payload verbatim, which is why the browser's
 rebuild divergence shipped untested; this closes that gap.
 """
@@ -90,7 +94,7 @@ def test_browser_signer_matches_staging_under_uuid_split(meta):
     )
     assert result.returncode == 0, result.stdout + "\n" + result.stderr
     signed = json.loads(result.stdout)
-    # The executor forwards only when the operator-signed payload equals the
-    # staged request. Genesis != binding here, yet they match — the publish
-    # that live-failed now succeeds.
+    # What the browser signs must equal what the dialog staged (render/sign
+    # coherence). Genesis != binding here, yet they match — the divergence
+    # that live-failed is pinned closed.
     assert signed == staged

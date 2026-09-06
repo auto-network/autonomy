@@ -19,7 +19,7 @@ from tools.network.registry.app import SESSION_COOKIE
 from tools.network.registry.assertion import Assertion, IDENTIFY_SCOPE, build_assertion
 from tools.network.registry.store import LinkGrant, RegistryStore
 
-from .conftest import DAY, NOW, ORG, TARGET, publish_link, signed
+from .conftest import DAY, NOW, ORG, TARGET, mint_link, signed
 
 ORIGIN = "https://dash.example"
 
@@ -301,10 +301,10 @@ class TestEndpointHints:
 
 class TestI12NoAttribution:
     def test_noauth_envelope_from_identified_session_records_nothing(
-        self, client, clock, bound_org, session_key, session_cert
+        self, client, clock, bound_org, root, session_key, session_cert
     ):
         # A plain (no require_auth) grant.
-        token = publish_link(client, clock, session_key, cert=session_cert).json()["token"]
+        token = mint_link(client, clock, root)["token"]
         # The same browser becomes identified.
         wire = operator_assertion(session_key, session_cert, nonce=_n("1"))
         assert client.post("/v1/link", json=wire).status_code == 200

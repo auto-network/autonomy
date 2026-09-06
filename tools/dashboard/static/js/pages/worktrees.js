@@ -276,21 +276,15 @@
           : Number(req.duration));
       payload = _linkPayloadWithTtl(rr.payload, ttl);
     }
-    // D19 routing: share links publish/revoke ride the org tunnel, so the
+    // D19 routing: EVERY link publish/revoke rides the org tunnel now
+    // (auto-qol1v retired the org:join HTTP path with the rest), so the
     // dashboard authenticates them LOCALLY and verifies this signature over
     // fixed proof-of-possession bytes (TUNNEL + a control path), NOT the
-    // registry's method/path. org:join keeps the HTTP registry bytes (it
-    // still travels to POST /v1/links). The executor's
-    // _verify_local_publish_authority reconstructs the SAME bytes, so the
-    // two sides must agree here (Codex D19 finding #3).
-    const isShareLink = !isOrgJoin && (
-      isRevoke ? (req.targetType && req.targetType !== 'org:join') : true);
-    let signMethod = rr.method;
-    let signPath = rr.path;
-    if (isShareLink) {
-      signMethod = 'TUNNEL';
-      signPath = isRevoke ? '/control/revoke-link' : '/control/create-link';
-    }
+    // registry's method/path. The executor's _verify_local_publish_authority
+    // reconstructs the SAME bytes, so the two sides must agree here
+    // (Codex D19 finding #3).
+    const signMethod = 'TUNNEL';
+    const signPath = isRevoke ? '/control/revoke-link' : '/control/create-link';
     try {
       let envelope;
       try {

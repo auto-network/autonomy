@@ -8,8 +8,6 @@
  * opportunistic re-key interval per organization, and prints what it did.
  * No organization root key is fetched or decrypted.
  *
- * `--publish` is a separate, opt-in step that exercises the request-signing
- * seam against a registry using one named organization's persona authority.
  */
 
 import fs from 'node:fs';
@@ -20,15 +18,11 @@ import { createNodeStorage } from '../storage.js';
 import {
   configure,
   signOn,
-  signRegistryRequest,
 } from '../../network-signon.mjs';
 
 if (!globalThis.crypto) {
   globalThis.crypto = webcrypto;
 }
-
-const DEFAULT_TARGET_TYPE = 'present';
-const LINK_PATH = '/v1/links';
 
 function requiredValue(argv, index, option) {
   const value = argv[index + 1];
@@ -42,8 +36,6 @@ function parseArguments(argv) {
   const options = {
     server: null,
     orgs: [],
-    publish: null,
-    target: null,
     ttlSeconds: null,
     passphraseFd: null,
     rekeyEndpoint: null,
@@ -59,14 +51,8 @@ function parseArguments(argv) {
       // Omitted entirely, sign-on covers every organization this node knows.
       options.orgs.push(requiredValue(argv, index, option));
       index += 1;
-    } else if (option === '--publish') {
-      options.publish = requiredValue(argv, index, option);
-      index += 1;
     } else if (option === '--rekey-endpoint') {
       options.rekeyEndpoint = requiredValue(argv, index, option);
-      index += 1;
-    } else if (option === '--target') {
-      options.target = requiredValue(argv, index, option);
       index += 1;
     } else if (option === '--ttl') {
       const value = requiredValue(argv, index, option);
@@ -94,7 +80,6 @@ function parseArguments(argv) {
     throw new Error('--server must be an http or https URL');
   }
   options.server = server.href.replace(/\/$/, '');
-  options.target = options.target || crypto.randomUUID();
   return options;
 }
 
@@ -152,54 +137,6 @@ function rekeyAdapter(server, endpoint) {
   };
 }
 
-async function responseBody(response) {
-  const text = await response.text();
-  if (!text) return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
-}
-
-async function publishLink(options, storage, orgRef) {
-  const session = await storage.getSession();
-  const entries = Object.values((session && session.orgs) || {});
-  const entry = entries.find(
-    (row) => row.orgSlug === orgRef || row.genesisId === orgRef
-      || row.org === orgRef,
-  );
-  if (!entry) {
-    throw new Error(`sign-on carries no authority for ${orgRef}`);
-  }
-  if (!entry.registryUrl) {
-    throw new Error(`${orgRef} is not bound to a registry`);
-  }
-  const payload = {
-    org: entry.org,
-    target_uuid: options.target,
-    target_type: DEFAULT_TARGET_TYPE,
-  };
-  const envelope = await signRegistryRequest(
-    'POST', LINK_PATH, payload, { org: orgRef },
-  );
-  const response = await globalThis.fetch(
-    new URL(LINK_PATH, `${entry.registryUrl.replace(/\/$/, '')}/`),
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(envelope),
-    },
-  );
-  return {
-    org: entry.orgSlug,
-    status: response.status,
-    request: { method: 'POST', path: LINK_PATH, payload },
-    envelope,
-    registry: await responseBody(response),
-  };
-}
-
 async function main(argv) {
   const options = parseArguments(argv);
   // Resolve the secret before configuring adapters or touching either live
@@ -252,9 +189,6 @@ async function main(argv) {
       diagnostics: result.diagnostics,
     },
   };
-  if (options.publish) {
-    output.publish = await publishLink(options, storage, options.publish);
-  }
   process.stdout.write(`${JSON.stringify(output)}\n`);
   return output;
 }

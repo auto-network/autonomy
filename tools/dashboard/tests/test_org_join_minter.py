@@ -1,4 +1,13 @@
-"""Live authorized org:join grant minting through the share-link client."""
+"""Live authorized org:join grant minting through the share-link client.
+
+The CLI (``graph link publish --target-type org:join``) posts the approval,
+the fixture plays the operator (sign the tunnel PoP bytes, approve), and the
+executor publishes the grant as a create-link control frame on the org's
+authenticated serving tunnel (auto-qol1v — the HTTP mint is retired). The
+tunnel control seam is stubbed with a recorder, so every byte that would
+cross to the untrusted relay is captured: the invitation BEARER must never
+be among them — only invite_ref and the invitation-aligned expiry cross.
+"""
 
 from __future__ import annotations
 
@@ -10,12 +19,11 @@ import time
 import urllib.error
 import urllib.parse
 
-import httpx
 import pytest
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
-from tools.dashboard import approvals_routes, link_approvals
+from tools.dashboard import approvals_routes
 from tools.dashboard.dao import approval_requests as ar
 from tools.graph import link_cmd, settings_ops
 from tools.graph.db import GraphDB
@@ -29,7 +37,6 @@ from tools.network.idkit import KeyPair, Subject, derive_persona, issue_cert
 from tools.network.invitation import decode_invitation
 from tools.network.ledger import HLC, LedgerStore, make_event, org_ledger_db_path
 from tools.network.ledger.found import found_org_ledger
-from tools.network.registry.app import create_app as create_registry_app
 from tools.network.registry.signing import sign_request
 
 
@@ -41,25 +48,7 @@ ROOT_SEED = bytes(range(32))
 FOUNDER_SEED = bytes(range(32, 64))
 OUTSIDER_SEED = bytes(range(64, 96))
 INVITE_TOKEN = "ef" * 32
-
-
-class RecordingASGITransport(httpx.AsyncBaseTransport):
-    def __init__(self, app, requests):
-        self.inner = httpx.ASGITransport(app=app)
-        self.requests = requests
-
-    async def handle_async_request(self, request):
-        self.requests.append(
-            {
-                "method": request.method,
-                "url": str(request.url),
-                "body": bytes(request.content),
-            }
-        )
-        return await self.inner.handle_async_request(request)
-
-    async def aclose(self):
-        await self.inner.aclose()
+GRANT_TOKEN = "f00dfeed" * 4  # 32 lowercase hex, matches _TOKEN_RE
 
 
 def _args(invite_ref):
@@ -73,15 +62,6 @@ def _args(invite_ref):
     )
 
 
-@pytest.mark.skip(
-    reason="org:join HTTP mint retired (auto-qol1v): org:join now publishes "
-    "over the tunnel control transport, which requires a serving credential "
-    "(the pre-sign guard) and never uses POST /v1/links. This integration test "
-    "exercises the retired HTTP mint; its tunnel migration is auto-rwbja. "
-    "Bearer-safety and expiry-alignment on the tunnel path are covered by "
-    "test_link_publish_tunnel.py::test_org_join_* (only invite_ref, never the "
-    "token, crosses)."
-)
 def test_authorized_client_mints_exact_expiry_join_link_without_bearer_leak(
     tmp_path,
     monkeypatch,
@@ -139,50 +119,51 @@ def test_authorized_client_mints_exact_expiry_join_link_without_bearer_leak(
         org=ORG,
     )
 
-    registry = create_registry_app(
-        ":memory:",
-        base_url=PUBLIC_LINK_URL,
-        secure_cookies=False,
-    )
-    registry_client = TestClient(registry)
-    register = sign_request(
-        root,
-        "POST",
-        "/v1/orgs",
-        {
-            "org_uuid": ORG_UUID,
-            "root_pub": root.public_hex,
-            "recovery_policy": "none",
-        },
-        ts=int(time.time()),
-    )
-    assert registry_client.post("/v1/orgs", json=register).status_code == 201
+    # Tunnel seams (auto-qol1v): serving credential present (the pre-sign
+    # guard), supervisor starts, and the control op is a recorder that mints
+    # a well-formed grant echoing the invitation-aligned expiry.
+    import tools.dashboard.link_serving_supervisor as _sup_mod
+
+    control_calls = []
+
+    class _TunnelStub:
+        def start(self, org):
+            return {"running": True}
+
+    def _control_stub(org, op, args, *, timeout=12.0):
+        control_calls.append((org, op, json.loads(json.dumps(args))))
+        if op == "create-link":
+            reply = {"ok": True, "token": GRANT_TOKEN,
+                     "url": f"{PUBLIC_LINK_URL}/l/{GRANT_TOKEN}"}
+            if "expires_at" in args:
+                reply["expires_at"] = args["expires_at"]
+            return reply
+        return {"ok": False, "error": f"unexpected control op {op}"}
+
+    monkeypatch.setattr(_sup_mod, "get_supervisor", lambda: _TunnelStub())
+    monkeypatch.setattr(_sup_mod, "control", _control_stub)
+    monkeypatch.setattr(_sup_mod, "serve_cert_state",
+                        lambda org, **k: {"status": "ok"})
 
     session_key = KeyPair.generate()
 
-    def session_cert(persona_pub):
+    def session_cert(persona):
+        """Persona-signed session certificate (sign-on is a personal act):
+        the local publish gate anchors the chain at the ACTING PERSONA in
+        subject.id — a root-signed certificate is refused at hop 1."""
         return issue_cert(
-            root,
+            persona,
             session_key.public_hex,
             scope=("link:publish",),
             org=ORG_UUID,
-            subject=Subject("operator", persona_pub),
+            subject=Subject("operator", persona.public_hex),
             not_before=int(time.time()) - 60,
             not_after=int(time.time()) + 86_400,
         )
 
-    active_cert = [session_cert(founder.public_hex)]
-    registry_requests = []
+    active_cert = [session_cert(founder)]
     approval_requests = []
     monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approvals.db")
-    monkeypatch.setattr(
-        link_approvals,
-        "_registry_client",
-        lambda base_url: httpx.AsyncClient(
-            base_url=base_url,
-            transport=RecordingASGITransport(registry, registry_requests),
-        ),
-    )
 
     with TestClient(Starlette(routes=approvals_routes.ROUTES)) as dashboard:
         def decide(approval_id):
@@ -190,6 +171,8 @@ def test_authorized_client_mints_exact_expiry_join_link_without_bearer_leak(
                 f"/api/approvals/{approval_id}"
             ).json()
             registry_request = enriched["registry_request"]
+            # What the operator reviews: the staged org:join identity law
+            # (org == target_uuid == the binding, exact invitation expiry).
             assert registry_request["payload"] == {
                 "org": ORG_UUID,
                 "target_uuid": ORG_UUID,
@@ -198,10 +181,12 @@ def test_authorized_client_mints_exact_expiry_join_link_without_bearer_leak(
                 "expires_at": invite_expiry,
                 "meta": {"label": "Member invitation"},
             }
+            # The browser signs the fixed tunnel PoP bytes (worktrees.js):
+            # publish rides the org tunnel, never a registry HTTP route.
             envelope = sign_request(
                 session_key,
-                registry_request["method"],
-                registry_request["path"],
+                "TUNNEL",
+                "/control/create-link",
                 registry_request["payload"],
                 ts=int(time.time()),
                 cert=active_cert[0],
@@ -272,12 +257,20 @@ def test_authorized_client_mints_exact_expiry_join_link_without_bearer_leak(
 
         # The invitation bearer remains exclusively in the CLI's final
         # fragment. It is absent from the persisted approval request and
-        # every request that reached the real registry.
+        # from every control frame that would cross to the untrusted relay.
         assert INVITE_TOKEN not in json.dumps(approval_requests)
-        assert all(
-            INVITE_TOKEN.encode("utf-8") not in request["body"]
-            for request in registry_requests
-        )
+        assert INVITE_TOKEN not in json.dumps(control_calls)
+
+        # Exactly one create-link crossed, carrying the invitation binding
+        # as top-level args (never meta) and the binding-reconciled uuid.
+        org, op, wire_args = control_calls[-1]
+        assert (org, op) == (ORG, "create-link")
+        assert wire_args["target_uuid"] == ORG_UUID
+        assert wire_args["target_type"] == "org:join"
+        assert wire_args["invite_ref"] == invite.event_id
+        assert wire_args["expires_at"] == invite_expiry
+        assert wire_args.get("meta") == {"label": "Member invitation"}
+
         published_line = next(
             line for line in output.splitlines()
             if line.startswith("✓ share-link published: ")
@@ -289,6 +282,7 @@ def test_authorized_client_mints_exact_expiry_join_link_without_bearer_leak(
             "t": [INVITE_TOKEN]
         }
         grant_token = parsed.path.rsplit("/", 1)[-1]
+        assert grant_token == GRANT_TOKEN
         invite_code_line = next(
             line for line in output.splitlines()
             if line.startswith("  AUTONOMY_INVITE: ")
@@ -300,21 +294,6 @@ def test_authorized_client_mints_exact_expiry_join_link_without_bearer_leak(
         assert invitation.channel_token == grant_token
         assert invitation.claim_token == INVITE_TOKEN
         assert invitation.channel_token != invitation.claim_token
-        stored = registry.state.store.get_link(grant_token)
-        assert stored.target_type == "org:join"
-        assert stored.target_uuid == ORG_UUID
-        assert stored.invite_ref == invite.event_id
-        assert stored.expires_at is None
-        assert stored.expires_at_ms == invite_expiry
-        envelope = registry_client.get(
-            f"/v1/links/{grant_token}/envelope"
-        ).json()
-        assert envelope["invite_ref"] == invite.event_id
-        assert envelope["target_type"] == "org:join"
-        bootloader = registry_client.get(parsed.path)
-        assert bootloader.status_code == 200
-        assert "/l-assets/autonet.js" in bootloader.text
-        assert bootloader.headers["referrer-policy"] == "no-referrer"
 
         cached = settings_ops.read_owned_set(
             NETWORK_LINK_GRANT_SET_ID,
@@ -345,15 +324,16 @@ def test_authorized_client_mints_exact_expiry_join_link_without_bearer_leak(
         assert short.status_code == 400
         assert "must equal the invitation expiry" in short.json()["error"]
 
-        # The registry certificate is valid, but a non-member persona fails
-        # the local ledger authorize(link:publish) gate before forwarding.
+        # A non-member persona signs a perfectly valid chain to ITSELF, but
+        # the local ledger authorize(link:publish) gate refuses before any
+        # control frame is emitted.
         outsider = derive_persona(OUTSIDER_SEED, founded.genesis_id)
-        active_cert[0] = session_cert(outsider.public_hex)
-        forwarded_before = len(registry_requests)
+        active_cert[0] = session_cert(outsider)
+        crossed_before = len(control_calls)
         with pytest.raises(SystemExit):
             link_cmd.cmd_link_publish(_args(invite.event_id))
         refused = capsys.readouterr()
         assert "is not authorized to publish share links" in refused.err
-        assert len(registry_requests) == forwarded_before
+        assert len(control_calls) == crossed_before
 
     GraphDB.close_all_pooled()

@@ -116,14 +116,12 @@ def wait_main_phase(expected: str, timeout: float = 25.0) -> dict:
     return last or {}
 
 
-def publish(client, session, cert, now, target_uuid: str, target_type: str) -> str:
-    response = client.post("/v1/links", json=sign_request(
-        session, "POST", "/v1/links",
-        {"org": ORG_UUID, "target_uuid": target_uuid, "target_type": target_type},
-        ts=now, cert=cert,
-    ))
-    assert response.status_code == 201, response.text
-    return response.json()["token"]
+def publish(registry_db, target_uuid: str, target_type: str) -> str:
+    # Publish rides the org tunnel in production; this stack's subject is
+    # bootloader serving, so seed the grant at the store (see testkit).
+    from tools.network.registry.testkit import mint_link_at
+    return mint_link_at(registry_db, ORG_UUID, target_uuid,
+                        target_type=target_type)
 
 
 def cache_grant(settings_ops, schema, token: str, target_uuid: str, target_type: str):
@@ -279,8 +277,8 @@ print('highlighted')
                  "recovery_policy": "none"}, ts=now,
             ))
             assert registered.status_code == 201, registered.text
-            note_token = publish(client, session, cert, now, note["id"], "note")
-            design_token = publish(client, session, cert, now, design, "design")
+        note_token = publish(registry_db, note["id"], "note")
+        design_token = publish(registry_db, design, "design")
 
         cache_grant(settings_ops, schema, note_token, note["id"], "note")
         cache_grant(settings_ops, schema, design_token, design, "design")

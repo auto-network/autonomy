@@ -91,16 +91,11 @@ def start_registry(port: int, db: Path, log: Path) -> subprocess.Popen:
     raise RuntimeError(f"registry did not come up; log: {log.read_text()[-2000:]}")
 
 
-def publish_link(port: int, root: KeyPair, target_uuid: str) -> str:
-    """Root-direct link publish on the registry; returns the minted token."""
-    with httpx.Client(base_url=f"http://127.0.0.1:{port}") as client:
-        response = client.post("/v1/links", json=sign_request(
-            root, "POST", "/v1/links",
-            {"org": ORG_UUID, "target_uuid": target_uuid, "target_type": "present"},
-            ts=int(time.time()),
-        ))
-        assert response.status_code == 201, response.text
-        return response.json()["token"]
+def publish_link(db, target_uuid: str) -> str:
+    """Seed one grant at the registry store; returns the token. Publish
+    rides the org tunnel in production — this stack's subject is serving."""
+    from tools.network.registry.testkit import mint_link_at
+    return mint_link_at(db, ORG_UUID, target_uuid)
 
 
 def cache_grant(token: str, target_uuid: str, *, meta: dict | None = None,
@@ -197,7 +192,7 @@ def stack(tmp_path, monkeypatch):
             min_backoff=0.1, max_backoff=1.0,
         )
         yield {"port": port, "root": root, "root_pub": root.public_hex,
-               "connector": connector}
+               "db": tmp_path / "registry.db", "connector": connector}
     finally:
         registry.terminate()
         registry.wait(timeout=5)
@@ -212,9 +207,9 @@ def test_tunnel_serves_only_against_local_grants(stack):
 
     # All three tokens are REAL registry grants — the relay will open a
     # viewer channel for each. The local cache is the only difference.
-    granted = publish_link(stack["port"], stack["root"], binder_rev)
-    registry_only = publish_link(stack["port"], stack["root"], binder_rev)
-    expired = publish_link(stack["port"], stack["root"], binder_rev)
+    granted = publish_link(stack["db"], binder_rev)
+    registry_only = publish_link(stack["db"], binder_rev)
+    expired = publish_link(stack["db"], binder_rev)
     cache_grant(granted, binder_rev)
     cache_grant(expired, binder_rev, meta={"ttl": 60},
                 issued_at=time.strftime(ISO, time.gmtime(time.time() - 3600)))
@@ -271,8 +266,8 @@ def test_probe_confirms_live_link_and_flags_dead_grant(stack):
         title="OSS Insights binder",
         variants=[{"id": "v1", "html": BINDER_HTML}],
     )
-    granted = publish_link(stack["port"], stack["root"], binder_rev)
-    registry_only = publish_link(stack["port"], stack["root"], binder_rev)
+    granted = publish_link(stack["db"], binder_rev)
+    registry_only = publish_link(stack["db"], binder_rev)
     cache_grant(granted, binder_rev)
 
     relay = f"ws://127.0.0.1:{stack['port']}"
@@ -362,7 +357,7 @@ def test_supervisor_brings_serving_live_end_to_end(stack, tmp_path, monkeypatch)
         title="OSS Insights binder",
         variants=[{"id": "v1", "html": BINDER_HTML}],
     )
-    token = publish_link(stack["port"], stack["root"], binder_rev)
+    token = publish_link(stack["db"], binder_rev)
     cache_grant(token, binder_rev)
     _provision_serve_cert(tmp_path, stack["root"], stack["port"])
 
@@ -402,7 +397,7 @@ def test_probe_reports_unreachable_when_no_connector(stack):
         title="OSS Insights binder",
         variants=[{"id": "v1", "html": BINDER_HTML}],
     )
-    token = publish_link(stack["port"], stack["root"], binder_rev)
+    token = publish_link(stack["db"], binder_rev)
     cache_grant(token, binder_rev)  # local grant is fine — the TUNNEL is down
     relay = f"ws://127.0.0.1:{stack['port']}"
 
@@ -433,8 +428,8 @@ def test_per_link_key_serves_end_to_end(stack, monkeypatch):
         title="OSS Insights binder",
         variants=[{"id": "v1", "html": BINDER_HTML}],
     )
-    keyed = publish_link(stack["port"], stack["root"], binder_rev)
-    legacy = publish_link(stack["port"], stack["root"], binder_rev)
+    keyed = publish_link(stack["db"], binder_rev)
+    legacy = publish_link(stack["db"], binder_rev)
 
     # The keyed link: grant row carries channel_pub; the private seed lives
     # behind the link_channel_key settings seam (in-memory here — the vault

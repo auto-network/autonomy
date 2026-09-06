@@ -3,11 +3,12 @@
 The CLI's single HTTP seam (``link_cmd._api_request``) is routed into a real
 approvals app (TestClient) whose test fixture plays the operator: as soon as
 the CLI posts an approval, the fixture fetches the enrichment, click-signs
-the staged registry request with a session key (what the C2 browser signer
-will do), and posts the decision. The registry is the real B1 app over
-ASGITransport, so the URL the CLI prints comes from an actually-issued
-grant. Covers: publish → URL printed; decline → clean message + exit 1;
-revoke → grant gone from ``graph link list``.
+the staged request with a session key (what the C2 browser signer
+will do), and posts the decision, so the URL the CLI prints comes from an issued
+grant. Execution rides the org tunnel (D19/auto-qol1v): the supervisor
+control seam is stubbed to mint a well-formed grant. Covers: publish → URL
+printed; decline → clean message + exit 1; revoke → grant gone from
+``graph link list``.
 """
 
 from __future__ import annotations
@@ -17,12 +18,11 @@ import io
 import time
 import urllib.error
 
-import httpx
 import pytest
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
-from tools.dashboard import approvals_routes, link_approvals
+from tools.dashboard import approvals_routes
 from tools.dashboard.dao import approval_requests as ar
 from tools.graph import link_cmd, settings_ops
 from tools.graph.schemas.network_identity import (
@@ -33,7 +33,6 @@ from tools.network.idkit import KeyPair, Subject, issue_cert
 from tools.network.idkit.persona import derive_persona
 from tools.network.ledger import LedgerStore, org_ledger_db_path
 from tools.network.ledger.found import found_org_ledger
-from tools.network.registry.app import create_app as create_registry_app
 from tools.network.registry.signing import sign_request
 
 ORG = "netorg"
@@ -63,26 +62,14 @@ class OperatorFixture:
             return
         enriched = self.client.get(f"/api/approvals/{rid}").json()
         rr = enriched["registry_request"]
-        # D19: share-link publish/revoke ride the org tunnel, so the
-        # executor verifies the signature over the fixed tunnel-control
+        # D19/auto-qol1v: EVERY link publish/revoke rides the org tunnel, so
+        # the executor verifies the signature over the fixed tunnel-control
         # PoP bytes, not the registry method/path. Mirrors the browser's
-        # signing branch (worktrees.js) exactly — the crypto pillar
-        # verified this block against the executor.
+        # signing branch (worktrees.js) exactly.
         is_revoke = rr["method"] == "DELETE"
-        target_type = (
-            enriched.get("target_type") if is_revoke
-            else (rr.get("payload") or {}).get("target_type")
-        )
-        is_share_link = (
-            target_type is not None and target_type != "org:join"
-            if is_revoke else target_type != "org:join"
-        )
-        method, path = rr["method"], rr["path"]
-        if is_share_link:
-            method = "TUNNEL"
-            path = "/control/revoke-link" if is_revoke else "/control/create-link"
+        path = "/control/revoke-link" if is_revoke else "/control/create-link"
         envelope = sign_request(
-            self.session_key, method, path, rr["payload"],
+            self.session_key, "TUNNEL", path, rr["payload"],
             ts=int(time.time()), cert=self.session_cert,
         )
         self.client.post(f"/api/approvals/{rid}/decision",
@@ -150,17 +137,6 @@ def operator_env(tmp_path, monkeypatch):
         not_before=now - 3600, not_after=now + 30 * 86400,
     )
 
-    registry_app = create_registry_app(":memory:", base_url=PUBLIC_LINK_URL,
-                                       secure_cookies=False)
-    rc = TestClient(registry_app)
-    envelope = sign_request(
-        root, "POST", "/v1/orgs",
-        {"org_uuid": ORG_UUID, "root_pub": root.public_hex,
-         "recovery_policy": "none"},
-        ts=now,
-    )
-    assert rc.post("/v1/orgs", json=envelope).status_code == 201
-
     monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approvals.db")
     GraphDB.close_all_pooled()
     # No GRAPH_DB pin: explicit-org settings resolution must route to the
@@ -177,11 +153,6 @@ def operator_env(tmp_path, monkeypatch):
             "binding_expires_at": "2030-01-01T00:00:00Z",
         },
         org=ORG,
-    )
-    monkeypatch.setattr(
-        link_approvals, "_registry_client",
-        lambda base_url: httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=registry_app), base_url=base_url),
     )
     # `graph link list` reads Settings host-direct against the tmp GRAPH_DB.
     from tools.graph import client as graph_client
@@ -439,10 +410,12 @@ def test_revoke_wants_a_real_token(operator_env, capsys):
 
 
 def test_link_list_hides_peer_published_grant(tmp_path, monkeypatch, capsys):
-    """`graph link list` shows only THIS org's own grants — a peer-published
-    grant row must never appear (owning-scope read, P2). Uses real per-org
-    DBs so the peer's canonical grant IS peer-visible; owning scope must
-    still exclude it."""
+    """`graph link list` shows only THIS org's own grants — another org's
+    grant row must never appear (owning-scope read, P2). The grant set's
+    publication band is raw-only, so a peer-visible (canonical) grant is
+    structurally unwritable — pinned below — and the strongest representable
+    contaminant is the peer org's raw row, which owning scope must still
+    exclude."""
     from tools.graph.db import GraphDB
     from tools.graph import client as graph_client
     from tools.graph.schemas.network_identity import NETWORK_LINK_GRANT_SET_ID
@@ -457,16 +430,19 @@ def test_link_list_hides_peer_published_grant(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(graph_client, "_FORCE_HOST_DIRECT", True)
 
     peer_token = "d" * 32
+    grant = {"token": peer_token, "target_uuid": TARGET, "target_type": "note",
+             "meta": {}, "subject": {"kind": "operator", "id": "peer"},
+             "issued_at": "2026-01-01T00:00:00Z"}
+    with pytest.raises(ValueError, match="publication band"):
+        settings_ops.add_setting(
+            NETWORK_LINK_GRANT_SET_ID, 1, peer_token,
+            grant, org="peerorg", state="canonical",
+        )
     settings_ops.add_setting(
-        NETWORK_LINK_GRANT_SET_ID, 1, peer_token,
-        {"token": peer_token, "target_uuid": TARGET, "target_type": "note",
-         "meta": {}, "subject": {"kind": "operator", "id": "peer"},
-         "issued_at": "2026-01-01T00:00:00Z"},
-        org="peerorg", state="canonical",
+        NETWORK_LINK_GRANT_SET_ID, 1, peer_token, grant, org="peerorg",
     )
 
-    # ORG owns no grants; a composed read would surface peerorg's canonical
-    # grant, owning-scope must not.
+    # ORG owns no grants; peerorg's raw row must not appear in ORG's list.
     link_cmd.cmd_link_list(argparse.Namespace(org=ORG))
     out = capsys.readouterr().out
     assert peer_token not in out
