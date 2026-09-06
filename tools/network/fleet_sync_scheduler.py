@@ -1078,6 +1078,32 @@ class SQLiteFleetSyncStore:
             conn.close()
 
 
+#: Minimum wait before re-pulling from a peer after a pull that received a
+#: full checkpoint and still failed (mirrors the relay redelivery guard).
+CHECKPOINT_FAILURE_BACKOFF_S = 600.0
+
+
+async def _install_personal_handoff(installer, stage: Path, source_machine_pub: str) -> None:
+    """Run the service installer for a direct-path personal checkpoint and
+    always clean the staged files; a failure is logged, never raised into
+    the loop (the next pull, after the backoff, tells the truth again)."""
+    import shutil as _shutil
+
+    try:
+        await installer(stage, source_machine_pub=source_machine_pub)
+        logger.info(
+            "fleet sync: direct-path personal checkpoint from %s installed",
+            source_machine_pub[:12],
+        )
+    except Exception:
+        logger.warning(
+            "fleet sync: direct-path personal checkpoint from %s failed to install",
+            source_machine_pub[:12], exc_info=True,
+        )
+    finally:
+        _shutil.rmtree(stage, ignore_errors=True)
+
+
 def _transaction_identity(item: AuthoredMutation) -> tuple[str, str, int]:
     return (
         item.origin_incarnation,
@@ -1118,6 +1144,13 @@ class FleetSyncScheduler:
         #: this process (v3 works against every server); a restart re-probes
         #: v4. Only wire efficiency rides on this, never correctness.
         self._peer_protocol: dict[str, int] = {}
+        #: ``async (stage_dir, *, source_machine_pub) -> installed`` for the
+        #: PERSONAL scope, set by the owning DashboardFleetSyncService. The
+        #: dashboard process holds live production handles on personal.db,
+        #: so an inline quiesce always refuses there; the service's install
+        #: pauses this scheduler, quiesces, installs, and resumes -- the same
+        #: path the relay puller uses. None (connector, tests) installs inline.
+        self.personal_checkpoint_installer = None
 
     @property
     def port(self) -> int:
@@ -1990,8 +2023,15 @@ class FleetSyncScheduler:
                         )
                     relative, body = decode_checkpoint_file(message)
                     target_file = checkpoint_stage / relative
-                    target_file.parent.mkdir(parents=True, exist_ok=True)
-                    target_file.write_bytes(body)
+
+                    def _stage_file(path=target_file, data=body) -> None:
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_bytes(data)
+
+                    # Off the loop: at tailnet speed a 4 MiB chunk lands
+                    # every few ms, and a synchronous write per chunk starved
+                    # the dashboard's event loop for minutes (2026-09-06).
+                    await asyncio.to_thread(_stage_file)
                     checkpoint_seen[0] += 1
                     checkpoint_seen[1] += len(body)
                     continue
@@ -2027,6 +2067,29 @@ class FleetSyncScheduler:
                             raise FleetSyncProtocolError(
                                 "checkpoint stream is incomplete"
                             )
+                        installer = self.personal_checkpoint_installer
+                        if scope == "personal" and installer is not None:
+                            # Hand the received base to the service: it stops
+                            # THIS scheduler (cancelling this task), quiesces
+                            # personal.db, installs, and restarts us; the delta
+                            # after the base is pulled next round from the
+                            # installed floor. Stage ownership transfers to
+                            # the handoff task, which cleans it up.
+                            stage, checkpoint_stage = checkpoint_stage, None
+                            await record("checkpoint-handoff")
+                            logger.info(
+                                "fleet sync peer %s scope 'personal': checkpoint "
+                                "received over direct (%d files, %d bytes); "
+                                "handing off to the runtime installer",
+                                machine_pub[:12], *checkpoint_seen,
+                            )
+                            asyncio.get_running_loop().create_task(
+                                _install_personal_handoff(
+                                    installer, stage, machine_pub
+                                ),
+                                name="fleet-direct-personal-install",
+                            )
+                            return
                         await self._install_direct_checkpoint(
                             checkpoint_stage, scope, machine_pub, epoch
                         )
@@ -2124,6 +2187,20 @@ class FleetSyncScheduler:
                 self.config.max_backoff,
                 self.config.min_backoff * (2 ** min(failures - 1, 16)),
             )
+            if checkpoint_stage is not None:
+                # A whole base arrived and the pull still failed (install
+                # refused, stream cut after it). The ordinary backoff caps
+                # at seconds; retrying asks the peer to rebuild and resend
+                # hundreds of MB every round -- the loop seen live on
+                # 2026-09-06 (343 MB every ~10s). Back off like the relay
+                # path's redelivery guard instead.
+                delay = max(delay, CHECKPOINT_FAILURE_BACKOFF_S)
+                logger.warning(
+                    "fleet sync peer %s scope %r: checkpoint received "
+                    "(%d files, %d bytes) but the pull failed; not asking "
+                    "again for %.0fs",
+                    machine_pub[:12], scope, *checkpoint_seen, delay,
+                )
             self._next_attempt[machine_pub] = (
                 asyncio.get_running_loop().time() + delay
             )
@@ -2263,6 +2340,9 @@ class DashboardFleetSyncService:
                     token.release()
                 if not self._stopping and self._config is config:
                     self._scheduler = FleetSyncScheduler(config)
+                    self._scheduler.personal_checkpoint_installer = (
+                        self.install_checkpoint
+                    )
                     await self._scheduler.start()
             assert installed is not None and epoch is not None
             # A checkpoint replaces the personal database as one published
@@ -2285,6 +2365,9 @@ class DashboardFleetSyncService:
                     current = desired
                     if desired is not None:
                         self._scheduler = FleetSyncScheduler(desired)
+                        self._scheduler.personal_checkpoint_installer = (
+                            self.install_checkpoint
+                        )
                         await self._scheduler.start()
             await self._changed.wait()
         async with self._transition:
