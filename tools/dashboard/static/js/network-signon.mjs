@@ -89,6 +89,7 @@ var signRegistryRequestCore;
   var CERT_DOMAIN = 'autonomy.idkit.cert.v1\n';
   var REQUEST_DOMAIN = 'autonomy.network.registry.request.v1\n';
   var REVOCATION_DOMAIN = 'autonomy.idkit.revocation.v1\n';
+  var CHECKPOINT_DOMAIN = 'autonomy.network.membership.checkpoint.v1\n';
 
   var DEFAULT_TTL_S = 24 * 3600;          // spec §6.3 default
   var MIN_TTL_S = 60;
@@ -750,6 +751,79 @@ var signRegistryRequestCore;
     }
   }
 
+  // A membership checkpoint keeps the registry's committed view of the org
+  // roster current (auto-tmers, graph://da0dd9fb-e75). The server decides
+  // locally (fold vs cached-adopted) and returns an UNSIGNED record; the
+  // browser signs it — the org ROOT for a seq-0 seed or reset, opened from
+  // the sealed key this unlock already holds exactly as _maintainBinding
+  // does; the PERSONA for an advance — and POSTs it. It rides sign-on for the
+  // same reason binding maintenance does: the seed needs the org root, an
+  // advance needs the persona, and both are reachable from the live personal
+  // seed. Non-fatal per org; it never disturbs the session.
+  async function _publishMembershipCheckpoint(slug, binding, personaPub,
+                                              personalSeed, genesisId) {
+    var orgQ = slug ? ('?org=' + encodeURIComponent(slug)) : '';
+    var decision = await _fetchJsonOrNull(
+      '/api/network/membership-checkpoint/decision' + orgQ +
+      '&persona=' + encodeURIComponent(personaPub) +
+      '&genesis_id=' + encodeURIComponent(genesisId), slug);
+    if (!decision || decision.ok !== true) {
+      return { checked: true, action: 'unavailable' };
+    }
+    if (decision.action !== 'assemble') {
+      return { checked: true, action: decision.action };
+    }
+    var record = decision.record;
+    var signingKey = null;
+    var persona = null;
+    var rootOpened = false;
+    try {
+      if (decision.sign_with === 'root') {
+        var orgKey = await _fetchJson('/api/network/org-key' + orgQ, slug);
+        if (!orgKey || !orgKey.sealed_root_key) {
+          return { checked: true, action: 'no-sealed-org-key' };
+        }
+        var rootSeed = await openSealedArmor(orgKey, personalSeed);
+        try {
+          signingKey = await _importRootKey(rootSeed);
+        } finally {
+          rootSeed.fill(0);                  // I1: root seed gone at import
+        }
+        rootOpened = true;
+        record.signer = binding.root_pub;    // a seed's signer is the bound root
+      } else {
+        persona = await derivePersona(personalSeed, genesisId);
+        signingKey = persona.signingKey;     // record.signer is already this persona
+      }
+      // The signing input mirrors membership_commitment._signing_input BYTE
+      // FOR BYTE: CHECKPOINT_DOMAIN + canonical_json(record without sig).
+      var sig = bytesToHex(await crypto.subtle.sign(
+        'Ed25519', signingKey,
+        _domainBytes(CHECKPOINT_DOMAIN, canonicalJson(record))));
+      record.sig = sig;
+      await _postCheckpoint(record, slug);
+      return { checked: true, action: 'published', seq: record.seq,
+               signWith: decision.sign_with, rootOpened: rootOpened };
+    } finally {
+      signingKey = null;                      // I1
+      if (persona) persona.signingKey = null; // I1
+    }
+  }
+
+  async function _postCheckpoint(record, orgSlug) {
+    var headers = { 'Content-Type': 'application/json' };
+    if (orgSlug) headers['X-Graph-Org'] = orgSlug;
+    var resp = await _transport.fetch('/api/network/membership-checkpoint', {
+      method: 'POST', headers: headers,
+      body: JSON.stringify({ org: orgSlug || null, record: record }),
+    });
+    var result = await resp.json().catch(function () { return {}; });
+    if (!resp.ok || result.ok === false) {
+      throw new Error(result.error || ('checkpoint refused (' + resp.status + ')'));
+    }
+    return result;
+  }
+
   // The ONE unlock. Sign-on is personal, so the only armor it opens is the
   // personal root armor — no organization's key is fetched, and none is
   // decrypted. Every persona below comes out of this single seed.
@@ -1009,11 +1083,28 @@ var signRegistryRequestCore;
           }
         }
 
+        // The registry's committed membership view lives on the same unlock:
+        // the org root the sealed key opens signs a seed, the persona just
+        // derived signs an advance, and a fold that already matches the
+        // adopted record is a cheap local no-op. Non-fatal per org, reported
+        // like the serving and binding maintenance beside it.
+        var checkpoint = { checked: false, action: 'skipped' };
+        if (bound) {
+          try {
+            checkpoint = await _publishMembershipCheckpoint(
+              slug, binding, persona.publicHex, opened.seed, genesisId);
+            if (checkpoint.rootOpened) orgRootsOpened += 1;
+          } catch (e) {
+            checkpoint = { checked: true, action: 'failed',
+                           error: (e && e.message) || String(e) };
+          }
+        }
+
         reports.push({
           orgSlug: slug, genesisId: genesisId, org: orgId,
           personaPub: persona.publicHex, notAfter: certPayload.not_after,
           certWire: certWire, registryUrl: entry.registryUrl, rekey: rekey,
-          serveCert: serve, binding: bindingMaint,
+          serveCert: serve, binding: bindingMaint, checkpoint: checkpoint,
         });
       }
     } finally {
@@ -1058,6 +1149,17 @@ var signRegistryRequestCore;
           .map(function (r) {
             return { org: r.orgSlug, status: r.serveCert.status,
                      error: r.serveCert.error || null };
+          }),
+        membershipCheckpointsPublished: reports
+          .filter(function (r) { return r.checkpoint && r.checkpoint.action === 'published'; })
+          .map(function (r) {
+            return { org: r.orgSlug, seq: r.checkpoint.seq,
+                     signWith: r.checkpoint.signWith };
+          }),
+        membershipCheckpointsFailed: reports
+          .filter(function (r) { return r.checkpoint && r.checkpoint.action === 'failed'; })
+          .map(function (r) {
+            return { org: r.orgSlug, error: r.checkpoint.error || null };
           }),
       },
     };

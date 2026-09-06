@@ -2077,10 +2077,16 @@ async def get_membership_checkpoint_decision(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": (
             "persona and genesis_id query params are required"
         )}, status_code=400)
+    # The registry identity for record["org"] is the org's bound uuid, not the
+    # local slug; without a binding there is no registry to publish to, so the
+    # slug stands in and the eventual forward would 409 unregistered anyway.
+    binding_member = _first_member(NETWORK_BINDING_SET_ID, org)
+    org_uuid = binding_member.payload.get("org_uuid") if binding_member else None
     from tools.dashboard import membership_checkpoint as cp
     try:
         decision = cp.checkpoint_due(
-            org, persona_pub, ts=int(time.time()), genesis_id=genesis_id)
+            org, persona_pub, ts=int(time.time()), genesis_id=genesis_id,
+            org_uuid=org_uuid)
     except Exception as e:
         return JSONResponse({"ok": False, "error": f"checkpoint check failed: {e}"},
                             status_code=500)
