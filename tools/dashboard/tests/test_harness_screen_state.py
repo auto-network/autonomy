@@ -8,8 +8,8 @@ Tests cover:
   - Claude detects composer prompt → composer_ready true (only when
     no overlay blocks input).
   - Claude detects auth-required banner.
-  - Codex stub returns composer_ready=true unconditionally with no
-    keystrokes (so Codex sessions can transition to ready).
+  - Codex distinguishes its trust menu from the empty composer and confirms
+    the menu exactly once.
   - tmux_send_keys helper builds the right tmux send-keys invocations.
 """
 from __future__ import annotations
@@ -161,27 +161,63 @@ def test_claude_composer_gated_on_no_overlays():
     assert state["in_planning_mode"] is True
 
 
-# ── Codex stub ─────────────────────────────────────────────────────
+# ── Codex adapter ──────────────────────────────────────────────────
 
 
-def test_codex_stub_returns_composer_ready_true():
-    """CRITICAL: Codex sessions must reach composer_ready or they
-    never transition to 'ready' in the lifecycle. Stub returns true
-    unconditionally."""
-    state, keys = CODEX_HARNESS.read_screen_state("any pane text", {})
-    assert state["composer_ready"] is True
-    assert state["confirming_trust_prompt"] is False
-    assert state["in_planning_mode"] is False
-    assert state["blocking_modal"] is None
+PANE_CODEX_TRUST_DIALOG = """
+>_ You are in /workspace/repo
+
+  Do you trust the contents of this directory?
+  Trusting the directory allows project-local config, hooks, and exec policies to load.
+
+› 1. Yes, continue
+  2. No, quit
+
+  Press enter to continue
+"""
+
+PANE_CODEX_COMPOSER_READY = """
+╭────────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.150.1)                         │
+│ model: gpt-5.6-sol · directory: /workspace/repo    │
+╰────────────────────────────────────────────────────╯
+
+›
+"""
+
+
+def test_codex_trust_dialog_is_confirmed_but_never_called_composer_ready():
+    state, keys = CODEX_HARNESS.read_screen_state(PANE_CODEX_TRUST_DIALOG, {})
+
+    assert state["confirming_trust_prompt"] is True
+    assert state["composer_ready"] is False
+    assert keys == [{"kind": "key", "value": "C-m"}]
+
+
+def test_codex_trust_confirmation_is_sent_only_once_while_dialog_remains():
+    state, keys = CODEX_HARNESS.read_screen_state(
+        PANE_CODEX_TRUST_DIALOG, {"confirming_trust_prompt": True},
+    )
+
+    assert state["confirming_trust_prompt"] is True
+    assert state["composer_ready"] is False
     assert keys == []
 
 
-def test_codex_stub_ignores_pane_content():
-    """The stub returns the same dict regardless of pane content (it
-    doesn't actually parse anything yet)."""
-    state_a, _ = CODEX_HARNESS.read_screen_state(PANE_TRUST_DIALOG, {})
-    state_b, _ = CODEX_HARNESS.read_screen_state(PANE_BUSY, {})
-    assert state_a == state_b
+def test_codex_empty_composer_clears_trust_and_reports_ready():
+    state, keys = CODEX_HARNESS.read_screen_state(
+        PANE_CODEX_COMPOSER_READY, {"confirming_trust_prompt": True},
+    )
+
+    assert state["confirming_trust_prompt"] is False
+    assert state["composer_ready"] is True
+    assert keys == []
+
+
+def test_codex_busy_screen_is_not_composer_ready():
+    state, keys = CODEX_HARNESS.read_screen_state(PANE_BUSY, {})
+    assert state["composer_ready"] is False
+    assert keys == []
 
 
 # ── tmux_send_keys helper ──────────────────────────────────────────

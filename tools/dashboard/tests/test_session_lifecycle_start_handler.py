@@ -344,6 +344,26 @@ def test_inject_echo_verified_codex_submits_once_without_visible_echo(monkeypatc
     ]
 
 
+def test_inject_echo_verified_codex_has_no_fixed_settle_delay(monkeypatch):
+    """Composer readiness is a screen-state fact, not a timing guess."""
+    from tools.dashboard import server
+
+    sleeps = []
+    monkeypatch.setattr(server.time, "sleep", sleeps.append)
+    monkeypatch.setattr(server, "_run_tmux_capture", lambda *_a, **_kw: "> ")
+    monkeypatch.setattr(server, "tmux_paste_checked_sync", lambda *_a, **_kw: None)
+    monkeypatch.setattr(server, "tmux_enter_checked_sync", lambda *_a, **_kw: None)
+
+    server._inject_echo_verified(
+        tmux_name="auto-codex",
+        message="Hello",
+        harness_name="codex",
+        deadline=server.time.monotonic() + 30,
+    )
+
+    assert 1.5 not in sleeps
+
+
 def test_wait_for_prompt_waits_for_poller_signal(monkeypatch, tmp_path):
     """_wait_for_prompt is a signal-waiter: the pane-poller is the single
     pane reader/keystroke sender; the worker step waits on the durable

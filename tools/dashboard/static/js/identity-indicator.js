@@ -928,6 +928,26 @@
         event.stopPropagation();
       });
     }
+    // Keep one live identity component and move it between the two shell
+    // homes at the same breakpoint that pins/unpins navigation. Moving the
+    // node preserves focus and open-panel state; cloning it would create two
+    // independently refreshed representations of the operator.
+    var headerHome = indicatorHost && indicatorHost.parentNode;
+    var sidebarHome = root.document.getElementById('identity-sidebar-slot');
+    var desktopQuery = root.matchMedia && root.matchMedia('(min-width: 768px)');
+    function syncPlacement() {
+      if (!indicatorHost || !headerHome || !sidebarHome || !desktopQuery) return;
+      var target = desktopQuery.matches ? sidebarHome : headerHome;
+      if (indicatorHost.parentNode !== target) target.appendChild(indicatorHost);
+    }
+    syncPlacement();
+    if (desktopQuery) {
+      if (typeof desktopQuery.addEventListener === 'function') {
+        desktopQuery.addEventListener('change', syncPlacement);
+      } else if (typeof desktopQuery.addListener === 'function') {
+        desktopQuery.addListener(syncPlacement);
+      }
+    }
     root.document.addEventListener('keydown', function (event) {
       if (event.key === 'Escape') closePanel();
     });

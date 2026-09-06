@@ -7799,9 +7799,6 @@ def _inject_echo_verified(
     deadline: float,
 ) -> None:
     harness = (harness_name or "").lower()
-    settle = {"codex": 1.5, "claude": 0.0}.get(harness, 0.0)
-    if settle:
-        time.sleep(min(settle, max(0.0, deadline - time.monotonic())))
 
     last_error = "paste echo was not visible"
     while time.monotonic() < deadline:

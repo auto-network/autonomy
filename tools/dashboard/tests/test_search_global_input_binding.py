@@ -365,7 +365,7 @@ class TestCompactGlobalSearchChrome:
         """)
         assert state == {"collapsed": True, "focused_icon": True}
 
-    def test_desktop_profile_and_search_fit_without_overflow(self, harness):
+    def test_desktop_profile_moves_into_fixed_navigation(self, harness):
         _open("/sessions")
         ab_raw("set", "viewport", "1280", "800")
         time.sleep(0.4)
@@ -374,17 +374,20 @@ class TestCompactGlobalSearchChrome:
             var icon = document.getElementById('global-search-icon');
             return {
                 profile_visible: profile.offsetParent !== null,
+                profile_in_sidebar: profile.parentElement &&
+                    profile.parentElement.id === 'identity-sidebar-slot',
                 icon_visible: icon.offsetParent !== null,
                 no_overflow: document.documentElement.scrollWidth <= window.innerWidth + 1,
             };
         """)
         assert state == {
             "profile_visible": True,
+            "profile_in_sidebar": True,
             "icon_visible": True,
             "no_overflow": True,
         }
 
-    def test_app_owned_and_session_routes_hide_shell_utilities(self, harness):
+    def test_app_owned_and_session_routes_keep_profile_visible(self, harness):
         _open("/sessions")
         state = ab_eval("""
             var header = document.querySelector('header[data-app-chrome]');
@@ -411,11 +414,11 @@ class TestCompactGlobalSearchChrome:
         """)
         assert state["app_owned"] == {
             "search_hidden": True,
-            "profile_hidden": True,
+            "profile_hidden": False,
         }
         assert state["route_immersive"] is True
         assert state["search_hidden"] is True
-        assert state["profile_hidden"] is True
+        assert state["profile_hidden"] is False
         assert state["header_present"] is True
 
 

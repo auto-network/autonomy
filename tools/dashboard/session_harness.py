@@ -544,20 +544,7 @@ class CodexSessionHarness:
         pane_text: str,
         current_state: dict[str, Any] | None,
     ) -> tuple[dict[str, Any], list[dict]]:
-        # auto-eerfx: Codex screen-reading is deferred to a follow-up
-        # bead. The stub returns composer_ready=True unconditionally so
-        # Codex sessions can reach composer_ready (and
-        # thus the derived 'ready' state) without waiting on a
-        # screen-state signal this adapter doesn't yet produce.
-        return (
-            {
-                "composer_ready": True,
-                "confirming_trust_prompt": False,
-                "in_planning_mode": False,
-                "blocking_modal": None,
-            },
-            [],
-        )
+        return _codex_read_screen_state(pane_text, current_state)
 
 
 CODEX_HARNESS = CodexSessionHarness()
@@ -2966,6 +2953,57 @@ def extract_codex_harness_state(
         "windows": windows,
     })
     return current_state if updated_state == current_state else updated_state
+
+
+# Codex TUI screen-state inference.  The trust menu and composer both use the
+# same `›` glyph, so readiness must key on an EMPTY prompt and explicitly
+# exclude the dialog.  Treating any `›` as ready caused the 2026-09-06 launch
+# regression: the orientation was pasted into option 1 and discarded when
+# Enter accepted trust.
+_CODEX_TRUST_DIALOG_RE = re.compile(
+    r"trust\s+the\s+contents\s+of\s+this\s+directory|"
+    r"trusting\s+the\s+directory\s+allows\s+project-local\s+config",
+    re.IGNORECASE,
+)
+_CODEX_TRUST_CONFIRM_RE = re.compile(
+    r"(?:^|\n)\s*[›>]\s*1\.\s*yes,?\s+continue\b|"
+    r"press\s+enter\s+to\s+continue",
+    re.IGNORECASE,
+)
+_CODEX_COMPOSER_PROMPT_RE = re.compile(r"(?:^|\n)\s*›\s*(?:\n|$)")
+_CODEX_AUTH_RE = re.compile(
+    r"not logged in|sign in to continue|authentication required|run\s+codex\s+login",
+    re.IGNORECASE,
+)
+
+
+def _codex_read_screen_state(
+    pane_text: str,
+    current_state: dict[str, Any] | None,
+) -> tuple[dict[str, Any], list[dict]]:
+    prev = dict(current_state or {})
+    new_state = dict(prev)
+    keys: list[dict] = []
+    text = pane_text or ""
+
+    trust_visible = bool(
+        _CODEX_TRUST_DIALOG_RE.search(text)
+        and _CODEX_TRUST_CONFIRM_RE.search(text)
+    )
+    was_confirming = bool(prev.get("confirming_trust_prompt"))
+    new_state["confirming_trust_prompt"] = trust_visible
+    if trust_visible and not was_confirming:
+        keys.append({"kind": "key", "value": "C-m"})
+
+    blocking_modal = "auth_required" if _CODEX_AUTH_RE.search(text) else None
+    new_state["blocking_modal"] = blocking_modal
+    new_state["in_planning_mode"] = False
+    new_state["composer_ready"] = bool(
+        _CODEX_COMPOSER_PROMPT_RE.search(text)
+        and not trust_visible
+        and not blocking_modal
+    )
+    return new_state, keys
 
 
 # auto-eerfx: Claude TUI screen-state inference.
