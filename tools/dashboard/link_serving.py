@@ -58,6 +58,7 @@ import contextlib
 import json
 import logging
 import mimetypes
+import os
 import re
 import secrets
 import time
@@ -1557,6 +1558,12 @@ async def _serve_control_listener(connector, ctl_path: str,
                         # imports). The supervisor adopts an incumbent only
                         # when this matches the current disk head.
                         "boot_commit": _BOOT_COMMIT,
+                        # Live pull/blob streams right now. The supervisor
+                        # DRAINS a stale incumbent (waits for zero, or a
+                        # deadline) instead of severing mid-transfer — a
+                        # first-contact fleet pull needs minutes in one
+                        # connector generation (2026-09-06 merge churn).
+                        "active_streams": connector_runtime.active_streams,
                         # How many sync pulls this process has turned away while
                         # unarmed, and when the first was -- the profile sync
                         # flag's "764 requests refused since 8pm". Zero on a
@@ -1674,6 +1681,12 @@ def main() -> None:
     global _BOOT_COMMIT
     from tools.network import build_version
     _BOOT_COMMIT = build_version.disk_head()
+    # One banner per generation: the shared append-mode log needs each
+    # process to self-identify (pid + code generation) at birth.
+    logging.getLogger(__name__).warning(
+        "connector starting pid=%d boot_commit=%s",
+        os.getpid(), (_BOOT_COMMIT or "unknown")[:12],
+    )
     from tools.network.idkit import DelegationCert, KeyPair
 
     parser = argparse.ArgumentParser(

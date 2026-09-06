@@ -87,6 +87,13 @@ CONNECTOR_STARTUP_TIMEOUT_S = 60.0
 #: unable to serve was the single failure nothing reaped.
 CONNECTOR_RECONNECT_TIMEOUT_S = 600.0
 
+#: How long a STALE incumbent adopted mid-stream (a lame duck) may keep
+#: serving while its streams drain before it is replaced regardless. Bounds
+#: how long superseded code can serve: new streams landing on the duck can
+#: keep active_streams above zero indefinitely, so the deadline — not the
+#: stream count — is the staleness guarantee.
+LAME_DUCK_DRAIN_DEADLINE_S = 600.0
+
 _log = logging.getLogger(__name__)
 
 #: ``prctl`` option number (``linux/prctl.h``): send a signal when the parent
@@ -794,6 +801,9 @@ class ServingSupervisor:
         self._started_at: dict = {}  # org -> launch time; fresh-tunnel grace
         self._grace_s: float = CONNECTOR_STARTUP_TIMEOUT_S
         self._last_served: dict = {}  # org -> last time observed serving
+        # org -> when a STALE incumbent was adopted mid-stream to drain; the
+        # watchdog replaces it at zero active streams or the drain deadline.
+        self._lame_duck_since: dict = {}
         self._locks: dict = {}       # org -> open file holding flock ownership
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -840,6 +850,7 @@ class ServingSupervisor:
                 self._procs.pop(org, None)
                 self._credentials.pop(org, None)
                 self._last_served.pop(org, None)
+                self._lame_duck_since.pop(org, None)
             self._procs.pop(org, None)
             state = serve_cert_state(org, now=self._now())
             if state["status"] != "ok":
@@ -894,6 +905,7 @@ class ServingSupervisor:
                 self._reap_strays(org)
             self._started_at.pop(org, None)
             self._last_served.pop(org, None)
+            self._lame_duck_since.pop(org, None)
             self._release_lock(org)
             reason = state["status"] if state["status"] != "ok" else "no-live-grants"
             return {"running": False, "reason": reason}
@@ -902,6 +914,30 @@ class ServingSupervisor:
             if self._credentials.get(org) == (
                 state["cert"], state["viewer_cert"], state["key_path"]
             ):
+                ducked = self._lame_duck_since.get(org)
+                if ducked is not None:
+                    # A stale incumbent adopted mid-stream: replace it the
+                    # moment its streams drain, or when the drain deadline
+                    # bounds how long stale code may keep serving.
+                    ctl_path = getattr(proc, "_ctl_path", None)
+                    status = _probe_ctl_status(ctl_path) if ctl_path else None
+                    streams = (status or {}).get("active_streams")
+                    drained = not (isinstance(streams, int) and streams > 0)
+                    expired = now - ducked > LAME_DUCK_DRAIN_DEADLINE_S
+                    if drained or expired:
+                        _log.warning(
+                            "replacing lame-duck connector for org=%s "
+                            "(drained=%s, deadline_expired=%s, "
+                            "active_streams=%s)",
+                            org, drained, expired, streams,
+                        )
+                        proc.stop()
+                        self._procs.pop(org, None)
+                        self._credentials.pop(org, None)
+                        self._last_served.pop(org, None)
+                        self._lame_duck_since.pop(org, None)
+                        return self._launch(org, state)
+                    return {"running": True, "reason": "lame-duck-draining"}
                 current = self._live_process_state(org, proc)
                 if current is not None:
                     return current
@@ -918,6 +954,7 @@ class ServingSupervisor:
                 self._procs.pop(org, None)
                 self._credentials.pop(org, None)
                 self._last_served.pop(org, None)
+                self._lame_duck_since.pop(org, None)
                 return self._launch(org, state)
             # Provisioning replaced this org's credential. Keeping the old
             # process alive would leave it presenting the superseded cert
@@ -931,6 +968,7 @@ class ServingSupervisor:
             self._procs.pop(org, None)
             self._credentials.pop(org, None)
             self._last_served.pop(org, None)
+            self._lame_duck_since.pop(org, None)
         # A dead handle: drop it and relaunch below.
         self._procs.pop(org, None)
         self._credentials.pop(org, None)
@@ -962,6 +1000,7 @@ class ServingSupervisor:
         self._credentials.pop(org, None)
         self._started_at.pop(org, None)
         self._last_served.pop(org, None)
+        self._lame_duck_since.pop(org, None)
         self._release_lock(org)
         result = {"running": False, "reason": eligibility.reason}
         if eligibility.selected_machine_id is not None:
@@ -1030,7 +1069,11 @@ class ServingSupervisor:
 
             disk = build_version.disk_head()
             boot = status.get("boot_commit")
-            if disk is not None and boot != disk:
+            stale = disk is not None and boot != disk
+            active_streams = status.get("active_streams")
+            if stale and not (
+                isinstance(active_streams, int) and active_streams > 0
+            ):
                 _log.warning(
                     "not adopting incumbent connector for org=%s: stale code "
                     "generation (boot_commit=%s, disk=%s) — replacing",
@@ -1049,6 +1092,23 @@ class ServingSupervisor:
                 state["cert"], state["viewer_cert"], state["key_path"])
             self._started_at[org] = self._now()
             self._last_served[org] = self._now()
+            if stale:
+                # DRAIN, don't sever: a stale incumbent that is mid-stream
+                # keeps serving as a lame duck until its streams hit zero or
+                # the drain deadline passes (watchdog enforces both in
+                # _reconcile). A first-contact fleet pull needs minutes in
+                # ONE connector generation; recycling on every /app commit
+                # killed every transfer during active development (observed
+                # live 2026-09-06: ~66s generations vs a 325MiB transfer).
+                self._lame_duck_since[org] = self._now()
+                _log.warning(
+                    "adopting STALE incumbent connector pid=%s for org=%s as "
+                    "a lame duck (boot_commit=%s, disk=%s, active_streams=%s)"
+                    " — draining before replacement",
+                    pid, org_uuid, (boot or "unknown")[:12], disk[:12],
+                    active_streams,
+                )
+                return {"running": True, "reason": "lame-duck-draining"}
             _log.info(
                 "adopted surviving serving connector pid=%s for org=%s "
                 "(previous dashboard incarnation; streams preserved)",
@@ -1126,6 +1186,7 @@ class ServingSupervisor:
             state["cert"], state["viewer_cert"], state["key_path"])
         self._started_at[org] = self._now()
         self._last_served.pop(org, None)
+        self._lame_duck_since.pop(org, None)
         return {"running": True, "reason": "launched"}
 
     def _owned_pids(self) -> set[int]:
@@ -1283,6 +1344,7 @@ class ServingSupervisor:
                 proc.stop()
             self._credentials.pop(org, None)
             self._last_served.pop(org, None)
+            self._lame_duck_since.pop(org, None)
             self._started_at.pop(org, None)
             self._managed.add(org)
             return self._reconcile(org)

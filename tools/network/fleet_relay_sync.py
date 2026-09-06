@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import faulthandler
 import hashlib
 import json
 import logging
@@ -23,6 +24,7 @@ import os
 import sqlite3
 import shutil
 import struct
+import sys
 import tempfile
 import threading
 import time
@@ -286,6 +288,10 @@ class ConnectorFleetRuntime:
         #: deadline, and the retry cadence turns that into a permanent
         #: 100%-CPU wedge (observed live 2026-09-06).
         self._checkpoint_build_locks: dict[str, asyncio.Lock] = {}
+        #: Live pull/blob streams right now. Reported in connector-status so
+        #: the supervisor can DRAIN a stale-code incumbent (wait for zero, or
+        #: a deadline) instead of severing mid-transfer on every merge.
+        self.active_streams: int = 0
 
     def configure(self, payload: object) -> dict:
         from tools.dashboard.link_approvals import _load_binding
@@ -483,6 +489,8 @@ class ConnectorFleetRuntime:
         )
 
         async def stream():
+            self.active_streams += 1
+            _arm_stall_dump()
             started_at_ns = time.time_ns()
             started_monotonic_ns = time.monotonic_ns()
             stats = {
@@ -638,7 +646,20 @@ class ConnectorFleetRuntime:
                 error_code = "relay_stream_failed"
                 raise
             finally:
+                self.active_streams -= 1
+                _disarm_stall_dump()
                 shutil.rmtree(root, ignore_errors=True)
+                # One greppable delivery line per stream: "build completed"
+                # only proves the artifact existed — this is the line that
+                # says whether the peer actually received it (outcome=success
+                # means the delta phase finished; checkpoint bytes counted).
+                logger.warning(
+                    "fleet relay sync: stream finished scope=%s outcome=%s "
+                    "sent=%dB checkpoint=%dB in=%.1fs",
+                    scope, outcome, stats["bytes_sent"],
+                    stats["checkpoint_bytes"],
+                    (time.monotonic_ns() - started_monotonic_ns) / 1e9,
+                )
                 recorder = scheduler.config.telemetry_recorder
                 if recorder is not None:
                     with contextlib.suppress(Exception):
@@ -697,21 +718,60 @@ class ConnectorFleetRuntime:
         db_paths = list(scheduler._scope_paths().values())
 
         async def stream():
-            yield canonical_json({
-                "v": PROTOCOL_VERSION,
-                "kind": "fleet.server-hello",
-                "hello": _json(server_hello, "fleet server hello"),
-                "roster_epoch": current_epoch,
-            })
-            frames = iter_blob_frames(db_paths, list(digests))
-            while True:
-                scheduler.authenticator.authorize(peer_pub)
-                frame = await asyncio.to_thread(next, frames, None)
-                if frame is None:
-                    return
-                yield frame
+            self.active_streams += 1
+            try:
+                yield canonical_json({
+                    "v": PROTOCOL_VERSION,
+                    "kind": "fleet.server-hello",
+                    "hello": _json(server_hello, "fleet server hello"),
+                    "roster_epoch": current_epoch,
+                })
+                frames = iter_blob_frames(db_paths, list(digests))
+                while True:
+                    scheduler.authenticator.authorize(peer_pub)
+                    frame = await asyncio.to_thread(next, frames, None)
+                    if frame is None:
+                        return
+                    yield frame
+            finally:
+                self.active_streams -= 1
 
         return stream()
+
+
+#: Auto-dump every thread's Python stack to the connector log when a serve
+#: stream spends longer than this in any single phase. py-spy is unavailable
+#: in the serving container (no SYS_PTRACE, and granting it needs a restart
+#: that wipes the warm keycache), so this is the ONLY way to name a CPU-bound
+#: build/transfer hotspot in production. Set below the client's 60s frame-
+#: silence limit and above a healthy ~28s build, so a healthy stream never
+#: dumps and a pathological one self-reports where it is stuck.
+STREAM_STALL_DUMP_S = 45.0
+
+_stall_dump_lock = threading.Lock()
+_stall_dump_active = 0
+
+
+def _arm_stall_dump() -> None:
+    """Refcounted arm of the process-global stack-dump timer, so concurrent
+    scope streams keep it armed until the last one finishes."""
+    global _stall_dump_active
+    with _stall_dump_lock:
+        _stall_dump_active += 1
+        if _stall_dump_active == 1:
+            with contextlib.suppress(Exception):
+                faulthandler.dump_traceback_later(
+                    STREAM_STALL_DUMP_S, repeat=True, file=sys.stderr
+                )
+
+
+def _disarm_stall_dump() -> None:
+    global _stall_dump_active
+    with _stall_dump_lock:
+        _stall_dump_active = max(0, _stall_dump_active - 1)
+        if _stall_dump_active == 0:
+            with contextlib.suppress(Exception):
+                faulthandler.cancel_dump_traceback_later()
 
 
 connector_runtime = ConnectorFleetRuntime()
