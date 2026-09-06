@@ -109,6 +109,16 @@ class BackupConfigV1(SettingSchema):
     offsite_enabled: bool = field(
         default=True,
         description="Whether captures push to the offsite restic repo")
+    offsite_provider: str = field(
+        default="", enum=["", "b2", "r2", "s3"],
+        description="Offsite provider; empty = not configured. Secrets "
+                    "are NOT here — they live in autonomy.vault.audited "
+                    "(backup.restic-password, backup.b2-key-id, "
+                    "backup.b2-application-key)")
+    offsite_bucket: str = field(
+        default="",
+        description="Offsite bucket/repository name (configuration, "
+                    "not a secret)")
     schedule_owner: str = field(
         default="cron", enum=["cron", "plugin"],
         description="Who triggers captures on this machine: the host "

@@ -69,13 +69,30 @@ def _drill_due() -> bool:
 async def _drill_scheduler_loop() -> None:
     from tools.dashboard.plugins.backup import drill as drill_mod
 
+    from tools.dashboard.plugins.backup import credentials
+
     while True:
         try:
             if await asyncio.to_thread(_drill_due) \
                     and drill_mod.running_stamp() is None:
+                # Cadence gate on credentials (auto-uy896): a cold vault
+                # means the system is not live — skip quietly, never a
+                # doomed drill and never an alarm. Unsealed/unconfigured
+                # log so a configured-but-never-sealed setup is visible.
+                vault_env, status = await asyncio.to_thread(
+                    credentials.offsite_env)
+                if vault_env is None:
+                    log = (logger.debug
+                           if status == credentials.STATUS_VAULT_COLD
+                           else logger.info)
+                    log("scheduled drill skipped: offsite credentials %s",
+                        status)
+                    await asyncio.sleep(DRILL_CHECK_INTERVAL_S)
+                    continue
                 logger.info("backup drill cadence due; starting scheduled drill")
                 try:
-                    await asyncio.to_thread(drill_mod.run_drill, "scheduled")
+                    await asyncio.to_thread(
+                        drill_mod.run_drill, "scheduled")
                 except drill_mod.DrillAlreadyRunning:
                     pass
         except asyncio.CancelledError:
