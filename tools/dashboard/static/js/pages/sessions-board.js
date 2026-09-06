@@ -138,6 +138,7 @@
       boundId: '', dragId: '', dragging: false, movingCol: '', viewportTick: 0,
       organize: { state: 'idle', status: '', runId: '' }, commitTick: 0,
       menuFor: '', menuActions: [],
+      modelMenuFor: '', modelOptions: [], modelBusy: '', _modelCache: {},
       commits: {}, workspaces: {},
       // session -> column slug the operator just moved it to, held until the
       // store's groupId agrees. Without it a registry broadcast that lands
@@ -166,7 +167,10 @@
         window.addEventListener('sessions:registry-changed', this._onStoreChanged);
         this._onResize = function () { self.viewportTick++; };
         window.addEventListener('resize', this._onResize);
-        this._onDocClick = function (e) { if (self.menuFor && !e.target.closest('.sb-menu, .sc-org')) self.menuFor = ''; };
+        this._onDocClick = function (e) {
+          if (self.menuFor && !e.target.closest('.sb-menu, .sc-org')) self.menuFor = '';
+          if (self.modelMenuFor && !e.target.closest('.sb-model-menu, .sc-harness')) self.modelMenuFor = '';
+        };
         document.addEventListener('click', this._onDocClick, true);
         // A CrossTalk message names its sender as a link to that session's
         // full-page viewer. On the board the sender is usually a card already
@@ -175,6 +179,14 @@
         // into view. Bubbles to us before app.js's document-level router, so
         // stopping here keeps the SPA from navigating. A sender with no card
         // (dead, or filtered out) navigates normally.
+        // The model badge opens a switcher for its own session.
+        this._onBadgeClick = function (e) {
+          var badge = e.target.closest('.sc-harness'); if (!badge) return;
+          var card = badge.closest('.sb-card'); if (!card) return;
+          e.preventDefault(); e.stopPropagation();
+          self.openModelMenu(card.dataset.session);
+        };
+        this.$refs.board.addEventListener('click', this._onBadgeClick, true);
         this._onSenderClick = function (e) {
           var a = e.target.closest('a.sc-ct-sender'); if (!a) return;
           var m = String(a.getAttribute('href') || '').match(/^\/session\/[^/]+\/([^/?#]+)/);
@@ -217,6 +229,7 @@
       destroy() {
         document.removeEventListener('click', this._onDocClick, true);
         if (this.$refs.board && this._onSenderClick) this.$refs.board.removeEventListener('click', this._onSenderClick);
+        if (this.$refs.board && this._onBadgeClick) this.$refs.board.removeEventListener('click', this._onBadgeClick, true);
         if (this._offGroupChange) this._offGroupChange();
         if (this._offLayoutChange) this._offLayoutChange();
         window.removeEventListener('sessions:store-changed', this._onStoreChanged);
@@ -953,6 +966,51 @@
         }
         return actions;
       },
+      // Switch the model a live session is running, by typing the harness's
+      // own command into it. The list comes from the dispatcher's alias table
+      // (/api/session-models), so the board offers exactly the names a bead's
+      // `model:` label accepts. A harness whose switch command is not known
+      // answers with an empty list and gets no menu — the board never types an
+      // unverified command into a live agent.
+      async openModelMenu(id) {
+        this.menuFor = '';
+        if (this.modelMenuFor === id) { this.modelMenuFor = ''; return; }
+        var row = this.rowFor(id), harness = row.harness || '';
+        if (!row.is_live || !harness) return;
+        var cached = this._modelCache[harness];
+        if (!cached) {
+          try {
+            var res = await fetch('/api/session-models?harness=' + encodeURIComponent(harness), { credentials: 'same-origin' });
+            cached = res.ok ? await res.json() : { models: [], command: null };
+          } catch (e) { cached = { models: [], command: null }; }
+          this._modelCache[harness] = cached;
+        }
+        if (!cached.command || !cached.models.length) return;
+        this.modelOptions = cached.models.map(function (m) {
+          return { alias: m.alias, model: m.model, current: (row.model || '') === m.model };
+        });
+        this.modelMenuFor = id;
+      },
+      async chooseModel(id, alias) {
+        var row = this.rowFor(id);
+        var harness = row.harness || '';
+        var cmd = (this._modelCache[harness] || {}).command;
+        if (!cmd) return;
+        this.modelMenuFor = '';
+        this.modelBusy = id;
+        try {
+          var res = await fetch('/api/session/send', {
+            method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tmux_session: id, message: cmd + ' ' + alias }),
+          });
+          if (!res.ok) {
+            var err = await res.json().catch(function () { return {}; });
+            console.warn('[board] model switch failed', err.error || res.status);
+          }
+        } catch (e) { console.warn('[board] model switch failed', e.message); }
+        this.modelBusy = '';
+      },
+
       showSessionActions(s) {
         var tmux = s.session_id || s.id;
         if (this.menuFor === tmux) { this.menuFor = ''; return; }
