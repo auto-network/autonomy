@@ -39,6 +39,7 @@ from tools.network import (
     fleet_sync_telemetry,
 )
 from tools.network.fleet_sync.catalog import AuthoredMutation
+from tools.network.fleet_sync.compaction import WatermarkError
 from tools.network.fleet_sync_channel import FleetAuthenticator
 from tools.network.fleet_sync_scheduler import (
     _DONE_MAGIC,
@@ -513,7 +514,20 @@ class ConnectorFleetRuntime:
                 })
                 stats["bytes_sent"] += len(server_hello_frame)
                 yield server_hello_frame
+                resume_floor_ref = None
                 if serve_checkpoint:
+                    # Journal position BEFORE the checkpoint cut; the delta
+                    # phase below starts here instead of replaying the
+                    # whole journal the checkpoint already carries. A store
+                    # whose fleet writers are not active yet has no journal
+                    # position — fall back to the full replay (correct,
+                    # merely slow) rather than refuse the pull.
+                    try:
+                        resume_floor_ref = await asyncio.to_thread(
+                            scope_store.newest_transaction_ref
+                        )
+                    except WatermarkError:
+                        resume_floor_ref = None
                     active = tuple(sorted(fleet_roster.resolve(
                         scheduler._roster_snapshot,
                         anchor_root_pub=scheduler.config.personal_root_pub,
@@ -650,6 +664,7 @@ class ConnectorFleetRuntime:
                     # The relay stream handles its own checkpoint phase above;
                     # the delegated delta phase must never start a second one.
                     allow_checkpoint=False,
+                    resume_floor_ref=resume_floor_ref,
                 )
                 async for frame in deltas:
                     yield frame

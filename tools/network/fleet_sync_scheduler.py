@@ -1255,6 +1255,9 @@ class FleetSyncScheduler:
                 # the last verified authorization snapshot.
                 resolve(snapshot, anchor_root_pub=self.config.personal_root_pub)
                 self._roster_snapshot = snapshot
+                # This is THE roster change point for this process: a kick
+                # must land on open streams now, not within the cache TTL.
+                self.authenticator.invalidate_authorization_cache()
             except Exception:
                 logger.warning("fleet roster refresh failed", exc_info=True)
 
@@ -1270,7 +1273,16 @@ class FleetSyncScheduler:
         telemetry_started_at_ns: int | None = None,
         telemetry_started_monotonic_ns: int | None = None,
         allow_checkpoint: bool = True,
+        resume_floor_ref: int | None = None,
     ):
+        """``resume_floor_ref``: a caller that already served this peer a
+        checkpoint passes the journal's newest transaction ref captured
+        BEFORE that checkpoint's cut. The delta then starts there instead of
+        at the peer's (empty, first-contact) trail — everything at or below
+        the floor is inside the checkpoint by construction, and every later
+        transaction is still replayed. Without it a first-contact pull sent
+        the checkpoint AND the entire journal (~700k operations live
+        2026-09-06), authorizing each one on the way."""
         from tools.network.fleet_sync.blob_transport import peek_request_op
 
         if peek_request_op(message) == "blob":
@@ -1332,6 +1344,10 @@ class FleetSyncScheduler:
                 # not by installing each other's blank databases.
                 server_has_content = await asyncio.to_thread(store.has_state)
                 served_checkpoint = False
+                # Local alias: assigning the parameter name inside this
+                # generator would make it generator-local (unbound on the
+                # no-checkpoint path).
+                floor_ref = resume_floor_ref
                 if allow_checkpoint and server_has_content and (
                     serve_checkpoint_decision(cursor, bootstrap, journal_gap)
                 ):
@@ -1351,6 +1367,17 @@ class FleetSyncScheduler:
                     ))
                     built = stage / "checkpoint"
                     try:
+                        # Taken BEFORE the cut: a transaction landing between
+                        # this read and the freeze has a higher ref and is
+                        # replayed below — redundancy in that window, never
+                        # a skip.
+                        try:
+                            floor_ref = await asyncio.to_thread(
+                                store.newest_transaction_ref
+                            )
+                        except WatermarkError:
+                            floor_ref = None  # inactive store: full replay
+
                         def build() -> None:
                             with FleetSyncAlpha(
                                 scope_path, self.authenticator.machine_pub
@@ -1412,6 +1439,12 @@ class FleetSyncScheduler:
                             "fleet sync served-ack record failed",
                             exc_info=True,
                         )
+                # The ack above records only what the peer PROVED it holds
+                # (its trail). The checkpoint floor is applied after it so a
+                # transfer that dies mid-stream never advances the pruning
+                # frontier past what the peer actually installed.
+                if floor_ref is not None:
+                    cursor = max(cursor, floor_ref)
                 while True:
                     self.authenticator.authorize(peer_pub)
                     page = await asyncio.to_thread(
