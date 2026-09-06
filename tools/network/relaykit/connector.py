@@ -1040,20 +1040,6 @@ class TunnelConnector:
                 link_key = self._link_key_for(token)
             except Exception:
                 link_key = None  # a resolver fault falls back to legacy serving
-        if link_key is None:
-            # Legacy (certificate) serving requires the identity-neutral
-            # viewer certificate. A persona-bearing certificate must NEVER
-            # reach a viewer (D16 privacy rule), and a revision-3 persona
-            # credential has no viewer certificate at all — such a connector
-            # serves per-link links only, so a keyless link closes here.
-            cc = self._channel_cert
-            if (cc is None or cc.subject.kind != "operator"
-                    or cc.subject.id != cc.child_pub):
-                with contextlib.suppress(Exception):
-                    await send_frame(FRAME_CLOSE, channel_id)
-                if self._publisher is not None:
-                    self._publisher.detached(token)
-                return
         try:
             await serve_channel(
                 self._key, self._channel_cert, org=self._org, token=token,
