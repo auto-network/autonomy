@@ -56,6 +56,7 @@ echo "==> syncing code and install primer to $TARGET:$APP_DIR"
 ssh "$TARGET" "mkdir -p $APP_DIR/tools/network $APP_DIR/tools/dashboard/static/js/lib $APP_DIR/deploy"
 rsync -az --delete --exclude '__pycache__' --exclude 'tests' \
     "$REPO_ROOT/tools/network/idkit" \
+    "$REPO_ROOT/tools/network/ledger" \
     "$REPO_ROOT/tools/network/relaykit" \
     "$REPO_ROOT/tools/network/registry" \
     "$TARGET:$APP_DIR/tools/network/"
@@ -68,6 +69,13 @@ rsync -az --delete --exclude '__pycache__' --exclude 'tests' \
 # fix. They are plain source, imported only on demand, harmless if unused.
 rsync -az "$REPO_ROOT"/tools/network/*.py \
     "$TARGET:$APP_DIR/tools/network/"
+# Top-level tools/*.py modules OUTSIDE tools/network that the network packages
+# import at load time (data_paths.py — the data-volume path contract the
+# ledger/registry stores resolve through). Neither the package sync nor the
+# tools/network/*.py sibling sync above reaches these, so a from-scratch box
+# crashes with ModuleNotFoundError: tools.data_paths. Ship them explicitly.
+rsync -az "$REPO_ROOT"/tools/data_paths.py \
+    "$TARGET:$APP_DIR/tools/"
 rsync -az --delete \
     "$REPO_ROOT/deploy/install" \
     "$TARGET:$APP_DIR/deploy/"
