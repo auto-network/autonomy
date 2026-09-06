@@ -187,7 +187,7 @@ if [[ -d "$BEADS_ROOT" ]]; then
         MYSQLDUMP=()
         fail "beads: FAILED (no mysqldump and no docker available)"
     fi
-    BEADS_ROWS="$(BEADS_DIR="$BEADS_ROOT" "$PYTHON" "$STORES_HELPER" beads)" || {
+    BEADS_ROWS="$(BEADS_DIR="$BEADS_ROOT" "$PYTHON" "$STORES_HELPER" beads --with-passwords)" || {
         BEADS_ROWS=""
         fail "beads: FAILED (could not enumerate dolt databases)"
     }
