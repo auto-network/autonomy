@@ -10,10 +10,16 @@
  * (partials/session-card.html) as its head. Nothing here formats a turn.
  *
  * Design of record: Design Studio 2c31c67a-ca7d-4f92-aee3-e3e2a15de87d
- * (graph://e61d916d-34b). This file ports that design's behaviour; the two
- * deliberate differences are that a card click binds dictation through the
- * standard voice path (window.Autonomy.voice.ui.onClick) and that the org
- * glyph's actions go through the shared window.actionSheet.
+ * (graph://e61d916d-34b). This file ports that design's behaviour, with two
+ * deliberate differences: a card click binds dictation through the standard
+ * voice path (window.Autonomy.voice.ui.onClick), and the org glyph opens an
+ * inline popover in the card rather than the global slide-up tray, which is
+ * the phone's affordance and dims the whole screen.
+ *
+ * Dictation is shown by the card itself: each card's panel viewer renders
+ * partials/session-pending-tiles.html, the same outbox/dictation surface the
+ * session viewer uses, so the operator's words appear in the card they are
+ * talking to. There is no floating capsule.
  *
  * State ownership. Membership (which session sits in which column) is the
  * shared session-group record: the store carries groupId / groupTab / group
@@ -119,6 +125,7 @@
       cardPresentations: {}, cardHeights: {}, resources: {},
       boundId: '', dragId: '', dragging: false, movingCol: '', viewportTick: 0,
       organize: { state: 'idle', status: '', runId: '' },
+      menuFor: '', menuActions: [],
       _dragSource: null, _provisional: null, _frame: null, _drag: null,
       _resourceTipOpen: null, _diskRefreshing: {}, resumeError: {}, resuming: {}, resumed: {},
       _workspaceStatusByTmux: {},
@@ -140,6 +147,8 @@
         window.addEventListener('sessions:registry-changed', this._onStoreChanged);
         this._onResize = function () { self.viewportTick++; };
         window.addEventListener('resize', this._onResize);
+        this._onDocClick = function (e) { if (self.menuFor && !e.target.closest('.sb-menu, .sc-org')) self.menuFor = ''; };
+        document.addEventListener('click', this._onDocClick, true);
         this._resourceHandler = function (d) { if (d && typeof d === 'object') self._applyResourceRows(d.sessions || d); };
         if (window.registerHandler) window.registerHandler('resources', this._resourceHandler);
         this._hydrateResources();
@@ -163,6 +172,7 @@
         }
       },
       destroy() {
+        document.removeEventListener('click', this._onDocClick, true);
         if (this._offGroupChange) this._offGroupChange();
         if (this._offLayoutChange) this._offLayoutChange();
         window.removeEventListener('sessions:store-changed', this._onStoreChanged);
@@ -671,6 +681,7 @@
 
       // ── dictation: click binds through the standard voice path, never navigates ──
       bindDictation(ev, id) {
+        this.menuFor = '';
         var ui = window.Autonomy && window.Autonomy.voice && window.Autonomy.voice.ui;
         if (!ui || typeof ui.onClick !== 'function') return;
         var row = this.rowFor(id);
@@ -729,27 +740,38 @@
       attnTitle(col) { var self = this, w = 0, t = 0; col.members.forEach(function (m) { var c = self.attnClass(m); if (c === 'working') w++; else if (c === 'thinking') t++; }); return w + ' working · ' + t + ' thinking · ' + (col.members.length - w - t) + ' idle'; },
 
       // ── session actions: the org glyph's menu, same actions as the Sessions page ──
-      showSessionActions(s) {
+      // The org glyph's menu. This surface is desktop-only, so it opens as an
+      // inline popover anchored to the card — never the global action sheet,
+      // which is the phone's slide-up tray and dims the whole screen.
+      sessionActions(s) {
         var tmux = s.session_id || s.id, actions = [];
+        var put = function (url, opts) { return fetch(url, opts || { method: 'POST' }); };
         if (s.is_live) {
-          actions.push({ label: s.nag_enabled ? 'Disable Nag' : 'Enable Nag (15m)', handler: function () {
-            fetch('/api/session/' + encodeURIComponent(tmux) + '/nag', {
+          actions.push({ icon: s.nag_enabled ? '🔕' : '🔔', label: s.nag_enabled ? 'Disable nag' : 'Enable nag (15m)', handler: function () {
+            put('/api/session/' + encodeURIComponent(tmux) + '/nag', {
               method: s.nag_enabled ? 'DELETE' : 'PUT', headers: { 'Content-Type': 'application/json' },
               body: s.nag_enabled ? undefined : JSON.stringify({ enabled: true, interval: 15 }),
             });
           } });
-          if (s.nag_enabled) {
-            [5, 15, 30, 60].forEach(function (mins) {
-              if (mins !== s.nag_interval) actions.push({ label: 'Nag every ' + mins + 'm', handler: function () {
-                fetch('/api/session/' + encodeURIComponent(tmux) + '/nag', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: true, interval: mins, message: s.nag_message || '' }) });
-              } });
-            });
-          }
-          actions.push({ label: 'Open full viewer', handler: function () { if (window.navigateTo) window.navigateTo('/session/' + encodeURIComponent(s.project || 'default') + '/' + encodeURIComponent(tmux)); } });
-          actions.push({ label: 'Restart Session', handler: function () { fetch('/api/session/' + encodeURIComponent(tmux) + '/restart', { method: 'POST' }); } });
-          actions.push({ label: 'Close Session', style: 'destructive', handler: function () { fetch('/api/terminal/' + encodeURIComponent(tmux) + '/kill', { method: 'POST' }); } });
+          actions.push({ icon: '⤢', label: 'Open full viewer', handler: function () {
+            var url = '/session/' + encodeURIComponent(s.project || 'default') + '/' + encodeURIComponent(tmux);
+            if (window.navigateTo) window.navigateTo(url); else window.location.href = url;
+          } });
+          actions.push({ icon: '⧉', label: 'Copy session name', handler: function () { try { navigator.clipboard.writeText(tmux); } catch (e) {} } });
+          actions.push({ icon: '↻', label: 'Restart session', handler: function () { put('/api/session/' + encodeURIComponent(tmux) + '/restart'); } });
+          actions.push({ icon: '✕', label: 'Close session', style: 'destructive', handler: function () { put('/api/terminal/' + encodeURIComponent(tmux) + '/kill'); } });
         }
-        if (window.actionSheet && window.actionSheet.show) window.actionSheet.show({ title: s.label || tmux, actions: actions });
+        return actions;
+      },
+      showSessionActions(s) {
+        var tmux = s.session_id || s.id;
+        if (this.menuFor === tmux) { this.menuFor = ''; return; }
+        this.menuActions = this.sessionActions(s);
+        this.menuFor = tmux;
+      },
+      runMenuAction(a) {
+        this.menuFor = '';
+        if (a && typeof a.handler === 'function') a.handler();
       },
 
       // ── contract the production card partial expects from its host page ──
