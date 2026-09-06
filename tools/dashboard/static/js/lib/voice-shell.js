@@ -128,7 +128,7 @@
   function _viewerComposerActive() {
     if (typeof document === 'undefined' || !document.body) return false;
     var voice = _voiceStore();
-    var bound = voice && voice.boundSessionId;
+    var bound = voice && (voice.deliverySessionId || voice.boundSessionId);
     if (!bound) return false;
     try {
       var body = document.body;
@@ -262,7 +262,7 @@
   function _syncViewerOutboxCapture() {
     var voice = _voiceStore();
     if (!voice) return false;
-    var bound = voice.boundSessionId;
+    var bound = voice.deliverySessionId || voice.boundSessionId;
     if (typeof window === 'undefined' ||
         typeof window.getSessionStore !== 'function') return false;
     if (!bound || !_viewerComposerActive()) return false;
@@ -426,7 +426,8 @@
             Alpine.effect(function () {
               var voice = _voiceStore();
               if (!voice) return;
-              var _bound = voice.boundSessionId;      // track for reactivity
+              var _bound = voice.boundSessionId;      // track capture lifecycle
+              var _deliverySession = voice.deliverySessionId; // track outbox routing
               var _text = voice.bufferText;           // track for reactivity
               var _viewed = voice.viewedSessionId;    // track viewer composer changes
               var _delivery = voice.deliveryMode;     // keep Voiceover out of session outbox
@@ -510,18 +511,20 @@
         // off store props (boundSessionId + viewedSessionId the viewer publishes).
         get sheetCrossSession() {
           var v = this.voice;
-          return !!(v && v.boundSessionId && v.viewedSessionId &&
-                    v.boundSessionId !== v.viewedSessionId);
+          var delivery = v && (v.deliverySessionId || v.boundSessionId);
+          return !!(v && delivery && v.viewedSessionId &&
+                    delivery !== v.viewedSessionId);
         },
         get sheetCrossTargetTitle() {
           var v = this.voice;
-          if (!v || !v.boundSessionId) return '';
+          var delivery = v && (v.deliverySessionId || v.boundSessionId);
+          if (!delivery) return '';
           try {
             var sessions = (typeof Alpine !== 'undefined' && Alpine.store) ? Alpine.store('sessions') : null;
-            var s = sessions && sessions[v.boundSessionId];
+            var s = sessions && sessions[delivery];
             if (s && s.label) return s.label;
           } catch (_e) {}
-          return v.boundSessionId;
+          return delivery;
         },
 
         get sendPulse() {
@@ -688,11 +691,10 @@
           return document.body.dataset.svComposerSession || '';
         },
         _beginCapsuleClaim(target) {
-          // Long-press on the violet Send → re-bind dictation to the session being
-          // viewed. bindSession carries the live buffer over (#23 switch-takes-
-          // buffer); viewed === bound now, so the fill drains violet → blue.
-          if (!target || !this.voice || typeof this.voice.bindSession !== 'function') return;
-          this.voice.bindSession(target);
+          // Long-press changes only where the accumulated buffer will be sent.
+          // Capture and its session-bound transport remain untouched.
+          if (!target || !this.voice || typeof this.voice.retargetDelivery !== 'function') return;
+          if (this.voice.retargetDelivery(target) !== true) return;
           var self = this;
           setTimeout(function () { self._setSendFill(100, 280); }, 240);
         },
@@ -855,7 +857,7 @@
           // be false when the operator clears from a different view — leaving a
           // stale tile showing the old text (operator-reported). Null the
           // capturing voice outbox directly here so Clear always wipes the tile.
-          var bound = this.voice.boundSessionId;
+          var bound = this.voice.deliverySessionId || this.voice.boundSessionId;
           if (bound && typeof window !== 'undefined' &&
               typeof window.getSessionStore === 'function') {
             var s = window.getSessionStore(bound);
@@ -943,18 +945,11 @@
 
         switchSheetToCurrent() {
           var voice = this.voice;
+          var delivery = voice && (voice.deliverySessionId || voice.boundSessionId);
           if (!voice || !voice.viewedSessionId ||
-              voice.viewedSessionId === voice.boundSessionId ||
-              typeof voice.bindSession !== 'function') return false;
-          var priorMode = voice.micMode;
-          voice.bindSession(voice.viewedSessionId);
-          // Opening the keyboard mutes capture. Preserve that state across the
-          // explicit target switch; if the operator used the sheet mic button
-          // to resume capture, bindSession's listening state is already right.
-          if (priorMode === 'muted' && typeof voice.setMicMode === 'function') {
-            voice.setMicMode('muted');
-          }
-          return true;
+              voice.viewedSessionId === delivery ||
+              typeof voice.retargetDelivery !== 'function') return false;
+          return voice.retargetDelivery(voice.viewedSessionId) === true;
         },
 
         onSheetInput() {

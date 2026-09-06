@@ -19,6 +19,7 @@ function loadVoiceShell(opts) {
   const voiceStore = Object.assign({
     enabled: true,
     boundSessionId: 'session-a',
+    deliverySessionId: 'session-a',
     micMode: 'listening',
     bufferText: '',
     capsulePosition: null,
@@ -72,7 +73,12 @@ function loadVoiceShell(opts) {
     },
     bindSession(sessionId) {
       this.boundSessionId = sessionId;
+      this.deliverySessionId = sessionId;
       this.micMode = 'listening';
+      return true;
+    },
+    retargetDelivery(sessionId) {
+      this.deliverySessionId = sessionId;
       return true;
     },
     setMicMode(mode) {
@@ -95,6 +101,11 @@ function loadVoiceShell(opts) {
       return true;
     },
   }, (opts && opts.voiceStore) || {});
+  if (opts && opts.voiceStore &&
+      Object.prototype.hasOwnProperty.call(opts.voiceStore, 'boundSessionId') &&
+      !Object.prototype.hasOwnProperty.call(opts.voiceStore, 'deliverySessionId')) {
+    voiceStore.deliverySessionId = voiceStore.boundSessionId;
+  }
 
   const flagsStore = {
     get(name) {
@@ -510,15 +521,16 @@ describe('voice shell helpers', () => {
   });
 
   it('long-press on the violet (cross-session) Send claims dictation to the viewed session', async () => {
-    const bindCalls = [];
-    const h = loadVoiceShell({ voiceStore: { bindSession(id) { bindCalls.push(id); } } });
+    const retargetCalls = [];
+    const h = loadVoiceShell({ voiceStore: { retargetDelivery(id) { retargetCalls.push(id); return true; } } });
     h.document.body.classList.add('sv-cross-session-dictation');
     h.document.body.dataset.svComposerSession = 'auto-viewed';
     const down = { clientX: 320, clientY: 730, target: actionTarget('send'), preventDefault() {} };
     assert.equal(h.component.onCapsulePointerDown(down), true);
     await new Promise((r) => setTimeout(r, 650));   // past the CAPSULE_CLEAR_MS hold
     h.winListeners.pointerup[0]({ clientX: 320, clientY: 730 });
-    assert.deepEqual(bindCalls, ['auto-viewed'], 'claimed to the viewed session');
+    assert.deepEqual(retargetCalls, ['auto-viewed'], 'delivery moved to the viewed session');
+    assert.equal(h.voiceStore.boundSessionId, 'session-a', 'capture binding is unchanged');
     assert.equal(h.voiceStore._sendCalls, 0, 'claim does not also send');
   });
 
@@ -843,7 +855,8 @@ describe('voice shell helpers', () => {
       },
     });
     assert.equal(h.component.switchSheetToCurrent(), true);
-    assert.equal(h.voiceStore.boundSessionId, 'auto-A');
+    assert.equal(h.voiceStore.boundSessionId, 'auto-B');
+    assert.equal(h.voiceStore.deliverySessionId, 'auto-A');
     assert.equal(h.voiceStore.micMode, 'muted');
     assert.equal(h.component.sheetCrossSession, false);
   });

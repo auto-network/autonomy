@@ -51,7 +51,7 @@ function makeHarness() {
     removeEventListener() {},
   };
   const voice = {
-    boundSessionId: '', micMode: 'idle', bufferText: '', enabled: true, sheetError: '',
+    boundSessionId: '', deliverySessionId: '', micMode: 'idle', bufferText: '', enabled: true, sheetError: '',
     setBufferText(t) { this.bufferText = t; },
     setConnState() {},
   };
@@ -115,6 +115,39 @@ function makeHarness() {
 }
 
 describe('#23 voice-capture switch-takes-buffer', () => {
+  it('does not observe a delivery-only retarget as a capture binding change', async () => {
+    const h = makeHarness();
+    h.voice.boundSessionId = 'auto-A';
+    h.voice.deliverySessionId = 'auto-A';
+    h.voice.micMode = 'listening';
+    h.runEffects();
+    await h.flush();
+    h.sockets[0].fireOpen();
+    await h.flush();
+    const before = {
+      socket: h.state.ws,
+      stream: h.state.stream,
+      context: h.state.ctx,
+      worklet: h.state.workletNode,
+      captureGen: h.state.captureGen,
+      startGen: h.state.startGen,
+      bind: h.state.bind,
+    };
+
+    h.voice.deliverySessionId = 'auto-B';
+    h.runEffects();
+    await h.flush();
+
+    assert.equal(h.sockets.length, 1);
+    assert.equal(h.state.ws, before.socket);
+    assert.equal(h.state.stream, before.stream);
+    assert.equal(h.state.ctx, before.context);
+    assert.equal(h.state.workletNode, before.worklet);
+    assert.equal(h.state.captureGen, before.captureGen);
+    assert.equal(h.state.startGen, before.startGen);
+    assert.equal(h.state.bind, before.bind);
+  });
+
   it('carries the buffer to the new session so its transcript APPENDS, not overwrites', async () => {
     const h = makeHarness();
 
