@@ -20668,6 +20668,7 @@ _claude_credentials_refresh_task: asyncio.Task | None = None
 _codex_credentials_refresh_task: asyncio.Task | None = None
 _event_loop_watchdog_task: asyncio.Task | None = None
 _vault_release_sweeper_task: asyncio.Task | None = None
+_plugin_background_supervisor = None  # PluginBackgroundSupervisor | None
 _settings_mediator_started: bool = False
 
 
@@ -21137,6 +21138,23 @@ async def _on_startup():
         )
     _vault_release_sweeper_task = asyncio.create_task(_vault_release_sweeper())
     _mark("vault_release_sweeper.reconcile_on_startup")
+    # Plugin background tasks (auto-jjqct): the supervisor reconciles
+    # lifespan-owned tasks against the LIVE enable map, so a plugin
+    # toggled via dashboard.plugin gains/loses its tasks without a
+    # restart, and a crashing task restarts with bounded backoff.
+    global _plugin_background_supervisor
+    try:
+        from tools.dashboard.plugin_api.background import (
+            PluginBackgroundSupervisor,
+        )
+        _plugin_background_supervisor = PluginBackgroundSupervisor(
+            PLUGIN_REGISTRY, _plugin_enabled_map,
+        )
+        await _plugin_background_supervisor.start()
+    except Exception:
+        logger.exception("plugin background supervisor failed to start")
+        _plugin_background_supervisor = None
+    _mark("plugin_background.start")
     # Restore a WARM vault from a graceful hot-reload snapshot before traffic
     # (auto-a1pub). Present only after a graceful shutdown wrote it; a cold boot
     # or a crash finds nothing and the vault stays locked until a human unlock.
@@ -21406,6 +21424,13 @@ async def _on_shutdown():
     _claude_credentials_refresh_task = None
     _codex_credentials_refresh_task = None
     _vault_release_sweeper_task = None
+    global _plugin_background_supervisor
+    if _plugin_background_supervisor is not None:
+        try:
+            await _plugin_background_supervisor.stop()
+        except Exception:
+            logger.exception("error stopping the plugin background supervisor")
+        _plugin_background_supervisor = None
     try:
         await session_monitor.stop()
     except Exception:
