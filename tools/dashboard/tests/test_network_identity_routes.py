@@ -1497,3 +1497,75 @@ def test_persona_serve_cert_wrong_signer_refused(env, root, tmp_path, monkeypatc
     })
     assert r.status_code == 400
     assert "chain" in r.json()["error"] or "persona" in r.json()["error"]
+
+
+# ── membership-checkpoint routes (auto-tmers) ─────────────────
+
+
+def _register_with_registry(registry_app, root: KeyPair):
+    """Register ORG_UUID on the in-process registry (so its checkpoint route
+    accepts a seed root-signed by *root*). ASGITransport is async-only, so
+    drive it in a fresh loop."""
+    import asyncio
+    from tools.network.registry.signing import sign_request
+
+    async def _do():
+        async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=registry_app),
+                base_url=REGISTRY_URL) as c:
+            return await c.post("/v1/orgs", json=sign_request(
+                root, "POST", "/v1/orgs",
+                {"org_uuid": ORG_UUID, "root_pub": root.public_hex,
+                 "recovery_policy": "none"}, ts=int(time.time())))
+    r = asyncio.run(_do())
+    assert r.status_code == 201, r.text
+
+
+def _seed_record(root: KeyPair):
+    from tools.network.ledger import membership_commitment as mc
+    genesis = "aa" * 32
+    return mc.build_root_checkpoint(
+        org=ORG_UUID, seq=0, genesis_id=genesis, ledger_head=genesis,
+        members_root_hex=mc.compute_root([root.public_hex]),
+        checkpointers_root_hex=mc.compute_root([root.public_hex]),
+        ts=int(time.time()), root=root)
+
+
+def test_checkpoint_post_forwards_and_caches(env, registry_app, root):
+    _register_with_registry(registry_app, root)
+    _store_binding(root)
+    record = _seed_record(root)
+    r = env.post("/api/network/membership-checkpoint",
+                 json={"org": ORG, "record": record})
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True and r.json()["seq"] == 0
+    # Cached as adopted, so a follow-up decision reads up-to-date.
+    from tools.dashboard import membership_checkpoint as cp
+    assert cp._cached_adopted(ORG)["members_root"] == record["members_root"]
+
+
+def test_checkpoint_post_org_mismatch_refused(env, registry_app, root):
+    _register_with_registry(registry_app, root)
+    _store_binding(root)
+    record = _seed_record(root)
+    record["org"] = "99999999-9999-4999-8999-999999999999"
+    r = env.post("/api/network/membership-checkpoint",
+                 json={"org": ORG, "record": record})
+    assert r.status_code == 400
+    assert "does not match" in r.json()["error"]
+
+
+def test_checkpoint_post_registry_refusal_surfaced(env, registry_app, root):
+    # No registration → the registry 404s the org, and the route surfaces 502.
+    _store_binding(root)
+    record = _seed_record(root)
+    r = env.post("/api/network/membership-checkpoint",
+                 json={"org": ORG, "record": record})
+    assert r.status_code == 502
+    assert "registry refused" in r.json()["error"]
+
+
+def test_checkpoint_decision_requires_params(env):
+    r = env.get("/api/network/membership-checkpoint")
+    assert r.status_code == 400
+    assert "persona" in r.json()["error"]

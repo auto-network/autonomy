@@ -1899,6 +1899,90 @@ async def _post_serve_cert_v3(request: Request, body: dict) -> JSONResponse:
                          "not_after": cert.not_after})
 
 
+async def get_membership_checkpoint_decision(request: Request) -> JSONResponse:
+    """Is a membership checkpoint due for this org, and if so the UNSIGNED
+    record to sign (auto-tmers). Pure local fold + cache compare; no registry
+    call and no signing. The browser signs the returned record (root for a
+    seq-0 seed, persona otherwise) and POSTs it back to
+    ``/api/network/membership-checkpoint``.
+    """
+    org, refused = resolve_scoped_org(request.query_params.get("org"), request=request)
+    if refused is not None:
+        return refused
+    persona_pub = request.query_params.get("persona")
+    genesis_id = request.query_params.get("genesis_id")
+    if not isinstance(persona_pub, str) or not persona_pub \
+            or not isinstance(genesis_id, str) or not genesis_id:
+        return JSONResponse({"ok": False, "error": (
+            "persona and genesis_id query params are required"
+        )}, status_code=400)
+    from tools.dashboard import membership_checkpoint as cp
+    try:
+        decision = cp.checkpoint_due(
+            org, persona_pub, ts=int(time.time()), genesis_id=genesis_id)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"checkpoint check failed: {e}"},
+                            status_code=500)
+    out = {"ok": True, "action": decision.action}
+    if decision.action == "assemble":
+        out["record"] = decision.record
+        out["sign_with"] = decision.sign_with
+    if decision.reason:
+        out["reason"] = decision.reason
+    return JSONResponse(out)
+
+
+async def post_membership_checkpoint(request: Request) -> JSONResponse:
+    """Forward a SIGNED membership checkpoint to the registry and, on success,
+    cache it as adopted (auto-tmers). The record is self-authenticating, so it
+    rides the registry's bare checkpoint route, not a request envelope."""
+    if _mock_mode():
+        return JSONResponse({"ok": False, "error": "mock dashboard stores no checkpoints"},
+                            status_code=502)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "body must be JSON"}, status_code=400)
+    record = body.get("record") if isinstance(body, dict) else None
+    if not isinstance(record, dict) or not isinstance(record.get("org"), str):
+        return JSONResponse({"ok": False, "error": (
+            "body must carry a signed checkpoint 'record' with an 'org'"
+        )}, status_code=400)
+    org, refused = resolve_scoped_org(body.get("org"), request=request)
+    if refused is not None:
+        return refused
+    binding_member = _first_member(NETWORK_BINDING_SET_ID, org)
+    if binding_member is None:
+        return JSONResponse({"ok": False, "error": (
+            "this org is not registered on auto.network yet"
+        )}, status_code=409)
+    binding = binding_member.payload
+    org_uuid = binding.get("org_uuid")
+    if record.get("org") != org_uuid:
+        return JSONResponse({"ok": False, "error": (
+            "checkpoint org does not match the org's binding"
+        )}, status_code=400)
+    try:
+        async with _registry_client(binding["registry_url"]) as client:
+            resp = await client.post(
+                f"/v1/orgs/{org_uuid}/membership-checkpoints", json=record)
+    except httpx.HTTPError as e:
+        return JSONResponse({"ok": False, "error": (
+            f"could not reach the registry at {binding['registry_url']}: {e}"
+        )}, status_code=502)
+    if resp.status_code != 201:
+        try:
+            detail = resp.json().get("detail", resp.text)
+        except Exception:
+            detail = resp.text
+        return JSONResponse({"ok": False, "error": (
+            f"registry refused the checkpoint ({resp.status_code}): {detail}"
+        )}, status_code=502)
+    from tools.dashboard import membership_checkpoint as cp
+    cp.record_adopted(org, record)
+    return JSONResponse({"ok": True, "seq": record.get("seq")})
+
+
 async def post_serve_cert(request: Request) -> JSONResponse:
     """Provision the org's tunnel serving delegate (§5.1).
 
@@ -2728,5 +2812,9 @@ ROUTES = [
     Route("/api/network/unlock-report", get_unlock_maintenance_report),
     Route("/api/network/unlock-report", post_unlock_maintenance_report, methods=["POST"]),
     Route("/api/network/serve-cert", post_serve_cert, methods=["POST"]),
+    Route("/api/network/membership-checkpoint",
+          get_membership_checkpoint_decision, methods=["GET"]),
+    Route("/api/network/membership-checkpoint",
+          post_membership_checkpoint, methods=["POST"]),
     Route("/api/network/revocations", post_revocation, methods=["POST"]),
 ]
