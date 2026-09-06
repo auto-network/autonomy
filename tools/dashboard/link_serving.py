@@ -1580,6 +1580,10 @@ async def _serve_control_listener(connector, ctl_path: str,
                         "locked_refusal_since": (
                             connector_runtime.first_locked_refusal_at
                         ),
+                        # The direct (tailnet/LAN) listener THIS process has
+                        # bound, or null: the fleet verdict's proof that the
+                        # direct tier is up without an operator session.
+                        "direct_listener": connector_runtime.direct_listener,
                     }
                 elif request.get("op") == "serve-host":
                     # Dashboard-local desired-state seam. Unlike forwarding a
@@ -1655,6 +1659,13 @@ async def _run_connector_with_control(connector, ctl_path: str | None,
     if ctl_path is not None:
         tasks.append(asyncio.create_task(
             _serve_control_listener(connector, ctl_path, publisher)))
+    # The fleet direct listener (tailnet/LAN peers dial this process
+    # directly, bypassing the relay) is bound and kept matched to the
+    # fleet-direct row here, on the connector's loop.
+    from tools.network.fleet_relay_sync import connector_runtime as _fleet_rt
+
+    tasks.append(asyncio.create_task(
+        _fleet_rt.direct_listener_loop(), name="fleet-direct-listener"))
     try:
         await connector.run()
     finally:

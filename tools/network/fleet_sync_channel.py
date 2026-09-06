@@ -434,6 +434,14 @@ class FleetDirectServer:
     def connection_count(self) -> int:
         return self._server.connection_count
 
+    @property
+    def running(self) -> bool:
+        return self._server.running
+
+    @property
+    def host(self) -> str:
+        return self._server._host
+
     async def start(self) -> int:
         return await self._server.start()
 

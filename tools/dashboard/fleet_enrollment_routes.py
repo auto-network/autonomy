@@ -254,8 +254,12 @@ def _fleet_env_peers():
     return out
 
 
-def _reachability_peer_addresses(credential, root_pub):
+def _reachability_peer_addresses(credential, root_pub, *, pull_direct=True):
     """Build the scheduler's peer_addresses: registry discovery + env override.
+
+    ``pull_direct=False`` keeps the cache refreshing (this machine still
+    announces itself and still discovers peers for the verdict) but hands
+    the scheduler no addresses, so this dashboard never pulls over direct.
 
     A throttled ReachabilityCache announces this machine and resolves roster
     peers via node:announce/node:lookup (using the credential's machine key +
@@ -287,6 +291,8 @@ def _reachability_peer_addresses(credential, root_pub):
     def peers():
         merged = dict(cache.peers())
         merged.update(_fleet_env_peers())
+        if not pull_direct:
+            return {}
         return merged
 
     return peers
@@ -379,6 +385,7 @@ def _activate_runtime(
     # no peer can dial; a fixed port on a reachable interface plus advertised
     # URLs is what makes direct pulls happen instead of relay pulls.
     direct = fleet_direct_config.load()
+    listen_host, listen_port = fleet_direct_config.listener_bind(direct, "dashboard")
     fleet_sync_scheduler.configure_dashboard_fleet_sync(
         fleet_sync_scheduler.FleetSyncRuntimeConfig(
             machine_key=credential.process_key,
@@ -387,15 +394,17 @@ def _activate_runtime(
             require_delegation=True,
             personal_root_pub=root_pub,
             roster_entries=lambda: fleet_roster.load_entries(org=None),
-            listen_host=direct.listen_host,
-            listen_port=direct.listen_port,
+            listen_host=listen_host,
+            listen_port=listen_port,
             # Relay-discovered peer channels: a throttled ReachabilityCache
             # announces this machine (its reachability cert + machine key) and
             # resolves roster peers via node:announce/node:lookup. When the
             # personal org is not registered the credential carries no
             # reachability material, the cache yields {}, and this is byte-
             # identical to the sync-only path.
-            peer_addresses=_reachability_peer_addresses(credential, root_pub),
+            peer_addresses=_reachability_peer_addresses(
+                credential, root_pub, pull_direct=direct.pull_direct,
+            ),
             personal_db_path=_org_db_path("personal"),
             telemetry_recorder=fleet_sync_telemetry.record_iteration,
             resume_cursor=(

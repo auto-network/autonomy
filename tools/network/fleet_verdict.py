@@ -123,6 +123,8 @@ def _direct_check() -> dict:
             "listen_host": cfg.listen_host,
             "listen_port": cfg.listen_port,
             "advertise_addrs": list(cfg.advertise_addrs),
+            "serve_in": cfg.serve_in,
+            "pull_direct": cfg.pull_direct,
         })
     except Exception as exc:
         out["detail"] = f"could not read fleet-direct config: {exc!r}"
@@ -153,6 +155,15 @@ def _direct_check() -> dict:
     return out
 
 
+def _connector_direct_listener(org: str | None):
+    try:
+        from tools.dashboard import link_serving_supervisor as sup
+
+        return sup.control(org, "connector-status", {}).get("direct_listener")
+    except Exception:
+        return None
+
+
 def compute_verdict(org: str | None = None) -> dict:
     """Everything fleet_doctor's top line and /api/fleet/status need,
     in one call. org=None is the personal/scopeless sync scope."""
@@ -162,6 +173,7 @@ def compute_verdict(org: str | None = None) -> dict:
     last_pull = _last_pull_check()
     data = _data_check(org)
     direct = _direct_check()
+    direct["connector_listener"] = _connector_direct_listener(org)
 
     stale = connector_version.get("status") == "stale" \
         or dashboard_version.get("status") == "stale"

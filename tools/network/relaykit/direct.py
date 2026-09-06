@@ -91,6 +91,10 @@ class DirectChannelServer:
         return self._port
 
     @property
+    def running(self) -> bool:
+        return self._server is not None
+
+    @property
     def connection_count(self) -> int:
         """Open WebSocket connections right now (links are ephemeral —
         the swarm acceptance asserts this returns to zero post-transfer)."""
