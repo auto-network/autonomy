@@ -416,8 +416,10 @@ _restart_notice_lock = asyncio.Lock()
 _restart_notice_payload: dict[str, int] | None = None
 
 
-def _write_restart_notice(payload: dict[str, int]) -> None:
-    """Atomically persist the one datum the next process needs for timing."""
+def _write_restart_notice(payload: dict[str, Any]) -> None:
+    """Atomically persist what the next process needs: the countdown start and
+    the restart attribution (so the post-restart 'complete' toast can still
+    name the cause)."""
     try:
         RESTART_NOTICE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         tmp = RESTART_NOTICE_STATE_PATH.with_suffix(
@@ -429,13 +431,17 @@ def _write_restart_notice(payload: dict[str, int]) -> None:
         logger.warning("could not persist restart notice state", exc_info=True)
 
 
-def _read_restart_notice() -> dict[str, int] | None:
+def _read_restart_notice() -> dict[str, Any] | None:
     try:
         payload = json.loads(RESTART_NOTICE_STATE_PATH.read_text(encoding="utf-8"))
         started_at_ms = int(payload["started_at_ms"])
         if started_at_ms <= 0:
             raise ValueError("non-positive started_at_ms")
-        return {"started_at_ms": started_at_ms}
+        notice: dict[str, Any] = {"started_at_ms": started_at_ms}
+        attribution = payload.get("attribution")
+        if isinstance(attribution, dict):
+            notice["attribution"] = attribution
+        return notice
     except FileNotFoundError:
         return None
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
@@ -460,6 +466,99 @@ def _current_headline_context() -> dict[str, str]:
         return {}
 
 
+# A restart within this many seconds of HEAD's commit time is treated as merge-
+# driven when the reloader gave us no changed-file list to inspect (the precise
+# signal — working-tree drift from HEAD — needs the file list).
+_RESTART_MERGE_RECENCY_SECONDS = 120
+
+
+def _restart_attribution(changed_files: list[str] | None) -> dict[str, Any]:
+    """Explain what triggered this restart, for the UI toast.
+
+    A merge/ref-update leaves the working tree matching HEAD, so the change is
+    the new HEAD commit: attribute it to the session in HEAD's
+    ``Autonomy-Provenance`` trailer plus the commit headline. A direct host
+    file edit leaves the changed file diverged from HEAD (uncommitted): there
+    is no commit and no session, so attribute it to "host terminal · direct
+    file edit" plus the file name(s). Never let a git hiccup delay the restart:
+    every git call is bounded and any failure degrades to an empty dict.
+    """
+    def _git(*args: str) -> str | None:
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=_REPO_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=1,
+                check=True,
+            )
+            return result.stdout
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    files = [f for f in (changed_files or []) if f]
+
+    # Direct host edit: a changed file whose working-tree content diverges from
+    # HEAD. This is the precise signal and does not depend on wall-clock timing.
+    dirty = _git("diff", "--name-only", "HEAD")
+    if files and dirty is not None:
+        dirty_set = {line.strip() for line in dirty.splitlines() if line.strip()}
+        edited = []
+        for f in files:
+            # changed_files are absolute host paths; git reports repo-relative.
+            try:
+                rel = str(Path(f).resolve().relative_to(_REPO_ROOT))
+            except ValueError:
+                rel = f
+            if rel in dirty_set:
+                edited.append(rel)
+        if edited:
+            return {
+                "trigger": "direct-edit",
+                "files": edited,
+                "summary": "host terminal · direct file edit · " + ", ".join(
+                    Path(f).name for f in edited),
+            }
+
+    head = _git("log", "-1", "--format=%H%x00%s%x00%ct%x00%b")
+    if not head:
+        return {}
+    try:
+        commit_hash, subject, ctime_raw, body = head.split("\x00", 3)
+        ctime = int(ctime_raw)
+    except ValueError:
+        return {}
+
+    # With no changed-file list to prove working-tree drift, fall back to a
+    # recency window: an old HEAD with unexplained changes is more likely a
+    # direct edit than a merge.
+    if not files:
+        try:
+            age = time.time() - ctime
+        except Exception:
+            age = 0
+        if age > _RESTART_MERGE_RECENCY_SECONDS:
+            return {}
+
+    attribution: dict[str, Any] = {
+        "trigger": "merge",
+        "commit_hash": commit_hash,
+        "commit_headline": subject,
+    }
+    provenance = _parse_commit_provenance(body)
+    if provenance is not None:
+        attribution["session"] = provenance.get("session")
+        attribution["persona"] = provenance.get("persona")
+        attribution["turn"] = provenance.get("turn")
+        attribution["session_href"] = provenance.get("session_href")
+        who = provenance.get("session") or "a session"
+        attribution["summary"] = f"{who} · {subject}"
+    else:
+        attribution["summary"] = subject
+    return attribution
+
+
 def _discard_restart_event_cache() -> None:
     """Restart messages are for clients present at the time, never new tabs."""
     discard = getattr(event_bus, "discard_cached", None)
@@ -482,6 +581,12 @@ async def _emit_restart_complete() -> None:
         "expected_ms": _RESTART_EXPECTED_MS,
     }
     payload.update(_current_headline_context())
+    # The attribution was computed by the pre-restart worker and persisted in
+    # the notice; carry it into the completion toast so the operator still sees
+    # who/what caused this restart after the reload.
+    attribution = restart_notice.get("attribution")
+    if isinstance(attribution, dict) and attribution:
+        payload["attribution"] = attribution
     await event_bus.broadcast("server:restart", payload, dedup=False)
     _discard_restart_event_cache()
     try:
@@ -492,20 +597,32 @@ async def _emit_restart_complete() -> None:
         logger.warning("could not clear restart notice state", exc_info=True)
 
 
-async def _announce_restart() -> dict[str, int]:
-    """Persist and broadcast the restart countdown exactly once per worker."""
+async def _announce_restart(changed_files: list[str] | None = None) -> dict[str, Any]:
+    """Persist and broadcast the restart countdown exactly once per worker.
+
+    ``changed_files`` is the reloader's list of what changed; it drives
+    :func:`_restart_attribution`, which names the merged session + headline or
+    the direct host edit. The attribution rides the countdown toast and is
+    persisted so the post-restart completion toast can repeat it.
+    """
     global _restart_notice_payload
     async with _restart_notice_lock:
         if _restart_notice_payload is not None:
             return _restart_notice_payload
         started_at_ms = int(time.time() * 1000)
-        payload = {
+        attribution = await asyncio.to_thread(_restart_attribution, changed_files)
+        payload: dict[str, Any] = {
             "phase": "countdown",
             "started_at_ms": started_at_ms,
             "countdown_ends_at_ms": started_at_ms + _RESTART_WARNING_SECONDS * 1000,
             "expected_ms": _RESTART_EXPECTED_MS,
         }
-        _write_restart_notice({"started_at_ms": started_at_ms})
+        if attribution:
+            payload["attribution"] = attribution
+        notice: dict[str, Any] = {"started_at_ms": started_at_ms}
+        if attribution:
+            notice["attribution"] = attribution
+        _write_restart_notice(notice)
         await event_bus.broadcast("server:restart", payload, dedup=False)
         _discard_restart_event_cache()
         _restart_notice_payload = payload
@@ -13672,8 +13789,15 @@ async def api_internal_restart_notice(request):
     presented = request.headers.get(_RESTART_TOKEN_HEADER)
     if not expected or not presented or not hmac.compare_digest(presented, expected):
         return JSONResponse({"error": "forbidden"}, status_code=403)
+    changed_files: list[str] = []
     try:
-        payload = await _announce_restart()
+        body = await request.json()
+        if isinstance(body, dict) and isinstance(body.get("changed_files"), list):
+            changed_files = [str(f) for f in body["changed_files"] if f]
+    except Exception:
+        changed_files = []
+    try:
+        payload = await _announce_restart(changed_files)
     except Exception:
         logger.exception("could not announce pending restart")
         return JSONResponse({"error": "restart announcement failed"}, status_code=500)

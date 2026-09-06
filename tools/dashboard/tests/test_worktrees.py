@@ -1237,12 +1237,14 @@ class TestWorktreePage:
         registry method/path. org:join keeps the HTTP registry bytes. The
         browser and executor must agree on these exact strings."""
         js = (JS_DIR / "pages" / "worktrees.js").read_text()
-        assert "signMethod = 'TUNNEL'" in js
+        assert "const signMethod = 'TUNNEL'" in js
         assert "'/control/revoke-link' : '/control/create-link'" in js
-        # Routing matches the executor: a share link (publish always; revoke
-        # only when the cached type is a non-org:join) signs the tunnel bytes.
-        assert "const isShareLink = !isOrgJoin" in js
-        assert "req.targetType && req.targetType !== 'org:join'" in js
+        # Routing matches the executor: org:join is distinguished from a plain
+        # share link so its payload/return differ, but ALL publishes/revokes
+        # now sign the tunnel PoP bytes (auto-qol1v retired the org:join HTTP
+        # path). org:join is detected from the cached payload target_type.
+        assert "const isOrgJoin = !isRevoke && rr.payload && rr.payload.target_type === 'org:join'" in js
+        assert "(isOrgJoin || isRevoke) ? { envelope } : { envelope, ttl }" in js
         # Vault B-1 (01b5e75d) added the org option and wrapped the call, so
         # match the argument list rather than one exact source line.
         assert "signer.signRegistryRequest(" in js
