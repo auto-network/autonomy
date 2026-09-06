@@ -78,6 +78,9 @@ class LoadedPlugin:
     routes: list = field(default_factory=list)
     badge_counter: Callable[[], Any] | None = None
     session_contributions: Callable[[list[str], Any], Any] | None = None
+    #: Callable returning coroutine factories; lifecycle belongs to the
+    #: PluginBackgroundSupervisor (plugin_api.background), never the plugin.
+    background: Callable[[], Any] | None = None
     schemas: list = field(default_factory=list)
     actions: list[str] = field(default_factory=list)
 
@@ -269,6 +272,7 @@ def _resolve_entrypoints(
     routes: list = []
     badge_counter: Callable[[], Any] | None = None
     session_contributions: Callable[[list[str], Any], Any] | None = None
+    background: Callable[[], Any] | None = None
     schemas: list = []
     actions: list[str] = []
 
@@ -289,6 +293,13 @@ def _resolve_entrypoints(
                 raise TypeError(
                     f"entrypoints.session_contributions "
                     f"({ep.session_contributions!r}) must resolve to a callable"
+                )
+        if ep.background:
+            background = _resolve_attr(ep.background)
+            if not callable(background):
+                raise TypeError(
+                    f"entrypoints.background ({ep.background!r}) must "
+                    f"resolve to a callable returning coroutine factories"
                 )
         if ep.schemas:
             schemas = [_resolve_attr(s) for s in ep.schemas]
@@ -335,6 +346,7 @@ def _resolve_entrypoints(
         routes=routes,
         badge_counter=badge_counter,
         session_contributions=session_contributions,
+        background=background,
         schemas=schemas,
         actions=actions,
     )

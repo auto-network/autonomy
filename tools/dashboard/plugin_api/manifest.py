@@ -79,6 +79,13 @@ class PluginEntrypoints(BaseModel):
     # authorization; the substrate only normalizes and renders descriptors.
     session_contributions: Optional[str] = None
     schemas: Optional[List[str]] = None
+    # ``module:attr`` resolving to a callable that returns an iterable of
+    # zero-argument coroutine factories (auto-jjqct). The substrate's
+    # PluginBackgroundSupervisor owns their lifecycle: started while the
+    # plugin is enabled, cancelled when it is disabled or at shutdown,
+    # restarted with bounded backoff when one crashes. Plugins never
+    # create their own lifespan tasks.
+    background: Optional[str] = None
     # Each entry is a bare module path — the loader imports it for the
     # ``register_action(...)`` side effect at module top-level. No attribute
     # is resolved; the registry is the contract.
