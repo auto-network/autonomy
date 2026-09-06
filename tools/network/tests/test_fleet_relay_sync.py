@@ -829,3 +829,35 @@ async def test_first_contact_delta_starts_at_the_checkpoint_floor(
         f"{len(replayed)} journal operations replayed after the checkpoint"
     )
     assert any(f.startswith(_DONE_MAGIC) for f in frames), "delta must close"
+
+
+@pytest.mark.asyncio
+async def test_fresh_checkpoint_request_right_after_a_delivery_is_refused(
+    tmp_path, monkeypatch
+):
+    """A peer that just received a complete checkpoint and asks again with an
+    empty resume trail failed to install it; the server must refuse instead
+    of rebuilding (2.27GB per 3.5min live 2026-09-06)."""
+    fleet = _two_machine_fleet()
+    personal = tmp_path / "personal.db"
+    personal.touch()
+    alpha = tmp_path / "alpha.db"
+    _prepare_org_db(alpha, fleet.server_machine.public_hex)
+    _insert_note(alpha, "a-1", "org content")
+    server = _configure_relay_server(fleet, personal, monkeypatch)
+    monkeypatch.setattr(
+        server.scheduler, "_scope_paths",
+        lambda: {"personal": personal, "alpha": alpha},
+    )
+    token = "ab" * 16
+    _auth, _private, hello = _client_hello(fleet, token)
+    stream = await server.handle(token, _pull_message(fleet, alpha, hello))
+    frames = [frame async for frame in stream]
+    kinds = [json.loads(f).get("kind") for f in frames if f[:1] in ("{", b"{")]
+    assert "checkpoint.end" in kinds, "first delivery completes"
+
+    _auth2, _private2, hello2 = _client_hello(fleet, "cd" * 16)
+    with pytest.raises(
+        fleet_relay_sync.FleetRelaySyncError, match="failed to install"
+    ):
+        await server.handle("cd" * 16, _pull_message(fleet, alpha, hello2))
