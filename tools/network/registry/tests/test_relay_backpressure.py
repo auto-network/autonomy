@@ -192,3 +192,39 @@ def test_viewer_channel_cap_admits_below_capacity(monkeypatch):
     # It reached FRAME_OPEN rather than being refused by the cap. The fake
     # tunnel then fails that send and uses the same uniform public close.
     assert len(tunnel.channels) == 0
+
+
+def test_slow_viewer_overflow_is_logged_and_counted(caplog):
+    """The overflow close used to be silent (no log, no counter): a multi-GB
+    fleet checkpoint died on it 2026-09-06 and could only be inferred. It
+    must now leave one WARNING line and one counter increment."""
+    import logging
+
+    class _Metrics:
+        def __init__(self):
+            self.calls = []
+
+        def viewer_close(self, org, code):
+            self.calls.append((org, code))
+
+    async def run():
+        tunnel = Tunnel(_TunnelSocket(), "test-org")
+        fake = _Metrics()
+        tunnel.metrics = fake
+        slow_socket = _ViewerSocket(blocked=True)
+        slow_id = b"s" * 16
+        tunnel.add_viewer(slow_id, slow_socket)
+        one_mib = b"x" * (1024 * 1024)
+        tunnel.enqueue_viewer(slow_id, one_mib)
+        await asyncio.wait_for(slow_socket.send_started.wait(), timeout=1)
+        tunnel.enqueue_viewer(slow_id, one_mib)
+        with caplog.at_level(logging.WARNING):
+            tunnel.enqueue_viewer(slow_id, b"!")
+            await asyncio.wait_for(slow_socket.closed.wait(), timeout=1)
+        assert fake.calls == [("test-org", CLOSE_VIEWER_QUEUE_OVERFLOW)]
+        line = next(r.getMessage() for r in caplog.records
+                    if "slow-viewer queue overflow" in r.getMessage())
+        assert "org=test-org" in line and "queued_bytes=" in line \
+            and "payload_bytes=1" in line and "cap=2097152" in line
+
+    asyncio.run(run())
