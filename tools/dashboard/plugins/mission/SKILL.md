@@ -1,7 +1,10 @@
 # Mission Control (the `mission` plugin)
 
-Skill revision: **2026-08-24.1** — chat bake bounded (newest 100/pillar),
-session-viewer cross-link, URL naming (`/mission/<uuid>#view=…&tab=…`).
+Skill revision: **2026-09-06.1** — coordinator seats: how relays route,
+how to take or hand over a seat on a live mission, where the
+session-viewer icon comes from. Prior: 2026-08-24.1 (chat bake bounded
+newest 100/pillar, session-viewer cross-link, URL naming
+`/mission/<uuid>#view=…&tab=…`).
 An operator may ask for this revision line to confirm your primer is
 current; the live copy is always at `GET /api/plugins/mission/skill`.
 
@@ -223,6 +226,49 @@ Owns the mission record and the pillar roster (`mission.registry`,
 `coordinator_session` routes its chat and question relays). Reviews the
 Blockers tab as the mission's to-decide list, and keeps the decision
 log honest: a decision worth finding twice gets `--faq`.
+
+## Coordinator seats — routing, the icon, and re-seating
+
+Two Settings fields ARE the coordination wiring; everything visible
+derives from them:
+
+- `mission.pillar` payload `coordinator_session` — that pillar's chat
+  and question relays deliver to this session over CrossTalk.
+- `mission.registry` payload `coordinator_session` — mission-surface
+  chat and question relays deliver here. A mission with this unset has
+  NO working mission-level chat: storage still accepts messages, but
+  the relay targets nobody.
+
+The Mission Control icon on a session's viewer derives from exactly
+these rows (`session_contributions` in the plugin's API): a session
+badges once per active mission it coordinates — pillar seats first
+(pillar-accented), then the registry seat. No other record produces
+the icon; working a mission's beads or writing its items does not.
+Completed missions never badge.
+
+Seats name SESSIONS, and sessions die. Taking, filling, or handing
+over a seat on a live mission is one override on the existing row —
+do not re-`add` the whole payload:
+
+```bash
+# find the row ids
+graph set members mission.pillar        # keys are <mission-uuid>:<pillar>
+graph set members mission.registry     # keys are <mission-uuid>
+
+# re-seat a pillar (or set your own session on the registry row)
+graph set override <row-id> --inline '{"coordinator_session":"auto-..."}'
+
+# verify what RESOLVED, not what was written
+graph set read mission.pillar <mission-uuid>:<pillar> | grep coordinator
+```
+
+Rules of the seat: take it in writing (the seated session should accept
+via CrossTalk or its own item, not be volunteered silently), and when
+you find a seat pointing at a dead session, treat it as an incident for
+the mission coordinator — every chat message and question relay since
+that death went nowhere. A realignment that reconnects sessions to
+pillars is not done until every seat points at a live session or is
+explicitly recorded vacant as an open question.
 
 ## Ordering (fixed, per tab)
 
