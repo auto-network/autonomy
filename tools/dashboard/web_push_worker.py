@@ -41,18 +41,27 @@ class DeliveryCoordinator(Protocol):
     ) -> ReleaseAuthorization | None: ...
 
 
+def _route(claim: ClaimedTarget) -> str:
+    """Closed route-builder dispatch — builders are code keyed by the
+    registry's (route_builder_id, destination_id) pair, never data from
+    the claim body."""
+    key = (claim.route_builder_id, claim.destination_id)
+    if key == ("activity.approval.v1", "activity.approval"):
+        return "/activity?" + urlencode({
+            "focus": "approval",
+            "id": claim.source_guard_ref,
+        })
+    if key == ("backup.page.v1", "backup.page"):
+        # The backup page IS the review surface; every backup class
+        # coalesces there (auto-e4e66).
+        return "/backup"
+    raise ValueError("unregistered Web Push route builder")
+
+
 def _payload(claim: ClaimedTarget) -> str:
     if claim.privacy_renderer_id != "web_push.generic.v1":
         raise ValueError("unregistered Web Push privacy renderer")
-    if (
-        claim.route_builder_id != "activity.approval.v1"
-        or claim.destination_id != "activity.approval"
-    ):
-        raise ValueError("unregistered Web Push route builder")
-    route = "/activity?" + urlencode({
-        "focus": "approval",
-        "id": claim.source_guard_ref,
-    })
+    route = _route(claim)
     payload = {
         "v": 1,
         "event_id": claim.event_id,

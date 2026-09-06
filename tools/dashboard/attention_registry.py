@@ -28,6 +28,28 @@ _POLICY_VALUES = {
     "route_builder_id": "activity.approval.v1",
     "destination_id": "activity.approval",
 }
+#: The backup plugin's locked class policy (auto-e4e66) — the first
+#: non-approval attention profile, still a closed exact payload: policy
+#: remains code, never caller data. Differences from the approval
+#: profile: its own web-push budget pool (system_health — a broken
+#: backup must not spend the approval budget, nor vice versa) and the
+#: backup page as the destination. Coalescing stays per object: the
+#: producer picks object_refs so backup_stale coalesces per tier and
+#: backup_failed per run.
+_BACKUP_POLICY_VALUES = {
+    "class_policy_revision": 1,
+    "eligible_transition": "needs_attention",
+    "push_policy": "fallback",
+    "delivery_class": "normal",
+    "budget_class": "system_health",
+    "coalesce_scope": "object",
+    "ttl_seconds": 21600,
+    "urgency": "normal",
+    "privacy_renderer_id": "web_push.generic.v1",
+    "route_builder_id": "backup.page.v1",
+    "destination_id": "backup.page",
+}
+_POLICY_PROFILES = (_POLICY_VALUES, _BACKUP_POLICY_VALUES)
 _APPLICATION_META = {
     "worktrees": ("Worktrees", "attention.application.worktrees"),
     "jira": ("Jira", "attention.application.jira"),
@@ -38,7 +60,26 @@ _APPLICATION_META = {
     "relay": ("Relay", "attention.application.relay"),
     "fleet": ("Fleet", "attention.application.fleet"),
     "dropbox": ("Dropbox", "attention.application.dropbox"),
+    "backup": ("Backup", "attention.application.backup"),
 }
+
+#: Non-approval attention classes, by application scope (auto-e4e66,
+#: toward the plugin-registered-scope contract of graph://e561c072-032).
+#: Registration stays closed code: a row here is the trust grant, and
+#: the publishing runtime is supplied at composition time exactly like
+#: an approval attention runtime. Kinds share the approval kinds'
+#: namespace, so they carry their scope as a prefix.
+_APPLICATION_CLASSES = {
+    "backup": (
+        ("backup.failed", "backup_failed"),
+        ("backup.stale", "backup_stale"),
+        ("backup.drill_failed", "restore_drill_failed"),
+        ("backup.offsite_unreachable", "offsite_unreachable"),
+    ),
+}
+#: Which locked policy profile each non-approval scope's classes carry.
+#: Populated after AttentionClassPolicy is defined (see below).
+_SCOPE_POLICY_FACTORY: dict = {}
 
 
 class AttentionIndexError(RuntimeError):
@@ -99,13 +140,17 @@ class AttentionClassPolicy:
                     self.destination_id,
                 )
             )
-            or self.to_payload() != _POLICY_VALUES
+            or self.to_payload() not in _POLICY_PROFILES
         ):
-            raise ValueError("phase one accepts only the exact revision-1 policy")
+            raise ValueError("phase one accepts only a registered exact policy")
 
     @classmethod
     def approval_phase_one(cls) -> "AttentionClassPolicy":
         return cls(**_POLICY_VALUES)
+
+    @classmethod
+    def backup_phase_one(cls) -> "AttentionClassPolicy":
+        return cls(**_BACKUP_POLICY_VALUES)
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -121,6 +166,9 @@ class AttentionClassPolicy:
             "route_builder_id": self.route_builder_id,
             "destination_id": self.destination_id,
         }
+
+
+_SCOPE_POLICY_FACTORY["backup"] = AttentionClassPolicy.backup_phase_one
 
 
 @dataclass(frozen=True, slots=True)
@@ -418,6 +466,34 @@ def build_production_attention_registry(
                 review_renderer_id=approval.renderer_id,
                 policy=policy,
                 approval_runtime_enabled=approval.runtime is not None,
+                runtime=supplied.get(key),
+            ))
+    for application_scope, class_rows in _APPLICATION_CLASSES.items():
+        if application_scope not in rows:
+            raise ValueError(
+                f"unknown production attention application: {application_scope}")
+        for kind, notification_class in class_rows:
+            if kind in canonical_kinds:
+                raise ValueError(
+                    f"non-approval attention kind collides with an approval "
+                    f"kind: {kind}")
+            key = (kind, application_scope)
+            expected_runtime_keys.add(key)
+            rows[application_scope].append(AttentionClassRegistration(
+                kind=kind,
+                application_scope=application_scope,
+                producer_id=None,
+                notification_class=notification_class,
+                surface_category="apps",
+                review_renderer_id=f"{application_scope}.item.v1",
+                # Each non-approval scope carries its own locked policy
+                # profile. A non-approval class has no approval-side
+                # runtime to gate on; publication is enabled exactly
+                # when its publication runtime is supplied at
+                # composition time (the same publication_enabled rule
+                # approvals follow).
+                policy=_SCOPE_POLICY_FACTORY[application_scope](),
+                approval_runtime_enabled=True,
                 runtime=supplied.get(key),
             ))
     unknown = set(supplied) - expected_runtime_keys
