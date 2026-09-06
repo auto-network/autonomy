@@ -172,6 +172,15 @@ class FleetSyncStreamSilence(FleetSyncProtocolError):
     """
 
 
+class FleetSyncFoundedLedgerRefusal(FleetSyncProtocolError):
+    """The peer offered a checkpoint to a store that holds a founded ledger.
+
+    A checkpoint never carries the ledger, so installing it would be refused
+    (sync.py install guard); refusing at the offer saves the transfer. This
+    machine is an origin of authority for that scope and syncs by delta only.
+    """
+
+
 class FleetSyncFirstFrameSilence(FleetSyncStreamSilence):
     """No first frame within the pull's checkpoint-build allowance.
 
@@ -1972,6 +1981,7 @@ class FleetSyncScheduler:
             saw_done = False
             through_transaction_ref = 0
             through_breadcrumb: tuple[str, str, int] | None = None
+            checkpoint_offered = False
 
             async def apply_pending(items: list[AuthoredMutation]) -> None:
                 nonlocal peer_watermark, transactions
@@ -2122,6 +2132,22 @@ class FleetSyncScheduler:
                             raise FleetSyncProtocolError(
                                 "nested checkpoint stream"
                             )
+                        # Refuse at the OFFER, before a single chunk lands:
+                        # this store holds a founded ledger, so the install
+                        # would refuse anyway (ca33ba7); receiving hundreds
+                        # of MB first only to fail is the loop we had.
+                        from tools.network.fleet_sync.sync import founded_ledger_rows
+
+                        founded = await asyncio.to_thread(
+                            founded_ledger_rows, self._scope_paths()[scope]
+                        )
+                        if founded:
+                            checkpoint_offered = True
+                            raise FleetSyncFoundedLedgerRefusal(
+                                f"peer offered a checkpoint for scope {scope!r} "
+                                f"but this store holds a founded ledger "
+                                f"({founded} rows); refusing before transfer"
+                            )
                         import tempfile as _tempfile
 
                         checkpoint_stage = Path(_tempfile.mkdtemp(
@@ -2261,8 +2287,9 @@ class FleetSyncScheduler:
                 self.config.max_backoff,
                 self.config.min_backoff * (2 ** min(failures - 1, 16)),
             )
-            if checkpoint_stage is not None:
-                # A whole base arrived and the pull still failed (install
+            if checkpoint_stage is not None or checkpoint_offered:
+                # A whole base arrived (or was offered and refused) and the
+                # pull failed. The server just BUILT that base; the
                 # refused, stream cut after it). The ordinary backoff caps
                 # at seconds; retrying asks the peer to rebuild and resend
                 # hundreds of MB every round -- the loop seen live on
