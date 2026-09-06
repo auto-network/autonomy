@@ -785,3 +785,47 @@ async def test_slow_build_emits_keepalives_before_checkpoint_begin(
     first_begin = kinds.index("checkpoint.begin")
     assert kinds[:first_begin].count("keepalive") >= 1
     assert "checkpoint.end" in kinds, "build still completes and delivers"
+
+
+@pytest.mark.asyncio
+async def test_first_contact_delta_starts_at_the_checkpoint_floor(
+    tmp_path, monkeypatch
+):
+    """After serving a checkpoint the delta phase must NOT replay the journal
+    the checkpoint already carries: zero mutation frames follow the
+    checkpoint for a quiet store (live 2026-09-06 it replayed ~700k)."""
+    from tools.network.fleet_sync_scheduler import (
+        _DONE_MAGIC, _MUTATION_MAGIC, _OPERATION_MAGIC,
+    )
+
+    fleet = _two_machine_fleet()
+    personal = tmp_path / "personal.db"
+    personal.touch()
+    alpha = tmp_path / "alpha.db"
+    _prepare_org_db(alpha, fleet.server_machine.public_hex)
+    for i in range(25):
+        _insert_note(alpha, f"a-{i}", f"org content {i}")
+    server = _configure_relay_server(fleet, personal, monkeypatch)
+    monkeypatch.setattr(
+        server.scheduler, "_scope_paths",
+        lambda: {"personal": personal, "alpha": alpha},
+    )
+    # REAL scheduler._handle and REAL FleetSyncAlpha: this is the composition
+    # the perf suite never exercised.
+    token = "ab" * 16
+    _auth, _private, hello = _client_hello(fleet, token)
+    stream = await server.handle(token, _pull_message(fleet, alpha, hello))
+    frames = [frame async for frame in stream]
+
+    kinds = [
+        json.loads(f).get("kind") for f in frames if f[:1] in ("{", b"{")
+    ]
+    assert "checkpoint.begin" in kinds and "checkpoint.end" in kinds
+    replayed = [
+        f for f in frames
+        if f.startswith(_OPERATION_MAGIC) or f.startswith(_MUTATION_MAGIC)
+    ]
+    assert replayed == [], (
+        f"{len(replayed)} journal operations replayed after the checkpoint"
+    )
+    assert any(f.startswith(_DONE_MAGIC) for f in frames), "delta must close"

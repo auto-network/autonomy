@@ -45,6 +45,10 @@ from tools.network.relaykit.viewer import ViewerChannel, read_viewer_record
 FLEET_HANDSHAKE_VERSION = 2
 FLEET_HANDSHAKE_DOMAIN = b"autonomy.network.fleet-channel.handshake.v1\n"
 
+#: Upper bound on how long a kicked machine can keep an already-open stream
+#: alive: authorize() re-derives the roster at most this often per stream.
+AUTHORIZE_CACHE_TTL_S = 1.0
+
 _CLIENT_FIELDS = frozenset(
     {"v", "machine_pub", "eph_pub", "delegate_cert", "sig"}
 )
@@ -178,11 +182,33 @@ class FleetAuthenticator:
         self.require_delegation = bool(require_delegation)
         self.root_pub = _hex64(root_pub, "fleet root_pub")
         self._roster_entries = roster_entries
+        #: (monotonic, active machine_pubs) — see authorize().
+        self._active_cache: tuple[float, frozenset[str]] | None = None
+
+    def invalidate_authorization_cache(self) -> None:
+        """Drop the cached roster so the next authorize() re-derives it.
+        Callers that OWN the roster change point (the scheduler's snapshot
+        refresh) call this to make a kick land immediately rather than
+        within AUTHORIZE_CACHE_TTL_S."""
+        self._active_cache = None
 
     def authorize(self, machine_pub: str) -> None:
-        active = resolve(
-            self._roster_entries(), anchor_root_pub=self.root_pub
-        )
+        # Called per served transaction AND per operation so a kick lands on
+        # an already-open stream. The resolved roster is a few hundred bytes
+        # and changes only on a human enroll/kick, yet re-deriving it means a
+        # roster read plus an ed25519 verify per entry (~0.5ms) — which a
+        # first-contact journal replay multiplied 1.4 million times into ~12
+        # minutes of CPU per pull (live 2026-09-06). Cache it for a bounded
+        # window: a kick still takes effect within AUTHORIZE_CACHE_TTL_S.
+        now = time.monotonic()
+        cached = self._active_cache
+        if cached is None or now - cached[0] > AUTHORIZE_CACHE_TTL_S:
+            active = frozenset(resolve(
+                self._roster_entries(), anchor_root_pub=self.root_pub
+            ))
+            self._active_cache = (now, active)
+        else:
+            active = cached[1]
         if machine_pub not in active:
             raise HandshakeError("machine key is not active in this fleet roster")
 

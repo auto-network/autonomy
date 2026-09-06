@@ -93,7 +93,13 @@ def test_fleet_channel_rejects_machine_outside_personal_root_roster() -> None:
     asyncio.run(run())
 
 
-def test_kick_closes_an_already_authenticated_fleet_channel() -> None:
+def test_kick_closes_an_already_authenticated_fleet_channel(monkeypatch) -> None:
+    # A kick lands on an open channel within AUTHORIZE_CACHE_TTL_S (the
+    # roster is cached per stream, see authorize()). Pin the window to zero
+    # here to assert the enforcement path itself, not the bound.
+    from tools.network import fleet_sync_channel
+    monkeypatch.setattr(fleet_sync_channel, "AUTHORIZE_CACHE_TTL_S", 0.0)
+
     async def run() -> None:
         root = KeyPair.generate()
         left = KeyPair.generate()
@@ -230,3 +236,39 @@ def test_fleet_channel_refuses_overlong_process_delegation() -> None:
 
     with pytest.raises(HandshakeError, match="TTL bound"):
         auth.build_client_hello(new_session_id())
+
+
+def test_authorize_caches_the_resolved_roster_within_the_ttl(monkeypatch):
+    """authorize() runs per served operation; the roster must be re-derived
+    at most once per AUTHORIZE_CACHE_TTL_S, and a kick must still land once
+    the window expires."""
+    from tools.network import fleet_roster, fleet_sync_channel
+    from tools.network.idkit import KeyPair
+    from tools.network.relaykit.channel import HandshakeError
+
+    root = KeyPair.generate()
+    peer = KeyPair.generate()
+    me = KeyPair.generate()
+    entries = [fleet_roster.enroll(root, machine_pub=peer.public_hex),
+               fleet_roster.enroll(root, machine_pub=me.public_hex)]
+    calls = {"n": 0}
+
+    def roster():
+        calls["n"] += 1
+        return list(entries)
+
+    auth = fleet_sync_channel.FleetAuthenticator(
+        me, root_pub=root.public_hex, roster_entries=roster,
+    )
+    clock = {"t": 100.0}
+    monkeypatch.setattr(fleet_sync_channel.time, "monotonic", lambda: clock["t"])
+    for _ in range(10_000):
+        auth.authorize(peer.public_hex)
+    assert calls["n"] == 1, "10k authorizations inside the TTL = ONE resolve"
+
+    entries.append(fleet_roster.kick(root, machine_pub=peer.public_hex, seq=1))
+    auth.authorize(peer.public_hex)  # still inside the window: cached
+    clock["t"] += fleet_sync_channel.AUTHORIZE_CACHE_TTL_S + 0.01
+    with pytest.raises(HandshakeError):
+        auth.authorize(peer.public_hex)
+    assert calls["n"] == 2
