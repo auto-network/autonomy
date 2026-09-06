@@ -861,3 +861,27 @@ async def test_fresh_checkpoint_request_right_after_a_delivery_is_refused(
         fleet_relay_sync.FleetRelaySyncError, match="failed to install"
     ):
         await server.handle("cd" * 16, _pull_message(fleet, alpha, hello2))
+
+
+@pytest.mark.asyncio
+async def test_puller_connects_with_a_bulk_safe_ping_timeout(monkeypatch):
+    """The puller's websocket must not let pong latency kill a receiving
+    stream: SJC closed a 2.27GB transfer with 'keepalive ping timeout' at
+    the library's 20s default while data was still flowing (2026-09-06)."""
+    from tools.network.relaykit import viewer as viewer_module
+
+    captured = {}
+
+    async def fake_connect(url, **kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(viewer_module.websockets, "connect", fake_connect)
+    with pytest.raises(RuntimeError, match="stop here"):
+        await viewer_module.ViewerChannel.connect(
+            "wss://relay.example", "ab" * 16, org="autonomy",
+            ping_timeout=fleet_relay_sync.PULL_PING_TIMEOUT_S,
+        )
+    assert captured["ping_timeout"] == fleet_relay_sync.PULL_PING_TIMEOUT_S
+    assert captured["ping_timeout"] > 60.0, "must exceed the 60s frame-silence rule"
+    assert captured["ping_interval"] == 20.0, "keep pinging; only the deadline widens"
