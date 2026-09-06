@@ -22,7 +22,9 @@
   .sb-col-resize::after { content: ""; position: absolute; top: 12px; bottom: 12px; left: 6px; width: 2px; border-radius: 2px; background: transparent; transition: background .15s; }
   .sb-col-resize:hover::after, .sb-col-resize.active::after { background: #6366f1; }
 
-  .sb-col-head { flex: 0 0 auto; padding: 10px 12px 8px; border-bottom: 1px solid #1e293b; border-radius: 12px 12px 0 0; }
+  .sb-col-head { flex: 0 0 auto; padding: 10px 12px 8px; border-bottom: 1px solid #1e293b; border-radius: 12px 12px 0 0; cursor: grab; }
+  .sb-col-head:active { cursor: grabbing; }
+  .sb-col.moving-col { opacity: .55; }
   .sb-col-title-row { display: flex; align-items: center; gap: 8px; }
   .sb-col-swatch { width: 10px; height: 10px; border-radius: 3px; flex: 0 0 auto; }
   .sb-col-title { flex: 1; min-width: 0; font-size: 13px; font-weight: 700; color: #f1f5f9; background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 2px 6px; margin-left: -6px; outline: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -37,6 +39,8 @@
   .sb-col-meta b { color: #cbd5e1; font-weight: 600; font-variant-numeric: tabular-nums; }
   .sb-col-meta .lab { color: #55657d; margin-right: 3px; text-transform: uppercase; letter-spacing: .04em; font-size: 9px; }
   .sb-col-meta svg { margin-left: auto; }
+  .sb-col-why { margin-top: 5px; font-size: 10.5px; color: #8b9bb4; font-style: italic; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sb-col-why::before { content: "✦ "; color: #818cf8; font-style: normal; }
 
   .sb-col-body { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 10px; display: flex; flex-direction: column; gap: 10px; }
   .sb-card { position: relative; display: flex; flex-direction: column; border-radius: 10px; background: #111a2b; border: 1px solid #1e293b; overflow: hidden; flex: 0 0 auto; }
@@ -121,13 +125,13 @@
       <button type="button" @click="setPresentation('stats')" :aria-pressed="String(presentation === 'stats')">Stats</button>
     </div>
     <span class="sb-spacer"></span>
-    <span class="sb-hint">click a card → dictate · drag header → move · drag right → new column · ⤢ → full height</span>
+    <span class="sb-hint">click a card → dictate · drag header → move · drag right → new column · drag a column header → reorder · ⤢ → full height</span>
   </div>
 
   <div class="sb-board" :class="dragging ? 'dragging' : ''" x-ref="board">
     <template x-for="col in columns" :key="col.id">
-      <section class="sb-col" :class="[col.id === 'solo' ? 'solo' : '', col.focus ? 'focused' : '']" :style="'width:' + col.width + 'px'" :data-col="col.id">
-        <header class="sb-col-head">
+      <section class="sb-col" :class="[col.id === 'solo' ? 'solo' : '', col.focus ? 'focused' : '', movingCol === col.id ? 'moving-col' : '']" :style="'width:' + col.width + 'px'" :data-col="col.id">
+        <header class="sb-col-head" @pointerdown="onColHeadPointerDown($event, col)">
           <div class="sb-col-title-row">
             <span class="sb-col-swatch" :style="'background:' + (col.color || '#334155')"></span>
             <input class="sb-col-title" type="text" :value="col.title" :readonly="col.id === 'solo'"
@@ -138,6 +142,7 @@
               <template x-for="m in col.members" :key="m"><i :class="attnClass(m)"></i></template>
             </span>
           </div>
+          <div class="sb-col-why" x-show="col.why" :title="col.why" x-text="col.why"></div>
           <div class="sb-col-meta">
             <span><span class="lab">cpu</span><b x-text="colCpu(col)"></b></span>
             <span><span class="lab">mem</span><b x-text="colMem(col)"></b></span>

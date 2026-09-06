@@ -439,12 +439,97 @@ def _attach_org(rows: list[dict]) -> list[dict]:
     return rows
 
 
+# ── Session groups (Session Board) ─────────────────────────────────
+# In-memory shadow of dashboard_db.session_groups + the tmux_sessions mirror
+# columns, so the mock dashboard can exercise group writes without a DB.
+_GROUPS: dict[str, dict] = {}
+_SESSION_GROUP: dict[str, dict] = {}   # session_id -> {group_id, group_tab, group_joined_by}
+
+
+def list_groups() -> list[dict]:
+    return [dict(g) for g in _GROUPS.values()]
+
+
+def get_group(slug: str) -> dict | None:
+    g = _GROUPS.get(slug)
+    return dict(g) if g else None
+
+
+def upsert_group(slug: str, fields: dict, created_by: str = "") -> dict:
+    import time as _t
+    g = _GROUPS.setdefault(slug, {"slug": slug, "name": slug, "short": "", "color": "", "purpose": "", "why": "",
+                                  "coordinator_session": "", "refs": [], "created_at": _t.time(), "created_by": created_by,
+                                  "updated_at": _t.time()})
+    for k in ("name", "short", "color", "purpose", "why", "coordinator_session", "refs"):
+        if k in fields and fields[k] is not None:
+            g[k] = fields[k]
+    g["updated_at"] = _t.time()
+    return dict(g)
+
+
+def delete_group(slug: str) -> int:
+    n = 0
+    for sid, m in list(_SESSION_GROUP.items()):
+        if m.get("group_id") == slug:
+            _SESSION_GROUP.pop(sid, None); n += 1
+    _GROUPS.pop(slug, None)
+    return n
+
+
+def set_session_group(session_id: str, group_id: str | None, tab: str = "", joined_by: str = "") -> None:
+    if group_id:
+        _SESSION_GROUP[session_id] = {"group_id": group_id, "group_tab": tab, "group_joined_by": joined_by}
+    else:
+        _SESSION_GROUP.pop(session_id, None)
+
+
+def group_members(slug: str, live_only: bool = True) -> list[str]:
+    return [sid for sid, m in _SESSION_GROUP.items() if m.get("group_id") == slug]
+
+
+def group_summaries() -> dict[str, dict]:
+    return {s: {"slug": s, "name": g["name"], "short": g["short"], "color": g["color"], "why": g["why"]} for s, g in _GROUPS.items()}
+
+
+def session_group_index() -> dict[str, dict]:
+    summaries = group_summaries()
+    return {sid: {"group_id": m["group_id"], "group_tab": m.get("group_tab", ""), "group": summaries.get(m["group_id"])}
+            for sid, m in _SESSION_GROUP.items() if m.get("group_id")}
+
+
+_LAYOUT: dict = {"presentation": "transcript", "column_order": [], "widths": {}, "heights": {}, "updated_at": 0}
+
+
+def read_layout(key: str = "default") -> dict:
+    return dict(_LAYOUT)
+
+
+def write_layout(fields: dict, key: str = "default") -> dict:
+    import time as _t
+    for k in ("presentation", "column_order", "widths", "heights"):
+        if k in fields and fields[k] is not None:
+            _LAYOUT[k] = fields[k]
+    _LAYOUT["updated_at"] = _t.time()
+    return dict(_LAYOUT)
+
+
+def _attach_groups(rows: list[dict]) -> list[dict]:
+    summaries = group_summaries()
+    for r in rows:
+        m = _SESSION_GROUP.get(r.get("session_id"), {})
+        gid = m.get("group_id")
+        r["group_id"] = gid or None
+        r["group_tab"] = m.get("group_tab", "") if gid else ""
+        r["group"] = summaries.get(gid) if gid else None
+    return rows
+
+
 def get_active_sessions(threshold: int = 600) -> list[dict]:
     data = _load()
     rows = [_fill(s, SESSION_DEFAULTS) for s in data.get("active_sessions", [])]
     from tools.dashboard.dao.sessions import _ACTIVE_SESSION_TYPES
     rows = [r for r in rows if r.get("type") in _ACTIVE_SESSION_TYPES]
-    return _attach_org(rows)
+    return _attach_groups(_attach_org(rows))
 
 
 def get_session_by_id(session_id: str) -> dict | None:

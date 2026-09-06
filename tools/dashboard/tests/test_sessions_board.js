@@ -58,13 +58,14 @@ function makeBoard(opts) {
   const board = components.sessionsBoard();
   board.$refs = {};
   board.$watch = () => {};
+  board._ready = true;   // tests drive the component after the roster would have arrived
   board.rows = (opts.rows || []).map((id) => (typeof id === 'string' ? { id, session_id: id, tmux_session: id, label: 'Label ' + id, is_live: true, topics: [], org: null, session_type: 'interactive', project: 'p' } : id));
   return { board, logic: window.SessionBoardLogic, localStorage, localValues };
 }
 
-function ids(cols) { return cols.map((c) => c.id + ':' + c.members.join(',')); }
 // Values built inside the vm realm have a different Object prototype; compare structure only.
 function plain(v) { return JSON.parse(JSON.stringify(v)); }
+function ids(cols) { return plain(cols.map((c) => c.id + ':' + c.members.join(','))); }
 
 test('normaliseColumns keeps every live id exactly once and drops unknown ids', () => {
   const { logic } = makeBoard();
@@ -143,7 +144,8 @@ test('focusCard keeps the focused session in its slot and spills the others to i
   assert.equal(board.columns[1].id, 'g');
   assert.equal(board.columns[1].focus, 's3');
   assert.deepEqual(plain(board.columns[1].members), ['s3']);
-  assert.equal(board.columns[1].title, 'Label s3');
+  // Shared semantics: the focused session keeps the group (and its name); the others spill.
+  assert.equal(board.columns[1].title, 'Lane');
   assert.deepEqual(plain(board.columns[2].members), ['s2', 's4']);
   assert.equal(board.columns[2].title, 'Lane');
   // From Ungrouped: the new column takes Ungrouped's slot, Ungrouped shifts right with the rest.
@@ -167,17 +169,25 @@ test('card height is clamped to 80% of the viewport on read and on stored values
   assert.equal(board.cardHeight('missing'), 340);
 });
 
-test('persist round-trips columns, widths, heights and presentation through localStorage', () => {
-  const { board, localStorage } = makeBoard({ rows: ['s1', 's2'] });
+test('the layout payload is exactly the dashboard.session.board.layout member: presentation, column order, widths, heights', () => {
+  const { board } = makeBoard({ rows: ['s1', 's2'] });
   board.columns = board.normalise([{ id: 'g', title: 'G', members: ['s2'], width: 600, _sized: true }]);
   board.cardHeights = { s1: 500 };
   board.presentation = 'stats';
-  board.persist();
-  const saved = JSON.parse(localStorage.getItem('sessions.board.layout'));
-  assert.equal(saved.presentation, 'stats');
-  assert.equal(saved.widths.g, 600);
-  assert.equal(saved.heights.s1, 500);
-  assert.deepEqual(saved.columns.map((c) => c.id + ':' + c.members.join(',')), ['solo:s1', 'g:s2']);
+  const payload = plain(board.layoutPayload());
+  assert.deepEqual(payload, { presentation: 'stats', column_order: ['solo', 'g'], widths: { g: 600 }, heights: { s1: 500 } });
+  // Membership is never part of the layout — it is the group record's.
+  assert.ok(!('columns' in payload) && !('members' in payload));
+});
+
+test('columnSlotFor orders a dragged column from the resting midpoints and the pointer only', () => {
+  const { logic } = makeBoard();
+  const mids = [200, 600, 1000];
+  assert.equal(logic.columnSlotFor(mids, 100), 0);
+  assert.equal(logic.columnSlotFor(mids, 300), 1);
+  assert.equal(logic.columnSlotFor(mids, 700), 2);
+  assert.equal(logic.columnSlotFor(mids, 1500), 3);
+  for (let i = 0; i < 5; i++) assert.equal(logic.columnSlotFor(mids, 300), 1);
 });
 
 test('host sessions without a transcript fall back to the stats presentation', () => {
@@ -199,4 +209,46 @@ test('the template mounts the production partials and the panel viewer, and neve
   const js = fs.readFileSync(BOARD_JS, 'utf8');
   assert.ok(js.includes('ui.onClick(ev, ui.voiceBindKey(row)'), 'dictation binds through the standard voice path');
   assert.ok(!/store\('voice'\)\.(bindSession|requestBind)/.test(js), 'the board never binds the voice store directly');
+});
+
+test('columns derive from the store\'s group membership; local state keeps only order, width and member order', () => {
+  const sessions = {
+    s1: { groupId: 'deploy', groupTab: 'crypto', group: { slug: 'deploy', name: 'Registry deploy lane', color: '#f59e0b', why: 'one effort' }, entries: [] },
+    s2: { groupId: 'deploy', groupTab: '', group: { slug: 'deploy', name: 'Registry deploy lane', color: '#f59e0b', why: 'one effort' }, entries: [] },
+    s3: { groupId: null, groupTab: '', group: null, entries: [] },
+    s4: { groupId: 'recovery', groupTab: '', group: { slug: 'recovery', name: 'Post-crash recovery', color: '#38bdf8', why: '' }, entries: [] },
+  };
+  const { board } = makeBoard({ rows: ['s1', 's2', 's3', 's4'], sessions });
+  board.columns = board.normalise(board.columnsFromStore(null));
+  assert.deepEqual(ids(board.columns), ['solo:s3', 'deploy:s1,s2', 'recovery:s4']);
+  assert.equal(board.columns[1].title, 'Registry deploy lane');
+  assert.equal(board.columns[1].why, 'one effort');
+  assert.equal(board.columns[2].color, '#38bdf8');
+  // Local arrangement survives a re-derivation: member order inside a column, column order, width.
+  board.columns[1].members = ['s2', 's1'];
+  board.columns[1].width = 700; board.columns[1]._sized = true;
+  board.columns = [board.columns[2], board.columns[1], board.columns[0]];
+  board.columns = board.normalise(board.columnsFromStore(null));
+  assert.deepEqual(ids(board.columns), ['recovery:s4', 'deploy:s2,s1', 'solo:s3']);
+  assert.equal(board.columns[1].width, 700);
+  // Membership is server truth: a session that changed group on the server moves columns.
+  sessions.s2.groupId = 'recovery'; sessions.s2.group = sessions.s4.group;
+  board.columns = board.normalise(board.columnsFromStore(null));
+  assert.deepEqual(ids(board.columns), ['recovery:s4,s2', 'deploy:s1', 'solo:s3']);
+  // A dissolved group vanishes and its sessions land in Ungrouped.
+  sessions.s1.groupId = null; sessions.s1.group = null;
+  board.columns = board.normalise(board.columnsFromStore(null));
+  assert.deepEqual(ids(board.columns), ['recovery:s4,s2', 'solo:s3,s1']);
+});
+
+
+test('nothing is derived or persisted before the roster and the layout member arrive', () => {
+  const { board } = makeBoard({ rows: ['s1'] });
+  board._ready = false;
+  board.columns = [];
+  board.refresh({ columns: [{ id: 'g', members: [] }], widths: {} });
+  assert.deepEqual(ids(board.columns), []);
+  board._lastPersisted = null;
+  board.persist();
+  assert.equal(board._persistTimer, undefined);   // no write scheduled before ready
 });

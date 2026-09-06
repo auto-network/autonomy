@@ -1611,7 +1611,13 @@ class SessionMonitor:
     def get_registry(self) -> list[dict]:
         """Return registry of active sessions (lightweight roster for SSE)."""
         from tools.dashboard.org_identity import resolve_session_org
+        from tools.dashboard import session_board_settings as _sbs
         sessions = get_live_sessions()
+        try:
+            group_index = _sbs.session_group_index()
+        except Exception as exc:  # the board must never take the registry down
+            logger.warning("session group index unavailable: %s", exc)
+            group_index = {}
         out = []
         for s in sessions:
             _state = derive_lifecycle_state(s)
@@ -1668,6 +1674,13 @@ class SessionMonitor:
             prog = self._phase_progress.get(s["tmux_name"])
             if prog:
                 entry["phase_progress"] = prog
+            # Session-group membership (Session Board columns, auto-q9y6e.2).
+            # One group per session; the summary rides along so a board can
+            # paint the column without a second fetch.
+            membership = group_index.get(s["tmux_name"]) or {}
+            entry["group_id"] = membership.get("group_id") or None
+            entry["group_tab"] = membership.get("group_tab") or ""
+            entry["group"] = membership.get("group") or None
             entry["org"] = resolve_session_org(entry)
             out.append(entry)
         return out

@@ -149,6 +149,10 @@ document.addEventListener('alpine:init', function() {
         if (s.startup_state !== undefined) store.startupState = s.startup_state;
         if (s.state || s.lifecycle_state) store.state = s.state || s.lifecycle_state;
         if (s.attention !== undefined) store.attention = s.attention;
+        // Session-group membership (Session Board columns, auto-q9y6e.2).
+        store.groupId = s.group_id || null;
+        store.groupTab = s.group_tab || '';
+        store.group = s.group || null;
       }
       _emitSessionStoreChanged('seed');
     })
@@ -459,6 +463,11 @@ window.getSessionStore = function(sessionId) {
       phaseProgress: null,
       // Ephemeral Agent Test run progress; cleared by the worker on exit.
       agentTestProgress: null,
+      // Session-group membership (Session Board): slug, the session's short
+      // name inside the group, and the group's summary {slug,name,short,color,why}.
+      groupId: null,
+      groupTab: '',
+      group: null,
       // auto-16g9t canonical identity state. chain = ordered rollover
       // file stems (server-authoritative); committed = the span
       // high-water {file, off} advanced ONLY by contiguous spans/cursors
@@ -1074,6 +1083,12 @@ window.ensureSessionMessages = function() {
       // an active progress is set, omitted from payload otherwise. Store
       // gets explicit null on omit so the field clears cleanly.
       store.phaseProgress = s.phase_progress || null;
+      // Session-group membership (Session Board columns, auto-q9y6e.2). The
+      // registry is the one broadcast that carries it, so a board rebuilds
+      // its columns from these three fields on every registry event.
+      store.groupId = s.group_id || null;
+      store.groupTab = s.group_tab || '';
+      store.group = s.group || null;
     }
     // Mark removed sessions as dead. A session absent from the registry is
     // no longer live — including a resume/create whose launch FAILED (the

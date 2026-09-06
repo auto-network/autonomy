@@ -191,6 +191,7 @@ from tools.dashboard import harness_usage_settings as _harness_usage_settings  #
 from tools.dashboard import harness_bootstrap as _harness_bootstrap  # noqa: E402, F401
 from tools.dashboard import session_upload_settings as _session_upload  # noqa: E402, F401
 from tools.dashboard import session_orientation_settings as _session_orientation_settings  # noqa: E402, F401
+from tools.dashboard import session_board_settings  # noqa: E402
 from tools.dashboard import voice_transcription_settings as _voice_transcription_settings  # noqa: E402
 from tools.dashboard import worktree_directives as _worktree_directives  # noqa: E402, F401
 from tools.dashboard import claude_credentials_refresh as _claude_credentials_refresh  # noqa: E402
@@ -4112,6 +4113,211 @@ async def api_monitor_deregister(request):
     return JSONResponse({"ok": True})
 
 
+# ── Session groups — the Session Board's columns (auto-q9y6e.2) ──────────
+# A group is sessions working one effort right now. Agents write their own
+# membership from `graph group`; the operator writes it by dragging a card on
+# /sessions/board. Both land here, then the registry broadcast carries
+# group_id / group_tab / group to every open board.
+
+_GROUP_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+
+
+def _group_slug(text: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", (text or "").strip().lower()).strip("-")[:40]
+    return slug or f"g-{int(time.time()) % 100000:05d}"
+
+
+def _group_dao():
+    """The Settings-backed group record (dashboard.session.group in the personal
+    store) in production; the in-memory mock DAO under DASHBOARD_MOCK."""
+    return dao_sessions if os.environ.get("DASHBOARD_MOCK") else session_board_settings
+
+
+def _layout_dao():
+    return dao_sessions if os.environ.get("DASHBOARD_MOCK") else session_board_settings
+
+
+async def api_session_board_layout_get(request):
+    """GET /api/session-board/layout — the operator's board arrangement (dashboard.session.board.layout)."""
+    return JSONResponse({"layout": _layout_dao().read_layout()})
+
+
+async def api_session_board_layout_put(request):
+    """PUT /api/session-board/layout — write the arrangement. Body: any of
+    {presentation, column_order, widths, heights}; omitted fields are kept."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    fields = {}
+    if "presentation" in body:
+        if body["presentation"] not in ("transcript", "stats"):
+            return JSONResponse({"error": "presentation must be transcript or stats"}, status_code=400)
+        fields["presentation"] = body["presentation"]
+    if "column_order" in body:
+        if not isinstance(body["column_order"], list) or not all(isinstance(x, str) for x in body["column_order"]):
+            return JSONResponse({"error": "column_order must be a list of slugs"}, status_code=400)
+        fields["column_order"] = body["column_order"][:200]
+    for k in ("widths", "heights"):
+        if k in body:
+            v = body[k]
+            if not isinstance(v, dict) or not all(isinstance(x, (int, float)) for x in v.values()):
+                return JSONResponse({"error": f"{k} must map names to numbers"}, status_code=400)
+            fields[k] = {str(n): int(x) for n, x in list(v.items())[:500]}
+    if not fields:
+        return JSONResponse({"error": "nothing to write"}, status_code=400)
+    return JSONResponse({"ok": True, "layout": _layout_dao().write_layout(fields)})
+
+
+async def _broadcast_registry():
+    if os.environ.get("DASHBOARD_MOCK"):
+        await event_bus.broadcast("session:registry", dao_sessions.get_active_sessions())
+    else:
+        await event_bus.broadcast("session:registry", session_monitor.get_registry())
+
+
+def _group_with_members(g: dict) -> dict:
+    out = dict(g)
+    out["members"] = _group_dao().group_members(g["slug"])
+    return out
+
+
+async def api_groups_list(request):
+    """GET /api/groups — every session group with its live members."""
+    return JSONResponse({"groups": [_group_with_members(g) for g in _group_dao().list_groups()]})
+
+
+async def api_groups_create(request):
+    """POST /api/groups — create (or update by slug) a session group.
+
+    Body: {"name": "Registry deploy lane", "slug"?: "deploy", "short"?, "color"?,
+           "purpose"?, "why"?, "coordinator_session"?, "refs"?: [...], "members"?: [...]}
+    Returns the group with its members. Listing members here joins them.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    name = str(body.get("name") or "").strip()
+    slug = str(body.get("slug") or "").strip().lower() or _group_slug(name)
+    if not _GROUP_SLUG_RE.match(slug):
+        return JSONResponse({"error": "slug must be 1-40 chars of a-z, 0-9, -"}, status_code=400)
+    if not name:
+        name = slug
+    fields = {k: body.get(k) for k in ("short", "color", "purpose", "why", "coordinator_session", "refs") if k in body}
+    fields["name"] = name
+    if "refs" in fields and not isinstance(fields["refs"], list):
+        return JSONResponse({"error": "refs must be a list"}, status_code=400)
+    creator = _crosstalk_sender(request) or "operator"
+    g = _group_dao().upsert_group(slug, fields, created_by=creator)
+    members = body.get("members") or []
+    if not isinstance(members, list):
+        return JSONResponse({"error": "members must be a list"}, status_code=400)
+    for m in members:
+        _group_dao().set_session_group(str(m), slug, "", creator)
+    await _broadcast_registry()
+    return JSONResponse({"ok": True, "group": _group_with_members(g)}, status_code=201)
+
+
+async def api_groups_get(request):
+    g = _group_dao().get_group(request.path_params["slug"])
+    if not g:
+        return JSONResponse({"error": "group not found"}, status_code=404)
+    return JSONResponse({"group": _group_with_members(g)})
+
+
+async def api_groups_update(request):
+    """PUT /api/groups/{slug} — rename or edit a group. A rename tells every member."""
+    slug = request.path_params["slug"]
+    dao = _group_dao()
+    before = dao.get_group(slug)
+    if not before:
+        return JSONResponse({"error": "group not found"}, status_code=404)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    fields = {k: body.get(k) for k in ("name", "short", "color", "purpose", "why", "coordinator_session", "refs") if k in body}
+    if "name" in fields:
+        fields["name"] = str(fields["name"] or "").strip()
+        if not fields["name"]:
+            return JSONResponse({"error": "name must not be empty"}, status_code=400)
+    g = dao.upsert_group(slug, fields)
+    if fields.get("name") and fields["name"] != before["name"] and not os.environ.get("DASHBOARD_MOCK"):
+        # Members are told in their own transcript so an agent adopts the
+        # operator's name instead of overwriting it on its next write.
+        by = _crosstalk_sender(request) or "operator"
+        note = (f"Your session group was renamed: \"{before['name']}\" is now \"{g['name']}\" "
+                f"(slug {slug}, by {by}). Use the new name when you refer to the lane.")
+        for m in dao.group_members(slug):
+            if m != by:
+                try:
+                    await tmux_send(m, _dashboard_envelope(note))
+                except Exception as exc:  # delivery is best-effort; the record is the truth
+                    logger.warning("group rename notify failed for %s: %s", m, exc)
+    await _broadcast_registry()
+    return JSONResponse({"ok": True, "group": _group_with_members(g)})
+
+
+async def api_groups_delete(request):
+    """DELETE /api/groups/{slug} — dissolve: members become ungrouped."""
+    slug = request.path_params["slug"]
+    dao = _group_dao()
+    if not dao.get_group(slug):
+        return JSONResponse({"error": "group not found"}, status_code=404)
+    n = dao.delete_group(slug)
+    await _broadcast_registry()
+    return JSONResponse({"ok": True, "released": n})
+
+
+async def api_session_group(request):
+    """PUT /api/session/{tmux_name}/group — place a session in a group, or clear it.
+
+    Body: {"group": "deploy" | null, "tab"?: "crypto", "joined_by"?: "self"|"operator"|"<session>"}
+    The group must exist (create it with POST /api/groups). One group per session.
+    """
+    tmux_name = request.path_params["tmux_name"]
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    group = body.get("group")
+    if group is not None and not isinstance(group, str):
+        return JSONResponse({"error": "group must be a slug string or null"}, status_code=400)
+    tab = str(body.get("tab") or "").strip()[:12]
+    joined_by = str(body.get("joined_by") or "").strip()[:64] or (_crosstalk_sender(request) or "operator")
+    dao = _group_dao()
+    if group:
+        group = group.strip().lower()
+        if not dao.get_group(group):
+            return JSONResponse({"error": f"group not found: {group}"}, status_code=404)
+    dao.set_session_group(tmux_name, group or None, tab, joined_by)
+    await _broadcast_registry()
+    return JSONResponse({"ok": True, "session": tmux_name, "group": group or None, "tab": tab if group else ""})
+
+
+def _crosstalk_sender(request) -> str | None:
+    """The calling session's tmux name when the request carries a CrossTalk bearer, else None."""
+    try:
+        sender, err = _crosstalk_auth(request)
+    except Exception:
+        return None
+    return sender if not err else None
+
+
+def _dashboard_envelope(text: str) -> str:
+    iso_now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return (
+        '<crosstalk from="dashboard-ui"\n'
+        '           label="Dashboard UI"\n'
+        '           source="" turn="0"\n'
+        '           harness="dashboard" model=""\n'
+        f'           timestamp="{iso_now}">\n'
+        f'{text}\n'
+        '</crosstalk>'
+    )
+
+
 async def api_crosstalk_send(request):
     """POST /api/crosstalk/send — deliver a plain-text message to a peer session."""
     sender, err = _crosstalk_auth(request)
@@ -4130,6 +4336,48 @@ async def api_crosstalk_send(request):
     error = _validate_crosstalk_message(message)
     if error:
         return JSONResponse({"error": error}, status_code=400)
+
+    # Group target: `group:<slug>` fans out to every live member except the
+    # sender (auto-q9y6e.2). Stored once with the group target so the lane
+    # has a channel (`graph crosstalk --group <slug>`); each member sees the
+    # envelope with a group= attribute and the sender's tab.
+    if target.startswith("group:"):
+        slug = target[len("group:"):].strip().lower()
+        gdao = _group_dao()
+        grp = gdao.get_group(slug)
+        if not grp:
+            return JSONResponse({"error": f"group not found: {slug}"}, status_code=404)
+        members = [m for m in gdao.group_members(slug) if m != sender]
+        sender_row = dashboard_db.get_session(sender)
+        sender_label = (sender_row or {}).get("label", "") or sender
+        sender_tab = (gdao.session_group_index().get(sender) or {}).get("group_tab") or ""
+        sender_source_id = dashboard_db.reconcile_session_graph_source_id(sender_row)
+        sender_turn = dashboard_db.get_source_max_turn_number(sender_source_id)
+        iso_now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        envelope = (
+            f'<crosstalk from="{sender}"\n'
+            f'           label="{sender_label}"\n'
+            f'           group="{slug}" tab="{sender_tab}"\n'
+            f'           source="{sender_source_id}" turn="{str(sender_turn) if sender_turn is not None else ""}"\n'
+            f'           harness="{(sender_row or {}).get("harness") or "claude"}" model="{(sender_row or {}).get("model") or ""}"\n'
+            f'           timestamp="{iso_now}">\n'
+            f'{message}\n'
+            f'</crosstalk>'
+        )
+        delivered = []
+        for m in members:
+            if not _tmux_session_exists(m):
+                continue
+            try:
+                await tmux_send(m, envelope)
+                delivered.append(m)
+            except Exception as exc:
+                logger.warning("group crosstalk delivery to %s failed: %s", m, exc)
+        await asyncio.to_thread(
+            auth_db.insert_message, sender, sender_label, target,
+            sender_source_id or None, sender_turn, message, time.time(), 1 if delivered else 0)
+        return JSONResponse({"delivered": bool(delivered), "from": sender, "label": sender_label,
+                             "target": target, "group": slug, "members": delivered})
 
     # Validate target. A live tmux session delivers normally (below). A target
     # that is a known chat handle (ChatGPT-<datetime>) has no live pane; queue the
@@ -4355,6 +4603,10 @@ async def api_crosstalk_log(request):
         return JSONResponse({"error": "limit must be positive"}, status_code=400)
 
     session = request.query_params.get("session") or None
+    group = request.query_params.get("group") or None
+    if group:
+        # The lane's channel: every message addressed to group:<slug>.
+        session = f"group:{group.strip().lower()}"
     since = request.query_params.get("since")
     since_epoch = None
     if since:
@@ -20529,6 +20781,14 @@ routes = [
     Route("/api/session/{tmux_name}/label", api_session_label, methods=["PUT"]),
     Route("/api/session/{tmux_name}/topics", api_session_topics, methods=["PUT"]),
     Route("/api/session/{tmux_name}/role", api_session_role, methods=["PUT"]),
+    Route("/api/session/{tmux_name}/group", api_session_group, methods=["PUT"]),
+    Route("/api/groups", api_groups_list, methods=["GET"]),
+    Route("/api/groups", api_groups_create, methods=["POST"]),
+    Route("/api/groups/{slug}", api_groups_get, methods=["GET"]),
+    Route("/api/groups/{slug}", api_groups_update, methods=["PUT"]),
+    Route("/api/groups/{slug}", api_groups_delete, methods=["DELETE"]),
+    Route("/api/session-board/layout", api_session_board_layout_get, methods=["GET"]),
+    Route("/api/session-board/layout", api_session_board_layout_put, methods=["PUT"]),
     Route("/api/session/{tmux_name}/startup-trace", api_session_startup_trace, methods=["GET"]),
     Route("/api/session/{tmux_name}/nag", api_session_nag, methods=["PUT"]),
     Route("/api/session/{tmux_name}/nag", api_session_nag_delete, methods=["DELETE"]),

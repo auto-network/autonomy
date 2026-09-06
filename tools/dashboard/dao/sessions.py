@@ -16,6 +16,7 @@ from tools.dashboard.dao.dashboard_db import get_live_sessions as _db_live_sessi
 from tools.dashboard.dao.dashboard_db import find_live_session as _db_find_live
 from tools.dashboard.dao.dashboard_db import get_sessions_overlay as _db_all_sessions
 from tools.dashboard.dao.dashboard_db import get_session_status_rows as _db_session_status_rows
+from tools.dashboard import session_board_settings as _board_settings
 from tools.dashboard.org_identity import resolve_session_org
 from tools.graph.duration import parse_duration
 
@@ -157,6 +158,11 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
     now = time.time()
     db_rows = _db_live_sessions()
     alias_map = _claude_credentials_alias_map()
+    try:
+        group_index = _board_settings.session_group_index()
+    except Exception as exc:
+        logger.warning("session group index unavailable: %s", exc)
+        group_index = {}
     sessions = []
     for row in db_rows:
         stype = row.get("type", "")
@@ -191,6 +197,10 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
             "harness_token_alias": (
                 alias_map.get(harness_token) if harness_token else None
             ),
+            # Session-group membership (Session Board columns, auto-q9y6e.2).
+            "group_id": (group_index.get(row["tmux_name"]) or {}).get("group_id"),
+            "group_tab": (group_index.get(row["tmux_name"]) or {}).get("group_tab") or "",
+            "group": (group_index.get(row["tmux_name"]) or {}).get("group"),
         }
         entry["org"] = resolve_session_org(entry)
         sessions.append(entry)
