@@ -280,7 +280,7 @@ def test_autonomy_with_empty_peers_sees_own_canonical(orgs_root):
     settings_ops.add_setting(
         cross_org.PEER_SUBSCRIPTION_SET_ID, 1,
         key="autonomy", payload={"peers": []},
-        org="personal", state="canonical",
+        org="personal",
     )
 
     results = ops.search(
@@ -301,7 +301,7 @@ def test_autonomy_with_anchore_peer_sees_canonical_only(orgs_root):
     settings_ops.add_setting(
         cross_org.PEER_SUBSCRIPTION_SET_ID, 1,
         key="autonomy", payload={"peers": ["anchore"]},
-        org="personal", state="canonical",
+        org="personal",
     )
 
     results = ops.search(

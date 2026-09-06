@@ -62,6 +62,44 @@ def _write_secret(path: Path, value: str) -> None:
         stream.write(value)
 
 
+def _tunnel_op(registry: str, org_uuid: str, org_root, op: str, args: dict) -> dict:
+    """One control op on the org's serving tunnel — the production mint/revoke
+    path (auto-qol1v retired the registry HTTP link write routes)."""
+    import json as _json
+
+    from websockets.sync.client import connect as _ws_connect
+
+    from tools.network.idkit import KeyPair, Subject, issue_cert
+    from tools.network.relaykit.frames import (
+        CTRL_CHANNEL_ID,
+        FRAME_CTRL,
+        decode_frame,
+        encode_frame,
+    )
+    from tools.network.relaykit.hello import build_tunnel_hello
+
+    now = int(time.time())
+    serve_key = KeyPair.generate()
+    serve_cert = issue_cert(
+        org_root, serve_key.public_hex, scope=("tunnel:serve",), org=org_uuid,
+        subject=Subject("persona", "ab" * 32),
+        not_before=now - 30, not_after=now + 3600,
+    )
+    ws_base = registry.rstrip("/").replace("https://", "wss://").replace(
+        "http://", "ws://")
+    with _ws_connect(f"{ws_base}/t/{org_uuid}", open_timeout=20) as ws:
+        ws.send(build_tunnel_hello(serve_key, serve_cert, org=org_uuid, ts=now))
+        ack = _json.loads(ws.recv(timeout=20))
+        if not ack.get("ok"):
+            raise FixtureError(f"tunnel hello refused: {ack}")
+        request = {"id": "ab" * 16, "op": op, "args": args}
+        ws.send(encode_frame(
+            FRAME_CTRL, CTRL_CHANNEL_ID,
+            _json.dumps(request).encode("utf-8")))
+        frame = decode_frame(ws.recv(timeout=20))
+        return _json.loads(frame.payload.decode("utf-8"))
+
+
 def setup(payload: dict) -> dict:
     required = {
         "slug", "password", "registry_url", "link_base_url", "ttl",
@@ -104,7 +142,7 @@ def setup(payload: dict) -> dict:
     )
     from tools.graph.schemas.personal_identity import PERSONAL_IDENTITY_SET_ID
     from tools.network.idkit import KeyPair, Subject, derive_persona, issue_cert
-    from tools.network.idkit.armor import encrypt_root_key
+    from tools.network.idkit.root_factor_policy import mint_password_armor
     from tools.network.idkit.sealing import derive_encapsulation_keypair, seal
     from tools.network.ledger import LedgerStore, org_ledger_db_path
     from tools.network.ledger.found import found_org_ledger
@@ -136,7 +174,7 @@ def setup(payload: dict) -> dict:
             1,
             "default",
             {
-                "armored_private_key": encrypt_root_key(personal, password),
+                "armored_private_key": mint_password_armor(personal, password),
                 "root_pub": personal.public_hex,
                 "display_name": "TURN acceptance",
                 "created_at": time.strftime(ISO, time.gmtime()),
@@ -271,21 +309,17 @@ def setup(payload: dict) -> dict:
     )
     if registered["status"] != 201:
         raise FixtureError(f"production org registration refused: {registered['status']}")
-    published = _request(
-        registry,
-        "POST",
-        "/v1/links",
-        org_root,
+    published = _tunnel_op(
+        registry, org_uuid, org_root, "create-link",
         {
-            "org": org_uuid,
             "target_uuid": mission_id,
             "target_type": "mission",
             "meta": {"ttl": ttl, "label": "TURN acceptance"},
         },
     )
-    if published["status"] != 201 or not isinstance(published["body"], dict):
-        raise FixtureError(f"production link publish refused: {published['status']}")
-    token = published["body"]["token"]
+    if not published.get("ok") or not isinstance(published.get("token"), str):
+        raise FixtureError(f"production link publish refused: {published}")
+    token = published["token"]
     settings_ops.upsert_by_key(
         NETWORK_LINK_GRANT_SET_ID,
         NETWORK_LINK_GRANT_REVISION,
@@ -321,16 +355,24 @@ def setup(payload: dict) -> dict:
 def revoke(payload: dict) -> dict:
     if set(payload) != {"slug", "password", "registry_url", "token"}:
         raise FixtureError("revoke fields are malformed")
-    from deploy.harness.fixture_ops import _org_root, _personal_seed
+    from tools.graph.schemas.network_identity import NETWORK_BINDING_SET_ID
+
+    from deploy.harness.fixture_ops import (
+        _org_root,
+        _personal_seed,
+        _setting_payload,
+    )
 
     root = _org_root(payload["slug"], _personal_seed(payload["password"]))
-    path = f"/v1/links/{payload['token']}"
-    result = _request(
-        payload["registry_url"].rstrip("/"), "DELETE", path, root, {}
+    binding = _setting_payload(
+        NETWORK_BINDING_SET_ID, payload["slug"], key="relay")
+    reply = _tunnel_op(
+        payload["registry_url"].rstrip("/"), binding["org_uuid"], root,
+        "revoke-link", {"token": payload["token"]},
     )
-    if result["status"] not in (200, 404):
-        raise FixtureError(f"production link revoke refused: {result['status']}")
-    return {"revoked": result["status"] == 200}
+    if not reply.get("ok") and "unknown link" not in (reply.get("error") or ""):
+        raise FixtureError(f"production link revoke refused: {reply}")
+    return {"revoked": bool(reply.get("ok"))}
 
 
 COMMANDS = {"setup": setup, "revoke": revoke}

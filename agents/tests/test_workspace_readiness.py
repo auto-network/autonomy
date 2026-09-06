@@ -298,15 +298,43 @@ def test_volume_mount_presence_is_blocking_and_empty_is_advisory(
     absent = workspace_readiness("eng", org="anchore")
     assert [f.kind for f in absent.blocking] == ["missing_path"]
 
+    # An empty DIRECTORY is a valid mount target — ready, no finding at all
+    # (operator ruling: the doctor must not complain merely because an org
+    # mount directory is empty). Only an empty FILE draws the advisory.
     target = org / "org-mounts" / "anchore" / "fixtures"
     target.mkdir(parents=True)
     empty = workspace_readiness("eng", org="anchore")
     assert not empty.blocking
-    assert [f.kind for f in empty.advisory] == ["unpopulated_path"]
-    assert empty.advisory[0].remediation_id == "workspace.declared-path.v1"
-    assert empty.advisory[0].remediation_params == {}
+    assert empty.advisory == []
+    assert empty.ready
 
     (target / "sentinel").write_text("ready")
+    assert workspace_readiness("eng", org="anchore").ready
+
+
+def test_volume_mount_empty_file_is_advisory(org, monkeypatch):
+    """A zero-byte FILE is an unprovisioned stub — advisory, not ready-silent."""
+    _workspace("eng")
+    monkeypatch.setattr(workspace_manager, "DATA_DIR", org)
+    monkeypatch.setattr(
+        mount_plan,
+        "discover_topology",
+        lambda: mount_plan.NodeTopology(is_host_process=True, volumes=()),
+    )
+    mount = _volume_mount()
+    mount["kind"] = "file"
+    settings_ops.add_setting(
+        "autonomy.workspace.mount", 2, "eng:fixtures", mount,
+        org="anchore",
+    )
+    target = org / "org-mounts" / "anchore" / "fixtures"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"")
+    stub = workspace_readiness("eng", org="anchore")
+    assert not stub.blocking
+    assert [f.kind for f in stub.advisory] == ["unpopulated_path"]
+
+    target.write_text("ready")
     assert workspace_readiness("eng", org="anchore").ready
 
 
@@ -330,14 +358,19 @@ def test_volume_mount_is_unanswerable_without_volume_view(org, monkeypatch):
 
 
 def test_a_peers_workspace_is_not_this_operators_to_provision(org):
-    """Read the org's OWN rows. A workspace visible because a peer publishes
-    it belongs to that peer, and listing it asks the operator to provision
-    something they do not own."""
+    """Read the org's OWN rows. A workspace belonging to a peer must never
+    appear in this operator's provisioning list. Two layers enforce it now:
+    the workspace set's publication band is raw-only, so a peer-visible
+    (published) row is structurally unwritable — and even the peer's raw
+    row stays out of another org's readiness view."""
     GraphDB.create_org_db("partner").close()
+    payload = {"name": "Theirs", "image": "img", "harness": "claude",
+               "env_from_host": ["GH_TOKEN"]}
+    with pytest.raises(ValueError, match="publication band"):
+        settings_ops.add_setting(
+            "autonomy.workspace", 1, "theirs", payload,
+            org="partner", state="published")
     settings_ops.add_setting(
-        "autonomy.workspace", 1, "theirs",
-        {"name": "Theirs", "image": "img", "harness": "claude",
-         "env_from_host": ["GH_TOKEN"]},
-        org="partner", state="published")
+        "autonomy.workspace", 1, "theirs", payload, org="partner")
 
     assert [r.workspace_id for r in org_readiness("anchore")] == []

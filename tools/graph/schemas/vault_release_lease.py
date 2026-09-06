@@ -28,6 +28,20 @@ from tools.graph.schemas.registry import (
 )
 
 RELEASE_LEASE_SET_ID = "autonomy.vault.release-lease"
+
+SYNOPSIS = {
+    "summary": (
+        "Machine-homed cleanup obligation for one delivered vault secret: a "
+        "locator and deadline recorded before the ramfs file exists, shredded "
+        "in place after destruction — never plaintext or key material."
+    ),
+    "nouns": [
+        "release lease", "delivered secret", "vault delivery",
+        "cleanup obligation", "ramfs lease",
+    ],
+    "related_set_ids": ["autonomy.vault.secured#1"],
+}
+
 RELEASE_LEASE_REVISION = 1
 
 #: Closed vocabulary so the audit language cannot drift. ``expired`` = the

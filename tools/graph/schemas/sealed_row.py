@@ -54,6 +54,20 @@ from .registry import (
 )
 
 SEALED_ROW_SET_ID = "autonomy.sealed-settings.row"
+
+SYNOPSIS = {
+    "summary": (
+        "One opaque row of a SealedSettings store: an HMAC-addressed key and "
+        "a single ciphertext string the substrate can never read — all "
+        "meaning lives inside the sealed payload."
+    ),
+    "nouns": [
+        "sealed row", "sealed settings", "sealed store",
+        "opaque ciphertext row",
+    ],
+    "related_set_ids": [],
+}
+
 SEALED_ROW_REVISION = 1
 
 

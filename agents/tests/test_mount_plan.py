@@ -202,7 +202,8 @@ def test_marker_rides_dict_update_and_is_read_by_mount_spec(tmp_path):
     for h, spec in merged.items():
         plan.set(mp.mount_spec(h, spec))
     args = mp.mount_args(plan, topo)
-    assert "--mount" in args and "type=bind,src=/src/a,dst=/dst/a,readonly" in args
+    assert "--mount" in args and (
+        "type=bind,src=/src/a,dst=/dst/a,bind-propagation=rslave,readonly" in args)
     assert "-v" in args and "/src/b:/dst/b:ro" in args
 
 
@@ -241,6 +242,7 @@ def test_workspace_marker_forces_host_bind_despite_node_root_collision(monkeypat
     plan.set(mp.mount_spec(src, mp.BindRefuseMissing("/opt/x:ro")))
     args = mp.mount_args(plan, topo)
     joined = " ".join(args)
-    assert args == ["--mount", f"type=bind,src={src},dst=/opt/x,readonly"]
+    assert args == ["--mount",
+                    f"type=bind,src={src},dst=/opt/x,bind-propagation=rslave,readonly"]
     assert "type=volume" not in joined and "autonomy-data" not in joined
     assert "-v" not in args
