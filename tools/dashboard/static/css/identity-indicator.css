@@ -42,6 +42,17 @@
   left: 0;
 }
 
+/* The desktop drawer opens from the brand row into the content column. The
+ * sidebar's real scroll owner is `.sidebar-main`; leaving the outer nav at
+ * overflow:auto clips the drawer at the 14rem rail boundary and makes its
+ * apparently visible controls unhittable. Mobile keeps the outer off-canvas
+ * nav's existing overflow behavior. */
+@media (min-width: 768px) {
+  #sidebar {
+    overflow: visible;
+  }
+}
+
 header[data-app-chrome] .identity-trigger {
   min-width: 2rem;
   height: 2rem;
