@@ -1973,7 +1973,12 @@ def _monitor_post(path: str, body: dict, *, tmux_name: str) -> None:
         headers=headers,
     )
     ctx = ssl.create_default_context()
-    if url.startswith(("https://localhost", "https://127.0.0.1")):
+    # Same-node targets: localhost on the host, or the compose service name
+    # from inside the node's private network (GRAPH_API=https://dashboard:8080
+    # in docker-compose.yml). The node serves its Tailscale certificate, whose
+    # SAN is the ts.net hostname, so neither name can verify — and both are the
+    # same trust boundary the session containers already use unverified.
+    if url.startswith(("https://localhost", "https://127.0.0.1", "https://dashboard:", "https://dashboard/")):
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
     try:
