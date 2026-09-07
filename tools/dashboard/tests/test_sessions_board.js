@@ -469,6 +469,10 @@ test('a board card opens on a small tail; the full-page viewer keeps its own', (
   assert.match(viewer, /_olderTailUrl\(cursor\) \{[\s\S]*?tail_entries=' \+ FAST_OPEN_TAIL_LINES/);
 });
 
+// NOTE: the board's plumbing is kept and tested, but no harness currently
+// returns models (see api_session_models) — /model takes different names than
+// the dispatcher's alias table and can open a confirmation prompt. These
+// exercise the client contract against a stub so the wiring stays honest.
 test('the model badge switches a live session by typing the harness command', async () => {
   const calls = [];
   const fetchImpl = (url, opts) => {

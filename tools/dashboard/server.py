@@ -4257,27 +4257,29 @@ def _layout_dao():
 async def api_session_models(request):
     """GET /api/session-models?harness=claude — the models a session can switch to.
 
-    The list is the dispatcher's own alias table, so the dashboard offers
-    exactly the names a bead's ``model:`` label accepts and nothing invented
-    here. Only harnesses whose in-session switch command is known are
-    answered; anything else returns an empty list so a caller shows no menu
-    rather than typing an unverified command into a live agent.
+    DISABLED 2026-09-07 pending a verified name list. Every harness gets an
+    empty list, so the badge menu does not open anywhere.
+
+    Why: this served ``agents.dispatcher.MODEL_ALIASES``, which is the table
+    for a bead's ``model:`` label and the launcher's ``--model`` flag. Those
+    names are NOT what the harness's own ``/model`` command accepts. In live
+    use ``/model fable-5-1`` came back "unknown", and the accepted short name
+    ``fable`` opened an interactive confirmation the operator then had to
+    answer with a keypress — so a wrong entry does worse than nothing: it
+    parks a live agent at a prompt.
+
+    Two things must be true before this returns models again:
+
+    1. the exact argument values that harness's ``/model`` accepts, from the
+       harness itself rather than inferred from a dispatch table, and
+    2. an invocation that completes without leaving the session waiting on a
+       confirmation — or a way to answer it.
+
+    Keep the shape: a caller shows a menu only when ``command`` is non-null
+    and ``models`` is non-empty.
     """
     harness = (request.query_params.get("harness") or "").strip().lower()
-    if harness != "claude":
-        return JSONResponse({"harness": harness, "command": None, "models": []})
-    try:
-        from agents.dispatcher import MODEL_ALIASES
-    except Exception as exc:
-        logger.warning("session models unavailable: %s", exc)
-        return JSONResponse({"harness": harness, "command": None, "models": []})
-    seen, models = set(), []
-    for alias, model_id in MODEL_ALIASES.items():
-        if model_id in seen:
-            continue
-        seen.add(model_id)
-        models.append({"alias": alias, "model": model_id})
-    return JSONResponse({"harness": "claude", "command": "/model", "models": models})
+    return JSONResponse({"harness": harness, "command": None, "models": []})
 
 
 async def api_session_board_layout_get(request):

@@ -205,20 +205,18 @@ class TestGroupCrossTalkLog:
 
 
 class TestSessionModelsApi:
-    """The model switcher's list comes from the dispatcher's own alias table."""
+    """No harness offers models until the accepted names are verified.
 
-    def test_claude_lists_deduped_aliases_and_the_command(self, test_client):
-        body = test_client.get("/api/session-models?harness=claude").json()
-        assert body["harness"] == "claude" and body["command"] == "/model"
-        aliases = [m["alias"] for m in body["models"]]
-        assert "opus" in aliases and "sonnet" in aliases and "fable-5-1" in aliases
-        # One entry per distinct model id: opus-4-8 collapses into opus.
-        ids = [m["model"] for m in body["models"]]
-        assert len(ids) == len(set(ids))
-        from agents.dispatcher import MODEL_ALIASES
-        assert set(ids) == set(MODEL_ALIASES.values())
+    The endpoint briefly served the dispatcher's MODEL_ALIASES. Those are the
+    names for a bead's ``model:`` label, not the arguments the harness's own
+    ``/model`` command takes: ``/model fable-5-1`` was rejected as unknown and
+    the short name opened a confirmation prompt that left the session waiting.
+    A wrong entry is worse than an absent one, so the list is empty until the
+    real names and a prompt-free invocation are known.
+    """
 
-    def test_unknown_harness_offers_nothing(self, test_client):
-        for harness in ("codex", "", "made-up"):
+    def test_no_harness_offers_models_yet(self, test_client):
+        for harness in ("claude", "codex", "", "made-up"):
             body = test_client.get(f"/api/session-models?harness={harness}").json()
-            assert body["models"] == [] and body["command"] is None
+            assert body["models"] == [], f"{harness} must not offer unverified names"
+            assert body["command"] is None, "a null command is what suppresses the menu"
