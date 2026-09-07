@@ -1021,16 +1021,18 @@ async def test_per_origin_watermarks_serve_each_author_once_and_never_echo(
 
 
 @pytest.mark.asyncio
-async def test_server_skips_an_author_whose_retired_history_is_above_the_watermark(
+async def test_server_rebuilds_retired_frames_from_its_rows(
     tmp_path, monkeypatch
 ):
-    """A snapshot receiver holds an origin's early writes only as installed
-    rows (no frames). Serving that origin from a low watermark would
-    advance the puller past writes it never got. The server must skip the
-    origin and say so; a puller already past the retired prefix is served."""
+    """A machine that received an origin's early writes as a checkpoint (or
+    pruned their journal frames after every peer acknowledged) holds those
+    writes only as catalog rows plus live rows. It serves them anyway: the
+    frames are rebuilt from the rows, exactly as a checkpoint is built, so
+    a puller below that prefix receives it here and nothing is skipped."""
     from tools.network.fleet_sync_scheduler import (
-        _TRANSACTION_MAGIC, encode_pull_request, SQLiteFleetSyncStore,
-        decode_transaction_header,
+        _TRANSACTION_MAGIC, _OPERATION_MAGIC, encode_pull_request,
+        SQLiteFleetSyncStore, decode_transaction_header,
+        decode_operation_frame,
     )
     from tools.network.fleet_sync.catalog import MutationCatalog
 
@@ -1047,10 +1049,14 @@ async def test_server_skips_an_author_whose_retired_history_is_above_the_waterma
                     " VALUES(?,?,?,?,?,?)",
                     (ident, "note", ident, "{}", "2026-09-07T00:00:00Z", "2026-09-07T00:00:00Z"),
                 )
-        # Install shape: the first transaction's frames are gone.
+        # A fourth transaction overwrites a0's row: tx-a0 has nothing
+        # surviving, tx-a3 owns the row now.
+        with catalog.transaction(4_000, "tx-a3"):
+            db.conn.execute("UPDATE sources SET title='a0-renamed' WHERE id='a0'")
+        # Install shape: the first two transactions' frames are gone.
         db.conn.execute(
-            "DELETE FROM fleet_sync_journal WHERE transaction_ref="
-            "(SELECT MIN(id) FROM fleet_sync_transactions)"
+            "DELETE FROM fleet_sync_journal WHERE transaction_ref IN "
+            "(SELECT id FROM fleet_sync_transactions ORDER BY id LIMIT 2)"
         )
         db.conn.commit()
     finally:
@@ -1073,17 +1079,30 @@ async def test_server_skips_an_author_whose_retired_history_is_above_the_waterma
         stream = await server.scheduler._handle("tok", request, fleet.client_machine.public_hex)
         frames = [f async for f in stream]
         controls = [json.loads(f) for f in frames if f[:1] in ("{", b"{")]
-        served = [decode_transaction_header(f)[1] for f in frames if f.startswith(_TRANSACTION_MAGIC)]
-        return controls, served
+        served = [decode_transaction_header(f) for f in frames if f.startswith(_TRANSACTION_MAGIC)]
+        ops = [decode_operation_frame(f)[1] for f in frames if f.startswith(_OPERATION_MAGIC)]
+        return controls, served, ops
 
-    # Puller knows nothing of this origin: NOT served, told why.
-    controls, served = await pull({"ee" * 32: 5})
-    assert served == []
-    assert any(c.get("kind") == "retired" and c.get("origins") == [server_pub] for c in controls)
-    # Puller already holds the retired prefix (W >= 1000): served the rest.
-    controls, served = await pull({server_pub: 1_000})
-    assert served == ["tx-a1", "tx-a2"]
+    # Puller knows nothing of this origin: served everything, in order.
+    # tx-a0 survives nowhere (overwritten by tx-a3) and is named as empty
+    # with its timestamp so the puller's watermark still passes it;
+    # tx-a1's frame is rebuilt from the catalog row and the live row.
+    controls, served, ops = await pull({"ee" * 32: 5})
+    assert [tx for _o, tx, _n in served] == ["tx-a1", "tx-a2", "tx-a3"]
+    assert [n for _o, _tx, n in served] == [1, 1, 1]
+    empties = [c for c in controls if c.get("kind") == "transaction.empty"]
+    assert [(c["origin"], c["transaction_id"], c["timestamp_ns"]) for c in empties] == [
+        (server_pub, "tx-a0", 1_000)
+    ]
     assert not any(c.get("kind") == "retired" for c in controls)
+    rebuilt = ops[0]
+    assert rebuilt.table == "sources" and rebuilt.timestamp_ns == 2_000
+    assert dict(rebuilt.values)["title"] == "a1"
+    assert dict(ops[2].values)["title"] == "a0-renamed"
+    # Puller already holds through 2000: only the newer two.
+    controls, served, _ops = await pull({server_pub: 2_000})
+    assert [tx for _o, tx, _n in served] == ["tx-a2", "tx-a3"]
+    assert not any(c.get("kind") == "transaction.empty" for c in controls)
 
 
 @pytest.mark.asyncio

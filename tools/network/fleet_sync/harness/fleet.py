@@ -342,6 +342,21 @@ class HarnessFleet:
                     graph.insert_source(
                         Source(id=source_id, type="note", title=title)
                     )
+                    # Every harness observer reads with immutable=1 (see
+                    # _read_only), which sees the main file only. A write
+                    # left in the WAL is invisible to has()/digest(), so
+                    # converged() could return true before the write had
+                    # crossed to anyone; and a scenario that then drops the
+                    # WAL (restore from backup) destroys the write outright
+                    # (test_restored_backup_server_reconverges under xdist,
+                    # 2026-09-07). Land it in the main file now.
+                    for _attempt in range(10):
+                        busy, _log, _done = graph.conn.execute(
+                            "PRAGMA wal_checkpoint(TRUNCATE)"
+                        ).fetchone()
+                        if not busy:
+                            break
+                        time.sleep(0.05)
                 finally:
                     graph.close()
                 self.evidence["writes"] += 1
