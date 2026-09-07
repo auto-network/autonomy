@@ -9,7 +9,7 @@
     <section class="present-library" data-testid="present-library">
       <div class="present-toolbar">
         <div>
-          <h1>Decks</h1>
+          <h1>Slides</h1>
           <p x-text="decks.length + ' shown'"></p>
         </div>
         <button type="button" class="present-refresh" @click="loadLibrary()" title="Refresh" data-testid="present-refresh">
@@ -22,12 +22,16 @@
       </template>
 
       <template x-if="!loading && decks.length === 0">
-        <div class="present-empty" data-testid="present-empty">No decks have been shown yet.</div>
+        <div class="present-empty" data-testid="present-empty">No slides have been shown yet.</div>
       </template>
 
       <div class="present-deck-list" x-show="!loading && decks.length > 0" data-testid="present-deck-list">
         <template x-for="deck in decks" :key="deck.design_id || deck.key">
           <article class="present-deck-card" data-testid="present-deck-card">
+            <button type="button" class="present-deck-thumb" x-show="thumbnailUrl(deck)" @click="openDeck(deck)" :aria-label="'Open ' + (deck.name || 'deck')">
+              <img :src="thumbnailUrl(deck)" alt="" loading="lazy" decoding="async"
+                   @error="$el.parentElement.style.display = 'none'">
+            </button>
             <button type="button" class="present-deck-main" @click="openDeck(deck)">
               <span class="present-deck-name" x-text="deck.name || 'Untitled deck'"></span>
               <span class="present-deck-subtitle" x-show="deck.subtitle" x-text="deck.subtitle"></span>

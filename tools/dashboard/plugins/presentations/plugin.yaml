@@ -12,7 +12,7 @@ assets:
   style: page.css
 
 nav:
-  label: Present
+  label: Slides
 
 frontend:
   alpine_root: presentationsPage

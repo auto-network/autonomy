@@ -35,8 +35,13 @@ def _expires_at(payload: dict) -> int | None:
     return None
 
 
-def active_design_grants(org: str | None, *, now: datetime | None = None) -> list[dict]:
-    """Every unexpired design/present grant the org holds, newest first."""
+SHARE_TARGET_TYPES = ("design", "present", "note", "mission")
+
+
+def active_grants(org: str | None, target_types: Iterable[str] = SHARE_TARGET_TYPES,
+                  *, now: datetime | None = None) -> list[dict]:
+    """Every unexpired grant of the given types the org holds, newest first."""
+    wanted = set(target_types)
     from tools.graph import settings_ops
     from tools.graph.schemas.network_identity import (
         NETWORK_LINK_GRANT_REVISION,
@@ -60,7 +65,7 @@ def active_design_grants(org: str | None, *, now: datetime | None = None) -> lis
         payload = member.payload
         if not isinstance(payload, dict):
             continue
-        if payload.get("target_type") not in DESIGN_TARGET_TYPES:
+        if payload.get("target_type") not in wanted:
             continue
         expires_at = _expires_at(payload)
         if expires_at is not None and expires_at <= int(now.timestamp()):
@@ -77,6 +82,25 @@ def active_design_grants(org: str | None, *, now: datetime | None = None) -> lis
         })
     grants.sort(key=lambda g: str(g.get("issued_at") or ""), reverse=True)
     return grants
+
+
+def active_design_grants(org: str | None, *, now: datetime | None = None) -> list[dict]:
+    """Every unexpired design/present grant the org holds, newest first."""
+    return active_grants(org, DESIGN_TARGET_TYPES, now=now)
+
+
+def share_for_target(org: str | None, target_type: str, target_uuid: str,
+                     extra_ids: Iterable[str] = ()) -> dict:
+    """Share state for any shareable asset: ``{"shared", "grants"}``.
+
+    Design and Present grants are interchangeable (both serve the design's
+    latest revision), so a design or deck counts either type; other types
+    match only themselves.
+    """
+    types = DESIGN_TARGET_TYPES if target_type in DESIGN_TARGET_TYPES else (target_type,)
+    ids = {str(target_uuid)} | {str(i) for i in extra_ids if i}
+    mine = [g for g in active_grants(org, types) if g.get("target_uuid") in ids]
+    return {"shared": bool(mine), "grants": mine}
 
 
 def shared_design_ids(org: str | None, *, now: datetime | None = None) -> set[str]:

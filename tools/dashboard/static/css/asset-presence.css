@@ -1,0 +1,343 @@
+/* Asset presence + sharing control (static/js/asset-presence.js): the
+   top-right pill and dropdown shared by Design Studio, Slides, and Notes. */
+
+
+.design-card-presence-dot,
+.design-topbar-live-dot {
+  display: inline-block;
+  width: 0.45rem;
+  height: 0.45rem;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #475569;
+}
+
+.design-card-presence.is-live .design-card-presence-dot,
+.design-tile-presence.is-live .design-card-presence-dot,
+.design-topbar-presence.is-live .design-topbar-live-dot {
+  background: #22c55e;
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.13);
+}
+
+.design-presence-pill,
+.design-topbar-presence summary.design-presence-pill {
+  display: inline-flex;
+  width: auto;
+  min-width: 2.5rem;
+  height: 2.5rem;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0 0.5rem;
+  border-radius: 999px;
+}
+
+.design-viewer-presence .design-topbar-live-dot {
+  display: none;
+}
+
+.design-presence-stack {
+  display: inline-flex;
+  align-items: center;
+}
+
+.design-presence-avatar {
+  display: inline-grid;
+  width: 1.5rem;
+  height: 1.5rem;
+  place-items: center;
+  border-radius: 999px;
+  border: 2px solid #111927;
+  background: #334155;
+  color: #e2e8f0;
+  font-size: 0.6875rem;
+  font-weight: 800;
+  line-height: 1;
+  margin-left: -0.45rem;
+}
+
+.design-presence-avatar:first-child {
+  margin-left: 0;
+}
+
+.design-presence-avatar.is-live {
+  background: #15803d;
+  color: #f0fdf4;
+}
+
+.design-presence-avatar.is-empty {
+  background: transparent;
+  border-color: #334155;
+  color: #475569;
+}
+
+.design-presence-link {
+  border: none;
+  background: transparent;
+  color: #a5b4fc;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.6875rem;
+  font-weight: 650;
+  padding: 0 0 0 0.25rem;
+  text-decoration: underline;
+}
+
+.design-presence-count {
+  color: #94a3b8;
+  font-size: 0.6875rem;
+  font-weight: 700;
+}
+
+.design-presence-count.is-empty {
+  color: #475569;
+}
+
+.design-presence-sharemark {
+  display: inline-grid;
+  width: 1.1rem;
+  height: 1.1rem;
+  place-items: center;
+  border-radius: 999px;
+  background: #312e81;
+  color: #c7d2fe;
+  font-size: 0.7rem;
+  font-weight: 800;
+}
+
+.design-presence-share.is-quiet {
+  border-color: #334155;
+  background: transparent;
+  color: #cbd5e1;
+  font-weight: 600;
+}
+
+.design-presence-section {
+  color: #64748b;
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0.5rem 0.5rem 0.25rem;
+}
+
+.design-presence-row .design-presence-copy {
+  flex: 1 1 auto;
+  color: inherit;
+  text-decoration: none;
+}
+
+.design-presence-row.is-live .design-topbar-avatar {
+  box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.45);
+}
+
+.design-topbar-avatar.is-share {
+  background: #312e81;
+  color: #c7d2fe;
+  font-size: 0.875rem;
+}
+
+.design-presence-share-actions {
+  display: inline-flex;
+  gap: 0.125rem;
+}
+
+.design-presence-action {
+  display: inline-grid;
+  width: 1.9rem;
+  height: 1.9rem;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 0.375rem;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  padding: 0;
+}
+
+.design-presence-action svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.design-presence-action:hover,
+.design-presence-action:focus-visible {
+  border-color: #334155;
+  background: #1e293b;
+  color: #f1f5f9;
+  outline: none;
+}
+
+.design-presence-share {
+  display: block;
+  width: calc(100% - 0.5rem);
+  margin: 0.125rem 0.25rem 0.25rem;
+  border: 1px solid rgba(129, 140, 248, 0.5);
+  border-radius: 0.5rem;
+  background: rgba(49, 46, 129, 0.35);
+  color: #c7d2fe;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 650;
+  padding: 0.5rem 0.75rem;
+}
+
+.design-presence-share:hover:not(:disabled) {
+  background: rgba(49, 46, 129, 0.6);
+}
+
+.design-presence-share:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.design-presence-note {
+  color: #94a3b8;
+  font-size: 0.6875rem;
+  line-height: 1.35;
+  padding: 0.125rem 0.5rem 0.5rem;
+}
+
+.design-presence-note.is-error {
+  color: #fca5a5;
+}
+
+.design-topbar-presence summary,
+.design-topbar-avatars {
+  display: inline-flex;
+  align-items: center;
+}
+
+.design-topbar-strip {
+  gap: 0.5rem;
+  overflow: visible;
+}
+
+.design-topbar-presence summary {
+  position: relative;
+  height: 2.75rem;
+  justify-content: center;
+  border: 1px solid #26364b;
+  border-radius: 0.625rem;
+  background: #0f172a;
+  color: #cbd5e1;
+}
+
+.design-topbar-badge {
+  position: absolute;
+  top: -0.35rem;
+  right: -0.35rem;
+  display: inline-grid;
+  min-width: 1.15rem;
+  height: 1.15rem;
+  place-items: center;
+  border: 1px solid #020617;
+  border-radius: 999px;
+  background: #38bdf8;
+  color: #07111f;
+  font-size: 0.625rem;
+  font-weight: 800;
+  line-height: 1;
+  padding: 0 0.25rem;
+}
+
+.design-topbar-presence {
+  position: relative;
+  z-index: 30;
+}
+
+.design-topbar-presence summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 0;
+}
+
+.design-topbar-presence summary::-webkit-details-marker {
+  display: none;
+}
+
+.design-topbar-presence[open] summary,
+.design-topbar-presence summary:hover {
+  border-color: rgba(34, 197, 94, 0.4);
+}
+
+.design-topbar-avatars {
+  margin-left: 0.25rem;
+}
+
+.design-topbar-avatar {
+  display: inline-grid;
+  width: 1.35rem;
+  height: 1.35rem;
+  place-items: center;
+  border: 1px solid #0f172a;
+  border-radius: 999px;
+  background: #064e3b;
+  color: #d1fae5;
+  font-size: 0.625rem;
+  font-weight: 800;
+  line-height: 1;
+  margin-left: -0.45rem;
+}
+
+.design-topbar-avatar.is-row {
+  width: 1.75rem;
+  height: 1.75rem;
+  margin-left: 0;
+}
+
+.design-presence-menu {
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  right: 0;
+  width: min(20rem, calc(100vw - 2rem));
+  border: 1px solid #26364b;
+  border-radius: 0.625rem;
+  background: #0b1120;
+  box-shadow: 0 1rem 2.5rem rgba(0, 0, 0, 0.35);
+  padding: 0.375rem;
+}
+
+.design-presence-row {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  border-radius: 0.5rem;
+  color: #cbd5e1;
+  padding: 0.5rem;
+  text-decoration: none;
+}
+
+.design-presence-row:hover {
+  background: #111827;
+}
+
+.design-presence-copy {
+  display: grid;
+  min-width: 0;
+  gap: 0.125rem;
+}
+
+.design-presence-copy strong,
+.design-presence-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.design-presence-copy strong {
+  color: #f8fafc;
+  font-size: 0.75rem;
+  font-weight: 720;
+}
+
+.design-presence-copy span,
+.design-presence-empty {
+  color: #94a3b8;
+  font-size: 0.6875rem;
+}
+
+.design-presence-empty {
+  padding: 0.625rem;
+}
+

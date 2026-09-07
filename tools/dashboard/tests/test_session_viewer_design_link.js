@@ -285,58 +285,26 @@ describe('design viewer presence and sharing', () => {
     h.page.destroy();
   });
 
-  it('a cancelled or declined publish request returns the share button to idle', async () => {
+  it('feeds the shared presence control the design, its revisions, and chat state', async () => {
     const h = makeLinkedDesignHarness('');
-    h.page.designId = 'design-1';
-    h.page.design = {org: 'autonomy', title: 'Linked design'};
-    await h.page.shareDesign();
-    assert.equal(h.page.shareState, 'awaiting');
-    h.page.cancelShareWait();
-    assert.equal(h.page.shareState, 'idle');
-
-    await h.page.shareDesign();
-    h.sandbox.fetch = async (url) => {
-      if (String(url).startsWith('/api/approvals/')) return {ok: true, json: async () => ({result: {approved: false}})};
-      return {ok: true, json: async () => ({})};
-    };
-    assert.equal(await h.page._checkShareApproval(), 'declined');
-    h.page.destroy();
-  });
-
-  it('requests a link_publish approval for the design and waits for the grant', async () => {
-    const h = makeLinkedDesignHarness('');
-    h.page.designId = 'design-1';
-    h.page.design = {org: 'autonomy', title: 'Linked design'};
-    let overlay = '';
-    h.sandbox.openApprovalOverlay = (id) => { overlay = id; };
-    await h.page.shareDesign();
-    const post = h.fetches.find((f) => f.url === '/api/approvals');
-    const body = JSON.parse(post.init.body);
-    assert.equal(body.kind, 'link_publish');
-    assert.equal(JSON.stringify(body.request), JSON.stringify({org: 'autonomy', target_type: 'design', target_uuid: 'design-1', meta: {}}));
-    assert.equal(overlay, 'central-approval-1');
-    assert.equal(h.page.shareState, 'awaiting');
-    assert.equal(await h.page.shareDesign(), undefined); // no double request while awaiting
-    assert.equal(h.fetches.filter((f) => f.url === '/api/approvals').length, 1);
-    h.page.destroy();
-  });
-
-  it('exposes the newest grant: expiry text, open in a new tab, manage in Published Links', async () => {
-    const grant = {token: 'tok-1', url: 'https://relay.auto.network/l/tok-1', expires_at: Math.floor(Date.now() / 1000) + 3 * 86400};
-    const h = makeLinkedDesignHarness('', {share: {shared: true, grants: [grant]}});
     h.page.designId = 'design-1';
     h.page.design = {org: 'autonomy', title: 'Linked design'};
     await h.page._loadSeries();
-    assert.equal(h.page.share.shared, true);
-    assert.equal(h.page.primaryGrant.token, 'tok-1');
-    assert.match(h.page.shareExpiryText, /expires in (2|3) days/);
-    assert.match(h.page.presenceSummaryTitle, /shared by link/);
-    h.page.openShareLink();
-    assert.equal(h.opened, grant.url);
-    let openedSettings = null;
-    h.sandbox.AutonomyOrgSettings = {open(slug, opts) { openedSettings = {slug, opts}; }};
-    h.page.manageShare();
-    assert.equal(JSON.stringify(openedSettings), JSON.stringify({slug: 'autonomy', opts: {screen: 'published-links', focus: 'tok-1'}}));
+    const opts = h.page._presenceOptions();
+    assert.equal(opts.targetType, 'design');
+    assert.equal(opts.targetUuid, 'design-1');
+    assert.equal(opts.extraIds.join(','), 'revision-1,revision-2,revision-3');
+    assert.equal(opts.sessions.length, 2);
+    assert.equal(typeof opts.chat.onToggle, 'function');
+    assert.equal(h.page.share.shared, false);
+    h.page.destroy();
+  });
+
+  it('gives the linked (session) entry no chat in the presence control', () => {
+    const h = makeLinkedDesignHarness();
+    h.page.init();
+    h.page.designId = 'design-1';
+    assert.equal(h.page._presenceOptions().chat, null);
     h.page.destroy();
   });
 });
@@ -449,7 +417,6 @@ describe('linked Design Studio viewer mode', () => {
     // hamburger (phone), back-to-gallery control, and the chat overlay
     assert.equal((html.match(/x-if="!linkedSessionMode"/g) || []).length, 3);
     assert.match(html, /data-testid="design-gallery-return"/);
-    assert.match(html, /data-testid="design-presence-pick-session"/);
     assert.match(css, /body\.route-design-linked #sidebar/);
     // 50a05f29 deliberately stopped hiding the voice capsule on linked pages.
     assert.doesNotMatch(css, /body\.route-design-linked \.voice-capsule/);

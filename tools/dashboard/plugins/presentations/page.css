@@ -320,3 +320,31 @@
     display: none;
   }
 }
+
+/* Library thumbnails: decks are designs, so the Design Studio renderer's
+   composite is the preview. */
+.present-deck-thumb {
+  display: block;
+  width: 100%;
+  margin: 0 0 0.5rem;
+  padding: 0;
+  border: 1px solid #1f2937;
+  border-radius: 0.5rem;
+  background: #0b1220;
+  overflow: hidden;
+  cursor: pointer;
+  aspect-ratio: 16 / 10;
+}
+
+.present-deck-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: top center;
+}
+
+.present-topbar-presence-host {
+  display: inline-flex;
+  align-items: center;
+}

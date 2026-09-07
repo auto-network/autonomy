@@ -110,11 +110,8 @@
         // Series (plugin catalog row): revisions with their creator sessions
         // and the design's share state. Feeds the presence dropdown.
         series: null,
-        shareState: 'idle',   // 'idle' | 'requesting' | 'awaiting' | 'error'
-        shareError: '',
-        _shareApprovalId: '',
         _seriesGen: 0,
-        _sharePollTimer: null,
+        _presence: null,
 
         // Primer state: 'idle' | 'working' | 'done'
         primerState: 'idle',
@@ -186,21 +183,6 @@
           var share = this.series && this.series.share;
           return share && typeof share === 'object' ? share : { shared: false, grants: [] };
         },
-        get primaryGrant() {
-          var grants = this.share.grants || [];
-          return grants.length ? grants[0] : null;
-        },
-        get shareExpiryText() {
-          var grant = this.primaryGrant;
-          if (!grant) return '';
-          if (!grant.expires_at) return 'no expiry';
-          var ms = grant.expires_at * 1000 - Date.now();
-          if (ms <= 0) return 'expired';
-          var days = Math.floor(ms / 86400000);
-          if (days >= 1) return 'expires in ' + days + (days === 1 ? ' day' : ' days');
-          var hours = Math.max(1, Math.floor(ms / 3600000));
-          return 'expires in ' + hours + (hours === 1 ? ' hour' : ' hours');
-        },
 
         // ── Lifecycle ─────────────────────────────────────────────────────
 
@@ -222,6 +204,7 @@
           window.addEventListener('popstate', this._popstateHandler);
 
           this.$watch('chatOpen', function (open) {
+            self._syncPresence();
             if (self.linkedSessionMode) return;
             localStorage.setItem('design-chatOpen-' + self.designId, open ? 'true' : 'false');
             // Mirror chat-open into the panel viewer so it switches between the
@@ -249,7 +232,7 @@
 
         destroy: function () {
           this._destroyed = true;
-          this._stopSharePoll();
+          if (this._presence) { this._presence.destroy(); this._presence = null; }
           document.body.classList.remove('route-design-linked');
           if (window._designPage === this) window._designPage = null;
           if (this._designSeriesCleanup) {
@@ -459,16 +442,45 @@
             var data = await res.json();
             if (this._destroyed || gen !== this._seriesGen) return;
             this.series = data;
-            if (this.share.shared && this.shareState === 'awaiting') {
-              this.shareState = 'idle';
-              this._stopSharePoll();
-            }
+            this._syncPresence();
           } catch (e) { /* the dropdown keeps its last known state */ }
         },
 
-        onPresenceToggle: function (event) {
-          var el = event && event.target;
-          if (el && el.open) this._loadSeries();
+        // The shared AssetPresence control owns the pill, the dropdown, and
+        // all sharing; this page only feeds it sessions and chat state.
+        _presenceOptions: function () {
+          var self = this;
+          var revisions = (this.series && this.series.revisions) || [];
+          return {
+            org: (this.design && this.design.org) || 'autonomy',
+            targetType: 'design',
+            targetUuid: this.designId,
+            extraIds: revisions.map(function (r) { return r && r.id; }),
+            title: (this.design && this.design.title) || 'Design',
+            noun: 'design',
+            sessions: this.presenceSessions,
+            chat: this.linkedSessionMode ? null : {
+              open: !!this.chatOpen,
+              connected: !!this.chatConnected,
+              onToggle: function (session) {
+                if (session && session.id) self.chatWithSession(session);
+                else self.toggleChat();
+              },
+            },
+            onOpenSession: function (session) { if (session) self.openPresenceSession(session); },
+          };
+        },
+
+        _syncPresence: function () {
+          if (this._destroyed || !window.AssetPresence) return;
+          var host = this.$refs && this.$refs.presenceHost;
+          if (!host) return;
+          if (this._presence && this._presence.el === host) {
+            this._presence.update(this._presenceOptions());
+            return;
+          }
+          if (this._presence) this._presence.destroy();
+          this._presence = window.AssetPresence.mount(host, this._presenceOptions());
         },
 
         formatPush: function (value) {
@@ -493,123 +505,6 @@
           if (!s || !s.id || this.linkedSessionMode) return;
           this.chatOpen = true;
           if (this._tmuxSession !== s.id) this._connectSession(s.id);
-        },
-
-        // Sharing rides the existing link_publish approval: nothing is minted
-        // until the operator approves in Central. The dropdown then polls the
-        // series until the grant shows up (or gives up quietly).
-        shareDesign: async function () {
-          if (this.shareState === 'requesting' || this.shareState === 'awaiting') return;
-          this.shareError = '';
-          this.shareState = 'requesting';
-          try {
-            var fetcher = (window.Autonomy && window.Autonomy.fetch) || window.fetch;
-            var res = await fetcher('/api/approvals', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                kind: 'link_publish',
-                session: 'dashboard-ui',
-                request: {
-                  org: (this.design && this.design.org) || 'autonomy',
-                  target_type: 'design',
-                  target_uuid: this.designId,
-                  meta: {},
-                },
-              }),
-            });
-            var data = await res.json().catch(function () { return {}; });
-            if (!res.ok || data.error) {
-              this.shareState = 'error';
-              this.shareError = data.error || ('Share request failed (HTTP ' + res.status + ')');
-              return;
-            }
-            this.shareState = 'awaiting';
-            this._shareApprovalId = data.id || '';
-            if (data.id && typeof window.openApprovalOverlay === 'function') {
-              try { window.openApprovalOverlay(data.id); } catch (e) { /* Central still has it */ }
-            }
-            this._startSharePoll();
-          } catch (e) {
-            this.shareState = 'error';
-            this.shareError = 'Share request failed: ' + (e.message || e);
-          }
-        },
-
-        // While awaiting: watch the approval itself (a decline resets the
-        // button) and the series (an approval shows up as a grant).
-        _startSharePoll: function () {
-          this._stopSharePoll();
-          var self = this;
-          var remaining = 40; // ~3 minutes at 4.5s
-          var tick = function () {
-            self._sharePollTimer = null;
-            if (self._destroyed || self.shareState !== 'awaiting') return;
-            self._checkShareApproval().then(function (decided) {
-              if (self._destroyed || self.shareState !== 'awaiting') return;
-              if (decided === 'declined') { self.shareState = 'idle'; return; }
-              return self._loadSeries();
-            }).then(function () {
-              if (self._destroyed || self.shareState !== 'awaiting') return;
-              if (--remaining <= 0) { self.shareState = 'idle'; return; }
-              self._sharePollTimer = setTimeout(tick, 4500);
-            });
-          };
-          this._sharePollTimer = setTimeout(tick, 4500);
-        },
-
-        _checkShareApproval: async function () {
-          if (!this._shareApprovalId) return 'pending';
-          try {
-            var fetcher = (window.Autonomy && window.Autonomy.fetch) || window.fetch;
-            var res = await fetcher('/api/approvals/' + encodeURIComponent(this._shareApprovalId));
-            if (!res.ok) return res.status === 404 ? 'declined' : 'pending';
-            var data = await res.json();
-            var result = data && data.result;
-            if (!result) return 'pending';
-            return result.approved ? 'approved' : 'declined';
-          } catch (e) {
-            return 'pending';
-          }
-        },
-
-        cancelShareWait: function () {
-          this._stopSharePoll();
-          this._shareApprovalId = '';
-          this.shareState = 'idle';
-        },
-
-        _stopSharePoll: function () {
-          if (this._sharePollTimer) { clearTimeout(this._sharePollTimer); this._sharePollTimer = null; }
-        },
-
-        shareLink: async function () {
-          var grant = this.primaryGrant;
-          if (!grant || !grant.url) return;
-          var title = (this.design && this.design.title) || 'Design';
-          try {
-            if (navigator.share) { await navigator.share({ title: title, url: grant.url }); return; }
-          } catch (e) { if (e && e.name === 'AbortError') return; }
-          try {
-            await navigator.clipboard.writeText(grant.url);
-            this.shareError = '';
-          } catch (e) {
-            this.shareError = 'Could not copy the link: ' + grant.url;
-          }
-        },
-
-        openShareLink: function () {
-          var grant = this.primaryGrant;
-          if (!grant || !grant.url) return;
-          window.open(grant.url, '_blank', 'noopener');
-        },
-
-        manageShare: function () {
-          var grant = this.primaryGrant;
-          var org = (this.design && this.design.org) || 'autonomy';
-          if (window.AutonomyOrgSettings && typeof window.AutonomyOrgSettings.open === 'function') {
-            window.AutonomyOrgSettings.open(org, { screen: 'published-links', focus: grant ? grant.token : '' });
-          }
         },
 
         // ── Screenshot ────────────────────────────────────────────────────
@@ -742,8 +637,9 @@
 
         toggleChat: function () {
           if (this.linkedSessionMode) return;
-          if (this.chatOpen) { this.chatOpen = false; return; }
+          if (this.chatOpen) { this.chatOpen = false; this._syncPresence(); return; }
           this.openSessionPicker();
+          this._syncPresence();
         },
 
         formatPushedAt: function (value) {

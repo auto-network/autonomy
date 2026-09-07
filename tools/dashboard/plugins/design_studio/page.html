@@ -369,7 +369,7 @@
           </template>
 
           <!-- Right actions: close chat (when open), capture, then presence + sharing -->
-          <div class="flex items-center gap-1 flex-shrink-0">
+          <div class="design-toolbar-actions flex items-center gap-1 flex-shrink-0">
             <button type="button"
                     data-testid="design-chat-close"
                     class="design-linked-capture"
@@ -391,79 +391,7 @@
               <template x-if="captureState === 'error'"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 5l8 8M13 5l-8 8"></path></svg></template>
             </button>
 
-            <details class="design-topbar-presence design-viewer-presence"
-                     data-testid="design-presence"
-                     :class="presenceLive ? 'is-live' : ''"
-                     @toggle="onPresenceToggle($event)">
-              <summary :title="presenceSummaryTitle" :aria-label="presenceSummaryTitle" class="design-presence-pill">
-                <span class="design-presence-stack">
-                  <template x-for="s in presenceSessions.slice(0, 3)" :key="s.id">
-                    <span class="design-presence-avatar" :class="s.live ? 'is-live' : ''" :title="s.label + (s.live ? ' (live)' : '')" x-text="s.initial"></span>
-                  </template>
-                  <span class="design-presence-avatar is-empty" x-show="presenceSessions.length === 0" title="No session has pushed a revision">·</span>
-                </span>
-                <span class="design-presence-count" x-show="presenceSessions.length > 3" x-text="'+' + (presenceSessions.length - 3)"></span>
-                <span class="design-presence-sharemark" x-show="share.shared" title="Shared by link">↗</span>
-              </summary>
-              <div class="design-presence-menu" data-testid="design-presence-menu">
-                <div class="design-presence-section">Sessions on this design</div>
-                <template x-if="presenceSessions.length === 0">
-                  <div class="design-presence-empty">No session has pushed a revision yet</div>
-                </template>
-                <template x-for="s in presenceSessions" :key="s.id">
-                  <div class="design-presence-row" :class="s.live ? 'is-live' : ''" data-testid="design-presence-session">
-                    <span class="design-topbar-avatar is-row" x-text="s.initial"></span>
-                    <a class="design-presence-copy" :href="s.href" @click.prevent="openPresenceSession(s)">
-                      <strong x-text="s.label"></strong>
-                      <span x-text="(s.live ? 'live · ' : '') + 'last push ' + formatPush(s.last_push) + ' · ' + s.count + (s.count === 1 ? ' rev' : ' revs')"></span>
-                    </a>
-                    <button type="button" class="design-presence-action" x-show="!linkedSessionMode && s.live"
-                            :title="'Chat with ' + s.label" :aria-label="'Chat with ' + s.label"
-                            @click.prevent="chatWithSession(s)">
-                      <svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 3h14v9H6l-4 4V3z"/></svg>
-                    </button>
-                  </div>
-                </template>
-
-                <button type="button" class="design-presence-share is-quiet" data-testid="design-presence-pick-session"
-                        x-show="!linkedSessionMode"
-                        @click.prevent="toggleChat()"
-                        x-text="chatOpen ? 'Close chat' : (chatConnected ? 'Open chat' : 'Chat with a session…')"></button>
-                <div class="design-presence-section">Sharing</div>
-                <template x-if="share.shared">
-                  <div class="design-presence-row is-share" data-testid="design-share-row">
-                    <span class="design-topbar-avatar is-row is-share">↗</span>
-                    <span class="design-presence-copy">
-                      <strong>Shared by link</strong>
-                      <span x-text="shareExpiryText"></span>
-                    </span>
-                    <span class="design-presence-share-actions">
-                      <button type="button" class="design-presence-action" title="Share link" aria-label="Share link" @click.prevent="shareLink()">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V3M7 8l5-5 5 5"/><path d="M5 12v8h14v-8"/></svg>
-                      </button>
-                      <button type="button" class="design-presence-action" title="Open link in a new tab" aria-label="Open link in a new tab" @click.prevent="openShareLink()">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 5h5v5M19 5l-9 9"/><path d="M19 13v6H5V5h6"/></svg>
-                      </button>
-                      <button type="button" class="design-presence-action" title="Manage share in Published Links" aria-label="Manage share in Published Links" @click.prevent="manageShare()" data-testid="design-share-manage">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
-                      </button>
-                    </span>
-                  </div>
-                </template>
-                <template x-if="!share.shared">
-                  <button type="button" class="design-presence-share" data-testid="design-share-request"
-                          :disabled="shareState === 'requesting' || shareState === 'awaiting'"
-                          @click.prevent="shareDesign()">
-                    <span x-text="shareState === 'requesting' ? 'Requesting…' : shareState === 'awaiting' ? 'Awaiting approval' : shareState === 'error' ? 'Share failed — retry' : 'Share design by link'"></span>
-                  </button>
-                </template>
-                <div class="design-presence-note" x-show="shareState === 'awaiting'">
-                  Approve the publish request in Central; the link appears here once it is minted.
-                  <button type="button" class="design-presence-link" data-testid="design-share-cancel" @click.prevent="cancelShareWait()">Cancel</button>
-                </div>
-                <div class="design-presence-note is-error" x-show="shareError" x-text="shareError"></div>
-              </div>
-            </details>
+            <div data-testid="design-presence" x-ref="presenceHost" class="design-presence-host"></div>
           </div>
         </div>
 
