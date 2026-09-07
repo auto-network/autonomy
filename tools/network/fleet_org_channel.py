@@ -61,6 +61,31 @@ ORG_HELLO_MAX_SKEW_S = 300
 #: Grace for a peer admitted under an older adopted checkpoint to re-prove
 #: under the newer one (the registry's MEMBERSHIP_REPROVE_DEADLINE_S).
 REPROVE_DEADLINE_S = 5.0
+ORG_EPOCH_DOMAIN = b"autonomy.network.fleet-sync.org-epoch.v1\n"
+ORG_PEER_STATE_DOMAIN = b"autonomy.network.fleet-sync.org-peer-state.v1\n"
+
+
+def org_epoch(org: str, seq: int | None) -> str:
+    """The org scope's wire epoch (design §2): the membership checkpoint
+    seq this node's own proof is verified under, bound to the org, in the
+    64-hex shape every roster_epoch field and validator already accepts.
+    It rides the org scope's pull request, done frame and checkpoint
+    manifest in place of the personal roster hash, which two members of one
+    organization compute differently by construction. Observable state,
+    never authority: admission is the hello's."""
+    return hashlib.sha256(
+        ORG_EPOCH_DOMAIN + canonical_json({"org": org, "seq": seq})
+    ).hexdigest()
+
+
+def org_state_key(org: str) -> str:
+    """The org scope's fleet_sync_peer_state key (design §2): the org id
+    alone, so per-peer state is keyed by (machine pair, org) and a
+    membership change -- join, leave, removal, rekey -- neither changes the
+    key nor forces a re-checkpoint."""
+    return hashlib.sha256(
+        ORG_PEER_STATE_DOMAIN + canonical_json({"org": org})
+    ).hexdigest()
 
 ORG_CLIENT_FIELDS = frozenset({
     "v", "org", "machine_pub", "eph_pub", "persona_cert", "membership_proof",
@@ -330,6 +355,11 @@ class OrgFleetAuthenticator:
         )
 
     # -- per-message authorization and membership change -----------------
+
+    def newest_adopted_seq(self) -> int | None:
+        """The newest membership checkpoint seq this node has adopted (what
+        its own hello proves under); None before the seed."""
+        return self._newest_seq()
 
     def admitted(self, machine_pub: str) -> AdmittedPeer | None:
         return self._admitted.get(machine_pub)

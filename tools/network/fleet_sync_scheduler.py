@@ -1159,6 +1159,27 @@ class SQLiteFleetSyncStore:
         finally:
             conn.close()
 
+    def peer_machines(self, epoch: str) -> list[str]:
+        """Machines with a peer-state row under *epoch* (the org scope's
+        state key: every co-member machine that has pulled or been served
+        here), for the served-ack prune's acknowledgement set."""
+        import sqlite3 as _sqlite3
+
+        if not Path(self.path).exists():
+            return []
+        conn = _sqlite3.connect(f"file:{self.path}?mode=ro", uri=True)
+        try:
+            return sorted(
+                str(row[0]) for row in conn.execute(
+                    "SELECT DISTINCT machine_public_key FROM fleet_sync_peer_state "
+                    "WHERE roster_epoch=?", (epoch,),
+                )
+            )
+        except _sqlite3.Error:
+            return []
+        finally:
+            conn.close()
+
     def peer_last_success(self) -> dict[str, int]:
         """Newest recorded pull success per peer, across epochs, for
         stalest-first ranking. Absent machines simply have no entry."""
@@ -1605,6 +1626,29 @@ class FleetSyncScheduler:
             self._roster_snapshot, self.config.personal_root_pub
         )
 
+    def _scope_epochs(self, scope: str) -> tuple[str, str]:
+        """``(wire epoch, peer-state key)`` for one scope.
+
+        Personal, and an org scope with no org channel on this machine:
+        both are the personal roster hash, as always. An org scope with an
+        org channel (auto-coea3, design §2): the wire epoch is
+        org_epoch(org, newest adopted seq) and the peer-state key is
+        org_state_key(org) -- one key per (machine pair, org), unchanged
+        by membership changes, the same on every one of this machine's
+        pulls and serves of that scope whichever hello admitted the peer.
+        """
+        if scope != "personal":
+            channel = self._org_channels().get(scope)
+            if channel is not None:
+                from tools.network.fleet_org_channel import org_epoch, org_state_key
+
+                return (
+                    org_epoch(channel.org, channel.newest_adopted_seq()),
+                    org_state_key(channel.org),
+                )
+        epoch = self._current_epoch()
+        return epoch, epoch
+
     def _recover_interrupted_installs(self) -> None:
         """Consume any crashed install's marker and backup before syncing.
 
@@ -1803,7 +1847,7 @@ class FleetSyncScheduler:
         ) = decode_pull_request(message)
         self._confine_scope(scope, admitted_org)
         store = await asyncio.to_thread(self._store_for, scope)
-        epoch = self._current_epoch()
+        epoch, state_epoch = self._scope_epochs(scope)
         record_here = telemetry_stats is None
         stats = telemetry_stats if telemetry_stats is not None else {}
         stats.setdefault("bytes_sent", 0)
@@ -1973,7 +2017,7 @@ class FleetSyncScheduler:
                     try:
                         await asyncio.to_thread(
                             store.record_served_ack,
-                            peer_pub, epoch, cursor,
+                            peer_pub, state_epoch, cursor,
                         )
                     except Exception:
                         logger.warning(
@@ -2142,7 +2186,7 @@ class FleetSyncScheduler:
                 # task and the generator ends now.
                 deferred_after_done = True
                 self._spawn_after_serve(
-                    store=store, scope=scope, epoch=epoch, peer_pub=peer_pub,
+                    store=store, scope=scope, epoch=state_epoch, peer_pub=peer_pub,
                     telemetry=(
                         dict(
                             channel=telemetry_channel, direction="serve",
@@ -2237,10 +2281,23 @@ class FleetSyncScheduler:
                 self._roster_snapshot,
                 anchor_root_pub=self.config.personal_root_pub,
             )
-            others = [
+            others = {
                 pub for pub in active
                 if pub != self.authenticator.machine_pub
-            ]
+            }
+            if scope != "personal" and scope in self._org_channels():
+                # An org scope is also pulled by co-members' machines,
+                # which no personal roster names. Every machine with a
+                # peer-state row under the org key must have acknowledged
+                # before a row is retired; otherwise a lagging co-member
+                # would be served deltas with a hole it cannot detect. A
+                # co-member that pulled once and vanished therefore holds
+                # retirement (storage, not correctness); which machines an
+                # org store may stop waiting for is an open point on
+                # auto-coea3.
+                others |= set(await asyncio.to_thread(store.peer_machines, epoch))
+                others.discard(self.authenticator.machine_pub)
+            others = sorted(others)
             started = time.monotonic()
             journal_rows, transaction_rows = await asyncio.to_thread(
                 store.prune_acknowledged, others, epoch
@@ -2566,7 +2623,7 @@ class FleetSyncScheduler:
         the org hello (auto-coea3) instead of the personal roster's; the
         request, the stream and the apply are otherwise identical."""
         store = await asyncio.to_thread(self._store_for, scope)
-        epoch = self._current_epoch()
+        epoch, state_epoch = self._scope_epochs(scope)
         authenticator = org_channel if org_channel is not None else self.authenticator
         channel = None
         sent = 0
@@ -2679,7 +2736,7 @@ class FleetSyncScheduler:
                 raise last_error
 
             await asyncio.to_thread(
-                store.record_peer, machine_pub, epoch, online=True
+                store.record_peer, machine_pub, state_epoch, online=True
             )
             resume_trail: Sequence[tuple[str, str, int]] = ()
             if self.config.resume_cursor is not None:
@@ -2755,7 +2812,7 @@ class FleetSyncScheduler:
                     await asyncio.to_thread(
                         store.record_peer,
                         machine_pub,
-                        epoch,
+                        state_epoch,
                         online=True,
                         transactions_applied=applied,
                         peer_watermark=peer_watermark,
@@ -2818,7 +2875,7 @@ class FleetSyncScheduler:
                     )
                     with contextlib.suppress(Exception):
                         await asyncio.to_thread(
-                            store.record_peer, machine_pub, epoch,
+                            store.record_peer, machine_pub, state_epoch,
                             online=False, error="schema_mismatch",
                             peer_built_at=peer_built_at,
                         )
@@ -3019,7 +3076,7 @@ class FleetSyncScheduler:
                             )
                             return
                         await self._install_direct_checkpoint(
-                            checkpoint_stage, scope, machine_pub, epoch
+                            checkpoint_stage, scope, machine_pub, state_epoch
                         )
                         # No receipt recording here: install_checkpoint's
                         # _record_checkpoint_receipt already records it
@@ -3052,7 +3109,7 @@ class FleetSyncScheduler:
             await asyncio.to_thread(
                 store.record_peer,
                 machine_pub,
-                epoch,
+                state_epoch,
                 online=False,
                 bytes_sent=sent,
                 bytes_received=received,
@@ -3097,7 +3154,7 @@ class FleetSyncScheduler:
                 await asyncio.to_thread(
                     store.record_peer,
                     machine_pub,
-                    epoch,
+                    state_epoch,
                     online=False,
                     bytes_sent=sent,
                     bytes_received=received,
@@ -3172,7 +3229,7 @@ class FleetSyncScheduler:
                 await asyncio.to_thread(
                     store.record_peer,
                     machine_pub,
-                    epoch,
+                    state_epoch,
                     online=False,
                     bytes_sent=sent,
                     bytes_received=received,
