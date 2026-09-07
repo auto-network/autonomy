@@ -406,6 +406,10 @@ def run_bd(
     try:
         from tools.data_paths import beads_client_env
         env = {**os.environ, **beads_client_env(beads_dir)}
+        # Same default the dashboard's run_cli applies: without it bd searches
+        # the cwd (/app in the Compose dispatcher) for a tracker, logs "no beads
+        # database found" every cycle and falls back to the API path.
+        env.setdefault("BEADS_DIR", str(DATA_ROOT / ".beads"))
         result = subprocess.run(
             ["bd"] + args,
             capture_output=True, text=True, timeout=timeout,
