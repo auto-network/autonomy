@@ -233,7 +233,10 @@ def test_incremental_prune_converges_to_the_one_shot_result(tmp_path: Path, monk
             )
             calls += 1
             totals[0] += j; totals[1] += t
-            if (j, t) == (0, 0) or calls > 200:
+            # A pass sweeps one window and remembers where it stopped; a
+            # window with nothing retirable is not the end. The sweep is
+            # complete when the cursor has wrapped to 0.
+            if inc_server.prune_cursor() == 0 or calls > 200:
                 break
         assert calls > 3, "the budget must have split the work across calls"
         assert tuple(totals) == (one_journal, one_tx)

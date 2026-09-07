@@ -33,7 +33,8 @@ IGNORED_TABLES = {
     # Fleet-sync's own local catalog/progress state.  These are absent before
     # preparation and present afterward, but never cross to another machine.
     "fleet_sync_catalog", "fleet_sync_origins",
-    "fleet_sync_peer_state", "fleet_sync_state", "fleet_sync_transactions",
+    "fleet_sync_peer_state", "fleet_sync_prune_cursor", "fleet_sync_state",
+    "fleet_sync_transactions",
 }
 
 
