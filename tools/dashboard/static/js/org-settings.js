@@ -128,7 +128,7 @@
     var forSlug = state.slug;
     var forScreen = screen.id;
     Promise.resolve()
-      .then(function () { return screen.render(state.slug); })
+      .then(function () { return screen.render(state.slug, { focus: state.focus }); })
       .then(function (node) {
         // The reader may have moved on while this was in flight. Rendering
         // into a pane that now shows something else is how a stale answer
@@ -140,6 +140,14 @@
           var c = screen.count();
           setCount(forScreen, c && c.text, c && c.tone);
         }
+        if (state.focus) {
+          var target = node.querySelector && node.querySelector('[data-share="' + state.focus + '"]');
+          state.focus = '';
+          if (target) {
+            target.classList.add('orgset-focus');
+            if (target.scrollIntoView) target.scrollIntoView({ block: 'center' });
+          }
+        }
       })
       .catch(function (err) {
         if (state.slug !== forSlug || state.screenId !== forScreen) return;
@@ -148,11 +156,17 @@
       });
   }
 
-  function open(slug) {
+  // open(slug, {screen, focus}) — `screen` selects a registered screen id
+  // (default: the first), `focus` is an opaque hint the screen may honour
+  // once rendered (Published Links scrolls to `[data-share="<focus>"]`).
+  function open(slug, opts) {
     if (!slug) return;
+    opts = opts || {};
     close();
     state.slug = slug;
-    state.screenId = screens.length ? screens[0].id : null;
+    state.focus = opts.focus || '';
+    var wanted = screens.filter(function (s) { return s.id === opts.screen; })[0];
+    state.screenId = wanted ? wanted.id : (screens.length ? screens[0].id : null);
 
     host = el('div', 'orgset-overlay');
     host.setAttribute('data-testid', 'org-settings');

@@ -118,6 +118,17 @@ function makeLinkedDesignHarness(search = '?from_session=auto-linked', viewport 
   let navigatedTo = '';
   let historyPath = '';
   let captureInits = 0;
+  let opened = '';
+  const fetches = [];
+  const series = viewport.series || {
+    design_id: 'design-1',
+    revisions: [
+      {id: 'revision-1', creator_session_id: 'auto-other', creator_session_label: 'Other', created_at: '2026-09-01 10:00:00'},
+      {id: 'revision-2', creator_session_id: 'auto-linked', creator_session_label: 'Linked', created_at: '2026-09-06 10:00:00'},
+      {id: 'revision-3', creator_session_id: 'auto-linked', creator_session_label: 'Linked', created_at: '2026-09-07 01:00:00'},
+    ],
+    share: viewport.share || {shared: false, grants: []},
+  };
   const visualViewport = {
     width: viewport.width || 390,
     height: viewport.height || 844,
@@ -188,7 +199,18 @@ function makeLinkedDesignHarness(search = '?from_session=auto-linked', viewport 
     cancelAnimationFrame() {},
     addEventListener() {},
     removeEventListener() {},
-    fetch: async () => ({ok: true, json: async () => fullDesign}),
+    fetch: async (url, init) => {
+      fetches.push({url, init});
+      if (String(url).startsWith('/api/design-studio/designs/')) {
+        return {ok: true, json: async () => series};
+      }
+      if (String(url) === '/api/approvals') {
+        return {ok: true, json: async () => ({id: 'central-approval-1'})};
+      }
+      return {ok: true, json: async () => fullDesign};
+    },
+    navigator: {},
+    open(url) { opened = url; },
   };
   sandbox.window = sandbox;
   vm.createContext(sandbox);
@@ -209,8 +231,71 @@ function makeLinkedDesignHarness(search = '?from_session=auto-linked', viewport 
     get navigatedTo() { return navigatedTo; },
     get historyPath() { return historyPath; },
     get captureInits() { return captureInits; },
+    get opened() { return opened; },
+    fetches,
+    sandbox,
   };
 }
+
+describe('design viewer presence and sharing', () => {
+  it('lists every session that pushed a revision, live first, newest first', async () => {
+    const h = makeLinkedDesignHarness('');
+    h.page.designId = 'design-1';
+    h.page.design = {org: 'autonomy', title: 'Linked design'};
+    await h.page._loadSeries();
+    const sessions = h.page.presenceSessions;
+    assert.equal(sessions.map((s) => s.id).join(','), 'auto-linked,auto-other');
+    assert.equal(sessions[0].count, 2);
+    assert.equal(sessions[0].last_push, '2026-09-07 01:00:00');
+    assert.equal(sessions[0].live, true);
+    assert.equal(sessions[0].label, 'Linked session');
+    assert.equal(sessions[0].href, '/session/autonomy/auto-linked');
+    assert.equal(sessions[1].live, true);   // the harness registry lists both as live
+    assert.equal(sessions[1].label, 'Other session');
+    assert.equal(h.page.presenceLive, true);
+    assert.match(h.page.presenceSummaryTitle, /2 sessions, 2 live · not shared/);
+    h.page.openPresenceSession(sessions[1]);
+    assert.equal(h.navigatedTo, '/session/autonomy/auto-other');
+    h.page.destroy();
+  });
+
+  it('requests a link_publish approval for the design and waits for the grant', async () => {
+    const h = makeLinkedDesignHarness('');
+    h.page.designId = 'design-1';
+    h.page.design = {org: 'autonomy', title: 'Linked design'};
+    let overlay = '';
+    h.sandbox.openApprovalOverlay = (id) => { overlay = id; };
+    await h.page.shareDesign();
+    const post = h.fetches.find((f) => f.url === '/api/approvals');
+    const body = JSON.parse(post.init.body);
+    assert.equal(body.kind, 'link_publish');
+    assert.equal(JSON.stringify(body.request), JSON.stringify({org: 'autonomy', target_type: 'design', target_uuid: 'design-1', meta: {}}));
+    assert.equal(overlay, 'central-approval-1');
+    assert.equal(h.page.shareState, 'awaiting');
+    assert.equal(await h.page.shareDesign(), undefined); // no double request while awaiting
+    assert.equal(h.fetches.filter((f) => f.url === '/api/approvals').length, 1);
+    h.page.destroy();
+  });
+
+  it('exposes the newest grant: expiry text, open in a new tab, manage in Published Links', async () => {
+    const grant = {token: 'tok-1', url: 'https://relay.auto.network/l/tok-1', expires_at: Math.floor(Date.now() / 1000) + 3 * 86400};
+    const h = makeLinkedDesignHarness('', {share: {shared: true, grants: [grant]}});
+    h.page.designId = 'design-1';
+    h.page.design = {org: 'autonomy', title: 'Linked design'};
+    await h.page._loadSeries();
+    assert.equal(h.page.share.shared, true);
+    assert.equal(h.page.primaryGrant.token, 'tok-1');
+    assert.match(h.page.shareExpiryText, /expires in (2|3) days/);
+    assert.match(h.page.presenceSummaryTitle, /shared by link/);
+    h.page.openShareLink();
+    assert.equal(h.opened, grant.url);
+    let openedSettings = null;
+    h.sandbox.AutonomyOrgSettings = {open(slug, opts) { openedSettings = {slug, opts}; }};
+    h.page.manageShare();
+    assert.equal(JSON.stringify(openedSettings), JSON.stringify({slug: 'autonomy', opts: {screen: 'published-links', focus: 'tok-1'}}));
+    h.page.destroy();
+  });
+});
 
 describe('portable session contributions', () => {
   it('loads a linked Design Studio action, refreshes it live, and opens it', async () => {
@@ -313,7 +398,8 @@ describe('linked Design Studio viewer mode', () => {
   it('renders only the linked rail and iframe while focused', () => {
     const html = fs.readFileSync(DESIGN_PAGE_HTML, 'utf8');
     const css = fs.readFileSync(DESIGN_PAGE_CSS, 'utf8');
-    assert.match(html, /data-testid="design-linked-toolbar"/);
+    assert.match(html, /data-testid="design-toolbar"/);
+    assert.match(html, /data-testid="design-presence"/);
     assert.match(html, /data-testid="design-linked-return"/);
     assert.match(html, /data-testid="design-linked-capture"/);
     assert.equal((html.match(/x-if="!linkedSessionMode"/g) || []).length, 2);

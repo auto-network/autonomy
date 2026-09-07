@@ -253,70 +253,47 @@
   <template x-if="state === 'ready'">
     <div style="display:flex;flex-direction:column;flex:1;min-height:0">
 
-      <!-- Focused shell used only when a linked session opens its design. -->
-      <div class="design-linked-toolbar"
-           data-testid="design-linked-toolbar"
-           x-show="linkedSessionMode">
-        <a class="design-linked-return"
-           data-testid="design-linked-return"
-           :href="linkedSessionHref"
-           :title="'Back to ' + linkedSessionLabel"
-           :aria-label="'Back to session ' + linkedSessionLabel"
-           @click.prevent="returnToSession()">
-          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M10.5 3.25 5.75 8l4.75 4.75"></path>
-          </svg>
-          <span>Session</span>
-        </a>
-        <div class="design-linked-identity">
-          <span class="design-linked-presence"
-                :class="linkedSessionLive ? 'is-live' : ''"
-                :title="linkedSessionLive ? linkedSessionLabel + ' is active' : linkedSessionLabel + ' is not active'"
-                :aria-label="linkedSessionLive ? linkedSessionLabel + ' is active' : linkedSessionLabel + ' is not active'"
-                role="status"></span>
-          <span class="design-linked-title"
-                data-testid="design-linked-title"
-                x-text="design?.title || 'Design'"></span>
-        </div>
-        <button class="design-linked-capture"
-                data-testid="design-linked-capture"
-                type="button"
-                @click="captureScreenshot()"
-                :disabled="captureState === 'working'"
-                :class="'capture-' + captureState"
-                :title="captureState === 'working' ? 'Capturing screenshot' : 'Capture screenshot'"
-                aria-label="Capture screenshot">
-          <template x-if="captureState === 'idle'"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3.5" width="14" height="11" rx="1.5"></rect><circle cx="9" cy="9" r="3"></circle></svg></template>
-          <template x-if="captureState === 'working'"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="9" cy="9" r="7" stroke-dasharray="34 12"></circle></svg></template>
-          <template x-if="captureState === 'success'"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9l4 4 6-7"></path></svg></template>
-          <template x-if="captureState === 'error'"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 5l8 8M13 5l-8 8"></path></svg></template>
-        </button>
-      </div>
-
-      <!-- ═══ UNIFIED TOOLBAR — from Design Studio experiment a8ee8212 ═══ -->
-      <template x-if="!linkedSessionMode">
-        <div data-testid="exp-toolbar"
-             class="flex flex-wrap items-center px-3 bg-[#1a2332] border-b border-[#1e293b] min-h-[48px] select-none"
-             style="flex-shrink:0;z-index:10">
+      <!-- ═══ ONE TOOLBAR for both entry paths ═══
+           Linked entry (from the session viewer) swaps the hamburger for a
+           back-to-session control; everything else — title, revision
+           navigation, capture, presence + sharing — is the same. -->
+      <div data-testid="design-toolbar"
+           class="design-toolbar flex flex-wrap items-center px-2 md:px-3 select-none"
+           :class="linkedSessionMode ? 'is-linked' : ''"
+           style="flex-shrink:0;z-index:10">
 
         <!-- Row 1 -->
         <div class="flex items-center gap-2 w-full h-12">
 
-          <!-- Hamburger: shown mobile, hidden desktop -->
-          <button data-testid="toolbar-hamburger"
-                  @click="window.toggleSidebar()"
-                  class="md:hidden w-9 h-11 flex items-center justify-center bg-transparent border-none text-gray-500 cursor-pointer rounded-lg flex-shrink-0"
-                  title="Toggle sidebar">
-            <svg class="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><line x1="2" y1="4" x2="14" y2="4"/><line x1="2" y1="8" x2="14" y2="8"/><line x1="2" y1="12" x2="14" y2="12"/></svg>
-          </button>
+          <template x-if="linkedSessionMode">
+            <a class="design-linked-return"
+               data-testid="design-linked-return"
+               :href="linkedSessionHref"
+               :title="'Back to ' + linkedSessionLabel"
+               :aria-label="'Back to session ' + linkedSessionLabel"
+               @click.prevent="returnToSession()">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M10.5 3.25 5.75 8l4.75 4.75"></path>
+              </svg>
+              <span>Session</span>
+            </a>
+          </template>
+          <template x-if="!linkedSessionMode">
+            <button data-testid="toolbar-hamburger"
+                    @click="window.toggleSidebar()"
+                    class="md:hidden w-9 h-11 flex items-center justify-center bg-transparent border-none text-gray-500 cursor-pointer rounded-lg flex-shrink-0"
+                    title="Toggle sidebar">
+              <svg class="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><line x1="2" y1="4" x2="14" y2="4"/><line x1="2" y1="8" x2="14" y2="8"/><line x1="2" y1="12" x2="14" y2="12"/></svg>
+            </button>
+          </template>
 
           <!-- Design title -->
           <span data-testid="toolbar-title"
-                class="flex-1 min-w-0 text-sm font-medium text-gray-400 truncate"
+                class="flex-1 min-w-0 text-sm font-medium text-gray-300 truncate"
                 :style="toolbarState === 'PICKER' ? 'color:#a5b4fc;font-weight:600' : ''"
                 x-text="toolbarState === 'PICKER' ? 'Select Session' : (design?.title || 'Design')"></span>
 
-          <!-- Iter nav — desktop only -->
+          <!-- Revision nav — desktop position -->
           <template x-if="toolbar.showIterNav">
             <div data-testid="toolbar-iter-desktop"
                  class="hidden md:flex flex-1 justify-center items-center gap-0.5 flex-shrink-0">
@@ -339,36 +316,93 @@
             </div>
           </template>
 
-          <!-- Right actions -->
+          <!-- Right actions: capture, then presence + sharing -->
           <div class="flex items-center gap-1 flex-shrink-0">
-            <!-- Capture — desktop only -->
-            <template x-if="toolbar.captureVisible">
-              <button data-testid="toolbar-capture"
-                      @click="captureScreenshot()" :disabled="captureState === 'working'"
-                      class="hidden md:flex w-11 h-11 items-center justify-center bg-transparent border-none cursor-pointer rounded-lg transition-all"
-                      :class="'capture-' + captureState"
-                      title="Capture screenshot">
-                <template x-if="captureState === 'idle'"><svg class="w-[18px] h-[18px]" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3.5" width="14" height="11" rx="1.5"/><circle cx="9" cy="9" r="3"/></svg></template>
-                <template x-if="captureState === 'working'"><svg class="w-[18px] h-[18px]" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="9" cy="9" r="7" stroke-dasharray="34 12"/></svg></template>
-                <template x-if="captureState === 'success'"><svg class="w-[18px] h-[18px]" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9l4 4 6-7"/></svg></template>
-                <template x-if="captureState === 'error'"><svg class="w-[18px] h-[18px]" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 5l8 8M13 5l-8 8"/></svg></template>
-              </button>
-            </template>
-
-            <!-- Chat toggle -->
-            <button data-testid="toolbar-chat-toggle"
-                    @click="chatOpen = !chatOpen"
-                    class="w-11 h-11 flex items-center justify-center bg-transparent border-none cursor-pointer rounded-lg transition-all"
-                    :class="toolbar.chatIconClass" title="Toggle chat">
-              <svg class="w-[18px] h-[18px]" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 3h14v9H6l-4 4V3z"/></svg>
+            <button data-testid="design-linked-capture"
+                    type="button"
+                    @click="captureScreenshot()" :disabled="captureState === 'working'"
+                    class="design-linked-capture"
+                    :class="'capture-' + captureState"
+                    :title="captureState === 'working' ? 'Capturing screenshot' : 'Capture screenshot'"
+                    aria-label="Capture screenshot">
+              <template x-if="captureState === 'idle'"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3.5" width="14" height="11" rx="1.5"></rect><circle cx="9" cy="9" r="3"></circle></svg></template>
+              <template x-if="captureState === 'working'"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="9" cy="9" r="7" stroke-dasharray="34 12"></circle></svg></template>
+              <template x-if="captureState === 'success'"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9l4 4 6-7"></path></svg></template>
+              <template x-if="captureState === 'error'"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 5l8 8M13 5l-8 8"></path></svg></template>
             </button>
+
+            <details class="design-topbar-presence design-viewer-presence"
+                     data-testid="design-presence"
+                     :class="presenceLive ? 'is-live' : ''"
+                     @toggle="onPresenceToggle($event)">
+              <summary :title="presenceSummaryTitle" :aria-label="presenceSummaryTitle">
+                <span class="design-topbar-live-dot"></span>
+                <span class="design-topbar-avatars">
+                  <template x-for="s in presenceSessions.slice(0, 3)" :key="s.id">
+                    <span class="design-topbar-avatar" :class="s.live ? 'is-live' : ''" :title="s.label" x-text="s.initial"></span>
+                  </template>
+                </span>
+                <span class="design-topbar-badge" :class="share.shared ? 'is-shared' : ''" x-text="share.shared ? '↗' : presenceSessions.length"></span>
+              </summary>
+              <div class="design-presence-menu" data-testid="design-presence-menu">
+                <div class="design-presence-section">Sessions on this design</div>
+                <template x-if="presenceSessions.length === 0">
+                  <div class="design-presence-empty">No session has pushed a revision yet</div>
+                </template>
+                <template x-for="s in presenceSessions" :key="s.id">
+                  <div class="design-presence-row" :class="s.live ? 'is-live' : ''" data-testid="design-presence-session">
+                    <span class="design-topbar-avatar is-row" x-text="s.initial"></span>
+                    <a class="design-presence-copy" :href="s.href" @click.prevent="openPresenceSession(s)">
+                      <strong x-text="s.label"></strong>
+                      <span x-text="(s.live ? 'live · ' : '') + 'last push ' + formatPush(s.last_push) + ' · ' + s.count + (s.count === 1 ? ' rev' : ' revs')"></span>
+                    </a>
+                    <button type="button" class="design-presence-action" x-show="!linkedSessionMode && s.live"
+                            :title="'Chat with ' + s.label" :aria-label="'Chat with ' + s.label"
+                            @click.prevent="chatWithSession(s)">
+                      <svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 3h14v9H6l-4 4V3z"/></svg>
+                    </button>
+                  </div>
+                </template>
+
+                <div class="design-presence-section">Sharing</div>
+                <template x-if="share.shared">
+                  <div class="design-presence-row is-share" data-testid="design-share-row">
+                    <span class="design-topbar-avatar is-row is-share">↗</span>
+                    <span class="design-presence-copy">
+                      <strong>Shared by link</strong>
+                      <span x-text="shareExpiryText"></span>
+                    </span>
+                    <span class="design-presence-share-actions">
+                      <button type="button" class="design-presence-action" title="Share link" aria-label="Share link" @click.prevent="shareLink()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V3M7 8l5-5 5 5"/><path d="M5 12v8h14v-8"/></svg>
+                      </button>
+                      <button type="button" class="design-presence-action" title="Open link in a new tab" aria-label="Open link in a new tab" @click.prevent="openShareLink()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 5h5v5M19 5l-9 9"/><path d="M19 13v6H5V5h6"/></svg>
+                      </button>
+                      <button type="button" class="design-presence-action" title="Manage share in Published Links" aria-label="Manage share in Published Links" @click.prevent="manageShare()" data-testid="design-share-manage">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+                      </button>
+                    </span>
+                  </div>
+                </template>
+                <template x-if="!share.shared">
+                  <button type="button" class="design-presence-share" data-testid="design-share-request"
+                          :disabled="shareState === 'requesting' || shareState === 'awaiting'"
+                          @click.prevent="shareDesign()">
+                    <span x-text="shareState === 'requesting' ? 'Requesting…' : shareState === 'awaiting' ? 'Awaiting approval' : shareState === 'error' ? 'Share failed — retry' : 'Share design by link'"></span>
+                  </button>
+                </template>
+                <div class="design-presence-note" x-show="shareState === 'awaiting'">Approve the publish request in Central; the link appears here once it is minted.</div>
+                <div class="design-presence-note is-error" x-show="shareError" x-text="shareError"></div>
+              </div>
+            </details>
           </div>
         </div>
 
-        <!-- Row 2a: iteration nav — mobile only -->
+        <!-- Row 2a: revision nav — mobile position -->
         <template x-if="toolbar.showIterNav">
           <div data-testid="toolbar-iter-mobile"
-               class="flex md:hidden items-center w-full h-12 pb-0.5 justify-center relative">
+               class="flex md:hidden items-center w-full h-10 pb-0.5 justify-center relative">
             <div class="flex items-center gap-0.5">
               <button @click="prevIteration()"
                       class="w-7 h-7 flex items-center justify-center bg-transparent border-none cursor-pointer rounded-md text-gray-500 hover:bg-gray-800 hover:text-gray-400 disabled:text-gray-700 disabled:cursor-default transition-all"
@@ -387,21 +421,6 @@
                 <svg class="w-3.5 h-3.5" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 2l5 5-5 5"/><path d="M8 2l5 5-5 5"/></svg>
               </button>
             </div>
-            <!-- Capture — mobile position -->
-            <template x-if="toolbar.captureVisible">
-              <div class="absolute right-0 flex items-center">
-                <button data-testid="toolbar-capture-mobile"
-                        @click="captureScreenshot()" :disabled="captureState === 'working'"
-                        class="w-11 h-11 flex items-center justify-center bg-transparent border-none cursor-pointer rounded-lg transition-all"
-                        :class="'capture-' + captureState"
-                        title="Capture screenshot">
-                  <template x-if="captureState === 'idle'"><svg class="w-[18px] h-[18px]" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3.5" width="14" height="11" rx="1.5"/><circle cx="9" cy="9" r="3"/></svg></template>
-                  <template x-if="captureState === 'working'"><svg class="w-[18px] h-[18px]" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="9" cy="9" r="7" stroke-dasharray="34 12"/></svg></template>
-                  <template x-if="captureState === 'success'"><svg class="w-[18px] h-[18px]" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9l4 4 6-7"/></svg></template>
-                  <template x-if="captureState === 'error'"><svg class="w-[18px] h-[18px]" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 5l8 8M13 5l-8 8"/></svg></template>
-                </button>
-              </div>
-            </template>
           </div>
         </template>
 
@@ -437,8 +456,7 @@
           </div>
         </template>
 
-        </div>
-      </template>
+      </div>
 
       <!-- Design surface (State 1: visible when chat closed) -->
       <div class="design-surface"
