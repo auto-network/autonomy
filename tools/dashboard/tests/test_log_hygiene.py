@@ -21,16 +21,19 @@ class _Clock:
         return self.t
 
 
-def test_state_logger_emits_on_new_change_and_interval(caplog):
+def test_state_logger_emits_per_key_on_new_and_change_only(caplog):
     clock = _Clock()
-    scl = log_throttle.StateChangeLogger(interval_s=60.0, clock=clock)
+    scl = log_throttle.StateChangeLogger(
+        interval_s=60.0, clock=clock,
+        summary="proxy still behind ({repeats} drops in the last {interval:.0f}s)",
+    )
     log = logging.getLogger("test.throttle")
     with caplog.at_level(logging.INFO, logger="test.throttle"):
         assert scl.emit(log, logging.WARNING, "k", "behind", "behind by %d", 5)
         for n in range(10):                       # same state inside the interval: quiet
             assert not scl.emit(log, logging.WARNING, "k", "behind", "behind by %d", n)
-        clock.t = 61.0                            # interval elapsed: one count line
-        assert scl.emit(log, logging.WARNING, "k", "behind", "behind by %d", 99)
+        clock.t = 61.0                            # interval elapsed: ONE aggregated line
+        assert not scl.emit(log, logging.WARNING, "k", "behind", "behind by %d", 99)
         clock.t = 70.0
         assert not scl.emit(log, logging.WARNING, "k", "behind", "behind by %d", 1)
         assert scl.emit(log, logging.INFO, "k", "current", "caught up")   # state change
@@ -38,9 +41,33 @@ def test_state_logger_emits_on_new_change_and_interval(caplog):
     msgs = [r.getMessage() for r in caplog.records]
     assert msgs == [
         "behind by 5",
-        "behind by 99 (×10 in the last 60s)",
+        "proxy still behind (11 drops in the last 60s)",
         "caught up (previous state repeated 1×)",
     ]
+
+
+def test_state_logger_aggregates_many_keys_into_one_line(caplog):
+    """~20 preserved worktrees must cost one line a minute, not twenty."""
+    clock = _Clock()
+    scl = log_throttle.StateChangeLogger(
+        interval_s=60.0, clock=clock,
+        summary="worktree preserved: {keys} worktree(s) unchanged ({repeats} pass(es) in the last {interval:.0f}s)",
+    )
+    log = logging.getLogger("test.throttle.many")
+    with caplog.at_level(logging.INFO, logger="test.throttle.many"):
+        for i in range(20):                       # first observation: one line each
+            assert scl.emit(log, logging.WARNING, ("s", f"/wt/{i}"), "dirty", "preserved %s", i)
+        for _ in range(3):                        # three quiet cleanup passes
+            for i in range(20):
+                assert not scl.emit(log, logging.WARNING, ("s", f"/wt/{i}"), "dirty", "preserved %s", i)
+        clock.t = 61.0
+        scl.emit(log, logging.WARNING, ("s", "/wt/0"), "dirty", "preserved %s", 0)
+    msgs = [r.getMessage() for r in caplog.records]
+    assert len(msgs) == 21
+    assert msgs[-1] == "worktree preserved: 20 worktree(s) unchanged (61 pass(es) in the last 60s)"
+    # Nothing accumulated since → no summary at the next interval.
+    clock.t = 122.0
+    assert scl.take_summary() is None
 
 
 def test_state_logger_keys_are_independent():
