@@ -613,6 +613,93 @@ def test_collect_claude_usage_no_session_dependency(graph_db_env, monkeypatch):
     assert keys == ["claude:org:org-X"]
 
 
+def _stored_reading(updated_at: str, *, long_resets_at: int) -> dict:
+    """A persisted ok reading whose 7d window is still open."""
+    return {
+        "harness": "claude", "identity_id": "org:org-X", "status": "ok",
+        "source": "oauth_usage", "updated_at": updated_at,
+        "windows": {
+            "short": {"used_percent": 74.0, "window_minutes": 300,
+                      "resets_at": long_resets_at - 6 * 86400},
+            "long": {"used_percent": 48.0, "window_minutes": 10080,
+                     "resets_at": long_resets_at},
+        },
+    }
+
+
+def test_collect_claude_usage_refetches_when_stored_reading_is_older_than_interval(
+    graph_db_env, monkeypatch,
+):
+    """Regression for 2026-09-06: skipping the /usage call while the stored
+    reading was merely *valid* (7d window not yet reset) froze both accounts
+    at one reading for the entire week. Validity is a lower bound for the
+    strip to keep showing; it is not a reason to stop polling."""
+    import datetime as _dt
+    import time as _time
+
+    _install_credentials(graph_db_env, alias="default",
+                         org_uuid="org-X", access_token="tok-default")
+    now = int(_time.time())
+    taken = _dt.datetime.fromtimestamp(now - 23 * 3600, _dt.timezone.utc)
+    stored = _stored_reading(taken.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                             long_resets_at=now + 20 * 3600)
+    assert hus.reading_still_valid(stored, now_epoch=now)
+    monkeypatch.setattr(server, "_existing_usage_payload", lambda key: stored)
+
+    fetch_calls: list[str] = []
+
+    def _fake_fetch(token):
+        fetch_calls.append(token)
+        return _CLAUDE_USAGE_BODY, {}
+
+    monkeypatch.setattr(server, "_fetch_claude_oauth_usage", _fake_fetch)
+
+    payloads = server._collect_claude_usage_payloads([], "2026-09-07T19:00:00Z")
+
+    assert fetch_calls == ["tok-default"]
+    assert [k for k, _ in payloads] == ["claude:org:org-X"]
+
+
+def test_collect_claude_usage_skips_fetch_when_stored_reading_is_fresh(
+    graph_db_env, monkeypatch,
+):
+    """The restart-storm guard: a reading younger than one poll interval is
+    reused rather than re-fetched."""
+    import datetime as _dt
+    import time as _time
+
+    _install_credentials(graph_db_env, alias="default",
+                         org_uuid="org-X", access_token="tok-default")
+    now = int(_time.time())
+    taken = _dt.datetime.fromtimestamp(now - 60, _dt.timezone.utc)
+    stored = _stored_reading(taken.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                             long_resets_at=now + 20 * 3600)
+    monkeypatch.setattr(server, "_existing_usage_payload", lambda key: stored)
+    monkeypatch.setattr(
+        server, "_fetch_claude_oauth_usage",
+        lambda token: (_ for _ in ()).throw(AssertionError("must not call /usage")),
+    )
+
+    payloads = server._collect_claude_usage_payloads([], "2026-09-07T19:00:00Z")
+
+    assert payloads == []
+
+
+def test_reading_is_fresh_is_age_based_not_validity_based():
+    now = 1_788_808_743
+    recent = {"status": "ok", "updated_at": "2026-09-07T19:10:00Z",
+              "windows": {"long": {"resets_at": now + 86400}}}
+    old = {"status": "ok", "updated_at": "2026-09-06T19:52:30Z",
+           "windows": {"long": {"resets_at": now + 86400}}}
+    assert hus.reading_is_fresh(recent, max_age_seconds=900, now_epoch=now)
+    assert not hus.reading_is_fresh(old, max_age_seconds=900, now_epoch=now)
+    assert hus.reading_still_valid(old, now_epoch=now)
+    unavailable = dict(recent, status="unavailable")
+    assert not hus.reading_is_fresh(unavailable, max_age_seconds=900, now_epoch=now)
+    assert not hus.reading_is_fresh(None, max_age_seconds=900, now_epoch=now)
+    assert not hus.reading_is_fresh({"status": "ok"}, max_age_seconds=900, now_epoch=now)
+
+
 # ── auto-10lsv: declarative schema migration ───────────────────
 
 

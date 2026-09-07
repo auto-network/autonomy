@@ -15782,19 +15782,21 @@ def _collect_claude_usage_payloads(
                 alias=alias,
             )
             continue
-        # A persisted reading stays true until its window resets (usage is
-        # monotonic within a window -- see reading_still_valid). Re-querying
-        # the vendor while that reading still holds spends quota to relearn
-        # what we already stored, and on a restart the poller ticks once
-        # immediately -- so a restart storm becomes a burst of /usage calls,
-        # which is exactly what gets the account rate-limited. Read the stored
-        # setting first and skip the call while it is valid; only fetch once
-        # the reading has reset or is absent/unavailable.
+        # Restart-storm guard: the poller ticks once immediately on start, so
+        # a burst of restarts becomes a burst of /usage calls, which is what
+        # gets the account rate-limited. Skip the call only while the stored
+        # reading is younger than one poll interval. Do NOT skip merely
+        # because the reading is still *valid* (its window has not reset):
+        # usage rises inside the window, and skipping on validity froze both
+        # accounts at one reading for the whole 7-day window (2026-09-06).
         existing = _existing_usage_payload(row_key)
-        if _harness_usage_settings.reading_still_valid(existing):
+        if _harness_usage_settings.reading_is_fresh(
+            existing, max_age_seconds=_HARNESS_USAGE_POLL_INTERVAL,
+        ):
             logger.debug(
-                "claude harness usage: persisted reading still valid for "
-                "org=%s alias=%r; skipping /usage fetch", org_uuid, alias,
+                "claude harness usage: persisted reading younger than the "
+                "poll interval for org=%s alias=%r; skipping /usage fetch",
+                org_uuid, alias,
             )
             continue
         logger.info(
