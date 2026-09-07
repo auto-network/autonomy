@@ -452,11 +452,18 @@ def bound_persona_label(org: str, persona_pub: str) -> str | None:
     advertised the route and five DNS-01 challenges were published under the
     bound label while ACME validated the new one, tripping the rate limit.
     """
+    earliest: tuple[str, str] | None = None
     for member in _reservation_members(org):
         payload = getattr(member, "payload", None) or {}
-        if payload.get("persona_pub") == persona_pub and payload.get("persona_label"):
-            return payload["persona_label"]
-    return None
+        if payload.get("persona_pub") != persona_pub or not payload.get("persona_label"):
+            continue
+        # The registry bound the label of the FIRST registration; mirror that
+        # by created_at, never by iteration order (a released misbound row
+        # from tonight must not win over the label bound weeks ago).
+        stamp = str(payload.get("created_at") or "")
+        if earliest is None or stamp < earliest[0]:
+            earliest = (stamp, payload["persona_label"])
+    return earliest[1] if earliest else None
 
 
 def _reservation_members(org: str):

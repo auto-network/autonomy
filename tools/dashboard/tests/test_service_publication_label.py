@@ -43,3 +43,15 @@ def test_reserve_origin_payload_prefers_bound_label_over_display_name(monkeypatc
     except Exception:
         pass  # projection of the stubbed write may fail; the payload is what matters
     assert calls.get("payload", {}).get("persona_label") == "persona-77827e972ba4c37d4215"
+
+
+def test_bound_label_is_the_earliest_reservation_not_a_later_misbound_one(monkeypatch):
+    class _Old:
+        payload = {"persona_pub": "ab" * 32, "persona_label": "persona-77827e972ba4c37d4215",
+                   "app_label": "old", "created_at": "2026-08-30T17:32:50.000Z", "state": "released"}
+
+    class _Tonight:
+        payload = {"persona_pub": "ab" * 32, "persona_label": "jeremy-77827e972ba4c37d4215",
+                   "app_label": "bakeoff", "created_at": "2026-09-07T05:23:57.991Z", "state": "released"}
+    monkeypatch.setattr(sp, "_reservation_members", lambda org: [_Tonight(), _Old()])
+    assert sp.bound_persona_label("autonomy", "ab" * 32) == "persona-77827e972ba4c37d4215"
