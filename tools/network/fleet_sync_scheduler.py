@@ -1176,6 +1176,13 @@ class SQLiteFleetSyncStore:
         finally:
             conn.close()
 
+    def drain_pending_signatures(self) -> int:
+        conn, catalog = self._open()
+        try:
+            return catalog.drain_pending_signatures()
+        finally:
+            conn.close()
+
     def drain_attachments(self, entries) -> int:
         from tools.network.fleet_sync.blob_transport import drain_backlog
 
@@ -2680,6 +2687,20 @@ class FleetSyncScheduler:
             except Exception:
                 logger.warning(
                     "fleet attachment drain failed", exc_info=True
+                )
+            try:
+                scope_store = await asyncio.to_thread(self._store_for, scope)
+                cleared = await asyncio.to_thread(
+                    scope_store.drain_pending_signatures
+                )
+                if cleared:
+                    logger.info(
+                        "fleet sync scope %r: %d signed row(s) verified after "
+                        "their organization genesis arrived", scope, cleared,
+                    )
+            except Exception:
+                logger.warning(
+                    "fleet signature drain failed", exc_info=True
                 )
         except asyncio.CancelledError:
             with contextlib.suppress(Exception):

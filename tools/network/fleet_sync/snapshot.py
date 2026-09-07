@@ -88,13 +88,21 @@ def _logical_address(
             hashlib.sha256(content.encode("utf-8")).hexdigest(),
         )
     if policy.table == "settings":
-        return (
+        address: tuple[CanonicalValue, ...] = (
             row["set_id"],
             row["schema_revision"],
             row["key"],
             row["publication_state"],
             _setting_role(row),
         )
+        # One slot per signer (graph://21a0da9e-1c2, auto-y068i): a signed
+        # row's address carries its terminal persona, so two members'
+        # rows at one natural key are two logical rows on every store. An
+        # unsigned row keeps the five-part address, byte-for-byte as before.
+        persona = row.get("terminal_persona")
+        if persona is not None:
+            address = address + (persona,)
+        return address
     return tuple(row[column] for column in policy.key)
 
 

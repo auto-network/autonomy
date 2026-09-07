@@ -933,6 +933,10 @@ def install_checkpoint(
                 ("attachments", (attachment_id,), "attachment_bytes_unavailable")
                 for attachment_id in report.pending_attachments
             ]
+            unrealized += [
+                (table, tuple(address), reason)
+                for table, address, reason in report.rejected_signatures
+            ]
             skip_count = len(unrealized)
             skip_blobs = frozenset(
                 encode_value([table, list(address)])
