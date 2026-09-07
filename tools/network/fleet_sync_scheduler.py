@@ -58,7 +58,7 @@ SUPPORTED_PROTOCOL_VERSIONS = frozenset({3, 4})
 _REQUEST_FIELDS = frozenset({
     "v", "op", "roster_epoch", "resume", "compat",
 })
-_REQUEST_OPTIONAL_FIELDS = frozenset({"scope", "bootstrap", "accept_checkpoint"})
+_REQUEST_OPTIONAL_FIELDS = frozenset({"scope", "bootstrap", "accept_checkpoint", "watermarks"})
 FILE_MAGIC = b"FSB1"
 _REFUSAL_FIELDS = frozenset({"v", "kind", "digest"})
 _DONE_FIELDS = frozenset(
@@ -514,8 +514,16 @@ def encode_pull_request(
     bootstrap: bool = False,
     version: int = FLEET_SYNC_PROTOCOL_VERSION,
     accept_checkpoint: bool = True,
+    watermarks: Mapping[str, int] | None = None,
 ) -> bytes:
     """Ask for every journal transaction after a content-addressed position.
+
+    ``watermarks`` (design of record graph://1155b8f4-8cf) is the puller's
+    per-author map ``{author_pub: max timestamp_ns held}``. A server that
+    receives it serves, per author, only transactions newer than the
+    puller's watermark for that author and never the puller's own writes --
+    so each write crosses the wire to each machine once, whichever server
+    it comes from. The trail stays for servers that predate the field.
 
     ``accept_checkpoint=False`` (sent only when False, so the historical
     request bytes are unchanged) tells the server this store holds a
@@ -555,13 +563,24 @@ def encode_pull_request(
         body["bootstrap"] = True
     if not accept_checkpoint:
         body["accept_checkpoint"] = False
+    if watermarks is not None:
+        if len(watermarks) > MAX_WATERMARK_AUTHORS:
+            raise FleetSyncProtocolError("fleet sync watermark map exceeds bound")
+        body["watermarks"] = {
+            _require_hex64(author, "fleet sync watermark author"): int(value)
+            for author, value in sorted(watermarks.items())
+        }
     return canonical_json(body)
+
+
+#: Bound on the per-author map: a roster, not the world.
+MAX_WATERMARK_AUTHORS = 4096
 
 
 def decode_pull_request(
     raw: bytes,
-) -> tuple[str, tuple[tuple[str, str, int], ...], str, str, bool, int, bool]:
-    """-> (epoch, resume trail, compat, scope, bootstrap, version, accept_checkpoint)."""
+) -> tuple[str, tuple[tuple[str, str, int], ...], str, str, bool, int, bool, dict[str, int] | None]:
+    """-> (epoch, resume trail, compat, scope, bootstrap, version, accept_checkpoint, watermarks)."""
     try:
         value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
@@ -589,6 +608,19 @@ def decode_pull_request(
     accept_checkpoint = value.get("accept_checkpoint", True)
     if not isinstance(accept_checkpoint, bool):
         raise FleetSyncProtocolError("fleet sync accept_checkpoint flag must be bool")
+    watermarks = value.get("watermarks")
+    if watermarks is not None:
+        if (
+            not isinstance(watermarks, dict)
+            or len(watermarks) > MAX_WATERMARK_AUTHORS
+            or any(
+                not isinstance(k, str) or len(k) != 64
+                or isinstance(v, bool) or not isinstance(v, int) or v < 0
+                for k, v in watermarks.items()
+            )
+        ):
+            raise FleetSyncProtocolError("fleet sync watermark map is malformed")
+        watermarks = {str(k): int(v) for k, v in watermarks.items()}
     if value["op"] != "pull":
         raise FleetSyncProtocolError("unsupported fleet sync operation")
     epoch = _require_hex64(value["roster_epoch"], "fleet sync roster_epoch")
@@ -599,7 +631,7 @@ def decode_pull_request(
     return epoch, tuple(
         decode_breadcrumb(entry, "fleet sync resume breadcrumb")
         for entry in resume
-    ), compat, scope, bootstrap, version, accept_checkpoint
+    ), compat, scope, bootstrap, version, accept_checkpoint, watermarks
 
 
 def encode_authored(item: AuthoredMutation, *, transaction_operations: int) -> bytes:
@@ -909,6 +941,43 @@ class SQLiteFleetSyncStore:
         finally:
             conn.close()
 
+    def author_watermarks(self) -> dict[str, int]:
+        conn, catalog = self._open()
+        try:
+            return catalog.author_watermarks()
+        finally:
+            conn.close()
+
+    def author_list(self) -> list[str]:
+        conn, catalog = self._open()
+        try:
+            return catalog.author_list()
+        finally:
+            conn.close()
+
+    def next_transaction_for_author(self, incarnation, after_timestamp_ns, after_transaction_id=None):
+        conn, catalog = self._open()
+        try:
+            return catalog.next_transaction_for_author(
+                incarnation, after_timestamp_ns, after_transaction_id
+            )
+        finally:
+            conn.close()
+
+    def implied_ack_ref(self, watermarks) -> int:
+        conn, catalog = self._open()
+        try:
+            return catalog.implied_ack_ref(watermarks)
+        finally:
+            conn.close()
+
+    def retired_above_watermarks(self, watermarks, exclude=None) -> list[str]:
+        conn, catalog = self._open()
+        try:
+            return catalog.retired_above_watermarks(watermarks, exclude)
+        finally:
+            conn.close()
+
     def oldest_journal_ref(self) -> int | None:
         """The smallest transaction ref that still has journal frames."""
         import sqlite3 as _sqlite3
@@ -1207,6 +1276,61 @@ def _transaction_identity(item: AuthoredMutation) -> tuple[str, str, int]:
     )
 
 
+class _JournalPager:
+    """Legacy paging: every retained transaction after one local position."""
+
+    def __init__(self, store, cursor: int):
+        self.store = store
+        self.cursor = cursor
+
+    def next(self):
+        page = self.store.next_transaction(self.cursor)
+        if page is None:
+            return None
+        self.cursor, items = page
+        return self.cursor, items
+
+
+class _AuthorPager:
+    """Per-author paging: for each author other than the puller, every
+    retained transaction with timestamp_ns above the puller's watermark for
+    that author, in (timestamp_ns, transaction_id) order. Each call opens a
+    short-lived store connection, as the legacy pager does."""
+
+    def __init__(self, store, watermarks, exclude_origin: str | None):
+        self.store = store
+        self.watermarks = dict(watermarks)
+        self.exclude = exclude_origin
+        self._authors: list[str] | None = None
+        self._index = 0
+        self._position: tuple[int, str | None] | None = None
+        self.newest_ref = 0
+
+    def next(self):
+        if self._authors is None:
+            self._authors = [
+                author for author in self.store.author_list()
+                if author != self.exclude
+            ]
+        while self._index < len(self._authors):
+            author = self._authors[self._index]
+            if self._position is None:
+                self._position = (int(self.watermarks.get(author, 0)), None)
+            timestamp, transaction_id = self._position
+            page = self.store.next_transaction_for_author(
+                author, timestamp, transaction_id
+            )
+            if page is None:
+                self._index += 1
+                self._position = None
+                continue
+            ref, timestamp, transaction_id, items = page
+            self._position = (timestamp, transaction_id)
+            self.newest_ref = max(self.newest_ref, ref)
+            return ref, items
+        return None
+
+
 class FleetSyncScheduler:
     """One direct listener plus bounded, roster-filtered outbound pulls."""
 
@@ -1424,7 +1548,7 @@ class FleetSyncScheduler:
             return self._blob_response(message, peer_pub)
         (
             _requested_epoch, resume_trail, peer_digest, scope, bootstrap,
-            protocol_version, accept_checkpoint,
+            protocol_version, accept_checkpoint, watermarks,
         ) = decode_pull_request(message)
         store = await asyncio.to_thread(self._store_for, scope)
         epoch = self._current_epoch()
@@ -1469,7 +1593,16 @@ class FleetSyncScheduler:
                 # from backup re-serves its divergence window instead of
                 # honouring a cursor into journal rows that no longer exist.
                 cursor = 0
-                if resume_trail:
+                if watermarks is not None:
+                    # Per-author mode: the map proves the prefix it covers,
+                    # which feeds the same served-ack floor the trail did.
+                    # The ack is exactly what the map proves consumed (may be
+                    # 0); the decision below never snapshots a non-bootstrap
+                    # puller, so no position hack is needed for it.
+                    cursor = await asyncio.to_thread(
+                        store.implied_ack_ref, watermarks
+                    )
+                elif resume_trail:
                     cursor = await asyncio.to_thread(
                         store.resume_ref, resume_trail
                     )
@@ -1607,14 +1740,28 @@ class FleetSyncScheduler:
                 # frontier past what the peer actually installed.
                 if floor_ref is not None:
                     cursor = max(cursor, floor_ref)
+                if watermarks is not None and not served_checkpoint:
+                    retired = await asyncio.to_thread(
+                        store.retired_above_watermarks, watermarks, peer_pub
+                    )
+                    if retired:
+                        logger.warning(
+                            "fleet sync peer %s scope %r: retained history for "
+                            "%d author(s) starts above the peer's watermark "
+                            "(%s); the retired prefix cannot be replayed",
+                            peer_pub[:12], scope, len(retired),
+                            ",".join(a[:12] for a in retired),
+                        )
+                    pager = _AuthorPager(store, watermarks, peer_pub)
+                else:
+                    pager = _JournalPager(store, cursor)
                 while True:
                     self.authenticator.authorize(peer_pub)
-                    page = await asyncio.to_thread(
-                        store.next_transaction, cursor
-                    )
+                    page = await asyncio.to_thread(pager.next)
                     if page is None:
                         break
-                    cursor, items = page
+                    ref, items = page
+                    cursor = max(cursor, ref)
                     stats["transactions"] += 1
                     operation_count = len(items)
                     if protocol_version >= 4 and items:
@@ -2049,10 +2196,12 @@ class FleetSyncScheduler:
             founded_rows = await asyncio.to_thread(
                 founded_ledger_rows, self._scope_paths()[scope]
             )
+            watermarks = await asyncio.to_thread(store.author_watermarks)
             request = encode_pull_request(
                 epoch, compat=local_digest, resume=resume_trail,
                 scope=scope, bootstrap=bootstrap, version=protocol_version,
                 accept_checkpoint=founded_rows == 0,
+                watermarks=watermarks,
             )
             sent += len(request)
             await channel.send_message(request)
