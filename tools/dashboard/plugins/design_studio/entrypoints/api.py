@@ -66,21 +66,6 @@ def _safe_revision_id(raw: str) -> str:
     return rev_id
 
 
-def _screenshot_path(revision_id: str) -> Path | None:
-    rev_id = _safe_revision_id(revision_id)
-    if not rev_id:
-        return None
-    from tools.data_paths import DATA_ROOT
-
-    base = (DATA_ROOT / "experiments").resolve()
-    candidate = (base / rev_id / "screenshot.png").resolve()
-    try:
-        candidate.relative_to(base)
-    except ValueError:
-        return None
-    return candidate
-
-
 def _thumbnail_url(revision_id: str) -> str:
     rev_id = _safe_revision_id(revision_id)
     if rev_id and rev_id in _screenshot_revision_ids():
@@ -88,7 +73,14 @@ def _thumbnail_url(revision_id: str) -> str:
     return ""
 
 
+def _clear_thumbnail_cache() -> None:
+    _screenshot_cache["revision_ids"] = None
+    _screenshot_cache["expires_at"] = 0.0
+
+
 def _screenshot_revision_ids() -> set[str]:
+    """Revisions with any catalog image: the headless composite
+    (thumbnail.jpg) or the operator's in-browser capture (screenshot.png)."""
     if os.environ.get("DASHBOARD_MOCK"):
         return set()
     now = time.monotonic()
@@ -98,14 +90,27 @@ def _screenshot_revision_ids() -> set[str]:
     from tools.data_paths import DATA_ROOT
 
     base = DATA_ROOT / "experiments"
-    revision_ids = {
-        path.parent.name
-        for path in base.glob("*/screenshot.png")
-        if _safe_revision_id(path.parent.name)
-    } if base.exists() else set()
+    revision_ids: set[str] = set()
+    if base.exists():
+        for pattern in ("*/thumbnail.jpg", "*/screenshot.png"):
+            revision_ids.update(
+                path.parent.name
+                for path in base.glob(pattern)
+                if _safe_revision_id(path.parent.name)
+            )
     _screenshot_cache["revision_ids"] = revision_ids
     _screenshot_cache["expires_at"] = now + _SCREENSHOT_CACHE_TTL_SECONDS
     return set(revision_ids)
+
+
+def _form_factor(revision_id: str) -> str:
+    """desktop | mobile | both from the renderer's metadata, else ''."""
+    if os.environ.get("DASHBOARD_MOCK"):
+        return ""
+    from tools.dashboard import design_thumbnails
+
+    meta = design_thumbnails.read_meta(revision_id)
+    return str((meta or {}).get("form_factor") or "")
 
 
 def _mock_design_rows() -> list[dict]:
@@ -367,11 +372,14 @@ def _series_from_rows(rows: list[dict]) -> list[dict]:
         first_created = min(created_values) if created_values else ""
         latest_created = max(created_values) if created_values else ""
         thumbnail_url = str(latest.get("thumbnail_url") or "")
+        thumbnail_revision_id = str(latest.get("id") or "") if thumbnail_url else ""
         if not thumbnail_url:
             for revision in reversed(revisions):
                 thumbnail_url = str(revision.get("thumbnail_url") or _thumbnail_url(str(revision.get("id") or "")))
                 if thumbnail_url:
+                    thumbnail_revision_id = str(revision.get("id") or "")
                     break
+        form_factor = _form_factor(thumbnail_revision_id) if thumbnail_revision_id else ""
         design_org = next(
             (r.get("org") for r in reversed(revisions) if r.get("org")), None)
         series.append({
@@ -393,6 +401,8 @@ def _series_from_rows(rows: list[dict]) -> list[dict]:
             "org": latest.get("org"),
             "creator_session_count": len(set(creators)),
             "thumbnail_url": thumbnail_url,
+            "thumbnail_revision_id": thumbnail_revision_id,
+            "form_factor": form_factor,
         })
     return series
 
@@ -470,10 +480,13 @@ async def get_revision_thumbnail(request: Request):
     # Org-scope: another org's thumbnail is the same 404 as a missing one.
     if api_auth.caller_org_scope_hides(request, _design_org(revision_id)):
         return JSONResponse({"error": "thumbnail not found"}, status_code=404)
-    path = _screenshot_path(revision_id)
+    from tools.dashboard import design_thumbnails
+
+    path = design_thumbnails.thumbnail_path(revision_id)
     if not path or not path.is_file():
         return JSONResponse({"error": "thumbnail not found"}, status_code=404)
-    return FileResponse(path, media_type="image/png")
+    media_type = "image/jpeg" if path.suffix == ".jpg" else "image/png"
+    return FileResponse(path, media_type=media_type)
 
 
 async def update_revision_metadata(request: Request) -> JSONResponse:
@@ -571,6 +584,48 @@ async def update_design_status(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "design": series})
 
 
+async def render_revision_thumbnail(request: Request) -> JSONResponse:
+    """Queue a headless thumbnail render for one revision (no LLM)."""
+    revision_id = request.path_params["revision_id"]
+    if api_auth.caller_org_scope_hides(request, _design_org(revision_id)):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if not _safe_revision_id(revision_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    from tools.dashboard import design_thumbnails
+
+    queued = design_thumbnails.queue.enqueue(revision_id)
+    status = design_thumbnails.queue.status()
+    if not status["available"]:
+        return JSONResponse(
+            {"error": "thumbnail renderer unavailable: agent-browser is not installed on this host",
+             "status": status},
+            status_code=503,
+        )
+    if not status["running"]:
+        return JSONResponse(
+            {"error": "thumbnail renderer is not running", "status": status},
+            status_code=503,
+        )
+    return JSONResponse({"ok": True, "queued": queued, "status": status}, status_code=202)
+
+
+async def render_status(request: Request) -> JSONResponse:
+    from tools.dashboard import design_thumbnails
+
+    return JSONResponse(design_thumbnails.queue.status())
+
+
+async def render_backfill(request: Request) -> JSONResponse:
+    """Queue every design whose latest revision has no composed thumbnail."""
+    denied = api_auth.require_global_api_authority(request)
+    if denied is not None:
+        return denied
+    from tools.dashboard import design_thumbnails
+
+    queued = design_thumbnails.queue.enqueue_missing()
+    return JSONResponse({"ok": True, "queued": queued, "status": design_thumbnails.queue.status()}, status_code=202)
+
+
 def badge_counter() -> int:
     try:
         return _summarize(_all_series()).get("pending_series", 0)
@@ -634,4 +689,7 @@ routes: list[Route] = [
     Route("/api/design-studio/designs/{design_id}", get_design_series, methods=["GET"]),
     Route("/api/design-studio/revisions/{revision_id}/metadata", update_revision_metadata, methods=["PATCH", "PUT"]),
     Route("/api/design-studio/revisions/{revision_id}/thumbnail", get_revision_thumbnail, methods=["GET"]),
+    Route("/api/design-studio/revisions/{revision_id}/render", render_revision_thumbnail, methods=["POST"]),
+    Route("/api/design-studio/render/status", render_status, methods=["GET"]),
+    Route("/api/design-studio/render/backfill", render_backfill, methods=["POST"]),
 ]
