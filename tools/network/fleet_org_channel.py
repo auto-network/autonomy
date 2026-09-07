@@ -40,7 +40,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -183,6 +183,7 @@ class OrgFleetAuthenticator:
         newest_adopted_seq: Callable[[], int | None],
         now: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
+        adopted_members_for: Callable[[int], Iterable[str] | None] | None = None,
     ) -> None:
         if not isinstance(org, str) or not org:
             raise HandshakeError("org must be a non-empty string")
@@ -194,6 +195,10 @@ class OrgFleetAuthenticator:
         self._proof_for = membership_proof_for
         self._adopted_for = adopted_checkpoint_for
         self._newest_seq = newest_adopted_seq
+        #: Optional: the persona set of an adopted checkpoint (the members
+        #: behind its members_root), for readers that filter hints such as
+        #: reachability rows by membership. None: unknown to this node.
+        self._members_for = adopted_members_for
         self._now = now
         self._monotonic = monotonic
         #: machine_pub -> AdmittedPeer for peers this endpoint admitted.
@@ -360,6 +365,19 @@ class OrgFleetAuthenticator:
         """The newest membership checkpoint seq this node has adopted (what
         its own hello proves under); None before the seed."""
         return self._newest_seq()
+
+    def is_member(self, persona_pub: str) -> bool | None:
+        """Whether *persona_pub* is in the newest adopted member set; None
+        when this node cannot tell (no member list, no adoption yet)."""
+        if self._members_for is None:
+            return None
+        newest = self._newest_seq()
+        if newest is None:
+            return None
+        members = self._members_for(int(newest))
+        if members is None:
+            return None
+        return persona_pub in set(members)
 
     def admitted(self, machine_pub: str) -> AdmittedPeer | None:
         return self._admitted.get(machine_pub)

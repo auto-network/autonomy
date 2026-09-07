@@ -83,8 +83,13 @@ class Member:
         self.org = org
         self.members = list(members)
         self.entries = (enroll(self.root, machine_pub=self.machine.public_hex),)
-        self.personal = tmp / f"{name}-personal.db"
-        self.alpha = tmp / f"{name}-alpha.db"
+        # Layout mirrors a machine's data root: the org database lives in
+        # an orgs/ directory, so AUTONOMY_ORGS_DIR can name it for the
+        # settings write path (reachability rows) when a test needs to.
+        self.personal = tmp / name / "personal.db"
+        self.orgs_dir = tmp / name / "orgs"
+        self.orgs_dir.mkdir(parents=True, exist_ok=True)
+        self.alpha = self.orgs_dir / "alpha.db"
         _prepare(self.personal, self.machine)
         _prepare(self.alpha, self.machine)
         # Authored-then-deleted local state keeps the org scope on the delta
@@ -93,11 +98,14 @@ class Member:
         _delete(self.alpha, f"{name}-seed")
         self.seq = 0
         self.adopted = {0: {"seq": 0, "members_root": mc.compute_root(self.members)}}
+        self.members_at = {0: list(self.members)}
+        self.persona_cert = _cert(persona, self.machine, org)
         self.channel = OrgFleetAuthenticator(
-            self.machine, org=org, persona_cert=_cert(persona, self.machine, org),
+            self.machine, org=org, persona_cert=self.persona_cert,
             membership_proof_for=self._rider,
             adopted_checkpoint_for=lambda s: self.adopted.get(int(s)),
             newest_adopted_seq=lambda: max(self.adopted),
+            adopted_members_for=lambda s: self.members_at.get(int(s)),
         )
 
     def _rider(self) -> dict:
@@ -112,6 +120,7 @@ class Member:
         proves under it from now on."""
         self.members = list(members)
         self.adopted[seq] = {"seq": seq, "members_root": mc.compute_root(members)}
+        self.members_at[seq] = list(members)
         self.seq = seq
         self.channel.note_adoption(seq)
 
@@ -122,7 +131,8 @@ class Member:
         )
 
     def scheduler(self, *, peer_addresses=None, org_peers=None,
-                  with_channel: bool = True, poll: float = 0.2) -> fss.FleetSyncScheduler:
+                  with_channel: bool = True, poll: float = 0.2,
+                  advertised=None, recorder=None) -> fss.FleetSyncScheduler:
         peers = dict(peer_addresses or {})
         config = fss.FleetSyncRuntimeConfig(
             machine_key=self.machine,
@@ -133,6 +143,8 @@ class Member:
             sync_scopes=lambda: {"alpha": self.alpha},
             org_channels=(lambda: {"alpha": self.channel}) if with_channel else None,
             org_peer_addresses=org_peers,
+            advertised_addresses=advertised,
+            telemetry_recorder=recorder,
             poll_interval=poll,
             connect_timeout=3.0,
             min_backoff=0.02,

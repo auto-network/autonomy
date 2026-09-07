@@ -269,6 +269,13 @@ class FleetSyncRuntimeConfig:
     org_peer_addresses: Callable[
         [], Mapping[str, Mapping[str, Sequence[str]]]
     ] | None = None
+    #: This machine's dialable direct addresses (fleet_direct_config
+    #: advertise_addrs). With org channels, the scheduler publishes them
+    #: as this machine's row in autonomy.org.fleet-reachability#1 of every
+    #: org scope it has a channel for -- only when the set changes, never
+    #: as a heartbeat (auto-mldvv) -- and reads co-members' rows from the
+    #: same set as their addresses. None: publish nothing.
+    advertised_addresses: Callable[[], Sequence[str]] | None = None
 
 
 def discover_org_sync_scopes() -> dict[str, Path]:
@@ -1569,6 +1576,10 @@ class FleetSyncScheduler:
         #: Per-machine random source for peer selection (see rank_peers).
         self._last_prune_at: dict[str, float] = {}
         self._after_serve_tasks: set = set()
+        #: scope -> address-set fingerprint last published to the org's
+        #: reachability set by this process (the row itself is compared
+        #: too, so a restart with unchanged addresses writes nothing).
+        self._published_reachability: dict[str, str] = {}
         self._rng = random.Random(int.from_bytes(os.urandom(8), "big"))
         #: ``async (stage_dir, *, source_machine_pub) -> installed`` for the
         #: PERSONAL scope, set by the owning DashboardFleetSyncService. The
@@ -1778,6 +1789,107 @@ class FleetSyncScheduler:
         if admitted_org is None:
             return list(paths.values())
         return [paths[s] for s in self._org_scopes_for(admitted_org) if s in paths]
+
+    def _publish_org_reachability(self) -> None:
+        """This machine's row in each org scope's reachability set, written
+        only when its address set changed since the stored row. Skipped for
+        a scope whose database is not the one the settings write path
+        resolves for that slug (an explicitly pathed scope in a test or
+        harness process without AUTONOMY_ORGS_DIR), so a row never lands in
+        a store this scheduler does not sync."""
+        provider = self.config.advertised_addresses
+        if provider is None:
+            return
+        channels = self._org_channels()
+        if not channels:
+            return
+        try:
+            addresses = tuple(provider())
+        except Exception:
+            logger.warning("fleet sync: advertised address provider failed", exc_info=True)
+            return
+        from tools.graph.db import _org_db_path
+        from tools.network.fleet_org_reachability import (
+            digest_addresses, publish_if_changed,
+        )
+
+        fingerprint = digest_addresses(addresses)
+        paths = self._scope_paths()
+        for scope, channel in channels.items():
+            if scope == "personal" or scope not in paths:
+                continue
+            if self._published_reachability.get(scope) == fingerprint:
+                continue
+            try:
+                if Path(_org_db_path(scope)).resolve() != Path(paths[scope]).resolve():
+                    logger.info(
+                        "fleet sync scope %r: reachability row not published; the "
+                        "scope's database is not the settings home for that slug",
+                        scope,
+                    )
+                    self._published_reachability[scope] = fingerprint
+                    continue
+                written = publish_if_changed(
+                    scope, self.config.machine_key, channel.persona_cert, addresses,
+                )
+            except Exception:
+                logger.warning(
+                    "fleet sync scope %r: reachability row publish failed",
+                    scope, exc_info=True,
+                )
+                continue
+            self._published_reachability[scope] = fingerprint
+            if written:
+                logger.info(
+                    "fleet sync scope %r: published this machine's %d address(es) "
+                    "to the org reachability set", scope, len(addresses),
+                )
+
+    def _org_peer_candidates(
+        self, channels: Mapping[str, "OrgFleetAuthenticator"],
+    ) -> dict[str, dict[str, tuple[str, ...]]]:
+        """scope -> {machine_pub: addresses} of co-member machines: the
+        verified reachability rows replicated into each org scope's own
+        database, unioned with the org_peer_addresses hook (first contact;
+        the harness). Hook addresses come first for a machine both name."""
+        from tools.network.fleet_org_reachability import co_member_addresses
+
+        merged: dict[str, dict[str, list[str]]] = {}
+        provider = self.config.org_peer_addresses
+        if provider is not None:
+            try:
+                for scope, peers in provider().items():
+                    merged.setdefault(str(scope), {})
+                    for machine_pub, addresses in peers.items():
+                        merged[str(scope)][machine_pub] = list(addresses)
+            except Exception:
+                logger.warning(
+                    "fleet sync: org peer address provider failed", exc_info=True
+                )
+        paths = self._scope_paths()
+        for scope, channel in channels.items():
+            if scope == "personal" or scope not in paths:
+                continue
+            try:
+                rows = co_member_addresses(
+                    paths[scope], org=channel.org,
+                    own_machine_pub=self.authenticator.machine_pub,
+                    is_member=channel.is_member,
+                )
+            except Exception:
+                logger.warning(
+                    "fleet sync scope %r: reachability rows unreadable",
+                    scope, exc_info=True,
+                )
+                continue
+            bucket = merged.setdefault(scope, {})
+            for machine_pub, addresses in rows.items():
+                known = bucket.get(machine_pub, [])
+                bucket[machine_pub] = known + [a for a in addresses if a not in known]
+        return {
+            scope: {pub: tuple(addrs) for pub, addrs in peers.items() if addrs}
+            for scope, peers in merged.items()
+        }
 
     async def _refresh_roster(self) -> None:
         while not self._stopping.is_set():
@@ -2521,19 +2633,11 @@ class FleetSyncScheduler:
         channel, a bounded stalest-first selection of co-member machines
         that are NOT in the personal roster, each pulling that scope only,
         through the org hello."""
-        provider = self.config.org_peer_addresses
-        if provider is None:
-            return
         channels = self._org_channels()
         if not channels:
             return
-        try:
-            by_scope = provider()
-        except Exception:
-            logger.warning(
-                "fleet sync: org peer address provider failed", exc_info=True
-            )
-            return
+        await asyncio.to_thread(self._publish_org_reachability)
+        by_scope = await asyncio.to_thread(self._org_peer_candidates, channels)
         paths = self._scope_paths()
         jobs: list[tuple[str, str, tuple[str, ...], "OrgFleetAuthenticator"]] = []
         for scope, peers in by_scope.items():
