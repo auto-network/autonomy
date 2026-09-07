@@ -115,12 +115,11 @@ counts, and stages attachment metadata until verified bytes exist locally.
 
 ## Transactional mutation catalog
 
-`catalog.py` closes the snapshot-only gap. It adds five local-only tables: a
+`catalog.py` closes the snapshot-only gap. It adds four local-only tables: a
 singleton containing the catalog version, machine incarnation, last authored
 timestamp and no-more-before floor; normalized machine and transaction
-dictionaries; one skinny current-winner/tombstone row per canonical logical
-address; and a bounded unacknowledged transaction journal. The winner catalog
-never duplicates live payload.
+dictionaries; and one skinny current-winner/tombstone row per canonical logical
+address. The catalog never duplicates live payload.
 
 SQLite insert/update/delete triggers capture the address transition in the
 same transaction as the graph write. Writes to a replicated table without an
@@ -133,24 +132,32 @@ them in dependency order, and commits atomically. Store-forward retains the
 original machine incarnation and transaction identity. Equal timestamps use
 the canonical candidate hash; replay is inert.
 
-On 100,000 400-byte source rows, normalization reduced current-winner tracking
-allocation from 269 to 141 bytes per address. After pruning the journal and
-VACUUM, the measured steady file delta was 113 bytes/address relative to the
-same indexed graph. Canonical logical-key indexes remain a separate ~24
-bytes/address on the million-row source corpus, for an estimated 137 MiB of
-steady local overhead per million short-key addresses. Without journal
-framing, tracked ingestion accepted 18,782 rows/s versus 24,804 rows/s; with
-the current per-row Python compression callback it accepted 5,011 versus
-24,506 rows/s. Native transaction-level framing/compression is therefore a
-performance requirement for production, not a format change.
+There is no separate history of wire frames. A delta is served by rebuilding
+each frame from the catalog row (address, timestamp, tombstone, transaction,
+operation) and the live row it points at — exactly how a checkpoint is built —
+so any machine can serve any origin's writes from any watermark, whether it
+learned them by delta or by installing a checkpoint. A transaction none of
+whose rows survive (every one overwritten later) is named to the puller with
+its timestamp so the puller's watermark still passes it. Rows a receiver could
+not realize yet (an attachment awaiting bytes) are forwarded from the frame the
+quarantine keeps, so a relaying machine never serves a transaction short.
 
-The current-winner catalog cannot replace transaction history: a hot receiver
-that missed a multi-table transaction needs the original frames in their
-atomic group. `fleet_sync_journal` therefore retains compressed canonical
-frames only until a durably acknowledged exact base covers them. On the same
-workload that transient journal costs 390 bytes per unacknowledged changed row
-(39.0 MiB for 100,000 changes), then becomes reusable free SQLite space after
-pruning. It is measured separately from steady catalog overhead.
+Until 2026-09-07 a fifth table, `fleet_sync_journal`, stored every frame at
+write time "until a durably acknowledged exact base covers it". Every field
+in it was derivable from the catalog and the live row, its only unique content
+was superseded row versions that last-writer-wins discards on arrival, and its
+recorded cost was 1,024 bytes per mutation on 400-byte rows — a tracked store
+at 149–157% of a plain indexed store while any roster peer had not
+acknowledged, plus a per-row frame callback on the write path. Measured on the
+removal (perf suite kernel + storage, same box, 2026-09-07): storage overhead
+versus a plain indexed store 157% → 17.6%; tracked ingestion 8,719 → 15,816
+rows/s; kernel inserts 8,439 → 17,255 rows/s, updates 10,268 → 26,664 rows/s;
+steady (post-prune) size unchanged. Historical numbers below that mention the
+journal describe the removed design.
+
+On 100,000 400-byte source rows, normalization reduced current-winner tracking
+allocation from 269 to 141 bytes per address. Canonical logical-key indexes
+remain a separate ~24 bytes/address on the million-row source corpus.
 
 The payload-free winner artifact measured 229 bytes/address. That is checkpoint
 wire metadata, not another persistent payload copy: each live row's values
@@ -186,8 +193,7 @@ walk with no temporary sort.
 1. persist the no-more-before floor and establish a frozen WAL read snapshot;
 2. release writers and stream the snapshot into key-ordered base chunks;
 3. stream one payload-free current winner/tombstone record per logical address
-   from that same cut (independent of whether older acknowledged journal
-   history has retired);
+   from that same cut;
 4. commit every immutable chunk and strict catalog by SHA-256 root;
 5. reconstruct each immutable object through real RaptorQ;
 6. validate and realize the base in bounded batches into a staging GraphDB;
@@ -286,7 +292,7 @@ rather than reinterpreted as bootstrap state. Subsequent GraphDB,
 `DbContentStore`, and
 `KeyControlStore` connections discover the active catalog and attach the same
 commit/rollback lifecycle automatically. Their application rows and compact
-journal/catalog metadata therefore commit or roll back together; caller-owned
+catalog metadata therefore commit or roll back together; caller-owned
 multi-row transactions retain one transaction identity and stable operation
 indexes. A raw SQLite writer or an unrecognized mutation form reaches the
 trigger without context and fails closed.
@@ -315,16 +321,16 @@ through RelayKit's existing encrypted record layer, applies one transaction
 atomically, and stores bytes, retries,
 watermarks, completed pulls, and applied-transaction counts in local peer
 state. The resume position is content-addressed, never a served row number:
-the puller presents a breadcrumb trail of verified stream positions —
-each names one transaction from a past verified summary, the recent few kept contiguously plus
-an exponentially thinned history reaching back to its first pull — and the
-serving journal recomputes the position from its own rows on every request,
-resuming after the newest breadcrumb it still knows. A serving database
-restored from a backup therefore re-serves exactly its divergence window
-(deterministic merge makes the replayed prefix inert), instead of silently
-honouring a cursor into journal rows that no longer exist; its own rolled-back
-authoring floor recovers automatically when peers hand its post-backup history
-back through the ordinary apply path. The stream carries
+the puller presents its per-origin watermark map — for every origin it has
+learned, the newest transaction timestamp it holds — and the server serves,
+per origin, every transaction above that mark, rebuilding frames from its
+rows. (A request without a map is served from the newest timestamp per origin
+named in its breadcrumb trail.) A serving database restored from a backup
+therefore re-serves exactly what the puller's map says it lacks (deterministic
+merge makes any overlap inert), and a restored PULLER recovers its own lost
+writes from any peer, since its own origin is served like every other; its
+rolled-back authoring floor recovers automatically through the ordinary apply
+path. The stream carries
 a bounded message count and digest, and refuses malformed framing, incomplete
 transaction groups, an unauthorized machine, or an individual mutation that
 cannot fit the channel's message bound.
@@ -376,7 +382,7 @@ python3 -m tools.network.fleet_sync.perf run                 # full baselines
 ```
 
 It runs five benchmarks — `kernel` (insert/update throughput with the
-served-ack floor active, journal plateau, steady tracking overhead),
+served-ack floor active, steady tracking overhead),
 `storage` (tracked-vs-indexed on-disk cost), `checkpoint` (seed → freeze →
 RaptorQ transport → install lifecycle), `live` (concurrent
 writer/reader/delta lag), and the `crsqlite` yardstick (auto-skipped unless

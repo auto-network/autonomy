@@ -149,12 +149,11 @@ def test_partition_during_prune_retains_needed_frames(tmp_path: Path) -> None:
                 uri=True,
             ) as conn:
                 retained = conn.execute(
-                    "SELECT COUNT(DISTINCT transaction_ref) "
-                    "FROM fleet_sync_journal"
+                    "SELECT COUNT(*) FROM fleet_sync_transactions"
                 ).fetchone()[0]
             assert retained >= 6, (
-                f"machine {live} retained only {retained} journaled "
-                "transactions while a partitioned peer was unacknowledged"
+                f"machine {live} retained only {retained} transaction rows "
+                "while a partitioned peer was unacknowledged"
             )
         fleet.heal(2, 0)
         fleet.heal(2, 1)

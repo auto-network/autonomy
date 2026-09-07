@@ -30,8 +30,9 @@ def local_stores(tmp_path, monkeypatch):
 
 
 def _journal_rows(path) -> int:
+    """Authored work on the personal store: catalog rows (the journal is gone)."""
     with sqlite3.connect(path) as conn:
-        return int(conn.execute("SELECT COUNT(*) FROM fleet_sync_journal").fetchone()[0])
+        return int(conn.execute("SELECT COUNT(*) FROM fleet_sync_catalog").fetchone()[0])
 
 
 def test_recording_sync_telemetry_never_authors_personal_fleet_work(local_stores):

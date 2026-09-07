@@ -909,13 +909,6 @@ async def test_established_puller_with_unknown_position_gets_the_journal_not_a_s
         lambda: {"personal": personal, "alpha": alpha},
     )
     store = SQLiteFleetSyncStore(alpha)
-    # Retire the first frames the way pruning does, so the journal has a gap.
-    with sqlite3.connect(alpha) as conn:
-        conn.execute(
-            "DELETE FROM fleet_sync_journal WHERE transaction_ref IN "
-            "(SELECT id FROM fleet_sync_transactions ORDER BY id LIMIT 2)"
-        )
-    assert store.journal_gap() is True
 
     request = encode_pull_request(
         "cd" * 32, compat=store.compatibility_digest(), resume=(),
@@ -931,7 +924,7 @@ async def test_established_puller_with_unknown_position_gets_the_journal_not_a_s
         f for f in frames
         if f.startswith(_OPERATION_MAGIC) or f.startswith(_MUTATION_MAGIC)
     ]
-    assert len(replayed) == 4, "the four surviving transactions replay"
+    assert len(replayed) == 6, "every transaction replays, built from rows"
     assert any(f.startswith(_DONE_MAGIC) for f in frames)
 
     # A genuinely empty puller (bootstrap=True) still gets the snapshot.
@@ -1017,7 +1010,6 @@ async def test_per_origin_watermarks_serve_each_author_once_and_never_echo(
     # acknowledgement, so the server may now retire those frames (the
     # existing served-ack floor, fed by implied_ack_ref).
     assert await served({server_pub: 3_000}) == []
-    assert store.oldest_journal_ref() in (None, 4)
 
 
 @pytest.mark.asyncio
@@ -1053,11 +1045,6 @@ async def test_server_rebuilds_retired_frames_from_its_rows(
         # surviving, tx-a3 owns the row now.
         with catalog.transaction(4_000, "tx-a3"):
             db.conn.execute("UPDATE sources SET title='a0-renamed' WHERE id='a0'")
-        # Install shape: the first two transactions' frames are gone.
-        db.conn.execute(
-            "DELETE FROM fleet_sync_journal WHERE transaction_ref IN "
-            "(SELECT id FROM fleet_sync_transactions ORDER BY id LIMIT 2)"
-        )
         db.conn.commit()
     finally:
         db.close()

@@ -35,8 +35,6 @@ from .streaming import ensure_streaming_indexes, iter_indexed_snapshot_mutations
 
 
 CATALOG_SCHEMA_VERSION = 3
-JOURNAL_STORAGE_VERSION = 2
-_JOURNAL_STORAGE_ZLIB = 1
 MAX_TRANSACTION_OPERATIONS = 16_384
 MAX_TRANSACTION_FRAME_BYTES = 128 * 1024 * 1024
 
@@ -66,48 +64,11 @@ _MUTATING_TABLE = re.compile(
 )
 
 
-def _pack_journal(frame: bytes) -> bytes:
-    # Raw storage: the journal is transient once served acknowledgements
-    # retire it, and per-row zlib through a Python callback was the single
-    # largest write-path cost (measured 4.9x on ingestion). Version 1
-    # (zlib) rows remain readable below.
-    return bytes([JOURNAL_STORAGE_VERSION]) + frame
-
-
-def _unpack_journal(stored: bytes) -> bytes:
-    if not stored:
-        raise WatermarkError("unsupported journal storage frame")
-    if stored[0] == JOURNAL_STORAGE_VERSION:
-        frame = bytes(stored[1:])
-        if len(frame) > MAX_FRAME_BYTES:
-            raise WatermarkError("journal storage frame violates size bounds")
-        return frame
-    if stored[0] == _JOURNAL_STORAGE_ZLIB:
-        decompressor = zlib.decompressobj()
-        frame = decompressor.decompress(stored[1:], MAX_FRAME_BYTES + 1)
-        if len(frame) > MAX_FRAME_BYTES or not decompressor.eof:
-            raise WatermarkError("journal storage frame violates size bounds")
-        if decompressor.unused_data or decompressor.unconsumed_tail:
-            raise WatermarkError("journal storage frame has trailing data")
-        return frame
-    raise WatermarkError("unsupported journal storage frame")
-
-
 def journal_has_gap(conn: sqlite3.Connection) -> bool:
-    """True when the retained journal cannot replay from the beginning.
-
-    Acknowledged pruning deletes journal frames while winner-pinned
-    transaction rows survive, and a checkpoint install writes winner
-    transactions with no journal at all — in both cases a peer without a
-    resolvable breadcrumb needs a checkpoint, not a journal replay, because
-    the replay would silently omit retired history.
-    """
-    row = conn.execute(
-        "SELECT 1 FROM fleet_sync_transactions t WHERE NOT EXISTS("
-        "SELECT 1 FROM fleet_sync_journal j WHERE j.transaction_ref=t.id"
-        ") LIMIT 1"
-    ).fetchone()
-    return row is not None
+    """Retired: deltas are served from catalog + live rows, so a store can
+    always replay from any watermark. Kept as a name for callers that still
+    import it; always False."""
+    return False
 
 
 def ensure_quarantine_table(conn: sqlite3.Connection) -> None:
@@ -250,20 +211,19 @@ def _capture_statement(
         values_open, values_close = "VALUES(", ")"
     else:
         values_open, values_close = "SELECT ", f" WHERE {condition}"
-    frame_arguments = ",".join(
-        f"{prefix}.{_quote(column)}" for column in columns
-    )
+    # The catalog row is the whole capture: address, timestamp, tombstone
+    # and the (transaction, operation) that wrote it. Wire frames are
+    # rebuilt from this row plus the live row when served
+    # (transaction_items) -- exactly how a checkpoint is built. The
+    # per-row frame callback that used to fill fleet_sync_journal was the
+    # write path's largest cost (tracked ingestion 0.41x of untracked).
+    del columns  # the column list still shapes the trigger's NEW/OLD refs
     return f"""
-        INSERT INTO fleet_sync_journal(transaction_ref,operation_index,frame)
-        {values_open}
-            fleet_sync_transaction_ref(),fleet_sync_next_operation(),
-            fleet_sync_frame_{table}({tombstone},{frame_arguments})
-        {values_close};
         INSERT INTO fleet_sync_catalog(
             address,timestamp_ns,tombstone,transaction_ref,operation_index
         ) {values_open}
             {_sql_key(prefix, table)},fleet_sync_timestamp(),{tombstone},
-            fleet_sync_transaction_ref(),fleet_sync_current_operation()
+            fleet_sync_transaction_ref(),fleet_sync_next_operation()
         {values_close}
         ON CONFLICT(address) DO UPDATE SET
             timestamp_ns=excluded.timestamp_ns,
@@ -452,12 +412,6 @@ class MutationCatalog:
             "fleet_sync_capture_enabled", 0,
             self._capture_enabled,
         )
-        for table, columns in self._table_columns.items():
-            self.conn.create_function(
-                f"fleet_sync_frame_{table}", -1,
-                lambda tombstone, *values, table=table, columns=columns:
-                    self._frame(table, bool(tombstone), columns, values),
-            )
 
     def before_statement(self, sql: object) -> bool:
         """Enter one automatic originated context at the first replicated DML.
@@ -598,25 +552,6 @@ class MutationCatalog:
             raise sqlite3.IntegrityError("fleet-sync operation was not allocated")
         return context.current_operation
 
-    def _frame(
-        self, table: str, tombstone: bool,
-        columns: tuple[str, ...], values: tuple[object, ...],
-    ) -> bytes:
-        context = self._require_context()
-        row = dict(zip(columns, values, strict=True))
-        policy = TABLE_POLICIES[table]
-        address = _logical_address(policy, row)
-        logical_values = () if tombstone else _logical_values(policy, row)
-        frame = encode_mutation_frame(Mutation(
-            table, address, context.timestamp_ns, tombstone, logical_values
-        ))
-        context.frame_bytes += len(frame)
-        if context.frame_bytes > MAX_TRANSACTION_FRAME_BYTES:
-            raise sqlite3.IntegrityError(
-                "fleet-sync transaction exceeds byte bound"
-            )
-        return _pack_journal(frame)
-
     @staticmethod
     def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
         return conn.execute(
@@ -716,13 +651,12 @@ class MutationCatalog:
                 UNIQUE(origin_id,transaction_id),
                 FOREIGN KEY(origin_id) REFERENCES fleet_sync_origins(id)
             )""",
-            """CREATE TABLE IF NOT EXISTS fleet_sync_journal(
-                transaction_ref INTEGER NOT NULL,
-                operation_index INTEGER NOT NULL,
-                frame BLOB NOT NULL,
-                PRIMARY KEY(transaction_ref,operation_index),
-                FOREIGN KEY(transaction_ref) REFERENCES fleet_sync_transactions(id)
-            ) WITHOUT ROWID""",
+            # fleet_sync_journal (per-change wire frames) is retired: every
+            # frame is derivable from fleet_sync_catalog + the live row, and
+            # it doubled the store (1,024 bytes per mutation on 400-byte rows,
+            # 149-157% overhead vs a plain indexed store, perf baseline
+            # 2026-09-02 / 2026-09-07). Dropped on the next install.
+            """DROP TABLE IF EXISTS fleet_sync_journal""",
             """CREATE TABLE IF NOT EXISTS fleet_sync_peer_state(
                 machine_public_key TEXT NOT NULL,
                 roster_epoch TEXT NOT NULL,
@@ -1042,10 +976,11 @@ class MutationCatalog:
 
         Older settings triggers recorded ``deprecated: 0 -> 1`` as a live
         update even though snapshots and ``_live_row`` both define that base
-        address as absent.  Rewrite only the exact self-inconsistent case: the
-        winner and its journal frame are non-tombstones carrying
-        ``deprecated=1``, and the physical row at that address has the same
-        originated timestamp.  Provenance and operation ordering are preserved.
+        address as absent. Rewrite only the exact self-inconsistent case: the
+        catalog winner is a non-tombstone and the physical row at that
+        address is deprecated with the same originated timestamp. Provenance
+        and operation ordering are preserved (the winner keeps its
+        transaction and operation; only the tombstone flag flips).
         """
         policy = TABLE_POLICIES["settings"]
         repaired = 0
@@ -1058,44 +993,17 @@ class MutationCatalog:
             address = _logical_address(policy, row)
             address_blob = encode_value(["settings", list(address)])
             winner = self.conn.execute(
-                "SELECT timestamp_ns,transaction_ref,operation_index "
-                "FROM fleet_sync_catalog WHERE address=? AND tombstone=0",
+                "SELECT timestamp_ns FROM fleet_sync_catalog "
+                "WHERE address=? AND tombstone=0",
                 (address_blob,),
             ).fetchone()
             if winner is None:
                 continue
-            timestamp, transaction_ref, operation_index = winner
-            if _row_timestamp(policy, row) != int(timestamp):
+            if _row_timestamp(policy, row) != int(winner[0]):
                 continue
-            stored = self.conn.execute(
-                "SELECT frame FROM fleet_sync_journal WHERE transaction_ref=? "
-                "AND operation_index=?",
-                (transaction_ref, operation_index),
-            ).fetchone()
-            if stored is None:
-                continue
-            legacy = decode_mutation_frame(_unpack_journal(bytes(stored[0])))
-            if (
-                legacy.table != "settings"
-                or legacy.address != address
-                or legacy.timestamp_ns != int(timestamp)
-                or legacy.tombstone
-                or dict(legacy.values).get("deprecated") != 1
-            ):
-                continue
-            tombstone = Mutation("settings", address, int(timestamp), True)
             self.conn.execute(
                 "UPDATE fleet_sync_catalog SET tombstone=1 WHERE address=?",
                 (address_blob,),
-            )
-            self.conn.execute(
-                "UPDATE fleet_sync_journal SET frame=? WHERE transaction_ref=? "
-                "AND operation_index=?",
-                (
-                    _pack_journal(encode_mutation_frame(tombstone)),
-                    transaction_ref,
-                    operation_index,
-                ),
             )
             repaired += 1
         return repaired
@@ -1145,14 +1053,11 @@ class MutationCatalog:
         locked current rows before installing triggers. Imported or originated
         history is never silently reinterpreted as bootstrap state.
         """
-        journal_rows = int(self.conn.execute(
-            "SELECT COUNT(*) FROM fleet_sync_journal"
-        ).fetchone()[0])
         non_bootstrap = self.conn.execute(
             "SELECT transaction_id FROM fleet_sync_transactions "
             "WHERE transaction_id NOT LIKE 'bootstrap-v1:%' LIMIT 1"
         ).fetchone()
-        if journal_rows or non_bootstrap is not None:
+        if non_bootstrap is not None:
             raise WatermarkError(
                 "triggerless fleet-sync catalog contains originated history"
             )
@@ -1184,8 +1089,7 @@ class MutationCatalog:
         audit_schema(self.conn)
         required = {
             "fleet_sync_state", "fleet_sync_catalog", "fleet_sync_origins",
-            "fleet_sync_transactions", "fleet_sync_journal",
-            "fleet_sync_peer_state",
+            "fleet_sync_transactions", "fleet_sync_peer_state",
         }
         schema_created = not all(
             self._table_exists(self.conn, table) for table in required
@@ -1573,130 +1477,57 @@ class MutationCatalog:
         *,
         after_watermark: int = -1,
     ) -> Iterator[AuthoredMutation]:
+        """Every row change with a transaction timestamp in
+        (after_watermark, through], as wire mutations, in
+        (timestamp_ns, origin, transaction_id, operation_index) order --
+        built from the catalog row and the live row. A row overwritten by
+        a later transaction appears once, under that later transaction."""
         conn = cut.reader if cut is not None else self.conn
         through = cut.watermark if cut is not None else (1 << 63) - 1
         rows = conn.execute(
-            "SELECT o.incarnation,t.transaction_id,j.operation_index,j.frame "
-            "FROM fleet_sync_journal j "
-            "JOIN fleet_sync_transactions t ON t.id=j.transaction_ref "
+            "SELECT o.incarnation,t.transaction_id,c.operation_index,"
+            "c.address,c.timestamp_ns,c.tombstone "
+            "FROM fleet_sync_catalog c "
+            "JOIN fleet_sync_transactions t ON t.id=c.transaction_ref "
             "JOIN fleet_sync_origins o ON o.id=t.origin_id "
             "WHERE t.timestamp_ns>? AND t.timestamp_ns<=? "
-            "ORDER BY t.timestamp_ns,o.incarnation,t.transaction_id,j.operation_index",
+            "ORDER BY t.timestamp_ns,o.incarnation,t.transaction_id,c.operation_index",
             (after_watermark, through),
-        )
-        for origin, transaction, operation, frame in rows:
+        ).fetchall()
+        for origin, transaction, operation, address_blob, timestamp, tombstone in rows:
+            table, address = self._decode_address(bytes(address_blob))
+            if bool(tombstone):
+                mutation = Mutation(table, address, int(timestamp), True)
+            else:
+                policy = TABLE_POLICIES[table]
+                live = self._live_row(conn, table, address)
+                mutation = Mutation(
+                    table, address, int(timestamp), False,
+                    _logical_values(policy, live),
+                )
             yield AuthoredMutation(
-                str(origin), str(transaction), int(operation),
-                decode_mutation_frame(_unpack_journal(bytes(frame))),
+                str(origin), str(transaction), int(operation), mutation,
             )
 
-    def next_journal_transaction(
-        self,
-        after: tuple[int, str, str] | None = None,
-    ) -> tuple[tuple[int, str, str], list[AuthoredMutation]] | None:
-        """Read the next retained originated transaction in bounded memory.
-
-        ``after`` is the exact total-order key returned by the prior call, not
-        a scalar watermark. The connection is short-lived at the scheduler
-        layer, so this gives a response iterator one transaction at a time
-        without holding a SQLite snapshot or collecting the journal.
-        """
-        where = ""
-        params: tuple[object, ...] = ()
-        if after is not None:
-            where = (
-                "AND (t.timestamp_ns,o.incarnation,t.transaction_id)>(?,?,?) "
-            )
-            params = after
-        row = self.conn.execute(
-            "SELECT t.id,t.timestamp_ns,o.incarnation,t.transaction_id "
-            "FROM fleet_sync_transactions t "
-            "JOIN fleet_sync_origins o ON o.id=t.origin_id "
-            "WHERE EXISTS(SELECT 1 FROM fleet_sync_journal j "
-            "WHERE j.transaction_ref=t.id) "
-            + where
-            + "ORDER BY t.timestamp_ns,o.incarnation,t.transaction_id LIMIT 1",
-            params,
-        ).fetchone()
-        if row is None:
-            return None
-        transaction_ref = int(row[0])
-        key = (int(row[1]), str(row[2]), str(row[3]))
-        items = [
-            AuthoredMutation(
-                key[1], key[2], int(operation),
-                decode_mutation_frame(_unpack_journal(bytes(frame))),
-            )
-            for operation, frame in self.conn.execute(
-                "SELECT operation_index,frame FROM fleet_sync_journal "
-                "WHERE transaction_ref=? ORDER BY operation_index",
-                (transaction_ref,),
-            )
-        ]
-        return key, items
-
-    def next_journal_transaction_ref(
-        self,
-        after_transaction_ref: int = 0,
-    ) -> tuple[int, list[AuthoredMutation]] | None:
-        """Read the next retained transaction after one local journal position.
-
-        Transaction row ids are assigned monotonically when this database
-        learns a transaction, including a transaction imported from a peer.
-        They are therefore the serving database's compact resume position;
-        mutation timestamps remain convergence data and are not cursors.
-        """
-        if (
-            isinstance(after_transaction_ref, bool)
-            or not isinstance(after_transaction_ref, int)
-            or after_transaction_ref < 0
-        ):
-            raise WatermarkError("journal transaction cursor is malformed")
-        row = self.conn.execute(
-            "SELECT t.id,o.incarnation,t.transaction_id "
-            "FROM fleet_sync_transactions t "
-            "JOIN fleet_sync_origins o ON o.id=t.origin_id "
-            "WHERE t.id>? AND EXISTS(SELECT 1 FROM fleet_sync_journal j "
-            "WHERE j.transaction_ref=t.id) ORDER BY t.id LIMIT 1",
-            (after_transaction_ref,),
-        ).fetchone()
-        if row is None:
-            return None
-        transaction_ref = int(row[0])
-        origin = str(row[1])
-        transaction = str(row[2])
-        items = [
-            AuthoredMutation(
-                origin,
-                transaction,
-                int(operation),
-                decode_mutation_frame(_unpack_journal(bytes(frame))),
-            )
-            for operation, frame in self.conn.execute(
-                "SELECT operation_index,frame FROM fleet_sync_journal "
-                "WHERE transaction_ref=? ORDER BY operation_index",
-                (transaction_ref,),
-            )
-        ]
-        return transaction_ref, items
-
-    # -- per-origin watermarks (design of record graph://1155b8f4-8cf) ----
-
-    def origin_watermarks(self) -> dict[str, int]:
+    def origin_watermarks(self, through_ref: int | None = None) -> dict[str, int]:
         """``{origin incarnation: max timestamp_ns held}`` over every
-        transaction this database has learned, frames retained or not. Under
-        the per-origin write-floor promise this is W[origin]: every
-        origin-originated transaction at or below it is held."""
+        transaction this database has learned. Under the per-origin
+        write-floor promise this is W[origin]: every origin-originated
+        transaction at or below it is held. ``through_ref`` restricts the
+        map to transactions learned at or below that local row id: the
+        frontier a checkpoint cut at that position carried."""
+        clause = "" if through_ref is None else "WHERE t.id<=? "
+        params: tuple = () if through_ref is None else (int(through_ref),)
         return {
             str(row[0]): int(row[1])
             for row in self.conn.execute(
                 "SELECT o.incarnation, MAX(t.timestamp_ns) "
                 "FROM fleet_sync_transactions t "
                 "JOIN fleet_sync_origins o ON o.id=t.origin_id "
-                "GROUP BY o.incarnation"
+                + clause + "GROUP BY o.incarnation",
+                params,
             )
         }
-
     def origin_list(self) -> list[str]:
         return [
             str(row[0]) for row in self.conn.execute(
@@ -1707,31 +1538,30 @@ class MutationCatalog:
     def transaction_items(
         self, transaction_ref: int, incarnation: str, transaction_id: str
     ) -> list[AuthoredMutation]:
-        """The row changes of one transaction, as wire mutations.
-
-        Journal frames are used when they are still retained (exact). When
-        the served-ack prune has retired them, the same frames are rebuilt
-        from the rows that still cite the transaction in fleet_sync_catalog
-        and their live rows -- exactly how a checkpoint is built
-        (iter_indexed_snapshot_mutations never reads the journal). A row
+        """The row changes of one transaction, as wire mutations, built from
+        the rows that still cite the transaction in fleet_sync_catalog and
+        their live rows -- exactly how a checkpoint is built. A row
         overwritten by a later transaction is absent here and arrives under
         that later transaction; the receiver resolves by timestamp, so the
         superseded version was never needed. Empty when nothing survives.
         """
-        journal = [
-            AuthoredMutation(
-                incarnation, transaction_id, int(operation),
-                decode_mutation_frame(_unpack_journal(bytes(frame))),
-            )
-            for operation, frame in self.conn.execute(
-                "SELECT operation_index,frame FROM fleet_sync_journal "
-                "WHERE transaction_ref=? ORDER BY operation_index",
-                (int(transaction_ref),),
-            )
-        ]
-        if journal:
-            return journal
         items: list[AuthoredMutation] = []
+        # A row this machine could not realize yet (an attachment awaiting
+        # bytes) is not in the catalog, but its exact frame is parked in
+        # the quarantine with its replay identity. Forward it from there,
+        # so a relaying machine never serves the transaction short and a
+        # downstream watermark never passes a row nobody sent.
+        ensure_quarantine_table(self.conn)
+        for frame, operation in self.conn.execute(
+            "SELECT frame,operation_index FROM fleet_sync_quarantine "
+            "WHERE origin=? AND transaction_id=? AND frame IS NOT NULL "
+            "AND operation_index IS NOT NULL",
+            (incarnation, transaction_id),
+        ).fetchall():
+            items.append(AuthoredMutation(
+                incarnation, transaction_id, int(operation),
+                decode_mutation_frame(bytes(frame)),
+            ))
         for raw in self.conn.execute(
             "SELECT address,timestamp_ns,tombstone,operation_index "
             "FROM fleet_sync_catalog WHERE transaction_ref=? "
@@ -1751,7 +1581,27 @@ class MutationCatalog:
             items.append(AuthoredMutation(
                 incarnation, transaction_id, int(raw[3]), mutation,
             ))
+        items.sort(key=lambda item: item.operation_index)
         return items
+
+    def next_transaction_after_ref(
+        self, after_transaction_ref: int = 0,
+    ) -> tuple[int, list[AuthoredMutation]] | None:
+        """The next transaction this database learned after one local row
+        id, with its items built from rows (``transaction_items``). Row ids
+        are local and never wire authority; this is the walk a test or a
+        repair tool uses to drain a store in learned order."""
+        row = self.conn.execute(
+            "SELECT t.id,o.incarnation,t.transaction_id "
+            "FROM fleet_sync_transactions t "
+            "JOIN fleet_sync_origins o ON o.id=t.origin_id "
+            "WHERE t.id>? ORDER BY t.id LIMIT 1",
+            (int(after_transaction_ref),),
+        ).fetchone()
+        if row is None:
+            return None
+        ref = int(row[0])
+        return ref, self.transaction_items(ref, str(row[1]), str(row[2]))
 
     def next_transaction_for_origin(
         self,
@@ -1759,44 +1609,12 @@ class MutationCatalog:
         after_timestamp_ns: int,
         after_transaction_id: str | None = None,
     ) -> tuple[int, int, str, list[AuthoredMutation]] | None:
-        """The next RETAINED transaction by *incarnation* strictly after the
-        given position in (timestamp_ns, transaction_id) order.
-
-        ``after_transaction_id`` None means "strictly newer timestamp" (the
-        puller's watermark); a tuple position continues a page walk."""
-        if after_transaction_id is None:
-            where = "t.timestamp_ns>?"
-            params: tuple = (incarnation, int(after_timestamp_ns))
-        else:
-            where = "(t.timestamp_ns>? OR (t.timestamp_ns=? AND t.transaction_id>?))"
-            params = (incarnation, int(after_timestamp_ns), int(after_timestamp_ns),
-                      after_transaction_id)
-        row = self.conn.execute(
-            "SELECT t.id,t.timestamp_ns,t.transaction_id "
-            "FROM fleet_sync_transactions t "
-            "JOIN fleet_sync_origins o ON o.id=t.origin_id "
-            f"WHERE o.incarnation=? AND {where} AND EXISTS("
-            "SELECT 1 FROM fleet_sync_journal j WHERE j.transaction_ref=t.id) "
-            "ORDER BY t.timestamp_ns, t.transaction_id LIMIT 1",
-            params,
-        ).fetchone()
-        if row is None:
-            return None
-        transaction_ref = int(row[0])
-        items = [
-            AuthoredMutation(
-                incarnation,
-                str(row[2]),
-                int(operation),
-                decode_mutation_frame(_unpack_journal(bytes(frame))),
-            )
-            for operation, frame in self.conn.execute(
-                "SELECT operation_index,frame FROM fleet_sync_journal "
-                "WHERE transaction_ref=? ORDER BY operation_index",
-                (transaction_ref,),
-            )
-        ]
-        return transaction_ref, int(row[1]), str(row[2]), items
+        """The next transaction by *incarnation* strictly after the given
+        position in (timestamp_ns, transaction_id) order, or None."""
+        page = self.next_transactions_for_origin(
+            incarnation, after_timestamp_ns, after_transaction_id, limit=1,
+        )
+        return page[0] if page else None
 
     def next_transactions_for_origin(
         self,
@@ -1834,20 +1652,6 @@ class MutationCatalog:
              self.transaction_items(int(head[0]), incarnation, str(head[2])))
             for head in heads
         ]
-
-    def next_journal_transactions(
-        self, after_transaction_ref: int, *, limit: int = 200
-    ) -> list[tuple[int, list[AuthoredMutation]]]:
-        """Legacy-position paging in batches on one connection."""
-        out = []
-        cursor = int(after_transaction_ref)
-        while len(out) < limit:
-            page = self.next_journal_transaction_ref(cursor)
-            if page is None:
-                break
-            cursor, items = page
-            out.append((cursor, items))
-        return out
 
     def record_transactions(
         self, entries: Sequence[tuple[str, str, int]]
@@ -1895,28 +1699,6 @@ class MutationCatalog:
             ).fetchone()
             return int(newest[0]) if newest else 0
         return max(0, first_uncovered - 1)
-
-    def retired_above_watermarks(
-        self, watermarks: dict[str, int], exclude: str | None = None
-    ) -> list[str]:
-        """Authors whose retained history starts ABOVE the puller's watermark:
-        a transaction newer than W[origin] whose frames were retired, which
-        no replay can supply. Empty means the map is fully servable."""
-        out: list[str] = []
-        for origin in self.origin_list():
-            if origin == exclude:
-                continue
-            row = self.conn.execute(
-                "SELECT 1 FROM fleet_sync_transactions t "
-                "JOIN fleet_sync_origins o ON o.id=t.origin_id "
-                "WHERE o.incarnation=? AND t.timestamp_ns>? AND NOT EXISTS("
-                "SELECT 1 FROM fleet_sync_journal j WHERE j.transaction_ref=t.id) "
-                "LIMIT 1",
-                (origin, int(watermarks.get(origin, 0))),
-            ).fetchone()
-            if row is not None:
-                out.append(origin)
-        return out
 
     def journal_breadcrumb(
         self, transaction_ref: int
@@ -1985,18 +1767,6 @@ class MutationCatalog:
                 continue
             best = max(best, int(row[0]))
         return best
-
-    def prune_journal(self, through_watermark: int) -> int:
-        """Retire transaction frames only after an exact base ACK covers them."""
-        if self._context is not None or self.conn.in_transaction:
-            raise WatermarkError("cannot prune journal inside a transaction")
-        with self.conn:
-            cursor = self.conn.execute(
-                "DELETE FROM fleet_sync_journal WHERE transaction_ref IN ("
-                "SELECT id FROM fleet_sync_transactions WHERE timestamp_ns<=?)",
-                (through_watermark,),
-            )
-        return int(cursor.rowcount)
 
     def record_served_ack(
         self, machine_public_key: str, roster_epoch: str,
@@ -2097,43 +1867,14 @@ class MutationCatalog:
         if floor is None or floor <= 0:
             return (0, 0)
         deadline = time.monotonic() + budget_s
-        journal_rows = 0
+        journal_rows = 0  # no journal any more; kept in the return shape
         transaction_rows = 0
 
         def within_budget() -> bool:
             return time.monotonic() < deadline
 
-        # Journal frames, lowest transaction first, one id range per
-        # transaction. The PK (transaction_ref, operation_index) makes both
-        # the MIN probe and the range delete index-bound. Each loop does at
-        # least one batch before consulting the budget, so every call makes
-        # progress however small the budget.
-        while True:
-            row = self.conn.execute(
-                "SELECT MIN(transaction_ref) FROM fleet_sync_journal "
-                "WHERE transaction_ref<=?", (floor,),
-            ).fetchone()
-            if row is None or row[0] is None:
-                break
-            low = int(row[0])
-            high = min(low + batch - 1, floor)
-            with self.conn:
-                journal_rows += int(self.conn.execute(
-                    "DELETE FROM fleet_sync_journal "
-                    "WHERE transaction_ref BETWEEN ? AND ?", (low, high),
-                ).rowcount)
-            time.sleep(PRUNE_YIELD_S)  # let a waiting writer take the lock
-            if not within_budget():
-                break
-        # Superseded transactions: current winners keep a foreign key to
-        # their authoring transaction as provenance, so only transactions
-        # referenced by neither the journal nor any winner retire — both
-        # checks are index probes (journal PK, idx_..._transaction_ref).
-        # Retained rows are bounded by live-address count, not history.
         retirable = (
-            "NOT EXISTS(SELECT 1 FROM fleet_sync_journal j "
-            "WHERE j.transaction_ref=fleet_sync_transactions.id) "
-            "AND NOT EXISTS(SELECT 1 FROM fleet_sync_catalog c "
+            "NOT EXISTS(SELECT 1 FROM fleet_sync_catalog c "
             "WHERE c.transaction_ref=fleet_sync_transactions.id) "
             # An origin's newest transaction is its watermark on this
             # machine; deleting it would make the map ask for (and be
@@ -2342,13 +2083,6 @@ class MutationCatalog:
                             originated.operation_index,
                         ),
                     )
-                self.conn.execute(
-                    "INSERT OR IGNORE INTO fleet_sync_journal VALUES(?,?,?)",
-                    (
-                        transaction_ref, originated.operation_index,
-                        _pack_journal(encode_mutation_frame(mutation)),
-                    ),
-                )
             if deferred:
                 deferred_rows = []
                 replay: dict[bytes, tuple[bytes, str, str, int]] = {}

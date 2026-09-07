@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 from tools.graph.db import GraphDB
-from tools.network.fleet_sync.catalog import MutationCatalog, journal_has_gap
+from tools.network.fleet_sync.catalog import MutationCatalog
 from tools.network import fleet_relay_sync
 
 
@@ -27,29 +27,13 @@ def test_serve_checkpoint_decision_truth_table() -> None:
     # holds no sync state (bootstrap)...
     assert decide(0, True, False) is True
     assert decide(0, True, True) is True
-    # ...never because the journal has retired history: a machine with
-    # state is served the retained journal from its oldest surviving frame
-    # (design of record graph://1155b8f4-8cf; the old rule re-based live
-    # databases on every first contact and every restore, 2026-09-06).
+    # ...never for any other reason: a machine with state is served deltas
+    # built from the server's rows (design of record graph://1155b8f4-8cf;
+    # the old rule re-based live databases on every first contact and
+    # every restore, 2026-09-06). The third argument is ignored.
     assert decide(0, False, True) is False
     # Fresh server, established-looking peer with no trail: bounded replay.
     assert decide(0, False, False) is False
-
-
-def test_journal_gap_appears_only_after_pruning(tmp_path: Path) -> None:
-    db = GraphDB(tmp_path / "personal.db")
-    try:
-        catalog = MutationCatalog(db.conn, "a" * 64)
-        catalog.install()
-        for index in range(3):
-            with catalog.transaction(1_000 + index, f"t{index}"):
-                _insert_source(db.conn, f"s{index}", f"title-{index}")
-        assert journal_has_gap(db.conn) is False
-        catalog.record_served_ack("b" * 64, "epoch-1", 2)
-        catalog.prune_acknowledged(["b" * 64], "epoch-1")
-        assert journal_has_gap(db.conn) is True
-    finally:
-        db.close()
 
 
 def test_local_sync_state_survives_epoch_changes(
@@ -93,22 +77,5 @@ def test_local_sync_state_survives_epoch_changes(
         assert fleet_relay_sync._has_local_sync_state(
             "m" * 64, "r" * 64
         ) is True
-    finally:
-        db.close()
-
-
-def test_checkpoint_receiver_journal_counts_as_gap(tmp_path: Path) -> None:
-    """A fresh checkpoint receiver has winner transactions with no journal
-    rows; serving an unknown trail from it must checkpoint, not replay."""
-    db = GraphDB(tmp_path / "personal.db")
-    try:
-        catalog = MutationCatalog(db.conn, "a" * 64)
-        catalog.install()
-        with catalog.transaction(1_000, "t0"):
-            _insert_source(db.conn, "s0", "one")
-        # Simulate the install shape: journal retired, winner rows pinned.
-        db.conn.execute("DELETE FROM fleet_sync_journal")
-        db.conn.commit()
-        assert journal_has_gap(db.conn) is True
     finally:
         db.close()

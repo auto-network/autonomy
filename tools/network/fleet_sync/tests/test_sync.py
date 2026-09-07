@@ -438,7 +438,6 @@ def test_full_checkpoint_survives_retired_transaction_journal(
     with FleetSyncAlpha(origin_path, "machine-a") as origin:
         with origin.author(10, "old-history"):
             _source(origin.graph.conn, "stable", "current winner")
-        assert origin.catalog.prune_journal(10) == 1
         checkpoint = origin.checkpoint(
             tmp_path / "checkpoint", roster_epoch=2,
             active_roster=("machine-a", "machine-b"), target_chunk_bytes=4096,

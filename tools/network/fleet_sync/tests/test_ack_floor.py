@@ -23,13 +23,22 @@ def _insert_source(conn, identity: str, title: str) -> None:
 
 def _pull_all(server: MutationCatalog, client: MutationCatalog,
               cursor: int) -> int:
-    """Drain the server's retained journal into the client, like one pull."""
-    while True:
-        page = server.next_journal_transaction_ref(cursor)
-        if page is None:
-            return cursor
-        cursor, items = page
-        client.apply_remote_batch(items)
+    """Serve the client everything above its per-origin watermarks, like
+    one pull; returns the newest server transaction row id served."""
+    held = client.origin_watermarks()
+    for origin in server.origin_list():
+        position: tuple[int, str | None] = (held.get(origin, 0), None)
+        while True:
+            page = server.next_transactions_for_origin(
+                origin, position[0], position[1], limit=50,
+            )
+            if not page:
+                break
+            for ref, timestamp, transaction_id, items in page:
+                client.apply_remote_batch(items)
+                cursor = max(cursor, ref)
+                position = (timestamp, transaction_id)
+    return cursor
 
 
 def test_ack_floor_bounds_journal_growth(tmp_path: Path) -> None:
@@ -56,11 +65,7 @@ def test_ack_floor_bounds_journal_growth(tmp_path: Path) -> None:
             journal_rows, _transaction_rows = server.prune_acknowledged(
                 [PEER], EPOCH
             )
-            assert journal_rows == 10
-            retained = source.conn.execute(
-                "SELECT COUNT(*) FROM fleet_sync_journal"
-            ).fetchone()[0]
-            assert retained == 0
+            assert journal_rows == 0  # nothing but rows is stored now
             # Transactions whose writes still win stay pinned as winner
             # provenance; nothing else survives.
             pinned = source.conn.execute(
@@ -83,9 +88,6 @@ def test_ack_floor_bounds_journal_growth(tmp_path: Path) -> None:
         assert source.conn.execute(
             "SELECT COUNT(*) FROM fleet_sync_transactions"
         ).fetchone()[0] == 1
-        assert source.conn.execute(
-            "SELECT COUNT(*) FROM fleet_sync_journal"
-        ).fetchone()[0] == 0
 
         # The client's newest breadcrumb still resolves after pruning, so
         # the next pull resumes rather than replaying from zero.
@@ -113,7 +115,7 @@ def test_floor_unavailable_prunes_nothing(tmp_path: Path) -> None:
         catalog.record_served_ack(PEER, EPOCH, 1)
         assert catalog.prune_acknowledged([PEER, "c" * 64], EPOCH) == (0, 0)
         assert db.conn.execute(
-            "SELECT COUNT(*) FROM fleet_sync_journal"
+            "SELECT COUNT(*) FROM fleet_sync_transactions"
         ).fetchone()[0] == 1
     finally:
         db.close()
@@ -137,14 +139,12 @@ def test_floor_is_min_over_peers_and_acks_are_monotonic(
         catalog.record_served_ack(PEER, EPOCH, 1)
         assert catalog.acknowledged_journal_floor([PEER, slow], EPOCH) == 2
 
-        journal_rows, _transactions = catalog.prune_acknowledged(
-            [PEER, slow], EPOCH
-        )
-        assert journal_rows == 2
+        # Every transaction is still cited by a live row: nothing retires.
+        assert catalog.prune_acknowledged([PEER, slow], EPOCH) == (0, 0)
         remaining = db.conn.execute(
-            "SELECT transaction_ref FROM fleet_sync_journal"
+            "SELECT id FROM fleet_sync_transactions ORDER BY id"
         ).fetchall()
-        assert [int(row[0]) for row in remaining] == [3]
+        assert [int(row[0]) for row in remaining] == [1, 2, 3]
     finally:
         db.close()
 
@@ -194,9 +194,7 @@ def _write_history(catalog: MutationCatalog, conn) -> None:
 def _remaining(conn) -> tuple[list, int]:
     ids = [int(r[0]) for r in conn.execute(
         "SELECT id FROM fleet_sync_transactions ORDER BY id")]
-    journal = int(conn.execute(
-        "SELECT COUNT(*) FROM fleet_sync_journal").fetchone()[0])
-    return ids, journal
+    return ids, 0
 
 
 def test_incremental_prune_converges_to_the_one_shot_result(tmp_path: Path, monkeypatch) -> None:
@@ -219,7 +217,10 @@ def test_incremental_prune_converges_to_the_one_shot_result(tmp_path: Path, monk
     try:
         one_graph, _, one_server = dbs["oneshot"]
         one_journal, one_tx = one_server.prune_acknowledged([PEER], EPOCH)
-        assert one_journal == 60 and one_tx > 0
+        # 40 updates of one row: the row's insert and 39 superseded updates
+        # retire; the newest update stays cited by the row (and is the
+        # origin's frontier). Nothing else is stored per transaction.
+        assert (one_journal, one_tx) == (0, 40)
 
         inc_graph, _, inc_server = dbs["incremental"]
         totals = [0, 0]
@@ -249,8 +250,6 @@ def test_prune_transaction_check_probes_an_index_not_the_catalog(tmp_path: Path)
         plan = " | ".join(str(tuple(r)) for r in graph.conn.execute(
             "EXPLAIN QUERY PLAN SELECT MIN(id) FROM fleet_sync_transactions "
             "WHERE id>=? AND id<? "
-            "AND NOT EXISTS(SELECT 1 FROM fleet_sync_journal j "
-            "WHERE j.transaction_ref=fleet_sync_transactions.id) "
             "AND NOT EXISTS(SELECT 1 FROM fleet_sync_catalog c "
             "WHERE c.transaction_ref=fleet_sync_transactions.id)", (0, 10)))
         assert "SCAN c" not in plan and "SCAN fleet_sync_catalog" not in plan, plan
