@@ -34,16 +34,17 @@ def test_manifest_declares_librarian_agent_action():
 
     payload = json.loads((plugin_dir / (decl.payload_file or "")).read_text())
     assert payload["asset_type"] == "design"
-    assert payload["writes"] == ["design.thumbnail", "design.description"]
+    # Thumbnails render headlessly on the dashboard; the librarian only
+    # writes the summary, and only through bearer-authenticated calls.
+    assert payload["writes"] == ["design.description"]
     prompt = payload["prompt_template"]
-    assert "/api/design/" in prompt
+    assert "graph ui-design --pull" in prompt
     assert "/metadata" in prompt
-    assert "screenshot #design-iframe" in prompt
-    assert "--data-binary" in prompt
-    assert "manualCaptureScreenshot" not in prompt
+    assert "CROSSTALK_TOKEN" in prompt
+    assert "screenshot" not in prompt.lower()
+    assert "session-auth" in prompt  # named only to forbid it
     assert "tools.dashboard.plugins.design_studio.librarian" not in prompt
     assert "Do not read or write data/experiments.db directly" in prompt
-    assert "Do not upload a full-page screenshot" in prompt
 
 
 def test_librarian_agent_action_prompt_renders_through_dispatch_template_engine():
@@ -83,10 +84,10 @@ def test_librarian_agent_action_prompt_renders_through_dispatch_template_engine(
     assert 'export DASHBOARD="${DASHBOARD:-https://localhost:8080}"' in rendered
     assert "payload = {'description': 'REPLACE_WITH_CONCISE_RENDERED_DESIGN_SUMMARY'}" in rendered
     assert "f'{dash}/api/design-studio/revisions/{rev}/metadata'" in rendered
-    assert 'headers={\'Content-Type\': \'application/json\'}' in rendered
-    assert "screenshot #design-iframe $SHOT" in rendered
-    assert '--data-binary "@$SHOT"' in rendered
-    assert "{asset[" not in rendered
+    assert "'Authorization': 'Bearer ' + os.environ['CROSSTALK_TOKEN']" in rendered
+    assert 'graph ui-design --pull "$REV" /tmp/design-$REV' in rendered
+    assert "/api/design-studio/designs/series-a" in rendered
+    assert "{asset[" not in rendered and "{design[" not in rendered
 
 
 def test_update_revision_metadata_helper_preserves_revision_provenance(tmp_path):

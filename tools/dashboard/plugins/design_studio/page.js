@@ -1010,7 +1010,7 @@ function designStudioPage() {
       if (state === 'working') return 'Librarian is queued';
       if (state === 'done') return 'Librarian dispatched';
       if (state === 'error') return 'Librarian dispatch failed';
-      return 'Refresh preview and summary';
+      return 'Refresh summary (librarian)';
     },
 
     showStatusPill: function (design) {
