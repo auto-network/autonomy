@@ -1336,22 +1336,76 @@ var signRegistryRequestCore;
   // per-org work is added HERE, as a named step — not hand-wired into one
   // unlock path where it silently misses the others (the bug this replaces).
   //
-  // ctx: { slug, binding, heads, genesisId, persona, seed, deriveSeed }
+  // Each step declares `when(ctx)` — a KNOW-FIRST precondition answered from
+  // the unlock plan already in hand (ctx.plan), with NO network call of its
+  // own. A step whose precondition is false is not attempted at all: it never
+  // fetches, never signs, and never reports a failure for work it was never
+  // entitled to do. Publishing a checkpoint is the case that forced this —
+  // it is rare, most personas may not do it at all, and it is meaningless for
+  // a local store, so asking the server about it once per org per unlock was
+  // both noise and a source of alarming non-failures.
+  //
+  // NO PLAN, NO GATE: when the plan is absent (an older server, the mock, a
+  // failed prefetch) every `when` returns run, and each step falls back to the
+  // probe it has always done. The plan can therefore only ever SKIP work that
+  // was going to decline itself anyway — it can never invent work, and it can
+  // never make an unlock do less than it did before it existed.
+  //
+  // ctx: { slug, binding, heads, genesisId, persona, seed, deriveSeed, plan }
+  function _run() { return { run: true }; }
+  function _skip(reason) { return { run: false, reason: reason }; }
+
   var _ORG_ROOT_STEPS = [
-    { name: 'rekey', run: function (ctx) {
+    { name: 'rekey',
+      when: function (ctx) {
+        var r = ctx.plan && ctx.plan.rekey;
+        if (!r) return _run();
+        return r.due ? _run() : _skip(r.reason || 'not-due');
+      },
+      run: function (ctx) {
         return _evaluateRekey(
           { orgSlug: ctx.slug, genesisId: ctx.genesisId,
             org: ctx.binding.org_uuid, personaPub: ctx.persona.publicHex },
           ctx.deriveSeed);
       } },
-    { name: 'serve-cert', run: function (ctx) {
+    { name: 'serve-cert',
+      when: function (ctx) {
+        // The plan carries the serve-cert route's OWN verdict, so this gate
+        // and that route cannot disagree: a credential inside its renewal
+        // window is `required` even though its status is still 'ok'.
+        var s = ctx.plan && ctx.plan.serve_cert;
+        if (!s) return _run();
+        return s.required ? _run()
+                          : _skip('current' + (s.days_remaining !== null &&
+                                               s.days_remaining !== undefined
+                              ? ' (' + s.days_remaining + 'd)' : ''));
+      },
+      run: function (ctx) {
         return _renewServeCredential(
           ctx.slug, ctx.binding, ctx.persona.publicHex, ctx.seed, ctx.genesisId);
       } },
-    { name: 'binding', run: function (ctx) {
+    { name: 'binding',
+      // Cheap and self-gating: _maintainBinding compares the expiry it was
+      // handed and opens nothing unless the binding is actually near death.
+      when: _run,
+      run: function (ctx) {
         return _maintainBinding(ctx.slug, ctx.binding, ctx.seed);
       } },
-    { name: 'checkpoint', run: function (ctx) {
+    { name: 'checkpoint',
+      when: function (ctx) {
+        var p = ctx.plan;
+        if (!p) return _run();
+        // Three independent reasons not to attempt one, all knowable up front:
+        if (!p.committed_membership_org) return _skip('not-a-committed-org');
+        var c = p.checkpoint || {};
+        if (!c.needed) return _skip('up-to-date');
+        var pubs = c.checkpointer_pubs || [];
+        if (pubs.indexOf(ctx.persona.publicHex) === -1) {
+          return _skip('not-checkpointer');
+        }
+        return _run();
+      },
+      run: function (ctx) {
         return _publishMembershipCheckpoint(
           ctx.slug, ctx.binding, ctx.persona.publicHex, ctx.seed, ctx.genesisId);
       } },
@@ -1361,6 +1415,21 @@ var signRegistryRequestCore;
     var steps = [];
     for (var s = 0; s < _ORG_ROOT_STEPS.length; s++) {
       var def = _ORG_ROOT_STEPS[s];
+      var gate = { run: true };
+      try {
+        if (def.when) gate = def.when(ctx) || { run: true };
+      } catch (e) {
+        // A precondition that cannot be evaluated must not silently cancel
+        // the step — fall back to running it, which self-gates as it always
+        // did. Failing OPEN here is the safe direction: the cost is one
+        // redundant probe, where failing closed is skipped maintenance.
+        gate = { run: true };
+      }
+      if (!gate.run) {
+        steps.push({ step: def.name, ok: true, skipped: true,
+                     reason: gate.reason || 'not-needed' });
+        continue;
+      }
       try {
         var result = await def.run(ctx);
         steps.push({ step: def.name, ok: true, result: result });
@@ -1372,6 +1441,22 @@ var signRegistryRequestCore;
     return steps;
   }
 
+  // ONE round-trip for the whole ceremony's to-do list. Fetched BEFORE the
+  // per-org loop (and cheap enough to prefetch on the signing page's first
+  // load) so no step has to ask the server whether it applies. A failure is
+  // never fatal: null means every step falls back to its own probe.
+  async function _fetchUnlockPlan(slugs) {
+    if (!slugs || !slugs.length) return null;
+    try {
+      var body = await _fetchJsonOrNull(
+        '/api/network/unlock-plan?orgs=' +
+        encodeURIComponent(slugs.join(',')), null);
+      return (body && body.ok === true && body.plan) ? body.plan : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
   async function repairAllServeCredentialsWithRootSeed(personalRootSeed, opts) {
     opts = opts || {};
     if (!(personalRootSeed instanceof Uint8Array) || personalRootSeed.length !== 32) {
@@ -1381,6 +1466,10 @@ var signRegistryRequestCore;
     var checkpoints = [], rekeys = [], orgs = [];
     try {
       var slugs = await _signOnOrgSlugs(opts);
+      // The whole ceremony's to-do list, in one call, before any org is
+      // touched. opts.plan lets a page that already prefetched it on first
+      // load hand it in, so the unlock itself makes zero preparatory calls.
+      var plan = opts.plan || await _fetchUnlockPlan(slugs);
       for (var i = 0; i < slugs.length; i++) {
         var slug = slugs[i];
         try {
@@ -1397,6 +1486,7 @@ var signRegistryRequestCore;
           var stepOutcomes = await _reconcileOrgUnderRoot({
             slug: slug, binding: binding, heads: heads,
             genesisId: heads.genesis_id, persona: persona, seed: personalRootSeed,
+            plan: (plan && plan[slug]) || null,
             deriveSeed: (function (seed) {
               return function (info) { return derivePersona(seed, info); };
             })(personalRootSeed),
@@ -1406,23 +1496,30 @@ var signRegistryRequestCore;
           // consumers read, plus the new per-step surfaces (loud reporting).
           for (var k = 0; k < stepOutcomes.length; k++) {
             var o = stepOutcomes[k];
+            // A SKIPPED step reports WHY, not 'unknown'. "skipped:
+            // not-a-committed-org" is an answer; 'unknown' reads like a
+            // failure and is what sent the last investigation down the wrong
+            // path.
+            var why = o.skipped ? ('skipped: ' + o.reason) : null;
             if (o.step === 'serve-cert') {
               if (!o.ok) failed.push({ org: slug, error: o.error });
               else if (o.result && o.result.renewed) repaired.push(slug);
-              else ready.push(slug);
+              else ready.push(o.skipped ? (slug + ' (' + o.reason + ')') : slug);
             } else if (o.step === 'binding') {
               bindings.push(o.ok
-                ? { org: slug, action: (o.result && o.result.action) || 'unknown' }
+                ? { org: slug,
+                    action: why || (o.result && o.result.action) || 'unknown' }
                 : { org: slug, action: 'failed', error: o.error });
             } else if (o.step === 'checkpoint') {
               checkpoints.push(o.ok
-                ? { org: slug, action: (o.result && o.result.action) || 'unknown',
+                ? { org: slug,
+                    action: why || (o.result && o.result.action) || 'unknown',
                     seq: o.result && o.result.seq }
                 : { org: slug, action: 'failed', error: o.error });
             } else if (o.step === 'rekey') {
               rekeys.push(o.ok
                 ? { org: slug, fired: !!(o.result && o.result.fired),
-                    reason: o.result && o.result.reason }
+                    reason: o.skipped ? o.reason : (o.result && o.result.reason) }
                 : { org: slug, fired: false, error: o.error });
             }
           }
@@ -1677,6 +1774,13 @@ var signRegistryRequestCore;
       loadFromStore: _loadFromStore,
       hexToBytes: hexToBytes,
       bytesToHex: bytesToHex,
+      // The root-ceremony step registry and its runner. Exposed so the
+      // preconditions can be exercised directly: which steps a given plan
+      // runs is the ceremony's contract, and it must be assertable without
+      // driving a whole unlock.
+      orgRootSteps: _ORG_ROOT_STEPS,
+      reconcileOrgUnderRoot: _reconcileOrgUnderRoot,
+      fetchUnlockPlan: _fetchUnlockPlan,
       domains: {
         cert: CERT_DOMAIN, request: REQUEST_DOMAIN, revocation: REVOCATION_DOMAIN,
       },
