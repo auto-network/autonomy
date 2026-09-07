@@ -46,13 +46,28 @@ resolve_ipv4() {
 HOST_IP=$(resolve_ipv4 "$HOST_NAME")
 [ -n "$HOST_IP" ] || { echo "cannot resolve '$HOST_NAME' to an IPv4 address" >&2; exit 1; }
 NODE_ID=${NODE_ID:-registry-ash-1}
-# The IP that serve.auto.network A answers resolve to. Defaults to the box's
-# own IP (single-box POC), but serve rides its own floating IP where a dumb
-# :443 forward reaches the raw-stream ingress — so it is set explicitly there.
-RELAY_IP=${RELAY_IP:-$HOST_IP}
+# The IP every serve A answer resolves to: the serve FLOATING IP the raw
+# tls-stream ingress binds on :443 (SERVE_BIND_IP in the box's
+# /etc/autonomy-serve/serve.env), never the box's own IP — that address's
+# :443 is the estate Caddy, which has no certificate for serve names and
+# answers every ClientHello with a TLS alert. Defaulting to the box IP took
+# every serve host down on 2026-09-07 while NS/SOA looked healthy. So: read
+# the box's serve env unless --relay-ip is given explicitly.
+if [ -z "$RELAY_IP" ]; then
+    RELAY_IP=$(ssh -o IdentitiesOnly=yes "$HOST"         'sed -n "s/^SERVE_BIND_IP=//p" /etc/autonomy-serve/serve.env 2>/dev/null' | tr -d '"' | head -1)
+    [ -n "$RELAY_IP" ] || {
+        echo "no SERVE_BIND_IP in $HOST:/etc/autonomy-serve/serve.env — pass --relay-ip <serve floating IP> explicitly" >&2
+        exit 1
+    }
+    echo "== relay IP from the box's serve env: $RELAY_IP"
+fi
 case "$RELAY_IP" in
 *[!0-9.]*) echo "--relay-ip must be a dotted IPv4 address, got '$RELAY_IP'" >&2; exit 1 ;;
 esac
+if [ "$RELAY_IP" = "$HOST_IP" ]; then
+    echo "refusing: relay IP $RELAY_IP is the box's own address; serve answers must point at the serve floating IP (SERVE_BIND_IP)" >&2
+    exit 1
+fi
 
 echo "== preflight: the registry code on the box must carry the responder"
 ssh -o IdentitiesOnly=yes "$HOST" \
@@ -108,14 +123,14 @@ PY
 
 echo "== proving authoritative answers"
 for _ in $(seq 15); do
-    if [ "$(probe_answer)" = "$HOST_IP" ]; then
-        echo "   @$HOST_IP answers probe.serve.auto.network → $HOST_IP ✓"
+    if [ "$(probe_answer)" = "$RELAY_IP" ]; then
+        echo "   @$HOST_IP answers probe.serve.auto.network → $RELAY_IP ✓"
         echo "deploy complete. Next: verify-dns.sh $HOST_IP"
         exit 0
     fi
     sleep 2
 done
-echo "@$HOST_IP never answered an A query for probe.serve.auto.network." >&2
+echo "@$HOST_IP never answered probe.serve.auto.network A → $RELAY_IP (got '$(probe_answer)')." >&2
 echo "This is a real outage signal, not a proof-script quirk: NS/SOA can answer while A fails." >&2
 echo "Check: ssh $HOST 'cat /etc/autonomy-dns/dns.env; journalctl -u autonomy-registry-dns -n 30'" >&2
 exit 1

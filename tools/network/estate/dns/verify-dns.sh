@@ -13,7 +13,10 @@
 
 set -euo pipefail
 ZONE="serve.auto.network"
-RELAY_IP="5.161.219.195"
+# The serve FLOATING IP (SERVE_BIND_IP): where the raw tls-stream ingress
+# listens on :443. Not the box IP (5.161.219.195), whose :443 is the estate
+# Caddy — A answers pointing there fail every TLS handshake (2026-09-07).
+RELAY_IP="5.161.17.217"
 PRIMARY=${1:?usage: verify-dns.sh <host-ip> [second-ip] [--public]}
 shift
 SECONDARY="" PUBLIC=""
