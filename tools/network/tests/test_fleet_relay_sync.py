@@ -948,6 +948,79 @@ async def test_established_puller_with_unknown_position_gets_the_journal_not_a_s
 
 
 @pytest.mark.asyncio
+async def test_per_author_watermarks_serve_each_author_once_and_never_echo(
+    tmp_path, monkeypatch
+):
+    """Design of record: a puller sends {author: max timestamp held}; the
+    server streams, per author, only transactions newer than that, and
+    never the puller's own writes -- so an established peer with no trail
+    on this server receives exactly what it lacks, not the journal."""
+    from tools.network.fleet_sync_scheduler import (
+        _DONE_MAGIC, _TRANSACTION_MAGIC, encode_pull_request,
+        SQLiteFleetSyncStore, decode_transaction_header,
+    )
+    from tools.network.fleet_sync.catalog import MutationCatalog
+
+    fleet = _two_machine_fleet()
+    alpha = tmp_path / "alpha.db"
+    _prepare_org_db(alpha, fleet.server_machine.public_hex)
+    # Server-authored transactions at known timestamps, plus a transaction
+    # the CLIENT authored that the server imported (must never echo).
+    db = GraphDB(alpha)
+    try:
+        catalog = MutationCatalog(db.conn, fleet.server_machine.public_hex)
+        for ts, ident in ((1_000, "s-old"), (2_000, "s-mid"), (3_000, "s-new")):
+            with catalog.transaction(ts, f"tx-{ident}"):
+                db.conn.execute(
+                    "INSERT INTO sources(id,type,title,metadata,created_at,ingested_at)"
+                    " VALUES(?,?,?,?,?,?)",
+                    (ident, "note", ident, "{}", "2026-09-07T00:00:00Z", "2026-09-07T00:00:00Z"),
+                )
+    finally:
+        db.close()
+    store = SQLiteFleetSyncStore(alpha)
+    personal = tmp_path / "personal.db"
+    personal.touch()
+    server = _configure_relay_server(fleet, personal, monkeypatch)
+    monkeypatch.setattr(
+        server.scheduler, "_scope_paths",
+        lambda: {"personal": personal, "alpha": alpha},
+    )
+
+    async def served(watermarks):
+        request = encode_pull_request(
+            "cd" * 32, compat=store.compatibility_digest(), resume=(),
+            scope="alpha", bootstrap=False, watermarks=watermarks,
+        )
+        stream = await server.scheduler._handle(
+            "tok", request, fleet.client_machine.public_hex,
+        )
+        frames = [f async for f in stream]
+        headers = [
+            decode_transaction_header(f) for f in frames
+            if f.startswith(_TRANSACTION_MAGIC)
+        ]
+        assert any(f.startswith(_DONE_MAGIC) for f in frames)
+        kinds = [json.loads(f).get("kind") for f in frames if f[:1] in ("{", b"{")]
+        assert "checkpoint.begin" not in kinds
+        return [(origin, tx) for origin, tx, _ops in headers]
+
+    server_pub = fleet.server_machine.public_hex
+    # Knows nothing about this author (established elsewhere): receives all
+    # three, once, in author order -- not a snapshot, not the puller's own.
+    assert [tx for _o, tx in await served({"ee" * 32: 9_999})] == [
+        "tx-s-old", "tx-s-mid", "tx-s-new",
+    ]
+    # Holds the server's writes through ts=2000: receives only s-new.
+    assert await served({server_pub: 2_000}) == [(server_pub, "tx-s-new")]
+    # Holds everything: receives nothing -- and that map is a full
+    # acknowledgement, so the server may now retire those frames (the
+    # existing served-ack floor, fed by implied_ack_ref).
+    assert await served({server_pub: 3_000}) == []
+    assert store.oldest_journal_ref() in (None, 4)
+
+
+@pytest.mark.asyncio
 async def test_fresh_checkpoint_request_right_after_a_delivery_is_refused(
     tmp_path, monkeypatch
 ):

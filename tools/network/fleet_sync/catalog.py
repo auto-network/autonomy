@@ -1680,6 +1680,122 @@ class MutationCatalog:
         ]
         return transaction_ref, items
 
+    # -- per-author watermarks (design of record graph://1155b8f4-8cf) ----
+
+    def author_watermarks(self) -> dict[str, int]:
+        """``{author incarnation: max timestamp_ns held}`` over every
+        transaction this database has learned, frames retained or not. Under
+        the per-author write-floor promise this is W[author]: every
+        author-authored transaction at or below it is held."""
+        return {
+            str(row[0]): int(row[1])
+            for row in self.conn.execute(
+                "SELECT o.incarnation, MAX(t.timestamp_ns) "
+                "FROM fleet_sync_transactions t "
+                "JOIN fleet_sync_origins o ON o.id=t.origin_id "
+                "GROUP BY o.incarnation"
+            )
+        }
+
+    def author_list(self) -> list[str]:
+        return [
+            str(row[0]) for row in self.conn.execute(
+                "SELECT incarnation FROM fleet_sync_origins ORDER BY incarnation"
+            )
+        ]
+
+    def next_transaction_for_author(
+        self,
+        incarnation: str,
+        after_timestamp_ns: int,
+        after_transaction_id: str | None = None,
+    ) -> tuple[int, int, str, list[AuthoredMutation]] | None:
+        """The next RETAINED transaction by *incarnation* strictly after the
+        given position in (timestamp_ns, transaction_id) order.
+
+        ``after_transaction_id`` None means "strictly newer timestamp" (the
+        puller's watermark); a tuple position continues a page walk."""
+        if after_transaction_id is None:
+            where = "t.timestamp_ns>?"
+            params: tuple = (incarnation, int(after_timestamp_ns))
+        else:
+            where = "(t.timestamp_ns>? OR (t.timestamp_ns=? AND t.transaction_id>?))"
+            params = (incarnation, int(after_timestamp_ns), int(after_timestamp_ns),
+                      after_transaction_id)
+        row = self.conn.execute(
+            "SELECT t.id,t.timestamp_ns,t.transaction_id "
+            "FROM fleet_sync_transactions t "
+            "JOIN fleet_sync_origins o ON o.id=t.origin_id "
+            f"WHERE o.incarnation=? AND {where} AND EXISTS("
+            "SELECT 1 FROM fleet_sync_journal j WHERE j.transaction_ref=t.id) "
+            "ORDER BY t.timestamp_ns, t.transaction_id LIMIT 1",
+            params,
+        ).fetchone()
+        if row is None:
+            return None
+        transaction_ref = int(row[0])
+        items = [
+            AuthoredMutation(
+                incarnation,
+                str(row[2]),
+                int(operation),
+                decode_mutation_frame(_unpack_journal(bytes(frame))),
+            )
+            for operation, frame in self.conn.execute(
+                "SELECT operation_index,frame FROM fleet_sync_journal "
+                "WHERE transaction_ref=? ORDER BY operation_index",
+                (transaction_ref,),
+            )
+        ]
+        return transaction_ref, int(row[1]), str(row[2]), items
+
+    def implied_ack_ref(self, watermarks: dict[str, int]) -> int:
+        """The journal position a per-author watermark map proves consumed:
+        the largest local transaction id such that every transaction at or
+        below it has timestamp_ns <= W[its author] (0 for an author absent
+        from the map). Feeds the existing served-ack prune floor unchanged,
+        so retention keeps its proven invariant."""
+        first_uncovered: int | None = None
+        for author in self.author_list():
+            row = self.conn.execute(
+                "SELECT MIN(t.id) FROM fleet_sync_transactions t "
+                "JOIN fleet_sync_origins o ON o.id=t.origin_id "
+                "WHERE o.incarnation=? AND t.timestamp_ns>?",
+                (author, int(watermarks.get(author, 0))),
+            ).fetchone()
+            if row is not None and row[0] is not None:
+                candidate = int(row[0])
+                if first_uncovered is None or candidate < first_uncovered:
+                    first_uncovered = candidate
+        if first_uncovered is None:
+            newest = self.conn.execute(
+                "SELECT COALESCE(MAX(id),0) FROM fleet_sync_transactions"
+            ).fetchone()
+            return int(newest[0]) if newest else 0
+        return max(0, first_uncovered - 1)
+
+    def retired_above_watermarks(
+        self, watermarks: dict[str, int], exclude: str | None = None
+    ) -> list[str]:
+        """Authors whose retained history starts ABOVE the puller's watermark:
+        a transaction newer than W[author] whose frames were retired, which
+        no replay can supply. Empty means the map is fully servable."""
+        out: list[str] = []
+        for author in self.author_list():
+            if author == exclude:
+                continue
+            row = self.conn.execute(
+                "SELECT 1 FROM fleet_sync_transactions t "
+                "JOIN fleet_sync_origins o ON o.id=t.origin_id "
+                "WHERE o.incarnation=? AND t.timestamp_ns>? AND NOT EXISTS("
+                "SELECT 1 FROM fleet_sync_journal j WHERE j.transaction_ref=t.id) "
+                "LIMIT 1",
+                (author, int(watermarks.get(author, 0))),
+            ).fetchone()
+            if row is not None:
+                out.append(author)
+        return out
+
     def journal_breadcrumb(
         self, transaction_ref: int
     ) -> tuple[str, str, int] | None:

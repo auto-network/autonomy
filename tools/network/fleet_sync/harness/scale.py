@@ -121,12 +121,14 @@ def run(args: argparse.Namespace) -> dict:
     fleet = HarnessFleet(
         out / "fleet", size=args.size, seed=args.seed,
         poll_interval=args.poll_interval,
+        max_concurrent_pulls=args.concurrent_pulls,
     )
     late = args.size - 1 if args.late_join_at is not None else None
     evidence: dict = {
         "size": args.size, "writers": args.writers, "rate": args.rate,
         "duration_s": args.duration, "late_join_at_s": args.late_join_at,
         "poll_interval_s": args.poll_interval,
+        "concurrent_pulls": args.concurrent_pulls,
         "started_at": time.time(), **limits,
     }
     try:
@@ -318,6 +320,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--duration", type=float, default=30.0)
     parser.add_argument("--late-join-at", type=float, default=None)
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--concurrent-pulls", type=int, default=3,
+                        help="pulls a machine runs at once per round (production: 3)")
     parser.add_argument("--poll-interval", type=float, default=1.0,
                         help="seconds between pull rounds per machine (production: 10)")
     parser.add_argument("--out", required=True)

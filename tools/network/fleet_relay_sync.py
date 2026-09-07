@@ -525,10 +525,22 @@ class ConnectorFleetRuntime:
         # so a mixed-version fleet keeps syncing the personal scope while
         # only newer pullers carry the fields an older server refuses.
         if not (_REQUEST_FIELDS <= set(message)
-                <= _REQUEST_FIELDS | {"scope", "sync_v"}) \
+                <= _REQUEST_FIELDS | {"scope", "sync_v", "watermarks"}) \
                 or message.get("v") != PROTOCOL_VERSION \
                 or message.get("op") != PULL_OP:
             raise FleetRelaySyncError("fleet sync pull has unknown fields")
+        # Per-author watermark map (design of record): validated here, then
+        # handed to the direct engine's request encoder unchanged.
+        watermarks = message.get("watermarks")
+        if watermarks is not None and (
+            not isinstance(watermarks, dict)
+            or any(
+                not isinstance(k, str) or len(k) != 64
+                or isinstance(v, bool) or not isinstance(v, int) or v < 0
+                for k, v in watermarks.items()
+            )
+        ):
+            raise FleetRelaySyncError("fleet sync pull watermark map is malformed")
         scope = message.get("scope", "personal")
         if not isinstance(scope, str) or not scope or ":" in scope:
             raise FleetRelaySyncError("fleet sync pull scope is malformed")
@@ -830,6 +842,7 @@ class ConnectorFleetRuntime:
                         resume=resume_trail,
                         scope=scope,
                         version=sync_version,
+                        watermarks=watermarks,
                     ),
                     peer_pub,
                     telemetry_channel="relay",
@@ -1290,6 +1303,17 @@ async def pull_checkpoint_once(
                 scope, credential.machine_pub
             ).compatibility_digest()
         )
+        # Per-author watermarks: what this store holds per author, so the
+        # server sends only what is missing and never this machine's own
+        # writes (graph://1155b8f4-8cf). Empty on a brand-new store.
+        try:
+            watermarks = await asyncio.to_thread(
+                lambda: _scoped_store(
+                    scope, credential.machine_pub
+                ).author_watermarks()
+            )
+        except Exception:
+            watermarks = {}
         sync_version = _relay_sync_versions.get(
             route.origin_machine_pub, FLEET_SYNC_PROTOCOL_VERSION
         )
@@ -1299,6 +1323,7 @@ async def pull_checkpoint_once(
             "roster_epoch": epoch,
             "checkpoint": include_checkpoint,
             "compat": local_digest,
+            "watermarks": watermarks,
             "resume": [
                 encode_breadcrumb(breadcrumb) for breadcrumb in resume_trail
             ],
