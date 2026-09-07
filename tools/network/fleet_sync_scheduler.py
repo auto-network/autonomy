@@ -2418,6 +2418,7 @@ class FleetSyncScheduler:
                 )
         try:
             last_error: Exception | None = None
+            candidate_failures: list[tuple[str, str]] = []
             for address in addresses:
                 try:
                     channel = await fleet_direct_connect(
@@ -2431,8 +2432,20 @@ class FleetSyncScheduler:
                     break
                 except Exception as exc:
                     last_error = exc
+                    candidate_failures.append(
+                        (address, f"{type(exc).__name__}: {exc}"[:160])
+                    )
             if channel is None:
                 assert last_error is not None
+                # Every candidate failed. Name each one: the raised error is
+                # only the LAST candidate's (often the harmless container
+                # bridge address, refused in milliseconds), which hid what
+                # happened to the reachable one (SJC-2 -> home, 2026-09-07).
+                logger.warning(
+                    "fleet sync peer %s scope %r: no candidate connected: %s",
+                    machine_pub[:12], scope,
+                    "; ".join(f"{a} -> {e}" for a, e in candidate_failures),
+                )
                 raise last_error
 
             await asyncio.to_thread(
