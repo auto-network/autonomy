@@ -1007,6 +1007,20 @@ class HttpClient:
             headers=_settings_headers(org),
         )
 
+    def share_vault_credential(self, set_id, name, *, to_org, org, replace=False):
+        """Re-seal one AUDITED credential from the caller's namespace into
+        ``<to_org>:<name>``; the server derives the source namespace from the
+        bearer, the value never crosses this client."""
+        org = _resolve_client_org_arg(org)
+        return self._request(
+            "POST",
+            f"/api/vault/credential/"
+            f"{urllib.parse.quote(set_id, safe='')}/"
+            f"{urllib.parse.quote(name, safe='')}/share",
+            body={"to_org": to_org, "replace": bool(replace)},
+            headers=_settings_headers(org),
+        )
+
     def remove_vault_credential(self, set_id, name, *, org):
         """Remove one sealed credential by its bare name.
 

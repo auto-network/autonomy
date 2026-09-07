@@ -75,11 +75,14 @@ def test_prefixed_name_gets_the_derives_the_namespace_refusal(monkeypatch):
     assert removed == []
 
 
-def test_org_session_on_the_audited_set_is_refused_cleanly(monkeypatch):
-    """No org-keyed namespace is declared there (until auto-rhorp A-1)."""
+def test_org_session_on_the_audited_set_addresses_its_own_derived_key(monkeypatch):
+    """The audited set declares the org-keyed namespace too (auto-rhorp A-1
+    landed): an org session's remove derives ``<org>:name`` and, with no such
+    row, is a 404 scoped to that namespace — never a 403 and never another
+    namespace's row."""
     client = _client(monkeypatch, _org_session())
     response = client.delete(f"/api/vault/credential/{AUDITED}/pg.test")
-    assert response.status_code == 403, response.text
+    assert response.status_code == 404, response.text
     assert "namespace" in response.json()["error"]
 
 

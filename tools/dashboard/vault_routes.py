@@ -463,6 +463,114 @@ async def reseal(request: Request):
         return JSONResponse({"error": str(exc)}, status_code=400)
 
 
+
+async def share_vault_credential(request: Request):
+    """Copy one AUDITED credential from the caller's namespace into another
+    organization's namespace, re-sealed by the process delegate.
+
+    POST /api/vault/credential/{set_id}/{name}/share  {"to_org": slug, "replace": bool}
+
+    An audited secret opens unattended for its holder, so sharing it needs no
+    human factor: the source session's own authority to read it IS the consent,
+    and the delegate re-seals the one value into ``<to_org>:<name>`` through the
+    ordinary vaulted write path. The plaintext exists only where an audited
+    release already holds it. A SECURED secret is refused here: it needs the
+    operator's factor at release and re-enrolment at the secured tier
+    (bead auto-2pgaq, the two-ledger protocol).
+    """
+    if (denied := api_auth.require_authenticated_api_caller(request)) is not None:
+        return denied
+    set_id = request.path_params["set_id"]
+    name = request.path_params["name"]
+    if set_id == VAULT_SECURED_SET_ID:
+        return JSONResponse(
+            {"error": (
+                "a secured secret is shared with the operator's factor and "
+                "re-enrolled at the secured tier; that ceremony is not built yet "
+                "(auto-2pgaq). Only audited secrets can be shared unattended."
+            )},
+            status_code=400,
+        )
+    if set_id != VAULT_AUDITED_SET_ID:
+        return JSONResponse(
+            {"error": f"{set_id!r} is not a vault credential set"}, status_code=400,
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "body must be JSON"}, status_code=400)
+    if not isinstance(body, dict) or not isinstance(body.get("to_org"), str):
+        return JSONResponse({"error": "body must be {to_org: slug, replace?: bool}"}, status_code=400)
+    to_org = body["to_org"].strip()
+    replace = bool(body.get("replace", False))
+    from tools.graph import org_ops
+    try:
+        org_ops._validate_slug(to_org)
+    except Exception as exc:
+        return JSONResponse({"error": f"to_org: {exc}"}, status_code=400)
+
+    from tools.dashboard.vault_open_approvals import _setting_route
+    from tools.graph.schemas.registry import derive_org_writeback_key
+    principal = api_auth.principal_from_request(request)
+    try:
+        source_key, _scope = _setting_route(principal, set_id, name)
+    except PermissionError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=403)
+    except (ValueError, LookupError, SchemaValidationError) as exc:
+        message = str(exc)
+        if message.startswith("vault_open "):
+            message = "vault_share " + message[len("vault_open "):]
+        return JSONResponse({"error": message}, status_code=400)
+    if principal.org == to_org:
+        return JSONResponse(
+            {"error": f"{name!r} is already in the {to_org!r} namespace"}, status_code=400,
+        )
+    destination_key = derive_org_writeback_key(set_id, to_org, name)
+
+    # The launcher's read: org=None routes to the personal store with no
+    # prefix filter, and the delegate opens audited rows in-process.
+    members = settings_ops.read_set(set_id, org=None, peers=[])
+    source = next(
+        (m for m in (getattr(members, "members", None) or []) if getattr(m, "key", None) == source_key),
+        None,
+    )
+    if source is None:
+        return JSONResponse(
+            {"error": f"no sealed credential named {name!r} in your vault namespace"},
+            status_code=404,
+        )
+    if getattr(source, "vault_error", None) is not None:
+        return JSONResponse(
+            {"error": "the vault is cold; unlock the dashboard, then share again"},
+            status_code=503,
+        )
+    payload = getattr(source, "payload", None) or {}
+    value = payload.get("value") if isinstance(payload, dict) else None
+    if not isinstance(value, str) or not value:
+        return JSONResponse({"error": "source credential is malformed"}, status_code=500)
+
+    existing = settings_ops.layers_for(set_id, destination_key, org=None)
+    if (existing.get("base") or {}).get("id") and not replace:
+        return JSONResponse(
+            {"error": f"{to_org}:{name} already exists; pass replace=true to overwrite"},
+            status_code=409,
+        )
+    try:
+        setting_id = settings_ops.write_by_key(
+            set_id, VAULT_CREDENTIAL_REVISION, name, {"value": value}, org=to_org,
+        )
+    except Exception as exc:
+        logger.warning("vault_share write failed for %s -> %s: %s", source_key, destination_key, exc)
+        return JSONResponse({"error": f"destination write failed: {type(exc).__name__}"}, status_code=500)
+    logger.info(
+        "vault_credential_shared caller_kind=%s caller=%s from=%s to=%s setting_id=%s replace=%s",
+        principal.kind.value, principal.subject, source_key, destination_key, setting_id, replace,
+    )
+    return JSONResponse({
+        "ok": True, "set_id": set_id, "from_key": source_key,
+        "to_key": destination_key, "setting_id": setting_id,
+    })
+
 ROUTES = [
     Route("/api/identity/factors", factors, methods=["GET"]),
     Route("/api/identity/vault-anchors", root_anchors, methods=["GET"]),
@@ -477,6 +585,11 @@ ROUTES = [
         "/api/vault/credential/{set_id}/{name}",
         remove_vault_credential,
         methods=["DELETE"],
+    ),
+    Route(
+        "/api/vault/credential/{set_id}/{name}/share",
+        share_vault_credential,
+        methods=["POST"],
     ),
     Route("/api/identity/factors/password", enroll_password, methods=["POST"]),
     Route("/api/identity/classes", create_class, methods=["POST"]),

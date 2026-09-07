@@ -239,6 +239,35 @@ def cmd_vault_list(args) -> None:
         print(f"  {name:<{width}}  {tier}")
 
 
+def cmd_vault_share(args) -> None:
+    """Share an audited secret into another organization's namespace."""
+    if ":" in args.name:
+        print(
+            "Error: the source namespace is derived from your session; do not put "
+            "an explicit prefix in the name",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    org = _vault_org(args)
+    client = get_client()
+    try:
+        result = client.share_vault_credential(
+            VAULT_AUDITED_SET_ID, args.name, to_org=args.to_org, org=org,
+            replace=args.replace,
+        )
+    except Exception as exc:  # the server's message is the useful part
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    print(
+        f"  ✓ shared {result.get('from_key')} → {result.get('to_key')} "
+        f"(audited; setting {str(result.get('setting_id'))[:11]})"
+    )
+    print(
+        f"  Reference it from a workspace as credential:{result.get('to_key')}; "
+        "a NEW session of that workspace receives it as an environment variable."
+    )
+
+
 def attach_vault_subparser(sub) -> None:
     """Wire up ``graph vault ...`` onto an existing subparsers object."""
     p_vault = sub.add_parser(
@@ -291,6 +320,15 @@ def attach_vault_subparser(sub) -> None:
     )
     p_read.set_defaults(func=cmd_vault_read)
 
+    p_share = vault_sub.add_parser(
+        "share",
+        help="Re-seal an AUDITED secret into another organization's namespace "
+             "(no human factor; secured secrets need the operator's ceremony)",
+    )
+    p_share.add_argument("name", help="Stable credential name in your namespace (no prefix)")
+    p_share.add_argument("--to-org", required=True, dest="to_org", help="Destination organization slug")
+    p_share.add_argument("--replace", action="store_true", help="Overwrite an existing destination row")
+    p_share.set_defaults(func=cmd_vault_share)
     p_remove = vault_sub.add_parser("remove", help="Remove a secret by name (either tier)")
     p_remove.add_argument("name")
     _add_scope(p_remove)
