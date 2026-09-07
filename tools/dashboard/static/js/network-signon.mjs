@@ -1325,12 +1325,60 @@ var signRegistryRequestCore;
   // WebAuthn PRF has already opened the personal root, so consume a fresh seed
   // copy directly and use the same sealed-org-root renewal primitives as
   // ordinary sign-on. The caller's buffer is always zeroed here.
+  // ── The per-org root-authority step registry ────────────────────────────
+  //
+  // The STRICT list of what happens to one organization while the personal
+  // root is warm. Each step is atomic, idempotent, self-gates on the authority
+  // it needs (its run may skip and return a benign result), and is ISOLATED:
+  // _reconcileOrgUnderRoot runs each in its own try/catch, so one step failing
+  // can never skip another. A step that needs a prior step's OUTPUT reads it
+  // from ctx (a precondition), never inherits its exception. New root-warm
+  // per-org work is added HERE, as a named step — not hand-wired into one
+  // unlock path where it silently misses the others (the bug this replaces).
+  //
+  // ctx: { slug, binding, heads, genesisId, persona, seed, deriveSeed }
+  var _ORG_ROOT_STEPS = [
+    { name: 'rekey', run: function (ctx) {
+        return _evaluateRekey(
+          { orgSlug: ctx.slug, genesisId: ctx.genesisId,
+            org: ctx.binding.org_uuid, personaPub: ctx.persona.publicHex },
+          ctx.deriveSeed);
+      } },
+    { name: 'serve-cert', run: function (ctx) {
+        return _renewServeCredential(
+          ctx.slug, ctx.binding, ctx.persona.publicHex, ctx.seed, ctx.genesisId);
+      } },
+    { name: 'binding', run: function (ctx) {
+        return _maintainBinding(ctx.slug, ctx.binding, ctx.seed);
+      } },
+    { name: 'checkpoint', run: function (ctx) {
+        return _publishMembershipCheckpoint(
+          ctx.slug, ctx.binding, ctx.persona.publicHex, ctx.seed, ctx.genesisId);
+      } },
+  ];
+
+  async function _reconcileOrgUnderRoot(ctx) {
+    var steps = [];
+    for (var s = 0; s < _ORG_ROOT_STEPS.length; s++) {
+      var def = _ORG_ROOT_STEPS[s];
+      try {
+        var result = await def.run(ctx);
+        steps.push({ step: def.name, ok: true, result: result });
+      } catch (e) {
+        steps.push({ step: def.name, ok: false,
+                     error: (e && e.message) || String(e) });
+      }
+    }
+    return steps;
+  }
+
   async function repairAllServeCredentialsWithRootSeed(personalRootSeed, opts) {
     opts = opts || {};
     if (!(personalRootSeed instanceof Uint8Array) || personalRootSeed.length !== 32) {
       throw new Error('personalRootSeed must be a 32-byte Uint8Array');
     }
     var repaired = [], ready = [], failed = [], bindings = [];
+    var checkpoints = [], rekeys = [], orgs = [];
     try {
       var slugs = await _signOnOrgSlugs(opts);
       for (var i = 0; i < slugs.length; i++) {
@@ -1346,24 +1394,45 @@ var signRegistryRequestCore;
             continue;
           }
           var persona = await derivePersona(personalRootSeed, heads.genesis_id);
-          var result = await _renewServeCredential(
-            slug, binding, persona.publicHex, personalRootSeed,
-            heads.genesis_id);
-          if (result.renewed) repaired.push(slug);
-          else ready.push(slug);
-          try {
-            var bm = await _maintainBinding(slug, binding, personalRootSeed);
-            bindings.push({ org: slug, action: bm.action });
-          } catch (e) {
-            bindings.push({ org: slug, action: 'failed',
-                            error: (e && e.message) || String(e) });
+          var stepOutcomes = await _reconcileOrgUnderRoot({
+            slug: slug, binding: binding, heads: heads,
+            genesisId: heads.genesis_id, persona: persona, seed: personalRootSeed,
+            deriveSeed: (function (seed) {
+              return function (info) { return derivePersona(seed, info); };
+            })(personalRootSeed),
+          });
+          orgs.push({ org: slug, steps: stepOutcomes });
+          // Fold each step's outcome back into the arrays existing report
+          // consumers read, plus the new per-step surfaces (loud reporting).
+          for (var k = 0; k < stepOutcomes.length; k++) {
+            var o = stepOutcomes[k];
+            if (o.step === 'serve-cert') {
+              if (!o.ok) failed.push({ org: slug, error: o.error });
+              else if (o.result && o.result.renewed) repaired.push(slug);
+              else ready.push(slug);
+            } else if (o.step === 'binding') {
+              bindings.push(o.ok
+                ? { org: slug, action: (o.result && o.result.action) || 'unknown' }
+                : { org: slug, action: 'failed', error: o.error });
+            } else if (o.step === 'checkpoint') {
+              checkpoints.push(o.ok
+                ? { org: slug, action: (o.result && o.result.action) || 'unknown',
+                    seq: o.result && o.result.seq }
+                : { org: slug, action: 'failed', error: o.error });
+            } else if (o.step === 'rekey') {
+              rekeys.push(o.ok
+                ? { org: slug, fired: !!(o.result && o.result.fired),
+                    reason: o.result && o.result.reason }
+                : { org: slug, fired: false, error: o.error });
+            }
           }
         } catch (e) {
           failed.push({ org: slug, error: (e && e.message) || String(e) });
         }
       }
       return { repaired: repaired, ready: ready, failed: failed,
-               bindings: bindings };
+               bindings: bindings, checkpoints: checkpoints, rekeys: rekeys,
+               orgs: orgs };
     } finally {
       personalRootSeed.fill(0);
     }
