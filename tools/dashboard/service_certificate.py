@@ -553,6 +553,44 @@ def active_gateway_pair(org: str, persona_label: object) -> tuple[str, str] | No
     return gateway_pair_paths(metadata)
 
 
+def _dns01_preflight(client, apex: str, *, wait=None) -> None:
+    """Prove, against our OWN authoritative name servers, that a challenge for
+    this apex will land where ACME looks — before any ACME order exists.
+
+    Presents a canary value, checks the relay published it under exactly
+    ``_acme-challenge.<apex>`` (the relay derives the name from the persona's
+    bound serving label, never from us), waits until both authoritative
+    servers answer it, then cleans up. Raises with both labels named on a
+    mismatch, so a wrong apex costs nothing at Let's Encrypt.
+    """
+    if wait is None:
+        from tools.dashboard.acme_dns01 import wait_authoritative_txt as wait
+    expected = f"_acme-challenge.{apex}"
+    order = f"preflight-{uuid.uuid4().hex}"
+    canary = "preflight-" + uuid.uuid4().hex
+    result = client.present(order, canary, ttl=30, lifetime=120)
+    try:
+        published = str(result.get("name", ""))
+        if published != expected:
+            relay_label = published.removeprefix("_acme-challenge.").removesuffix(".serve.auto.network")
+            raise ServiceCertificateError(
+                "DNS-01 preflight: the relay publishes challenges for this persona under "
+                f"{published!r} but the certificate is for {expected!r}; the persona's bound "
+                f"serving label is {relay_label!r}, not {apex.split('.serve.', 1)[0]!r}. "
+                "No ACME order was placed."
+            )
+        try:
+            wait(expected, canary)
+        except Exception as exc:
+            raise ServiceCertificateError(
+                f"DNS-01 preflight: canary TXT for {expected!r} did not reach every "
+                f"authoritative nameserver ({type(exc).__name__}: {exc}). No ACME order was placed."
+            ) from exc
+    finally:
+        with contextlib.suppress(Exception):
+            client.cleanup(order, canary)
+
+
 async def obtain(
     org: str, persona_label: str, *, staging: bool = False
 ) -> tuple[dict, bytes, bytes]:
@@ -562,6 +600,7 @@ async def obtain(
     client = load_dns01_client(org)
     order = f"service-{uuid.uuid4().hex}"
     apex = f"{persona_label}.serve.auto.network"
+    await asyncio.to_thread(_dns01_preflight, client, apex)
     cert_name = order if staging else certificate_name(org, persona_label)
     socket_path = ACME_ROOT / "dns01.sock"
     ACME_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)

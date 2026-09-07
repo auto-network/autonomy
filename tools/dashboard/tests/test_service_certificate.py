@@ -184,6 +184,7 @@ def test_failed_certbot_run_surfaces_real_cause_and_preserves_attempt(monkeypatc
     monkeypatch.setattr(certs, "_restore_acme_bundle", lambda: None)
     monkeypatch.setattr(certs, "_compose_environment", lambda: {})
     monkeypatch.setattr(certs, "_certbot_command", lambda *a, **k: ["certbot"])
+    monkeypatch.setattr(certs, "_dns01_preflight", lambda client, apex, wait=None: None)
 
     class _Server:
         def __init__(self, *a, **k):
@@ -233,3 +234,64 @@ def test_failed_certbot_run_surfaces_real_cause_and_preserves_attempt(monkeypatc
     assert (attempts[0] / "output.txt").read_bytes().count(b"--- stdout ---") == 1
     assert (attempts[0] / "logs" / "letsencrypt.log").read_text() == "hook says: refused\n"
     assert not (acme_root / "logs").exists()  # ephemeral root still wiped
+
+
+class _FakeDns01Client:
+    def __init__(self, bound_label):
+        self.bound_label = bound_label
+        self.presented = []
+        self.cleaned = []
+
+    def present(self, order, value, *, ttl=60, lifetime=600):
+        self.presented.append((order, value))
+        return {"name": f"_acme-challenge.{self.bound_label}.serve.auto.network", "expires_at": 1}
+
+    def cleanup(self, order, value):
+        self.cleaned.append((order, value))
+
+
+def test_dns01_preflight_refuses_a_label_the_relay_did_not_bind_before_any_acme_order(monkeypatch):
+    """The relay derives the challenge name from the persona's bound serving
+    label. If that is not the apex we are about to order for, ACME would look
+    in the wrong place five times and rate-limit us (2026-09-07). Fail here,
+    name both labels, place no order, and always clean the canary."""
+    from tools.dashboard import service_certificate as certs
+    client = _FakeDns01Client("persona-77827e972ba4c37d4215")
+    waited = []
+    with pytest.raises(certs.ServiceCertificateError) as excinfo:
+        certs._dns01_preflight(client, "jeremy-77827e972ba4c37d4215.serve.auto.network",
+                               wait=lambda name, value: waited.append(name))
+    msg = str(excinfo.value)
+    assert "bound serving label is 'persona-77827e972ba4c37d4215'" in msg
+    assert "'jeremy-77827e972ba4c37d4215'" in msg and "No ACME order was placed" in msg
+    assert waited == []  # never waited on a name ACME will not query
+    assert len(client.cleaned) == 1 and client.cleaned[0] == client.presented[0]
+
+
+def test_dns01_preflight_passes_when_our_nameservers_answer_the_right_name():
+    from tools.dashboard import service_certificate as certs
+    client = _FakeDns01Client("persona-77827e972ba4c37d4215")
+    waited = []
+    certs._dns01_preflight(client, "persona-77827e972ba4c37d4215.serve.auto.network",
+                           wait=lambda name, value: waited.append((name, value)))
+    assert waited[0][0] == "_acme-challenge.persona-77827e972ba4c37d4215.serve.auto.network"
+    assert waited[0][1] == client.presented[0][1]
+    assert client.cleaned == client.presented
+
+
+def test_obtain_runs_the_preflight_before_starting_certbot(monkeypatch, tmp_path):
+    import asyncio
+    from tools.dashboard import service_certificate as certs
+    monkeypatch.setattr(certs, "ACME_ROOT", tmp_path / "acme")
+    monkeypatch.setattr(certs, "load_dns01_client", lambda org: _FakeDns01Client("persona-77827e972ba4c37d4215"))
+    monkeypatch.setattr(certs, "_restore_acme_bundle", lambda: None)
+    started = []
+
+    async def fake_exec(*a, **k):
+        started.append(a)
+        raise AssertionError("certbot must not start after a failed preflight")
+
+    monkeypatch.setattr(certs.asyncio, "create_subprocess_exec", fake_exec)
+    with pytest.raises(certs.ServiceCertificateError, match="DNS-01 preflight"):
+        asyncio.run(certs.obtain("autonomy", "jeremy-77827e972ba4c37d4215"))
+    assert started == []

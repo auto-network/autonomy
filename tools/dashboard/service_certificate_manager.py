@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import datetime as _dt
 import json
 import logging
+import re
 import time
 
 from tools.dashboard import service_certificate, service_publication
@@ -40,6 +42,31 @@ def desired_personas() -> set[tuple[str, str]]:
             ):
                 desired.add((ref.slug, persona))
     return desired
+
+
+_RETRY_AFTER_RE = re.compile(r"retry after (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) UTC")
+MAX_BACKOFF_SECONDS = 15 * 60.0
+NO_BACKOFF_MARKERS = ("vault is locked", "vault cold", "key holder")
+
+
+def failure_hold_seconds(error: str, consecutive: int, now: float) -> float:
+    """How long to leave an identity alone after a failed issuance.
+
+    An ACME rate limit names its own retry time; honour it (plus a margin)
+    instead of hammering a 1-hour limit every 60 s. Other failures back off
+    exponentially from one minute to fifteen. A locked vault is the operator's
+    next action, not ours: no hold, so the unlock is picked up within a minute.
+    """
+    match = _RETRY_AFTER_RE.search(error or "")
+    if match:
+        when = _dt.datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=_dt.timezone.utc
+        ).timestamp()
+        return max(0.0, when - now) + 30.0
+    lowered = (error or "").lower()
+    if any(marker in lowered for marker in NO_BACKOFF_MARKERS):
+        return 0.0
+    return min(MAX_BACKOFF_SECONDS, 60.0 * (2 ** max(0, consecutive - 1)))
 
 
 def _import_legacy_pair(org: str, persona_label: str) -> dict | None:
@@ -95,12 +122,16 @@ class ServiceCertificateManager:
         self._materialized: dict[tuple[str, str], str] = {}
         self.errors: dict[tuple[str, str], str] = {}
         self.in_progress: set[tuple[str, str]] = set()
+        self.hold_until: dict[tuple[str, str], float] = {}
+        self.failures: dict[tuple[str, str], int] = {}
 
     async def reconcile_once(self) -> bool:
         async with self._lock:
             desired = sorted(self._desired())
             for org, persona in desired:
                 identity = (org, persona)
+                if self.hold_until.get(identity, 0.0) > float(self._now()):
+                    continue  # rate-limited or backing off; the state says until when
                 self.in_progress.add(identity)
                 try:
                     metadata = service_certificate.certificate_metadata(org, persona)
@@ -134,7 +165,10 @@ class ServiceCertificateManager:
                         )
                     self._materialized[identity] = metadata["serial"]
                     self.errors.pop(identity, None)
+                    self.hold_until.pop(identity, None)
+                    self.failures.pop(identity, None)
                 except service_certificate.ServiceCertificateError as exc:
+                    self._note_failure(identity, f"{type(exc).__name__}: {exc}")
                     # Expected, self-describing refusals (vault still locked or
                     # its bundle not yet restored on a fresh worker, no gateway
                     # pair to import): one line, no traceback. The retry
@@ -146,7 +180,7 @@ class ServiceCertificateManager:
                         org, persona, exc,
                     )
                 except Exception as exc:
-                    self.errors[identity] = f"{type(exc).__name__}: {exc}"
+                    self._note_failure(identity, f"{type(exc).__name__}: {exc}")
                     logger.warning(
                         "Service certificate reconciliation failed for %s/%s",
                         org,
@@ -156,6 +190,19 @@ class ServiceCertificateManager:
                 finally:
                     self.in_progress.discard(identity)
             return not any(identity in self.errors for identity in desired)
+
+    def _note_failure(self, identity: tuple[str, str], error: str) -> None:
+        self.errors[identity] = error
+        self.failures[identity] = self.failures.get(identity, 0) + 1
+        hold = failure_hold_seconds(error, self.failures[identity], float(self._now()))
+        if hold > 0:
+            self.hold_until[identity] = float(self._now()) + hold
+            logger.warning(
+                "Service certificate: holding %s/%s for %.0f s after failure %d",
+                identity[0], identity[1], hold, self.failures[identity],
+            )
+        else:
+            self.hold_until.pop(identity, None)
 
     def certificate_states(self) -> list[dict]:
         """Return the operator-facing state of every desired persona pair."""
@@ -173,6 +220,10 @@ class ServiceCertificateManager:
                 lines = [line.strip() for line in error.splitlines() if line.strip()]
                 summary = " · ".join(lines[-3:])[-600:] if lines else error[:600]
                 reason = f"Certificate issuance failed: {summary}"
+                held = self.hold_until.get(identity, 0.0)
+                if held > now:
+                    at = _dt.datetime.fromtimestamp(held, _dt.timezone.utc).strftime("%H:%M:%S UTC")
+                    reason += f" · next attempt at {at}"
             elif identity in self.in_progress:
                 state = "issuing"
                 reason = "Certificate issuance or renewal is in progress."

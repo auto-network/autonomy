@@ -440,6 +440,24 @@ def list_reservations(org: str) -> list[dict]:
     return sorted(projected, key=lambda row: row["origin"])
 
 
+def bound_persona_label(org: str, persona_pub: str) -> str | None:
+    """The serving label this persona already publishes under, if any.
+
+    The registry binds ONE immutable serving label per persona at its first
+    host registration (relay design §3.2) and refuses every other label as
+    invalid. A later display-name change must therefore not mint a new apex:
+    the first reservation's label wins here exactly as it does at the relay.
+    Observed 2026-09-07: a display name of "Jeremy" produced
+    jeremy-<suffix> while the registry held persona-<suffix>; the gateway never
+    advertised the route and five DNS-01 challenges were published under the
+    bound label while ACME validated the new one, tripping the rate limit.
+    """
+    for row in list_reservations(org):
+        if row.get("persona_pub") == persona_pub and row.get("persona_label"):
+            return row["persona_label"]
+    return None
+
+
 def reserve_origin(org: str, app_label: str) -> tuple[dict, bool]:
     app_label = validate_app_label(app_label)
     persona_pub, display_name = _persona_for_org(org)
@@ -452,7 +470,8 @@ def reserve_origin(org: str, app_label: str) -> tuple[dict, bool]:
     now = _utc_now()
     payload = {
         "persona_pub": persona_pub,
-        "persona_label": normalize_persona_label(display_name, persona_pub),
+        "persona_label": bound_persona_label(org, persona_pub)
+        or normalize_persona_label(display_name, persona_pub),
         "app_label": app_label,
         "state": "active",
         "created_at": now,
