@@ -147,3 +147,54 @@ def test_list_shows_names_and_tiers_never_values(monkeypatch, capsys):
     assert "a" in out and "b" in out
     assert "secured" in out and "audited" in out
     assert "SECRET" not in out
+
+
+# ---- 2026-09-07: half-wired verbs found by the BlindHash hand-off ----------
+
+def test_find_member_matches_the_bearer_prefixed_key():
+    """`graph vault list` shows `<org>:name`; read/remove/seal must address it
+    by the bare name (the server already scoped the listing)."""
+    c = FakeClient({vault_cmd.VAULT_AUDITED_SET_ID: [FakeMember("blindhash:dnsmadeeasy.api-key")]})
+    tier, member = vault_cmd._find_member(c, "dnsmadeeasy.api-key", "personal")
+    assert tier == "audited" and member.key == "blindhash:dnsmadeeasy.api-key"
+    assert vault_cmd._find_member(c, "api-key", "personal") == (None, None)  # no suffix matching
+
+
+def test_audited_read_over_http_never_prints_the_value(monkeypatch, capsys, tmp_path):
+    member = FakeMember("autonomy:openrouter.api-key")
+    member.payload = {"value": "sk-secret"}
+    c = FakeClient({vault_cmd.VAULT_AUDITED_SET_ID: [member]})
+    c.request_vault_open = lambda *a, **k: {"path": "/never"}  # HTTP client: rendezvous exists
+    _use(monkeypatch, c)
+    # no ramfs in this container: refuse, and say what to do
+    monkeypatch.setattr(vault_cmd, "Path", lambda p: tmp_path / "absent")
+    with pytest.raises(SystemExit):
+        vault_cmd.cmd_vault_read(_args(name="openrouter.api-key", org=vault_cmd._ORG_SENTINEL))
+    out = capsys.readouterr()
+    assert "sk-secret" not in out.out + out.err
+    assert "credential:<org>:openrouter.api-key" in out.err
+    # with a ramfs: deliver to a 0600 file and print only the path
+    ramfs = tmp_path / "secrets"; ramfs.mkdir()
+    monkeypatch.setattr(vault_cmd, "Path", lambda p: ramfs)
+    vault_cmd.cmd_vault_read(_args(name="openrouter.api-key", org=vault_cmd._ORG_SENTINEL))
+    out = capsys.readouterr()
+    assert out.out.strip() == str(ramfs / "openrouter.api-key")
+    assert "sk-secret" not in out.out
+    assert (ramfs / "openrouter.api-key").read_text() == "sk-secret"
+    assert oct((ramfs / "openrouter.api-key").stat().st_mode & 0o777) == "0o600"
+
+
+def test_share_sends_no_org_header_by_default_and_the_slug_when_named(monkeypatch, capsys):
+    calls = []
+    c = FakeClient()
+    c.share_vault_credential = lambda set_id, name, *, to_org, org, replace=False: (
+        calls.append((set_id, name, to_org, org, replace)) or
+        {"from_key": "blindhash:" + name, "to_key": to_org + ":" + name, "setting_id": "s1"}
+    )
+    _use(monkeypatch, c)
+    vault_cmd.cmd_vault_share(_args(name="dnsmadeeasy.api-key", to_org="autonomy", replace=False, org=None))
+    vault_cmd.cmd_vault_share(_args(name="dnsmadeeasy.api-key", to_org="autonomy", replace=True, org="blindhash"))
+    assert calls[0] == (vault_cmd.VAULT_AUDITED_SET_ID, "dnsmadeeasy.api-key", "autonomy", None, False)
+    assert calls[1][3] == "blindhash" and calls[1][4] is True
+    out = capsys.readouterr().out
+    assert "blindhash:dnsmadeeasy.api-key → autonomy:dnsmadeeasy.api-key" in out

@@ -9,7 +9,9 @@ name across the two sets. The secret never crosses argv or an environment value.
 
 from __future__ import annotations
 
+import os
 import sys
+from pathlib import Path
 
 from .client import get_client
 from .ops import CALLER_ORG
@@ -61,6 +63,14 @@ def _add_scope(parser) -> None:
     parser.set_defaults(org=None)
 
 
+def _key_matches(stored_key: str, name: str) -> bool:
+    """A bare name addresses its own row whether the store holds it bare (the
+    operator's own store) or under the bearer-derived ``<org>:name`` prefix (an
+    org session's row). The server has already filtered the listing to the
+    caller's namespace, so the prefix is never another organization's."""
+    return stored_key == name or stored_key.endswith(":" + name)
+
+
 def _find_member(client, name, org):
     """The (tier, member) a name resolves to across both tiers, or (None, None)."""
     for tier, set_id in _TIER_SET.items():
@@ -69,7 +79,7 @@ def _find_member(client, name, org):
         except Exception:  # noqa: BLE001 — a set the caller cannot read is "absent here"
             continue
         for m in members.members:
-            if m.key == name:
+            if _key_matches(m.key, name):
                 return tier, m
     return None, None
 
@@ -199,14 +209,34 @@ def _emit_release(client, set_id, name, org, member):
     if sealed is not None and opener is not None:
         print(opener(set_id, name, org=org)["path"])
         return
-    # Direct-host recovery mode returns the opened payload inline; there is no
-    # ramfs rendezvous to route it through.
     payload = getattr(member, "payload", None)
-    if isinstance(payload, dict) and "value" in payload:
+    if not (isinstance(payload, dict) and isinstance(payload.get("value"), str)):
+        print(f"Error: {name!r} did not open", file=sys.stderr)
+        sys.exit(1)
+    if opener is None:
+        # Direct-host recovery mode (--force-host, in-process client): there is
+        # no ramfs rendezvous to route through, and the operator asked for it.
         print(payload["value"])
         return
-    print(f"Error: {name!r} did not open", file=sys.stderr)
-    sys.exit(1)
+    # Over HTTP an audited row arrives opened, but this verb promises a PATH,
+    # never the value in the transcript: place it in the session's private
+    # ramfs, or refuse and say what to do instead.
+    ramfs = Path("/run/secrets")
+    if not (ramfs.is_dir() and os.access(ramfs, os.W_OK)):
+        print(
+            f"Error: {name!r} opened, but this container has no /run/secrets "
+            "ramfs to deliver it to. Reference it from a workspace as "
+            f"credential:<org>:{name} (a new session receives it as an "
+            "environment variable), or run this from a session launched with "
+            "the secrets bind.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    target = ramfs / name
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(payload["value"])
+    print(str(target))
 
 
 def cmd_vault_remove(args) -> None:
@@ -248,7 +278,11 @@ def cmd_vault_share(args) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
-    org = _vault_org(args)
+    # The server derives the SOURCE namespace from the bearer; a named --org
+    # slug is only a label. Never send "personal" as X-Graph-Org from an org
+    # session (that is an organization mismatch).
+    scope = getattr(args, "org", None)
+    org = None if (scope is None or scope is _ORG_SENTINEL) else scope
     client = get_client()
     try:
         result = client.share_vault_credential(
@@ -325,6 +359,7 @@ def attach_vault_subparser(sub) -> None:
         help="Re-seal an AUDITED secret into another organization's namespace "
              "(no human factor; secured secrets need the operator's ceremony)",
     )
+    _add_scope(p_share)
     p_share.add_argument("name", help="Stable credential name in your namespace (no prefix)")
     p_share.add_argument("--to-org", required=True, dest="to_org", help="Destination organization slug")
     p_share.add_argument("--replace", action="store_true", help="Overwrite an existing destination row")
