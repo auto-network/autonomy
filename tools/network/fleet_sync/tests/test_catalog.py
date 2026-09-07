@@ -485,3 +485,94 @@ def test_authored_transaction_bound_fails_atomically(
         ).fetchone()[0] == 0
     finally:
         db.close()
+
+
+def _settings_address_blob(row: dict) -> bytes:
+    address = catalog_module._logical_address(TABLE_POLICIES["settings"], row)
+    return catalog_module.encode_value(["settings", list(address)])
+
+
+def test_reconcile_lets_a_live_row_win_over_an_older_stale_tombstone(
+    tmp_path: Path,
+) -> None:
+    """A live row whose catalog address holds an OLDER tombstone is the
+    truth (re-created or restored without capture): the reconcile
+    re-bootstraps it instead of stopping. A NEWER tombstone is a genuine
+    contradiction and stops the reconcile, naming the row (two anonymous
+    3-minute startup failures on 2026-09-07)."""
+    db = GraphDB(tmp_path / "personal.db")
+    try:
+        catalog = MutationCatalog(db.conn, "a" * 64)
+        catalog.install()
+        with catalog.transaction(1_000, "create"):
+            _insert_setting(
+                db.conn, identity="live", set_id="dashboard.example",
+                key="k", payload='{"v":1}', deprecated=0,
+            )
+        row = dict(db.conn.execute("SELECT * FROM settings WHERE id='live'").fetchone())
+        blob = _settings_address_blob(row)
+        db.conn.execute(
+            "UPDATE fleet_sync_catalog SET tombstone=1, timestamp_ns=500 WHERE address=?",
+            (blob,),
+        )
+        db.conn.commit()
+        catalog.reconcile_catalog(audit=False)
+        tombstone, = db.conn.execute(
+            "SELECT tombstone FROM fleet_sync_catalog WHERE address=?", (blob,)
+        ).fetchone()
+        assert tombstone == 0
+
+        db.conn.execute(
+            "UPDATE fleet_sync_catalog SET tombstone=1, timestamp_ns=? WHERE address=?",
+            ((1 << 62), blob),
+        )
+        db.conn.commit()
+        with pytest.raises(WatermarkError, match="table='settings'"):
+            catalog.reconcile_catalog(audit=False)
+    finally:
+        db.close()
+
+
+def test_deprecated_base_repair_never_tombstones_an_address_with_a_live_base(
+    tmp_path: Path,
+) -> None:
+    """Base rows collapse to one address per natural key. When an old
+    deprecated base row and a new live base row share it, the address is
+    live; the repair must leave it alone even when the deprecated row's
+    own timestamp matches the catalog winner's."""
+    db = GraphDB(tmp_path / "personal.db")
+    try:
+        catalog = MutationCatalog(db.conn, "a" * 64)
+        catalog.install()
+        with catalog.transaction(1_000, "old"):
+            _insert_setting(
+                db.conn, identity="old", set_id="dashboard.example",
+                key="k", payload='{"v":1}', deprecated=0,
+            )
+        with catalog.transaction(2_000, "retire-old"):
+            db.conn.execute("UPDATE settings SET deprecated=1 WHERE id='old'")
+        with catalog.transaction(3_000, "new"):
+            _insert_setting(
+                db.conn, identity="new", set_id="dashboard.example",
+                key="k", payload='{"v":2}', deprecated=0,
+            )
+        old_row = dict(db.conn.execute("SELECT * FROM settings WHERE id='old'").fetchone())
+        blob = _settings_address_blob(old_row)
+        # Force the repair's trigger condition: the winner is live and its
+        # timestamp equals the deprecated row's own timestamp.
+        db.conn.execute(
+            "UPDATE fleet_sync_catalog SET tombstone=0, timestamp_ns=? WHERE address=?",
+            (catalog_module._row_timestamp(TABLE_POLICIES["settings"], old_row), blob),
+        )
+        db.conn.commit()
+        assert catalog._repair_deprecated_settings_tombstones() == 0
+        catalog.reconcile_catalog(audit=False)
+        tombstone, = db.conn.execute(
+            "SELECT tombstone FROM fleet_sync_catalog WHERE address=?", (blob,)
+        ).fetchone()
+        assert tombstone == 0
+        assert db.conn.execute(
+            "SELECT id FROM settings WHERE deprecated=0 AND key='k'"
+        ).fetchone()[0] == "new"
+    finally:
+        db.close()

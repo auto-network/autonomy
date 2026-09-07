@@ -908,15 +908,34 @@ class MutationCatalog:
                     mutation.table, list(mutation.address)
                 ])
                 existing = self.conn.execute(
-                    "SELECT tombstone FROM fleet_sync_catalog WHERE address=?",
+                    "SELECT tombstone,timestamp_ns FROM fleet_sync_catalog "
+                    "WHERE address=?",
                     (address_blob,),
                 ).fetchone()
                 if existing is not None:
                     if bool(existing[0]):
-                        raise WatermarkError(
-                            "live bootstrap row conflicts with catalog tombstone"
+                        # The row exists and the catalog says it was deleted.
+                        # A tombstone older than the row's own timestamp is
+                        # stale (the row was re-created or restored without
+                        # capture): the live row wins and is re-bootstrapped
+                        # below. A tombstone NEWER than the row is a genuine
+                        # contradiction and stops the reconcile, naming the row
+                        # (two ~3-minute startups were spent on an anonymous
+                        # version of this error, 2026-09-07).
+                        if int(existing[1]) > mutation.timestamp_ns:
+                            raise WatermarkError(
+                                "live bootstrap row conflicts with a newer "
+                                f"catalog tombstone: table={mutation.table!r} "
+                                f"address={mutation.address!r} "
+                                f"row_ts={mutation.timestamp_ns} "
+                                f"tombstone_ts={int(existing[1])}"
+                            )
+                        self.conn.execute(
+                            "DELETE FROM fleet_sync_catalog WHERE address=?",
+                            (address_blob,),
                         )
-                    continue
+                    else:
+                        continue
 
                 if generation is None:
                     generation = int(self.conn.execute(
@@ -1003,6 +1022,21 @@ class MutationCatalog:
             if winner is None:
                 continue
             if _row_timestamp(policy, row) != int(winner[0]):
+                continue
+            # Base rows collapse to one address per natural key. If a LIVE
+            # base row (deprecated=0) still exists at this address, the
+            # address is live and the retired row is mere history: never
+            # tombstone it, or the next bootstrap finds a live row under a
+            # tombstone and the reconcile stops.
+            live = self.conn.execute(
+                "SELECT 1 FROM settings WHERE set_id=? AND schema_revision=? "
+                'AND "key"=? AND publication_state=? AND supersedes IS NULL '
+                "AND excludes IS NULL AND deprecated=0 "
+                "AND terminal_persona IS ? LIMIT 1",
+                (row["set_id"], row["schema_revision"], row["key"],
+                 row["publication_state"], row.get("terminal_persona")),
+            ).fetchone()
+            if live is not None:
                 continue
             self.conn.execute(
                 "UPDATE fleet_sync_catalog SET tombstone=1 WHERE address=?",
