@@ -318,7 +318,8 @@ describe('linked Design Studio viewer mode', () => {
     assert.match(html, /data-testid="design-linked-capture"/);
     assert.equal((html.match(/x-if="!linkedSessionMode"/g) || []).length, 2);
     assert.match(css, /body\.route-design-linked #sidebar/);
-    assert.match(css, /body\.route-design-linked \.voice-capsule/);
+    // 50a05f29 deliberately stopped hiding the voice capsule on linked pages.
+    assert.doesNotMatch(css, /body\.route-design-linked \.voice-capsule/);
     assert.match(css, /body\.route-design-linked \.design-surface/);
     assert.match(css, /--design-viewport-top/);
     assert.match(css, /env\(safe-area-inset-top/);
