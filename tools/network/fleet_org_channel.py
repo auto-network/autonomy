@@ -40,7 +40,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -96,9 +96,14 @@ def org_state_key(org: str) -> str:
 
 ORG_CLIENT_FIELDS = frozenset({
     "v", "org", "machine_pub", "eph_pub", "persona_cert", "membership_proof",
-    "ts", "sig",
+    "ts", "addresses", "sig",
 })
-ORG_SERVER_FIELDS = ORG_CLIENT_FIELDS | {"client_machine_pub"}
+#: Bound on the addresses a client hello may introduce (fleet_direct_config
+#: MAX_ADVERTISE_ADDRS).
+MAX_HELLO_ADDRESSES = 8
+#: The server answers with its own persona and proof; it introduces no
+#: addresses (the client dialled it) and names the client machine instead.
+ORG_SERVER_FIELDS = (ORG_CLIENT_FIELDS - {"addresses"}) | {"client_machine_pub"}
 
 
 def _hex64(value: object, what: str) -> str:
@@ -134,6 +139,19 @@ def _parse(raw: object, fields: frozenset[str], what: str) -> dict[str, Any]:
         raise HandshakeError(f"{what} membership_proof must be an object")
     if type(data["ts"]) is not int:
         raise HandshakeError(f"{what} ts must be an integer")
+    if "addresses" in fields:
+        addresses = data["addresses"]
+        if (
+            not isinstance(addresses, list) or len(addresses) > MAX_HELLO_ADDRESSES
+            or any(
+                not isinstance(a, str) or not a or len(a) > 256
+                or not (a.startswith("ws://") or a.startswith("wss://"))
+                for a in addresses
+            )
+        ):
+            raise HandshakeError(
+                f"{what} addresses must be at most {MAX_HELLO_ADDRESSES} ws:// or wss:// URLs"
+            )
     if not isinstance(data["sig"], str):
         raise HandshakeError(f"{what} sig must be a string")
     if "client_machine_pub" in fields:
@@ -174,6 +192,12 @@ class AdmittedPeer:
     machine_pub: str
     persona_pub: str
     checkpoint_seq: int
+    #: Addresses the peer introduced itself at in its client hello (signed
+    #: by its machine key), or () for a server-side peer. Sync is pull-only,
+    #: so this is how the machine that is dialled first learns where to
+    #: dial back; a hint only, superseded by the peer's replicated
+    #: reachability row (auto-mldvv) once that has crossed.
+    addresses: tuple[str, ...] = ()
 
 
 class OrgFleetAuthenticator:
@@ -200,6 +224,7 @@ class OrgFleetAuthenticator:
         now: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
         adopted_members_for: Callable[[int], Iterable[str] | None] | None = None,
+        advertised_addresses: Callable[[], Sequence[str]] | None = None,
     ) -> None:
         if not isinstance(org, str) or not org:
             raise HandshakeError("org must be a non-empty string")
@@ -215,6 +240,8 @@ class OrgFleetAuthenticator:
         #: behind its members_root), for readers that filter hints such as
         #: reachability rows by membership. None: unknown to this node.
         self._members_for = adopted_members_for
+        #: This machine's dialable addresses, introduced in its client hello.
+        self._advertised = advertised_addresses
         self._now = now
         self._monotonic = monotonic
         #: machine_pub -> AdmittedPeer for peers this endpoint admitted.
@@ -314,13 +341,20 @@ class OrgFleetAuthenticator:
         private_key = X25519PrivateKey.generate()
         eph_pub = _eph_pub(private_key)
         own = self._own_fields()
+        addresses: list[str] = []
+        if self._advertised is not None:
+            try:
+                addresses = list(dict.fromkeys(self._advertised()))[:MAX_HELLO_ADDRESSES]
+            except Exception:
+                addresses = []
         body = {
             "v": ORG_HANDSHAKE_VERSION, "org": self.org,
             "machine_pub": self.machine_pub, "eph_pub": eph_pub, **own,
+            "addresses": addresses,
         }
         body["sig"] = self.machine_key.sign_hex(_payload(
             "client", org=self.org, session=session, machine_pub=self.machine_pub,
-            eph_pub=eph_pub, **own,
+            eph_pub=eph_pub, **own, addresses=addresses,
         ))
         return private_key, canonical_json(body)
 
@@ -336,11 +370,13 @@ class OrgFleetAuthenticator:
                 "client", org=self.org, session=session, machine_pub=client_pub,
                 eph_pub=data["eph_pub"], persona_cert=data["persona_cert"],
                 membership_proof=data["membership_proof"], ts=data["ts"],
+                addresses=data["addresses"],
             ))
         except IdkitError as exc:
             raise HandshakeError(f"client machine proof failed: {exc}") from exc
         self._admitted[client_pub] = AdmittedPeer(
             client_pub, persona_pub, int(data["membership_proof"]["checkpoint_seq"]),
+            tuple(data["addresses"]),
         )
         private_key = X25519PrivateKey.generate()
         server_eph = _eph_pub(private_key)
@@ -381,9 +417,13 @@ class OrgFleetAuthenticator:
             ))
         except IdkitError as exc:
             raise HandshakeError(f"server machine proof failed: {exc}") from exc
+        # A server hello introduces no addresses; keep the ones this peer
+        # gave us in its own client hello, if it has dialled us before.
+        known = self._admitted.get(data["machine_pub"])
         self._admitted[data["machine_pub"]] = AdmittedPeer(
             data["machine_pub"], persona_pub,
             int(data["membership_proof"]["checkpoint_seq"]),
+            known.addresses if known is not None else (),
         )
         return data["eph_pub"], _transcript(
             org=self.org, session=session, client_machine_pub=self.machine_pub,
@@ -460,9 +500,23 @@ class OrgFleetAuthenticator:
             raise HandshakeError(
                 f"persona is not in the adopted member set at checkpoint {seq}: {exc}"
             ) from exc
-        updated = AdmittedPeer(machine_pub, peer.persona_pub, seq)
+        updated = AdmittedPeer(machine_pub, peer.persona_pub, seq, peer.addresses)
         self._admitted[machine_pub] = updated
         return updated
+
+    def admitted_addresses(self) -> dict[str, tuple[str, ...]]:
+        """machine_pub -> addresses for every admitted peer that introduced
+        any and is still current (not stale past the re-prove window)."""
+        out: dict[str, tuple[str, ...]] = {}
+        for peer in self._admitted.values():
+            if not peer.addresses:
+                continue
+            try:
+                self.authorize(peer.machine_pub)
+            except HandshakeError:
+                continue
+            out[peer.machine_pub] = peer.addresses
+        return out
 
     def stale_peers(self) -> list[AdmittedPeer]:
         """Peers whose proof is older than the newest adopted checkpoint."""

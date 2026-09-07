@@ -1886,6 +1886,14 @@ class FleetSyncScheduler:
             for machine_pub, addresses in rows.items():
                 known = bucket.get(machine_pub, [])
                 bucket[machine_pub] = known + [a for a in addresses if a not in known]
+            # Machines that dialled us and introduced themselves in their
+            # org hello: sync is pull-only, so this is how the first-dialled
+            # side learns where to pull back until the peer's row crosses.
+            for machine_pub, addresses in channel.admitted_addresses().items():
+                if machine_pub == self.authenticator.machine_pub:
+                    continue
+                known = bucket.get(machine_pub, [])
+                bucket[machine_pub] = known + [a for a in addresses if a not in known]
         return {
             scope: {pub: tuple(addrs) for pub, addrs in peers.items() if addrs}
             for scope, peers in merged.items()
