@@ -153,7 +153,7 @@ class DirectChannelServer:
             else:
                 await self._channel_server(
                     token=data["session"], recv=recv, send=ws.send,
-                    handler=self._handler,
+                    handler=self._handler, close=ws.close,
                 )
         except Exception:  # HandshakeError, RecordError, transport failures
             pass

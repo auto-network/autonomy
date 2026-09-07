@@ -115,14 +115,28 @@ class Member:
             index, path = 0, []
         return {"v": 1, "checkpoint_seq": self.seq, "index": index, "path": path}
 
-    def adopt(self, seq: int, members: list[str]) -> None:
+    def adopt(self, seq: int, members: list[str], *, deadline_s: float = 5.0) -> None:
         """This machine adopts membership checkpoint *seq*; its own hello
-        proves under it from now on."""
+        proves under it from now on. ``deadline_s`` is the re-prove grace
+        for peers admitted under an older seq (5 s in production)."""
         self.members = list(members)
         self.adopted[seq] = {"seq": seq, "members_root": mc.compute_root(members)}
         self.members_at[seq] = list(members)
         self.seq = seq
-        self.channel.note_adoption(seq)
+        self.channel.note_adoption(seq, deadline_s=deadline_s)
+
+    def rekey(self, persona: KeyPair) -> None:
+        """The member's persona is rekeyed: this machine gets a certificate
+        from the new persona and proves under the new leaf from now on."""
+        self.persona = persona
+        self.persona_cert = _cert(persona, self.machine, self.org)
+        self.channel = OrgFleetAuthenticator(
+            self.machine, org=self.org, persona_cert=self.persona_cert,
+            membership_proof_for=self._rider,
+            adopted_checkpoint_for=lambda s: self.adopted.get(int(s)),
+            newest_adopted_seq=lambda: max(self.adopted),
+            adopted_members_for=lambda s: self.members_at.get(int(s)),
+        )
 
     def personal_authenticator(self) -> FleetAuthenticator:
         return FleetAuthenticator(
@@ -358,3 +372,100 @@ def test_scope_epochs_are_the_org_epoch_only_with_an_org_channel(tmp_path: Path)
     assert org_epoch(ORG, 0) != org_epoch(ORG, 1) != org_epoch(OTHER_ORG, 1)
     assert org_state_key(ORG) != org_state_key(OTHER_ORG)
     assert org_state_key(ORG) != org_epoch(ORG, 0)
+
+
+def test_a_removing_checkpoint_closes_the_removed_member_with_4417(tmp_path: Path) -> None:
+    pa, pb = KeyPair.generate(), KeyPair.generate()
+    members = [pa.public_hex, pb.public_hex]
+    a = Member(tmp_path, "a", pa, members)
+    b = Member(tmp_path, "b", pb, members)
+
+    async def run() -> None:
+        server = a.scheduler()
+        await server.start()
+        addr = f"ws://127.0.0.1:{server.port}"
+        b_peers = {"alpha": {a.machine.public_hex: [addr]}}
+        puller = b.scheduler(org_peers=lambda: b_peers)
+        try:
+            _insert(a.alpha, "row-1", "before removal")
+            await puller.start()
+            await _wait(lambda: _has(b.alpha, "row-1"), timeout=30.0, label="row before removal")
+            # A connection B holds open, admitted under seq 0.
+            held = await fleet_direct_connect(
+                addr, authenticator=b.channel,
+                expected_machine_pub=a.machine.public_hex, session=new_session_id(),
+            )
+            # A adopts a checkpoint that removes B's persona. Inside the
+            # re-prove window the held connection still serves; after it,
+            # the next message closes it with 4417.
+            a.adopt(1, [pa.public_hex], deadline_s=0.3)
+            await asyncio.sleep(0.5)
+            async with held:
+                epoch = org_epoch(ORG, 0)
+                store = server._store_for("alpha")
+                await held.send_message(fss.encode_pull_request(
+                    epoch, compat=store.compatibility_digest(), scope="alpha",
+                    watermarks={},
+                ))
+                try:
+                    await asyncio.wait_for(held.recv_message(), timeout=5.0)
+                except Exception:
+                    pass
+                assert held._ws.close_code == 4417, held._ws.close_code
+            # A fresh hello from B proves under seq 0, which A no longer
+            # accepts outside the window: refused at the hello, typed.
+            with pytest.raises(Exception):
+                await fleet_direct_connect(
+                    addr, authenticator=b.channel,
+                    expected_machine_pub=a.machine.public_hex, session=new_session_id(),
+                )
+            # And even if B adopts seq 1 itself, its persona is not in that
+            # member set: nothing written on A after the removal reaches B.
+            b.adopt(1, [pa.public_hex])
+            _insert(a.alpha, "row-2", "after removal")
+            await asyncio.sleep(2.0)
+            assert not _has(b.alpha, "row-2")
+        finally:
+            await puller.stop()
+            await server.stop()
+
+    asyncio.run(run())
+
+
+def test_a_rekeyed_member_re_proves_under_its_new_leaf_and_survives(tmp_path: Path) -> None:
+    pa, pb, pb2 = KeyPair.generate(), KeyPair.generate(), KeyPair.generate()
+    members = [pa.public_hex, pb.public_hex]
+    a = Member(tmp_path, "a", pa, members)
+    b = Member(tmp_path, "b", pb, members)
+
+    async def run() -> None:
+        server = a.scheduler()
+        await server.start()
+        b_peers = {"alpha": {a.machine.public_hex: [f"ws://127.0.0.1:{server.port}"]}}
+        puller = b.scheduler(org_peers=lambda: b_peers)
+        try:
+            _insert(a.alpha, "row-1", "before the rekey")
+            await puller.start()
+            await _wait(lambda: _has(b.alpha, "row-1"), timeout=30.0, label="row before rekey")
+            # B's persona is rekeyed; both machines adopt the checkpoint
+            # whose member set carries the new leaf. B's machine proves
+            # under its new certificate and keeps syncing; no checkpoint
+            # is pulled and the peer-state key is unchanged.
+            rekeyed = [pa.public_hex, pb2.public_hex]
+            b.rekey(pb2)
+            a.adopt(1, rekeyed, deadline_s=0.3)
+            b.adopt(1, rekeyed, deadline_s=0.3)
+            await asyncio.sleep(0.5)
+            _insert(a.alpha, "row-2", "after the rekey")
+            await _wait(lambda: _has(b.alpha, "row-2"), timeout=30.0, label="row after rekey")
+        finally:
+            await puller.stop()
+            await server.stop()
+        with sqlite3.connect(b.alpha) as conn:
+            rows = conn.execute(
+                "SELECT machine_public_key,roster_epoch,checkpoints_received "
+                "FROM fleet_sync_peer_state"
+            ).fetchall()
+        assert rows == [(a.machine.public_hex, org_state_key(ORG), 0)]
+
+    asyncio.run(run())

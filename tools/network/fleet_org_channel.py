@@ -61,6 +61,13 @@ ORG_HELLO_MAX_SKEW_S = 300
 #: Grace for a peer admitted under an older adopted checkpoint to re-prove
 #: under the newer one (the registry's MEMBERSHIP_REPROVE_DEADLINE_S).
 REPROVE_DEADLINE_S = 5.0
+#: Close code for a peer whose membership proof is stale past the re-prove
+#: deadline (the registry's CLOSE_MEMBERSHIP_STALE, tools/network/registry/relay.py).
+CLOSE_MEMBERSHIP_STALE = 4417
+#: A client hello's ephemeral key is remembered this long: a captured hello
+#: replayed inside the ts freshness window is refused by it, and one that
+#: arrives later is refused by the ts check.
+HELLO_REPLAY_MEMORY_S = 2 * ORG_HELLO_MAX_SKEW_S
 ORG_EPOCH_DOMAIN = b"autonomy.network.fleet-sync.org-epoch.v1\n"
 ORG_PEER_STATE_DOMAIN = b"autonomy.network.fleet-sync.org-peer-state.v1\n"
 
@@ -153,6 +160,15 @@ def _transcript(*, org: str, session: str, client_machine_pub: str,
     })).digest()
 
 
+class MembershipStaleError(HandshakeError):
+    """The peer's membership proof is under an older checkpoint than this
+    node has adopted and the re-prove deadline has passed: the connection
+    closes with CLOSE_MEMBERSHIP_STALE. A removed member cannot produce a
+    proof under the new root, so this is how removal takes effect."""
+
+    close_code = CLOSE_MEMBERSHIP_STALE
+
+
 @dataclass(frozen=True)
 class AdmittedPeer:
     machine_pub: str
@@ -205,6 +221,8 @@ class OrgFleetAuthenticator:
         self._admitted: dict[str, AdmittedPeer] = {}
         #: (newest seq, monotonic deadline) after note_adoption().
         self._reprove_window: tuple[int, float] | None = None
+        #: client eph_pub -> wall-clock expiry, for replay refusal.
+        self._seen_client_eph: dict[str, float] = {}
 
     # -- verification ---------------------------------------------------
 
@@ -247,7 +265,7 @@ class OrgFleetAuthenticator:
             )
         newest = self._newest_seq()
         if newest is not None and seq != newest and not self._within_reprove_window(seq):
-            raise HandshakeError(
+            raise MembershipStaleError(
                 f"{what} membership_proof is for checkpoint {seq}; this node "
                 f"has adopted {newest}: re-prove required"
             )
@@ -262,6 +280,19 @@ class OrgFleetAuthenticator:
                 f"checkpoint {seq}: {exc}"
             ) from exc
         return persona_pub
+
+    def _refuse_replay(self, client_eph: str) -> None:
+        """A client hello carries a fresh ephemeral key by construction; one
+        seen before is a replayed capture, refused before any other check.
+        (Its signature would still bind a replay to the original session id,
+        which the client chooses, so binding alone is not freshness.)"""
+        now = self._now()
+        expired = [k for k, until in self._seen_client_eph.items() if until <= now]
+        for key in expired:
+            del self._seen_client_eph[key]
+        if client_eph in self._seen_client_eph:
+            raise HandshakeError("ORG_CLIENT_HELLO is a replayed capture (eph_pub seen before)")
+        self._seen_client_eph[client_eph] = now + HELLO_REPLAY_MEMORY_S
 
     def _within_reprove_window(self, seq: int) -> bool:
         window = self._reprove_window
@@ -298,6 +329,7 @@ class OrgFleetAuthenticator:
     ) -> tuple[str, X25519PrivateKey, bytes, bytes]:
         data = _parse(raw, ORG_CLIENT_FIELDS, "ORG_CLIENT_HELLO")
         client_pub = data["machine_pub"]
+        self._refuse_replay(data["eph_pub"])
         persona_pub = self._verify_peer(data, "ORG_CLIENT_HELLO")
         try:
             verify_signature(client_pub, data["sig"], _payload(
@@ -392,7 +424,7 @@ class OrgFleetAuthenticator:
         newest = self._newest_seq()
         if newest is not None and peer.checkpoint_seq != newest \
                 and not self._within_reprove_window(peer.checkpoint_seq):
-            raise HandshakeError(
+            raise MembershipStaleError(
                 f"membership proof is for checkpoint {peer.checkpoint_seq}; this "
                 f"node has adopted {newest}: re-prove required"
             )

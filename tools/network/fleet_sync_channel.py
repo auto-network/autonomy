@@ -539,7 +539,11 @@ class FleetDirectServer:
     async def stop(self) -> None:
         await self._server.stop()
 
-    async def _serve(self, *, token: str, recv, send, handler) -> None:
+    async def _serve(self, *, token: str, recv, send, handler, close=None) -> None:
+        """``close(code=, reason=)`` is the transport's close, used to end an
+        org-admitted connection whose membership proof went stale past the
+        re-prove deadline with CLOSE_MEMBERSHIP_STALE (4417), the code the
+        registry uses for the same condition."""
         raw = await recv()
         if raw is None:
             return
@@ -567,13 +571,21 @@ class FleetDirectServer:
                 response = await response
             return response
 
-        await serve_established_channel(
-            crypto,
-            token=token,
-            recv=recv,
-            send=send,
-            handler=authorized_handler,
-        )
+        try:
+            await serve_established_channel(
+                crypto,
+                token=token,
+                recv=recv,
+                send=send,
+                handler=authorized_handler,
+            )
+        except HandshakeError as exc:
+            code = getattr(exc, "close_code", None)
+            if code is None or close is None:
+                raise
+            with contextlib.suppress(Exception):
+                await close(code=int(code), reason=str(exc)[:120])
+            raise
 
 
 async def fleet_direct_connect(
