@@ -47,7 +47,7 @@
         <div class="design-studio-strip-end">
           <span class="design-studio-render-chip"
                 x-show="renderChip"
-                :class="renderStatus.available === false ? 'is-off' : ''"
+                :class="renderChipWarns ? 'is-off' : (renderStatus.available === false ? 'is-quiet' : '')"
                 :title="renderChipTitle"
                 x-text="renderChip"
                 data-testid="design-render-chip"></span>

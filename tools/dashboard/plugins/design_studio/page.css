@@ -158,6 +158,11 @@
   color: #fca5a5;
 }
 
+.design-studio-render-chip.is-quiet {
+  border-color: #334155;
+  color: #64748b;
+}
+
 .design-studio-result-count {
   color: #64748b;
   font-size: 0.6875rem;
