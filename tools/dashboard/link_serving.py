@@ -55,6 +55,7 @@ import base64
 import binascii
 import calendar
 import contextlib
+import io
 import json
 import logging
 import mimetypes
@@ -197,9 +198,10 @@ def _variant_html(design: dict) -> str:
     return (selected or variants)[-1].get("html") or ""
 
 
-def _resolve_present(target_uuid: str):
-    """Present deck HTML — deck semantics, so a stable design id follows
-    to its latest revision (mirrors the Present plugin's resolution)."""
+def _latest_design(target_uuid: str) -> dict | None:
+    """The newest revision of the design a revision id or stable design id
+    names — the resolution the Present plugin and the Design Studio viewer
+    both perform, so a link never shows an older state than the dashboard."""
     from agents.design_db import _get_conn, get_design
 
     design = get_design(target_uuid)
@@ -220,6 +222,13 @@ def _resolve_present(target_uuid: str):
         finally:
             conn.close()
         design = get_design(row["id"]) if row else None
+    return design or None
+
+
+def _resolve_present(target_uuid: str):
+    """Present deck HTML — deck semantics, so a stable design id follows
+    to its latest revision (mirrors the Present plugin's resolution)."""
+    design = _latest_design(target_uuid)
     if not design:
         return None
     html_text = _variant_html(design)
@@ -229,12 +238,16 @@ def _resolve_present(target_uuid: str):
 
 
 def _resolve_design(target_uuid: str):
-    """The exact Design Studio revision's HTML — no latest-revision hop:
-    the operator approved sharing this revision, not the design's future."""
-    from agents.design_db import get_design
+    """The design's LATEST revision, same as Present.
 
-    design = get_design(target_uuid)
-    if not design or design.get("id") != target_uuid:
+    A design grant records the stable design id, which is the first
+    revision's id, so pinning "the approved revision" always served
+    revision 1 — usually the first scratch state of a live-watched design
+    (graph note a714c09a-ccd).  A shared design follows the design forward,
+    the way the dashboard viewer and Present links already do.
+    """
+    design = _latest_design(target_uuid)
+    if not design:
         return None
     html_text = _variant_html(design)
     if not html_text:
@@ -246,17 +259,15 @@ def _resolve_mission(target_uuid: str, grant: dict | None = None):
     """One composed screen, from Mission Control's own compose function.
 
     This branch stays a plain producer dispatch: a grant carries a
-    target_type and the types genuinely resolve differently (design pins
-    one revision, present follows a stable design, note assembles an
-    artifact). What it must NOT do is know how a mission document is
+    target_type and the types genuinely resolve differently (design and
+    present follow a stable design to its latest revision, note assembles
+    an artifact). What it must NOT do is know how a mission document is
     built -- that lives in the owning module, and the same function
     serves the dashboard path, so the two surfaces cannot drift.
 
-    Unlike design (pinned to the exact approved revision, see
-    _resolve_design's docstring), this always composes the CURRENT
-    revision on every open, matching note's reload-shows-latest
-    behavior: a mission page reflects the live state of the work, not a
-    frozen snapshot from whenever the link was approved.
+    Like design, present, and note, this composes the CURRENT revision
+    on every open: a mission page reflects the live state of the work,
+    not a frozen snapshot from whenever the link was approved.
     """
     from tools.dashboard.plugins.mission_control import compose
 
@@ -1781,7 +1792,12 @@ def main() -> None:
     # no sudo, no restart (the container lacks SYS_PTRACE for py-spy).
     import faulthandler
     import signal as _signal
-    faulthandler.register(_signal.SIGUSR1, all_threads=True)
+    try:
+        faulthandler.register(_signal.SIGUSR1, all_threads=True)
+    except (io.UnsupportedOperation, ValueError, AttributeError):
+        # stderr with no fileno (pytest capture, some launchers): the
+        # dump-on-USR1 aid is optional, serving is not.
+        pass
     global _BOOT_COMMIT
     from tools.network import build_version
     _BOOT_COMMIT = build_version.disk_head()

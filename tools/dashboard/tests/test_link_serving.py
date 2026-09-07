@@ -793,18 +793,17 @@ class TestDesignResolvers:
         assert "content" not in header
         assert sliced(body, header["viewer"]) == b"<html><body>rev two final</body></html>"
 
-    def test_design_serves_exact_revision_only(self, deck):
-        _design_id, rev1, rev2 = deck
-        token = _token(41)
-        put_grant(token, rev1, "design")
-        header, body = parse(serve(token))
-        assert header["kind"] == "design" and "content" not in header
-        assert sliced(body, header["viewer"]) == b"<html><body>rev one</body></html>"
-
-        token2 = _token(42)
-        put_grant(token2, rev2, "design")
-        header2, body2 = parse(serve(token2))
-        assert sliced(body2, header2["viewer"]) == b"<html><body>rev two final</body></html>"
+    def test_design_follows_the_latest_revision(self, deck):
+        # `graph link publish --type design` stores the STABLE design id,
+        # which equals revision 1's id; a design link must therefore follow
+        # the design forward exactly like a present link (a714c09a-ccd).
+        design_id, rev1, rev2 = deck
+        for n, target in enumerate((design_id, rev1, rev2)):
+            token = _token(41 + n)
+            put_grant(token, target, "design")
+            header, body = parse(serve(token))
+            assert header["kind"] == "design" and "content" not in header
+            assert sliced(body, header["viewer"]) == b"<html><body>rev two final</body></html>"
 
     def test_selected_variant_wins(self, deck):
         _design_id, _rev1, rev2 = deck
@@ -821,9 +820,8 @@ class TestDesignResolvers:
 
 
 class TestMissionResolver:
-    """Deliberately the opposite of TestDesignResolvers: a mission grant
-    must NOT pin to a revision the way `design` does (a714c09a-ccd's "BUG"
-    section) -- it always serves whatever is current, matching `note`."""
+    """A mission grant always serves whatever is current, matching `note`
+    (and, since the a714c09a-ccd fix, `design` and `present` too)."""
 
     @pytest.fixture(autouse=True)
     def _mission_db(self, env, tmp_path, monkeypatch):
