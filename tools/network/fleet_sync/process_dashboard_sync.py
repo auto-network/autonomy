@@ -84,7 +84,7 @@ async def _worker(config_path: Path) -> int:
             # aggregates frames/bytes per pull to separate payload
             # duplication from protocol overhead.
             entry = {k: v for k, v in values.items()
-                     if isinstance(v, (int, float, str)) or v is None}
+                     if isinstance(v, (int, float, str, list)) or v is None}
             entry["peer"] = peer[:12]
             entry["at"] = time.time()
             with open(pull_log, "a") as handle:

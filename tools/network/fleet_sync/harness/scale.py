@@ -232,6 +232,11 @@ def run(args: argparse.Namespace) -> dict:
                         continue
                     entry["machine"] = machine.index
                     pulls.append(entry)
+        # The worker's ledger records every telemetry iteration -- serves
+        # as well as pulls. Duplication is a receiver-side question, so
+        # count pulls only (until 2026-09-07 serves were summed in too,
+        # roughly doubling every reported duplication figure).
+        pulls = [p for p in pulls if p.get("direction", "pull") == "pull"]
         ok = [p for p in pulls if p.get("outcome") == "success"]
         evidence["pulls"] = {
             "total": len(pulls),
