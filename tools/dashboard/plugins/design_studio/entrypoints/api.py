@@ -134,6 +134,7 @@ def _mock_design_rows() -> list[dict]:
             "has_fixture": bool(design.get("fixture")),
             "thumbnail_url": design.get("thumbnail_url") or "",
             "form_factor": design.get("form_factor") or "",
+            "shared": bool(design.get("shared")),
         })
     return rows
 
@@ -342,11 +343,25 @@ def _all_series() -> list[dict]:
     return series
 
 
+def _shared_ids_for_org(org: str | None) -> set[str]:
+    """Design/revision ids an active link grant reaches, for one org."""
+    if os.environ.get("DASHBOARD_MOCK") or not org:
+        return set()
+    try:
+        from tools.dashboard import design_shares
+
+        return design_shares.shared_design_ids(org)
+    except Exception:
+        logger.debug("design-studio: share state unavailable for org %r", org, exc_info=True)
+        return set()
+
+
 def _series_from_rows(rows: list[dict]) -> list[dict]:
     grouped: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
         grouped[str(row.get("design_id") or row.get("id"))].append(row)
 
+    shared_by_org: dict[str, set[str]] = {}
     series = []
     for design_id, revisions in grouped.items():
         revisions.sort(key=lambda r: (
@@ -386,6 +401,12 @@ def _series_from_rows(rows: list[dict]) -> list[dict]:
             form_factor = str(thumb_row.get("form_factor") or "") or _form_factor(thumbnail_revision_id)
         design_org = next(
             (r.get("org") for r in reversed(revisions) if r.get("org")), None)
+        share_org = design_org or "autonomy"
+        if share_org not in shared_by_org:
+            shared_by_org[share_org] = _shared_ids_for_org(share_org)
+        shared = any(bool(r.get("shared")) for r in revisions) or bool(
+            ({design_id} | {str(r.get("id") or "") for r in revisions}) & shared_by_org[share_org]
+        )
         series.append({
             "design_id": design_id,
             "org": design_org,
@@ -407,6 +428,7 @@ def _series_from_rows(rows: list[dict]) -> list[dict]:
             "thumbnail_url": thumbnail_url,
             "thumbnail_revision_id": thumbnail_revision_id,
             "form_factor": form_factor,
+            "shared": shared,
         })
     return series
 
@@ -606,6 +628,33 @@ async def update_design_status(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "design": series})
 
 
+async def list_shared_remote(request: Request) -> JSONResponse:
+    """Designs shared WITH this dashboard's org(s) that live on another
+    member's machine: link grants (replicated through org sync) whose target
+    is not a local design. The gallery shows them as link-out tiles; the
+    HTML never syncs, the auto.network link serves it."""
+    if os.environ.get("DASHBOARD_MOCK"):
+        return JSONResponse({"shares": []})
+    from tools.dashboard import design_shares
+
+    local_ids: set[str] = set()
+    orgs: set[str] = set()
+    for row in _design_rows():
+        local_ids.add(str(row.get("id") or ""))
+        local_ids.add(str(row.get("design_id") or row.get("id") or ""))
+        if row.get("org"):
+            orgs.add(str(row["org"]))
+    scope = api_auth.organization_scope_from_request(request)
+    orgs = {scope} if scope else (orgs | {"autonomy"})
+    shares = []
+    for org in sorted(orgs):
+        for grant in design_shares.active_design_grants(org):
+            if grant.get("target_uuid") in local_ids:
+                continue
+            shares.append(dict(grant, org=org))
+    return JSONResponse({"shares": shares})
+
+
 async def render_revision_thumbnail(request: Request) -> JSONResponse:
     """Queue a headless thumbnail render for one revision (no LLM)."""
     revision_id = request.path_params["revision_id"]
@@ -723,5 +772,6 @@ routes: list[Route] = [
     Route("/api/design-studio/revisions/{revision_id}/thumbnail", get_revision_thumbnail, methods=["GET"]),
     Route("/api/design-studio/revisions/{revision_id}/render", render_revision_thumbnail, methods=["POST"]),
     Route("/api/design-studio/render/status", render_status, methods=["GET"]),
+    Route("/api/design-studio/shared", list_shared_remote, methods=["GET"]),
     Route("/api/design-studio/render/backfill", render_backfill, methods=["POST"]),
 ]

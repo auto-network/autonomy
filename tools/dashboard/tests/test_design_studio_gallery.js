@@ -131,6 +131,35 @@ describe('Design Studio gallery strip', () => {
     assert.match(refused.page.actionError, /agent-browser/);
   });
 
+  it('narrows by shared state and organization, and lists org-shared designs from other machines', async () => {
+    const { page, requests } = makeLibrary({ responses: {
+      '/api/design-studio/designs?': { designs: [
+        { design_id: 'd-1', latest_revision_id: 'r-1', title: 'Mine', status: 'pending', shared: true, org: 'autonomy' },
+        { design_id: 'd-2', latest_revision_id: 'r-2', title: 'Private', status: 'pending', shared: false, org: 'anchore' },
+      ], summary: {}, filtered_count: 2 },
+      '/api/design-studio/shared': { shares: [
+        { token: 't-remote', url: 'https://relay/l/t-remote', label: "Teammate's deck", target_type: 'present', org: 'autonomy' },
+        { token: 't-other', url: 'https://relay/l/t-other', label: 'Other org design', target_type: 'design', org: 'anchore' },
+      ] },
+    } });
+    await page.loadDesigns();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.ok(requests.some((r) => r.url === '/api/design-studio/shared'));
+    assert.equal(page.orgOptions.join(','), 'anchore,autonomy');
+    assert.equal(page.visibleDesigns.length, 2);
+    page.sharedOnly = true;
+    assert.equal(page.visibleDesigns.map((d) => d.design_id).join(','), 'd-1');
+    assert.equal(page.visibleRemoteShares.map((s) => s.token).join(','), 't-remote,t-other');
+    page.org = 'anchore';
+    assert.equal(page.visibleDesigns.length, 0);
+    assert.equal(page.visibleRemoteShares.map((s) => s.token).join(','), 't-other');
+    page.org = 'all';
+    page.query = 'teammate';
+    assert.equal(page.visibleRemoteShares.map((s) => s.token).join(','), 't-remote');
+    assert.equal(page.hasFilters, true);
+    page.destroy();
+  });
+
   it('labels form factors with icons the strip and the tile badge share', () => {
     const { page } = makeLibrary();
     assert.equal(page.formFactorOptions.map((o) => o.value).join(','), 'all,both,desktop,mobile');

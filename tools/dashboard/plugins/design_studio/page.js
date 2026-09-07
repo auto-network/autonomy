@@ -897,6 +897,9 @@ function designStudioPage() {
     formFactor: 'all',
     liveOnly: false,
     dynamicOnly: false,
+    sharedOnly: false,
+    org: 'all',
+    remoteShares: [],
     renderStatus: {},
     actionStates: {},
     topbarHandle: null,
@@ -944,7 +947,33 @@ function designStudioPage() {
 
     get hasFilters() {
       return !!String(this.query || '').trim() || this.status !== 'pending'
-        || this.formFactor !== 'all' || this.liveOnly || this.dynamicOnly;
+        || this.formFactor !== 'all' || this.liveOnly || this.dynamicOnly
+        || this.sharedOnly || this.org !== 'all';
+    },
+
+    // Orgs present in the catalog; the strip shows the select only when
+    // there is more than one to choose from.
+    get orgOptions() {
+      var seen = {};
+      var out = [];
+      (this.designs || []).forEach(function (d) {
+        var org = (d && d.org) || 'autonomy';
+        if (!seen[org]) { seen[org] = true; out.push(org); }
+      });
+      return out.sort();
+    },
+
+    // Designs shared with this org from other members' machines that match
+    // the strip (query + org); shown as link-out tiles under Shared.
+    get visibleRemoteShares() {
+      var self = this;
+      var q = String(this.query || '').trim().toLowerCase();
+      return (this.remoteShares || []).filter(function (share) {
+        if (!share) return false;
+        if (self.org !== 'all' && (share.org || 'autonomy') !== self.org) return false;
+        if (!q) return true;
+        return [share.label, share.target_uuid, share.org].join(' ').toLowerCase().indexOf(q) >= 0;
+      });
     },
 
     // The strip's client-side axes (form factor, live, dynamic) narrow the
@@ -957,6 +986,8 @@ function designStudioPage() {
         if (self.formFactor !== 'all' && (design.form_factor || '') !== self.formFactor) return false;
         if (self.liveOnly && !self.isLiveDesign(design)) return false;
         if (self.dynamicOnly && !design.has_fixture) return false;
+        if (self.sharedOnly && !design.shared) return false;
+        if (self.org !== 'all' && (design.org || 'autonomy') !== self.org) return false;
         return true;
       });
     },
@@ -1125,11 +1156,27 @@ function designStudioPage() {
         }
         var data = await res.json();
         this._applyCatalogData(data, cacheKey);
+        this._loadRemoteShares();
       } catch (e) {
         this.error = 'Design catalog failed: ' + (e.message || e);
       } finally {
         this.loading = false;
       }
+    },
+
+    _loadRemoteShares: async function () {
+      try {
+        var fetcher = (window.Autonomy && window.Autonomy.fetch) || window.fetch;
+        var res = await fetcher('/api/design-studio/shared');
+        if (!res.ok) return;
+        var data = await res.json();
+        this.remoteShares = Array.isArray(data.shares) ? data.shares : [];
+      } catch (e) { /* remote shares are an enhancement over the local catalog */ }
+    },
+
+    openRemoteShare: function (share) {
+      if (!share || !share.url) return;
+      window.open(share.url, '_blank', 'noopener');
     },
 
     openDesign: function (design) {

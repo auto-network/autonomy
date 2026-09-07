@@ -552,3 +552,30 @@ def test_get_design_series_hides_a_cross_org_design_as_404():
         op = asyncio.run(design_api.get_design_series(
             _req(_operator(), path_params={"design_id": "series-auto"})))
         assert op.status_code == 200
+
+
+def test_catalog_row_is_shared_when_a_grant_reaches_any_revision():
+    rows = _rows()
+    with patch.object(design_api, "_shared_ids_for_org", side_effect=lambda org: {"rev-a1"} if org == "autonomy" else set()):
+        series = {s["design_id"]: s for s in design_api._series_from_rows(rows)}
+    assert series["series-a"]["shared"] is True
+    assert all(s["shared"] is False for key, s in series.items() if key != "series-a")
+
+
+def test_shared_route_lists_grants_that_target_designs_not_on_this_machine():
+    from tools.dashboard import design_shares
+
+    grants = [
+        {"target_uuid": "rev-a1", "target_type": "design", "token": "local", "url": "https://l/local"},
+        {"target_uuid": "remote-design", "target_type": "present", "token": "remote", "url": "https://l/remote",
+         "label": "Teammate's deck", "issued_at": "2026-09-06T00:00:00Z", "expires_at": None},
+    ]
+    with patch.object(design_api, "_design_rows", return_value=_rows()), \
+         patch.object(design_api.api_auth, "organization_scope_from_request", return_value=None), \
+         patch.object(design_shares, "active_design_grants", side_effect=lambda org, now=None: grants if org == "autonomy" else []):
+        resp = _client().get("/api/design-studio/shared")
+    assert resp.status_code == 200
+    shares = resp.json()["shares"]
+    assert [s["token"] for s in shares] == ["remote"]
+    assert shares[0]["org"] == "autonomy"
+    assert shares[0]["label"] == "Teammate's deck"
