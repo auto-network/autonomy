@@ -91,8 +91,13 @@ def test_co_member_learns_addresses_from_the_replicated_rows(tmp_path: Path, mon
     advertised: list[str] = []
     first_contact: dict = {}
     pulls: list[tuple[str, str | None, str]] = []
+    b_port: list[int] = []
 
     def record(peer, **values):
+        # B also SERVES A once A has pulled back; only B's own pulls carry
+        # the candidate address this test follows.
+        if values.get("direction") != "pull":
+            return
         pulls.append((values.get("scope"), values.get("address"), values.get("outcome")))
 
     async def run() -> None:
@@ -104,12 +109,25 @@ def test_co_member_learns_addresses_from_the_replicated_rows(tmp_path: Path, mon
         # or the join rendezvous); it is withdrawn after B's first success
         # so everything after rides the replicated rows alone.
         first_contact["alpha"] = {a.machine.public_hex: [real]}
-        puller = b.scheduler(org_peers=lambda: dict(first_contact), recorder=record)
+        puller = b.scheduler(
+            org_peers=lambda: dict(first_contact), recorder=record,
+            advertised=lambda: [f"ws://127.0.0.1:{p}" for p in b_port],
+        )
         try:
             _insert(a.alpha, "row-1", "first org row")
             await puller.start()
+            b_port.append(puller.port)
             await _wait(lambda: _has(b.alpha, "row-1"), timeout=30.0, label="first contact pull")
             first_contact.clear()
+            # Sync is pull-only, so A learns where B is from B's own hello
+            # (signed by B's machine key) and pulls B back: an org row
+            # written on B's machine reaches A with no hook on A's side.
+            _insert(b.alpha, "b-row-1", "written on the joiner")
+            await _wait(lambda: _has(a.alpha, "b-row-1"), timeout=30.0,
+                        label="the first-dialled side pulls back through the hello introduction")
+            assert server._org_peer_candidates(server._org_channels())["alpha"] == {
+                b.machine.public_hex: (f"ws://127.0.0.1:{puller.port}",),
+            }
             await _wait(
                 lambda: reach.co_member_addresses(
                     b.alpha, org=ORG, own_machine_pub=b.machine.public_hex,
@@ -117,9 +135,12 @@ def test_co_member_learns_addresses_from_the_replicated_rows(tmp_path: Path, mon
                 ) == {a.machine.public_hex: [real]},
                 timeout=30.0, label="A's reachability row on B",
             )
+            # B's own row is not published: B's org database is not the
+            # settings home for "alpha" in this process (that is A's), so
+            # the scheduler skips the write rather than misplace the row.
             assert reach.co_member_addresses(
                 a.alpha, org=ORG, own_machine_pub=a.machine.public_hex,
-            ) == {}  # B publishes nothing: no advertised addresses.
+            ) == {}
             _insert(a.alpha, "row-2", "found through the row, not the hook")
             await _wait(lambda: _has(b.alpha, "row-2"), timeout=30.0, label="row-based pull")
             # A's address set changes (a dead address ahead of the live

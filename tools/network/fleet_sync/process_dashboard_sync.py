@@ -59,9 +59,113 @@ def _peer_report(path: Path) -> dict:
     }
 
 
+class _OrgChannels:
+    """The worker's org channels (auto-coea3), built from the config's
+    ``org_channels`` block and refreshed when the parent rewrites the
+    config file -- the harness's stand-in for the membership half
+    updating a node's adopted checkpoint (a removal, a rekey, a join).
+
+    Per scope: ``{"org", "persona_cert", "adopted": {seq: [persona pubs]},
+    "seq"}``. The rider is computed from the member list of ``seq`` with
+    membership_commitment.inclusion_proof; the adopted checkpoint record
+    carries the members_root of that list; a newer ``seq`` on reload calls
+    note_adoption with the 5 s production deadline; a changed persona
+    certificate (a rekey) rebuilds that scope's authenticator.
+    """
+
+    def __init__(self, config_path: Path, payload: dict, addresses, machine_key) -> None:
+        self._path = config_path
+        self._addresses = addresses
+        self._machine_key = machine_key
+        self._mtime = config_path.stat().st_mtime_ns
+        self._channels: dict = {}
+        self._specs: dict = {}
+        self.org_peers: dict = dict(payload.get("org_peer_addresses") or {})
+        self._apply(payload.get("org_channels") or {})
+
+    def _build(self, scope: str, spec: dict, machine_key):
+        from tools.network.fleet_org_channel import OrgFleetAuthenticator
+        from tools.network.idkit import DelegationCert
+        from tools.network.ledger import membership_commitment as mc
+
+        state = {"seq": int(spec["seq"]), "adopted": {
+            int(k): list(v) for k, v in spec["adopted"].items()
+        }}
+        cert = DelegationCert.from_dict(spec["persona_cert"])
+        persona = str(cert.subject.id)
+
+        def rider():
+            members = state["adopted"][state["seq"]]
+            try:
+                index, path = mc.inclusion_proof(members, persona)
+            except mc.MembershipCommitmentError:
+                index, path = 0, []
+            return {"v": 1, "checkpoint_seq": state["seq"], "index": index, "path": path}
+
+        def adopted_for(seq):
+            members = state["adopted"].get(int(seq))
+            if members is None:
+                return None
+            return {"seq": int(seq), "members_root": mc.compute_root(members)}
+
+        channel = OrgFleetAuthenticator(
+            machine_key, org=str(spec["org"]), persona_cert=cert,
+            membership_proof_for=rider, adopted_checkpoint_for=adopted_for,
+            newest_adopted_seq=lambda: max(state["adopted"]),
+            adopted_members_for=lambda seq: state["adopted"].get(int(seq)),
+            advertised_addresses=self._addresses,
+        )
+        return channel, state
+
+    def _apply(self, specs: dict) -> None:
+        for scope, spec in specs.items():
+            machine_key = self._machine_key
+            previous = self._specs.get(scope)
+            if previous is None or previous["persona_cert"] != spec["persona_cert"] \
+                    or previous["org"] != spec["org"]:
+                self._channels[scope] = self._build(scope, spec, machine_key)
+            else:
+                channel, state = self._channels[scope]
+                newest_before = max(state["adopted"])
+                state["adopted"] = {int(k): list(v) for k, v in spec["adopted"].items()}
+                state["seq"] = int(spec["seq"])
+                newest = max(state["adopted"])
+                if newest > newest_before:
+                    channel.note_adoption(newest)
+            self._specs[scope] = dict(spec)
+        for scope in list(self._channels):
+            if scope not in specs:
+                del self._channels[scope]
+                self._specs.pop(scope, None)
+
+    def refresh(self) -> None:
+        try:
+            mtime = self._path.stat().st_mtime_ns
+        except OSError:
+            return
+        if mtime == self._mtime:
+            return
+        self._mtime = mtime
+        try:
+            payload = json.loads(self._path.read_text())
+        except (OSError, ValueError):
+            return
+        self.org_peers = dict(payload.get("org_peer_addresses") or {})
+        self._apply(payload.get("org_channels") or {})
+
+    def channels(self) -> dict:
+        self.refresh()
+        return {scope: pair[0] for scope, pair in self._channels.items()}
+
+    def peers(self) -> dict:
+        self.refresh()
+        return dict(self.org_peers)
+
+
 async def _worker(config_path: Path) -> int:
     payload = json.loads(config_path.read_text())
     entries = tuple(_entry(item) for item in payload["roster_entries"])
+    machine_key = KeyPair.from_private_hex(payload["machine_private"])
     # In-memory resume trails, as production keeps durably: without a trail
     # every pull presents position zero, and against a gap-pruned journal
     # the continuity decision would re-checkpoint on every poll. Losing the
@@ -100,9 +204,16 @@ async def _worker(config_path: Path) -> int:
             with open(pull_log, "a") as handle:
                 handle.write(json.dumps(entry, sort_keys=True) + "\n")
 
+    # Org channels (auto-coea3): present only when the config carries them;
+    # a worker without them is the personal-fleet worker exactly as before.
+    advertised: list[str] = []
+    org: _OrgChannels | None = None
+    if payload.get("org_channels"):
+        org = _OrgChannels(config_path, payload, lambda: list(advertised), machine_key)
+
     scheduler = FleetSyncScheduler(
         FleetSyncRuntimeConfig(
-            machine_key=KeyPair.from_private_hex(payload["machine_private"]),
+            machine_key=machine_key,
             personal_root_pub=payload["personal_root_pub"],
             roster_entries=lambda: entries,
             peer_addresses=lambda: payload["peer_addresses"],
@@ -125,6 +236,11 @@ async def _worker(config_path: Path) -> int:
             # (10 s) with 3 concurrent pulls whatever the scenario asked for.
             poll_interval=float(payload.get("poll_interval", 10.0)),
             max_concurrent_pulls=int(payload.get("max_concurrent_pulls", 3)),
+            org_channels=(org.channels if org is not None else None),
+            org_peer_addresses=(org.peers if org is not None else None),
+            advertised_addresses=(
+                (lambda: list(advertised)) if org is not None else None
+            ),
         )
     )
     stopped = asyncio.Event()
@@ -144,6 +260,10 @@ async def _worker(config_path: Path) -> int:
 
     watcher = asyncio.ensure_future(parent_watch())
     await scheduler.start()
+    if org is not None:
+        # The listener's port is known only now; it is what this machine
+        # introduces in its org hello and publishes as its reachability row.
+        advertised.append(f"ws://127.0.0.1:{scheduler.port}")
     print(json.dumps({"kind": "ready", "port": scheduler.port}), flush=True)
     await stopped.wait()
     watcher.cancel()

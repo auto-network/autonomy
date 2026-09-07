@@ -100,12 +100,19 @@ class Member:
         self.adopted = {0: {"seq": 0, "members_root": mc.compute_root(self.members)}}
         self.members_at = {0: list(self.members)}
         self.persona_cert = _cert(persona, self.machine, org)
-        self.channel = OrgFleetAuthenticator(
-            self.machine, org=org, persona_cert=self.persona_cert,
+        #: Addresses this machine introduces in its org hello and publishes
+        #: to the reachability set (filled by scheduler(advertised=...)).
+        self.advertised: list[str] = []
+        self.channel = self._channel()
+
+    def _channel(self) -> OrgFleetAuthenticator:
+        return OrgFleetAuthenticator(
+            self.machine, org=self.org, persona_cert=self.persona_cert,
             membership_proof_for=self._rider,
             adopted_checkpoint_for=lambda s: self.adopted.get(int(s)),
             newest_adopted_seq=lambda: max(self.adopted),
             adopted_members_for=lambda s: self.members_at.get(int(s)),
+            advertised_addresses=lambda: list(self.advertised),
         )
 
     def _rider(self) -> dict:
@@ -130,13 +137,7 @@ class Member:
         from the new persona and proves under the new leaf from now on."""
         self.persona = persona
         self.persona_cert = _cert(persona, self.machine, self.org)
-        self.channel = OrgFleetAuthenticator(
-            self.machine, org=self.org, persona_cert=self.persona_cert,
-            membership_proof_for=self._rider,
-            adopted_checkpoint_for=lambda s: self.adopted.get(int(s)),
-            newest_adopted_seq=lambda: max(self.adopted),
-            adopted_members_for=lambda s: self.members_at.get(int(s)),
-        )
+        self.channel = self._channel()
 
     def personal_authenticator(self) -> FleetAuthenticator:
         return FleetAuthenticator(
@@ -147,7 +148,16 @@ class Member:
     def scheduler(self, *, peer_addresses=None, org_peers=None,
                   with_channel: bool = True, poll: float = 0.2,
                   advertised=None, recorder=None) -> fss.FleetSyncScheduler:
+        """``advertised``: a callable returning this machine's dialable
+        addresses; it feeds both the scheduler (reachability rows) and the
+        org hello (introduction)."""
         peers = dict(peer_addresses or {})
+        if advertised is not None:
+            provider = advertised
+
+            def advertised():  # noqa: F811 - wraps the caller's
+                self.advertised = list(provider())
+                return list(self.advertised)
         config = fss.FleetSyncRuntimeConfig(
             machine_key=self.machine,
             personal_root_pub=self.root.public_hex,

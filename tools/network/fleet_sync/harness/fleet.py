@@ -78,6 +78,10 @@ class HarnessFleet:
         self.evidence: dict = {"faults": [], "restarts": [], "writes": 0}
         self._root_key = KeyPair.generate()
         self._entries: list = []
+        #: Optional hooks for a parent that composes fleets (harness/org.py):
+        #: extra worker-config keys per machine, and extra environment.
+        self.config_extra: "Callable[[Machine], dict] | None" = None
+        self.worker_env: "Callable[[Machine], dict] | None" = None
 
     # -- construction -----------------------------------------------------
 
@@ -132,7 +136,7 @@ class HarnessFleet:
             peer_addresses[other.key.public_hex] = [
                 f"ws://{link.host}:{link.port}"
             ]
-        machine.config_path.write_text(json.dumps({
+        payload = {
             "poll_interval": self.poll_interval,
             "max_concurrent_pulls": self.max_concurrent_pulls,
             "personal_root_pub": self._root_key.public_hex,
@@ -144,7 +148,14 @@ class HarnessFleet:
                 slug: str(self.org_db_path(machine.index, slug))
                 for slug in self.org_scopes
             },
-        }, sort_keys=True))
+        }
+        if self.config_extra is not None:
+            payload.update(self.config_extra(machine))
+        # Written whole then renamed: a worker reloading on mtime never
+        # reads a half-written file.
+        temporary = machine.config_path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(payload, sort_keys=True))
+        os.replace(temporary, machine.config_path)
 
     # -- lifecycle --------------------------------------------------------
 
@@ -163,6 +174,7 @@ class HarnessFleet:
                 "AUTONOMY_HARNESS_PULL_LOG": str(
                     self.root_dir / f"machine-{index}-pulls.jsonl"
                 ),
+                **(self.worker_env(machine) if self.worker_env is not None else {}),
             },
         )
         assert process.stdout is not None
