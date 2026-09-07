@@ -876,6 +876,160 @@ REGISTRY_CAPS = frozenset({CAP_HOST_LEASE, CAP_TLS_STREAM, CAP_DNS01})
 #: serve:dns-01 op signature domain (auto-bhs3c).
 DNS01_DOMAIN = b"autonomy.network.serve.dns01.v1\n"
 
+# -- organization-owned delegated zones (custom domains) ---------------------
+#: The registry's own name servers: a delegated zone must name them.
+ZONE_NS_NAMES = frozenset({"ns1.auto.network", "ns2.auto.network"})
+#: Per-org name-server shape for the ns-token binding: <org-uuid>.ns.auto.network
+ZONE_NS_TOKEN_SUFFIX = ".ns.auto.network"
+#: Parent-zone TXT binding: _autonomy.<parent> holds autonomy-org=<org-uuid>.
+ZONE_BINDING_LABEL = "_autonomy"
+ZONE_BINDING_KINDS = frozenset({"parent-txt", "ns-token"})
+_ZONE_OP_ARGS = {
+    "serve.zone.claim": frozenset({"zone", "binding_kind"}),
+    "serve.zone.release": frozenset({"zone"}),
+}
+_ZONE_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
+
+
+class ZoneValidationError(Exception):
+    """A zone claim that fails closed."""
+
+
+def validate_org_zone(zone: str) -> str:
+    """Normalize and bound an org zone name: lowercase FQDN without a
+    trailing dot, at least three labels, never the base zone, never under
+    auto.network at all (those are ours)."""
+    if not isinstance(zone, str):
+        raise ZoneValidationError("zone must be a string")
+    zone = zone.strip().rstrip(".").lower()
+    if not zone or len(zone) > 253:
+        raise ZoneValidationError("zone is not a valid FQDN")
+    labels = zone.split(".")
+    if len(labels) < 3:
+        raise ZoneValidationError("a delegated zone needs at least three labels")
+    if any(_ZONE_LABEL_RE.match(label) is None for label in labels):
+        raise ZoneValidationError("zone carries a malformed label")
+    if zone == SERVE_BASE_DOMAIN or zone.endswith("." + SERVE_BASE_DOMAIN) \
+            or zone == "auto.network" or zone.endswith(".auto.network"):
+        raise ZoneValidationError("zone must be outside auto.network")
+    return zone
+
+
+def verify_zone_binding(zone: str, org: str, binding_kind: str, *,
+                        lookup=None) -> str:
+    """Prove the PARENT zone delegates ``zone`` to us and binds it to ``org``.
+
+    Returns the binding value observed. ``lookup(kind, name)`` is injectable
+    for tests; the default reads real DNS through dns_lookup (delegation from
+    the parent's own servers, TXT through public resolvers).
+    """
+    if binding_kind not in ZONE_BINDING_KINDS:
+        raise ZoneValidationError("unknown binding kind")
+    if lookup is None:
+        from tools.network.registry import dns_lookup as _dl
+
+        def lookup(kind: str, name: str) -> list:
+            if kind == "delegation":
+                return _dl.delegation_ns(name)
+            return _dl.query(name, "TXT")
+    try:
+        delegated = {str(n).rstrip(".").lower() for n in lookup("delegation", zone)}
+    except Exception as exc:
+        raise ZoneValidationError(f"delegation lookup failed: {exc}") from exc
+    if binding_kind == "ns-token":
+        expected = f"{org}{ZONE_NS_TOKEN_SUFFIX}"
+        if expected not in delegated:
+            raise ZoneValidationError(
+                f"parent does not delegate {zone} to {expected}")
+        return expected
+    if not ZONE_NS_NAMES <= delegated:
+        raise ZoneValidationError(
+            f"parent does not delegate {zone} to {', '.join(sorted(ZONE_NS_NAMES))}")
+    parent = zone.split(".", 1)[1]
+    binding_name = f"{ZONE_BINDING_LABEL}.{parent}"
+    try:
+        strings = [str(s) for s in lookup("txt", binding_name)]
+    except Exception as exc:
+        raise ZoneValidationError(f"binding lookup failed: {exc}") from exc
+    wanted = f"autonomy-org={org}"
+    if not any(s.strip().strip('"') == wanted for s in strings):
+        raise ZoneValidationError(
+            f"no TXT at {binding_name} with {wanted}")
+    return wanted
+
+
+def _ctrl_zone_op(tunnel: "Tunnel", op: str, args: dict,
+                  store: RegistryStore, now: int, *, lookup=None) -> dict:
+    """serve.zone.claim / serve.zone.release on the authenticated org tunnel.
+    Identity is the tunnel's org; the body never names one."""
+    if CAP_HOST_LEASE not in tunnel.caps:
+        raise _CtrlError("not-authorized")
+    if not isinstance(args, dict) or set(args) != _ZONE_OP_ARGS[op]:
+        raise _CtrlError("bad-request")
+    try:
+        zone = validate_org_zone(args["zone"])
+    except ZoneValidationError as exc:
+        raise _CtrlError(f"zone-invalid: {exc}") from exc
+    if op == "serve.zone.release":
+        row = store.get_serve_zone(zone)
+        if row is None or row["org_uuid"] != tunnel.org:
+            raise _CtrlError("zone-not-owned")
+        store.set_serve_zone_state(zone, "revoked", now=now)
+        return {"zone": zone, "state": "revoked"}
+    binding_kind = args["binding_kind"]
+    try:
+        value = verify_zone_binding(zone, tunnel.org, binding_kind, lookup=lookup)
+    except ZoneValidationError as exc:
+        # Record the failed claim so the operator can see WHY, then refuse.
+        try:
+            store.upsert_serve_zone(
+                zone, org=tunnel.org, binding_kind=str(binding_kind)[:32],
+                binding_value="", state="pending", now=now,
+            )
+        except ValueError:
+            raise _CtrlError("zone-owned-elsewhere") from exc
+        raise _CtrlError(f"zone-unverified: {exc}") from exc
+    try:
+        row = store.upsert_serve_zone(
+            zone, org=tunnel.org, binding_kind=binding_kind,
+            binding_value=value, state="active", now=now, verified_at=now,
+        )
+    except ValueError as exc:
+        raise _CtrlError("zone-owned-elsewhere") from exc
+    return {"zone": zone, "state": row["state"], "verified_at": row["verified_at"]}
+
+
+def zone_reservation_id(zone: str, app_label: str) -> str:
+    """The reservation id for a service directly under an org zone; the
+    dashboard mints the identical value."""
+    return str(_uuid.uuid5(RESERVATION_NAMESPACE, f"zone:{zone}\0{app_label}"))
+
+
+def validate_zone_host_registration(
+    host: str, reservation: str, org: str, active_zones: dict
+) -> tuple[str, str] | None:
+    """If ``host`` is directly under an ACTIVE org zone, validate it and
+    return ``(app_label, zone)``; return None when it is not under any org
+    zone (the base-zone rules apply then). Raises on a bad claim."""
+    if not isinstance(host, str) or not isinstance(reservation, str):
+        raise HostValidationError("host and reservation must be strings")
+    zone = None
+    for candidate in active_zones:
+        if host.endswith("." + candidate) and (zone is None or len(candidate) > len(zone)):
+            zone = candidate
+    if zone is None:
+        return None
+    if active_zones[zone] != org:
+        raise HostValidationError("zone is owned by another organization")
+    app_label = host[: -len(zone) - 1]
+    if "." in app_label or _APP_LABEL_RE.match(app_label) is None \
+            or app_label in _RESERVED_APP_LABELS:
+        raise HostValidationError("app label is reserved or malformed")
+    if reservation != zone_reservation_id(zone, app_label):
+        raise HostValidationError(
+            "reservation id does not derive from zone and app label")
+    return app_label, zone
+
 _APP_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 _RESERVED_APP_LABELS = frozenset(
     {"_autonomy", "www", "api", "relay", "registry", "auto", "serve"}
@@ -1005,9 +1159,15 @@ class HostRoutes:
     def register(self, tunnel: "Tunnel", reservation: str, host: str) -> dict:
         """host-register: the authenticated desired-state advertisement."""
         try:
-            app_label, persona_label = validate_host_registration(
-                host, reservation, tunnel.persona_pub
+            zoned = validate_zone_host_registration(
+                host, reservation, tunnel.org, self._store.active_serve_zones()
             )
+            if zoned is not None:
+                app_label, persona_label = zoned[0], None
+            else:
+                app_label, persona_label = validate_host_registration(
+                    host, reservation, tunnel.persona_pub
+                )
         except HostValidationError as exc:
             raise _CtrlError("label-invalid") from exc
         owner = self._store.get_host_ownership(reservation)
@@ -1024,15 +1184,16 @@ class HostRoutes:
         # binds it; a different slug for the same persona fails closed, and
         # a label already bound to a different persona key is refused
         # rather than silently renamed (design §3.2).
-        bound = self._store.get_persona_label(tunnel.persona_pub)
-        if bound is None:
-            if not self._store.bind_persona_label(
-                tunnel.persona_pub, persona_label,
-                now=int(self._now_fn()),
-            ):
-                raise _CtrlError("host-owned-elsewhere")
-        elif bound != persona_label:
-            raise _CtrlError("label-invalid")
+        if persona_label is not None:  # base zone: immutable persona label
+            bound = self._store.get_persona_label(tunnel.persona_pub)
+            if bound is None:
+                if not self._store.bind_persona_label(
+                    tunnel.persona_pub, persona_label,
+                    now=int(self._now_fn()),
+                ):
+                    raise _CtrlError("host-owned-elsewhere")
+            elif bound != persona_label:
+                raise _CtrlError("label-invalid")
         current = self._live(reservation)
         if current is not None and current.tunnel is not tunnel:
             raise _CtrlError("lease-held")
@@ -1542,8 +1703,10 @@ def _dns01_verify(tunnel: "Tunnel", op: str, args: dict,
     caller collapses every failure to the uniform refusal."""
     if CAP_DNS01 not in tunnel.caps:
         raise _CtrlError("capability not negotiated")
-    if not isinstance(args, dict) or set(args) != _DNS01_ARGS[op]:
+    if not isinstance(args, dict) or set(args) - {"zone"} != _DNS01_ARGS[op]:
         raise _CtrlError("bad arg set")
+    if "zone" in args and not isinstance(args["zone"], str):
+        raise _CtrlError("bad zone")
     if not isinstance(args["order"], str) or \
             _DNS01_ORDER_RE.match(args["order"]) is None:
         raise _CtrlError("bad order")
@@ -1564,6 +1727,8 @@ def _dns01_verify(tunnel: "Tunnel", op: str, args: dict,
     if op == "serve.dns01.present":
         core_fields["ttl"] = args["ttl"]
         core_fields["expiry"] = args["expiry"]
+    if "zone" in args:
+        core_fields["zone"] = args["zone"]  # signed: the zone is part of the request
     binding = store.get_org(tunnel.org)
     if binding is None or binding.expires_at < now:
         raise _CtrlError("no live binding")
@@ -1601,10 +1766,22 @@ def _ctrl_dns01(tunnel: "Tunnel", op: str, args: dict,
     label = None
     try:
         _dns01_verify(tunnel, op, args, store, now)
-        label = store.get_persona_label(tunnel.persona_pub)
-        if label is None:
-            raise _CtrlError("no serving-label binding")
-        name = f"_acme-challenge.{label}.{SERVE_BASE_DOMAIN}"
+        if "zone" in args:
+            # An org-owned zone: the challenge sits DIRECTLY at the zone
+            # (one wildcard per zone), and only the owning org may write it.
+            try:
+                zone = validate_org_zone(args["zone"])
+            except ZoneValidationError as exc:
+                raise _CtrlError("zone-invalid") from exc
+            if store.active_serve_zones().get(zone) != tunnel.org:
+                raise _CtrlError("zone-not-owned")
+            label = zone
+            name = f"_acme-challenge.{zone}"
+        else:
+            label = store.get_persona_label(tunnel.persona_pub)
+            if label is None:
+                raise _CtrlError("no serving-label binding")
+            name = f"_acme-challenge.{label}.{SERVE_BASE_DOMAIN}"
         if op == "serve.dns01.present":
             ttl = max(DNS01_TTL_FLOOR,
                       min(DNS01_TTL_CEILING, args["ttl"]))
@@ -1689,6 +1866,8 @@ async def _handle_ctrl_frame(tunnel: "Tunnel", payload: bytes,
             result = _ctrl_issue_turn(tunnel, args, turn_issuer)
         elif op in _HOST_OP_ARGS:
             result = _ctrl_host_op(tunnel, op, args, host_routes)
+        elif op in _ZONE_OP_ARGS:
+            result = _ctrl_zone_op(tunnel, op, args, store, now)
         elif op in _DNS01_ARGS:
             result = _ctrl_dns01(
                 tunnel, op, args, store, now,

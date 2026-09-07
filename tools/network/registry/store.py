@@ -297,6 +297,21 @@ CREATE TABLE IF NOT EXISTS serve_labels (
     created_at  INTEGER NOT NULL
 );
 
+-- Organization-owned delegated zones (custom domains). A zone is claimed by
+-- an org tunnel, verified against the PARENT zone's delegation and binding
+-- record, and served authoritatively by the registry's own responder.
+-- Services sit directly under it (<app>.<zone>); no persona label layer.
+CREATE TABLE IF NOT EXISTS serve_zones (
+    zone          TEXT PRIMARY KEY,
+    org_uuid      TEXT NOT NULL,
+    binding_kind  TEXT NOT NULL,
+    binding_value TEXT NOT NULL,
+    state         TEXT NOT NULL,
+    verified_at   INTEGER,
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL
+);
+
 -- auto-e2ufw: the per-org allow-set of registered SERVING machine public
 -- keys. Onboarding/backfill registers the unlinkable serving-machine pubkey
 -- for each (org, machine); the tunnel hello verify hard-enforces membership
@@ -1400,6 +1415,67 @@ class RegistryStore:
             entry["values"].append(row["value"])
             entry["ttl"] = min(entry["ttl"], row["ttl"])
         return challenges
+
+    # -- organization-owned delegated zones (custom domains) ---------------
+    @_locked
+    def get_serve_zone(self, zone: str) -> Optional[dict]:
+        row = self._conn.execute(
+            "SELECT zone, org_uuid, binding_kind, binding_value, state,"
+            " verified_at, created_at, updated_at FROM serve_zones"
+            " WHERE zone = ?",
+            (zone,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    @_locked
+    def upsert_serve_zone(
+        self, zone: str, *, org: str, binding_kind: str, binding_value: str,
+        state: str, now: int, verified_at: Optional[int] = None,
+    ) -> dict:
+        """Claim or refresh a zone for an org. A zone already claimed by a
+        DIFFERENT org is refused (ValueError) — never silently re-owned."""
+        current = self._conn.execute(
+            "SELECT org_uuid FROM serve_zones WHERE zone = ?", (zone,)
+        ).fetchone()
+        if current is not None and current["org_uuid"] != org:
+            raise ValueError("zone is owned by another organization")
+        self._conn.execute(
+            "INSERT INTO serve_zones (zone, org_uuid, binding_kind,"
+            " binding_value, state, verified_at, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT (zone) DO UPDATE SET binding_kind = excluded.binding_kind,"
+            " binding_value = excluded.binding_value, state = excluded.state,"
+            " verified_at = excluded.verified_at, updated_at = excluded.updated_at",
+            (zone, org, binding_kind, binding_value, state, verified_at, now, now),
+        )
+        self._conn.commit()
+        return self.get_serve_zone.__wrapped__(self, zone)  # type: ignore[attr-defined]
+
+    @_locked
+    def set_serve_zone_state(self, zone: str, state: str, *, now: int,
+                             verified_at: Optional[int] = None) -> None:
+        self._conn.execute(
+            "UPDATE serve_zones SET state = ?, updated_at = ?,"
+            " verified_at = COALESCE(?, verified_at) WHERE zone = ?",
+            (state, now, verified_at, zone),
+        )
+        self._conn.commit()
+
+    def active_serve_zones(self) -> dict:
+        """{zone: org_uuid} for every ACTIVE org-owned zone."""
+        rows = self._conn.execute(
+            "SELECT zone, org_uuid FROM serve_zones WHERE state = 'active'"
+        ).fetchall()
+        return {row["zone"]: row["org_uuid"] for row in rows}
+
+    def list_serve_zones(self, org: Optional[str] = None) -> list:
+        sql = ("SELECT zone, org_uuid, binding_kind, binding_value, state,"
+               " verified_at, created_at, updated_at FROM serve_zones")
+        params: tuple = ()
+        if org is not None:
+            sql += " WHERE org_uuid = ?"
+            params = (org,)
+        return [dict(r) for r in self._conn.execute(sql + " ORDER BY zone", params).fetchall()]
 
     @_locked
     def get_persona_label(self, persona_pub: str) -> Optional[str]:

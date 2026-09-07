@@ -57,9 +57,13 @@ class ZoneState:
     """Everything the responder answers from — injected, never global."""
 
     def __init__(self, *, relay_ip: str, node_id: str = "",
-                 txt_lookup=None, txt_ttl=None, answer_a=None):
+                 txt_lookup=None, txt_ttl=None, answer_a=None, zones=None):
         self.relay_ip = relay_ip
         self.node_id = node_id
+        #: () -> iterable of zone names this responder is authoritative for.
+        #: The base zone is always included; org-owned delegated zones join
+        #: it once claimed and verified (the zone-state feed carries them).
+        self.zones = zones or (lambda: (ZONE,))
         #: fqdn (lowercase, trailing dot) -> list of TXT strings
         self.txt_lookup = txt_lookup or (lambda name: [])
         #: fqdn -> answer TTL for that name's TXT values (bhs3c honors
@@ -85,6 +89,16 @@ def _rr(owner: bytes, rtype: int, rclass: int, ttl: int,
 
 
 _QPTR = b"\xc0\x0c"  # compression pointer to the question name at offset 12
+
+
+def match_zone(qname: str, zones) -> str | None:
+    """The zone ``qname`` belongs to: the longest suffix match, or None."""
+    best = None
+    for zone in zones:
+        if qname == zone or qname.endswith("." + zone):
+            if best is None or len(zone) > len(best):
+                best = zone
+    return best
 
 
 def _soa_rdata(now: int) -> bytes:
@@ -229,14 +243,14 @@ def handle_query(raw: bytes, state: ZoneState, *, tcp: bool = False,
     if qclass != _CLASS_IN:
         return finish(_RCODE_REFUSED)
 
-    in_zone = qname == ZONE or qname.endswith("." + ZONE)
-    if not in_zone:
+    zone = match_zone(qname, state.zones())
+    if zone is None:
         return finish(_RCODE_REFUSED)
     if qtype in (_TYPE_ANY, _TYPE_AXFR, _TYPE_IXFR):
         return finish(_RCODE_REFUSED)
 
     now = int(now_fn())
-    soa_authority = _rr(_encode_name(ZONE + "."), _TYPE_SOA, _CLASS_IN,
+    soa_authority = _rr(_encode_name(zone + "."), _TYPE_SOA, _CLASS_IN,
                         SOA_MINIMUM, _soa_rdata(now))
 
     def nodata():
@@ -253,7 +267,7 @@ def handle_query(raw: bytes, state: ZoneState, *, tcp: bool = False,
             _rr(_QPTR, _TYPE_A, _CLASS_IN, DATA_TTL, rdata)])
 
     if qtype == _TYPE_NS:
-        if qname != ZONE:
+        if qname != zone:
             return nodata()  # QNAME-minimization probe: NODATA, not REFUSED
         answers = [
             _rr(_QPTR, _TYPE_NS, _CLASS_IN, NS_TTL, _encode_name(ns))
@@ -262,7 +276,7 @@ def handle_query(raw: bytes, state: ZoneState, *, tcp: bool = False,
         return finish(0, aa=True, answers=answers)
 
     if qtype == _TYPE_SOA:
-        if qname != ZONE:
+        if qname != zone:
             return nodata()
         return finish(0, aa=True, answers=[
             _rr(_QPTR, _TYPE_SOA, _CLASS_IN, NS_TTL, _soa_rdata(now))])
