@@ -8,6 +8,8 @@ ephemeral opener seeds when an operation needs to open a class.
 """
 from __future__ import annotations
 
+import asyncio
+
 from datetime import datetime, timezone
 import logging
 
@@ -571,6 +573,102 @@ async def share_vault_credential(request: Request):
         "to_key": destination_key, "setting_id": setting_id,
     })
 
+
+async def deliver_vault_credential(request: Request):
+    """Deliver one AUDITED credential from the caller's namespace into the
+    caller's own private session ramfs, unattended.
+
+    POST /api/vault/credential/{set_id}/{name}/deliver  {"ttl_seconds": 0}
+
+    The secured tier already delivers this way after the operator decides
+    (vault_open_approvals → vault_release_delivery). An audited secret opens
+    unattended for its holder, so the same delivery runs without a ceremony:
+    the delegate opens the row, the privileged helper creates the session's
+    private ``/run/secrets`` ramfs on first use and writes the file (0600), and
+    only the receipt path crosses back. The value never enters a response.
+    """
+    if (denied := api_auth.require_authenticated_api_caller(request)) is not None:
+        return denied
+    set_id = request.path_params["set_id"]
+    name = request.path_params["name"]
+    if set_id == VAULT_SECURED_SET_ID:
+        return JSONResponse(
+            {"error": "a secured secret is released through the operator ceremony "
+                      "(request_vault_open), not unattended"},
+            status_code=400,
+        )
+    if set_id != VAULT_AUDITED_SET_ID:
+        return JSONResponse({"error": f"{set_id!r} is not a vault credential set"}, status_code=400)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+    ttl = body.get("ttl_seconds", 0)
+    if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or ttl < 0:
+        return JSONResponse({"error": "ttl_seconds must be >= 0"}, status_code=400)
+
+    principal = api_auth.principal_from_request(request)
+    session = principal.subject
+    from tools.dashboard.dao import dashboard_db
+    if not isinstance(session, str) or not session or dashboard_db.get_session(session) is None:
+        return JSONResponse(
+            {"error": "delivery needs a live session container to deliver into; "
+                      "this caller is not a session"},
+            status_code=400,
+        )
+    from tools.dashboard.vault_open_approvals import _setting_route
+    try:
+        routed_key, _scope = _setting_route(principal, set_id, name)
+    except PermissionError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=403)
+    except (ValueError, LookupError, SchemaValidationError) as exc:
+        message = str(exc)
+        if message.startswith("vault_open "):
+            message = "vault_deliver " + message[len("vault_open "):]
+        return JSONResponse({"error": message}, status_code=400)
+
+    members = settings_ops.read_set(set_id, org=None, peers=[])
+    source = next(
+        (m for m in (getattr(members, "members", None) or []) if getattr(m, "key", None) == routed_key),
+        None,
+    )
+    if source is None:
+        return JSONResponse(
+            {"error": f"no sealed credential named {name!r} in your vault namespace"},
+            status_code=404,
+        )
+    if getattr(source, "vault_error", None) is not None:
+        return JSONResponse(
+            {"error": "the vault is cold; unlock the dashboard, then read again"},
+            status_code=503,
+        )
+    payload = getattr(source, "payload", None) or {}
+    from tools.dashboard import vault_release_delivery
+    import uuid as _uuid
+    row = {
+        "id": _uuid.uuid4().hex,
+        "session": session,
+        "request": {
+            "ttl_seconds": ttl,
+            "setting": {"set_id": set_id, "key": routed_key},
+            "target": f"{set_id}/{routed_key}",
+        },
+    }
+    try:
+        receipt = await asyncio.to_thread(vault_release_delivery.deliver_payload, row, payload)
+    except vault_release_delivery.VaultDeliveryError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    except Exception as exc:
+        logger.warning("vault_deliver failed for %s into %s: %s", routed_key, session, type(exc).__name__)
+        return JSONResponse({"error": f"delivery failed: {type(exc).__name__}"}, status_code=502)
+    logger.info(
+        "vault_credential_delivered caller_kind=%s session=%s key=%s path=%s",
+        principal.kind.value, session, routed_key, receipt.get("path"),
+    )
+    return JSONResponse(receipt)
+
 ROUTES = [
     Route("/api/identity/factors", factors, methods=["GET"]),
     Route("/api/identity/vault-anchors", root_anchors, methods=["GET"]),
@@ -589,6 +687,11 @@ ROUTES = [
     Route(
         "/api/vault/credential/{set_id}/{name}/share",
         share_vault_credential,
+        methods=["POST"],
+    ),
+    Route(
+        "/api/vault/credential/{set_id}/{name}/deliver",
+        deliver_vault_credential,
         methods=["POST"],
     ),
     Route("/api/identity/factors/password", enroll_password, methods=["POST"]),

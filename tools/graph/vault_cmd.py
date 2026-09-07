@@ -209,34 +209,23 @@ def _emit_release(client, set_id, name, org, member):
     if sealed is not None and opener is not None:
         print(opener(set_id, name, org=org)["path"])
         return
+    deliver = getattr(client, "deliver_vault_credential", None)
+    if deliver is not None:
+        # Over HTTP this verb delivers a PATH, never the value: the dashboard
+        # opens the audited row and its privileged helper writes it into this
+        # session's private ramfs (created on first delivery), exactly as a
+        # secured release does after the operator decides.
+        receipt = deliver(set_id, name, org=org)
+        print(receipt["path"])
+        return
+    # Direct-host recovery mode (--force-host, in-process client): there is
+    # no session ramfs to deliver into, and the operator asked for it inline.
     payload = getattr(member, "payload", None)
-    if not (isinstance(payload, dict) and isinstance(payload.get("value"), str)):
-        print(f"Error: {name!r} did not open", file=sys.stderr)
-        sys.exit(1)
-    if opener is None:
-        # Direct-host recovery mode (--force-host, in-process client): there is
-        # no ramfs rendezvous to route through, and the operator asked for it.
+    if isinstance(payload, dict) and isinstance(payload.get("value"), str):
         print(payload["value"])
         return
-    # Over HTTP an audited row arrives opened, but this verb promises a PATH,
-    # never the value in the transcript: place it in the session's private
-    # ramfs, or refuse and say what to do instead.
-    ramfs = Path("/run/secrets")
-    if not (ramfs.is_dir() and os.access(ramfs, os.W_OK)):
-        print(
-            f"Error: {name!r} opened, but this container has no /run/secrets "
-            "ramfs to deliver it to. Reference it from a workspace as "
-            f"credential:<org>:{name} (a new session receives it as an "
-            "environment variable), or run this from a session launched with "
-            "the secrets bind.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    target = ramfs / name
-    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as fh:
-        fh.write(payload["value"])
-    print(str(target))
+    print(f"Error: {name!r} did not open", file=sys.stderr)
+    sys.exit(1)
 
 
 def cmd_vault_remove(args) -> None:

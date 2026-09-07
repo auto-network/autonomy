@@ -1007,6 +1007,20 @@ class HttpClient:
             headers=_settings_headers(org),
         )
 
+    def deliver_vault_credential(self, set_id, name, *, org, ttl_seconds=0):
+        """Deliver one AUDITED credential into this session's private ramfs,
+        unattended; returns the receipt ({"delivery": "session-ramfs", "path":
+        "/run/secrets/<name>"}). The value never crosses this client."""
+        org = _resolve_client_org_arg(org)
+        return self._request(
+            "POST",
+            f"/api/vault/credential/"
+            f"{urllib.parse.quote(set_id, safe='')}/"
+            f"{urllib.parse.quote(name, safe='')}/deliver",
+            body={"ttl_seconds": int(ttl_seconds or 0)},
+            headers=_settings_headers(org),
+        )
+
     def share_vault_credential(self, set_id, name, *, to_org, org, replace=False):
         """Re-seal one AUDITED credential from the caller's namespace into
         ``<to_org>:<name>``; the server derives the source namespace from the
