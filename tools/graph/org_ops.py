@@ -29,7 +29,7 @@ from typing import Any
 
 from tools.data_paths import DATA_ROOT, resolve_orgs_root
 
-from .db import GraphDB
+from .db import GraphDB, GraphDBMissing, GraphDBNotReady
 from . import schemas
 from .schemas.registry import SchemaValidationError
 
@@ -222,6 +222,44 @@ def _open_org_db(path: Path) -> GraphDB:
     return GraphDB(path)
 
 
+def _open_org_db_ro(path: Path) -> GraphDB:
+    """Read-only, no fleet-sync catalog attach, never creates.
+
+    The inventory reads ONE row per store. Opening read-write ran the schema
+    init, the catalog attach (PRAGMA table_info per table + trigger-SQL diff)
+    and the reconcile backfill on every org store per call — ~14 times a
+    second from the gateway supervisor alone, 21% of event-loop stall
+    samples on 2026-09-07 (auto-nkxko).
+    """
+    return GraphDB(path, mode="ro", create=False, attach_fleet_sync=False)
+
+
+def _inventory_read(path: Path) -> OrgRef | None:
+    """The bootstrap row of one store, or None when the file is not (yet) a
+    store: no schema, no ``orgs`` table, no row. Read-only, never creates.
+
+    Deliberately NOT memoized: a memo keyed by inode goes stale when a
+    deleted store's inode is reused by a recreated one, and any content-
+    derived key needs the open it would save. The read-only open is
+    sub-millisecond; the storm was the read-write open's schema init and
+    catalog attach, which this path never runs.
+    """
+    try:
+        db = _open_org_db_ro(path)
+    except (sqlite3.Error, OSError, GraphDBMissing, GraphDBNotReady):
+        return None
+    try:
+        row = _read_orgs_row(db)
+    finally:
+        db.close()
+    if row is None:
+        return None
+    return OrgRef(
+        id=row["id"], slug=row["slug"], type=row["type"],
+        created_at=row["created_at"], db_path=str(path),
+    )
+
+
 # ── Read paths ───────────────────────────────────────────────
 
 
@@ -246,21 +284,10 @@ def list_orgs(*, root: Path | str | None = None) -> list[OrgRef]:
             candidate_paths.append(local)
     for path in candidate_paths:
         # Skip WAL/SHM artifacts that glob('*.db') wouldn't match anyway,
-        # plus the rare empty/ancillary file.
-        try:
-            db = _open_org_db(path)
-        except sqlite3.Error:
-            continue
-        try:
-            row = _read_orgs_row(db)
-        finally:
-            db.close()
-        if row is None:
-            continue
-        refs.append(OrgRef(
-            id=row["id"], slug=row["slug"], type=row["type"],
-            created_at=row["created_at"], db_path=str(path),
-        ))
+        # plus the rare empty/ancillary file (no bootstrap row → skipped).
+        ref = _inventory_read(path)
+        if ref is not None:
+            refs.append(ref)
     refs.sort(key=lambda r: r.slug)
     return refs
 
@@ -270,20 +297,7 @@ def get_org(slug: str, *, root: Path | str | None = None) -> OrgRef | None:
     path = _slug_db_path(slug, root)
     if not path.exists():
         return None
-    try:
-        db = _open_org_db(path)
-    except sqlite3.Error:
-        return None
-    try:
-        row = _read_orgs_row(db)
-    finally:
-        db.close()
-    if row is None:
-        return None
-    return OrgRef(
-        id=row["id"], slug=row["slug"], type=row["type"],
-        created_at=row["created_at"], db_path=str(path),
-    )
+    return _inventory_read(path)
 
 
 def show_org(slug: str, *, root: Path | str | None = None) -> dict | None:

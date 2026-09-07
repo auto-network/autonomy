@@ -66,7 +66,11 @@ Loader = Callable[[str], Awaitable[None]]
 
 INITIAL_BACKOFF_SECONDS = 0.5
 MAX_BACKOFF_SECONDS = 30.0
-RECONCILE_INTERVAL_SECONDS = 1.0
+# The watchdog heartbeat. The supervisor ALSO reconciles on every relevant
+# EventBus event, so this only bounds how long a missed event can go
+# unnoticed. It was 1.0 s, which made the planner's org discovery + Settings
+# reads the dashboard's busiest loop-side work (auto-nkxko).
+RECONCILE_INTERVAL_SECONDS = 30.0
 CERT_SOURCE_PATH = "/run/autonomy-keycache/service-gateway/tls.crt"
 KEY_SOURCE_PATH = "/run/autonomy-keycache/service-gateway/tls.key"
 
@@ -225,7 +229,9 @@ async def _build_desired_state() -> GatewayDesiredState:
     found_unready_connector = False
     found_missing_certificate = False
 
-    for org in _discover_orgs():
+    # Discovery opens every org store (read-only, memoized in org_ops) — the
+    # cold call belongs off the loop.
+    for org in await asyncio.to_thread(_discover_orgs):
         reservations = service_publication.list_reservations(org)
         target_ids = {
             row.get("reservation_id")
