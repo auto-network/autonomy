@@ -890,6 +890,7 @@ def _app_json(payload: dict) -> bytes:
 #: Same discipline as the write side: the relay learns nothing about what
 #: is being read, only which module owns reads for this target_type.
 logger = logging.getLogger(__name__)
+from tools.dashboard.log_throttle import StateChangeLogger
 
 #: The dashboard hands one of its own bus events to this connector over the
 #: loopback control listener it already drives. Not a registry control frame
@@ -1425,6 +1426,16 @@ async def proxy_events_to_connectors(bus, *, org=None, stop=None,
         return
 
 
+def _wants(predicate, topic, data) -> bool:
+    """A consumer filter must never take the proxy down: a raising filter
+    counts as "wants it" so the connector's own filter still applies."""
+    try:
+        return bool(predicate(topic, data))
+    except Exception:
+        logger.debug("event filter raised; forwarding", exc_info=True)
+        return True
+
+
 async def _run_event_proxy_once(bus, org, stop, control, max_pending: int) -> None:
     """One attempt at :func:`proxy_events_to_connectors` — no retry of its
     own. Split out so the supervising loop above can restart a fresh
@@ -1433,6 +1444,16 @@ async def _run_event_proxy_once(bus, org, stop, control, max_pending: int) -> No
     routes = event_routes()
     if not routes:
         return
+    # A consumer may declare ``wants_event(topic, data) -> bool`` to filter
+    # dashboard-side, BEFORE the control round-trip. The mission consumer
+    # subscribes to ``setting.changed`` but only for one set_id; without the
+    # filter every Settings write on the machine crossed to the connector
+    # only to be discarded there.
+    filters = {
+        consumer: getattr(_event_dispatch(consumer), "wants_event", None)
+        for consumers in routes.values() for consumer in consumers
+    }
+    backlog = StateChangeLogger(interval_s=60.0)
     queue = bus.subscribe()
     try:
         while stop is None or not stop.is_set():
@@ -1440,16 +1461,28 @@ async def _run_event_proxy_once(bus, org, stop, control, max_pending: int) -> No
             consumers = routes.get(topic)
             if not consumers:
                 continue
+            consumers = [
+                c for c in consumers
+                if filters.get(c) is None or _wants(filters[c], topic, data)
+            ]
+            if not consumers:
+                continue
             if queue.qsize() > max_pending:
                 # A live update is best-effort by design: a guest recovers a
                 # gap by refetching on its own channel, which is
                 # authoritative. So drop rather than grow without bound
-                # behind a tunnel that may be down for hours.
-                logger.warning(
-                    "event proxy is behind by %d events; dropping this one",
+                # behind a tunnel that may be down for hours. Say "behind"
+                # once, then a count per minute, and "caught up" once.
+                backlog.emit(
+                    logger, logging.WARNING, "event-proxy", "behind",
+                    "event proxy is behind by %d events; dropping",
                     queue.qsize(),
                 )
                 continue
+            backlog.emit(
+                logger, logging.INFO, "event-proxy", "current",
+                "event proxy caught up; forwarding again",
+            )
             for consumer in consumers:
                 try:
                     await asyncio.to_thread(

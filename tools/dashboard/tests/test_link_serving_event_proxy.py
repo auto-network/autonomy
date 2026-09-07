@@ -250,3 +250,32 @@ async def _cancel_during_backoff(bus):
     with __import__("contextlib").suppress(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=2)
     return task.cancelled()
+
+
+# ── dashboard-side pre-filter (log hygiene B) ──────────────────────────────
+
+def test_a_foreign_settings_write_never_crosses_the_boundary():
+    """The mission consumer subscribes to setting.changed for ONE set_id.
+    Every other Settings write used to cross to the connector only to be
+    discarded there; the consumer's wants_event now drops it dashboard-side."""
+    from tools.dashboard.plugins.mission_control import relay_publisher as rp
+    bus = _Bus()
+    bus.queue.put_nowait((rp.PRESENCE_TOPIC, {"set_id": "dashboard.feature_flags", "key": "x"}, 1))
+    bus.queue.put_nowait((rp.PRESENCE_TOPIC, {"set_id": rp.PRESENCE_SET_ID, "key": "mission:m1:p"}, 2))
+    calls = asyncio.run(_drain(bus, []))
+    assert len(calls) == 1
+    assert calls[0][2]["data"]["set_id"] == rp.PRESENCE_SET_ID
+
+
+def test_a_backlog_is_logged_once_not_per_dropped_event(caplog):
+    import logging
+    bus = _Bus()
+    topic = next(iter(link_serving.event_routes()))
+    for i in range(40):
+        bus.queue.put_nowait((topic, {"mission_id": f"m{i}"}, i))
+    with caplog.at_level(logging.INFO, logger=link_serving.logger.name):
+        asyncio.run(_drain(bus, [], max_pending=5))
+    behind = [r for r in caplog.records if "event proxy is behind" in r.getMessage()]
+    assert len(behind) == 1, [r.getMessage() for r in behind]
+    caught = [r for r in caplog.records if "caught up" in r.getMessage()]
+    assert len(caught) <= 1

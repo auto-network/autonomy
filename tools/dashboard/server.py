@@ -32,6 +32,12 @@ from urllib import error as urllib_error, request as urllib_request
 from urllib.parse import quote as url_quote
 
 logger = logging.getLogger(__name__)
+# Child loggers so the noisiest streams can be routed to their own files by
+# name (see the logging setup below): one line per HTTP request, event-loop
+# stall diagnostics, and the voice websocket's per-connection diagnostics.
+_http_logger = logging.getLogger(__name__ + ".http")
+_stall_logger = logging.getLogger(__name__ + ".stall")
+_voice_logger = logging.getLogger(__name__ + ".voice")
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -10250,7 +10256,9 @@ async def api_session_resume(request):
         owner_org = located["org"]
         principal = api_auth.principal_from_request(request)
         if principal.org_bound and principal.org != owner_org:
-            logger.warning(
+            api_auth._refusals.emit(
+                logger, logging.WARNING,
+                ("session.resume", principal.org, owner_org), "refused",
                 "api_authz_refused action=session.resume caller=%s "
                 "caller_org=%s owner_org=%s",
                 principal.subject,
@@ -11351,7 +11359,7 @@ async def ws_voice(websocket: WebSocket):
         # wrapper, so this is guaranteed-new text) AND surface to
         # the operator as a transcript:final frame.
         voice_buffer_mod.MANAGER.append_final(bind, text)
-        logger.info("ws_voice DIAG: FINAL transcript bind=%s text=%r", bind, text)
+        _voice_logger.info("ws_voice DIAG: FINAL transcript bind=%s text=%r", bind, text)
         try:
             await websocket.send_json({
                 "type": "transcript",
@@ -11408,11 +11416,11 @@ async def ws_voice(websocket: WebSocket):
             on_final=_on_final,
             on_error=_on_whisperlive_error,
         )
-        logger.info("ws_voice DIAG: 'start' received → connecting WhisperLive bind=%s url=%s", bind, voice_wl.WHISPERLIVE_URL)
+        _voice_logger.info("ws_voice DIAG: 'start' received → connecting WhisperLive bind=%s url=%s", bind, voice_wl.WHISPERLIVE_URL)
         try:
             await whisperlive_client.connect_and_wait_ready()
         except voice_wl.WhisperLiveConnectError as exc:
-            logger.warning("ws_voice DIAG: WhisperLive connect FAILED bind=%s err=%s", bind, exc)
+            _voice_logger.warning("ws_voice DIAG: WhisperLive connect FAILED bind=%s err=%s", bind, exc)
             whisperlive_unavailable = True
             try:
                 await websocket.send_json({
@@ -11426,7 +11434,7 @@ async def ws_voice(websocket: WebSocket):
             # we leave the reference so close() in finally is a no-op
             # rather than re-instantiating.
             return False
-        logger.info("ws_voice DIAG: WhisperLive READY bind=%s", bind)
+        _voice_logger.info("ws_voice DIAG: WhisperLive READY bind=%s", bind)
         return True
 
     async def _handle_voice_reset(
@@ -11476,7 +11484,7 @@ async def ws_voice(websocket: WebSocket):
             allow_open=not audio_ready_required,
             expected_generation=arrival_generation,
         )
-        logger.info("ws_voice DIAG: reset → epoch=%d bind=%s", voice_epoch, bind)
+        _voice_logger.info("ws_voice DIAG: reset → epoch=%d bind=%s", voice_epoch, bind)
 
     logger.info(
         "ws_voice: connected bind=%s state=%s restored_buffer_chars=%d",
@@ -11545,7 +11553,7 @@ async def ws_voice(websocket: WebSocket):
                         voice_buffer_mod.buffer_state_frame("")
                     )
                 responses = session.handle_control(frame_type)
-                logger.info("ws_voice DIAG: ctrl=%s → state=%s bind=%s", frame_type, session.state, bind)
+                _voice_logger.info("ws_voice DIAG: ctrl=%s → state=%s bind=%s", frame_type, session.state, bind)
                 for resp in responses:
                     await websocket.send_json(resp)
                 control_accepted = not any(
@@ -11674,12 +11682,6 @@ async def ws_voice(websocket: WebSocket):
                         _audio_capture_wav.writeframes(audio_bytes)
                     except Exception:
                         pass
-                if _audio_frames % 50 == 1:
-                    logger.info(
-                        "ws_voice DIAG: audio frame #%d forward=%s wl_ready=%s bind=%s",
-                        _audio_frames, should_forward,
-                        (whisperlive_client.is_ready() if whisperlive_client else None), bind,
-                    )
                 if (
                     should_forward
                     and whisperlive_client is not None
@@ -19262,7 +19264,9 @@ async def api_agent_action_dispatch(request):
     def target_org_auth_error(target_org):
         if not principal.org_bound or principal.org == target_org:
             return None
-        logger.warning(
+        api_auth._refusals.emit(
+            logger, logging.WARNING,
+            ("agent.dispatch", principal.org, target_org), "refused",
             "api_authz_refused action=agent.dispatch caller=%s "
             "caller_org=%s owner_org=%s",
             principal.subject,
@@ -21338,10 +21342,17 @@ def _loop_stall_sampler():
     index within one episode; a run of identical stacks = one long blocking
     call, varied stacks = accumulation.
     """
-    import traceback
-    episode_hb = None
-    dumps = 0
-    last_dump_t = 0.0
+    # Compaction lives in tools/dashboard/stall_report.py: stacks are trimmed
+    # to start at the first repository frame, identical consecutive samples
+    # collapse, every episode ends in one `STALL <dur>s leaf=… via …` line,
+    # and a 10-minute rollup names the top leaves by time blocked.
+    from tools.dashboard import stall_report
+    tracker = stall_report.EpisodeTracker(
+        _stall_logger,
+        max_dumps=_STALL_MAX_DUMPS,
+        resample_s=_STALL_RESAMPLE_S,
+        rollup=stall_report.Rollup(_stall_logger),
+    )
     while True:
         time.sleep(0.1)
         tid = _loop_thread_id
@@ -21350,23 +21361,16 @@ def _loop_stall_sampler():
         hb = _loop_heartbeat
         now = time.monotonic()
         stalled = now - hb
-        if stalled < _STALL_SAMPLE_S:
-            continue
-        if hb != episode_hb:          # new stall episode (loop ticked since last)
-            episode_hb = hb
-            dumps = 0
-            last_dump_t = 0.0
-        if dumps >= _STALL_MAX_DUMPS or (now - last_dump_t) < _STALL_RESAMPLE_S:
-            continue
-        frame = sys._current_frames().get(tid)
-        if frame is not None:
-            stack = "".join(traceback.format_stack(frame))
-            logger.error(
-                "EVENT-LOOP STALL STACK #%d (stalled %.2fs, loop thread mid-call):\n%s",
-                dumps + 1, stalled, stack,
-            )
-        dumps += 1
-        last_dump_t = now
+        try:
+            if stalled < _STALL_SAMPLE_S:
+                tracker.idle(hb, now)
+                continue
+            frame = sys._current_frames().get(tid)
+            frames = stall_report.frames_from(frame) if frame is not None else []
+            tracker.observe(hb, now, stalled, frames)
+        except Exception:
+            # Diagnostics must never take the sampler thread down.
+            _stall_logger.debug("stall sampler error", exc_info=True)
 
 
 async def _event_loop_watchdog():
@@ -21394,13 +21398,13 @@ async def _event_loop_watchdog():
         _loop_heartbeat = now
         lag = now - t0 - _TICK
         if lag >= _LAG_HANG_S:
-            logger.error(
+            _stall_logger.error(
                 "EVENT-LOOP STALL: loop blocked %.2fs — a sync or CPU-bound "
                 "(GIL-holding) call is not yielding; all requests hung this long",
                 lag,
             )
         elif lag >= _LAG_WARN_S:
-            logger.warning("EVENT-LOOP LAG: loop blocked %.2fs", lag)
+            _stall_logger.warning("EVENT-LOOP LAG: loop blocked %.2fs", lag)
 
 # Task* tile enricher — per-session taskId → subject/status map. Populated by
 # the session monitor tailer as it walks JSONL entries; also used by the HTTP
@@ -22221,24 +22225,55 @@ class _RequestDurationMiddleware(BaseHTTPMiddleware):
     # correlate in one grep.
     _SLOW_MS = 1000.0
     _HANG_MS = 5000.0
+    _QUERY_MAX = 80
+
+    # This line IS the access log: uvicorn's own is disabled (--no-access-log
+    # in both launchers) because it duplicated every request at the same
+    # INFO level without the duration. Fields: method, path?query (query
+    # truncated), status, duration, client.
+    @classmethod
+    def _describe(cls, request, status_code, dur_ms) -> tuple:
+        query = request.url.query or ""
+        if len(query) > cls._QUERY_MAX:
+            query = query[: cls._QUERY_MAX] + "…"
+        target = f"{request.url.path}?{query}" if query else request.url.path
+        return request.method, target, status_code, dur_ms, _client_address(request)
 
     async def dispatch(self, request, call_next):
         t0 = time.monotonic()
         response = await call_next(request)
         dur_ms = (time.monotonic() - t0) * 1000
         if dur_ms >= self._HANG_MS:
-            logger.error(
-                "SLOW-REQUEST(HANG) %s %s %d %.0fms — event loop likely blocked",
-                request.method, request.url.path, response.status_code, dur_ms,
+            _http_logger.error(
+                "SLOW-REQUEST(HANG) %s %s %d %.0fms client=%s — event loop likely blocked",
+                *self._describe(request, response.status_code, dur_ms),
             )
         elif dur_ms >= self._SLOW_MS:
-            logger.warning(
-                "SLOW-REQUEST %s %s %d %.0fms",
-                request.method, request.url.path, response.status_code, dur_ms,
+            _http_logger.warning(
+                "SLOW-REQUEST %s %s %d %.0fms client=%s",
+                *self._describe(request, response.status_code, dur_ms),
             )
         else:
-            logger.info("%s %s %d %.1fms", request.method, request.url.path, response.status_code, dur_ms)
+            _http_logger.info(
+                "%s %s %d %.1fms client=%s",
+                *self._describe(request, response.status_code, dur_ms),
+            )
         return response
+
+
+def _client_address(request) -> str:
+    """The requesting client for the access line: the first X-Forwarded-For
+    hop when a gateway (Caddy, the serving connector) fronted the request,
+    else the peer address; ``-`` when neither is known."""
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        first = forwarded.split(",", 1)[0].strip()
+        if first:
+            return first
+    client = request.client
+    if client and client.host:
+        return client.host
+    return "-"
 
 
 class _FleetJoiningMiddleware(BaseHTTPMiddleware):

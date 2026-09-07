@@ -179,6 +179,7 @@ setsid bash -c "
     --reload-exclude 'agents/tests/*' \
     --reload-exclude '**/__pycache__/*' \
     --timeout-graceful-shutdown 5 \
+    --no-access-log \
     \$SSL_ARGS \
     2>&1 | awk '{ printf \"%s %s\n\", strftime(\"%Y-%m-%d %H:%M:%S\"), \$0; fflush() }' >> \"$LOG_FILE\" &
   wait

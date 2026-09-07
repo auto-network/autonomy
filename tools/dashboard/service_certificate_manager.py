@@ -134,6 +134,17 @@ class ServiceCertificateManager:
                         )
                     self._materialized[identity] = metadata["serial"]
                     self.errors.pop(identity, None)
+                except service_certificate.ServiceCertificateError as exc:
+                    # Expected, self-describing refusals (vault still locked or
+                    # its bundle not yet restored on a fresh worker, no gateway
+                    # pair to import): one line, no traceback. The retry
+                    # interval handles them; the traceback added nothing but
+                    # a page of noise per worker startup.
+                    self.errors[identity] = f"{type(exc).__name__}: {exc}"
+                    logger.warning(
+                        "Service certificate reconciliation deferred for %s/%s: %s",
+                        org, persona, exc,
+                    )
                 except Exception as exc:
                     self.errors[identity] = f"{type(exc).__name__}: {exc}"
                     logger.warning(
