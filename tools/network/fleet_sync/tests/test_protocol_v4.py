@@ -121,12 +121,15 @@ def test_v4_cuts_wire_bytes_forty_percent_on_multi_op_transactions(
     machine = KeyPair.generate()
     path = tmp_path / "sample.db"
     _prepare(path, machine)
+    _insert(path, "kept-row", "one realistic row payload")
     _insert(path, "bulk-row", "one realistic row payload")
     _delete(path, "bulk-row")
-    transactions = _journal_transactions(path)
-    assert len(transactions) == 2
-    insert_item = transactions[0][0]
-    tombstone_item = transactions[1][0]
+    # Served from rows: the deleted row's insert transaction has nothing
+    # surviving (its address now cites the tombstone), so take the
+    # realistic insert from the row that is kept.
+    items = [item for tx in _journal_transactions(path) for item in tx]
+    insert_item = next(i for i in items if not i.mutation.tombstone)
+    tombstone_item = next(i for i in items if i.mutation.tombstone)
 
     def wire(item: AuthoredMutation, operations: int) -> tuple[int, int]:
         ops = _fan_out(item, operations)

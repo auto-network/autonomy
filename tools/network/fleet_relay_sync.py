@@ -603,14 +603,17 @@ class ConnectorFleetRuntime:
             resume_position = await asyncio.to_thread(
                 scope_store.resume_ref, resume_trail
             )
-        journal_gap = await asyncio.to_thread(scope_store.journal_gap)
+        if watermarks:
+            # A watermark map is continuity in itself: the peer holds state
+            # and is served deltas from it (per-origin, from catalog rows).
+            resume_position = max(resume_position, 1)
         # An empty server has nothing a checkpoint delivers; two freshly
         # prepared machines must meet through (empty) deltas, not by
         # installing each other's blank databases — same guard as the
         # direct path's serve decision.
         server_has_content = await asyncio.to_thread(scope_store.has_state)
         serve_checkpoint = server_has_content and _serve_checkpoint_decision(
-            resume_position, include_checkpoint, journal_gap
+            resume_position, include_checkpoint
         )
         # A request carrying a resolvable trail proves the peer kept what it
         # received: clear any redelivery strikes for this scope.

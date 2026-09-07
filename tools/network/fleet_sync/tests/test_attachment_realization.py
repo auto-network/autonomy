@@ -17,6 +17,15 @@ EPOCH = 7
 ROSTER = ("machine-a", "machine-b")
 
 
+
+def _first_transaction(catalog, origin: str):
+    """(ref, items) of the origin's first transaction, served from rows."""
+    page = catalog.next_transactions_for_origin(origin, 0, None, limit=1)
+    if not page:
+        return None
+    ref, _ts, _tx, items = page[0]
+    return ref, items
+
 def _identity(path: Path, marker: str) -> None:
     graph = GraphDB(path)
     try:
@@ -145,7 +154,7 @@ def test_install_quarantines_missing_bytes_and_carries_backlog(
                     third.graph.conn, "att-3", other_digest,
                     len(b"third-bytes"), other,
                 )
-            served = third.catalog.next_journal_transaction_ref(0)
+            served = _first_transaction(third.catalog, "machine-c")
         other.unlink()
         assert served is not None
         applied, ignored = catalog.apply_remote_batch(served[1])
@@ -200,7 +209,7 @@ def test_delta_defer_does_not_poison_batch(tmp_path: Path) -> None:
                 "ingested_at) VALUES('s1','note','t','{}',"
                 "'2026-08-19T00:00:00Z','2026-08-19T00:00:00Z')"
             )
-        served = left.next_journal_transaction_ref(0)
+        served = _first_transaction(left, "machine-a")
         assert served is not None and len(served[1]) == 2
 
         # Without a store the attachment defers; the batch must not raise
@@ -215,10 +224,11 @@ def test_delta_defer_does_not_poison_batch(tmp_path: Path) -> None:
         rows = _quarantine_rows(target.conn)
         assert [r["reason"] for r in rows] == ["attachment_bytes_unavailable"]
         assert rows[0]["frame"] is not None
-        # The deferred frame was still journaled for onward serving.
-        assert target.conn.execute(
-            "SELECT COUNT(*) FROM fleet_sync_journal"
-        ).fetchone()[0] == 2
+        # The deferred row is still forwarded onward: the quarantine keeps
+        # its frame, and the served transaction is never short.
+        onward = _first_transaction(right, "machine-a")
+        assert onward is not None and len(onward[1]) == 2
+        assert sorted(i.mutation.table for i in onward[1]) == ["attachments", "sources"]
 
         # With a store that can fetch the bytes, replaying the same batch
         # realizes the attachment (the drain path) and duplicates stay inert.
@@ -250,7 +260,7 @@ def test_delta_realizes_attachment_with_local_bytes(tmp_path: Path) -> None:
             _insert_attachment(
                 source.conn, "att-5", digest, len(content), payload
             )
-        served = left.next_journal_transaction_ref(0)
+        served = _first_transaction(left, "machine-a")
         assert served is not None
         right.blob_store = production_blob_store(
             tmp_path / "target.db", extra_source=tmp_path / "source.db"

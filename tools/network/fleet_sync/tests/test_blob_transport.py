@@ -191,8 +191,9 @@ def test_backlog_lists_only_replayable_attachment_entries(
             _insert_attachment(
                 source.conn, "att-b", digest, len(content), payload
             )
-        served = left.next_journal_transaction_ref(0)
-        assert served is not None
+        page = left.next_transactions_for_origin("machine-a", 0, None, limit=1)
+        assert page
+        served = (page[0][0], page[0][3])
         assert right.apply_remote_batch(served[1]) == (0, 0)
         entries = pending_attachment_backlog(target.conn)
         assert [e.digest for e in entries] == [digest]

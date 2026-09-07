@@ -135,13 +135,16 @@ def bench_kernel(scratch: Path, scale: Scale) -> dict[str, Any]:
         update_s = time.perf_counter() - started
 
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        journal_rows = int(conn.execute(
-            "SELECT COUNT(*) FROM fleet_sync_journal"
+        # The journal is gone (2026-09-07): nothing accumulates between
+        # acknowledgements any more. Retained transaction rows are the
+        # only per-transaction bookkeeping left.
+        journal_rows = 0
+        transaction_rows = int(conn.execute(
+            "SELECT COUNT(*) FROM fleet_sync_transactions"
         ).fetchone()[0])
         file_full = path.stat().st_size
 
         started = time.perf_counter()
-        catalog.prune_journal((1 << 63) - 1)
         conn.execute("VACUUM")
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         prune_s = time.perf_counter() - started
@@ -161,6 +164,7 @@ def bench_kernel(scratch: Path, scale: Scale) -> dict[str, Any]:
             "file_steady_bytes": file_steady,
             "steady_tracking_overhead_percent": overhead,
             "journal_rows_after_ack": journal_rows,
+            "transaction_rows": transaction_rows,
             "prune_vacuum_s": prune_s,
         },
         "detail": {

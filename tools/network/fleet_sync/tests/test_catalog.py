@@ -246,18 +246,8 @@ def test_reconcile_repairs_legacy_live_encoding_of_deprecated_base(
             "UPDATE fleet_sync_catalog SET tombstone=0 WHERE address=?",
             (address_blob,),
         )
-        db.conn.execute(
-            "UPDATE fleet_sync_journal SET frame=? WHERE transaction_ref=? "
-            "AND operation_index=?",
-            (
-                catalog_module._pack_journal(
-                    catalog_module.encode_mutation_frame(legacy)
-                ),
-                transaction_ref,
-                operation_index,
-            ),
-        )
         db.conn.commit()
+        del legacy  # the legacy frame lived in the journal, which is gone
 
         catalog.reconcile_catalog(audit=False)
         repaired = list(catalog.iter_journal(after_watermark=10))
@@ -394,7 +384,7 @@ def test_remote_multitable_transaction_is_dependency_ordered_and_atomic(
         target.close()
 
 
-def test_journal_is_incremental_and_prunes_only_after_acknowledged_floor(
+def test_iter_journal_is_built_from_rows_and_bounded_by_watermark(
     tmp_path: Path,
 ) -> None:
     db = GraphDB(tmp_path / "personal.db")
@@ -408,9 +398,8 @@ def test_journal_is_incremental_and_prunes_only_after_acknowledged_floor(
         assert [item.mutation.timestamp_ns for item in catalog.iter_journal(
             after_watermark=10
         )] == [20]
-        assert catalog.prune_journal(10) == 1
-        assert [item.mutation.timestamp_ns for item in catalog.iter_journal()] == [20]
-        # Pruning history does not remove the current-winner catalog.
+        assert [item.mutation.timestamp_ns for item in catalog.iter_journal()] == [10, 20]
+        assert dict(list(catalog.iter_journal())[0].mutation.values)["title"] == "one"
         assert len(list(catalog.iter_mutations())) == 2
     finally:
         db.close()
@@ -429,10 +418,13 @@ def test_journal_pages_exact_transactions_without_skips_or_duplicates(
         with catalog.transaction(20, "second"):
             _insert_source(db.conn, "s3", "three")
 
-        cursor = None
+        position: tuple[int, str | None] = (0, None)
         pages: list[list[AuthoredMutation]] = []
-        while page := catalog.next_journal_transaction(cursor):
-            cursor, items = page
+        while page := catalog.next_transactions_for_origin(
+            "machine-a", position[0], position[1], limit=1,
+        ):
+            _ref, timestamp, transaction_id, items = page[0]
+            position = (timestamp, transaction_id)
             pages.append(items)
 
         assert [[item.transaction_id for item in items] for items in pages] == [
@@ -442,7 +434,9 @@ def test_journal_pages_exact_transactions_without_skips_or_duplicates(
         assert [
             item.operation_index for items in pages for item in items
         ] == [0, 1, 0]
-        assert catalog.next_journal_transaction(cursor) is None
+        assert catalog.next_transactions_for_origin(
+            "machine-a", position[0], position[1], limit=1,
+        ) == []
     finally:
         db.close()
 
@@ -460,9 +454,12 @@ def test_multiple_operations_on_one_address_keep_transaction_final_state(
         with left.transaction(10, "rewrite"):
             _insert_source(source.conn, "s1", "first")
             source.conn.execute("UPDATE sources SET title='final' WHERE id='s1'")
+        # Two operations on one address inside one transaction: the row's
+        # final state is what exists, and what is served.
         journal = list(left.iter_journal())
-        assert len(journal) == 2
-        assert right.apply_remote_batch(journal) == (2, 0)
+        assert len(journal) == 1
+        assert journal[0].operation_index == 1
+        assert right.apply_remote_batch(journal) == (1, 0)
         assert target.conn.execute("SELECT title FROM sources").fetchone()[0] == "final"
         assert dict(list(right.iter_mutations())[0].mutation.values)["title"] == "final"
     finally:
@@ -484,7 +481,7 @@ def test_authored_transaction_bound_fails_atomically(
                 _insert_source(db.conn, "s2", "two")
         assert db.conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0] == 0
         assert db.conn.execute(
-            "SELECT COUNT(*) FROM fleet_sync_journal"
+            "SELECT COUNT(*) FROM fleet_sync_catalog"
         ).fetchone()[0] == 0
     finally:
         db.close()

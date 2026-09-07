@@ -60,9 +60,7 @@ def _seed(
                 )
         graph.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         allocation = _allocated(graph.conn)
-        journal_rows = int(graph.conn.execute(
-            "SELECT COUNT(*) FROM fleet_sync_journal"
-        ).fetchone()[0]) if tracked else 0
+        journal_rows = 0  # the journal table is retired (2026-09-07) if tracked else 0
     finally:
         graph.close()
     elapsed = time.perf_counter() - started
@@ -98,7 +96,6 @@ def run(
             through_watermark=1_787_000_000_000_000_000
             + ((rows - 1) // batch_rows) * batch_rows,
         )
-        tracked_catalog.prune_journal((1 << 63) - 1)
         tracked_graph.conn.execute("VACUUM")
     finally:
         tracked_graph.close()

@@ -525,6 +525,22 @@ def decode_checkpoint_file(raw: bytes) -> tuple[str, bytes]:
     return path.as_posix(), body
 
 
+def watermarks_from_trail(
+    resume_trail: Sequence[tuple[str, str, int]] | None,
+) -> dict[str, int]:
+    """Per-origin watermarks a breadcrumb trail proves: the newest
+    timestamp the peer verified from each origin named in the trail."""
+    out: dict[str, int] = {}
+    for origin, _transaction_id, timestamp_ns in resume_trail or ():
+        try:
+            ts = int(timestamp_ns)
+        except (TypeError, ValueError):
+            continue
+        if ts > out.get(str(origin), 0):
+            out[str(origin)] = ts
+    return out
+
+
 def serve_checkpoint_decision(
     resume_position: int, requested: bool, journal_gap: bool = False
 ) -> bool:
@@ -962,11 +978,12 @@ class SQLiteFleetSyncStore:
         return conn, catalog
 
     def next_transaction(
-        self, after_transaction_ref: int
+        self, after_transaction_ref: int = 0,
     ) -> tuple[int, list[AuthoredMutation]] | None:
+        """Drain helper: the next learned transaction after a local row id."""
         conn, catalog = self._open()
         try:
-            return catalog.next_journal_transaction_ref(after_transaction_ref)
+            return catalog.next_transaction_after_ref(after_transaction_ref)
         finally:
             conn.close()
 
@@ -990,6 +1007,13 @@ class SQLiteFleetSyncStore:
         conn, catalog = self._open()
         try:
             return catalog.origin_watermarks()
+        finally:
+            conn.close()
+
+    def origin_watermarks_through(self, through_ref: int) -> dict[str, int]:
+        conn, catalog = self._open()
+        try:
+            return catalog.origin_watermarks(through_ref=through_ref)
         finally:
             conn.close()
 
@@ -1019,39 +1043,10 @@ class SQLiteFleetSyncStore:
         finally:
             conn.close()
 
-    def next_transactions(self, after_transaction_ref: int, *, limit: int = 200):
-        conn, catalog = self._open()
-        try:
-            return catalog.next_journal_transactions(after_transaction_ref, limit=limit)
-        finally:
-            conn.close()
-
     def implied_ack_ref(self, watermarks) -> int:
         conn, catalog = self._open()
         try:
             return catalog.implied_ack_ref(watermarks)
-        finally:
-            conn.close()
-
-    def retired_above_watermarks(self, watermarks, exclude=None) -> list[str]:
-        conn, catalog = self._open()
-        try:
-            return catalog.retired_above_watermarks(watermarks, exclude)
-        finally:
-            conn.close()
-
-    def oldest_journal_ref(self) -> int | None:
-        """The smallest transaction ref that still has journal frames."""
-        import sqlite3 as _sqlite3
-
-        conn = _sqlite3.connect(f"file:{self.path}?mode=ro", uri=True)
-        try:
-            row = conn.execute(
-                "SELECT MIN(transaction_ref) FROM fleet_sync_journal"
-            ).fetchone()
-            return None if row is None or row[0] is None else int(row[0])
-        except _sqlite3.Error:
-            return None
         finally:
             conn.close()
 
@@ -1165,19 +1160,6 @@ class SQLiteFleetSyncStore:
             return conn.execute(
                 "SELECT 1 FROM fleet_sync_transactions LIMIT 1"
             ).fetchone() is not None
-        except _sqlite3.Error:
-            return False
-        finally:
-            conn.close()
-
-    def journal_gap(self) -> bool:
-        from tools.network.fleet_sync.catalog import journal_has_gap
-
-        import sqlite3 as _sqlite3
-
-        conn = _sqlite3.connect(f"file:{self.path}?mode=ro", uri=True)
-        try:
-            return journal_has_gap(conn)
         except _sqlite3.Error:
             return False
         finally:
@@ -1387,29 +1369,6 @@ def _transaction_identity(item: AuthoredMutation) -> tuple[str, str, int]:
 
 #: Transactions fetched per store connection while serving a pull.
 SERVE_PAGE_TRANSACTIONS = 200
-
-
-class _JournalPager:
-    """Legacy paging: every retained transaction after one local position,
-    fetched SERVE_PAGE_TRANSACTIONS at a time on one connection."""
-
-    def __init__(self, store, cursor: int):
-        self.store = store
-        self.cursor = cursor
-        self._buffer: list = []
-        self._exhausted = False
-
-    def next(self):
-        if not self._buffer and not self._exhausted:
-            self._buffer = self.store.next_transactions(
-                self.cursor, limit=SERVE_PAGE_TRANSACTIONS
-            )
-            if not self._buffer:
-                self._exhausted = True
-        if not self._buffer:
-            return None
-        self.cursor, items = self._buffer.pop(0)
-        return self.cursor, items, None
 
 
 class _OriginPager:
@@ -1725,21 +1684,22 @@ class FleetSyncScheduler:
                 # ids; the position is recomputed here so a database restored
                 # from backup re-serves its divergence window instead of
                 # honouring a cursor into journal rows that no longer exist.
-                cursor = 0
-                if watermarks is not None:
-                    # Per-origin mode: the map proves the prefix it covers,
-                    # which feeds the same served-ack floor the trail did.
-                    # The ack is exactly what the map proves consumed (may be
-                    # 0); the decision below never snapshots a non-bootstrap
-                    # puller, so no position hack is needed for it.
-                    cursor = await asyncio.to_thread(
-                        store.implied_ack_ref, watermarks
-                    )
-                elif resume_trail:
-                    cursor = await asyncio.to_thread(
-                        store.resume_ref, resume_trail
-                    )
-                journal_gap = await asyncio.to_thread(store.journal_gap)
+                # Local alias (assigning the parameter name inside this
+                # generator would make it generator-local and unbound).
+                # A request without a watermark map (older client, or a
+                # trail-only resume): the trail names transactions the peer
+                # verified, so its newest timestamp per origin is a
+                # watermark the peer has earned. Origins absent from the
+                # trail replay from 0; last-writer-wins makes that inert.
+                origin_watermarks = (
+                    dict(watermarks) if watermarks is not None
+                    else watermarks_from_trail(resume_trail)
+                )
+                # The map proves the prefix it covers, which feeds the same
+                # served-ack floor the trail did (may be 0).
+                cursor = await asyncio.to_thread(
+                    store.implied_ack_ref, origin_watermarks
+                )
                 # An empty server has nothing a checkpoint delivers; two
                 # freshly prepared machines must meet through (empty) deltas,
                 # not by installing each other's blank databases.
@@ -1749,33 +1709,16 @@ class FleetSyncScheduler:
                 # generator would make it generator-local (unbound on the
                 # no-checkpoint path).
                 floor_ref = resume_floor_ref
-                wants_checkpoint = serve_checkpoint_decision(
-                    cursor, bootstrap, journal_gap
-                )
-                if cursor == 0 and not wants_checkpoint and journal_gap:
-                    # Unknown position on a store whose journal no longer
-                    # reaches its beginning: serve from the oldest surviving
-                    # frame and say so once. The prefix before it is retired
-                    # only below the served-ack floor, i.e. content every
-                    # active peer already acknowledged.
-                    oldest = await asyncio.to_thread(store.oldest_journal_ref)
-                    logger.info(
-                        "fleet sync peer %s scope %r: position unknown; "
-                        "serving the retained journal from ref %s "
-                        "(frames before it are retired)",
-                        peer_pub[:12], scope, oldest,
-                    )
+                checkpoint_frontier: dict[str, int] = {}
+                wants_checkpoint = serve_checkpoint_decision(cursor, bootstrap)
                 if wants_checkpoint and not accept_checkpoint:
-                    # A founded origin never installs a checkpoint; give it
-                    # the retained journal from the start. Rows it already
-                    # holds merge inert; the retired prefix before this
-                    # journal's floor is, for a member, the origin's own
-                    # checkpoint content.
+                    # A founded origin never installs a checkpoint; serve it
+                    # deltas from its watermarks instead. Rows it already
+                    # holds merge inert.
                     logger.warning(
                         "fleet sync peer %s scope %r refuses checkpoints "
-                        "(founded origin); replaying the retained journal "
-                        "from position %d instead (journal_gap=%s)",
-                        peer_pub[:12], scope, cursor, journal_gap,
+                        "(founded origin); serving deltas from position %d",
+                        peer_pub[:12], scope, cursor,
                     )
                     wants_checkpoint = False
                 if allow_checkpoint and server_has_content and wants_checkpoint:
@@ -1803,8 +1746,17 @@ class FleetSyncScheduler:
                             floor_ref = await asyncio.to_thread(
                                 store.newest_transaction_ref
                             )
+                            # Same rule for the per-origin frontier the
+                            # delta phase serves above: read before the
+                            # cut, so anything that lands after this read
+                            # is served as a delta (redundant inside the
+                            # window, never skipped).
+                            checkpoint_frontier = await asyncio.to_thread(
+                                store.origin_watermarks
+                            )
                         except WatermarkError:
                             floor_ref = None  # inactive store: full replay
+                            checkpoint_frontier = {}
 
                         def build() -> None:
                             with FleetSyncAlpha(
@@ -1873,16 +1825,26 @@ class FleetSyncScheduler:
                 # frontier past what the peer actually installed.
                 if floor_ref is not None:
                     cursor = max(cursor, floor_ref)
-                if watermarks is not None and not served_checkpoint:
-                    # Every origin is served from the puller's watermark,
-                    # the puller's own included (a machine restored from a
-                    # backup has lost its own newest writes). Retired
-                    # journal frames are rebuilt from catalog and live
-                    # rows (catalog.transaction_items), so no origin is
-                    # ever skipped and no "retired" notice is needed.
-                    pager = _OriginPager(store, watermarks, None)
-                else:
-                    pager = _JournalPager(store, cursor)
+                if served_checkpoint:
+                    # The checkpoint carried everything through its cut;
+                    # the delta phase serves above the frontier read just
+                    # before that cut (checkpoint_frontier).
+                    origin_watermarks = checkpoint_frontier
+                elif floor_ref:
+                    # The caller (relay path) served the checkpoint itself
+                    # and names the position it was cut at: serve above
+                    # the per-origin frontier that position carried.
+                    carried = await asyncio.to_thread(
+                        store.origin_watermarks_through, floor_ref
+                    )
+                    for origin_key, ts in carried.items():
+                        if ts > origin_watermarks.get(origin_key, 0):
+                            origin_watermarks[origin_key] = ts
+                # Every origin is served from the puller's watermark, the
+                # puller's own included (a machine restored from a backup
+                # has lost its own newest writes). Frames are built from
+                # catalog and live rows (catalog.transaction_items).
+                pager = _OriginPager(store, origin_watermarks, None)
                 while True:
                     self.authenticator.authorize(peer_pub)
                     page = await asyncio.to_thread(pager.next)

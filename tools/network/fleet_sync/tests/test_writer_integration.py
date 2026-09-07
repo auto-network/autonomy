@@ -25,8 +25,7 @@ def _local_operation_groups(conn: sqlite3.Connection) -> list[int]:
         int(row[0])
         for row in conn.execute(
             "SELECT COUNT(*) FROM fleet_sync_transactions AS tx "
-            "JOIN fleet_sync_journal AS journal "
-            "ON journal.transaction_ref=tx.id "
+            "JOIN fleet_sync_catalog AS c ON c.transaction_ref=tx.id "
             "WHERE tx.transaction_id LIKE 'local:%' GROUP BY tx.id ORDER BY tx.id"
         )
     ]
@@ -195,11 +194,13 @@ def test_reopen_refreshes_triggers_after_replicated_columns_are_added(
             "SELECT sql FROM sqlite_master WHERE type='trigger' "
             "AND name='fleet_sync_sources_insert'"
         ).fetchone()[0]
-        assert "later_persona" in trigger
-        assert "later_session" in trigger
+        # Trigger bodies no longer enumerate row columns (the frame callback
+        # that needed them is gone with the journal); what matters is that
+        # the refreshed trigger captures a write made after the upgrade.
+        assert trigger.startswith("CREATE TRIGGER fleet_sync_sources_insert")
         reopened.insert_source(Source(id="after-schema-upgrade", type="note"))
         assert reopened.conn.execute(
-            "SELECT COUNT(*) FROM fleet_sync_journal"
+            "SELECT COUNT(*) FROM fleet_sync_catalog"
         ).fetchone()[0] == 1
 
 
@@ -295,12 +296,16 @@ def test_recorder_failure_aborts_originating_graph_mutation(
 ) -> None:
     db = GraphDB(tmp_path / "personal.db")
     try:
-        db.activate_fleet_sync_writers(ORIGIN)
-
         def fail_frame(*args, **kwargs):
             raise RuntimeError("injected recorder failure")
 
-        monkeypatch.setattr(db._fleet_catalog, "_frame", fail_frame)
+        # The capture trigger calls the SQL function registered at catalog
+        # construction, so the injection must be on the class before
+        # activation constructs the catalog.
+        from tools.network.fleet_sync.catalog import MutationCatalog
+
+        monkeypatch.setattr(MutationCatalog, "_next_operation", fail_frame)
+        db.activate_fleet_sync_writers(ORIGIN)
         with pytest.raises(sqlite3.OperationalError, match="user-defined function"):
             db.insert_source(Source(id="must-rollback", type="note"))
         assert db.conn.execute(

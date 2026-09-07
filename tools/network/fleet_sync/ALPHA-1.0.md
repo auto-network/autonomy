@@ -65,9 +65,9 @@ hash tie-break.
 - The measured/default immutable segment is 4 MiB. On the fixed 524,000,000
   byte corpus it balanced 125 objects, 590 MiB/s four-worker coding, a 297 MiB
   conservative pool-memory bound, and the lowest measured lifecycle time.
-- The steady catalog contains no live payload. The compressed journal is
-  temporary payload history retained only until a covering exact base is
-  durably acknowledged.
+- The catalog contains no live payload. Wire frames are rebuilt from the
+  catalog row and the live row at serve time; there is no stored frame
+  history (the journal table was removed 2026-09-07).
 
 ## External deep-review disposition
 

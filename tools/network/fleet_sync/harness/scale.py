@@ -54,15 +54,13 @@ def _machine_counters(db_path: Path, own_pub: str) -> dict:
             " COALESCE(SUM(deltas_sent),0), COALESCE(SUM(deltas_received),0),"
             " COALESCE(SUM(transactions_applied),0) FROM fleet_sync_peer_state"
         ).fetchone()
-        journal_frames = conn.execute("SELECT COUNT(*) FROM fleet_sync_journal").fetchone()[0]
+        catalog_rows = conn.execute("SELECT COUNT(*) FROM fleet_sync_catalog").fetchone()[0]
         transactions = conn.execute("SELECT COUNT(*) FROM fleet_sync_transactions").fetchone()[0]
-        authored = conn.execute(
-            "SELECT COUNT(DISTINCT t.id), COALESCE(SUM(LENGTH(j.frame)),0)"
-            " FROM fleet_sync_transactions t"
-            " JOIN fleet_sync_origins o ON o.id=t.origin_id"
-            " LEFT JOIN fleet_sync_journal j ON j.transaction_ref=t.id"
-            " WHERE o.incarnation=?", (own_pub,),
-        ).fetchone()
+        authored_tx = 0
+        authored_bytes = 0
+        for _origin, _tx, size in _transaction_frame_sizes(conn, own_pub, only_origin=own_pub):
+            authored_tx += 1
+            authored_bytes += size
         sources = conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0]
     finally:
         conn.close()
@@ -71,10 +69,29 @@ def _machine_counters(db_path: Path, own_pub: str) -> dict:
         "checkpoints_sent": row[2], "checkpoints_received": row[3],
         "deltas_sent": row[4], "deltas_received": row[5],
         "transactions_applied": row[6],
-        "journal_frames": journal_frames, "transactions": transactions,
-        "authored_transactions": authored[0], "authored_payload_bytes": authored[1],
+        "catalog_rows": catalog_rows, "transactions": transactions,
+        "authored_transactions": authored_tx, "authored_payload_bytes": authored_bytes,
         "sources": sources,
     }
+
+
+def _transaction_frame_sizes(conn, own_pub: str, *, only_origin: str | None = None):
+    """(origin, transaction_id, wire bytes) per transaction, with the frames
+    rebuilt from catalog + live rows exactly as the server serves them
+    (there is no journal to read them from any more)."""
+    from tools.network.fleet_sync.catalog import MutationCatalog
+    from tools.network.fleet_sync.codec import encode_mutation_frame
+
+    catalog = MutationCatalog(conn, own_pub)
+    where = " WHERE o.incarnation=?" if only_origin else ""
+    params = (only_origin,) if only_origin else ()
+    heads = conn.execute(
+        "SELECT t.id, o.incarnation, t.transaction_id FROM fleet_sync_transactions t"
+        " JOIN fleet_sync_origins o ON o.id=t.origin_id" + where, params,
+    ).fetchall()
+    for ref, origin, tx in heads:
+        items = catalog.transaction_items(int(ref), str(origin), str(tx))
+        yield str(origin), str(tx), sum(len(encode_mutation_frame(i.mutation)) for i in items)
 
 
 def _ensure_descriptors(size: int) -> dict:
@@ -191,10 +208,10 @@ def run(args: argparse.Namespace) -> dict:
         total = sum(sum(row) for row in matrix)
         machines = []
         snapshots_served = 0
-        # Unique payload: every distinct (author, transaction) in the fleet,
-        # with its frame bytes taken from any machine that still holds the
-        # journal frames -- a checkpoint install rebuilds a machine's own
-        # journal, so the author's copy is not always the surviving one.
+        # Unique payload: every distinct (origin, transaction) in the fleet,
+        # with its wire bytes rebuilt from catalog + live rows on whichever
+        # machine still cites the transaction (a row overwritten everywhere
+        # contributes 0 bytes, as it would on the wire today).
         distinct: dict[tuple[str, str], int] = {}
         for machine in fleet.machines:
             counters = _machine_counters(machine.db_path, machine.key.public_hex)
@@ -204,12 +221,8 @@ def run(args: argparse.Namespace) -> dict:
             snapshots_served += counters["checkpoints_sent"]
             conn = sqlite3.connect(f"file:{machine.db_path}?mode=ro", uri=True)
             try:
-                for origin, tx, size in conn.execute(
-                    "SELECT o.incarnation, t.transaction_id,"
-                    " COALESCE(SUM(LENGTH(j.frame)),0) FROM fleet_sync_transactions t"
-                    " JOIN fleet_sync_origins o ON o.id=t.origin_id"
-                    " LEFT JOIN fleet_sync_journal j ON j.transaction_ref=t.id"
-                    " GROUP BY o.incarnation, t.transaction_id"
+                for origin, tx, size in _transaction_frame_sizes(
+                    conn, machine.key.public_hex,
                 ):
                     key = (origin, tx)
                     if size and size > distinct.get(key, 0):
@@ -300,13 +313,13 @@ def _report(e: dict) -> str:
         f"- snapshots served: {e['snapshots_served']}  received: {e['snapshots_received']}"
         + (f"  (late join at {e['late_joined_at_s']:.1f}s)" if e.get('late_joined_at_s') else ""),
         "",
-        "| machine | sent | received | ckpt sent | ckpt recv | deltas recv | journal frames | authored tx | cpu s | peak rss MB |",
+        "| machine | sent | received | ckpt sent | ckpt recv | deltas recv | catalog rows | authored tx | cpu s | peak rss MB |",
         "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for m in e["machines"]:
         lines.append(
             f"| {m['index']} | {m['bytes_sent']:,} | {m['bytes_received']:,} | {m['checkpoints_sent']} |"
-            f" {m['checkpoints_received']} | {m['deltas_received']} | {m['journal_frames']:,} |"
+            f" {m['checkpoints_received']} | {m['deltas_received']} | {m['catalog_rows']:,} |"
             f" {m['authored_transactions']} | {m.get('cpu_s','?')} | {round(m.get('peak_rss_kb',0)/1024)} |"
         )
     lines += ["", "## Bytes per dial (row = dialer, column = target)", ""]
