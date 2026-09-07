@@ -363,6 +363,10 @@ def rank_peers(
     )
     if limit <= 0:
         return ordered
+    # Measured 2026-09-07 (N=50, poll 1 s, one pull per round, this box):
+    # whole-roster uniform random 16.8 s settle vs 15.6 s for this pool.
+    # Selection width is not a settle lever; the pool stays narrow for
+    # the fairness it gives a returning peer.
     pool = ordered[:max(RANK_POOL_FACTOR * limit, 3)]
     if len(pool) <= limit:
         return pool
@@ -1095,7 +1099,17 @@ class SQLiteFleetSyncStore:
         """
         conn, catalog = self._open()
         try:
-            return [catalog.apply_remote_batch(items) for items in groups]
+            results = [catalog.apply_remote_batch(items) for items in groups]
+            # Fold what was just applied from the WAL into the main file
+            # while this connection is still open. PASSIVE never blocks a
+            # reader or writer; it does as much as it can. Without it the
+            # WAL grows until the last connection closes (a busy server
+            # rarely has none open: personal.db-wal pinned at 102 MB, live
+            # 2026-09-06), and anything reading the main file alone sees
+            # the applied rows only then.
+            with contextlib.suppress(Exception):
+                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            return results
         finally:
             conn.close()
 
