@@ -32,7 +32,10 @@ from tools.network.fleet_sync_channel import (
     FleetDirectServer,
     fleet_direct_connect,
 )
-from tools.network.fleet_sync_connection import FleetSyncConnection
+from tools.network.fleet_sync_connection import (
+    FleetSyncConnection,
+    FleetSyncQuiescenceError,
+)
 from tools.network.fleet_sync.catalog import (
     AuthoredMutation,
     MAX_TRANSACTION_OPERATIONS,
@@ -231,7 +234,7 @@ class FleetSyncRuntimeConfig:
     sync_scopes: Callable[[], Mapping[str, Path]] | None = None
     #: Peers pulled per round (stalest-first ranking fills the slots; zero
     #: or negative means every eligible peer). ONE by default (auto-mfgko):
-    #: with per-author watermarks every server can supply every author's
+    #: with per-origin watermarks every server can supply every origin's
     #: writes, so a second concurrent pull in the same round mostly carries
     #: the same new transactions -- measured 1.65x receipts/minimum at 3
     #: per round versus 1.00x at 1 per round (N=5, 2026-09-07). Rounds are
@@ -553,9 +556,9 @@ def encode_pull_request(
     """Ask for every journal transaction after a content-addressed position.
 
     ``watermarks`` (design of record graph://1155b8f4-8cf) is the puller's
-    per-author map ``{author_pub: max timestamp_ns held}``. A server that
-    receives it serves, per author, only transactions newer than the
-    puller's watermark for that author and never the puller's own writes --
+    per-origin map ``{author_pub: max timestamp_ns held}``. A server that
+    receives it serves, per origin, only transactions newer than the
+    puller's watermark for that origin and never the puller's own writes --
     so each write crosses the wire to each machine once, whichever server
     it comes from. The trail stays for servers that predate the field.
 
@@ -564,7 +567,7 @@ def encode_pull_request(
     founded ledger and will refuse any checkpoint: when the trail does not
     resolve, replay the retained journal from its start instead. That is
     how an ORIGIN receives a member's writes -- the member's retained
-    journal is everything it authored or received since its own install,
+    journal is everything it originated or received since its own install,
     and deterministic merge makes rows the origin already holds inert.
 
     ``resume`` is the puller's verified breadcrumb trail, newest first.  It
@@ -598,17 +601,17 @@ def encode_pull_request(
     if not accept_checkpoint:
         body["accept_checkpoint"] = False
     if watermarks is not None:
-        if len(watermarks) > MAX_WATERMARK_AUTHORS:
+        if len(watermarks) > MAX_WATERMARK_ORIGINS:
             raise FleetSyncProtocolError("fleet sync watermark map exceeds bound")
         body["watermarks"] = {
-            _require_hex64(author, "fleet sync watermark author"): int(value)
-            for author, value in sorted(watermarks.items())
+            _require_hex64(origin, "fleet sync watermark origin"): int(value)
+            for origin, value in sorted(watermarks.items())
         }
     return canonical_json(body)
 
 
-#: Bound on the per-author map: a roster, not the world.
-MAX_WATERMARK_AUTHORS = 4096
+#: Bound on the per-origin map: a roster, not the world.
+MAX_WATERMARK_ORIGINS = 4096
 
 
 def decode_pull_request(
@@ -646,7 +649,7 @@ def decode_pull_request(
     if watermarks is not None:
         if (
             not isinstance(watermarks, dict)
-            or len(watermarks) > MAX_WATERMARK_AUTHORS
+            or len(watermarks) > MAX_WATERMARK_ORIGINS
             or any(
                 not isinstance(k, str) or len(k) != 64
                 or isinstance(v, bool) or not isinstance(v, int) or v < 0
@@ -681,7 +684,7 @@ def encode_authored(item: AuthoredMutation, *, transaction_operations: int) -> b
     message = _MUTATION_MAGIC + struct.pack(">I", len(header)) + header + frame
     if len(header) > _HEADER_LIMIT or len(message) > MAX_MESSAGE_SIZE:
         raise FleetSyncProtocolError(
-            "authored mutation exceeds the fleet channel message bound"
+            "originated mutation exceeds the fleet channel message bound"
         )
     return message
 
@@ -796,7 +799,7 @@ def encode_operation_frame(item: AuthoredMutation) -> bytes:
     )
     if len(message) > MAX_MESSAGE_SIZE:
         raise FleetSyncProtocolError(
-            "authored mutation exceeds the fleet channel message bound"
+            "originated mutation exceeds the fleet channel message bound"
         )
     return message
 
@@ -979,34 +982,34 @@ class SQLiteFleetSyncStore:
         finally:
             conn.close()
 
-    def author_watermarks(self) -> dict[str, int]:
+    def origin_watermarks(self) -> dict[str, int]:
         conn, catalog = self._open()
         try:
-            return catalog.author_watermarks()
+            return catalog.origin_watermarks()
         finally:
             conn.close()
 
-    def author_list(self) -> list[str]:
+    def origin_list(self) -> list[str]:
         conn, catalog = self._open()
         try:
-            return catalog.author_list()
+            return catalog.origin_list()
         finally:
             conn.close()
 
-    def next_transaction_for_author(self, incarnation, after_timestamp_ns, after_transaction_id=None):
+    def next_transaction_for_origin(self, incarnation, after_timestamp_ns, after_transaction_id=None):
         conn, catalog = self._open()
         try:
-            return catalog.next_transaction_for_author(
+            return catalog.next_transaction_for_origin(
                 incarnation, after_timestamp_ns, after_transaction_id
             )
         finally:
             conn.close()
 
-    def next_transactions_for_author(self, incarnation, after_timestamp_ns,
+    def next_transactions_for_origin(self, incarnation, after_timestamp_ns,
                                      after_transaction_id=None, *, limit=200):
         conn, catalog = self._open()
         try:
-            return catalog.next_transactions_for_author(
+            return catalog.next_transactions_for_origin(
                 incarnation, after_timestamp_ns, after_transaction_id, limit=limit
             )
         finally:
@@ -1118,7 +1121,7 @@ class SQLiteFleetSyncStore:
             conn.close()
 
     def has_state(self) -> bool:
-        """Any applied or authored sync state at all, receipts included.
+        """Any applied or originated sync state at all, receipts included.
 
         Read with a plain connection: the answer is needed before fleet
         writers are activated on a brand-new database, where absent tables
@@ -1386,18 +1389,18 @@ class _JournalPager:
         return self.cursor, items
 
 
-class _AuthorPager:
-    """Per-author paging: for each author other than the puller, every
+class _OriginPager:
+    """Per-origin paging: for each origin other than the puller, every
     retained transaction with timestamp_ns above the puller's watermark for
-    that author, in (timestamp_ns, transaction_id) order. Each call opens a
+    that origin, in (timestamp_ns, transaction_id) order. Each call opens a
     short-lived store connection, as the legacy pager does."""
 
     def __init__(self, store, watermarks, exclude_origin: str | None,
-                 skip_authors: Sequence[str] = ()):
+                 skip_origins: Sequence[str] = ()):
         self.store = store
         self.watermarks = dict(watermarks)
         self.exclude = exclude_origin
-        self.skip = set(skip_authors)
+        self.skip = set(skip_origins)
         self._authors: list[str] | None = None
         self._index = 0
         self._position: tuple[int, str | None] | None = None
@@ -1407,8 +1410,8 @@ class _AuthorPager:
     def next(self):
         if self._authors is None:
             self._authors = [
-                author for author in self.store.author_list()
-                if author != self.exclude and author not in self.skip
+                origin for origin in self.store.origin_list()
+                if origin != self.exclude and origin not in self.skip
             ]
         while self._index < len(self._authors):
             if self._buffer:
@@ -1416,12 +1419,12 @@ class _AuthorPager:
                 self._position = (timestamp, transaction_id)
                 self.newest_ref = max(self.newest_ref, ref)
                 return ref, items
-            author = self._authors[self._index]
+            origin = self._authors[self._index]
             if self._position is None:
-                self._position = (int(self.watermarks.get(author, 0)), None)
+                self._position = (int(self.watermarks.get(origin, 0)), None)
             timestamp, transaction_id = self._position
-            self._buffer = self.store.next_transactions_for_author(
-                author, timestamp, transaction_id, limit=SERVE_PAGE_TRANSACTIONS,
+            self._buffer = self.store.next_transactions_for_origin(
+                origin, timestamp, transaction_id, limit=SERVE_PAGE_TRANSACTIONS,
             )
             if not self._buffer:
                 self._index += 1
@@ -1535,6 +1538,7 @@ class FleetSyncScheduler:
             recover_checkpoint_handoff,
         )
         from tools.network.fleet_sync_connection import (
+    FleetSyncQuiescenceError,
             acquire_database_quiescence,
         )
 
@@ -1694,7 +1698,7 @@ class FleetSyncScheduler:
                 # honouring a cursor into journal rows that no longer exist.
                 cursor = 0
                 if watermarks is not None:
-                    # Per-author mode: the map proves the prefix it covers,
+                    # Per-origin mode: the map proves the prefix it covers,
                     # which feeds the same served-ack floor the trail did.
                     # The ack is exactly what the map proves consumed (may be
                     # 0); the decision below never snapshots a non-bootstrap
@@ -1845,19 +1849,19 @@ class FleetSyncScheduler:
                         store.retired_above_watermarks, watermarks, peer_pub
                     )
                     if retired:
-                        # This server cannot serve these authors from the
+                        # This server cannot serve these origins from the
                         # puller's watermark: it holds their early history
                         # only as installed rows (no journal frames). Serving
                         # what IS retained would advance the puller's
                         # watermark past writes it never received -- lost
                         # for good (four machines permanently two writes
-                        # short, s5-n10, 2026-09-07). Skip those authors
+                        # short, s5-n10, 2026-09-07). Skip those origins
                         # entirely and say so; the puller gets that prefix
                         # from a holder whose journal still reaches it (the
-                        # author itself, until the fleet-wide ack retires it).
+                        # origin itself, until the fleet-wide ack retires it).
                         logger.warning(
                             "fleet sync peer %s scope %r: not serving %d "
-                            "author(s) whose retained history starts above the "
+                            "origin(s) whose retained history starts above the "
                             "peer's watermark (%s)",
                             peer_pub[:12], scope, len(retired),
                             ",".join(a[:12] for a in retired),
@@ -1865,11 +1869,11 @@ class FleetSyncScheduler:
                         notice = canonical_json({
                             "v": protocol_version,
                             "kind": "retired",
-                            "authors": sorted(retired),
+                            "origins": sorted(retired),
                         })
                         stats["bytes_sent"] += len(notice)
                         yield notice
-                    pager = _AuthorPager(store, watermarks, peer_pub, retired)
+                    pager = _OriginPager(store, watermarks, peer_pub, retired)
                 else:
                     pager = _JournalPager(store, cursor)
                 while True:
@@ -2319,7 +2323,7 @@ class FleetSyncScheduler:
             founded_rows = await asyncio.to_thread(
                 founded_ledger_rows, self._scope_paths()[scope]
             )
-            watermarks = await asyncio.to_thread(store.author_watermarks)
+            watermarks = await asyncio.to_thread(store.origin_watermarks)
             request = encode_pull_request(
                 epoch, compat=local_digest, resume=resume_trail,
                 scope=scope, bootstrap=bootstrap, version=protocol_version,
@@ -2519,17 +2523,17 @@ class FleetSyncScheduler:
                         # They are outside the summary digest and count.
                         continue
                     if kind == "retired":
-                        # The server skipped these authors for this pull
+                        # The server skipped these origins for this pull
                         # (its retained history starts above our watermark).
                         # Our watermark for them does not move; another
                         # holder supplies the prefix. Outside the digest.
-                        authors = control.get("authors") or []
+                        origins = control.get("origins") or []
                         logger.info(
-                            "fleet sync peer %s scope %r: %d author(s) not "
+                            "fleet sync peer %s scope %r: %d origin(s) not "
                             "served here (history retired above our "
                             "watermark): %s",
-                            machine_pub[:12], scope, len(authors),
-                            ",".join(str(a)[:12] for a in authors),
+                            machine_pub[:12], scope, len(origins),
+                            ",".join(str(a)[:12] for a in origins),
                         )
                         continue
                     if kind == "checkpoint.begin":
@@ -2689,9 +2693,18 @@ class FleetSyncScheduler:
                 self.config.max_backoff,
                 self.config.min_backoff * (2 ** min(failures - 1, 16)),
             )
-            if checkpoint_stage is not None or checkpoint_offered:
+            transient = isinstance(exc, (
+                FleetSyncQuiescenceError, ConnectionError, OSError,
+            )) or type(exc).__name__.startswith("ConnectionClosed")
+            if (checkpoint_stage is not None or checkpoint_offered) and not transient:
                 # A whole base arrived (or was offered and refused) and the
-                # pull failed. The server just BUILT that base; the
+                # pull failed for a reason that will recur (an install
+                # refusal, a founded-ledger refusal). A quiescence collision
+                # or a dropped connection is NOT that: it clears in seconds,
+                # and the long wait turned one collision at bootstrap into a
+                # ten-minute stall of every scope from that peer
+                # (test_org_databases_sync_with_isolation, 2026-09-07).
+                # The server just BUILT that base; the
                 # refused, stream cut after it). The ordinary backoff caps
                 # at seconds; retrying asks the peer to rebuild and resend
                 # hundreds of MB every round -- the loop seen live on

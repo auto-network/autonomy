@@ -529,7 +529,7 @@ class ConnectorFleetRuntime:
                 or message.get("v") != PROTOCOL_VERSION \
                 or message.get("op") != PULL_OP:
             raise FleetRelaySyncError("fleet sync pull has unknown fields")
-        # Per-author watermark map (design of record): validated here, then
+        # Per-origin watermark map (design of record): validated here, then
         # handed to the direct engine's request encoder unchanged.
         watermarks = message.get("watermarks")
         if watermarks is not None and (
@@ -1303,14 +1303,14 @@ async def pull_checkpoint_once(
                 scope, credential.machine_pub
             ).compatibility_digest()
         )
-        # Per-author watermarks: what this store holds per author, so the
+        # Per-origin watermarks: what this store holds per origin, so the
         # server sends only what is missing and never this machine's own
         # writes (graph://1155b8f4-8cf). Empty on a brand-new store.
         try:
             watermarks = await asyncio.to_thread(
                 lambda: _scoped_store(
                     scope, credential.machine_pub
-                ).author_watermarks()
+                ).origin_watermarks()
             )
         except Exception:
             watermarks = {}
@@ -1993,7 +1993,7 @@ def _has_local_sync_state(
     epoch-independent continuity proof, so a roster change must never force
     a fleet-wide re-checkpoint (the old check keyed receipts on the current
     epoch and did exactly that). State is a checkpoint receipt from ANY
-    epoch, or any applied/authored transaction. The peer arguments are kept
+    epoch, or any applied/originated transaction. The peer arguments are kept
     for call-site continuity; state is a property of this machine, not of
     one peer. ``db_path`` selects the scope database; None means personal.
     """

@@ -144,6 +144,21 @@ async def test_failed_pull_after_a_received_checkpoint_backs_off_long(direct, ca
     sched._install_direct_checkpoint = refuse
     with pytest.raises(FleetSyncQuiescenceError):
         await sched._pull_scope(server_pub, ["ws://peer:9410"], "personal")
+    # A quiescence collision is transient: the ordinary short backoff, so a
+    # joiner that collided once at bootstrap retries within seconds.
+    wait = sched._next_attempt[server_pub] - asyncio.get_running_loop().time()
+    assert wait <= sched.config.max_backoff
+
+    # A refusal that will recur keeps the long backoff.
+    from tools.network.fleet_sync.sync import AlphaError
+
+    async def refuse_for_good(*_a):
+        raise AlphaError("refusing to install a checkpoint over a store with a founded ledger")
+
+    sched._install_direct_checkpoint = refuse_for_good
+    sched._next_attempt.pop(server_pub, None)
+    with pytest.raises(AlphaError):
+        await sched._pull_scope(server_pub, ["ws://peer:9410"], "personal")
     wait = sched._next_attempt[server_pub] - asyncio.get_running_loop().time()
     assert wait >= fss.CHECKPOINT_FAILURE_BACKOFF_S - 1
     assert any("checkpoint received" in r.getMessage() and "not asking again" in r.getMessage()
