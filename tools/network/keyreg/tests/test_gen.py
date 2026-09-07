@@ -66,6 +66,48 @@ def test_every_entry_has_a_coverage_row(registry, views):
         )
 
 
+def test_workflows_preserve_registry_details(registry, views):
+    workflows = views["workflows.md"]
+    for mutation_id, entry in registry["mutations"].items():
+        assert f"## {mutation_id}\n" in workflows
+        assert entry["source"]["file"] in workflows
+        for values in (entry["authority"], entry.get("preconditions", []),
+                       entry.get("refusals", []), *entry["effects"].values()):
+            for value in values:
+                assert value in workflows
+        if entry.get("notes"):
+            assert entry["notes"].strip() in workflows
+
+
+def test_register_preserves_notes_and_seals(registry, views):
+    register = views["key-register.md"]
+    for entry in registry["keys"].values():
+        if entry.get("notes"):
+            assert entry["notes"].strip() in register
+        for seal in entry.get("seals_to", []):
+            assert seal["recipient"] in register
+            if seal.get("purpose"):
+                assert seal["purpose"] in register
+        if entry.get("derivation", {}) and entry["derivation"].get("purpose"):
+            assert entry["derivation"]["purpose"] in register
+
+
+def test_navigation_targets_exist(views):
+    for name in ("key-register.md", "workflows.md"):
+        document = views[name]
+        targets = re.findall(r'\]\(#([^)]*)\)', document)
+        assert targets
+        for target in targets:
+            assert f'id="{target}"' in document
+        assert len(targets) == len(set(targets))
+
+
+def test_reader_semantics_are_explicit(views):
+    assert "do not encode AND/OR" in views["workflows.md"]
+    assert "does not run proofs" in views["proof-coverage.md"]
+    assert 'Sealed stores (designed)' not in views["key-graph.mmd"]
+
+
 def test_json_round_trips_whole_registry(registry, views):
     assert json.loads(views["registry.json"]) == registry
 

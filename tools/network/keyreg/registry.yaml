@@ -80,8 +80,12 @@ keys:
       reaches: >-
         Three domain-separated derivations, none reaching another: the armor
         recovery slot recipient, the recovery signing key, and the
-        per-organization member recovery keys.
-      snapshot: The sealed root seed, opened only by the code. No org content.
+        per-organization member recovery keys. The armor recipient opens
+        the matching recovery slot, restoring personal-root authority.
+      snapshot: >-
+        With the matching encrypted recovery record, restores the personal
+        root and its downstream authority. This is the intentional master
+        recovery capability, independent of the normal factor policy.
       live: "No."
       revoke: >-
         Replacement with the code in hand runs replace_recovery_slot
@@ -91,7 +95,14 @@ keys:
       bound: None.
     code:
       - tools/network/idkit/recovery.py
+      - tools/network/idkit/root_factor_policy.py:open_root_with_recovery
     crib: ["§9"]
+    notes: >-
+      One cold code supplies decryption and signing functions. The separate
+      recovery signature prevents a hot-root thief without the cold code
+      from rotating the identity. It does not prevent the code holder from
+      recovering. Ordinary complete-authority rotation and the designed
+      lost-code witnessed succession path are distinct workflows.
 
   recovery_signing_key:
     group: recovery
@@ -495,6 +506,15 @@ keys:
       - {framework: tamarin, theory: VaultFleetDist, lemma: machine_key_yields_nothing_undistributed}
       - {framework: tamarin, theory: VaultFleetDist, lemma: kicked_machine_excluded}
 
+    notes: >-
+      Reconciliation pending: this entry describes the designed fleet KEM
+      recipient, but derive_machine_key currently returns an Ed25519
+      signing KeyPair used for fleet authentication. The distribution
+      mutation is explicitly designed, not implemented. Do not infer an
+      implemented decryption recipient from the signing-key code anchors;
+      recipient identity and derivation need reconciliation before this
+      entry can describe both consistently.
+
   serving_delegate_key:
     group: org-authority
     kind: signing
@@ -511,6 +531,57 @@ keys:
     code:
       - tools/network/idkit/certs.py
     crib: ["§8", "§9"]
+
+  serving_machine_signing_key:
+    group: fleet
+    kind: signing
+    custody:
+      class: memory
+      forced_by: Derived at root unlock for unattended serving; not stored separately.
+    derivation:
+      parent: personal_root_seed
+      fn: derive_serving_machine_key
+      inputs: [genesis_id, machine_id]
+      purpose: autonomy.identity.serving-machine.v1
+    descriptor:
+      reaches: Authentication of a serving machine in one organization.
+      snapshot: No content decryption; this is an Ed25519 signing key.
+      live: "Yes — authentication signatures must reach a verifier."
+      revoke: Follows the accepted serving credentials and fleet authorization.
+      bound: The organization and machine identifiers bound into the derivation.
+    code:
+      - tools/network/idkit/persona.py:derive_serving_machine_key
+      - tools/network/fleet_runtime.py:serving_machine_key
+    crib: ["§10"]
+    notes: >-
+      Distinct from the personal fleet operating key and the serving delegate.
+      Binding both organization and machine avoids presenting the same
+      machine public key across organizations.
+
+  delegate_audited_recipient:
+    group: vault-classes
+    kind: kem
+    custody:
+      class: memory
+      forced_by: Private recipient warms at root unlock for unattended audited reads.
+    derivation:
+      parent: personal_root_seed
+      fn: derive_encapsulation_keypair
+      purpose: autonomy/vault/delegate-audited-recipient/v1
+    descriptor:
+      reaches: Audited personal-vault object content keys sealed to this recipient.
+      snapshot: Opens retained audited envelopes sealed to this recipient.
+      live: "No — possession of the private key and an envelope permits opening."
+      revoke: Replacement protects newly sealed material; follows personal-root lifecycle.
+      bound: Audited envelopes addressed to this recipient, not secured policy classes.
+    code:
+      - tools/vault/personal_object.py:derive_delegate_audited_recipient
+    crib: ["§3", "§9"]
+    notes: >-
+      X25519 encapsulation key, never a signing key. The public half supports
+      cold writes. Organization isolation of personal-homed audited rows is
+      enforced separately at the API namespace boundary; this derivation
+      itself has no organization input.
 
   root_anchor_seed:
     group: vault-classes
@@ -573,7 +644,7 @@ keys:
   sealed_index:
     group: sealed-stores
     kind: seed
-    status: designed
+    status: built
     custody:
       class: cold
       forced_by: Exists only in sealed form; released by a factor ceremony.
@@ -584,7 +655,9 @@ keys:
       live: "No."
       revoke: Re-mint the store under a new index.
       bound: The one store.
-    code: []
+    code:
+      - tools/graph/sealed_settings.py:SealedSettings
+      - tools/graph/sealed_settings.py:_get_or_create_sealed_index
     crib: ["§23"]
     proofs:
       - {framework: tamarin, theory: VaultDeniability, lemma: Observational_equivalence}
@@ -592,13 +665,14 @@ keys:
   k_index_k_meta:
     group: sealed-stores
     kind: derived-secret
-    status: designed
+    status: built
     custody:
       class: cold
       forced_by: Subkeys of the sealed index; neither exists outside a release.
     derivation:
       parent: sealed_index
       fn: HKDF
+      inputs: [index, metadata]
     descriptor:
       reaches: >-
         K_index computes blind row addresses; K_meta seals row values. The
@@ -607,13 +681,15 @@ keys:
       live: "No."
       revoke: Follows the sealed index.
       bound: The one store.
-    code: []
+    code:
+      - tools/graph/sealed_settings.py:_keys
+      - tools/graph/sealed_settings.py:blind_index
     crib: ["§23"]
 
   pepper:
     group: sealed-stores
     kind: symmetric
-    status: designed
+    status: built
     custody:
       class: memory
       forced_by: >-
@@ -622,14 +698,19 @@ keys:
         location oracle.
     derivation: null
     descriptor:
-      reaches: The row addresses of every secret vault (location, not content).
+      reaches: >-
+        Store row addresses within one scope (location, not content).
+        Operator-personal and each organization scope have separate peppers.
       snapshot: >-
         Encrypted at rest, nothing. Held warm, the ability to test password
         guesses against vault locations offline.
       live: "No."
-      revoke: Re-mint and re-address every secret vault.
-      bound: Location secrecy only; contents keep their own seals.
-    code: []
+      revoke: Requires re-addressing the affected scope's stores; normal get-or-create preserves the pepper.
+      bound: One scope's location secrecy only; contents keep their own seals.
+    code:
+      - tools/graph/sealed_settings.py:read_pepper
+      - tools/graph/sealed_settings.py:ensure_pepper_minted
+      - tools/graph/sealed_settings.py:hidden_address
     crib: ["§24"]
     proofs:
       - {framework: tamarin, theory: VaultDeniability, lemma: Observational_equivalence}
@@ -1047,6 +1128,15 @@ purposes:
   autonomy.identity.machine.v1:
     description: Derives the per-machine operating key from the personal root seed and machine_id.
     used_by: [tools/network/idkit/persona.py]
+  autonomy.identity.serving-machine.v1:
+    description: Derives the organization-and-machine-specific Ed25519 serving key.
+    used_by: [tools/network/idkit/persona.py]
+  autonomy/vault/delegate-audited-recipient/v1:
+    description: Derives the dedicated X25519 recipient for unattended audited reads.
+    used_by: [tools/vault/personal_object.py]
+  autonomy/vault/delegate-audited-cek/v1:
+    description: Seals an audited content key to the delegate recipient, bound to object and revision.
+    used_by: [tools/vault/personal_object.py]
   autonomy.network.ledger.sync-key.v1:
     description: Derives the ledger bundle sync key.
     used_by: [tools/network/ledger/bundles.py]

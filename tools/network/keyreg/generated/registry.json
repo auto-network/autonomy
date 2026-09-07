@@ -118,6 +118,34 @@
         }
       ]
     },
+    "delegate_audited_recipient": {
+      "code": [
+        "tools/vault/personal_object.py:derive_delegate_audited_recipient"
+      ],
+      "crib": [
+        "\u00a73",
+        "\u00a79"
+      ],
+      "custody": {
+        "class": "memory",
+        "forced_by": "Private recipient warms at root unlock for unattended audited reads."
+      },
+      "derivation": {
+        "fn": "derive_encapsulation_keypair",
+        "parent": "personal_root_seed",
+        "purpose": "autonomy/vault/delegate-audited-recipient/v1"
+      },
+      "descriptor": {
+        "bound": "Audited envelopes addressed to this recipient, not secured policy classes.",
+        "live": "No \u2014 possession of the private key and an envelope permits opening.",
+        "reaches": "Audited personal-vault object content keys sealed to this recipient.",
+        "revoke": "Replacement protects newly sealed material; follows personal-root lifecycle.",
+        "snapshot": "Opens retained audited envelopes sealed to this recipient."
+      },
+      "group": "vault-classes",
+      "kind": "kem",
+      "notes": "X25519 encapsulation key, never a signing key. The public half supports cold writes. Organization isolation of personal-homed audited rows is enforced separately at the API namespace boundary; this derivation itself has no organization input."
+    },
     "factor_recipient": {
       "code": [
         "tools/network/idkit/sealing.py:derive_encapsulation_keypair",
@@ -227,7 +255,10 @@
       ]
     },
     "k_index_k_meta": {
-      "code": [],
+      "code": [
+        "tools/graph/sealed_settings.py:_keys",
+        "tools/graph/sealed_settings.py:blind_index"
+      ],
       "crib": [
         "\u00a723"
       ],
@@ -237,6 +268,10 @@
       },
       "derivation": {
         "fn": "HKDF",
+        "inputs": [
+          "index",
+          "metadata"
+        ],
         "parent": "sealed_index"
       },
       "descriptor": {
@@ -248,7 +283,7 @@
       },
       "group": "sealed-stores",
       "kind": "derived-secret",
-      "status": "designed"
+      "status": "built"
     },
     "member_recovery_key": {
       "code": [
@@ -386,7 +421,11 @@
       "kind": "signing"
     },
     "pepper": {
-      "code": [],
+      "code": [
+        "tools/graph/sealed_settings.py:read_pepper",
+        "tools/graph/sealed_settings.py:ensure_pepper_minted",
+        "tools/graph/sealed_settings.py:hidden_address"
+      ],
       "crib": [
         "\u00a724"
       ],
@@ -396,10 +435,10 @@
       },
       "derivation": null,
       "descriptor": {
-        "bound": "Location secrecy only; contents keep their own seals.",
+        "bound": "One scope's location secrecy only; contents keep their own seals.",
         "live": "No.",
-        "reaches": "The row addresses of every secret vault (location, not content).",
-        "revoke": "Re-mint and re-address every secret vault.",
+        "reaches": "Store row addresses within one scope (location, not content). Operator-personal and each organization scope have separate peppers.",
+        "revoke": "Requires re-addressing the affected scope's stores; normal get-or-create preserves the pepper.",
         "snapshot": "Encrypted at rest, nothing. Held warm, the ability to test password guesses against vault locations offline."
       },
       "group": "sealed-stores",
@@ -411,7 +450,7 @@
           "theory": "VaultDeniability"
         }
       ],
-      "status": "designed"
+      "status": "built"
     },
     "per_credential_wrapping_key": {
       "code": [
@@ -475,6 +514,7 @@
       },
       "group": "fleet",
       "kind": "kem",
+      "notes": "Reconciliation pending: this entry describes the designed fleet KEM recipient, but derive_machine_key currently returns an Ed25519 signing KeyPair used for fleet authentication. The distribution mutation is explicitly designed, not implemented. Do not infer an implemented decryption recipient from the signing-key code anchors; recipient identity and derivation need reconciliation before this entry can describe both consistently.",
       "proofs": [
         {
           "framework": "tamarin",
@@ -635,7 +675,8 @@
     },
     "recovery_code": {
       "code": [
-        "tools/network/idkit/recovery.py"
+        "tools/network/idkit/recovery.py",
+        "tools/network/idkit/root_factor_policy.py:open_root_with_recovery"
       ],
       "crib": [
         "\u00a79"
@@ -648,12 +689,13 @@
       "descriptor": {
         "bound": "None.",
         "live": "No.",
-        "reaches": "Three domain-separated derivations, none reaching another: the armor recovery slot recipient, the recovery signing key, and the per-organization member recovery keys.",
+        "reaches": "Three domain-separated derivations, none reaching another: the armor recovery slot recipient, the recovery signing key, and the per-organization member recovery keys. The armor recipient opens the matching recovery slot, restoring personal-root authority.",
         "revoke": "Replacement with the code in hand runs replace_recovery_slot (tools/network/idkit/root_factor_policy.py). Regeneration with the code lost is the witnessed succession window: declaration, blocking alert, cancellation or veto, completion after the window.",
-        "snapshot": "The sealed root seed, opened only by the code. No org content."
+        "snapshot": "With the matching encrypted recovery record, restores the personal root and its downstream authority. This is the intentional master recovery capability, independent of the normal factor policy."
       },
       "group": "recovery",
-      "kind": "seed"
+      "kind": "seed",
+      "notes": "One cold code supplies decryption and signing functions. The separate recovery signature prevents a hot-root thief without the cold code from rotating the identity. It does not prevent the code holder from recovering. Ordinary complete-authority rotation and the designed lost-code witnessed succession path are distinct workflows."
     },
     "recovery_signing_key": {
       "code": [
@@ -753,7 +795,10 @@
       ]
     },
     "sealed_index": {
-      "code": [],
+      "code": [
+        "tools/graph/sealed_settings.py:SealedSettings",
+        "tools/graph/sealed_settings.py:_get_or_create_sealed_index"
+      ],
       "crib": [
         "\u00a723"
       ],
@@ -778,7 +823,7 @@
           "theory": "VaultDeniability"
         }
       ],
-      "status": "designed"
+      "status": "built"
     },
     "serving_delegate_key": {
       "code": [
@@ -802,6 +847,38 @@
       },
       "group": "org-authority",
       "kind": "signing"
+    },
+    "serving_machine_signing_key": {
+      "code": [
+        "tools/network/idkit/persona.py:derive_serving_machine_key",
+        "tools/network/fleet_runtime.py:serving_machine_key"
+      ],
+      "crib": [
+        "\u00a710"
+      ],
+      "custody": {
+        "class": "memory",
+        "forced_by": "Derived at root unlock for unattended serving; not stored separately."
+      },
+      "derivation": {
+        "fn": "derive_serving_machine_key",
+        "inputs": [
+          "genesis_id",
+          "machine_id"
+        ],
+        "parent": "personal_root_seed",
+        "purpose": "autonomy.identity.serving-machine.v1"
+      },
+      "descriptor": {
+        "bound": "The organization and machine identifiers bound into the derivation.",
+        "live": "Yes \u2014 authentication signatures must reach a verifier.",
+        "reaches": "Authentication of a serving machine in one organization.",
+        "revoke": "Follows the accepted serving credentials and fleet authorization.",
+        "snapshot": "No content decryption; this is an Ed25519 signing key."
+      },
+      "group": "fleet",
+      "kind": "signing",
+      "notes": "Distinct from the personal fleet operating key and the serving delegate. Binding both organization and machine avoids presenting the same machine public key across organizations."
     },
     "vault_factor_recipient": {
       "code": [
@@ -1838,6 +1915,12 @@
         "tools/network/idkit/persona.py"
       ]
     },
+    "autonomy.identity.serving-machine.v1": {
+      "description": "Derives the organization-and-machine-specific Ed25519 serving key.",
+      "used_by": [
+        "tools/network/idkit/persona.py"
+      ]
+    },
     "autonomy.network.channel.keys.v1": {
       "description": "Derives relay channel keys.",
       "used_by": [
@@ -1998,6 +2081,18 @@
       "description": "Wraps a class key to the root anchor's derived recipient.",
       "used_by": [
         "tools/vault/root_anchor.py"
+      ]
+    },
+    "autonomy/vault/delegate-audited-cek/v1": {
+      "description": "Seals an audited content key to the delegate recipient, bound to object and revision.",
+      "used_by": [
+        "tools/vault/personal_object.py"
+      ]
+    },
+    "autonomy/vault/delegate-audited-recipient/v1": {
+      "description": "Derives the dedicated X25519 recipient for unattended audited reads.",
+      "used_by": [
+        "tools/vault/personal_object.py"
       ]
     },
     "autonomy/vault/object-id/v1": {
