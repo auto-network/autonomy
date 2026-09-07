@@ -110,6 +110,11 @@ async def _worker(config_path: Path) -> int:
             connect_timeout=3.0,
             min_backoff=0.02,
             max_backoff=0.08,
+            # Honor the fleet's settings: until 2026-09-07 these two were
+            # ignored, so every harness run polled at the production default
+            # (10 s) with 3 concurrent pulls whatever the scenario asked for.
+            poll_interval=float(payload.get("poll_interval", 10.0)),
+            max_concurrent_pulls=int(payload.get("max_concurrent_pulls", 3)),
         )
     )
     stopped = asyncio.Event()
