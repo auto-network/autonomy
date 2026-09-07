@@ -1,6 +1,7 @@
 """Stable voice ASGI host. Run without Uvicorn reload, outside dashboard workers."""
 import asyncio
 import os
+import logging
 import ssl
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -15,6 +16,9 @@ from tools.dashboard.voice_transport import serve_voice
 from tools.data_paths import DATA_ROOT
 
 
+logger = logging.getLogger(__name__)
+
+
 def valid_origin(origin: str, host: str) -> bool:
     """Compare public browser authority; forwarded headers confer no authority."""
     try:
@@ -22,7 +26,15 @@ def valid_origin(origin: str, host: str) -> bool:
         scheme = "https" if tls else "http"
         source = urlsplit(origin)
         target = urlsplit(scheme + "://" + host)
-        dashboard_port = int(os.environ.get("VOICE_DASHBOARD_PUBLIC_PORT", "443" if tls else "80"))
+        # The dashboard may be reachable on more than one public port at once
+        # (e.g. 443 via `tailscale serve` and 8080 published directly); accept a
+        # comma-separated list. Live 2026-09-07: the operator's browser was on
+        # :8080 and every socket was refused as an Origin mismatch.
+        dashboard_ports = {
+            int(p) for p in os.environ.get(
+                "VOICE_DASHBOARD_PUBLIC_PORT", "443" if tls else "80"
+            ).split(",") if p.strip()
+        }
         voice_port = int(os.environ.get("VOICE_PUBLIC_PORT", "8443"))
         return bool(
             source.scheme == scheme and source.hostname and target.hostname
@@ -31,7 +43,7 @@ def valid_origin(origin: str, host: str) -> bool:
             and not target.username and not target.password
             and not source.path and not source.query and not source.fragment
             and not target.path and not target.query and not target.fragment
-            and (source.port or (443 if tls else 80)) == dashboard_port
+            and (source.port or (443 if tls else 80)) in dashboard_ports
             and target.port == voice_port
         )
     except (ValueError, TypeError):
@@ -67,14 +79,23 @@ async def commit_text(bind: str, text: str) -> None:
 
 
 async def voice_socket(websocket):
-    if not valid_origin(websocket.headers.get("origin", ""), websocket.headers.get("host", "")):
+    # Name the refusal: uvicorn logs every pre-accept close as a bare 403, which
+    # is indistinguishable between an Origin mismatch and a missing/invalid
+    # login cookie (live 2026-09-07: "no voice at all" with only 403s to go on).
+    origin = websocket.headers.get("origin", "")
+    host = websocket.headers.get("host", "")
+    if not valid_origin(origin, host):
+        logger.warning("voice socket refused: origin mismatch origin=%r host=%r", origin, host)
         await websocket.close(code=4403)
         return
-    identity = await asyncio.to_thread(
-        unlock_routes.verify_session_token,
-        websocket.cookies.get(unlock_routes.SESSION_COOKIE),
-    )
+    cookie = websocket.cookies.get(unlock_routes.SESSION_COOKIE)
+    identity = await asyncio.to_thread(unlock_routes.verify_session_token, cookie)
     if identity is None:
+        logger.warning(
+            "voice socket refused: %s login cookie (host=%r cookies=%s)",
+            "invalid/expired/revoked" if cookie else "missing", host,
+            sorted(websocket.cookies.keys()),
+        )
         await websocket.close(code=4401)
         return
     bind_exists = await asyncio.to_thread(session_exists, websocket.query_params.get("bind", ""))
