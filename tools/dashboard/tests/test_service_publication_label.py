@@ -7,9 +7,9 @@ def test_reserve_origin_reuses_the_persona_already_bound_serving_label(monkeypat
     """A display-name change must not mint a new apex: the registry binds one
     immutable serving label per persona, so the first reservation's label wins
     (2026-09-07: jeremy-<suffix> vs bound persona-<suffix>)."""
-    monkeypatch.setattr(sp, "list_reservations", lambda org: [
-        {"persona_pub": "ab" * 32, "persona_label": "persona-77827e972ba4c37d4215", "app_label": "old"},
-    ])
+    class _M:
+        payload = {"persona_pub": "ab" * 32, "persona_label": "persona-77827e972ba4c37d4215", "app_label": "old"}
+    monkeypatch.setattr(sp, "_reservation_members", lambda org: [_M()])
     assert sp.bound_persona_label("autonomy", "ab" * 32) == "persona-77827e972ba4c37d4215"
     assert sp.bound_persona_label("autonomy", "cd" * 32) is None
 
@@ -18,9 +18,10 @@ def test_reserve_origin_payload_prefers_bound_label_over_display_name(monkeypatc
     calls = {}
     monkeypatch.setattr(sp, "_persona_for_org", lambda org: ("ab" * 32, "Jeremy"))
     monkeypatch.setattr(sp, "_member_by_key", lambda org, key: None)
-    monkeypatch.setattr(sp, "list_reservations", lambda org: [
-        {"persona_pub": "ab" * 32, "persona_label": "persona-77827e972ba4c37d4215", "app_label": "old"},
-    ])
+
+    class _M:
+        payload = {"persona_pub": "ab" * 32, "persona_label": "persona-77827e972ba4c37d4215", "app_label": "old"}
+    monkeypatch.setattr(sp, "_reservation_members", lambda org: [_M()])
 
     def fake_upsert(*args, **kwargs):
         payload = kwargs.get("payload") or next((a for a in args if isinstance(a, dict) and "persona_label" in a), None)
