@@ -105,10 +105,13 @@ else:
         create_design, get_design, submit_results, list_pending as list_pending_designs,
         dismiss_design, resolve_design_prefix,
     )
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(name)s %(levelname)s %(message)s",
-)
+# Log channels (tools/dashboard/log_channels.py): INFO catch-all in
+# <log dir>/dashboard.log, routed buckets for http / stalls / monitors / fleet
+# / voice that are NOT duplicated into it, WARNING+ on stdout. Off (plain
+# stream logging, the old basicConfig) under DASHBOARD_MOCK or
+# DASHBOARD_LOG_CHANNELS=off.
+from tools.dashboard import log_channels as _log_channels
+_log_channels.configure()
 
 from tools.dashboard.event_bus import event_bus, current_server_epoch
 from tools.dashboard import session_harness
