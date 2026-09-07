@@ -12,7 +12,8 @@ import pytest
 
 from tools.dashboard.tests.membership_sim._harness import Org, RoleSpec
 from tools.network.fleet_org_channel import (
-    ORG_HELLO_MAX_SKEW_S, OrgFleetAuthenticator,
+    CLOSE_MEMBERSHIP_STALE, MembershipStaleError, ORG_HELLO_MAX_SKEW_S,
+    OrgFleetAuthenticator,
 )
 from tools.network.idkit import KeyPair, Subject, issue_cert
 from tools.network.ledger import membership_commitment as mc
@@ -205,3 +206,28 @@ def test_a_join_or_rekey_checkpoint_keeps_honest_members_who_reprove(org):
     alice2 = Node(alice_new, rekeyed, seq=2)
     _handshake(alice2, bob)
     bob.auth.authorize(alice2.machine.public_hex)
+
+
+def test_a_replayed_client_hello_is_refused_and_staleness_is_typed() -> None:
+    pa, pb = KeyPair.generate(), KeyPair.generate()
+    members = [pa.public_hex, pb.public_hex]
+    a, b = Node(pa, members), Node(pb, members)
+    _priv, hello = b.auth.build_client_hello("s1")
+    a.auth.accept_client(hello, session="s1")
+    # The same capture again, on the same or a new session id: refused
+    # before any other check -- its ephemeral key was seen already.
+    for session in ("s1", "s2"):
+        with pytest.raises(HandshakeError, match="replayed"):
+            a.auth.accept_client(hello, session=session)
+    # A fresh hello from the same machine is fine.
+    _priv, fresh = b.auth.build_client_hello("s3")
+    a.auth.accept_client(fresh, session="s3")
+    # Staleness past the deadline is the typed close, code 4417.
+    a.adopt(1, members)
+    a.auth.note_adoption(1, deadline_s=0.0)
+    with pytest.raises(MembershipStaleError) as caught:
+        a.auth.authorize(b.machine.public_hex)
+    assert caught.value.close_code == CLOSE_MEMBERSHIP_STALE == 4417
+    with pytest.raises(MembershipStaleError):
+        _priv, stale = b.auth.build_client_hello("s4")  # b still proves under seq 0
+        a.auth.accept_client(stale, session="s4")
