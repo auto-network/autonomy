@@ -174,7 +174,10 @@ def _publish_codex_harness_usage_setting(
         identity_id=identity_id,
         identity_label=identity_label,
     )
-    return _harness_usage_settings.publish_if_changed(
+    # publish_if_NEWER, not publish_if_changed: every live Codex session
+    # tails its own transcript and writes this one row, so a session holding
+    # an older reading must not roll it backwards.
+    return _harness_usage_settings.publish_if_newer(
         key,
         payload,
         upsert_by_key=graph_ops.upsert_by_key,

@@ -15675,7 +15675,11 @@ def _expire_cold_codex_usage_row(
         "codex harness usage: retiring cold row (age %.0fs, no live Codex session)",
         age,
     )
-    _harness_usage_settings.publish_if_changed(
+    # publish_if_NEWER keeps the ordering cache coherent: after this the row
+    # is stamped at tick time, so a session tail that later reports the very
+    # reading we just retired cannot resurrect it, while a genuinely new
+    # Codex session's fresher reading still lands.
+    _harness_usage_settings.publish_if_newer(
         key,
         _harness_usage_settings.make_unavailable_usage_payload(
             harness="codex",
