@@ -27,8 +27,14 @@ from typing import Callable
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from tools.dashboard.log_throttle import StateChangeLogger
+
 
 logger = logging.getLogger(__name__)
+# A refused caller usually keeps calling (a poller on an org-bound token, a
+# stale tab). One line when a (policy, method, path) starts being refused,
+# then a count once a minute — not one line per attempt.
+_refusals = StateChangeLogger(interval_s=60.0)
 
 
 class ApiPrincipalKind(str, Enum):
@@ -229,7 +235,9 @@ def require_authenticated_api_caller(request: Request) -> JSONResponse | None:
     from tools.dashboard import unlock_routes
     if not unlock_routes.gate_enforced():
         return None
-    logger.warning(
+    _refusals.emit(
+        logger, logging.WARNING,
+        ("authenticated", request.method, request.url.path), "refused",
         "api_authz_refused policy=authenticated method=%s path=%s",
         request.method, request.url.path,
     )
@@ -273,7 +281,10 @@ def require_global_api_authority(request: Request) -> JSONResponse | None:
     if principal.global_authority:
         return None
     if principal.org_bound:
-        logger.warning(
+        _refusals.emit(
+            logger, logging.WARNING,
+            ("global_operator", request.method, request.url.path, principal.org),
+            "refused",
             "api_authz_refused policy=global_operator method=%s path=%s "
             "caller=%s caller_org=%s",
             request.method,

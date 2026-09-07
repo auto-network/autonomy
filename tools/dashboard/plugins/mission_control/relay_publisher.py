@@ -62,6 +62,16 @@ EVENT_TOPICS = (CONVERSATION_TOPIC, PRESENCE_TOPIC)
 FRAME_VERSION = 1
 
 
+def wants_event(topic: str, data) -> bool:
+    """Dashboard-side pre-filter for the generic event proxy: the presence
+    topic is the machine-wide ``setting.changed`` stream, of which only the
+    presence set is ours. Everything else is decided by :func:`build_frame`
+    on the connector, exactly as before."""
+    if topic == PRESENCE_TOPIC:
+        return isinstance(data, dict) and data.get("set_id") == PRESENCE_SET_ID
+    return True
+
+
 def build_frame(topic: str, data: dict) -> tuple[str, bytes] | None:
     """One bus event -> ``(mission_id, frame_json)``, or None to ignore.
 

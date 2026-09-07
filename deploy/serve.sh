@@ -44,4 +44,5 @@ exec python3 -m tools.dashboard.reload_with_notice tools.dashboard.server:app \
     --reload-exclude 'agents/tests/*' \
     --reload-exclude '**/__pycache__/*' \
     --timeout-graceful-shutdown 5 \
+    --no-access-log \
     $SSL_ARGS

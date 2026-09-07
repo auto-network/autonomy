@@ -77,6 +77,8 @@ from agents.workspace_manager import (
 )
 
 logger = logging.getLogger(__name__)
+from tools.dashboard.log_throttle import StateChangeLogger
+_preserved = StateChangeLogger(interval_s=60.0)
 
 # inotify — optional, falls back to polling if unavailable
 try:
@@ -296,7 +298,11 @@ def _log_worktree_cleanup(tmux_name: str, result: CleanupResult) -> None:
             tmux_name, len(result.removed), ", ".join(result.removed),
         )
     for path, reason in result.preserved:
-        logger.warning(
+        # A preserved worktree is preserved on EVERY cleanup pass for the same
+        # reason; say so once, then once a minute with a count, and again the
+        # moment the reason changes.
+        _preserved.emit(
+            logger, logging.WARNING, (tmux_name, str(path)), reason,
             "session_monitor: worktree preserved %s: %s (%s)",
             tmux_name, path, reason,
         )
