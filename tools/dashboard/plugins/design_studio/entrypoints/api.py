@@ -476,7 +476,25 @@ async def get_design_series(request: Request) -> JSONResponse:
         r.get("id") or "",
     ))
     series["revisions"] = revisions
+    series["share"] = _share_state(series, revisions)
     return JSONResponse(series)
+
+
+def _share_state(series: dict, revisions: list[dict]) -> dict:
+    """Active link grants that reach this design — read model only."""
+    if os.environ.get("DASHBOARD_MOCK"):
+        return {"shared": False, "grants": []}
+    try:
+        from tools.dashboard import design_shares
+
+        return design_shares.share_for_design(
+            series.get("org") or "autonomy",
+            str(series.get("design_id") or ""),
+            [str(r.get("id") or "") for r in revisions],
+        )
+    except Exception:
+        logger.exception("design-studio: share state unavailable")
+        return {"shared": False, "grants": [], "error": "share state unavailable"}
 
 
 async def get_revision_thumbnail(request: Request):
@@ -631,8 +649,18 @@ async def render_backfill(request: Request) -> JSONResponse:
 
 
 def badge_counter() -> int:
+    """Designs a live session is working on right now — not the backlog.
+    The pending count was a permanent three-digit badge; this is zero when
+    nothing is being designed."""
+    if os.environ.get("DASHBOARD_MOCK"):
+        try:
+            return _summarize(_all_series()).get("pending_series", 0)
+        except Exception:
+            return 0
     try:
-        return _summarize(_all_series()).get("pending_series", 0)
+        from tools.dashboard import design_lifecycle
+
+        return design_lifecycle.live_design_count()
     except Exception:
         return 0
 
