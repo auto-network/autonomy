@@ -1099,6 +1099,15 @@ class SQLiteFleetSyncStore:
         finally:
             conn.close()
 
+    def record_transactions(self, entries) -> int:
+        """Record transactions the server reported empty (nothing of them
+        survives there), so our watermark for their origin moves past."""
+        conn, catalog = self._open()
+        try:
+            return catalog.record_transactions(list(entries))
+        finally:
+            conn.close()
+
     def peer_last_success(self) -> dict[str, int]:
         """Newest recorded pull success per peer, across epochs, for
         stalest-first ranking. Absent machines simply have no entry."""
@@ -1386,7 +1395,7 @@ class _JournalPager:
         if not self._buffer:
             return None
         self.cursor, items = self._buffer.pop(0)
-        return self.cursor, items
+        return self.cursor, items, None
 
 
 class _OriginPager:
@@ -1409,17 +1418,23 @@ class _OriginPager:
 
     def next(self):
         if self._authors is None:
+            # The puller's own origin is served like any other: normally
+            # the server holds nothing above the puller's own watermark
+            # (zero rows, zero cost), but a machine restored from a backup
+            # has lost its own newest writes and its own-origin watermark
+            # says so. Excluding it left scenario (e) unrecoverable
+            # (test_restored_backup_server_reconverges, 2026-09-07).
             self._authors = [
                 origin for origin in self.store.origin_list()
-                if origin != self.exclude and origin not in self.skip
+                if origin not in self.skip
             ]
         while self._index < len(self._authors):
+            origin = self._authors[self._index]
             if self._buffer:
                 ref, timestamp, transaction_id, items = self._buffer.pop(0)
                 self._position = (timestamp, transaction_id)
                 self.newest_ref = max(self.newest_ref, ref)
-                return ref, items
-            origin = self._authors[self._index]
+                return ref, items, (origin, transaction_id, timestamp)
             if self._position is None:
                 self._position = (int(self.watermarks.get(origin, 0)), None)
             timestamp, transaction_id = self._position
@@ -1649,7 +1664,7 @@ class FleetSyncScheduler:
         from tools.network.fleet_sync.blob_transport import peek_request_op
 
         if peek_request_op(message) == "blob":
-            return self._blob_response(message, peer_pub)
+            return self._blob_response(message, peer_pub, telemetry_channel)
         (
             _requested_epoch, resume_trail, peer_digest, scope, bootstrap,
             protocol_version, accept_checkpoint, watermarks,
@@ -1845,35 +1860,13 @@ class FleetSyncScheduler:
                 if floor_ref is not None:
                     cursor = max(cursor, floor_ref)
                 if watermarks is not None and not served_checkpoint:
-                    retired = await asyncio.to_thread(
-                        store.retired_above_watermarks, watermarks, peer_pub
-                    )
-                    if retired:
-                        # This server cannot serve these origins from the
-                        # puller's watermark: it holds their early history
-                        # only as installed rows (no journal frames). Serving
-                        # what IS retained would advance the puller's
-                        # watermark past writes it never received -- lost
-                        # for good (four machines permanently two writes
-                        # short, s5-n10, 2026-09-07). Skip those origins
-                        # entirely and say so; the puller gets that prefix
-                        # from a holder whose journal still reaches it (the
-                        # origin itself, until the fleet-wide ack retires it).
-                        logger.warning(
-                            "fleet sync peer %s scope %r: not serving %d "
-                            "origin(s) whose retained history starts above the "
-                            "peer's watermark (%s)",
-                            peer_pub[:12], scope, len(retired),
-                            ",".join(a[:12] for a in retired),
-                        )
-                        notice = canonical_json({
-                            "v": protocol_version,
-                            "kind": "retired",
-                            "origins": sorted(retired),
-                        })
-                        stats["bytes_sent"] += len(notice)
-                        yield notice
-                    pager = _OriginPager(store, watermarks, peer_pub, retired)
+                    # Every origin is served from the puller's watermark,
+                    # the puller's own included (a machine restored from a
+                    # backup has lost its own newest writes). Retired
+                    # journal frames are rebuilt from catalog and live
+                    # rows (catalog.transaction_items), so no origin is
+                    # ever skipped and no "retired" notice is needed.
+                    pager = _OriginPager(store, watermarks, None)
                 else:
                     pager = _JournalPager(store, cursor)
                 while True:
@@ -1881,10 +1874,28 @@ class FleetSyncScheduler:
                     page = await asyncio.to_thread(pager.next)
                     if page is None:
                         break
-                    ref, items = page
+                    ref, items, header = page
                     cursor = max(cursor, ref)
                     stats["transactions"] += 1
                     operation_count = len(items)
+                    if not items and header is not None:
+                        # Nothing of this transaction survives here (every
+                        # row it wrote was overwritten later). The puller
+                        # still needs to advance its watermark past it, so
+                        # it is named with its timestamp. Outside the
+                        # digest and count, like the other control frames.
+                        if protocol_version >= 4:
+                            origin_key, transaction_id, timestamp_ns = header
+                            empty = canonical_json({
+                                "v": protocol_version,
+                                "kind": "transaction.empty",
+                                "origin": origin_key,
+                                "transaction_id": transaction_id,
+                                "timestamp_ns": int(timestamp_ns),
+                            })
+                            stats["bytes_sent"] += len(empty)
+                            yield empty
+                        continue
                     if protocol_version >= 4 and items:
                         # v4: the origin, transaction id, and operation
                         # count travel once in a header frame instead of
@@ -1995,8 +2006,15 @@ class FleetSyncScheduler:
 
         return self._observed(response(), telemetry_channel)
 
-    def _blob_response(self, message: bytes, peer_pub: str):
-        """Serve requested attachment objects in bounded chunk frames."""
+    def _blob_response(
+        self, message: bytes, peer_pub: str, telemetry_channel: str = "direct"
+    ):
+        """Serve requested attachment objects in bounded chunk frames.
+
+        ``telemetry_channel`` was read here without being a parameter after
+        the stream observer landed (NameError on every blob request, so no
+        attachment ever crossed a fleet: test_end_to_end_attachment_crosses_
+        the_fleet, found 2026-09-07)."""
         from tools.network.fleet_sync.blob_transport import (
             decode_blob_request,
             iter_blob_frames,
@@ -2352,9 +2370,18 @@ class FleetSyncScheduler:
             # on one connection (auto-t43kz); see SQLiteFleetSyncStore.apply_many.
             batch: list[list[AuthoredMutation]] = []
             batch_bytes = 0
+            empty_transactions: list[tuple[str, str, int]] = []
 
             async def flush_batch() -> None:
                 nonlocal peer_watermark, transactions, batch, batch_bytes
+                nonlocal empty_transactions
+                if empty_transactions:
+                    empties, empty_transactions = empty_transactions, []
+                    await asyncio.to_thread(store.record_transactions, empties)
+                    transactions += len(empties)
+                    peer_watermark = max(
+                        peer_watermark or 0, max(ts for _o, _t, ts in empties)
+                    )
                 if not batch:
                     return
                 groups, batch, batch_bytes = batch, [], 0
@@ -2521,6 +2548,28 @@ class FleetSyncScheduler:
                         # Tolerated, never emitted (yet): a future server
                         # may keep a long build phase live with these.
                         # They are outside the summary digest and count.
+                        continue
+                    if kind == "transaction.empty":
+                        # A transaction of which nothing survives on the
+                        # server; recorded so our watermark for its origin
+                        # advances past it. Outside the digest.
+                        if pending:
+                            validate_pending()
+                            await apply_pending(pending)
+                            pending = []
+                        transaction_group = None
+                        try:
+                            empty_transactions.append((
+                                str(control["origin"]),
+                                str(control["transaction_id"]),
+                                int(control["timestamp_ns"]),
+                            ))
+                        except (KeyError, TypeError, ValueError) as exc:
+                            raise FleetSyncProtocolError(
+                                "malformed empty-transaction frame"
+                            ) from exc
+                        if len(empty_transactions) >= APPLY_BATCH_TRANSACTIONS:
+                            await flush_batch()
                         continue
                     if kind == "retired":
                         # The server skipped these origins for this pull

@@ -70,6 +70,16 @@ async def _worker(config_path: Path) -> int:
     acknowledged: dict[tuple[str, str], list] = {}
 
     pull_log = os.environ.get("AUTONOMY_HARNESS_PULL_LOG")
+    if pull_log:
+        # The engine's warnings (a failed attachment drain, a refused
+        # install) are otherwise lost with the worker's stderr pipe; a
+        # harness run wants them next to its ledger.
+        import logging
+
+        logging.basicConfig(
+            level=logging.INFO, filename=f"{pull_log}.log",
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        )
 
     def record(peer, **values):
         breadcrumb = values.get("acknowledged_breadcrumb")

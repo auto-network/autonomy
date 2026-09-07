@@ -1704,6 +1704,55 @@ class MutationCatalog:
             )
         ]
 
+    def transaction_items(
+        self, transaction_ref: int, incarnation: str, transaction_id: str
+    ) -> list[AuthoredMutation]:
+        """The row changes of one transaction, as wire mutations.
+
+        Journal frames are used when they are still retained (exact). When
+        the served-ack prune has retired them, the same frames are rebuilt
+        from the rows that still cite the transaction in fleet_sync_catalog
+        and their live rows -- exactly how a checkpoint is built
+        (iter_indexed_snapshot_mutations never reads the journal). A row
+        overwritten by a later transaction is absent here and arrives under
+        that later transaction; the receiver resolves by timestamp, so the
+        superseded version was never needed. Empty when nothing survives.
+        """
+        journal = [
+            AuthoredMutation(
+                incarnation, transaction_id, int(operation),
+                decode_mutation_frame(_unpack_journal(bytes(frame))),
+            )
+            for operation, frame in self.conn.execute(
+                "SELECT operation_index,frame FROM fleet_sync_journal "
+                "WHERE transaction_ref=? ORDER BY operation_index",
+                (int(transaction_ref),),
+            )
+        ]
+        if journal:
+            return journal
+        items: list[AuthoredMutation] = []
+        for raw in self.conn.execute(
+            "SELECT address,timestamp_ns,tombstone,operation_index "
+            "FROM fleet_sync_catalog WHERE transaction_ref=? "
+            "ORDER BY operation_index",
+            (int(transaction_ref),),
+        ).fetchall():
+            table, address = self._decode_address(bytes(raw[0]))
+            if bool(raw[2]):
+                mutation = Mutation(table, address, int(raw[1]), True)
+            else:
+                policy = TABLE_POLICIES[table]
+                row = self._live_row(self.conn, table, address)
+                mutation = Mutation(
+                    table, address, int(raw[1]), False,
+                    _logical_values(policy, row),
+                )
+            items.append(AuthoredMutation(
+                incarnation, transaction_id, int(raw[3]), mutation,
+            ))
+        return items
+
     def next_transaction_for_origin(
         self,
         incarnation: str,
@@ -1772,27 +1821,19 @@ class MutationCatalog:
             "SELECT t.id,t.timestamp_ns,t.transaction_id "
             "FROM fleet_sync_transactions t "
             "JOIN fleet_sync_origins o ON o.id=t.origin_id "
-            f"WHERE o.incarnation=? AND {where} AND EXISTS("
-            "SELECT 1 FROM fleet_sync_journal j WHERE j.transaction_ref=t.id) "
+            f"WHERE o.incarnation=? AND {where} "
             "ORDER BY t.timestamp_ns, t.transaction_id LIMIT ?",
             params,
         ).fetchall()
-        out = []
-        for head in heads:
-            ref = int(head[0])
-            items = [
-                AuthoredMutation(
-                    incarnation, str(head[2]), int(operation),
-                    decode_mutation_frame(_unpack_journal(bytes(frame))),
-                )
-                for operation, frame in self.conn.execute(
-                    "SELECT operation_index,frame FROM fleet_sync_journal "
-                    "WHERE transaction_ref=? ORDER BY operation_index",
-                    (ref,),
-                )
-            ]
-            out.append((ref, int(head[1]), str(head[2]), items))
-        return out
+        # Every transaction after the position is served, retained journal
+        # or not: transaction_items rebuilds retired frames from the
+        # catalog and live rows, and a transaction with nothing surviving
+        # comes back empty so the puller still advances its watermark.
+        return [
+            (int(head[0]), int(head[1]), str(head[2]),
+             self.transaction_items(int(head[0]), incarnation, str(head[2])))
+            for head in heads
+        ]
 
     def next_journal_transactions(
         self, after_transaction_ref: int, *, limit: int = 200
@@ -1807,6 +1848,28 @@ class MutationCatalog:
             cursor, items = page
             out.append((cursor, items))
         return out
+
+    def record_transactions(
+        self, entries: Sequence[tuple[str, str, int]]
+    ) -> int:
+        """Record transactions served with no surviving rows, so this
+        machine's watermark for their origin advances past them. One
+        commit; a transaction already known is left alone."""
+        if not entries:
+            return 0
+        if self._context is not None or self.conn.in_transaction:
+            raise WatermarkError("cannot record transactions inside another transaction")
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            for origin, transaction_id, timestamp_ns in entries:
+                self._ensure_transaction(
+                    str(origin), str(transaction_id), int(timestamp_ns)
+                )
+            self.conn.execute("COMMIT")
+        except BaseException:
+            self.conn.execute("ROLLBACK")
+            raise
+        return len(entries)
 
     def implied_ack_ref(self, watermarks: dict[str, int]) -> int:
         """The journal position a per-origin watermark map proves consumed:
@@ -2071,7 +2134,15 @@ class MutationCatalog:
             "NOT EXISTS(SELECT 1 FROM fleet_sync_journal j "
             "WHERE j.transaction_ref=fleet_sync_transactions.id) "
             "AND NOT EXISTS(SELECT 1 FROM fleet_sync_catalog c "
-            "WHERE c.transaction_ref=fleet_sync_transactions.id)"
+            "WHERE c.transaction_ref=fleet_sync_transactions.id) "
+            # An origin's newest transaction is its watermark on this
+            # machine; deleting it would make the map ask for (and be
+            # re-served) what it already holds.
+            "AND NOT EXISTS(SELECT 1 FROM ("
+            "SELECT id FROM fleet_sync_transactions n WHERE n.origin_id="
+            "fleet_sync_transactions.origin_id "
+            "ORDER BY n.timestamp_ns DESC,n.transaction_id DESC LIMIT 1"
+            ") k WHERE k.id=fleet_sync_transactions.id)"
         )
         cursor = 0
         while cursor < floor:
