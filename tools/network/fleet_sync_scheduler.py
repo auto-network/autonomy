@@ -2001,10 +2001,15 @@ class FleetSyncScheduler:
                     through_breadcrumb = await asyncio.to_thread(
                         store.breadcrumb, cursor
                     )
-                logger.info(
-                    "fleet sync serve %s scope %r: %d transaction(s), %d "
-                    "frame(s); slowest phase %s %.1fs %s", peer_pub[:12],
-                    scope, stats.get("transactions", 0), count,
+                # WARNING on purpose: the serving connector's log level is
+                # WARNING, and this one line per round is the evidence that
+                # the serve reached its end (a puller reporting silence for
+                # a round that has this line was not served slowly; it was
+                # not delivered to).
+                logger.warning(
+                    "fleet sync serve %s scope %r: done after %d "
+                    "transaction(s), %d frame(s); slowest phase %s %.1fs %s",
+                    peer_pub[:12], scope, stats.get("transactions", 0), count,
                     slowest_phase[0] or "none", slowest_phase[1],
                     slowest_phase[2],
                 )
@@ -2069,6 +2074,18 @@ class FleetSyncScheduler:
                 error_code = type(exc).__name__
                 raise
             finally:
+                if outcome != "success":
+                    # A serve that did not reach its done frame: the
+                    # generator was closed (peer gone, connector stopping)
+                    # or failed. Named with how far it got, so a puller's
+                    # silence can be matched to the server's side.
+                    logger.warning(
+                        "fleet sync serve %s scope %r: ended early (%s%s) "
+                        "after %d transaction(s), %d frame(s)",
+                        peer_pub[:12], scope, outcome,
+                        f" {error_code}" if error_code else "",
+                        stats.get("transactions", 0), count,
+                    )
                 recorder = self.config.telemetry_recorder
                 if record_here and recorder is not None:
                     duration_ms = max(
