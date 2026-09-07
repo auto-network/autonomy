@@ -2484,7 +2484,7 @@
         <template x-if="$store.app.restartStatus">
           <div class="sse-banner-bar mt-1 h-1.5 w-full overflow-hidden rounded bg-amber-950/40">
             <div class="h-full rounded bg-amber-100 transition-[width] duration-200"
-                 :style="'width:' + ($store.app.restartStatus.phase === 'countdown' ? $store.app.restartCountdownProgress() : $store.app.restartProgress()) + '%'"></div>
+                 :style="'width:' + $store.app.restartProgress() + '%'"></div>
           </div>
         </template>
         <span class="sse-banner-headline mt-1 text-xs text-amber-100"

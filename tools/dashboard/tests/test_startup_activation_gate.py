@@ -125,12 +125,18 @@ def test_restart_notice_handoff_mode_snapshots_without_countdown(test_app, monke
         assert body["mode"] == "handoff"
         assert body["snapshot"]["event_bus"] is True
         assert body["snapshot"]["vault"] is False      # no warm vault in tests
-        assert not any(t == "server:restart" for t, _ in broadcasts), (
-            "hand-off must not announce a countdown: clients never lose service"
+        announced = [p for t, p in broadcasts if t == "server:restart"]
+        assert len(announced) == 1, "hand-off announces the background reload once"
+        assert announced[0]["phase"] == "restarting"
+        assert "countdown_ends_at_ms" not in announced[0], (
+            "no countdown: the page stays live while the replacement boots"
         )
+        assert announced[0]["started_at_ms"] == body["started_at_ms"]
         assert server.EVENT_BUS_STATE_PATH.exists()
 
-        # The legacy body still announces the countdown.
+        # The legacy body still announces the countdown (on a worker that has
+        # not announced yet: the announcement is once per worker).
+        server._restart_notice_payload = None
         resp = client.post(
             "/api/internal/restart-notice",
             json={},
