@@ -498,7 +498,10 @@
           this.chatConnected = true;
           this.isLive = true;
           localStorage.setItem('design-chat-' + this.designId, sessionId);
-          initDisplayCapture(this.revisionId).catch(function () {});
+          // Connecting a session never asks the browser for a screen-share
+          // stream: the auto-reconnect path runs on every library open, and a
+          // getDisplayMedia prompt on open is a cancel-every-time nuisance.
+          // Only the capture button (manualCaptureScreenshot) may acquire one.
 
           // Resolve project and label from picker data
           var session = this.chatSessions.find(function (s) { return s.id === sessionId; });

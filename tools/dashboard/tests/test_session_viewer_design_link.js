@@ -117,6 +117,7 @@ function makeLinkedDesignHarness(search = '?from_session=auto-linked', viewport 
   };
   let navigatedTo = '';
   let historyPath = '';
+  let captureInits = 0;
   const visualViewport = {
     width: viewport.width || 390,
     height: viewport.height || 844,
@@ -169,7 +170,7 @@ function makeLinkedDesignHarness(search = '?from_session=auto-linked', viewport 
     unregisterHandler() {},
     captureTabScreenshot() {},
     async manualCaptureScreenshot() {},
-    async initDisplayCapture() {},
+    async initDisplayCapture() { captureInits += 1; },
     navigateTo(pathname) { navigatedTo = pathname; },
     history: {pushState(_state, _title, pathname) { historyPath = pathname; }},
     localStorage: {
@@ -207,6 +208,7 @@ function makeLinkedDesignHarness(search = '?from_session=auto-linked', viewport 
     viewportListeners,
     get navigatedTo() { return navigatedTo; },
     get historyPath() { return historyPath; },
+    get captureInits() { return captureInits; },
   };
 }
 
@@ -248,6 +250,19 @@ describe('linked Design Studio viewer mode', () => {
 
     h.page.destroy();
     assert.equal(h.bodyClasses.has('route-design-linked'), false);
+  });
+
+  it('never requests a screen-share stream when a chat session connects', () => {
+    const h = makeLinkedDesignHarness('');
+    h.page.init();
+    h.page.designId = 'design-1';
+    h.page.revisionId = 'revision-2';
+    h.page.chatSessions = [{id: 'auto-other', label: 'Other session', project: 'default'}];
+    h.page._connectSession('auto-other');
+    assert.equal(h.page.chatConnected, true);
+    assert.equal(h.storage.get('design-chat-design-1'), 'auto-other');
+    assert.equal(h.captureInits, 0);
+    h.page.destroy();
   });
 
   it('does not enter focused mode for ordinary library/direct navigation', () => {
