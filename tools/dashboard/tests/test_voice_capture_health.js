@@ -143,7 +143,10 @@ function makeHarness(options = {}) {
   };
   const document = {
     visibilityState: 'visible',
-    querySelector() { return null; },
+    querySelector(selector) {
+      return options.voicePort && selector === 'meta[name="autonomy-voice-port"]'
+        ? { getAttribute() { return String(options.voicePort); } } : null;
+    },
     addEventListener(type, callback) {
       (documentListeners[type] ||= []).push(callback);
     },
@@ -207,7 +210,7 @@ function makeHarness(options = {}) {
     WebSocket: FakeWebSocket,
     AudioContext: FakeAudioContext,
     AudioWorkletNode: FakeWorkletNode,
-    location: { protocol: 'https:', host: 'localhost:8080' },
+    location: { protocol: 'https:', host: 'localhost:8080', hostname: 'localhost' },
     setTimeout: setTimer, clearTimeout: clearTimer,
     setInterval() { return { unref() {} }; }, clearInterval() {},
     Promise, JSON, Math, Date: FakeDate, Number, Object, Array, String,
@@ -285,6 +288,18 @@ async function startRestored(h) {
 }
 
 describe('verified dictation health coordinator', () => {
+  it('uses the stable voice port and leaves it untouched on dashboard recovery', async () => {
+    const h = makeHarness({ voicePort: 8443 });
+    await startRestored(h);
+    h.verifyFlow();
+    const socket = h.socket;
+    const stream = h.stream;
+    assert.equal(socket.url, 'wss://localhost:8443/ws/voice?bind=auto-A&audio_ack=1');
+    h.api.onServerRecovered();
+    assert.equal(h.socket, socket);
+    assert.equal(h.stream, stream);
+    assert.equal(h.sockets.length, 1);
+  });
   it('preserves the exact capture through a long system-authentication interruption', async () => {
     const h = makeHarness();
     await startRestored(h);

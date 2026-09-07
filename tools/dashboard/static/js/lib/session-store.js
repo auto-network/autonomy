@@ -205,11 +205,12 @@ var _OUTBOX_PREFIX = 'sessionOutbox:';
 // never lost, even if the page dies before the log echoes it back. On the next
 // mount the viewer restores it and re-arms reconciliation.
 window.saveOutbox = function(sessionId, outbox) {
-  if (!sessionId) return;
+  if (!sessionId) return false;
   try {
     if (outbox) window.localStorage.setItem(_OUTBOX_PREFIX + sessionId, JSON.stringify(outbox));
     else window.localStorage.removeItem(_OUTBOX_PREFIX + sessionId);
-  } catch (e) { /* private mode / quota — in-memory outbox still works */ }
+    return true;
+  } catch (e) { return false; }
 };
 window.loadOutbox = function(sessionId) {
   if (!sessionId) return null;
@@ -232,6 +233,21 @@ window.clearOutbox = function(sessionId) {
 var _OUTBOX_CONFIRM_MS = 9000;
 var _outboxTimers = {};
 var _outboxInFlight = {};
+var _outboxRetryTimers = {};
+var _outboxRetryAttempts = {};
+
+function _queueOutboxRetry(sessionId, options) {
+  if (_outboxRetryTimers[sessionId]) return;
+  var attempt = _outboxRetryAttempts[sessionId] || 0;
+  _outboxRetryAttempts[sessionId] = attempt + 1;
+  var delay = Math.min(10000, 1000 * Math.pow(2, Math.min(attempt, 4)) * (0.8 + Math.random() * 0.4));
+  _outboxRetryTimers[sessionId] = setTimeout(function() {
+    delete _outboxRetryTimers[sessionId];
+    var store = _outboxStore(sessionId);
+    if (!store || !store.outbox || store.outbox.delivery !== 'queued') return;
+    if (!window.tryReconcileOutbox(sessionId)) window.sendCurrentOutbox(sessionId, options);
+  }, delay);
+}
 
 function _outboxStore(sessionId) {
   if (!sessionId || typeof window.getSessionStore !== 'function') return null;
@@ -243,6 +259,11 @@ function _outboxText(outbox) {
 }
 
 function _clearOutboxTimer(sessionId) {
+  if (_outboxRetryTimers[sessionId]) {
+    clearTimeout(_outboxRetryTimers[sessionId]);
+    delete _outboxRetryTimers[sessionId];
+  }
+  delete _outboxRetryAttempts[sessionId];
   if (_outboxTimers[sessionId]) {
     clearTimeout(_outboxTimers[sessionId]);
     delete _outboxTimers[sessionId];
@@ -273,8 +294,10 @@ window.tryReconcileOutbox = function(sessionId) {
   var entries = (s && s.entries) || [];
   for (var i = entries.length - 1; i >= 0 && i >= entries.length - 8; i--) {
     var e = entries[i];
-    if (e && e.type === 'user' && typeof e.content === 'string' &&
-        e.content.trim().indexOf(want) !== -1) {
+    if (e && e.type === 'user' && (
+        e.client_id ? e.client_id === o.localId :
+        (!(o.healthGated && o.delivery === 'queued') &&
+         typeof e.content === 'string' && e.content.trim().indexOf(want) !== -1))) {
       _clearOutboxTimer(sessionId);
       delete _outboxInFlight[sessionId];
       s.outbox = null;
@@ -294,6 +317,53 @@ window.sendCurrentOutbox = async function(sessionId, options) {
   if (!options.force && _outboxInFlight[sessionId] === o.localId) return true;
 
   _outboxInFlight[sessionId] = o.localId;
+  if (o.healthGated && o.delivery === 'queued') {
+    // Failure here is provably before injection. Keep the durable snapshot
+    // queued; a failed POST below remains ambiguous and must not auto-retry.
+    var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    var deadline = controller ? setTimeout(function() { controller.abort(); }, 3000) : null;
+    var healthy = false;
+    var confirmed = false;
+    try {
+      var ping = await fetch('/api/ping', { cache: 'no-store', signal: controller ? controller.signal : undefined });
+      healthy = !!ping.ok;
+      // Refresh authoritative evidence before retry, without replacing the
+      // viewer's entry window or interpreting old identical text as delivery.
+      if (healthy && (_outboxRetryAttempts[sessionId] || 0) > 0) {
+        healthy = false;
+        if (s.project) {
+          var tail = await fetch('/api/session/' + encodeURIComponent(s.project) + '/' +
+            encodeURIComponent(sessionId) + '/tail?tail_entries=100',
+            { cache: 'no-store', signal: controller ? controller.signal : undefined });
+          if (tail.ok) {
+            var snapshot = await tail.json();
+            healthy = Array.isArray(snapshot.entries);
+            confirmed = healthy && snapshot.entries.some(function(entry) {
+              return entry.type === 'user' && entry.client_id === o.localId;
+            });
+          }
+        }
+      }
+    } catch (_e) {}
+    if (deadline) clearTimeout(deadline);
+    if (!s.outbox || s.outbox.localId !== o.localId) {
+      delete _outboxInFlight[sessionId];
+      return false;
+    }
+    if (confirmed) {
+      _clearOutboxTimer(sessionId);
+      delete _outboxInFlight[sessionId];
+      s.outbox = null;
+      window.clearOutbox(sessionId);
+      return true;
+    }
+    if (!healthy) {
+      delete _outboxInFlight[sessionId];
+      _queueOutboxRetry(sessionId, options);
+      return true;
+    }
+    _outboxRetryAttempts[sessionId] = 0;
+  }
   s.outbox = Object.assign({}, o, { delivery: 'posted' });
   window.saveOutbox(sessionId, s.outbox);
 
@@ -338,9 +408,15 @@ window.stageOutboxSend = function(sessionId, outbox, options) {
     text: outbox.text,
     ts: outbox.ts || ((typeof Date !== 'undefined' && Date.now) ? Date.now() : 0),
     delivery: 'queued',
+    healthGated: !!(outbox.source === 'voice' && document.querySelector &&
+      document.querySelector('meta[name="autonomy-voice-port"]')),
   });
+  // Voice clears its live buffer immediately after staging returns. If durable
+  // storage is unavailable, throw synchronously so the voice handler retains it.
+  if (!window.saveOutbox(sessionId, next) && next.healthGated) {
+    throw new Error('Cannot durably queue voice message');
+  }
   s.outbox = next;
-  window.saveOutbox(sessionId, next);
   return window.sendCurrentOutbox(sessionId, options);
 };
 
@@ -382,6 +458,19 @@ window.restoreOutbox = function(sessionId) {
   }
   return true;
 };
+
+if (typeof window.addEventListener === 'function') {
+  var wakeQueuedOutboxes = function() {
+    Object.keys(_outboxRetryTimers).forEach(function(sessionId) {
+      _clearOutboxTimer(sessionId);
+      var s = _outboxStore(sessionId);
+      if (s && s.outbox && s.outbox.delivery === 'queued' &&
+          !window.tryReconcileOutbox(sessionId)) window.sendCurrentOutbox(sessionId);
+    });
+  };
+  window.addEventListener('online', wakeQueuedOutboxes);
+  window.addEventListener('autonomy:dashboard-online', wakeQueuedOutboxes);
+}
 
 // Pending-message state for the session-card / viewer activity dot (auto-xkdoi).
 // Returns '' | 'sending' | 'unconfirmed' — the "hasn't cleared yet" states that

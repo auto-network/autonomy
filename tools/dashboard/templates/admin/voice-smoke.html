@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+  __VOICE_ENDPOINT_META__
   <meta charset="utf-8">
   <meta
     name="viewport"
@@ -846,7 +847,10 @@
 
       function wsUrl(bind) {
         const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-        return proto + "//" + window.location.host + "/ws/voice?bind=" + encodeURIComponent(bind);
+        var meta = document.querySelector('meta[name="autonomy-voice-port"]');
+        var port = meta && meta.getAttribute('content');
+        var host = port ? window.location.hostname + ':' + port : window.location.host;
+        return proto + "//" + host + "/ws/voice?bind=" + encodeURIComponent(bind);
       }
 
       function selectedBind() {

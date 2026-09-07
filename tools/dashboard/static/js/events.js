@@ -308,6 +308,9 @@
     var url = '/api/events';
     if (cid) url += '?client_id=' + encodeURIComponent(cid);
     _es = new EventSource(url);
+    _es.addEventListener('open', function() {
+      window.dispatchEvent(new CustomEvent('autonomy:dashboard-online'));
+    });
     _esConnectedAt = Date.now();
     _lastSeenTs = Date.now();
     // The server emits `heartbeat` only when the stream is otherwise idle;

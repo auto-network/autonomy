@@ -6,6 +6,7 @@
 # identity the sessions use — no root-vs-agent permission gap.
 set -e
 cd /app
+python3 -m tools.dashboard.voice_service_config
 
 INIT_ARGS=""
 if [ "${DASHBOARD_TLS:-}" = "off" ]; then
@@ -20,6 +21,11 @@ python3 -m tools.portability migrate-on-mount /app/data $INIT_ARGS
 SSL_ARGS=""
 if [ -f "${AUTONOMY_TLS_CERT:-/app/data/tls.crt}" ] && [ -f "${AUTONOMY_TLS_KEY:-/app/data/tls.key}" ] && [ "${DASHBOARD_TLS:-}" != "off" ]; then
     SSL_ARGS="--ssl-certfile ${AUTONOMY_TLS_CERT:-/app/data/tls.crt} --ssl-keyfile ${AUTONOMY_TLS_KEY:-/app/data/tls.key}"
+fi
+
+# Provision once in the supervisor, not in each reloaded dashboard worker.
+if [ "${VOICE_SIDECAR_ENABLED:-false}" = true ]; then
+    python3 -m tools.dashboard.voice_service_token
 fi
 
 # Rebuild CSS on template edits (best-effort, backgrounded, never fatal).

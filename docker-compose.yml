@@ -110,6 +110,10 @@ services:
       # Unset would default to loopback, which inside this container is the
       # container itself — dictation would fail with nothing obviously wrong.
       WHISPERLIVE_URL: ${WHISPERLIVE_URL:-ws://whisper:9090}
+      VOICE_SIDECAR_ENABLED: ${VOICE_SIDECAR_ENABLED:-false}
+      VOICE_PUBLIC_PORT: ${VOICE_PUBLIC_PORT:-8443}
+      VOICE_COMPOSE_MODE: "true"
+      COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
     logging:
       driver: json-file
       options: { max-size: "20m", max-file: "5" }
@@ -347,7 +351,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
 
   # Optional: streaming transcription for dashboard dictation (/ws/voice).
-  #   docker compose --profile voice up -d
+  #   COMPOSE_PROFILES=voice VOICE_SIDECAR_ENABLED=true docker compose up -d
+  # Publish the TLS gateway on the Tailnet before switching clients; deploy/VOICE.md.
   #
   # Its own image and its own dependency set (deploy/Dockerfile.whisper): the
   # node image is ~57 packages, this one carries CTranslate2 and the CUDA
@@ -357,6 +362,37 @@ services:
   # Reachable only on the project network as ws://whisper:9090 — nothing is
   # published to the host. The dashboard finds it via WHISPERLIVE_URL; left
   # unset it defaults to loopback, which is correct when both run natively.
+  voice-gateway:
+    profiles: ["voice"]
+    image: ${AUTONOMY_IMAGE:-autonomy-node:local}
+    restart: unless-stopped
+    init: true
+    user: "1000:1000"
+    entrypoint: ["sh", "/app/deploy/serve-voice.sh"]
+    ports:
+      - "127.0.0.1:${VOICE_BACKEND_PORT:-8082}:8082"
+    environment:
+      AUTONOMY_DATA_ROOT: /app/data
+      DASHBOARD_TLS: ${DASHBOARD_TLS:-}
+      WHISPERLIVE_URL: ws://whisper:9090
+      VOICE_PUBLIC_PORT: ${VOICE_PUBLIC_PORT:-8443}
+      VOICE_DASHBOARD_PUBLIC_PORT: ${VOICE_DASHBOARD_PUBLIC_PORT:-443}
+      VOICE_DASHBOARD_URL: ${VOICE_DASHBOARD_URL:-https://dashboard:8080}
+      VOICE_SIDECAR_ENABLED: ${VOICE_SIDECAR_ENABLED:-false}
+    volumes:
+      - autonomy-code:/app:ro
+      - autonomy-data:/app/data
+    depends_on:
+      dashboard:
+        condition: service_started
+      whisper:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('127.0.0.1',8082),timeout=2).close()"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
   whisper:
     profiles: ["voice"]
     build:
@@ -368,6 +404,8 @@ services:
     restart: unless-stopped
     environment:
       WHISPER_MODEL_PATH: ${WHISPER_MODEL_PATH:-/app/data/models/distil-large-v3}
+      WHISPER_MAX_CLIENTS: ${WHISPER_MAX_CLIENTS:-4}
+      WHISPER_MAX_CONNECTION_TIME: ${WHISPER_MAX_CONNECTION_TIME:-86400}
     volumes:
       # Read-only: the model is operator data, this service only consumes it.
       - autonomy-data:/app/data:ro

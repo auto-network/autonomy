@@ -852,7 +852,10 @@
 
   function wsUrl(bind) {
     var proto = (typeof location !== 'undefined' && location.protocol === 'https:') ? 'wss:' : 'ws:';
-    return proto + '//' + location.host + '/ws/voice?bind=' + encodeURIComponent(bind) + '&audio_ack=1';
+    var meta = document.querySelector && document.querySelector('meta[name="autonomy-voice-port"]');
+    var port = meta && meta.getAttribute('content');
+    var host = port ? location.hostname + ':' + port : location.host;
+    return proto + '//' + host + '/ws/voice?bind=' + encodeURIComponent(bind) + '&audio_ack=1';
   }
 
   function sendControl(type, extra) {
