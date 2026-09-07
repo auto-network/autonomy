@@ -106,6 +106,7 @@ def _key_expressions(policy: TablePolicy) -> tuple[str, ...]:
         return (
             '"set_id"', '"schema_revision"', '"key"',
             '"publication_state"', _role_expression(),
+            'COALESCE("terminal_persona",\'\')',
         )
     return tuple(f'"{column}"' for column in policy.key)
 
@@ -211,7 +212,10 @@ def iter_indexed_snapshot_mutations(
         if start_table == table:
             comparison = f"({','.join(expressions)}) > ({','.join('?' for _ in expressions)})"
             where += (" AND " if where else " WHERE ") + comparison
-            params += tuple(start_address)
+            resume_key = tuple(start_address)
+            if table == "settings" and len(resume_key) == len(expressions) - 1:
+                resume_key += ("",)  # an unsigned row's address has no persona
+            params += resume_key
         query = (
             f'SELECT * FROM "{table}"{where} '
             f'ORDER BY {",".join(expressions)}'

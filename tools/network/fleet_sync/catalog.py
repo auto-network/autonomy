@@ -168,7 +168,7 @@ def _trigger_key_arguments(table: str) -> tuple[str, ...]:
     if table == "settings":
         return (
             "id", "set_id", "schema_revision", "key", "publication_state",
-            "supersedes", "excludes",
+            "supersedes", "excludes", "terminal_persona",
         )
     return policy.key
 
@@ -512,7 +512,8 @@ class MutationCatalog:
                 hashlib.sha256(content.encode("utf-8")).hexdigest(),
             )
         elif table == "settings":
-            row_id, set_id, revision, key, publication, supersedes, excludes = values
+            (row_id, set_id, revision, key, publication, supersedes, excludes,
+             persona) = values
             if supersedes is not None:
                 role = f"supersedes:{supersedes}:{row_id}"
             elif excludes is not None:
@@ -520,6 +521,8 @@ class MutationCatalog:
             else:
                 role = "base"
             address = (set_id, revision, key, publication, role)
+            if persona is not None:
+                address = address + (persona,)  # one slot per signer
         else:
             address = values
         return encode_value([table, list(address)])
@@ -1325,6 +1328,14 @@ class MutationCatalog:
                        "publication_state=?"]
             params = list(address[:4])
             role = str(address[4])
+            # Signed rows are one slot per signer: the address names the
+            # persona. An unsigned address must never resolve to a signed
+            # row at the same natural key, hence the explicit IS NULL.
+            if len(address) > 5:
+                clauses.append("terminal_persona=?")
+                params.append(address[5])
+            else:
+                clauses.append("terminal_persona IS NULL")
             if role == "base":
                 # The winner for a base address is the sole ``deprecated = 0``
                 # base row for this natural key; the deprecated siblings are
@@ -1555,7 +1566,8 @@ class MutationCatalog:
         for frame, operation in self.conn.execute(
             "SELECT frame,operation_index FROM fleet_sync_quarantine "
             "WHERE origin=? AND transaction_id=? AND frame IS NOT NULL "
-            "AND operation_index IS NOT NULL",
+            "AND operation_index IS NOT NULL "
+            "AND reason!='settings_signature_invalid'",
             (incarnation, transaction_id),
         ).fetchall():
             items.append(AuthoredMutation(
@@ -1652,6 +1664,35 @@ class MutationCatalog:
              self.transaction_items(int(head[0]), incarnation, str(head[2])))
             for head in heads
         ]
+
+    def drain_pending_signatures(self) -> int:
+        """Re-apply signed settings rows parked as ``settings_signature_pending``
+        (this store had no organization genesis to verify against when they
+        arrived). Each entry goes back through ordinary apply: it lands, or
+        it is inert against a newer winner, or it is re-parked (still
+        pending, or now provably invalid). Returns the entries cleared."""
+        ensure_quarantine_table(self.conn)
+        rows = self.conn.execute(
+            "SELECT address,frame,origin,transaction_id,operation_index "
+            "FROM fleet_sync_quarantine WHERE reason='settings_signature_pending' "
+            "AND frame IS NOT NULL AND origin IS NOT NULL "
+            "AND transaction_id IS NOT NULL AND operation_index IS NOT NULL"
+        ).fetchall()
+        cleared = 0
+        for address, frame, origin, transaction_id, operation_index in rows:
+            applied, ignored = self.apply_remote_batch([AuthoredMutation(
+                str(origin), str(transaction_id), int(operation_index),
+                decode_mutation_frame(bytes(frame)),
+            )])
+            if not applied and not ignored:
+                continue
+            with self.conn:
+                self.conn.execute(
+                    "DELETE FROM fleet_sync_quarantine WHERE address=?",
+                    (bytes(address),),
+                )
+            cleared += 1
+        return cleared
 
     def record_transactions(
         self, entries: Sequence[tuple[str, str, int]]
@@ -2043,6 +2084,16 @@ class MutationCatalog:
                 encode_value([table, list(address)])
                 for table, address in report.skipped_orphans
             )
+            # Signed settings rows whose envelope did not verify here: an
+            # invalid signature is never stored and never forwarded; a
+            # row this store cannot verify yet (no organization genesis
+            # known) is parked with its frame and re-applied by the drain
+            # once the genesis has arrived.
+            rejected_reasons = {
+                encode_value([table, list(address)]): reason
+                for table, address, reason in report.rejected_signatures
+            }
+            deferred.update(rejected_reasons)
             final_winners = {
                 address_blob: originated for originated, address_blob in winners
             }
@@ -2090,7 +2141,7 @@ class MutationCatalog:
                     if address_blob not in deferred:
                         continue
                     mutation = originated.mutation
-                    reason = (
+                    reason = rejected_reasons.get(address_blob) or (
                         "attachment_bytes_unavailable"
                         if mutation.table == "attachments" else "fk_orphan"
                     )

@@ -49,6 +49,12 @@ class MaterializationReport:
     #: exclude them from the winner-catalog install and the base/winner count
     #: invariants, and quarantine them for later repair.
     skipped_orphans: tuple[tuple[str, tuple], ...] = ()
+    #: (table, address, reason) of signed settings rows not stored: reason
+    #: ``settings_signature_invalid`` (envelope failed to verify against its
+    #: own signing key; never stored, never forwarded) or
+    #: ``settings_signature_pending`` (no organization genesis known to this
+    #: store yet, so the record could not be rebuilt; parked for the drain).
+    rejected_signatures: tuple[tuple[str, tuple, str], ...] = ()
 
 
 class ContentAddressedBlobStore:
@@ -349,6 +355,12 @@ def _upsert(conn: sqlite3.Connection, mutation: Mutation, row: dict[str, object]
         clauses = ["set_id=?", "schema_revision=?", '"key"=?',
                    "publication_state=?"]
         params: list[object] = list(mutation.address[:4])
+        # One slot per signer: only the same persona's row is replaced.
+        if len(mutation.address) > 5:
+            clauses.append("terminal_persona=?")
+            params.append(mutation.address[5])
+        else:
+            clauses.append("terminal_persona IS NULL")
         if role == "base":
             clauses.extend(["supersedes IS NULL", "excludes IS NULL"])
         elif role.startswith("supersedes:"):
@@ -479,6 +491,83 @@ def _insert(conn: sqlite3.Connection, table: str, row: dict[str, object]) -> Non
     )
 
 
+LEDGER_EVENT_SET_ID = "autonomy.org.ledger-event"
+
+
+def store_genesis_id(conn: sqlite3.Connection) -> str | None:
+    """The organization genesis id this store knows, or None.
+
+    A founded store has it in its own ledger tables; any member store that
+    has received the org's replicated ledger events (autonomy.org.ledger-event,
+    auto-dqemk) has it as a settings row whose wire is the genesis event and
+    whose key is that event's id.
+    """
+    try:
+        row = conn.execute(
+            "SELECT event_id FROM ledger_events WHERE event_type='genesis' LIMIT 1"
+        ).fetchone()
+        if row is not None and row[0]:
+            return str(row[0])
+    except sqlite3.Error:
+        pass
+    try:
+        rows = conn.execute(
+            'SELECT "key",payload FROM settings WHERE set_id=?',
+            (LEDGER_EVENT_SET_ID,),
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    for key, payload in rows:
+        if _payload_is_genesis(payload):
+            return str(key)
+    return None
+
+
+def genesis_from_mutations(mutations: Iterable[Mutation]) -> str | None:
+    for mutation in mutations:
+        if mutation.tombstone or not mutation.address:
+            continue
+        if mutation.address[0] != LEDGER_EVENT_SET_ID:
+            continue
+        values = dict(mutation.values)
+        if _payload_is_genesis(values.get("payload")):
+            return str(mutation.address[2])
+    return None
+
+
+def _payload_is_genesis(payload: object) -> bool:
+    try:
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        wire = payload.get("wire") if isinstance(payload, dict) else None
+        if isinstance(wire, str):
+            wire = json.loads(wire)
+        return isinstance(wire, dict) and isinstance(wire.get("payload"), dict) \
+            and wire["payload"].get("type") == "genesis"
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
+def _verify_settings_row(row: dict[str, object], genesis: str | None) -> str | None:
+    """None when the row's envelope verifies against its own signing key;
+    otherwise the quarantine reason. The cryptographic step only: persona
+    resolution, membership, scope, revocation and the witness bound are the
+    fold's boundary checks (design of record, "Verification, at the
+    boundaries") and belong to the org channel."""
+    if genesis is None:
+        return "settings_signature_pending"
+    from tools.network.idkit.errors import SignatureError
+    from tools.network.settingskit.envelope import (
+        EnvelopeFormatError, record_from_row, verify_record,
+    )
+
+    try:
+        verify_record(record_from_row(row, genesis), str(row["signature"]))
+    except (SignatureError, EnvelopeFormatError, ValueError, TypeError, KeyError):
+        return "settings_signature_invalid"
+    return None
+
+
 def materialize(
     conn: sqlite3.Connection,
     mutations: Iterable[Mutation],
@@ -498,6 +587,12 @@ def materialize(
     deleted = 0
     pending: list[str] = []
     skipped: list[tuple[str, tuple]] = []
+    rejected: list[tuple[str, tuple, str]] = []
+    # The envelope of a signed settings row covers the organization's genesis
+    # id. Read it once: from this store's own ledger, from ledger events
+    # already replicated into it, or from a genesis event inside this very
+    # batch (a joiner's checkpoint carries both in one pass).
+    genesis = store_genesis_id(conn) or genesis_from_mutations(grouped["settings"])
     transaction = conn if manage_transaction else nullcontext()
     with transaction:
         for table in _TABLE_ORDER:
@@ -512,6 +607,13 @@ def materialize(
                     deleted += 1
                     continue
                 row = _row(mutation)
+                if table == "settings" and row.get("signature") is not None:
+                    verdict = _verify_settings_row(row, genesis)
+                    if verdict is not None:
+                        rejected.append(
+                            (mutation.table, tuple(mutation.address), verdict)
+                        )
+                        continue
                 if table == "attachments":
                     if blob_store is None:
                         pending.append(str(row["id"]))
@@ -537,5 +639,6 @@ def materialize(
                 applied += 1
         _finish_vault_materialization(conn)
     return MaterializationReport(
-        applied, deleted, tuple(sorted(pending)), tuple(skipped)
+        applied, deleted, tuple(sorted(pending)), tuple(skipped),
+        tuple(rejected),
     )

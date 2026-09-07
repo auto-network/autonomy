@@ -280,7 +280,17 @@ def _validate_policy(mutation: Mutation) -> None:
         PolicyKind.IMMUTABLE, PolicyKind.IMMUTABLE_PRUNABLE,
     }:
         raise CodecError(f"immutable table does not accept tombstones: {mutation.table}")
-    if len(mutation.address) != len(policy.key):
+    width = len(policy.key)
+    if mutation.table == "settings" and len(mutation.address) == width + 1:
+        # One slot per signer (graph://21a0da9e-1c2): a signed settings
+        # row's address ends with its terminal persona. Unsigned rows keep
+        # the five-part address, so the policy inventory (and with it the
+        # compatibility digest) is unchanged.
+        persona = mutation.address[width]
+        if not isinstance(persona, str) or len(persona) != 64 \
+                or any(ch not in "0123456789abcdef" for ch in persona):
+            raise CodecError("settings signer address must be a 64-hex persona")
+    elif len(mutation.address) != width:
         raise CodecError(f"wrong logical address width for {mutation.table}")
     value_columns = {column for column, _ in mutation.values}
     forbidden = value_columns.intersection(policy.excluded_columns)
