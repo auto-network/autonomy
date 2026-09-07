@@ -704,6 +704,114 @@ describe('verified dictation health coordinator', () => {
     assert.equal(h.voice.recoveryIncident.transportAttempts, 1);
   });
 
+  it('preserves a recoverable visible partial across flow-health socket replacement', async () => {
+    const h = makeHarness();
+    await startRestored(h);
+    h.verifyFlow('connection-current', 1);
+
+    // Partials are already visible to the operator, but the server deliberately
+    // persists finals only. WhisperLive overtime can therefore strand the whole
+    // visible draft on the client side before it becomes a server final.
+    h.socket.deliver({
+      type: 'transcript', kind: 'final', text: 'the finalized prefix', epoch: 0,
+    });
+    h.socket.deliver({
+      type: 'transcript', kind: 'partial',
+      text: 'recoverable words already visible to the operator', epoch: 0,
+    });
+    assert.equal(
+      h.voice.bufferText,
+      'the finalized prefix recoverable words already visible to the operator',
+    );
+
+    const oldSocket = h.socket;
+    await h.advance(4000);
+    h.frame();
+    h.api._audioWatchdogTick();
+    const replacement = h.socket;
+    assert.notEqual(replacement, oldSocket, 'flow-health recovery replaces the browser socket');
+
+    // The replacement WhisperLive session starts with no old partial. Its first
+    // hypothesis must not overwrite text that is still recoverable in JS memory.
+    replacement.open();
+    await h.flush();
+    replacement.deliver({
+      type: 'buffer_state', text: 'the finalized prefix', epoch: 0,
+    });
+    assert.equal(
+      h.voice.bufferText,
+      'the finalized prefix recoverable words already visible to the operator',
+      'the finals-only server snapshot cannot shorten or duplicate the browser draft',
+    );
+    replacement.deliver({
+      type: 'transcript', kind: 'partial', text: 'words after recovery', epoch: 0,
+    });
+    assert.equal(
+      h.voice.bufferText,
+      'the finalized prefix recoverable words already visible to the operator words after recovery',
+    );
+  });
+
+  it('preserves a visible partial across an ordinary unexpected socket close', async () => {
+    const h = makeHarness();
+    await startRestored(h);
+    h.verifyFlow('connection-current', 1);
+    h.socket.deliver({
+      type: 'transcript', kind: 'partial', text: 'draft before network loss', epoch: 0,
+    });
+
+    h.socket.fire('close');
+    await h.advance(2000);
+    const replacement = h.socket;
+    replacement.open();
+    await h.flush();
+    replacement.deliver({
+      type: 'transcript', kind: 'partial', text: 'speech after network loss', epoch: 0,
+    });
+
+    assert.equal(
+      h.voice.bufferText,
+      'draft before network loss speech after network loss',
+    );
+  });
+
+  it('retries an action-required transport without destroying capture or draft', async () => {
+    const h = makeHarness();
+    await startRestored(h);
+    h.verifyFlow('connection-current', 1);
+    h.socket.deliver({
+      type: 'transcript', kind: 'partial', text: 'draft before exhausted recovery', epoch: 0,
+    });
+    const stream = h.stream;
+    const context = h.contexts.at(-1);
+    const worklet = h.worklets.at(-1);
+
+    // Model the bounded transport controller's terminal state. Deadline behavior
+    // is covered separately; this regression targets what the red retry does to
+    // still-live capture and client-owned text.
+    h.api._state.ws = null;
+    h.api._state.wsOpen = false;
+    h.api._state.talkActive = false;
+    h.voice.setActionRequired('recovery_failed');
+    assert.equal(h.voice.actionRequiredReason, 'recovery_failed');
+
+    assert.equal(h.api.enableFromGesture(), true);
+    assert.equal(h.stream, stream);
+    assert.equal(h.contexts.at(-1), context);
+    assert.equal(h.worklets.at(-1), worklet);
+    assert.equal(h.voice.bufferText, 'draft before exhausted recovery');
+
+    h.socket.open();
+    await h.flush();
+    h.socket.deliver({
+      type: 'transcript', kind: 'partial', text: 'speech after retry', epoch: 0,
+    });
+    assert.equal(
+      h.voice.bufferText,
+      'draft before exhausted recovery speech after retry',
+    );
+  });
+
   it('starts every gesture-gated browser API before enableFromGesture returns', () => {
     const h = makeHarness({ resume: false, contextState: 'suspended' });
     h.voice.boundSessionId = 'auto-A';

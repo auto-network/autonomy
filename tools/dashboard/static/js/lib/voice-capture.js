@@ -48,9 +48,9 @@
     lastRendered: '',       // last text actually shown in the box (incl. in-flight
                             // partial) — what a Clear/Send must remember to suppress,
                             // since s.finals is empty when clearing mid-partial.
-    carryPrefix: '',        // text carried over when the binding switches mid-buffer
-                            // (#23 switch-takes-buffer): prepended to whatever the
-                            // NEW session transcribes so the old text isn't clobbered.
+    carryPrefix: '',        // browser-owned text carried across a fresh transcription
+                            // timeline (target switch or transport replacement), then
+                            // prepended so the new session cannot clobber the draft.
     removed: [],            // recently cleared/sent text, for re-emit suppression (legacy/flag-off path)
     serverEpoch: 0,         // #43: highest transcript-acceptance epoch seen from the server
     acceptEpoch: 0,         // #43: drop transcript/buffer_state frames whose epoch < this
@@ -207,6 +207,7 @@
     s.requiresReconnect = true;
     s.talkActive = false;
     s.starting = false;
+    _preserveVisibleBufferForReconnect();
     var failedSocket = s.ws;
     s.ws = null;
     s.wsOpen = false;
@@ -487,11 +488,24 @@
     return true;
   }
 
+  function _preserveVisibleBufferForReconnect() {
+    var st = store();
+    var visible = String((st && st.bufferText) || s.lastRendered || '').trim();
+    if (!visible) return;
+    // A visible partial exists only in this document; BufferManager persists
+    // finals, not partial hypotheses. Make the complete visible draft the fixed
+    // prefix for the fresh WhisperLive timeline and let new frames append to it.
+    s.carryPrefix = visible;
+    s.finals = '';
+    s.lastRendered = visible;
+  }
+
   function _replaceVoiceSocket(reason) {
     var st = store();
     var bind = s.bind || (st && st.boundSessionId) || '';
     if (!bind) return;
     _diag(reason + ' — replacing voice socket');
+    _preserveVisibleBufferForReconnect();
     s.startGen++;
     s.starting = false;
     s.desiredBind = bind;
@@ -700,6 +714,12 @@
     var st = store();
     var bind = (st && st.boundSessionId) || s.bind || '';
     if (!bind) return false;
+    if (st && st.actionRequiredReason === 'recovery_failed' && s.stream) {
+      // The red action represents transport exhaustion, not lost microphone
+      // permission. Retry only the connection and retain both capture and draft.
+      _preserveVisibleBufferForReconnect();
+      return retryReconnectNow();
+    }
     if (s.bind && s.bind !== bind && st) {
       var carried = String(st.bufferText || '').trim();
       if (carried) s.carryPrefix = carried;
@@ -1101,7 +1121,11 @@
         var bsRaw = String(frame.text || '');
         var bsKept = _rmode ? bsRaw : _stripRemoved(bsRaw);
         if (!_rmode && bsRaw) _vlog('BUFFER_STATE raw="' + bsRaw.slice(0, 70) + '" removedN=' + s.removed.length + ' kept="' + bsKept.slice(0, 70) + '"');
-        s.finals = bsKept;
+        // If this document carried a visible draft across the reconnect, it is
+        // newer than the finals-only server snapshot and may include a partial
+        // the server never persisted. Keep it authoritative. Reset/Send/Clear
+        // clear carryPrefix before their intentional empty buffer_state arrives.
+        if (!s.carryPrefix) s.finals = bsKept;
         if (frame.epoch != null && (frame.epoch | 0) > s.serverEpoch) {
           s.serverEpoch = frame.epoch | 0;
         }
@@ -1127,6 +1151,7 @@
     });
     ws.addEventListener('close', function () {
       if (ws !== s.ws) return;   // intentional teardown nulls s.ws first → ignored here
+      _preserveVisibleBufferForReconnect();
       _clearResetBoundary();
       s.wsOpen = false; s.started = false; s.ws = null;
       s.starting = false;
