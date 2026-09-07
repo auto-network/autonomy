@@ -1234,9 +1234,28 @@ class SQLiteFleetSyncStore:
     def prune_acknowledged(
         self, machine_pubs: Sequence[str], epoch: str
     ) -> tuple[int, int]:
+        """Retention maintenance that yields to contention: the prune is
+        ~30 ms of query work on a quiescent copy of a 73k-transaction store
+        (anchore, measured 2026-09-07), and 150-170 s on the live file when
+        another writer holds the store's write lock. Waiting the store's
+        30 s busy timeout per statement is wrong for a background sweep;
+        it waits at most PRUNE_BUSY_TIMEOUT_MS and otherwise skips this
+        pass, naming the store so the long writer can be found."""
+        import sqlite3 as _sqlite3
+
         conn, catalog = self._open()
         try:
+            conn.execute(f"PRAGMA busy_timeout={int(PRUNE_BUSY_TIMEOUT_MS)}")
             return catalog.prune_acknowledged(machine_pubs, epoch)
+        except _sqlite3.OperationalError as exc:
+            if "locked" not in str(exc) and "busy" not in str(exc):
+                raise
+            logger.warning(
+                "fleet sync: served-ack prune skipped, %s is write-locked by "
+                "another writer for more than %.1fs (%s)",
+                Path(self.path).name, PRUNE_BUSY_TIMEOUT_MS / 1000.0, exc,
+            )
+            return (0, 0)
         finally:
             conn.close()
 
@@ -1419,6 +1438,10 @@ SERVE_PAGE_TRANSACTIONS = 200
 #: The prune holds the store's write lock for up to its budget; once a
 #: minute is plenty for retention and invisible to the dashboard's writers.
 PRUNE_MIN_INTERVAL_S = 60.0
+
+#: How long the served-ack prune waits for a store's write lock before it
+#: skips the pass (a background sweep must never queue behind a long writer).
+PRUNE_BUSY_TIMEOUT_MS = 2_000
 
 
 class _OriginPager:
