@@ -894,23 +894,32 @@ def get_active_agentic_runs() -> list[dict]:
         conn.close()
 
 
-def fail_stale_prelaunch_runs() -> int:
+def fail_stale_prelaunch_runs(exclude_run_ids=None) -> int:
     """FAIL agentic rows stranded in QUEUED/PREPARING by a process restart.
 
     The accept-then-work launch task lives in the dashboard process; a
-    restart (WatchFiles bounces it on every merge) kills in-flight preps,
-    and their containers never existed — so at startup any pre-launch row
-    is an orphan by definition. Returns the number of rows failed.
+    restart kills in-flight preps, and their containers never existed — so
+    once the previous process is gone any pre-launch row it accepted is an
+    orphan by definition. Returns the number of rows failed.
+
+    ``exclude_run_ids`` names rows the CALLING process accepted itself. Under
+    the zero-downtime hand-off the replacement worker takes traffic before its
+    predecessor exits, so by the time it sweeps it may hold live launches of
+    its own; those are not orphans and must survive the sweep.
     """
+    excluded = [rid for rid in (exclude_run_ids or ()) if rid]
     conn = _get_conn()
     try:
-        cur = conn.execute(
+        sql = (
             "UPDATE dispatch_runs SET status = 'FAILED', "
             "failure_class = 'orphaned-prelaunch', "
             "reason = 'dashboard restarted during queued/preparing launch', "
             "completed_at = datetime('now') "
-            "WHERE kind = 'agentic' AND status IN ('QUEUED', 'PREPARING')",
+            "WHERE kind = 'agentic' AND status IN ('QUEUED', 'PREPARING')"
         )
+        if excluded:
+            sql += " AND id NOT IN (" + ",".join("?" for _ in excluded) + ")"
+        cur = conn.execute(sql, excluded)
         conn.commit()
         return cur.rowcount or 0
     except Exception:

@@ -106,6 +106,7 @@ logging.basicConfig(
 
 from tools.dashboard.event_bus import event_bus, current_server_epoch
 from tools.dashboard import session_harness
+from tools.dashboard import worker_handoff
 from tools.dashboard.session_harness import (
     CLAUDE_HARNESS,
     dedup_claude_entries,
@@ -13825,19 +13826,64 @@ async def api_dao_bead(request):
 
 # ── SSE EventBus endpoint ─────────────────────────────────────
 
+async def _snapshot_for_handoff() -> dict[str, bool]:
+    """Write the state a replacement worker restores at ITS startup while this
+    worker keeps serving: the EventBus replay buffer and the vault key cache.
+    Both are re-written at this worker's shutdown as well; the hand-off copy
+    only closes the gap so the replacement is warm before it takes traffic."""
+    result = {"event_bus": False, "vault": False}
+    snapshot_fn = getattr(event_bus, "snapshot", None)
+    if callable(snapshot_fn):
+        try:
+            await asyncio.to_thread(snapshot_fn, EVENT_BUS_STATE_PATH)
+            result["event_bus"] = True
+        except Exception:
+            logger.exception("hand-off EventBus snapshot failed; replacement restores the older one")
+    try:
+        from tools.dashboard.unlock_routes import save_vault_across_hot_reload
+        result["vault"] = bool(await asyncio.to_thread(save_vault_across_hot_reload))
+    except Exception:
+        logger.exception("hand-off vault snapshot failed; replacement boots locked until activation")
+    return result
+
+
 async def api_internal_restart_notice(request):
-    """Accept the reloader's authenticated warning before it stops this worker."""
+    """Accept the reloader's authenticated notice about this worker.
+
+    ``{"mode": "handoff"}`` (the zero-downtime supervisor): snapshot hand-off
+    state and return; no countdown is announced because clients never lose
+    service. Any other body is the legacy warn-then-stop path and announces
+    the countdown banner.
+    """
     expected = os.environ.get("DASHBOARD_RESTART_TOKEN")
     presented = request.headers.get(_RESTART_TOKEN_HEADER)
     if not expected or not presented or not hmac.compare_digest(presented, expected):
         return JSONResponse({"error": "forbidden"}, status_code=403)
     changed_files: list[str] = []
+    body: Any = {}
     try:
         body = await request.json()
         if isinstance(body, dict) and isinstance(body.get("changed_files"), list):
             changed_files = [str(f) for f in body["changed_files"] if f]
     except Exception:
-        changed_files = []
+        body, changed_files = {}, []
+    if isinstance(body, dict) and body.get("mode") == "handoff":
+        global _handoff_attribution
+        snapshot = await _snapshot_for_handoff()
+        # No countdown, but the attribution still names the merge: it is
+        # stamped on the restart-notice state at this worker's shutdown so the
+        # replacement's activation "complete" toast can repeat it.
+        try:
+            _handoff_attribution = await asyncio.to_thread(_restart_attribution, changed_files)
+        except Exception:
+            logger.exception("hand-off attribution failed; completing without one")
+            _handoff_attribution = None
+        return JSONResponse({
+            "ok": True,
+            "mode": "handoff",
+            "snapshot": snapshot,
+            "attribution": _handoff_attribution or None,
+        })
     try:
         payload = await _announce_restart(changed_files)
     except Exception:
@@ -21252,6 +21298,16 @@ _event_loop_watchdog_task: asyncio.Task | None = None
 _vault_release_sweeper_task: asyncio.Task | None = None
 _plugin_background_supervisor = None  # PluginBackgroundSupervisor | None
 _settings_mediator_started: bool = False
+# Zero-downtime hand-off (tools/dashboard/worker_handoff.py): under the reload
+# supervisor a replacement worker starts serving while its predecessor is
+# still alive, and runs the predecessor-exclusive startup steps only once the
+# supervisor confirms the old worker has exited.
+_activation_task: asyncio.Task | None = None
+_worker_activated: bool = False
+# Attribution of the pending hand-off (which merge / who), computed when the
+# supervisor's notice arrives and stamped on the restart-notice state at
+# shutdown so the replacement's "complete" toast can name it.
+_handoff_attribution: dict[str, Any] | None = None
 
 
 
@@ -21504,8 +21560,11 @@ async def _on_startup():
         set_settings_materialization_hook,
     )
     set_settings_materialization_hook(attention_routes.emit_personal_sync_change)
-    await dashboard_fleet_sync_service.start()
-    _mark("fleet_sync_scheduler.start")
+    # The scheduler itself starts at ACTIVATION (see _activate_worker): its
+    # checkpoint install swaps the personal database file under a quiescence
+    # gate that only sees this process's handles, so it must never run while
+    # the predecessor worker still holds the old file open.
+    _mark("fleet_sync_scheduler.configure")
 
     # Replay the Dashboard's OWN Fleet runtime credential from the warm ramfs
     # cache so a restarted machine re-arms Fleet sync with nobody present
@@ -21592,6 +21651,7 @@ async def _on_startup():
         if os.environ.get("DASHBOARD_MOCK_EVENTS"):
             from tools.dashboard.dao.mock import mock_event_watcher
             _mock_event_watcher_task = asyncio.create_task(mock_event_watcher())
+        worker_handoff.mark_ready()
         await _emit_restart_complete()
         return
 
@@ -21672,15 +21732,10 @@ async def _on_startup():
         _ensure_dispatcher_service_token()
     except Exception:
         logger.exception("dispatcher monitor token provisioning failed")
-    try:
-        from agents.dispatch_db import fail_stale_prelaunch_runs
-        swept = await asyncio.to_thread(fail_stale_prelaunch_runs)
-        if swept:
-            logger.warning(
-                "failed %d agentic run(s) stranded in QUEUED/PREPARING by "
-                "the previous process", swept)
-    except Exception:
-        logger.exception("stale prelaunch sweep failed")
+    # The stale-prelaunch sweep runs at ACTIVATION (_activate_worker): it fails
+    # every QUEUED/PREPARING agentic row on the assumption that the previous
+    # process is dead, which under a hand-off is only true once the supervisor
+    # says so.
     _dispatch_watcher_task = asyncio.create_task(_dispatch_watcher())
     global _agentic_queue_task
     _agentic_queue_task = asyncio.create_task(
@@ -21741,6 +21796,11 @@ async def _on_startup():
     # (auto-a1pub). Present only after a graceful shutdown wrote it; a cold boot
     # or a crash finds nothing and the vault stays locked until a human unlock.
     # The snapshot files are cleared once consumed.
+    # Under the hand-off supervisor the predecessor writes a fresh snapshot
+    # when it receives the hand-off notice (before this process was spawned),
+    # so this restore warms the vault before traffic. The predecessor writes
+    # again at its own shutdown; _activate_worker re-runs the restore to pick
+    # that up, so an unlock during the overlap window is not lost.
     try:
         from tools.dashboard.unlock_routes import restore_vault_across_hot_reload
         await asyncio.to_thread(restore_vault_across_hot_reload)
@@ -21779,20 +21839,13 @@ async def _on_startup():
     _SESSION_LIFECYCLE_WORKER.start()
     logger.info("session_lifecycle: worker started from _on_startup (idle until create enqueues)")
     _mark("lifecycle_worker.start")
-    # Recover rows a restart froze mid-launch — must run before traffic so
-    # the first registry broadcast the clients see is already repaired.
-    await _recover_stuck_lifecycle_rows()
-    _mark("recover_stuck_lifecycle_rows")
+    # _recover_stuck_lifecycle_rows and the credentials refresh pollers run at
+    # ACTIVATION (_activate_worker): the recovery adopts launches the previous
+    # process may still be driving, and Anthropic rotates the refresh token on
+    # every refresh, so two live workers ticking at once would strand a row as
+    # "revoked" until an operator reinstalls it.
     if _should_run_harness_usage_poller():
         _harness_usage_poller_task = asyncio.create_task(_harness_usage_poller())
-    if _claude_credentials_refresh.should_run_credentials_refresh_poller():
-        _claude_credentials_refresh_task = asyncio.create_task(
-            _claude_credentials_refresh.credentials_refresh_poller()
-        )
-    if _codex_credentials_refresh.should_run_codex_credentials_refresh_poller():
-        _codex_credentials_refresh_task = asyncio.create_task(
-            _codex_credentials_refresh.codex_credentials_refresh_poller()
-        )
     if os.environ.get("DASHBOARD_MOCK_EVENTS"):
         from tools.dashboard.dao.mock import mock_event_watcher
         _mock_event_watcher_task = asyncio.create_task(mock_event_watcher())
@@ -21883,10 +21936,17 @@ async def _on_startup():
         "startup phase: TOTAL %.1fms", (time.monotonic() - _startup_t0) * 1000,
     )
 
-    # The final lifecycle event is intentionally last: receiving it means this
-    # process has completed its synchronous warm-up and can serve the browser,
-    # not merely that a Python process has bound the port.
-    await _emit_restart_complete()
+    # Hand-off: publish readiness so the supervisor stops the predecessor, then
+    # run the predecessor-exclusive steps once it confirms the old worker has
+    # exited. On a cold start (no predecessor) activation is immediate and the
+    # restart-complete event keeps its pre-hand-off meaning.
+    global _activation_task
+    worker_handoff.mark_ready()
+    if worker_handoff.predecessor_pid() is not None:
+        _activation_task = asyncio.create_task(
+            _await_activation(), name="worker-activation")
+    else:
+        await _activate_worker(worker_handoff.ACTIVATED_NO_PREDECESSOR)
 
 async def _on_shutdown():
     global _dispatch_watcher_task, _mock_event_watcher_task
@@ -21895,12 +21955,16 @@ async def _on_shutdown():
     global _settings_mediator_started, _serving_bootstrap_task
     global _event_proxy_task
     global _vault_release_sweeper_task
-    # Uvicorn closes SSE sockets before it calls this lifespan hook. Its parent
-    # watcher has already called the authenticated endpoint and waited three
-    # seconds. Direct shutdowns cannot warn a browser, but still leave timing
-    # state for the next process.
+    # Uvicorn closes SSE sockets before it calls this lifespan hook. Under the
+    # hand-off supervisor the replacement is already serving by now, so this
+    # stamp marks the start of the only gap clients can see: from here until
+    # the replacement's activation emits "complete". Direct shutdowns cannot
+    # warn a browser, but still leave timing state for the next process.
     if _restart_notice_payload is None:
-        _write_restart_notice({"started_at_ms": int(time.time() * 1000)})
+        notice: dict[str, Any] = {"started_at_ms": int(time.time() * 1000)}
+        if _handoff_attribution:
+            notice["attribution"] = _handoff_attribution
+        _write_restart_notice(notice)
     try:
         await web_push_worker.stop_worker()
     except Exception:
@@ -21984,8 +22048,10 @@ async def _on_shutdown():
         except Exception:
             logger.exception("error during settings_mediator.stop_action_loop()")
         _settings_mediator_started = False
+    global _activation_task, _worker_activated
     tasks = [
         t for t in (
+            _activation_task,
             _dispatch_watcher_task,
             _mock_event_watcher_task,
             _harness_usage_poller_task,
@@ -22000,6 +22066,8 @@ async def _on_shutdown():
         t.cancel()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
+    _activation_task = None
+    _worker_activated = False
     _dispatch_watcher_task = None
     _mock_event_watcher_task = None
     _harness_usage_poller_task = None
@@ -22054,6 +22122,86 @@ async def _on_shutdown():
         logger.exception(
             "vault hot-reload snapshot raised; the next process boots locked"
         )
+
+async def _activate_worker(reason: str) -> None:
+    """Run the startup steps that require the previous worker to be gone.
+
+    Called inline on a cold start, or from ``_await_activation`` once the
+    reload supervisor has terminated and joined the predecessor. Each step is
+    best-effort and logged on failure, matching how they behaved when they
+    lived inline in ``_on_startup``.
+    """
+    global _worker_activated, _claude_credentials_refresh_task
+    global _codex_credentials_refresh_task
+    if _worker_activated:
+        return
+    _worker_activated = True
+    t0 = time.monotonic()
+    logger.info("worker activation begins (%s)", reason)
+
+    if reason != worker_handoff.ACTIVATED_NO_PREDECESSOR:
+        # The predecessor wrote its final vault snapshot at shutdown; pick up
+        # any unlock that happened during the overlap window.
+        try:
+            from tools.dashboard.unlock_routes import restore_vault_across_hot_reload
+            await asyncio.to_thread(restore_vault_across_hot_reload)
+        except Exception:
+            logger.exception("vault restore at activation raised; keeping current state")
+
+    try:
+        from agents.dispatch_db import fail_stale_prelaunch_runs
+        # Rows this process accepted during the overlap window are live, not
+        # orphans: their launch contexts are in _pending_agentic_launches.
+        owned_here = set(_pending_agentic_launches)
+        swept = await asyncio.to_thread(fail_stale_prelaunch_runs, owned_here)
+        if swept:
+            logger.warning(
+                "failed %d agentic run(s) stranded in QUEUED/PREPARING by "
+                "the previous process", swept)
+    except Exception:
+        logger.exception("stale prelaunch sweep failed")
+
+    try:
+        await _recover_stuck_lifecycle_rows()
+    except Exception:
+        logger.exception("stuck lifecycle row recovery failed")
+
+    try:
+        from tools.network.fleet_sync_scheduler import dashboard_fleet_sync_service
+        await dashboard_fleet_sync_service.start()
+    except Exception:
+        logger.exception("fleet sync scheduler failed to start")
+
+    if _claude_credentials_refresh.should_run_credentials_refresh_poller():
+        _claude_credentials_refresh_task = asyncio.create_task(
+            _claude_credentials_refresh.credentials_refresh_poller()
+        )
+    if _codex_credentials_refresh.should_run_codex_credentials_refresh_poller():
+        _codex_credentials_refresh_task = asyncio.create_task(
+            _codex_credentials_refresh.codex_credentials_refresh_poller()
+        )
+
+    logger.info(
+        "worker activation complete (%s) in %.1fms",
+        reason, (time.monotonic() - t0) * 1000,
+    )
+    # The final lifecycle event is intentionally last: receiving it means this
+    # process has completed its warm-up AND owns the machine, not merely that a
+    # Python process has bound the port. Under a hand-off the predecessor stamps
+    # started_at at its shutdown, so the reported duration is the true gap.
+    await _emit_restart_complete()
+
+
+async def _await_activation() -> None:
+    try:
+        reason = await worker_handoff.wait_for_activation()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("hand-off activation wait failed; activating anyway")
+        reason = worker_handoff.ACTIVATED_PREDECESSOR_GONE
+    await _activate_worker(reason)
+
 
 @asynccontextmanager
 async def _lifespan(app):
