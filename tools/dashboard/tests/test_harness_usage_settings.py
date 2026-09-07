@@ -504,6 +504,69 @@ def test_codex_publishes_each_changed_reading_without_user_message(monkeypatch):
     assert [w["windows"]["long"]["used_percent"] for w in writes] == [4.0, 5.0, 6.0]
 
 
+def test_codex_older_reading_never_overwrites_a_newer_one(monkeypatch):
+    """Regression, observed live 2026-09-07 21:29Z: with the poller's
+    freshest-across-sessions selection gone, two Codex sessions tailing their
+    own transcripts flapped the shared row -- an 02:48 reading landed on top
+    of a 21:27 one. The ordering now lives at the write."""
+    writes: list[dict] = []
+    monkeypatch.setattr(
+        session_monitor.graph_ops, "upsert_by_key",
+        lambda set_id, schema_revision, key, payload, *, org, state="raw":
+            writes.append(payload) or "sid",
+    )
+    hus.clear_published_payload_cache()
+
+    fresh = _codex_state(updated_at="2026-09-07T21:27:50.805Z", used_percent=1.0)
+    stale = _codex_state(updated_at="2026-09-07T02:48:18.263Z", used_percent=16.0)
+
+    assert session_monitor._publish_codex_harness_usage_setting(
+        {"harness": "codex"}, fresh) is True
+    assert session_monitor._publish_codex_harness_usage_setting(
+        {"harness": "codex"}, stale) is False
+
+    assert [w["updated_at"] for w in writes] == ["2026-09-07T21:27:50.805Z"]
+
+
+def test_codex_newer_reading_still_publishes(monkeypatch):
+    writes: list[dict] = []
+    monkeypatch.setattr(
+        session_monitor.graph_ops, "upsert_by_key",
+        lambda set_id, schema_revision, key, payload, *, org, state="raw":
+            writes.append(payload) or "sid",
+    )
+    hus.clear_published_payload_cache()
+
+    for at, pct in (("2026-09-07T21:27:50.805Z", 1.0),
+                    ("2026-09-07T21:30:08.297Z", 2.0)):
+        session_monitor._publish_codex_harness_usage_setting(
+            {"harness": "codex"}, _codex_state(updated_at=at, used_percent=pct))
+
+    assert [w["windows"]["long"]["used_percent"] for w in writes] == [1.0, 2.0]
+
+
+def test_reading_epoch_is_sub_second_precise():
+    a = hus.reading_epoch({"updated_at": "2026-09-07T21:27:50.805Z"})
+    b = hus.reading_epoch({"updated_at": "2026-09-07T21:27:50.806Z"})
+    assert a is not None and b is not None and b > a
+    assert hus.reading_epoch({"updated_at": "not-a-time"}) is None
+    assert hus.reading_epoch({}) is None
+    assert hus.reading_epoch(None) is None
+
+
+def test_publish_if_newer_publishes_a_reading_with_no_timestamp(monkeypatch):
+    """Nothing to order it by, so it is not silently dropped."""
+    writes: list[str] = []
+    hus.clear_published_payload_cache()
+    hus.publish_if_newer(
+        "codex:default",
+        {"harness": "codex", "identity_id": "default", "identity_label": "d",
+         "status": "ok", "source": "transcript", "windows": {}},
+        upsert_by_key=lambda *a, **k: writes.append(a[2]) or "sid",
+    )
+    assert writes == ["codex:default"]
+
+
 def _run_codex_expiry(monkeypatch, *, stored: dict | None, live_codex: bool):
     published: list[dict] = []
     monkeypatch.setattr(server, "_existing_usage_payload", lambda key: stored)

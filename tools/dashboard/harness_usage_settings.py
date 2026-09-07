@@ -33,6 +33,9 @@ HARNESS_USAGE_CACHE_TTL = timedelta(minutes=15)
 
 _publish_lock = threading.RLock()
 _published_payload_fingerprints: dict[str, str] = {}
+#: key -> epoch seconds of the most recent reading published under it, so a
+#: late writer holding an older reading cannot roll the row backwards.
+_published_reading_epochs: dict[str, float] = {}
 
 
 def clear_published_payload_cache(*, key: str | None = None) -> None:
@@ -40,8 +43,66 @@ def clear_published_payload_cache(*, key: str | None = None) -> None:
     with _publish_lock:
         if key is None:
             _published_payload_fingerprints.clear()
+            _published_reading_epochs.clear()
         else:
             _published_payload_fingerprints.pop(key, None)
+            _published_reading_epochs.pop(key, None)
+
+
+def reading_epoch(payload: object) -> float | None:
+    """When a payload's reading was taken, as epoch seconds.
+
+    Kept float-precise: Codex transcript timestamps carry milliseconds, and
+    two readings can land in the same second.
+    """
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("updated_at")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def publish_if_newer(
+    key: str,
+    payload: dict[str, Any],
+    *,
+    upsert_by_key: Callable[..., Any],
+) -> bool:
+    """Publish a reading only when it is not older than the last one published.
+
+    Every live Codex session tails its own transcript and publishes the same
+    ``codex:default`` row, so "last writer wins" lets a session holding a
+    stale reading roll the row backwards. Observed live on 2026-09-07: the
+    row read 21:27:50Z / 7d 1%, and a minute later read 02:48:18Z / 7d 16%
+    -- an eighteen-hour-old reading from another session presented as the
+    current one.
+
+    Freshest-wins used to be done by the poller picking the freshest
+    ``harness_state`` across live sessions before writing once. auto-pojkz
+    removed that indirection to give the row a single writer and an honest
+    reading-time clock, so the ordering has to live at the write instead.
+
+    A reading with no parseable ``updated_at`` is published (we have nothing
+    better to order it by); the first reading under a key always publishes.
+    """
+    taken = reading_epoch(payload)
+    with _publish_lock:
+        last = _published_reading_epochs.get(key)
+        if taken is not None and last is not None and taken < last:
+            return False
+        published = publish_if_changed(
+            key, payload, upsert_by_key=upsert_by_key,
+        )
+        if published and taken is not None:
+            _published_reading_epochs[key] = taken
+        return published
 
 
 def publish_if_changed(
