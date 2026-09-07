@@ -19,6 +19,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+# Python for the launcher modules: the host venv when it is a real interpreter,
+# otherwise the image's python3 (inside the Compose node the bind-mounted
+# .venv/bin/python is a dangling symlink into the host filesystem, and the
+# repo is already on PYTHONPATH there).
+PYTHON="$REPO_ROOT/.venv/bin/python"
+[[ -x "$PYTHON" ]] || PYTHON="$(command -v python3)"
 IMAGE="autonomy-session"
 
 # ── Args ──────────────────────────────────────────────
@@ -58,10 +64,14 @@ elif [[ -f "$SETUP_TOKEN_FILE" ]]; then
 elif [[ -f "$CLAUDE_CREDS/.credentials.json" ]]; then
     AUTH_MODE="creds_file"
 else
-    echo "ERROR: No Claude credentials found." >&2
-    echo "Either: set CLAUDE_CODE_OAUTH_TOKEN, save token to $SETUP_TOKEN_FILE," >&2
-    echo "        or run 'claude login' to create $CLAUDE_CREDS/.credentials.json" >&2
-    exit 1
+    # No env var and no ~/.claude file: the Python launcher below resolves
+    # the credential from the Settings substrate (dashboard.claude.setup_tokens,
+    # session_launcher._resolve_credentials_via_substrate) and fails with its
+    # own error if none exists. The Compose dispatcher container has neither
+    # an env token nor a ~/.claude, so exiting here blocked every dispatch
+    # launch since the cutover (observed 2026-09-07: 0 launches, every cycle
+    # "No Claude credentials found") while the substrate held two accounts.
+    AUTH_MODE="substrate"
 fi
 echo "    Auth: $AUTH_MODE"
 
@@ -72,7 +82,7 @@ fi
 
 # ── Generate prompt ───────────────────────────────────
 echo "==> Generating prompt for $BEAD_ID..."
-PROMPT=$("$REPO_ROOT/.venv/bin/python" -m agents.compose "$BEAD_ID")
+PROMPT=$("$PYTHON" -m agents.compose "$BEAD_ID")
 if [[ -z "$PROMPT" ]]; then
     echo "ERROR: Empty prompt generated for $BEAD_ID" >&2
     exit 1
@@ -187,7 +197,7 @@ fi
 
 if $DETACH; then
     # ── Detached mode: delegate to Python launch_session_cli ──
-    LAUNCH_OUTPUT=$("$REPO_ROOT/.venv/bin/python" -m agents.launch_session_cli \
+    LAUNCH_OUTPUT=$("$PYTHON" -m agents.launch_session_cli \
         --session-type dispatch \
         --name "$CONTAINER_NAME" \
         --prompt-file "$PROMPT_FILE" \
@@ -225,7 +235,7 @@ if $DETACH; then
 fi
 
 # ── Foreground mode: delegate to Python launch_session_cli ───
-"$REPO_ROOT/.venv/bin/python" -m agents.launch_session_cli \
+"$PYTHON" -m agents.launch_session_cli \
     --session-type dispatch \
     --name "$CONTAINER_NAME" \
     --prompt-file "$PROMPT_FILE" \
