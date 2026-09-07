@@ -32,10 +32,10 @@ def main() -> int:
                 data += chunk
         reply = json.loads(data.split(b"\n", 1)[0])
     except Exception as exc:
-        print(f"autonomy DNS-01 hook unavailable: {type(exc).__name__}", file=sys.stderr)
+        print(f"autonomy DNS-01 hook unavailable: {type(exc).__name__}: {exc} (socket {path!r}, action {sys.argv[1]})", file=sys.stderr)
         return 1
     if reply.get("ok") is not True:
-        print("autonomy DNS-01 hook refused", file=sys.stderr)
+        print(f"autonomy DNS-01 hook refused: {reply.get('error', 'no reason')} (action {sys.argv[1]})", file=sys.stderr)
         return 1
     return 0
 

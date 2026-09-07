@@ -49,6 +49,7 @@ class Dns01HookServer:
 
     async def _handle(self, reader, writer):
         reply = {"ok": False, "error": "invalid request"}
+        action = "?"
         try:
             raw = await reader.readline()
             if len(raw) > 2048:
@@ -60,6 +61,7 @@ class Dns01HookServer:
             value = request["value"]
             if action not in {"present", "cleanup"} or not isinstance(value, str):
                 raise ValueError("invalid operation")
+            logger.info("DNS-01 hook: %s request for order %s", action, self._order)
             if action == "present":
                 result = await asyncio.to_thread(
                     self._client.present, self._order, value,
@@ -73,13 +75,15 @@ class Dns01HookServer:
                     self._client.cleanup, self._order, value,
                 )
                 reply = {"ok": True}
-        except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
-            pass
-        except Exception:
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            logger.warning("DNS-01 hook: invalid request (%s) for order %s", exc, self._order)
+        except Exception as exc:
             # The hook needs a useful success bit, not authority or relay
             # diagnostics. Full detail remains in the Dashboard log.
-            logger.exception("DNS-01 hook operation failed")
-            reply = {"ok": False, "error": "operation failed"}
+            logger.exception("DNS-01 hook: %s failed for order %s", action, self._order)
+            reply = {"ok": False, "error": f"operation failed: {type(exc).__name__}"}
+        else:
+            logger.info("DNS-01 hook: %s ok for order %s", action, self._order)
         try:
             writer.write((json.dumps(reply, separators=(",", ":")) + "\n").encode())
             await writer.drain()

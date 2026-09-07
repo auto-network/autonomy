@@ -12,7 +12,9 @@ import argparse
 import asyncio
 import base64
 import contextlib
+import datetime as _dt
 import hashlib
+import logging
 import io
 import json
 import os
@@ -49,6 +51,59 @@ ACME_BUNDLE_VERSION = 1
 CERTIFICATE_CHECK_INTERVAL_SECONDS = 6 * 3600
 RENEWAL_WINDOW_SECONDS = 30 * 24 * 3600
 _LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+
+
+logger = logging.getLogger(__name__)
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+_NOISE_LINE_RE = re.compile(
+    r"^\s*(Container .* (Creating|Created|Starting|Started|Stopping|Stopped|Removing|Removed)\s*$"
+    r"|Ask for help or search for solutions|See the logfile .* for more details|Saving debug log to)",
+)
+
+
+def _meaningful_output(stdout: bytes, stderr: bytes, limit: int = 3000) -> str:
+    """Certbot's actual complaint, not Compose's progress renderer or the epilogue.
+
+    Certbot writes hook failures and ACME errors to STDOUT and only the generic
+    'see the logfile' epilogue to STDERR; Compose overwrites its progress lines
+    with ANSI/CR on STDERR. Strip both so the surfaced detail names the cause.
+    """
+    lines: list[str] = []
+    for raw in (stdout, stderr):
+        text = _ANSI_RE.sub("", raw.decode("utf-8", "replace")).replace("\r", "\n")
+        for line in text.splitlines():
+            if line.strip() and not _NOISE_LINE_RE.search(line):
+                lines.append(line.rstrip())
+    return "\n".join(lines)[-limit:]
+
+
+def _preserve_attempt(persona_label: str, stdout: bytes, stderr: bytes, returncode: int) -> Path | None:
+    """Keep the whole story of a failed attempt somewhere durable, BEFORE the
+    ephemeral ACME_ROOT is wiped: Certbot's own log directory plus both captured
+    streams. Returns the attempt directory, or None when no data root exists."""
+    try:
+        from tools.data_paths import resolve_data_root
+        root = resolve_data_root()
+    except Exception:
+        root = None
+    if root is None:
+        return None
+    stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    attempt = Path(root) / "service-certs" / "attempts" / f"{stamp}-{persona_label}"
+    try:
+        attempt.mkdir(parents=True, exist_ok=True, mode=0o700)
+        (attempt / "output.txt").write_bytes(
+            b"# returncode " + str(returncode).encode() + b"\n# --- stdout ---\n" + stdout
+            + b"\n# --- stderr ---\n" + stderr
+        )
+        logs = ACME_ROOT / "logs"
+        if logs.is_dir():
+            shutil.copytree(logs, attempt / "logs", dirs_exist_ok=True)
+    except Exception:
+        logger.exception("service certificate: could not preserve attempt %s", attempt)
+        return None
+    return attempt
 
 
 class ServiceCertificateError(RuntimeError):
@@ -533,9 +588,15 @@ async def obtain(
             )
             stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
-            detail = stderr.decode("utf-8", "replace")[-2000:]
+            detail = _meaningful_output(stdout, stderr) or "(no output)"
+            preserved = _preserve_attempt(persona_label, stdout, stderr, proc.returncode)
+            logger.error(
+                "service certificate: certbot failed for apex %s (exit %s); attempt kept at %s\n%s",
+                apex, proc.returncode, preserved, detail,
+            )
+            where = f" [attempt kept at {preserved}]" if preserved else ""
             raise ServiceCertificateError(
-                f"Certbot failed ({proc.returncode}): {detail}"
+                f"Certbot failed ({proc.returncode}): {detail}{where}"
             )
         lineage = ACME_ROOT / "config" / "live" / cert_name
         cert_path = lineage / "fullchain.pem"
