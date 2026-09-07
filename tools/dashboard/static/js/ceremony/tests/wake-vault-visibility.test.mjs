@@ -8,11 +8,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { wakeVault } from '../vault-unlock.js';
 import {
-  WAKE_FAILED_STORAGE_KEY,
-  describeWakeFailure,
-  wakeVault,
-} from '../vault-unlock.js';
+  STEP_FAILURES_STORAGE_KEY,
+  describeStepFailure,
+} from '../step-report.js';
+
+function storedMessages(storage) {
+  const raw = storage.getItem(STEP_FAILURES_STORAGE_KEY);
+  return raw ? JSON.parse(raw) : {};
+}
 
 const ROOT_SEED = Uint8Array.from(Buffer.from(
   '9d61b19deffd5a60ba844af492ec2cc4'
@@ -75,7 +80,7 @@ test('a heads 409 surfaces as ledger-no-genesis in all three channels', async ()
     assert.equal(result.reason, 'ledger-no-genesis');
 
     // 1. The shell notice: stored message names genesis and warns off re-founding.
-    const stored = storage.getItem(WAKE_FAILED_STORAGE_KEY);
+    const stored = storedMessages(storage)['vault-wake'];
     assert.ok(stored && stored.includes('genesis'), stored);
     assert.ok(stored.includes('do NOT re-found'), stored);
     // 2. The console.
@@ -103,9 +108,9 @@ test('a heads 404 stays the quiet never-founded reason, distinct from 409', asyn
       fetchImpl: headsGateFetch(404, []),
     });
     assert.equal(result.reason, 'not-founded');
-    const stored = storage.getItem(WAKE_FAILED_STORAGE_KEY);
+    const stored = storedMessages(storage)['vault-wake'];
     assert.ok(stored && stored.includes('not founded'), stored);
-    assert.ok(!stored.includes('genesis missing'), stored);
+    assert.ok(!stored.includes('holds no genesis'), stored);
   } finally {
     console.error = origError;
     delete globalThis.sessionStorage;
@@ -136,15 +141,15 @@ test('reporting failures never break the wake result', async () => {
   }
 });
 
-test('describeWakeFailure yields an operator sentence for every known gate', () => {
+test('describeStepFailure yields an operator sentence for every known gate', () => {
   for (const reason of [
     'anchor-inventory-503', 'personal-root-500', 'personal-root-public-key',
     'anchor-race-409', 'anchor-enroll-400', 'root-class-500',
     'ledger-no-genesis', 'not-founded', 'heads-502', 'delegate-403',
     'vault-keys-400', 'something-unmapped',
   ]) {
-    const message = describeWakeFailure(reason);
+    const message = describeStepFailure('vault-wake', reason);
     assert.ok(message.startsWith('The vault did not come up:'), message);
-    assert.ok(message.includes(`[${reason}]`), message);
+    assert.ok(message.includes(`[vault-wake/${reason}]`), message);
   }
 });

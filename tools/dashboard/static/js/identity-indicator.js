@@ -741,17 +741,26 @@
     if (state !== 'bootstrap' && state !== 'error') {
       panel.appendChild(flagTray());
       if (unlockState === null && !unlockStateError) loadUnlockState();
-      // A failed vault wake leaves its operator-legible message under this
-      // key (ceremony/vault-unlock.js reportWakeOutcome); the next
-      // successful wake clears it. Render it here — the shell is the one
-      // surface that survives the unlock page's post-sign-in navigation,
-      // so the failure is visible without DevTools (auto-uhdxm).
+      // Every unlock step that failed leaves an operator-legible message in
+      // this map, keyed by step (and org for per-org steps) — written by
+      // ceremony/step-report.js reportStepOutcome, cleared per entry by that
+      // step's next success. Render them here: the shell is the one surface
+      // that survives the unlock page's post-sign-in navigation, so a failed
+      // vault wake or seed-mint is visible without DevTools (auto-uhdxm).
+      // This file loads as a classic script and cannot import, so the key is
+      // literal — keep it in step with STEP_FAILURES_STORAGE_KEY.
       try {
-        var wakeFailed = sessionStorage.getItem('autonomy.vault.wake-failed');
-        if (wakeFailed) {
-          panel.appendChild(el('div', 'identity-panel-error', wakeFailed));
+        var rawFailures = sessionStorage.getItem('autonomy.unlock.step-failures');
+        var failures = rawFailures ? JSON.parse(rawFailures) : null;
+        if (failures && typeof failures === 'object') {
+          Object.keys(failures).sort().forEach(function (entry) {
+            var message = failures[entry];
+            if (typeof message === 'string' && message) {
+              panel.appendChild(el('div', 'identity-panel-error', message));
+            }
+          });
         }
-      } catch (e) { /* storage unavailable — nothing to render */ }
+      } catch (e) { /* storage unavailable or unparseable — render nothing */ }
     }
 
     if (state === 'gate-off') {
