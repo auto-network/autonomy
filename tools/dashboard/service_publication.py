@@ -452,10 +452,20 @@ def bound_persona_label(org: str, persona_pub: str) -> str | None:
     advertised the route and five DNS-01 challenges were published under the
     bound label while ACME validated the new one, tripping the rate limit.
     """
-    for row in list_reservations(org):
-        if row.get("persona_pub") == persona_pub and row.get("persona_label"):
-            return row["persona_label"]
+    for member in _reservation_members(org):
+        payload = getattr(member, "payload", None) or {}
+        if payload.get("persona_pub") == persona_pub and payload.get("persona_label"):
+            return payload["persona_label"]
     return None
+
+
+def _reservation_members(org: str):
+    """Raw reservation rows (payloads carry persona_pub; projections do not)."""
+    return [
+        member
+        for member in settings_ops.read_owned_set(NAMESPACE_RESERVATION_SET_ID, org=org).members
+        if isinstance(getattr(member, "payload", None), dict)
+    ]
 
 
 def reserve_origin(org: str, app_label: str) -> tuple[dict, bool]:
