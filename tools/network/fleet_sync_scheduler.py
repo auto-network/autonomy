@@ -228,9 +228,14 @@ class FleetSyncRuntimeConfig:
     #: always first. Databases share the graph schema; each keeps its own
     #: catalog, journal, peer state, and breadcrumb trails.
     sync_scopes: Callable[[], Mapping[str, Path]] | None = None
-    #: Bounded pulls per round; the stalest-first ranking below decides
-    #: which peers fill the slots. Zero or negative means unbounded.
-    max_concurrent_pulls: int = 3
+    #: Peers pulled per round (stalest-first ranking fills the slots; zero
+    #: or negative means every eligible peer). ONE by default (auto-mfgko):
+    #: with per-author watermarks every server can supply every author's
+    #: writes, so a second concurrent pull in the same round mostly carries
+    #: the same new transactions -- measured 1.65x receipts/minimum at 3
+    #: per round versus 1.00x at 1 per round (N=5, 2026-09-07). Rounds are
+    #: 1-10 s apart and starvation-free, so every peer is still reached.
+    max_concurrent_pulls: int = 1
     #: Stream liveness policy (auto-fzy8s). The first frame of a pull may
     #: lag for an entire server-side checkpoint build (~60s/GB measured),
     #: so it gets its own allowance: 900s covers a ~15GB database, an
@@ -969,6 +974,23 @@ class SQLiteFleetSyncStore:
         finally:
             conn.close()
 
+    def next_transactions_for_author(self, incarnation, after_timestamp_ns,
+                                     after_transaction_id=None, *, limit=200):
+        conn, catalog = self._open()
+        try:
+            return catalog.next_transactions_for_author(
+                incarnation, after_timestamp_ns, after_transaction_id, limit=limit
+            )
+        finally:
+            conn.close()
+
+    def next_transactions(self, after_transaction_ref: int, *, limit: int = 200):
+        conn, catalog = self._open()
+        try:
+            return catalog.next_journal_transactions(after_transaction_ref, limit=limit)
+        finally:
+            conn.close()
+
     def implied_ack_ref(self, watermarks) -> int:
         conn, catalog = self._open()
         try:
@@ -1309,18 +1331,30 @@ def _transaction_identity(item: AuthoredMutation) -> tuple[str, str, int]:
     )
 
 
+#: Transactions fetched per store connection while serving a pull.
+SERVE_PAGE_TRANSACTIONS = 200
+
+
 class _JournalPager:
-    """Legacy paging: every retained transaction after one local position."""
+    """Legacy paging: every retained transaction after one local position,
+    fetched SERVE_PAGE_TRANSACTIONS at a time on one connection."""
 
     def __init__(self, store, cursor: int):
         self.store = store
         self.cursor = cursor
+        self._buffer: list = []
+        self._exhausted = False
 
     def next(self):
-        page = self.store.next_transaction(self.cursor)
-        if page is None:
+        if not self._buffer and not self._exhausted:
+            self._buffer = self.store.next_transactions(
+                self.cursor, limit=SERVE_PAGE_TRANSACTIONS
+            )
+            if not self._buffer:
+                self._exhausted = True
+        if not self._buffer:
             return None
-        self.cursor, items = page
+        self.cursor, items = self._buffer.pop(0)
         return self.cursor, items
 
 
@@ -1338,6 +1372,7 @@ class _AuthorPager:
         self._index = 0
         self._position: tuple[int, str | None] | None = None
         self.newest_ref = 0
+        self._buffer: list = []
 
     def next(self):
         if self._authors is None:
@@ -1346,21 +1381,21 @@ class _AuthorPager:
                 if author != self.exclude
             ]
         while self._index < len(self._authors):
+            if self._buffer:
+                ref, timestamp, transaction_id, items = self._buffer.pop(0)
+                self._position = (timestamp, transaction_id)
+                self.newest_ref = max(self.newest_ref, ref)
+                return ref, items
             author = self._authors[self._index]
             if self._position is None:
                 self._position = (int(self.watermarks.get(author, 0)), None)
             timestamp, transaction_id = self._position
-            page = self.store.next_transaction_for_author(
-                author, timestamp, transaction_id
+            self._buffer = self.store.next_transactions_for_author(
+                author, timestamp, transaction_id, limit=SERVE_PAGE_TRANSACTIONS,
             )
-            if page is None:
+            if not self._buffer:
                 self._index += 1
                 self._position = None
-                continue
-            ref, timestamp, transaction_id, items = page
-            self._position = (timestamp, transaction_id)
-            self.newest_ref = max(self.newest_ref, ref)
-            return ref, items
         return None
 
 

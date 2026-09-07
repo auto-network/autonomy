@@ -1749,6 +1749,65 @@ class MutationCatalog:
         ]
         return transaction_ref, int(row[1]), str(row[2]), items
 
+    def next_transactions_for_author(
+        self,
+        incarnation: str,
+        after_timestamp_ns: int,
+        after_transaction_id: str | None = None,
+        *,
+        limit: int = 200,
+    ) -> list[tuple[int, int, str, list[AuthoredMutation]]]:
+        """Up to *limit* retained transactions by *incarnation* after the
+        position, in (timestamp_ns, transaction_id) order, on ONE
+        connection. Serving one transaction per connection open made the
+        busiest server take ~180 s per puller at N=20 (2026-09-07)."""
+        if after_transaction_id is None:
+            where = "t.timestamp_ns>?"
+            params: tuple = (incarnation, int(after_timestamp_ns), int(limit))
+        else:
+            where = "(t.timestamp_ns>? OR (t.timestamp_ns=? AND t.transaction_id>?))"
+            params = (incarnation, int(after_timestamp_ns), int(after_timestamp_ns),
+                      after_transaction_id, int(limit))
+        heads = self.conn.execute(
+            "SELECT t.id,t.timestamp_ns,t.transaction_id "
+            "FROM fleet_sync_transactions t "
+            "JOIN fleet_sync_origins o ON o.id=t.origin_id "
+            f"WHERE o.incarnation=? AND {where} AND EXISTS("
+            "SELECT 1 FROM fleet_sync_journal j WHERE j.transaction_ref=t.id) "
+            "ORDER BY t.timestamp_ns, t.transaction_id LIMIT ?",
+            params,
+        ).fetchall()
+        out = []
+        for head in heads:
+            ref = int(head[0])
+            items = [
+                AuthoredMutation(
+                    incarnation, str(head[2]), int(operation),
+                    decode_mutation_frame(_unpack_journal(bytes(frame))),
+                )
+                for operation, frame in self.conn.execute(
+                    "SELECT operation_index,frame FROM fleet_sync_journal "
+                    "WHERE transaction_ref=? ORDER BY operation_index",
+                    (ref,),
+                )
+            ]
+            out.append((ref, int(head[1]), str(head[2]), items))
+        return out
+
+    def next_journal_transactions(
+        self, after_transaction_ref: int, *, limit: int = 200
+    ) -> list[tuple[int, list[AuthoredMutation]]]:
+        """Legacy-position paging in batches on one connection."""
+        out = []
+        cursor = int(after_transaction_ref)
+        while len(out) < limit:
+            page = self.next_journal_transaction_ref(cursor)
+            if page is None:
+                break
+            cursor, items = page
+            out.append((cursor, items))
+        return out
+
     def implied_ack_ref(self, watermarks: dict[str, int]) -> int:
         """The journal position a per-author watermark map proves consumed:
         the largest local transaction id such that every transaction at or
