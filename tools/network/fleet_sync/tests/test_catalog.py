@@ -576,3 +576,42 @@ def test_deprecated_base_repair_never_tombstones_an_address_with_a_live_base(
         ).fetchone()[0] == "new"
     finally:
         db.close()
+
+
+def test_serve_survives_a_catalog_row_whose_live_row_cannot_be_resolved(
+    tmp_path: Path,
+) -> None:
+    """A settings base row deprecated in place (the pre-fix encoding) leaves
+    the catalog citing a live row that no longer resolves. The serve emits a
+    tombstone for that address and keeps serving the rest of the transaction
+    instead of failing every round at it."""
+    db = GraphDB(tmp_path / "personal.db")
+    try:
+        catalog = MutationCatalog(db.conn, "a" * 64)
+        catalog.install()
+        with catalog.transaction(1_000, "mixed"):
+            _insert_setting(
+                db.conn, identity="gone", set_id="dashboard.example",
+                key="k1", payload='{"v":1}', deprecated=0,
+            )
+            _insert_source(db.conn, "s1", "kept")
+        # Deprecate the base row bypassing capture (legacy shape): the
+        # capture trigger fails closed on this connection, so do it on a raw
+        # connection with the update trigger removed.
+        db.conn.commit()
+        raw = sqlite3.connect(tmp_path / "personal.db")
+        raw.execute("DROP TRIGGER IF EXISTS fleet_sync_settings_update")
+        raw.execute("UPDATE settings SET deprecated=1 WHERE id='gone'")
+        raw.commit()
+        raw.close()
+        ref, = [r[0] for r in db.conn.execute(
+            "SELECT id FROM fleet_sync_transactions WHERE transaction_id='mixed'"
+        )]
+        items, more = catalog.transaction_group(ref, "a" * 64, "mixed", offset=0, limit=100)
+        assert more is False
+        by_table = {i.mutation.table: i.mutation for i in items}
+        assert by_table["sources"].tombstone is False
+        assert by_table["settings"].tombstone is True
+        assert by_table["settings"].address[:3] == ("dashboard.example", 1, "k1")
+    finally:
+        db.close()

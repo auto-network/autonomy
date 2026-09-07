@@ -219,3 +219,26 @@ async def test_direct_pull_records_the_connected_address_and_path(direct):
     assert values["address"] == "ws://100.122.70.30:9410"
     assert values["path_class"] == "tailnet"
     assert values["outcome"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_connect_failure_before_any_frame_reports_the_real_error(direct, caplog):
+    """A round that fails at connect must surface the connect error itself,
+    not an UnboundLocalError from the commit-on-failure handler reading
+    state the receive loop never created (SJC-2, 2026-09-07)."""
+    import logging
+
+    from tools.network import fleet_sync_scheduler as fss
+
+    sched, server_pub, _channel = direct
+
+    async def refuse(*a, **k):
+        raise ConnectionRefusedError(111, "Connect call failed")
+
+    caplog.set_level(logging.WARNING)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(fss, "fleet_direct_connect", refuse)
+        with pytest.raises(ConnectionRefusedError):
+            await sched._pull_scope(server_pub, ["ws://172.16.0.2:9410"], "personal")
+    assert not any("UnboundLocalError" in (r.exc_text or "") for r in caplog.records)
+    assert not any("could not commit" in r.getMessage() for r in caplog.records)

@@ -2346,6 +2346,14 @@ class FleetSyncScheduler:
         started_at_ns = time.time_ns()
         started_monotonic_ns = time.monotonic_ns()
         peer_watermark: int | None = None
+        # Bound before the connect: the commit-on-failure path below reads
+        # them on ANY failure, including one before the receive loop ever
+        # ran (connect refused), where they used to be unbound and the
+        # handler itself crashed, masking the real error (SJC-2, 2026-09-07).
+        batch: list[list[AuthoredMutation]] = []
+        batch_bytes = 0
+        empty_transactions: list[tuple[str, str, int]] = []
+        flush_batch = None
         #: The candidate that actually connected -- the tier-used readout.
         connected_address: str | None = None
         #: Harness-only trace of (origin[:8], transaction_id, timestamp) per
@@ -2471,10 +2479,6 @@ class FleetSyncScheduler:
 
             # Complete transactions are queued and applied in bounded batches
             # on one connection (auto-t43kz); see SQLiteFleetSyncStore.apply_many.
-            batch: list[list[AuthoredMutation]] = []
-            batch_bytes = 0
-            empty_transactions: list[tuple[str, str, int]] = []
-
             async def flush_batch() -> None:
                 nonlocal peer_watermark, transactions, batch, batch_bytes
                 nonlocal empty_transactions
@@ -2863,7 +2867,7 @@ class FleetSyncScheduler:
             # keeps its progress instead of repeating identically
             # (SJC-2 autonomy: 35 identical failed rounds, 2026-09-07).
             try:
-                if batch:
+                if batch and flush_batch is not None:
                     await flush_batch()
             except Exception:
                 logger.warning(
