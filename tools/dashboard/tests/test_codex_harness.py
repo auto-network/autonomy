@@ -1509,6 +1509,78 @@ def test_parse_codex_functions_exec_enriches_nested_graph_result(
     assert semantic["tags"] == ["codex", "viewer"]
 
 
+def test_resets_in_seconds_converts_to_resets_at():
+    """Codex reports the reset either absolutely or as an offset from the
+    event that carried it. Dropping the offset form left resets_at None,
+    which reads as "no reset known": the strip prints a dash and
+    reading_still_valid() is False for a window that has plainly not reset."""
+    from tools.dashboard.session_harness import extract_codex_harness_state
+
+    state = extract_codex_harness_state({
+        "type": "event_msg",
+        "timestamp": "2026-09-07T20:00:00Z",
+        "payload": {"type": "token_count", "rate_limits": {
+            "primary": {"used_percent": 42.0, "window_minutes": 10080,
+                        "resets_in_seconds": 3600},
+        }},
+    }, None)
+
+    # 2026-09-07T20:00:00Z + 1h
+    assert state["windows"]["long"]["resets_at"] == 1788814800
+
+
+def test_absolute_resets_at_wins_over_the_offset():
+    from tools.dashboard.session_harness import extract_codex_harness_state
+
+    state = extract_codex_harness_state({
+        "type": "event_msg",
+        "timestamp": "2026-09-07T20:00:00Z",
+        "payload": {"type": "token_count", "rate_limits": {
+            "primary": {"used_percent": 42.0, "window_minutes": 10080,
+                        "resets_at": 1789409110, "resets_in_seconds": 3600},
+        }},
+    }, None)
+
+    assert state["windows"]["long"]["resets_at"] == 1789409110
+
+
+def test_resets_in_seconds_without_a_parseable_timestamp_is_not_invented():
+    from tools.dashboard.session_harness import extract_codex_harness_state
+
+    state = extract_codex_harness_state({
+        "type": "event_msg",
+        "timestamp": "not-a-timestamp",
+        "payload": {"type": "token_count", "rate_limits": {
+            "primary": {"used_percent": 42.0, "window_minutes": 10080,
+                        "resets_in_seconds": 3600},
+        }},
+    }, None)
+
+    assert state["windows"]["long"]["resets_at"] is None
+
+
+def test_long_only_codex_window_is_not_a_fault():
+    """OpenAI suspended the rolling 5-hour window on 2026-07-12, so a row
+    carrying only a weekly window is CORRECT. `graph harness` must print the
+    absent short window as a dash, not as an error."""
+    from tools.graph.harness_cmd import _fmt_reset
+
+    from tools.dashboard.session_harness import extract_codex_harness_state
+
+    state = extract_codex_harness_state({
+        "type": "event_msg",
+        "timestamp": "2026-09-07T20:00:00Z",
+        "payload": {"type": "token_count", "rate_limits": {
+            "primary": {"used_percent": 1.0, "window_minutes": 10080,
+                        "resets_at": 1789409110},
+        }},
+    }, None)
+
+    assert set(state["windows"]) == {"long"}
+    assert _fmt_reset(None, 1788808743) == "—"
+    assert _fmt_reset(1789409110, 1788808743) != "—"
+
+
 def test_single_weekly_window_lands_in_long_slot():
     """Codex reporting only its 7-day window must not render under '5h'.
 

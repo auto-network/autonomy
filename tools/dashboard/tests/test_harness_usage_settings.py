@@ -356,77 +356,40 @@ def test_codex_harness_state_preserves_last_user_message_at():
     assert state["windows"]["short"]["used_percent"] == 4.0
 
 
-def test_publish_harness_usage_snapshot_skips_codex_when_no_new_user_messages(monkeypatch):
-    """Codex telemetry comes from session transcripts, so the publisher
-    dedups on (session signature × latest user message) — replaying the
-    same state twice produces one write.
+def _stub_fleet_gate(monkeypatch, *, allowed: bool = True) -> None:
+    """Pin the singular-ownership gate the usage tick runs behind.
 
-    auto-08n3f: Claude usage is now substrate-backed and runs every
-    tick unconditionally, so this dedup applies to codex only.
+    Without this a test's result depends on whether the machine running it
+    happens to be the Fleet tunnel-server, which is not a property of the
+    code under test.
     """
-    rows = [{
-        "tmux_name": "codex-a",
-        "harness": "codex",
-        "harness_state": json.dumps({
-            "last_user_message_at": "2026-05-02T21:00:00Z",
-        }),
-    }]
-    writes: list[str] = []
+    from types import SimpleNamespace
+    from tools.network import fleet_tunnel_server
 
-    monkeypatch.setattr(server.dashboard_db, "get_live_sessions", lambda: rows)
     monkeypatch.setattr(
-        server,
-        "_collect_codex_usage_payloads",
-        lambda rows, updated_at: [(
-            "codex:default",
-            hus.make_unavailable_usage_payload(
-                harness="codex",
-                identity_id="default",
-                identity_label="default",
-                source="transcript",
-                note="test",
-                updated_at=updated_at,
-            ),
-        )],
+        fleet_tunnel_server, "state",
+        lambda: SimpleNamespace(
+            allowed=allowed, managed=True,
+            reason="selected" if allowed else "other-machine-selected",
+        ),
     )
-    monkeypatch.setattr(
-        server,
-        "_collect_claude_usage_payloads",
-        lambda rows, updated_at: [],
-    )
-    monkeypatch.setattr(
-        server.graph_ops,
-        "upsert_by_key",
-        lambda set_id, schema_revision, key, payload, org=None, state="raw": writes.append(key) or "sid",
-    )
-    monkeypatch.setattr(server, "operator_is_idle", lambda threshold_minutes=15: False)
-    server._harness_usage_last_refresh_context.clear()
-
-    server._publish_harness_usage_snapshot()
-    server._publish_harness_usage_snapshot()
-
-    assert writes == ["codex:default"]
 
 
 def test_publish_harness_usage_snapshot_collects_claude_but_writes_only_changes(
     monkeypatch,
 ):
-    """auto-08n3f: Claude path is decoupled from live sessions, so it
-    runs every tick regardless of the session-signature dedup that
-    governs codex.
+    """auto-08n3f: the Claude path is decoupled from live sessions, so it
+    runs every tick; auto-pojkz removed the session-signature dedup that
+    used to gate codex alongside it.
     """
     writes: list[str] = []
 
+    _stub_fleet_gate(monkeypatch)
     monkeypatch.setattr(server.dashboard_db, "get_live_sessions", lambda: [])
     monkeypatch.setattr(
         server,
-        "_collect_codex_usage_payloads",
-        lambda rows, updated_at: [],
-    )
-    monkeypatch.setattr(
-        server,
         "_collect_claude_usage_payloads",
-        lambda rows, updated_at: [(
+        lambda updated_at: [(
             "claude:org:org-X",
             hus.make_unavailable_usage_payload(
                 harness="claude",
@@ -446,7 +409,6 @@ def test_publish_harness_usage_snapshot_collects_claude_but_writes_only_changes(
         lambda set_id, schema_revision, key, payload, org=None, state="raw": writes.append(key) or "sid",
     )
     monkeypatch.setattr(server, "operator_is_idle", lambda threshold_minutes=15: False)
-    server._harness_usage_last_refresh_context.clear()
 
     server._publish_harness_usage_snapshot()
     server._publish_harness_usage_snapshot()
@@ -454,6 +416,158 @@ def test_publish_harness_usage_snapshot_collects_claude_but_writes_only_changes(
     # Substrate enumeration still runs every tick, but timestamp-only refreshes
     # do not rewrite the Personal/raw Setting.
     assert writes == ["claude:org:org-X"]
+
+
+# ── auto-pojkz: one Codex writer, reading-time clock, cold-row expiry ──
+
+
+def _codex_state(*, updated_at: str, used_percent: float = 4.0) -> dict:
+    return {
+        "kind": "rate_limits",
+        "source": "transcript",
+        "updated_at": updated_at,
+        "limit_id": "codex",
+        "windows": {
+            "long": {
+                "used_percent": used_percent,
+                "window_minutes": 10080,
+                "resets_at": 1789409110,
+            },
+        },
+    }
+
+
+def test_codex_row_has_single_writer(monkeypatch):
+    """The poller tick must not write a codex row at all: the session tail
+    is the only Codex writer, so the two can no longer stamp one row with
+    two different clocks."""
+    writes: list[str] = []
+
+    _stub_fleet_gate(monkeypatch)
+    monkeypatch.setattr(server, "operator_is_idle", lambda threshold_minutes=15: False)
+    monkeypatch.setattr(
+        server.dashboard_db, "get_live_sessions",
+        lambda: [{
+            "tmux_name": "codex-a",
+            "harness": "codex",
+            "harness_state": json.dumps(_codex_state(updated_at="2026-09-07T20:00:00Z")),
+        }],
+    )
+    monkeypatch.setattr(server, "_collect_claude_usage_payloads", lambda updated_at: [])
+    monkeypatch.setattr(
+        server.graph_ops, "upsert_by_key",
+        lambda set_id, schema_revision, key, payload, org=None, state="raw":
+            writes.append(key) or "sid",
+    )
+
+    server._publish_harness_usage_snapshot()
+
+    assert writes == []
+    assert not hasattr(server, "_collect_codex_usage_payloads")
+
+
+def test_codex_updated_at_is_event_timestamp(monkeypatch):
+    """The row's updated_at is when the reading was TAKEN, not when a tick
+    happened to notice it."""
+    writes: list[dict] = []
+    monkeypatch.setattr(
+        session_monitor.graph_ops, "upsert_by_key",
+        lambda set_id, schema_revision, key, payload, *, org, state="raw":
+            writes.append(payload) or "sid",
+    )
+
+    session_monitor._publish_codex_harness_usage_setting(
+        {"harness": "codex"}, _codex_state(updated_at="2026-09-07T20:00:00Z"),
+    )
+
+    assert writes[0]["updated_at"] == "2026-09-07T20:00:00Z"
+
+
+def test_codex_publishes_each_changed_reading_without_user_message(monkeypatch):
+    """Codex rate limits advance on ASSISTANT turns, so a long autonomous run
+    with no new user message must still publish every changed reading. The
+    old last_user_message_at gate froze exactly this case."""
+    writes: list[dict] = []
+    monkeypatch.setattr(
+        session_monitor.graph_ops, "upsert_by_key",
+        lambda set_id, schema_revision, key, payload, *, org, state="raw":
+            writes.append(payload) or "sid",
+    )
+
+    for pct, at in ((4.0, "2026-09-07T20:00:00Z"),
+                    (5.0, "2026-09-07T20:05:00Z"),
+                    (6.0, "2026-09-07T20:10:00Z")):
+        session_monitor._publish_codex_harness_usage_setting(
+            {"harness": "codex"}, _codex_state(updated_at=at, used_percent=pct),
+        )
+
+    assert [w["windows"]["long"]["used_percent"] for w in writes] == [4.0, 5.0, 6.0]
+
+
+def _run_codex_expiry(monkeypatch, *, stored: dict | None, live_codex: bool):
+    published: list[dict] = []
+    monkeypatch.setattr(server, "_existing_usage_payload", lambda key: stored)
+    monkeypatch.setattr(
+        server.graph_ops, "upsert_by_key",
+        lambda set_id, schema_revision, key, payload, org=None, state="raw":
+            published.append(payload) or "sid",
+    )
+    hus.clear_published_payload_cache()
+    rows = [{"tmux_name": "codex-a", "harness": "codex"}] if live_codex else []
+    server._expire_cold_codex_usage_row(rows, updated_at="2026-09-07T21:00:00Z")
+    return published
+
+
+def _cold_codex_row(age_seconds: float, *, status: str = "ok") -> dict:
+    import datetime as _dt
+    taken = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=age_seconds)
+    return {
+        "harness": "codex", "identity_id": "default", "identity_label": "default",
+        "status": status, "source": "transcript", "plan_type": "pro",
+        "updated_at": taken.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "windows": {"long": {"used_percent": 12.0, "window_minutes": 10080,
+                             "resets_at": 1789409110}},
+    }
+
+
+def test_codex_cold_row_expires_after_three_intervals(monkeypatch):
+    age = 3 * server._HARNESS_USAGE_POLL_INTERVAL + 60
+    published = _run_codex_expiry(
+        monkeypatch, stored=_cold_codex_row(age), live_codex=False,
+    )
+
+    assert len(published) == 1
+    assert published[0]["status"] == "unavailable"
+    assert published[0]["source"] == "transcript"
+    assert "no Codex reading since" in published[0]["note"]
+    # The last good reading survives in the note rather than vanishing.
+    assert "long 12.0%" in published[0]["note"]
+
+
+def test_codex_cold_row_survives_until_three_intervals(monkeypatch):
+    age = 3 * server._HARNESS_USAGE_POLL_INTERVAL - 60
+    assert _run_codex_expiry(
+        monkeypatch, stored=_cold_codex_row(age), live_codex=False,
+    ) == []
+
+
+def test_codex_cold_row_not_expired_while_a_codex_session_is_live(monkeypatch):
+    age = 3 * server._HARNESS_USAGE_POLL_INTERVAL + 60
+    assert _run_codex_expiry(
+        monkeypatch, stored=_cold_codex_row(age), live_codex=True,
+    ) == []
+
+
+def test_codex_cold_row_not_rewritten_when_already_unavailable(monkeypatch):
+    age = 30 * server._HARNESS_USAGE_POLL_INTERVAL
+    assert _run_codex_expiry(
+        monkeypatch, stored=_cold_codex_row(age, status="unavailable"),
+        live_codex=False,
+    ) == []
+
+
+def test_codex_cold_row_expiry_tolerates_a_missing_row(monkeypatch):
+    assert _run_codex_expiry(monkeypatch, stored=None, live_codex=False) == []
 
 
 def test_operator_is_idle_delegates_to_operator_activity(monkeypatch):
@@ -479,7 +593,6 @@ def test_publish_harness_usage_snapshot_skips_when_operator_is_idle(monkeypatch)
         "get_live_sessions",
         lambda: (_ for _ in ()).throw(AssertionError("poller should skip before reading sessions")),
     )
-    server._harness_usage_last_refresh_context.clear()
 
     server._publish_harness_usage_snapshot()
 
@@ -537,7 +650,7 @@ def test_collect_claude_usage_writes_one_row_per_credential(graph_db_env, monkey
 
     monkeypatch.setattr(server, "_fetch_claude_oauth_usage", _fake_fetch)
 
-    payloads = server._collect_claude_usage_payloads([], "2026-05-04T13:00:00Z")
+    payloads = server._collect_claude_usage_payloads("2026-05-04T13:00:00Z")
 
     assert sorted(fetch_calls) == ["tok-default", "tok-primary"]
     keys = [k for k, _ in payloads]
@@ -559,7 +672,7 @@ def test_collect_claude_usage_returns_nothing_when_no_credentials(
         lambda token: (_ for _ in ()).throw(AssertionError("must not call OAuth")),
     )
 
-    payloads = server._collect_claude_usage_payloads([], "2026-05-04T13:00:00Z")
+    payloads = server._collect_claude_usage_payloads("2026-05-04T13:00:00Z")
 
     assert payloads == []
 
@@ -583,7 +696,7 @@ def test_collect_claude_usage_writes_unavailable_on_failure(
     monkeypatch.setattr(server, "_fetch_claude_oauth_usage", _fake_fetch)
 
     payloads = dict(
-        server._collect_claude_usage_payloads([], "2026-05-04T13:00:00Z"),
+        server._collect_claude_usage_payloads("2026-05-04T13:00:00Z"),
     )
 
     assert set(payloads) == {"claude:org:org-DEFAULT", "claude:org:org-PRIMARY"}
@@ -607,7 +720,7 @@ def test_collect_claude_usage_no_session_dependency(graph_db_env, monkeypatch):
         lambda token: (_CLAUDE_USAGE_BODY, {}),
     )
 
-    payloads = server._collect_claude_usage_payloads([], "2026-05-04T13:00:00Z")
+    payloads = server._collect_claude_usage_payloads("2026-05-04T13:00:00Z")
 
     keys = [k for k, _ in payloads]
     assert keys == ["claude:org:org-X"]
@@ -695,7 +808,7 @@ def test_collect_claude_usage_probes_each_setup_token_row(graph_db_env, monkeypa
         lambda token: (_ for _ in ()).throw(AssertionError("bundle path must not run")),
     )
 
-    payloads = dict(server._collect_claude_usage_payloads([], "2026-09-07T20:00:00Z"))
+    payloads = dict(server._collect_claude_usage_payloads("2026-09-07T20:00:00Z"))
 
     assert sorted(probed) == ["sk-ant-oat01-A", "sk-ant-oat01-B"]
     assert set(payloads) == {"claude:org:org-A", "claude:org:org-B"}
@@ -717,7 +830,7 @@ def test_collect_claude_usage_joins_alias_from_credentials(graph_db_env, monkeyp
         lambda token: (_ for _ in ()).throw(AssertionError("bundle must not be used")),
     )
 
-    payloads = dict(server._collect_claude_usage_payloads([], "2026-09-07T20:00:00Z"))
+    payloads = dict(server._collect_claude_usage_payloads("2026-09-07T20:00:00Z"))
 
     assert payloads["claude:org:org-X"]["alias"] == "gmail"
     assert payloads["claude:org:org-X"]["status"] == "ok"
@@ -735,7 +848,7 @@ def test_collect_claude_usage_probe_failure_keeps_valid_reading(graph_db_env, mo
         lambda token: (_ for _ in ()).throw(RuntimeError("Claude usage probe failed: URLError")),
     )
 
-    payloads = dict(server._collect_claude_usage_payloads([], "2026-09-07T20:00:00Z"))
+    payloads = dict(server._collect_claude_usage_payloads("2026-09-07T20:00:00Z"))
 
     assert payloads == {}
 
@@ -750,7 +863,7 @@ def test_collect_claude_usage_probe_failure_writes_unavailable_when_no_valid_rea
         lambda token: (_ for _ in ()).throw(RuntimeError("Claude usage probe returned HTTP 401")),
     )
 
-    payloads = dict(server._collect_claude_usage_payloads([], "2026-09-07T20:00:00Z"))
+    payloads = dict(server._collect_claude_usage_payloads("2026-09-07T20:00:00Z"))
 
     row = payloads["claude:org:org-X"]
     assert row["status"] == "unavailable"
@@ -773,30 +886,23 @@ def test_collect_claude_usage_falls_back_to_bundle_without_setup_token(
         lambda token: fetched.append(token) or (_CLAUDE_USAGE_BODY, {}),
     )
 
-    payloads = dict(server._collect_claude_usage_payloads([], "2026-09-07T20:00:00Z"))
+    payloads = dict(server._collect_claude_usage_payloads("2026-09-07T20:00:00Z"))
 
     assert fetched == ["tok-N"]
     assert payloads["claude:org:org-N"]["source"] == "oauth_usage"
 
 
 def _snapshot_with_fleet_gate(monkeypatch, *, allowed: bool) -> list[str]:
-    from types import SimpleNamespace
-    from tools.network import fleet_tunnel_server
-
     claude_runs: list[str] = []
+    _stub_fleet_gate(monkeypatch, allowed=allowed)
     monkeypatch.setattr(server.dashboard_db, "get_live_sessions", lambda: [])
     monkeypatch.setattr(server, "operator_is_idle", lambda threshold_minutes=15: False)
-    monkeypatch.setattr(server, "_collect_codex_usage_payloads", lambda rows, updated_at: [])
+    monkeypatch.setattr(server, "_expire_cold_codex_usage_row",
+                        lambda rows, *, updated_at: None)
     monkeypatch.setattr(
         server, "_publish_claude_harness_usage_unconditional",
         lambda updated_at: claude_runs.append(updated_at),
     )
-    monkeypatch.setattr(
-        fleet_tunnel_server, "state",
-        lambda: SimpleNamespace(allowed=allowed, managed=True,
-                                reason="selected" if allowed else "other-machine-selected"),
-    )
-    server._harness_usage_last_refresh_context.clear()
     server._publish_harness_usage_snapshot()
     return claude_runs
 
@@ -867,7 +973,7 @@ def test_collect_claude_usage_refetches_when_stored_reading_is_older_than_interv
 
     monkeypatch.setattr(server, "_fetch_claude_oauth_usage", _fake_fetch)
 
-    payloads = server._collect_claude_usage_payloads([], "2026-09-07T19:00:00Z")
+    payloads = server._collect_claude_usage_payloads("2026-09-07T19:00:00Z")
 
     assert fetch_calls == ["tok-default"]
     assert [k for k, _ in payloads] == ["claude:org:org-X"]
@@ -893,7 +999,7 @@ def test_collect_claude_usage_skips_fetch_when_stored_reading_is_fresh(
         lambda token: (_ for _ in ()).throw(AssertionError("must not call /usage")),
     )
 
-    payloads = server._collect_claude_usage_payloads([], "2026-09-07T19:00:00Z")
+    payloads = server._collect_claude_usage_payloads("2026-09-07T19:00:00Z")
 
     assert payloads == []
 

@@ -15026,7 +15026,6 @@ _watcher_errors: dict[str, str] = {}  # helper_name -> last error string
 # the watcher loops every 5s — without this we'd flood every connected
 # client with identical payloads 6x more often than the data changes).
 _worktrees_last_signature: str | None = None
-_harness_usage_last_refresh_context: dict[str, tuple[tuple[str, ...], float]] = {}
 
 
 _WAITING_LIST_LIMIT = 5
@@ -15579,48 +15578,36 @@ def _publish_harness_usage_snapshot() -> None:
     if operator_is_idle(threshold_minutes=15):
         return
 
-    rows = dashboard_db.get_live_sessions()
-    updated_at = _now_iso()
-
-    codex_rows = [
-        row for row in rows
-        if str(row.get("harness") or "claude").strip().lower() == "codex"
-    ]
-    claude_rows = [
-        row for row in rows
-        if str(row.get("harness") or "claude").strip().lower() == "claude"
-    ]
-
-    _maybe_publish_harness_usage(
-        harness="codex",
-        rows=codex_rows,
-        updated_at=updated_at,
-        collector=_collect_codex_usage_payloads,
-    )
-    # auto-08n3f: Claude usage is enumerated from substrate-stored
-    # credentials, not from live sessions, so the publisher runs every
-    # tick regardless of how many Claude sessions are alive. Codex still
-    # gates on live sessions because its telemetry is harvested from
-    # session transcripts.
-    #
-    # auto-r5wlw: the Claude reading is now a one-token inference probe
-    # per account, and the rows are personal-homed and fleet-synced, so
-    # exactly one machine may probe. Reuse the singular-ownership gate
+    # Everything this tick does is GLOBAL row maintenance: probing the vendor
+    # for a Claude reading (auto-r5wlw) and expiring a Codex row nobody is
+    # refreshing (auto-pojkz). Both write personal-homed, fleet-synced rows, so
+    # exactly one machine may do them -- reuse the singular-ownership gate
     # claude_credentials_refresh already uses for the same reason.
-    allowed, reason = _claude_usage_probe_allowed()
+    #
+    # Codex READINGS are deliberately NOT here. They are written by
+    # session_monitor._publish_codex_harness_usage_setting straight off each
+    # machine's own live transcripts, which is a local observation and correct
+    # to do everywhere. auto-08n3f did the same for Claude by moving it off
+    # live sessions and onto the substrate credential rows.
+    allowed, reason = _fleet_usage_maintenance_allowed()
     if not allowed:
         logger.info(
-            "claude harness usage: skipping tick, not the Fleet tunnel-server "
+            "harness usage: skipping tick, not the Fleet tunnel-server "
             "machine (reason=%s)", reason,
         )
         return
+
+    updated_at = _now_iso()
     _publish_claude_harness_usage_unconditional(
         updated_at=updated_at,
     )
+    _expire_cold_codex_usage_row(
+        dashboard_db.get_live_sessions(), updated_at=updated_at,
+    )
 
 
-def _claude_usage_probe_allowed() -> tuple[bool, str]:
-    """Whether this dashboard is the one Fleet machine that probes Claude usage.
+def _fleet_usage_maintenance_allowed() -> tuple[bool, str]:
+    """Whether this dashboard is the one Fleet machine that maintains usage rows.
 
     ``fleet_tunnel_server.state()`` allows an installation that has not
     initialized the Fleet model at all (single node) and otherwise exactly
@@ -15635,109 +15622,92 @@ def _claude_usage_probe_allowed() -> tuple[bool, str]:
     return bool(eligibility.allowed), str(eligibility.reason)
 
 
+#: How stale a Codex reading may get, in poll intervals, before a tick with no
+#: live Codex session anywhere to refresh it retires the row.
+_CODEX_COLD_ROW_INTERVALS = 3
+
+
+def _expire_cold_codex_usage_row(
+    rows: list[dict[str, Any]], *, updated_at: str,
+) -> None:
+    """Retire the Codex row once nothing is left to refresh it.
+
+    Codex telemetry only exists while a Codex session is streaming
+    ``token_count`` events, so when the last one ends the stored row simply
+    stops moving -- and, because it still says ``ok``, the strip presents a
+    days-old reading as the current one. Nothing else expires it: the session
+    tail is the only writer and a dead session writes nothing.
+
+    The note states the age of the READING, not a claim about which sessions
+    are alive: this runs on one Fleet machine that cannot see another
+    machine's sessions, and a reading older than
+    ``_CODEX_COLD_ROW_INTERVALS`` ticks is stale wherever it came from. The
+    last good windows are preserved in the note so the account picker can
+    still read what the account had.
+    """
+    if any(
+        str(row.get("harness") or "claude").strip().lower() == "codex"
+        for row in rows
+    ):
+        return
+    key = _harness_usage_settings.make_harness_usage_key("codex", "default")
+    existing = _existing_usage_payload(key)
+    if not isinstance(existing, dict) or existing.get("status") != "ok":
+        return
+    stored_at = _harness_usage_settings.iso_to_epoch_seconds(
+        existing.get("updated_at"),
+    )
+    if stored_at is None:
+        return
+    age = time.time() - stored_at
+    if age < _CODEX_COLD_ROW_INTERVALS * _HARNESS_USAGE_POLL_INTERVAL:
+        return
+    windows = existing.get("windows") if isinstance(existing.get("windows"), dict) else {}
+    last_seen = ", ".join(
+        f"{name} {(window or {}).get('used_percent')}%"
+        for name, window in sorted(windows.items())
+        if isinstance(window, dict)
+    )
+    note = f"no Codex reading since {existing.get('updated_at')}"
+    if last_seen:
+        note = f"{note}; last seen {last_seen}"
+    logger.info(
+        "codex harness usage: retiring cold row (age %.0fs, no live Codex session)",
+        age,
+    )
+    _harness_usage_settings.publish_if_changed(
+        key,
+        _harness_usage_settings.make_unavailable_usage_payload(
+            harness="codex",
+            identity_id="default",
+            identity_label="default",
+            source="transcript",
+            note=note[:200],
+            updated_at=updated_at,
+            plan_type=existing.get("plan_type"),
+        ),
+        upsert_by_key=graph_ops.upsert_by_key,
+    )
+
+
 def _publish_claude_harness_usage_unconditional(
     *, updated_at: str,
 ) -> None:
     """Run the Claude collector every tick and persist changed payloads.
 
-    Bypasses the `rows`-based dedup in :func:`_maybe_publish_harness_usage`
-    because Claude usage no longer depends on live sessions — every
-    installed credentials row gets a tick whether or not anyone is
-    burning it. The collector decides whether each row is `ok` or
-    `unavailable`; the shared publisher suppresses unchanged telemetry.
+    Claude usage does not depend on live sessions: every installed
+    account gets a tick whether or not anyone is burning it (auto-08n3f).
+    The collector decides whether each row is `ok` or `unavailable`;
+    :func:`harness_usage_settings.publish_if_changed` suppresses telemetry
+    that has not moved.
     """
-    payloads = _collect_claude_usage_payloads([], updated_at)
+    payloads = _collect_claude_usage_payloads(updated_at)
     for key, payload in payloads:
         _harness_usage_settings.publish_if_changed(
             key,
             payload,
             upsert_by_key=graph_ops.upsert_by_key,
         )
-
-
-def _maybe_publish_harness_usage(
-    *,
-    harness: str,
-    rows: list[dict[str, Any]],
-    updated_at: str,
-    collector,
-) -> None:
-    if not rows:
-        _harness_usage_last_refresh_context.pop(harness, None)
-        return
-
-    session_signature = tuple(sorted(
-        str(row.get("tmux_name") or "").strip()
-        for row in rows
-        if str(row.get("tmux_name") or "").strip()
-    ))
-    latest_user_message_at = _latest_harness_user_message_at(rows)
-    previous_context = _harness_usage_last_refresh_context.get(harness)
-    if previous_context is not None:
-        previous_signature, previous_user_message_at = previous_context
-        if (
-            previous_signature == session_signature
-            and latest_user_message_at <= previous_user_message_at
-        ):
-            return
-
-    payloads = collector(rows, updated_at)
-    for key, payload in payloads:
-        _harness_usage_settings.publish_if_changed(
-            key,
-            payload,
-            upsert_by_key=graph_ops.upsert_by_key,
-        )
-    _harness_usage_last_refresh_context[harness] = (
-        session_signature,
-        latest_user_message_at,
-    )
-
-
-def _latest_harness_user_message_at(rows: list[dict[str, Any]]) -> float:
-    latest = 0.0
-    for row in rows:
-        state = _parse_harness_state(row.get("harness_state"))
-        latest = max(latest, _state_timestamp(state, "last_user_message_at"))
-    return latest
-
-
-def _collect_codex_usage_payloads(
-    rows: list[dict[str, Any]],
-    updated_at: str,
-) -> list[tuple[str, dict[str, Any]]]:
-    freshest_state: dict[str, Any] | None = None
-    freshest_ts = 0.0
-    for row in rows:
-        state = _parse_harness_state(row.get("harness_state"))
-        if not _has_rate_limit_state(state):
-            continue
-        state_ts = _state_timestamp(state, "updated_at")
-        if freshest_state is None or state_ts >= freshest_ts:
-            freshest_state = state
-            freshest_ts = state_ts
-
-    key = _harness_usage_settings.make_harness_usage_key("codex", "default")
-    if freshest_state is None:
-        return [(
-            key,
-            _harness_usage_settings.make_unavailable_usage_payload(
-                harness="codex",
-                identity_id="default",
-                identity_label="default",
-                source="transcript",
-                note="No transcript rate-limit telemetry captured yet",
-                updated_at=updated_at,
-            ),
-        )]
-
-    return [(
-        key,
-        _harness_usage_settings.normalize_codex_usage_payload(
-            freshest_state,
-            updated_at=updated_at,
-        ),
-    )]
 
 
 #: The model the usage probe asks for one token from. Any model the setup
@@ -15748,7 +15718,6 @@ _CLAUDE_USAGE_PROBE_URL = "https://api.anthropic.com/v1/messages"
 
 
 def _collect_claude_usage_payloads(
-    rows: list[dict[str, Any]],
     updated_at: str,
 ) -> list[tuple[str, dict[str, Any]]]:
     """Build harness-usage payloads for every installed Claude account.
@@ -15765,16 +15734,13 @@ def _collect_claude_usage_payloads(
     install in progress) falls back to the legacy ``GET /api/oauth/usage``
     bundle path so it still reports.
 
-    The row key is the bare ``claude:org:<uuid>``. ``rows`` is retained for
-    symmetry with ``_collect_codex_usage_payloads`` and unused.
+    The row key is the bare ``claude:org:<uuid>``.
 
     On failure a row is written with ``status='unavailable'`` unless the
     stored reading is still valid (its window has not reset), in which case
     the stored reading is kept -- a capped account answers with 429 and
     that IS a reading, handled in :func:`_claude_usage_via_probe`.
     """
-    del rows  # Claude usage is enumerated from substrate rows now.
-
     from tools.graph import ops as graph_ops_local
     from tools.graph.schemas.claude_credentials import (
         CLAUDE_CREDENTIALS_SET_ID,
