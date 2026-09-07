@@ -211,6 +211,20 @@ class SessionHarness(Protocol):
     def extract_context_tokens(self, raw_entry: dict, current_tokens: int) -> int:
         """Update the current context-token estimate from a raw transcript event."""
 
+    def extract_usage_delta(self, raw_entry: dict) -> dict[str, int] | None:
+        """Tokens this one entry billed, or None if it billed none.
+
+        Distinct from :meth:`extract_context_tokens`, which reports how large
+        the context is *right now* and falls back to a smaller number after a
+        compaction. This returns what a single turn consumed, so summing it
+        across a transcript is the session's true spend and a compaction
+        cannot corrupt the total: the next turn simply bills less input.
+
+        Keys are :data:`dashboard_db.USAGE_LEDGER_COLUMNS` minus
+        ``usage_turns``, which the caller counts. Implementations must be
+        cheap and tolerant of missing fields.
+        """
+
     def extract_model(self, raw_entry: dict, current_model: str | None) -> str | None:
         """Return the model id observed in this entry, or ``current_model`` if none.
 
@@ -403,6 +417,33 @@ class ClaudeSessionHarness:
         )
         return ctx if ctx > 0 else current_tokens
 
+    def extract_usage_delta(self, raw_entry: dict) -> dict[str, int] | None:
+        """Per-turn billed tokens from an assistant entry's ``usage`` block.
+
+        Verified against a live transcript (2026-09-07): every assistant
+        entry carries ``message.usage`` with ``input_tokens``,
+        ``cache_creation_input_tokens``, ``cache_read_input_tokens`` and
+        ``output_tokens``. The block also holds ``iterations``, a per-message
+        breakdown whose entries sum to these same totals -- read the totals,
+        never both, or every turn counts twice.
+        """
+        if raw_entry.get("type") != "assistant":
+            return None
+        usage = (raw_entry.get("message") or {}).get("usage")
+        if not isinstance(usage, dict):
+            return None
+        delta = {
+            "usage_input_tokens": _usage_int(usage.get("input_tokens")),
+            "usage_cache_creation_tokens": _usage_int(
+                usage.get("cache_creation_input_tokens"),
+            ),
+            "usage_cache_read_tokens": _usage_int(
+                usage.get("cache_read_input_tokens"),
+            ),
+            "usage_output_tokens": _usage_int(usage.get("output_tokens")),
+        }
+        return delta if any(delta.values()) else None
+
     def extract_model(self, raw_entry: dict, current_model: str | None) -> str | None:
         if raw_entry.get("type") != "assistant":
             return current_model
@@ -531,6 +572,21 @@ class CodexSessionHarness:
 
     def extract_context_tokens(self, raw_entry: dict, current_tokens: int) -> int:
         return extract_codex_context_tokens(raw_entry, current_tokens)
+
+    def extract_usage_delta(self, raw_entry: dict) -> dict[str, int] | None:
+        """Not yet: Codex needs its own accounting rule, tracked separately.
+
+        Codex ``token_count`` events carry BOTH ``info.last_token_usage``
+        (one turn) and ``info.total_token_usage`` (cumulative). Summing the
+        per-turn field is only correct if exactly one such event is emitted
+        per turn; if Codex also emits them mid-stream, summing double-counts,
+        and the safe form is to difference the cumulative field instead.
+        Deciding that requires reading real rollouts, and returning a
+        plausible guess here would silently corrupt a spend figure. Until
+        then a Codex session accrues no ledger, which reads as zero rather
+        than as a wrong number.
+        """
+        return None
 
     def extract_model(self, raw_entry: dict, current_model: str | None) -> str | None:
         return extract_codex_model(raw_entry, current_model)
@@ -2852,6 +2908,19 @@ def extract_codex_context_tokens(raw_entry: dict, current_tokens: int) -> int:
             if val > 0:
                 return val
     return current_tokens
+
+
+def _usage_int(value: Any) -> int:
+    """A usage count as a non-negative int; anything unparseable is zero.
+
+    A ledger entry is money, so a malformed field must not poison the sum
+    with a negative or a string.
+    """
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
 
 
 def _coerce_rate_limit_int(value: Any) -> int | None:

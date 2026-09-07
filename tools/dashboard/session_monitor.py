@@ -3433,6 +3433,11 @@ class SessionMonitor:
         parsed_entries: list = []
         last_message: str | None = None
         context_tokens = row.get("context_tokens", 0)
+        # Token ledger (auto-pbrhs): what THIS window's lines billed. Starts
+        # at zero every pass because it is persisted as an increment, under
+        # the same offset CAS as entry_count -- so an ack for bytes already
+        # drained is dropped whole rather than counted twice.
+        usage_add: dict[str, int] = {}
         prior_model = row.get("model") or None
         model = prior_model
         prior_harness_state_raw = row.get("harness_state") or "{}"
@@ -3461,6 +3466,11 @@ class SessionMonitor:
             if text:
                 last_message = text
             context_tokens = harness.extract_context_tokens(entry, context_tokens)
+            usage_delta = harness.extract_usage_delta(entry)
+            if usage_delta:
+                for column, amount in usage_delta.items():
+                    usage_add[column] = usage_add.get(column, 0) + amount
+                usage_add["usage_turns"] = usage_add.get("usage_turns", 0) + 1
             model = harness.extract_model(entry, model)
             harness_state = harness.extract_harness_state(entry, harness_state) or {}
             try:
@@ -3495,6 +3505,7 @@ class SessionMonitor:
             "entries": parsed_entries,
             "last_message": last_message,
             "context_tokens": context_tokens,
+            "usage_add": usage_add,
             "model_to_write": model if (model and model != prior_model) else None,
             "harness_state_patch": (
                 json.dumps(patch, sort_keys=True) if patch else None
@@ -3554,6 +3565,7 @@ class SessionMonitor:
             last_activity=window["mtime"],
             last_message=window["last_message"],
             entry_count_add=window["raw_count"],
+            usage_add=window.get("usage_add"),
             context_tokens=window["context_tokens"],
             model=window["model_to_write"],
             harness_state_patch=window["harness_state_patch"],

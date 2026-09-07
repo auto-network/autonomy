@@ -34,6 +34,17 @@ _conn_owner: int | None = None
 _active_path: Path | None = None
 _thread_local = threading.local()
 
+#: The per-session token ledger (auto-pbrhs). Components, not a total: an
+#: input token, a cache write and a cache read are priced an order of
+#: magnitude apart, so a single number could not be turned back into money.
+USAGE_LEDGER_COLUMNS = (
+    "usage_input_tokens",
+    "usage_cache_creation_tokens",
+    "usage_cache_read_tokens",
+    "usage_output_tokens",
+    "usage_turns",
+)
+
 _SCHEMA = """\
 CREATE TABLE IF NOT EXISTS tmux_sessions (
     tmux_name           TEXT PRIMARY KEY,
@@ -81,6 +92,17 @@ CREATE TABLE IF NOT EXISTS tmux_sessions (
     last_message        TEXT DEFAULT '',
     entry_count         INTEGER DEFAULT 0,
     context_tokens      INTEGER DEFAULT 0,
+    -- Cumulative billed tokens for the session (auto-pbrhs). context_tokens
+    -- above is a GAUGE (how big the context is right now, and it falls on a
+    -- compaction); these are COUNTERS that only rise, summed from each
+    -- assistant turn's own usage block, which is why a compaction cannot
+    -- corrupt them. Kept as components, not one total, because their prices
+    -- differ by an order of magnitude.
+    usage_input_tokens          INTEGER DEFAULT 0,
+    usage_cache_creation_tokens INTEGER DEFAULT 0,
+    usage_cache_read_tokens     INTEGER DEFAULT 0,
+    usage_output_tokens         INTEGER DEFAULT 0,
+    usage_turns                 INTEGER DEFAULT 0,
     label               TEXT DEFAULT '',
     topics              TEXT DEFAULT '[]',
     role                TEXT DEFAULT '',
@@ -478,6 +500,21 @@ def init_db(db_path: Path | None = None) -> None:
         _conn.execute(
             "ALTER TABLE tmux_sessions ADD COLUMN link_seq INTEGER NOT NULL DEFAULT 0"
         )
+        _conn.commit()
+    # Migrate: per-session token ledger (auto-pbrhs). Additive counters
+    # written by the drain pass under the same path/generation/offset CAS
+    # that guards entry_count, so a re-read of already-drained bytes cannot
+    # double-count them.
+    try:
+        _conn.execute("SELECT usage_input_tokens FROM tmux_sessions LIMIT 0")
+    except sqlite3.OperationalError:
+        for column in (
+            "usage_input_tokens", "usage_cache_creation_tokens",
+            "usage_cache_read_tokens", "usage_output_tokens", "usage_turns",
+        ):
+            _conn.execute(
+                f"ALTER TABLE tmux_sessions ADD COLUMN {column} INTEGER DEFAULT 0"
+            )
         _conn.commit()
     logger.info("dashboard_db: initialised at %s", path)
 
@@ -1185,6 +1222,7 @@ def persist_tail_state(
     last_activity: float | None = None,
     last_message: str | None = None,
     entry_count_add: int = 0,
+    usage_add: dict[str, int] | None = None,
     context_tokens: int | None = None,
     model: str | None = None,
     harness_state_patch: str | None = None,
@@ -1214,11 +1252,26 @@ def persist_tail_state(
     reason. Lifecycle columns are deliberately absent from this statement —
     ``state``/``startup_state`` belong exclusively to STATE_AUTHORITY.
 
+    ``usage_add`` (auto-pbrhs) carries the same shape of increment for the
+    token ledger: the tokens this window's own lines billed, keyed by
+    :data:`USAGE_LEDGER_COLUMNS`. It rides in this statement deliberately —
+    the offset CAS above is exactly what makes the ledger idempotent, since
+    an ack for bytes that were already drained is dropped whole rather than
+    adding them twice. Unknown keys are refused rather than silently
+    dropped, so a typo cannot quietly stop counting.
+
     Returns True iff the row accepted the write.
     """
     conn = get_conn()
     parts = ["file_offset=?", "entry_count=COALESCE(entry_count,0)+?"]
     vals: list[Any] = [file_offset, entry_count_add]
+    for column, amount in sorted((usage_add or {}).items()):
+        if column not in USAGE_LEDGER_COLUMNS:
+            raise ValueError(f"persist_tail_state: unknown usage column {column!r}")
+        if not amount:
+            continue
+        parts.append(f"{column}=COALESCE({column},0)+?")
+        vals.append(int(amount))
     if last_activity is not None:
         # Monotonic (auto-7263s): callers pass a transcript file's mtime, and
         # resuming an idle session replays its OLD transcript — whose mtime
@@ -1528,7 +1581,7 @@ _OVERLAY_COLUMNS = (
     "label", "role", "entry_count", "context_tokens", "bead_id",
     "harness", "model", "harness_token", "disk_bytes", "disk_detail",
     "last_activity", "ended_at", "created_at", "type", "project",
-)
+) + USAGE_LEDGER_COLUMNS
 
 
 def get_sessions_overlay() -> list[dict]:
