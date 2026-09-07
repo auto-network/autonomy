@@ -826,6 +826,18 @@ body.route-design-linked .design-surface {
   height: 1rem;
 }
 
+.design-linked-return.is-icon {
+  width: 2.25rem;
+  justify-content: center;
+  padding: 0;
+  color: #94a3b8;
+}
+
+.design-linked-return.is-icon svg {
+  width: 1.125rem;
+  height: 1.125rem;
+}
+
 .design-linked-capture svg {
   width: 1.125rem;
   height: 1.125rem;
