@@ -36,7 +36,7 @@ from typing import Any, Iterable
 
 from tools.data_paths import resolve_orgs_root
 
-from .db import GraphDB, resolve_caller_db_path
+from .db import GraphDB, GraphDBNotReady, resolve_caller_db_path
 
 
 # Public so tests can import and assert against it.
@@ -280,7 +280,10 @@ def open_peer_db(slug: str) -> GraphDB | None:
     """
     try:
         return GraphDB.for_org(slug, mode="ro")
-    except FileNotFoundError:
+    except (FileNotFoundError, GraphDBNotReady):
+        # No file, or a file another component created ahead of the graph
+        # schema (fleet enrollment writes its join-state table into the
+        # machine store before any GraphDB open): no settings to read yet.
         return None
 
 

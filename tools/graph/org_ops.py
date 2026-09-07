@@ -306,12 +306,28 @@ def warm_org_stores(*, root: Path | str | None = None) -> dict:
     """
     warmed: list[str] = []
     errors: dict[str, str] = {}
-    for ref in list_orgs(root=root):
+    seen: set[str] = set()
+    targets: list[tuple[str, Path]] = [
+        (ref.slug, Path(ref.db_path)) for ref in list_orgs(root=root)
+    ]
+    # Local stores the inventory skipped because they have no bootstrap row
+    # yet — e.g. a machine store another component created ahead of the graph
+    # schema. They still need the schema before read-only readers can use them.
+    from .db import LOCAL_STORE_SLUGS, _local_store_db_path
+    listed = {str(path) for _, path in targets}
+    for name in LOCAL_STORE_SLUGS:
+        local = _local_store_db_path(name, root)
+        if local.exists() and str(local) not in listed:
+            targets.append((name, local))
+    for slug, path in targets:
+        if str(path) in seen:
+            continue
+        seen.add(str(path))
         try:
-            GraphDB(Path(ref.db_path)).close()
-            warmed.append(ref.slug)
+            GraphDB(path).close()
+            warmed.append(slug)
         except Exception as exc:  # one bad store must not stop the rest
-            errors[ref.slug] = f"{type(exc).__name__}: {exc}"
+            errors[slug] = f"{type(exc).__name__}: {exc}"
     return {"warmed": warmed, "errors": errors}
 
 
