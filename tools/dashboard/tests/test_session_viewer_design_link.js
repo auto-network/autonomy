@@ -238,6 +238,19 @@ function makeLinkedDesignHarness(search = '?from_session=auto-linked', viewport 
 }
 
 describe('design viewer presence and sharing', () => {
+  it('returns to the gallery and opens the session picker from the library entry', () => {
+    const h = makeLinkedDesignHarness('');
+    h.page.init();
+    h.page.returnToGallery();
+    assert.equal(h.navigatedTo, '/design');
+    let loaded = 0;
+    h.page._loadChatSessions = () => { loaded += 1; };
+    h.page.openSessionPicker();
+    assert.equal(h.page.chatOpen, true);
+    assert.equal(loaded, 1);
+    h.page.destroy();
+  });
+
   it('lists every session that pushed a revision, live first, newest first', async () => {
     const h = makeLinkedDesignHarness('');
     h.page.designId = 'design-1';
@@ -402,7 +415,10 @@ describe('linked Design Studio viewer mode', () => {
     assert.match(html, /data-testid="design-presence"/);
     assert.match(html, /data-testid="design-linked-return"/);
     assert.match(html, /data-testid="design-linked-capture"/);
-    assert.equal((html.match(/x-if="!linkedSessionMode"/g) || []).length, 2);
+    // hamburger (phone), back-to-gallery control, and the chat overlay
+    assert.equal((html.match(/x-if="!linkedSessionMode"/g) || []).length, 3);
+    assert.match(html, /data-testid="design-gallery-return"/);
+    assert.match(html, /data-testid="design-presence-pick-session"/);
     assert.match(css, /body\.route-design-linked #sidebar/);
     // 50a05f29 deliberately stopped hiding the voice capsule on linked pages.
     assert.doesNotMatch(css, /body\.route-design-linked \.voice-capsule/);

@@ -4237,6 +4237,38 @@ def cmd_agent_runs(args):
     db.close()
 
 
+def _schedule_design_thumbnail(api_base: str, token: str, revision_id: str, delay: float = 2.5) -> None:
+    """Render this revision's thumbnail from HERE (the session container has
+    the headless browser the dashboard host may lack) and upload it. Runs on
+    a daemon thread after a short quiet period so a live-watched design does
+    not render every keystroke; the newest scheduled revision wins."""
+    import threading
+
+    if os.environ.get("GRAPH_UI_DESIGN_THUMBNAILS", "1") in ("0", "off", "false"):
+        return
+    state = _schedule_design_thumbnail.__dict__.setdefault("state", {"latest": None, "timer": None})
+    state["latest"] = revision_id
+    if state["timer"] is not None:
+        state["timer"].cancel()
+
+    def run():
+        rev = state["latest"]
+        if rev != revision_id:
+            return
+        try:
+            from tools.dashboard import design_thumbnails
+            if not design_thumbnails.renderer_available():
+                return
+            design_thumbnails.remote_backfill(api_base, token, only=rev, log=lambda *_a, **_k: None)
+        except Exception as exc:  # thumbnails are an enhancement, never a failure of the design
+            print(f"  (thumbnail render skipped: {str(exc)[:120]})", file=sys.stderr)
+
+    timer = threading.Timer(delay, run)
+    timer.daemon = True
+    state["timer"] = timer
+    timer.start()
+
+
 def cmd_ui_design(args):
     """Create/watch, list, or pull a Design Studio design."""
     import time as _time
@@ -4437,6 +4469,8 @@ def cmd_ui_design(args):
     print(f"  Publishing to {api_base}…")
     try:
         result = _post("/api/design", exp_data)
+        if result.get("id"):
+            _schedule_design_thumbnail(api_base, token, result["id"])
     except urllib.error.HTTPError as exc:
         if exc.code == 409:
             payload = _http_error_payload(exc)
@@ -4592,6 +4626,7 @@ def cmd_ui_design(args):
                 latest_exp_id = new_id
                 _screenshot_linked = False  # New experiment, need fresh symlink
                 print(f"  → {new_id} ({len(variants)} variants)")
+                _schedule_design_thumbnail(api_base, token, new_id)
             except Exception as e:
                 print(f"  ERROR: {e}", file=sys.stderr)
 

@@ -319,6 +319,19 @@
               <svg class="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><line x1="2" y1="4" x2="14" y2="4"/><line x1="2" y1="8" x2="14" y2="8"/><line x1="2" y1="12" x2="14" y2="12"/></svg>
             </button>
           </template>
+          <template x-if="!linkedSessionMode">
+            <a class="design-linked-return"
+               data-testid="design-gallery-return"
+               href="/design"
+               title="Back to Design Studio"
+               aria-label="Back to Design Studio"
+               @click.prevent="returnToGallery()">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M10.5 3.25 5.75 8l4.75 4.75"></path>
+              </svg>
+              <span>Designs</span>
+            </a>
+          </template>
 
           <!-- Design title -->
           <span data-testid="toolbar-title"
@@ -368,14 +381,16 @@
                      data-testid="design-presence"
                      :class="presenceLive ? 'is-live' : ''"
                      @toggle="onPresenceToggle($event)">
-              <summary :title="presenceSummaryTitle" :aria-label="presenceSummaryTitle">
+              <summary :title="presenceSummaryTitle" :aria-label="presenceSummaryTitle" class="design-presence-pill">
                 <span class="design-topbar-live-dot"></span>
-                <span class="design-topbar-avatars">
+                <span class="nx-avatar-stack design-presence-stack" style="--nx-stack-cap: 3;">
                   <template x-for="s in presenceSessions.slice(0, 3)" :key="s.id">
-                    <span class="design-topbar-avatar" :class="s.live ? 'is-live' : ''" :title="s.label" x-text="s.initial"></span>
+                    <span class="nx-avatar design-presence-avatar" :class="s.live ? 'is-live' : ''" :title="s.label" x-text="s.initial"></span>
                   </template>
                 </span>
-                <span class="design-topbar-badge" :class="share.shared ? 'is-shared' : ''" x-text="share.shared ? '↗' : presenceSessions.length"></span>
+                <span class="design-presence-count" x-show="presenceSessions.length > 3" x-text="'+' + (presenceSessions.length - 3)"></span>
+                <span class="design-presence-count is-empty" x-show="presenceSessions.length === 0">—</span>
+                <span class="design-presence-sharemark" x-show="share.shared" title="Shared by link">↗</span>
               </summary>
               <div class="design-presence-menu" data-testid="design-presence-menu">
                 <div class="design-presence-section">Sessions on this design</div>
@@ -397,6 +412,9 @@
                   </div>
                 </template>
 
+                <button type="button" class="design-presence-share is-quiet" data-testid="design-presence-pick-session"
+                        x-show="!linkedSessionMode && !chatConnected"
+                        @click.prevent="openSessionPicker()">Chat with a session…</button>
                 <div class="design-presence-section">Sharing</div>
                 <template x-if="share.shared">
                   <div class="design-presence-row is-share" data-testid="design-share-row">

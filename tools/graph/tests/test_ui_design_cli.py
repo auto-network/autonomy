@@ -55,6 +55,13 @@ def _parse_ui_args(monkeypatch, argv):
     return captured
 
 
+@pytest.fixture(autouse=True)
+def _no_thumbnail_render(monkeypatch):
+    # The CLI renders a thumbnail on a timer thread after each push; tests
+    # stub the network and must not start a headless browser.
+    monkeypatch.setenv("GRAPH_UI_DESIGN_THUMBNAILS", "0")
+
+
 def test_once_publishes_with_timeout_and_skips_watch(tmp_path, monkeypatch, capsys):
     calls = []
 

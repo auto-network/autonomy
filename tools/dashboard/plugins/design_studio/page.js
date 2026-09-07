@@ -699,6 +699,18 @@
           navigateTo(this.linkedSessionHref);
         },
 
+        returnToGallery: function () {
+          navigateTo('/design');
+        },
+
+        // The Chat With picker (PICKER toolbar state) for connecting any live
+        // session, not only one already on the design.
+        openSessionPicker: function () {
+          if (this.linkedSessionMode) return;
+          this.chatOpen = true;
+          if (!this.chatConnected) this._loadChatSessions();
+        },
+
         // ── Chat With session management ──────────────────────────────────
 
         _connectSession: function (sessionId) {
@@ -1436,14 +1448,10 @@ function designStudioPage() {
     },
 
     _topbarStatsHtml: function () {
-      var org = (window.Autonomy && (window.Autonomy._activePluginOrg || window.Autonomy._activeShellOrg)) || 'autonomy';
-      var active = this.summary.pending_series || 0;
-      var total = this.summary.series || 0;
       var live = this._liveDesignSessions();
-      var orgTitle = _escapeDesignHtml(org + ': ' + active + ' active designs, ' + total + ' total');
       var avatarHtml = live.slice(0, 3).map(function (s) {
         var initial = (s.label || s.id || '?').trim().charAt(0).toUpperCase() || '?';
-        return '<span class="design-topbar-avatar" title="' + _escapeDesignHtml(s.label || s.id) + '">' + _escapeDesignHtml(initial) + '</span>';
+        return '<span class="nx-avatar design-presence-avatar is-live" title="' + _escapeDesignHtml(s.label || s.id) + '">' + _escapeDesignHtml(initial) + '</span>';
       }).join('');
       var liveRows = live.map(function (s) {
         var initial = (s.label || s.id || '?').trim().charAt(0).toUpperCase() || '?';
@@ -1453,21 +1461,18 @@ function designStudioPage() {
           + '<span>' + _escapeDesignHtml(s.label || s.id) + '</span></span>'
           + '</a>';
       }).join('');
-      var presenceBody = liveRows || '<div class="design-presence-empty">No live design sessions</div>';
-      return '<span class="design-topbar-strip">'
-        + '<span class="design-topbar-orgtile" title="' + orgTitle + '" aria-label="' + orgTitle + '">'
-        + '<img src="/static/icon.svg" alt="">'
-        + '<span class="design-topbar-badge">' + active + '</span>'
-        + '</span>'
-        + '<details class="design-topbar-presence' + (live.length ? ' is-live' : '') + '">'
-        + '<summary title="' + live.length + ' live design sessions" aria-label="' + live.length + ' live design sessions">'
+      var presenceBody = liveRows || '<div class="design-presence-empty">No live session is designing right now</div>';
+      var title = live.length === 0 ? 'No live design sessions'
+        : live.length + (live.length === 1 ? ' live design session' : ' live design sessions');
+      return '<details class="design-topbar-presence is-topbar' + (live.length ? ' is-live' : '') + '" data-testid="design-topbar-presence">'
+        + '<summary class="design-presence-pill" title="' + _escapeDesignHtml(title) + '" aria-label="' + _escapeDesignHtml(title) + '">'
         + '<span class="design-topbar-live-dot"></span>'
-        + '<span class="design-topbar-avatars">' + avatarHtml + '</span>'
-        + '<span class="design-topbar-badge">' + live.length + '</span>'
+        + '<span class="nx-avatar-stack design-presence-stack" style="--nx-stack-cap: 3;">' + avatarHtml + '</span>'
+        + (live.length > 3 ? '<span class="design-presence-count">+' + (live.length - 3) + '</span>' : '')
+        + (live.length === 0 ? '<span class="design-presence-count is-empty">—</span>' : '')
         + '</summary>'
-        + '<div class="design-presence-menu">' + presenceBody + '</div>'
-        + '</details>'
-        + '</span>';
+        + '<div class="design-presence-menu"><div class="design-presence-section">Designing now</div>' + presenceBody + '</div>'
+        + '</details>';
     },
 
     _updateTopbar: function () {
@@ -1489,7 +1494,7 @@ function designStudioPage() {
         return;
       }
       var options = {
-        title: 'Design',
+        title: 'Design Studio',
         left: [
           { type: 'html', id: 'design-stats', html: this._topbarStatsHtml() },
         ],
