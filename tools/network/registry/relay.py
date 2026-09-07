@@ -1518,17 +1518,20 @@ def _ops(event: str, **fields) -> None:
     _OPS_LOGGER.info("%s %s", event, rendered)
 
 
-def _dns01_audit(op: str, persona: str, args: dict, result: str) -> None:
+def _dns01_audit(op: str, persona: str, args: dict, result: str,
+                 label: str | None = None) -> None:
     """One audit line per op: hashed order/value, never raw values, never
-    key material. The uniform wire error keeps detail server-side."""
+    key material. The uniform wire error keeps detail server-side. The
+    serving label the record was published under IS logged: it is public
+    DNS, and a label mismatch (2026-09-07) was invisible without it."""
     def _h(field):
         raw = args.get(field)
         return hashlib.sha256(
             raw.encode() if isinstance(raw, str) else b"?").hexdigest()[:16]
     _AUDIT_LOGGER.info(
-        "dns01 op=%s persona=%s order=%s value=%s ttl=%s expiry=%s "
+        "dns01 op=%s persona=%s label=%s order=%s value=%s ttl=%s expiry=%s "
         "result=%s",
-        op, (persona or "")[:8], _h("order"), _h("value"),
+        op, (persona or "")[:8], label or "-", _h("order"), _h("value"),
         args.get("ttl"), args.get("expiry"), result,
     )
 
@@ -1595,6 +1598,7 @@ def _ctrl_dns01(tunnel: "Tunnel", op: str, args: dict,
     """serve.dns01.present / .cleanup — the record name is DERIVED from
     the tunnel persona's serving-label binding, never body-supplied.
     Every negative collapses to the uniform {"error": "refused"}."""
+    label = None
     try:
         _dns01_verify(tunnel, op, args, store, now)
         label = store.get_persona_label(tunnel.persona_pub)
@@ -1619,11 +1623,11 @@ def _ctrl_dns01(tunnel: "Tunnel", op: str, args: dict,
     except Exception as exc:
         _dns01_audit(op, tunnel.persona_pub or "", args
                      if isinstance(args, dict) else {},
-                     f"refused:{type(exc).__name__}")
+                     f"refused:{type(exc).__name__}", label=label)
         if metrics is not None:
             metrics.dns01_op("refused")
         raise _CtrlError("refused") from exc
-    _dns01_audit(op, tunnel.persona_pub or "", args, "ok")
+    _dns01_audit(op, tunnel.persona_pub or "", args, "ok", label=label)
     if metrics is not None:
         metrics.dns01_op("ok")
     return result

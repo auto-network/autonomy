@@ -276,3 +276,48 @@ def test_issuance_failure_reason_shows_the_cause_not_the_preamble(monkeypatch):
     assert "attempt kept at" in state["reason"]
     assert "Requesting a certificate" not in state["reason"]
     assert state["detail"].startswith("Certbot failed (1)")
+
+
+def test_rate_limited_failure_holds_until_the_named_retry_time(monkeypatch):
+    """An ACME 429 names its retry time; the manager must honour it instead of
+    retrying every 60 s into the limit, and say so in the reason (auto-0iwrd)."""
+    import asyncio
+    identity = ("autonomy", "jeremy-77827e972ba4c37d4215")
+    monkeypatch.setattr(certs, "certificate_metadata", lambda *_args: None)
+    monkeypatch.setattr(manager, "_import_legacy_pair", lambda *_args: None)
+    calls = []
+
+    async def issue(org, persona, *, staging=False):
+        calls.append((org, persona))
+        raise certs.ServiceCertificateError(
+            "Certbot failed (1): urn:ietf:params:acme:error:rateLimited: too many failed "
+            "authorizations (5) for x.serve.auto.network in the last 1h, "
+            "retry after 2026-09-07 05:48:01 UTC"
+        )
+
+    monkeypatch.setattr(certs, "issue", issue)
+    import datetime as dt
+    utc = lambda s: dt.datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=dt.timezone.utc).timestamp()
+    clock = {"now": utc("2026-09-07 05:38:00")}
+    lifecycle = manager.ServiceCertificateManager(
+        now=lambda: clock["now"], desired_fn=lambda: {identity},
+    )
+    assert asyncio.run(lifecycle.reconcile_once()) is False
+    assert len(calls) == 1
+    hold = lifecycle.hold_until[identity]
+    assert hold == utc("2026-09-07 05:48:01") + 30.0  # named retry time + margin
+    assert "next attempt at 05:48:31 UTC" in lifecycle.certificate_states()[0]["reason"]
+    clock["now"] += 60
+    asyncio.run(lifecycle.reconcile_once())
+    assert len(calls) == 1  # held: no second call one minute later
+    clock["now"] = hold + 1
+    asyncio.run(lifecycle.reconcile_once())
+    assert len(calls) == 2  # released after the named time
+
+
+def test_failure_hold_policy():
+    now = 1_000_000.0
+    assert manager.failure_hold_seconds("vault is locked; unlock", 3, now) == 0.0
+    assert manager.failure_hold_seconds("Certbot failed (1): hook unavailable", 1, now) == 60.0
+    assert manager.failure_hold_seconds("Certbot failed (1): hook unavailable", 3, now) == 240.0
+    assert manager.failure_hold_seconds("Certbot failed (1): hook unavailable", 9, now) == 900.0
