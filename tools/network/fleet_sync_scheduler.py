@@ -18,6 +18,7 @@ import contextlib
 import hashlib
 import json
 import os
+import random
 import logging
 import struct
 import time
@@ -314,28 +315,55 @@ def materialize_org_scopes_from_roster() -> list[str]:
     return created
 
 
+#: With a random source, selection draws from the stalest pool of this many
+#: times the limit (at least 3), so fairness holds while lockstep breaks.
+RANK_POOL_FACTOR = 3
+
+
 def rank_peers(
     candidates: Sequence[str],
     last_success_ns: Mapping[str, int],
     *,
     limit: int,
+    rng=None,
 ) -> list[str]:
     """Stalest-first bounded peer selection for one sync round.
 
     A peer with no recorded success ever ranks ahead of every peer with
     one, so a machine returning from a long absence — or never yet synced
     — fills the first slot on its first eligible round. Among recorded
-    successes, oldest first. Ties break on the key itself so rounds are
-    deterministic. Starvation-free by construction: an unselected peer's
-    staleness only grows, monotonically raising its rank until selected.
+    successes, oldest first. Starvation-free by construction: an
+    unselected peer's staleness only grows, monotonically raising its rank
+    until selected.
+
+    Without ``rng`` ties break on the key and rounds are deterministic
+    (tests). With ``rng`` (production: each scheduler's own Random) the
+    pick is uniform among the RANK_POOL_FACTOR x limit stalest candidates.
+    The deterministic tie-break made every machine of a fresh fleet rank
+    the SAME peer first and rotate in lockstep: one hot server per round
+    (19 pullers on one machine at N=20, 2026-09-07) and no gossip fan-out,
+    so a write needed ~N rounds to spread instead of ~log N. Pull gossip
+    on a complete graph converges in about log2(N) + ln(N) rounds only when
+    each machine picks independently at random.
     """
+    if rng is None:
+        ordered = sorted(
+            candidates,
+            key=lambda pub: (last_success_ns.get(pub) or 0, pub),
+        )
+        if limit <= 0:
+            return ordered
+        return ordered[:limit]
     ordered = sorted(
         candidates,
-        key=lambda pub: (last_success_ns.get(pub) or 0, pub),
+        key=lambda pub: (last_success_ns.get(pub) or 0, rng.random()),
     )
     if limit <= 0:
         return ordered
-    return ordered[:limit]
+    pool = ordered[:max(RANK_POOL_FACTOR * limit, 3)]
+    if len(pool) <= limit:
+        return pool
+    return rng.sample(pool, limit)
 
 
 def roster_epoch(entries: Iterable[RosterEntry], root_pub: str) -> str:
@@ -1431,6 +1459,8 @@ class FleetSyncScheduler:
         #: this process (v3 works against every server); a restart re-probes
         #: v4. Only wire efficiency rides on this, never correctness.
         self._peer_protocol: dict[str, int] = {}
+        #: Per-machine random source for peer selection (see rank_peers).
+        self._rng = random.Random(int.from_bytes(os.urandom(8), "big"))
         #: ``async (stage_dir, *, source_machine_pub) -> installed`` for the
         #: PERSONAL scope, set by the owning DashboardFleetSyncService. The
         #: dashboard process holds live production handles on personal.db,
@@ -2109,6 +2139,7 @@ class FleetSyncScheduler:
                 selected = rank_peers(
                     eligible, weights,
                     limit=self.config.max_concurrent_pulls,
+                    rng=self._rng,
                 )
                 self._last_round_selection = tuple(selected)
             if selected:

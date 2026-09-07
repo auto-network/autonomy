@@ -173,13 +173,18 @@ class HarnessFleet:
         selector = selectors.DefaultSelector()
         selector.register(process.stdout, selectors.EVENT_READ)
         try:
-            ready = selector.select(15.0)
+            # 60 s: a 50-machine fleet's workers start while the previous
+            # run's processes may still be tearing down on the same box.
+            ready = selector.select(60.0)
         finally:
             selector.close()
         if not ready:
             process.kill()
-            _out, err = process.communicate()
-            raise RuntimeError(f"machine {index} did not start: {err[-2000:]}")
+            out, err = process.communicate()
+            raise RuntimeError(
+                f"machine {index} did not start within 60s "
+                f"(pid {process.pid}); stdout={out[-500:]!r} stderr={err[-2000:]!r}"
+            )
         message = json.loads(process.stdout.readline())
         if message.get("kind") != "ready":
             raise RuntimeError(f"machine {index} unexpected startup: {message}")
