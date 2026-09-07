@@ -915,3 +915,25 @@ async def test_confirmed_dormant_state_does_not_poll_docker_each_tick():
     await supervisor.reconcile(desired())
 
     assert runtime.health_checks == 1
+
+
+# ── auto-nkxko: cadence and off-loop discovery ─────────────────────────────
+
+def test_watchdog_interval_is_no_longer_one_second():
+    """Event-driven reconciles do the real work; the heartbeat only bounds a
+    missed event. At 1 s it made org discovery the loop's busiest work."""
+    assert sup.RECONCILE_INTERVAL_SECONDS >= 30.0
+
+
+@pytest.mark.asyncio
+async def test_planner_discovers_orgs_off_the_event_loop(monkeypatch):
+    import threading
+    seen = []
+
+    def discover():
+        seen.append(threading.current_thread() is threading.main_thread())
+        return []
+    monkeypatch.setattr(sup, "_discover_orgs", discover)
+    state = await sup._build_desired_state()
+    assert seen == [False], "org discovery must run in a worker thread"
+    assert state is not None
