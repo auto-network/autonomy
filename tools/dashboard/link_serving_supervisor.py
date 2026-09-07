@@ -329,6 +329,58 @@ def serve_cert_ok(org: str | None, *, now: float | None = None) -> bool:
     return serve_cert_state(org, now=now)["status"] == "ok"
 
 
+#: Renew BEFORE it dies, not after. A credential is replaced once fewer than
+#: this many days remain — half the 30-day lifetime, wide enough that an
+#: ordinary irregular unlock falls inside the window, so a renewal never has
+#: to begin with an outage.
+SERVE_CERT_RENEW_BELOW_DAYS = 20
+
+
+def serve_cert_requirement(org: str | None, *, now: float | None = None) -> dict:
+    """THE definition of "should this unlock mint a serving credential?" →
+    ``{required, status, days_remaining}``.
+
+    There is exactly one of these on purpose. Both callers — the pre-unlock
+    status route and the unlock plan the ceremony gates its serve-cert step on
+    — resolve it here, because a second, simpler copy of this rule (e.g.
+    ``status != "ok"``) silently drops the two cases that are not about
+    expiry: a row with no ``dns01_cert`` (a pre-narrowing credential the
+    ceremony must upgrade) and a still-valid credential inside the renewal
+    window. A gate built on that copy would skip a renewal that is genuinely
+    due and let the credential die.
+
+    ``status`` is reported untouched: the connector and the supervisor gate
+    serving on it being ``ok``, and reporting a still-valid certificate as
+    anything else would stop serving — a worse outage than the one renewal
+    prevents.
+    """
+    now = time.time() if now is None else now
+    state = serve_cert_state(org, now=now)
+    status = state.get("status", "missing")
+    required = status != "ok"
+    row = state.get("row") or {}
+    if not isinstance(row.get("dns01_cert"), str):
+        # Existing tunnel credentials remain usable while the ordinary unlock
+        # ceremony upgrades them. Do not take the live connector down merely
+        # because its new, narrower DNS authority has not been minted yet.
+        required = True
+    days_remaining = None
+    not_after = row.get("not_after")
+    if isinstance(not_after, int):
+        days_remaining = (not_after - int(now)) / 86400.0
+        if days_remaining < SERVE_CERT_RENEW_BELOW_DAYS:
+            required = True
+    return {
+        "required": required,
+        "status": status,
+        # Reported whether or not a renewal is due, so the caller can say how
+        # long a credential has left instead of only that it is fine for now.
+        "days_remaining": (
+            None if days_remaining is None else round(days_remaining, 1)
+        ),
+    }
+
+
 def _has_live_grant(org: str | None, now: float) -> bool:
     """Any non-expired grant in the org's own cache — the 'links are live'
     half of the run condition (reuses the I9 validity check)."""

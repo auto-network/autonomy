@@ -52,6 +52,8 @@ def test_browser_module_load_configures_real_signon_path():
     assert result.returncode == 0, result.stdout + "\n" + result.stderr
     output = json.loads(result.stdout)
 
+    persona = derive_persona(bytes.fromhex(personal.private_hex), genesis_id)
+
     assert output["state"]["signedIn"] is True
     assert output["storedSessions"] == 1
     # No browser label is minted any more: the actor is the persona, so the
@@ -62,17 +64,27 @@ def test_browser_module_load_configures_real_signon_path():
     # organization. The serving check is READ-ONLY and needs no key; the
     # organization key itself is fetched only when a certificate is actually
     # due for renewal, which it is not here.
+    #
+    # The trailing checkpoint probe is `signOn`'s — the worktrees-approval
+    # path, which still hand-wires its per-org maintenance instead of running
+    # the plan-gated step registry the dashboard unlock uses
+    # (repairAllServeCredentialsWithRootSeed). On that path the same probe is
+    # not made at all unless a checkpoint is genuinely due AND this persona may
+    # publish it. Converting signOn to the one runner is auto-77y5a's
+    # remaining piece; until then this call is real and asserted, not wished
+    # away.
     assert output["fetchCalls"] == [
         "/api/identity/personal",
         "/api/network/ledger/heads?org=module-load-org",
         "/api/network/binding?org=module-load-org",
         "/api/network/rekey-policy?org=module-load-org",
         "/api/network/serve-cert?org=module-load-org",
+        "/api/network/membership-checkpoint/decision"
+        "?org=module-load-org"
+        "&persona=" + persona.public_hex +
+        "&genesis_id=" + genesis_id,
     ]
 
-    persona = derive_persona(
-        bytes.fromhex(personal.private_hex), genesis_id,
-    )
     entry = output["signOnResult"]["orgs"][0]
     assert entry["personaPub"] == persona.public_hex
     certificate = DelegationCert.from_json(entry["certWire"])

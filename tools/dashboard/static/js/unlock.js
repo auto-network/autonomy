@@ -219,14 +219,53 @@
     }
   }
 
+  // THE CEREMONY'S TO-DO LIST, FETCHED WHILE THE OPERATOR IS STILL TYPING.
+  //
+  // Everything the root ceremony needs to decide which per-org steps apply is
+  // persona-independent and knowable before any factor is proven, so it is
+  // fetched on first page load — two GETs, concurrent with a human typing a
+  // password — and the unlock itself then makes no preparatory calls at all.
+  // Failure is free: a null plan means each step probes exactly as it used to.
+  var _planPrefetch = null;
+
+  //: How stale a prefetched plan may be and still be trusted. A page left open
+  //: for an hour must not gate a ceremony on what was true then; past this the
+  //: ceremony fetches its own, which costs one round-trip and is always right.
+  var PLAN_FRESH_FOR_MS = 10 * 60 * 1000;
+
+  function _prefetchUnlockPlan() {
+    var startedAt = Date.now();
+    _planPrefetch = (async function () {
+      var listing = await _fetchJson('/api/orgs');
+      var slugs = ((listing && listing.orgs) || []).map(function (row) {
+        return (row && row.org && row.org.slug) || (row && row.slug);
+      }).filter(function (s) { return typeof s === 'string' && s; });
+      if (!slugs.length) return null;
+      var body = await _fetchJson('/api/network/unlock-plan?orgs=' +
+                                  encodeURIComponent(slugs.join(',')));
+      return (body && body.ok === true && body.plan)
+        ? { plan: body.plan, at: startedAt } : null;
+    })().catch(function () { return null; });
+  }
+
+  async function _prefetchedPlan() {
+    if (!_planPrefetch) return null;
+    var got = await _planPrefetch;
+    if (!got || (Date.now() - got.at) > PLAN_FRESH_FOR_MS) return null;
+    return got.plan;
+  }
+
   // Every successful ROOT unlock converges here. The factor that proved the
   // policy is irrelevant: password, passkey, recovery, or a future factor all
   // yield the same opened personal root and therefore the same maintenance.
   async function _repairServingAfterRootUnlock(rootSeed) {
     var report;
+    var plan = null;
+    try { plan = await _prefetchedPlan(); } catch (e) { plan = null; }
     try {
       report = await window.AutonomyNetworkSession
-        .repairAllServeCredentialsWithRootSeed(new Uint8Array(rootSeed), {});
+        .repairAllServeCredentialsWithRootSeed(new Uint8Array(rootSeed),
+                                               { plan: plan });
     } catch (e) {
       report = { repaired: [], ready: [], bindings: [],
                  failed: [{ org: 'all', error: (e && e.message) || String(e) }] };
@@ -991,6 +1030,11 @@
 
   async function _init() {
     U.webauthnOk = !!(window.PublicKeyCredential && navigator.credentials);
+    // Start the ceremony's to-do list now, in the background. It is never
+    // awaited here and never blocks a render — by the time a factor is
+    // proven it has long since resolved, and if it failed the unlock is
+    // unaffected.
+    _prefetchUnlockPlan();
     var status;
     try {
       status = await _fetchJson('/api/identity/status');

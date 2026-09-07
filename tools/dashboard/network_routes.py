@@ -1885,7 +1885,10 @@ def _write_serve_key(path: Path, private_key_hex: str) -> None:
 #: replaces it well before it dies.
 logger = logging.getLogger(__name__)
 
-SERVE_CERT_RENEW_BELOW_DAYS = 20
+#: The renewal window, and the rule that consumes it, live with
+#: serve_cert_state as link_serving_supervisor.serve_cert_requirement — one
+#: definition, so this route and the unlock plan cannot drift apart. (Imported
+#: lazily inside the handlers, as every supervisor use here is.)
 
 #: Last browser-side unlock maintenance report, for reading back off-device.
 _LAST_UNLOCK_MAINTENANCE: dict = {}
@@ -1901,45 +1904,13 @@ async def get_serve_cert_status(request: Request) -> JSONResponse:
     org, refused = resolve_scoped_org(request.query_params.get("org"), request=request)
     if refused is not None:
         return refused
-    from tools.dashboard.link_serving_supervisor import serve_cert_state
+    from tools.dashboard.link_serving_supervisor import serve_cert_requirement
 
-    state = serve_cert_state(org)
-    status = state.get("status", "missing")
-
-    # RENEW BEFORE IT DIES, not after. `status` is "ok" for any certificate
-    # that has not already passed not_after, so keying the mint decision on it
-    # alone means a credential can only ever be replaced once it is expired --
-    # every renewal necessarily begins with an outage, lasting until whenever
-    # the next password unlock happens to occur. Renewal is opportunistic and
-    # unlocks are irregular, so the window has to be wide enough that an
-    # ordinary sign-in falls inside it: half the 30-day lifetime.
-    #
-    # Only the browser's "should I mint?" answer changes here. `status` is
-    # returned untouched because the connector and the supervisor gate serving
-    # on it being "ok" -- reporting a still-valid certificate as anything else
-    # would stop serving, which is a worse outage than the one this prevents.
-    required = status != "ok"
-    days_remaining = None
-    row = state.get("row") or {}
-    if not isinstance(row.get("dns01_cert"), str):
-        # Existing tunnel credentials remain usable while the ordinary unlock
-        # ceremony upgrades them.  Do not take the live connector down merely
-        # because its new, narrower DNS authority has not been minted yet.
-        required = True
-    not_after = row.get("not_after")
-    if isinstance(not_after, int):
-        days_remaining = (not_after - int(time.time())) / 86400.0
-        if days_remaining < SERVE_CERT_RENEW_BELOW_DAYS:
-            required = True
-    return JSONResponse({
-        "required": required,
-        "status": status,
-        # Reported whether or not a renewal is due, so the caller can say how
-        # long a credential has left instead of only that it is fine for now.
-        "days_remaining": (
-            None if days_remaining is None else round(days_remaining, 1)
-        ),
-    })
+    # The rule itself lives with serve_cert_state (renew before it dies, and
+    # upgrade a pre-narrowing credential). The unlock plan resolves the SAME
+    # function, so the ceremony's serve-cert gate and this pre-unlock answer
+    # are the same verdict by construction rather than by two copies agreeing.
+    return JSONResponse(serve_cert_requirement(org))
 
 
 async def _post_serve_cert_v3(request: Request, body: dict) -> JSONResponse:
@@ -2060,6 +2031,20 @@ async def _post_serve_cert_v3(request: Request, body: dict) -> JSONResponse:
                          "not_after": cert.not_after})
 
 
+def _rekey_plan(org: str | None) -> dict:
+    """The §1d opportunistic-rekey verdict for one org.
+
+    There is no ``/api/network/rekey-policy`` handler and no policy Setting
+    behind one: the client's per-org probe 404s every time, which
+    ``_evaluateRekey`` reads as ``no-interval-configured`` and skips. So the
+    honest verdict today is "never due", and stating it here is what lets the
+    ceremony stop paying a 404 round-trip per org to rediscover it. When a
+    policy source does land, it is read HERE and the client needs no change.
+    """
+    return {"due": False, "interval_seconds": None,
+            "reason": "no-interval-configured"}
+
+
 async def get_unlock_plan(request: Request) -> JSONResponse:
     """The pre-unlock to-do list: for each org slug, the verdict the unlock
     ceremony needs to decide LOCALLY which steps to run — one fold per org, no
@@ -2069,8 +2054,14 @@ async def get_unlock_plan(request: Request) -> JSONResponse:
     replaces the ~5-round-trips-per-org probe storm the old per-step design ran
     every unlock, and its verdicts subsume the scoping/recovery fixes:
     committed_membership_org=false for personal/local stores (no checkpoint /
-    persona-serve attempt); serve_cert_present=false mints fresh instead of
+    persona-serve attempt); a missing credential mints fresh instead of
     deadlocking; a persona absent from checkpointer_pubs never checkpoints.
+
+    Every verdict here is RESOLVED from the same function its own route uses —
+    ``serve_cert_requirement`` for serving, ``checkpoint_status`` for
+    membership — never re-derived. A plan that computed its own simpler
+    version of a rule would gate the ceremony on a different answer than the
+    rule's owner gives, which is the failure this endpoint exists to end.
     """
     if _mock_mode():
         return JSONResponse(
@@ -2082,9 +2073,6 @@ async def get_unlock_plan(request: Request) -> JSONResponse:
         return JSONResponse(
             {"ok": False, "error": "query must carry orgs=<comma-separated slugs>"},
             status_code=400)
-    from tools.dashboard.link_serving_supervisor import serve_cert_state
-    from tools.dashboard import membership_checkpoint as cp
-    from tools.network.ledger import LedgerStore, org_ledger_db_path
     try:
         from tools.data_paths import LOCAL_STORE_KEYS
     except Exception:
@@ -2096,45 +2084,70 @@ async def get_unlock_plan(request: Request) -> JSONResponse:
         if refused is not None:
             plan[slug] = {"slug": slug, "error": "scope-refused"}
             continue
-        binding_member = _first_member(NETWORK_BINDING_SET_ID, org)
-        binding = binding_member.payload if binding_member is not None else {}
-        bound = bool(binding.get("org_uuid") and binding.get("root_pub")
-                     and binding.get("registry_url"))
-        okey = _first_member(NETWORK_ORG_KEY_SET_ID, org)
-        has_org_key = bool(okey is not None and (
-            okey.payload.get("sealed_root_key")
-            or okey.payload.get("armored_private_key")))
-        committed = bool(bound and has_org_key and org not in LOCAL_STORE_KEYS)
-
-        genesis_id = None
+        # ONE SLUG CANNOT COST THE OTHERS. A slug whose store does not exist
+        # yet raises out of the very first settings read, and an uncaught raise
+        # here would 500 the whole plan — the ceremony would then have no
+        # verdict for ANY org and fall back to probing all of them. Isolating
+        # each slug is the same rule the step runner enforces one level down.
         try:
-            path = org_ledger_db_path(org)
-            if path.exists():
-                with LedgerStore(path) as store:
-                    genesis_id = store.ledger.genesis_id
-        except Exception:
-            genesis_id = None
-
-        try:
-            st = serve_cert_state(org)
-            serve_present = st.get("status") == "ok"
-        except Exception:
-            serve_present = False
-
-        checkpoint = (cp.checkpoint_status(org) if committed
-                      else {"needed": False, "checkpointer_pubs": []})
-
-        plan[slug] = {
-            "slug": slug,
-            "org_uuid": binding.get("org_uuid"),
-            "root_pub": binding.get("root_pub"),
-            "genesis_id": genesis_id,
-            "committed_membership_org": committed,
-            "serve_cert_present": serve_present,
-            "serve_cert_due": (not serve_present),
-            "checkpoint": checkpoint,
-        }
+            plan[slug] = _org_unlock_plan(slug, org, LOCAL_STORE_KEYS)
+        except Exception as e:
+            logger.info("unlock plan: %s unavailable (%s)", slug, e)
+            plan[slug] = {"slug": slug, "error": "unavailable"}
     return JSONResponse({"ok": True, "plan": plan})
+
+
+def _org_unlock_plan(slug: str, org: str, local_store_keys) -> dict:
+    """One org's verdicts. Every one is RESOLVED from the rule's owner."""
+    from tools.dashboard.link_serving_supervisor import serve_cert_requirement
+    from tools.dashboard import membership_checkpoint as cp
+    from tools.network.ledger import LedgerStore, org_ledger_db_path
+
+    binding_member = _first_member(NETWORK_BINDING_SET_ID, org)
+    binding = binding_member.payload if binding_member is not None else {}
+    bound = bool(binding.get("org_uuid") and binding.get("root_pub")
+                 and binding.get("registry_url"))
+    okey = _first_member(NETWORK_ORG_KEY_SET_ID, org)
+    has_org_key = bool(okey is not None and (
+        okey.payload.get("sealed_root_key")
+        or okey.payload.get("armored_private_key")))
+    committed = bool(bound and has_org_key and org not in local_store_keys)
+
+    genesis_id = None
+    try:
+        path = org_ledger_db_path(org)
+        if path.exists():
+            with LedgerStore(path) as store:
+                genesis_id = store.ledger.genesis_id
+    except Exception:
+        genesis_id = None
+
+    # The SAME verdict the pre-unlock status route serves, resolved from the
+    # one definition — never a re-derivation here (a simpler copy would skip
+    # the renewal window and let a live credential die).
+    try:
+        serve = serve_cert_requirement(org)
+    except Exception:
+        serve = {"required": True, "status": "unknown", "days_remaining": None}
+
+    checkpoint = (cp.checkpoint_status(org) if committed
+                  else {"needed": False, "checkpointer_pubs": []})
+
+    return {
+        "slug": slug,
+        "org_uuid": binding.get("org_uuid"),
+        "root_pub": binding.get("root_pub"),
+        "registry_url": binding.get("registry_url"),
+        "binding_expires_at": binding.get("binding_expires_at"),
+        "recovery_policy": binding.get("recovery_policy"),
+        "genesis_id": genesis_id,
+        "committed_membership_org": committed,
+        "has_sealed_org_key": bool(
+            okey is not None and okey.payload.get("sealed_root_key")),
+        "serve_cert": serve,
+        "checkpoint": checkpoint,
+        "rekey": _rekey_plan(org),
+    }
 
 
 async def get_membership_checkpoint_decision(request: Request) -> JSONResponse:
