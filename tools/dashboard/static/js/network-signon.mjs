@@ -1161,6 +1161,13 @@ var signRegistryRequestCore;
           .map(function (r) {
             return { org: r.orgSlug, error: r.checkpoint.error || null };
           }),
+        // A 'unavailable' means the decision endpoint 404'd (or was
+        // unreachable) — the maintenance call silently did nothing. Surface it
+        // so a routing/path regression is visible in the sign-on report rather
+        // than swallowed (the 2026-09-07 seed-mint no-op was invisible here).
+        membershipCheckpointsUnavailable: reports
+          .filter(function (r) { return r.checkpoint && r.checkpoint.action === 'unavailable'; })
+          .map(function (r) { return r.orgSlug; }),
       },
     };
   }

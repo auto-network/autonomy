@@ -2982,6 +2982,13 @@ ROUTES = [
     Route("/api/network/unlock-report", get_unlock_maintenance_report),
     Route("/api/network/unlock-report", post_unlock_maintenance_report, methods=["POST"]),
     Route("/api/network/serve-cert", post_serve_cert, methods=["POST"]),
+    # The sign-on hook GETs the DECISION at .../decision (network-signon.mjs
+    # _publishMembershipCheckpoint). The bare GET is kept as a back-compat
+    # alias; the POST submit shares the bare path. A path mismatch here 404s
+    # into a silent 'unavailable' no-op, so it is asserted in
+    # test_membership_checkpoint_routes against the JS's literal path.
+    Route("/api/network/membership-checkpoint/decision",
+          get_membership_checkpoint_decision, methods=["GET"]),
     Route("/api/network/membership-checkpoint",
           get_membership_checkpoint_decision, methods=["GET"]),
     Route("/api/network/membership-checkpoint",
