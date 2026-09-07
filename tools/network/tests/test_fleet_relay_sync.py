@@ -884,6 +884,70 @@ async def test_founded_origin_gets_the_retained_journal_not_a_checkpoint(
 
 
 @pytest.mark.asyncio
+async def test_established_puller_with_unknown_position_gets_the_journal_not_a_snapshot(
+    tmp_path, monkeypatch
+):
+    """The rule of record: a puller that has sync state (bootstrap=False)
+    but whose trail resolves nowhere is served the retained journal even
+    when the server's journal has retired history -- never a snapshot.
+    Before 2026-09-07 this exact case re-based live databases."""
+    from tools.network.fleet_sync_scheduler import (
+        _DONE_MAGIC, _MUTATION_MAGIC, _OPERATION_MAGIC, encode_pull_request,
+        SQLiteFleetSyncStore,
+    )
+
+    fleet = _two_machine_fleet()
+    alpha = tmp_path / "alpha.db"
+    _prepare_org_db(alpha, fleet.server_machine.public_hex)
+    for i in range(6):
+        _insert_note(alpha, f"a-{i}", f"org content {i}")
+    personal = tmp_path / "personal.db"
+    personal.touch()
+    server = _configure_relay_server(fleet, personal, monkeypatch)
+    monkeypatch.setattr(
+        server.scheduler, "_scope_paths",
+        lambda: {"personal": personal, "alpha": alpha},
+    )
+    store = SQLiteFleetSyncStore(alpha)
+    # Retire the first frames the way pruning does, so the journal has a gap.
+    with sqlite3.connect(alpha) as conn:
+        conn.execute(
+            "DELETE FROM fleet_sync_journal WHERE transaction_ref IN "
+            "(SELECT id FROM fleet_sync_transactions ORDER BY id LIMIT 2)"
+        )
+    assert store.journal_gap() is True
+
+    request = encode_pull_request(
+        "cd" * 32, compat=store.compatibility_digest(), resume=(),
+        scope="alpha", bootstrap=False,
+    )
+    stream = await server.scheduler._handle(
+        "tok", request, fleet.client_machine.public_hex,
+    )
+    frames = [frame async for frame in stream]
+    kinds = [json.loads(f).get("kind") for f in frames if f[:1] in ("{", b"{")]
+    assert "checkpoint.begin" not in kinds
+    replayed = [
+        f for f in frames
+        if f.startswith(_OPERATION_MAGIC) or f.startswith(_MUTATION_MAGIC)
+    ]
+    assert len(replayed) == 4, "the four surviving transactions replay"
+    assert any(f.startswith(_DONE_MAGIC) for f in frames)
+
+    # A genuinely empty puller (bootstrap=True) still gets the snapshot.
+    request = encode_pull_request(
+        "cd" * 32, compat=store.compatibility_digest(), resume=(),
+        scope="alpha", bootstrap=True,
+    )
+    stream = await server.scheduler._handle(
+        "tok", request, fleet.client_machine.public_hex,
+    )
+    frames = [frame async for frame in stream]
+    kinds = [json.loads(f).get("kind") for f in frames if f[:1] in ("{", b"{")]
+    assert "checkpoint.begin" in kinds
+
+
+@pytest.mark.asyncio
 async def test_fresh_checkpoint_request_right_after_a_delivery_is_refused(
     tmp_path, monkeypatch
 ):

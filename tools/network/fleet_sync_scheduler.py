@@ -485,12 +485,24 @@ def decode_checkpoint_file(raw: bytes) -> tuple[str, bytes]:
 
 
 def serve_checkpoint_decision(
-    resume_position: int, requested: bool, journal_gap: bool
+    resume_position: int, requested: bool, journal_gap: bool = False
 ) -> bool:
-    """A resolvable trail always means deltas; an unresolvable one means a
-    checkpoint when the peer asked or when replay would omit retired
-    history."""
-    return resume_position == 0 and (requested or journal_gap)
+    """A snapshot goes ONLY to a machine that declares it holds no sync
+    state (``requested`` = the puller's bootstrap flag) and whose trail
+    resolves to nothing. Every other unresolved puller is served the
+    retained journal from its oldest surviving frame.
+
+    ``journal_gap`` is accepted for call compatibility and ignored. It used
+    to select a checkpoint ("replay would omit retired history"), which is
+    true of every store that has ever pruned or installed -- so any first
+    contact between two established machines, and any restore, re-based a
+    live database (design of record graph://1155b8f4-8cf: a checkpoint is a
+    bulk-transfer optimization, never the answer to an unknown position;
+    measured 2026-09-06: 1,365 snapshots for 103 writes at N=50). Under the
+    served-ack pruning invariant no active peer is ever behind the retained
+    floor, so the omitted prefix is content the puller already holds.
+    """
+    return resume_position == 0 and requested
 
 
 def encode_pull_request(
@@ -894,6 +906,21 @@ class SQLiteFleetSyncStore:
         conn, catalog = self._open()
         try:
             return catalog.journal_breadcrumb(transaction_ref)
+        finally:
+            conn.close()
+
+    def oldest_journal_ref(self) -> int | None:
+        """The smallest transaction ref that still has journal frames."""
+        import sqlite3 as _sqlite3
+
+        conn = _sqlite3.connect(f"file:{self.path}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT MIN(transaction_ref) FROM fleet_sync_journal"
+            ).fetchone()
+            return None if row is None or row[0] is None else int(row[0])
+        except _sqlite3.Error:
+            return None
         finally:
             conn.close()
 
@@ -1459,6 +1486,19 @@ class FleetSyncScheduler:
                 wants_checkpoint = serve_checkpoint_decision(
                     cursor, bootstrap, journal_gap
                 )
+                if cursor == 0 and not wants_checkpoint and journal_gap:
+                    # Unknown position on a store whose journal no longer
+                    # reaches its beginning: serve from the oldest surviving
+                    # frame and say so once. The prefix before it is retired
+                    # only below the served-ack floor, i.e. content every
+                    # active peer already acknowledged.
+                    oldest = await asyncio.to_thread(store.oldest_journal_ref)
+                    logger.info(
+                        "fleet sync peer %s scope %r: position unknown; "
+                        "serving the retained journal from ref %s "
+                        "(frames before it are retired)",
+                        peer_pub[:12], scope, oldest,
+                    )
                 if wants_checkpoint and not accept_checkpoint:
                     # A founded origin never installs a checkpoint; give it
                     # the retained journal from the start. Rows it already
