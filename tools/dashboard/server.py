@@ -21414,6 +21414,7 @@ _settings_mediator_started: bool = False
 # supervisor confirms the old worker has exited.
 _activation_task: asyncio.Task | None = None
 _worker_activated: bool = False
+_org_warmup_task: asyncio.Task | None = None
 # Attribution of the pending hand-off (which merge / who), computed when the
 # supervisor's notice arrives and stamped on the restart-notice state at
 # shutdown so the replacement's "complete" toast can name it.
@@ -22219,10 +22220,11 @@ async def _on_shutdown():
         except Exception:
             logger.exception("error during settings_mediator.stop_action_loop()")
         _settings_mediator_started = False
-    global _activation_task, _worker_activated
+    global _activation_task, _worker_activated, _org_warmup_task
     tasks = [
         t for t in (
             _activation_task,
+            _org_warmup_task,
             _dispatch_watcher_task,
             _mock_event_watcher_task,
             _harness_usage_poller_task,
@@ -22238,6 +22240,7 @@ async def _on_shutdown():
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
     _activation_task = None
+    _org_warmup_task = None
     _worker_activated = False
     _dispatch_watcher_task = None
     _mock_event_watcher_task = None
@@ -22373,6 +22376,15 @@ async def _activate_worker(reason: str) -> None:
         except Exception:
             logger.exception("design-lifecycle: sweeper failed to start")
 
+    # Migrate every org store to the running code's schema (one read-write
+    # open each, off the loop, in the background). The inventory listing did
+    # this implicitly at startup before it went read-only (auto-nkxko); a
+    # schema bump must not wait for a store's first write.
+    global _org_warmup_task
+    if not os.environ.get("DASHBOARD_MOCK"):
+        _org_warmup_task = asyncio.create_task(
+            _warm_org_stores(), name="org-store-warmup")
+
     logger.info(
         "worker activation complete (%s) in %.1fms",
         reason, (time.monotonic() - t0) * 1000,
@@ -22382,6 +22394,30 @@ async def _activate_worker(reason: str) -> None:
     # Python process has bound the port. Under a hand-off the predecessor stamps
     # started_at at its shutdown, so the reported duration is the true gap.
     await _emit_restart_complete()
+
+
+async def _warm_org_stores() -> None:
+    from tools.graph import org_ops
+    t0 = time.monotonic()
+    try:
+        result = await asyncio.to_thread(org_ops.warm_org_stores)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("org store warm-up failed")
+        return
+    if result["errors"]:
+        logger.warning(
+            "org store warm-up: %d migrated, %d failed in %.1fms: %s",
+            len(result["warmed"]), len(result["errors"]),
+            (time.monotonic() - t0) * 1000,
+            "; ".join(f"{k}: {v}" for k, v in result["errors"].items()),
+        )
+    else:
+        logger.info(
+            "org store warm-up: %d store(s) at current schema in %.1fms",
+            len(result["warmed"]), (time.monotonic() - t0) * 1000,
+        )
 
 
 async def _await_activation() -> None:
