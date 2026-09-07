@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any, Callable, Generic, Iterator, TypeVar
 from uuid import uuid4
 
-from .db import GraphDB, _org_db_path, resolve_caller_db_path
+from .db import GraphDB, GraphDBNotReady, _org_db_path, resolve_caller_db_path
 from . import schemas
 
 
@@ -2474,7 +2474,14 @@ def _open_read(org: str | None, set_id: str | None = None) -> GraphDB:
     # nobody could find it.
     path = _db_path(org)
     if path and Path(path).exists():
-        return GraphDB(path, mode="ro")
+        try:
+            return GraphDB(path, mode="ro")
+        except GraphDBNotReady:
+            # The file exists but carries no graph schema yet (another
+            # component created it first). The read-write open below
+            # initialises it — the same thing the read-write inventory
+            # listing used to do implicitly (auto-nkxko) — then reads.
+            pass
     return _open(org, set_id, for_read=True)
 
 
