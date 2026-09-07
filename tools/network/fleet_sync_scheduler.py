@@ -1392,10 +1392,12 @@ class _AuthorPager:
     that author, in (timestamp_ns, transaction_id) order. Each call opens a
     short-lived store connection, as the legacy pager does."""
 
-    def __init__(self, store, watermarks, exclude_origin: str | None):
+    def __init__(self, store, watermarks, exclude_origin: str | None,
+                 skip_authors: Sequence[str] = ()):
         self.store = store
         self.watermarks = dict(watermarks)
         self.exclude = exclude_origin
+        self.skip = set(skip_authors)
         self._authors: list[str] | None = None
         self._index = 0
         self._position: tuple[int, str | None] | None = None
@@ -1406,7 +1408,7 @@ class _AuthorPager:
         if self._authors is None:
             self._authors = [
                 author for author in self.store.author_list()
-                if author != self.exclude
+                if author != self.exclude and author not in self.skip
             ]
         while self._index < len(self._authors):
             if self._buffer:
@@ -1843,14 +1845,31 @@ class FleetSyncScheduler:
                         store.retired_above_watermarks, watermarks, peer_pub
                     )
                     if retired:
+                        # This server cannot serve these authors from the
+                        # puller's watermark: it holds their early history
+                        # only as installed rows (no journal frames). Serving
+                        # what IS retained would advance the puller's
+                        # watermark past writes it never received -- lost
+                        # for good (four machines permanently two writes
+                        # short, s5-n10, 2026-09-07). Skip those authors
+                        # entirely and say so; the puller gets that prefix
+                        # from a holder whose journal still reaches it (the
+                        # author itself, until the fleet-wide ack retires it).
                         logger.warning(
-                            "fleet sync peer %s scope %r: retained history for "
-                            "%d author(s) starts above the peer's watermark "
-                            "(%s); the retired prefix cannot be replayed",
+                            "fleet sync peer %s scope %r: not serving %d "
+                            "author(s) whose retained history starts above the "
+                            "peer's watermark (%s)",
                             peer_pub[:12], scope, len(retired),
                             ",".join(a[:12] for a in retired),
                         )
-                    pager = _AuthorPager(store, watermarks, peer_pub)
+                        notice = canonical_json({
+                            "v": protocol_version,
+                            "kind": "retired",
+                            "authors": sorted(retired),
+                        })
+                        stats["bytes_sent"] += len(notice)
+                        yield notice
+                    pager = _AuthorPager(store, watermarks, peer_pub, retired)
                 else:
                     pager = _JournalPager(store, cursor)
                 while True:
@@ -2498,6 +2517,20 @@ class FleetSyncScheduler:
                         # Tolerated, never emitted (yet): a future server
                         # may keep a long build phase live with these.
                         # They are outside the summary digest and count.
+                        continue
+                    if kind == "retired":
+                        # The server skipped these authors for this pull
+                        # (its retained history starts above our watermark).
+                        # Our watermark for them does not move; another
+                        # holder supplies the prefix. Outside the digest.
+                        authors = control.get("authors") or []
+                        logger.info(
+                            "fleet sync peer %s scope %r: %d author(s) not "
+                            "served here (history retired above our "
+                            "watermark): %s",
+                            machine_pub[:12], scope, len(authors),
+                            ",".join(str(a)[:12] for a in authors),
+                        )
                         continue
                     if kind == "checkpoint.begin":
                         if checkpoint_stage is not None:
