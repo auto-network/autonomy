@@ -28,8 +28,16 @@
         </button>
         <button type="button" class="design-studio-toggle" :class="dynamicOnly ? 'is-on' : ''"
                 :aria-pressed="dynamicOnly ? 'true' : 'false'" @click="dynamicOnly = !dynamicOnly" data-testid="design-dynamic-toggle">Dynamic</button>
+        <button type="button" class="design-studio-toggle" :class="sharedOnly ? 'is-on' : ''"
+                :aria-pressed="sharedOnly ? 'true' : 'false'" @click="sharedOnly = !sharedOnly" data-testid="design-shared-toggle">Shared</button>
         <button type="button" class="design-studio-toggle" :class="status !== 'pending' ? 'is-on' : ''"
                 :aria-pressed="status !== 'pending' ? 'true' : 'false'" @click="toggleArchived()" data-testid="design-archived-toggle">Archived</button>
+        <select class="design-studio-select" x-model="org" x-show="orgOptions.length > 1" data-testid="design-org" aria-label="Organization">
+          <option value="all">All orgs</option>
+          <template x-for="slug in orgOptions" :key="slug">
+            <option :value="slug" x-text="slug"></option>
+          </template>
+        </select>
         <select class="design-studio-select" x-model="sort" @change="loadDesigns()" data-testid="design-sort" aria-label="Sort">
           <option value="updated">Latest update</option>
           <option value="created">First created</option>
@@ -62,14 +70,38 @@
         <div class="design-studio-action-error" data-testid="design-action-error" x-text="actionError"></div>
       </template>
 
-      <template x-if="!loading && !error && visibleDesigns.length === 0">
+      <template x-if="!loading && !error && visibleDesigns.length === 0 && !(sharedOnly && visibleRemoteShares.length)">
         <div class="design-studio-empty" data-testid="design-empty">
           <span x-show="hasFilters">No designs match those filters.</span>
           <span x-show="!hasFilters">No designs found.</span>
         </div>
       </template>
 
-      <section class="design-studio-gallery" data-testid="design-list" x-show="!loading && !error && visibleDesigns.length">
+      <section class="design-studio-gallery" data-testid="design-list" x-show="!loading && !error && (visibleDesigns.length || (sharedOnly && visibleRemoteShares.length))">
+        <template x-for="share in (sharedOnly ? visibleRemoteShares : [])" :key="'remote:' + share.token">
+          <figure class="design-tile is-remote"
+                  role="link"
+                  tabindex="0"
+                  :title="'Shared with ' + (share.org || 'the org') + ' from another machine — opens the auto.network link'"
+                  @click="openRemoteShare(share)"
+                  @keydown.enter.prevent="openRemoteShare(share)"
+                  data-testid="design-remote-share">
+            <div class="design-tile-frame">
+              <div class="design-tile-blank">
+                <span class="design-tile-blank-initial">↗</span>
+                <span class="design-tile-blank-note">Shared with org</span>
+              </div>
+            </div>
+            <figcaption class="design-tile-caption">
+              <span class="design-tile-title" x-text="share.label || ('Shared ' + share.target_type)"></span>
+              <span class="design-tile-meta">
+                <span x-text="share.org || ''"></span>
+                <span aria-hidden="true">·</span>
+                <span x-text="share.expires_at ? 'expires ' + formatDateTime(new Date(share.expires_at * 1000).toISOString()) : 'no expiry'"></span>
+              </span>
+            </figcaption>
+          </figure>
+        </template>
         <template x-for="design in visibleDesigns" :key="design.design_id">
           <figure class="design-tile"
                   :class="[design.thumbnail_url ? 'has-thumbnail' : 'no-thumbnail', design.status !== 'pending' ? 'is-archived' : '']"
@@ -100,6 +132,7 @@
                 <span class="design-card-presence-dot"></span>
               </button>
               <span class="design-tile-form" x-show="design.form_factor" :title="formFactorTitle(design.form_factor)" x-html="formFactorIcon(design.form_factor)"></span>
+              <span class="design-tile-shared" x-show="design.shared" title="Shared by link">↗</span>
               <div class="design-tile-actions" aria-label="Design actions" @click.stop>
                 <button class="design-card-action" type="button"
                         :class="designActionState(design, 'render')"

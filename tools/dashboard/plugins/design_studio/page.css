@@ -258,6 +258,27 @@
   height: 0.85rem;
 }
 
+.design-tile-shared {
+  position: absolute;
+  top: 0.5rem;
+  right: 2.75rem;
+  z-index: 2;
+  display: inline-grid;
+  width: 1.5rem;
+  height: 1.5rem;
+  place-items: center;
+  border-radius: 999px;
+  background: rgba(49, 46, 129, 0.85);
+  color: #c7d2fe;
+  font-size: 0.8125rem;
+  font-weight: 800;
+  pointer-events: none;
+}
+
+.design-tile.is-remote .design-tile-blank-initial {
+  color: #818cf8;
+}
+
 .design-tile-actions {
   position: absolute;
   top: 0.5rem;
