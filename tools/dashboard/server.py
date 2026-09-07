@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 _http_logger = logging.getLogger(__name__ + ".http")
 _stall_logger = logging.getLogger(__name__ + ".stall")
 _voice_logger = logging.getLogger(__name__ + ".voice")
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1270,12 +1271,25 @@ async def api_dispatch_pause_state(request):
     return JSONResponse({"paused": paused, "reason": reason})
 
 
-def _get_dispatcher_state() -> dict:
-    """Read dispatcher pause state and merge health from SQLite/git for SSE broadcast."""
-    paused = is_paused()
-    reason = get_pause_reason() if paused else None
+def _get_pause_dict() -> dict:
+    """The dispatcher pause flag + reason from the dispatch SQLite DB.
 
-    # Check for UU (unmerged) files that block all merges
+    Split out of ``_get_dispatcher_state`` so the dispatch watcher can
+    gate the cheap SQLite pause read (which moves whenever dispatch.db is
+    written, i.e. on the ``data_version`` signal) independently of the
+    expensive ``git status`` merge-health probe.
+    """
+    paused = is_paused()
+    return {"paused": paused, "reason": get_pause_reason() if paused else None}
+
+
+def _get_merge_health() -> dict:
+    """UU (unmerged) file check via ``git status --porcelain``.
+
+    This is the one subprocess in the header recompute; the watcher runs
+    it at most once per 60 s (heartbeat, or a worktree change floored to
+    60 s) rather than every 5 s tick.
+    """
     merge_health: dict = {"status": "ok"}
     try:
         porcelain = subprocess.run(
@@ -1292,8 +1306,13 @@ def _get_dispatcher_state() -> dict:
             }
     except Exception:
         pass  # Non-critical — don't break SSE on git failure
+    return merge_health
 
-    return {"paused": paused, "reason": reason, "merge_health": merge_health}
+
+def _get_dispatcher_state() -> dict:
+    """Read dispatcher pause state and merge health from SQLite/git for SSE broadcast."""
+    pause = _get_pause_dict()
+    return {**pause, "merge_health": _get_merge_health()}
 
 
 async def api_dispatch_status(request):
@@ -14404,24 +14423,28 @@ async def api_diag_settings_mediator(request):
 
 # ── Background watchers ───────────────────────────────────────
 
-_DISPATCH_WATCHER_INTERVAL = 5   # seconds between dispatch polls
+_DISPATCH_WATCHER_INTERVAL = 5   # seconds between change-signal samples
+# The only unconditional recompute+broadcast. Between heartbeats the ten
+# reads run only when a cheap change signal (dispatch-DB data_version, a
+# session/worktree/setting EventBus topic, or the Dolt head hash) says an
+# input actually moved. See bead auto-jnm58 and the polling registry note
+# graph://bc2c1f51-659.
+_DISPATCH_WATCHER_HEARTBEAT = 60.0
+# The git status --porcelain merge-health probe is the one subprocess in
+# the recompute; never run it more often than this.
+_DISPATCH_WATCHER_GIT_FLOOR = 60.0
+# EventBus topics the watcher treats as change signals. ``worktrees`` is
+# (today) self-produced by this watcher, so it mainly closes the loop on a
+# real worktree-signature change the heartbeat would otherwise carry.
+_DISPATCH_WATCHER_TOPICS = frozenset({
+    "session:registry", "session:ended", "worktrees", "setting.changed",
+})
 # 15 min: no point polling the provider /usage APIs faster than the cache
 # lives (HARNESS_USAGE_CACHE_TTL = 15 min), and the slower cadence keeps us
 # off the Claude /usage rate limit (was 300s).
 _HARNESS_USAGE_POLL_INTERVAL = 900.0
 
-_WATCHER_HELPERS = [
-    "collect_dispatch_data", "get_bead_counts", "count_active_sessions",
-    "count_terminals", "count_today_done", "get_dispatcher_state", "get_pinned_beads",
-    "count_worktrees", "count_streams", "collect_harness_usage", "collect_plugin_badges",
-]
 _watcher_errors: dict[str, str] = {}  # helper_name -> last error string
-
-# Last-broadcast signature for the ``worktrees`` SSE topic. Lets the
-# watcher emit only on change (worktree_monitor refreshes every 30s,
-# the watcher loops every 5s — without this we'd flood every connected
-# client with identical payloads 6x more often than the data changes).
-_worktrees_last_signature: str | None = None
 
 
 _WAITING_LIST_LIMIT = 5
@@ -14706,6 +14729,42 @@ def _count_worktrees() -> dict[str, int]:
         "with_commits": sum(1 for row in rows if row.commits),
         "with_changes": sum(1 for row in rows if row.is_dirty),
     }
+
+
+def _collect_worktree_state_rows() -> list[dict]:
+    """Serialize per-row worktree state for the ``worktrees`` SSE topic."""
+    return [_worktree_state_json(row) for row in worktree_monitor.get_all()]
+
+
+def _worktree_rows_signature(rows: list[dict]) -> str:
+    """Change signature for worktree rows — drives on-change ``worktrees`` emit."""
+    return json.dumps(
+        [
+            [
+                r.get("session_name"), r.get("repo_name"),
+                r.get("commits_ahead"), r.get("is_dirty"),
+                len(r.get("dirty_files") or []),
+            ]
+            for r in rows
+        ],
+        sort_keys=True,
+    )
+
+
+def _sample_dispatch_data_version(conn: sqlite3.Connection) -> int | None:
+    """``PRAGMA data_version`` on the dispatch-DB connection, or None.
+
+    On a persistent connection this integer advances whenever any OTHER
+    connection commits to dispatch.db — the cheap gate for the dispatch
+    board, today-done count and pause reads. A fresh connection per call
+    would never observe a change, so the watcher holds one open connection
+    for its lifetime.
+    """
+    try:
+        row = conn.execute("PRAGMA data_version").fetchone()
+        return int(row[0]) if row else None
+    except Exception:
+        return None
 
 
 def _parse_harness_state(raw_state: Any) -> dict[str, Any]:
@@ -15554,7 +15613,6 @@ async def _vault_release_sweeper() -> None:
 # card stranded while the dashboard was down).
 _dispatch_sessions_registered: set = set()
 _dispatch_sessions_demoted: set = set()
-_last_orphan_sweep: float = 0.0
 
 
 def _dispatch_run_session_name(row: dict) -> str | None:
@@ -15628,128 +15686,297 @@ async def _reconcile_dispatch_sessions() -> None:
                 "dispatch-session reconcile: demote failed for %s", name)
 
 
-async def _dispatch_watcher():
-    """Background task: poll dispatch state and broadcast to SSE topics.
+async def _orphan_sweep() -> None:
+    """Finalize RUNNING agentic rows whose container is gone (~5 min cadence).
 
-    Uses return_exceptions=True so one failing helper doesn't kill the rest.
-    Logs errors on state change only (first failure / recovery).
+    Kept as a standalone coroutine so the watcher can inject a no-op in
+    tests instead of touching the real dispatch DB.
     """
-    while True:
-        try:
-            results = await asyncio.gather(
-                _collect_dispatch_data(),
-                asyncio.to_thread(dao_beads.get_bead_counts),
-                asyncio.to_thread(_count_active_sessions),
-                asyncio.to_thread(_count_terminals),
-                asyncio.to_thread(_count_today_done),
-                asyncio.to_thread(_get_dispatcher_state),
-                asyncio.to_thread(dao_beads.get_beads_by_label, "pinned"),
-                asyncio.to_thread(_count_worktrees),
-                asyncio.to_thread(_count_streams),
-                asyncio.to_thread(_collect_harness_usage),
-                asyncio.to_thread(_collect_plugin_badges),
-                return_exceptions=True,
-            )
+    from agents.dispatch_db import fail_orphaned_running_agentic
+    orphaned = await asyncio.to_thread(fail_orphaned_running_agentic)
+    if orphaned:
+        logger.warning(
+            "orphan sweep finalized %d agentic run(s): %s",
+            len(orphaned), ", ".join(orphaned))
 
-            # Log per-helper errors on state change (avoid spam)
-            for name, result in zip(_WATCHER_HELPERS, results):
-                if isinstance(result, BaseException):
-                    err_str = f"{type(result).__name__}: {result}"
-                    if _watcher_errors.get(name) != err_str:
-                        logger.error("[dispatch_watcher] %s failed: %s", name, err_str)
-                        _watcher_errors[name] = err_str
-                else:
-                    if name in _watcher_errors:
-                        logger.info("[dispatch_watcher] %s recovered", name)
-                        del _watcher_errors[name]
 
-            # Unpack with safe defaults for failed helpers
-            dispatch_data = results[0] if not isinstance(results[0], BaseException) else {"active": [], "waiting": [], "blocked": [], "paused": {}}
-            counts = results[1] if not isinstance(results[1], BaseException) else {}
-            active_sessions = results[2] if not isinstance(results[2], BaseException) else 0
-            terminal_count = results[3] if not isinstance(results[3], BaseException) else 0
-            today_done = results[4] if not isinstance(results[4], BaseException) else 0
-            dispatcher_state = results[5] if not isinstance(results[5], BaseException) else {"paused": False, "reason": None}
-            pinned_beads = results[6] if not isinstance(results[6], BaseException) else []
-            worktree_counts = results[7] if not isinstance(results[7], BaseException) else {"with_commits": 0, "with_changes": 0}
-            stream_count = results[8] if not isinstance(results[8], BaseException) else 0
-            harness_usage = results[9] if not isinstance(results[9], BaseException) else {"harnesses": []}
-            plugin_badges = results[10] if not isinstance(results[10], BaseException) else {}
+@dataclass
+class _WatcherSignals:
+    """Which cheap change signals fired on one watcher tick.
 
-            nav_data = {
-                "open_beads": counts.get("open_count", 0),
-                "running_agents": len(dispatch_data["active"]),
-                "approved_waiting": dispatch_data.get(
-                    "waiting_total", len(dispatch_data["waiting"])),
-                "approved_blocked": len(dispatch_data["blocked"]),
-                "active_sessions": active_sessions,
-                "terminal_count": terminal_count,
-                "today_done": today_done,
-                "pinned": pinned_beads,
-                "worktrees_with_commits": worktree_counts.get("with_commits", 0),
-                "worktrees_with_changes": worktree_counts.get("with_changes", 0),
-                "stream_count": stream_count,
-                "plugins": plugin_badges,
-                "harness_usage": harness_usage,
-            }
-            await event_bus.broadcast("dispatch", dispatch_data)
-            await event_bus.broadcast("nav", nav_data)
-            await event_bus.broadcast("dispatcher_state", dispatcher_state)
+    Each field gates a subset of the ten header reads (see the per-input
+    table on bead auto-jnm58). ``heartbeat`` forces every read regardless.
+    """
+    beads: bool = False        # Dolt head hash moved
+    timeline: bool = False     # dispatch-DB PRAGMA data_version moved
+    sessions: bool = False     # session:registry / session:ended topic
+    worktrees: bool = False    # worktrees topic
+    settings: bool = False     # setting.changed topic
+    heartbeat: bool = False    # 60 s unconditional recompute
 
+
+class _DispatchWatcher:
+    """Event-driven driver for the dashboard header (``dispatch``/``nav``)
+    broadcasts and the ``timeline:changed`` page-refresh nudge.
+
+    Each 5 s tick only SAMPLES change signals; the ten expensive reads run
+    only for the signals that moved, or on the 60 s heartbeat. ``dispatch``
+    and ``nav`` go out only when their payload changed or on the heartbeat;
+    ``timeline:changed`` fires on every dispatch-DB ``data_version`` move.
+    """
+
+    def __init__(
+        self,
+        *,
+        bus,
+        data_version_fn,
+        dolt_head_fn,
+        recompute_fn=None,
+        reconcile_fn=None,
+        orphan_fn=None,
+        clock=time.monotonic,
+        sleep=asyncio.sleep,
+        interval: float = _DISPATCH_WATCHER_INTERVAL,
+        heartbeat: float = _DISPATCH_WATCHER_HEARTBEAT,
+        git_floor: float = _DISPATCH_WATCHER_GIT_FLOOR,
+    ) -> None:
+        self._bus = bus
+        self._data_version_fn = data_version_fn
+        self._dolt_head_fn = dolt_head_fn
+        self._recompute_fn = recompute_fn or self._recompute
+        self._reconcile_fn = reconcile_fn or _reconcile_dispatch_sessions
+        self._orphan_fn = orphan_fn or _orphan_sweep
+        self._clock = clock
+        self._sleep = sleep
+        self._interval = interval
+        self._heartbeat = heartbeat
+        self._git_floor = git_floor
+
+        self._queue = None
+        self._last_dv: int | None = None
+        self._last_head: str | None = None
+        # -inf so the very first tick is always a heartbeat (seeds every cache).
+        self._last_recompute = float("-inf")
+        self._last_git = float("-inf")
+        self._last_orphan = float("-inf")
+
+        # Cached read results, reused between the ticks that don't refresh them.
+        self._cache: dict = {}
+        self._last_dispatch = None
+        self._last_nav = None
+        self._wt_sig: str | None = None
+
+    def _drain(self) -> set[str]:
+        """Collect the set of topics queued since the last tick (non-blocking)."""
+        topics: set[str] = set()
+        q = self._queue
+        if q is None:
+            return topics
+        while True:
             try:
-                await _reconcile_dispatch_sessions()
+                item = q.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            topics.add(item[0])
+        return topics
+
+    async def prime(self) -> None:
+        """Subscribe and seed signal baselines; no recompute yet."""
+        self._queue = self._bus.subscribe(client_id="dispatch-watcher")
+        self._last_dv = self._data_version_fn()
+        self._last_head = self._dolt_head_fn()
+        # Discard the cached-state replay the bus enqueues on subscribe so it
+        # doesn't read as a burst of change signals on the first live tick.
+        self._drain()
+
+    async def run(self) -> None:
+        await self.prime()
+        try:
+            while True:
+                try:
+                    await self.tick()
+                except Exception:
+                    logger.exception("[dispatch_watcher] unexpected tick error")
+                await self._sleep(self._interval)
+        finally:
+            if self._queue is not None:
+                self._bus.unsubscribe(self._queue)
+
+    async def tick(self) -> None:
+        now = self._clock()
+        topics = self._drain()
+
+        dv = self._data_version_fn()
+        dv_changed = self._last_dv is not None and dv != self._last_dv
+        self._last_dv = dv
+
+        head = self._dolt_head_fn()
+        head_changed = self._last_head is not None and head != self._last_head
+        self._last_head = head
+
+        signals = _WatcherSignals(
+            beads=head_changed,
+            timeline=dv_changed,
+            sessions=bool(topics & {"session:registry", "session:ended"}),
+            worktrees="worktrees" in topics,
+            settings="setting.changed" in topics,
+            heartbeat=(now - self._last_recompute) >= self._heartbeat,
+        )
+
+        # timeline:changed is a page-refresh nudge, not a payload — dedup=False
+        # so a second identical (empty) frame in a burst is still delivered.
+        if dv_changed:
+            await self._bus.broadcast("timeline:changed", {}, dedup=False)
+
+        any_signal = (
+            signals.beads or signals.timeline or signals.sessions
+            or signals.worktrees or signals.settings
+        )
+        if any_signal or signals.heartbeat:
+            self._last_recompute = now
+            await self._recompute_fn(signals, now)
+
+        # Session-card reconcile follows dispatch.db writes (data_version) or
+        # the heartbeat; the orphan sweep self-gates on a ~5-minute wall clock.
+        if signals.timeline or signals.heartbeat:
+            try:
+                await self._reconcile_fn()
             except Exception:
                 logger.exception("dispatch-session reconcile pass failed")
-
-            # Orphan sweep on a ~5-minute cadence (operator directive):
-            # RUNNING agentic rows whose container is gone finalize as
-            # orphaned-no-exit instead of wedging forever. The watcher
-            # ticks every few seconds; this gates itself by wall clock.
-            global _last_orphan_sweep
-            if time.monotonic() - _last_orphan_sweep >= 300.0:
-                _last_orphan_sweep = time.monotonic()
-                try:
-                    from agents.dispatch_db import fail_orphaned_running_agentic
-                    orphaned = await asyncio.to_thread(
-                        fail_orphaned_running_agentic)
-                    if orphaned:
-                        logger.warning(
-                            "orphan sweep finalized %d agentic run(s): %s",
-                            len(orphaned), ", ".join(orphaned))
-                except Exception:
-                    logger.exception("agentic orphan sweep failed")
-
-            # Per-row worktree state — drives the ⌥ workspace-changes
-            # indicator on session cards / page-mode header. Emit only
-            # on signature change so connected clients aren't flooded
-            # with identical payloads (worktree_monitor caches refresh
-            # every 30s, this watcher loops every 5s).
+        if now - self._last_orphan >= 300.0:
+            self._last_orphan = now
             try:
-                wt_rows = [
-                    _worktree_state_json(row)
-                    for row in worktree_monitor.get_all()
-                ]
+                await self._orphan_fn()
             except Exception:
-                logger.exception("[dispatch_watcher] worktree state serialization failed")
-                wt_rows = []
-            global _worktrees_last_signature
-            wt_signature = json.dumps(
-                [
-                    [
-                        r.get("session_name"), r.get("repo_name"),
-                        r.get("commits_ahead"), r.get("is_dirty"),
-                        len(r.get("dirty_files") or []),
-                    ]
-                    for r in wt_rows
-                ],
-                sort_keys=True,
-            )
-            if wt_signature != _worktrees_last_signature:
-                _worktrees_last_signature = wt_signature
-                await event_bus.broadcast("worktrees", wt_rows)
+                logger.exception("agentic orphan sweep failed")
+
+    async def _recompute(self, signals: _WatcherSignals, now: float) -> None:
+        """Run only the reads whose gate fired (or all, on the heartbeat),
+        reuse cached results for the rest, and broadcast on change/heartbeat."""
+        hb = signals.heartbeat
+        run_git = hb or (signals.worktrees and (now - self._last_git) >= self._git_floor)
+
+        # (cache-key, awaitable-factory, default) — only gated reads run, and
+        # the awaitable is built lazily so an ungated read never creates (and
+        # then leaks) a coroutine.
+        reads: list[tuple[str, object]] = []
+
+        def add(key, gated, factory, default):
+            if gated:
+                reads.append((key, factory(), default))
+            else:
+                self._cache.setdefault(key, default)
+
+        add("dispatch_data", hb or signals.timeline or signals.beads,
+            lambda: _collect_dispatch_data(),
+            {"active": [], "waiting": [], "waiting_total": 0, "blocked": [],
+             "paused": {}, "pause_reasons": {}})
+        add("counts", hb or signals.beads,
+            lambda: asyncio.to_thread(dao_beads.get_bead_counts), {})
+        add("pinned", hb or signals.beads,
+            lambda: asyncio.to_thread(dao_beads.get_beads_by_label, "pinned"), [])
+        add("today_done", hb or signals.timeline,
+            lambda: asyncio.to_thread(_count_today_done), 0)
+        add("pause", hb or signals.timeline or signals.beads or signals.worktrees,
+            lambda: asyncio.to_thread(_get_pause_dict),
+            {"paused": False, "reason": None})
+        add("merge_health", run_git,
+            lambda: asyncio.to_thread(_get_merge_health), {"status": "ok"})
+        add("active_sessions", hb or signals.sessions,
+            lambda: asyncio.to_thread(_count_active_sessions), 0)
+        add("terminals", hb or signals.sessions,
+            lambda: asyncio.to_thread(_count_terminals), 0)
+        add("worktree_counts", hb or signals.worktrees,
+            lambda: asyncio.to_thread(_count_worktrees),
+            {"with_commits": 0, "with_changes": 0})
+        add("wt_rows", hb or signals.worktrees,
+            lambda: asyncio.to_thread(_collect_worktree_state_rows), [])
+        add("streams", hb or signals.sessions,
+            lambda: asyncio.to_thread(_count_streams), 0)
+        add("harness_usage", hb,
+            lambda: asyncio.to_thread(_collect_harness_usage), {"harnesses": []})
+        add("plugins", hb or signals.settings,
+            lambda: asyncio.to_thread(_collect_plugin_badges), {})
+
+        if reads:
+            results = await asyncio.gather(
+                *(aw for _key, aw, _default in reads), return_exceptions=True)
+            for (key, _aw, default), result in zip(reads, results):
+                if isinstance(result, BaseException):
+                    err_str = f"{type(result).__name__}: {result}"
+                    if _watcher_errors.get(key) != err_str:
+                        logger.error("[dispatch_watcher] %s failed: %s", key, err_str)
+                        _watcher_errors[key] = err_str
+                    self._cache.setdefault(key, default)
+                else:
+                    if key in _watcher_errors:
+                        logger.info("[dispatch_watcher] %s recovered", key)
+                        del _watcher_errors[key]
+                    self._cache[key] = result
+            if run_git:
+                self._last_git = now
+
+        dispatch_data = self._cache["dispatch_data"]
+        counts = self._cache["counts"]
+        dispatcher_state = {
+            **self._cache["pause"], "merge_health": self._cache["merge_health"]}
+        nav_data = {
+            "open_beads": counts.get("open_count", 0),
+            "running_agents": len(dispatch_data["active"]),
+            "approved_waiting": dispatch_data.get(
+                "waiting_total", len(dispatch_data["waiting"])),
+            "approved_blocked": len(dispatch_data["blocked"]),
+            "active_sessions": self._cache["active_sessions"],
+            "terminal_count": self._cache["terminals"],
+            "today_done": self._cache["today_done"],
+            "pinned": self._cache["pinned"],
+            "worktrees_with_commits": self._cache["worktree_counts"].get("with_commits", 0),
+            "worktrees_with_changes": self._cache["worktree_counts"].get("with_changes", 0),
+            "stream_count": self._cache["streams"],
+            "plugins": self._cache["plugins"],
+            "harness_usage": self._cache["harness_usage"],
+        }
+
+        # dispatch / nav: only when the payload moved, or on the heartbeat
+        # (the one unconditional refresh). dedup=False so the heartbeat frame
+        # is actually delivered even when identical.
+        if hb or dispatch_data != self._last_dispatch or nav_data != self._last_nav:
+            await self._bus.broadcast("dispatch", dispatch_data, dedup=False)
+            await self._bus.broadcast("nav", nav_data, dedup=False)
+            self._last_dispatch = dispatch_data
+            self._last_nav = nav_data
+        # dispatcher_state stays deduped — a quiet dashboard never re-sends it.
+        await self._bus.broadcast("dispatcher_state", dispatcher_state)
+
+        # Per-row worktree state (⌥ workspace-changes indicator) — emit only
+        # on signature change so identical payloads never flood clients.
+        wt_rows = self._cache["wt_rows"]
+        wt_sig = _worktree_rows_signature(wt_rows)
+        if wt_sig != self._wt_sig:
+            self._wt_sig = wt_sig
+            await self._bus.broadcast("worktrees", wt_rows)
+
+
+async def _dispatch_watcher():
+    """Background task: event-driven dispatch/header broadcasts.
+
+    Holds one persistent dispatch-DB connection for its ``data_version``
+    signal (a fresh connection per tick would never observe a change), and
+    one EventBus subscription for the session/worktree/setting signals.
+    """
+    conn = _timeline_conn()
+    watcher = _DispatchWatcher(
+        bus=event_bus,
+        data_version_fn=lambda: _sample_dispatch_data_version(conn),
+        dolt_head_fn=dao_beads.get_dolt_head_hash,
+    )
+    try:
+        await watcher.run()
+    finally:
+        try:
+            conn.close()
         except Exception:
-            logger.exception("[dispatch_watcher] unexpected top-level error")
-        await asyncio.sleep(_DISPATCH_WATCHER_INTERVAL)
+            pass
 
 
 # ── Graph Write API (single-writer proxy) ─────────────────────

@@ -563,6 +563,45 @@ def get_open_beads(limit: int = 200) -> list[dict]:
         return [_coerce(r) for r in _rows(cur)]
 
 
+@_degrade_when_unreachable(lambda: None)
+def get_dolt_head_hash(org: str | None = None) -> str | None:
+    """Return a cheap change token for the org's Dolt database, or None.
+
+    Used by the dashboard header watcher as a gate: the bead-count and
+    pinned-bead reads only re-run when this token moves. Prefers
+    ``dolt_hashof_db()`` — the working-set hash, which advances on any
+    write (committed or not); falls back to the ``@@<database>_head``
+    system variable (the HEAD commit hash) on a Dolt server that lacks the
+    function. Returns None when neither is available so the caller treats
+    "no token" as "cannot gate" and falls back to the heartbeat.
+
+    Which of the two answered is recorded in ``get_dolt_head_hash.source``
+    for diagnostics ("hashof_db" | "head_var" | None).
+    """
+    conn = _get_conn(org)
+    with conn.cursor() as cur:
+        try:
+            cur.execute("SELECT dolt_hashof_db() AS h")
+            row = cur.fetchone()
+            if row and row.get("h"):
+                get_dolt_head_hash.source = "hashof_db"
+                return str(row["h"])
+        except pymysql.err.MySQLError:
+            # Older Dolt without the function — fall through to the head var.
+            pass
+        db = _conn_params(org)["database"]
+        cur.execute(f"SELECT @@{db}_head AS h")
+        row = cur.fetchone()
+        if row and row.get("h") is not None:
+            get_dolt_head_hash.source = "head_var"
+            return str(row["h"])
+    get_dolt_head_hash.source = None
+    return None
+
+
+get_dolt_head_hash.source = None  # type: ignore[attr-defined]
+
+
 @_degrade_when_unreachable(dict)
 def get_bead_counts() -> dict[str, int]:
     """Return lightweight counts for nav badges and dashboard header.
