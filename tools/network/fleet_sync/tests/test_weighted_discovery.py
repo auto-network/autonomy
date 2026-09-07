@@ -22,6 +22,33 @@ def test_ranking_is_stalest_first_bounded_and_deterministic() -> None:
     assert rank_peers(["cc", "aa"], weights, limit=0) == ["aa", "cc"]
 
 
+def test_random_source_breaks_lockstep_but_keeps_fairness() -> None:
+    """Twenty fresh machines must not all pick the same first peer, and a
+    peer far staler than the rest must still be picked."""
+    import collections
+    import random
+
+    from tools.network.fleet_sync_scheduler import RANK_POOL_FACTOR
+
+    peers = [f"{i:02d}" * 32 for i in range(20)]
+    firsts = collections.Counter()
+    for seed in range(200):
+        rng = random.Random(seed)
+        firsts[rank_peers(peers, {}, limit=1, rng=rng)[0]] += 1
+    assert len(firsts) >= 10, firsts          # spread, not one hot server
+    assert max(firsts.values()) < 60         # no single peer dominates
+
+    # Fairness bound: with one very stale peer, it is always in the pool
+    # and is picked at least as often as 1/pool.
+    weights = {pub: 1_000 for pub in peers}
+    weights[peers[7]] = 1
+    picks = collections.Counter(
+        rank_peers(peers, weights, limit=1, rng=random.Random(seed))[0]
+        for seed in range(300)
+    )
+    assert picks[peers[7]] >= 300 // max(RANK_POOL_FACTOR, 3) // 2
+
+
 def test_bounded_rounds_converge_and_cap_pull_volume(tmp_path: Path) -> None:
     fleet = HarnessFleet(
         tmp_path / "fleet", size=4, max_concurrent_pulls=2
