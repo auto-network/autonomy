@@ -1013,18 +1013,28 @@ function designStudioPage() {
       ];
     },
 
+    // The host renderer is optional: sessions render the revisions they
+    // push. The chip only warns when the host has work it cannot do.
     get renderChip() {
       var st = this.renderStatus || {};
-      if (st.available === false) return 'Renderer unavailable';
-      if (st.current || (st.pending || 0) > 0) {
-        return 'Rendering ' + ((st.pending || 0) + (st.current ? 1 : 0));
-      }
+      var queued = (st.pending || 0) + (st.current ? 1 : 0);
+      if (st.available === false) return queued > 0 ? 'No host renderer' : 'Renders from sessions';
+      if (queued > 0) return 'Rendering ' + queued;
       return '';
+    },
+
+    get renderChipWarns() {
+      var st = this.renderStatus || {};
+      return st.available === false && ((st.pending || 0) > 0 || !!st.current);
     },
 
     get renderChipTitle() {
       var st = this.renderStatus || {};
-      if (st.available === false) return 'agent-browser is not installed on the dashboard host, so thumbnails cannot render';
+      if (st.available === false) {
+        return 'The dashboard host has no headless browser (agent-browser), so thumbnails render from the session '
+          + 'that pushes a design. To render on the host: npm install -g agent-browser && agent-browser install. '
+          + 'To backfill from any session: python -m tools.dashboard.design_thumbnails --remote https://localhost:8080';
+      }
       if (st.last_error) return 'Last render error: ' + st.last_error;
       return 'Thumbnails render headlessly on the dashboard';
     },
@@ -1050,7 +1060,7 @@ function designStudioPage() {
       var st = this.renderStatus || {};
       var key = this._designActionKey(design, 'render');
       if (this.actionStates[key] === 'working' || this.actionStates[key] === 'done') return 'Rendering';
-      if (st.available === false) return 'No renderer';
+      if (st.available === false) return 'Renders on next push';
       if (st.current || (st.pending || 0) > 0) return 'Queued';
       return 'No preview yet';
     },

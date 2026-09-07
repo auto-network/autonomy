@@ -105,8 +105,13 @@ describe('Design Studio gallery strip', () => {
     assert.equal(page.blankNote(design), 'Queued');
     assert.equal(page.renderChip, 'Rendering 3');
     page.renderStatus = { available: false };
-    assert.equal(page.blankNote(design), 'No renderer');
-    assert.equal(page.renderChip, 'Renderer unavailable');
+    assert.equal(page.blankNote(design), 'Renders on next push');
+    assert.equal(page.renderChip, 'Renders from sessions');   // quiet: sessions render on push
+    assert.equal(page.renderChipWarns, false);
+    page.renderStatus = { available: false, pending: 2 };
+    assert.equal(page.renderChip, 'No host renderer');         // warns: queued work it cannot do
+    assert.equal(page.renderChipWarns, true);
+    assert.match(page.renderChipTitle, /npm install -g agent-browser/);
     page.actionStates[page._designActionKey(design, 'render')] = 'working';
     assert.equal(page.blankNote(design), 'Rendering');
   });
