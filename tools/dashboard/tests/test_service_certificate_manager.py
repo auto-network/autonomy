@@ -252,3 +252,27 @@ def test_manager_reports_each_certificate_state(
 
     assert state["state"] == expected
     assert state["reason"]
+
+
+def test_issuance_failure_reason_shows_the_cause_not_the_preamble(monkeypatch):
+    """Certbot's first line is 'Requesting a certificate for …'; the cause is
+    last. The operator-facing reason must show the tail and the state must
+    carry the whole detail (auto-0iwrd)."""
+    identity = ("autonomy", "jeremy-77827e972ba4c37d4215")
+    monkeypatch.setattr(certs, "certificate_metadata", lambda *_args: None)
+    lifecycle = manager.ServiceCertificateManager(
+        now=lambda: 100, desired_fn=lambda: {identity},
+    )
+    lifecycle.errors[identity] = (
+        "Certbot failed (1): Requesting a certificate for x.serve.auto.network\n"
+        "Hook '--manual-auth-hook' for x reported error code 1\n"
+        "Hook '--manual-auth-hook' ran with error output:\n"
+        " autonomy DNS-01 hook unavailable: FileNotFoundError: [Errno 2] (socket '/run/autonomy-acme/dns01.sock', action present)\n"
+        " [attempt kept at /app/data/service-certs/attempts/20260907T053700Z-x]"
+    )
+    state = lifecycle.certificate_states()[0]
+    assert state["state"] == "issuance_failed"
+    assert "hook unavailable: FileNotFoundError" in state["reason"]
+    assert "attempt kept at" in state["reason"]
+    assert "Requesting a certificate" not in state["reason"]
+    assert state["detail"].startswith("Certbot failed (1)")

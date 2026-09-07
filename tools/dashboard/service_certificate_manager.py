@@ -167,7 +167,11 @@ class ServiceCertificateManager:
             error = self.errors.get(identity)
             if error:
                 state = "issuance_failed"
-                summary = error.splitlines()[0].strip()[:300]
+                # Certbot states the CAUSE last (the hook's stderr, the ACME
+                # error, the 'attempt kept at' pointer); the first line is its
+                # 'Requesting a certificate for …' preamble. Show the tail.
+                lines = [line.strip() for line in error.splitlines() if line.strip()]
+                summary = " · ".join(lines[-3:])[-600:] if lines else error[:600]
                 reason = f"Certificate issuance failed: {summary}"
             elif identity in self.in_progress:
                 state = "issuing"
@@ -188,6 +192,7 @@ class ServiceCertificateManager:
                     reason = "The persona Service TLS certificate is current."
             states.append(
                 {
+                    "detail": error if error else None,
                     "org": org,
                     "persona_label": persona,
                     "state": state,
