@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import os
 import logging
 import struct
 import time
@@ -901,7 +902,11 @@ class SQLiteFleetSyncStore:
         import sqlite3
         from tools.network.fleet_sync.streaming import register_streaming_functions
 
-        conn = sqlite3.connect(self.path, factory=FleetSyncConnection)
+        # 30 s busy wait: several pulls (and the local writer) share one
+        # file; the 5 s default surfaced as OperationalError at N=50.
+        conn = sqlite3.connect(
+            self.path, factory=FleetSyncConnection, timeout=30.0,
+        )
         conn.row_factory = sqlite3.Row
         register_streaming_functions(conn)
         catalog = attach_active_production_catalog(conn)
@@ -1019,6 +1024,25 @@ class SQLiteFleetSyncStore:
         conn, catalog = self._open()
         try:
             return catalog.apply_remote_batch(items)
+        finally:
+            conn.close()
+
+    def apply_many(
+        self, groups: list[list[AuthoredMutation]]
+    ) -> list[tuple[int, int]]:
+        """Apply several complete transactions on ONE connection.
+
+        Opening a connection (schema audit, streaming functions, blob store)
+        per transaction was the pull's dominant cost: ~4 transactions per
+        second per machine under load (auto-89b7q), so pulls ran 10-60 s and
+        overlapped, and every overlapping pull carried the same new writes.
+        Each group still commits on its own (apply_remote_batch's
+        BEGIN IMMEDIATE), so a failure mid-batch leaves earlier groups
+        applied and the later ones unapplied, exactly as before.
+        """
+        conn, catalog = self._open()
+        try:
+            return [catalog.apply_remote_batch(items) for items in groups]
         finally:
             conn.close()
 
@@ -1201,6 +1225,15 @@ class SQLiteFleetSyncStore:
 #: Minimum wait before re-pulling from a peer after a pull that received a
 #: full checkpoint and still failed (mirrors the relay redelivery guard).
 CHECKPOINT_FAILURE_BACKOFF_S = 600.0
+
+#: Harness forensics: when the per-pull ledger is on, each pull's record
+#: lists the transactions it received.
+_PULL_TRACE = bool(os.environ.get("AUTONOMY_HARNESS_PULL_LOG"))
+
+#: Batched apply bounds (auto-t43kz): complete transactions queue until one
+#: of these trips, then apply on a single store connection.
+APPLY_BATCH_TRANSACTIONS = 200
+APPLY_BATCH_OPERATIONS = 5_000
 
 #: While a direct serve is silent (a checkpoint build sends nothing for
 #: minutes), the observer is touched this often so the supervisor's
@@ -2105,6 +2138,9 @@ class FleetSyncScheduler:
         peer_watermark: int | None = None
         #: The candidate that actually connected -- the tier-used readout.
         connected_address: str | None = None
+        #: Harness-only trace of (origin[:8], transaction_id, timestamp) per
+        #: received transaction, for duplication forensics.
+        received_ids: list[tuple[str, str, int]] = []
         # Initialized BEFORE the try: the except/finally paths read them,
         # and a pull that fails at connect never reaches the in-try inits
         # (a bad candidate stopped being recorded as a retry, 2026-09-06).
@@ -2146,6 +2182,8 @@ class FleetSyncScheduler:
 
                 values["address"] = connected_address
                 values["path_class"] = _pc(connected_address)
+            if _PULL_TRACE:
+                values["received"] = list(received_ids)
             if acknowledged_transaction_ref is not None:
                 values["acknowledged_transaction_ref"] = (
                     acknowledged_transaction_ref
@@ -2221,30 +2259,59 @@ class FleetSyncScheduler:
             through_breadcrumb: tuple[str, str, int] | None = None
             checkpoint_offered = False
 
-            async def apply_pending(items: list[AuthoredMutation]) -> None:
-                nonlocal peer_watermark, transactions
-                won, _ignored = await asyncio.to_thread(store.apply, items)
-                if won == len(items):
-                    _emit_settings_materialized(items)
-                elif won:
-                    # The catalog currently returns counts rather than the
-                    # winning subset.  Never mislabel a losing address as
-                    # changed: one coalesced gap asks consumers to re-resolve
-                    # their durable truth.
-                    _emit_settings_materialized(gap=True)
-                transactions += 1
-                peer_watermark = max(
-                    item.mutation.timestamp_ns for item in items
-                )
-                if won:
+            # Complete transactions are queued and applied in bounded batches
+            # on one connection (auto-t43kz); see SQLiteFleetSyncStore.apply_many.
+            batch: list[list[AuthoredMutation]] = []
+            batch_bytes = 0
+
+            async def flush_batch() -> None:
+                nonlocal peer_watermark, transactions, batch, batch_bytes
+                if not batch:
+                    return
+                groups, batch, batch_bytes = batch, [], 0
+                results = await asyncio.to_thread(store.apply_many, groups)
+                applied = 0
+                for items, (won, _ignored) in zip(groups, results):
+                    if won == len(items):
+                        _emit_settings_materialized(items)
+                    elif won:
+                        # The catalog returns counts, not the winning subset:
+                        # one coalesced gap asks consumers to re-resolve.
+                        _emit_settings_materialized(gap=True)
+                    transactions += 1
+                    peer_watermark = max(
+                        peer_watermark or 0,
+                        max(item.mutation.timestamp_ns for item in items),
+                    )
+                    if won:
+                        applied += 1
+                if applied:
                     await asyncio.to_thread(
                         store.record_peer,
                         machine_pub,
                         epoch,
                         online=True,
-                        transactions_applied=1,
+                        transactions_applied=applied,
                         peer_watermark=peer_watermark,
                     )
+
+            async def apply_pending(items: list[AuthoredMutation]) -> None:
+                nonlocal batch_bytes
+                if _PULL_TRACE and items:
+                    received_ids.append((
+                        items[0].origin_incarnation[:8], items[0].transaction_id,
+                        items[0].mutation.timestamp_ns,
+                    ))
+                batch.append(list(items))
+                # Operations, not bytes, bound the batch: frames were
+                # already size-checked on decode, and a transaction is at
+                # most MAX_TRANSACTION_OPERATIONS operations.
+                batch_bytes += len(items)
+                if (
+                    len(batch) >= APPLY_BATCH_TRANSACTIONS
+                    or batch_bytes >= APPLY_BATCH_OPERATIONS
+                ):
+                    await flush_batch()
 
             def validate_pending() -> None:
                 if not pending:
@@ -2296,6 +2363,7 @@ class FleetSyncScheduler:
                         validate_pending()
                         await apply_pending(pending)
                         pending = []
+                    await flush_batch()
                     if message_count != expected_count:
                         raise FleetSyncProtocolError("fleet message count mismatch")
                     if digest.hexdigest() != expected_digest:
@@ -2370,6 +2438,7 @@ class FleetSyncScheduler:
                             raise FleetSyncProtocolError(
                                 "nested checkpoint stream"
                             )
+                        await flush_batch()
                         # Refuse at the OFFER, before a single chunk lands:
                         # this store holds a founded ledger, so the install
                         # would refuse anyway (ca33ba7); receiving hundreds
