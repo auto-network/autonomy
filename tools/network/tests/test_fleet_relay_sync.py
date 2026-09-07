@@ -1021,6 +1021,72 @@ async def test_per_author_watermarks_serve_each_author_once_and_never_echo(
 
 
 @pytest.mark.asyncio
+async def test_server_skips_an_author_whose_retired_history_is_above_the_watermark(
+    tmp_path, monkeypatch
+):
+    """A snapshot receiver holds an author's early writes only as installed
+    rows (no frames). Serving that author from a low watermark would
+    advance the puller past writes it never got. The server must skip the
+    author and say so; a puller already past the retired prefix is served."""
+    from tools.network.fleet_sync_scheduler import (
+        _TRANSACTION_MAGIC, encode_pull_request, SQLiteFleetSyncStore,
+        decode_transaction_header,
+    )
+    from tools.network.fleet_sync.catalog import MutationCatalog
+
+    fleet = _two_machine_fleet()
+    alpha = tmp_path / "alpha.db"
+    _prepare_org_db(alpha, fleet.server_machine.public_hex)
+    db = GraphDB(alpha)
+    try:
+        catalog = MutationCatalog(db.conn, fleet.server_machine.public_hex)
+        for ts, ident in ((1_000, "a0"), (2_000, "a1"), (3_000, "a2")):
+            with catalog.transaction(ts, f"tx-{ident}"):
+                db.conn.execute(
+                    "INSERT INTO sources(id,type,title,metadata,created_at,ingested_at)"
+                    " VALUES(?,?,?,?,?,?)",
+                    (ident, "note", ident, "{}", "2026-09-07T00:00:00Z", "2026-09-07T00:00:00Z"),
+                )
+        # Install shape: the first transaction's frames are gone.
+        db.conn.execute(
+            "DELETE FROM fleet_sync_journal WHERE transaction_ref="
+            "(SELECT MIN(id) FROM fleet_sync_transactions)"
+        )
+        db.conn.commit()
+    finally:
+        db.close()
+    store = SQLiteFleetSyncStore(alpha)
+    personal = tmp_path / "personal.db"
+    personal.touch()
+    server = _configure_relay_server(fleet, personal, monkeypatch)
+    monkeypatch.setattr(
+        server.scheduler, "_scope_paths",
+        lambda: {"personal": personal, "alpha": alpha},
+    )
+    server_pub = fleet.server_machine.public_hex
+
+    async def pull(watermarks):
+        request = encode_pull_request(
+            "cd" * 32, compat=store.compatibility_digest(), resume=(),
+            scope="alpha", bootstrap=False, watermarks=watermarks,
+        )
+        stream = await server.scheduler._handle("tok", request, fleet.client_machine.public_hex)
+        frames = [f async for f in stream]
+        controls = [json.loads(f) for f in frames if f[:1] in ("{", b"{")]
+        served = [decode_transaction_header(f)[1] for f in frames if f.startswith(_TRANSACTION_MAGIC)]
+        return controls, served
+
+    # Puller knows nothing of this author: NOT served, told why.
+    controls, served = await pull({"ee" * 32: 5})
+    assert served == []
+    assert any(c.get("kind") == "retired" and c.get("authors") == [server_pub] for c in controls)
+    # Puller already holds the retired prefix (W >= 1000): served the rest.
+    controls, served = await pull({server_pub: 1_000})
+    assert served == ["tx-a1", "tx-a2"]
+    assert not any(c.get("kind") == "retired" for c in controls)
+
+
+@pytest.mark.asyncio
 async def test_fresh_checkpoint_request_right_after_a_delivery_is_refused(
     tmp_path, monkeypatch
 ):
