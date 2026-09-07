@@ -23,10 +23,15 @@ def test_serve_checkpoint_decision_truth_table() -> None:
     # A resolvable trail always means deltas, whatever was requested.
     assert decide(7, True, True) is False
     assert decide(7, False, True) is False
-    # An unresolvable trail checkpoints when requested...
+    # An unresolvable trail checkpoints ONLY when the peer declares it
+    # holds no sync state (bootstrap)...
     assert decide(0, True, False) is True
-    # ...or when replay would omit retired history.
-    assert decide(0, False, True) is True
+    assert decide(0, True, True) is True
+    # ...never because the journal has retired history: a machine with
+    # state is served the retained journal from its oldest surviving frame
+    # (design of record graph://1155b8f4-8cf; the old rule re-based live
+    # databases on every first contact and every restore, 2026-09-06).
+    assert decide(0, False, True) is False
     # Fresh server, established-looking peer with no trail: bounded replay.
     assert decide(0, False, False) is False
 

@@ -1951,12 +1951,12 @@ dashboard_relay_sync_service = DashboardFleetRelaySyncService()
 
 
 def _serve_checkpoint_decision(
-    resume_position: int, requested: bool, journal_gap: bool
+    resume_position: int, requested: bool, journal_gap: bool = False
 ) -> bool:
-    """A resolvable trail always means deltas; an unresolvable one means a
-    checkpoint when the peer asked or when replay would omit retired
-    history."""
-    return resume_position == 0 and (requested or journal_gap)
+    """One rule for both serve paths: see serve_checkpoint_decision."""
+    from tools.network.fleet_sync_scheduler import serve_checkpoint_decision
+
+    return serve_checkpoint_decision(resume_position, requested, journal_gap)
 
 
 def _has_local_sync_state(
