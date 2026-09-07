@@ -34,6 +34,15 @@ def _org_ledger(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
     from tools.graph.db import GraphDB
     (tmp_path / "orgs").mkdir(parents=True, exist_ok=True)
+    # This fixture repoints the graph/org stores; tools.graph.db pools
+    # connections keyed by path, so a pooled handle to this temp dir would
+    # leak into the next module in the same xdist worker (deleted dir ->
+    # phantom cross-module failures). Drain on both edges.
+    GraphDB.close_all_pooled()
+    try:
+        yield
+    finally:
+        GraphDB.close_all_pooled()
 
 
 def _install_org(sim: Sim):

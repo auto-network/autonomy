@@ -34,11 +34,21 @@ T0 = 1_800_000_000_000
 
 @pytest.fixture
 def orgs_dir(monkeypatch, tmp_path):
+    # tools.graph.db pools connections in a module-level dict keyed by path,
+    # and this fixture repoints the org/graph stores at a temp dir (through
+    # checkpoint_due's cache read and record_adopted's write). A pooled handle
+    # to this dir would survive teardown and be read by the next module in the
+    # same xdist worker after the dir is gone. Drain the pool on both edges.
+    from tools.graph.db import GraphDB
     d = tmp_path / "orgs"
     d.mkdir()
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(d))
     monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
-    return d
+    GraphDB.close_all_pooled()
+    try:
+        yield d
+    finally:
+        GraphDB.close_all_pooled()
 
 
 def _found():
