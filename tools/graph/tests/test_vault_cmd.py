@@ -160,28 +160,29 @@ def test_find_member_matches_the_bearer_prefixed_key():
     assert vault_cmd._find_member(c, "api-key", "personal") == (None, None)  # no suffix matching
 
 
-def test_audited_read_over_http_never_prints_the_value(monkeypatch, capsys, tmp_path):
+def test_audited_read_over_http_delivers_a_path_never_the_value(monkeypatch, capsys):
     member = FakeMember("autonomy:openrouter.api-key")
     member.payload = {"value": "sk-secret"}
     c = FakeClient({vault_cmd.VAULT_AUDITED_SET_ID: [member]})
-    c.request_vault_open = lambda *a, **k: {"path": "/never"}  # HTTP client: rendezvous exists
+    calls = []
+    c.deliver_vault_credential = lambda set_id, name, *, org, ttl_seconds=0: (
+        calls.append((set_id, name, org)) or {"delivery": "session-ramfs", "path": f"/run/secrets/{name}"}
+    )
     _use(monkeypatch, c)
-    # no ramfs in this container: refuse, and say what to do
-    monkeypatch.setattr(vault_cmd, "Path", lambda p: tmp_path / "absent")
-    with pytest.raises(SystemExit):
-        vault_cmd.cmd_vault_read(_args(name="openrouter.api-key", org=vault_cmd._ORG_SENTINEL))
-    out = capsys.readouterr()
-    assert "sk-secret" not in out.out + out.err
-    assert "credential:<org>:openrouter.api-key" in out.err
-    # with a ramfs: deliver to a 0600 file and print only the path
-    ramfs = tmp_path / "secrets"; ramfs.mkdir()
-    monkeypatch.setattr(vault_cmd, "Path", lambda p: ramfs)
     vault_cmd.cmd_vault_read(_args(name="openrouter.api-key", org=vault_cmd._ORG_SENTINEL))
     out = capsys.readouterr()
-    assert out.out.strip() == str(ramfs / "openrouter.api-key")
-    assert "sk-secret" not in out.out
-    assert (ramfs / "openrouter.api-key").read_text() == "sk-secret"
-    assert oct((ramfs / "openrouter.api-key").stat().st_mode & 0o777) == "0o600"
+    assert out.out.strip() == "/run/secrets/openrouter.api-key"
+    assert "sk-secret" not in out.out + out.err
+    assert calls == [(vault_cmd.VAULT_AUDITED_SET_ID, "openrouter.api-key", vault_cmd.CALLER_ORG)]
+
+
+def test_audited_read_in_process_prints_inline_only_when_no_client_delivery_exists(monkeypatch, capsys):
+    member = FakeMember("openrouter.api-key")
+    member.payload = {"value": "sk-secret"}
+    c = FakeClient({vault_cmd.VAULT_AUDITED_SET_ID: [member]})  # no deliver/open: direct-host mode
+    _use(monkeypatch, c)
+    vault_cmd.cmd_vault_read(_args(name="openrouter.api-key"))
+    assert capsys.readouterr().out.strip() == "sk-secret"
 
 
 def test_share_sends_no_org_header_by_default_and_the_slug_when_named(monkeypatch, capsys):

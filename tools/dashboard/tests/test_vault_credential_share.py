@@ -95,3 +95,47 @@ def test_bad_slug_is_refused(monkeypatch):
     client = _client(monkeypatch, _org_session(), members=[_member(f"{SRC}:x", "v")])
     r = client.post(_url("x"), json={"to_org": "Not A Slug!"})
     assert r.status_code == 400 and "to_org" in r.json()["error"]
+
+
+
+# ---- deliver: unattended audited release into the caller's session ramfs ----
+
+def _deliver_client(monkeypatch, principal, *, members=(), delivered=None, session_exists=True):
+    client = _client(monkeypatch, principal, members=members)
+    import tools.dashboard.dao.dashboard_db as ddb
+    monkeypatch.setattr(ddb, "get_session", lambda name: {"tmux_name": name} if session_exists else None)
+    import tools.dashboard.vault_release_delivery as vrd
+
+    def deliver_payload(row, payload, *, now=None):
+        (delivered if delivered is not None else []).append((row, payload))
+        return {"delivery": "session-ramfs", "path": f"/run/secrets/{row['request']['setting']['key'].rsplit(':', 1)[-1]}"}
+
+    monkeypatch.setattr(vrd, "deliver_payload", deliver_payload)
+    return client
+
+
+def _durl(name, set_id=VAULT_AUDITED_SET_ID):
+    return f"/api/vault/credential/{set_id}/{name}/deliver"
+
+
+def test_audited_deliver_writes_into_the_callers_session_ramfs(monkeypatch):
+    delivered = []
+    client = _deliver_client(monkeypatch, _org_session("autonomy"),
+                             members=[_member("autonomy:openrouter.api-key", "sk-1")], delivered=delivered)
+    r = client.post(_durl("openrouter.api-key"), json={"ttl_seconds": 0})
+    assert r.status_code == 200, r.text
+    assert r.json()["path"] == "/run/secrets/openrouter.api-key"
+    assert "sk-1" not in r.text
+    row, payload = delivered[0]
+    assert row["session"] == "sess-1" and payload == {"value": "sk-1"}
+    assert row["request"]["setting"] == {"set_id": VAULT_AUDITED_SET_ID, "key": "autonomy:openrouter.api-key"}
+
+
+def test_deliver_refuses_secured_and_non_sessions_and_cold_vault(monkeypatch):
+    client = _deliver_client(monkeypatch, _org_session("autonomy"), members=[_member("autonomy:x", "v")])
+    assert client.post(_durl("x", VAULT_SECURED_SET_ID), json={}).status_code == 400
+    client = _deliver_client(monkeypatch, _org_session("autonomy"), members=[_member("autonomy:x", "v")], session_exists=False)
+    assert client.post(_durl("x"), json={}).status_code == 400
+    client = _deliver_client(monkeypatch, _org_session("autonomy"),
+                             members=[_member("autonomy:x", None, vault_error=SimpleNamespace(reason="cold"))])
+    assert client.post(_durl("x"), json={}).status_code == 503
