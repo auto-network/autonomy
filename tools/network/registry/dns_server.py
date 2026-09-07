@@ -86,6 +86,9 @@ class _ChallengeCache:
         self._url = f"{registry_url.rstrip('/')}/v1/dns/zone-state"
         self._challenges: dict[str, tuple[list[str], int]] = {}
         self._zones: tuple[str, ...] = (ZONE,)
+        #: zone -> NS names (trailing dot) for zones delegated to token
+        #: name servers; absent zones answer the shared ns1/ns2 set.
+        self._zone_ns: dict[str, tuple[str, ...]] = {}
         self._fetched_at = 0.0
         self._lock = asyncio.Lock()
 
@@ -102,6 +105,15 @@ class _ChallengeCache:
                 str(z).rstrip(".").lower() for z in zones
                 if isinstance(z, str) and z and z != ZONE
             )
+        zone_ns = data.get("zone_ns", {})
+        if isinstance(zone_ns, dict):
+            self._zone_ns = {
+                str(z).rstrip(".").lower(): tuple(
+                    str(n).rstrip(".").lower() + "." for n in names if isinstance(n, str) and n
+                )
+                for z, names in zone_ns.items()
+                if isinstance(names, list) and names
+            }
         challenges = data.get("challenges", {})
         if not isinstance(challenges, dict):
             return {}
@@ -130,6 +142,9 @@ class _ChallengeCache:
 
     def zones(self) -> tuple[str, ...]:
         return self._zones
+    def zone_ns(self, zone: str):
+        return self._zone_ns.get(zone)
+
 
     def lookup(self, name: str) -> list[str]:
         return self._challenges.get(name, ([], 60))[0]
@@ -153,6 +168,7 @@ class DnsService:
             txt_lookup=self._cache.lookup,
             txt_ttl=self._cache.lookup_ttl,
             zones=self._cache.zones,
+            zone_ns=self._cache.zone_ns,
         )
 
     async def answer(self, raw: bytes, source: str, *,

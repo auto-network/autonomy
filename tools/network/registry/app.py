@@ -2589,9 +2589,19 @@ def create_app(
     async def dns_zone_state():
         # Read path for the co-located DNS process (auto-g1jxw). Contents
         # are public by nature — every value here is published in DNS.
+        # A token-bound zone is delegated to <org>.ns1/ns2.auto.network at its
+        # parent; the child must answer the same NS set (and SOA MNAME).
+        from .relay import zone_token_names
+        zone_ns = {}
+        for row in store.list_serve_zones():
+            if row.get("state") == "active" and row.get("binding_kind") == "ns-token":
+                zone_ns[row["zone"]] = [
+                    name + "." for name in zone_token_names(row["org_uuid"])
+                ]
         return {
             "challenges": store.live_serve_challenges(now=now()),
             "zones": sorted(store.active_serve_zones()),
+            "zone_ns": zone_ns,
         }
 
     @app.get("/healthz")

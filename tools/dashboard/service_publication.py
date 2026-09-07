@@ -715,3 +715,28 @@ def release_zone(org: str, zone: object, *, control=None) -> dict:
         SERVE_ZONE_SET_ID, SERVE_ZONE_REVISION, zone, payload, org=org,
     )
     return zone_projection(zone, payload)
+
+
+def reservation_publishers(org: str) -> dict[str, dict]:
+    """reservation_id -> {persona_pub, display_name} for every reservation
+    row. Rows replicate organization-wide through fleet sync, so a card may
+    belong to another member; the persona is the only durable owner mark."""
+    from tools.graph.schemas.org_member_profile import MEMBER_PROFILE_SET_ID
+
+    names: dict[str, str] = {}
+    try:
+        for member in settings_ops.read_owned_set(MEMBER_PROFILE_SET_ID, org=org).members:
+            if isinstance(member.payload, dict) and isinstance(member.payload.get("display_name"), str):
+                names[member.key] = member.payload["display_name"]
+    except Exception:
+        names = {}
+    result: dict[str, dict] = {}
+    for member in _reservation_members(org):
+        persona_pub = member.payload.get("persona_pub")
+        if not isinstance(persona_pub, str):
+            continue
+        result[member.key] = {
+            "persona_pub": persona_pub,
+            "display_name": names.get(persona_pub) or ("member " + persona_pub[:8]),
+        }
+    return result

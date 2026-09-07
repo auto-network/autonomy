@@ -57,9 +57,14 @@ class ZoneState:
     """Everything the responder answers from — injected, never global."""
 
     def __init__(self, *, relay_ip: str, node_id: str = "",
-                 txt_lookup=None, txt_ttl=None, answer_a=None, zones=None):
+                 txt_lookup=None, txt_ttl=None, answer_a=None, zones=None,
+                 zone_ns=None):
         self.relay_ip = relay_ip
         self.node_id = node_id
+        #: zone -> iterable of NS names (trailing dot) when a zone is
+        #: delegated to per-organization token name servers; None → the
+        #: shared NS_NAMES. The child's NS set must match the parent's.
+        self.zone_ns = zone_ns or (lambda zone: None)
         #: () -> iterable of zone names this responder is authoritative for.
         #: The base zone is always included; org-owned delegated zones join
         #: it once claimed and verified (the zone-state feed carries them).
@@ -101,10 +106,10 @@ def match_zone(qname: str, zones) -> str | None:
     return best
 
 
-def _soa_rdata(now: int) -> bytes:
+def _soa_rdata(now: int, *, mname: str = SOA_MNAME) -> bytes:
     serial = max(1, now // 60)
     return (
-        _encode_name(SOA_MNAME)
+        _encode_name(mname)
         + _encode_name(SOA_RNAME)
         + struct.pack(">IIIII", serial, SOA_REFRESH, SOA_RETRY,
                       SOA_EXPIRE, SOA_MINIMUM)
@@ -250,8 +255,9 @@ def handle_query(raw: bytes, state: ZoneState, *, tcp: bool = False,
         return finish(_RCODE_REFUSED)
 
     now = int(now_fn())
+    ns_names = tuple(state.zone_ns(zone) or ()) or NS_NAMES
     soa_authority = _rr(_encode_name(zone + "."), _TYPE_SOA, _CLASS_IN,
-                        SOA_MINIMUM, _soa_rdata(now))
+                        SOA_MINIMUM, _soa_rdata(now, mname=ns_names[0]))
 
     def nodata():
         return finish(0, aa=True, authority=[soa_authority])
@@ -271,7 +277,7 @@ def handle_query(raw: bytes, state: ZoneState, *, tcp: bool = False,
             return nodata()  # QNAME-minimization probe: NODATA, not REFUSED
         answers = [
             _rr(_QPTR, _TYPE_NS, _CLASS_IN, NS_TTL, _encode_name(ns))
-            for ns in NS_NAMES
+            for ns in ns_names
         ]
         return finish(0, aa=True, answers=answers)
 
@@ -279,7 +285,7 @@ def handle_query(raw: bytes, state: ZoneState, *, tcp: bool = False,
         if qname != zone:
             return nodata()
         return finish(0, aa=True, answers=[
-            _rr(_QPTR, _TYPE_SOA, _CLASS_IN, NS_TTL, _soa_rdata(now))])
+            _rr(_QPTR, _TYPE_SOA, _CLASS_IN, NS_TTL, _soa_rdata(now, mname=ns_names[0]))])
 
     if qtype == _TYPE_TXT:
         if qname.startswith(_CHALLENGE_PREFIX):

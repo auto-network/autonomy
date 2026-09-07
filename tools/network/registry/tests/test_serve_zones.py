@@ -125,6 +125,44 @@ def test_verify_zone_binding_parent_txt_and_ns_token():
         ORG_ZONE, ORG, "ns-token", lookup=_lookup([f"{ORG}.ns.auto.network"], [])) == f"{ORG}.ns.auto.network"
 
 
+def test_token_binding_is_the_delegation_itself():
+    """One set of records: the parent's NS names carry the org id under the
+    token hosts; no TXT. Every NS must carry THIS org — a foreign server or
+    another org's token in the set is not our zone."""
+    pair = list(relay_mod.zone_token_names(ORG))
+    assert pair == [f"{ORG}.ns1.auto.network", f"{ORG}.ns2.auto.network"]
+    assert relay_mod.verify_zone_binding(
+        ORG_ZONE, ORG, "ns-token", lookup=_lookup([n.upper() + "." for n in pair], [])
+    ) == ",".join(pair)
+    for bad in ([pair[0], "ns2.auto.network"], [f"{OTHER_ORG}.ns1.auto.network"], [pair[0], f"{OTHER_ORG}.ns2.auto.network"], []):
+        with pytest.raises(relay_mod.ZoneValidationError, match="does not delegate"):
+            relay_mod.verify_zone_binding(ORG_ZONE, ORG, "ns-token", lookup=_lookup(bad, []))
+
+
+def test_token_zone_feed_and_responder_answer_the_token_name_servers(app, client, clock, root, monkeypatch):
+    register(client, clock, root, org_uuid=ORG)
+    import tools.network.registry.dns_lookup as dl
+    from tools.network.registry import dns_responder as r
+    from tools.network.registry.dns_lookup import _build_query
+    import struct
+    monkeypatch.setattr(dl, "delegation_ns", lambda zone: list(relay_mod.zone_token_names(ORG)))
+    with _tunnel(client, clock, root) as ws:
+        reply = _claim(ws, kind="ns-token")
+        assert reply["ok"] is True and reply["state"] == "active", reply
+        feed = client.get("/v1/dns/zone-state").json()
+        assert feed["zones"] == [ORG_ZONE]
+        assert feed["zone_ns"] == {ORG_ZONE: [n + "." for n in relay_mod.zone_token_names(ORG)]}
+    # The responder, fed that state, answers the token NS set (and SOA MNAME)
+    # for the token zone and the shared ns1/ns2 set for the base zone.
+    ns = {z: tuple(v) for z, v in feed["zone_ns"].items()}
+    state = r.ZoneState(relay_ip="5.161.17.217", zones=lambda: ["serve.auto.network", *feed["zones"]], zone_ns=ns.get)
+    for zone, expect_token in ((ORG_ZONE, True), ("serve.auto.network", False)):
+        for qtype in (2, 6):
+            out = r.handle_query(_build_query(zone, qtype, recursive=False)[0], state)
+            assert out[3] & 0xF == 0 and struct.unpack(">H", out[6:8])[0] >= 1
+            assert (ORG.encode() in out) is expect_token
+
+
 def test_validate_org_zone_bounds():
     assert relay_mod.validate_org_zone("Autonomy.TapLink.net.") == ORG_ZONE
     for bad in ("taplink.net", "serve.auto.network", "x.serve.auto.network", "foo.auto.network", "bad_label.example.com"):

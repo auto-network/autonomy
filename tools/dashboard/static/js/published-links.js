@@ -47,7 +47,8 @@
 
   function Controller(slug, root, data) {
     this.slug = slug; this.root = root; this.open = null; this.error = ''; this.errorDetail = '';
-    this.tab = 'services'; this.shareType = 'note'; this.zoneKind = 'parent-txt';
+    this.tab = 'services'; this.shareType = 'note';
+    this.domainFilter = ''; this.zoneStatus = null; this.zoneDraft = '';
     this.absorb(data);
   }
   Controller.prototype.absorb = function (data) {
@@ -70,13 +71,37 @@
     this.zones.forEach(function (z) { options.push({value: z.zone, label: z.zone}); });
     return options;
   };
-  Controller.prototype.zoneRecords = function (zone, kind) {
-    zone = (zone || '<zone>').toLowerCase();
-    var parent = zone.indexOf('.') >= 0 ? zone.slice(zone.indexOf('.') + 1) : '<parent>';
+  // One set of records: the delegation's NS names carry the organization id
+  // (<org>.ns1/ns2.auto.network), so the same records both hand the name to
+  // Autonomy and bind it to this organization — no separate TXT.
+  Controller.prototype.zoneRecords = function (zone) {
+    zone = (zone || 'autonomy.example.com').toLowerCase();
+    var parent = zone.indexOf('.') >= 0 ? zone.slice(zone.indexOf('.') + 1) : 'example.com';
     var org = this.orgUuid || '<organization id>';
-    if (kind === 'ns-token') return [zone + '  NS  ' + org + '.ns.auto.network'];
-    return [zone + '  NS  ns1.auto.network', zone + '  NS  ns2.auto.network', '_autonomy.' + parent + '  TXT  "autonomy-org=' + org + '"'];
+    return {
+      zone: zone, parent: parent,
+      delegation: [{name: zone, type: 'NS', value: org + '.ns1.auto.network'}, {name: zone, type: 'NS', value: org + '.ns2.auto.network'}]
+    };
   };
+  // The registry's refusal, in words a DNS-provider user can act on.
+  Controller.prototype.zoneReason = function (e) {
+    var code = e && e.message || '', detail = e && e.detail || '';
+    if (code === 'zone_unverified') {
+      if (/does not delegate/.test(detail)) return 'Your DNS provider is not pointing this name at the two Autonomy name servers below yet, or points it at other servers too. DNS changes can take a few minutes to appear; try again shortly.';
+      if (/lookup failed/.test(detail)) return 'The name could not be looked up yet. Check the spelling and try again in a minute.';
+      return 'Not verified yet: ' + detail;
+    }
+    if (code === 'zone_owned_elsewhere') return 'This domain is already connected to another organization.';
+    if (code === 'zone_invalid') return detail || 'That is not a valid domain name.';
+    if (code === 'serving_unavailable') return 'This dashboard is not connected to the network right now, so the domain cannot be verified.';
+    if (code === 'zone_in_use') return 'Stop the services published under this domain first.';
+    return detail ? code + ': ' + detail : code;
+  };
+  function recordRows(records) {
+    return records.map(function (r) {
+      return '<div class="pl-record"><div class="pl-record-cell"><span class="pl-record-k">Name</span><code>'+esc(r.name)+'</code></div><div class="pl-record-cell pl-record-type"><span class="pl-record-k">Type</span><code>'+esc(r.type)+'</code></div><div class="pl-record-cell"><span class="pl-record-k">Value</span><code>'+esc(r.value)+'</code><button class="pl-copy" data-copy="'+esc(r.value)+'" aria-label="Copy value">Copy</button></div></div>';
+    }).join('');
+  }
   Controller.prototype.render = function () {
     var self = this;
     lastCount = this.services.length + this.shares.length;
@@ -88,7 +113,9 @@
     if (this.tab === 'services') {
       body += '<div data-panel="services">';
       if (this.serviceWarning && this.services.length) body += '<div class="pl-notice"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5M12 16.5h.01"/></svg><span>'+esc(this.serviceWarning)+'</span></div>';
-      this.services.forEach(function (service) { body += self.serviceCard(service); });
+      var shownServices = this.domainFilter ? this.services.filter(function (s) { return s.zone === self.domainFilter; }) : this.services;
+      if (this.domainFilter) body += '<div class="pl-filter">Showing services under <b>'+esc(this.domainFilter)+'</b> <button data-action="clear-filter">Show all</button></div>';
+      shownServices.forEach(function (service) { body += self.serviceCard(service); });
       if (!this.services.length) body += '<article class="pl-empty"><div class="pl-empty-title">No Services published</div><p>Instantly publish any local service to the Internet by simply asking your agent. All connections are end-to-end encrypted directly to your machine. You have no Services currently published.</p></article>';
       body += this.zonesPanel();
       body += '</div>';
@@ -114,11 +141,21 @@
     var body = '<div class="pl-zones"><div class="pl-eyebrow" style="margin:18px 0 6px">Custom domains</div>';
     this.zones.forEach(function (z) {
       var confirm = self.open === 'zone-release:' + z.zone;
-      body += '<article class="pl-card" data-zone="'+esc(z.zone)+'"><div class="pl-row"><span class="pl-state"><i class="pl-dot"></i>Verified</span><div class="pl-hosted" style="margin-top:0"><div class="pl-eyebrow">Services publish under</div><div class="pl-hostline"><span class="pl-host-app">*</span><span class="pl-host-dot">.</span><span class="pl-host-domain">'+esc(z.zone)+'</span></div></div><div class="pl-footer"><span class="pl-terminal">'+esc(z.binding_kind)+'</span><span></span><div class="pl-pair"><button class="pl-danger" data-action="release">Release</button></div><span></span><span></span></div></div>'+
-        '<div class="pl-detail '+(confirm?'open':'')+'"><div class="pl-share-title">Release this domain?</div><p style="margin:5px 0 0;color:#9ca3af;font-size:12px">Stop every Service published under it first. The delegation at your DNS provider is left in place.</p><div class="pl-formactions"><button class="pl-secondary" data-action="cancel">Cancel</button><button class="pl-danger" data-action="confirm-release">Release domain</button></div></div></article>';
+      var count = self.services.filter(function (s) { return s.zone === z.zone; }).length;
+      body += '<article class="pl-card" data-zone="'+esc(z.zone)+'"><div class="pl-row"><span class="pl-state"><i class="pl-dot"></i>Verified</span><div class="pl-hosted" style="margin-top:0"><div class="pl-eyebrow">Services publish under</div><div class="pl-hostline"><span class="pl-host-app">*</span><span class="pl-host-dot">.</span><span class="pl-host-domain">'+esc(z.zone)+'</span></div></div><div class="pl-zone-meta"><button class="pl-link" data-action="filter">'+count+' service'+(count===1?'':'s')+'</button><span class="pl-zone-note">Any member of this organization can publish here.</span></div><div class="pl-footer pl-footer-end"><button class="pl-danger" data-action="release">Release</button></div></div>'+
+        '<div class="pl-detail '+(confirm?'open':'')+'"><div class="pl-share-title">Release this domain?</div><p style="margin:5px 0 0;color:#9ca3af;font-size:12px">'+(count?'Stop the '+count+' service'+(count===1?'':'s')+' published under it first. ':'')+'Services can no longer be published under it until it is verified again. The records at your DNS provider are left in place.</p><div class="pl-formactions"><button class="pl-secondary" data-action="cancel">Cancel</button><button class="pl-danger" data-action="confirm-release">Release domain</button></div></div></article>';
     });
-    body += '<article class="pl-card" data-zone-add><div class="pl-row"><div class="pl-subtitle">Publish Services directly under a domain you own, as <b>app.your-zone</b>. Delegate the zone to Autonomy at your DNS provider, then verify it here.</div><div class="pl-footer" style="margin-top:10px"><button class="pl-secondary" data-action="zone-add">'+(this.zones.length?'Add another domain':'Add a custom domain')+'</button><span></span><span></span><span></span><span></span></div></div>'+
-      '<div class="pl-detail '+(open?'open':'')+'"><div class="pl-field"><label>Zone (a subdomain you delegate, e.g. autonomy.example.com)</label><input data-field="zone" placeholder="autonomy.example.com" value="'+esc(this.zoneDraft||'')+'"></div><div class="pl-field" style="margin-top:10px"><label>Binding</label><select data-field="kind"><option value="parent-txt" '+(this.zoneKind==='parent-txt'?'selected':'')+'>TXT in the parent zone (standard)</option><option value="ns-token" '+(this.zoneKind==='ns-token'?'selected':'')+'>Per-organization name server</option></select></div><div class="pl-field" style="margin-top:10px"><label>Records to create at your DNS provider</label><pre class="pl-terminal" style="margin:0;white-space:pre-wrap;padding:8px;background:#0b1220;border:1px solid #1f2937;border-radius:6px">'+esc(this.zoneRecords(this.zoneDraft, this.zoneKind).join('\n'))+'</pre></div><div class="pl-formactions"><button class="pl-secondary" data-action="cancel">Cancel</button><button class="pl-primary" data-action="zone-claim">Verify and claim</button></div></div></article></div>';
+    var rec = this.zoneRecords(this.zoneDraft), preview = this.zoneDraft ? 'service.' + this.zoneDraft.toLowerCase() : 'service.autonomy.example.com';
+    var st = this.zoneStatus, statusHtml = '';
+    if (st && st.kind === 'busy') statusHtml = '<div class="pl-status busy">Verifying…</div>';
+    else if (st && st.kind === 'error') statusHtml = '<div class="pl-status error">'+esc(st.text)+'</div>';
+    else if (st && st.kind === 'ok') statusHtml = '<div class="pl-status ok">✓ Verified — '+esc(st.text)+' is connected to this organization.</div>';
+    body += '<article class="pl-card" data-zone-add><div class="pl-row"><div class="pl-subtitle">Publish services directly under a subdomain you control, as <b>app.autonomy.yourdomain.com</b>.</div><div class="pl-footer" style="margin-top:10px"><button class="pl-secondary" data-action="zone-add">Add custom domain</button></div></div>'+
+      '<div class="pl-detail '+(open?'open':'')+'">'+
+        '<div class="pl-field"><label>Your domain</label><input data-field="zone" placeholder="autonomy.example.com" value="'+esc(this.zoneDraft||'')+'"><div class="pl-hint">A subdomain you control, for example autonomy.example.com. Support for a whole domain such as example.com is coming.</div><div class="pl-hint" data-role="preview">Services you publish here will appear as <b>'+esc(preview)+'</b>.</div></div>'+
+        '<div class="pl-step"><div class="pl-step-title">Name server delegation</div><p class="pl-step-text">Tell your DNS provider that Autonomy answers for <b data-role="zone">'+esc(rec.zone)+'</b>: in the zone for <b data-role="parent">'+esc(rec.parent)+'</b>, add these two NS records. The name servers carry your organization id, so the same records also prove the name is yours; no other record is needed. Nothing else under <span data-role="zone">'+esc(rec.zone)+'</span> will resolve from your provider after this, which is why a dedicated subdomain is used.</p><div data-role="delegation">'+recordRows(rec.delegation)+'</div></div>'+
+        '<div data-role="status">'+statusHtml+'</div>'+
+        '<div class="pl-formactions"><button class="pl-secondary" data-action="cancel">Cancel</button><button class="pl-primary" data-action="zone-claim">Verify</button></div></div></article></div>';
     return body;
   };
   Controller.prototype.serviceCard = function (s) {
@@ -128,7 +165,7 @@
     var options = this.domainOptions(), current = s.zone || '';
     if (!options.some(function (o) { return o.value === current; })) options.unshift({value: current, label: domain + root});
     var select = options.map(function (o) { return '<option value="'+esc(o.value)+'" '+(o.value===current?'selected':'')+'>'+esc(o.label)+'</option>'; }).join('');
-    return '<article class="pl-card" data-service="'+esc(s.reservation_id)+'"><div class="pl-row"><span class="pl-state '+(s.state==='paused'?'paused':'')+'"><i class="pl-dot"></i>'+(s.state==='paused'?'Paused':'Live')+'</span><div class="pl-session"><div class="pl-eyebrow">Hosted by</div><div class="pl-session-title">'+esc(s.session_title)+'</div><div class="pl-terminal">'+esc(s.target && s.target.session_id || 'Target unavailable')+'</div></div><div class="pl-hosted"><div class="pl-eyebrow">Hosted at</div><div class="pl-hostline"><span class="pl-host-app">'+esc(app)+'</span><span class="pl-host-dot">.</span><span class="pl-host-domain">'+esc(domain)+'</span>'+(root?'<span class="pl-host-root '+(short?'inline':'')+'">'+root+'</span>':'')+'</div></div><div class="pl-footer"><button class="pl-secondary" data-action="rename">Rename</button><span></span><div class="pl-pair"><button class="pl-secondary" data-action="toggle">'+(s.state==='paused'?'Resume':'Pause')+'</button><button class="pl-danger" data-action="stop">Stop</button></div><span></span><div class="pl-icons"><button class="pl-icon" data-action="share" aria-label="Share service">'+icon('share')+'</button><button class="pl-icon" data-action="visit" aria-label="Open service">'+icon('open')+'</button></div></div></div>'+
+    return '<article class="pl-card" data-service="'+esc(s.reservation_id)+'"><div class="pl-row"><span class="pl-state '+(s.state==='paused'?'paused':'')+'"><i class="pl-dot"></i>'+(s.state==='paused'?'Paused':'Live')+'</span><div class="pl-session"><div class="pl-eyebrow">Hosted by</div><div class="pl-session-title">'+esc(s.session_title)+'</div><div class="pl-terminal">'+esc(s.target && s.target.session_id || 'Target unavailable')+'</div>'+(s.publisher?'<div class="pl-publisher">Published by <b>'+esc(s.publisher.display_name)+'</b>'+(s.session_local===false?' · on another member\'s machine':'')+'</div>':'')+'</div><div class="pl-hosted"><div class="pl-eyebrow">Hosted at</div><div class="pl-hostline"><span class="pl-host-app">'+esc(app)+'</span><span class="pl-host-dot">.</span><span class="pl-host-domain">'+esc(domain)+'</span>'+(root?'<span class="pl-host-root '+(short?'inline':'')+'">'+root+'</span>':'')+'</div></div><div class="pl-footer"><button class="pl-secondary" data-action="rename">Rename</button><span></span><div class="pl-pair"><button class="pl-secondary" data-action="toggle">'+(s.state==='paused'?'Resume':'Pause')+'</button><button class="pl-danger" data-action="stop">Stop</button></div><span></span><div class="pl-icons"><button class="pl-icon" data-action="share" aria-label="Share service">'+icon('share')+'</button><button class="pl-icon" data-action="visit" aria-label="Open service">'+icon('open')+'</button></div></div></div>'+
       '<div class="pl-detail '+(detail==='rename'?'open':'')+'"><div class="pl-field"><label>Service hostname</label><input data-field="app" value="'+esc(s.app_label)+'"></div><div class="pl-field" style="margin-top:10px"><label>Publish under</label><select data-field="domain">'+select+'</select></div><p style="margin:8px 0 0;color:#fbbf24;font-size:11px">Changing either field creates a new public address. The current address stops after the new one is live.</p><div class="pl-formactions"><button class="pl-secondary" data-action="cancel">Cancel</button><button class="pl-primary" data-action="save">Save address</button></div></div>'+
       '<div class="pl-detail '+(detail==='stop'?'open':'')+'"><div class="pl-share-title">Stop this Service?</div><p style="margin:5px 0 0;color:#9ca3af;font-size:12px">This closes the public connection. The current address will stop working.</p><div class="pl-formactions"><button class="pl-secondary" data-action="cancel">Cancel</button><button class="pl-danger" data-action="confirm-stop">Stop Service</button></div></div></article>';
   };
@@ -155,23 +192,39 @@
     var add=this.root.querySelector('[data-zone-add]');
     if(add){
       add.onclick=function(e){var a=e.target.closest('[data-action]');if(!a)return;self.zoneAction(a.dataset.action,null,add);};
-      var zoneInput=add.querySelector('[data-field="zone"]'), kind=add.querySelector('[data-field="kind"]');
-      if(zoneInput) zoneInput.oninput=function(){self.zoneDraft=zoneInput.value.trim();var pre=add.querySelector('pre');if(pre)pre.textContent=self.zoneRecords(self.zoneDraft,self.zoneKind).join('\n');};
-      if(kind) kind.onchange=function(){self.zoneKind=kind.value;var pre=add.querySelector('pre');if(pre)pre.textContent=self.zoneRecords(self.zoneDraft,self.zoneKind).join('\n');};
+      var zoneInput=add.querySelector('[data-field="zone"]');
+      if(zoneInput) zoneInput.oninput=function(){
+        self.zoneDraft=zoneInput.value.trim(); self.zoneStatus=null;
+        var rec=self.zoneRecords(self.zoneDraft);
+        add.querySelector('[data-role="preview"]').innerHTML='Services you publish here will appear as <b>'+esc('service.'+(self.zoneDraft||'autonomy.example.com').toLowerCase())+'</b>.';
+        add.querySelectorAll('[data-role="zone"]').forEach(function(n){n.textContent=rec.zone;});
+        add.querySelectorAll('[data-role="parent"]').forEach(function(n){n.textContent=rec.parent;});
+        add.querySelector('[data-role="delegation"]').innerHTML=recordRows(rec.delegation);
+        add.querySelector('[data-role="status"]').innerHTML='';
+      };
     }
+    this.root.querySelectorAll('[data-copy]').forEach(function (b) {
+      b.onclick=function(e){e.stopPropagation();navigator.clipboard.writeText(b.dataset.copy).then(function(){b.textContent='Copied';setTimeout(function(){b.textContent='Copy';},1400);});};
+    });
+    var clear=this.root.querySelector('[data-action="clear-filter"]');
+    if(clear) clear.onclick=function(){self.domainFilter='';self.render();};
   };
   Controller.prototype.zoneAction = function (action, z, card) {
     var self=this;
-    if(action==='cancel'){this.open=null;return this.render();}
-    if(action==='zone-add'){this.open='zone:add';return this.render();}
+    if(action==='cancel'){this.open=null;this.zoneStatus=null;return this.render();}
+    if(action==='zone-add'){this.open='zone:add';this.zoneStatus=null;return this.render();}
+    if(action==='filter'){this.domainFilter=z.zone;return this.render();}
     if(action==='release'){this.open='zone-release:'+z.zone;return this.render();}
     if(action==='confirm-release'){
-      return request('/api/network/serve-zones/'+encodeURIComponent(z.zone),{method:'DELETE',headers:{'X-Graph-Org':this.slug}}).then(function(){return self.refresh();}).catch(function(e){self.fail(e);});
+      return request('/api/network/serve-zones/'+encodeURIComponent(z.zone),{method:'DELETE',headers:{'X-Graph-Org':this.slug}}).then(function(){return self.refresh();}).catch(function(e){self.error=self.zoneReason(e);self.errorDetail='';self.render();});
     }
     if(action==='zone-claim'){
       var zone=card.querySelector('[data-field="zone"]').value.trim(); if(!zone)return;
-      this.zoneDraft=zone; card.classList.add('pl-busy');
-      return request('/api/network/serve-zones',{method:'POST',headers:{'Content-Type':'application/json','X-Graph-Org':this.slug},body:JSON.stringify({zone:zone,binding_kind:this.zoneKind})}).then(function(){self.zoneDraft='';return self.refresh();}).catch(function(e){card.classList.remove('pl-busy');self.fail(e);});
+      this.zoneDraft=zone; this.zoneStatus={kind:'busy'}; this.render();
+      return request('/api/network/serve-zones',{method:'POST',headers:{'Content-Type':'application/json','X-Graph-Org':this.slug},body:JSON.stringify({zone:zone,binding_kind:'ns-token'})}).then(function(r){
+        self.zoneStatus={kind:'ok',text:(r&&r.zone&&r.zone.zone)||zone};
+        return request('/api/network/published-links',{headers:{'X-Graph-Org':self.slug}}).then(function(d){self.absorb(d);self.error='';self.errorDetail='';self.render();});
+      }).catch(function(e){self.zoneStatus={kind:'error',text:self.zoneReason(e)};self.render();});
     }
   };
   Controller.prototype.refresh = function () { var self=this; return request('/api/network/published-links',{headers:{'X-Graph-Org':this.slug}}).then(function(d){self.absorb(d);self.open=null;self.error='';self.errorDetail='';self.render();}); };
