@@ -1,14 +1,19 @@
 # Proof coverage — generated from registry.yaml by gen.py; do not edit.
 
-One row per key and per mutation: the machine-checked lemmas covering
-it, or GAP. Gap rows feed the formal-modeling queue on tracker note
+One row per key and per mutation: the recorded model references,
+or GAP where no reference is recorded. Gap rows feed the modeling queue on tracker note
 8277c76c-ad1.
+
+References locate evidence under a model's assumptions; this generator does not run proofs.
+A GAP is a missing reference, not a demonstrated vulnerability. Counts are inventory
+counts, not a percentage of system security proved. See [MODEL.md](../../storagekit/tamarin/MODEL.md).
 
 | entry | kind | proofs |
 |---|---|---|
 | agent_delegate_signing_key | key | VaultDelegateChain: write_resolves_to_current_member<br>VaultDelegateChain: delegate_scopes_only<br>VaultDelegateChain: write_requires_live_delegate |
 | browser_session_key | key | **GAP** |
 | class_key | key | VaultPolicyClass: revoked_factor_excluded_forward<br>VaultPolicyClass: revoked_factor_keeps_old |
+| delegate_audited_recipient | key | **GAP** |
 | factor_recipient | key | **GAP** |
 | factor_seed | key | VaultFactorPolicy: password_alone_no_root<br>VaultFactorPolicy: passkeys_both_no_root<br>VaultFactorPolicy: unlock_only_no_root |
 | generation_secret | key | VaultRekeyMarker: exclusion_forward<br>VaultConcurrentRekey: concurrent_grant_secret |
@@ -29,6 +34,7 @@ it, or GAP. Gap rows feed the formal-modeling queue on tracker note
 | root_anchor_seed | key | VaultPolicyClass: root_reaches_every_generation |
 | sealed_index | key | VaultDeniability: Observational_equivalence |
 | serving_delegate_key | key | **GAP** |
+| serving_machine_signing_key | key | **GAP** |
 | vault_factor_recipient | key | **GAP** |
 | armor.enroll_factor | mutation | **GAP** |
 | armor.replace_recovery_slot | mutation | **GAP** |
@@ -66,4 +72,4 @@ it, or GAP. Gap rows feed the formal-modeling queue on tracker note
 | vault.create_class | mutation | VaultPolicyClass: root_reaches_every_generation |
 | vault.revoke_class_factor | mutation | VaultPolicyClass: revoked_factor_excluded_forward<br>VaultPolicyClass: revoked_factor_keeps_old |
 
-26 of 59 entries carry at least one proof; 33 gaps.
+26 of 61 entries carry at least one model reference; 35 gaps.

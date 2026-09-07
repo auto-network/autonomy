@@ -44,20 +44,23 @@ graph LR
     subgraph vault_classes["Vault policy classes"]
         direction TB
         class_key["class key"]:::cold
+        delegate_audited_recipient["delegate audited recipient"]:::memory
         object_cek["object cek"]:::memory
         root_anchor_seed["root anchor seed"]:::cold
         vault_factor_recipient["vault factor recipient"]:::cold
     end
-    subgraph sealed_stores["Sealed stores (designed)"]
+    subgraph sealed_stores["Sealed stores"]
         direction TB
-        k_index_k_meta["k index k meta ⋄"]:::cold
-        pepper["pepper ⋄"]:::memory
-        sealed_index["sealed index ⋄"]:::cold
+        k_index_k_meta["k index k meta"]:::cold
+        pepper["pepper"]:::memory
+        sealed_index["sealed index"]:::cold
     end
     subgraph fleet["Fleet"]
         direction TB
         per_machine_key["per machine key"]:::memory
+        serving_machine_signing_key["serving machine signing key"]:::memory
     end
+    personal_root_seed -->|derive_encapsulation_keypair| delegate_audited_recipient
     factor_seed -->|derive_encapsulation_keypair| factor_recipient
     sealed_index -->|HKDF| k_index_k_meta
     recovery_code -->|HKDF| member_recovery_key
@@ -68,6 +71,7 @@ graph LR
     personal_root_seed -->|derive_persona| persona_signing_key
     recovery_code -->|HKDF| recovery_signing_key
     recovery_code -->|HKDF| recovery_slot_recipient
+    personal_root_seed -->|derive_serving_machine_key| serving_machine_signing_key
     factor_seed -->|derive_encapsulation_keypair| vault_factor_recipient
     class_key -.-> vault_factor_recipient
     class_key -.-> root_anchor_seed
