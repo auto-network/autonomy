@@ -1375,6 +1375,15 @@ def _transaction_identity(item: AuthoredMutation) -> tuple[str, str, int]:
 
 
 #: Transactions fetched per store connection while serving a pull.
+#: Least time between two served-ack prunes of one scope on this machine.
+#: The prune holds the store's write lock for up to its budget; once a
+#: minute is plenty for retention and invisible to the dashboard's writers.
+PRUNE_MIN_INTERVAL_S = 60.0
+
+
+class _PruneSkipped(Exception):
+    """Control flow: this serve is inside the prune interval."""
+
 SERVE_PAGE_TRANSACTIONS = 200
 
 
@@ -1460,6 +1469,7 @@ class FleetSyncScheduler:
         #: v4. Only wire efficiency rides on this, never correctness.
         self._peer_protocol: dict[str, int] = {}
         #: Per-machine random source for peer selection (see rank_peers).
+        self._last_prune_at: dict[str, float] = {}
         self._rng = random.Random(int.from_bytes(os.urandom(8), "big"))
         #: ``async (stage_dir, *, source_machine_pub) -> installed`` for the
         #: PERSONAL scope, set by the owning DashboardFleetSyncService. The
@@ -1937,6 +1947,17 @@ class FleetSyncScheduler:
                 # None for an empty peer list), so a concurrently enrolling
                 # machine can never race a full retirement.
                 try:
+                    # Rate-limited per scope: the prune takes the store's
+                    # write lock for up to PRUNE_BUDGET_S, and a peer
+                    # polling every second re-armed it after every serve,
+                    # so home's autonomy store was write-locked
+                    # continuously and every dashboard writer hit its 5 s
+                    # busy timeout (live 2026-09-07 04:42-04:46Z).
+                    loop_now = asyncio.get_running_loop().time()
+                    last = self._last_prune_at.get(scope, 0.0)
+                    if loop_now - last < PRUNE_MIN_INTERVAL_S:
+                        raise _PruneSkipped
+                    self._last_prune_at[scope] = loop_now
                     active = resolve(
                         self._roster_snapshot,
                         anchor_root_pub=self.config.personal_root_pub,
@@ -1954,6 +1975,8 @@ class FleetSyncScheduler:
                             "%d transactions",
                             journal_rows, transaction_rows,
                         )
+                except _PruneSkipped:
+                    pass
                 except Exception:
                     logger.warning(
                         "fleet sync journal prune failed", exc_info=True
