@@ -31,6 +31,20 @@ _LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 _HOST_RE = re.compile(
     rf"^(?P<app>{_LABEL})\.(?P<persona>{_LABEL})\.serve\.auto\.network$"
 )
+# A Service directly under an organization-owned delegated zone: the app
+# label plus a zone of at least three labels (the registry's floor), never
+# anything under auto.network (those are persona hosts, matched above).
+_ZONE_HOST_RE = re.compile(rf"^(?P<app>{_LABEL})(?:\.{_LABEL}){{3,}}$")
+
+
+def _valid_service_hostname(hostname: object) -> bool:
+    if not isinstance(hostname, str) or len(hostname) > 253:
+        return False
+    if _HOST_RE.fullmatch(hostname) is not None:
+        return True
+    if hostname.endswith(".auto.network"):
+        return False
+    return _ZONE_HOST_RE.fullmatch(hostname) is not None
 _SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _NETWORK_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -94,7 +108,7 @@ class ServiceGatewayRoute:
             validate_reservation_key(self.reservation_id)
         except Exception as exc:
             raise ValueError("invalid reservation id") from exc
-        if _HOST_RE.fullmatch(self.hostname) is None:
+        if not _valid_service_hostname(self.hostname):
             raise ValueError("invalid Service hostname")
         if _SESSION_RE.fullmatch(self.session_id) is None:
             raise ValueError("invalid session id")
@@ -128,9 +142,8 @@ async def resolve_gateway_route(org: str, reservation_id: str) -> ServiceGateway
         org, reservation_id, serving=True
     )
     descriptor = await service_publication.resolve_service_target(org, reservation_id)
-    payload = reservation.payload
-    hostname = (
-        f"{payload['app_label']}.{payload['persona_label']}.serve.auto.network"
+    hostname = service_publication.reservation_hostname_from_payload(
+        reservation.payload
     )
     return ServiceGatewayRoute(
         reservation_id=reservation_id,
@@ -149,14 +162,13 @@ def reservation_hostname(org: str, reservation_id: str) -> str:
     reservation = service_publication._reservation_for_target(
         org, reservation_id, serving=False
     )
-    payload = reservation.payload
     return _validate_unavailable_hostname(
-        f"{payload['app_label']}.{payload['persona_label']}.serve.auto.network"
+        service_publication.reservation_hostname_from_payload(reservation.payload)
     )
 
 
 def _validate_unavailable_hostname(hostname: str) -> str:
-    if not isinstance(hostname, str) or _HOST_RE.fullmatch(hostname) is None:
+    if not _valid_service_hostname(hostname):
         raise ValueError("invalid unavailable Service hostname")
     return hostname
 

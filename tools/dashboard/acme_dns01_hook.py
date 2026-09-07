@@ -20,12 +20,18 @@ class Dns01HookServer:
     this boundary.
     """
 
-    def __init__(self, client, order: str, path: str | Path, *, wait_ready=None):
+    def __init__(
+        self, client, order: str, path: str | Path, *, wait_ready=None,
+        zone: str | None = None,
+    ):
         if wait_ready is None:
             from tools.dashboard.acme_dns01 import wait_authoritative_txt
             wait_ready = wait_authoritative_txt
         self._client = client
         self._order = order
+        # An organization-owned zone: the challenge lands at the zone itself.
+        # Bound here, never read from the hook's request.
+        self._zone = zone
         self._path = Path(path)
         self._wait_ready = wait_ready
         self._server = None
@@ -47,6 +53,9 @@ class Dns01HookServer:
         with contextlib.suppress(FileNotFoundError):
             self._path.unlink()
 
+    def _zone_kwargs(self) -> dict:
+        return {"zone": self._zone} if self._zone is not None else {}
+
     async def _handle(self, reader, writer):
         reply = {"ok": False, "error": "invalid request"}
         action = "?"
@@ -64,7 +73,7 @@ class Dns01HookServer:
             logger.info("DNS-01 hook: %s request for order %s", action, self._order)
             if action == "present":
                 result = await asyncio.to_thread(
-                    self._client.present, self._order, value,
+                    self._client.present, self._order, value, **self._zone_kwargs(),
                 )
                 await asyncio.to_thread(
                     self._wait_ready, result["name"], value,
@@ -72,7 +81,7 @@ class Dns01HookServer:
                 reply = {"ok": True, **result}
             else:
                 await asyncio.to_thread(
-                    self._client.cleanup, self._order, value,
+                    self._client.cleanup, self._order, value, **self._zone_kwargs(),
                 )
                 reply = {"ok": True}
         except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:

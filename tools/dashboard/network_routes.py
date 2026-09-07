@@ -2655,8 +2655,13 @@ async def get_unlock_maintenance_report(request: Request) -> JSONResponse:
     return JSONResponse(dict(_LAST_UNLOCK_MAINTENANCE))
 
 
-def _service_publication_error(code: str, status_code: int = 400) -> JSONResponse:
-    return JSONResponse({"ok": False, "error": code}, status_code=status_code)
+def _service_publication_error(
+    code: str, status_code: int = 400, detail: str = ""
+) -> JSONResponse:
+    body = {"ok": False, "error": code}
+    if detail:
+        body["detail"] = detail
+    return JSONResponse(body, status_code=status_code)
 
 
 def _service_publication_org(request: Request) -> tuple[str | None, JSONResponse | None]:
@@ -2688,21 +2693,82 @@ async def post_service_reservation(request: Request) -> JSONResponse:
         return _service_publication_error("invalid_json")
     if not isinstance(body, dict):
         return _service_publication_error("invalid_json")
-    if set(body) != {"app_label"}:
+    if not {"app_label"} <= set(body) <= {"app_label", "zone"}:
         return _service_publication_error("unknown_fields")
     from tools.dashboard import service_publication
 
+    zone = body.get("zone")
+    if "zone" in body and zone is not None:
+        try:
+            zone = service_publication.validate_zone(zone)
+        except ValueError as exc:
+            return _service_publication_error("zone_invalid", 400, str(exc))
     try:
         projection, created = service_publication.reserve_origin(
-            org, body.get("app_label")
+            org, body.get("app_label"), zone
         )
     except ValueError:
         return _service_publication_error("invalid_app_label")
     except service_publication.ServicePublicationError as exc:
-        return _service_publication_error(exc.code, exc.status_code)
+        return _service_publication_error(exc.code, exc.status_code, exc.detail)
     return JSONResponse(
         {"reservation": projection}, status_code=201 if created else 200
     )
+
+
+async def get_serve_zones(request: Request) -> JSONResponse:
+    org, refused = _service_publication_org(request)
+    if refused is not None:
+        return refused
+    from tools.dashboard import service_publication
+
+    return JSONResponse({"zones": service_publication.list_zones(org)})
+
+
+async def post_serve_zone(request: Request) -> JSONResponse:
+    """Claim an organization-owned delegated zone. The registry verifies the
+    parent's delegation and binding over the org's serving tunnel; a row is
+    recorded only on its verdict."""
+    org, refused = _service_publication_org(request)
+    if refused is not None:
+        return refused
+    try:
+        body = await request.json()
+    except Exception:
+        return _service_publication_error("invalid_json")
+    if not isinstance(body, dict):
+        return _service_publication_error("invalid_json")
+    if not {"zone"} <= set(body) <= {"zone", "binding_kind"}:
+        return _service_publication_error("unknown_fields")
+    from tools.dashboard import service_publication
+
+    binding_kind = body.get("binding_kind", "parent-txt")
+    try:
+        projection, created = await asyncio.to_thread(
+            service_publication.claim_zone, org, body.get("zone"), binding_kind
+        )
+    except ValueError as exc:
+        return _service_publication_error("zone_invalid", 400, str(exc))
+    except service_publication.ServicePublicationError as exc:
+        return _service_publication_error(exc.code, exc.status_code, exc.detail)
+    return JSONResponse({"zone": projection}, status_code=201 if created else 200)
+
+
+async def delete_serve_zone(request: Request) -> Response:
+    org, refused = _service_publication_org(request)
+    if refused is not None:
+        return refused
+    from tools.dashboard import service_publication
+
+    try:
+        projection = await asyncio.to_thread(
+            service_publication.release_zone, org, request.path_params.get("zone", "")
+        )
+    except ValueError as exc:
+        return _service_publication_error("zone_invalid", 400, str(exc))
+    except service_publication.ServicePublicationError as exc:
+        return _service_publication_error(exc.code, exc.status_code, exc.detail)
+    return JSONResponse({"zone": projection})
 
 
 async def put_service_reservation_state(request: Request) -> JSONResponse:
@@ -2837,10 +2903,29 @@ async def get_published_links(request: Request) -> JSONResponse:
         state = certificate_states[0]
         warning = state.get("reason") or "A Service certificate needs attention."
 
+    zones = [
+        row for row in service_publication.list_zones(org) if row.get("state") == "active"
+    ]
+    persona_domain = None
+    try:
+        persona_pub, display_name = service_publication._persona_for_org(org)
+        persona_domain = (
+            service_publication.bound_persona_label(org, persona_pub)
+            or service_publication.normalize_persona_label(display_name, persona_pub)
+        ) + ".serve.auto.network"
+    except Exception:
+        persona_domain = None
+    binding, _binding_error = link_approvals._load_binding(org)
     return JSONResponse({
         "services": services,
         "shares": shares,
         "service_warning": warning,
+        # Where a Service may be published: the persona's serve.auto.network
+        # apex plus every zone this organization has claimed.
+        "zones": zones,
+        "persona_domain": persona_domain,
+        # The parent-zone TXT binding value a custom domain must carry.
+        "org_uuid": (binding or {}).get("org_uuid"),
     })
 
 
@@ -2927,6 +3012,9 @@ async def check_service_target(request: Request) -> JSONResponse:
 ROUTES = [
     Route("/api/network/service-reservations", get_service_reservations, methods=["GET"]),
     Route("/api/network/service-reservations", post_service_reservation, methods=["POST"]),
+    Route("/api/network/serve-zones", get_serve_zones, methods=["GET"]),
+    Route("/api/network/serve-zones", post_serve_zone, methods=["POST"]),
+    Route("/api/network/serve-zones/{zone}", delete_serve_zone, methods=["DELETE"]),
     Route(
         "/api/network/service-reservations/{reservation_id}/state",
         put_service_reservation_state,

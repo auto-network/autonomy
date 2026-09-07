@@ -119,23 +119,34 @@ class Dns01Client:
         *,
         ttl: int = 60,
         lifetime: int = 600,
+        zone: str | None = None,
     ) -> dict:
+        """Publish one challenge value. Without ``zone`` the relay derives the
+        record name from the persona's bound serving label; with ``zone`` (an
+        organization-owned delegated zone) the record sits directly at
+        ``_acme-challenge.<zone>`` and the zone is part of the signed request."""
         ts = int(self._now())
-        reply = self._send("serve.dns01.present", {
+        fields = {
             "order": order,
             "value": value,
             "ttl": ttl,
             "expiry": ts + lifetime,
             "ts": ts,
-        })
+        }
+        if zone is not None:
+            fields["zone"] = zone
+        reply = self._send("serve.dns01.present", fields)
         return {"name": reply["name"], "expires_at": reply["expires_at"]}
 
-    def cleanup(self, order: str, value: str) -> None:
-        self._send("serve.dns01.cleanup", {
+    def cleanup(self, order: str, value: str, *, zone: str | None = None) -> None:
+        fields = {
             "order": order,
             "value": value,
             "ts": int(self._now()),
-        })
+        }
+        if zone is not None:
+            fields["zone"] = zone
+        self._send("serve.dns01.cleanup", fields)
 
 
 def _query_authoritative_txt(server: str, name: str) -> set[str]:

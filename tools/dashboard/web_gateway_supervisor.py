@@ -257,8 +257,8 @@ async def _build_desired_state() -> GatewayDesiredState:
 
         for reservation in candidates:
             reservation_id = reservation["reservation_id"]
-            persona_label = reservation.get("persona_label")
-            pair = service_certificate.active_gateway_pair(org, persona_label)
+            identity = service_publication.certificate_identity_for_payload(reservation)
+            pair = service_certificate.active_gateway_pair(org, identity)
             if pair is None:
                 found_missing_certificate = True
                 continue

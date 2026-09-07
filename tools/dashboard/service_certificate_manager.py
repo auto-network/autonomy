@@ -21,7 +21,12 @@ CHECK_INTERVAL_SECONDS = 6 * 60 * 60.0
 
 
 def desired_personas() -> set[tuple[str, str]]:
-    """Return unique org/persona pairs with an active or paused publication."""
+    """Return unique org/identity pairs with an active or paused publication.
+
+    An identity is the persona serving label (``<persona>.serve.auto.network``)
+    or an organization-owned zone (``<app>.<zone>`` Services share one
+    wildcard certificate for the zone).
+    """
     from tools.graph import org_ops
 
     desired: set[tuple[str, str]] = set()
@@ -34,19 +39,26 @@ def desired_personas() -> set[tuple[str, str]]:
             if isinstance(row, dict)
         }
         for row in service_publication.list_reservations(ref.slug):
-            persona = row.get("persona_label") if isinstance(row, dict) else None
+            if not isinstance(row, dict):
+                continue
+            identity = service_publication.certificate_identity_for_payload(row)
             if (
-                isinstance(persona, str)
+                isinstance(identity, str)
                 and row.get("state") in {"active", "paused"}
                 and row.get("reservation_id") in targets
             ):
-                desired.add((ref.slug, persona))
+                desired.add((ref.slug, identity))
     return desired
 
 
 _RETRY_AFTER_RE = re.compile(r"retry after (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) UTC")
 MAX_BACKOFF_SECONDS = 15 * 60.0
-NO_BACKOFF_MARKERS = ("vault is locked", "vault cold", "key holder")
+# Conditions the operator resolves (an unlock, a restore): no hold, so the
+# next minute's retry picks the fix up. "bundle is unavailable" is the cold
+# vault seen from the read side: the sealed row exists but cannot be opened.
+NO_BACKOFF_MARKERS = (
+    "vault is locked", "vault cold", "key holder", "vault bundle is unavailable",
+)
 
 
 def failure_hold_seconds(error: str, consecutive: int, now: float) -> float:
@@ -75,7 +87,7 @@ def _import_legacy_pair(org: str, persona_label: str) -> dict | None:
         metadata = json.loads(service_certificate.STATUS_PATH.read_text())
     except Exception:
         return None
-    apex = f"{persona_label}.serve.auto.network"
+    apex = service_certificate.apex_for_identity(persona_label)
     if metadata.get("org") != org or metadata.get("apex") != apex:
         return None
     if not all(
@@ -246,6 +258,7 @@ class ServiceCertificateManager:
                     "detail": error if error else None,
                     "org": org,
                     "persona_label": persona,
+                    "apex": service_certificate.apex_for_identity(persona),
                     "state": state,
                     "reason": reason,
                 }
