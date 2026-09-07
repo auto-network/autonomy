@@ -44,6 +44,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from collections import Counter
@@ -401,24 +402,25 @@ def compose(revision_id: str, form_factor: str, style: str = DEFAULT_STYLE) -> P
 # ── Orchestration ─────────────────────────────────────────────────────
 
 
-def render_revision(revision_id: str, *, style: str | None = None) -> dict:
-    """Capture, classify, compose, and record ``thumbnail.json``.  Returns the
-    metadata written.  Raises on any failure; the caller decides what to log."""
-    from agents.design_db import get_design
-
+def render_design_into(revision_id: str, design: dict, out_dir: Path,
+                       *, style: str | None = None) -> dict:
+    """The renderer core, independent of where the design DB lives: capture,
+    classify, and compose into ``out_dir`` (desktop.png, mobile.png,
+    thumbnail.jpg) and return the metadata.  ``render_revision`` uses it on
+    the dashboard host; the ``--remote`` CLI uses it inside a container and
+    uploads the results."""
     rev_id = _safe_revision_id(revision_id)
-    rev_dir = revision_dir(rev_id)
-    if not rev_id or not rev_dir:
+    if not rev_id:
         raise ValueError("invalid revision id")
-    design = get_design(rev_id)
     if not design or not _variant_for_thumbnail(design):
         raise LookupError(f"revision {rev_id} has no renderable variant")
     style = style if style in STYLES else DEFAULT_STYLE
     started = time.monotonic()
-    measurements = capture(rev_id, design, rev_dir)
-    form_factor, evidence = classify(rev_dir / "desktop.png", measurements["mobile"])
-    compose(rev_id, form_factor, style)
-    meta = {
+    measurements = capture(rev_id, design, out_dir)
+    form_factor, evidence = classify(out_dir / "desktop.png", measurements["mobile"])
+    image = compose_image(out_dir / "desktop.png", out_dir / "mobile.png", form_factor, style)
+    image.save(out_dir / "thumbnail.jpg", "JPEG", quality=88, optimize=True)
+    return {
         "revision_id": rev_id,
         "design_id": design.get("design_id") or rev_id,
         "form_factor": form_factor,
@@ -429,10 +431,79 @@ def render_revision(revision_id: str, *, style: str | None = None) -> dict:
         "rendered_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "duration_seconds": round(time.monotonic() - started, 1),
     }
+
+
+def write_meta(revision_id: str, meta: dict) -> Path:
+    rev_dir = revision_dir(revision_id)
+    if not rev_dir:
+        raise ValueError("invalid revision id")
+    rev_dir.mkdir(parents=True, exist_ok=True)
     tmp = rev_dir / "thumbnail.json.tmp"
     tmp.write_text(json.dumps(meta, indent=2))
     os.replace(tmp, rev_dir / "thumbnail.json")
+    return rev_dir / "thumbnail.json"
+
+
+def render_revision(revision_id: str, *, style: str | None = None) -> dict:
+    """Capture, classify, compose, and record ``thumbnail.json`` for a
+    revision in the local design DB.  Raises on any failure; the caller
+    decides what to log."""
+    from agents.design_db import get_design
+
+    rev_id = _safe_revision_id(revision_id)
+    rev_dir = revision_dir(rev_id)
+    if not rev_id or not rev_dir:
+        raise ValueError("invalid revision id")
+    design = get_design(rev_id)
+    meta = render_design_into(rev_id, design, rev_dir, style=style)
+    write_meta(rev_id, meta)
     return meta
+
+
+ARTIFACT_NAMES = ("desktop.png", "mobile.png", "thumbnail.jpg")
+ARTIFACT_MAX_BYTES = 12 * 1024 * 1024
+_MAGIC = {"desktop.png": b"\x89PNG", "mobile.png": b"\x89PNG", "thumbnail.jpg": b"\xff\xd8\xff"}
+
+
+def write_artifacts(revision_id: str, files: dict[str, bytes], meta: dict) -> dict:
+    """Store artifacts rendered elsewhere (the ``--remote`` CLI).  Validates
+    names, sizes, and image magic; ``thumbnail.jpg`` and a form factor are
+    required, the raw captures are optional but keep the style switchable."""
+    rev_id = _safe_revision_id(revision_id)
+    rev_dir = revision_dir(rev_id)
+    if not rev_id or not rev_dir:
+        raise ValueError("invalid revision id")
+    if "thumbnail.jpg" not in files:
+        raise ValueError("thumbnail.jpg is required")
+    form_factor = str((meta or {}).get("form_factor") or "")
+    if form_factor not in FORM_FACTORS:
+        raise ValueError("meta.form_factor must be desktop, mobile, or both")
+    for name, data in files.items():
+        if name not in ARTIFACT_NAMES:
+            raise ValueError(f"unknown artifact {name!r}")
+        if not isinstance(data, (bytes, bytearray)) or len(data) > ARTIFACT_MAX_BYTES:
+            raise ValueError(f"{name} is missing or too large")
+        if not bytes(data).startswith(_MAGIC[name]):
+            raise ValueError(f"{name} is not the expected image type")
+    rev_dir.mkdir(parents=True, exist_ok=True)
+    for name, data in files.items():
+        tmp = rev_dir / (name + ".tmp")
+        tmp.write_bytes(bytes(data))
+        os.replace(tmp, rev_dir / name)
+    stored = {
+        "revision_id": rev_id,
+        "design_id": str(meta.get("design_id") or rev_id),
+        "form_factor": form_factor,
+        "style": meta.get("style") if meta.get("style") in STYLES else DEFAULT_STYLE,
+        "measurements": meta.get("measurements") if isinstance(meta.get("measurements"), dict) else {},
+        "evidence": meta.get("evidence") if isinstance(meta.get("evidence"), dict) else {},
+        "renderer": str(meta.get("renderer") or "remote")[:80],
+        "rendered_at": str(meta.get("rendered_at") or datetime.now(timezone.utc).isoformat(timespec="seconds")),
+        "duration_seconds": meta.get("duration_seconds"),
+        "uploaded": True,
+    }
+    write_meta(rev_id, stored)
+    return stored
 
 
 def recompose_revision(revision_id: str, style: str) -> dict | None:
@@ -577,3 +648,111 @@ class ThumbnailQueue:
 
 
 queue = ThumbnailQueue()
+
+
+# ── Remote rendering: a container renders, the dashboard stores ───────
+
+
+def remote_backfill(base_url: str, token: str, *, limit: int = 0, only: str = "",
+                    style: str | None = None, force: bool = False, log=print) -> dict:
+    """Render every design whose latest revision has no form factor yet
+    (``force`` re-renders all), using the dashboard API for both the design
+    HTML and the upload.  Meant for a session container, where
+    ``agent-browser`` exists, when the dashboard host has no browser."""
+    import base64
+    import ssl
+    import urllib.request
+
+    ctx = ssl._create_unverified_context()
+    base = base_url.rstrip("/")
+
+    def call(method: str, path: str, body: dict | None = None) -> dict:
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        req = urllib.request.Request(
+            base + path, data=data, method=method,
+            headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, context=ctx, timeout=120) as resp:
+            return json.loads(resp.read().decode("utf-8") or "{}")
+
+    if only:
+        targets = [{"latest_revision_id": only, "title": only, "form_factor": ""}]
+    else:
+        catalog = call("GET", "/api/design-studio/designs?status=all&limit=500&sort=updated")
+        targets = [
+            row for row in catalog.get("designs", [])
+            if row.get("latest_revision_id") and (force or not row.get("form_factor"))
+        ]
+    if limit:
+        targets = targets[:limit]
+    done, failed = 0, 0
+    log(f"remote render: {len(targets)} revision(s) to render against {base}")
+    for row in targets:
+        rev_id = str(row["latest_revision_id"])
+        try:
+            design = call("GET", f"/api/design/{rev_id}/full")
+            with tempfile.TemporaryDirectory(prefix="design-remote-") as tmp:
+                out_dir = Path(tmp)
+                meta = render_design_into(rev_id, design, out_dir, style=style)
+                files = {
+                    name: base64.b64encode((out_dir / name).read_bytes()).decode("ascii")
+                    for name in ARTIFACT_NAMES if (out_dir / name).is_file()
+                }
+            result = call("PUT", f"/api/design-studio/revisions/{rev_id}/thumbnail-artifacts",
+                          {"files": files, "meta": meta})
+            done += 1
+            log(f"  ok   {rev_id[:8]} {meta['form_factor']:<7} {meta['duration_seconds']:>5}s  {str(row.get('title') or '')[:50]}")
+            if result.get("error"):
+                log(f"       server: {result['error']}")
+        except Exception as exc:  # one bad design must not stop the batch
+            failed += 1
+            log(f"  FAIL {rev_id[:8]} {str(row.get('title') or '')[:40]}: {str(exc)[:160]}")
+    try:
+        _agent_browser("close", timeout=30)
+    except Exception:
+        pass
+    log(f"remote render: {done} rendered, {failed} failed")
+    return {"rendered": done, "failed": failed, "targets": len(targets)}
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python -m tools.dashboard.design_thumbnails",
+        description="Render Design Studio thumbnails headlessly (no LLM).",
+    )
+    parser.add_argument("--remote", metavar="DASHBOARD_URL",
+                        help="render here and upload to this dashboard (needs --token or CROSSTALK_TOKEN)")
+    parser.add_argument("--token", default=os.environ.get("CROSSTALK_TOKEN", ""))
+    parser.add_argument("--revision", default="", help="one revision id instead of the backfill selection")
+    parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--force", action="store_true", help="re-render designs that already have a form factor")
+    parser.add_argument("--style", choices=STYLES, default=None)
+    args = parser.parse_args(argv)
+    if not renderer_available():
+        print("agent-browser is not on PATH here; nothing can render", file=sys.stderr)
+        return 2
+    if args.remote:
+        if not args.token:
+            print("--remote needs --token or CROSSTALK_TOKEN", file=sys.stderr)
+            return 2
+        result = remote_backfill(args.remote, args.token, limit=args.limit, only=args.revision,
+                                 style=args.style, force=args.force)
+        return 0 if result["failed"] == 0 else 1
+    targets = [args.revision] if args.revision else missing_revisions()
+    if args.limit:
+        targets = targets[:args.limit]
+    failed = 0
+    for rev_id in targets:
+        try:
+            meta = render_revision(rev_id, style=args.style)
+            print(f"  ok   {rev_id[:8]} {meta['form_factor']}")
+        except Exception as exc:
+            failed += 1
+            print(f"  FAIL {rev_id[:8]}: {exc}")
+    return 0 if failed == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

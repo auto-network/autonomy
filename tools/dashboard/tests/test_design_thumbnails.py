@@ -216,3 +216,54 @@ def test_queue_renders_and_notifies(monkeypatch):
     status = asyncio.run(scenario())
     assert rendered == ["rev-a", "rev-b"]
     assert status["rendered"] == 2 and status["failed"] == 0 and status["pending"] == 0
+
+
+# ── artifacts rendered elsewhere ──────────────────────────────────────
+
+
+def _jpeg_bytes() -> bytes:
+    import io
+
+    buf = io.BytesIO()
+    Image.new("RGB", (4, 4), (1, 2, 3)).save(buf, "JPEG")
+    return buf.getvalue()
+
+
+def _png_bytes() -> bytes:
+    import io
+
+    buf = io.BytesIO()
+    Image.new("RGB", (4, 4), (1, 2, 3)).save(buf, "PNG")
+    return buf.getvalue()
+
+
+def test_write_artifacts_stores_images_and_meta(data_root):
+    stored = dt.write_artifacts(
+        "rev-remote",
+        {"thumbnail.jpg": _jpeg_bytes(), "desktop.png": _png_bytes(), "mobile.png": _png_bytes()},
+        {"form_factor": "mobile", "design_id": "design-r", "style": "overlay", "renderer": "agent-browser 0.27"},
+    )
+    rev_dir = data_root / "experiments" / "rev-remote"
+    assert (rev_dir / "thumbnail.jpg").read_bytes() == _jpeg_bytes()
+    assert (rev_dir / "desktop.png").is_file() and (rev_dir / "mobile.png").is_file()
+    meta = dt.read_meta("rev-remote")
+    assert meta["form_factor"] == "mobile" and meta["design_id"] == "design-r" and meta["uploaded"] is True
+    assert stored["renderer"] == "agent-browser 0.27"
+    assert dt.thumbnail_path("rev-remote") == rev_dir / "thumbnail.jpg"
+
+
+@pytest.mark.parametrize("files, meta, message", [
+    ({"desktop.png": b"\x89PNG..."}, {"form_factor": "both"}, "thumbnail.jpg is required"),
+    ({"thumbnail.jpg": b"\xff\xd8\xff.."}, {"form_factor": "tablet"}, "form_factor"),
+    ({"thumbnail.jpg": b"\xff\xd8\xff..", "evil.sh": b"#!"}, {"form_factor": "both"}, "unknown artifact"),
+    ({"thumbnail.jpg": b"not a jpeg"}, {"form_factor": "both"}, "not the expected image type"),
+])
+def test_write_artifacts_rejects_bad_input(data_root, files, meta, message):
+    with pytest.raises(ValueError, match=message):
+        dt.write_artifacts("rev-bad", files, meta)
+    assert not (data_root / "experiments" / "rev-bad").exists()
+
+
+def test_write_artifacts_refuses_path_traversal(data_root):
+    with pytest.raises(ValueError):
+        dt.write_artifacts("../escape", {"thumbnail.jpg": _jpeg_bytes()}, {"form_factor": "both"})

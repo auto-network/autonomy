@@ -680,6 +680,58 @@ async def render_revision_thumbnail(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "queued": queued, "status": status}, status_code=202)
 
 
+async def upload_thumbnail_artifacts(request: Request) -> JSONResponse:
+    """Store thumbnails rendered somewhere with a browser (a session
+    container running ``design_thumbnails --remote``) when this host has
+    none. Body: ``{"files": {name: base64}, "meta": {...}}``."""
+    revision_id = request.path_params["revision_id"]
+    denied = api_auth.require_authenticated_api_caller(request)
+    if denied is not None:
+        return denied
+    if api_auth.caller_org_scope_hides(request, _design_org(revision_id)):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if not _safe_revision_id(revision_id) or _design_org(revision_id) is None and not _revision_exists(revision_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    import base64
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    raw_files = body.get("files") if isinstance(body, dict) else None
+    meta = body.get("meta") if isinstance(body, dict) else None
+    if not isinstance(raw_files, dict) or not isinstance(meta, dict):
+        return JSONResponse({"error": "files and meta are required"}, status_code=400)
+    files: dict[str, bytes] = {}
+    try:
+        for name, encoded in raw_files.items():
+            files[str(name)] = base64.b64decode(str(encoded), validate=True)
+    except Exception:
+        return JSONResponse({"error": "files must be base64"}, status_code=400)
+    from tools.dashboard import design_thumbnails
+
+    try:
+        stored = design_thumbnails.write_artifacts(revision_id, files, meta)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    _clear_catalog_cache()
+    _clear_thumbnail_cache()
+    try:
+        from tools.dashboard.event_bus import event_bus
+        await event_bus.broadcast(
+            f"design:{stored.get('design_id') or revision_id}",
+            {"revision_id": revision_id, "design_id": stored.get("design_id") or revision_id,
+             "thumbnail_updated": True, "form_factor": stored.get("form_factor")},
+        )
+    except Exception:
+        logger.exception("design-studio: failed to broadcast thumbnail update")
+    return JSONResponse({"ok": True, "meta": stored})
+
+
+def _revision_exists(revision_id: str) -> bool:
+    return any(str(row.get("id") or "") == revision_id for row in _design_rows())
+
+
 async def render_status(request: Request) -> JSONResponse:
     from tools.dashboard import design_thumbnails
 
@@ -771,6 +823,7 @@ routes: list[Route] = [
     Route("/api/design-studio/revisions/{revision_id}/metadata", update_revision_metadata, methods=["PATCH", "PUT"]),
     Route("/api/design-studio/revisions/{revision_id}/thumbnail", get_revision_thumbnail, methods=["GET"]),
     Route("/api/design-studio/revisions/{revision_id}/render", render_revision_thumbnail, methods=["POST"]),
+    Route("/api/design-studio/revisions/{revision_id}/thumbnail-artifacts", upload_thumbnail_artifacts, methods=["PUT"]),
     Route("/api/design-studio/render/status", render_status, methods=["GET"]),
     Route("/api/design-studio/shared", list_shared_remote, methods=["GET"]),
     Route("/api/design-studio/render/backfill", render_backfill, methods=["POST"]),

@@ -579,3 +579,43 @@ def test_shared_route_lists_grants_that_target_designs_not_on_this_machine():
     assert [s["token"] for s in shares] == ["remote"]
     assert shares[0]["org"] == "autonomy"
     assert shares[0]["label"] == "Teammate's deck"
+
+
+def test_thumbnail_artifact_upload_stores_and_broadcasts(tmp_path):
+    import base64
+    import io
+
+    from PIL import Image
+
+    from tools import data_paths
+
+    buf = io.BytesIO()
+    Image.new("RGB", (4, 4), (1, 2, 3)).save(buf, "JPEG")
+    payload = {
+        "files": {"thumbnail.jpg": base64.b64encode(buf.getvalue()).decode("ascii")},
+        "meta": {"form_factor": "both", "design_id": "series-a", "style": "overlay"},
+    }
+    (tmp_path / "experiments").mkdir()
+    with patch.object(design_api, "_design_rows", return_value=_rows()), \
+         patch.object(design_api.api_auth, "require_authenticated_api_caller", return_value=None), \
+         patch.object(design_api.api_auth, "caller_org_scope_hides", return_value=False), \
+         patch.object(data_paths, "DATA_ROOT", tmp_path):
+        resp = _client().put("/api/design-studio/revisions/rev-a2/thumbnail-artifacts", json=payload)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["meta"]["form_factor"] == "both"
+        assert (tmp_path / "experiments" / "rev-a2" / "thumbnail.jpg").is_file()
+
+        bad = _client().put("/api/design-studio/revisions/rev-a2/thumbnail-artifacts",
+                            json={"files": {"thumbnail.jpg": "!!!"}, "meta": {"form_factor": "both"}})
+        assert bad.status_code == 400
+        missing = _client().put("/api/design-studio/revisions/nope/thumbnail-artifacts", json=payload)
+        assert missing.status_code == 404
+
+
+def test_thumbnail_artifact_upload_requires_an_authenticated_caller():
+    from starlette.responses import JSONResponse
+
+    with patch.object(design_api.api_auth, "require_authenticated_api_caller",
+                      return_value=JSONResponse({"error": "authentication required"}, status_code=401)):
+        resp = _client().put("/api/design-studio/revisions/rev-a2/thumbnail-artifacts", json={})
+    assert resp.status_code == 401
