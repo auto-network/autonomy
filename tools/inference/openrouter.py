@@ -68,13 +68,15 @@ def request(method: str, path: str, body: dict | None = None, timeout: float = 1
 
 
 def chat(model: str, prompt: str, system: str | None = None, max_tokens: int = 2048,
-         temperature: float | None = None) -> dict:
+         temperature: float | None = None, extra: dict | None = None) -> dict:
     messages = ([{"role": "system", "content": system}] if system else []) + [
         {"role": "user", "content": prompt}
     ]
     body: dict = {"model": model, "messages": messages, "max_tokens": max_tokens}
     if temperature is not None:
         body["temperature"] = temperature
+    if extra:
+        body.update(extra)  # e.g. {"reasoning": {"effort": "low"}} for reasoning models
     t0 = time.monotonic()
     out = request("POST", "/chat/completions", body)
     out["_latency_s"] = round(time.monotonic() - t0, 2)
