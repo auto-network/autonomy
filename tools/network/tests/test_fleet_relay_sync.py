@@ -948,11 +948,11 @@ async def test_established_puller_with_unknown_position_gets_the_journal_not_a_s
 
 
 @pytest.mark.asyncio
-async def test_per_author_watermarks_serve_each_author_once_and_never_echo(
+async def test_per_origin_watermarks_serve_each_author_once_and_never_echo(
     tmp_path, monkeypatch
 ):
-    """Design of record: a puller sends {author: max timestamp held}; the
-    server streams, per author, only transactions newer than that, and
+    """Design of record: a puller sends {origin: max timestamp held}; the
+    server streams, per origin, only transactions newer than that, and
     never the puller's own writes -- so an established peer with no trail
     on this server receives exactly what it lacks, not the journal."""
     from tools.network.fleet_sync_scheduler import (
@@ -964,8 +964,8 @@ async def test_per_author_watermarks_serve_each_author_once_and_never_echo(
     fleet = _two_machine_fleet()
     alpha = tmp_path / "alpha.db"
     _prepare_org_db(alpha, fleet.server_machine.public_hex)
-    # Server-authored transactions at known timestamps, plus a transaction
-    # the CLIENT authored that the server imported (must never echo).
+    # Server-originated transactions at known timestamps, plus a transaction
+    # the CLIENT originated that the server imported (must never echo).
     db = GraphDB(alpha)
     try:
         catalog = MutationCatalog(db.conn, fleet.server_machine.public_hex)
@@ -1006,8 +1006,8 @@ async def test_per_author_watermarks_serve_each_author_once_and_never_echo(
         return [(origin, tx) for origin, tx, _ops in headers]
 
     server_pub = fleet.server_machine.public_hex
-    # Knows nothing about this author (established elsewhere): receives all
-    # three, once, in author order -- not a snapshot, not the puller's own.
+    # Knows nothing about this origin (established elsewhere): receives all
+    # three, once, in origin order -- not a snapshot, not the puller's own.
     assert [tx for _o, tx in await served({"ee" * 32: 9_999})] == [
         "tx-s-old", "tx-s-mid", "tx-s-new",
     ]
@@ -1024,10 +1024,10 @@ async def test_per_author_watermarks_serve_each_author_once_and_never_echo(
 async def test_server_skips_an_author_whose_retired_history_is_above_the_watermark(
     tmp_path, monkeypatch
 ):
-    """A snapshot receiver holds an author's early writes only as installed
-    rows (no frames). Serving that author from a low watermark would
+    """A snapshot receiver holds an origin's early writes only as installed
+    rows (no frames). Serving that origin from a low watermark would
     advance the puller past writes it never got. The server must skip the
-    author and say so; a puller already past the retired prefix is served."""
+    origin and say so; a puller already past the retired prefix is served."""
     from tools.network.fleet_sync_scheduler import (
         _TRANSACTION_MAGIC, encode_pull_request, SQLiteFleetSyncStore,
         decode_transaction_header,
@@ -1076,10 +1076,10 @@ async def test_server_skips_an_author_whose_retired_history_is_above_the_waterma
         served = [decode_transaction_header(f)[1] for f in frames if f.startswith(_TRANSACTION_MAGIC)]
         return controls, served
 
-    # Puller knows nothing of this author: NOT served, told why.
+    # Puller knows nothing of this origin: NOT served, told why.
     controls, served = await pull({"ee" * 32: 5})
     assert served == []
-    assert any(c.get("kind") == "retired" and c.get("authors") == [server_pub] for c in controls)
+    assert any(c.get("kind") == "retired" and c.get("origins") == [server_pub] for c in controls)
     # Puller already holds the retired prefix (W >= 1000): served the rest.
     controls, served = await pull({server_pub: 1_000})
     assert served == ["tx-a1", "tx-a2"]

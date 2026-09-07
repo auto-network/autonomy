@@ -163,7 +163,7 @@ def quarantine_unrealized(
     ``replay`` optionally maps address blobs to the deferred mutation's
     replay identity ``(frame, origin, transaction_id, operation_index)``: a
     delta-deferred row is never re-served (the peer's trail advances past
-    it), so the drain rebuilds the authored mutation from the stored frame
+    it), so the drain rebuilds the originated mutation from the stored frame
     and re-applies it through ordinary last-writer-wins; checkpoint entries
     store NULLs because the next checkpoint carries the row again.
     Rewritable per address: a later install that finally realizes the row
@@ -460,7 +460,7 @@ class MutationCatalog:
             )
 
     def before_statement(self, sql: object) -> bool:
-        """Enter one automatic authored context at the first replicated DML.
+        """Enter one automatic originated context at the first replicated DML.
 
         The returned flag tells :class:`FleetSyncConnection` that this hook
         opened the SQLite transaction and therefore owns rollback if the
@@ -926,7 +926,7 @@ class MutationCatalog:
         """Install the Alpha schema and immediately activate capture hooks.
 
         Production uses :meth:`migrate_existing` first and activates hooks only
-        when every personal-store writer has moved to the authored adapter.
+        when every personal-store writer has moved to the originated adapter.
         Keeping this method eager preserves the executable Alpha contract.
         """
         if self.conn.in_transaction:
@@ -1045,7 +1045,7 @@ class MutationCatalog:
         address as absent.  Rewrite only the exact self-inconsistent case: the
         winner and its journal frame are non-tombstones carrying
         ``deprecated=1``, and the physical row at that address has the same
-        authored timestamp.  Provenance and operation ordering are preserved.
+        originated timestamp.  Provenance and operation ordering are preserved.
         """
         policy = TABLE_POLICIES["settings"]
         repaired = 0
@@ -1142,7 +1142,7 @@ class MutationCatalog:
         Preparation intentionally permits legacy writers to continue. Even a
         complete address inventory cannot detect an in-place value change, so
         activation discards only bootstrap provenance and rebuilds it from the
-        locked current rows before installing triggers. Imported or authored
+        locked current rows before installing triggers. Imported or originated
         history is never silently reinterpreted as bootstrap state.
         """
         journal_rows = int(self.conn.execute(
@@ -1154,7 +1154,7 @@ class MutationCatalog:
         ).fetchone()
         if journal_rows or non_bootstrap is not None:
             raise WatermarkError(
-                "triggerless fleet-sync catalog contains authored history"
+                "triggerless fleet-sync catalog contains originated history"
             )
         self.conn.execute("DELETE FROM fleet_sync_catalog")
         self.conn.execute("DELETE FROM fleet_sync_transactions")
@@ -1166,7 +1166,7 @@ class MutationCatalog:
 
         This migration intentionally does *not* create capture triggers.  The
         next rollout must first route GraphDB, vault, and key-control writers
-        through authored transactions, then activate the hooks in the same
+        through originated transactions, then activate the hooks in the same
         deployment.  Until then ordinary writes remain valid and a repeated
         migration bootstraps only rows that appeared since the previous pass.
         """
@@ -1594,7 +1594,7 @@ class MutationCatalog:
         self,
         after: tuple[int, str, str] | None = None,
     ) -> tuple[tuple[int, str, str], list[AuthoredMutation]] | None:
-        """Read the next retained authored transaction in bounded memory.
+        """Read the next retained originated transaction in bounded memory.
 
         ``after`` is the exact total-order key returned by the prior call, not
         a scalar watermark. The connection is short-lived at the scheduler
@@ -1680,13 +1680,13 @@ class MutationCatalog:
         ]
         return transaction_ref, items
 
-    # -- per-author watermarks (design of record graph://1155b8f4-8cf) ----
+    # -- per-origin watermarks (design of record graph://1155b8f4-8cf) ----
 
-    def author_watermarks(self) -> dict[str, int]:
-        """``{author incarnation: max timestamp_ns held}`` over every
+    def origin_watermarks(self) -> dict[str, int]:
+        """``{origin incarnation: max timestamp_ns held}`` over every
         transaction this database has learned, frames retained or not. Under
-        the per-author write-floor promise this is W[author]: every
-        author-authored transaction at or below it is held."""
+        the per-origin write-floor promise this is W[origin]: every
+        origin-originated transaction at or below it is held."""
         return {
             str(row[0]): int(row[1])
             for row in self.conn.execute(
@@ -1697,14 +1697,14 @@ class MutationCatalog:
             )
         }
 
-    def author_list(self) -> list[str]:
+    def origin_list(self) -> list[str]:
         return [
             str(row[0]) for row in self.conn.execute(
                 "SELECT incarnation FROM fleet_sync_origins ORDER BY incarnation"
             )
         ]
 
-    def next_transaction_for_author(
+    def next_transaction_for_origin(
         self,
         incarnation: str,
         after_timestamp_ns: int,
@@ -1749,7 +1749,7 @@ class MutationCatalog:
         ]
         return transaction_ref, int(row[1]), str(row[2]), items
 
-    def next_transactions_for_author(
+    def next_transactions_for_origin(
         self,
         incarnation: str,
         after_timestamp_ns: int,
@@ -1809,18 +1809,18 @@ class MutationCatalog:
         return out
 
     def implied_ack_ref(self, watermarks: dict[str, int]) -> int:
-        """The journal position a per-author watermark map proves consumed:
+        """The journal position a per-origin watermark map proves consumed:
         the largest local transaction id such that every transaction at or
-        below it has timestamp_ns <= W[its author] (0 for an author absent
+        below it has timestamp_ns <= W[its origin] (0 for an origin absent
         from the map). Feeds the existing served-ack prune floor unchanged,
         so retention keeps its proven invariant."""
         first_uncovered: int | None = None
-        for author in self.author_list():
+        for origin in self.origin_list():
             row = self.conn.execute(
                 "SELECT MIN(t.id) FROM fleet_sync_transactions t "
                 "JOIN fleet_sync_origins o ON o.id=t.origin_id "
                 "WHERE o.incarnation=? AND t.timestamp_ns>?",
-                (author, int(watermarks.get(author, 0))),
+                (origin, int(watermarks.get(origin, 0))),
             ).fetchone()
             if row is not None and row[0] is not None:
                 candidate = int(row[0])
@@ -1837,11 +1837,11 @@ class MutationCatalog:
         self, watermarks: dict[str, int], exclude: str | None = None
     ) -> list[str]:
         """Authors whose retained history starts ABOVE the puller's watermark:
-        a transaction newer than W[author] whose frames were retired, which
+        a transaction newer than W[origin] whose frames were retired, which
         no replay can supply. Empty means the map is fully servable."""
         out: list[str] = []
-        for author in self.author_list():
-            if author == exclude:
+        for origin in self.origin_list():
+            if origin == exclude:
                 continue
             row = self.conn.execute(
                 "SELECT 1 FROM fleet_sync_transactions t "
@@ -1849,10 +1849,10 @@ class MutationCatalog:
                 "WHERE o.incarnation=? AND t.timestamp_ns>? AND NOT EXISTS("
                 "SELECT 1 FROM fleet_sync_journal j WHERE j.transaction_ref=t.id) "
                 "LIMIT 1",
-                (author, int(watermarks.get(author, 0))),
+                (origin, int(watermarks.get(origin, 0))),
             ).fetchone()
             if row is not None:
-                out.append(author)
+                out.append(origin)
         return out
 
     def journal_breadcrumb(
@@ -1896,7 +1896,7 @@ class MutationCatalog:
 
         Journal row ids are never authority a peer may present: restoring
         this database from a backup renumbers them, and a stale numeric
-        cursor silently skips everything authored afterwards.  The peer
+        cursor silently skips everything originated afterwards.  The peer
         instead presents breadcrumbs naming transactions it has already
         verified — each one a durable promise that it consumed this
         journal's complete prefix through that transaction — and the resume
@@ -2103,15 +2103,15 @@ class MutationCatalog:
             )
         return (journal_rows, transaction_rows)
 
-    def apply_remote(self, authored: AuthoredMutation) -> bool:
+    def apply_remote(self, originated: AuthoredMutation) -> bool:
         """Merge one trusted remote mutation atomically; return winner status."""
-        applied, _ = self.apply_remote_batch([authored])
+        applied, _ = self.apply_remote_batch([originated])
         return applied == 1
 
     def apply_remote_batch(
         self, authored_items: Iterable[AuthoredMutation]
     ) -> tuple[int, int]:
-        """Atomically merge one authored transaction in dependency-safe order."""
+        """Atomically merge one originated transaction in dependency-safe order."""
         items: list[AuthoredMutation] = []
         total_bytes = 0
         for item in authored_items:
@@ -2131,7 +2131,7 @@ class MutationCatalog:
             or item.mutation.timestamp_ns != timestamp
             for item in items
         ):
-            raise WatermarkError("remote batch crosses an authored transaction")
+            raise WatermarkError("remote batch crosses an originated transaction")
         if len({item.operation_index for item in items}) != len(items):
             raise WatermarkError("remote transaction repeats an operation index")
         if self._context is not None or self.conn.in_transaction:
@@ -2140,8 +2140,8 @@ class MutationCatalog:
         try:
             winners: list[tuple[AuthoredMutation, bytes]] = []
             ignored = 0
-            for authored in items:
-                mutation = authored.mutation
+            for originated in items:
+                mutation = originated.mutation
                 address_blob = encode_value([
                     mutation.table, list(mutation.address)
                 ])
@@ -2172,17 +2172,17 @@ class MutationCatalog:
                         if not mutation_wins(current_mutation, mutation):
                             ignored += 1
                             continue
-                        winners.append((authored, address_blob))
+                        winners.append((originated, address_blob))
                         continue
                     if current_timestamp > mutation.timestamp_ns:
                         ignored += 1
                         continue
                     if current_timestamp == mutation.timestamp_ns:
                         if (str(current[1]), str(current[2])) == identity:
-                            if int(current[3]) >= authored.operation_index:
+                            if int(current[3]) >= originated.operation_index:
                                 ignored += 1
                                 continue
-                            winners.append((authored, address_blob))
+                            winners.append((originated, address_blob))
                             continue
                         current_values = ()
                         if not bool(current[4]):
@@ -2199,7 +2199,7 @@ class MutationCatalog:
                         if current_mutation.candidate_hash >= mutation.candidate_hash:
                             ignored += 1
                             continue
-                winners.append((authored, address_blob))
+                winners.append((originated, address_blob))
             if not winners:
                 self.conn.rollback()
                 return 0, ignored
@@ -2232,10 +2232,10 @@ class MutationCatalog:
                 for table, address in report.skipped_orphans
             )
             final_winners = {
-                address_blob: authored for authored, address_blob in winners
+                address_blob: originated for originated, address_blob in winners
             }
-            for address_blob, authored in final_winners.items():
-                mutation = authored.mutation
+            for address_blob, originated in final_winners.items():
+                mutation = originated.mutation
                 if mutation.tombstone or address_blob in deferred:
                     continue
                 installed = Mutation(
@@ -2253,8 +2253,8 @@ class MutationCatalog:
                         f"installed={installed.candidate_hash.hex()[:16]}"
                     )
             deferred_count = 0
-            for authored, address_blob in winners:
-                mutation = authored.mutation
+            for originated, address_blob in winners:
+                mutation = originated.mutation
                 if address_blob in deferred:
                     deferred_count += 1
                 else:
@@ -2268,23 +2268,23 @@ class MutationCatalog:
                         (
                             address_blob, mutation.timestamp_ns,
                             int(mutation.tombstone), transaction_ref,
-                            authored.operation_index,
+                            originated.operation_index,
                         ),
                     )
                 self.conn.execute(
                     "INSERT OR IGNORE INTO fleet_sync_journal VALUES(?,?,?)",
                     (
-                        transaction_ref, authored.operation_index,
+                        transaction_ref, originated.operation_index,
                         _pack_journal(encode_mutation_frame(mutation)),
                     ),
                 )
             if deferred:
                 deferred_rows = []
                 replay: dict[bytes, tuple[bytes, str, str, int]] = {}
-                for authored, address_blob in winners:
+                for originated, address_blob in winners:
                     if address_blob not in deferred:
                         continue
-                    mutation = authored.mutation
+                    mutation = originated.mutation
                     reason = (
                         "attachment_bytes_unavailable"
                         if mutation.table == "attachments" else "fk_orphan"
@@ -2294,9 +2294,9 @@ class MutationCatalog:
                     )
                     replay[address_blob] = (
                         encode_mutation_frame(mutation),
-                        authored.origin_incarnation,
-                        authored.transaction_id,
-                        authored.operation_index,
+                        originated.origin_incarnation,
+                        originated.transaction_id,
+                        originated.operation_index,
                     )
                 quarantine_unrealized(
                     self.conn, deferred_rows,
