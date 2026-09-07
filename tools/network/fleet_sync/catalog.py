@@ -2131,13 +2131,18 @@ class MutationCatalog:
         # every candidate inside one statement the budget could not
         # interrupt, holding the store's write lock for far longer than
         # PRUNE_BUDGET_S on a large scope (home, 2026-09-07 04:45Z).
+        # One grouped scan over the origin index: the previous correlated
+        # NOT EXISTS used the index on origin_id only and rescanned every
+        # transaction of the origin for every row (73k x 73k on anchore:
+        # 152-171 s per pass retiring nothing, measured 2026-09-07 08:00Z).
+        # Ties at the newest timestamp keep every tied id; extra keepers
+        # are always safe.
         keepers = [
             int(r[0]) for r in self.conn.execute(
-                "SELECT id FROM fleet_sync_transactions t WHERE NOT EXISTS("
-                "SELECT 1 FROM fleet_sync_transactions n "
-                "WHERE n.origin_id=t.origin_id AND ("
-                "n.timestamp_ns>t.timestamp_ns OR "
-                "(n.timestamp_ns=t.timestamp_ns AND n.transaction_id>t.transaction_id)))"
+                "SELECT t.id FROM fleet_sync_transactions t JOIN ("
+                "SELECT origin_id, MAX(timestamp_ns) AS newest "
+                "FROM fleet_sync_transactions GROUP BY origin_id"
+                ") m ON m.origin_id=t.origin_id AND m.newest=t.timestamp_ns"
             )
         ]
         keeper_clause = ""
