@@ -59,6 +59,8 @@ WORKDIR /app
 ENV WHISPER_HOST=0.0.0.0 \
     WHISPER_PORT=9090 \
     WHISPER_BACKEND=faster_whisper \
+    WHISPER_MAX_CLIENTS=4 \
+    WHISPER_MAX_CONNECTION_TIME=86400 \
     WHISPER_MODEL_PATH=/app/data/models/distil-large-v3
 
 CMD ["sh", "-c", "python3 -c \"\
@@ -69,4 +71,6 @@ TranscriptionServer().run( \
     port=int(os.environ['WHISPER_PORT']), \
     backend=os.environ['WHISPER_BACKEND'], \
     single_model=True, \
+    max_clients=int(os.environ['WHISPER_MAX_CLIENTS']), \
+    max_connection_time=int(os.environ['WHISPER_MAX_CONNECTION_TIME']), \
     faster_whisper_custom_model_path=os.environ['WHISPER_MODEL_PATH'])\""]

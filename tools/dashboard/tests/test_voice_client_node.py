@@ -8,6 +8,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
 VOICE_TESTS = [
+    "test_outbox_durable_send.js",
+    "test_voice_reset_epoch.js",
     "test_system_auth.js",
     "test_voice_store.js",
     "test_voice_shell.js",

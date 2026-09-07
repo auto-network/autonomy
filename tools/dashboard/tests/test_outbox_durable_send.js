@@ -129,6 +129,68 @@ describe('outbox durable send + reconciliation', () => {
     assert.ok(h.fetchCalls.some((c) => c.url === '/api/session/send'), 'queued restore must POST');
   });
 
+  it('does not discard an unsent queued message matching an older legacy turn', () => {
+    store.outbox = { localId: 'new-id', state: 'sending', source: 'voice',
+      healthGated: true, delivery: 'queued', text: 'repeat this', ts: 1 };
+    store.entries = [{ type: 'user', content: 'repeat this' }];
+    assert.equal(h.windowObj.tryReconcileOutbox('auto-test'), false);
+    assert.equal(store.outbox.text, 'repeat this');
+  });
+
+  it('queues a sidecar voice Send during outage and uses the same ID on recovery', async () => {
+    h.document.querySelector = () => ({});
+    store.project = 'test-project';
+    h.setFetch(() => Promise.reject(new Error('dashboard down')));
+    const staged = h.windowObj.stageOutboxSend('auto-test', {
+      localId: 'ob_outage', source: 'voice', text: 'safe outage draft', ts: 1,
+    });
+    assert.equal(h.windowObj.loadOutbox('auto-test').text, 'safe outage draft');
+    assert.equal(await staged, true, 'durable queue owns the snapshot');
+    assert.equal(store.outbox.delivery, 'queued');
+    assert.equal(h.fetchCalls.filter(c => c.url === '/api/session/send').length, 0);
+    h.setFetch(() => Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true, entries: [] }) }));
+    await h.windowObj.sendCurrentOutbox('auto-test');
+    const posts = h.fetchCalls.filter(c => c.url === '/api/session/send');
+    assert.equal(posts.length, 1);
+    assert.equal(JSON.parse(posts[0].opts.body).client_id, 'ob_outage');
+    assert.ok(store.outbox, 'HTTP success is not reconciliation');
+    store.entries = [{ type: 'user', content: 'safe outage draft', client_id: 'ob_outage' }];
+    assert.equal(h.windowObj.tryReconcileOutbox('auto-test'), true);
+  });
+
+  it('refreshes the log before retry and suppresses an exact-ID delivery already recorded', async () => {
+    h.document.querySelector = () => ({});
+    store.project = 'test-project';
+    h.setFetch(() => Promise.reject(new Error('offline')));
+    await h.windowObj.stageOutboxSend('auto-test', {
+      localId: 'already-recorded', source: 'voice', text: 'saved snapshot', ts: 1,
+    });
+    h.setFetch(() => Promise.resolve({ ok: true, json: () => Promise.resolve({
+      entries: [{ type: 'user', client_id: 'already-recorded', content: 'saved snapshot' }],
+    }) }));
+    await h.windowObj.sendCurrentOutbox('auto-test');
+    assert.ok(h.fetchCalls.some(c => c.url.includes('/tail?tail_entries=100')));
+    assert.equal(h.fetchCalls.filter(c => c.url === '/api/session/send').length, 0);
+    assert.equal(store.outbox, null);
+    assert.equal(h.windowObj.loadOutbox('auto-test'), null);
+  });
+
+  it('does not confirm identical text carrying another client ID', () => {
+    store.outbox = { localId: 'ob_new', state: 'sending', text: 'same text' };
+    store.entries = [{ type: 'user', content: 'same text', client_id: 'ob_old' }];
+    assert.equal(h.windowObj.tryReconcileOutbox('auto-test'), false);
+    assert.ok(store.outbox);
+  });
+
+  it('rejects sidecar voice staging synchronously if durable storage is unavailable', () => {
+    h.document.querySelector = () => ({});
+    h.windowObj.localStorage.setItem = () => { throw new Error('quota'); };
+    assert.throws(() => h.windowObj.stageOutboxSend('auto-test', {
+      localId: 'ob_quota', source: 'voice', text: 'keep in voice buffer',
+    }), /Cannot durably queue/);
+    assert.equal(h.fetchCalls.filter(c => c.url === '/api/session/send').length, 0);
+  });
+
   it('does NOT clear the outbox on HTTP 200 (waits for log echo)', async () => {
     store.outbox = { localId: 'ob_b', state: 'sending', source: 'manual', text: 'still pending', ts: 1 };
     await v._durableSend('still pending', 'ob_b');
