@@ -1340,10 +1340,17 @@ async def api_dispatch_approved(request):
     """
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse(dao_beads.get_dispatch_beads())
-    all_beads = await run_cli_json(["bd", "list", "--json", "-n", "100"], empty=[])
+    # Ask for exactly the approved set — the same query the dispatcher runs
+    # (agents/dispatcher.py get_ready_beads). `bd list -n 100` only saw the
+    # hundred highest-priority beads, so an approved P2 could be waiting for
+    # dispatch and absent from this view at the same time (2026-09-07).
+    all_beads = await run_cli_json(
+        ["bd", "query", 'status=open AND label="readiness:approved"', "--json"],
+        empty=[],
+    )
     bead_list = all_beads if isinstance(all_beads, list) else []
 
-    # Filter to open, approved beads not currently being dispatched
+    # Filter out beads currently being dispatched
     dispatch_labels = {
         "dispatch:queued", "dispatch:launching", "dispatch:running",
         "dispatch:collecting", "dispatch:merging",
