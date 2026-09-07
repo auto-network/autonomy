@@ -1413,16 +1413,12 @@ def _transaction_identity(item: AuthoredMutation) -> tuple[str, str, int]:
 
 
 #: Transactions fetched per store connection while serving a pull.
+SERVE_PAGE_TRANSACTIONS = 200
+
 #: Least time between two served-ack prunes of one scope on this machine.
 #: The prune holds the store's write lock for up to its budget; once a
 #: minute is plenty for retention and invisible to the dashboard's writers.
 PRUNE_MIN_INTERVAL_S = 60.0
-
-
-class _PruneSkipped(Exception):
-    """Control flow: this serve is inside the prune interval."""
-
-SERVE_PAGE_TRANSACTIONS = 200
 
 
 class _OriginPager:
@@ -1508,6 +1504,7 @@ class FleetSyncScheduler:
         self._peer_protocol: dict[str, int] = {}
         #: Per-machine random source for peer selection (see rank_peers).
         self._last_prune_at: dict[str, float] = {}
+        self._after_serve_tasks: set = set()
         self._rng = random.Random(int.from_bytes(os.urandom(8), "big"))
         #: ``async (stage_dir, *, source_machine_pub) -> installed`` for the
         #: PERSONAL scope, set by the owning DashboardFleetSyncService. The
@@ -1714,6 +1711,7 @@ class FleetSyncScheduler:
         async def response():
             digest = hashlib.sha256()
             count = 0
+            deferred_after_done = False
             outcome = "failed"
             error_code = "stream_incomplete"
             try:
@@ -2025,47 +2023,29 @@ class FleetSyncScheduler:
                 yield done
                 outcome = "success"
                 error_code = ""
-                # Retire journal frames every active peer has acknowledged.
-                # Best-effort maintenance: a prune failure never fails the
-                # serve, but it is logged rather than swallowed. A solo
-                # roster prunes nothing (acknowledged_journal_floor returns
-                # None for an empty peer list), so a concurrently enrolling
-                # machine can never race a full retirement.
-                try:
-                    # Rate-limited per scope: the prune takes the store's
-                    # write lock for up to PRUNE_BUDGET_S, and a peer
-                    # polling every second re-armed it after every serve,
-                    # so home's autonomy store was write-locked
-                    # continuously and every dashboard writer hit its 5 s
-                    # busy timeout (live 2026-09-07 04:42-04:46Z).
-                    loop_now = asyncio.get_running_loop().time()
-                    last = self._last_prune_at.get(scope, 0.0)
-                    if loop_now - last < PRUNE_MIN_INTERVAL_S:
-                        raise _PruneSkipped
-                    self._last_prune_at[scope] = loop_now
-                    active = resolve(
-                        self._roster_snapshot,
-                        anchor_root_pub=self.config.personal_root_pub,
-                    )
-                    others = [
-                        pub for pub in active
-                        if pub != self.authenticator.machine_pub
-                    ]
-                    journal_rows, transaction_rows = await asyncio.to_thread(
-                        store.prune_acknowledged, others, epoch
-                    )
-                    if journal_rows or transaction_rows:
-                        logger.info(
-                            "fleet sync journal pruned: %d frames, "
-                            "%d transactions",
-                            journal_rows, transaction_rows,
-                        )
-                except _PruneSkipped:
-                    pass
-                except Exception:
-                    logger.warning(
-                        "fleet sync journal prune failed", exc_info=True
-                    )
+                # The channel server marks a streamed record final only
+                # when the generator yields the next one or ENDS (one-
+                # message lookahead, relaykit connector._response_messages).
+                # Everything that used to run here after the done frame
+                # (served-ack prune, the telemetry write) held that frame
+                # back for as long as it took; on home's autonomy store the
+                # puller saw every data frame and then 60 s of silence
+                # (SJC-2, 2026-09-07 07:06Z). The tail work is handed to a
+                # task and the generator ends now.
+                deferred_after_done = True
+                self._spawn_after_serve(
+                    store=store, scope=scope, epoch=epoch, peer_pub=peer_pub,
+                    telemetry=(
+                        dict(
+                            channel=telemetry_channel, direction="serve",
+                            mode=telemetry_mode, outcome="success",
+                            started_at_ns=started_at_ns, error_code="",
+                            scope=scope, **stats,
+                        ) if record_here else None
+                    ),
+                    started_monotonic_ns=started_monotonic_ns,
+                )
+                return
             except asyncio.CancelledError:
                 outcome = "cancelled"
                 error_code = ""
@@ -2087,7 +2067,7 @@ class FleetSyncScheduler:
                         stats.get("transactions", 0), count,
                     )
                 recorder = self.config.telemetry_recorder
-                if record_here and recorder is not None:
+                if record_here and recorder is not None and not deferred_after_done:
                     duration_ms = max(
                         0,
                         (time.monotonic_ns() - started_monotonic_ns) // 1_000_000,
@@ -2108,6 +2088,63 @@ class FleetSyncScheduler:
                         )
 
         return self._observed(response(), telemetry_channel)
+
+    def _spawn_after_serve(self, *, store, scope, epoch, peer_pub, telemetry,
+                           started_monotonic_ns) -> None:
+        """Run the post-serve work (telemetry write, served-ack prune) off
+        the response generator, so the done frame is never held back."""
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(self._after_serve(
+            store=store, scope=scope, epoch=epoch, peer_pub=peer_pub,
+            telemetry=telemetry, started_monotonic_ns=started_monotonic_ns,
+        ))
+        self._after_serve_tasks.add(task)
+        task.add_done_callback(self._after_serve_tasks.discard)
+
+    async def _after_serve(self, *, store, scope, epoch, peer_pub, telemetry,
+                           started_monotonic_ns) -> None:
+        recorder = self.config.telemetry_recorder
+        if telemetry is not None and recorder is not None:
+            duration_ms = max(
+                0, (time.monotonic_ns() - started_monotonic_ns) // 1_000_000,
+            )
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(
+                    recorder, peer_pub, duration_ms=duration_ms, **telemetry,
+                )
+        # Retire transaction rows every active peer has acknowledged.
+        # Best-effort maintenance: a failure is logged, never raised. A
+        # solo roster prunes nothing (acknowledged_journal_floor returns
+        # None for an empty peer list). Rate-limited per scope: the prune
+        # takes the store's write lock for up to its budget, and a peer
+        # polling every second re-armed it after every serve (home's
+        # autonomy store write-locked continuously, 2026-09-07 04:42Z).
+        try:
+            loop_now = asyncio.get_running_loop().time()
+            last = self._last_prune_at.get(scope, 0.0)
+            if loop_now - last < PRUNE_MIN_INTERVAL_S:
+                return
+            self._last_prune_at[scope] = loop_now
+            active = resolve(
+                self._roster_snapshot,
+                anchor_root_pub=self.config.personal_root_pub,
+            )
+            others = [
+                pub for pub in active
+                if pub != self.authenticator.machine_pub
+            ]
+            started = time.monotonic()
+            journal_rows, transaction_rows = await asyncio.to_thread(
+                store.prune_acknowledged, others, epoch
+            )
+            took = time.monotonic() - started
+            if transaction_rows or took >= SLOW_SERVE_PHASE_S:
+                logger.warning(
+                    "fleet sync scope %r: served-ack prune retired %d "
+                    "transaction row(s) in %.1fs", scope, transaction_rows, took,
+                )
+        except Exception:
+            logger.warning("fleet sync journal prune failed", exc_info=True)
 
     def _blob_response(
         self, message: bytes, peer_pub: str, telemetry_channel: str = "direct"

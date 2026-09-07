@@ -1329,3 +1329,55 @@ async def test_large_transaction_is_served_in_bounded_groups_and_applies_whole(
         assert right.origin_watermarks()[fleet.server_machine.public_hex] == 5_000
     finally:
         tdb.close()
+
+
+@pytest.mark.asyncio
+async def test_serve_ends_right_after_its_done_frame_even_when_the_prune_is_slow(
+    tmp_path, monkeypatch
+):
+    """The channel server marks a record final only when the generator
+    ends; the served-ack prune and the telemetry write used to run after
+    the done frame inside the generator, holding it back for as long as
+    they took (SJC-2 saw every data frame then 60 s of silence, 2026-09-07).
+    The generator must end promptly; the prune runs in a task."""
+    import asyncio
+    import time as _time
+
+    from tools.network import fleet_sync_scheduler as fss
+    from tools.network.fleet_sync_scheduler import (
+        _DONE_MAGIC, encode_pull_request, SQLiteFleetSyncStore,
+    )
+
+    fleet = _two_machine_fleet()
+    alpha = tmp_path / "alpha.db"
+    _prepare_org_db(alpha, fleet.server_machine.public_hex)
+    _insert_note(alpha, "a-1", "content")
+    store = SQLiteFleetSyncStore(alpha)
+    personal = tmp_path / "personal.db"
+    personal.touch()
+    server = _configure_relay_server(fleet, personal, monkeypatch)
+    monkeypatch.setattr(
+        server.scheduler, "_scope_paths",
+        lambda: {"personal": personal, "alpha": alpha},
+    )
+    pruned = asyncio.Event()
+
+    def slow_prune(self, others, epoch):
+        _time.sleep(1.5)
+        pruned.set()
+        return (0, 0)
+
+    monkeypatch.setattr(fss.SQLiteFleetSyncStore, "prune_acknowledged", slow_prune)
+    monkeypatch.setattr(fss, "PRUNE_MIN_INTERVAL_S", 0.0)
+    request = encode_pull_request(
+        "cd" * 32, compat=store.compatibility_digest(), resume=(),
+        scope="alpha", bootstrap=False, watermarks={"ee" * 32: 1},
+    )
+    started = _time.monotonic()
+    stream = await server.scheduler._handle("tok", request, fleet.client_machine.public_hex)
+    frames = [f async for f in stream]
+    elapsed = _time.monotonic() - started
+    assert frames and frames[-1].startswith(_DONE_MAGIC)
+    assert elapsed < 1.0, f"generator held its done frame for {elapsed:.1f}s"
+    # The prune still happens, off the response path.
+    await asyncio.wait_for(pruned.wait(), 5.0)
