@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+from datetime import datetime, timezone
 import hashlib
 import json
 import logging
@@ -2867,12 +2868,42 @@ def _coerce_rate_limit_float(value: Any) -> float | None:
         return None
 
 
-def _normalize_codex_rate_limit_window(window: Any) -> dict[str, float | int | None] | None:
+def _codex_event_epoch(raw_entry: dict) -> int | None:
+    """Epoch seconds of a rollout entry's ``timestamp``, or None.
+
+    Codex stamps ISO-8601 with a ``Z`` suffix, which ``fromisoformat``
+    rejects before Python 3.11 and accepts after; normalize either way.
+    """
+    value = raw_entry.get("timestamp")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.timestamp())
+
+
+def _normalize_codex_rate_limit_window(
+    window: Any, *, event_epoch: int | None = None,
+) -> dict[str, float | int | None] | None:
     if not isinstance(window, dict):
         return None
     used_percent = _coerce_rate_limit_float(window.get("used_percent"))
     window_minutes = _coerce_rate_limit_int(window.get("window_minutes"))
     resets_at = _coerce_rate_limit_int(window.get("resets_at"))
+    if resets_at is None and event_epoch is not None:
+        # Codex reports the reset either as an absolute ``resets_at`` or as
+        # ``resets_in_seconds`` relative to the event that carried it. Without
+        # this conversion the row lands with resets_at None, which reads as
+        # "no reset known": the strip and `graph harness` print a dash, and
+        # reading_still_valid() is False for a window that has plainly not
+        # reset, so an exhausted account never looks exhausted.
+        resets_in = _coerce_rate_limit_int(window.get("resets_in_seconds"))
+        if resets_in is not None:
+            resets_at = event_epoch + resets_in
     if used_percent is None and window_minutes is None and resets_at is None:
         return None
     return {
@@ -2928,9 +2959,12 @@ def extract_codex_harness_state(
     if not isinstance(rate_limits, dict) or not rate_limits:
         return current_state
 
+    event_epoch = _codex_event_epoch(raw_entry)
     windows_found: list[tuple[str, dict[str, float | int | None]]] = []
     for key in ("primary", "secondary"):
-        normalized = _normalize_codex_rate_limit_window(rate_limits.get(key))
+        normalized = _normalize_codex_rate_limit_window(
+            rate_limits.get(key), event_epoch=event_epoch,
+        )
         if normalized is not None:
             windows_found.append((key, normalized))
     if not windows_found:
