@@ -29,7 +29,7 @@ import struct
 import time
 import urllib.request
 
-from .dns_responder import ZoneState, handle_query
+from .dns_responder import ZONE, ZoneState, handle_query
 
 logger = logging.getLogger("registry.dns")
 
@@ -66,6 +66,7 @@ class _ChallengeCache:
     def __init__(self, registry_url: str):
         self._url = f"{registry_url.rstrip('/')}/v1/dns/zone-state"
         self._challenges: dict[str, tuple[list[str], int]] = {}
+        self._zones: tuple[str, ...] = (ZONE,)
         self._fetched_at = 0.0
         self._lock = asyncio.Lock()
 
@@ -74,6 +75,14 @@ class _ChallengeCache:
             self._url, timeout=STATE_FETCH_TIMEOUT
         ) as resp:
             data = json.loads(resp.read())
+        zones = data.get("zones", [])
+        # Org zones ride the same feed; the base zone is always served.
+        # Fail soft exactly like challenges: a bad feed keeps the last set.
+        if isinstance(zones, list):
+            self._zones = (ZONE,) + tuple(
+                str(z).rstrip(".").lower() for z in zones
+                if isinstance(z, str) and z and z != ZONE
+            )
         challenges = data.get("challenges", {})
         if not isinstance(challenges, dict):
             return {}
@@ -100,6 +109,9 @@ class _ChallengeCache:
                 self._challenges = {}  # fail soft: NODATA, statics live on
             self._fetched_at = time.monotonic()
 
+    def zones(self) -> tuple[str, ...]:
+        return self._zones
+
     def lookup(self, name: str) -> list[str]:
         return self._challenges.get(name, ([], 60))[0]
 
@@ -121,6 +133,7 @@ class DnsService:
             relay_ip=relay_ip, node_id=node_id,
             txt_lookup=self._cache.lookup,
             txt_ttl=self._cache.lookup_ttl,
+            zones=self._cache.zones,
         )
 
     async def answer(self, raw: bytes, source: str, *,

@@ -34,10 +34,19 @@ class ChallengeError(Exception):
     """A request outside the challenge bounds — refused before any write."""
 
 
-def validate_challenge_name(name: str) -> str:
-    """Return the serving label of a valid challenge name, else refuse."""
+def validate_challenge_name(name: str, org_zones=()) -> str:
+    """Return the serving label of a valid challenge name, else refuse.
+
+    ``org_zones`` lists ACTIVE organization-owned zones; for those the only
+    valid name is the zone-direct ``_acme-challenge.<zone>`` (services sit
+    directly under an org zone, one wildcard per zone) and the returned
+    label is ``""``.
+    """
     if not isinstance(name, str) or len(name) > 253:
         raise ChallengeError("challenge name is not a valid DNS name")
+    for zone in org_zones:
+        if name == CHALLENGE_PREFIX + zone:
+            return ""
     suffix = "." + ZONE
     if not name.endswith(suffix):
         raise ChallengeError(f"challenge name must end with {suffix}")
