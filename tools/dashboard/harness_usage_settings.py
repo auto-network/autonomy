@@ -420,6 +420,30 @@ def reading_still_valid(payload: object, *, now_epoch: int | None = None) -> boo
     return False
 
 
+def reading_is_fresh(
+    payload: object, *, max_age_seconds: float, now_epoch: int | None = None,
+) -> bool:
+    """Whether a stored reading was taken recently enough to skip re-polling.
+
+    This is the restart-storm guard, and only that. A reading that is still
+    *valid* (``reading_still_valid``) is a lower bound the strip may keep
+    showing; it is not a reason to stop asking the vendor, because usage keeps
+    rising inside the window and the operator is watching the number move.
+    Skip the vendor call only while the stored reading is younger than one
+    poll interval, so a burst of restarts collapses to one call per interval
+    and a healthy poller keeps its normal cadence.
+    """
+    import time as _time
+
+    if not isinstance(payload, dict) or payload.get("status") not in (None, "ok"):
+        return False
+    taken_at = iso_to_epoch_seconds(payload.get("updated_at"))
+    if taken_at is None:
+        return False
+    now = now_epoch if now_epoch is not None else int(_time.time())
+    return 0 <= (now - taken_at) < max_age_seconds
+
+
 def is_exhausted(payload: object, *, now_epoch: int | None = None) -> bool:
     """Whether a still-valid reading says the account has no headroom left.
 
