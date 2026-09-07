@@ -133,6 +133,7 @@ def _mock_design_rows() -> list[dict]:
             "variant_count": len(variants),
             "has_fixture": bool(design.get("fixture")),
             "thumbnail_url": design.get("thumbnail_url") or "",
+            "form_factor": design.get("form_factor") or "",
         })
     return rows
 
@@ -379,7 +380,10 @@ def _series_from_rows(rows: list[dict]) -> list[dict]:
                 if thumbnail_url:
                     thumbnail_revision_id = str(revision.get("id") or "")
                     break
-        form_factor = _form_factor(thumbnail_revision_id) if thumbnail_revision_id else ""
+        form_factor = ""
+        if thumbnail_revision_id:
+            thumb_row = next((r for r in revisions if str(r.get("id") or "") == thumbnail_revision_id), {})
+            form_factor = str(thumb_row.get("form_factor") or "") or _form_factor(thumbnail_revision_id)
         design_org = next(
             (r.get("org") for r in reversed(revisions) if r.get("org")), None)
         series.append({

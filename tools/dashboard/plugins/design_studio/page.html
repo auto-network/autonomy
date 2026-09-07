@@ -2,31 +2,51 @@
 <div data-testid="design-studio-fragment-root" x-data="designStudioPage()" x-init="init()" class="design-studio-page">
   <template x-if="mode === 'library'">
     <div class="design-studio-library" data-testid="design-library">
-      <section class="design-studio-toolbar">
-        <div class="design-studio-controls">
-          <input
-            class="design-studio-search"
-            type="search"
-            placeholder="Search"
-            x-model="query"
-            @input="scheduleLoad()"
-            data-testid="design-search">
-          <select class="design-studio-select" x-model="status" @change="loadDesigns()" data-testid="design-status-filter">
-            <option value="pending">Active</option>
-            <option value="all">All statuses</option>
-            <option value="dismissed">Dismissed</option>
-            <option value="completed">Completed</option>
-          </select>
-          <select class="design-studio-select" x-model="sort" @change="loadDesigns()" data-testid="design-sort">
-            <option value="updated">Latest update</option>
-            <option value="created">First created</option>
-            <option value="revisions">Revision count</option>
-            <option value="title">Title</option>
-          </select>
+      <section class="design-studio-strip" data-testid="design-strip" aria-label="Filter designs">
+        <input
+          class="design-studio-search"
+          type="search"
+          placeholder="Search designs"
+          x-model="query"
+          @input="scheduleLoad()"
+          data-testid="design-search">
+        <div class="design-studio-seg" role="group" aria-label="Form factor" data-testid="design-form-factor">
+          <template x-for="opt in formFactorOptions" :key="opt.value">
+            <button type="button"
+                    class="design-studio-seg-btn"
+                    :class="formFactor === opt.value ? 'is-on' : ''"
+                    :aria-pressed="formFactor === opt.value ? 'true' : 'false'"
+                    :title="opt.title"
+                    @click="setFormFactor(opt.value)">
+              <span x-html="opt.icon"></span><span class="design-studio-seg-label" x-text="opt.label"></span>
+            </button>
+          </template>
         </div>
-        <div class="design-studio-result-count" data-testid="design-result-count">
-          <span x-text="(filteredCount || designs.length || 0).toLocaleString()"></span>
-          <span x-text="status === 'pending' ? 'active' : 'shown'"></span>
+        <button type="button" class="design-studio-toggle" :class="liveOnly ? 'is-on' : ''"
+                :aria-pressed="liveOnly ? 'true' : 'false'" @click="liveOnly = !liveOnly" data-testid="design-live-toggle">
+          <span class="design-studio-toggle-dot"></span>Live
+        </button>
+        <button type="button" class="design-studio-toggle" :class="dynamicOnly ? 'is-on' : ''"
+                :aria-pressed="dynamicOnly ? 'true' : 'false'" @click="dynamicOnly = !dynamicOnly" data-testid="design-dynamic-toggle">Dynamic</button>
+        <button type="button" class="design-studio-toggle" :class="status !== 'pending' ? 'is-on' : ''"
+                :aria-pressed="status !== 'pending' ? 'true' : 'false'" @click="toggleArchived()" data-testid="design-archived-toggle">Archived</button>
+        <select class="design-studio-select" x-model="sort" @change="loadDesigns()" data-testid="design-sort" aria-label="Sort">
+          <option value="updated">Latest update</option>
+          <option value="created">First created</option>
+          <option value="revisions">Revision count</option>
+          <option value="title">Title</option>
+        </select>
+        <div class="design-studio-strip-end">
+          <span class="design-studio-render-chip"
+                x-show="renderChip"
+                :class="renderStatus.available === false ? 'is-off' : ''"
+                :title="renderChipTitle"
+                x-text="renderChip"
+                data-testid="design-render-chip"></span>
+          <span class="design-studio-result-count" data-testid="design-result-count">
+            <span x-text="visibleDesigns.length.toLocaleString()"></span>
+            <span x-text="status === 'pending' ? 'active' : 'archived'"></span>
+          </span>
         </div>
       </section>
 
@@ -42,92 +62,85 @@
         <div class="design-studio-action-error" data-testid="design-action-error" x-text="actionError"></div>
       </template>
 
-      <template x-if="!loading && !error && designs.length === 0">
+      <template x-if="!loading && !error && visibleDesigns.length === 0">
         <div class="design-studio-empty" data-testid="design-empty">
           <span x-show="hasFilters">No designs match those filters.</span>
           <span x-show="!hasFilters">No designs found.</span>
         </div>
       </template>
 
-      <section class="design-studio-list" data-testid="design-list" x-show="!loading && !error && designs.length">
-        <template x-for="design in designs" :key="design.design_id">
-          <article class="design-card"
-                   :class="design.thumbnail_url ? 'has-thumbnail' : 'no-thumbnail'"
-                   role="button"
-                   tabindex="0"
-                   @click="openDesign(design)"
-                   @keydown.enter.prevent="openDesign(design)"
-                   @keydown.space.prevent="openDesign(design)"
-                   data-testid="design-card">
-            <button class="design-card-presence"
-                    type="button"
-                    x-show="design.creator_session_id"
-                    :class="isLiveDesign(design) ? 'is-live' : ''"
-                    :title="'Open session: ' + sessionLabel(design)"
-                    :aria-label="'Open session: ' + sessionLabel(design)"
-                    @click.stop="openSession(design)">
-              <span class="design-card-presence-dot"></span>
-            </button>
-            <template x-if="design.thumbnail_url">
-              <div class="design-card-thumb">
-                <img :src="design.thumbnail_url" alt="" loading="lazy">
-              </div>
-            </template>
-            <div class="design-card-body">
-              <div class="design-card-meta">
-                <span :class="statusClass(design.status)"
-                      x-show="showStatusPill(design)"
-                      x-text="statusLabel(design.status)"></span>
-                <span class="design-pill design-pill-dynamic" x-show="design.has_fixture">dynamic</span>
-              </div>
-              <div class="design-card-title" x-text="design.title"></div>
-              <div class="design-card-description" x-show="design.description" x-text="design.description"></div>
-              <div class="design-card-footer">
-                <div class="design-card-facts">
-                  <span><span x-text="design.revision_count"></span> rev</span>
-                  <span x-text="formatDateTime(design.latest_created_at)"></span>
+      <section class="design-studio-gallery" data-testid="design-list" x-show="!loading && !error && visibleDesigns.length">
+        <template x-for="design in visibleDesigns" :key="design.design_id">
+          <figure class="design-tile"
+                  :class="[design.thumbnail_url ? 'has-thumbnail' : 'no-thumbnail', design.status !== 'pending' ? 'is-archived' : '']"
+                  role="button"
+                  tabindex="0"
+                  :title="design.description || design.title"
+                  @click="openDesign(design)"
+                  @keydown.enter.prevent="openDesign(design)"
+                  @keydown.space.prevent="openDesign(design)"
+                  data-testid="design-card">
+            <div class="design-tile-frame">
+              <template x-if="design.thumbnail_url">
+                <img class="design-tile-img" :src="design.thumbnail_url" alt="" loading="lazy" decoding="async">
+              </template>
+              <template x-if="!design.thumbnail_url">
+                <div class="design-tile-blank" data-testid="design-tile-blank">
+                  <span class="design-tile-blank-initial" x-text="(design.title || '?').trim().charAt(0).toUpperCase()"></span>
+                  <span class="design-tile-blank-note" x-text="blankNote(design)"></span>
                 </div>
-                <div class="design-card-actions" aria-label="Design actions">
-                  <button class="design-card-action"
-                          type="button"
-                          :class="designActionState(design, 'librarian')"
-                          :title="designActionTitle(design)"
-                          :aria-label="designActionTitle(design)"
-                          :disabled="isDesignActionBusy(design, 'librarian')"
-                          @click.stop="dispatchDesignLibrarian(design)">
-                    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.8 1.8l.7 1.7 1.7.7-1.7.7-.7 1.7-.7-1.7-1.7-.7 1.7-.7.7-1.7zM4.8 4.2l.5 1.2 1.2.5-1.2.5-.5 1.2-.5-1.2-1.2-.5 1.2-.5.5-1.2zM10.8 8.2l3 3-2.6 2.6-3-3 2.6-2.6zM9.8 7.2l-6.6 6.6-1-1 6.6-6.6 1 1z"/></svg>
-                  </button>
-                  <button class="design-card-action"
-                          type="button"
-                          x-show="design.status === 'pending'"
-                          title="Complete design"
-                          aria-label="Complete design"
-                          :disabled="isDesignActionBusy(design, 'status')"
-                          @click.stop="setDesignStatus(design, 'completed')">
-                    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6.1 11.2L2.8 7.9l1.1-1.1 2.2 2.2 6-6 1.1 1.1-7.1 7.1z"/></svg>
-                  </button>
-                  <button class="design-card-action"
-                          type="button"
-                          x-show="design.status === 'pending'"
-                          title="Close design"
-                          aria-label="Close design"
-                          :disabled="isDesignActionBusy(design, 'status')"
-                          @click.stop="setDesignStatus(design, 'dismissed')">
-                    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.1 3L8 6.9 11.9 3 13 4.1 9.1 8l3.9 3.9-1.1 1.1L8 9.1 4.1 13 3 11.9 6.9 8 3 4.1 4.1 3z"/></svg>
-                  </button>
-                  <button class="design-card-action"
-                          type="button"
-                          x-show="design.status !== 'pending'"
-                          title="Reopen design"
-                          aria-label="Reopen design"
-                          :disabled="isDesignActionBusy(design, 'status')"
-                          @click.stop="setDesignStatus(design, 'pending')">
-                    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5a5.5 5.5 0 1 1-4.8 8.2l1.3-.8A4 4 0 1 0 4.7 6H7v1.5H2V2.5h1.5v2A5.5 5.5 0 0 1 8 2.5z"/></svg>
-                  </button>
-                </div>
+              </template>
+              <button class="design-tile-presence"
+                      type="button"
+                      x-show="design.creator_session_id"
+                      :class="isLiveDesign(design) ? 'is-live' : ''"
+                      :title="'Open session: ' + sessionLabel(design)"
+                      :aria-label="'Open session: ' + sessionLabel(design)"
+                      @click.stop="openSession(design)">
+                <span class="design-card-presence-dot"></span>
+              </button>
+              <span class="design-tile-form" x-show="design.form_factor" :title="formFactorTitle(design.form_factor)" x-html="formFactorIcon(design.form_factor)"></span>
+              <div class="design-tile-actions" aria-label="Design actions" @click.stop>
+                <button class="design-card-action" type="button"
+                        :class="designActionState(design, 'render')"
+                        :title="renderActionTitle(design)" :aria-label="renderActionTitle(design)"
+                        :disabled="isDesignActionBusy(design, 'render')"
+                        @click.stop="renderDesignThumbnail(design)" data-testid="design-render-action">
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="1.5" y="3" width="13" height="10" rx="1.5"/><circle cx="8" cy="8" r="2.5"/></svg>
+                </button>
+                <button class="design-card-action" type="button"
+                        :class="designActionState(design, 'librarian')"
+                        :title="designActionTitle(design)" :aria-label="designActionTitle(design)"
+                        :disabled="isDesignActionBusy(design, 'librarian')"
+                        @click.stop="dispatchDesignLibrarian(design)">
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.8 1.8l.7 1.7 1.7.7-1.7.7-.7 1.7-.7-1.7-1.7-.7 1.7-.7.7-1.7zM4.8 4.2l.5 1.2 1.2.5-1.2.5-.5 1.2-.5-1.2-1.2-.5 1.2-.5.5-1.2zM10.8 8.2l3 3-2.6 2.6-3-3 2.6-2.6zM9.8 7.2l-6.6 6.6-1-1 6.6-6.6 1 1z"/></svg>
+                </button>
+                <button class="design-card-action" type="button"
+                        x-show="design.status === 'pending'"
+                        title="Archive design" aria-label="Archive design"
+                        :disabled="isDesignActionBusy(design, 'status')"
+                        @click.stop="setDesignStatus(design, 'dismissed')">
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 4h12v2H2zM3 6v7h10V6M6.5 9h3"/></svg>
+                </button>
+                <button class="design-card-action" type="button"
+                        x-show="design.status !== 'pending'"
+                        title="Restore design" aria-label="Restore design"
+                        :disabled="isDesignActionBusy(design, 'status')"
+                        @click.stop="setDesignStatus(design, 'pending')">
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5a5.5 5.5 0 1 1-4.8 8.2l1.3-.8A4 4 0 1 0 4.7 6H7v1.5H2V2.5h1.5v2A5.5 5.5 0 0 1 8 2.5z"/></svg>
+                </button>
               </div>
             </div>
-          </article>
+            <figcaption class="design-tile-caption">
+              <span class="design-tile-title" x-text="design.title"></span>
+              <span class="design-tile-meta">
+                <span x-text="design.revision_count + (design.revision_count === 1 ? ' rev' : ' revs')"></span>
+                <span aria-hidden="true">·</span>
+                <span x-text="formatDateTime(design.latest_created_at)"></span>
+                <span class="design-tile-meta-flag" x-show="design.has_fixture">dynamic</span>
+              </span>
+            </figcaption>
+          </figure>
         </template>
       </section>
     </div>

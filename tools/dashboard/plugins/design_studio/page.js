@@ -685,9 +685,14 @@ function designStudioPage() {
     query: '',
     status: 'pending',
     sort: 'updated',
+    formFactor: 'all',
+    liveOnly: false,
+    dynamicOnly: false,
+    renderStatus: {},
     actionStates: {},
     topbarHandle: null,
     _loadTimer: null,
+    _renderPollTimer: null,
     _activeCacheKey: '',
     _sessionRegistryHandler: null,
 
@@ -698,6 +703,7 @@ function designStudioPage() {
         this._updateTopbar();
         this.loadDesigns({ background: hydrated });
         this._refreshPresenceDesigns();
+        this._pollRenderStatus();
         var self = this;
         this._sessionRegistryHandler = function () {
           self._updateTopbar();
@@ -713,6 +719,10 @@ function designStudioPage() {
         clearTimeout(this._loadTimer);
         this._loadTimer = null;
       }
+      if (this._renderPollTimer) {
+        clearTimeout(this._renderPollTimer);
+        this._renderPollTimer = null;
+      }
       if (this.topbarHandle && typeof this.topbarHandle.destroy === 'function') {
         this.topbarHandle.destroy();
       }
@@ -724,7 +734,134 @@ function designStudioPage() {
     },
 
     get hasFilters() {
-      return !!String(this.query || '').trim() || this.status !== 'pending';
+      return !!String(this.query || '').trim() || this.status !== 'pending'
+        || this.formFactor !== 'all' || this.liveOnly || this.dynamicOnly;
+    },
+
+    // The strip's client-side axes (form factor, live, dynamic) narrow the
+    // server-filtered catalog; query/status/sort still round-trip so the
+    // sessionStorage cache key stays honest.
+    get visibleDesigns() {
+      var self = this;
+      return (this.designs || []).filter(function (design) {
+        if (!design) return false;
+        if (self.formFactor !== 'all' && (design.form_factor || '') !== self.formFactor) return false;
+        if (self.liveOnly && !self.isLiveDesign(design)) return false;
+        if (self.dynamicOnly && !design.has_fixture) return false;
+        return true;
+      });
+    },
+
+    get formFactorOptions() {
+      return [
+        { value: 'all', label: 'All', title: 'Every design', icon: _formFactorIcon('all') },
+        { value: 'both', label: 'Responsive', title: 'Renders at desktop and phone widths', icon: _formFactorIcon('both') },
+        { value: 'desktop', label: 'Desktop', title: 'Desktop-only layouts', icon: _formFactorIcon('desktop') },
+        { value: 'mobile', label: 'Phone', title: 'Phone mockups', icon: _formFactorIcon('mobile') },
+      ];
+    },
+
+    get renderChip() {
+      var st = this.renderStatus || {};
+      if (st.available === false) return 'Renderer unavailable';
+      if (st.current || (st.pending || 0) > 0) {
+        return 'Rendering ' + ((st.pending || 0) + (st.current ? 1 : 0));
+      }
+      return '';
+    },
+
+    get renderChipTitle() {
+      var st = this.renderStatus || {};
+      if (st.available === false) return 'agent-browser is not installed on the dashboard host, so thumbnails cannot render';
+      if (st.last_error) return 'Last render error: ' + st.last_error;
+      return 'Thumbnails render headlessly on the dashboard';
+    },
+
+    setFormFactor: function (value) {
+      this.formFactor = value || 'all';
+    },
+
+    toggleArchived: function () {
+      this.status = this.status === 'pending' ? 'dismissed,completed' : 'pending';
+      this.loadDesigns();
+    },
+
+    formFactorIcon: function (value) {
+      return _formFactorIcon(value);
+    },
+
+    formFactorTitle: function (value) {
+      return { both: 'Responsive: desktop and phone', desktop: 'Desktop only', mobile: 'Phone mockup' }[value] || '';
+    },
+
+    blankNote: function (design) {
+      var st = this.renderStatus || {};
+      var key = this._designActionKey(design, 'render');
+      if (this.actionStates[key] === 'working' || this.actionStates[key] === 'done') return 'Rendering';
+      if (st.available === false) return 'No renderer';
+      if (st.current || (st.pending || 0) > 0) return 'Queued';
+      return 'No preview yet';
+    },
+
+    renderActionTitle: function (design) {
+      var state = this.actionStates[this._designActionKey(design, 'render')] || 'idle';
+      if (state === 'working') return 'Queueing render';
+      if (state === 'done') return 'Render queued';
+      if (state === 'error') return 'Render failed';
+      return 'Render thumbnail';
+    },
+
+    renderDesignThumbnail: async function (design) {
+      if (!design || !design.latest_revision_id) return;
+      var key = this._designActionKey(design, 'render');
+      if (this.actionStates[key] === 'working') return;
+      this.actionError = '';
+      this.actionStates[key] = 'working';
+      try {
+        var fetcher = (window.Autonomy && window.Autonomy.fetch) || window.fetch;
+        var res = await fetcher('/api/design-studio/revisions/' + encodeURIComponent(design.latest_revision_id) + '/render', {
+          method: 'POST',
+        });
+        var data = await res.json().catch(function () { return {}; });
+        if (!res.ok || data.error) {
+          this.actionStates[key] = 'error';
+          this.actionError = data.error || ('Render failed (HTTP ' + res.status + ')');
+          if (data.status) this.renderStatus = data.status;
+          return;
+        }
+        this.actionStates[key] = 'done';
+        if (data.status) this.renderStatus = data.status;
+        this._pollRenderStatus();
+      } catch (e) {
+        this.actionStates[key] = 'error';
+        this.actionError = 'Render failed: ' + (e.message || e);
+      }
+    },
+
+    // While the renderer has work, poll its status and refresh the catalog
+    // as thumbnails land; otherwise check once and go quiet.
+    _pollRenderStatus: async function () {
+      if (this._renderPollTimer) {
+        clearTimeout(this._renderPollTimer);
+        this._renderPollTimer = null;
+      }
+      if (window.location.pathname !== '/design') return;
+      var previousRendered = (this.renderStatus || {}).rendered || 0;
+      try {
+        var fetcher = (window.Autonomy && window.Autonomy.fetch) || window.fetch;
+        var res = await fetcher('/api/design-studio/render/status');
+        if (res.ok) this.renderStatus = await res.json();
+      } catch (e) { /* the chip simply stays as it was */ }
+      var st = this.renderStatus || {};
+      var busy = !!st.current || (st.pending || 0) > 0;
+      if ((st.rendered || 0) !== previousRendered) this.loadDesigns({ background: true });
+      if (busy) {
+        var self = this;
+        this._renderPollTimer = setTimeout(function () {
+          self._renderPollTimer = null;
+          self._pollRenderStatus();
+        }, 4000);
+      }
     },
 
     get statusOptions() {
@@ -968,7 +1105,8 @@ function designStudioPage() {
 
     _designMatchesCurrentFilter: function (design) {
       if (!design) return false;
-      if (this.status && this.status !== 'all' && design.status !== this.status) return false;
+      if (this.status && this.status !== 'all'
+          && String(this.status).split(',').indexOf(design.status) < 0) return false;
       return _matchesDesignQuery(design, this.query);
     },
 
@@ -1107,6 +1245,17 @@ function designStudioPage() {
       }
     },
   };
+}
+
+function _formFactorIcon(value) {
+  var stroke = 'fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"';
+  var desktop = '<svg viewBox="0 0 16 16" ' + stroke + '><rect x="1.5" y="2.5" width="13" height="8.5" rx="1.2"/><path d="M5.5 13.5h5M8 11v2.5"/></svg>';
+  var phone = '<svg viewBox="0 0 16 16" ' + stroke + '><rect x="4.5" y="1.5" width="7" height="13" rx="1.4"/><path d="M7 12.5h2"/></svg>';
+  if (value === 'desktop') return desktop;
+  if (value === 'mobile') return phone;
+  if (value === 'both') return desktop + phone;
+  if (value === 'all') return '<svg viewBox="0 0 16 16" ' + stroke + '><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>';
+  return '';
 }
 
 function _escapeDesignHtml(value) {
