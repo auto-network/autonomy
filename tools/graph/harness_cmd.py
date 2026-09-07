@@ -64,22 +64,37 @@ def _members(set_id: str, org: str) -> list[dict]:
 
 
 def _live_session_counts() -> tuple[Counter, bool]:
-    """Live sessions per (harness, alias). Second value is False when the
-    dashboard could not be reached, so the caller can say so rather than
-    print a confident zero."""
+    """Live sessions per ``(harness, account uuid)``. Second value is False
+    when the dashboard could not be reached, so the caller can say so rather
+    than print a confident zero.
+
+    Reads ``/api/dao/session_status``, the projection that actually carries
+    live sessions. ``/api/dao/recent_sessions`` deliberately does NOT: its
+    handler describes a bounded card projection the Sessions page reads once
+    *behind* the already-rendered Active list, with everything after that
+    coming from lifecycle SSE. Counting from it returned agentic runs and
+    half-populated stub rows whose ``harness`` is null, which is where the
+    ``None:None`` key in ``--json`` came from.
+
+    Sessions are keyed by ``harness_token`` -- the Anthropic organization
+    UUID of the credential the launcher picked -- because that is what the
+    usage rows are keyed by. A session with no recorded token is counted
+    under ``None`` and reported separately rather than being attributed to
+    an account that may not have served it.
+    """
     try:
-        data = _get_json("/api/dao/recent_sessions?window=1w", timeout=40)
+        data = _get_json("/api/dao/session_status", timeout=40)
     except Exception:
         return Counter(), False
-    rows = data if isinstance(data, list) else (
-        data.get("sessions") or data.get("rows") or data.get("data") or [])
+    rows = data.get("rows") if isinstance(data, dict) else data
     counts: Counter = Counter()
-    for row in rows:
-        if str(row.get("state") or "").upper() == "ENDED":
+    for row in rows or []:
+        if str(row.get("state") or "").upper() != "ACTIVE":
             continue
         if str(row.get("activity_state") or "").lower() in _DEAD_ACTIVITY:
             continue
-        counts[(row.get("harness"), row.get("harness_token_alias"))] += 1
+        harness = str(row.get("harness") or "").strip().lower() or None
+        counts[(harness, row.get("harness_token") or None)] += 1
     return counts, True
 
 
@@ -145,7 +160,13 @@ def _age(updated_at: Any) -> str:
 
 def cmd_harness_status(args) -> None:
     now = int(time.time())
-    org = getattr(args, "org", None) or "personal"
+    # No org by default. These sets are @home("personal"), and the dashboard
+    # resolves a personal-homed row for any authenticated caller; a container
+    # seat that names an org it is not a member of is refused outright
+    # ("organization mismatch: the request's bearer and X-Graph-Org name
+    # different organizations"), which is why this command used to report
+    # "no harness accounts are known" from every session.
+    org = getattr(args, "org", None)
 
     usage_rows = _members(USAGE_SET_ID, org)
     session_counts, dashboard_reachable = _live_session_counts()
@@ -158,10 +179,20 @@ def cmd_harness_status(args) -> None:
             if alias:
                 aliases[(harness, alias)] = payload
 
+    # account uuid -> operator-facing alias, for the LIVE column and --json.
+    alias_by_account = {
+        (payload or {}).get("account_id"): (payload or {}).get("alias")
+        for payload in ((m.get("payload") or {}) for m in usage_rows)
+        if payload.get("account_id") and payload.get("alias")
+    }
+
     if getattr(args, "json", False):
         print(json.dumps({
             "usage": [m.get("payload") for m in usage_rows],
-            "live_sessions": {f"{h}:{a}": n for (h, a), n in session_counts.items()},
+            "live_sessions": {
+                f"{h or 'unknown'}:{alias_by_account.get(t) or t or 'unattributed'}": n
+                for (h, t), n in session_counts.items()
+            },
             "dashboard_reachable": dashboard_reachable,
         }, indent=2))
         return
@@ -183,7 +214,7 @@ def cmd_harness_status(args) -> None:
         alias = payload.get("alias") or payload.get("identity_label") or "—"
         windows = payload.get("windows") or {}
         state = _verdict(payload, now)
-        live = session_counts.get((harness, alias if alias != "—" else None), 0)
+        live = session_counts.get((harness, payload.get("account_id")), 0)
         print(f"  {harness:8s} {str(alias)[:16]:16s} {state:10s} "
               f"{_fmt_window(windows.get('short'), now):20s} "
               f"{_fmt_window(windows.get('long'), now):20s} "
@@ -202,6 +233,19 @@ def cmd_harness_status(args) -> None:
             print(f"  {'':8s} └─ refresh error: "
                   f"{str(credential['last_refresh_error'])[:70]}")
 
+    # A session whose launch recorded no credential cannot be attributed to
+    # an account. Say so rather than let its absence read as an idle account.
+    attributable = {
+        (m.get("payload") or {}).get("harness")
+        for m in usage_rows if (m.get("payload") or {}).get("account_id")
+    }
+    for (harness, token), count in sorted(
+        session_counts.items(), key=lambda item: str(item[0][0]),
+    ):
+        if token is None and harness in attributable:
+            print(f"\n  ! {count} live {harness} session(s) are not attributed "
+                  f"to an account: no credential was recorded at launch")
+
     if not dashboard_reachable:
         print("\n  ! the dashboard is not reachable, so live session counts are unknown")
     if exhausted:
@@ -217,7 +261,10 @@ def register(subparsers) -> None:
         "harness",
         help="Show every account the platform can authenticate as, with usage",
     )
-    parser.add_argument("--org", default="personal",
-                        help="Which database holds the credentials (default: personal)")
+    parser.add_argument(
+        "--org", default=None,
+        help="Route the read through this organization. Rarely needed: the "
+             "rows are personal-homed and the dashboard resolves them for "
+             "any authenticated caller.")
     parser.add_argument("--json", action="store_true", help="Machine-readable output")
     parser.set_defaults(func=cmd_harness_status)
