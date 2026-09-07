@@ -278,6 +278,12 @@ def get_beads_by_label(label: str) -> list[dict]:
     return [b for b in _beads() if label in (b.get("labels") or [])]
 
 
+def get_dolt_head_hash(org: str | None = None) -> str | None:
+    """Static token for mock mode — no Dolt, so the bead reads fall back to
+    the watcher's 60 s heartbeat rather than a per-change gate."""
+    return None
+
+
 def get_open_beads(limit: int = 200) -> list[dict]:
     return [b for b in _beads() if b["status"] != "closed"][:limit]
 
