@@ -164,3 +164,72 @@ async def test_production_issue_refuses_cold_vault_before_contacting_acme(monkey
         await certs.issue("anchore", "persona-abc", staging=False)
 
     assert calls == []
+
+
+def test_failed_certbot_run_surfaces_real_cause_and_preserves_attempt(monkeypatch, tmp_path):
+    """A failing certbot job must (a) name certbot's own complaint, which it
+    writes to STDOUT, not Compose's progress line or the generic epilogue on
+    STDERR, and (b) keep the attempt (both streams + certbot's log dir) in the
+    data root BEFORE the ephemeral ACME root is wiped (auto-0iwrd)."""
+    import asyncio
+    from tools.dashboard import service_certificate as certs
+
+    acme_root = tmp_path / "acme"
+    monkeypatch.setattr(certs, "ACME_ROOT", acme_root)
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    import tools.data_paths as data_paths
+    monkeypatch.setattr(data_paths, "resolve_data_root", lambda: data_root)
+    monkeypatch.setattr(certs, "load_dns01_client", lambda org: object())
+    monkeypatch.setattr(certs, "_restore_acme_bundle", lambda: None)
+    monkeypatch.setattr(certs, "_compose_environment", lambda: {})
+    monkeypatch.setattr(certs, "_certbot_command", lambda *a, **k: ["certbot"])
+
+    class _Server:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            # certbot writes its log while the responder is up
+            (acme_root / "logs").mkdir(parents=True, exist_ok=True)
+            (acme_root / "logs" / "letsencrypt.log").write_text("hook says: refused\n")
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(certs, "Dns01HookServer", _Server)
+
+    class _Proc:
+        returncode = 1
+
+        async def communicate(self):
+            stdout = (
+                b"Hook '--manual-auth-hook' for example reported error code 1\n"
+                b"Hook '--manual-auth-hook' ran with error output:\n"
+                b" autonomy DNS-01 hook unavailable: FileNotFoundError: [Errno 2] (socket '/run/autonomy-acme/dns01.sock', action present)\n"
+            )
+            stderr = (
+                b"\x1b[?25l Container autonomy-service-certbot-run-abc Creating\r\n"
+                b" Container autonomy-service-certbot-run-abc Created\n"
+                b"Ask for help or search for solutions at https://community.letsencrypt.org.\n"
+                b"See the logfile /run/autonomy-acme/logs/letsencrypt.log for more details.\n"
+            )
+            return stdout, stderr
+
+    async def fake_exec(*a, **k):
+        return _Proc()
+
+    monkeypatch.setattr(certs.asyncio, "create_subprocess_exec", fake_exec)
+
+    with pytest.raises(certs.ServiceCertificateError) as excinfo:
+        asyncio.run(certs.obtain("autonomy", "jeremy-77827e972ba4c37d4215"))
+    message = str(excinfo.value)
+    assert "hook unavailable: FileNotFoundError" in message
+    assert "Creating" not in message and "See the logfile" not in message
+    attempts = list((data_root / "service-certs" / "attempts").iterdir())
+    assert len(attempts) == 1 and attempts[0].name.endswith("-jeremy-77827e972ba4c37d4215")
+    assert "attempt kept at" in message and attempts[0].name in message
+    assert (attempts[0] / "output.txt").read_bytes().count(b"--- stdout ---") == 1
+    assert (attempts[0] / "logs" / "letsencrypt.log").read_text() == "hook says: refused\n"
+    assert not (acme_root / "logs").exists()  # ephemeral root still wiped
