@@ -32,12 +32,27 @@ case "$HOST" in
 *auto-ash-1*|*5.161.179.179*)
     echo "refusing: '$HOST' is the legacy pet host" >&2; exit 1 ;;
 esac
-HOST_IP=${HOST#*@}
+HOST_NAME=${HOST#*@}
+# --host may name the box (root@registry.auto.network). Everything below
+# needs its IPv4: DNS_BIND is the socket address and DNS_RELAY_IP is the
+# literal every A answer carries — a hostname there made every A answer
+# raise inside the responder (2026-09-07, whole-zone outage, NS still fine).
+resolve_ipv4() {
+    case "$1" in
+    *[!0-9.]*) getent ahostsv4 "$1" 2>/dev/null | awk '{print $1; exit}' ;;
+    *) printf '%s\n' "$1" ;;
+    esac
+}
+HOST_IP=$(resolve_ipv4 "$HOST_NAME")
+[ -n "$HOST_IP" ] || { echo "cannot resolve '$HOST_NAME' to an IPv4 address" >&2; exit 1; }
 NODE_ID=${NODE_ID:-registry-ash-1}
 # The IP that serve.auto.network A answers resolve to. Defaults to the box's
 # own IP (single-box POC), but serve rides its own floating IP where a dumb
 # :443 forward reaches the raw-stream ingress — so it is set explicitly there.
 RELAY_IP=${RELAY_IP:-$HOST_IP}
+case "$RELAY_IP" in
+*[!0-9.]*) echo "--relay-ip must be a dotted IPv4 address, got '$RELAY_IP'" >&2; exit 1 ;;
+esac
 
 echo "== preflight: the registry code on the box must carry the responder"
 ssh -o IdentitiesOnly=yes "$HOST" \
@@ -100,5 +115,7 @@ for _ in $(seq 15); do
     fi
     sleep 2
 done
-echo "@$HOST_IP never answered; check: ssh $HOST systemctl status autonomy-registry-dns" >&2
+echo "@$HOST_IP never answered an A query for probe.serve.auto.network." >&2
+echo "This is a real outage signal, not a proof-script quirk: NS/SOA can answer while A fails." >&2
+echo "Check: ssh $HOST 'cat /etc/autonomy-dns/dns.env; journalctl -u autonomy-registry-dns -n 30'" >&2
 exit 1

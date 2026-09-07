@@ -33,6 +33,25 @@ from .dns_responder import ZONE, ZoneState, handle_query
 
 logger = logging.getLogger("registry.dns")
 
+
+def validate_relay_ip(value: str) -> str:
+    """The IPv4 every A answer resolves to. A hostname here (deploy.sh once
+    wrote ``registry.auto.network`` when given ``--host root@<name>``) made
+    every A answer raise inside the datagram handler, silently, while NS,
+    SOA and TXT kept answering — a whole-zone outage that looked like a
+    flaky proof. Refuse anything but a dotted IPv4 at startup."""
+    import ipaddress
+
+    try:
+        parsed = ipaddress.ip_address(str(value).strip())
+    except ValueError:
+        raise SystemExit(
+            f"--relay-ip must be an IPv4 address, got {value!r}") from None
+    if parsed.version != 4 or parsed.is_unspecified:
+        raise SystemExit(
+            f"--relay-ip must be a routable IPv4 address, got {value!r}")
+    return str(parsed)
+
 #: Per-source token bucket: burst, then sustained per-second refill.
 SOURCE_BURST = 50
 SOURCE_RATE = 25.0
@@ -130,7 +149,7 @@ class DnsService:
                 lambda: len(self._cache._challenges)
             )
         self.state = ZoneState(
-            relay_ip=relay_ip, node_id=node_id,
+            relay_ip=validate_relay_ip(relay_ip), node_id=node_id,
             txt_lookup=self._cache.lookup,
             txt_ttl=self._cache.lookup_ttl,
             zones=self._cache.zones,
@@ -165,11 +184,31 @@ class _UdpProtocol(asyncio.DatagramProtocol):
         task.add_done_callback(self._tasks.discard)
 
     async def _respond(self, data, addr):
-        with contextlib.suppress(Exception):
+        try:
             reply = await self._service.answer(
                 data, str(addr[0]), tcp=False)
             if reply is not None and self._transport is not None:
                 self._transport.sendto(reply, addr)
+        except Exception:
+            # A fault in one answer must not take the responder down, but it
+            # must not vanish either: one traceback per minute names it.
+            _note_answer_fault("udp")
+
+
+_FAULT_LOG_INTERVAL = 60.0
+_last_fault_log = 0.0
+answer_faults = 0
+
+
+def _note_answer_fault(transport: str) -> None:
+    global _last_fault_log, answer_faults
+    answer_faults += 1
+    now = time.monotonic()
+    if now - _last_fault_log >= _FAULT_LOG_INTERVAL:
+        _last_fault_log = now
+        logger.exception(
+            "DNS answer failed (%s); %d fault(s) so far — queries of this "
+            "shape are being dropped", transport, answer_faults)
 
 
 async def _serve_tcp(reader, writer, service: DnsService):
@@ -184,7 +223,11 @@ async def _serve_tcp(reader, writer, service: DnsService):
             if length == 0 or length > TCP_MAX_QUERY:
                 return
             raw = await asyncio.wait_for(reader.readexactly(length), 10)
-            reply = await service.answer(raw, source, tcp=True)
+            try:
+                reply = await service.answer(raw, source, tcp=True)
+            except Exception:
+                _note_answer_fault("tcp")
+                return
             if reply is None:
                 return
             writer.write(struct.pack(">H", len(reply)) + reply)
