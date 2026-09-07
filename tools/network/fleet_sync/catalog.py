@@ -685,6 +685,14 @@ class MutationCatalog:
             # 149-157% overhead vs a plain indexed store, perf baseline
             # 2026-09-02 / 2026-09-07). Dropped on the next install.
             """DROP TABLE IF EXISTS fleet_sync_journal""",
+            # Where the served-ack prune's sweep resumes on the next pass.
+            # Without it every pass restarted from id 0 and re-probed every
+            # still-cited transaction below the floor: 160-169 s per pass
+            # retiring nothing on a 580k-row store (anchore, 2026-09-07).
+            """CREATE TABLE IF NOT EXISTS fleet_sync_prune_cursor(
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                cursor INTEGER NOT NULL
+            )""",
             """CREATE TABLE IF NOT EXISTS fleet_sync_peer_state(
                 machine_public_key TEXT NOT NULL,
                 roster_epoch TEXT NOT NULL,
@@ -2140,37 +2148,55 @@ class MutationCatalog:
             "WHERE c.transaction_ref=fleet_sync_transactions.id)"
             + keeper_clause
         )
-        cursor = 0
+        # Sweep in fixed id windows from where the previous pass stopped,
+        # and wrap to 0 once the floor is reached, so a row that becomes
+        # retirable later (its winner overwritten) is reached on the next
+        # sweep. Every statement touches at most one window, so a pass
+        # costs about its budget however large the store. The old
+        # "jump to the next retirable id" MIN(id) query probed every
+        # still-cited row below the floor on every pass.
+        cursor = self.prune_cursor()
+        if cursor >= floor:
+            cursor = 0
+        swept_all = False
         while cursor < floor:
-            # Jump to the next retirable id rather than sweeping fixed
-            # ranges from 0: retained (still-cited) rows below the floor
-            # would otherwise be re-swept every pass and a small budget
-            # could never reach the ranges behind them.
-            row = self.conn.execute(
-                "SELECT MIN(id) FROM fleet_sync_transactions "
-                f"WHERE id>=? AND id<? AND {retirable}",
-                (cursor, floor, *keepers),
-            ).fetchone()
-            if row is None or row[0] is None:
-                break
-            low = int(row[0])
-            high = min(low + batch, floor)
+            high = min(cursor + batch, floor)
             with self.conn:
                 transaction_rows += int(self.conn.execute(
                     "DELETE FROM fleet_sync_transactions "
                     f"WHERE id>=? AND id<? AND {retirable}",
-                    (low, high, *keepers),
+                    (cursor, high, *keepers),
                 ).rowcount)
             cursor = high
+            if cursor >= floor:
+                swept_all = True
             time.sleep(PRUNE_YIELD_S)
             if not within_budget():
                 break
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO fleet_sync_prune_cursor(singleton,cursor) VALUES(1,?) "
+                "ON CONFLICT(singleton) DO UPDATE SET cursor=excluded.cursor",
+                (0 if swept_all else cursor,),
+            )
         with self.conn:
             self.conn.execute(
                 "DELETE FROM fleet_sync_peer_state WHERE roster_epoch<>?",
                 (roster_epoch,),
             )
         return (journal_rows, transaction_rows)
+
+    def prune_cursor(self) -> int:
+        """Where the served-ack prune's sweep resumes (0 = a fresh sweep)."""
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS fleet_sync_prune_cursor("
+            "singleton INTEGER PRIMARY KEY CHECK(singleton=1),"
+            "cursor INTEGER NOT NULL)"
+        )
+        row = self.conn.execute(
+            "SELECT cursor FROM fleet_sync_prune_cursor WHERE singleton=1"
+        ).fetchone()
+        return int(row[0]) if row is not None else 0
 
     def apply_remote(self, originated: AuthoredMutation) -> bool:
         """Merge one trusted remote mutation atomically; return winner status."""
