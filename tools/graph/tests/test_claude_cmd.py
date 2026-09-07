@@ -519,3 +519,59 @@ def test_install_does_not_print_bearer_credentials(graph_db_env):
     assert "rt-SECRET-CONSUMER" not in combined
     assert "at-SECRET-CONSOLE" not in combined
     assert "sk-ant-oat01-LEAKY" not in combined
+
+
+# ── auto-177b8: reading the rows from a container seat ────────
+
+
+def test_read_rows_uses_the_dashboard_when_graph_api_is_set(monkeypatch):
+    """In a container the rows live on the host, so the local personal.db is
+    empty and a direct read returns nothing. Route through the dashboard,
+    and send NO X-Graph-Org: the server resolves the row's declared home,
+    while naming ``personal`` from a session bearer is refused outright."""
+    from types import SimpleNamespace
+    from tools.graph import claude_cmd
+
+    monkeypatch.setenv("GRAPH_API", "https://localhost:8080")
+    monkeypatch.setattr(
+        claude_cmd.ops, "read_set",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("must not read the local DB in container mode")),
+    )
+    seen: list[dict] = []
+
+    class _Client:
+        def read_set(self, set_id, *, org, peers=None):
+            seen.append({"set_id": set_id, "org": org})
+            return SimpleNamespace(members=["row"])
+
+    monkeypatch.setattr("tools.graph.client.get_client", lambda: _Client())
+
+    assert claude_cmd._read_rows("dashboard.harness.usage") == ["row"]
+    assert seen == [{"set_id": "dashboard.harness.usage", "org": None}]
+
+
+def test_read_rows_reads_the_local_db_at_its_home_without_graph_api(monkeypatch):
+    """On the host there is no dashboard indirection, and the home has to be
+    named: the ambient GRAPH_ORG would read a different database than the
+    running system writes."""
+    from types import SimpleNamespace
+    from tools.graph import claude_cmd
+
+    monkeypatch.delenv("GRAPH_API", raising=False)
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    monkeypatch.setattr(
+        "tools.graph.client.get_client",
+        lambda: (_ for _ in ()).throw(AssertionError("must not use HTTP on the host")),
+    )
+    seen: list[dict] = []
+
+    def _read_set(set_id, *, org, peers=None):
+        seen.append({"set_id": set_id, "org": org})
+        return SimpleNamespace(members=["row"])
+
+    monkeypatch.setattr(claude_cmd.ops, "read_set", _read_set)
+
+    assert claude_cmd._read_rows("dashboard.claude.credentials") == ["row"]
+    assert seen == [{"set_id": "dashboard.claude.credentials", "org": "personal"}]
+

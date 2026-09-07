@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -114,44 +115,66 @@ def _setup_token_expires_at(setup_row: Any | None) -> str | None:
 
 
 def _credentials_org() -> str:
-    """Return the substrate org that owns every row this module touches.
+    """The org that owns every row this module touches, for a DIRECT read.
 
-    All three sets here — ``dashboard.claude.credentials``,
-    ``dashboard.claude.setup_tokens`` and ``dashboard.harness.usage`` — are
+    All three sets here -- ``dashboard.claude.credentials``,
+    ``dashboard.claude.setup_tokens`` and ``dashboard.harness.usage`` -- are
     operator-local: their correct value depends on *this* machine, they are
     secrets or host telemetry, and they sync only across the operator's own
     fleet. Their home is ``personal`` (org-scope rubric graph://4d88c2ad-625,
     worked-examples table).
 
-    This is the rubric's ergonomic law: *read a setting through a resolver
-    pinned to its home, never through the process's ambient ``GRAPH_ORG``.*
-    Pinning here is what makes this module agree with every other consumer —
-    ``credential_import.CREDENTIALS_ORG``, both refresh pollers'
-    ``_credentials_org()``, ``harness_usage_settings.HARNESS_USAGE_ORG`` and
-    the session launcher — all of which already hard-code ``personal``.
+    This names that home for the ``--force-host`` path, which bypasses the
+    dashboard and reads the local database directly. Every other read goes
+    through :func:`_read_rows`, which asks the dashboard scopelessly and lets
+    the server resolve the home -- the same law stated the other way round:
+    *never read a setting through the process's ambient ``GRAPH_ORG``*.
 
-    It previously passed ``ops.CALLER_ORG``, which follows ``GRAPH_ORG``.
-    Agent shells set ``GRAPH_ORG=autonomy``, so ``graph claude list`` read a
-    different database than the running system wrote, and reported a
-    two-month-stale row carrying ``invalid_grant`` for an account that was
-    refreshing normally — a health surface that failed toward false alarm.
+    Passing ``ops.CALLER_ORG`` here would follow ``GRAPH_ORG``. Agent shells
+    set ``GRAPH_ORG=autonomy``, so ``graph claude list`` read a different
+    database than the running system wrote, and reported a two-month-stale
+    row carrying ``invalid_grant`` for an account that was refreshing
+    normally -- a health surface that failed toward false alarm.
     """
     return "personal"
 
 
+def _read_rows(set_id: str) -> list[Any]:
+    """Members of a personal-homed set, from whichever seat is asking.
+
+    Two seats, one rule, and it is the branch ``client.py`` already
+    documents: with ``GRAPH_API`` set we are in a container and route
+    through the dashboard; without it we are on the host (or in a test) and
+    read the local database directly.
+
+    Over HTTP the request carries NO ``X-Graph-Org``, so the server resolves
+    the row's declared home instead of taking a scope from the caller. A
+    container seat that names ``personal`` explicitly is refused --
+    "organization mismatch: the request's bearer and X-Graph-Org name
+    different organizations" -- which is why ``graph claude list`` and
+    ``graph claude usage`` printed "no Claude accounts installed" from every
+    session while the dashboard was serving those very rows. Reading the
+    container's own ``personal.db`` instead is no better: it is empty,
+    because these rows live on the host.
+
+    Locally the home has to be named: see :func:`_credentials_org` for why
+    it must not be the ambient ``GRAPH_ORG``.
+    """
+    if os.environ.get("GRAPH_API"):
+        from .client import get_client
+        members = get_client().read_set(set_id, org=None, peers=[])
+    else:
+        members = ops.read_set(set_id, org=_credentials_org(), peers=[])
+    return list(members.members)
+
+
 def _read_credentials_rows() -> list[Any]:
     """Return the list of ``ResolvedSetting`` rows for installed credentials."""
-    members = ops.read_set(
-        CLAUDE_CREDENTIALS_SET_ID, org=_credentials_org(), peers=[],
-    )
-    return list(members.members)
+    return _read_rows(CLAUDE_CREDENTIALS_SET_ID)
 
 
 def _read_setup_token_rows() -> list[Any]:
-    members = ops.read_set(
-        CLAUDE_SETUP_TOKENS_SET_ID, org=_credentials_org(), peers=[],
-    )
-    return list(members.members)
+    return _read_rows(CLAUDE_SETUP_TOKENS_SET_ID)
 
 
 def _credentials_by_alias(alias: str) -> Any | None:
@@ -488,12 +511,9 @@ def _read_harness_usage_rows() -> list[Any]:
     only want claude rows for ``graph claude usage``.
     """
     try:
-        members = ops.read_set(
-            "dashboard.harness.usage", org=_credentials_org(),
-        )
+        return _read_rows("dashboard.harness.usage")
     except Exception:  # noqa: BLE001 — set may not exist yet on a fresh DB
         return []
-    return list(members.members)
 
 
 def _format_window_pct(window: dict[str, Any] | None) -> str:
