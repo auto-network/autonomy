@@ -1721,11 +1721,38 @@ class MutationCatalog:
                 mutation = Mutation(table, address, int(raw[1]), True)
             else:
                 policy = TABLE_POLICIES[table]
-                row = self._live_row(self.conn, table, address)
-                mutation = Mutation(
-                    table, address, int(raw[1]), False,
-                    _logical_values(policy, row),
-                )
+                try:
+                    row = self._live_row(self.conn, table, address)
+                except WatermarkError as exc:
+                    # The catalog cites a live row this store cannot
+                    # resolve (a settings base row deprecated in place
+                    # without a tombstone, or a row lost without capture).
+                    # One such row must not end every serve of the scope
+                    # at this transaction forever. A settings base address
+                    # whose only rows are deprecated IS absent by the
+                    # platform's rule, so it is served as a tombstone at
+                    # the catalog's timestamp; anything else is skipped and
+                    # named, for the reconcile to repair.
+                    if table == "settings" and str(address[4]) == "base":
+                        logger.warning(
+                            "fleet sync: catalog cites a settings base with "
+                            "no live row; serving a tombstone: address=%r "
+                            "transaction=%s (%s)", address, transaction_id, exc,
+                        )
+                        mutation = Mutation(table, address, int(raw[1]), True)
+                    else:
+                        logger.warning(
+                            "fleet sync: catalog cites a live row this store "
+                            "cannot resolve; skipping it in the serve: "
+                            "table=%s address=%r transaction=%s (%s)",
+                            table, address, transaction_id, exc,
+                        )
+                        continue
+                else:
+                    mutation = Mutation(
+                        table, address, int(raw[1]), False,
+                        _logical_values(policy, row),
+                    )
             items.append(AuthoredMutation(
                 incarnation, transaction_id, int(raw[3]), mutation,
             ))
