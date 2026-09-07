@@ -727,6 +727,11 @@ class MutationCatalog:
             # compatibility digest (table_info only).
             """CREATE INDEX IF NOT EXISTS idx_fleet_sync_catalog_transaction_ref
                 ON fleet_sync_catalog(transaction_ref)""",
+            # Per-origin order: the watermark pager (next_transactions_for_origin),
+            # origin_watermarks and the prune's newest-per-origin keeper set all
+            # walk transactions by origin in timestamp order.
+            """CREATE INDEX IF NOT EXISTS idx_fleet_sync_transactions_origin_ts
+                ON fleet_sync_transactions(origin_id,timestamp_ns,transaction_id)""",
         )
         for statement in statements:
             self.conn.execute(statement)
@@ -1989,17 +1994,30 @@ class MutationCatalog:
         def within_budget() -> bool:
             return time.monotonic() < deadline
 
+        # An origin's newest transaction is its watermark on this machine;
+        # deleting it would make the map ask for (and be re-served) what it
+        # already holds. Compute the keepers ONCE per pass (one row per
+        # origin, index-backed) instead of a correlated sort per candidate:
+        # the correlated form scanned every transaction of the origin for
+        # every candidate inside one statement the budget could not
+        # interrupt, holding the store's write lock for far longer than
+        # PRUNE_BUDGET_S on a large scope (home, 2026-09-07 04:45Z).
+        keepers = [
+            int(r[0]) for r in self.conn.execute(
+                "SELECT id FROM fleet_sync_transactions t WHERE NOT EXISTS("
+                "SELECT 1 FROM fleet_sync_transactions n "
+                "WHERE n.origin_id=t.origin_id AND ("
+                "n.timestamp_ns>t.timestamp_ns OR "
+                "(n.timestamp_ns=t.timestamp_ns AND n.transaction_id>t.transaction_id)))"
+            )
+        ]
+        keeper_clause = ""
+        if keepers:
+            keeper_clause = " AND id NOT IN (" + ",".join("?" * len(keepers)) + ")"
         retirable = (
             "NOT EXISTS(SELECT 1 FROM fleet_sync_catalog c "
-            "WHERE c.transaction_ref=fleet_sync_transactions.id) "
-            # An origin's newest transaction is its watermark on this
-            # machine; deleting it would make the map ask for (and be
-            # re-served) what it already holds.
-            "AND NOT EXISTS(SELECT 1 FROM ("
-            "SELECT id FROM fleet_sync_transactions n WHERE n.origin_id="
-            "fleet_sync_transactions.origin_id "
-            "ORDER BY n.timestamp_ns DESC,n.transaction_id DESC LIMIT 1"
-            ") k WHERE k.id=fleet_sync_transactions.id)"
+            "WHERE c.transaction_ref=fleet_sync_transactions.id)"
+            + keeper_clause
         )
         cursor = 0
         while cursor < floor:
@@ -2009,7 +2027,8 @@ class MutationCatalog:
             # could never reach the ranges behind them.
             row = self.conn.execute(
                 "SELECT MIN(id) FROM fleet_sync_transactions "
-                f"WHERE id>=? AND id<? AND {retirable}", (cursor, floor),
+                f"WHERE id>=? AND id<? AND {retirable}",
+                (cursor, floor, *keepers),
             ).fetchone()
             if row is None or row[0] is None:
                 break
@@ -2018,7 +2037,8 @@ class MutationCatalog:
             with self.conn:
                 transaction_rows += int(self.conn.execute(
                     "DELETE FROM fleet_sync_transactions "
-                    f"WHERE id>=? AND id<? AND {retirable}", (low, high),
+                    f"WHERE id>=? AND id<? AND {retirable}",
+                    (low, high, *keepers),
                 ).rowcount)
             cursor = high
             time.sleep(PRUNE_YIELD_S)
