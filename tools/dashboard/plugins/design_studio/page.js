@@ -107,6 +107,14 @@
         // Capture state: 'idle' | 'working' | 'success' | 'error'
         captureState: 'idle',
 
+        // Series (plugin catalog row): revisions with their creator sessions
+        // and the design's share state. Feeds the presence dropdown.
+        series: null,
+        shareState: 'idle',   // 'idle' | 'requesting' | 'awaiting' | 'error'
+        shareError: '',
+        _seriesGen: 0,
+        _sharePollTimer: null,
+
         // Primer state: 'idle' | 'working' | 'done'
         primerState: 'idle',
 
@@ -131,6 +139,66 @@
         get linkedSessionLabel() {
           var store = this.linkedSessionStore;
           return (store && store.label) || this.linkedSessionId;
+        },
+
+        // ── Presence: every session that pushed a revision, newest first ──
+        get presenceSessions() {
+          var revisions = (this.series && this.series.revisions) || [];
+          var sessions = (window.Alpine && Alpine.store && Alpine.store('sessions')) || {};
+          var org = (this.design && this.design.org) || 'autonomy';
+          var byId = {};
+          var order = [];
+          for (var i = 0; i < revisions.length; i++) {
+            var r = revisions[i];
+            var id = r && r.creator_session_id;
+            if (!id) continue;
+            if (!byId[id]) {
+              byId[id] = { id: id, count: 0, last_push: '', label: r.creator_session_label || id };
+              order.push(id);
+            }
+            byId[id].count += 1;
+            if (String(r.created_at || '') > String(byId[id].last_push || '')) byId[id].last_push = r.created_at || '';
+          }
+          return order.map(function (id) {
+            var s = byId[id];
+            var live = sessions[id] || null;
+            s.live = !!(live && live.isLive);
+            if (live && live.label) s.label = live.label;
+            s.initial = (s.label || id).trim().charAt(0).toUpperCase() || '?';
+            s.href = '/session/' + encodeURIComponent(org) + '/' + encodeURIComponent(id);
+            return s;
+          }).sort(function (a, b) {
+            if (a.live !== b.live) return a.live ? -1 : 1;
+            return String(b.last_push).localeCompare(String(a.last_push));
+          });
+        },
+        get presenceLive() {
+          return this.presenceSessions.some(function (s) { return s.live; });
+        },
+        get presenceSummaryTitle() {
+          var n = this.presenceSessions.length;
+          var live = this.presenceSessions.filter(function (s) { return s.live; }).length;
+          var text = n === 0 ? 'No sessions on this design' : (n + (n === 1 ? ' session' : ' sessions') + (live ? ', ' + live + ' live' : ''));
+          return text + (this.share.shared ? ' · shared by link' : ' · not shared');
+        },
+        get share() {
+          var share = this.series && this.series.share;
+          return share && typeof share === 'object' ? share : { shared: false, grants: [] };
+        },
+        get primaryGrant() {
+          var grants = this.share.grants || [];
+          return grants.length ? grants[0] : null;
+        },
+        get shareExpiryText() {
+          var grant = this.primaryGrant;
+          if (!grant) return '';
+          if (!grant.expires_at) return 'no expiry';
+          var ms = grant.expires_at * 1000 - Date.now();
+          if (ms <= 0) return 'expired';
+          var days = Math.floor(ms / 86400000);
+          if (days >= 1) return 'expires in ' + days + (days === 1 ? ' day' : ' days');
+          var hours = Math.max(1, Math.floor(ms / 3600000));
+          return 'expires in ' + hours + (hours === 1 ? ' hour' : ' hours');
         },
 
         // ── Lifecycle ─────────────────────────────────────────────────────
@@ -180,6 +248,7 @@
 
         destroy: function () {
           this._destroyed = true;
+          this._stopSharePoll();
           document.body.classList.remove('route-design-linked');
           if (window._designPage === this) window._designPage = null;
           if (this._designSeriesCleanup) {
@@ -294,6 +363,7 @@
 
             // SSE subscription for new design iterations
             this._subscribeToDesign();
+            this._loadSeries();
           } catch (e) {
             console.error('[designPage] load error', e);
             this.state = 'error';
@@ -376,6 +446,143 @@
           setTimeout(function () { captureTabScreenshot(revisionId); }, 1500);
         },
 
+        // ── Series: presence + share state ────────────────────────────────
+
+        _loadSeries: async function () {
+          if (!this.designId) return;
+          var gen = ++this._seriesGen;
+          try {
+            var fetcher = (window.Autonomy && window.Autonomy.fetch) || window.fetch;
+            var res = await fetcher('/api/design-studio/designs/' + encodeURIComponent(this.designId));
+            if (this._destroyed || gen !== this._seriesGen || !res.ok) return;
+            var data = await res.json();
+            if (this._destroyed || gen !== this._seriesGen) return;
+            this.series = data;
+            if (this.share.shared && this.shareState === 'awaiting') {
+              this.shareState = 'idle';
+              this._stopSharePoll();
+            }
+          } catch (e) { /* the dropdown keeps its last known state */ }
+        },
+
+        onPresenceToggle: function (event) {
+          var el = event && event.target;
+          if (el && el.open) this._loadSeries();
+        },
+
+        formatPush: function (value) {
+          if (!value) return 'unknown';
+          var raw = String(value).trim();
+          var normalized = raw.indexOf('T') >= 0 ? raw : raw.replace(' ', 'T') + 'Z';
+          var parsed = new Date(normalized);
+          if (isNaN(parsed.getTime())) return raw;
+          var diff = Date.now() - parsed.getTime();
+          if (diff < 60000) return 'just now';
+          if (diff < 3600000) return Math.floor(diff / 60000) + 'm ago';
+          if (diff < 86400000) return Math.floor(diff / 3600000) + 'h ago';
+          return parsed.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+        },
+
+        openPresenceSession: function (s) {
+          if (!s || !s.href) return;
+          navigateTo(s.href);
+        },
+
+        chatWithSession: function (s) {
+          if (!s || !s.id || this.linkedSessionMode) return;
+          this.chatOpen = true;
+          if (this._tmuxSession !== s.id) this._connectSession(s.id);
+        },
+
+        // Sharing rides the existing link_publish approval: nothing is minted
+        // until the operator approves in Central. The dropdown then polls the
+        // series until the grant shows up (or gives up quietly).
+        shareDesign: async function () {
+          if (this.shareState === 'requesting' || this.shareState === 'awaiting') return;
+          this.shareError = '';
+          this.shareState = 'requesting';
+          try {
+            var fetcher = (window.Autonomy && window.Autonomy.fetch) || window.fetch;
+            var res = await fetcher('/api/approvals', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                kind: 'link_publish',
+                session: 'dashboard-ui',
+                request: {
+                  org: (this.design && this.design.org) || 'autonomy',
+                  target_type: 'design',
+                  target_uuid: this.designId,
+                  meta: {},
+                },
+              }),
+            });
+            var data = await res.json().catch(function () { return {}; });
+            if (!res.ok || data.error) {
+              this.shareState = 'error';
+              this.shareError = data.error || ('Share request failed (HTTP ' + res.status + ')');
+              return;
+            }
+            this.shareState = 'awaiting';
+            if (data.id && typeof window.openApprovalOverlay === 'function') {
+              try { window.openApprovalOverlay(data.id); } catch (e) { /* Central still has it */ }
+            }
+            this._startSharePoll();
+          } catch (e) {
+            this.shareState = 'error';
+            this.shareError = 'Share request failed: ' + (e.message || e);
+          }
+        },
+
+        _startSharePoll: function () {
+          this._stopSharePoll();
+          var self = this;
+          var remaining = 40; // ~3 minutes at 4.5s
+          var tick = function () {
+            self._sharePollTimer = null;
+            if (self._destroyed || self.shareState !== 'awaiting') return;
+            self._loadSeries().then(function () {
+              if (self._destroyed || self.shareState !== 'awaiting') return;
+              if (--remaining <= 0) { self.shareState = 'idle'; return; }
+              self._sharePollTimer = setTimeout(tick, 4500);
+            });
+          };
+          this._sharePollTimer = setTimeout(tick, 4500);
+        },
+
+        _stopSharePoll: function () {
+          if (this._sharePollTimer) { clearTimeout(this._sharePollTimer); this._sharePollTimer = null; }
+        },
+
+        shareLink: async function () {
+          var grant = this.primaryGrant;
+          if (!grant || !grant.url) return;
+          var title = (this.design && this.design.title) || 'Design';
+          try {
+            if (navigator.share) { await navigator.share({ title: title, url: grant.url }); return; }
+          } catch (e) { if (e && e.name === 'AbortError') return; }
+          try {
+            await navigator.clipboard.writeText(grant.url);
+            this.shareError = '';
+          } catch (e) {
+            this.shareError = 'Could not copy the link: ' + grant.url;
+          }
+        },
+
+        openShareLink: function () {
+          var grant = this.primaryGrant;
+          if (!grant || !grant.url) return;
+          window.open(grant.url, '_blank', 'noopener');
+        },
+
+        manageShare: function () {
+          var grant = this.primaryGrant;
+          var org = (this.design && this.design.org) || 'autonomy';
+          if (window.AutonomyOrgSettings && typeof window.AutonomyOrgSettings.open === 'function') {
+            window.AutonomyOrgSettings.open(org, { screen: 'published-links', focus: grant ? grant.token : '' });
+          }
+        },
+
         // ── Screenshot ────────────────────────────────────────────────────
 
         captureScreenshot: async function () {
@@ -439,6 +646,7 @@
             if (data.design_id && data.design_id !== this.designId) {
               this.designId = data.design_id;
               this._subscribeToDesign();
+              this._loadSeries();
               // registerHandler can synchronously replay cached topic data and
               // re-enter _swapRevision (bumping _loadGen); bail if this call was
               // superseded so it can't schedule a stale injection or history push.
@@ -653,6 +861,7 @@
             if (data.design_id && data.design_id !== self.designId) return;
             // New iteration of the current design: soft swap (no page reload)
             self._swapRevision(data.revision_id);
+            self._loadSeries();
           };
           registerHandler(designTopic, handler);
           // Instance-scoped cleanup. A single shared global gets clobbered when
