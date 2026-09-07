@@ -80,3 +80,33 @@ def test_store_without_bootstrap_row_is_skipped_until_it_lands(orgs):
     conn.commit()
     conn.close()
     assert any(o.slug == "gamma" for o in org_ops.list_orgs(root=orgs))
+
+
+def test_warm_org_stores_opens_each_store_read_write_once(orgs, monkeypatch):
+    opened = []
+    real = org_ops.GraphDB
+
+    class Spy(real):
+        def __init__(self, *a, **k):
+            opened.append((str(a[0]) if a else k.get("db_path"), k.get("mode", "rw")))
+            super().__init__(*a, **k)
+    monkeypatch.setattr(org_ops, "GraphDB", Spy)
+    result = org_ops.warm_org_stores(root=orgs)
+    assert sorted(result["warmed"]) == ["acme", "beta"]
+    assert result["errors"] == {}
+    rw = [p for p, mode in opened if mode == "rw"]
+    assert sorted(rw) == sorted(str(orgs / f"{s}.db") for s in ("acme", "beta"))
+
+
+def test_warm_org_stores_reports_a_bad_store_and_continues(orgs, monkeypatch):
+    real = org_ops.GraphDB
+
+    class Boom(real):
+        def __init__(self, *a, **k):
+            if a and str(a[0]).endswith("acme.db") and k.get("mode", "rw") == "rw":
+                raise RuntimeError("locked")
+            super().__init__(*a, **k)
+    monkeypatch.setattr(org_ops, "GraphDB", Boom)
+    result = org_ops.warm_org_stores(root=orgs)
+    assert result["warmed"] == ["beta"]
+    assert result["errors"] == {"acme": "RuntimeError: locked"}

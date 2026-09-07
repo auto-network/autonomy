@@ -292,6 +292,29 @@ def list_orgs(*, root: Path | str | None = None) -> list[OrgRef]:
     return refs
 
 
+def warm_org_stores(*, root: Path | str | None = None) -> dict:
+    """Open every inventory store read-write once and close it.
+
+    A read-write open is where a store's schema migrates to the running
+    code's version and where the fleet-sync catalog objects roll forward.
+    Until auto-nkxko the inventory listing did this implicitly at every
+    dashboard startup (and on every gateway tick); now that listing is
+    read-only, this is the explicit, off-loop replacement so a code upgrade
+    with a schema bump still leaves every store migrated before its first
+    reader hits a new column. Per-store failures are reported, never raised.
+    Returns ``{"warmed": [slug, …], "errors": {slug: message}}``.
+    """
+    warmed: list[str] = []
+    errors: dict[str, str] = {}
+    for ref in list_orgs(root=root):
+        try:
+            GraphDB(Path(ref.db_path)).close()
+            warmed.append(ref.slug)
+        except Exception as exc:  # one bad store must not stop the rest
+            errors[ref.slug] = f"{type(exc).__name__}: {exc}"
+    return {"warmed": warmed, "errors": errors}
+
+
 def get_org(slug: str, *, root: Path | str | None = None) -> OrgRef | None:
     """Return the bootstrap row for *slug*, or ``None`` if absent."""
     path = _slug_db_path(slug, root)
