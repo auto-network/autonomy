@@ -12091,6 +12091,14 @@ async def api_design_create(request):
                 dedup=False,
             )
 
+    # Every new revision gets a headless thumbnail; the queue is a no-op in
+    # mock mode or before startup wired it.
+    try:
+        from tools.dashboard import design_thumbnails
+        design_thumbnails.queue.enqueue(rev_id)
+    except Exception:
+        logger.exception("design-thumbnails: could not queue %s", rev_id)
+
     return JSONResponse({"id": rev_id}, status_code=201)
 
 
@@ -21440,6 +21448,25 @@ def _warm_personal_settings_store() -> None:
     GraphDB(resolve_caller_db_path(None)).close()
 
 
+async def _on_design_thumbnail_rendered(meta: dict) -> None:
+    """A thumbnail landed on disk: drop the catalog caches and tell open
+    gallery/viewer pages so the tile fills in without a reload."""
+    try:
+        from tools.dashboard.plugins.design_studio.entrypoints import api as design_api
+        design_api._clear_catalog_cache()
+        design_api._clear_thumbnail_cache()
+    except Exception:
+        logger.exception("design-thumbnails: cache clear failed")
+    design_id = meta.get("design_id") or meta.get("revision_id")
+    if design_id:
+        await event_bus.broadcast(f"design:{design_id}", {
+            "revision_id": meta.get("revision_id"),
+            "design_id": design_id,
+            "thumbnail_updated": True,
+            "form_factor": meta.get("form_factor"),
+        })
+
+
 async def _on_startup():
     global _dispatch_watcher_task, _mock_event_watcher_task, _harness_usage_poller_task
     global _claude_credentials_refresh_task, _codex_credentials_refresh_task
@@ -21939,6 +21966,20 @@ async def _on_startup():
         )
         _event_proxy_task.add_done_callback(_log_event_proxy_result)
     _mark("serving_supervisor_bootstrap+event_proxy tasks_created")
+
+    # Design Studio thumbnails: one background worker renders each design's
+    # latest revision headlessly (no LLM) and backfills whatever has none.
+    # Skipped in mock mode (no design DB, no browser).
+    if not os.environ.get("DASHBOARD_MOCK"):
+        try:
+            from tools.dashboard import design_thumbnails
+            design_thumbnails.queue.on_rendered = _on_design_thumbnail_rendered
+            design_thumbnails.queue.start()
+            queued = design_thumbnails.queue.enqueue_missing()
+            logger.info("design-thumbnails: worker started, %d revision(s) queued for backfill", queued)
+        except Exception:
+            logger.exception("design-thumbnails: worker failed to start; thumbnails will not render")
+    _mark("design_thumbnails.queue.start")
     logger.info(
         "startup phase: TOTAL %.1fms", (time.monotonic() - _startup_t0) * 1000,
     )
@@ -21976,6 +22017,11 @@ async def _on_shutdown():
         await web_push_worker.stop_worker()
     except Exception:
         logger.exception("error stopping the Central Web Push delivery worker")
+    try:
+        from tools.dashboard import design_thumbnails
+        await design_thumbnails.queue.stop()
+    except Exception:
+        logger.exception("error stopping the design thumbnail worker")
     try:
         await image_build_worker.stop_worker()
     except Exception:

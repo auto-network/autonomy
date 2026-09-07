@@ -281,21 +281,92 @@ def test_get_design_series_returns_revision_timeline():
 
 
 def test_revision_thumbnail_serves_screenshot_file(tmp_path):
+    from tools.dashboard import design_thumbnails
+
     screenshot = tmp_path / "screenshot.png"
     screenshot.write_bytes(b"png")
-    with patch.object(design_api, "_screenshot_path", return_value=screenshot):
+    with patch.object(design_thumbnails, "thumbnail_path", return_value=screenshot):
         resp = _client().get("/api/design-studio/revisions/rev-a2/thumbnail")
 
     assert resp.status_code == 200
     assert resp.content == b"png"
+    assert resp.headers["content-type"] == "image/png"
+
+
+def test_revision_thumbnail_prefers_the_composed_jpeg(tmp_path):
+    from tools.dashboard import design_thumbnails
+
+    composed = tmp_path / "thumbnail.jpg"
+    composed.write_bytes(b"jpg")
+    with patch.object(design_thumbnails, "thumbnail_path", return_value=composed):
+        resp = _client().get("/api/design-studio/revisions/rev-a2/thumbnail")
+
+    assert resp.status_code == 200
+    assert resp.content == b"jpg"
+    assert resp.headers["content-type"] == "image/jpeg"
 
 
 def test_revision_thumbnail_rejects_missing_file(tmp_path):
+    from tools.dashboard import design_thumbnails
+
     missing = tmp_path / "missing.png"
-    with patch.object(design_api, "_screenshot_path", return_value=missing):
+    with patch.object(design_thumbnails, "thumbnail_path", return_value=missing):
         resp = _client().get("/api/design-studio/revisions/rev-a2/thumbnail")
 
     assert resp.status_code == 404
+
+
+def test_thumbnail_inventory_counts_composites_and_browser_captures(tmp_path):
+    from tools import data_paths
+
+    (tmp_path / "experiments" / "rev-jpg").mkdir(parents=True)
+    (tmp_path / "experiments" / "rev-jpg" / "thumbnail.jpg").write_bytes(b"jpg")
+    (tmp_path / "experiments" / "rev-png").mkdir(parents=True)
+    (tmp_path / "experiments" / "rev-png" / "screenshot.png").write_bytes(b"png")
+    (tmp_path / "experiments" / "rev-none").mkdir(parents=True)
+    design_api._clear_thumbnail_cache()
+    with patch.object(data_paths, "DATA_ROOT", tmp_path):
+        ids = design_api._screenshot_revision_ids()
+    design_api._clear_thumbnail_cache()
+    assert ids == {"rev-jpg", "rev-png"}
+
+
+def test_catalog_row_carries_the_thumbnail_revision_and_form_factor():
+    rows = [
+        {"id": "rev-a1", "design_id": "design-a", "title": "Alpha", "status": "pending",
+         "revision_seq": 1, "created_at": "2026-01-01 00:00:00", "thumbnail_url": "/thumb/a1"},
+        {"id": "rev-a2", "design_id": "design-a", "title": "Alpha", "status": "pending",
+         "revision_seq": 2, "created_at": "2026-01-02 00:00:00"},
+    ]
+    with patch.object(design_api, "_form_factor", side_effect=lambda rev: {"rev-a1": "mobile"}.get(rev, "")):
+        series = design_api._series_from_rows(rows)[0]
+    assert series["thumbnail_url"] == "/thumb/a1"
+    assert series["thumbnail_revision_id"] == "rev-a1"
+    assert series["form_factor"] == "mobile"
+
+
+def test_render_route_reports_an_unavailable_renderer():
+    from tools.dashboard import design_thumbnails
+
+    with patch.object(design_api, "_design_org", return_value=None), \
+         patch.object(design_thumbnails.queue, "enqueue", return_value=False), \
+         patch.object(design_thumbnails.queue, "status", return_value={"available": False, "running": False}):
+        resp = _client().post("/api/design-studio/revisions/rev-a2/render")
+    assert resp.status_code == 503
+    assert "agent-browser" in resp.json()["error"]
+
+
+def test_render_route_queues_when_the_worker_is_running():
+    from tools.dashboard import design_thumbnails
+
+    status = {"available": True, "running": True, "pending": 1}
+    with patch.object(design_api, "_design_org", return_value=None), \
+         patch.object(design_thumbnails.queue, "enqueue", return_value=True) as enqueue, \
+         patch.object(design_thumbnails.queue, "status", return_value=status):
+        resp = _client().post("/api/design-studio/revisions/rev-a2/render")
+    assert resp.status_code == 202
+    assert resp.json()["queued"] is True
+    enqueue.assert_called_once_with("rev-a2")
 
 
 def test_update_revision_metadata_updates_description_and_clears_cache():
