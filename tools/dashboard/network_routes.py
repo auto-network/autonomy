@@ -2060,6 +2060,83 @@ async def _post_serve_cert_v3(request: Request, body: dict) -> JSONResponse:
                          "not_after": cert.not_after})
 
 
+async def get_unlock_plan(request: Request) -> JSONResponse:
+    """The pre-unlock to-do list: for each org slug, the verdict the unlock
+    ceremony needs to decide LOCALLY which steps to run — one fold per org, no
+    persona, no signing (design graph://914adcc6-b77). The client prefetches
+    this once (page load, before unlock) and gates each per-org step against it,
+    so a member/org/unlock that needs nothing makes ZERO further calls. It
+    replaces the ~5-round-trips-per-org probe storm the old per-step design ran
+    every unlock, and its verdicts subsume the scoping/recovery fixes:
+    committed_membership_org=false for personal/local stores (no checkpoint /
+    persona-serve attempt); serve_cert_present=false mints fresh instead of
+    deadlocking; a persona absent from checkpointer_pubs never checkpoints.
+    """
+    if _mock_mode():
+        return JSONResponse(
+            {"ok": False, "error": "mock dashboard has no authority ledger"},
+            status_code=502)
+    raw = request.query_params.get("orgs") or ""
+    slugs = [s for s in (p.strip() for p in raw.split(",")) if s]
+    if not slugs:
+        return JSONResponse(
+            {"ok": False, "error": "query must carry orgs=<comma-separated slugs>"},
+            status_code=400)
+    from tools.dashboard.link_serving_supervisor import serve_cert_state
+    from tools.dashboard import membership_checkpoint as cp
+    from tools.network.ledger import LedgerStore, org_ledger_db_path
+    try:
+        from tools.data_paths import LOCAL_STORE_KEYS
+    except Exception:
+        LOCAL_STORE_KEYS = ()
+
+    plan = {}
+    for slug in slugs:
+        org, refused = resolve_scoped_org(slug, request=request)
+        if refused is not None:
+            plan[slug] = {"slug": slug, "error": "scope-refused"}
+            continue
+        binding_member = _first_member(NETWORK_BINDING_SET_ID, org)
+        binding = binding_member.payload if binding_member is not None else {}
+        bound = bool(binding.get("org_uuid") and binding.get("root_pub")
+                     and binding.get("registry_url"))
+        okey = _first_member(NETWORK_ORG_KEY_SET_ID, org)
+        has_org_key = bool(okey is not None and (
+            okey.payload.get("sealed_root_key")
+            or okey.payload.get("armored_private_key")))
+        committed = bool(bound and has_org_key and org not in LOCAL_STORE_KEYS)
+
+        genesis_id = None
+        try:
+            path = org_ledger_db_path(org)
+            if path.exists():
+                with LedgerStore(path) as store:
+                    genesis_id = store.ledger.genesis_id
+        except Exception:
+            genesis_id = None
+
+        try:
+            st = serve_cert_state(org)
+            serve_present = st.get("status") == "ok"
+        except Exception:
+            serve_present = False
+
+        checkpoint = (cp.checkpoint_status(org) if committed
+                      else {"needed": False, "checkpointer_pubs": []})
+
+        plan[slug] = {
+            "slug": slug,
+            "org_uuid": binding.get("org_uuid"),
+            "root_pub": binding.get("root_pub"),
+            "genesis_id": genesis_id,
+            "committed_membership_org": committed,
+            "serve_cert_present": serve_present,
+            "serve_cert_due": (not serve_present),
+            "checkpoint": checkpoint,
+        }
+    return JSONResponse({"ok": True, "plan": plan})
+
+
 async def get_membership_checkpoint_decision(request: Request) -> JSONResponse:
     """Is a membership checkpoint due for this org, and if so the UNSIGNED
     record to sign (auto-tmers). Pure local fold + cache compare; no registry
@@ -3083,6 +3160,7 @@ ROUTES = [
     # alias; the POST submit shares the bare path. A path mismatch here 404s
     # into a silent 'unavailable' no-op, so it is asserted in
     # test_membership_checkpoint_routes against the JS's literal path.
+    Route("/api/network/unlock-plan", get_unlock_plan, methods=["GET"]),
     Route("/api/network/membership-checkpoint/decision",
           get_membership_checkpoint_decision, methods=["GET"]),
     Route("/api/network/membership-checkpoint",

@@ -161,6 +161,35 @@ def test_just_granted_checkpointer_not_eligible_first():
     assert d2.action == "assemble"
 
 
+def test_checkpoint_status_is_the_persona_independent_verdict():
+    # The unlock-plan verdict: needed + the checkpointer permission set, no
+    # persona, no signing. A fresh org has no adopted checkpoint -> needed;
+    # the owner (holds *) is a checkpointer, a plain member never is.
+    sim, founder = org_with_owner()
+    member = add_member(sim)
+    _install_org(sim)
+    st = cp.checkpoint_status(ORG)
+    assert st["needed"] is True
+    assert founder.public_hex in st["checkpointer_pubs"]
+    assert member.public_hex not in st["checkpointer_pubs"]
+
+    state = sim.fold()
+    seed = mc.build_root_checkpoint(
+        org=ORG, seq=0, genesis_id=sim.genesis_id, ledger_head=sim.genesis_id,
+        members_root_hex=mc.members_root(state),
+        checkpointers_root_hex=mc.checkpointers_root(state),
+        ts=TS, root=sim.root)
+    cp.record_adopted(ORG, seed)
+    assert cp.checkpoint_status(ORG)["needed"] is False
+
+
+def test_checkpoint_status_on_an_unfounded_org_is_benign():
+    # The plan must not fail on an org with no ledger — a benign verdict, never
+    # a raise.
+    st = cp.checkpoint_status("no-such-org")
+    assert st["needed"] is False and st["checkpointer_pubs"] == []
+
+
 def test_record_adopted_round_trips():
     sim, founder = org_with_owner()
     _install_org(sim)

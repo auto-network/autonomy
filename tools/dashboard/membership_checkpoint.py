@@ -165,6 +165,33 @@ def checkpoint_due(org: str, persona_pub: str, *, ts: int,
                               sign_with=SIGN_WITH_PERSONA)
 
 
+def checkpoint_status(org: str) -> dict:
+    """The persona-INDEPENDENT checkpoint verdict for the unlock plan.
+
+    ``needed`` is true when the fold's roots differ from the last adopted
+    checkpoint — i.e. a fresh checkpoint would change the committed view.
+    ``checkpointer_pubs`` is the permission set: a client whose derived persona
+    is not in it can never publish and must never attempt. No persona, no
+    network, no signing here — the unlock plan carries both so the client gates
+    the checkpoint step LOCALLY (needed AND my persona in checkpointer_pubs).
+    """
+    try:
+        state, _heads = _fold_state(org)
+    except Exception:
+        return {"needed": False, "checkpointer_pubs": [], "reason": "no-ledger"}
+    members_root = mc.members_root(state)
+    checkpointers_root = mc.checkpointers_root(state)
+    cached = _cached_adopted(org)
+    up_to_date = (cached is not None
+                  and cached.get("members_root") == members_root
+                  and cached.get("checkpointers_root") == checkpointers_root)
+    return {
+        "needed": not up_to_date,
+        "checkpointer_pubs": list(mc.checkpointer_pubs(state)),
+        "members_root": members_root,
+    }
+
+
 def record_adopted(org: str, signed_record: dict) -> None:
     """Cache a checkpoint the registry has adopted (called after a successful
     POST, or a one-time registry read that discovers a newer state)."""
