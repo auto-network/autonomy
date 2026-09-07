@@ -78,7 +78,11 @@ from agents.workspace_manager import (
 
 logger = logging.getLogger(__name__)
 from tools.dashboard.log_throttle import StateChangeLogger
-_preserved = StateChangeLogger(interval_s=60.0)
+_preserved = StateChangeLogger(
+    interval_s=60.0,
+    summary="session_monitor: worktree preserved: {keys} worktree(s) unchanged "
+            "({repeats} cleanup pass(es) in the last {interval:.0f}s)",
+)
 
 # inotify — optional, falls back to polling if unavailable
 try:

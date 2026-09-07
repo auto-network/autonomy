@@ -34,7 +34,11 @@ logger = logging.getLogger(__name__)
 # A refused caller usually keeps calling (a poller on an org-bound token, a
 # stale tab). One line when a (policy, method, path) starts being refused,
 # then a count once a minute — not one line per attempt.
-_refusals = StateChangeLogger(interval_s=60.0)
+_refusals = StateChangeLogger(
+    interval_s=60.0,
+    summary="api_authz_refused: {keys} distinct policy/route(s) still refused "
+            "({repeats} attempt(s) in the last {interval:.0f}s)",
+)
 
 
 class ApiPrincipalKind(str, Enum):

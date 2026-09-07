@@ -1453,7 +1453,10 @@ async def _run_event_proxy_once(bus, org, stop, control, max_pending: int) -> No
         consumer: getattr(_event_dispatch(consumer), "wants_event", None)
         for consumers in routes.values() for consumer in consumers
     }
-    backlog = StateChangeLogger(interval_s=60.0)
+    backlog = StateChangeLogger(
+        interval_s=60.0,
+        summary="event proxy still behind ({repeats} event(s) dropped in the last {interval:.0f}s)",
+    )
     queue = bus.subscribe()
     try:
         while stop is None or not stop.is_set():
