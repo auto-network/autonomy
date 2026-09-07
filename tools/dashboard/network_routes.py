@@ -2742,7 +2742,9 @@ async def post_serve_zone(request: Request) -> JSONResponse:
         return _service_publication_error("unknown_fields")
     from tools.dashboard import service_publication
 
-    binding_kind = body.get("binding_kind", "parent-txt")
+    # The token binding is the standard: one set of NS records carries the
+    # organization id. parent-txt remains accepted for zones bound that way.
+    binding_kind = body.get("binding_kind", "ns-token")
     try:
         projection, created = await asyncio.to_thread(
             service_publication.claim_zone, org, body.get("zone"), binding_kind
@@ -2841,6 +2843,7 @@ async def get_published_links(request: Request) -> JSONResponse:
         row["reservation_id"]: row
         for row in service_publication.list_service_targets(org)
     }
+    publishers = service_publication.reservation_publishers(org)
     services = []
     for reservation in service_publication.list_reservations(org):
         if reservation.get("state") == "released":
@@ -2852,6 +2855,11 @@ async def get_published_links(request: Request) -> JSONResponse:
             "target": target,
             "session_title": ((session or {}).get("label") or
                               (target or {}).get("session_id") or "Target unavailable"),
+            # Who published it (rows are organization-wide) and whether the
+            # hosting session is on THIS dashboard, so the card can link to
+            # it here or say it lives on another member's machine.
+            "publisher": publishers.get(reservation["reservation_id"]),
+            "session_local": session is not None,
         })
 
     shares = []

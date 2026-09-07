@@ -879,8 +879,30 @@ DNS01_DOMAIN = b"autonomy.network.serve.dns01.v1\n"
 # -- organization-owned delegated zones (custom domains) ---------------------
 #: The registry's own name servers: a delegated zone must name them.
 ZONE_NS_NAMES = frozenset({"ns1.auto.network", "ns2.auto.network"})
-#: Per-org name-server shape for the ns-token binding: <org-uuid>.ns.auto.network
+#: Per-org name-server shape for the ns-token binding: the delegation's NS
+#: names carry the organization id as their first label, under one of the
+#: token hosts (<org-uuid>.ns1.auto.network / .ns2.auto.network; the older
+#: single-name .ns.auto.network form is still accepted). One set of records
+#: at the parent both delegates the zone and binds it to the org — no
+#: separate TXT — and it works the same at a registrar for a bare domain.
 ZONE_NS_TOKEN_SUFFIX = ".ns.auto.network"
+ZONE_NS_TOKEN_HOSTS = ("ns1.auto.network", "ns2.auto.network", "ns.auto.network")
+
+
+def zone_token_names(org: str) -> tuple[str, str]:
+    """The two name servers an organization delegates a token-bound zone to."""
+    return (f"{org}.ns1.auto.network", f"{org}.ns2.auto.network")
+
+
+def _token_org(name: str) -> str | None:
+    """The org id a token name-server name carries, or None."""
+    name = name.rstrip(".").lower()
+    for host in ZONE_NS_TOKEN_HOSTS:
+        if name.endswith("." + host):
+            head = name[: -len(host) - 1]
+            if head and "." not in head:
+                return head
+    return None
 #: Parent-zone TXT binding: _autonomy.<parent> holds autonomy-org=<org-uuid>.
 ZONE_BINDING_LABEL = "_autonomy"
 ZONE_BINDING_KINDS = frozenset({"parent-txt", "ns-token"})
@@ -937,11 +959,16 @@ def verify_zone_binding(zone: str, org: str, binding_kind: str, *,
     except Exception as exc:
         raise ZoneValidationError(f"delegation lookup failed: {exc}") from exc
     if binding_kind == "ns-token":
-        expected = f"{org}{ZONE_NS_TOKEN_SUFFIX}"
-        if expected not in delegated:
+        # Every name server in the delegation must carry THIS org's id: a
+        # foreign server in the set would mean the zone is not ours alone.
+        if not delegated:
+            raise ZoneValidationError(f"parent does not delegate {zone}")
+        carried = {_token_org(n) for n in delegated}
+        if carried != {org}:
+            expected = ", ".join(zone_token_names(org))
             raise ZoneValidationError(
                 f"parent does not delegate {zone} to {expected}")
-        return expected
+        return ",".join(sorted(delegated))
     if not ZONE_NS_NAMES <= delegated:
         raise ZoneValidationError(
             f"parent does not delegate {zone} to {', '.join(sorted(ZONE_NS_NAMES))}")

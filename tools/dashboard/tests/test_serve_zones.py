@@ -393,6 +393,30 @@ def test_reservation_post_accepts_a_zone_and_zone_routes_exist(monkeypatch):
         assert r.status_code == 400 and r.json()["error"] == "unknown_fields"
         assert client.get("/api/network/serve-zones").json() == {"zones": [{"zone": ZONE, "state": "active"}]}
         r = client.post("/api/network/serve-zones", json={"zone": ZONE})
-        assert r.status_code == 201 and r.json()["zone"] == {"zone": ZONE, "binding_kind": "parent-txt"}
+        assert r.status_code == 201 and r.json()["zone"] == {"zone": ZONE, "binding_kind": "ns-token"}
         r = client.delete(f"/api/network/serve-zones/{ZONE}")
         assert r.status_code == 200 and r.json()["zone"]["state"] == "revoked"
+
+
+def test_reservation_publishers_resolve_display_names_from_member_profiles(monkeypatch):
+    from tools.graph.schemas.org_member_profile import MEMBER_PROFILE_SET_ID
+
+    class _Row:
+        def __init__(self, key, payload):
+            self.key, self.payload = key, payload
+
+    class _Set:
+        def __init__(self, members):
+            self.members = members
+
+    def read_owned_set(set_id, org=None, **kw):
+        assert set_id == MEMBER_PROFILE_SET_ID
+        return _Set([_Row("ab" * 32, {"display_name": "Jeremy"})])
+    monkeypatch.setattr(sp.settings_ops, "read_owned_set", read_owned_set)
+    monkeypatch.setattr(sp, "_reservation_members", lambda org: [
+        _Row("r1", {"persona_pub": "ab" * 32, "app_label": "themes"}),
+        _Row("r2", {"persona_pub": "cd" * 32, "app_label": "docs"}),
+    ])
+    publishers = sp.reservation_publishers("autonomy")
+    assert publishers["r1"] == {"persona_pub": "ab" * 32, "display_name": "Jeremy"}
+    assert publishers["r2"]["display_name"] == "member cdcdcdcd"

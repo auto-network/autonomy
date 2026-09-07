@@ -9,13 +9,15 @@ const assert = require('node:assert/strict');
 
 const script = readFileSync(resolve(__dirname, '../../static/js/published-links.js'), 'utf8');
 const settle = () => new Promise((r) => setTimeout(r, 0));
+const failNext = { value: null };
+function zoneCard2Publisher(root) { return root.querySelector('[data-service="r-zone"] .pl-publisher').textContent; }
 
 const ZONE = 'autonomy.taplink.net';
 const PERSONA = 'persona-77827e972ba4c37d4215';
 const DATA = {
   services: [
-    { reservation_id: 'r-persona', origin: `https://docs.${PERSONA}.serve.auto.network`, persona_label: PERSONA, app_label: 'docs', state: 'active', target: { session_id: 's1', port: 8000 }, session_title: 'S1' },
-    { reservation_id: 'r-zone', origin: `https://themes.${ZONE}`, persona_label: null, zone: ZONE, app_label: 'themes', state: 'active', target: { session_id: 's2', port: 8790 }, session_title: 'S2' },
+    { reservation_id: 'r-persona', origin: `https://docs.${PERSONA}.serve.auto.network`, persona_label: PERSONA, app_label: 'docs', state: 'active', target: { session_id: 's1', port: 8000 }, session_title: 'S1', publisher: { persona_pub: 'ab'.repeat(32), display_name: 'Jeremy' }, session_local: true },
+    { reservation_id: 'r-zone', origin: `https://themes.${ZONE}`, persona_label: null, zone: ZONE, app_label: 'themes', state: 'active', target: { session_id: 's2', port: 8790 }, session_title: 's2', publisher: { persona_pub: 'cd'.repeat(32), display_name: 'Dean' }, session_local: false },
   ],
   shares: [],
   service_warning: '',
@@ -30,10 +32,16 @@ async function mount() {
   const posts = [];
   w.fetch = async (url, options = {}) => {
     const method = options.method || 'GET';
+    if (failNext.value && method === 'POST' && url === '/api/network/serve-zones') {
+      const f = failNext.value; failNext.value = null;
+      posts.push({ url, method, body: JSON.parse(options.body) });
+      return { ok: false, status: f.status, json: async () => f.body };
+    }
     if (url === '/api/network/published-links' && method === 'GET') return { ok: true, status: 200, json: async () => DATA };
     if (method === 'POST' || method === 'PUT' || method === 'DELETE') {
       posts.push({ url, method, body: options.body ? JSON.parse(options.body) : null });
       if (url === '/api/network/service-reservations') return { ok: true, status: 201, json: async () => ({ reservation: { reservation_id: 'r-new' } }) };
+      if (url === '/api/network/serve-zones' && method === 'POST') return { ok: true, status: 201, json: async () => ({ zone: { zone: 'demo.example.com', state: 'active' } }) };
       return { ok: true, status: 200, json: async () => ({ ok: true }) };
     }
     throw new Error('unexpected fetch ' + method + ' ' + url);
@@ -82,26 +90,65 @@ async function main() {
   assert.equal(posts[2].url, '/api/network/service-reservations/r-persona/state');
   posts.length = 0;
 
-  // Custom domains: the claimed zone is listed; the add form shows the records and claims via POST.
+  // Custom domains: the claimed zone is listed with its service count, no binding badge, Release at the end.
   const zonesPanel = root.querySelector('.pl-zones');
   assert.ok(zonesPanel, 'custom domains panel rendered');
-  assert.ok(zonesPanel.querySelector(`[data-zone="${ZONE}"]`), 'claimed zone listed');
+  const domainCard = zonesPanel.querySelector(`[data-zone="${ZONE}"]`);
+  assert.ok(domainCard, 'claimed zone listed');
+  assert.equal(domainCard.querySelector('[data-action="filter"]').textContent, '1 service');
+  assert.ok(!domainCard.textContent.includes('parent-txt'), 'binding kind badge removed');
+  assert.ok(domainCard.querySelector('.pl-footer-end [data-action="release"]'), 'release sits in the end-aligned footer');
+  assert.ok(domainCard.textContent.includes('Any member of this organization can publish here.'));
+  assert.equal(root.querySelector('[data-action="zone-add"]').textContent, 'Add custom domain');
+
+  // Publisher shows on every service card; a foreign session is marked as such.
+  assert.ok(personaCard.querySelector('.pl-publisher').textContent.includes('Jeremy'));
+  assert.ok(zoneCard2Publisher(root).includes("another member's machine"));
+
+  // The count filters the services list; Show all clears it.
+  domainCard.querySelector('[data-action="filter"]').click();
+  await settle();
+  assert.deepEqual([...root.querySelectorAll('[data-service]')].map((c) => c.dataset.service), ['r-zone']);
+  assert.ok(root.querySelector('.pl-filter').textContent.includes(ZONE));
+  root.querySelector('[data-action="clear-filter"]').click();
+  await settle();
+  assert.equal(root.querySelectorAll('[data-service]').length, 2);
+
+  // The add form: plain label, live preview, two explained steps with labelled records, no binding choice.
   root.querySelector('[data-action="zone-add"]').click();
   await settle();
-  const add = root.querySelector('[data-zone-add]');
+  let add = root.querySelector('[data-zone-add]');
+  assert.equal(add.querySelector('[data-field="kind"]'), null, 'binding selector removed');
+  assert.equal(add.querySelector('.pl-field label').textContent, 'Your domain');
   const input = add.querySelector('[data-field="zone"]');
-  input.value = 'demo.example.com';
+  input.value = 'Demo.Example.com';
   input.dispatchEvent(new w.Event('input', { bubbles: true }));
-  const records = add.querySelector('pre').textContent;
-  assert.ok(records.includes('demo.example.com  NS  ns1.auto.network'), records);
-  assert.ok(records.includes('_autonomy.example.com  TXT  "autonomy-org=2d4b90cb-1e89-452b-82cb-68ca44fd8e52"'), records);
-  const kind = add.querySelector('[data-field="kind"]');
-  kind.value = 'ns-token';
-  kind.dispatchEvent(new w.Event('change', { bubbles: true }));
-  assert.ok(add.querySelector('pre').textContent.includes('demo.example.com  NS  2d4b90cb-1e89-452b-82cb-68ca44fd8e52.ns.auto.network'));
+  assert.ok(add.querySelector('[data-role="preview"]').textContent.includes('service.demo.example.com'));
+  const delegation = [...add.querySelectorAll('[data-role="delegation"] .pl-record')].map((r) => [...r.querySelectorAll('code')].map((c) => c.textContent));
+  assert.deepEqual(delegation, [['demo.example.com', 'NS', '2d4b90cb-1e89-452b-82cb-68ca44fd8e52.ns1.auto.network'], ['demo.example.com', 'NS', '2d4b90cb-1e89-452b-82cb-68ca44fd8e52.ns2.auto.network']]);
+  assert.equal(add.querySelector('[data-role="authorization"]'), null, 'no separate TXT step');
+  assert.equal(add.querySelector('[data-copy]').dataset.copy, '2d4b90cb-1e89-452b-82cb-68ca44fd8e52.ns1.auto.network');
+  assert.ok(add.textContent.includes('Name server delegation') && !add.textContent.includes('TXT authorization'));
+
+  // Verify posts the TXT binding; a refusal renders inline above the button in plain words, not in the page header.
+  failNext.value = { status: 409, body: { ok: false, error: 'zone_unverified', detail: 'parent does not delegate demo.example.com to ns1.auto.network, ns2.auto.network' } };
   add.querySelector('[data-action="zone-claim"]').click();
   await settle(); await settle(); await settle();
-  assert.deepEqual(posts[0], { url: '/api/network/serve-zones', method: 'POST', body: { zone: 'demo.example.com', binding_kind: 'ns-token' } });
+  assert.deepEqual(posts[0], { url: '/api/network/serve-zones', method: 'POST', body: { zone: 'Demo.Example.com', binding_kind: 'ns-token' } });
+  add = root.querySelector('[data-zone-add]');
+  const status = add.querySelector('[data-role="status"] .pl-status');
+  assert.ok(status && status.classList.contains('error'), 'inline status rendered');
+  assert.ok(status.textContent.includes('not pointing this name at the two Autonomy name servers'), status.textContent);
+  assert.equal(root.querySelector('.pl-error'), null, 'no header error');
+  assert.equal(add.querySelector('[data-field="zone"]').value, 'Demo.Example.com', 'draft kept after a refusal');
+  posts.length = 0;
+
+  // A successful verify shows the green check inline.
+  add.querySelector('[data-action="zone-claim"]').click();
+  await settle(); await settle(); await settle(); await settle();
+  add = root.querySelector('[data-zone-add]');
+  const ok = add.querySelector('[data-role="status"] .pl-status.ok');
+  assert.ok(ok && ok.textContent.includes('Verified'), 'green check after success');
   posts.length = 0;
 
   // Release asks for confirmation, then DELETEs the zone.
