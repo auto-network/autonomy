@@ -1626,40 +1626,96 @@ class MutationCatalog:
             )
         ]
 
-    def transaction_items(
+    def iter_transaction_items(
         self, transaction_ref: int, incarnation: str, transaction_id: str
-    ) -> list[AuthoredMutation]:
-        """The row changes of one transaction, as wire mutations, built from
-        the rows that still cite the transaction in fleet_sync_catalog and
-        their live rows -- exactly how a checkpoint is built. A row
-        overwritten by a later transaction is absent here and arrives under
-        that later transaction; the receiver resolves by timestamp, so the
-        superseded version was never needed. Empty when nothing survives.
-        """
-        items: list[AuthoredMutation] = []
-        # A row this machine could not realize yet (an attachment awaiting
-        # bytes) is not in the catalog, but its exact frame is parked in
-        # the quarantine with its replay identity. Forward it from there,
-        # so a relaying machine never serves the transaction short and a
-        # downstream watermark never passes a row nobody sent.
+    ) -> Iterator[AuthoredMutation]:
+        """The row changes of one transaction, as wire mutations, built
+        lazily in operation order from the rows that still cite the
+        transaction in fleet_sync_catalog (plus rows parked in the
+        quarantine with their frame) and their live rows -- exactly how a
+        checkpoint is built. A row overwritten by a later transaction is
+        absent and arrives under that later transaction. Lazy so that a
+        transaction with tens of thousands of surviving rows can be served
+        in bounded groups while it is built, instead of after minutes of
+        silence (SJC-2's autonomy scope, 2026-09-07)."""
         ensure_quarantine_table(self.conn)
-        for frame, operation in self.conn.execute(
-            "SELECT frame,operation_index FROM fleet_sync_quarantine "
-            "WHERE origin=? AND transaction_id=? AND frame IS NOT NULL "
-            "AND operation_index IS NOT NULL "
-            "AND reason!='settings_signature_invalid'",
-            (incarnation, transaction_id),
-        ).fetchall():
-            items.append(AuthoredMutation(
-                incarnation, transaction_id, int(operation),
-                decode_mutation_frame(bytes(frame)),
-            ))
-        for raw in self.conn.execute(
+        parked = [
+            (int(operation), bytes(frame))
+            for frame, operation in self.conn.execute(
+                "SELECT frame,operation_index FROM fleet_sync_quarantine "
+                "WHERE origin=? AND transaction_id=? AND frame IS NOT NULL "
+                "AND operation_index IS NOT NULL "
+                "AND reason!='settings_signature_invalid'",
+                (incarnation, transaction_id),
+            ).fetchall()
+        ]
+        cited = self.conn.execute(
             "SELECT address,timestamp_ns,tombstone,operation_index "
             "FROM fleet_sync_catalog WHERE transaction_ref=? "
             "ORDER BY operation_index",
             (int(transaction_ref),),
-        ).fetchall():
+        ).fetchall()
+        # Merge the two operation-ordered sequences without materializing
+        # the mutations up front; the catalog list holds small tuples only.
+        parked.sort(key=lambda p: p[0])
+        p_index = 0
+        for raw in cited:
+            operation = int(raw[3])
+            while p_index < len(parked) and parked[p_index][0] < operation:
+                yield AuthoredMutation(
+                    incarnation, transaction_id, parked[p_index][0],
+                    decode_mutation_frame(parked[p_index][1]),
+                )
+                p_index += 1
+            table, address = self._decode_address(bytes(raw[0]))
+            if bool(raw[2]):
+                mutation = Mutation(table, address, int(raw[1]), True)
+            else:
+                policy = TABLE_POLICIES[table]
+                row = self._live_row(self.conn, table, address)
+                mutation = Mutation(
+                    table, address, int(raw[1]), False,
+                    _logical_values(policy, row),
+                )
+            yield AuthoredMutation(incarnation, transaction_id, operation, mutation)
+        while p_index < len(parked):
+            yield AuthoredMutation(
+                incarnation, transaction_id, parked[p_index][0],
+                decode_mutation_frame(parked[p_index][1]),
+            )
+            p_index += 1
+
+    def transaction_group(
+        self, transaction_ref: int, incarnation: str, transaction_id: str,
+        *, offset: int, limit: int,
+    ) -> tuple[list[AuthoredMutation], bool]:
+        """One bounded slice of a transaction's items, built from rows on
+        THIS connection: the cited catalog rows ``[offset, offset+limit)``
+        in operation order, plus (in the first slice only) the rows parked
+        in the quarantine with their frame. Returns ``(items, more)``.
+        Stateless per call so a serve can fetch each slice on whatever
+        worker thread it runs on (sqlite connections are thread-bound)."""
+        items: list[AuthoredMutation] = []
+        if offset == 0:
+            ensure_quarantine_table(self.conn)
+            for frame, operation in self.conn.execute(
+                "SELECT frame,operation_index FROM fleet_sync_quarantine "
+                "WHERE origin=? AND transaction_id=? AND frame IS NOT NULL "
+                "AND operation_index IS NOT NULL "
+                "AND reason!='settings_signature_invalid'",
+                (incarnation, transaction_id),
+            ).fetchall():
+                items.append(AuthoredMutation(
+                    incarnation, transaction_id, int(operation),
+                    decode_mutation_frame(bytes(frame)),
+                ))
+        rows = self.conn.execute(
+            "SELECT address,timestamp_ns,tombstone,operation_index "
+            "FROM fleet_sync_catalog WHERE transaction_ref=? "
+            "ORDER BY operation_index LIMIT ? OFFSET ?",
+            (int(transaction_ref), int(limit), int(offset)),
+        ).fetchall()
+        for raw in rows:
             table, address = self._decode_address(bytes(raw[0]))
             if bool(raw[2]):
                 mutation = Mutation(table, address, int(raw[1]), True)
@@ -1674,7 +1730,45 @@ class MutationCatalog:
                 incarnation, transaction_id, int(raw[3]), mutation,
             ))
         items.sort(key=lambda item: item.operation_index)
-        return items
+        return items, len(rows) == int(limit)
+
+    def transaction_items(
+        self, transaction_ref: int, incarnation: str, transaction_id: str
+    ) -> list[AuthoredMutation]:
+        """All of ``iter_transaction_items`` as a list."""
+        return list(self.iter_transaction_items(
+            transaction_ref, incarnation, transaction_id,
+        ))
+
+    def next_transaction_heads_for_origin(
+        self,
+        incarnation: str,
+        after_timestamp_ns: int,
+        after_transaction_id: str | None = None,
+        *,
+        limit: int = 200,
+    ) -> list[tuple[int, int, str]]:
+        """Up to *limit* ``(ref, timestamp_ns, transaction_id)`` of
+        *incarnation* after the position, in (timestamp_ns, transaction_id)
+        order, without building any items."""
+        if after_transaction_id is None:
+            where = "t.timestamp_ns>?"
+            params: tuple = (incarnation, int(after_timestamp_ns), int(limit))
+        else:
+            where = "(t.timestamp_ns>? OR (t.timestamp_ns=? AND t.transaction_id>?))"
+            params = (incarnation, int(after_timestamp_ns), int(after_timestamp_ns),
+                      after_transaction_id, int(limit))
+        return [
+            (int(r[0]), int(r[1]), str(r[2]))
+            for r in self.conn.execute(
+                "SELECT t.id,t.timestamp_ns,t.transaction_id "
+                "FROM fleet_sync_transactions t "
+                "JOIN fleet_sync_origins o ON o.id=t.origin_id "
+                f"WHERE o.incarnation=? AND {where} "
+                "ORDER BY t.timestamp_ns, t.transaction_id LIMIT ?",
+                params,
+            ).fetchall()
+        ]
 
     def next_transaction_after_ref(
         self, after_transaction_ref: int = 0,

@@ -1033,6 +1033,29 @@ class SQLiteFleetSyncStore:
         finally:
             conn.close()
 
+    def next_transaction_heads_for_origin(self, incarnation, after_timestamp_ns,
+                                          after_transaction_id=None, *, limit=200):
+        conn, catalog = self._open()
+        try:
+            return catalog.next_transaction_heads_for_origin(
+                incarnation, after_timestamp_ns, after_transaction_id, limit=limit,
+            )
+        finally:
+            conn.close()
+
+    def transaction_group(self, transaction_ref, incarnation, transaction_id,
+                          *, offset: int, limit: int):
+        """One bounded slice of a transaction's items on a fresh connection;
+        returns ``(items, more)``."""
+        conn, catalog = self._open()
+        try:
+            return catalog.transaction_group(
+                transaction_ref, incarnation, transaction_id,
+                offset=offset, limit=limit,
+            )
+        finally:
+            conn.close()
+
     def next_transactions_for_origin(self, incarnation, after_timestamp_ns,
                                      after_transaction_id=None, *, limit=200):
         conn, catalog = self._open()
@@ -1297,6 +1320,17 @@ _PULL_TRACE = bool(os.environ.get("AUTONOMY_HARNESS_PULL_LOG"))
 
 #: Batched apply bounds (auto-t43kz): complete transactions queue until one
 #: of these trips, then apply on a single store connection.
+#: Most operations in one wire transaction group. A transaction with more
+#: surviving rows is served as several groups under the same (origin,
+#: transaction id): the puller applies each group as it arrives, so a large
+#: transaction never needs to be built in full before its first frame (the
+#: 60 s stream-silence bound) and never exceeds the receiver's per-group
+#: operation bound (MAX_TRANSACTION_OPERATIONS).
+SERVE_GROUP_OPERATIONS = 2_000
+
+#: Longest a pull holds received, unapplied transactions before committing
+#: them: progress survives a round that is cut after this many seconds.
+APPLY_FLUSH_INTERVAL_S = 5.0
 APPLY_BATCH_TRANSACTIONS = 200
 APPLY_BATCH_OPERATIONS = 5_000
 
@@ -1420,14 +1454,14 @@ class _OriginPager:
         while self._index < len(self._authors):
             origin = self._authors[self._index]
             if self._buffer:
-                ref, timestamp, transaction_id, items = self._buffer.pop(0)
+                ref, timestamp, transaction_id = self._buffer.pop(0)
                 self._position = (timestamp, transaction_id)
                 self.newest_ref = max(self.newest_ref, ref)
-                return ref, items, (origin, transaction_id, timestamp)
+                return ref, (origin, transaction_id, timestamp)
             if self._position is None:
                 self._position = (int(self.watermarks.get(origin, 0)), None)
             timestamp, transaction_id = self._position
-            self._buffer = self.store.next_transactions_for_origin(
+            self._buffer = self.store.next_transaction_heads_for_origin(
                 origin, timestamp, transaction_id, limit=SERVE_PAGE_TRANSACTIONS,
             )
             if not self._buffer:
@@ -1867,56 +1901,67 @@ class FleetSyncScheduler:
                     page = await asyncio.to_thread(pager.next)
                     if page is None:
                         break
-                    ref, items, header = page
+                    ref, header = page
                     cursor = max(cursor, ref)
                     stats["transactions"] += 1
-                    operation_count = len(items)
-                    if not items and header is not None:
+                    origin_key, transaction_id, timestamp_ns = header
+                    served_any = False
+                    offset = 0
+                    more = True
+                    if True:
+                        while more:
+                            self.authenticator.authorize(peer_pub)
+                            items, more = await asyncio.to_thread(
+                                store.transaction_group, ref, origin_key,
+                                transaction_id, offset=offset,
+                                limit=SERVE_GROUP_OPERATIONS,
+                            )
+                            offset += SERVE_GROUP_OPERATIONS
+                            if not items:
+                                continue
+                            served_any = True
+                            operation_count = len(items)
+                            if protocol_version >= 4:
+                                # v4: origin, transaction id and the group's
+                                # operation count travel once in a header
+                                # frame. A large transaction arrives as
+                                # several groups under one transaction id;
+                                # the receiver applies each as it lands.
+                                opening = encode_transaction_header(
+                                    origin_key, transaction_id, operation_count,
+                                )
+                                _digest_add(digest, opening)
+                                stats["bytes_sent"] += len(opening)
+                                yield opening
+                            for item in items:
+                                self.authenticator.authorize(peer_pub)
+                                encoded = (
+                                    encode_operation_frame(item)
+                                    if protocol_version >= 4
+                                    else encode_authored(
+                                        item, transaction_operations=operation_count
+                                    )
+                                )
+                                _digest_add(digest, encoded)
+                                count += 1
+                                stats["mutation_frames"] += 1
+                                stats["bytes_sent"] += len(encoded)
+                                yield encoded
+                    if not served_any and protocol_version >= 4:
                         # Nothing of this transaction survives here (every
                         # row it wrote was overwritten later). The puller
                         # still needs to advance its watermark past it, so
                         # it is named with its timestamp. Outside the
                         # digest and count, like the other control frames.
-                        if protocol_version >= 4:
-                            origin_key, transaction_id, timestamp_ns = header
-                            empty = canonical_json({
-                                "v": protocol_version,
-                                "kind": "transaction.empty",
-                                "origin": origin_key,
-                                "transaction_id": transaction_id,
-                                "timestamp_ns": int(timestamp_ns),
-                            })
-                            stats["bytes_sent"] += len(empty)
-                            yield empty
-                        continue
-                    if protocol_version >= 4 and items:
-                        # v4: the origin, transaction id, and operation
-                        # count travel once in a header frame instead of
-                        # being repeated inside every operation. The digest
-                        # covers header and operation frames alike; the
-                        # summary count still counts operations only.
-                        opening = encode_transaction_header(
-                            items[0].origin_incarnation,
-                            items[0].transaction_id,
-                            operation_count,
-                        )
-                        _digest_add(digest, opening)
-                        stats["bytes_sent"] += len(opening)
-                        yield opening
-                    for item in items:
-                        self.authenticator.authorize(peer_pub)
-                        encoded = (
-                            encode_operation_frame(item)
-                            if protocol_version >= 4
-                            else encode_authored(
-                                item, transaction_operations=operation_count
-                            )
-                        )
-                        _digest_add(digest, encoded)
-                        count += 1
-                        stats["mutation_frames"] += 1
-                        stats["bytes_sent"] += len(encoded)
-                        yield encoded
+                        empty = canonical_json({
+                            "v": protocol_version,
+                            "kind": "transaction.empty",
+                            "origin": origin_key,
+                            "transaction_id": transaction_id,
+                            "timestamp_ns": int(timestamp_ns),
+                        })
+                        stats["bytes_sent"] += len(empty)
+                        yield empty
                 self.authenticator.authorize(peer_pub)
                 if served_checkpoint:
                     newest = await asyncio.to_thread(
@@ -2417,8 +2462,10 @@ class FleetSyncScheduler:
                         peer_watermark=peer_watermark,
                     )
 
+            last_flush_at = asyncio.get_running_loop().time()
+
             async def apply_pending(items: list[AuthoredMutation]) -> None:
-                nonlocal batch_bytes
+                nonlocal batch_bytes, last_flush_at
                 if _PULL_TRACE and items:
                     received_ids.append((
                         items[0].origin_incarnation[:8], items[0].transaction_id,
@@ -2429,11 +2476,20 @@ class FleetSyncScheduler:
                 # already size-checked on decode, and a transaction is at
                 # most MAX_TRANSACTION_OPERATIONS operations.
                 batch_bytes += len(items)
+                now_flush = asyncio.get_running_loop().time()
                 if (
                     len(batch) >= APPLY_BATCH_TRANSACTIONS
                     or batch_bytes >= APPLY_BATCH_OPERATIONS
+                    # Time also bounds a batch: a round cut by the server
+                    # (a connector recycled mid-serve, a dropped link)
+                    # keeps what arrived before the cut instead of losing
+                    # the whole round and repeating it identically
+                    # (SJC-2 autonomy, 23 identical failed rounds,
+                    # 2026-09-07).
+                    or now_flush - last_flush_at >= APPLY_FLUSH_INTERVAL_S
                 ):
                     await flush_batch()
+                    last_flush_at = asyncio.get_running_loop().time()
 
             def validate_pending() -> None:
                 if not pending:

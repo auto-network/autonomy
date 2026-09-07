@@ -1247,3 +1247,85 @@ async def test_repeated_unkept_deliveries_widen_the_refusal(tmp_path, monkeypatc
     await asyncio.sleep(0.25)                         # < window(1)=0.4s
     with pytest.raises(fleet_relay_sync.FleetRelaySyncError, match="strike 2"):
         await fresh_pull("ef" * 16)
+
+
+@pytest.mark.asyncio
+async def test_large_transaction_is_served_in_bounded_groups_and_applies_whole(
+    tmp_path, monkeypatch
+):
+    """A transaction with more surviving rows than one wire group carries is
+    served as several groups under one transaction id, the first group
+    leaving before the whole transaction is built (the 60 s silence bound),
+    and the receiver applies every row (SJC-2 autonomy scope, 2026-09-07)."""
+    from tools.network import fleet_sync_scheduler as fss
+    from tools.network.fleet_sync_scheduler import (
+        _TRANSACTION_MAGIC, encode_pull_request, SQLiteFleetSyncStore,
+        decode_transaction_header,
+    )
+    from tools.network.fleet_sync.catalog import MutationCatalog
+
+    monkeypatch.setattr(fss, "SERVE_GROUP_OPERATIONS", 40)
+    fleet = _two_machine_fleet()
+    alpha = tmp_path / "alpha.db"
+    _prepare_org_db(alpha, fleet.server_machine.public_hex)
+    db = GraphDB(alpha)
+    try:
+        catalog = MutationCatalog(db.conn, fleet.server_machine.public_hex)
+        with catalog.transaction(5_000, "tx-bulk"):
+            for i in range(105):
+                db.conn.execute(
+                    "INSERT INTO sources(id,type,title,metadata,created_at,ingested_at)"
+                    " VALUES(?,?,?,?,?,?)",
+                    (f"bulk-{i:03d}", "note", f"t{i}", "{}",
+                     "2026-09-07T00:00:00Z", "2026-09-07T00:00:00Z"),
+                )
+        db.conn.commit()
+    finally:
+        db.close()
+    store = SQLiteFleetSyncStore(alpha)
+    personal = tmp_path / "personal.db"
+    personal.touch()
+    server = _configure_relay_server(fleet, personal, monkeypatch)
+    monkeypatch.setattr(
+        server.scheduler, "_scope_paths",
+        lambda: {"personal": personal, "alpha": alpha},
+    )
+    request = encode_pull_request(
+        "cd" * 32, compat=store.compatibility_digest(), resume=(),
+        scope="alpha", bootstrap=False, watermarks={"ee" * 32: 1},
+    )
+    stream = await server.scheduler._handle("tok", request, fleet.client_machine.public_hex)
+    frames = [f async for f in stream]
+    headers = [decode_transaction_header(f) for f in frames if f.startswith(_TRANSACTION_MAGIC)]
+    # 105 rows in groups of 40: three groups, one transaction id.
+    assert [n for _o, _tx, n in headers] == [40, 40, 25]
+    assert {tx for _o, tx, _n in headers} == {"tx-bulk"}
+
+    # The receiver applies every group; all 105 rows land once.
+    target = tmp_path / "target.db"
+    _prepare_org_db(target, fleet.client_machine.public_hex)
+    tdb = GraphDB(target)
+    try:
+        right = MutationCatalog(tdb.conn, fleet.client_machine.public_hex)
+        from tools.network.fleet_sync_scheduler import _OPERATION_MAGIC, decode_operation_frame
+        from tools.network.fleet_sync.compaction import AuthoredMutation
+        group: list = []
+        applied = 0
+        current = None
+        for f in frames:
+            if f.startswith(_TRANSACTION_MAGIC):
+                if group:
+                    applied += right.apply_remote_batch(group)[0]
+                    group = []
+                current = decode_transaction_header(f)
+            elif f.startswith(_OPERATION_MAGIC):
+                op, mutation = decode_operation_frame(f)
+                group.append(AuthoredMutation(current[0], current[1], op, mutation))
+        if group:
+            applied += right.apply_remote_batch(group)[0]
+        assert applied == 105
+        assert tdb.conn.execute("SELECT COUNT(*) FROM sources WHERE id LIKE 'bulk-%'").fetchone()[0] == 105
+        # And the receiver's watermark for the origin passed the transaction.
+        assert right.origin_watermarks()[fleet.server_machine.public_hex] == 5_000
+    finally:
+        tdb.close()
