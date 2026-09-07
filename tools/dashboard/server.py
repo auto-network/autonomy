@@ -578,6 +578,15 @@ def _discard_restart_event_cache() -> None:
         discard(lambda topic, _data, _decoded_ok: topic == "server:restart")
 
 
+def _attribution_label(attribution: dict | None) -> str:
+    """``<session>/<short-commit>`` for the log line; ``-`` when unknown."""
+    if not attribution:
+        return "-"
+    who = attribution.get("session") or attribution.get("trigger") or "-"
+    commit = str(attribution.get("commit_hash") or "")[:8]
+    return f"{who}/{commit}" if commit else str(who)
+
+
 async def _emit_restart_complete() -> None:
     """Publish a durable restart completion only after this process is ready."""
     restart_notice = _read_restart_notice()
@@ -601,6 +610,11 @@ async def _emit_restart_complete() -> None:
         payload["attribution"] = attribution
     await event_bus.broadcast("server:restart", payload, dedup=False)
     _discard_restart_event_cache()
+    logger.info(
+        "restart announced phase=complete attribution=%s elapsed=%.1fs",
+        _attribution_label(attribution if isinstance(attribution, dict) else None),
+        payload["duration_ms"] / 1000,
+    )
     try:
         RESTART_NOTICE_STATE_PATH.unlink()
     except FileNotFoundError:
@@ -647,6 +661,10 @@ async def _announce_restart(
         await event_bus.broadcast("server:restart", payload, dedup=False)
         _discard_restart_event_cache()
         _restart_notice_payload = payload
+        logger.info(
+            "restart announced phase=%s attribution=%s",
+            phase, _attribution_label(attribution),
+        )
         return payload
 # Resource collector ring buffers survive hot reloads the same way the
 # event bus does: snapshot on shutdown, restore on boot. Env-overridable
