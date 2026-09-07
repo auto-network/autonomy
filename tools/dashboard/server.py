@@ -11682,6 +11682,38 @@ async def api_design_screenshot(request):
     return JSONResponse({"path": abs_path, "injected": injected})
 
 
+async def api_share_state(request):
+    """GET /api/share-state/{target_type}/{target_uuid}?org=&ids=a,b
+
+    The share state one asset surface shows (the AssetPresence control):
+    active, unexpired link grants that reach the asset. A read model over
+    the org's grant rows; nothing here mints or revokes."""
+    denied = api_auth.require_authenticated_api_caller(request)
+    if denied is not None:
+        return denied
+    from tools.dashboard import design_shares
+
+    target_type = request.path_params["target_type"]
+    target_uuid = request.path_params["target_uuid"]
+    if target_type not in design_shares.SHARE_TARGET_TYPES:
+        return JSONResponse({"error": "unknown target type"}, status_code=400)
+    requested_org = (request.query_params.get("org") or "").strip() or None
+    org, refused = api_auth.resolve_scoped_org(requested_org, request=request)
+    if refused is not None:
+        return refused
+    if not isinstance(org, str) or not org:
+        org = requested_org or "autonomy"
+    extra = [part for part in (request.query_params.get("ids") or "").split(",") if part]
+    try:
+        state = await asyncio.to_thread(
+            design_shares.share_for_target, org, target_type, target_uuid, extra,
+        )
+    except Exception:
+        logger.exception("share-state: unavailable for %s/%s", target_type, target_uuid)
+        return JSONResponse({"shared": False, "grants": [], "error": "share state unavailable"})
+    return JSONResponse(state)
+
+
 async def page_experiments_redirect(request):
     """Redirect /experiments/{id} to /design/{id} for backwards compat."""
     exp_id = request.path_params["id"]
@@ -20872,6 +20904,7 @@ routes = [
     Route("/api/design/{id}/dismiss", api_design_dismiss, methods=["POST"]),
     Route("/api/design/{id}/submit", api_design_submit, methods=["POST"]),
     Route("/api/design/{id}/screenshot", api_design_screenshot, methods=["POST"]),
+    Route("/api/share-state/{target_type}/{target_uuid}", api_share_state, methods=["GET"]),
     # Backwards compat redirects
     Route("/experiments/{id}", page_experiments_redirect),
 

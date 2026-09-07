@@ -172,7 +172,10 @@
                     <img class="sc-org-img" :src="src.org.favicon" x-show="src.org.favicon" :alt="src.org.name">
                   </span>
                 </template>
-                <div style="font-size:14px; font-weight:600; color:#f1f5f9; line-height:1.3; overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical" x-text="displayTitle"></div>
+                <div style="font-size:14px; font-weight:600; color:#f1f5f9; line-height:1.3; overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; flex:1 1 auto; min-width:0" x-text="displayTitle"></div>
+                <template x-if="isNote">
+                  <div x-ref="presenceHost" data-testid="note-presence" class="design-presence-host" style="margin-left:auto; flex:0 0 auto"></div>
+                </template>
               </div>
 
               <!-- Row 2.25: tmux session chip + viewer link (session-type sources) -->

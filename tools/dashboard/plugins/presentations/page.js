@@ -130,15 +130,39 @@
     deck = deck || {};
     var subtitle = deck.subtitle ? '<span>' + escapeHtml(deck.subtitle) + '</span>' : '';
     return '<div class="present-topbar">' +
-      '<a href="/presentations" class="present-topbar-back" title="Deck library" aria-label="Deck library">' +
+      '<a href="/presentations" class="present-topbar-back" title="Slides" aria-label="Back to Slides">' +
       '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>' +
       '</a>' +
       '<div class="present-topbar-title"><strong>' + escapeHtml(deck.name || 'Untitled deck') + '</strong>' + subtitle + '</div>' +
       '<div class="present-topbar-side">' +
-      topbarPresenceHtml(participants, ownerPresence) +
       '<div class="present-topbar-count">' + String(Number(activeSlide || 0) + 1) + ' / ' + String(slideCount || 1) + '</div>' +
+      '<div class="present-topbar-presence-host" data-testid="present-topbar-presence"></div>' +
       '</div>' +
       '</div>';
+  }
+
+  // Sessions for the shared AssetPresence control: the deck's owner first,
+  // then every present participant (SurfacePresence rows).
+  function presenceSessions(deck, participants, ownerPresence) {
+    var rows = [];
+    var seen = {};
+    var owner = ownerPresence && ownerPresence.participant_id;
+    if (owner) {
+      seen[owner] = true;
+      rows.push({ id: owner, label: ownerPresence.participant_label || owner,
+                  last_push: (deck && (deck.modified_at || deck.created_at)) || '', count: 0 });
+    } else if (deck && deck.creator_session_id && !seen[deck.creator_session_id]) {
+      seen[deck.creator_session_id] = true;
+      rows.push({ id: deck.creator_session_id, label: deck.creator_session_label || deck.creator_session_id,
+                  last_push: deck.modified_at || deck.created_at || '', count: 0 });
+    }
+    (Array.isArray(participants) ? participants : []).forEach(function (p) {
+      var id = p && p.participant_id;
+      if (!id || seen[id]) return;
+      seen[id] = true;
+      rows.push({ id: id, label: p.participant_label || id, last_push: p.heartbeat_at || '', count: 0 });
+    });
+    return rows;
   }
 
   function clamp(value, min, max) {
@@ -284,6 +308,7 @@
         },
 
         destroy: function () {
+          if (this._presence) { this._presence.destroy(); this._presence = null; }
           if (this._messageHandler) window.removeEventListener('message', this._messageHandler);
           if (this._keydownHandler) window.removeEventListener('keydown', this._keydownHandler);
           this._messageHandler = null;
@@ -435,7 +460,7 @@
 
         updateTopbar: function () {
           var deckName = (this.deck && this.deck.name) || '';
-          document.title = deckName ? deckName + ' · Present' : 'Present';
+          document.title = deckName ? deckName + ' · Slides' : 'Slides';
           if (!window.Autonomy || typeof window.Autonomy.setTopbar !== 'function') return;
           window.Autonomy.setTopbar({
             html: topbarHtml(
@@ -446,6 +471,36 @@
               this.ownerPresence,
             ),
           });
+          this._mountPresence();
+        },
+
+        // The shared AssetPresence control (same as Design Studio and Notes)
+        // lives in the topbar; setTopbar re-renders the HTML, so re-mount
+        // whenever the host element is new.
+        _presenceOptions: function () {
+          var deck = this.deck || {};
+          return {
+            org: deck.org || 'autonomy',
+            targetType: 'present',
+            targetUuid: deck.design_id || deck.key || '',
+            extraIds: [deck.latest_revision_id].filter(Boolean),
+            title: deck.name || 'Deck',
+            noun: 'deck',
+            sessions: presenceSessions(deck, this.participants, this.ownerPresence),
+            chat: null,
+          };
+        },
+
+        _mountPresence: function () {
+          if (!window.AssetPresence) return;
+          var host = document.querySelector('.present-topbar-presence-host');
+          if (!host) return;
+          if (this._presence && this._presence.el === host) {
+            this._presence.update(this._presenceOptions());
+            return;
+          }
+          if (this._presence) this._presence.destroy();
+          this._presence = window.AssetPresence.mount(host, this._presenceOptions());
         },
 
         nextSlide: function () {
@@ -459,6 +514,11 @@
         openDeck: function (deck) {
           var id = deck && (deck.design_id || deck.key);
           if (id) navigateTo('/presentations/' + encodeURIComponent(id));
+        },
+
+        thumbnailUrl: function (deck) {
+          var rev = deck && deck.latest_revision_id;
+          return rev ? '/api/design-studio/revisions/' + encodeURIComponent(rev) + '/thumbnail' : '';
         },
 
         openDesign: function (deck) {

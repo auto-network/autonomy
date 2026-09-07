@@ -109,6 +109,33 @@
         } catch { return []; }
       },
 
+      // The shared AssetPresence control (same as Design Studio and Slides):
+      // the note's author session, and the note's share state.
+      _mountNotePresence() {
+        if (!this.isNote || !window.AssetPresence) return;
+        const self = this;
+        this.$nextTick(() => {
+          const host = self.$refs && self.$refs.presenceHost;
+          if (!host || self._destroyedNote) return;
+          const meta = self._sourceMeta || {};
+          const sessions = [];
+          const author = meta.author || '';
+          if (author) sessions.push({ id: author, label: author, last_push: self.src?.created_at || '', count: 0 });
+          const opts = {
+            org: (self.src && self.src.org && self.src.org.slug) || self.callerOrg || 'autonomy',
+            targetType: 'note',
+            targetUuid: self.src?.id || self.id,
+            title: self.displayTitle,
+            noun: 'note',
+            sessions,
+            chat: null,
+          };
+          if (self._presence && self._presence.el === host) { self._presence.update(opts); return; }
+          if (self._presence) self._presence.destroy();
+          self._presence = window.AssetPresence.mount(host, opts);
+        });
+      },
+
       // Author from metadata
       get author() {
         try {
@@ -583,6 +610,8 @@
             });
           }
 
+          this._mountNotePresence();
+
           // Update page title
           const titleEl = document.getElementById('page-title');
           if (titleEl) {
@@ -619,7 +648,10 @@
         }
       },
 
-      destroy() {},
+      destroy() {
+        this._destroyedNote = true;
+        if (this._presence) { this._presence.destroy(); this._presence = null; }
+      },
     }));
   });
 })();

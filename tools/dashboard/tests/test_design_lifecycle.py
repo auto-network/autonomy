@@ -136,3 +136,16 @@ def test_active_design_grants_filters_types_and_expiry(monkeypatch):
     assert grants[0]["label"] == "deck"
     assert design_shares.shared_design_ids("autonomy", now=NOW) == {"d2"}
     assert design_shares.active_design_grants(None) == []
+
+
+def test_share_for_target_treats_design_and_present_grants_alike_and_others_strictly(monkeypatch):
+    grants = [
+        {"target_uuid": "deck-1", "target_type": "present", "token": "p", "issued_at": "2026-09-01T00:00:00Z"},
+        {"target_uuid": "note-1", "target_type": "note", "token": "n", "issued_at": "2026-09-02T00:00:00Z"},
+    ]
+    monkeypatch.setattr(design_shares, "active_grants",
+                        lambda org, types=design_shares.SHARE_TARGET_TYPES, now=None: [g for g in grants if g["target_type"] in set(types)])
+    assert design_shares.share_for_target("autonomy", "design", "deck-1")["shared"] is True    # present grant reaches the design
+    assert design_shares.share_for_target("autonomy", "note", "note-1")["grants"][0]["token"] == "n"
+    assert design_shares.share_for_target("autonomy", "note", "deck-1")["shared"] is False    # a deck grant is not a note grant
+    assert design_shares.share_for_target("autonomy", "present", "other", ["deck-1"])["shared"] is True
