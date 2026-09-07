@@ -61,6 +61,7 @@ from tools.dashboard.dao.dashboard_db import (
     get_session,
     get_tailable_sessions,
     insert_session,
+    rewrite_session_paths,
     mark_dead,
     delete_session,
     update_activity_state,
@@ -83,6 +84,45 @@ _preserved = StateChangeLogger(
     summary="session_monitor: worktree preserved: {keys} worktree(s) unchanged "
             "({repeats} cleanup pass(es) in the last {interval:.0f}s)",
 )
+# A session directory that does not exist in this process's frame stays
+# absent across every rescan; say so once per directory, then a count.
+_watch_gaps = StateChangeLogger(
+    interval_s=600.0,
+    summary="session_monitor: {keys} session director(ies) still absent "
+            "({repeats} watch attempt(s) skipped in the last {interval:.0f}s)",
+)
+
+
+def _agent_runs_root() -> Path:
+    """The agent-runs directory in THIS process's data frame
+    (``DASHBOARD_AGENT_RUNS_DIR`` → ``<DATA_ROOT>/agent-runs``)."""
+    from tools.data_paths import resolve_store
+    return Path(resolve_store("agent_runs"))
+
+
+def _local_agent_runs_path(stored: str | Path | None) -> str | None:
+    """Re-root a stored agent-runs path into this frame when the stored one
+    does not resolve here (auto-nsu0e).
+
+    Rows written before the Compose cutover carry the host prefix
+    (``/home/…/data/agent-runs/<session>/sessions``); inside the container
+    that path does not exist, so the monitor could never watch those
+    sessions. Re-rooting by the stable ``/agent-runs/`` anchor onto the
+    local agent-runs directory recovers them. A stored path that exists is
+    kept as is; a path without the anchor (host ``.claude`` transcripts) and
+    a re-rooted path that does not exist either pass through unchanged.
+    """
+    if stored is None:
+        return None
+    text = str(stored)
+    if os.path.exists(text):
+        return text
+    anchor = "/agent-runs/"
+    i = text.find(anchor)
+    if i == -1:
+        return text
+    candidate = str(_agent_runs_root()).rstrip("/") + text[i + len("/agent-runs"):]
+    return candidate if os.path.exists(candidate) else text
 
 # inotify — optional, falls back to polling if unavailable
 try:
@@ -1512,11 +1552,7 @@ class SessionMonitor:
             if p.exists():
                 return p
 
-        env_override = _os.environ.get("DASHBOARD_AGENT_RUNS_DIR")
-        if env_override:
-            agent_runs = Path(env_override)
-        else:
-            agent_runs = Path(__file__).resolve().parents[2] / "data" / "agent-runs"
+        agent_runs = _agent_runs_root()
         if not agent_runs.exists():
             return None
 
@@ -1786,10 +1822,11 @@ class SessionMonitor:
         For all unresolved sessions with resolution_dir: add IN_CREATE dir watch.
         """
         sessions = get_live_sessions()
-        agent_runs = Path(__file__).resolve().parents[2] / "data" / "agent-runs"
+        agent_runs = _agent_runs_root()
         recovered = 0
         for row in sessions:
             tmux_name = row["tmux_name"]
+            self._rehome_row_paths(row)
             if row.get("jsonl_path"):
                 # Already resolved — ensure dir watch exists for rollover
                 # detection, then re-observe the linked path as a persisted
@@ -1980,6 +2017,7 @@ class SessionMonitor:
             self._use_inotify = True
             # Add watches for sessions already in the DB
             for row in get_tailable_sessions():
+                self._rehome_row_paths(row)
                 self._add_file_watch(row["tmux_name"], row["jsonl_path"])
                 dir_path = row.get("resolution_dir") or str(Path(row["jsonl_path"]).parent)
                 self._add_dir_watch(row["tmux_name"], dir_path)
@@ -1991,6 +2029,36 @@ class SessionMonitor:
             logger.warning("session_monitor: inotify init failed (%s), using polling", exc)
             self._inotify = None
             self._use_inotify = False
+
+    def _rehome_row_paths(self, row: dict) -> bool:
+        """Translate a row's stored transcript paths into this frame and, when
+        that changes anything, persist the rewrite so every later reader (the
+        tail endpoint, ingest, the viewer) resolves the same file (auto-nsu0e).
+        Mutates ``row`` in place; returns whether a rewrite was persisted."""
+        changes: dict[str, str] = {}
+        for field_name in ("jsonl_path", "resolution_dir"):
+            stored = row.get(field_name)
+            if not stored:
+                continue
+            local = _local_agent_runs_path(stored)
+            if local and local != stored:
+                changes[field_name] = local
+        if not changes:
+            return False
+        row.update(changes)
+        try:
+            rewrite_session_paths(row["tmux_name"], **changes)
+        except Exception:
+            logger.warning(
+                "session_monitor: could not persist re-homed paths for %s",
+                row.get("tmux_name"), exc_info=True,
+            )
+            return False
+        logger.info(
+            "session_monitor: re-homed pre-cutover paths for %s: %s",
+            row.get("tmux_name"), ", ".join(f"{k}={v}" for k, v in changes.items()),
+        )
+        return True
 
     def _add_file_watch(self, tmux_name: str, jsonl_path: str) -> None:
         """Subscribe a session's streaming tail to its file's inode watch
@@ -2006,6 +2074,7 @@ class SessionMonitor:
         # Drop this session's previous file subscription (re-link).
         self._unsubscribe_watch(("session", tmux_name))
         ts.watch_descriptor = None
+        jsonl_path = _local_agent_runs_path(jsonl_path) or jsonl_path
         try:
             st = os.stat(jsonl_path)
         except OSError as exc:
@@ -2153,6 +2222,19 @@ class SessionMonitor:
         """
         if not self._inotify:
             return
+        dir_path = _local_agent_runs_path(dir_path) or dir_path
+        if not os.path.isdir(dir_path):
+            # Attempting add_watch on an absent directory raised ENOENT and
+            # logged it on every startup and rescan (auto-nsu0e). Skip the
+            # attempt; the next registration or rescan tries again, and the
+            # line repeats only as a per-directory state + a 10-min count.
+            _watch_gaps.emit(
+                logger, logging.WARNING, ("dir", dir_path), "absent",
+                "session_monitor: session directory absent, watch skipped for %s: %s",
+                tmux_name, dir_path,
+            )
+            return
+        _watch_gaps.forget(("dir", dir_path))
         if dir_path in self._dir_path_to_wd:
             # Directory already watched — attach this session to the refcount
             # set, then still scan: another session's initial scan may have

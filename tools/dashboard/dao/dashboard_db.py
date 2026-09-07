@@ -678,6 +678,33 @@ def update_jsonl_link(
     conn.commit()
 
 
+def rewrite_session_paths(
+    tmux_name: str,
+    *,
+    jsonl_path: str | None = None,
+    resolution_dir: str | None = None,
+) -> None:
+    """Re-home a session's stored transcript paths into this process's data
+    frame (auto-nsu0e). Rows written before the Compose cutover carry the
+    old host prefix; only the given fields are touched."""
+    sets: list[str] = []
+    args: list[str] = []
+    if jsonl_path is not None:
+        sets.append("jsonl_path=?")
+        args.append(jsonl_path)
+    if resolution_dir is not None:
+        sets.append("resolution_dir=?")
+        args.append(resolution_dir)
+    if not sets:
+        return
+    conn = get_conn()
+    conn.execute(
+        f"UPDATE tmux_sessions SET {', '.join(sets)} WHERE tmux_name=?",
+        (*args, tmux_name),
+    )
+    conn.commit()
+
+
 def next_link_seq(tmux_name: str) -> int:
     """Increment and return the per-session link sequence nonce (auto-suvcp).
 
