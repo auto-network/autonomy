@@ -133,3 +133,27 @@ def test_same_bead_via_two_trackers_dedupes_to_one(org_tree, monkeypatch):
     monkeypatch.setattr(disp, "run_bd", fake_run_bd)
     beads = disp.get_ready_beads()
     assert [b["id"] for b in beads] == ["auto-dup1"]
+
+
+def test_run_bd_defaults_beads_dir_to_the_data_root_tracker(monkeypatch):
+    """The Compose dispatcher has no BEADS_DIR in its environment; without a
+    default bd searched its cwd, logged "no beads database found" every cycle
+    and fell back to the API path. Mirror the dashboard's run_cli default."""
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["env"] = kw.get("env")
+        return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+
+    import tools.data_paths as data_paths
+    monkeypatch.setattr(disp.subprocess, "run", fake_run)
+    monkeypatch.setattr(data_paths, "beads_client_env", lambda beads_dir=None: {})
+    monkeypatch.delenv("BEADS_DIR", raising=False)
+
+    disp.run_bd(["query", 'status=open AND label="readiness:approved"', "--json"], beads_dir=None)
+    assert captured["env"]["BEADS_DIR"] == str(disp.DATA_ROOT / ".beads")
+
+    # An ambient BEADS_DIR still wins (session containers set their own).
+    monkeypatch.setenv("BEADS_DIR", "/elsewhere/.beads")
+    disp.run_bd(["query", "status=open", "--json"], beads_dir=None)
+    assert captured["env"]["BEADS_DIR"] == "/elsewhere/.beads"
