@@ -45,6 +45,11 @@ def client(monkeypatch, tmp_path):
     ])
     with TestClient(app) as c:
         yield c
+    # This fixture repoints AUTONOMY_ORGS_DIR/AUTONOMY_DATA_ROOT at a tmp
+    # dir; tools.graph.db pools connections by path, so a handle opened
+    # under those paths must not survive into the next module.
+    from tools.graph.db import GraphDB
+    GraphDB.close_all_pooled()
 
 
 class Org:
