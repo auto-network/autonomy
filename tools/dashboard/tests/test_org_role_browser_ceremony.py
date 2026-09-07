@@ -75,6 +75,16 @@ def _vector(server_url: str, seed: bytes, *args: str) -> dict:
     return result
 
 
+@pytest.fixture(autouse=True)
+def _drained_pool():
+    """tools.graph.db pools connections in a module-level dict keyed by path.
+    This module repoints AUTONOMY_ORGS_DIR at a tmp dir and the live server
+    opens org DBs there, so without a teardown drain the next module in the
+    same xdist worker reads a handle onto a deleted directory."""
+    yield
+    GraphDB.close_all_pooled()
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
 def test_browser_role_module_defines_grants_and_revokes_on_a_live_ledger(
     tmp_path, monkeypatch,
