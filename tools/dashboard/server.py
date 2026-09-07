@@ -21467,6 +21467,29 @@ async def _on_design_thumbnail_rendered(meta: dict) -> None:
         })
 
 
+async def _design_lifecycle_sweeper() -> None:
+    """Archive quiet designs at startup and hourly (design_lifecycle)."""
+    from tools.dashboard import design_lifecycle
+
+    while True:
+        try:
+            result = await asyncio.to_thread(design_lifecycle.sweep)
+            if result.get("archived"):
+                from tools.dashboard.plugins.design_studio.entrypoints import api as design_api
+                design_api._clear_catalog_cache()
+                await event_bus.broadcast(
+                    "plugin_badges", {"design_studio": {"badge": design_api.badge_counter()}},
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("design-lifecycle: sweep failed; retrying next interval")
+        await asyncio.sleep(design_lifecycle.SWEEP_INTERVAL_SECONDS)
+
+
+_design_lifecycle_task: asyncio.Task | None = None
+
+
 async def _on_startup():
     global _dispatch_watcher_task, _mock_event_watcher_task, _harness_usage_poller_task
     global _claude_credentials_refresh_task, _codex_credentials_refresh_task
@@ -21980,6 +22003,13 @@ async def _on_startup():
         except Exception:
             logger.exception("design-thumbnails: worker failed to start; thumbnails will not render")
     _mark("design_thumbnails.queue.start")
+
+    global _design_lifecycle_task
+    if not os.environ.get("DASHBOARD_MOCK"):
+        _design_lifecycle_task = asyncio.create_task(
+            _design_lifecycle_sweeper(), name="design-lifecycle",
+        )
+    _mark("design_lifecycle.sweeper")
     logger.info(
         "startup phase: TOTAL %.1fms", (time.monotonic() - _startup_t0) * 1000,
     )
@@ -22022,6 +22052,14 @@ async def _on_shutdown():
         await design_thumbnails.queue.stop()
     except Exception:
         logger.exception("error stopping the design thumbnail worker")
+    global _design_lifecycle_task
+    if _design_lifecycle_task is not None:
+        _design_lifecycle_task.cancel()
+        try:
+            await _design_lifecycle_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        _design_lifecycle_task = None
     try:
         await image_build_worker.stop_worker()
     except Exception:

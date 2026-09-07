@@ -271,14 +271,31 @@ def test_list_designs_uses_older_revision_thumbnail_when_latest_has_none():
     assert resp.json()["designs"][0]["thumbnail_url"] == "/thumb/rev-a1"
 
 
-def test_get_design_series_returns_revision_timeline():
-    with patch.object(design_api, "_design_rows", return_value=_rows()):
+def test_get_design_series_returns_revision_timeline_and_share_state():
+    from tools.dashboard import design_shares
+
+    grants = [{"target_uuid": "rev-a1", "target_type": "design", "token": "tok",
+               "url": "https://relay.auto.network/l/tok", "issued_at": "2026-09-01T00:00:00Z"}]
+    with patch.object(design_api, "_design_rows", return_value=_rows()), \
+         patch.object(design_shares, "active_design_grants", return_value=grants):
         resp = _client().get("/api/design-studio/designs/series-a")
 
     assert resp.status_code == 200
     data = resp.json()
     assert data["design_id"] == "series-a"
     assert [row["id"] for row in data["revisions"]] == ["rev-a1", "rev-a2"]
+    # A grant on ANY revision id (or the design id) makes the design shared.
+    assert data["share"]["shared"] is True
+    assert data["share"]["grants"][0]["token"] == "tok"
+
+
+def test_badge_counts_live_designs_not_the_backlog():
+    from tools.dashboard import design_lifecycle
+
+    with patch.object(design_lifecycle, "live_design_count", return_value=2):
+        assert design_api.badge_counter() == 2
+    with patch.object(design_lifecycle, "live_design_count", side_effect=RuntimeError("db")):
+        assert design_api.badge_counter() == 0
 
 
 def test_revision_thumbnail_serves_screenshot_file(tmp_path):
