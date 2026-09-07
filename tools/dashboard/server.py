@@ -15602,9 +15602,37 @@ def _publish_harness_usage_snapshot() -> None:
     # tick regardless of how many Claude sessions are alive. Codex still
     # gates on live sessions because its telemetry is harvested from
     # session transcripts.
+    #
+    # auto-r5wlw: the Claude reading is now a one-token inference probe
+    # per account, and the rows are personal-homed and fleet-synced, so
+    # exactly one machine may probe. Reuse the singular-ownership gate
+    # claude_credentials_refresh already uses for the same reason.
+    allowed, reason = _claude_usage_probe_allowed()
+    if not allowed:
+        logger.info(
+            "claude harness usage: skipping tick, not the Fleet tunnel-server "
+            "machine (reason=%s)", reason,
+        )
+        return
     _publish_claude_harness_usage_unconditional(
         updated_at=updated_at,
     )
+
+
+def _claude_usage_probe_allowed() -> tuple[bool, str]:
+    """Whether this dashboard is the one Fleet machine that probes Claude usage.
+
+    ``fleet_tunnel_server.state()`` allows an installation that has not
+    initialized the Fleet model at all (single node) and otherwise exactly
+    the selected machine; uncertainty fails closed. A raised error is
+    treated as "not allowed" and named, never swallowed into a probe.
+    """
+    try:
+        from tools.network import fleet_tunnel_server
+        eligibility = fleet_tunnel_server.state()
+    except Exception as exc:  # pragma: no cover - defensive
+        return False, f"fleet gate error: {type(exc).__name__}"
+    return bool(eligibility.allowed), str(eligibility.reason)
 
 
 def _publish_claude_harness_usage_unconditional(
@@ -15712,78 +15740,94 @@ def _collect_codex_usage_payloads(
     )]
 
 
+#: The model the usage probe asks for one token from. Any model the setup
+#: token may call works; the reading is in the response headers, not the
+#: body, so the cheapest one is right.
+_CLAUDE_USAGE_PROBE_MODEL = "claude-haiku-4-5-20251001"
+_CLAUDE_USAGE_PROBE_URL = "https://api.anthropic.com/v1/messages"
+
+
 def _collect_claude_usage_payloads(
     rows: list[dict[str, Any]],
     updated_at: str,
 ) -> list[tuple[str, dict[str, Any]]]:
-    """Build harness-usage payloads for every installed Claude credential.
+    """Build harness-usage payloads for every installed Claude account.
 
-    auto-08n3f: enumerates ``dashboard.claude.credentials`` rows instead
-    of walking host ``~/.claude/.setup-token*`` files. Each row carries
-    a fresh ``access_token`` (the OAuth refresh poller — bead 3 — keeps
-    it ahead of the 8h Anthropic expiry); we use it as the Bearer for
-    GET ``/api/oauth/usage``. The harness-usage row is keyed by the
-    bare ``claude:org:<uuid>`` (no alias suffix), since the credentials
-    set is keyed-per-entity by org UUID and one row per org is the
-    natural shape. Alias is kept on the harness-usage payload as
-    informational so existing UI rendering paths still see it.
+    auto-r5wlw: the reading comes from the rate-limit headers of a
+    ``max_tokens: 1`` probe against ``POST /v1/messages`` using each
+    account's long-lived setup token (``dashboard.claude.setup_tokens``,
+    keyed by org UUID). That token lives a year and never rotates, so the
+    reading no longer dies with the consumer bundle's refresh token
+    (``invalid_grant``). Alias is joined from the
+    ``dashboard.claude.credentials`` row with the same key, informationally.
 
-    The ``rows`` parameter is retained for symmetry with
-    ``_collect_codex_usage_payloads`` (the publisher dispatches on
-    harness) but is intentionally unused here; sessions no longer
-    contribute Claude usage telemetry.
+    An org that has a credentials row but no fresh setup-token row (an
+    install in progress) falls back to the legacy ``GET /api/oauth/usage``
+    bundle path so it still reports.
 
-    On failure (HTTP 4xx / 5xx / network) we still write a row for the
-    org with ``status='unavailable'`` so the dashboard footer can show
-    "telemetry unavailable for <alias>" rather than silently dropping
-    the account — matches the codex-side pattern.
+    The row key is the bare ``claude:org:<uuid>``. ``rows`` is retained for
+    symmetry with ``_collect_codex_usage_payloads`` and unused.
+
+    On failure a row is written with ``status='unavailable'`` unless the
+    stored reading is still valid (its window has not reset), in which case
+    the stored reading is kept -- a capped account answers with 429 and
+    that IS a reading, handled in :func:`_claude_usage_via_probe`.
     """
-    del rows  # Claude usage is enumerated from substrate credentials now.
+    del rows  # Claude usage is enumerated from substrate rows now.
 
     from tools.graph import ops as graph_ops_local
     from tools.graph.schemas.claude_credentials import (
         CLAUDE_CREDENTIALS_SET_ID,
     )
+    from tools.graph.schemas.claude_setup_tokens import (
+        CLAUDE_SETUP_TOKENS_SET_ID,
+    )
 
-    payloads: dict[str, dict[str, Any]] = {}
     org = _harness_usage_org()
     try:
-        members = graph_ops_local.read_set(CLAUDE_CREDENTIALS_SET_ID, org=org, peers=[])
+        credential_members = graph_ops_local.read_set(
+            CLAUDE_CREDENTIALS_SET_ID, org=org, peers=[],
+        )
     except Exception:
         logger.exception(
             "claude harness usage: read_set(%s) failed; tick aborted",
             CLAUDE_CREDENTIALS_SET_ID,
         )
         return []
-    rows_iter = list(getattr(members, "members", []) or [])
-    if not rows_iter:
-        return []
+    try:
+        setup_members = graph_ops_local.read_set(
+            CLAUDE_SETUP_TOKENS_SET_ID, org=org, peers=[],
+        )
+    except Exception:
+        logger.exception(
+            "claude harness usage: read_set(%s) failed; using bundle path only",
+            CLAUDE_SETUP_TOKENS_SET_ID,
+        )
+        setup_members = None
 
-    for member in rows_iter:
+    credentials_by_org: dict[str, dict[str, Any]] = {}
+    for member in list(getattr(credential_members, "members", []) or []):
         payload = member.payload if isinstance(member.payload, dict) else {}
-        org_uuid = member.key
-        alias = payload.get("alias") if isinstance(payload.get("alias"), str) else None
-        access_token = payload.get("access_token")
+        credentials_by_org[str(member.key)] = payload
+    setup_tokens_by_org: dict[str, str] = {}
+    for member in _fresh_setup_token_members(
+        list(getattr(setup_members, "members", []) or []),
+    ):
+        payload = member.payload if isinstance(member.payload, dict) else {}
+        raw_key = payload.get("raw_key")
+        if isinstance(raw_key, str) and raw_key:
+            setup_tokens_by_org[str(member.key)] = raw_key
+
+    payloads: dict[str, dict[str, Any]] = {}
+    for org_uuid in sorted(set(credentials_by_org) | set(setup_tokens_by_org)):
+        credentials = credentials_by_org.get(org_uuid, {})
+        alias = credentials.get("alias") if isinstance(credentials.get("alias"), str) else None
         identity_id = f"org:{org_uuid}"
         row_key = _harness_usage_settings.make_harness_usage_key(
             "claude", identity_id,
         )
-        if not isinstance(access_token, str) or not access_token:
-            payloads[row_key] = _harness_usage_settings.make_unavailable_usage_payload(
-                harness="claude",
-                identity_id=identity_id,
-                identity_label=_harness_usage_settings.short_identity_label(
-                    "org", org_uuid,
-                ),
-                source="oauth_usage",
-                note="credentials row missing access_token",
-                updated_at=updated_at,
-                account_id=org_uuid,
-                alias=alias,
-            )
-            continue
         # Restart-storm guard: the poller ticks once immediately on start, so
-        # a burst of restarts becomes a burst of /usage calls, which is what
+        # a burst of restarts becomes a burst of vendor calls, which is what
         # gets the account rate-limited. Skip the call only while the stored
         # reading is younger than one poll interval. Do NOT skip merely
         # because the reading is still *valid* (its window has not reset):
@@ -15795,65 +15839,238 @@ def _collect_claude_usage_payloads(
         ):
             logger.debug(
                 "claude harness usage: persisted reading younger than the "
-                "poll interval for org=%s alias=%r; skipping /usage fetch",
+                "poll interval for org=%s alias=%r; skipping probe",
                 org_uuid, alias,
             )
             continue
-        logger.info(
-            "claude harness usage: fetching /usage for org=%s alias=%r",
-            org_uuid, alias,
-        )
-        try:
-            usage_body, _headers = _fetch_claude_oauth_usage(access_token)
-        except Exception as exc:
-            logger.exception(
-                "claude harness usage: /usage call failed for org=%s alias=%r",
-                org_uuid, alias,
+        setup_token = setup_tokens_by_org.get(org_uuid)
+        if setup_token:
+            payload = _claude_usage_via_probe(
+                setup_token, org_uuid=org_uuid, alias=alias, row_key=row_key,
+                identity_id=identity_id, updated_at=updated_at,
             )
-            # A failed poll must not erase a reading that is still true. Usage
-            # is monotonic within a window, so a stored reading holds as a
-            # lower bound until its own reset time -- and a maxed account
-            # answers /usage with 429, which means the reading this would
-            # overwrite is the one proving the account is exhausted.
-            existing = _existing_usage_payload(row_key)
-            if _harness_usage_settings.reading_still_valid(existing):
-                logger.info(
-                    "claude harness usage: keeping the live reading for "
-                    "org=%s alias=%r; its window has not reset", org_uuid, alias,
-                )
-                continue
-            payloads[row_key] = _harness_usage_settings.make_unavailable_usage_payload(
-                harness="claude",
-                identity_id=identity_id,
-                identity_label=_harness_usage_settings.short_identity_label(
-                    "org", org_uuid,
-                ),
-                source="oauth_usage",
-                note=f"/usage call failed: {type(exc).__name__}: {exc}"[:200],
-                updated_at=updated_at,
-                account_id=org_uuid,
-                alias=alias,
+        else:
+            payload = _claude_usage_via_bundle(
+                credentials, org_uuid=org_uuid, alias=alias, row_key=row_key,
+                identity_id=identity_id, updated_at=updated_at,
             )
-            continue
-        # The credentials row is the source of truth for org identity now;
-        # we don't need the response header. Build the payload with the row's
-        # own org_uuid so failure rows and ok rows key consistently.
-        logger.info(
-            "claude harness usage: /usage OK for org=%s alias=%r",
-            org_uuid, alias,
-        )
-        payloads[row_key] = _harness_usage_settings.normalize_claude_usage_payload(
-            bundle={
-                "subscription_type": None,
-                "rate_limit_tier": None,
-            },
-            usage_body=usage_body,
-            org_id=org_uuid,
-            updated_at=updated_at,
-            alias=alias,
-        )
+        if payload is not None:
+            payloads[row_key] = payload
 
     return sorted(payloads.items(), key=lambda item: item[0])
+
+
+def _fresh_setup_token_members(members: list[Any]) -> list[Any]:
+    """Drop setup-token rows past their year, the way the launcher's picker does.
+
+    Mirrors ``agents.session_launcher._setup_token_rows``: substrate
+    ``created_at`` plus :data:`CLAUDE_SETUP_TOKEN_TTL` is the expiry; a row
+    with no parseable ``created_at`` is assumed fresh.
+    """
+    from tools.graph.schemas.claude_setup_tokens import CLAUDE_SETUP_TOKEN_TTL
+
+    now = datetime.now(timezone.utc)
+    fresh: list[Any] = []
+    for member in members:
+        created_at = getattr(member, "created_at", None)
+        if not created_at:
+            fresh.append(member)
+            continue
+        try:
+            minted = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            fresh.append(member)
+            continue
+        if minted.tzinfo is None:
+            minted = minted.replace(tzinfo=timezone.utc)
+        if minted + CLAUDE_SETUP_TOKEN_TTL > now:
+            fresh.append(member)
+    return fresh
+
+
+def _claude_usage_failure_payload(
+    exc: BaseException, *, source: str, org_uuid: str, alias: str | None,
+    row_key: str, identity_id: str, updated_at: str, what: str,
+) -> dict[str, Any] | None:
+    """The row to write after a failed poll, or None to keep the stored one.
+
+    A failed poll must not erase a reading that is still true. Usage is
+    monotonic within a window, so a stored reading holds as a lower bound
+    until its own reset time.
+    """
+    existing = _existing_usage_payload(row_key)
+    if _harness_usage_settings.reading_still_valid(existing):
+        logger.info(
+            "claude harness usage: keeping the live reading for "
+            "org=%s alias=%r; its window has not reset", org_uuid, alias,
+        )
+        return None
+    return _harness_usage_settings.make_unavailable_usage_payload(
+        harness="claude",
+        identity_id=identity_id,
+        identity_label=_harness_usage_settings.short_identity_label(
+            "org", org_uuid,
+        ),
+        source=source,
+        note=f"{what} failed: {type(exc).__name__}: {exc}"[:200],
+        updated_at=updated_at,
+        account_id=org_uuid,
+        alias=alias,
+    )
+
+
+def _claude_usage_via_probe(
+    setup_token: str, *, org_uuid: str, alias: str | None, row_key: str,
+    identity_id: str, updated_at: str,
+) -> dict[str, Any] | None:
+    logger.info(
+        "claude harness usage: probing /v1/messages for org=%s alias=%r",
+        org_uuid, alias,
+    )
+    try:
+        http_status, headers = _fetch_claude_usage_probe(setup_token)
+        payload = _harness_usage_settings.normalize_claude_probe_headers(
+            headers, http_status=http_status, org_id=org_uuid,
+            updated_at=updated_at, alias=alias,
+        )
+        if payload is None:
+            raise RuntimeError(
+                f"probe HTTP {http_status} carried no anthropic-ratelimit-unified headers",
+            )
+    except Exception as exc:
+        logger.exception(
+            "claude harness usage: probe failed for org=%s alias=%r",
+            org_uuid, alias,
+        )
+        return _claude_usage_failure_payload(
+            exc, source="probe_headers", org_uuid=org_uuid, alias=alias,
+            row_key=row_key, identity_id=identity_id, updated_at=updated_at,
+            what="usage probe",
+        )
+    logger.info(
+        "claude harness usage: probe HTTP %d org=%s alias=%r 5h=%s%% 7d=%s%%",
+        http_status, org_uuid, alias,
+        (payload["windows"].get("short") or {}).get("used_percent"),
+        (payload["windows"].get("long") or {}).get("used_percent"),
+    )
+    return payload
+
+
+def _claude_usage_via_bundle(
+    credentials: dict[str, Any], *, org_uuid: str, alias: str | None,
+    row_key: str, identity_id: str, updated_at: str,
+) -> dict[str, Any] | None:
+    """Legacy path: ``GET /api/oauth/usage`` with the consumer bundle's
+    ``access_token``. Used only for an org with no fresh setup-token row."""
+    access_token = credentials.get("access_token")
+    if not isinstance(access_token, str) or not access_token:
+        return _harness_usage_settings.make_unavailable_usage_payload(
+            harness="claude",
+            identity_id=identity_id,
+            identity_label=_harness_usage_settings.short_identity_label(
+                "org", org_uuid,
+            ),
+            source="oauth_usage",
+            note="no setup token and credentials row missing access_token",
+            updated_at=updated_at,
+            account_id=org_uuid,
+            alias=alias,
+        )
+    logger.info(
+        "claude harness usage: no setup token for org=%s alias=%r; "
+        "fetching /usage with the bundle", org_uuid, alias,
+    )
+    try:
+        usage_body, _headers = _fetch_claude_oauth_usage(access_token)
+    except Exception as exc:
+        logger.exception(
+            "claude harness usage: /usage call failed for org=%s alias=%r",
+            org_uuid, alias,
+        )
+        return _claude_usage_failure_payload(
+            exc, source="oauth_usage", org_uuid=org_uuid, alias=alias,
+            row_key=row_key, identity_id=identity_id, updated_at=updated_at,
+            what="/usage call",
+        )
+    logger.info(
+        "claude harness usage: /usage OK for org=%s alias=%r", org_uuid, alias,
+    )
+    return _harness_usage_settings.normalize_claude_usage_payload(
+        bundle={"subscription_type": None, "rate_limit_tier": None},
+        usage_body=usage_body,
+        org_id=org_uuid,
+        updated_at=updated_at,
+        alias=alias,
+    )
+
+
+def _fetch_claude_usage_probe(setup_token: str) -> tuple[int, dict[str, str]]:
+    """One-token ``POST /v1/messages`` whose only purpose is the response headers.
+
+    Returns ``(http_status, lowercased headers)`` for HTTP 200 and for HTTP
+    429 -- a capped account still answers with the unified rate-limit
+    headers, and that answer is the proof it is capped. Any other HTTP
+    status or a network error raises ``RuntimeError``. The token is never
+    logged.
+    """
+    from tools.graph.claude_oauth import CLAUDE_USER_AGENT
+
+    body = json.dumps({
+        "model": _CLAUDE_USAGE_PROBE_MODEL,
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "."}],
+    }).encode("utf-8")
+    req = urllib_request.Request(
+        _CLAUDE_USAGE_PROBE_URL,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {setup_token}",
+            "anthropic-beta": "oauth-2025-04-20",
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+            "User-Agent": CLAUDE_USER_AGENT,
+        },
+        method="POST",
+    )
+    logger.info("claude usage probe: POST %s max_tokens=1 (Bearer auth)", _CLAUDE_USAGE_PROBE_URL)
+    started = time.monotonic()
+    try:
+        with urllib_request.urlopen(req, timeout=15) as resp:
+            resp.read()
+            headers = {k.lower(): v for k, v in resp.headers.items()}
+            status_code = int(resp.status)
+    except urllib_error.HTTPError as exc:
+        elapsed_ms = (time.monotonic() - started) * 1000
+        if exc.code == 429:
+            headers = {k.lower(): v for k, v in exc.headers.items()}
+            logger.info(
+                "claude usage probe: HTTP 429 in %.1fms (capped; headers carry the reading)",
+                elapsed_ms,
+            )
+            return 429, headers
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="replace").strip()
+        except Exception:
+            detail = ""
+        logger.error(
+            "claude usage probe: FAILED HTTP %d in %.1fms: %s",
+            exc.code, elapsed_ms, detail[:160] or "<empty body>",
+        )
+        suffix = f": {detail[:160]}" if detail else ""
+        raise RuntimeError(f"Claude usage probe returned HTTP {exc.code}{suffix}") from exc
+    except Exception as exc:
+        elapsed_ms = (time.monotonic() - started) * 1000
+        logger.error(
+            "claude usage probe: ERROR in %.1fms: %s", elapsed_ms, type(exc).__name__,
+        )
+        raise RuntimeError(f"Claude usage probe failed: {type(exc).__name__}") from exc
+    elapsed_ms = (time.monotonic() - started) * 1000
+    logger.info(
+        "claude usage probe: HTTP %d in %.1fms org=%s",
+        status_code, elapsed_ms, headers.get("anthropic-organization-id", "<unset>"),
+    )
+    return status_code, headers
 
 
 def _fetch_claude_oauth_usage(

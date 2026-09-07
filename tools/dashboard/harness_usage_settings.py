@@ -97,7 +97,7 @@ SYNOPSIS = {
 
 _VALID_HARNESSES = ("claude", "codex")
 _VALID_STATUSES = ("ok", "unavailable")
-_VALID_SOURCES = ("oauth_usage", "transcript")
+_VALID_SOURCES = ("oauth_usage", "transcript", "probe_headers")
 
 
 #: The operator's own store. Observed: every stored row lives there
@@ -158,7 +158,12 @@ class DashboardHarnessUsageV1(SettingSchema):
     source: str = field(
         required=True,
         enum=list(_VALID_SOURCES),
-        description="Data origin: 'oauth_usage' for Claude /usage; 'transcript' for Codex.",
+        description=(
+            "Data origin: 'probe_headers' for Claude (rate-limit headers of a "
+            "one-token /v1/messages probe on the setup token); 'oauth_usage' "
+            "for the legacy Claude /api/oauth/usage bundle path; 'transcript' "
+            "for Codex."
+        ),
     )
     updated_at: str = field(
         required=True,
@@ -581,6 +586,65 @@ def _normalize_existing_windows(
 
 def _string_or(value: Any, default: str | None = None) -> str | None:
     return value if isinstance(value, str) else default
+
+
+#: Header prefix Anthropic stamps on every /v1/messages response for an
+#: OAuth (setup-token) principal. Utilization is a 0..1 fraction; reset is
+#: epoch seconds; status is "allowed", "allowed_warning" or a rejection.
+CLAUDE_PROBE_HEADER_PREFIX = "anthropic-ratelimit-unified-"
+
+
+def normalize_claude_probe_headers(
+    headers: dict[str, str],
+    *,
+    http_status: int,
+    org_id: str | None,
+    updated_at: str,
+    alias: str | None = None,
+) -> dict[str, Any] | None:
+    """Build a Claude harness-usage row from probe response headers.
+
+    The setup token (``sk-ant-oat01-…``) lacks the ``user:profile`` scope
+    that ``GET /api/oauth/usage`` requires, but a ``max_tokens: 1`` call to
+    ``POST /v1/messages`` answers with the same 5h / 7d utilization in
+    ``anthropic-ratelimit-unified-*`` headers -- on HTTP 200 and on HTTP 429
+    alike. A 429 is therefore a reading (the account is capped), not a
+    failure. Returns None when neither window header is present, which the
+    caller treats as a failed poll.
+    """
+    lowered = {str(k).lower(): str(v) for k, v in (headers or {}).items()}
+
+    def _window(tag: str, minutes: int) -> dict[str, int | float | None] | None:
+        util = _coerce_float(lowered.get(f"{CLAUDE_PROBE_HEADER_PREFIX}{tag}-utilization"))
+        reset = _coerce_int(lowered.get(f"{CLAUDE_PROBE_HEADER_PREFIX}{tag}-reset"))
+        if util is None and reset is None:
+            return None
+        return {
+            "used_percent": round(util * 100.0, 1) if util is not None else None,
+            "window_minutes": minutes,
+            "resets_at": reset,
+        }
+
+    windows = _build_windows({"short": _window("5h", 300), "long": _window("7d", 10080)})
+    if not windows:
+        return None
+    unified_status = _string_or(lowered.get(f"{CLAUDE_PROBE_HEADER_PREFIX}status"))
+    reached: str | None = None
+    if int(http_status) == 429:
+        reached = unified_status if unified_status and not unified_status.startswith("allowed") else "429"
+    identity = _resolve_claude_identity(org_id)
+    return _build_usage_payload(
+        harness="claude",
+        identity_id=identity["identity_id"],
+        identity_label=identity["identity_label"],
+        account_id=identity["account_id"],
+        alias=alias,
+        status="ok",
+        source="probe_headers",
+        updated_at=updated_at,
+        rate_limit_reached_type=reached,
+        windows=windows,
+    )
 
 
 def _normalize_claude_usage_window(

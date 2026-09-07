@@ -613,6 +613,219 @@ def test_collect_claude_usage_no_session_dependency(graph_db_env, monkeypatch):
     assert keys == ["claude:org:org-X"]
 
 
+def _install_setup_token(graph_db_env, *, org_uuid: str, raw_key: str) -> None:
+    """Install one ``dashboard.claude.setup_tokens`` row (payload is only
+    ``raw_key``; the key is the org uuid) so the probe path can read it."""
+    from tools.graph.schemas.claude_setup_tokens import (
+        CLAUDE_SETUP_TOKENS_REVISION,
+        CLAUDE_SETUP_TOKENS_SET_ID,
+    )
+    ops.upsert_by_key(
+        CLAUDE_SETUP_TOKENS_SET_ID,
+        CLAUDE_SETUP_TOKENS_REVISION,
+        org_uuid,
+        {"raw_key": raw_key},
+        org=ops.CALLER_ORG,
+    )
+
+
+_PROBE_HEADERS_200 = {
+    "anthropic-ratelimit-unified-5h-utilization": "0.06",
+    "anthropic-ratelimit-unified-5h-reset": "1788210000",
+    "anthropic-ratelimit-unified-5h-status": "allowed",
+    "anthropic-ratelimit-unified-7d-utilization": "0.82",
+    "anthropic-ratelimit-unified-7d-reset": "1788274800",
+    "anthropic-ratelimit-unified-7d-status": "allowed_warning",
+    "anthropic-ratelimit-unified-status": "allowed_warning",
+    "anthropic-organization-id": "org-X",
+}
+
+
+# ── auto-r5wlw: usage from the setup-token probe ───────────────
+
+
+def test_probe_headers_parse_200():
+    payload = hus.normalize_claude_probe_headers(
+        _PROBE_HEADERS_200, http_status=200, org_id="org-X",
+        updated_at="2026-09-07T20:00:00Z", alias="gmail",
+    )
+    assert payload["status"] == "ok"
+    assert payload["source"] == "probe_headers"
+    assert payload["identity_id"] == "org:org-X"
+    assert payload["alias"] == "gmail"
+    assert payload["rate_limit_reached_type"] is None
+    assert payload["windows"]["short"] == {
+        "used_percent": 6.0, "window_minutes": 300, "resets_at": 1788210000,
+    }
+    assert payload["windows"]["long"] == {
+        "used_percent": 82.0, "window_minutes": 10080, "resets_at": 1788274800,
+    }
+
+
+def test_probe_headers_parse_429_marks_exhausted():
+    headers = dict(_PROBE_HEADERS_200)
+    headers["anthropic-ratelimit-unified-5h-utilization"] = "1.0"
+    headers["anthropic-ratelimit-unified-status"] = "rejected"
+    payload = hus.normalize_claude_probe_headers(
+        headers, http_status=429, org_id="org-X",
+        updated_at="2026-09-07T20:00:00Z",
+    )
+    assert payload["status"] == "ok"
+    assert payload["rate_limit_reached_type"] == "rejected"
+    assert hus.is_exhausted(payload, now_epoch=1788200000)
+
+
+def test_probe_missing_headers_is_failure():
+    assert hus.normalize_claude_probe_headers(
+        {"content-type": "application/json"}, http_status=200, org_id="org-X",
+        updated_at="2026-09-07T20:00:00Z",
+    ) is None
+
+
+def test_collect_claude_usage_probes_each_setup_token_row(graph_db_env, monkeypatch):
+    _install_setup_token(graph_db_env, org_uuid="org-A", raw_key="sk-ant-oat01-A")
+    _install_setup_token(graph_db_env, org_uuid="org-B", raw_key="sk-ant-oat01-B")
+    probed: list[str] = []
+    monkeypatch.setattr(
+        server, "_fetch_claude_usage_probe",
+        lambda token: probed.append(token) or (200, _PROBE_HEADERS_200),
+    )
+    monkeypatch.setattr(
+        server, "_fetch_claude_oauth_usage",
+        lambda token: (_ for _ in ()).throw(AssertionError("bundle path must not run")),
+    )
+
+    payloads = dict(server._collect_claude_usage_payloads([], "2026-09-07T20:00:00Z"))
+
+    assert sorted(probed) == ["sk-ant-oat01-A", "sk-ant-oat01-B"]
+    assert set(payloads) == {"claude:org:org-A", "claude:org:org-B"}
+    assert all(p["source"] == "probe_headers" for p in payloads.values())
+    assert payloads["claude:org:org-A"]["account_id"] == "org-A"
+
+
+def test_collect_claude_usage_joins_alias_from_credentials(graph_db_env, monkeypatch):
+    """The probe row needs no bundle, but an existing credentials row with the
+    same org key lends its alias -- and its dead refresh token changes nothing."""
+    _install_setup_token(graph_db_env, org_uuid="org-X", raw_key="sk-ant-oat01-X")
+    _install_credentials(graph_db_env, alias="gmail", org_uuid="org-X",
+                         access_token="tok-expired-bundle")
+    monkeypatch.setattr(
+        server, "_fetch_claude_usage_probe", lambda token: (200, _PROBE_HEADERS_200),
+    )
+    monkeypatch.setattr(
+        server, "_fetch_claude_oauth_usage",
+        lambda token: (_ for _ in ()).throw(AssertionError("bundle must not be used")),
+    )
+
+    payloads = dict(server._collect_claude_usage_payloads([], "2026-09-07T20:00:00Z"))
+
+    assert payloads["claude:org:org-X"]["alias"] == "gmail"
+    assert payloads["claude:org:org-X"]["status"] == "ok"
+
+
+def test_collect_claude_usage_probe_failure_keeps_valid_reading(graph_db_env, monkeypatch):
+    import time as _time
+
+    _install_setup_token(graph_db_env, org_uuid="org-X", raw_key="sk-ant-oat01-X")
+    now = int(_time.time())
+    stored = _stored_reading("2026-09-06T19:52:30Z", long_resets_at=now + 20 * 3600)
+    monkeypatch.setattr(server, "_existing_usage_payload", lambda key: stored)
+    monkeypatch.setattr(
+        server, "_fetch_claude_usage_probe",
+        lambda token: (_ for _ in ()).throw(RuntimeError("Claude usage probe failed: URLError")),
+    )
+
+    payloads = dict(server._collect_claude_usage_payloads([], "2026-09-07T20:00:00Z"))
+
+    assert payloads == {}
+
+
+def test_collect_claude_usage_probe_failure_writes_unavailable_when_no_valid_reading(
+    graph_db_env, monkeypatch,
+):
+    _install_setup_token(graph_db_env, org_uuid="org-X", raw_key="sk-ant-oat01-X")
+    monkeypatch.setattr(server, "_existing_usage_payload", lambda key: None)
+    monkeypatch.setattr(
+        server, "_fetch_claude_usage_probe",
+        lambda token: (_ for _ in ()).throw(RuntimeError("Claude usage probe returned HTTP 401")),
+    )
+
+    payloads = dict(server._collect_claude_usage_payloads([], "2026-09-07T20:00:00Z"))
+
+    row = payloads["claude:org:org-X"]
+    assert row["status"] == "unavailable"
+    assert row["source"] == "probe_headers"
+    assert "HTTP 401" in row["note"]
+
+
+def test_collect_claude_usage_falls_back_to_bundle_without_setup_token(
+    graph_db_env, monkeypatch,
+):
+    _install_credentials(graph_db_env, alias="fresh", org_uuid="org-N",
+                         access_token="tok-N")
+    monkeypatch.setattr(
+        server, "_fetch_claude_usage_probe",
+        lambda token: (_ for _ in ()).throw(AssertionError("no setup token, no probe")),
+    )
+    fetched: list[str] = []
+    monkeypatch.setattr(
+        server, "_fetch_claude_oauth_usage",
+        lambda token: fetched.append(token) or (_CLAUDE_USAGE_BODY, {}),
+    )
+
+    payloads = dict(server._collect_claude_usage_payloads([], "2026-09-07T20:00:00Z"))
+
+    assert fetched == ["tok-N"]
+    assert payloads["claude:org:org-N"]["source"] == "oauth_usage"
+
+
+def _snapshot_with_fleet_gate(monkeypatch, *, allowed: bool) -> list[str]:
+    from types import SimpleNamespace
+    from tools.network import fleet_tunnel_server
+
+    claude_runs: list[str] = []
+    monkeypatch.setattr(server.dashboard_db, "get_live_sessions", lambda: [])
+    monkeypatch.setattr(server, "operator_is_idle", lambda threshold_minutes=15: False)
+    monkeypatch.setattr(server, "_collect_codex_usage_payloads", lambda rows, updated_at: [])
+    monkeypatch.setattr(
+        server, "_publish_claude_harness_usage_unconditional",
+        lambda updated_at: claude_runs.append(updated_at),
+    )
+    monkeypatch.setattr(
+        fleet_tunnel_server, "state",
+        lambda: SimpleNamespace(allowed=allowed, managed=True,
+                                reason="selected" if allowed else "other-machine-selected"),
+    )
+    server._harness_usage_last_refresh_context.clear()
+    server._publish_harness_usage_snapshot()
+    return claude_runs
+
+
+def test_publish_snapshot_skips_claude_when_fleet_gate_denies(monkeypatch):
+    assert _snapshot_with_fleet_gate(monkeypatch, allowed=False) == []
+
+
+def test_publish_snapshot_runs_claude_when_fleet_gate_allows(monkeypatch):
+    assert len(_snapshot_with_fleet_gate(monkeypatch, allowed=True)) == 1
+
+
+def test_fetch_claude_usage_probe_returns_headers_on_429(monkeypatch):
+    import email.message
+    from urllib import error as urllib_error
+
+    hdrs = email.message.Message()
+    for k, v in _PROBE_HEADERS_200.items():
+        hdrs[k] = v
+
+    def _raise(req, timeout=0):
+        raise urllib_error.HTTPError(req.full_url, 429, "Too Many Requests", hdrs, None)
+
+    monkeypatch.setattr(server.urllib_request, "urlopen", _raise)
+    status, headers = server._fetch_claude_usage_probe("sk-ant-oat01-test")
+    assert status == 429
+    assert headers["anthropic-ratelimit-unified-7d-utilization"] == "0.82"
+
+
 def _stored_reading(updated_at: str, *, long_resets_at: int) -> dict:
     """A persisted ok reading whose 7d window is still open."""
     return {
