@@ -340,6 +340,10 @@ services:
       DISPATCH_INTERVAL: ${DISPATCH_INTERVAL:-5}
       DISPATCH_MAX_CONCURRENT: ${DISPATCH_MAX_CONCURRENT:-2}
       DOLT_SQL_HOST: dolt
+      # The dispatcher is on the compose network (not host networking like session
+      # containers), so localhost is itself: reach the dashboard by service name for
+      # /api/monitor/register and dispatch status posts.
+      GRAPH_API: https://dashboard:8080
       AUTONOMY_DATA_ROOT: /app/data   # real mount, never repo-relative (see dashboard note)
     logging:
       driver: json-file
