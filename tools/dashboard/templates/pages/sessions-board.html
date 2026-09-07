@@ -237,15 +237,15 @@
                 <div class="sb-model-menu" x-show="modelMenuFor === id" x-cloak @click.stop
                      @keydown.escape.window="modelMenuFor = ''">
                   <div class="hd">Switch model</div>
-                  <template x-for="m in modelOptions" :key="m.alias">
+                  <template x-for="m in modelOptions" :key="m.argument">
                     <button type="button" :class="m.current ? 'is-current' : ''"
-                            :disabled="m.current" @click="chooseModel(id, m.alias)">
-                      <span class="al" x-text="m.alias"></span>
-                      <span class="mid" x-text="m.model"></span>
+                            :disabled="m.current" @click="chooseModel(id, m)">
+                      <span class="al" x-text="m.label"></span>
+                      <span class="mid" x-text="(m.command || '/model') + ' ' + m.argument"></span>
                       <span class="tick" x-show="m.current" aria-hidden="true">✓</span>
                     </button>
                   </template>
-                  <div class="ft">Types the harness's own command into the session.</div>
+                  <div class="ft">Types the harness's own command, and answers its confirmation.</div>
                 </div>
                 <div class="sb-menu" x-show="menuFor === id" x-cloak @click.stop
                      @keydown.escape.window="menuFor = ''">

@@ -469,19 +469,15 @@ test('a board card opens on a small tail; the full-page viewer keeps its own', (
   assert.match(viewer, /_olderTailUrl\(cursor\) \{[\s\S]*?tail_entries=' \+ FAST_OPEN_TAIL_LINES/);
 });
 
-// NOTE: the board's plumbing is kept and tested, but no harness currently
-// returns models (see api_session_models) — /model takes different names than
-// the dispatcher's alias table and can open a confirmation prompt. These
-// exercise the client contract against a stub so the wiring stays honest.
-test('the model badge switches a live session by typing the harness command', async () => {
+test('the model badge types the harness vocabulary and answers its confirmation', async () => {
   const calls = [];
   const fetchImpl = (url, opts) => {
     calls.push({ url: String(url), body: opts && opts.body });
     if (String(url).indexOf('/api/session-models') !== -1) {
-      return Promise.resolve({ ok: true, json: () => Promise.resolve({
-        harness: 'claude', command: '/model',
-        models: [{ alias: 'opus', model: 'claude-opus-4-8' }, { alias: 'sonnet', model: 'claude-sonnet-4-6' }],
-      }) });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ harness: 'claude', models: [
+        { label: 'Opus', argument: 'opus', command: '/model', model: 'claude-opus-4-8', confirm_key: '' },
+        { label: 'Fable', argument: 'fable', command: '/model', model: 'claude-fable-5-1', confirm_key: '1' },
+      ] }) });
     }
     return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
   };
@@ -489,20 +485,31 @@ test('the model badge switches a live session by typing the harness command', as
                   org: null, session_type: 'interactive', project: 'p', harness: 'claude', model: 'claude-opus-4-8' }];
   const { board } = makeBoard({ rows, fetchImpl });
   await board.openModelMenu('s1');
-  assert.equal(board.modelMenuFor, 's1');
-  assert.deepEqual(plain(board.modelOptions).map((m) => m.alias), ['opus', 'sonnet']);
-  // The model it is already running is marked and not selectable.
+  assert.deepEqual(plain(board.modelOptions).map((m) => m.label), ['Opus', 'Fable']);
+  // The running model is ticked and not selectable.
   assert.equal(plain(board.modelOptions)[0].current, true);
   assert.equal(plain(board.modelOptions)[1].current, false);
-  // Choosing one types the harness's own command into that session.
-  await board.chooseModel('s1', 'sonnet');
-  const send = calls.filter((c) => c.url.indexOf('/api/session/send') !== -1)[0];
-  assert.deepEqual(JSON.parse(send.body), { tmux_session: 's1', message: '/model sonnet' });
+
+  // A model that needs no confirmation sends exactly one message.
+  await board.chooseModel('s1', plain(board.modelOptions)[0]);
+  let sends = calls.filter((c) => c.url.indexOf('/api/session/send') !== -1);
+  assert.equal(sends.length, 1);
+  assert.deepEqual(JSON.parse(sends[0].body), { tmux_session: 's1', message: '/model opus' });
+
+  // Fable is accepted only as the bare name, and then asks to confirm — the
+  // versioned name was rejected in live use, and an unanswered prompt parks
+  // the session. Both facts are Settings data, not code.
+  calls.length = 0;
+  await board.chooseModel('s1', plain(board.modelOptions)[1]);
+  sends = calls.filter((c) => c.url.indexOf('/api/session/send') !== -1);
+  assert.equal(sends.length, 2, 'command then confirmation');
+  assert.deepEqual(JSON.parse(sends[0].body), { tmux_session: 's1', message: '/model fable' });
+  assert.deepEqual(JSON.parse(sends[1].body), { tmux_session: 's1', message: '1' });
   assert.equal(board.modelMenuFor, '');
 });
 
 test('a harness with no known switch command gets no model menu', async () => {
-  const fetchImpl = () => Promise.resolve({ ok: true, json: () => Promise.resolve({ harness: 'codex', command: null, models: [] }) });
+  const fetchImpl = () => Promise.resolve({ ok: true, json: () => Promise.resolve({ harness: 'codex', models: [] }) });
   const rows = [{ id: 'c1', session_id: 'c1', tmux_session: 'c1', label: 'C1', is_live: true, topics: [],
                   org: null, session_type: 'interactive', project: 'p', harness: 'codex', model: 'gpt-5.6-sol' }];
   const { board } = makeBoard({ rows, fetchImpl });

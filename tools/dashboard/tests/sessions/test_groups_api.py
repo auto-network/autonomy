@@ -205,18 +205,30 @@ class TestGroupCrossTalkLog:
 
 
 class TestSessionModelsApi:
-    """No harness offers models until the accepted names are verified.
+    """What the badge offers is Settings data, not the dispatcher's aliases.
 
-    The endpoint briefly served the dispatcher's MODEL_ALIASES. Those are the
-    names for a bead's ``model:`` label, not the arguments the harness's own
-    ``/model`` command takes: ``/model fable-5-1`` was rejected as unknown and
-    the short name opened a confirmation prompt that left the session waiting.
-    A wrong entry is worse than an absent one, so the list is empty until the
-    real names and a prompt-free invocation are known.
+    The switch arguments a harness accepts in-session differ from the names
+    the launcher's ``--model`` takes: ``/model fable-5-1`` was rejected as
+    unknown, while the bare ``fable`` was accepted and then asked to confirm.
+    Keeping these in a Settings set means a wrong string is an edit.
     """
 
-    def test_no_harness_offers_models_yet(self, test_client):
-        for harness in ("claude", "codex", "", "made-up"):
-            body = test_client.get(f"/api/session-models?harness={harness}").json()
-            assert body["models"] == [], f"{harness} must not offer unverified names"
-            assert body["command"] is None, "a null command is what suppresses the menu"
+    def test_claude_offers_harness_vocabulary_not_dispatch_aliases(self, test_client):
+        body = test_client.get("/api/session-models?harness=claude").json()
+        rows = {m["label"]: m for m in body["models"]}
+        assert set(rows) >= {"Opus", "Sonnet", "Haiku", "Fable"}
+        assert rows["Fable"]["argument"] == "fable"
+        # The versioned dispatch alias is exactly what the harness rejected.
+        from agents.dispatcher import MODEL_ALIASES
+        assert "fable-5-1" in MODEL_ALIASES
+        assert all(m["argument"] != "fable-5-1" for m in body["models"])
+        assert all(m["command"] == "/model" for m in body["models"])
+
+    def test_a_model_that_confirms_carries_the_key_that_answers_it(self, test_client):
+        rows = {m["label"]: m for m in test_client.get("/api/session-models?harness=claude").json()["models"]}
+        assert rows["Fable"]["confirm_key"] == "1"
+        assert rows["Opus"]["confirm_key"] == ""
+
+    def test_a_harness_with_no_rows_offers_nothing(self, test_client):
+        for harness in ("codex", "", "made-up"):
+            assert test_client.get(f"/api/session-models?harness={harness}").json()["models"] == []

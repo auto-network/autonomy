@@ -4257,29 +4257,34 @@ def _layout_dao():
 async def api_session_models(request):
     """GET /api/session-models?harness=claude — the models a session can switch to.
 
-    DISABLED 2026-09-07 pending a verified name list. Every harness gets an
-    empty list, so the badge menu does not open anywhere.
+    Served from ``dashboard.session.model-switch``: per model, the label to
+    show, the argument to type, and the key that answers a confirmation when
+    that harness asks for one. Those arguments are the harness's OWN
+    vocabulary and are deliberately NOT taken from
+    ``agents.dispatcher.MODEL_ALIASES`` — that table names the launcher's
+    ``--model`` flag, and in live use its versioned names were rejected by
+    the in-session command. Because the values are Settings, a name that
+    turns out to be wrong is an edit, not a release.
 
-    Why: this served ``agents.dispatcher.MODEL_ALIASES``, which is the table
-    for a bead's ``model:`` label and the launcher's ``--model`` flag. Those
-    names are NOT what the harness's own ``/model`` command accepts. In live
-    use ``/model fable-5-1`` came back "unknown", and the accepted short name
-    ``fable`` opened an interactive confirmation the operator then had to
-    answer with a keypress — so a wrong entry does worse than nothing: it
-    parks a live agent at a prompt.
-
-    Two things must be true before this returns models again:
-
-    1. the exact argument values that harness's ``/model`` accepts, from the
-       harness itself rather than inferred from a dispatch table, and
-    2. an invocation that completes without leaving the session waiting on a
-       confirmation — or a way to answer it.
-
-    Keep the shape: a caller shows a menu only when ``command`` is non-null
-    and ``models`` is non-empty.
+    A harness with no rows returns an empty list and the caller shows no menu.
     """
     harness = (request.query_params.get("harness") or "").strip().lower()
-    return JSONResponse({"harness": harness, "command": None, "models": []})
+    try:
+        rows = session_board_settings.list_model_switches(harness)
+    except Exception as exc:
+        logger.warning("model switch list unavailable for %s: %s", harness, exc)
+        rows = []
+    models = [
+        {
+            "label": r.get("label") or r.get("argument"),
+            "argument": r.get("argument"),
+            "command": r.get("command") or "/model",
+            "model": r.get("model") or "",
+            "confirm_key": r.get("confirm_key") or "",
+        }
+        for r in rows
+    ]
+    return JSONResponse({"harness": harness, "models": models})
 
 
 async def api_session_board_layout_get(request):

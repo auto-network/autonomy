@@ -34,6 +34,7 @@ from tools.graph.schemas.registry import (
     singleton,
 )
 
+MODEL_SWITCH_SET_ID = "dashboard.session.model-switch"
 GROUP_SET_ID = "dashboard.session.group"
 LAYOUT_SET_ID = "dashboard.session.board.layout"
 SCHEMA_REVISION = 1
@@ -44,6 +45,14 @@ _STATE = "raw"
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 
 SYNOPSIS = {
+    MODEL_SWITCH_SET_ID: (
+        "What the model badge offers, and exactly what it types. One member per "
+        "switchable model: the harness it belongs to, the label shown, the "
+        "argument passed to that harness's switch command, and the key that "
+        "answers a confirmation if one appears. The arguments a harness's "
+        "in-session command accepts are NOT the dispatcher's model aliases, so "
+        "they live here where they can be corrected without a code change."
+    ),
     GROUP_SET_ID: (
         "Session groups — the columns of the Session Board. One member per "
         "group slug: title, colour, purpose, rationale, and the sessions that "
@@ -59,6 +68,25 @@ SYNOPSIS = {
         "same board."
     ),
 }
+
+
+@publication_band(min="raw", max="canonical")
+@home(STORE)
+@keyed_per_entity(key_strategy="harness_and_model")
+class SessionModelSwitchV1(SettingSchema):
+    """One model the badge can switch a session to. Key is ``<harness>:<name>``."""
+
+    set_id = MODEL_SWITCH_SET_ID
+    schema_revision = SCHEMA_REVISION
+
+    harness: str = field(required=True, description="Harness this applies to, e.g. claude or codex.")
+    label: str = field(required=True, description="What the menu shows, e.g. Opus.")
+    argument: str = field(required=True, description="Typed after the switch command. The harness's OWN vocabulary, which differs from the dispatcher's model aliases.")
+    command: str = field(default="/model", description="The harness's in-session switch command.")
+    model: str = field(default="", description="Resolved model id, used only to tick the one a session is already running.")
+    confirm_key: str = field(default="", description="Sent after the command when that harness asks to confirm. Empty means no confirmation is expected.")
+    order: int = field(default=100, description="Menu order, ascending.")
+    enabled: bool = field(default=True, description="Set false to hide a model without deleting its row.")
 
 
 @publication_band(min="raw", max="canonical")
@@ -104,6 +132,51 @@ class SessionBoardLayoutV1(SettingSchema):
     heights: dict = field(default_factory=dict, description="Card height in CSS px by session name, only for cards the operator resized.")
     focus_session: str = field(default="", description="The session shown full height in its column, or empty. Its column is wherever that session sits.")
     updated_at: float = field(default=0.0, description="Unix time of the last write.")
+
+
+# ── Model switching ─────────────────────────────────────────────────────
+#
+# Seeded from what the operator verified in live use, NOT from
+# agents.dispatcher.MODEL_ALIASES — those are the launcher's ``--model``
+# names and the harness's in-session command rejects them (``fable-5-1``
+# came back unknown; the bare ``fable`` was accepted but asked to confirm).
+# Every value here is overridable per member, so a name that turns out to be
+# wrong is a Settings edit rather than a release.
+
+MODEL_SWITCH_DEFAULTS: list[dict] = [
+    {"key": "claude:opus", "harness": "claude", "label": "Opus", "argument": "opus",
+     "model": "claude-opus-4-8", "order": 10},
+    {"key": "claude:sonnet", "harness": "claude", "label": "Sonnet", "argument": "sonnet",
+     "model": "claude-sonnet-4-6", "order": 20},
+    {"key": "claude:haiku", "harness": "claude", "label": "Haiku", "argument": "haiku",
+     "model": "claude-haiku-4-5-20251001", "order": 30},
+    # Verified by the operator: the bare name is accepted and then asks to
+    # confirm with "1"; the versioned name is rejected outright.
+    {"key": "claude:fable", "harness": "claude", "label": "Fable", "argument": "fable",
+     "model": "claude-fable-5-1", "confirm_key": "1", "order": 40},
+]
+
+
+def list_model_switches(harness: str) -> list[dict]:
+    """Models the badge offers for ``harness``: the defaults, with any Settings
+    member of the same key overriding it, plus any the operator added."""
+    harness = (harness or "").strip().lower()
+    rows: dict[str, dict] = {}
+    for d in MODEL_SWITCH_DEFAULTS:
+        rows[d["key"]] = dict(d)
+    try:
+        for member in settings_ops.read_set(MODEL_SWITCH_SET_ID, org=STORE, peers=[]).members:
+            payload = dict(member.payload or {})
+            payload["key"] = member.key
+            rows[member.key] = {**rows.get(member.key, {}), **payload}
+    except Exception:
+        pass   # defaults still serve; a broken store must not hide the menu
+    out = [r for r in rows.values()
+           if (r.get("harness") or "").lower() == harness
+           and r.get("enabled", True)
+           and (r.get("argument") or "").strip()]
+    out.sort(key=lambda r: (r.get("order", 100), r.get("label", "")))
+    return out
 
 
 # ── Groups ──────────────────────────────────────────────────────────────

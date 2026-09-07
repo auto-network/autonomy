@@ -985,27 +985,36 @@
           } catch (e) { cached = { models: [], command: null }; }
           this._modelCache[harness] = cached;
         }
-        if (!cached.command || !cached.models.length) return;
+        if (!cached.models || !cached.models.length) return;
         this.modelOptions = cached.models.map(function (m) {
-          return { alias: m.alias, model: m.model, current: (row.model || '') === m.model };
+          return { label: m.label, argument: m.argument, command: m.command || '/model',
+                   model: m.model || '', confirmKey: m.confirm_key || '',
+                   current: !!m.model && (row.model || '') === m.model };
         });
         this.modelMenuFor = id;
       },
-      async chooseModel(id, alias) {
-        var row = this.rowFor(id);
-        var harness = row.harness || '';
-        var cmd = (this._modelCache[harness] || {}).command;
-        if (!cmd) return;
+      _send(id, text) {
+        return fetch('/api/session/send', {
+          method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tmux_session: id, message: text }),
+        });
+      },
+      async chooseModel(id, option) {
+        if (!option || !option.argument) return;
         this.modelMenuFor = '';
         this.modelBusy = id;
         try {
-          var res = await fetch('/api/session/send', {
-            method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ tmux_session: id, message: cmd + ' ' + alias }),
-          });
+          var res = await this._send(id, (option.command || '/model') + ' ' + option.argument);
           if (!res.ok) {
             var err = await res.json().catch(function () { return {}; });
             console.warn('[board] model switch failed', err.error || res.status);
+          } else if (option.confirmKey) {
+            // Some models answer with a confirmation. The key that answers it
+            // is Settings data per model, so a harness that stops asking (or
+            // starts) is an edit, not a release. Without this the session sits
+            // at the prompt — which is exactly what it did in live use.
+            await new Promise(function (r) { setTimeout(r, 600); });
+            await this._send(id, option.confirmKey);
           }
         } catch (e) { console.warn('[board] model switch failed', e.message); }
         this.modelBusy = '';
