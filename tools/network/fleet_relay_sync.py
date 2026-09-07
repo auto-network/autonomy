@@ -596,7 +596,9 @@ class ConnectorFleetRuntime:
             scheduler._confine_scope(scope, admission.org)
         except FleetSyncProtocolError as exc:
             raise FleetRelaySyncError(str(exc)) from exc
-        current_epoch = scheduler._current_epoch()
+        # The scope's wire epoch: the personal roster hash, or the org
+        # epoch for an org scope with an org channel (auto-coea3 step 3).
+        current_epoch, _state_epoch = scheduler._scope_epochs(scope)
         # Continuity decides the transfer, not the request alone: a
         # resolvable breadcrumb trail proves the peer consumed this
         # journal's prefix, so deltas suffice regardless of roster changes;

@@ -16,7 +16,9 @@ import pytest
 from tools.graph.db import GraphDB
 from tools.graph.models import Source
 from tools.network import fleet_sync_scheduler as fss
-from tools.network.fleet_org_channel import OrgFleetAuthenticator
+from tools.network.fleet_org_channel import (
+    OrgFleetAuthenticator, org_epoch, org_state_key,
+)
 from tools.network.fleet_roster import enroll
 from tools.network.fleet_sync_channel import FleetAuthenticator, fleet_direct_connect
 from tools.network.idkit import KeyPair, Subject, issue_cert
@@ -89,6 +91,7 @@ class Member:
         # path (checkpoint bootstrap has its own harness coverage).
         _insert(self.alpha, f"{name}-seed", "delta path")
         _delete(self.alpha, f"{name}-seed")
+        self.seq = 0
         self.adopted = {0: {"seq": 0, "members_root": mc.compute_root(self.members)}}
         self.channel = OrgFleetAuthenticator(
             self.machine, org=org, persona_cert=_cert(persona, self.machine, org),
@@ -102,7 +105,15 @@ class Member:
             index, path = mc.inclusion_proof(self.members, self.persona.public_hex)
         except mc.MembershipCommitmentError:
             index, path = 0, []
-        return {"v": 1, "checkpoint_seq": 0, "index": index, "path": path}
+        return {"v": 1, "checkpoint_seq": self.seq, "index": index, "path": path}
+
+    def adopt(self, seq: int, members: list[str]) -> None:
+        """This machine adopts membership checkpoint *seq*; its own hello
+        proves under it from now on."""
+        self.members = list(members)
+        self.adopted[seq] = {"seq": seq, "members_root": mc.compute_root(members)}
+        self.seq = seq
+        self.channel.note_adoption(seq)
 
     def personal_authenticator(self) -> FleetAuthenticator:
         return FleetAuthenticator(
@@ -165,19 +176,43 @@ def test_co_member_machine_pulls_the_org_scope_through_the_org_hello(tmp_path: P
             # land in B's personal database.
             assert not _has(b.personal, "p-row")
             assert not _has(b.personal, "a-row")
+            # Both members adopt a newer membership checkpoint (a join, say:
+            # the member set here is unchanged, the seq advances). The org
+            # epoch on the wire changes; the peer-state key does not, and
+            # no checkpoint is pulled -- rows keep flowing by delta.
+            wire_before = puller._scope_epochs("alpha")
+            a.adopt(1, members)
+            b.adopt(1, members)
+            wire_after = puller._scope_epochs("alpha")
+            assert wire_after[0] != wire_before[0]
+            assert wire_after[1] == wire_before[1] == org_state_key(ORG)
+            _insert(a.alpha, "a-row-3", "after the adoption")
+            await _wait(lambda: _has(b.alpha, "a-row-3"), timeout=30.0,
+                        label="org row after both members adopted seq 1")
         finally:
             await puller.stop()
             await server.stop()
-        # The org pull is keyed by machine pair in the org scope's store.
+        # Per-peer state for the org scope is keyed by (machine pair, org):
+        # exactly one row for A's machine in B's org store, under the org
+        # key, with no checkpoint received across the adoption; nothing in
+        # B's personal store.
         with sqlite3.connect(b.alpha) as conn:
-            peers = [row[0] for row in conn.execute(
-                "SELECT machine_public_key FROM fleet_sync_peer_state"
-            )]
-        assert a.machine.public_hex in peers
+            rows = conn.execute(
+                "SELECT machine_public_key,roster_epoch,checkpoints_received "
+                "FROM fleet_sync_peer_state"
+            ).fetchall()
+        assert [(r[0], r[1]) for r in rows] == [(a.machine.public_hex, org_state_key(ORG))]
+        assert rows[0][2] == 0
         with sqlite3.connect(b.personal) as conn:
             assert conn.execute(
                 "SELECT COUNT(*) FROM fleet_sync_peer_state"
             ).fetchone()[0] == 0
+        # A's org store recorded B's served acknowledgement under the same key.
+        with sqlite3.connect(a.alpha) as conn:
+            served = conn.execute(
+                "SELECT machine_public_key,roster_epoch FROM fleet_sync_peer_state"
+            ).fetchall()
+        assert (b.machine.public_hex, org_state_key(ORG)) in served
 
     asyncio.run(run())
 
@@ -292,3 +327,22 @@ def test_without_an_org_channel_the_scheduler_is_the_personal_one(tmp_path: Path
     scheduler._pull_scope = fake_pull  # type: ignore[method-assign]
     asyncio.run(scheduler._sync_org_peers(set(), 0.0))
     assert calls == []
+
+
+def test_scope_epochs_are_the_org_epoch_only_with_an_org_channel(tmp_path: Path) -> None:
+    pa = KeyPair.generate()
+    a = Member(tmp_path, "a", pa, [pa.public_hex])
+    with_channel = a.scheduler()
+    with_channel._roster_snapshot = a.entries
+    personal = fss.roster_epoch(a.entries, a.root.public_hex)
+    assert with_channel._scope_epochs("personal") == (personal, personal)
+    assert with_channel._scope_epochs("alpha") == (org_epoch(ORG, 0), org_state_key(ORG))
+    without = a.scheduler(with_channel=False)
+    without._roster_snapshot = a.entries
+    assert without._scope_epochs("alpha") == (personal, personal)
+    # Shape: every roster_epoch field and validator accepts 64 lowercase hex.
+    for value in (org_epoch(ORG, 0), org_epoch(ORG, None), org_state_key(ORG)):
+        assert len(value) == 64 and all(ch in "0123456789abcdef" for ch in value)
+    assert org_epoch(ORG, 0) != org_epoch(ORG, 1) != org_epoch(OTHER_ORG, 1)
+    assert org_state_key(ORG) != org_state_key(OTHER_ORG)
+    assert org_state_key(ORG) != org_epoch(ORG, 0)
