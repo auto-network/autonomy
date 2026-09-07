@@ -21,7 +21,8 @@ import inspect
 import json
 import time
 from collections.abc import Callable, Iterable
-from typing import Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import websockets
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
@@ -41,6 +42,9 @@ from tools.network.relaykit.connector import serve_established_channel
 from tools.network.relaykit.direct import DirectChannelServer, DIRECT_VERSION
 from tools.network.relaykit.frames import VIEWER_KIND_RECORD, tag_viewer_message
 from tools.network.relaykit.viewer import ViewerChannel, read_viewer_record
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from tools.network.fleet_org_channel import OrgFleetAuthenticator
 
 FLEET_HANDSHAKE_VERSION = 2
 FLEET_HANDSHAKE_DOMAIN = b"autonomy.network.fleet-channel.handshake.v1\n"
@@ -404,6 +408,88 @@ class FleetAuthenticator:
         )
 
 
+@dataclass(frozen=True)
+class Admission:
+    """The outcome of accepting one client hello, whichever hello it was.
+
+    ``org`` is None for a hello admitted by the PERSONAL roster and the
+    organization's genesis id for one admitted by the org hello
+    (fleet_org_channel); ``authorize`` is the per-message re-check of the
+    authenticator that admitted the peer.
+    """
+
+    client_pub: str
+    client_eph: str
+    private_key: X25519PrivateKey
+    server_hello: bytes
+    transcript: bytes
+    authorize: Callable[[str], None]
+    org: str | None
+
+
+def hello_org(raw: object) -> str | None:
+    """The ``org`` an incoming client hello names, or None for a personal
+    hello. Only the shape is read here; every check is the authenticator's.
+    The personal hello has no ``org`` field, so its bytes and its path are
+    untouched by this dispatch."""
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            raw = bytes(raw).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise HandshakeError("client hello is not valid UTF-8") from exc
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise HandshakeError("client hello is not valid JSON") from exc
+    if not isinstance(data, dict):
+        raise HandshakeError("client hello must be an object")
+    org = data.get("org")
+    if org is None:
+        return None
+    if not isinstance(org, str) or not org:
+        raise HandshakeError("client hello org must be a non-empty string")
+    return org
+
+
+def accept_client_hello(
+    raw: object,
+    *,
+    session: str,
+    authenticator: FleetAuthenticator,
+    org_channel_for: "Callable[[str], OrgFleetAuthenticator | None] | None" = None,
+) -> Admission:
+    """Admit one client hello: the personal roster's for a personal hello,
+    the org hello's authenticator for a hello naming an ``org``.
+
+    A hello naming an organization this machine has no org channel for is
+    refused with a typed error; nothing about that organization is learned
+    from an unadmitted peer.
+    """
+    org = hello_org(raw)
+    if org is None:
+        client_pub, private_key, hello, transcript = (
+            authenticator.accept_client(raw, session=session)
+        )
+        client_eph = _parse(raw, _CLIENT_FIELDS, "FLEET_CLIENT_HELLO")["eph_pub"]
+        return Admission(
+            client_pub, client_eph, private_key, hello, transcript,
+            authenticator.authorize, None,
+        )
+    channel = org_channel_for(org) if org_channel_for is not None else None
+    if channel is None:
+        raise HandshakeError(
+            f"no organization scope on this machine admits org {org[:16]}..."
+        )
+    client_pub, private_key, hello, transcript = (
+        channel.accept_client(raw, session=session)
+    )
+    client_eph = json.loads(raw)["eph_pub"]
+    return Admission(
+        client_pub, client_eph, private_key, hello, transcript,
+        channel.authorize, channel.org,
+    )
+
+
 class FleetDirectServer:
     """A RelayKit direct listener authenticated by the personal fleet roster."""
 
@@ -414,8 +500,13 @@ class FleetDirectServer:
         *,
         host: str = "127.0.0.1",
         port: int = 0,
+        org_channel_for: "Callable[[str], OrgFleetAuthenticator | None] | None" = None,
     ):
+        """``org_channel_for(org)`` returns the org hello authenticator for
+        an organization's genesis id, or None; without it every hello
+        naming an org is refused and the listener is the personal one."""
         self.authenticator = authenticator
+        self._org_channel_for = org_channel_for
         self._server = DirectChannelServer(
             None,
             None,
@@ -452,21 +543,26 @@ class FleetDirectServer:
         raw = await recv()
         if raw is None:
             return
-        client_pub, private_key, hello, transcript = (
-            self.authenticator.accept_client(raw, session=token)
+        admission = accept_client_hello(
+            raw, session=token, authenticator=self.authenticator,
+            org_channel_for=self._org_channel_for,
         )
-        await send(tag_viewer_message(VIEWER_KIND_RECORD, hello))
+        client_pub = admission.client_pub
+        await send(tag_viewer_message(VIEWER_KIND_RECORD, admission.server_hello))
         crypto = ChannelCrypto.server(
-            private_key,
-            _parse(raw, _CLIENT_FIELDS, "FLEET_CLIENT_HELLO")["eph_pub"],
-            transcript,
+            admission.private_key, admission.client_eph, admission.transcript,
         )
+        # An org-admitted connection tells the handler which organization
+        # admitted it; a personal one passes exactly what it always did.
+        extra = {} if admission.org is None else {
+            "authorize": admission.authorize, "admitted_org": admission.org,
+        }
 
         async def authorized_handler(channel_token: str, message: bytes):
             # Re-resolve on every application message. A kick takes effect on
             # an already-open socket before any further data is accepted.
-            self.authenticator.authorize(client_pub)
-            response = handler(channel_token, message, client_pub)
+            admission.authorize(client_pub)
+            response = handler(channel_token, message, client_pub, **extra)
             if inspect.isawaitable(response):
                 response = await response
             return response
@@ -483,12 +579,18 @@ class FleetDirectServer:
 async def fleet_direct_connect(
     addr: str,
     *,
-    authenticator: FleetAuthenticator,
+    authenticator: "FleetAuthenticator | OrgFleetAuthenticator",
     expected_machine_pub: str,
     session: str,
     timeout: float = 3.0,
 ) -> ViewerChannel:
-    """Open one mutually authenticated fleet channel over a direct address."""
+    """Open one mutually authenticated fleet channel over a direct address.
+
+    ``authenticator`` is the personal roster's for a machine of one's own
+    fleet, or an org scope's OrgFleetAuthenticator for a co-member's
+    machine; both produce a hello carrying ``eph_pub`` and verify the
+    server's answer.
+    """
 
     async def attempt() -> ViewerChannel:
         # ping/pong pinned, not defaulted: the sync stream liveness policy
@@ -503,9 +605,7 @@ async def fleet_direct_connect(
         try:
             await ws.send(json.dumps({"v": DIRECT_VERSION, "session": session}))
             private_key, hello = authenticator.build_client_hello(session)
-            client_eph = _parse(
-                hello, _CLIENT_FIELDS, "FLEET_CLIENT_HELLO"
-            )["eph_pub"]
+            client_eph = json.loads(hello)["eph_pub"]
             await ws.send(hello)
             server_hello = await ws.recv()
             if isinstance(server_hello, str):

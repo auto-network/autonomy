@@ -1,0 +1,294 @@
+"""auto-coea3 step 2 (design graph://c2baad48-0a3 §1, §3): an org scope's
+pull and serve route through the ORG hello when the peer is a co-member's
+machine outside the personal roster; the personal path is untouched; an
+org-admitted connection is confined to its organization's scope; within a
+round the machine's own fleet is pulled before co-members."""
+
+from __future__ import annotations
+
+import asyncio
+import sqlite3
+import time
+from pathlib import Path
+
+import pytest
+
+from tools.graph.db import GraphDB
+from tools.graph.models import Source
+from tools.network import fleet_sync_scheduler as fss
+from tools.network.fleet_org_channel import OrgFleetAuthenticator
+from tools.network.fleet_roster import enroll
+from tools.network.fleet_sync_channel import FleetAuthenticator, fleet_direct_connect
+from tools.network.idkit import KeyPair, Subject, issue_cert
+from tools.network.ledger import membership_commitment as mc
+from tools.network.relaykit.direct import new_session_id
+
+ORG = "genesis-" + "ab" * 28
+OTHER_ORG = "genesis-" + "cd" * 28
+
+
+def _cert(persona: KeyPair, machine: KeyPair, org: str = ORG):
+    now = int(time.time())
+    return issue_cert(
+        persona, machine.public_hex, scope=("fleet:sync",), org=org,
+        subject=Subject("persona", persona.public_hex),
+        not_before=now - 300, not_after=now + 86_400,
+    )
+
+
+def _prepare(path: Path, machine: KeyPair) -> None:
+    db = GraphDB(path)
+    try:
+        db.activate_fleet_sync_writers(machine.public_hex)
+    finally:
+        db.close()
+
+
+def _insert(path: Path, source_id: str, title: str) -> None:
+    db = GraphDB(path)
+    try:
+        db.insert_source(Source(id=source_id, type="note", title=title))
+    finally:
+        db.close()
+
+
+def _delete(path: Path, source_id: str) -> None:
+    db = GraphDB(path)
+    try:
+        db.conn.execute("DELETE FROM sources WHERE id=?", (source_id,))
+        db.conn.commit()
+    finally:
+        db.close()
+
+
+def _has(path: Path, source_id: str) -> bool:
+    with sqlite3.connect(path) as conn:
+        return conn.execute(
+            "SELECT 1 FROM sources WHERE id=?", (source_id,)
+        ).fetchone() is not None
+
+
+class Member:
+    """One operator: own personal root and roster (one machine), a persona
+    in the organization, a personal database and the org's database."""
+
+    def __init__(self, tmp: Path, name: str, persona: KeyPair, members: list[str],
+                 *, org: str = ORG) -> None:
+        self.name = name
+        self.root = KeyPair.generate()
+        self.machine = KeyPair.generate()
+        self.persona = persona
+        self.org = org
+        self.members = list(members)
+        self.entries = (enroll(self.root, machine_pub=self.machine.public_hex),)
+        self.personal = tmp / f"{name}-personal.db"
+        self.alpha = tmp / f"{name}-alpha.db"
+        _prepare(self.personal, self.machine)
+        _prepare(self.alpha, self.machine)
+        # Authored-then-deleted local state keeps the org scope on the delta
+        # path (checkpoint bootstrap has its own harness coverage).
+        _insert(self.alpha, f"{name}-seed", "delta path")
+        _delete(self.alpha, f"{name}-seed")
+        self.adopted = {0: {"seq": 0, "members_root": mc.compute_root(self.members)}}
+        self.channel = OrgFleetAuthenticator(
+            self.machine, org=org, persona_cert=_cert(persona, self.machine, org),
+            membership_proof_for=self._rider,
+            adopted_checkpoint_for=lambda s: self.adopted.get(int(s)),
+            newest_adopted_seq=lambda: max(self.adopted),
+        )
+
+    def _rider(self) -> dict:
+        try:
+            index, path = mc.inclusion_proof(self.members, self.persona.public_hex)
+        except mc.MembershipCommitmentError:
+            index, path = 0, []
+        return {"v": 1, "checkpoint_seq": 0, "index": index, "path": path}
+
+    def personal_authenticator(self) -> FleetAuthenticator:
+        return FleetAuthenticator(
+            self.machine, root_pub=self.root.public_hex,
+            roster_entries=lambda: self.entries,
+        )
+
+    def scheduler(self, *, peer_addresses=None, org_peers=None,
+                  with_channel: bool = True, poll: float = 0.2) -> fss.FleetSyncScheduler:
+        peers = dict(peer_addresses or {})
+        config = fss.FleetSyncRuntimeConfig(
+            machine_key=self.machine,
+            personal_root_pub=self.root.public_hex,
+            roster_entries=lambda: self.entries,
+            peer_addresses=lambda: peers,
+            personal_db_path=self.personal,
+            sync_scopes=lambda: {"alpha": self.alpha},
+            org_channels=(lambda: {"alpha": self.channel}) if with_channel else None,
+            org_peer_addresses=org_peers,
+            poll_interval=poll,
+            connect_timeout=3.0,
+            min_backoff=0.02,
+            max_backoff=0.1,
+        )
+        return fss.FleetSyncScheduler(config)
+
+
+async def _wait(predicate, *, timeout: float, label: str) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"timed out waiting for {label}")
+        await asyncio.sleep(0.05)
+
+
+def test_co_member_machine_pulls_the_org_scope_through_the_org_hello(tmp_path: Path) -> None:
+    pa, pb = KeyPair.generate(), KeyPair.generate()
+    members = [pa.public_hex, pb.public_hex]
+    a = Member(tmp_path, "a", pa, members)
+    b = Member(tmp_path, "b", pb, members)
+
+    async def run() -> None:
+        server = a.scheduler()
+        await server.start()
+        b_peers = {"alpha": {a.machine.public_hex: [f"ws://127.0.0.1:{server.port}"]}}
+        puller = b.scheduler(org_peers=lambda: b_peers)
+        try:
+            _insert(a.personal, "p-row", "personal, must not cross")
+            _insert(a.alpha, "a-row", "org row crossing between members")
+            await puller.start()
+            await _wait(lambda: _has(b.alpha, "a-row"), timeout=30.0,
+                        label="org row on the co-member's machine")
+            # A second write after admission rides the same path.
+            _insert(a.alpha, "a-row-2", "second org row")
+            await _wait(lambda: _has(b.alpha, "a-row-2"), timeout=30.0,
+                        label="second org row")
+            await asyncio.sleep(0.5)
+            # Isolation: B is not in A's personal roster, so nothing of A's
+            # personal scope reaches B by any path, and the org rows do not
+            # land in B's personal database.
+            assert not _has(b.personal, "p-row")
+            assert not _has(b.personal, "a-row")
+        finally:
+            await puller.stop()
+            await server.stop()
+        # The org pull is keyed by machine pair in the org scope's store.
+        with sqlite3.connect(b.alpha) as conn:
+            peers = [row[0] for row in conn.execute(
+                "SELECT machine_public_key FROM fleet_sync_peer_state"
+            )]
+        assert a.machine.public_hex in peers
+        with sqlite3.connect(b.personal) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM fleet_sync_peer_state"
+            ).fetchone()[0] == 0
+
+    asyncio.run(run())
+
+
+def test_org_admitted_connection_is_confined_and_wrong_hellos_are_refused(tmp_path: Path) -> None:
+    pa, pb, pc = KeyPair.generate(), KeyPair.generate(), KeyPair.generate()
+    members = [pa.public_hex, pb.public_hex]
+    a = Member(tmp_path, "a", pa, members)
+    b = Member(tmp_path, "b", pb, members)
+    # C's persona is a member of ANOTHER organization; A has no channel for it.
+    c = Member(tmp_path, "c", pc, [pc.public_hex], org=OTHER_ORG)
+
+    async def refused(coro) -> None:
+        with pytest.raises(Exception):
+            await coro
+
+    async def run() -> None:
+        server = a.scheduler()
+        await server.start()
+        addr = f"ws://127.0.0.1:{server.port}"
+        try:
+            # Admitted by the org hello; a personal-scope request on that
+            # connection is refused (the channel ends without a frame).
+            channel = await fleet_direct_connect(
+                addr, authenticator=b.channel,
+                expected_machine_pub=a.machine.public_hex, session=new_session_id(),
+            )
+            async with channel:
+                epoch = fss.roster_epoch(b.entries, b.root.public_hex)
+                store = server._store_for("personal")
+                await channel.send_message(fss.encode_pull_request(
+                    epoch, compat=store.compatibility_digest(), scope="personal",
+                    watermarks={},
+                ))
+                try:
+                    got = await asyncio.wait_for(channel.recv_message(), timeout=5.0)
+                except Exception:
+                    got = None
+                assert got is None, got
+            # Blob answers for an org-admitted peer come only from that
+            # organization's scope; a personal peer sees every scope.
+            assert server._blob_paths(None) == [a.personal, a.alpha]
+            assert server._blob_paths(ORG) == [a.alpha]
+            assert server._blob_paths(OTHER_ORG) == []
+            # An org hello for an organization this machine has no channel
+            # for is refused at the hello.
+            await refused(fleet_direct_connect(
+                addr, authenticator=c.channel,
+                expected_machine_pub=a.machine.public_hex, session=new_session_id(),
+            ))
+            # A co-member's PERSONAL hello is refused as before: its
+            # machine is not in A's personal roster.
+            await refused(fleet_direct_connect(
+                addr, authenticator=b.personal_authenticator(),
+                expected_machine_pub=a.machine.public_hex, session=new_session_id(),
+            ))
+        finally:
+            await server.stop()
+
+    asyncio.run(run())
+
+
+def test_a_round_pulls_the_own_fleet_before_co_members(tmp_path: Path) -> None:
+    pa, pb = KeyPair.generate(), KeyPair.generate()
+    members = [pa.public_hex, pb.public_hex]
+    a = Member(tmp_path, "a", pa, members)
+    fleet_mate = KeyPair.generate()
+    a.entries = a.entries + (enroll(a.root, machine_pub=fleet_mate.public_hex),)
+    co_member_machine = KeyPair.generate().public_hex
+    org_peers = {"alpha": {
+        co_member_machine: ["ws://127.0.0.1:1"],
+        # A machine that is ALSO in the personal roster is pulled on the
+        # personal path and never again through the org hello.
+        fleet_mate.public_hex: ["ws://127.0.0.1:1"],
+    }}
+    scheduler = a.scheduler(
+        peer_addresses={fleet_mate.public_hex: ["ws://127.0.0.1:1"]},
+        org_peers=lambda: org_peers,
+    )
+    scheduler._roster_snapshot = a.entries
+    calls: list[tuple[str, str, bool]] = []
+
+    async def fake_pull(machine_pub, addresses, scope, *, org_channel=None):
+        calls.append((scope, machine_pub, org_channel is not None))
+        if org_channel is not None:
+            scheduler._stopping.set()
+
+    scheduler._pull_scope = fake_pull  # type: ignore[method-assign]
+    asyncio.run(scheduler._run())
+
+    assert calls == [
+        ("personal", fleet_mate.public_hex, False),
+        ("alpha", fleet_mate.public_hex, False),
+        ("alpha", co_member_machine, True),
+    ]
+
+
+def test_without_an_org_channel_the_scheduler_is_the_personal_one(tmp_path: Path) -> None:
+    pa = KeyPair.generate()
+    a = Member(tmp_path, "a", pa, [pa.public_hex])
+    scheduler = a.scheduler(with_channel=False, org_peers=lambda: {"alpha": {"ff" * 32: ["ws://x"]}})
+    assert scheduler._org_channels() == {}
+    assert scheduler._org_channel_for_genesis(ORG) is None
+    scheduler._confine_scope("personal", None)
+    with pytest.raises(fss.FleetSyncProtocolError):
+        scheduler._confine_scope("alpha", ORG)
+    calls: list = []
+
+    async def fake_pull(*args, **kwargs):
+        calls.append(args)
+
+    scheduler._pull_scope = fake_pull  # type: ignore[method-assign]
+    asyncio.run(scheduler._sync_org_peers(set(), 0.0))
+    assert calls == []
