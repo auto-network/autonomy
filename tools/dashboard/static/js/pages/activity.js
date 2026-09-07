@@ -371,7 +371,9 @@
       _RefreshSchema: null,
       _DismissedSchema: null,
       _notifUnsubs: [],
-      _intervalId: null,
+      _heartbeatId: null,
+      _timelineDebounce: null,
+      _timelineChangedHandler: null,
       _dispatchHandler: null,
       _pauseHandler: null,
       _dispatcherStateHandler: null,
@@ -557,6 +559,16 @@
             el.scrollIntoView({ behavior: 'smooth', block: 'start' });
           }
         }, 50);
+      },
+
+      // Coalesce a burst of `timeline:changed` nudges into a single refetch
+      // 5 s after the last one (auto-jnm58).
+      _onTimelineChanged() {
+        if (this._timelineDebounce) clearTimeout(this._timelineDebounce);
+        this._timelineDebounce = setTimeout(() => {
+          this._timelineDebounce = null;
+          this.refreshTimeline();
+        }, 5000);
       },
 
       async refreshTimeline() {
@@ -1018,7 +1030,13 @@
         this._handleJournalHash();
         this._hashHandler = () => this._handleJournalHash();
         window.addEventListener('hashchange', this._hashHandler);
-        this._intervalId = setInterval(() => this.refreshTimeline(), 15000);
+        // Event-driven refresh (auto-jnm58): the server nudges `timeline:changed`
+        // whenever the dispatch DB moves. Debounce a burst into one refetch;
+        // keep a 60 s heartbeat as the only unconditional fallback (was a
+        // blind 15 s setInterval).
+        this._timelineChangedHandler = () => this._onTimelineChanged();
+        registerHandler('timeline:changed', this._timelineChangedHandler);
+        this._heartbeatId = setInterval(() => this.refreshTimeline(), 60000);
         this._initAsks();
         this.initDeviceAlerts();
         this.openFocusedApproval();
@@ -1029,9 +1047,17 @@
           window.removeEventListener('hashchange', this._hashHandler);
           this._hashHandler = null;
         }
-        if (this._intervalId) {
-          clearInterval(this._intervalId);
-          this._intervalId = null;
+        if (this._heartbeatId) {
+          clearInterval(this._heartbeatId);
+          this._heartbeatId = null;
+        }
+        if (this._timelineDebounce) {
+          clearTimeout(this._timelineDebounce);
+          this._timelineDebounce = null;
+        }
+        if (this._timelineChangedHandler) {
+          unregisterHandler('timeline:changed', this._timelineChangedHandler);
+          this._timelineChangedHandler = null;
         }
         if (this._dispatchHandler) {
           unregisterHandler('dispatch', this._dispatchHandler);
