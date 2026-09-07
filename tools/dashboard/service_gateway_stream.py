@@ -33,10 +33,10 @@ class LocalCaddyStreamHandler:
             return None
 
         payload = member.payload
-        expected_host = (
-            f"{payload.get('app_label')}.{payload.get('persona_label')}"
-            ".serve.auto.network"
-        )
+        try:
+            expected_host = service_publication.reservation_hostname_from_payload(payload)
+        except KeyError:
+            return None
         if payload.get("state") not in {"active", "paused"} or host != expected_host:
             return None
 

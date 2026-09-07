@@ -33,6 +33,8 @@ from tools.graph.schemas.service_certificate import (
     SERVICE_CERTIFICATE_REVISION,
     SERVICE_CERTIFICATE_SET_ID,
     ServiceCertificateV1,
+    apex_for_identity,
+    certificate_identity,
 )
 from tools.graph.schemas.vault_credential import (
     VAULT_AUDITED_SET_ID,
@@ -314,21 +316,28 @@ def _atomic_copy(source: Path, destination: Path, mode: int) -> None:
             temporary.unlink()
 
 
-def certificate_key(org: str, persona_label: str) -> str:
-    return f"{org}:{persona_label}"
+def certificate_key(org: str, identity: str) -> str:
+    """Metadata row key. ``identity`` is a persona serving label or an
+    organization-owned zone (the certificate identity, see the schema)."""
+    return f"{org}:{identity}"
 
 
-def certificate_vault_key(org: str, persona_label: str, serial: str) -> str:
-    return f"service.tls.{org}.{persona_label}.{serial}"
+def certificate_vault_key(org: str, identity: str, serial: str) -> str:
+    return f"service.tls.{org}.{identity}.{serial}"
 
 
-def _pair_directory(org: str, persona_label: str, serial: str) -> Path:
-    return PERSONA_CERT_ROOT / org / persona_label / serial
+def _pair_directory(org: str, identity: str, serial: str) -> Path:
+    return PERSONA_CERT_ROOT / org / identity / serial
+
+
+def _identity_fields(identity: str) -> dict:
+    """The metadata fields that name an identity: one of the two, never both."""
+    return {"zone": identity} if "." in identity else {"persona_label": identity}
 
 
 def pair_paths(metadata: dict) -> tuple[Path, Path]:
     directory = _pair_directory(
-        metadata["org"], metadata["persona_label"], metadata["serial"]
+        metadata["org"], certificate_identity(metadata), metadata["serial"]
     )
     return directory / "tls.crt", directory / "tls.key"
 
@@ -336,7 +345,7 @@ def pair_paths(metadata: dict) -> tuple[Path, Path]:
 def gateway_pair_paths(metadata: dict) -> tuple[str, str]:
     """Return the same ramfs pair in the Caddy container's mount frame."""
     relative = _pair_directory(
-        metadata["org"], metadata["persona_label"], metadata["serial"]
+        metadata["org"], certificate_identity(metadata), metadata["serial"]
     ).relative_to(Path("/run/autonomy-keycache/service-gateway"))
     root = Path("/run/autonomy-service-gateway-certs") / relative
     return str(root / "tls.crt"), str(root / "tls.key")
@@ -348,7 +357,7 @@ def _bundle_payload(cert_path: Path, key_path: Path, metadata: dict) -> dict:
             "fullchain_pem": cert_path.read_text(),
             "private_key_pem": key_path.read_text(),
             "org": metadata["org"],
-            "persona_label": metadata["persona_label"],
+            **_identity_fields(certificate_identity(metadata)),
             "serial": metadata["serial"],
         },
         sort_keys=True,
@@ -368,16 +377,18 @@ def _read_bundle(vault_key: str) -> dict:
         bundle = json.loads(payload["value"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ServiceCertificateError("certificate vault bundle is invalid") from exc
-    if set(bundle) != {
-        "fullchain_pem", "private_key_pem", "org", "persona_label", "serial"
-    }:
+    fields = set(bundle)
+    if fields not in (
+        {"fullchain_pem", "private_key_pem", "org", "persona_label", "serial"},
+        {"fullchain_pem", "private_key_pem", "org", "zone", "serial"},
+    ):
         raise ServiceCertificateError("certificate vault bundle has invalid fields")
     return bundle
 
 
 def _write_bundle(cert_path: Path, key_path: Path, metadata: dict) -> str:
     vault_key = certificate_vault_key(
-        metadata["org"], metadata["persona_label"], metadata["serial"]
+        metadata["org"], certificate_identity(metadata), metadata["serial"]
     )
     settings_ops.write_by_key(
         VAULT_AUDITED_SET_ID,
@@ -391,7 +402,7 @@ def _write_bundle(cert_path: Path, key_path: Path, metadata: dict) -> str:
 
 
 def _materialize_bundle(metadata: dict, bundle: dict) -> tuple[Path, Path]:
-    for name in ("org", "persona_label", "serial"):
+    for name in ("org", "persona_label", "zone", "serial"):
         if bundle.get(name) != metadata.get(name):
             raise ServiceCertificateError("certificate bundle identity mismatch")
     cert_path, key_path = pair_paths(metadata)
@@ -416,7 +427,7 @@ def _materialize_bundle(metadata: dict, bundle: dict) -> tuple[Path, Path]:
 
 
 def _retire_old_ramfs(metadata: dict) -> None:
-    root = PERSONA_CERT_ROOT / metadata["org"] / metadata["persona_label"]
+    root = PERSONA_CERT_ROOT / metadata["org"] / certificate_identity(metadata)
     keep = {metadata["serial"]}
     previous = metadata.get("previous_serial")
     if isinstance(previous, str):
@@ -447,18 +458,19 @@ def _retire_old_ramfs(metadata: dict) -> None:
 
 def activate_pair(
     org: str,
-    persona_label: str,
+    identity: str,
     cert_path: Path,
     key_path: Path,
     metadata: dict,
 ) -> dict:
-    """Seal, verify, materialize, then publish the active metadata pointer."""
-    current = certificate_metadata(org, persona_label)
+    """Seal, verify, materialize, then publish the active metadata pointer.
+    ``identity`` is the persona serving label or the organization zone."""
+    current = certificate_metadata(org, identity)
     value = dict(metadata)
-    value.update({"org": org, "persona_label": persona_label})
-    vault_key = certificate_vault_key(
-        value["org"], value["persona_label"], value["serial"]
-    )
+    value.pop("persona_label", None)
+    value.pop("zone", None)
+    value.update({"org": org, **_identity_fields(identity)})
+    vault_key = certificate_vault_key(value["org"], identity, value["serial"])
     expected_bundle = json.loads(_bundle_payload(cert_path, key_path, value)["value"])
     existing = settings_ops.read_set_key(
         VAULT_AUDITED_SET_ID, vault_key, org=None, peers=[]
@@ -480,7 +492,7 @@ def activate_pair(
     settings_ops.write_by_key(
         SERVICE_CERTIFICATE_SET_ID,
         SERVICE_CERTIFICATE_REVISION,
-        certificate_key(org, persona_label),
+        certificate_key(org, identity),
         value,
         org="machine",
         state="raw",
@@ -489,10 +501,10 @@ def activate_pair(
     return value
 
 
-def certificate_metadata(org: str, persona_label: str) -> dict | None:
+def certificate_metadata(org: str, identity: str) -> dict | None:
     row = settings_ops.read_set_key(
         SERVICE_CERTIFICATE_SET_ID,
-        certificate_key(org, persona_label),
+        certificate_key(org, identity),
         org="machine",
         peers=[],
     )
@@ -516,11 +528,12 @@ def materialize_active_pairs() -> list[dict]:
     return result
 
 
-def active_gateway_pair(org: str, persona_label: object) -> tuple[str, str] | None:
-    """Return one verified materialized pair in the gateway mount frame."""
-    if not isinstance(persona_label, str):
+def active_gateway_pair(org: str, identity: object) -> tuple[str, str] | None:
+    """Return one verified materialized pair in the gateway mount frame.
+    ``identity`` is a persona serving label or an organization zone."""
+    if not isinstance(identity, str) or not identity:
         return None
-    metadata = certificate_metadata(org, persona_label)
+    metadata = certificate_metadata(org, identity)
     if metadata is None:
         # One-time migration bridge for the certificate issued during the
         # emergency launch. It is exact-identity and expiry checked, and the
@@ -533,7 +546,7 @@ def active_gateway_pair(org: str, persona_label: object) -> tuple[str, str] | No
             return None
         if (
             legacy.get("org") != org
-            or legacy.get("apex") != f"{persona_label}.serve.auto.network"
+            or legacy.get("apex") != apex_for_identity(identity)
             or int(legacy.get("not_after") or 0) <= int(time.time())
             or not all(
                 path.is_file() and path.stat().st_size > 0
@@ -568,15 +581,16 @@ def _dns01_preflight(client, apex: str, *, wait=None) -> None:
     expected = f"_acme-challenge.{apex}"
     order = f"preflight-{uuid.uuid4().hex}"
     canary = "preflight-" + uuid.uuid4().hex
-    result = client.present(order, canary, ttl=30, lifetime=120)
+    zone_kwargs = _zone_kwargs_for_apex(apex)
+    result = client.present(order, canary, ttl=30, lifetime=120, **zone_kwargs)
     try:
         published = str(result.get("name", ""))
         if published != expected:
             relay_label = published.removeprefix("_acme-challenge.").removesuffix(".serve.auto.network")
             raise ServiceCertificateError(
-                "DNS-01 preflight: the relay publishes challenges for this persona under "
-                f"{published!r} but the certificate is for {expected!r}; the persona's bound "
-                f"serving label is {relay_label!r}, not {apex.split('.serve.', 1)[0]!r}. "
+                "DNS-01 preflight: the relay publishes challenges for this identity under "
+                f"{published!r} but the certificate is for {expected!r}; the bound serving "
+                f"label is {relay_label!r}, not {apex.removesuffix('.serve.auto.network')!r}. "
                 "No ACME order was placed."
             )
         try:
@@ -588,20 +602,29 @@ def _dns01_preflight(client, apex: str, *, wait=None) -> None:
             ) from exc
     finally:
         with contextlib.suppress(Exception):
-            client.cleanup(order, canary)
+            client.cleanup(order, canary, **zone_kwargs)
+
+
+def _zone_kwargs_for_apex(apex: str) -> dict:
+    """An organization zone is its own apex; a persona apex is under the base
+    zone and the relay derives its challenge name from the bound label."""
+    return {} if apex.endswith(".serve.auto.network") else {"zone": apex}
 
 
 async def obtain(
-    org: str, persona_label: str, *, staging: bool = False
+    org: str, identity: str, *, staging: bool = False
 ) -> tuple[dict, bytes, bytes]:
-    """Obtain and verify a candidate without activating it."""
-    if not _LABEL_RE.fullmatch(persona_label):
-        raise ServiceCertificateError("invalid persona label")
+    """Obtain and verify a candidate without activating it. ``identity`` is
+    a persona serving label or an organization-owned zone."""
+    try:
+        apex = apex_for_identity(identity)
+    except Exception as exc:
+        raise ServiceCertificateError(f"invalid certificate identity: {exc}") from None
+    persona_label = identity
     client = load_dns01_client(org)
     order = f"service-{uuid.uuid4().hex}"
-    apex = f"{persona_label}.serve.auto.network"
     await asyncio.to_thread(_dns01_preflight, client, apex)
-    cert_name = order if staging else certificate_name(org, persona_label)
+    cert_name = order if staging else certificate_name(org, identity)
     socket_path = ACME_ROOT / "dns01.sock"
     ACME_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
@@ -616,7 +639,9 @@ async def obtain(
             not staging
             and (ACME_ROOT / "config" / "renewal" / f"{cert_name}.conf").is_file()
         )
-        async with Dns01HookServer(client, order, socket_path):
+        async with Dns01HookServer(
+            client, order, socket_path, **_zone_kwargs_for_apex(apex)
+        ):
             proc = await asyncio.create_subprocess_exec(
                 *_certbot_command(
                     apex, cert_name, staging=staging, renew=renew
@@ -653,7 +678,7 @@ async def obtain(
             shutil.rmtree(ACME_ROOT / child, ignore_errors=True)
 
 
-async def issue(org: str, persona_label: str, *, staging: bool = False) -> dict:
+async def issue(org: str, identity: str, *, staging: bool = False) -> dict:
     if not staging and not settings_ops.personal_delegate_audited_is_warm():
         # A production order is useful only if its account state and verified
         # pair can be read back and committed. Refuse before contacting ACME
@@ -662,7 +687,7 @@ async def issue(org: str, persona_label: str, *, staging: bool = False) -> dict:
             "certificate vault is locked; unlock before issuing a certificate"
         )
     metadata, cert_bytes, key_bytes = await obtain(
-        org, persona_label, staging=staging
+        org, identity, staging=staging
     )
     candidate = ACME_ROOT / f"activate-{uuid.uuid4().hex}"
     cert_path = candidate / "fullchain.pem"
@@ -673,7 +698,7 @@ async def issue(org: str, persona_label: str, *, staging: bool = False) -> dict:
         key_path.write_bytes(key_bytes)
         os.chmod(cert_path, 0o600)
         os.chmod(key_path, 0o600)
-        return activate_pair(org, persona_label, cert_path, key_path, metadata)
+        return activate_pair(org, identity, cert_path, key_path, metadata)
     finally:
         shutil.rmtree(candidate, ignore_errors=True)
 

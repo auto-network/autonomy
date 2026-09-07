@@ -2,7 +2,9 @@
 
 The Setting member key is the sole stable reservation identity.  Values do
 not repeat that key, the owning organization, or the origin recoverable from
-``app_label`` and ``persona_label``.
+``app_label`` and either ``persona_label`` (``<app>.<persona>.serve.auto.network``)
+or ``zone`` (``<app>.<zone>`` directly under an organization-owned delegated
+zone, see ``serve_zone``).  Exactly one of the two is present.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from .registry import (
     keyed_per_entity,
     publication_band,
 )
+from .serve_zone import validate_zone_value
 
 
 NAMESPACE_RESERVATION_SET_ID = "autonomy.network.namespace-reservation"
@@ -101,7 +104,8 @@ SYNOPSIS = {
 @home("organization")
 @keyed_per_entity(key_strategy=RESERVATION_KEY_STRATEGY)
 class NamespaceReservationV1(SettingSchema):
-    """A persona-owned ``<app>.<persona>.serve.auto.network`` origin."""
+    """A persona-owned ``<app>.<persona>.serve.auto.network`` origin, or an
+    organization-owned ``<app>.<zone>`` origin under a claimed zone."""
 
     set_id = NAMESPACE_RESERVATION_SET_ID
     schema_revision = NAMESPACE_RESERVATION_REVISION
@@ -111,8 +115,18 @@ class NamespaceReservationV1(SettingSchema):
         description="Organization-scoped persona public key as lowercase hex.",
     )
     persona_label: str = field(
-        required=True,
-        description="Immutable DNS label derived from display name and persona key.",
+        required=False,
+        description=(
+            "Immutable DNS label derived from display name and persona key. "
+            "Present exactly when the origin lives under serve.auto.network."
+        ),
+    )
+    zone: str = field(
+        required=False,
+        description=(
+            "Organization-owned delegated zone the origin lives directly under. "
+            "Present exactly when persona_label is absent."
+        ),
     )
     app_label: str = field(
         required=True,
@@ -147,17 +161,30 @@ class NamespaceReservationV1(SettingSchema):
             )
         validate_app_label_value(payload.get("app_label"))
         persona_label = payload.get("persona_label")
-        digest = hashlib.sha256(bytes.fromhex(persona_pub)).hexdigest()[:20]
-        suffix = "-" + digest
-        if not isinstance(persona_label, str) or not persona_label.endswith(suffix):
-            raise SchemaValidationError(
-                f"{cls.__name__}: persona_label must end in its persona digest"
-            )
-        slug = persona_label[: -len(suffix)]
-        if not 1 <= len(slug) <= 42 or not _PERSONA_SLUG_RE.fullmatch(slug):
-            raise SchemaValidationError(
-                f"{cls.__name__}: persona_label has an invalid slug"
-            )
+        zone = payload.get("zone")
+        if zone is not None:
+            if persona_label is not None:
+                raise SchemaValidationError(
+                    f"{cls.__name__}: a zone origin carries no persona_label"
+                )
+            try:
+                normalized = validate_zone_value(zone)
+            except SchemaValidationError as exc:
+                raise SchemaValidationError(f"{cls.__name__}: {exc}") from None
+            if normalized != zone:
+                raise SchemaValidationError(f"{cls.__name__}: zone is not normalized")
+        else:
+            digest = hashlib.sha256(bytes.fromhex(persona_pub)).hexdigest()[:20]
+            suffix = "-" + digest
+            if not isinstance(persona_label, str) or not persona_label.endswith(suffix):
+                raise SchemaValidationError(
+                    f"{cls.__name__}: persona_label must end in its persona digest"
+                )
+            slug = persona_label[: -len(suffix)]
+            if not 1 <= len(slug) <= 42 or not _PERSONA_SLUG_RE.fullmatch(slug):
+                raise SchemaValidationError(
+                    f"{cls.__name__}: persona_label has an invalid slug"
+                )
         for name in ("created_at", "updated_at"):
             value = payload.get(name)
             if not _is_rfc3339_millis(value):

@@ -28,6 +28,13 @@ from tools.graph.schemas.namespace_reservation import (
     validate_app_label_value,
     validate_reservation_key,
 )
+from tools.graph.schemas.serve_zone import (
+    SERVE_BASE_DOMAIN,
+    SERVE_ZONE_REVISION,
+    SERVE_ZONE_SET_ID,
+    ZONE_BINDING_KINDS,
+    validate_zone_value,
+)
 from tools.graph.schemas.service_target import (
     SERVICE_TARGET_REVISION,
     SERVICE_TARGET_SET_ID,
@@ -40,10 +47,15 @@ _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
-@dataclass(frozen=True)
 class ServicePublicationError(Exception):
-    code: str
-    status_code: int
+    """A refusal with an API code, an HTTP status, and an optional detail the
+    UI may show verbatim (the registry's reason for a zone refusal)."""
+
+    def __init__(self, code: str, status_code: int = 400, detail: str = "") -> None:
+        super().__init__(code)
+        self.code = code
+        self.status_code = status_code
+        self.detail = detail
 
 
 @dataclass(frozen=True)
@@ -94,6 +106,42 @@ def reservation_key(persona_pub: str, app_label: str) -> str:
     if not isinstance(persona_pub, str) or not re.fullmatch(r"[0-9a-f]{64}", persona_pub):
         raise ValueError("persona_pub must be 32-byte lowercase hex")
     return str(uuid.uuid5(_RESERVATION_NAMESPACE, persona_pub + "\0" + app_label))
+
+
+def validate_zone(value: object) -> str:
+    """Normalize an organization zone; ValueError on anything the registry
+    would refuse (mirrors relay.validate_org_zone)."""
+    try:
+        return validate_zone_value(value)
+    except Exception as exc:
+        raise ValueError(str(exc)) from None
+
+
+def zone_reservation_key(zone: str, app_label: str) -> str:
+    """The reservation id for a Service directly under an organization zone.
+    Byte-for-byte the registry's ``zone_reservation_id`` so the host lease the
+    connector registers is the one the relay derives."""
+    validate_app_label(app_label)
+    zone = validate_zone(zone)
+    return str(uuid.uuid5(_RESERVATION_NAMESPACE, f"zone:{zone}\0{app_label}"))
+
+
+def reservation_hostname_from_payload(payload: dict) -> str:
+    """The one public hostname a stored reservation denotes."""
+    zone = payload.get("zone")
+    if isinstance(zone, str) and zone:
+        return f"{payload['app_label']}.{zone}"
+    return f"{payload['app_label']}.{payload['persona_label']}.{SERVE_BASE_DOMAIN}"
+
+
+def certificate_identity_for_payload(payload: dict) -> str | None:
+    """The certificate identity (zone, else persona label) a reservation
+    is served under; None when the row carries neither."""
+    zone = payload.get("zone")
+    if isinstance(zone, str) and zone:
+        return zone
+    persona = payload.get("persona_label")
+    return persona if isinstance(persona, str) and persona else None
 
 
 def _persona_for_org(org: str) -> tuple[str, str]:
@@ -414,16 +462,17 @@ def unbind_service_target(org: str, key: str) -> bool:
 def reservation_projection(key: str, payload: dict) -> dict:
     result = {
         "reservation_id": key,
-        "origin": (
-            f"https://{payload['app_label']}.{payload['persona_label']}"
-            ".serve.auto.network"
-        ),
-        "persona_label": payload["persona_label"],
+        "origin": f"https://{reservation_hostname_from_payload(payload)}",
+        "persona_label": payload.get("persona_label"),
         "app_label": payload["app_label"],
         "state": payload["state"],
         "created_at": payload["created_at"],
         "updated_at": payload["updated_at"],
     }
+    if payload.get("zone"):
+        # Only organization-zone rows carry it; base-zone projections are
+        # unchanged so existing consumers see exactly what they always did.
+        result["zone"] = payload["zone"]
     if payload.get("released_at"):
         result["released_at"] = payload["released_at"]
     return result
@@ -475,10 +524,20 @@ def _reservation_members(org: str):
     ]
 
 
-def reserve_origin(org: str, app_label: str) -> tuple[dict, bool]:
+def reserve_origin(
+    org: str, app_label: str, zone: str | None = None
+) -> tuple[dict, bool]:
+    """Reserve ``<app>.<persona>.serve.auto.network`` or, with ``zone``,
+    ``<app>.<zone>`` directly under a zone this organization has claimed."""
     app_label = validate_app_label(app_label)
     persona_pub, display_name = _persona_for_org(org)
-    key = reservation_key(persona_pub, app_label)
+    if zone is not None:
+        zone = validate_zone(zone)
+        if active_zone(org, zone) is None:
+            raise ServicePublicationError("zone_not_claimed", 409)
+        key = zone_reservation_key(zone, app_label)
+    else:
+        key = reservation_key(persona_pub, app_label)
     existing = _member_by_key(org, key)
     if existing is not None:
         if existing.payload.get("state") == "released":
@@ -487,13 +546,18 @@ def reserve_origin(org: str, app_label: str) -> tuple[dict, bool]:
     now = _utc_now()
     payload = {
         "persona_pub": persona_pub,
-        "persona_label": bound_persona_label(org, persona_pub)
-        or normalize_persona_label(display_name, persona_pub),
         "app_label": app_label,
         "state": "active",
         "created_at": now,
         "updated_at": now,
     }
+    if zone is not None:
+        payload["zone"] = zone
+    else:
+        payload["persona_label"] = (
+            bound_persona_label(org, persona_pub)
+            or normalize_persona_label(display_name, persona_pub)
+        )
     settings_ops.upsert_by_key(
         NAMESPACE_RESERVATION_SET_ID,
         NAMESPACE_RESERVATION_REVISION,
@@ -531,3 +595,123 @@ def transition_reservation(org: str, key: str, state: str) -> tuple[dict, bool]:
         org=org,
     )
     return reservation_projection(key, payload), True
+
+
+# --- organization-owned delegated zones (custom domains) --------------------
+
+_ZONE_ERROR_CODES = {
+    "zone-invalid": ("zone_invalid", 400),
+    "zone-unverified": ("zone_unverified", 409),
+    "zone-owned-elsewhere": ("zone_owned_elsewhere", 409),
+    "zone-not-owned": ("zone_not_claimed", 409),
+    "not-authorized": ("zone_not_authorized", 403),
+}
+
+
+def _zone_members(org: str):
+    return [
+        member
+        for member in settings_ops.read_owned_set(SERVE_ZONE_SET_ID, org=org).members
+        if isinstance(getattr(member, "payload", None), dict)
+    ]
+
+
+def zone_projection(zone: str, payload: dict) -> dict:
+    return {
+        "zone": zone,
+        "binding_kind": payload.get("binding_kind"),
+        "state": payload.get("state"),
+        "verified_at": payload.get("verified_at"),
+        "claimed_at": payload.get("claimed_at"),
+        "updated_at": payload.get("updated_at"),
+    }
+
+
+def list_zones(org: str) -> list[dict]:
+    return sorted(
+        (zone_projection(m.key, m.payload) for m in _zone_members(org)),
+        key=lambda row: row["zone"],
+    )
+
+
+def active_zone(org: str, zone: str) -> dict | None:
+    """The claimed, still-active zone row, or None."""
+    for member in _zone_members(org):
+        if member.key == zone and member.payload.get("state") == "active":
+            return zone_projection(member.key, member.payload)
+    return None
+
+
+def _zone_control(org: str, op: str, args: dict, control=None) -> dict:
+    """One control op on the org's serving tunnel; connector faults become
+    a 503 the UI can explain, relay refusals map to their own codes."""
+    if control is None:
+        from tools.dashboard.link_serving_supervisor import control as _control
+        control = _control
+    try:
+        reply = control(org, op, args)
+    except Exception as exc:  # TunnelUnavailable, socket faults
+        raise ServicePublicationError("serving_unavailable", 503, str(exc)) from exc
+    if not isinstance(reply, dict):
+        raise ServicePublicationError("serving_unavailable", 503, "no reply")
+    if reply.get("ok") is True:
+        return reply
+    error = str(reply.get("error") or "refused")
+    head = error.split(":", 1)[0].strip()
+    code, status = _ZONE_ERROR_CODES.get(head, ("zone_refused", 409))
+    detail = error.split(":", 1)[1].strip() if ":" in error else ""
+    raise ServicePublicationError(code, status, detail)
+
+
+def claim_zone(org: str, zone: object, binding_kind: object, *, control=None) -> tuple[dict, bool]:
+    """Ask the registry to verify and claim ``zone`` for this organization,
+    then record the verified claim. The registry's verdict is the authority;
+    the row is only written on success."""
+    zone = validate_zone(zone)
+    if binding_kind not in ZONE_BINDING_KINDS:
+        raise ValueError("unknown binding kind")
+    reply = _zone_control(
+        org, "serve.zone.claim", {"zone": zone, "binding_kind": binding_kind},
+        control,
+    )
+    if reply.get("zone") != zone:
+        raise ServicePublicationError("zone_refused", 409, "registry answered for another zone")
+    now = _utc_now()
+    existing = next((m for m in _zone_members(org) if m.key == zone), None)
+    created = existing is None or existing.payload.get("state") != "active"
+    verified_at = reply.get("verified_at")
+    payload = {
+        "binding_kind": binding_kind,
+        "state": "active",
+        "verified_at": int(verified_at) if isinstance(verified_at, int) and verified_at > 0
+        else int(datetime.now(timezone.utc).timestamp()),
+        "claimed_at": (existing.payload.get("claimed_at") if existing else None) or now,
+        "updated_at": now,
+    }
+    settings_ops.upsert_by_key(
+        SERVE_ZONE_SET_ID, SERVE_ZONE_REVISION, zone, payload, org=org,
+    )
+    return zone_projection(zone, payload), created
+
+
+def release_zone(org: str, zone: object, *, control=None) -> dict:
+    """Release a claimed zone. Refused while any live reservation still
+    publishes under it: stop those Services first."""
+    zone = validate_zone(zone)
+    existing = next((m for m in _zone_members(org) if m.key == zone), None)
+    if existing is None or existing.payload.get("state") != "active":
+        raise ServicePublicationError("zone_not_claimed", 404)
+    for member in _reservation_members(org):
+        if member.payload.get("zone") == zone and member.payload.get("state") in {"active", "paused"}:
+            raise ServicePublicationError("zone_in_use", 409)
+    try:
+        _zone_control(org, "serve.zone.release", {"zone": zone}, control)
+    except ServicePublicationError as exc:
+        # Already gone at the registry: the local row is still ours to close.
+        if exc.code != "zone_not_claimed":
+            raise
+    payload = {**existing.payload, "state": "revoked", "updated_at": _utc_now()}
+    settings_ops.upsert_by_key(
+        SERVE_ZONE_SET_ID, SERVE_ZONE_REVISION, zone, payload, org=org,
+    )
+    return zone_projection(zone, payload)
