@@ -24,6 +24,7 @@ import subprocess
 import sys
 import termios
 import threading
+from collections import OrderedDict
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -6058,66 +6059,129 @@ def _reconstruct_read_state(
     (caught up, no entries) never gets here. Built as a standalone helper
     so it can be reused for reverse windows if that ruling comes.
     """
-    parse_ctx: dict = {}
-    pp_state = harness.new_postprocess_state()
-    tracker = TaskStateTracker()
-    last_enqueue: str | None = None
+    import copy
 
-    # Round-2 review RB2: the claim ALLOCATION is part of the stream state.
-    # Collecting descriptions alone left claimed_subagents empty, so a
-    # replay re-claimed the first matching subagent for a repeated
-    # description and emitted the wrong tool_calls at the same canonical
-    # ref. Replay the SAME enrichment function over the prefix so both the
-    # descriptions and the claim set stand exactly as they did at the
-    # cursor (the prefix entries themselves are discarded).
-    class _ReconTs:
-        agent_descriptions: dict[str, str] = {}
-        claimed_subagents: set[str] = set()
-    recon_ts = _ReconTs()
-    recon_ts.agent_descriptions = {}
-    recon_ts.claimed_subagents = set()
-
+    # The replay frontier per file: (stem, path, limit) for every chain file
+    # through the cursor. ``limit`` is a complete-line offset, so a replay may
+    # stop and later resume there — the live monitor tails these files in
+    # arbitrary increments on exactly that assumption.
+    limits: list[tuple[str, Path, int]] = []
     for stem, path in chain:
         try:
             complete = _last_complete_offset_in(path)
         except OSError:
-            continue
-        limit = min(upto_off, complete) if stem == upto_file else complete
-        if limit > 0:
+            complete = None
+        if complete is not None:
+            limit = min(upto_off, complete) if stem == upto_file else complete
+            limits.append((stem, path, limit))
+        if stem == upto_file:
+            break
+
+    # Incremental cache (auto-3xony): the previous replay of this chain, if
+    # it stopped at or before the new cursor with every earlier file unchanged,
+    # is extended from its frontier instead of re-parsing from byte 0. A
+    # 40 MB session then costs one prefix parse per process lifetime plus a
+    # delta per gap fetch. Anything else (file shrank, chain rolled over,
+    # first request) falls back to the full replay.
+    key = (tuple(stem for stem, _ in chain), upto_file)
+    frontier = {stem: limit for stem, _, limit in limits}
+    state = None
+    reused = False
+    begin_at = 0
+    with _recon_cache_lock:
+        cached = _recon_cache.get(key)
+        if cached is not None:
+            _recon_cache.move_to_end(key)
+    if cached is not None:
+        old = cached["frontier"]
+        earlier_unchanged = all(
+            old.get(stem) == limit for stem, _, limit in limits[:-1]
+        )
+        same_files = set(old) == set(frontier)
+        cur_from = old.get(upto_file, 0)
+        cur_to = frontier.get(upto_file, 0)
+        if same_files and earlier_unchanged and 0 <= cur_from <= cur_to:
+            state = copy.deepcopy(cached["state"])
+            reused = True
+            begin_at = cur_from
+    if state is None:
+        state = {
+            "parse_ctx": {},
+            "postprocess_state": harness.new_postprocess_state(),
+            "tracker": TaskStateTracker(),
+            "last_enqueue_content": None,
+            # Round-2 review RB2: the claim ALLOCATION is part of the stream
+            # state. Replay the SAME enrichment function over the prefix so
+            # both the descriptions and the claim set stand exactly as they
+            # did at the cursor (the prefix entries themselves are discarded).
+            "agent_descriptions": {},
+            "claimed_subagents": set(),
+        }
+        _recon_stats["full"] += 1
+    else:
+        _recon_stats["incremental"] += 1
+
+    class _ReconTs:
+        agent_descriptions: dict[str, str] = state["agent_descriptions"]
+        claimed_subagents: set[str] = state["claimed_subagents"]
+
+    # Prefix entries are discarded, so the per-tile graph lookups are pure
+    # cost here; parse state does not depend on them.
+    with session_harness.semantic_enrichment_disabled():
+        for stem, path, limit in limits:
+            begin = 0
+            if reused and stem != upto_file:
+                continue                      # already in the cached state
+            if reused and stem == upto_file:
+                begin = begin_at
+            if limit <= begin:
+                continue
             try:
                 with open(path, "rb") as fh:
-                    data = fh.read(limit)
+                    fh.seek(begin)
+                    data = fh.read(limit - begin)
             except OSError:
                 data = b""
             reader = session_harness.resolve_harness_for_path(
-                path, ctx=parse_ctx,
+                path, ctx=state["parse_ctx"],
             )
             prefix = reader.parse_bytes_with_refs(
-                data, stem=stem, base_offset=0,
+                data, stem=stem, base_offset=begin,
             )
-            prefix, last_enqueue, _ = session_monitor_mod.dedup_queued_entries(
-                prefix, last_enqueue,
+            prefix, state["last_enqueue_content"], _ = (
+                session_monitor_mod.dedup_queued_entries(
+                    prefix, state["last_enqueue_content"],
+                )
             )
             out = harness.postprocess_entries(
-                prefix, session_dir=path.parent / path.stem, state=pp_state,
+                prefix, session_dir=path.parent / path.stem,
+                state=state["postprocess_state"],
             )
             try:
                 session_monitor_mod.SessionMonitor._enrich_agent_entries(
-                    {"jsonl_path": str(path)}, recon_ts, out,
+                    {"jsonl_path": str(path)}, _ReconTs, out,
                 )
             except Exception:
                 logger.exception("tail: prefix agent-claim replay failed")
-            tracker.enrich("_reconstruct", out)
-        if stem == upto_file:
-            break
-    return {
-        "parse_ctx": parse_ctx,
-        "postprocess_state": pp_state,
-        "tracker": tracker,
-        "last_enqueue_content": last_enqueue,
-        "agent_descriptions": recon_ts.agent_descriptions,
-        "claimed_subagents": recon_ts.claimed_subagents,
-    }
+            state["agent_descriptions"] = _ReconTs.agent_descriptions
+            state["claimed_subagents"] = _ReconTs.claimed_subagents
+            state["tracker"].enrich("_reconstruct", out)
+
+    with _recon_cache_lock:
+        _recon_cache[key] = {"frontier": frontier, "state": copy.deepcopy(state)}
+        _recon_cache.move_to_end(key)
+        while len(_recon_cache) > _RECON_CACHE_MAX:
+            _recon_cache.popitem(last=False)
+    return state
+
+
+#: auto-3xony: per-chain replay frontier + state, keyed by (chain stems,
+#: cursor file). Bounded LRU; entries are deep-copied on the way in and out so
+#: a caller's later enrichment never mutates the cached master.
+_RECON_CACHE_MAX = 64
+_recon_cache: "OrderedDict[tuple, dict]" = OrderedDict()
+_recon_cache_lock = threading.Lock()
+_recon_stats = {"full": 0, "incremental": 0}
 
 
 def _parse_and_enrich_segments(
@@ -6128,9 +6192,17 @@ def _parse_and_enrich_segments(
     *,
     trim_to: int | None = None,
     reconstruct_from: tuple[list[tuple[str, Path]], str, int] | None = None,
+    snapshot: dict | None = None,
+    tracker: TaskStateTracker | None = None,
 ) -> tuple[list[dict], list[dict], dict | None]:
     """Parse + postprocess + enrich chain segments the same way the live
     stream does.
+
+    Thread-safe when the caller supplies ``snapshot`` (the live monitor's
+    read context, taken on the event loop) and ``tracker`` (a fork of the
+    process tracker, also taken on the loop); the endpoint runs this in a
+    worker thread with both pre-taken (auto-3xony). Without them the
+    snapshot path reads loop-owned state and must run on the loop.
 
     Two state modes (review B3/B4, coordinator-approved split):
     - ``reconstruct_from=(chain, file, off)`` — forward gap fills into the
@@ -6152,6 +6224,8 @@ def _parse_and_enrich_segments(
         recon = _reconstruct_read_state(
             chain, harness, upto_file=upto_file, upto_off=upto_off,
         )
+    elif snapshot is not None:
+        snap = snapshot
     else:
         snap = session_monitor.snapshot_read_context(tmux_name) if tmux_name else None
 
@@ -6223,7 +6297,7 @@ def _parse_and_enrich_segments(
         recon["tracker"].enrich("_reconstruct", out)
     else:
         key = tmux_name or "_http"
-        _task_state_tracker.fork_session(key).enrich(key, out)
+        (tracker or _task_state_tracker.fork_session(key)).enrich(key, out)
 
     # Agent tool_calls enrichment against reconstructed/snapshot copies
     # (never the live descriptions/claims — reads must not consume live
@@ -6519,13 +6593,21 @@ async def api_session_tail(request):
         return JSONResponse(resp)
 
     # ── Chain modes: (file, offset) pair cursors over the rollover chain ──
+    # auto-3xony: file reads, JSON parsing and enrichment run in a worker
+    # thread. Only the two loop-owned reads — the monitor's read-context
+    # snapshot and the tracker fork — are taken here first.
     if chain_reverse:
-        segments, older_cursor, has_more = _read_chain_window_backward(
+        segments, older_cursor, has_more = await asyncio.to_thread(
+            _read_chain_window_backward,
             chain, harness, n=tail_lines,
             before_file=before_file, before_off=before,
         )
-        entries, spans, trimmed_from = _parse_and_enrich_segments(
+        snap = session_monitor.snapshot_read_context(tmux_name) if tmux_name else None
+        fork = _task_state_tracker.fork_session(tmux_name or "_http")
+        entries, spans, trimmed_from = await asyncio.to_thread(
+            _parse_and_enrich_segments,
             segments, harness, db_row, tmux_name, trim_to=tail_lines,
+            snapshot=snap, tracker=fork,
         )
         if trimmed_from is not None:
             older_cursor = trimmed_from
@@ -6544,7 +6626,7 @@ async def api_session_tail(request):
 
     if chain_forward:
         cur_stem = chain_stems[-1]
-        cur_complete = _last_complete_offset_in(chain[-1][1])
+        cur_complete = await asyncio.to_thread(_last_complete_offset_in, chain[-1][1])
         if after_file == cur_stem and after >= cur_complete:
             # Happy-path caught-up: a few hundred bytes, no entries.
             resp = dict(base_resp)
@@ -6553,8 +6635,8 @@ async def api_session_tail(request):
                 "has_more_forward": False,
             })
             return _finish(resp)
-        segments, cursor, has_more_fwd = _read_chain_forward(
-            chain, after_file=after_file, after_off=after,
+        segments, cursor, has_more_fwd = await asyncio.to_thread(
+            _read_chain_forward, chain, after_file=after_file, after_off=after,
         )
         # Reconstruction anchor = the position the forward read actually
         # started from (mirrors _read_chain_forward's unknown-stem
@@ -6564,7 +6646,8 @@ async def api_session_tail(request):
             recon_anchor = (after_file, after)
         else:
             recon_anchor = (chain_stems[-1], 0)
-        entries, spans, _trimmed = _parse_and_enrich_segments(
+        entries, spans, _trimmed = await asyncio.to_thread(
+            _parse_and_enrich_segments,
             segments, harness, db_row, tmux_name,
             reconstruct_from=(chain, recon_anchor[0], recon_anchor[1]),
         )
@@ -6582,7 +6665,8 @@ async def api_session_tail(request):
         return JSONResponse(base_resp)
 
     if reverse_window:
-        data, window_start, window_end = _read_jsonl_tail_window(
+        data, window_start, window_end = await asyncio.to_thread(
+            _read_jsonl_tail_window,
             session_file,
             n=tail_lines,
             before=before,
@@ -14110,14 +14194,25 @@ def _read_jsonl_tail_window(
                 end = max(0, min(int(before), size))
             if end <= 0:
                 return b"", 0, 0
+            # auto-3xony: collect chunks and join once, counting newlines per
+            # chunk. The previous ``buf = fh.read(read) + buf`` plus a
+            # ``buf.count`` per iteration was quadratic in the window size —
+            # 6.5 s on the loop for a window holding a 1.3 MB tool result.
+            # Chunks grow geometrically so a multi-MB line costs a handful of
+            # reads, not hundreds.
             chunk_size = 8192
-            buf = b""
+            chunks: list[bytes] = []          # newest (highest offset) first
+            newlines = 0
             offset = end
-            while offset > 0 and buf.count(b"\n") <= n:
+            while offset > 0 and newlines <= n:
                 read = min(chunk_size, offset)
                 offset -= read
                 fh.seek(offset)
-                buf = fh.read(read) + buf
+                chunk = fh.read(read)
+                chunks.append(chunk)
+                newlines += chunk.count(b"\n")
+                chunk_size = min(chunk_size * 2, 1 << 20)
+            buf = b"".join(reversed(chunks))
             if offset > 0:
                 nl = buf.find(b"\n")
                 if nl != -1:

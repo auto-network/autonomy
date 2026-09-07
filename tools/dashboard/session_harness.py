@@ -7,6 +7,8 @@ shared normalized entries, activity state, SSE delivery, and rendering.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import hashlib
 import json
 import logging
@@ -846,7 +848,30 @@ def _upconvert_graph_result(content: str, timestamp: str, tool_id: str = "") -> 
     return None
 
 
+#: Semantic-tile enrichment opens a read-only sqlite connection per graph
+#: tile. The tail endpoint's gap-fill reconstruction replays a file prefix
+#: whose entries are DISCARDED (only parse state is kept), so enriching them
+#: was pure cost — 58% of event-loop stall samples on 2026-09-07. A
+#: ContextVar (not a parameter) because the call sites sit inside the pure
+#: per-line parsers, which take no context.
+_SEMANTIC_ENRICHMENT = contextvars.ContextVar(
+    "session_harness_semantic_enrichment", default=True,
+)
+
+
+@contextlib.contextmanager
+def semantic_enrichment_disabled():
+    """Parse without the per-tile graph lookups; tiles keep their shape."""
+    token = _SEMANTIC_ENRICHMENT.set(False)
+    try:
+        yield
+    finally:
+        _SEMANTIC_ENRICHMENT.reset(token)
+
+
 def _enrich_semantic_tile(entry: dict) -> None:
+    if not _SEMANTIC_ENRICHMENT.get():
+        return
     source_id = entry.get("source_id") or entry.get("comment_id")
     if not source_id:
         return
