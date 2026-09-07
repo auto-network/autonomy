@@ -37,6 +37,7 @@ import {
 import { buildEvent, derivePersona, signEvent } from './ledger-event.js';
 import { buildPersonaKemCredential, deriveKemSeed } from './founding.js';
 import { createRootAnchorEnvelope } from './root-anchor.js';
+import { reportStepOutcome } from './step-report.js';
 
 /** Mirrors ``tools.network.ledger.events.DELEGATE_CONSENT_DOMAIN``. */
 const DELEGATE_CONSENT_DOMAIN = 'autonomy.ledger.delegate-consent.v2\n';
@@ -285,87 +286,19 @@ export async function ensurePersonalRootVault({
   return { ready: true, created: true, reason: null };
 }
 
-//: Key under which a failed wake leaves its operator-legible message for the
-//: shell (identity-indicator) to render. Cleared by the next successful wake.
-export const WAKE_FAILED_STORAGE_KEY = 'autonomy.vault.wake-failed';
-
-const WAKE_REASON_PHRASES = [
-  ['anchor-inventory', 'the vault anchor inventory could not be read'],
-  ['personal-root-public-key', 'the personal identity record has no root public key'],
-  ['personal-root', 'the personal identity record could not be read'],
-  ['anchor-race', 'the vault anchor inventory changed mid-ceremony'],
-  ['anchor-enroll', 'the root anchor could not be enrolled'],
-  ['root-class', 'the root policy class could not be created'],
-  ['ledger-no-genesis', 'the personal ledger database is present but holds no'
-    + ' genesis — the wrong store may be resolving, or the data is damaged;'
-    + ' do NOT re-found'],
-  ['not-founded', 'this identity’s personal ledger is not founded, so nothing can be delegated'],
-  ['heads', 'the personal ledger heads could not be read'],
-  ['delegate', 'the storage delegate grant was refused by the ledger'],
-  ['vault-keys', 'the dashboard refused the vault key material'],
-];
-
-/** One operator-legible sentence for a wake failure reason slug. */
-export function describeWakeFailure(reason) {
-  const slug = String(reason || 'unknown');
-  const match = WAKE_REASON_PHRASES.find(([prefix]) => slug.startsWith(prefix));
-  const phrase = match ? match[1] : 'an unexpected step failed';
-  const status = /-(\d{3})$/.exec(slug);
-  return 'The vault did not come up: ' + phrase
-    + (status ? ' (HTTP ' + status[1] + ')' : '')
-    + '. Secrets stay locked until a sign-in completes this step'
-    + ' [' + slug + '].';
-}
-
-/**
- * Make a wake outcome VISIBLE. A failed vault wake used to vanish: callers
- * ignored the returned reason, nothing logged, and the operator saw a
- * completed sign-in with a dead vault (2026-09-06 incident, auto-uhdxm).
- * Every failure now lands in three places — the console, the capped
- * client-error log, and a storage flag the shell renders — and a later
- * successful wake clears the flag.
- */
-function reportWakeOutcome(result, fetchImpl) {
-  const storage = (typeof sessionStorage !== 'undefined') ? sessionStorage : null;
-  try {
-    if (result && result.ready) {
-      if (storage) storage.removeItem(WAKE_FAILED_STORAGE_KEY);
-      return;
-    }
-    const reason = (result && result.reason) || 'unknown';
-    const message = describeWakeFailure(reason);
-    if (typeof console !== 'undefined' && console.error) {
-      console.error('vault wake failed:', message);
-    }
-    if (storage) storage.setItem(WAKE_FAILED_STORAGE_KEY, message);
-    Promise.resolve(fetchImpl('/api/identity/ceremony-error', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ceremony: 'vault-wake',
-        action: reason,
-        name: 'VaultWakeFailure',
-        message,
-        stack: '',
-        context: {},
-      }),
-    })).catch(() => {});
-  } catch (e) { /* diagnostics must never break the unlock */ }
-}
-
 /**
  * Bring the vault up for this unlock. Call it AFTER the session exists.
  *
  * Returns `{ ready, reason }`. It never throws for an expected cold-start
  * condition: a vault that failed to wake must leave the dashboard usable and
  * say so, not break the sign-in that just succeeded. "Say so" is enforced
- * centrally here: every outcome passes through reportWakeOutcome, so no
- * caller can silently drop a failure again.
+ * centrally here: every outcome passes through reportStepOutcome (the one
+ * surfacing mechanism, shared with the root-step runner), so no caller can
+ * silently drop a failure again.
  */
 export async function wakeVault(options) {
   const result = await _wakeVaultInner(options);
-  reportWakeOutcome(result, options.fetchImpl || fetch);
+  reportStepOutcome('vault-wake', result, { fetchImpl: options.fetchImpl || fetch });
   return result;
 }
 
