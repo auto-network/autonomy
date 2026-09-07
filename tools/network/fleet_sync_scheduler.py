@@ -24,7 +24,7 @@ import struct
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Callable, Iterable, Mapping, Sequence
 
 from tools.network.fleet_roster import RosterEntry, resolve
 from tools.network.fleet_sync_channel import (
@@ -36,6 +36,9 @@ from tools.network.fleet_sync_connection import (
     FleetSyncConnection,
     FleetSyncQuiescenceError,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from tools.network.fleet_org_channel import OrgFleetAuthenticator
 from tools.network.fleet_sync.catalog import (
     AuthoredMutation,
     MAX_TRANSACTION_OPERATIONS,
@@ -250,6 +253,22 @@ class FleetSyncRuntimeConfig:
     #: more diagnostic ConnectionClosed rather than a silence timeout.
     pull_first_frame_allowance_s: float = 900.0
     pull_stream_silence_limit_s: float = 60.0
+    #: Org channels (auto-coea3, graph://c2baad48-0a3): scope slug -> this
+    #: machine's OrgFleetAuthenticator for that organization (its persona
+    #: certificate, its membership proof, its adopted checkpoints). With
+    #: one, the scope can be pulled from and served to a co-member's machine
+    #: through the org hello; without one the scope still syncs inside the
+    #: personal fleet exactly as before. Resolved fresh per round.
+    org_channels: Callable[
+        [], Mapping[str, "OrgFleetAuthenticator"]
+    ] | None = None
+    #: Co-member machines outside the personal roster, as scope slug ->
+    #: {machine_pub: direct address candidates}. Discovery fills this
+    #: (auto-mldvv); the harness injects it. A machine that is also in the
+    #: personal roster is pulled on the personal path and skipped here.
+    org_peer_addresses: Callable[
+        [], Mapping[str, Mapping[str, Sequence[str]]]
+    ] | None = None
 
 
 def discover_org_sync_scopes() -> dict[str, Path]:
@@ -1513,6 +1532,7 @@ class FleetSyncScheduler:
             self._handle,
             host=config.listen_host,
             port=config.listen_port,
+            org_channel_for=self._org_channel_for_genesis,
         )
         self._task: asyncio.Task | None = None
         self._roster_task: asyncio.Task | None = None
@@ -1664,6 +1684,57 @@ class FleetSyncScheduler:
             self._activated_scopes.add(path)
         return SQLiteFleetSyncStore(path)
 
+    # -- org channels (auto-coea3) -----------------------------------------
+
+    def _org_channels(self) -> dict[str, "OrgFleetAuthenticator"]:
+        """scope slug -> org hello authenticator, for the scopes that have
+        one. A failing provider yields no channels rather than a crash: the
+        personal path does not depend on it."""
+        provider = self.config.org_channels
+        if provider is None:
+            return {}
+        try:
+            return dict(provider())
+        except Exception:
+            logger.warning("fleet sync: org channel provider failed", exc_info=True)
+            return {}
+
+    def _org_channel_for_genesis(self, org: str) -> "OrgFleetAuthenticator | None":
+        """The org hello authenticator for an organization's genesis id (the
+        listener's lookup for an incoming org hello), or None."""
+        for channel in self._org_channels().values():
+            if channel.org == org:
+                return channel
+        return None
+
+    def _org_scopes_for(self, admitted_org: str) -> list[str]:
+        """The scope slugs this machine syncs for *admitted_org*."""
+        return [
+            scope for scope, channel in self._org_channels().items()
+            if channel.org == admitted_org and scope != "personal"
+        ]
+
+    def _confine_scope(self, scope: str, admitted_org: str | None) -> None:
+        """A connection admitted by an org hello may request only that
+        organization's scope: never the personal scope, never another
+        organization's. A personal-admitted connection is unrestricted."""
+        if admitted_org is None:
+            return
+        if scope not in self._org_scopes_for(admitted_org):
+            raise FleetSyncProtocolError(
+                f"scope {scope!r} is not the organization this connection "
+                "was admitted to"
+            )
+
+    def _blob_paths(self, admitted_org: str | None) -> list[Path]:
+        """Stores a blob request may be answered from: every synchronized
+        scope for a personal-admitted peer (digests are self-certifying),
+        only the admitted organization's scope(s) for an org-admitted one."""
+        paths = self._scope_paths()
+        if admitted_org is None:
+            return list(paths.values())
+        return [paths[s] for s in self._org_scopes_for(admitted_org) if s in paths]
+
     async def _refresh_roster(self) -> None:
         while not self._stopping.is_set():
             try:
@@ -1700,8 +1771,16 @@ class FleetSyncScheduler:
         telemetry_started_monotonic_ns: int | None = None,
         allow_checkpoint: bool = True,
         resume_floor_ref: int | None = None,
+        authorize: Callable[[str], None] | None = None,
+        admitted_org: str | None = None,
     ):
-        """``resume_floor_ref``: a caller that already served this peer a
+        """``authorize`` / ``admitted_org``: set by the listener for a
+        connection admitted by the ORG hello (fleet_org_channel): the
+        per-message re-check is that authenticator's, and the connection is
+        confined to the admitted organization's scope. Absent, the
+        connection is a personal-roster one and behaves exactly as before.
+
+        ``resume_floor_ref``: a caller that already served this peer a
         checkpoint passes the journal's newest transaction ref captured
         BEFORE that checkpoint's cut. The delta then starts there instead of
         at the peer's (empty, first-contact) trail — everything at or below
@@ -1711,12 +1790,18 @@ class FleetSyncScheduler:
         2026-09-06), authorizing each one on the way."""
         from tools.network.fleet_sync.blob_transport import peek_request_op
 
+        if authorize is None:
+            authorize = self.authenticator.authorize
         if peek_request_op(message) == "blob":
-            return self._blob_response(message, peer_pub, telemetry_channel)
+            return self._blob_response(
+                message, peer_pub, telemetry_channel,
+                authorize=authorize, admitted_org=admitted_org,
+            )
         (
             _requested_epoch, resume_trail, peer_digest, scope, bootstrap,
             protocol_version, accept_checkpoint, watermarks,
         ) = decode_pull_request(message)
+        self._confine_scope(scope, admitted_org)
         store = await asyncio.to_thread(self._store_for, scope)
         epoch = self._current_epoch()
         record_here = telemetry_stats is None
@@ -1862,7 +1947,7 @@ class FleetSyncScheduler:
                         stats["bytes_sent"] += len(begin)
                         yield begin
                         for path in files:
-                            self.authenticator.authorize(peer_pub)
+                            authorize(peer_pub)
                             encoded = encode_checkpoint_file(
                                 path.relative_to(built).as_posix(),
                                 await asyncio.to_thread(path.read_bytes),
@@ -1923,7 +2008,7 @@ class FleetSyncScheduler:
                 pager = _OriginPager(store, origin_watermarks, None)
                 slowest_phase = ("", 0.0, "")
                 while True:
-                    self.authenticator.authorize(peer_pub)
+                    authorize(peer_pub)
                     phase_started = time.monotonic()
                     page = await asyncio.to_thread(pager.next)
                     phase_s = time.monotonic() - phase_started
@@ -1946,7 +2031,7 @@ class FleetSyncScheduler:
                     more = True
                     if True:
                         while more:
-                            self.authenticator.authorize(peer_pub)
+                            authorize(peer_pub)
                             phase_started = time.monotonic()
                             items, more = await asyncio.to_thread(
                                 store.transaction_group, ref, origin_key,
@@ -1983,7 +2068,7 @@ class FleetSyncScheduler:
                                 stats["bytes_sent"] += len(opening)
                                 yield opening
                             for item in items:
-                                self.authenticator.authorize(peer_pub)
+                                authorize(peer_pub)
                                 encoded = (
                                     encode_operation_frame(item)
                                     if protocol_version >= 4
@@ -2011,7 +2096,7 @@ class FleetSyncScheduler:
                         })
                         stats["bytes_sent"] += len(empty)
                         yield empty
-                self.authenticator.authorize(peer_pub)
+                authorize(peer_pub)
                 if served_checkpoint:
                     newest = await asyncio.to_thread(
                         store.newest_transaction_ref
@@ -2170,7 +2255,9 @@ class FleetSyncScheduler:
             logger.warning("fleet sync journal prune failed", exc_info=True)
 
     def _blob_response(
-        self, message: bytes, peer_pub: str, telemetry_channel: str = "direct"
+        self, message: bytes, peer_pub: str, telemetry_channel: str = "direct",
+        *, authorize: Callable[[str], None] | None = None,
+        admitted_org: str | None = None,
     ):
         """Serve requested attachment objects in bounded chunk frames.
 
@@ -2184,15 +2271,18 @@ class FleetSyncScheduler:
         )
 
         digests = decode_blob_request(message)
+        if authorize is None:
+            authorize = self.authenticator.authorize
         # Digests are self-certifying, so every synchronized scope's store
         # and attachment rows are legitimate candidates regardless of which
-        # scope's backlog asked.
-        db_paths = list(self._scope_paths().values())
+        # scope's backlog asked -- for a personal-admitted peer. An
+        # org-admitted peer is answered from that organization's scope only.
+        db_paths = self._blob_paths(admitted_org)
 
         async def response():
             frames = iter_blob_frames(db_paths, digests)
             while True:
-                self.authenticator.authorize(peer_pub)
+                authorize(peer_pub)
                 frame = await asyncio.to_thread(next, frames, None)
                 if frame is None:
                     return
@@ -2257,9 +2347,13 @@ class FleetSyncScheduler:
 
     async def _drain_attachment_backlog(
         self, machine_pub: str, addresses: Sequence[str],
-        scope: str = "personal",
+        scope: str = "personal", *, authenticator=None,
     ) -> None:
-        """Best-effort post-pull drain of the attachment byte backlog."""
+        """Best-effort post-pull drain of the attachment byte backlog.
+        ``authenticator`` is the one the pull connected with (the org
+        channel for a co-member's machine); default the personal one."""
+        if authenticator is None:
+            authenticator = self.authenticator
         from tools.network.fleet_sync.blob_transport import (
             BlobReceiver,
             encode_blob_request,
@@ -2282,7 +2376,7 @@ class FleetSyncScheduler:
                 try:
                     channel = await fleet_direct_connect(
                         address,
-                        authenticator=self.authenticator,
+                        authenticator=authenticator,
                         expected_machine_pub=machine_pub,
                         session=new_session_id(),
                         timeout=self.config.connect_timeout,
@@ -2301,7 +2395,7 @@ class FleetSyncScheduler:
                 first_allowance_s=self.config.pull_stream_silence_limit_s,
                 silence_limit_s=self.config.pull_stream_silence_limit_s,
             ):
-                self.authenticator.authorize(machine_pub)
+                authenticator.authorize(machine_pub)
                 await asyncio.to_thread(receiver.feed, frame)
                 if receiver.done:
                     break
@@ -2354,12 +2448,69 @@ class FleetSyncScheduler:
                     ) for machine_pub in selected),
                     return_exceptions=True,
                 )
+            # Fleet-first (graph://c2baad48-0a3 §3): the machine's own
+            # roster is pulled above, then co-members' machines, so a fleet
+            # converges internally before it presents one face outward.
+            await self._sync_org_peers(set(active), now)
             try:
                 await asyncio.wait_for(
                     self._stopping.wait(), timeout=self.config.poll_interval
                 )
             except asyncio.TimeoutError:
                 pass
+
+    async def _sync_org_peers(self, own_fleet: set[str], now: float) -> None:
+        """One round's outward pulls: for every org scope with an org
+        channel, a bounded stalest-first selection of co-member machines
+        that are NOT in the personal roster, each pulling that scope only,
+        through the org hello."""
+        provider = self.config.org_peer_addresses
+        if provider is None:
+            return
+        channels = self._org_channels()
+        if not channels:
+            return
+        try:
+            by_scope = provider()
+        except Exception:
+            logger.warning(
+                "fleet sync: org peer address provider failed", exc_info=True
+            )
+            return
+        paths = self._scope_paths()
+        jobs: list[tuple[str, str, tuple[str, ...], "OrgFleetAuthenticator"]] = []
+        for scope, peers in by_scope.items():
+            channel = channels.get(scope)
+            if channel is None or scope not in paths or scope == "personal":
+                continue
+            eligible = [
+                machine_pub for machine_pub in sorted(peers)
+                if machine_pub != self.authenticator.machine_pub
+                and machine_pub not in own_fleet
+                and peers.get(machine_pub)
+                and now >= self._next_attempt.get(machine_pub, 0.0)
+            ]
+            if not eligible:
+                continue
+            try:
+                store = await asyncio.to_thread(self._store_for, scope)
+                weights = await asyncio.to_thread(store.peer_last_success)
+            except Exception:
+                weights = {}
+            selected = rank_peers(
+                eligible, weights,
+                limit=self.config.max_concurrent_pulls, rng=self._rng,
+            )
+            jobs.extend(
+                (scope, machine_pub, tuple(peers[machine_pub]), channel)
+                for machine_pub in selected
+            )
+        if jobs:
+            await asyncio.gather(
+                *(self._sync_scope(machine_pub, addresses, scope, org_channel=channel)
+                  for scope, machine_pub, addresses, channel in jobs),
+                return_exceptions=True,
+            )
 
     async def _sync_peer(self, machine_pub: str, addresses: Sequence[str]) -> None:
         """Pull every synchronized scope from one peer, personal first.
@@ -2369,35 +2520,54 @@ class FleetSyncScheduler:
         transport-level and backs off the whole peer.
         """
         for scope in self._scope_paths():
-            try:
-                await self._pull_scope(machine_pub, addresses, scope)
-            except FleetSyncSchemaMismatch:
-                logger.info(
-                    "fleet sync scope %r paused on schema mismatch", scope
-                )
-                continue
-            except Exception:
+            if not await self._sync_scope(machine_pub, addresses, scope):
                 return
-            # Bead auto-dqemk: a pulled scope may carry ledger-event rows
-            # (autonomy.org.ledger-event#1); absorb them into this store's
-            # ledger and publish any local events the set lacks. A store
-            # with no genesis ignores the rows — founding arrives via the
-            # join flow, never from replicated rows.
-            try:
-                from tools.network.ledger.settings_bridge import reconcile
 
-                await asyncio.to_thread(reconcile, scope)
-            except Exception:
-                logger.debug(
-                    "ledger-event reconcile skipped for scope %r",
-                    scope, exc_info=True,
-                )
+    async def _sync_scope(
+        self, machine_pub: str, addresses: Sequence[str], scope: str,
+        *, org_channel: "OrgFleetAuthenticator | None" = None,
+    ) -> bool:
+        """Pull one scope from one peer, then absorb any ledger-event rows
+        it carried. False when the failure was transport-level (the caller
+        stops trying this peer for the round); True after success or a
+        schema-mismatch pause, which affects only this scope."""
+        try:
+            await self._pull_scope(
+                machine_pub, addresses, scope, org_channel=org_channel
+            )
+        except FleetSyncSchemaMismatch:
+            logger.info(
+                "fleet sync scope %r paused on schema mismatch", scope
+            )
+            return True
+        except Exception:
+            return False
+        # Bead auto-dqemk: a pulled scope may carry ledger-event rows
+        # (autonomy.org.ledger-event#1); absorb them into this store's
+        # ledger and publish any local events the set lacks. A store
+        # with no genesis ignores the rows — founding arrives via the
+        # join flow, never from replicated rows.
+        try:
+            from tools.network.ledger.settings_bridge import reconcile
+
+            await asyncio.to_thread(reconcile, scope)
+        except Exception:
+            logger.debug(
+                "ledger-event reconcile skipped for scope %r",
+                scope, exc_info=True,
+            )
+        return True
 
     async def _pull_scope(
-        self, machine_pub: str, addresses: Sequence[str], scope: str
+        self, machine_pub: str, addresses: Sequence[str], scope: str,
+        *, org_channel: "OrgFleetAuthenticator | None" = None,
     ) -> None:
+        """``org_channel``: pull *scope* from a co-member's machine through
+        the org hello (auto-coea3) instead of the personal roster's; the
+        request, the stream and the apply are otherwise identical."""
         store = await asyncio.to_thread(self._store_for, scope)
         epoch = self._current_epoch()
+        authenticator = org_channel if org_channel is not None else self.authenticator
         channel = None
         sent = 0
         received = 0
@@ -2483,7 +2653,7 @@ class FleetSyncScheduler:
                 try:
                     channel = await fleet_direct_connect(
                         address,
-                        authenticator=self.authenticator,
+                        authenticator=authenticator,
                         expected_machine_pub=machine_pub,
                         session=new_session_id(),
                         timeout=self.config.connect_timeout,
@@ -2637,7 +2807,7 @@ class FleetSyncScheduler:
             ):
                 # A kick that lands after the hello revokes this live session
                 # before another application message is accepted.
-                self.authenticator.authorize(machine_pub)
+                authenticator.authorize(machine_pub)
                 received += len(message)
                 if message.startswith(_REFUSAL_MAGIC):
                     # Capture — do NOT discard — the peer's digest and build
@@ -2902,7 +3072,7 @@ class FleetSyncScheduler:
             # preceded it, but it is logged rather than swallowed.
             try:
                 await self._drain_attachment_backlog(
-                    machine_pub, addresses, scope
+                    machine_pub, addresses, scope, authenticator=authenticator,
                 )
             except Exception:
                 logger.warning(

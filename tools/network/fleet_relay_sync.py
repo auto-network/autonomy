@@ -40,7 +40,7 @@ from tools.network import (
 )
 from tools.network.fleet_sync.catalog import AuthoredMutation
 from tools.network.fleet_sync.compaction import WatermarkError
-from tools.network.fleet_sync_channel import FleetAuthenticator
+from tools.network.fleet_sync_channel import FleetAuthenticator, accept_client_hello
 from tools.network.fleet_sync_scheduler import (
     _DONE_MAGIC,
     _MUTATION_MAGIC,
@@ -584,9 +584,18 @@ class ConnectorFleetRuntime:
             # transport until the schemas reconverge.
             raise FleetRelaySyncError("fleet sync schema mismatch")
         hello = canonical_json(message.get("hello"))
-        peer_pub, _private, server_hello, _transcript = (
-            scheduler.authenticator.accept_client(hello, session=token)
+        # The hello decides the admission: the personal roster's for a
+        # personal hello, the org hello's authenticator for one naming an
+        # org (auto-coea3); an org-admitted peer is confined to its scope.
+        admission = accept_client_hello(
+            hello, session=token, authenticator=scheduler.authenticator,
+            org_channel_for=scheduler._org_channel_for_genesis,
         )
+        peer_pub, server_hello = admission.client_pub, admission.server_hello
+        try:
+            scheduler._confine_scope(scope, admission.org)
+        except FleetSyncProtocolError as exc:
+            raise FleetRelaySyncError(str(exc)) from exc
         current_epoch = scheduler._current_epoch()
         # Continuity decides the transfer, not the request alone: a
         # resolvable breadcrumb trail proves the peer consumed this
@@ -857,6 +866,8 @@ class ConnectorFleetRuntime:
                     # the delegated delta phase must never start a second one.
                     allow_checkpoint=False,
                     resume_floor_ref=resume_floor_ref,
+                    authorize=admission.authorize,
+                    admitted_org=admission.org,
                 )
                 async for frame in deltas:
                     self._touch_stream_activity()
@@ -953,14 +964,17 @@ class ConnectorFleetRuntime:
         ):
             raise FleetRelaySyncError("fleet blob request digests are malformed")
         hello = canonical_json(message.get("hello"))
-        peer_pub, _private, server_hello, _transcript = (
-            scheduler.authenticator.accept_client(hello, session=token)
+        admission = accept_client_hello(
+            hello, session=token, authenticator=scheduler.authenticator,
+            org_channel_for=scheduler._org_channel_for_genesis,
         )
+        peer_pub, server_hello = admission.client_pub, admission.server_hello
         current_epoch = scheduler._current_epoch()
         # Digests are self-certifying, so every synchronized scope's store
         # is a legitimate candidate regardless of which scope's backlog
-        # asked — same rule as the direct path's blob response.
-        db_paths = list(scheduler._scope_paths().values())
+        # asked — same rule as the direct path's blob response; an
+        # org-admitted peer is answered from its organization's scope only.
+        db_paths = scheduler._blob_paths(admission.org)
 
         async def stream():
             self.active_streams += 1
@@ -973,7 +987,7 @@ class ConnectorFleetRuntime:
                 })
                 frames = iter_blob_frames(db_paths, list(digests))
                 while True:
-                    scheduler.authenticator.authorize(peer_pub)
+                    admission.authorize(peer_pub)
                     frame = await asyncio.to_thread(next, frames, None)
                     if frame is None:
                         return
