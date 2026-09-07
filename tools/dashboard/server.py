@@ -608,13 +608,21 @@ async def _emit_restart_complete() -> None:
         logger.warning("could not clear restart notice state", exc_info=True)
 
 
-async def _announce_restart(changed_files: list[str] | None = None) -> dict[str, Any]:
-    """Persist and broadcast the restart countdown exactly once per worker.
+async def _announce_restart(
+    changed_files: list[str] | None = None, *, phase: str = "countdown",
+) -> dict[str, Any]:
+    """Persist and broadcast the restart announcement exactly once per worker.
+
+    ``phase`` is ``"countdown"`` for the legacy stop-then-start reload (the
+    banner counts down to the gap) or ``"restarting"`` for the zero-downtime
+    hand-off (the replacement boots in the background while this worker keeps
+    serving; the banner shows progress and the cause, and the replacement's
+    activation completes it).
 
     ``changed_files`` is the reloader's list of what changed; it drives
     :func:`_restart_attribution`, which names the merged session + headline or
-    the direct host edit. The attribution rides the countdown toast and is
-    persisted so the post-restart completion toast can repeat it.
+    the direct host edit. The attribution rides the toast and is persisted so
+    the completion toast can repeat it.
     """
     global _restart_notice_payload
     async with _restart_notice_lock:
@@ -623,11 +631,12 @@ async def _announce_restart(changed_files: list[str] | None = None) -> dict[str,
         started_at_ms = int(time.time() * 1000)
         attribution = await asyncio.to_thread(_restart_attribution, changed_files)
         payload: dict[str, Any] = {
-            "phase": "countdown",
+            "phase": phase,
             "started_at_ms": started_at_ms,
-            "countdown_ends_at_ms": started_at_ms + _RESTART_WARNING_SECONDS * 1000,
             "expected_ms": _RESTART_EXPECTED_MS,
         }
+        if phase == "countdown":
+            payload["countdown_ends_at_ms"] = started_at_ms + _RESTART_WARNING_SECONDS * 1000
         if attribution:
             payload["attribution"] = attribution
         notice: dict[str, Any] = {"started_at_ms": started_at_ms}
@@ -13965,21 +13974,21 @@ async def api_internal_restart_notice(request):
     except Exception:
         body, changed_files = {}, []
     if isinstance(body, dict) and body.get("mode") == "handoff":
-        global _handoff_attribution
-        snapshot = await _snapshot_for_handoff()
-        # No countdown, but the attribution still names the merge: it is
-        # stamped on the restart-notice state at this worker's shutdown so the
-        # replacement's activation "complete" toast can repeat it.
+        # Announce first so the operator sees the reload begin (cause + progress
+        # bar) while this worker keeps serving; the replacement's activation
+        # emits the matching "complete". Then snapshot for the replacement.
         try:
-            _handoff_attribution = await asyncio.to_thread(_restart_attribution, changed_files)
+            payload = await _announce_restart(changed_files, phase="restarting")
         except Exception:
-            logger.exception("hand-off attribution failed; completing without one")
-            _handoff_attribution = None
+            logger.exception("could not announce hand-off")
+            payload = {}
+        snapshot = await _snapshot_for_handoff()
         return JSONResponse({
             "ok": True,
             "mode": "handoff",
             "snapshot": snapshot,
-            "attribution": _handoff_attribution or None,
+            "started_at_ms": payload.get("started_at_ms"),
+            "attribution": payload.get("attribution"),
         })
     try:
         payload = await _announce_restart(changed_files)
@@ -21604,10 +21613,6 @@ _settings_mediator_started: bool = False
 _activation_task: asyncio.Task | None = None
 _worker_activated: bool = False
 _org_warmup_task: asyncio.Task | None = None
-# Attribution of the pending hand-off (which merge / who), computed when the
-# supervisor's notice arrives and stamped on the restart-notice state at
-# shutdown so the replacement's "complete" toast can name it.
-_handoff_attribution: dict[str, Any] | None = None
 
 
 
@@ -22309,10 +22314,7 @@ async def _on_shutdown():
     # the replacement's activation emits "complete". Direct shutdowns cannot
     # warn a browser, but still leave timing state for the next process.
     if _restart_notice_payload is None:
-        notice: dict[str, Any] = {"started_at_ms": int(time.time() * 1000)}
-        if _handoff_attribution:
-            notice["attribution"] = _handoff_attribution
-        _write_restart_notice(notice)
+        _write_restart_notice({"started_at_ms": int(time.time() * 1000)})
     try:
         await web_push_worker.stop_worker()
     except Exception:
