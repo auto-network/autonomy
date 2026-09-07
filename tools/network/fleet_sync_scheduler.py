@@ -1328,6 +1328,10 @@ _PULL_TRACE = bool(os.environ.get("AUTONOMY_HARNESS_PULL_LOG"))
 #: operation bound (MAX_TRANSACTION_OPERATIONS).
 SERVE_GROUP_OPERATIONS = 2_000
 
+#: A serve phase (heads page, transaction slice) slower than this is logged
+#: with what it was doing: the evidence a stalled stream needs.
+SLOW_SERVE_PHASE_S = 2.0
+
 #: Longest a pull holds received, unapplied transactions before committing
 #: them: progress survives a round that is cut after this many seconds.
 APPLY_FLUSH_INTERVAL_S = 5.0
@@ -1896,9 +1900,20 @@ class FleetSyncScheduler:
                 # has lost its own newest writes). Frames are built from
                 # catalog and live rows (catalog.transaction_items).
                 pager = _OriginPager(store, origin_watermarks, None)
+                slowest_phase = ("", 0.0, "")
                 while True:
                     self.authenticator.authorize(peer_pub)
+                    phase_started = time.monotonic()
                     page = await asyncio.to_thread(pager.next)
+                    phase_s = time.monotonic() - phase_started
+                    if phase_s > slowest_phase[1]:
+                        slowest_phase = ("heads", phase_s, "")
+                    if phase_s >= SLOW_SERVE_PHASE_S:
+                        logger.warning(
+                            "fleet sync serve %s scope %r: fetching the next "
+                            "transaction heads took %.1fs", peer_pub[:12],
+                            scope, phase_s,
+                        )
                     if page is None:
                         break
                     ref, header = page
@@ -1911,11 +1926,24 @@ class FleetSyncScheduler:
                     if True:
                         while more:
                             self.authenticator.authorize(peer_pub)
+                            phase_started = time.monotonic()
                             items, more = await asyncio.to_thread(
                                 store.transaction_group, ref, origin_key,
                                 transaction_id, offset=offset,
                                 limit=SERVE_GROUP_OPERATIONS,
                             )
+                            phase_s = time.monotonic() - phase_started
+                            if phase_s > slowest_phase[1]:
+                                slowest_phase = ("slice", phase_s, transaction_id)
+                            if phase_s >= SLOW_SERVE_PHASE_S:
+                                tables = sorted({i.mutation.table for i in items})
+                                logger.warning(
+                                    "fleet sync serve %s scope %r: building "
+                                    "%d row(s) of transaction %s (offset %d, "
+                                    "tables %s) took %.1fs", peer_pub[:12],
+                                    scope, len(items), transaction_id, offset,
+                                    ",".join(tables), phase_s,
+                                )
                             offset += SERVE_GROUP_OPERATIONS
                             if not items:
                                 continue
@@ -1973,6 +2001,13 @@ class FleetSyncScheduler:
                     through_breadcrumb = await asyncio.to_thread(
                         store.breadcrumb, cursor
                     )
+                logger.info(
+                    "fleet sync serve %s scope %r: %d transaction(s), %d "
+                    "frame(s); slowest phase %s %.1fs %s", peer_pub[:12],
+                    scope, stats.get("transactions", 0), count,
+                    slowest_phase[0] or "none", slowest_phase[1],
+                    slowest_phase[2],
+                )
                 done = encode_done(
                     epoch=epoch,
                     count=count,
@@ -2583,6 +2618,18 @@ class FleetSyncScheduler:
                     _digest_add(digest, message)
                     message_count += 1
                     mutation_frames += 1
+                    if pending_count is not None and len(pending) >= pending_count:
+                        # The group is complete: queue it now rather than
+                        # at the NEXT header. A stall after the last
+                        # frame of a group used to leave that group (and
+                        # the timed flush, which only ran from here)
+                        # waiting for a header that never came (SJC-2
+                        # autonomy, 2026-09-07).
+                        validate_pending()
+                        await apply_pending(pending)
+                        pending = []
+                        transaction_group = None
+                        pending_count = None
                     continue
                 if message.startswith(FILE_MAGIC):
                     if checkpoint_stage is None:
@@ -2794,6 +2841,18 @@ class FleetSyncScheduler:
             await record("cancelled")
             raise
         except Exception as exc:
+            # Complete transaction groups received before the failure
+            # are verified units; commit them so a round cut short
+            # keeps its progress instead of repeating identically
+            # (SJC-2 autonomy: 35 identical failed rounds, 2026-09-07).
+            try:
+                if batch:
+                    await flush_batch()
+            except Exception:
+                logger.warning(
+                    "fleet sync: could not commit the groups received "
+                    "before the failure", exc_info=True,
+                )
             if (
                 protocol_version >= 4
                 and received == 0
