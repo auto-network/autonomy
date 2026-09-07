@@ -332,16 +332,23 @@
             </a>
           </template>
 
-          <!-- Design title -->
-          <span data-testid="toolbar-title"
-                class="flex-1 min-w-0 text-sm font-medium text-gray-300 truncate"
-                :style="toolbarState === 'PICKER' ? 'color:#a5b4fc;font-weight:600' : ''"
-                x-text="toolbarState === 'PICKER' ? 'Select Session' : (design?.title || 'Design')"></span>
+          <!-- Design title, with the shown revision and its push time beneath -->
+          <span class="design-toolbar-heading flex-1 min-w-0">
+            <span data-testid="toolbar-title"
+                  class="design-toolbar-title"
+                  :style="toolbarState === 'PICKER' ? 'color:#a5b4fc;font-weight:600' : ''"
+                  x-text="toolbarState === 'PICKER' ? 'Select Session' : (design?.title || 'Design')"></span>
+            <span class="design-toolbar-subtitle" data-testid="toolbar-subtitle" x-show="toolbarState !== 'PICKER'">
+              <span x-text="'v' + (iterIndex + 1) + (iterCount > 1 ? ' of ' + iterCount : '')"></span>
+              <span aria-hidden="true" x-show="design?.created_at">·</span>
+              <span x-show="design?.created_at" x-text="'pushed ' + formatPushedAt(design?.created_at)"></span>
+            </span>
+          </span>
 
           <!-- Revision nav — desktop position -->
           <template x-if="toolbar.showIterNav">
             <div data-testid="toolbar-iter-desktop"
-                 class="hidden md:flex flex-1 justify-center items-center gap-0.5 flex-shrink-0">
+                 class="design-toolbar-nav hidden md:flex items-center gap-0.5">
               <button @click="prevIteration()"
                       class="w-7 h-7 flex items-center justify-center bg-transparent border-none cursor-pointer rounded-md text-gray-500 hover:bg-gray-800 hover:text-gray-400 disabled:text-gray-700 disabled:cursor-default transition-all"
                       :disabled="!canGoBack" title="Previous">
@@ -361,8 +368,16 @@
             </div>
           </template>
 
-          <!-- Right actions: capture, then presence + sharing -->
+          <!-- Right actions: close chat (when open), capture, then presence + sharing -->
           <div class="flex items-center gap-1 flex-shrink-0">
+            <button type="button"
+                    data-testid="design-chat-close"
+                    class="design-linked-capture"
+                    x-show="!linkedSessionMode && chatOpen"
+                    title="Close chat" aria-label="Close chat"
+                    @click="chatOpen = false">
+              <svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M5 5l8 8M13 5l-8 8"/></svg>
+            </button>
             <button data-testid="design-linked-capture"
                     type="button"
                     @click="captureScreenshot()" :disabled="captureState === 'working'"
@@ -381,14 +396,13 @@
                      :class="presenceLive ? 'is-live' : ''"
                      @toggle="onPresenceToggle($event)">
               <summary :title="presenceSummaryTitle" :aria-label="presenceSummaryTitle" class="design-presence-pill">
-                <span class="design-topbar-live-dot"></span>
-                <span class="nx-avatar-stack design-presence-stack" style="--nx-stack-cap: 3;">
+                <span class="design-presence-stack">
                   <template x-for="s in presenceSessions.slice(0, 3)" :key="s.id">
-                    <span class="nx-avatar design-presence-avatar" :class="s.live ? 'is-live' : ''" :title="s.label" x-text="s.initial"></span>
+                    <span class="design-presence-avatar" :class="s.live ? 'is-live' : ''" :title="s.label + (s.live ? ' (live)' : '')" x-text="s.initial"></span>
                   </template>
+                  <span class="design-presence-avatar is-empty" x-show="presenceSessions.length === 0" title="No session has pushed a revision">·</span>
                 </span>
                 <span class="design-presence-count" x-show="presenceSessions.length > 3" x-text="'+' + (presenceSessions.length - 3)"></span>
-                <span class="design-presence-count is-empty" x-show="presenceSessions.length === 0">—</span>
                 <span class="design-presence-sharemark" x-show="share.shared" title="Shared by link">↗</span>
               </summary>
               <div class="design-presence-menu" data-testid="design-presence-menu">
@@ -412,8 +426,9 @@
                 </template>
 
                 <button type="button" class="design-presence-share is-quiet" data-testid="design-presence-pick-session"
-                        x-show="!linkedSessionMode && !chatConnected"
-                        @click.prevent="openSessionPicker()">Chat with a session…</button>
+                        x-show="!linkedSessionMode"
+                        @click.prevent="toggleChat()"
+                        x-text="chatOpen ? 'Close chat' : (chatConnected ? 'Open chat' : 'Chat with a session…')"></button>
                 <div class="design-presence-section">Sharing</div>
                 <template x-if="share.shared">
                   <div class="design-presence-row is-share" data-testid="design-share-row">
@@ -442,7 +457,10 @@
                     <span x-text="shareState === 'requesting' ? 'Requesting…' : shareState === 'awaiting' ? 'Awaiting approval' : shareState === 'error' ? 'Share failed — retry' : 'Share design by link'"></span>
                   </button>
                 </template>
-                <div class="design-presence-note" x-show="shareState === 'awaiting'">Approve the publish request in Central; the link appears here once it is minted.</div>
+                <div class="design-presence-note" x-show="shareState === 'awaiting'">
+                  Approve the publish request in Central; the link appears here once it is minted.
+                  <button type="button" class="design-presence-link" data-testid="design-share-cancel" @click.prevent="cancelShareWait()">Cancel</button>
+                </div>
                 <div class="design-presence-note is-error" x-show="shareError" x-text="shareError"></div>
               </div>
             </details>

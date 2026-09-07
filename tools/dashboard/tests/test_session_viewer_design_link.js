@@ -272,6 +272,37 @@ describe('design viewer presence and sharing', () => {
     h.page.destroy();
   });
 
+  it('toggles the chat panel and closes it from the toolbar', () => {
+    const h = makeLinkedDesignHarness('');
+    h.page.init();
+    h.page._loadChatSessions = () => {};
+    assert.equal(h.page.chatOpen, false);
+    h.page.toggleChat();
+    assert.equal(h.page.chatOpen, true);
+    h.page.toggleChat();
+    assert.equal(h.page.chatOpen, false);
+    assert.match(h.page.formatPushedAt('2026-09-07 01:00:00'), /Sep 7/);
+    h.page.destroy();
+  });
+
+  it('a cancelled or declined publish request returns the share button to idle', async () => {
+    const h = makeLinkedDesignHarness('');
+    h.page.designId = 'design-1';
+    h.page.design = {org: 'autonomy', title: 'Linked design'};
+    await h.page.shareDesign();
+    assert.equal(h.page.shareState, 'awaiting');
+    h.page.cancelShareWait();
+    assert.equal(h.page.shareState, 'idle');
+
+    await h.page.shareDesign();
+    h.sandbox.fetch = async (url) => {
+      if (String(url).startsWith('/api/approvals/')) return {ok: true, json: async () => ({result: {approved: false}})};
+      return {ok: true, json: async () => ({})};
+    };
+    assert.equal(await h.page._checkShareApproval(), 'declined');
+    h.page.destroy();
+  });
+
   it('requests a link_publish approval for the design and waits for the grant', async () => {
     const h = makeLinkedDesignHarness('');
     h.page.designId = 'design-1';

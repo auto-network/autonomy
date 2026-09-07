@@ -112,6 +112,7 @@
         series: null,
         shareState: 'idle',   // 'idle' | 'requesting' | 'awaiting' | 'error'
         shareError: '',
+        _shareApprovalId: '',
         _seriesGen: 0,
         _sharePollTimer: null,
 
@@ -524,6 +525,7 @@
               return;
             }
             this.shareState = 'awaiting';
+            this._shareApprovalId = data.id || '';
             if (data.id && typeof window.openApprovalOverlay === 'function') {
               try { window.openApprovalOverlay(data.id); } catch (e) { /* Central still has it */ }
             }
@@ -534,6 +536,8 @@
           }
         },
 
+        // While awaiting: watch the approval itself (a decline resets the
+        // button) and the series (an approval shows up as a grant).
         _startSharePoll: function () {
           this._stopSharePoll();
           var self = this;
@@ -541,13 +545,38 @@
           var tick = function () {
             self._sharePollTimer = null;
             if (self._destroyed || self.shareState !== 'awaiting') return;
-            self._loadSeries().then(function () {
+            self._checkShareApproval().then(function (decided) {
+              if (self._destroyed || self.shareState !== 'awaiting') return;
+              if (decided === 'declined') { self.shareState = 'idle'; return; }
+              return self._loadSeries();
+            }).then(function () {
               if (self._destroyed || self.shareState !== 'awaiting') return;
               if (--remaining <= 0) { self.shareState = 'idle'; return; }
               self._sharePollTimer = setTimeout(tick, 4500);
             });
           };
           this._sharePollTimer = setTimeout(tick, 4500);
+        },
+
+        _checkShareApproval: async function () {
+          if (!this._shareApprovalId) return 'pending';
+          try {
+            var fetcher = (window.Autonomy && window.Autonomy.fetch) || window.fetch;
+            var res = await fetcher('/api/approvals/' + encodeURIComponent(this._shareApprovalId));
+            if (!res.ok) return res.status === 404 ? 'declined' : 'pending';
+            var data = await res.json();
+            var result = data && data.result;
+            if (!result) return 'pending';
+            return result.approved ? 'approved' : 'declined';
+          } catch (e) {
+            return 'pending';
+          }
+        },
+
+        cancelShareWait: function () {
+          this._stopSharePoll();
+          this._shareApprovalId = '';
+          this.shareState = 'idle';
         },
 
         _stopSharePoll: function () {
@@ -709,6 +738,21 @@
           if (this.linkedSessionMode) return;
           this.chatOpen = true;
           if (!this.chatConnected) this._loadChatSessions();
+        },
+
+        toggleChat: function () {
+          if (this.linkedSessionMode) return;
+          if (this.chatOpen) { this.chatOpen = false; return; }
+          this.openSessionPicker();
+        },
+
+        formatPushedAt: function (value) {
+          if (!value) return '';
+          var raw = String(value).trim();
+          var normalized = raw.indexOf('T') >= 0 ? raw : raw.replace(' ', 'T') + 'Z';
+          var parsed = new Date(normalized);
+          if (isNaN(parsed.getTime())) return raw;
+          return parsed.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
         },
 
         // ── Chat With session management ──────────────────────────────────
