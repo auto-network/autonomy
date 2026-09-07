@@ -125,6 +125,12 @@
 
   function _finishRestart(current, payload) {
     if (payload) Object.assign(current, payload);
+    // The server's completion frame carries the measured duration. When we
+    // complete locally (missed frame, fallback) report the elapsed time the
+    // operator has been watching count up — never "0.0s".
+    if (!(Number(current.duration_ms) > 0) && Number(current.started_at_ms) > 0) {
+      current.duration_ms = Math.max(0, Date.now() - Number(current.started_at_ms));
+    }
     current.phase = 'complete';
     _armRestartTimer(current, RESTART_DISMISS_MS, _dismissRestart);
   }

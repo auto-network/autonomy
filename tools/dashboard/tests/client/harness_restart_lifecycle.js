@@ -181,6 +181,8 @@ function testMissedCompletionFallsBackAfterTheNewEpoch() {
   check(h.app().restartStatus === st && st.phase === 'restarting', 'fallback has not fired yet');
   h.advance(1);
   check(st.phase === 'complete', 'a missed completion is synthesised 10 s after the new epoch');
+  check(st.duration_ms === 10000, 'the synthesised completion reports the elapsed time, not 0.0s');
+  check(h.app().restartMessage().startsWith('Reload complete in 10.0s'), 'and the message shows it');
   h.advance(2500);
   check(h.app().restartStatus === null, 'and then dismissed');
 }
@@ -245,6 +247,7 @@ function testColdTabSeesOnlyACompletionToast() {
   h.emit(2, 11, 'server:restart', { phase: 'complete', started_at_ms: 500_000, duration_ms: 21000 });
   check(h.app().restartStatus && h.app().restartStatus.phase === 'complete',
     'a tab that never saw the announcement gets one completion toast');
+  check(h.app().restartMessage().startsWith('Reload complete in 21.0s'), 'with the server-measured duration');
   h.advance(2500);
   check(h.app().restartStatus === null, 'which dismisses on its own');
 }
