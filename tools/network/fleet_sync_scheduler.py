@@ -1166,6 +1166,28 @@ class SQLiteFleetSyncStore:
         finally:
             conn.close()
 
+    def peer_ack_rows(self, epoch: str) -> list[tuple[str, int | None, int]]:
+        """``(machine, local_watermark, updated_at_ns)`` for every peer-state
+        row under *epoch*: which machines have acknowledged this store's
+        prefix (a completed pull) and when each was last seen."""
+        import sqlite3 as _sqlite3
+
+        if not Path(self.path).exists():
+            return []
+        conn = _sqlite3.connect(f"file:{self.path}?mode=ro", uri=True)
+        try:
+            return [
+                (str(row[0]), None if row[1] is None else int(row[1]), int(row[2] or 0))
+                for row in conn.execute(
+                    "SELECT machine_public_key,local_watermark,updated_at_ns "
+                    "FROM fleet_sync_peer_state WHERE roster_epoch=?", (epoch,),
+                )
+            ]
+        except _sqlite3.Error:
+            return []
+        finally:
+            conn.close()
+
     def peer_machines(self, epoch: str) -> list[str]:
         """Machines with a peer-state row under *epoch* (the org scope's
         state key: every co-member machine that has pulled or been served
@@ -1485,6 +1507,13 @@ SERVE_PAGE_TRANSACTIONS = 200
 #: The prune holds the store's write lock for up to its budget; once a
 #: minute is plenty for retention and invisible to the dashboard's writers.
 PRUNE_MIN_INTERVAL_S = 60.0
+#: Ruling on auto-coea3 (membership half, 2026-09-07): membership grants the
+#: right to pull, not the power to freeze another member's compaction. A
+#: still-member machine that has not completed a pull of an org scope for
+#: this long stops holding that store's served-ack retirement; its row is
+#: kept, so its own next pull resumes from its watermark (a checkpoint if
+#: the rows are gone).
+ORG_PRUNE_ABSENCE_S = 7 * 24 * 3600.0
 
 #: How long the served-ack prune waits for a store's write lock before it
 #: skips the pass (a background sweep must never queue behind a long writer).
@@ -2373,6 +2402,41 @@ class FleetSyncScheduler:
         self._after_serve_tasks.add(task)
         task.add_done_callback(self._after_serve_tasks.discard)
 
+    def _org_ack_holders(
+        self, store, channel: "OrgFleetAuthenticator", scope_path: Path,
+        state_epoch: str, *, now_ns: int | None = None,
+    ) -> list[str]:
+        """The machines whose acknowledgement an org store waits for before
+        retiring rows (ruling on auto-coea3): every machine with a COMPLETED
+        pull recorded under the org key -- own fleet not special-cased --
+        except one whose persona is outside the newest adopted member set
+        (it cannot pull again; retire now) and one absent longer than
+        ORG_PRUNE_ABSENCE_S (its row stays as its watermark). A machine
+        with no completed pull holds nothing. A persona is known from the
+        peer's admitted hello or its verified reachability row; unknown
+        counts as a member within the absence bound."""
+        from tools.network.fleet_org_reachability import read_rows, verify_row
+
+        now_ns = time.time_ns() if now_ns is None else now_ns
+        absence_ns = int(ORG_PRUNE_ABSENCE_S * 1e9)
+        personas: dict[str, str] = {}
+        for key, payload in read_rows(scope_path).items():
+            verified = verify_row(key, payload, org=channel.org)
+            if verified is not None:
+                personas[key] = verified[0]
+        holders: list[str] = []
+        for machine, ack, updated_at_ns in store.peer_ack_rows(state_epoch):
+            if machine == self.authenticator.machine_pub or ack is None:
+                continue
+            admitted = channel.admitted(machine)
+            persona = admitted.persona_pub if admitted is not None else personas.get(machine)
+            if persona is not None and channel.is_member(persona) is False:
+                continue
+            if now_ns - updated_at_ns > absence_ns:
+                continue
+            holders.append(machine)
+        return sorted(holders)
+
     async def _after_serve(self, *, store, scope, epoch, peer_pub, telemetry,
                            started_monotonic_ns) -> None:
         recorder = self.config.telemetry_recorder
@@ -2401,23 +2465,20 @@ class FleetSyncScheduler:
                 self._roster_snapshot,
                 anchor_root_pub=self.config.personal_root_pub,
             )
-            others = {
+            others = sorted(
                 pub for pub in active
                 if pub != self.authenticator.machine_pub
-            }
-            if scope != "personal" and scope in self._org_channels():
-                # An org scope is also pulled by co-members' machines,
-                # which no personal roster names. Every machine with a
-                # peer-state row under the org key must have acknowledged
-                # before a row is retired; otherwise a lagging co-member
-                # would be served deltas with a hole it cannot detect. A
-                # co-member that pulled once and vanished therefore holds
-                # retirement (storage, not correctness); which machines an
-                # org store may stop waiting for is an open point on
-                # auto-coea3.
-                others |= set(await asyncio.to_thread(store.peer_machines, epoch))
-                others.discard(self.authenticator.machine_pub)
-            others = sorted(others)
+            )
+            channel = self._org_channels().get(scope) if scope != "personal" else None
+            if channel is not None:
+                # An org scope is also pulled by co-members' machines, which
+                # no personal roster names: the acknowledgement set is the
+                # machines with a completed pull under the org key, minus
+                # removed personas and the long absent (_org_ack_holders).
+                others = await asyncio.to_thread(
+                    self._org_ack_holders, store, channel,
+                    self._scope_paths()[scope], epoch,
+                )
             started = time.monotonic()
             journal_rows, transaction_rows = await asyncio.to_thread(
                 store.prune_acknowledged, others, epoch

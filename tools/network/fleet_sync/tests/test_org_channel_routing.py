@@ -479,3 +479,57 @@ def test_a_rekeyed_member_re_proves_under_its_new_leaf_and_survives(tmp_path: Pa
         assert rows == [(a.machine.public_hex, org_state_key(ORG), 0)]
 
     asyncio.run(run())
+
+
+def test_org_prune_holders_follow_the_membership_ruling(tmp_path: Path) -> None:
+    """Who an org store waits for before retiring rows: machines with a
+    completed pull under the org key, minus removed personas and the long
+    absent; own fleet not special-cased; no completed pull holds nothing."""
+    import time as _time
+
+    from tools.network import fleet_org_reachability as reach
+
+    pa, pb, pc = KeyPair.generate(), KeyPair.generate(), KeyPair.generate()
+    members = [pa.public_hex, pb.public_hex, pc.public_hex]
+    a = Member(tmp_path, "a", pa, members)
+    b = Member(tmp_path, "b", pb, members)   # a current member, active
+    c = Member(tmp_path, "c", pc, members)   # will be removed
+    scheduler = a.scheduler()
+    store = scheduler._store_for("alpha")
+    key = org_state_key(ORG)
+    now_ns = _time.time_ns()
+    # Personas are known from verified reachability rows in A's org store.
+    import json, sqlite3 as _sqlite3, uuid
+    # Through GraphDB: the store's capture triggers need its registered
+    # SQL functions, as any real writer has.
+    db = GraphDB(a.alpha)
+    try:
+        for member in (b, c):
+            row = reach.build_row(member.machine, member.persona_cert, ["ws://10.0.0.9:1"])
+            db.conn.execute(
+                "INSERT INTO settings(id,set_id,schema_revision,key,payload,publication_state)"
+                " VALUES(?,?,?,?,?,'published')",
+                (str(uuid.uuid4()), reach.SET_ID, reach.REVISION, member.machine.public_hex, json.dumps(row)),
+            )
+        db.conn.commit()
+    finally:
+        db.close()
+    absent = KeyPair.generate().public_hex      # persona unknown, long absent
+    fresh_unknown = KeyPair.generate().public_hex  # persona unknown, recent
+    never_pulled = KeyPair.generate().public_hex
+    for machine in (b.machine.public_hex, c.machine.public_hex, absent, fresh_unknown):
+        store.record_served_ack(machine, key, 5)
+    store.record_peer(never_pulled, key, online=True)  # a row, but no ack
+    with _sqlite3.connect(a.alpha) as conn:
+        conn.execute(
+            "UPDATE fleet_sync_peer_state SET updated_at_ns=? WHERE machine_public_key=?",
+            (now_ns - int(fss.ORG_PRUNE_ABSENCE_S * 1e9) - 1, absent),
+        )
+    holders = scheduler._org_ack_holders(store, a.channel, a.alpha, key, now_ns=now_ns)
+    assert holders == sorted([b.machine.public_hex, c.machine.public_hex, fresh_unknown])
+    # C's persona is removed at the next adopted checkpoint: C stops
+    # holding at once, and its row is still there.
+    a.adopt(1, [pa.public_hex, pb.public_hex])
+    holders = scheduler._org_ack_holders(store, a.channel, a.alpha, key, now_ns=now_ns)
+    assert holders == sorted([b.machine.public_hex, fresh_unknown])
+    assert c.machine.public_hex in store.peer_machines(key)
