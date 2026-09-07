@@ -44,6 +44,27 @@ _ISOLATED_TEST_ENVS = (
 
 
 @pytest.fixture(autouse=True)
+def _isolate_restart_state(tmp_path, monkeypatch):
+    """Per-test homes for the small hand-off state files the lifespan writes.
+
+    ``_on_shutdown`` persists restart_notice.state / resource_monitor.state /
+    worktree_row_cache.state under DATA_ROOT; with no redirect they landed in
+    the repo checkout's data/, and the NEXT lifespan test in the same worker
+    read the stale restart notice, emitted a ``server:restart`` completion
+    (which is deliberately kept out of the replay buffer) and made
+    seq != buffer_last_seq assertions flaky. Paths are read at server import,
+    so fixtures that reload the server module pick these up.
+    """
+    for env, name in (
+        ("DASHBOARD_RESTART_NOTICE_STATE", "restart_notice.state"),
+        ("DASHBOARD_RESOURCE_MONITOR_STATE", "resource_monitor.state"),
+        ("DASHBOARD_WORKTREE_ROW_CACHE_STATE", "worktree_row_cache.state"),
+    ):
+        if not os.environ.get(env):
+            monkeypatch.setenv(env, str(tmp_path / name))
+
+
+@pytest.fixture(autouse=True)
 def _restore_dashboard_env():
     """Restore common dashboard/graph env after each test.
 
@@ -369,6 +390,9 @@ def _isolate_repo_data_writes():
     for env, name in (
         ("DASHBOARD_TRACE_DIR", "session-traces"),
         ("DASHBOARD_AGENT_RUNS_DIR", "agent-runs"),
+        # log_channels.configure() runs at server import and would otherwise
+        # create data/logs/*.log in the repo checkout.
+        ("DASHBOARD_LOG_DIR", "logs"),
     ):
         if _os.environ.get(env):
             continue
