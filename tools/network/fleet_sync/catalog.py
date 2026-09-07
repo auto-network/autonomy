@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import json
+import logging
 from pathlib import Path
 import re
 import sqlite3
@@ -35,6 +36,11 @@ from .streaming import ensure_streaming_indexes, iter_indexed_snapshot_mutations
 
 
 CATALOG_SCHEMA_VERSION = 3
+logger = logging.getLogger(__name__)
+
+#: Local objects earlier versions created and this version removes on open.
+RETIRED_SCHEMA_OBJECTS: frozenset[str] = frozenset({"fleet_sync_journal"})
+
 MAX_TRANSACTION_OPERATIONS = 16_384
 MAX_TRANSACTION_FRAME_BYTES = 128 * 1024 * 1024
 
@@ -388,6 +394,7 @@ class MutationCatalog:
         # Per store, never module-global: the previous global was rewritten by
         # every open, so a process serving two stores regenerated each one's
         # trigger SQL from whichever store it opened LAST.
+        self.newly_captured_tables: frozenset[str] = frozenset()
         self._table_columns: dict[str, tuple[str, ...]] = {
             table: tuple(str(row[1]) for row in self.conn.execute(
                 f"PRAGMA table_info({_quote(table)})"
@@ -608,8 +615,26 @@ class MutationCatalog:
                 "WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%'"
             )
         }
-        if expected <= present:
+        retired = present & RETIRED_SCHEMA_OBJECTS
+        if expected <= present and not retired:
             return False
+        if retired and expected <= present:
+            # Nothing to create, only something to drop. A DROP inside
+            # _create_schema_objects never ran on an activated store,
+            # because this check saw nothing missing (fleet_sync_journal
+            # stayed on every live store after 6fdec619 and broke the
+            # schema audit, 2026-09-07). Drop it here, unconditionally.
+            if self.conn.in_transaction:
+                self.conn.commit()
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                for name in sorted(retired):
+                    self.conn.execute(f'DROP TABLE IF EXISTS "{name}"')
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+            return True
         if self.conn.in_transaction:
             self.conn.commit()
         self.conn.execute("BEGIN IMMEDIATE")
@@ -842,9 +867,25 @@ class MutationCatalog:
             ensure_streaming_indexes(
                 self.conn, manage_transaction=False, audit=False,
             )
+            before = {
+                str(r[0]).removeprefix("fleet_sync_").rsplit("_", 1)[0]
+                for r in self.conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='trigger' "
+                    "AND name LIKE 'fleet_sync_%'"
+                )
+            }
             self._install_triggers()
             if not self._triggers_match_current_schema():
                 raise WatermarkError("fleet-sync trigger refresh incomplete")
+            after = {
+                table for table, policy in TABLE_POLICIES.items()
+                if policy.kind not in {PolicyKind.LOCAL, PolicyKind.DERIVED}
+                and self._table_columns.get(table)
+            }
+            # Tables that had NO capture before this refresh: rows written
+            # to them so far are untracked and need a backfill. A table
+            # whose trigger text merely changed needs none.
+            self.newly_captured_tables = frozenset(after - before)
             self.conn.commit()
             return True
         except Exception:
@@ -2241,10 +2282,29 @@ def attach_active_production_catalog(
     if not catalog.triggers_active():
         raise WatermarkError("fleet-sync capture triggers are only partially active")
     if refreshed:
-        # A package upgrade may add a newly classified table. Trigger refresh
-        # closes its write boundary; this one-time backfill gives rows written
-        # before the upgrade ordinary winner metadata. Unclassified plugin
-        # tables remain outside this maintenance path.
-        catalog.reconcile_catalog(audit=False)
+        # Recompiling trigger text changes no data. The only case that
+        # needs a backfill is a table that gained capture for the first
+        # time (a package upgrade classified it) and already holds rows.
+        # Running the full reconcile on every refresh cost ~165 s per org
+        # store inside dashboard startup, twice on 2026-09-07 (auto-boa0j).
+        untracked = {
+            table: int(conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+            for table in sorted(getattr(catalog, "newly_captured_tables", ()))
+        }
+        untracked = {t: n for t, n in untracked.items() if n}
+        if untracked:
+            started = time.monotonic()
+            logger.warning(
+                "fleet sync: capture newly installed on %s with existing rows; "
+                "backfilling winner metadata", untracked,
+            )
+            catalog.reconcile_catalog(audit=False)
+            logger.warning(
+                "fleet sync: backfill finished in %.1fs", time.monotonic() - started,
+            )
+        else:
+            logger.info(
+                "fleet sync: capture triggers recompiled; no backfill needed"
+            )
     conn.install_fleet_sync_hook(catalog)
     return catalog

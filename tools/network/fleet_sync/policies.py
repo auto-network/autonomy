@@ -224,6 +224,10 @@ DERIVED_TABLE_PREFIXES: Final[tuple[str, ...]] = (
 
 LOCAL_SYNC_TABLES: Final[frozenset[str]] = frozenset({
     "fleet_sync_catalog",
+    # Retired 2026-09-07 (frames are rebuilt from rows). Still classified so
+    # the schema audit never fails on a store that has not yet been opened
+    # by code that drops it; ensure_schema_objects drops it on open.
+    "fleet_sync_journal",
     "fleet_sync_origins",
     "fleet_sync_peer_state",
     "fleet_sync_quarantine",
