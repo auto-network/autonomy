@@ -22085,26 +22085,11 @@ async def _on_startup():
         _event_proxy_task.add_done_callback(_log_event_proxy_result)
     _mark("serving_supervisor_bootstrap+event_proxy tasks_created")
 
-    # Design Studio thumbnails: one background worker renders each design's
-    # latest revision headlessly (no LLM) and backfills whatever has none.
-    # Skipped in mock mode (no design DB, no browser).
-    if not os.environ.get("DASHBOARD_MOCK"):
-        try:
-            from tools.dashboard import design_thumbnails
-            design_thumbnails.queue.on_rendered = _on_design_thumbnail_rendered
-            design_thumbnails.queue.start()
-            queued = design_thumbnails.queue.enqueue_missing()
-            logger.info("design-thumbnails: worker started, %d revision(s) queued for backfill", queued)
-        except Exception:
-            logger.exception("design-thumbnails: worker failed to start; thumbnails will not render")
-    _mark("design_thumbnails.queue.start")
-
-    global _design_lifecycle_task
-    if not os.environ.get("DASHBOARD_MOCK"):
-        _design_lifecycle_task = asyncio.create_task(
-            _design_lifecycle_sweeper(), name="design-lifecycle",
-        )
-    _mark("design_lifecycle.sweeper")
+    # Design Studio thumbnails + lifecycle sweep start at ACTIVATION (see
+    # _activate_worker): both write beside the design DB and drive a single
+    # headless browser session, so two live workers during a hand-off must
+    # not run them side by side.
+    _mark("design_studio.deferred_to_activation")
     logger.info(
         "startup phase: TOTAL %.1fms", (time.monotonic() - _startup_t0) * 1000,
     )
@@ -22366,6 +22351,27 @@ async def _activate_worker(reason: str) -> None:
         _codex_credentials_refresh_task = asyncio.create_task(
             _codex_credentials_refresh.codex_credentials_refresh_poller()
         )
+
+    # Design Studio: the headless thumbnail worker (renders each design's
+    # latest revision, backfills whatever has none) and the hourly archive
+    # sweep. Activation-only: the predecessor is gone, so one browser
+    # session and one sweeper per machine. Skipped in mock mode.
+    global _design_lifecycle_task
+    if not os.environ.get("DASHBOARD_MOCK"):
+        try:
+            from tools.dashboard import design_thumbnails
+            design_thumbnails.queue.on_rendered = _on_design_thumbnail_rendered
+            design_thumbnails.queue.start()
+            queued = design_thumbnails.queue.enqueue_missing()
+            logger.info("design-thumbnails: worker started, %d revision(s) queued for backfill", queued)
+        except Exception:
+            logger.exception("design-thumbnails: worker failed to start; thumbnails will not render")
+        try:
+            _design_lifecycle_task = asyncio.create_task(
+                _design_lifecycle_sweeper(), name="design-lifecycle",
+            )
+        except Exception:
+            logger.exception("design-lifecycle: sweeper failed to start")
 
     logger.info(
         "worker activation complete (%s) in %.1fms",
