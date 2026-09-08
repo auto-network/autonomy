@@ -205,7 +205,7 @@ class GraphAppender:
                 dedup_turns = _dedup_new_turns(db, self.source_id, new_turns, max_turn)
 
                 state = self.extractor.state
-                thoughts, derivations, entities = _write_new_turns(
+                thoughts, derivations = _write_new_turns(
                     db, self.source_id, dedup_turns,
                     model=state.get("model") or self.default_model,
                     persona_id=_ingest_persona(),

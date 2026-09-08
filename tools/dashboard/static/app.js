@@ -2496,8 +2496,9 @@ api('/api/stats').then(data => {
     const m = line.match(/^\s*(\w+)\s+(\d+)/);
     if (m) entries.push([m[1], parseInt(m[2])]);
   });
-  // Show the 4 most important: sources, thoughts, entities, edges
-  const keys = ['sources', 'thoughts', 'entities', 'edges'];
+  // Show the 4 most important: sources, thoughts, derivations, edges.
+  // 'entities' was here until the table was retired; it rendered a hard 0.
+  const keys = ['sources', 'thoughts', 'derivations', 'edges'];
   const show = keys.map(k => {
     const e = entries.find(([name]) => name === k);
     return e ? e : [k, 0];

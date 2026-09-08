@@ -21,6 +21,17 @@ from .codec import CanonicalValue, Mutation, encode_value
 from .policies import PolicyKind, TABLE_POLICIES
 
 
+class SecondaryIdentityConflict(ValueError):
+    """An arriving row is new under the replication key but collides with a
+    local row on a different unique column.
+
+    Skippable, like a foreign-key orphan: the batch continues and the row is
+    quarantined for a human. Treating it as fatal deadlocks the scope,
+    because nothing applies, the watermark never advances, and the same batch
+    is re-served indefinitely.
+    """
+
+
 class MaterializationError(ValueError):
     """The logical graph cannot be represented safely in the target DB."""
 
@@ -49,11 +60,16 @@ class MaterializationReport:
     #: exclude them from the winner-catalog install and the base/winner count
     #: invariants, and quarantine them for later repair.
     skipped_orphans: tuple[tuple[str, tuple], ...] = ()
-    #: (table, address, reason) of signed settings rows not stored: reason
-    #: ``settings_signature_invalid`` (envelope failed to verify against its
-    #: own signing key; never stored, never forwarded) or
+    #: (table, address, reason) of rows not stored, WITH the reason -- the
+    #: channel to use whenever the cause is known, because the unreasoned
+    #: ``skipped_orphans`` path is filed as ``fk_orphan`` by default.
+    #: Reasons: ``settings_signature_invalid`` (envelope failed to verify
+    #: against its own signing key; never stored, never forwarded),
     #: ``settings_signature_pending`` (no organization genesis known to this
-    #: store yet, so the record could not be rebuilt; parked for the drain).
+    #: store yet, so the record could not be rebuilt; parked for the drain),
+    #: and ``secondary_identity_conflict`` (see SecondaryIdentityConflict).
+    #: Named ``rejected_signatures`` for its original signed-settings use;
+    #: the field now carries every reasoned rejection.
     rejected_signatures: tuple[tuple[str, tuple, str], ...] = ()
 
 
@@ -176,12 +192,12 @@ def production_blob_store(
 # Parents precede children. Tables without declared foreign keys are still
 # placed after the content they describe so failures are understandable.
 _TABLE_ORDER = (
-    "sources", "entities", "nodes", "tags", "threads",
+    "sources", "nodes", "tags", "threads",
     "root_anchors", "vault_factors", "policy_classes", "vault_secrets",
     "vault_content_bodies", "keycontrol_state", "keycontrol_grant",
     "keycontrol_credential",
     "keycontrol_bridge", "vault_content_objects", "settings",
-    "thoughts", "derivations", "claims", "edges", "entity_mentions",
+    "thoughts", "derivations", "claims", "edges",
     "node_refs", "note_comments", "note_reads", "captures", "attachments",
     "note_versions",
 )
@@ -399,9 +415,24 @@ def _upsert(conn: sqlite3.Connection, mutation: Mutation, row: dict[str, object]
                     f"{mutation.table} row at {mutation.address!r} references a "
                     f"parent absent from the checkpoint: {exc}"
                 ) from exc
+            if "UNIQUE constraint failed" in str(exc):
+                # The arriving row is distinct under the REPLICATION key but
+                # collides with a local row on some OTHER unique column. That
+                # is unmergeable here -- this layer cannot know which of the
+                # two identities is the real one -- but it must not be fatal.
+                # Aborting the batch means nothing applies, the watermark
+                # never advances, and the identical batch replays forever: a
+                # single junk row blocked 2.8M rows of real content for a day
+                # (entities.canonical_name, 2026-09-08). Quarantine it and let
+                # the rest of the batch through, exactly as a foreign-key
+                # orphan is handled.
+                raise SecondaryIdentityConflict(
+                    f"{mutation.table} row at {mutation.address!r} collides "
+                    f"with a local row on a unique column: {exc}"
+                ) from exc
             raise MaterializationError(
-                f"{mutation.table} has a secondary-identity conflict at "
-                f"{mutation.address!r}: {exc}"
+                f"{mutation.table} row at {mutation.address!r} could not be "
+                f"applied: {exc}"
             ) from exc
         return
     if policy.kind in {PolicyKind.IMMUTABLE, PolicyKind.IMMUTABLE_PRUNABLE}:
@@ -635,6 +666,18 @@ def materialize(
                     # constraint abort leaves the transaction usable, so the
                     # rest of the batch still applies.
                     skipped.append((mutation.table, tuple(mutation.address)))
+                    continue
+                except SecondaryIdentityConflict:
+                    # Skippable like an orphan, but recorded through the
+                    # REASONED channel so quarantine says what actually
+                    # happened. The unreasoned path defaults every skip to
+                    # "fk_orphan", which would file this under a cause it does
+                    # not have -- the same class of lie as a scan that reports
+                    # absence when it could not look.
+                    rejected.append((
+                        mutation.table, tuple(mutation.address),
+                        "secondary_identity_conflict",
+                    ))
                     continue
                 applied += 1
         _finish_vault_materialization(conn)

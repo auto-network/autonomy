@@ -2537,21 +2537,6 @@ def move_source(
             moved_meta["reason"] = reason
         origin_meta["moved"] = moved_meta
 
-        moved_thought_ids = {
-            r["id"]
-            for r in conn.execute(
-                "SELECT id FROM main.thoughts WHERE source_id = ?",
-                (source_id,),
-            ).fetchall()
-        }
-        moved_derivation_ids = {
-            r["id"]
-            for r in conn.execute(
-                "SELECT id FROM main.derivations WHERE source_id = ?",
-                (source_id,),
-            ).fetchall()
-        }
-
         target_attach_conflict = conn.execute(
             "SELECT 1 FROM target.attachments "
             "WHERE (source_id = ? OR source_id LIKE ?) "
@@ -2566,43 +2551,6 @@ def move_source(
                 "target org already has an attachment row for one of this "
                 "source's blob paths; cannot preserve attachment UUIDs safely"
             )
-
-        entity_id_map: dict[str, str] = {}
-
-        def _ensure_target_entity(old_id: str) -> str:
-            mapped = entity_id_map.get(old_id)
-            if mapped:
-                return mapped
-            ent = conn.execute(
-                "SELECT * FROM main.entities WHERE id = ?",
-                (old_id,),
-            ).fetchone()
-            if ent is None:
-                entity_id_map[old_id] = old_id
-                return old_id
-            existing = conn.execute(
-                "SELECT id FROM target.entities WHERE canonical_name = ?",
-                (ent["canonical_name"],),
-            ).fetchone()
-            if existing is not None:
-                entity_id_map[old_id] = existing["id"]
-                return existing["id"]
-            conn.execute(
-                "INSERT INTO target.entities("
-                "id, name, canonical_name, type, description, metadata, created_at"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    ent["id"], ent["name"], ent["canonical_name"], ent["type"],
-                    ent["description"], ent["metadata"], ent["created_at"],
-                ),
-            )
-            entity_id_map[old_id] = ent["id"]
-            return ent["id"]
-
-        def _map_maybe_entity(ref_id: str | None) -> str | None:
-            if not ref_id:
-                return ref_id
-            return _ensure_target_entity(ref_id)
 
         conn.execute("BEGIN IMMEDIATE")
 
@@ -2661,10 +2609,6 @@ def move_source(
         for claim in claim_rows:
             subj = claim["subject_id"]
             obj = claim["object_id"]
-            if subj not in moved_thought_ids and subj not in moved_derivation_ids:
-                subj = _map_maybe_entity(subj)
-            if obj not in moved_thought_ids and obj not in moved_derivation_ids:
-                obj = _map_maybe_entity(obj)
             conn.execute(
                 "INSERT INTO target.claims("
                 "id, subject_id, predicate, object_id, object_val, source_id, "
@@ -2678,38 +2622,6 @@ def move_source(
                 ),
             )
 
-        mention_rows = conn.execute(
-            "SELECT em.* FROM main.entity_mentions em "
-            "WHERE (em.content_type = 'thought' AND em.content_id IN ("
-            "         SELECT id FROM main.thoughts WHERE source_id = ?"
-            "      )) OR (em.content_type = 'derivation' AND em.content_id IN ("
-            "         SELECT id FROM main.derivations WHERE source_id = ?"
-            "      ))",
-            (source_id, source_id),
-        ).fetchall()
-        for mention in mention_rows:
-            new_entity_id = _ensure_target_entity(mention["entity_id"])
-            conn.execute(
-                "INSERT INTO target.entity_mentions(entity_id, content_id, content_type, count) "
-                "VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(entity_id, content_id) DO UPDATE SET count = excluded.count",
-                (
-                    new_entity_id,
-                    mention["content_id"],
-                    mention["content_type"],
-                    mention["count"],
-                ),
-            )
-
-        conn.execute(
-            "DELETE FROM main.entity_mentions "
-            "WHERE (content_type = 'thought' AND content_id IN ("
-            "         SELECT id FROM main.thoughts WHERE source_id = ?"
-            "      )) OR (content_type = 'derivation' AND content_id IN ("
-            "         SELECT id FROM main.derivations WHERE source_id = ?"
-            "      ))",
-            (source_id, source_id),
-        )
         conn.execute("DELETE FROM main.claims WHERE source_id = ?", (source_id,))
         conn.execute("DELETE FROM main.edges WHERE source_id = ?", (source_id,))
         conn.execute("DELETE FROM main.captures WHERE source_id = ?", (source_id,))
@@ -3238,7 +3150,6 @@ def create_note(
     if title is not None and not title.strip():
         raise ValueError("title cannot be empty when set explicitly")
     from .models import Source, Thought, Edge, new_id
-    from .ingest import extract_entities
 
     tags = list(tags or [])
     is_rich = bool(html_path)
@@ -3308,10 +3219,6 @@ def create_note(
         )
         db.insert_thought(thought)
         db.insert_note_version(source.id, 1, content, persona_id=persona_id, session_id=session_id)
-
-        for name, etype in extract_entities(content):
-            eid = db.upsert_entity(name, etype)
-            db.add_mention(eid, thought.id, "thought")
 
         if session_hint and not (auto_provenance_source_id and auto_provenance_turn):
             auto_provenance_source_id, auto_provenance_turn = _resolve_note_provenance(
@@ -3417,8 +3324,6 @@ def update_note(
     placeholders: the caller must re-pass the complete ordered attachment
     list once rather than risk silently binding an image to the wrong slot.
     """
-    from .ingest import extract_entities
-
     # Reject pure no-op calls early. At least one mutation must be
     # specified; otherwise the caller is asking for nothing and we'd
     # silently no-op while still claiming success in the response.
@@ -3636,10 +3541,6 @@ def update_note(
                 )
 
             db.update_thought_content(thought["id"], content)
-
-            for name, etype in extract_entities(content):
-                eid = db.upsert_entity(name, etype)
-                db.add_mention(eid, thought["id"], "thought")
 
             for cid in (integrate_comments or []):
                 row = db.conn.execute(
@@ -4064,99 +3965,6 @@ def get_tree(
     db = _open(org)
     try:
         return db.get_tree(root, depth=depth)
-    finally:
-        db.close()
-
-
-def search_entities(
-    query: str,
-    *,
-    limit: int = 20,
-    org: str | None = None,
-) -> list[dict]:
-    """Full-text search entities by name.
-
-    Scopeless callers union across every org DB, then truncate to limit.
-    """
-    resolved_org = _resolve_org(org)
-    if _global_scope_active(resolved_org, None):
-        rows = _union_across_orgs(
-            lambda d: d.search_entities(query, limit=limit)
-        )
-        return rows[:limit]
-    db = _open(org)
-    try:
-        return db.search_entities(query, limit=limit)
-    finally:
-        db.close()
-
-
-def list_entities(
-    *,
-    entity_type: str | None = None,
-    limit: int = 20,
-    org: str | None = None,
-) -> list[dict]:
-    """List entities, optionally filtered by type.
-
-    Scopeless callers union across every org DB, then truncate to limit.
-    """
-    resolved_org = _resolve_org(org)
-    if _global_scope_active(resolved_org, None):
-        rows = _union_across_orgs(
-            lambda d: d.list_entities(entity_type=entity_type, limit=limit)
-        )
-        return rows[:limit]
-    db = _open(org)
-    try:
-        return db.list_entities(entity_type=entity_type, limit=limit)
-    finally:
-        db.close()
-
-
-def entity_thoughts(
-    entity_id: str,
-    *,
-    limit: int = 20,
-    org: str | None = None,
-) -> list[dict]:
-    """Thoughts mentioning a given entity id.
-
-    Scopeless callers union across every org DB.
-    """
-    resolved_org = _resolve_org(org)
-    if _global_scope_active(resolved_org, None):
-        rows = _union_across_orgs(lambda d: d.entity_thoughts(entity_id))
-        return rows[:limit]
-    db = _open(org)
-    try:
-        return db.entity_thoughts(entity_id)[:limit]
-    finally:
-        db.close()
-
-
-def entity_mention_count(
-    entity_id: str,
-    *,
-    org: str | None = None,
-) -> int:
-    """Total mentions of an entity across all sources.
-
-    Scopeless callers sum counts across every org DB.
-    """
-    sql = "SELECT SUM(count) AS total FROM entity_mentions WHERE entity_id = ?"
-    resolved_org = _resolve_org(org)
-    if _global_scope_active(resolved_org, None):
-        total = 0
-        for _slug, slug_db in _iter_org_dbs():
-            row = slug_db.conn.execute(sql, (entity_id,)).fetchone()
-            if row and row["total"]:
-                total += int(row["total"])
-        return total
-    db = _open(org)
-    try:
-        row = db.conn.execute(sql, (entity_id,)).fetchone()
-        return int(row["total"] or 0) if row else 0
     finally:
         db.close()
 

@@ -17547,33 +17547,6 @@ async def api_graph_tree(request):
     return JSONResponse({"nodes": graph_ops.get_tree(root, depth=depth, org=org)})
 
 
-async def api_graph_entities(request):
-    """GET /api/graph/entities — list or search entities."""
-    org = api_auth.organization_scope_from_request(request)
-    params = request.query_params
-    query = params.get("query") or None
-    etype = params.get("type") or None
-    limit = int(params.get("limit", "20"))
-    if query:
-        entities = graph_ops.search_entities(query, limit=limit, org=org)
-    else:
-        entities = graph_ops.list_entities(entity_type=etype, limit=limit, org=org)
-    # Annotate with mention counts so the CLI doesn't have to do N+1 round-trips.
-    for e in entities:
-        e["mentions"] = graph_ops.entity_mention_count(e["id"], org=org)
-    return JSONResponse({"entities": entities})
-
-
-async def api_graph_entity_thoughts(request):
-    """GET /api/graph/entity/{id}/thoughts — thoughts mentioning an entity."""
-    org = api_auth.organization_scope_from_request(request)
-    entity_id = request.path_params["id"]
-    limit = int(request.query_params.get("limit", "20"))
-    return JSONResponse(
-        {"thoughts": graph_ops.entity_thoughts(entity_id, limit=limit, org=org)},
-    )
-
-
 # ── Settings primitive (graph://0d3f750f-f9c) ──────────────
 
 
@@ -21076,8 +21049,6 @@ routes = [
     Route("/api/graph/attention", api_graph_attention, methods=["GET"]),
     Route("/api/graph/stats", api_graph_stats, methods=["GET"]),
     Route("/api/graph/tree", api_graph_tree, methods=["GET"]),
-    Route("/api/graph/entities", api_graph_entities, methods=["GET"]),
-    Route("/api/graph/entity/{id}/thoughts", api_graph_entity_thoughts, methods=["GET"]),
     # Settings primitive (graph://0d3f750f-f9c). Routes ordered specific → generic.
     Route("/api/graph/sets", api_graph_set_ids, methods=["GET"]),
     Route("/api/graph/setting-resolve/{value}", api_graph_setting_resolve, methods=["GET"]),

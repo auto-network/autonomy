@@ -716,16 +716,37 @@ def check_sync_data(report: dict) -> None:
                     catalog_rows = org_conn.execute(
                         "SELECT COUNT(*) FROM fleet_sync_catalog"
                     ).fetchone()[0]
-                    backlog = org_conn.execute(
-                        "SELECT COUNT(*) FROM fleet_sync_quarantine"
-                    ).fetchone()[0] if org_conn.execute(
-                        "SELECT 1 FROM sqlite_master "
-                        "WHERE name='fleet_sync_quarantine'"
-                    ).fetchone() else 0
+                    # Report the quarantine BY REASON. A bare backlog count
+                    # says a row did not land but not why, which is how an
+                    # unmergeable row sat behind a plausible-looking number
+                    # while it blocked a whole scope (2026-09-08).
+                    reasons = (
+                        org_conn.execute(
+                            "SELECT reason, COUNT(*) FROM fleet_sync_quarantine "
+                            "GROUP BY reason ORDER BY COUNT(*) DESC"
+                        ).fetchall()
+                        if org_conn.execute(
+                            "SELECT 1 FROM sqlite_master "
+                            "WHERE name='fleet_sync_quarantine'"
+                        ).fetchone() else []
+                    )
+                    backlog = sum(int(count) for _reason, count in reasons)
+                    detail = ", ".join(
+                        f"{count} {reason}" for reason, count in reasons
+                    ) or "none"
+                    # Attachments waiting on bytes are the STEADY STATE
+                    # while blob transfer is unwired, so they are not a
+                    # warning. Everything else is a row that will never land
+                    # on its own and needs a human.
+                    stuck = sum(
+                        int(count) for reason, count in reasons
+                        if reason != "attachment_bytes_unavailable"
+                    )
                     _line(
                         f"scope {slug}",
                         f"{catalog_rows} catalog rows, "
-                        f"{backlog} quarantined",
+                        f"{backlog} quarantined ({detail})",
+                        warn=stuck > 0,
                     )
                 except sqlite3.OperationalError:
                     _line(

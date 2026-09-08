@@ -31,7 +31,7 @@ def test_write_new_turns_stamps_persona_and_session(tmp_path):
         {"turn_number": 2, "message_id": "m2", "content": "an AI reply",
          "role": "assistant"},
     ]
-    thoughts, derivations, _ = _write_new_turns(
+    thoughts, derivations = _write_new_turns(
         db, source_id, turns, model="claude",
         persona_id=persona, session_id=session_uuid,
     )
@@ -60,7 +60,7 @@ def test_write_new_turns_defaults_none_when_unstamped(tmp_path):
     db, source_id = _db_with_source(tmp_path)
     turns = [{"turn_number": 1, "message_id": "m1", "content": "x",
               "role": "user"}]
-    thoughts, _, _ = _write_new_turns(db, source_id, turns, model=None)
+    thoughts, _ = _write_new_turns(db, source_id, turns, model=None)
     assert thoughts[0].persona_id is None
     assert thoughts[0].session_id is None
     db.close()

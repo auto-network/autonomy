@@ -30,7 +30,9 @@ from .codec import (
 from .compaction import AuthoredMutation, WatermarkError
 from .materialize import ContentAddressedBlobStore, materialize
 from .merge import mutation_wins
-from .policies import PolicyKind, TABLE_POLICIES, audit_schema
+from .policies import (
+    RETIRED_LOGICAL_TABLES, PolicyKind, TABLE_POLICIES, audit_schema,
+)
 from .snapshot import _logical_address, _logical_values, _row_timestamp
 from .streaming import ensure_streaming_indexes, iter_indexed_snapshot_mutations
 
@@ -40,6 +42,52 @@ logger = logging.getLogger(__name__)
 
 #: Local objects earlier versions created and this version removes on open.
 RETIRED_SCHEMA_OBJECTS: frozenset[str] = frozenset({"fleet_sync_journal"})
+
+
+def _address_prefix(table: str) -> bytes:
+    """The exact byte prefix every catalog/quarantine address of *table* has.
+
+    An address is ``encode_value([table, [key...]])``, and that encoding is
+    frozen: a two-item list header, then the table name as a length-prefixed
+    string. So a half-open range over the prefix is an exact, index-driven
+    scan of the WITHOUT ROWID primary key -- not a LIKE over blobs.
+    """
+    return encode_value([table, []])[: 1 + 4 + 1 + 4 + len(table.encode("utf-8"))]
+
+
+def purge_retired_catalog_addresses(
+    conn: sqlite3.Connection, tables: Sequence[str],
+) -> int:
+    """Delete winner-catalog and quarantine rows addressing dropped tables.
+
+    Dropping a replicated table's SQL definition without this leaves the
+    catalog citing rows that no longer exist: _verify_catalog_integrity
+    raises on the first one ("catalog address names non-replicated table")
+    and every later open of the store fails. Called by the GraphDB migration
+    that drops them, inside its transaction.
+
+    Refuses any table that is not declared retired, so a live table can never
+    be silently unwound by a typo.
+    """
+    removed = 0
+    for table in tables:
+        if table not in RETIRED_LOGICAL_TABLES:
+            raise WatermarkError(f"table is not retired: {table!r}")
+        low = _address_prefix(table)
+        high = low[:-1] + bytes([low[-1] + 1])
+        for name in ("fleet_sync_catalog", "fleet_sync_quarantine"):
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (name,),
+            ).fetchone() is None:
+                continue
+            cursor = conn.execute(
+                f"DELETE FROM {name} WHERE address >= ? AND address < ?",
+                (low, high),
+            )
+            removed += cursor.rowcount if cursor.rowcount > 0 else 0
+    return removed
+
 
 MAX_TRANSACTION_OPERATIONS = 16_384
 MAX_TRANSACTION_FRAME_BYTES = 128 * 1024 * 1024
@@ -123,10 +171,14 @@ def quarantine_unrealized(
 
     Each entry is ``(table, address, reason)``. ``reason`` is ``fk_orphan`` (a
     NOT-NULL parent absent from the checkpoint — the origin keeps its own copy;
-    repair re-materializes it once the parent is recovered) or
+    repair re-materializes it once the parent is recovered),
     ``attachment_bytes_unavailable`` (external content-addressed bytes not yet
-    fetched — the row lands once blob transfer backfills it). Recording them
-    keeps a durable, decodable backlog so a later repair or fetch can drain it.
+    fetched — the row lands once blob transfer backfills it), or
+    ``secondary_identity_conflict`` (the row is new under its replication key
+    but collides with a local row on some OTHER unique column, so this store
+    can never realize it — it is still forwarded, because a downstream peer
+    holding no such local row can). Recording them keeps a durable, decodable
+    backlog so a later repair or fetch can drain it.
     ``replay`` optionally maps address blobs to the deferred mutation's
     replay identity ``(frame, origin, transaction_id, operation_index)``: a
     delta-deferred row is never re-served (the peer's trail advances past
@@ -800,13 +852,18 @@ class MutationCatalog:
 
     def _install_triggers(self) -> None:
         for table, policy in TABLE_POLICIES.items():
-            if policy.kind in {PolicyKind.LOCAL, PolicyKind.DERIVED}:
-                continue
-            columns = self._table_columns.get(table, ())
+            # Drop first, unconditionally, INCLUDING for tables this pass
+            # will not re-create. Reclassifying a live table to DERIVED or
+            # LOCAL otherwise leaves its capture triggers behind, and
+            # _triggers_match_current_schema then never converges: the
+            # refresh raises "trigger refresh incomplete" on every open.
             for operation in ("insert", "update", "delete"):
                 self.conn.execute(
                     f"DROP TRIGGER IF EXISTS fleet_sync_{table}_{operation}"
                 )
+            if policy.kind in {PolicyKind.LOCAL, PolicyKind.DERIVED}:
+                continue
+            columns = self._table_columns.get(table, ())
             if not columns:
                 continue  # policy table absent from THIS store: no trigger
             for sql in _trigger_sql(table, columns):

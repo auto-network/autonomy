@@ -39,7 +39,6 @@ from tools.graph.db import GraphDB
 NOT_NULL_FKS = (
     ("thoughts", "source_id", "sources"),
     ("derivations", "source_id", "sources"),
-    ("entity_mentions", "entity_id", "entities"),
     ("node_refs", "node_id", "nodes"),
     ("note_comments", "source_id", "sources"),
     ("note_versions", "source_id", "sources"),
