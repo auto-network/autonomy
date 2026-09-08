@@ -29,7 +29,7 @@ the access map is durable and shared rather than pasted between sessions.
 ``--target`` overrides or adds one for a single run.
 
     python3 -m tools.network.fleet_sync_report
-    python3 -m tools.network.fleet_sync_report --target 'sjc-2=-i ~/.ssh/sjc -p 11222 root@100.68.240.25'
+    python3 -m tools.network.fleet_sync_report --target 'sjc-2=-i ~/.ssh/sjc -p 11222 root@<tailnet-ip>'
     python3 -m tools.network.fleet_sync_report --json
 """
 
@@ -362,7 +362,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--target", action="append", default=[], metavar="NAME=SSH",
         help="add or override a target for this run, e.g. "
-             "--target 'sjc-2=-i ~/.ssh/sjc -p 11222 root@100.68.240.25'",
+             "--target 'sjc-2=-i ~/.ssh/sjc -p 11222 root@<tailnet-ip>'",
     )
     parser.add_argument(
         "--no-local", action="store_true",
