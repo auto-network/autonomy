@@ -138,7 +138,7 @@ def test_a_legacy_store_is_carried_across_on_open(tmp_path, monkeypatch):
     assert set(_rows()) == set(wires)
     # Idempotent: a second open carries nothing and changes nothing.
     with sqlite3.connect(path) as conn:
-        assert settings_bridge.migrate_events_to_settings(conn) == 0
+        assert settings_bridge.migrate_events_to_settings(conn, path) == 0
     assert set(_rows()) == set(wires)
 
 
