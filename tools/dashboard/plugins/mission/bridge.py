@@ -16,8 +16,8 @@ derives the per-pillar task lists the viewer bakes in:
 
 Two payloads, two costs. The SCREEN carries only what its lists and
 arcs read — id, title, ladder state, dependency ids, the epic flag and
-a comment count — from ONE batched ``bd list`` (which already returns
-every issue field). Everything a reader opens a task to see — the
+a comment count — from one ``bd list`` and one typed dependency batch.
+The list command no longer includes dependency arrays. Everything a reader opens a task to see — the
 description, a closed bead's close reason, the bd comments — is the
 DETAIL, fetched per task from ``/api/mission/tasks/<m>/detail`` when a
 sheet opens. Before this split the render ran ``bd show`` over every
@@ -29,6 +29,7 @@ into the document for a 158-bead mission, almost none of it ever read.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 
@@ -36,6 +37,7 @@ from tools.data_paths import beads_client_env, org_beads_dir
 
 _TIMEOUT_S = 30
 _DESC_LIMIT = 8000
+_log = logging.getLogger(__name__)
 
 
 def _beads_env(org: str | None) -> dict:
@@ -53,9 +55,12 @@ def _beads_env(org: str | None) -> dict:
 
 def _bd(args: list[str], org: str | None = None) -> list | dict | None:
     try:
-        raw = subprocess.run(
+        result = subprocess.run(
             ["bd", *args, "--json"], capture_output=True, text=True,
-            timeout=_TIMEOUT_S, env=_beads_env(org)).stdout
+            timeout=_TIMEOUT_S, env=_beads_env(org))
+        if result.returncode:
+            return None
+        raw = result.stdout
         return json.loads(raw) if raw.strip() else None
     except Exception:
         return None
@@ -84,15 +89,44 @@ def _pillar_of(row: dict, label_map: dict[str, str]) -> str | None:
                  if lb in label_map), None)
 
 
-def _summary(row: dict) -> dict:
+def group_dependencies(records: object) -> dict[str, list[dict]] | None:
+    """Validate a whole flat batch; partial edges must never imply readiness.
+
+    Keep unknown edge types inspectable, but strip unused edge metadata.
+    ``None`` is unavailable; ``{}`` is a successfully read empty graph.
+    """
+    if not isinstance(records, list):
+        return None
+    grouped: dict[str, list[dict]] = {}
+    for edge in records:
+        if not isinstance(edge, dict) or any(
+            not isinstance(edge.get(k), str) or not edge[k].strip()
+            or edge[k] != edge[k].strip()
+            for k in ("issue_id", "depends_on_id", "type")
+        ):
+            return None
+        clean = {k: edge[k] for k in ("issue_id", "depends_on_id", "type")}
+        grouped.setdefault(edge["issue_id"], []).append(clean)
+    return grouped
+
+
+def _summary(row: dict, edges: list[dict] | None = None,
+             *, dependencies_known: bool = False) -> dict:
     """The screen's view of one bead — what lists, arcs and ranks read."""
     task = {
         "id": row["id"],
         "title": row.get("title") or "",
         "state": _ladder(row),
-        "deps": [d.get("id") for d in row.get("dependencies") or []
-                 if isinstance(d, dict) and d.get("id")],
+        "dependencies": edges or [],
+        "dependencies_known": dependencies_known,
+        "deps": sorted({d["depends_on_id"] for d in edges or []}),
+        "blocks_on": sorted({d["depends_on_id"] for d in edges or []
+                             if d["type"] == "blocks"}),
     }
+    parents = sorted({d["depends_on_id"] for d in edges or []
+                      if d["type"] == "parent-child"})
+    if parents:
+        task["parent"] = parents[0]
     if row.get("issue_type") == "epic":
         task["epic"] = True
     if row.get("comment_count"):
@@ -104,8 +138,7 @@ def load_beads(mission_id: str, pillars: list[dict],
                org: str | None = None) -> dict[str, list[dict]]:
     """``{pillar_id: [task, ...]}`` for every pillar with mapped beads.
 
-    One ``bd list`` — its rows already carry every issue field, so no
-    per-bead follow-up is needed for the summary shape.
+    One list and one dependency batch, never per-bead follow-ups.
     """
     label_map: dict[str, str] = {}
     for p in pillars:
@@ -113,10 +146,19 @@ def load_beads(mission_id: str, pillars: list[dict],
             label_map[lb] = p["pillar_id"]
     if not label_map:
         return {}
-    rows = _bd(["list", "--label", f"mission:{mission_id}", "--all"],
+    # --all currently overrides the default limit; pin it explicitly too.
+    rows = _bd(["list", "--label", f"mission:{mission_id}", "--all",
+                "--limit", "0"],
                org=org)
     if not isinstance(rows, list) or not rows:
         return {}
+    rows = [r for r in rows if isinstance(r, dict) and r.get("id")]
+    if not rows:
+        return {}
+    edges = group_dependencies(_bd(["dep", "list", *[r["id"] for r in rows]],
+                                   org=org))
+    if edges is None:
+        _log.warning("Mission task dependencies unavailable; rendering unknown edges")
     out: dict[str, list[dict]] = {}
     for row in rows:
         if not isinstance(row, dict) or not row.get("id"):
@@ -124,7 +166,9 @@ def load_beads(mission_id: str, pillars: list[dict],
         pillar_id = _pillar_of(row, label_map)
         if pillar_id is None:
             continue
-        out.setdefault(pillar_id, []).append(_summary(row))
+        out.setdefault(pillar_id, []).append(_summary(
+            row, (edges or {}).get(row["id"], []),
+            dependencies_known=edges is not None))
     return out
 
 
@@ -175,7 +219,17 @@ def load_task_detail(mission_id: str, bead_ids: list[str],
                 comments[bid] = got
     out: dict[str, dict] = {}
     for r in rows:
-        detail = _summary(r)
+        # Some bd show versions still inline dependencies. Preserve that
+        # legacy detail contract without adding a per-detail subprocess.
+        inline = r.get("dependencies")
+        converted = None
+        if isinstance(inline, list):
+            converted = group_dependencies([
+                {"issue_id": r["id"], "depends_on_id": d.get("id"),
+                 "type": d.get("dependency_type") or d.get("type") or "unknown"}
+                if isinstance(d, dict) else d for d in inline])
+        detail = _summary(r, (converted or {}).get(r["id"], []),
+                          dependencies_known=converted is not None)
         detail["desc"] = _trim(r.get("description") or "")
         detail["evidence"] = ((r.get("close_reason") or "").strip()
                               if r.get("status") == "closed" else "")

@@ -16,13 +16,15 @@ PILLARS = [
 ]
 
 
-def _stub(monkeypatch, lists, shows, comments=None):
+def _stub(monkeypatch, lists, shows, comments=None, edges=None):
     calls = []
 
     def fake(args, org=None):
         calls.append(args)
         if args[0] == "list":
             return lists
+        if args[:2] == ["dep", "list"]:
+            return [] if edges is None else edges
         if args[0] == "show":
             return shows
         if args[0] == "comments":
@@ -48,11 +50,15 @@ def test_mapping_ladder_epic_and_deps(monkeypatch):
         _row("a-done", status="closed", close_reason="landed abc123",
              comment_count=2),
         _row("a-epic", issue_type="epic",
-             labels=[f"mission:{MID}", "pillar:platform-core"],
-             dependencies=[{"id": "a-run", "dependency_type": "parent-child"}]),
+             labels=[f"mission:{MID}", "pillar:platform-core"]),
         _row("a-stray", labels=[f"mission:{MID}", "pillar:unmapped"]),
     ]
-    calls = _stub(monkeypatch, rows, rows)
+    edges = [
+        {"issue_id": "a-epic", "depends_on_id": "a-run", "type": "parent-child"},
+        {"issue_id": "a-epic", "depends_on_id": "a-spec", "type": "blocks"},
+        {"issue_id": "a-epic", "depends_on_id": "a-open", "type": "relates-to"},
+    ]
+    calls = _stub(monkeypatch, rows, rows, edges=edges)
     out = bridge.load_beads(MID, PILLARS)
     relay = {b["id"]: b for b in out["relay"]}
     assert relay["a-open"]["state"] == "defined"
@@ -60,7 +66,16 @@ def test_mapping_ladder_epic_and_deps(monkeypatch):
     assert relay["a-run"]["state"] == "running"
     assert relay["a-done"]["state"] == "complete"
     epic = out["platform"][0]
-    assert epic["epic"] is True and epic["deps"] == ["a-run"]
+    assert epic["epic"] is True
+    assert set(epic["deps"]) == {"a-run", "a-spec", "a-open"}
+    assert epic["blocks_on"] == ["a-spec"]
+    assert epic["parent"] == "a-run"
+    assert epic["dependencies_known"] is True
+    assert epic["dependencies"] == edges
+    assert relay["a-open"]["deps"] == []
+    assert relay["a-open"]["blocks_on"] == []
+    assert relay["a-open"]["dependencies_known"] is True
+    assert "parent" not in relay["a-open"]
     # unmapped pillar labels are excluded, not misfiled
     assert all("a-stray" != b["id"] for bl in out.values() for b in bl)
     assert "empty" not in out
@@ -70,14 +85,61 @@ def test_mapping_ladder_epic_and_deps(monkeypatch):
     assert "comment_count" not in relay["a-open"]
     for b in relay.values():
         assert not {"desc", "evidence", "comments"} & set(b)
-    # ONE bd invocation for the whole screen: the list. No show, no
-    # per-bead comments — that was the seven-second render.
-    assert [c[0] for c in calls] == ["list"]
+    # One list and one dependency batch; never N show/comment calls.
+    assert [c[0] for c in calls] == ["list", "dep"]
+    assert calls[1] == ["dep", "list", *[r["id"] for r in rows]]
+    assert calls[0][-2:] == ["--limit", "0"]
+
+
+def test_empty_dependencies_are_known_without_warning(monkeypatch, caplog):
+    _stub(monkeypatch, [_row("a")], [], edges=[])
+    task = bridge.load_beads(MID, PILLARS)["relay"][0]
+    assert task["dependencies_known"] is True
+    assert task["deps"] == task["blocks_on"] == task["dependencies"] == []
+    assert "parent" not in task
+    assert not caplog.records
+
+
+def test_malformed_dependency_batches_are_wholly_unknown(monkeypatch, caplog):
+    valid = {"issue_id": "a", "depends_on_id": "b", "type": "blocks"}
+    for bad in (None, {}, {"error": "unavailable"}, [valid, {}],
+                [valid, "not an edge"], [{**valid, "type": None}],
+                [{**valid, "issue_id": " a "}],
+                [{**valid, "depends_on_id": ""}]):
+        caplog.clear()
+        monkeypatch.setattr(bridge, "_bd", lambda args, org=None:
+                            [_row("a")] if args[0] == "list" else bad)
+        task = bridge.load_beads(MID, PILLARS)["relay"][0]
+        assert task["dependencies_known"] is False
+        assert task["deps"] == task["blocks_on"] == task["dependencies"] == []
+        assert "parent" not in task
+        assert len(caplog.records) == 1
+
+
+def test_multiple_parents_have_deterministic_compatibility_field(monkeypatch):
+    edges = [{"issue_id": "a", "depends_on_id": p, "type": "parent-child"}
+             for p in ("z-parent", "b-parent")]
+    for order in (edges, list(reversed(edges))):
+        _stub(monkeypatch, [_row("a")], [], edges=order)
+        task = bridge.load_beads(MID, PILLARS)["relay"][0]
+        assert task["parent"] == "b-parent"
+        assert task["blocks_on"] == []
+        assert len(task["dependencies"]) == 2
+
+
+def test_nonzero_bd_exit_cannot_be_known_empty(monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(bridge.subprocess, "run", lambda *a, **kw:
+                        SimpleNamespace(stdout="[]", returncode=1))
+    monkeypatch.setattr(bridge, "_beads_env", lambda org: {})
+    assert bridge._bd(["dep", "list", "a"]) is None
 
 
 def test_detail_batches_show_and_comments(monkeypatch):
     rows = [_row("a-c", comment_count=1, description="spec text"),
-            _row("a-quiet"),
+            _row("a-quiet", dependencies=[
+                {"id": "a-c", "dependency_type": "blocks"},
+                {"id": "a-parent", "dependency_type": "parent-child"}]),
             _row("a-done", status="closed", close_reason="landed abc123"),
             _row("a-foreign", labels=["mission:other", "pillar:relay-network"])]
     calls = _stub(monkeypatch, [], rows, comments={
@@ -88,6 +150,10 @@ def test_detail_batches_show_and_comments(monkeypatch):
     assert out["a-c"]["desc"] == "spec text"
     assert out["a-c"]["comments"][0]["by"] == "terminal:auto-1"
     assert out["a-quiet"]["comments"] == [] and out["a-quiet"]["evidence"] == ""
+    assert out["a-quiet"]["deps"] == ["a-c", "a-parent"]
+    assert out["a-quiet"]["blocks_on"] == ["a-c"]
+    assert out["a-quiet"]["parent"] == "a-parent"
+    assert out["a-quiet"]["dependencies_known"] is True
     assert out["a-done"]["evidence"] == "landed abc123"
     # a bead outside the mission is not served through it
     assert "a-foreign" not in out
