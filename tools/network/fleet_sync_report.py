@@ -182,6 +182,104 @@ def compare(targets: list[Target]) -> dict:
     return result
 
 
+def compare_frontiers(targets: list[Target]) -> dict:
+    """Per scope, per origin: how far behind each machine is against the
+    machine that is furthest ahead for that origin.
+
+    This is the measurement that answers "is synchronization current", and it
+    is only answerable by comparison. One machine's frontier age says nothing:
+    an old frontier for an origin that has not written anything is correct,
+    not stale. Only the DIFFERENCE between machines is a gap.
+
+    Reported per origin rather than per scope because a scope can be current
+    with one machine's writes and a day behind another's.
+    """
+    live = [t for t in targets if t.reachable]
+    out: dict = {}
+    for target in live:
+        for scope, entry in (target.report.get("sync_frontiers") or {}).items():
+            for origin in (entry.get("origins") or []):
+                bucket = out.setdefault(scope, {}).setdefault(origin["origin"], {})
+                bucket[target.name] = {
+                    "newest_ns": origin["newest_ns"],
+                    "age_s": origin["age_s"],
+                    "transactions": origin["transactions"],
+                }
+    for scope, origins in out.items():
+        for origin, machines in origins.items():
+            ahead = max(machines.values(), key=lambda m: m["newest_ns"])
+            for name, m in machines.items():
+                m["behind_s"] = max(0, (ahead["newest_ns"] - m["newest_ns"]) // 1_000_000_000)
+    return out
+
+
+def _human(seconds: int) -> str:
+    if seconds < 120:
+        return f"{seconds}s"
+    if seconds < 7200:
+        return f"{seconds // 60}m"
+    if seconds < 172800:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
+
+
+#: A machine more than this far behind another for the same origin is lagging,
+#: not merely idle. Deliberately generous; the live fault was 24 hours.
+LAG_THRESHOLD_S = 900
+
+
+#: Set by render() so the frontier verdict can name the empty channels that
+#: explain a lag. Kept module-level rather than threaded through, because the
+#: two reports are printed from one run and never composed elsewhere.
+_EMPTY_BY_MACHINE: dict[str, list[str]] = {}
+
+
+def _empty_channels_for(machine: str, scope: str) -> list[str]:
+    return [
+        channel for channel in _EMPTY_BY_MACHINE.get(machine, [])
+        if channel.split("/")[0] == scope
+    ]
+
+
+def render_frontiers(frontiers: dict) -> int:
+    """Print the lag table. Returns 1 if any machine is behind."""
+    if not frontiers:
+        return 0
+    worst = 0
+    print("\n== sync frontiers (behind = against the machine furthest ahead for that origin) ==")
+    for scope, origins in sorted(frontiers.items()):
+        for origin, machines in sorted(origins.items()):
+            if len(machines) < 2:
+                continue  # only one machine holds this origin: nothing to compare
+            lagging = [
+                (n, m) for n, m in machines.items() if m["behind_s"] >= LAG_THRESHOLD_S
+            ]
+            line = ", ".join(
+                f"{n} {_human(m['behind_s'])} behind" if m["behind_s"] else f"{n} current"
+                for n, m in sorted(machines.items())
+            )
+            mark = "FAIL" if lagging else "ok  "
+            print(f"  [{mark}] {scope:<12} <- {origin[:12]}  {line}")
+            if lagging:
+                worst = 1
+                for name, _m in lagging:
+                    empty = _empty_channels_for(name, scope)
+                    if empty:
+                        print(
+                            f"         {name} pulled {', '.join(empty)} and got "
+                            "NOTHING while another machine is ahead: the server "
+                            "agreed there was nothing past the position "
+                            f"{name} claimed. Its claim is wrong, or the server "
+                            "is not serving that scope."
+                        )
+    if worst:
+        print(
+            "  A machine behind here is NOT receiving writes another machine "
+            "has. An idle scope is never reported here: this compares machines."
+        )
+    return worst
+
+
 def _verdict(scope_data: dict) -> tuple[str, str]:
     """(state, sentence) for one scope. States: ok, stalled, uncaptured, alone."""
     machines = scope_data["machines"]
@@ -221,6 +319,12 @@ def _verdict(scope_data: dict) -> tuple[str, str]:
 
 
 def render(targets: list[Target], comparison: dict) -> int:
+    _EMPTY_BY_MACHINE.clear()
+    for target in targets:
+        if target.reachable:
+            _EMPTY_BY_MACHINE[target.name] = list(
+                target.report.get("empty_pull_channels") or []
+            )
     print("Fleet org-sync report")
     print("=" * 60)
     for target in targets:
@@ -271,6 +375,7 @@ def main(argv: list[str] | None = None) -> int:
     for target in targets:
         collect(target)
     comparison = compare(targets)
+    frontiers = compare_frontiers(targets)
     if args.json:
         print(json.dumps({
             "targets": {
@@ -278,9 +383,11 @@ def main(argv: list[str] | None = None) -> int:
                 for t in targets
             },
             "comparison": comparison,
+            "frontiers": frontiers,
         }, indent=2, default=str))
         return 0
-    return render(targets, comparison)
+    rc = render(targets, comparison)
+    return max(rc, render_frontiers(frontiers))
 
 
 if __name__ == "__main__":
