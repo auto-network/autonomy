@@ -1739,14 +1739,24 @@ def launch_session(
     #  netns — so a compose-networked session must be pointed at the Dolt
     #  server's compose-network DNS name instead (auto f25941a6-a15). Never edit
     #  the shared config: host-net sessions still need 172.17.0.1.
-    if network_host:
-        network_args = ["--network=host"]
-        graph_api = "https://localhost:8080"
-        beads_dolt_host = None
-    elif not _topo.is_host_process and _topo.network:
+    if not _topo.is_host_process and _topo.network:
+        # DERIVED FROM TOPOLOGY, not the caller's network_host default: a
+        # CONTAINERIZED/Compose dashboard puts the session on the SAME compose
+        # network and reaches the dashboard by its service DNS name. On such a
+        # node --network=host + https://localhost:8080 is simply wrong — the
+        # dashboard publishes on a specific interface (its tailnet IP), NOT the
+        # host's localhost, so host-net sessions could never reach the graph
+        # API and every `graph` call failed (sjc-2, 2026-09-08). The old
+        # `network_host=True` default was a native/dev-box assumption that the
+        # Compose bring-up inherited unchanged; deriving the mode from topology
+        # makes a fresh Compose node correct from install with no config.
         network_args = ["--network", _topo.network]
         graph_api = "https://dashboard:8080"
         beads_dolt_host = "dolt"
+    elif network_host:
+        network_args = ["--network=host"]
+        graph_api = "https://localhost:8080"
+        beads_dolt_host = None
     else:
         network_args = ["--add-host=host.docker.internal:host-gateway"]
         graph_api = "https://host.docker.internal:8080"
