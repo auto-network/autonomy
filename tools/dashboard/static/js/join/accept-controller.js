@@ -31,6 +31,21 @@ function defaultDelay() {
   });
 }
 
+// How many approvals a minted claim event actually carries. The event is
+// canonical JSON bytes or an already-parsed object depending on the mint
+// seam; both shapes answer the same question. An unreadable event counts as
+// zero, so finalize() refuses rather than submitting something it cannot
+// verify.
+function countApprovals(event) {
+  try {
+    const parsed = typeof event === 'string' ? JSON.parse(event) : event;
+    const payload = (parsed && parsed.payload) || parsed || {};
+    return (payload.approvals || []).length;
+  } catch (_) {
+    return 0;
+  }
+}
+
 export class JoinSession {
   constructor({ inputs, openChannel, runCeremony = null }) {
     this.inputs = inputs;
@@ -112,11 +127,108 @@ export class JoinSession {
     if (!this.ready()) {
       throw new Error('accept() called before a successful connect()');
     }
+    // Refuse to submit over a staged claim that already carries approvals.
+    // A claim is addressed by claim_key = sha256(invite_ref ‖ persona_pub),
+    // stable for this invitation and this joiner, and an approval is stored
+    // against that staged row. Minting again produces the same key with a
+    // fresh body whose approvals are empty, so submitting it REPLACES the
+    // row and discards signatures already gathered — silently, since the
+    // reply just reads 'pending' again. This cost a real operator approval
+    // on 2026-09-08. Finalizing is finalize(), which carries them.
+    const staged = await this._stagedApprovals();
+    if (staged && staged.approvals.length) {
+      return {
+        state: 'already-approved',
+        reason: 'submitting again would discard approvals already gathered',
+        have: staged.have,
+        need: staged.need,
+      };
+    }
     const minted = await this.runCeremony({
       context: this.context,
       inputs: this.inputs,
       passphrase,
     });
+    this.claimKey = minted.claimKey;
+    this.personaPub = minted.personaPub;
+    this.kemPrivateKey = minted.kemPrivateKey || null;
+    this.kemCredential = minted.kemCredential || null;
+    let reply;
+    try {
+      reply = await submitClaim({ context: this.context, event: minted.event });
+    } catch (_) {
+      return { state: 'link-lost', reason: 'submit-failed' };
+    }
+    return this._fromLedger(reply);
+  }
+
+  // The staged row's approvals and its pinned causal position, or null when
+  // nothing is staged yet. Both guards and finalize() read this first.
+  async _stagedApprovals() {
+    if (!this.claimKey || !this.personaPub) return null;
+    let reply;
+    try {
+      reply = await getClaimStatus({
+        context: this.context,
+        claimKey: this.claimKey,
+        inviteRef: this.inputs.inviteRef,
+        personaPub: this.personaPub,
+      });
+    } catch (_) {
+      return null;
+    }
+    return {
+      approvals: (reply && reply.approvals) || [],
+      position: (reply && reply.position) || null,
+      have: (reply && reply.have) || 0,
+      need: (reply && reply.need) || 0,
+      status: reply && reply.status,
+    };
+  }
+
+  // Admission is a SECOND submit: countersigning only marks a staged claim
+  // ready, and the joiner must re-mint at the pinned position carrying the
+  // approvals for the ledger to admit. Refuses rather than submits whenever
+  // it would not be carrying them, so a mistimed call can never replace a
+  // signed row with an empty one.
+  async finalize(passphrase) {
+    if (typeof this.runCeremony !== 'function') {
+      throw new Error('acceptance ceremony is not enabled');
+    }
+    if (!this.ready()) {
+      throw new Error('finalize() called before a successful connect()');
+    }
+    const staged = await this._stagedApprovals();
+    if (!staged) return { state: 'link-lost', reason: 'status-failed' };
+    if (staged.status === 'admitted') return { state: 'admitted' };
+    if (!staged.approvals.length) {
+      return { state: 'pending', reason: 'no approvals staged', approvals: [] };
+    }
+    if (!staged.position) {
+      return { state: 'pending', reason: 'no pinned position' };
+    }
+    if (staged.need && staged.have < staged.need) {
+      return { state: 'pending', reason: 'below threshold', have: staged.have, need: staged.need };
+    }
+    const minted = await this.runCeremony({
+      context: this.context,
+      inputs: this.inputs,
+      passphrase,
+      approvals: staged.approvals,
+      position: staged.position,
+    });
+    // Prove the built event carries them before anything is sent: a ceremony
+    // that quietly dropped either would otherwise submit the empty body this
+    // method exists to prevent.
+    const carried = countApprovals(minted.event);
+    if (carried !== staged.approvals.length) {
+      return {
+        state: 'pending',
+        reason: 'minted claim did not carry the approvals; not submitting',
+        carried,
+        expected: staged.approvals.length,
+      };
+    }
     this.claimKey = minted.claimKey;
     this.personaPub = minted.personaPub;
     this.kemPrivateKey = minted.kemPrivateKey || null;

@@ -38,7 +38,13 @@ export function makeCeremony({
   mintMemberClaim = realMint,
   randomSeed = defaultRandomSeed,
 } = {}) {
-  return async function runCeremony({ context, inputs, passphrase }) {
+  // ``approvals`` and ``position`` are supplied only by finalize(): the
+  // second submit must re-mint at the staged claim's pinned causal position
+  // carrying the countersignatures already gathered, or the ledger sees a
+  // fresh unapproved claim and the signatures are lost.
+  return async function runCeremony({
+    context, inputs, passphrase, approvals = [], position = null,
+  }) {
     if (typeof passphrase !== 'string' || !passphrase) {
       throw new Error('a passphrase is required to accept');
     }
@@ -60,6 +66,8 @@ export function makeCeremony({
         inviteRef: inputs.inviteRef,
         token: inputs.bearer || null,
         kemSeed,
+        approvals,
+        position,
       });
       return {
         event: minted.event,
