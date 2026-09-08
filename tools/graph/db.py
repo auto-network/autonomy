@@ -64,8 +64,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # as one).
 # v9: first-class persona_id/session_id on authored graph content.
 # v10 (auto-52j7e): optional durable selected-text anchors on note comments.
-# v11: drop the retired entities / entity_mentions tables.
-_SCHEMA_USER_VERSION = 11
+# NOT bumped for the entities/entity_mentions retirement (2026-09-08):
+# removing a table from schema.sql needs no work on an existing DB, and
+# a bump would have forced every live store to re-run the whole schema
+# script under the write lock for nothing.
+_SCHEMA_USER_VERSION = 10
 
 #: Captured data-phase migrations: ``(schema_user_version, rewrite)`` pairs,
 #: run in order for every version above the database's previous stamp.  The
@@ -612,7 +615,6 @@ class GraphDB:
         self._migrate_source_short_description()
         self._migrate_source_keywords()
         self._migrate_drop_source_project()
-        self._migrate_drop_entities()
         # sources_fts depends on `short_description` + `keywords` columns, so
         # it must run AFTER both column migrations above.
         self._migrate_sources_fts()
@@ -837,21 +839,25 @@ class GraphDB:
             self.conn.execute("ALTER TABLE sources DROP COLUMN project")
             self.conn.commit()
 
-    def _migrate_drop_entities(self):
+    def drop_retired_entity_tables(self, *, batch: int = 20_000) -> dict:
         """Drop the retired ``entities`` / ``entity_mentions`` tables.
 
-        They were a regex index over thought/derivation text that nothing
-        read, and they could not replicate: ``upsert_entity`` deduped on the
-        UNIQUE ``canonical_name`` while minting the replication key ``id`` at
-        random, so two machines matching the same string produced rows that
-        were distinct under the key and identical under the constraint. One
-        such row stalled the autonomy scope for a day. See
-        ``RETIRED_LOGICAL_TABLES`` in fleet_sync/policies.py.
+        DELIBERATELY NOT CALLED FROM ``_init_schema``. It was, for one merge
+        on 2026-09-08, and that took the live dashboard's graph API down: the
+        drop plus a purge of ~556k winner-catalog addresses ran inside every
+        process's open path, held the single SQLite write lock for far longer
+        than the 5s busy timeout, and every concurrent opener failed. Because
+        ``user_version`` is stamped only after the whole migration, each
+        failure re-ran the whole thing -- a livelock, not a slow migration.
 
-        Dropping the tables is not enough on an activated store: the winner
-        catalog and the quarantine still address rows in them, and both are
-        audited against the live schema. Purge those addresses in the same
-        transaction, or the next catalog verification raises.
+        Physically dropping these tables is HOUSEKEEPING, not correctness.
+        The correctness change is their DERIVED policy, which stops them
+        replicating with no DDL at all. So this runs when an operator asks,
+        in bounded batches that release the write lock between them, and
+        never on the request path.
+
+        Returns counts. Idempotent: re-running on a migrated store is a
+        no-op.
         """
         from tools.network.fleet_sync.catalog import (
             purge_retired_catalog_addresses,
@@ -865,14 +871,21 @@ class GraphDB:
                 tuple(sorted(RETIRED_LOGICAL_TABLES)),
             ).fetchall()
         }
-        if not present:
-            return
+        # Purge the catalog/quarantine addresses FIRST, in bounded batches
+        # with a commit after each, so no single transaction is long. The
+        # tables may already be gone while addresses remain (an interrupted
+        # earlier pass), so this does not depend on `present`.
+        purged = purge_retired_catalog_addresses(
+            self.conn, sorted(RETIRED_LOGICAL_TABLES), batch=batch,
+        )
+        dropped = []
         # entity_mentions holds the foreign key, so it goes first.
         for table in ("entity_mentions", "entities"):
             if table in present:
                 self.conn.execute(f'DROP TABLE IF EXISTS "{table}"')
-        purge_retired_catalog_addresses(self.conn, sorted(present))
+                dropped.append(table)
         self.conn.commit()
+        return {"dropped": dropped, "addresses_purged": purged}
 
     def _migrate_sources_fts(self):
         """Create the sources_fts FTS5 table + sync triggers (idempotent).

@@ -119,7 +119,7 @@ def test_migration_drops_tables_and_purges_catalog_addresses(
             )
         db.conn.commit()
 
-        db._migrate_drop_entities()
+        db.drop_retired_entity_tables()
 
         tables = {
             r[0] for r in db.conn.execute(
@@ -140,8 +140,8 @@ def test_migration_drops_tables_and_purges_catalog_addresses(
 def test_migration_is_a_no_op_on_a_migrated_store(tmp_path: Path) -> None:
     db = GraphDB(tmp_path / "personal.db")
     try:
-        db._migrate_drop_entities()
-        db._migrate_drop_entities()
+        db.drop_retired_entity_tables()
+        db.drop_retired_entity_tables()
     finally:
         db.close()
 
@@ -252,7 +252,7 @@ def test_activated_store_survives_the_drop(tmp_path: Path) -> None:
         with pytest.raises(WatermarkError, match="non-replicated table"):
             catalog._verify_catalog_integrity()
 
-        db._migrate_drop_entities()
+        db.drop_retired_entity_tables()
 
         live_rows, catalog_rows = catalog._verify_catalog_integrity()
         assert live_rows == catalog_rows == 1

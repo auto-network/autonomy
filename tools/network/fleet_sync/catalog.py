@@ -56,15 +56,21 @@ def _address_prefix(table: str) -> bytes:
 
 
 def purge_retired_catalog_addresses(
-    conn: sqlite3.Connection, tables: Sequence[str],
+    conn: sqlite3.Connection, tables: Sequence[str], *, batch: int = 20_000,
 ) -> int:
     """Delete winner-catalog and quarantine rows addressing dropped tables.
 
     Dropping a replicated table's SQL definition without this leaves the
     catalog citing rows that no longer exist: _verify_catalog_integrity
-    raises on the first one ("catalog address names non-replicated table")
-    and every later open of the store fails. Called by the GraphDB migration
-    that drops them, inside its transaction.
+    raises on the first one ("catalog address names non-replicated table").
+
+    BOUNDED BY CONSTRUCTION. A live store carries hundreds of thousands of
+    these addresses, and deleting them in one statement holds the single
+    SQLite write lock for far longer than a concurrent reader's busy timeout
+    -- which is exactly how an unbounded version of this took the dashboard's
+    graph API down on 2026-09-08. Each batch is its own transaction and the
+    lock is released between them, so a busy database keeps serving while
+    the purge makes progress. Interrupting it is safe: the next call resumes.
 
     Refuses any table that is not declared retired, so a live table can never
     be silently unwound by a typo.
@@ -81,11 +87,18 @@ def purge_retired_catalog_addresses(
                 (name,),
             ).fetchone() is None:
                 continue
-            cursor = conn.execute(
-                f"DELETE FROM {name} WHERE address >= ? AND address < ?",
-                (low, high),
-            )
-            removed += cursor.rowcount if cursor.rowcount > 0 else 0
+            while True:
+                cursor = conn.execute(
+                    f"DELETE FROM {name} WHERE address IN ("
+                    f"  SELECT address FROM {name} "
+                    "   WHERE address >= ? AND address < ? LIMIT ?)",
+                    (low, high, int(batch)),
+                )
+                deleted = cursor.rowcount if cursor.rowcount > 0 else 0
+                conn.commit()
+                removed += deleted
+                if deleted < int(batch):
+                    break
     return removed
 
 
