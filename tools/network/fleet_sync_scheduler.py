@@ -1999,6 +1999,18 @@ class FleetSyncScheduler:
             _requested_epoch, resume_trail, peer_digest, scope, bootstrap,
             protocol_version, accept_checkpoint, watermarks,
         ) = decode_pull_request(message)
+        # DIAGNOSTIC (2026-09-08, operator escalation): name every scope a peer
+        # actually ASKS for, before any confinement or store resolution. Home
+        # logs a completed round per scope, so a scope that is never requested
+        # is invisible — org scopes stopped appearing in the serve log at
+        # 2026-09-07T20:28 with no error, and this line distinguishes "the peer
+        # stopped asking" from "home refused/failed" without guessing.
+        logger.warning(
+            "fleet sync PULL REQUEST from %s: scope=%r admitted_org=%r "
+            "bootstrap=%s proto=%s watermarks=%s known_scopes=%s",
+            peer_pub[:12], scope, admitted_org, bootstrap, protocol_version,
+            len(watermarks or ()), sorted(self._scope_paths()),
+        )
         self._confine_scope(scope, admitted_org)
         store = await asyncio.to_thread(self._store_for, scope)
         epoch, state_epoch = self._scope_epochs(scope)
