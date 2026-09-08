@@ -296,3 +296,63 @@ def test_reclassifying_a_live_table_removes_its_capture_triggers(
         ).fetchone()[0] == 0
     finally:
         db.close()
+
+
+def test_a_leftover_address_does_not_end_the_serve(tmp_path: Path) -> None:
+    """The sender-side twin of the receive-side skip.
+
+    A retired table keeps its catalog addresses until the housekeeping purge
+    runs, and across a fleet the code deploy and that purge are not ordered
+    with respect to each other. Building a Mutation for a non-replicating
+    table raises CodecError in __post_init__, so before this guard the first
+    leftover address ended every serve of the scope — the same shape of bug,
+    pointing the other way, as the batch abort that stalled it for a day.
+    """
+    from tools.network.fleet_sync.catalog import MutationCatalog
+
+    db = GraphDB(tmp_path / "personal.db")
+    try:
+        db.conn.executescript(LEGACY_ENTITY_DDL)
+        db.conn.execute(
+            "INSERT INTO entities(id,name,canonical_name) VALUES('e1','X','x')"
+        )
+        db.conn.commit()  # activation requires an idle connection
+        db.activate_fleet_sync_writers("cc" * 32)
+        db.conn.execute(
+            "INSERT INTO sources(id,type,title,metadata,created_at,"
+            "ingested_at) VALUES('s1','note','Real content','{}',"
+            "'2026-09-01T00:00:00Z','2026-09-01T00:00:00Z')"
+        )
+        db.conn.commit()
+
+        catalog = MutationCatalog(db.conn, "cc" * 32)
+        row = db.conn.execute(
+            "SELECT transaction_ref, operation_index FROM fleet_sync_catalog "
+            "LIMIT 1"
+        ).fetchone()
+        ref = int(row[0])
+        # Plant the leftover exactly as an un-purged store carries it.
+        db.conn.execute(
+            "INSERT OR REPLACE INTO fleet_sync_catalog VALUES(?,?,?,?,?)",
+            (encode_value(["entities", ["e1"]]), 1, 0, ref,
+             int(row[1]) + 1),
+        )
+        db.conn.commit()
+
+        txn = db.conn.execute(
+            "SELECT t.transaction_id, o.incarnation FROM fleet_sync_transactions t "
+            "JOIN fleet_sync_origins o ON o.id=t.origin_id WHERE t.id=?",
+            (ref,),
+        ).fetchone()
+
+        served = list(catalog.iter_transaction_items(ref, txn[1], txn[0]))
+        assert served, "the real content must still be served"
+        assert not any(m.mutation.table in RETIRED_LOGICAL_TABLES for m in served)
+
+        items, _more = catalog.transaction_group(
+            ref, txn[1], txn[0], offset=0, limit=100,
+        )
+        assert items
+        assert not any(m.mutation.table in RETIRED_LOGICAL_TABLES for m in items)
+    finally:
+        db.close()
