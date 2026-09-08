@@ -36,7 +36,7 @@ is invented. Keyboard dictation focuses the answer field; the voice capsule
 integration remains separate.
 
 Read API: `GET /api/mission/ops/{mission_id}`; document:
-`GET /api/mission/ops/{mission_id}/screen`. Both require visibility of the
+`GET /api/mission/screen/{mission_id}/ops`. Both require visibility of the
 selected mission and resolve its owning organization server-side.
 
 Skill revision: **2026-09-06.1** — coordinator seats: how relays route,

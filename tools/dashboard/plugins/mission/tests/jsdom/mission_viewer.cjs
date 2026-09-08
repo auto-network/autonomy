@@ -65,6 +65,10 @@ const SCENARIOS = {
     // ── chrome: the six mission tabs ──
     check("top tabs", texts(document, ".mc-tabs button").join("|") ===
       "Activity|Pillars|Blockers|Feed|Chat|Ops");
+    document.getElementById("tab-ops").click();
+    const opsFrame = document.querySelector(".mc-view.on iframe");
+    check("Ops uses frameable mission screen namespace", !!opsFrame &&
+      /^\/api\/mission\/screen\/[^/]+\/ops$/.test(opsFrame.getAttribute("src")));
 
     // ── pillar view: subtabs + amber attention counts ──
     const v = openPillar("Relay");

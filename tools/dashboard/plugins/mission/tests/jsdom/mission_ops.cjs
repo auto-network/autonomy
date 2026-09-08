@@ -27,7 +27,7 @@ const data = {
       artifacts: [{label: 'Design', href: '/design/abc'}, {label: 'Unsafe', href: 'javascript:alert(1)'}]}}]
 };
 let failWrite = false, posts = [];
-const dom = new JSDOM(html, {url: 'https://dashboard.test/api/mission/ops/m/screen', runScripts: 'outside-only', pretendToBeVisual: true});
+const dom = new JSDOM(html, {url: 'https://dashboard.test/api/mission/screen/m/ops', runScripts: 'outside-only', pretendToBeVisual: true});
 const w = dom.window;
 w.confirm = () => true;
 w.fetch = async (url, options = {}) => {
