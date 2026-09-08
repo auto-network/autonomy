@@ -19,6 +19,10 @@ nav:
 
 frontend:
   alpine_root: missionPage
+  voice:
+    live_transcript: true
+    replace_caption: true
+    replace_controls: true
 
 # Agent-facing doctrine + verbs. Embedded into every session's workspace
 # primer while this plugin is enabled; served at GET /api/plugins/mission/skill.

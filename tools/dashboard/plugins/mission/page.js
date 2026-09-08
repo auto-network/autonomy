@@ -90,6 +90,11 @@ window.missionPage = function () {
       });
     },
 
+    destroy() {
+      window.dispatchEvent(new Event('mission:stop-dictation'));
+      clearInterval(this._peepTimer);
+    },
+
     async refresh() {
       try {
         const r = await fetch("/api/mission/missions");
