@@ -1512,10 +1512,6 @@ SERVE_PAGE_TRANSACTIONS = 200
 #: The prune holds the store's write lock for up to its budget; once a
 #: minute is plenty for retention and invisible to the dashboard's writers.
 PRUNE_MIN_INTERVAL_S = 60.0
-#: How often a scope's ledger events are republished into the replicated
-#: set (auto-azzvp). The pass is a settings read plus an event scan and
-#: writes only what is missing, so it is cheap once converged.
-LEDGER_RECONCILE_MIN_INTERVAL_S = 300.0
 #: Ruling on auto-coea3 (membership half, 2026-09-07): membership grants the
 #: right to pull, not the power to freeze another member's compaction. A
 #: still-member machine that has not completed a pull of an org scope for
@@ -1618,8 +1614,6 @@ class FleetSyncScheduler:
         #: reachability set by this process (the row itself is compared
         #: too, so a restart with unchanged addresses writes nothing).
         self._published_reachability: dict[str, str] = {}
-        #: scope -> loop time of the last ledger-event reconcile.
-        self._last_ledger_reconcile: dict[str, float] = {}
         self._rng = random.Random(int.from_bytes(os.urandom(8), "big"))
         #: ``async (stage_dir, *, source_machine_pub) -> installed`` for the
         #: PERSONAL scope, set by the owning DashboardFleetSyncService. The
@@ -1658,10 +1652,6 @@ class FleetSyncScheduler:
             self._refresh_roster(), name="fleet-sync-roster"
         )
         self._task = asyncio.create_task(self._run(), name="fleet-sync-scheduler")
-        # Publish before the first round: a machine that only ever serves
-        # would otherwise wait a full poll interval to say anything.
-        for scope in self._scope_paths():
-            await self._reconcile_ledger(scope, force=True)
 
     async def stop(self) -> None:
         self._stopping.set()
@@ -2705,14 +2695,6 @@ class FleetSyncScheduler:
             # roster is pulled above, then co-members' machines, so a fleet
             # converges internally before it presents one face outward.
             await self._sync_org_peers(set(active), now)
-            # Peer-independent (auto-azzvp): every scope republishes its own
-            # ledger events on a timer, whether or not anything was pulled,
-            # so the machine that HOLDS the events is not the one machine
-            # that never publishes them.
-            for scope in self._scope_paths():
-                if self._stopping.is_set():
-                    break
-                await self._reconcile_ledger(scope)
             try:
                 await asyncio.wait_for(
                     self._stopping.wait(), timeout=self.config.poll_interval
@@ -2795,48 +2777,7 @@ class FleetSyncScheduler:
             return True
         except Exception:
             return False
-        # A pulled scope may carry ledger-event rows; absorb them now
-        # rather than waiting for the periodic pass (auto-dqemk).
-        await self._reconcile_ledger(scope, force=True)
         return True
-
-    async def _reconcile_ledger(self, scope: str, *, force: bool = False) -> None:
-        """Publish this store's ledger events into the replicated set and
-        absorb any that arrived (autonomy.org.ledger-event#1).
-
-        Called after a successful pull AND on a timer independent of any
-        peer (auto-azzvp). Publishing used to run only on the post-pull
-        path, so a machine that serves a scope rather than pulling it --
-        or whose sync for that scope is broken -- never published its own
-        events, and the set stayed empty at the one machine holding the
-        events everyone else needs. A durability mechanism must not be
-        gated on the thing it exists to survive.
-
-        A store with no genesis publishes nothing and absorbs nothing;
-        founding arrives via the join flow, never from replicated rows.
-        """
-        loop_now = asyncio.get_running_loop().time()
-        if not force:
-            last = self._last_ledger_reconcile.get(scope)
-            if last is not None and loop_now - last < LEDGER_RECONCILE_MIN_INTERVAL_S:
-                return
-        self._last_ledger_reconcile[scope] = loop_now
-        try:
-            from tools.network.ledger.settings_bridge import reconcile
-
-            report = await asyncio.to_thread(reconcile, scope)
-        except Exception:
-            logger.debug(
-                "ledger-event reconcile skipped for scope %r",
-                scope, exc_info=True,
-            )
-            return
-        if report and (report.get("published") or report.get("absorbed")):
-            logger.info(
-                "ledger-event reconcile scope %r: published %d, absorbed %d, "
-                "unappendable %d", scope, report.get("published", 0),
-                report.get("absorbed", 0), report.get("unappendable", 0),
-            )
 
     async def _pull_scope(
         self, machine_pub: str, addresses: Sequence[str], scope: str,
