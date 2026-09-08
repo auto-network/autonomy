@@ -1749,6 +1749,8 @@ class MutationCatalog:
                 )
                 p_index += 1
             table, address = self._decode_address(bytes(raw[0]))
+            if not self._serveable(table, address, transaction_id):
+                continue
             if bool(raw[2]):
                 mutation = Mutation(table, address, int(raw[1]), True)
             else:
@@ -1765,6 +1767,33 @@ class MutationCatalog:
                 decode_mutation_frame(parked[p_index][1]),
             )
             p_index += 1
+
+    def _serveable(self, table: str, address: tuple, transaction_id: str) -> bool:
+        """Whether a cited address still names something this store may send.
+
+        Scoped deliberately to RETIRED tables, not to every non-replicating
+        one. A retired table keeps its catalog addresses until the
+        housekeeping purge runs, and across a fleet the code deploy and that
+        purge are not ordered with respect to each other. Constructing a
+        Mutation for a non-replicating table raises CodecError in
+        __post_init__, so without this the FIRST leftover address ends every
+        serve of the scope -- the sender-side twin of the receive-side abort
+        that stalled the autonomy scope for a day.
+
+        A LOCAL table appearing in a catalog is a different thing entirely: it
+        has no capture triggers, so an address for one should be impossible.
+        Swallowing that quietly would hide a real defect, so it is left to
+        raise.
+        """
+        if table not in RETIRED_LOGICAL_TABLES:
+            return True
+        logger.warning(
+            "fleet sync: catalog cites the retired table %s; skipping it in "
+            "the serve (run drop_retired_entity_tables to purge it): "
+            "address=%r transaction=%s",
+            table, address, transaction_id,
+        )
+        return False
 
     def transaction_group(
         self, transaction_ref: int, incarnation: str, transaction_id: str,
@@ -1798,6 +1827,8 @@ class MutationCatalog:
         ).fetchall()
         for raw in rows:
             table, address = self._decode_address(bytes(raw[0]))
+            if not self._serveable(table, address, transaction_id):
+                continue
             if bool(raw[2]):
                 mutation = Mutation(table, address, int(raw[1]), True)
             else:
