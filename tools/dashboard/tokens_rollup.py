@@ -119,7 +119,12 @@ class DashboardTokensRollupV1(SettingSchema):
             "seen that day. Organization, account and model are content, not "
             "addressing: no read fetches one account's single day directly, "
             "and lifting them into the key would multiply the row count for a "
-            "lookup nobody performs."
+            "lookup nobody performs. NOTE for readers: account may be the "
+            "literal string 'unattributed', which is a real bucket and not a "
+            "null -- those sessions launched without recording a credential, "
+            "so their spend is genuine but cannot be charged to an account "
+            "(bead auto-7fm71). Render it as its own row; never coalesce it "
+            "into another account and never drop it."
         ),
     )
 
@@ -295,7 +300,10 @@ def settle_day(
     for row in rows:
         set_watermark(str(row.get("tmux_name") or ""), watermark_for(row, day))
     logger.info(
-        "tokens rollup: settled %s for machine %s (%d entries, %d sessions)",
+        # Ellipsis on purpose: the KEY carries the full 64-hex id, and a bare
+        # 12-char prefix here reads like a different value to anyone comparing
+        # the log against the row by eye.
+        "tokens rollup: settled %s for machine %s… (%d entries, %d sessions)",
         day, machine_id[:12], len(entries),
         sum(int(e.get("sessions") or 0) for e in entries),
     )
