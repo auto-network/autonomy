@@ -15,6 +15,7 @@ envelope signer, so a machine can only ever announce itself.
 from __future__ import annotations
 
 import logging
+import threading
 import time as _time
 from typing import Iterable, Mapping, Optional, Sequence
 
@@ -152,7 +153,20 @@ class ReachabilityCache:
         ts=None,
         clock=None,
         client=None,
+        background: bool = False,
+        min_lookup_spacing: float = 15.0,
     ):
+        """``background=True`` (the dashboard): a due refresh runs on its own
+        daemon thread and the caller gets the last map at once, so registry
+        latency never touches the event loop (three 16 s dashboard stalls,
+        2026-09-07, auto-8dw0w). ``False`` (tests, CLIs) refreshes inline.
+
+        Cadence (auto-8dw0w): announce on boot, when the advertised set or
+        relay route changes, and as a keepalive every ttl/2 (hints expire at
+        ``ttl``); look up when a roster peer has no address, when the
+        scheduler reported a failed pull for one (:meth:`note_failed`), or
+        every ``interval`` -- never more often than ``min_lookup_spacing``.
+        """
         self._binding_getter = binding_getter
         self._machine_key_getter = machine_key_getter
         self._cert_getter = cert_getter
@@ -185,6 +199,16 @@ class ReachabilityCache:
         self._logged_peers: Optional[str] = None
         #: (monotonic, addrs) of the last successful announce, for status.
         self.last_announce: Optional[tuple[float, list]] = None
+        self._background = background
+        self._min_lookup_spacing = min_lookup_spacing
+        #: What was last announced successfully: (addrs, relay_url).
+        self._announced: Optional[tuple[tuple, Optional[str]]] = None
+        self._last_lookup: Optional[float] = None
+        #: Roster peers the scheduler reported a failed pull for since the
+        #: last lookup: they are looked up again at the next opportunity.
+        self._stale: set = set()
+        self._lock = threading.Lock()
+        self._worker: Optional[threading.Thread] = None
 
     def advertised_addrs(self) -> list:
         """The URLs this machine currently advertises (fresh if a getter)."""
@@ -200,6 +224,18 @@ class ReachabilityCache:
     def peers(self) -> dict:
         self._maybe_refresh()
         return dict(self._peers)
+
+    def note_failed(self, machine_pub: str) -> None:
+        """The scheduler could not pull *machine_pub* at its known address:
+        look that peer up again at the next opportunity."""
+        with self._lock:
+            self._stale.add(machine_pub)
+
+    def wait_idle(self, timeout: float = 10.0) -> None:
+        """Block until a background refresh in flight has finished (tests)."""
+        worker = self._worker
+        if worker is not None:
+            worker.join(timeout)
 
     def snapshot(self) -> dict:
         """The last resolved peer map WITHOUT triggering a refresh (status)."""
@@ -221,12 +257,60 @@ class ReachabilityCache:
             return None
         return value if isinstance(value, str) and value else None
 
+    def _due(self, now: float) -> bool:
+        """Whether anything needs the registry now (see the constructor)."""
+        if self._last is None:
+            return True
+        if (now - self._last) >= self._interval:
+            return True
+        announced = self._announced
+        if self.last_announce is not None and (now - self.last_announce[0]) >= self._ttl / 2:
+            return True
+        if announced is not None and announced != (
+            tuple(self.advertised_addrs()), self.announced_relay_url()
+        ):
+            return True
+        last_lookup = self._last_lookup
+        spaced = last_lookup is None or (now - last_lookup) >= self._min_lookup_spacing
+        if not spaced:
+            return False
+        if self._stale:
+            return True
+        try:
+            own = self._machine_key_getter()
+            own_pub = own.public_hex if own is not None else None
+            missing = [p for p in self._roster_getter() if p != own_pub and p not in self._peers]
+        except Exception:
+            missing = []
+        return bool(missing)
+
     def _maybe_refresh(self) -> None:
         now = self._clock()
-        if self._last is not None and (now - self._last) < self._interval:
+        if not self._due(now):
             return
-        self._last = now
+        if not self._background:
+            self._last = now
+            self._refresh(now)
+            return
+        with self._lock:
+            worker = self._worker
+            if worker is not None and worker.is_alive():
+                return
+            self._last = now
+            worker = threading.Thread(
+                target=self._refresh, args=(now,),
+                name="fleet-reachability-refresh", daemon=True,
+            )
+            self._worker = worker
+        worker.start()
 
+    def _refresh(self, now: float) -> None:
+        try:
+            self._refresh_inner(now)
+        except Exception as exc:  # never let a refresh thread die loudly
+            self._error(f"refresh failed: {exc!r}")
+
+    def _refresh_inner(self, now: float) -> None:
         binding = self._binding_getter()
         key = self._machine_key_getter()
         cert = self._cert_getter()
@@ -253,12 +337,18 @@ class ReachabilityCache:
 
         advertise = self.advertised_addrs()
         relay_url = self.announced_relay_url()
-        if advertise or relay_url:
+        wanted = (tuple(advertise), relay_url)
+        keepalive_due = (
+            self.last_announce is None
+            or (now - self.last_announce[0]) >= self._ttl / 2
+        )
+        if (advertise or relay_url) and (self._announced != wanted or keepalive_due):
             try:
                 announce(registry_url, org_uuid, key, cert, advertise,
                          ttl=self._ttl, relay_url=relay_url, ts=self._ts,
                          timeout=self._timeout, client=self._client)
                 self.last_announce = (now, list(advertise))
+                self._announced = wanted
                 self._error(None)
                 self._state(
                     "announce",
@@ -269,7 +359,7 @@ class ReachabilityCache:
             except Exception as exc:
                 # keep serving the last map; retry next interval
                 self._error(f"announce failed: {exc!r}")
-        else:
+        elif not (advertise or relay_url):
             self._state("announce", "nothing",
                         "fleet reachability: nothing to announce (no advertised "
                         "addresses, no standing route) -- peers cannot dial this "
@@ -281,13 +371,36 @@ class ReachabilityCache:
         except Exception as exc:
             self._error(f"roster read failed: {exc!r}")
             return
+        # Which peers to look up: all of them on a full interval, otherwise
+        # only those with no address or a reported failed pull.
+        full = self._last_lookup is None or (now - self._last_lookup) >= self._interval
+        with self._lock:
+            stale, self._stale = self._stale, set()
+        targets = pubs if full else [
+            p for p in pubs if p not in self._peers or p in stale
+        ]
+        if not targets:
+            return
         try:
-            hints = lookup_hints(registry_url, org_uuid, key, cert, pubs,
+            hints = lookup_hints(registry_url, org_uuid, key, cert, targets,
                                  ts=self._ts, timeout=self._timeout,
                                  client=self._client)
         except Exception as exc:
+            with self._lock:
+                self._stale |= stale
             self._error(f"lookup failed: {exc!r}")
             return
+        self._last_lookup = now
+        if full:
+            merged_hints = dict(hints)
+        else:
+            merged_hints = dict(self._hints)
+            for pub in targets:
+                if pub in hints:
+                    merged_hints[pub] = hints[pub]
+                else:
+                    merged_hints.pop(pub, None)
+        hints = merged_hints
         self._hints = hints
         self._peers = {pub: h["addrs"] for pub, h in hints.items() if h["addrs"]}
         summary = "; ".join(

@@ -276,6 +276,11 @@ class FleetSyncRuntimeConfig:
     #: as a heartbeat (auto-mldvv) -- and reads co-members' rows from the
     #: same set as their addresses. None: publish nothing.
     advertised_addresses: Callable[[], Sequence[str]] | None = None
+    #: Called with a peer's machine key when a pull of it failed at the
+    #: transport (no candidate connected, stream cut). The dashboard wires
+    #: the reachability cache's note_failed so that peer is looked up again
+    #: before the next full interval (auto-8dw0w); None: nothing.
+    on_peer_failure: Callable[[str], None] | None = None
 
 
 def discover_org_sync_scopes() -> dict[str, Path]:
@@ -3367,6 +3372,11 @@ class FleetSyncScheduler:
                 )
             failures = self._failures.get(machine_pub, 0) + 1
             self._failures[machine_pub] = failures
+            if self.config.on_peer_failure is not None and not isinstance(
+                exc, (FleetSyncSchemaMismatch,)
+            ):
+                with contextlib.suppress(Exception):
+                    self.config.on_peer_failure(machine_pub)
             delay = min(
                 self.config.max_backoff,
                 self.config.min_backoff * (2 ** min(failures - 1, 16)),
