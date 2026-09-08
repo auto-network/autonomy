@@ -872,7 +872,19 @@ class NetworkMembershipCheckpointV1(SettingSchema):
 #: writes that are correct.
 @publication_band(min="raw", max="raw")
 @home("organization")
-@singleton(key="default")
+#: ONE ROW PER MACHINE, not per org (auto-527te, graph://90ba11c8-3d3). This
+#: was `@singleton(key="default")`, and that cardinality was the defect: the
+#: row names a mode-0600 serving key FILE that is local to one machine and must
+#: never replicate, while this set is org-homed and DOES replicate. A single
+#: fleet-wide row therefore landed on every machine while only the minting one
+#: held the key — every other machine read `key-missing` and could not serve,
+#: and each new mint evicted the last working machine.
+#:
+#: The key is the owning machine's id. Keys are caller-supplied, so legacy
+#: rows written at "default" remain valid and readable: the machine holding
+#: that row's key file keeps serving off it uninterrupted, and every other
+#: machine ignores it (link_serving_supervisor._rows_owned_by_this_machine).
+@keyed_per_entity(key_strategy="machine_id")
 class NetworkServeCertV2(SettingSchema):
     """One serving key with two context-specific root-signed certificates.
 
@@ -1093,7 +1105,10 @@ class NetworkServeCertV2(SettingSchema):
 
 @publication_band(min="raw", max="raw")
 @home("organization")
-@singleton(key="default")
+#: ONE ROW PER MACHINE — see the identical note on NetworkServeCertV2. The
+#: serving key is a machine-local file; this set replicates; so the row that
+#: names it cannot be a fleet-wide singleton.
+@keyed_per_entity(key_strategy="machine_id")
 class NetworkServeCertV3(SettingSchema):
     """One serving key with PERSONA-signed registry-facing certificates.
 
