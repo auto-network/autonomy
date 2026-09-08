@@ -58,10 +58,20 @@
     if (!avatar) return '';
     return /^https?:/.test(avatar) ? avatar : '/api/attachment/' + encodeURIComponent(avatar);
   }
-  var ROLE_WORDS = { owner: 'Owner' };
+  //: Display overrides for role names whose ledger form is not simply the
+  //: capitalized word. A role NAME is a lowercase ledger fact
+  //: (^[a-z0-9._-]{1,64}$, signed into role.define); only its rendering is
+  //: capitalized here. Roles the operator defines later — member, admin, or
+  //: anything custom — therefore read as words rather than identifiers
+  //: without needing an entry each.
+  var ROLE_WORDS = {};
   var SCOPE_WORDS = { '*': 'Full authority' };
   function roleWord(roles) {
-    return (roles || []).map(function (role) { return ROLE_WORDS[role] || role; }).join(' · ');
+    return (roles || []).map(function (role) {
+      if (ROLE_WORDS[role]) return ROLE_WORDS[role];
+      var name = String(role || '');
+      return name ? name.charAt(0).toUpperCase() + name.slice(1) : name;
+    }).join(' · ');
   }
   // The scope catalog (static/js/scope-catalog.js) names every enforced
   // scope in plain words; a scope it does not know renders raw, never hidden.
@@ -831,7 +841,7 @@
     this.render();
     var opened = null;
     Promise.all([
-      this.openRoot(isVersion ? 'Sign version ' + (d.baseVersion + 1) + ' of ' + roleWord([d.name]) : 'Define the ' + d.name + ' role',
+      this.openRoot(isVersion ? 'Sign version ' + (d.baseVersion + 1) + ' of ' + roleWord([d.name]) : 'Define the ' + roleWord([d.name]) + ' role',
         'Unlock your personal root to open the organization root and sign the definition.'),
       this.loadRoleCeremony(),
     ]).then(function (loaded) {
