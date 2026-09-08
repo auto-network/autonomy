@@ -1824,7 +1824,7 @@ class SessionMonitor:
         For host sessions: attempt .session_meta.json scan; if that fails, add dir watch.
         For all unresolved sessions with resolution_dir: add IN_CREATE dir watch.
         """
-        sessions = get_live_sessions()
+        sessions = await asyncio.to_thread(get_live_sessions)
         agent_runs = _agent_runs_root()
         recovered = 0
         for row in sessions:
@@ -4137,7 +4137,7 @@ class SessionMonitor:
         while True:
             try:
                 await asyncio.sleep(self.SCREEN_POLL_INTERVAL_S)
-                rows = get_live_sessions()
+                rows = await asyncio.to_thread(get_live_sessions)
                 # Drop armed entries whose session left the live set (died
                 # mid-launch, killed, failed) so the set can't leak.
                 live_names = {r["tmux_name"] for r in rows}
@@ -4955,19 +4955,25 @@ class SessionMonitor:
         """Check tmux liveness for all sessions every 10s."""
         while True:
             try:
-                sessions = get_live_sessions()
+                # dashboard.db reads run off the loop thread: this loop fires
+                # every 10 s and get_live_sessions is a wide read that stalls
+                # every in-flight request whenever the DB is busy (WAL
+                # checkpoint / concurrent writer) — the top served-time stall
+                # leaf (auto-gwdqq).
+                sessions = await asyncio.to_thread(get_live_sessions)
                 now = time.time()
                 changed = await self._sweep_tmux_liveness(sessions, now)
 
                 # Clean up old dead sessions from tail states
                 # (Dead sessions with _COOLDOWN expired get deleted from DB)
-                conn = get_conn()
-                expired = conn.execute(
-                    "SELECT tmux_name FROM tmux_sessions"
-                    " WHERE state IN ('ENDED','FAILED') AND last_activity IS NOT NULL"
-                    "   AND (? - COALESCE(last_activity, created_at)) > ?",
-                    (now, self._COOLDOWN_SECONDS),
-                ).fetchall()
+                expired = await asyncio.to_thread(
+                    lambda: get_conn().execute(
+                        "SELECT tmux_name FROM tmux_sessions"
+                        " WHERE state IN ('ENDED','FAILED') AND last_activity IS NOT NULL"
+                        "   AND (? - COALESCE(last_activity, created_at)) > ?",
+                        (now, self._COOLDOWN_SECONDS),
+                    ).fetchall()
+                )
                 for exp_row in expired:
                     # Don't actually delete from DB — keep for history
                     # Just ensure tail states are cleaned up
@@ -5080,7 +5086,7 @@ class SessionMonitor:
         # graph_source_id backfill from running.
         try:
             now = time.time()
-            for row in get_live_sessions():
+            for row in await asyncio.to_thread(get_live_sessions):
                 tmux_name = row["tmux_name"]
                 res_dir = row.get("resolution_dir") or (
                     str(Path(row["jsonl_path"]).parent)

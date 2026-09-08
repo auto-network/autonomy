@@ -144,7 +144,11 @@ class HostnameLeaseReconciler:
         return self._control(org, op, args)
 
     async def reconcile(self) -> None:
-        desired = self._desired()
+        # _desired() folds every shared org's Settings (org-store ro opens +
+        # per-org reservation/target reads, each a GraphDB open+close). It ran
+        # on the loop every reconcile tick — the top served-time stall leaf
+        # after the planner discovery moved off in auto-nkxko (auto-gwdqq).
+        desired = await asyncio.to_thread(self._desired)
         for org, leases in desired.items():
             try:
                 status = await asyncio.to_thread(
