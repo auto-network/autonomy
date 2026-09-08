@@ -12,7 +12,7 @@ import { webcrypto } from 'node:crypto';
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 
-const { defineRole } = await import('../org-role.js');
+const { defineRole, grantRole } = await import('../org-role.js');
 const { mintOrgInvite } = await import('../org-invite.js');
 const {
   getClaimContext, mintMemberClaim, submitClaim,
@@ -43,6 +43,7 @@ const originFetch = (url, options) =>
   fetchImpl(String(url).startsWith('http') ? url : server + url, options);
 const operatorSeed = seed('AUTONOMY_OPERATOR_SEED_HEX');
 const joinerSeed = seed('AUTONOMY_JOINER_SEED_HEX');
+const thirdSeed = seed('AUTONOMY_THIRD_SEED_HEX');
 const out = { steps: [] };
 const step = (name, data) => { out.steps.push({ name, ...data }); };
 
@@ -159,8 +160,78 @@ try {
   });
   step('narrow', narrowed);
 
+  // 6. CASE 3 — a non-owner invites. Define Admin, grant it to the joiner,
+  //    and have the JOINER mint an invitation from their own authority.
+  const admin = await defineRole({
+    fetchImpl, serverUrl: server, org, personalRootSeed: operatorSeed,
+    name: 'admin', scopeSet: ['invite:member', 'role:grant:member'],
+    claimRequires: 'admin-ack', approverThreshold: 1,
+  });
+  step('define_admin', admin);
+  const granted = await grantRole({
+    fetchImpl, serverUrl: server, org, genesisId,
+    personalRootSeed: operatorSeed, persona: joiner.publicHex, role: 'admin',
+  });
+  step('grant_admin', granted);
+
+  const secondInvite = await mintOrgInvite({
+    fetchImpl, serverUrl: server, org, genesisId,
+    personalRootSeed: joinerSeed, role: 'member',
+    expiry: Date.now() + 7 * 86400000, maxUses: 1,
+  });
+  step('member_invites_member', { inviteId: secondInvite.inviteId, by: joiner.publicHex });
+
+  // 7. CASE 5 — N-of-M. A third persona claims that invitation; Member is
+  //    threshold 1, so one eligible approver admits — and the JOINER (holding
+  //    role:grant:member through Admin) is that approver, not the root.
+  const third = await derivePersona(thirdSeed, genesisId);
+  const ctx3 = await getClaimContext({
+    transport: { fetch: originFetch, serverUrl: server }, orgSlug: org, inviteRef: secondInvite.inviteId,
+  });
+  const thirdClaim = await mintMemberClaim({
+    context: { ...context(ctx3.heads), maxHlc: ctx3.max_hlc || [Date.now(), 0] },
+    personalRootSeed: thirdSeed, inviteRef: secondInvite.inviteId,
+    token: secondInvite.bearer, profile: { display_name: 'Third Joiner' }, kemSeed: thirdSeed,
+  });
+  await submitClaim({
+    context: { ...context(ctx3.heads), maxHlc: ctx3.max_hlc || [Date.now(), 0] },
+    event: thirdClaim.event,
+  });
+  const thirdKey = thirdClaim.claimKey || (await claimKey(secondInvite.inviteId, third.publicHex));
+  const ctx4 = await getClaimContext({
+    transport: { fetch: originFetch, serverUrl: server }, orgSlug: org, inviteRef: secondInvite.inviteId,
+  });
+  const joinerApproval = await signClaimApproval({
+    context: { ...context(ctx4.heads), maxHlc: ctx4.max_hlc || [Date.now(), 0] },
+    personalRootSeed: joinerSeed, inviteRef: secondInvite.inviteId, personaPub: third.publicHex,
+  });
+  await submitClaimApproval({
+    context: { ...context(ctx4.heads), maxHlc: ctx4.max_hlc || [Date.now(), 0] },
+    claimKey: thirdKey, inviteRef: secondInvite.inviteId, personaPub: third.publicHex,
+    approval: joinerApproval,
+  });
+  const thirdStatus = await getClaimStatus({
+    context: { ...context(ctx4.heads), maxHlc: ctx4.max_hlc || [Date.now(), 0] },
+    claimKey: thirdKey, inviteRef: secondInvite.inviteId, personaPub: third.publicHex,
+  });
+  step('third_status', { have: thirdStatus && thirdStatus.have, need: thirdStatus && thirdStatus.need });
+  if (thirdStatus && thirdStatus.position) {
+    const finalThird = await mintMemberClaim({
+      context: { ...context(thirdStatus.position.parents), maxHlc: thirdStatus.position.hlc },
+      personalRootSeed: thirdSeed, inviteRef: secondInvite.inviteId, token: secondInvite.bearer,
+      profile: { display_name: 'Third Joiner' }, approvals: thirdStatus.approvals || [],
+      kemSeed: thirdSeed, position: thirdStatus.position, credentialHlc: thirdStatus.position.hlc,
+    });
+    const admittedThird = await submitClaim({
+      context: { ...context(thirdStatus.position.parents), maxHlc: thirdStatus.position.hlc },
+      event: finalThird.event, position: thirdStatus.position,
+    });
+    step('third_finalize', { status: admittedThird && (admittedThird.status || admittedThird.ok) });
+  }
+
   out.ok = true;
   out.joinerPersona = joiner.publicHex;
+  out.thirdPersona = third.publicHex;
   process.stdout.write(JSON.stringify(out) + '\n');
 } catch (error) {
   out.ok = false;
