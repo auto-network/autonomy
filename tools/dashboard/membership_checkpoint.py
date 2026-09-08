@@ -189,6 +189,12 @@ def checkpoint_status(org: str) -> dict:
         "needed": not up_to_date,
         "checkpointer_pubs": list(mc.checkpointer_pubs(state)),
         "members_root": members_root,
+        # The seq this node has adopted, or None when no checkpoint has been
+        # adopted at all. None is what makes a PERSONA-signed serving
+        # credential unusable for this org: it authenticates only at a registry
+        # that has adopted the org's seed, and the provisioning route refuses
+        # to store one before then.
+        "adopted_seq": (cached or {}).get("seq") if cached is not None else None,
     }
 
 
