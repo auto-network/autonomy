@@ -1267,6 +1267,20 @@ def build_mount_plan(
                     "beads: no tracker for org %r and could not provision one "
                     "(%s) — session launches on the shared tracker", org, exc,
                 )
+    # The mount source must EXIST or `--mount type=bind` refuses it and NO
+    # container is created (auto-qk4ip). On a fresh node DATA_ROOT/.beads does
+    # not exist yet — the shared tracker's local dir is state that accretes, not
+    # something the image ships or the optional `beads` profile creates — so
+    # every first session launch refused with "1 launch input missing" until
+    # someone hand-made it (sjc-2, 2026-09-08). Create it idempotently instead
+    # of hard-failing: a launcher must not require an optional subsystem's dir.
+    try:
+        Path(beads_src).mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        logger.warning(
+            "beads: could not ensure mount source %s exists (%s); the launch "
+            "may refuse the .beads mount", beads_src, exc,
+        )
     plan.set(mount_spec(beads_src, "/data/.beads"), replace=False)
     # ``.beads`` is rw for bd, but its dolt-remote credential is host-only
     # material no session reads; mask it with an empty ro device bind (auto-j3oj3).

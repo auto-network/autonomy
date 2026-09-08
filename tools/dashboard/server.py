@@ -10072,9 +10072,24 @@ def _own_dashboard_url() -> str:
                 if out.returncode == 0 and out.stdout.strip():
                     bindings = json.loads(out.stdout) or {}
                     entries = bindings.get("8080/tcp") or []
-                    host_port = (entries[0] or {}).get("HostPort") if entries else None
+                    entry = (entries[0] or {}) if entries else {}
+                    host_port = entry.get("HostPort")
+                    host_ip = entry.get("HostIp")
                     if host_port:
-                        url = f"https://localhost:{host_port}"
+                        # Reach the dashboard at the address it is actually
+                        # BOUND to, not a hardcoded localhost. A fleet node that
+                        # publishes on a specific interface (e.g. its tailnet IP
+                        # 100.x:8080) is unreachable at localhost from a
+                        # --network=host session container, so GRAPH_API=localhost
+                        # 401'd/timed out and every `graph` call from the session
+                        # failed (sjc-2, 2026-09-08). An empty/wildcard HostIp
+                        # (0.0.0.0/::) does include localhost, so keep it there.
+                        host = (
+                            host_ip
+                            if host_ip and host_ip not in ("", "0.0.0.0", "::")
+                            else "localhost"
+                        )
+                        url = f"https://{host}:{host_port}"
         except Exception:
             logger.exception("_own_dashboard_url: self-inspect failed; using default")
         _OWN_DASHBOARD_URL = url
