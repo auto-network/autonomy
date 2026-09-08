@@ -89,14 +89,51 @@ def _age_text(seconds: float | None) -> str:
     return f"{seconds / 86400:.1f}d"
 
 
+def is_backup_source(runs: list[dict], config: dict,
+                     reports_exist: bool | None = None) -> bool:
+    """Does this machine show any evidence of being a backup SOURCE?
+
+    STOPGAP (2026-09-08) for the fleet-machine false alarm, ahead of the
+    real designation primitive (auto-2fz3b / auto-l1n6t): the plugin's
+    enable row is org-homed and therefore SYNCS, so every fleet machine
+    switches the plugin on, finds zero run rows, and alarms "backup is
+    stale" about a machine that was never meant to back anything up —
+    with unscoped attention ids that then collide fleet-wide.
+
+    Evidence, any one of which means "this machine is supposed to back
+    up": it has captured at least once, an offsite provider is
+    configured here, or the capture engine's report directory exists.
+    A machine with NONE of these has no backup configuration at all, so
+    its silence is a true statement, not a suppressed failure. A real
+    source keeps alarming: the moment a provider is configured or one
+    run lands, evidence exists forever after (run rows are retained and
+    the report directory persists), so this can never quiet a machine
+    that has ever backed up.
+    """
+    if runs:
+        return True
+    if (config.get("offsite_provider") or "").strip():
+        return True
+    if reports_exist is None:
+        from tools.dashboard.plugins.backup import reconcile as reconcile_mod
+        try:
+            reports_exist = reconcile_mod.default_report_root().is_dir()
+        except Exception:
+            reports_exist = False
+    return bool(reports_exist)
+
+
 def derive_conditions(runs: list[dict], config: dict,
-                      now: datetime | None = None) -> list[dict]:
+                      now: datetime | None = None,
+                      reports_exist: bool | None = None) -> list[dict]:
     """Pure derivation: run rows + config → attention condition rows.
 
     Emits BOTH directions (needs_attention and resolved) for every
     condition it evaluates; ``publish_conditions`` drops resolved rows
     whose item is not currently open.
     """
+    if not is_backup_source(runs, config, reports_exist):
+        return []
     now = now or datetime.now(timezone.utc)
     conditions: list[dict] = []
     newest_complete_overall: dict | None = None

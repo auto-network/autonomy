@@ -160,6 +160,8 @@ def summarize(runs: list[dict], drills: list[dict], config: dict,
               now: datetime | None = None) -> dict:
     """The whole page's answer, in the page's order: am I safe now,
     when was the last good copy, does restore actually work."""
+    from tools.dashboard.plugins.backup.deriver import is_backup_source
+    source = is_backup_source(runs, config)
     tiers = [tier_health(runs, config, tier, now=now) for tier in TIERS]
     finished = [d for d in drills if d.get("verdict") != "running"]
     finished.sort(key=lambda d: d.get("key", ""), reverse=True)
@@ -176,8 +178,14 @@ def summarize(runs: list[dict], drills: list[dict], config: dict,
             worst = "stale"
     if last_drill and last_drill.get("verdict") != "pass" and worst == "ok":
         worst = "stale"
+    if not source:
+        # No backup configuration of any kind on this machine — a fleet
+        # member whose data is captured elsewhere. "Stale" would be a
+        # false claim about a job this machine was never given.
+        worst = "not-a-source"
     return {
         "overall": worst,
+        "is_source": source,
         "tiers": tiers,
         "last_drill": last_drill,
         "running_drill": running,

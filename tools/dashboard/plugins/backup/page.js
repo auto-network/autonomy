@@ -180,11 +180,23 @@ function backupPage() {
 
     overallLabel() {
       const overall = (this.summary || {}).overall || 'unknown';
-      return { ok: 'PROTECTED', stale: 'ATTENTION', failing: 'FAILING' }[overall]
+      return { ok: 'PROTECTED', stale: 'ATTENTION', failing: 'FAILING',
+               'not-a-source': 'NOT A BACKUP MACHINE' }[overall]
         || overall.toUpperCase();
     },
 
+    isSource() {
+      const s = this.summary || {};
+      return s.is_source === undefined ? true : !!s.is_source;
+    },
+
     overallExplanation() {
+      if (!this.isSource()) {
+        return 'No backups run on this machine and none are configured '
+          + 'here. Your fleet data is captured by whichever machine runs '
+          + 'the backups; this page does not yet show that machine\'s '
+          + 'state.';
+      }
       const problems = this.tierRows()
         .filter((row) => row.reason)
         .map((row) => `${row.tier}: ${row.reason}`);

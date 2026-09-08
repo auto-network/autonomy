@@ -91,7 +91,7 @@
         </div>
         <div class="bk-sub mt-1" data-testid="backup-overall-why"
              x-text="overallExplanation()"></div>
-        <table class="mt-2" data-testid="backup-tier-table">
+        <table class="mt-2" data-testid="backup-tier-table" x-show="isSource()">
           <thead><tr>
             <th>Schedule</th><th>Last good backup</th>
             <th class="bk-num">Size</th><th>Offsite copy</th>
@@ -114,10 +114,10 @@
       </div>
 
       <!-- Where backups go -->
-      <h2>Where backups go</h2>
+      <h2 x-show="isSource()">Where backups go</h2>
       <p class="bk-sub">Every backup is written to the local destination,
         then pushed to the encrypted offsite repository.</p>
-      <div class="bk-card" data-testid="backup-destinations">
+      <div class="bk-card" data-testid="backup-destinations" x-show="isSource()">
         <dl>
           <dt>Local destination (NAS)</dt>
           <dd class="bk-mono"
@@ -137,16 +137,16 @@
       </div>
 
       <!-- Does restore actually work -->
-      <h2>
+      <h2 x-show="isSource()">
         Restore drill
         <button class="bk-btn ml-2" data-testid="backup-drill-run"
                 :disabled="!!summary.running_drill"
                 @click="runDrill()">run drill now</button>
       </h2>
-      <p class="bk-sub">A drill restores the newest offsite snapshot to a
+      <p class="bk-sub" x-show="isSource()">A drill restores the newest offsite snapshot to a
         scratch area and verifies every database — proof the backups can
         actually be restored, not just written.</p>
-      <div class="bk-card" data-testid="backup-drill-panel">
+      <div class="bk-card" data-testid="backup-drill-panel" x-show="isSource()">
         <div x-show="drillMessage" class="text-sm bk-warn mb-1"
              x-text="drillMessage"></div>
         <template x-if="summary.running_drill">
@@ -179,10 +179,10 @@
       </div>
 
       <!-- When did backups run -->
-      <h2>Backup runs</h2>
-      <p class="bk-sub">One row per backup attempt, newest first;
+      <h2 x-show="isSource()">Backup runs</h2>
+      <p class="bk-sub" x-show="isSource()">One row per backup attempt, newest first;
         failures pin to the top with their reason.</p>
-      <div class="bk-card" data-testid="backup-run-stream">
+      <div class="bk-card" data-testid="backup-run-stream" x-show="isSource()">
         <template x-if="!runStream.length">
           <div class="text-sm bk-muted">No backup runs recorded yet.</div>
         </template>
@@ -205,7 +205,7 @@
       </div>
 
       <!-- What exactly is protected -->
-      <h2>What the latest backup contains</h2>
+      <h2 x-show="isSource()">What the latest backup contains</h2>
       <p class="bk-sub" x-text="latestContents()
           ? 'Every store captured by ' + latestContents().key
             + ' — hourly and daily backups protect the same data.'
