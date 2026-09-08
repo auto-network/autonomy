@@ -90,6 +90,31 @@ def _workspace_runtime(workspace_id: str) -> tuple[bool, str]:
     return False, "standard"
 
 
+def _workspace_network_host(workspace_id: str) -> bool:
+    """Return the ``network_host`` privilege declared on ``workspace_id``.
+
+    Host networking is a per-workspace privilege (autonomy.workspace). The
+    dashboard launch paths already forward ``proj.network_host``; the
+    bead-dispatch path must too, or a workspace flipped to ``network_host:
+    false`` still comes up host-networked and can bind host ports (auto-0l7jg).
+
+    When ``workspace_id`` is empty or unknown we fall back to ``True`` — the
+    same default ``launch_session()`` uses today — so an unmatched bead's
+    networking is unchanged. A resolved workspace always states the field
+    explicitly (see ``WorkspaceConfig.from_setting``), so the fallback governs
+    only the no-workspace case.
+    """
+    if not workspace_id:
+        return True
+    try:
+        ws = load_workspaces().get(workspace_id)
+        if ws is not None:
+            return bool(ws.network_host)
+    except Exception:
+        pass
+    return True
+
+
 def _bead_title(bead_id: str) -> str | None:
     """Best-effort Dolt lookup of a bead's title, done once at dispatch.
 
@@ -185,6 +210,7 @@ def main() -> int:
 
     workspace_model = _workspace_model(args.workspace_id)
     needs_nested_docker, session_runtime = _workspace_runtime(args.workspace_id)
+    network_host = _workspace_network_host(args.workspace_id)
 
     if args.detach:
         container_id = launch_session(
@@ -200,6 +226,7 @@ def main() -> int:
             model=args.model or workspace_model or None,
             needs_nested_docker=needs_nested_docker,
             runtime=session_runtime,
+            network_host=network_host,
         )
         if not container_id:
             return 1
@@ -292,13 +319,38 @@ def main() -> int:
         )
         # Docker socket refusal is enforced in mount_args() over the full plan.
 
+        # ── Networking ─────────────────────────────────────────────
+        # Honor the workspace's network_host privilege on this path too — the
+        # foreground launch previously hard-coded --network=host, so a
+        # workspace flipped to network_host:false still came up host-networked
+        # (auto-0l7jg). The three-topology precedence mirrors
+        # session_launcher.launch_session exactly: host-net → localhost;
+        # containerized node on non-host-net → the node's own network with the
+        # `dashboard`/`dolt` DNS aliases; dev-box bridge → host.docker.internal.
+        _topo = discover_topology()
+        if network_host:
+            network_args = ["--network=host"]
+            graph_api = "https://localhost:8080"
+            beads_dolt_host = None
+        elif not _topo.is_host_process and _topo.network:
+            network_args = ["--network", _topo.network]
+            graph_api = "https://dashboard:8080"
+            beads_dolt_host = "dolt"
+        else:
+            network_args = ["--add-host=host.docker.internal:host-gateway"]
+            graph_api = "https://host.docker.internal:8080"
+            beads_dolt_host = None
+
         cmd: list[str] = [
             "docker", "run",
             "--rm",
             "--name", args.name,
-            "--network=host",
+            *network_args,
             "-e", f"BD_ACTOR={args.session_type}:{args.name}",
             "-e", "BD_READONLY=0",
+            "-e", f"GRAPH_API={graph_api}",
+            *(["-e", f"BEADS_DOLT_SERVER_HOST={beads_dolt_host}"]
+              if beads_dolt_host else []),
             "-e", "CODEX_HOME=/home/agent/.codex",
             *auth_args,
         ]
@@ -320,7 +372,7 @@ def main() -> int:
         # (the Codex auth.json declared by build_mount_plan) — a refusal here
         # writes and mints nothing (auto-vm8qh criterion 6).
         try:
-            _mount_argv = mount_args(plan, discover_topology())
+            _mount_argv = mount_args(plan, _topo)
         except SocketMountRefused:
             print("ERROR: refusing host Docker socket mount", file=sys.stderr)
             return 1
