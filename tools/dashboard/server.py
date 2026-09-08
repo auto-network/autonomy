@@ -11794,6 +11794,52 @@ async def api_version(request):
     return JSONResponse({"version": _static_version()})
 
 
+async def api_software_update_status(request):
+    """How far this checkout is behind the GitHub origin (git-derived).
+
+    The profile dropdown polls this to decide whether to show a "behind"
+    badge. ``?fetch=0`` returns the cheap cached comparison without a network
+    round-trip. An author machine (local commits ahead of origin) reports
+    ``mode=author`` / ``can_update=false`` — the destructive fast-forward is
+    never offered where it would discard unshipped work.
+    """
+    auth_error = api_auth.require_authenticated_api_caller(request)
+    if auth_error is not None:
+        return auth_error
+    from tools.dashboard import software_update
+
+    fetch = request.query_params.get("fetch", "1") not in ("0", "false", "no")
+    status = await asyncio.to_thread(software_update.update_status, fetch=fetch)
+    return JSONResponse(status)
+
+
+async def api_software_update(request):
+    """One-click fast-forward onto origin, then let the code hot-reload.
+
+    Refuses anything that is not a clean fast-forward (dirty tree, or a machine
+    ahead of origin) so it can never destroy local work — the guard is git
+    history itself, not a trusted flag. Returns the applied commit range;
+    ``deploy_changed`` warns when the update touched deploy/ and a container
+    recreate (not just a hot-reload) is needed to fully apply it.
+    """
+    auth_error = api_auth.require_authenticated_api_caller(request)
+    if auth_error is not None:
+        return auth_error
+    from tools.dashboard import software_update
+
+    try:
+        result = await asyncio.to_thread(software_update.perform_update)
+    except software_update.SoftwareUpdateError as exc:
+        # A refused fast-forward is a precondition failure, not a server error.
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    logger.info(
+        "software_update: applied updated=%s from=%s to=%s count=%s deploy_changed=%s",
+        result.get("updated"), result.get("from"), result.get("to"),
+        result.get("count"), result.get("deploy_changed"),
+    )
+    return JSONResponse(result)
+
+
 async def page_web_push_proof(request):
     return HTMLResponse(_load_template("web-push-proof.html"))
 
@@ -21160,6 +21206,8 @@ routes = [
     Route("/api/timeline", api_timeline),
     Route("/api/timeline/stats", api_timeline_stats),
     Route("/api/version", api_version),
+    Route("/api/software/update-status", api_software_update_status),
+    Route("/api/software/update", api_software_update, methods=["POST"]),
 
     # Graph write API (single-writer proxy for containers)
     Route("/api/graph/note", api_graph_note, methods=["POST"]),
