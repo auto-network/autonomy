@@ -2124,6 +2124,9 @@ function renderMissionScreenFragment() {
 }
 
 async function route() {
+  // Let a writing surface pause its microphone while its lease still exists.
+  // Clearing plugin identity/claims first makes safe owner-checked cleanup too late.
+  window.dispatchEvent(new CustomEvent('app:navigating'));
   closeGlobalSearch();
   if (window.AutonomyIdentityIndicator
       && typeof window.AutonomyIdentityIndicator.close === 'function') {

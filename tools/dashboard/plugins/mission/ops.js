@@ -30,15 +30,33 @@
     return /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/.test(value) ? value.replace(' ', 'T') + 'Z' : value;
   }
   global.missionOps = function (config) {
+    // Browser objects and unsubscribe handles must not be Alpine-proxied.
+    let capture = null;
+    function voiceContext() {
+      try {
+        let win = global;
+        const frames = [];
+        for (let depth = 0; depth < 6; depth++) {
+          if (win.Autonomy?._activePluginId === 'mission' && win.Autonomy.voice) {
+            return {root:win, api:win.Autonomy.voice, voice:win.Alpine?.store('voice'), frames};
+          }
+          if (win.parent === win || !win.frameElement) return null;
+          frames.push(win.frameElement); win = win.parent;
+        }
+      } catch (_) { /* Cross-origin/public/standalone frames receive no voice access. */ }
+      return null;
+    }
+    function owns(c) { return c.voice.boundSessionId === c.session && c.voice.surfaceClaim?.claimId === c.claimId && c.voice.surfaceClaim?.pluginId === 'mission'; }
+    function visible(c) { return c.root.Autonomy?._activePluginId === 'mission' && c.frames.every(f => f.isConnected && f.getClientRects().length && (!f.closest('.mc-view') || f.closest('.mc-view').classList.contains('on'))); }
     return {
       config, view: 'overview', filter: 'focus', scope: 'mission', sortKey: 'default', sortDirection: 'asc', search: '', limit: 100, selectedId: '',
       issues: [], sessions: [], seats: [], raw: null, errors: [], loading: true,
       drafts: {}, answers: {}, sending: false, sendError: '', notice: '', now: Date.now(), clock: null,
-      dictationHint: false, reportTitle: '', reportBody: '',
+      talking: false, voiceError: '', reportTitle: '', reportBody: '',
       filters: [['focus', 'In focus'], ['all', 'All open'], ['ready', 'Ready to pick up'],
         ['spec', 'Needs shaping'], ['check', 'Ready to check'], ['completed', 'Recently completed']],
       init() { this.refresh(); this.clock = setInterval(() => { this.now = Date.now(); }, 60000); },
-      destroy() { clearInterval(this.clock); },
+      destroy() { this.stopDictation(); clearInterval(this.clock); },
       async refresh() {
         if (this._fetching) return;
         this._fetching = true; this.loading = true;
@@ -50,6 +68,7 @@
           this.now = Date.now();
           this.raw = data; this.errors = data.errors || []; this.sessions = data.sessions;
           this.project();
+          if (this.view === 'detail' && (!this.current || !this.current.canSend)) this.stopDictation();
           if (this.view === 'detail' && !this.current) this.view = 'overview';
         } catch (e) { this.errors = [{source: 'ops', message: e.message + (this.raw ? ' Previous records remain visible.' : '')}]; }
         finally { this.loading = false; this._fetching = false; }
@@ -171,7 +190,8 @@
       ago(at) { const ms = this.now - Date.parse(stamp(at)); if (!at || !Number.isFinite(ms)) return 'Unknown'; if (ms < 0) return 'Clock mismatch'; const m = Math.floor(ms / 60000); return m < 1 ? 'Just now' : m < 60 ? m + ' min ago' : m < 1440 ? Math.floor(m / 60) + ' hr ago' : Math.floor(m / 1440) + ' days ago'; },
       timeTitle(i) { const at = i.completedAt || i.updatedAt; return at ? new Date(at).toUTCString() : 'Source timestamp unavailable'; },
       async open(id) {
-        this.selectedId = id; this.view = 'detail'; this.sendError = ''; this.dictationHint = false;
+        this.stopDictation();
+        this.selectedId = id; this.view = 'detail'; this.sendError = ''; this.voiceError = '';
         const issue = this.current;
         if (!issue?.task || !issue.missionId || issue.detailLoaded) return;
         try {
@@ -185,9 +205,76 @@
           issue.detailLoaded = true;
         } catch (_) { issue.background = 'Task details could not be loaded. Open the task directly or retry.'; }
       },
-      back() { this.view = 'overview'; this.sendError = ''; },
-      report() { this.view = 'report'; this.sendError = ''; },
-      dictate() { this.dictationHint = true; this.$nextTick(() => this.$refs.answer?.focus()); },
+      back() { this.stopDictation(); this.view = 'overview'; this.sendError = ''; },
+      report() { this.stopDictation(); this.view = 'report'; this.sendError = ''; },
+      dictate() {
+        if (this.talking) { this.stopDictation(); return; }
+        this.voiceError = '';
+        if (this.view !== 'detail' || !this.current?.canSend || this.sending || this.answers[this.selectedId]) return;
+        const context = voiceContext();
+        if (!context?.voice?.enabled) { this.voiceError = 'Capsule dictation is unavailable. Open Ops inside Mission Control with voice enabled.'; return; }
+        if (!context.voice.boundSessionId) { this.voiceError = 'Start the capsule on a live session first, then return here and tap Dictate.'; return; }
+        if (context.voice.surfaceClaim) { this.voiceError = 'Another field owns dictation. Pause it before dictating here.'; return; }
+        if (!visible(context) || typeof context.api.snapshot !== 'function' || typeof context.api.subscribe !== 'function') { this.voiceError = 'The live capsule connection is unavailable. Reload Mission Control.'; return; }
+        const lease = context.api.claimSurface({caption:'plugin', controls:'plugin'});
+        if (!lease) { this.voiceError = 'Mission Control has not loaded its dictation permission. Reload the dashboard.'; return; }
+        const editor = this.$refs.answer, body = this.draft;
+        const anchor = Math.max(0, Math.min(Number.isFinite(editor?.selectionStart) ? editor.selectionStart : body.length, body.length));
+        let prefix = body.slice(0, anchor), suffix = body.slice(anchor);
+        if (prefix && !/\s$/.test(prefix)) prefix += ' ';
+        if (suffix && !/^\s/.test(suffix)) suffix = ' ' + suffix;
+        const c = {...context, lease, claimId:context.voice.surfaceClaim.claimId, session:context.voice.boundSessionId,
+          target:this.selectedId, prefix, suffix, text:'', expected:body, revision:-1, seen:false, applied:false, cleanups:[]};
+        capture = c; this.talking = true;
+        const stop = () => this.stopDictation();
+        for (const win of new Set([global, context.root])) {
+          win.addEventListener('pagehide', stop); win.addEventListener('mission:stop-dictation', stop);
+          c.cleanups.push(() => { win.removeEventListener('pagehide', stop); win.removeEventListener('mission:stop-dictation', stop); });
+        }
+        context.root.addEventListener('app:navigating', stop);
+        c.cleanups.push(() => context.root.removeEventListener('app:navigating', stop));
+        for (const doc of new Set(c.frames.map(f => f.ownerDocument))) {
+          const observer = new context.root.MutationObserver(() => { if (capture === c && !visible(c)) this.stopDictation(); });
+          observer.observe(doc.documentElement, {subtree:true, childList:true, attributes:true, attributeFilter:['class','style','hidden']});
+          c.cleanups.push(() => observer.disconnect());
+        }
+        // subscribe immediately delivers the current buffer. The target and range
+        // must already exist; do not clear words spoken before pressing Dictate.
+        const unsubscribe = context.api.subscribe(snapshot => this.voiceSnapshot(snapshot));
+        if (capture !== c) { unsubscribe(); return; }
+        c.cleanups.push(unsubscribe);
+        if (context.voice.setMicMode('listening') === false) { this.stopDictation(); this.voiceError = 'The capsule could not start listening.'; return; }
+        this.$nextTick(() => this.$refs.answer?.focus());
+      },
+      voiceSnapshot(snapshot) {
+        const c = capture;
+        if (!c || !snapshot) return;
+        if (!owns(c) || !visible(c) || this.selectedId !== c.target || this.view !== 'detail') { this.stopDictation(false); return; }
+        if (!c.seen && !snapshot.text) { c.seen = true; c.revision = Number.isFinite(snapshot.revision) ? snapshot.revision : -1; return; }
+        c.seen = true;
+        if (snapshot.sessionId !== c.session || ['clear','end','send','rebind'].includes(snapshot.update)) { this.stopDictation(false); return; }
+        if (!Number.isFinite(snapshot.revision) || snapshot.revision <= c.revision) return;
+        if (this.drafts[c.target] !== undefined && this.drafts[c.target] !== c.expected) { this.stopDictation(false); return; }
+        c.revision = snapshot.revision;
+        c.text = String(snapshot.text || '');
+        // An empty initial snapshot must not insert whitespace into typed text.
+        if (!c.text && !c.applied) return;
+        c.applied = true;
+        c.expected = c.prefix + c.text + c.suffix;
+        this.drafts[c.target] = c.expected;
+        this.$nextTick(() => { if (capture === c && this.$refs.answer) { const caret=c.prefix.length+c.text.length; this.$refs.answer.setSelectionRange(caret,caret); } });
+      },
+      stopDictation(finalSnapshot = true) {
+        const c = capture;
+        if (!c) return;
+        if (finalSnapshot && owns(c)) this.voiceSnapshot(c.api.snapshot());
+        if (capture !== c) return;
+        capture = null; this.talking = false;
+        c.cleanups.forEach(fn => fn());
+        if (owns(c)) { c.voice.setMicMode('muted'); c.api.clearBuffer('clear'); }
+        c.lease.release();
+      },
+      answerInput(event) { this.stopDictation(false); this.draft = event.target.value; },
       edit() { delete this.answers[this.selectedId]; },
       async copy() { try { await navigator.clipboard.writeText(this.answers[this.selectedId]?.text || this.draft); this.notice = 'Copied'; } catch (_) { this.sendError = 'Copy unavailable; select the text to copy.'; } },
       endpoint(issue, action) {
@@ -203,6 +290,7 @@
         return out.relayed ? 'Saved; relay confirmed' : 'Saved; relay not confirmed';
       },
       async submit(action = 'reply', override = null) {
+        this.stopDictation();
         const issue = this.current, text = override === null ? this.draft.trim() : override;
         if (!issue?.canSend || !text || this.sending || (action === 'answer' && !issue.canResolve)) return;
         const id = issue.id;

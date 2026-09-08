@@ -42,8 +42,12 @@ Send and Needs clarification append a reply; only explicit Resolve answers
 the question. Receipts distinguish stored text from relay confirmation and
 never claim owner acknowledgment. General reports target the selected
 mission's actual `mc-infra` pillar; without that coordinator no report route
-is invented. Keyboard dictation focuses the answer field; the voice capsule
-integration remains separate.
+is invented. Dictate connects the already-bound capsule stream to the selected
+answer through the Notes lease/snapshot API. While connected, the answer owns
+the controls; Pause, typing, Send, and navigation stop capture. Existing capsule
+text is imported and later hypotheses replace its range. No live binding means
+an actionable error, never an arbitrary session choice. Dictation does not send
+or resolve anything automatically; browser-restart draft recovery is separate.
 
 Read API: `GET /api/mission/ops/{mission_id}`; document:
 `GET /api/mission/screen/{mission_id}/ops`. Both require visibility of the

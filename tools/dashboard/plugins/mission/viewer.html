@@ -2817,6 +2817,10 @@
   }
   var currentView = null;
   function show(id){
+    if (id !== "ops" && opsView.firstChild) {
+      var voiceWindow = opsView.firstChild.contentWindow;
+      if (voiceWindow) voiceWindow.dispatchEvent(new voiceWindow.Event("mission:stop-dictation"));
+    }
     document.getElementById("mc-app").classList.toggle("ops-wide", id === "ops");
     if (id === "ops" && !opsView.firstChild) {
       var opsFrame = document.createElement("iframe");
