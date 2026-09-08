@@ -1,31 +1,36 @@
-"""Ledger events ride Settings (bead auto-dqemk, operator ruling 2026-09-06).
+"""Ledger events ARE Settings rows (design of record graph://53b5bb04-bc0).
 
-Two one-way pumps between an org's ``LedgerStore`` and the org-homed
-append-only set ``autonomy.org.ledger-event#1``:
+The ruling that design serves: Settings is the table-synchronization method;
+a bespoke table is allowed only with a concrete mechanical reason. Its verdict
+for the event log is *convert*, not mirror: ``ledger_events`` becomes an
+org-homed append-only Settings set keyed by the event id, which is the content
+hash of the event's own signed bytes.
 
-* **publish** — every event in the store gets a row keyed by its event id,
-  payload ``{"wire": <canonical JSON, verbatim>}``. ``LedgerStore.append``
-  calls :func:`publish_event` best-effort after its own transaction commits
-  (a row write must never fail a ledger append); :func:`reconcile` backfills
-  anything missed, idempotent by key.
-* **ingest** — rows whose event id the store does not hold are fed through
-  ``LedgerStore.append_wire``, which re-verifies the content hash and the
-  embedded author signature and maintains this store's own parents/heads
-  indexes. Delivery order does not matter: unappendable rows (parent not yet
-  arrived) are retried each pass until a pass makes no progress.
+One home, therefore:
 
-The set is the TRANSPORT, never the store — the ledger tables stay LOCAL in
-fleet-sync policy and are rebuilt per node by ``absorb``/``append_wire``.
-A store with no genesis ignores foreign rows entirely: founding arrives via
-the join flow, never from replicated rows.
+* **Write** — appending an event writes exactly one Settings row. That write is
+  what the capture triggers replicate, so an event is on the wire by virtue of
+  being stored, not by a second bookkeeping step.
+* **Read** — a store loads its events from those rows and rebuilds its in-memory
+  graph from them. Parent links are inside each signed event; heads are computed
+  from the graph.
+* **Receive** — a co-member's events arrive as ordinary replicated rows, into the
+  same place this store reads from. There is no absorb step, because there is
+  nowhere else to absorb them to.
 
-Production wiring: the fleet-sync scheduler calls :func:`reconcile` after
-each successful org-scope pull (the post-sync sweep the bead names), and
-``LedgerStore.append`` publishes fresh events inline.
+The interim shape (bead auto-dqemk) kept ``ledger_events`` as the store and
+mirrored each event into the set as a transport copy. Two copies of the same
+bytes cannot be written atomically -- SQLite locks per file, so the mirror had
+to be a second connection after the first transaction committed -- which is why
+that arrangement needed a repair pass and a correspondence check. Converting
+removes the second copy and every mechanism that existed to reconcile it.
+
+:func:`migrate_events_to_settings` carries a legacy store's rows across on open.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 
 logger = logging.getLogger(__name__)
@@ -34,100 +39,132 @@ SET_ID = "autonomy.org.ledger-event"
 REVISION = 1
 
 
-def _existing_keys(slug: str) -> set[str]:
-    from tools.graph import settings_ops
+def _slug_of(path) -> str:
+    from pathlib import Path as _Path
 
-    members = settings_ops.read_owned_set(SET_ID, org=slug).members
-    return {str(m.key) for m in members}
-
-
-def publish_event(slug: str, event_id: str, wire: str) -> bool:
-    """Write one event's row; True on write, False when it already exists
-    or the write is impossible here (no org DB, schema mismatch). Never
-    raises — callers on the append path must not fail on transport."""
-    try:
-        from tools.graph import settings_ops
-
-        if event_id in _existing_keys(slug):
-            return False
-        settings_ops.add_setting(
-            SET_ID, REVISION, event_id, {"wire": wire},
-            org=slug, state="published",
-        )
-        return True
-    except Exception:
-        logger.debug("ledger-event row publish skipped for %s", slug, exc_info=True)
-        return False
+    return _Path(str(path)).stem
 
 
-def reconcile(slug: str) -> dict:
-    """Publish missing rows for local events; absorb foreign rows into the
-    local store. Returns ``{"published": n, "absorbed": n, "unappendable": n}``.
+#: The settings table as tools/graph/db.py defines it. Created only when
+#: absent, which is the case for a bare ledger file (tests, tooling); a real
+#: organization database already has it and this is a no-op there.
+_SETTINGS_DDL = (
+    "CREATE TABLE IF NOT EXISTS settings ("
+    " id TEXT PRIMARY KEY,"
+    " set_id TEXT NOT NULL,"
+    " schema_revision INTEGER NOT NULL,"
+    " key TEXT NOT NULL,"
+    " payload TEXT NOT NULL,"
+    " publication_state TEXT NOT NULL DEFAULT 'raw'"
+    "   CHECK (publication_state IN ('raw','curated','published','canonical')),"
+    " supersedes TEXT,"
+    " excludes TEXT,"
+    " deprecated INTEGER NOT NULL DEFAULT 0 CHECK (deprecated IN (0,1)),"
+    " successor_id TEXT,"
+    " created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),"
+    " updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))"
+    ")"
+)
 
-    Safe to run any time; every step is idempotent. A store that does not
-    exist or has no genesis publishes nothing and absorbs nothing.
+
+def ensure_settings_table(conn) -> None:
+    """Make sure the connection's database can hold event rows."""
+    conn.execute(_SETTINGS_DDL)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_settings_set ON settings(set_id, key)")
+
+
+def read_event_wires(conn) -> dict:
+    """``{event_id: wire}`` for every event stored in *conn*'s database.
+
+    Read on the store's OWN connection, against the file it was opened on.
+    A ledger loads its own store's rows and never a peer's, so there is no
+    org resolution here -- the path the caller gave is the answer.
     """
-    from tools.graph import settings_ops
-    from .store import LedgerStore, org_ledger_db_path
-
-    report = {"published": 0, "absorbed": 0, "unappendable": 0}
-    path = org_ledger_db_path(slug)
-    if not path.exists():
-        return report
-    # Read-only probe before any LedgerStore open: opening a store CREATES
-    # the ledger tables and writes a WAL/meta row, which must not happen to
-    # a database that never held a ledger (and must not take a write lock
-    # on a file the sync engine may be mid-install on).
     import sqlite3
 
     try:
-        probe = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        try:
-            has_ledger = probe.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' "
-                "AND name='ledger_events' LIMIT 1"
-            ).fetchone() is not None
-        finally:
-            probe.close()
+        rows = conn.execute(
+            'SELECT "key", payload FROM settings WHERE set_id=? '
+            "AND supersedes IS NULL AND excludes IS NULL AND deprecated=0",
+            (SET_ID,),
+        ).fetchall()
     except sqlite3.Error:
-        return report
-    if not has_ledger:
-        return report
-    with LedgerStore(path) as store:
-        if store.ledger.genesis_id is None:
-            return report
-        rows = {
-            str(m.key): (m.payload or {}).get("wire")
-            for m in settings_ops.read_owned_set(SET_ID, org=slug).members
+        return {}
+    out: dict = {}
+    for key, payload in rows:
+        try:
+            body = json.loads(payload) if isinstance(payload, str) else payload
+            wire = body.get("wire") if isinstance(body, dict) else None
+        except (ValueError, TypeError):
+            continue
+        if isinstance(wire, str) and wire:
+            out[str(key)] = wire
+    return out
+
+
+def write_event(conn, event_id: str, wire: str) -> bool:
+    """Store one event as its Settings row, on the caller's connection.
+
+    Returns False when the row is already there. The caller supplies the
+    transaction, so the event is stored atomically -- there is no second
+    connection and no window in which the event exists in one place and not
+    another. On a real organization database this INSERT is what the capture
+    triggers replicate, so an event is on the wire by virtue of being stored.
+    """
+    import uuid
+
+    from tools.graph.schemas.org_ledger_event import OrgLedgerEventV1
+
+    payload = {"wire": wire}
+    OrgLedgerEventV1.validate(payload)
+    OrgLedgerEventV1.validate_member_key(event_id)
+    existing = conn.execute(
+        'SELECT 1 FROM settings WHERE set_id=? AND "key"=? LIMIT 1',
+        (SET_ID, event_id),
+    ).fetchone()
+    if existing is not None:
+        return False
+    conn.execute(
+        "INSERT INTO settings(id, set_id, schema_revision, key, payload,"
+        " publication_state) VALUES(?,?,?,?,?,'published')",
+        (str(uuid.uuid4()), SET_ID, REVISION, event_id, json.dumps(payload)),
+    )
+    return True
+
+
+def migrate_events_to_settings(conn, label: str = "") -> int:
+    """Carry a legacy ``ledger_events`` table into the Settings set.
+
+    Returns the number of events carried. Idempotent, and a no-op for a store
+    that never held the table or whose rows are already across. The table is
+    left in place: dropping it is a separate, later step once every store on
+    every machine has been through this.
+    """
+    import sqlite3
+
+    try:
+        has_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='ledger_events' LIMIT 1"
+        ).fetchone() is not None
+        if not has_table:
+            return 0
+        legacy = {
+            str(row[0]): bytes(row[1]).decode("utf-8")
+            for row in conn.execute("SELECT event_id, wire FROM ledger_events")
         }
-        # Publish local events the set lacks.
-        for event in store.events():
-            if event.event_id not in rows:
-                if publish_event(slug, event.event_id, event.to_json().decode("utf-8")):
-                    report["published"] += 1
-        # Absorb foreign rows the store lacks; retry until a pass makes no
-        # progress so parents arriving in any order still converge.
-        pending = {
-            key: wire for key, wire in rows.items()
-            if wire and key not in store.ledger
-        }
-        while pending:
-            progressed = []
-            for key, wire in pending.items():
-                try:
-                    store.append_wire(wire.encode("utf-8"))
-                except Exception:
-                    continue
-                progressed.append(key)
-                report["absorbed"] += 1
-            if not progressed:
-                break
-            for key in progressed:
-                pending.pop(key, None)
-        report["unappendable"] = len(pending)
-        if pending:
-            logger.warning(
-                "ledger-event ingest for %s left %d row(s) unappendable "
-                "(bad wire or parents never arrived)", slug, len(pending),
-            )
-    return report
+    except (sqlite3.Error, UnicodeDecodeError):
+        return 0
+    if not legacy:
+        return 0
+    carried = 0
+    with conn:
+        for event_id, wire in legacy.items():
+            if write_event(conn, event_id, wire):
+                carried += 1
+    if carried:
+        logger.info(
+            "ledger migration: carried %d legacy event(s) of %s into %s",
+            carried, label or "store", SET_ID,
+        )
+    return carried

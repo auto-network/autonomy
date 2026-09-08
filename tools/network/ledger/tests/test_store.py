@@ -242,40 +242,51 @@ class TestTamperDetection:
         db = tmp_path / "org.ledger.db"
         store_from(sim, db).close()
 
+        import json as _json
+
+        from tools.network.ledger.settings_bridge import SET_ID
+
         raw = sqlite3.connect(db)
-        (victim,) = raw.execute(
-            "SELECT event_id FROM ledger_events WHERE event_type='delegate' LIMIT 1"
-        ).fetchone()
-        wire = raw.execute(
-            "SELECT wire FROM ledger_events WHERE event_id=?", (victim,)
-        ).fetchone()[0]
-        tampered = bytes(wire).replace(b'"can_redelegate":true', b'"can_redelegate":false')
-        if tampered == bytes(wire):
-            tampered = bytes(wire).replace(
-                b'"can_redelegate":false', b'"can_redelegate":true'
-            )
+        rows = raw.execute(
+            'SELECT "key", payload FROM settings WHERE set_id=?', (SET_ID,)
+        ).fetchall()
+        victim, payload = next(
+            (k, p) for k, p in rows if b'"delegate"' in _json.loads(p)["wire"].encode()
+        )
+        wire = _json.loads(payload)["wire"]
+        tampered = wire.replace('"can_redelegate":true', '"can_redelegate":false')
+        if tampered == wire:
+            tampered = wire.replace('"can_redelegate":false', '"can_redelegate":true')
         with raw:
-            raw.execute("UPDATE ledger_events SET wire=? WHERE event_id=?", (tampered, victim))
+            raw.execute(
+                'UPDATE settings SET payload=? WHERE set_id=? AND "key"=?',
+                (_json.dumps({"wire": tampered}), SET_ID, victim),
+            )
         raw.close()
 
         with pytest.raises(TamperError):
             LedgerStore(db)
 
-    def test_heads_table_tamper_detected_on_open(self, tmp_path):
+    def test_heads_cannot_be_lied_about_because_they_are_derived(self, tmp_path):
+        """Heads used to be a stored table that a tamper check defended.
+
+        They are no longer stored at all: each event carries its parents
+        inside its own signed bytes, so the graph -- and therefore its
+        heads -- is computed from the events on every open. There is
+        nothing to falsify, which is a stronger property than detecting a
+        falsification (design graph://53b5bb04-bc0).
+        """
         sim = populated_sim()
         db = tmp_path / "org.ledger.db"
         store_from(sim, db).close()
+        with LedgerStore(db) as store:
+            expected = set(store.ledger.heads())
         raw = sqlite3.connect(db)
         with raw:
             raw.execute("DELETE FROM ledger_heads")
-            # genesis always has children here, so it is never a real head
-            raw.execute(
-                "INSERT INTO ledger_heads(event_id) SELECT event_id FROM ledger_events"
-                " WHERE event_type='genesis'"
-            )
         raw.close()
-        with pytest.raises(TamperError):
-            LedgerStore(db)
+        with LedgerStore(db) as store:
+            assert set(store.ledger.heads()) == expected
 
 
 class TestCheckpointColdJoin:

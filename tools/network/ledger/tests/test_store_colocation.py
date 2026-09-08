@@ -155,14 +155,20 @@ def test_tamper_survives_relocation(orgs_dir):
     victim = sim.ledger.events()[1].event_id
     store.close()
 
+    import json as _json
+
+    from tools.network.ledger.settings_bridge import SET_ID
+
     raw = sqlite3.connect(org_ledger_db_path("acme"))
     with raw:
-        wire = raw.execute(
-            "SELECT wire FROM ledger_events WHERE event_id=?", (victim,)
+        payload = raw.execute(
+            'SELECT payload FROM settings WHERE set_id=? AND "key"=?', (SET_ID, victim)
         ).fetchone()[0]
-        tampered = bytes(wire[:-1]) + bytes([wire[-1] ^ 1])
+        wire = _json.loads(payload)["wire"]
+        tampered = wire[:-1] + chr(ord(wire[-1]) ^ 1)
         raw.execute(
-            "UPDATE ledger_events SET wire=? WHERE event_id=?", (tampered, victim)
+            'UPDATE settings SET payload=? WHERE set_id=? AND "key"=?',
+            (_json.dumps({"wire": tampered}), SET_ID, victim)
         )
     raw.close()
     with pytest.raises(TamperError):

@@ -224,19 +224,31 @@ class LedgerStore:
                     )
 
     def _hydrate(self) -> None:
-        rows = self.db.execute("SELECT event_id, wire FROM ledger_events").fetchall()
+        """Load this store's events from their Settings rows.
+
+        Events ARE Settings rows (design graph://53b5bb04-bc0): one home, and
+        replication delivers a co-member's events into the same place this
+        reads from. A legacy store's ``ledger_events`` table is carried across
+        first; heads are computed from the graph rather than stored, since the
+        parents are inside each signed event.
+        """
+        from .settings_bridge import (
+            ensure_settings_table, migrate_events_to_settings, read_event_wires,
+        )
+
+        ensure_settings_table(self.db)
+        migrate_events_to_settings(self.db, label=Path(self.path).stem)
+        wires = read_event_wires(self.db)
         events = []
-        for event_id, wire in rows:
-            if hashlib.sha256(wire).hexdigest() != event_id:
+        for event_id, wire in wires.items():
+            raw = wire.encode("utf-8")
+            if hashlib.sha256(raw).hexdigest() != event_id:
                 raise TamperError(
                     f"stored event {event_id[:12]} does not match its content address"
                 )
-            events.append(Event.from_json(bytes(wire)))  # anti-malleable parse
+            events.append(Event.from_json(raw))  # anti-malleable parse
         if events:
             self.ledger.ingest(events)
-        stored_heads = {r[0] for r in self.db.execute("SELECT event_id FROM ledger_heads")}
-        if stored_heads != set(self.ledger.heads()):
-            raise TamperError("stored heads table does not match the event DAG")
 
     # -- write side ----------------------------------------------------------------
 
@@ -253,44 +265,16 @@ class LedgerStore:
         self.ledger.add(event)  # full structural verification; idempotent
         if known:
             return event.event_id
-        with self.db:
-            self.db.execute(
-                "INSERT INTO ledger_events(event_id, event_type, author_key, hlc_ts, hlc_count, wire)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    event.event_id,
-                    event.type,
-                    event.author_key,
-                    event.hlc.ts,
-                    event.hlc.count,
-                    event.to_json(),
-                ),
-            )
-            self.db.executemany(
-                "INSERT INTO ledger_parents(event_id, parent_id) VALUES (?, ?)",
-                [(event.event_id, p) for p in event.parents],
-            )
-            self.db.executemany(
-                "DELETE FROM ledger_heads WHERE event_id = ?", [(p,) for p in event.parents]
-            )
-            self.db.execute("INSERT INTO ledger_heads(event_id) VALUES (?)", (event.event_id,))
-        # Bead auto-dqemk: the event also rides the org's replicated Settings
-        # set (autonomy.org.ledger-event#1) so peers can rebuild their ledger
-        # from rows. Best-effort by contract — a transport-row write must
-        # never fail a ledger append; settings_bridge.reconcile repairs
-        # anything missed.
-        try:
-            from .settings_bridge import publish_event
+        # ONE write, to the one home. The Settings row IS the event's storage
+        # (design graph://53b5bb04-bc0), and that write is what the capture
+        # triggers replicate -- so an event is on the wire by virtue of being
+        # stored. A failure here is a failure to record the event and is
+        # raised, not swallowed: there is no second copy to fall back on and
+        # nothing to reconcile later.
+        from .settings_bridge import write_event
 
-            publish_event(
-                Path(self.path).stem, event.event_id,
-                event.to_json().decode("utf-8"),
-            )
-        except Exception:
-            logging.getLogger(__name__).debug(
-                "ledger-event row publish hook failed for %s",
-                self.path, exc_info=True,
-            )
+        with self.db:
+            write_event(self.db, event.event_id, event.to_json().decode("utf-8"))
         return event.event_id
 
     def append_wire(self, raw) -> str:
@@ -674,10 +658,28 @@ def relocate_ledger_to_org_db(slug: str, *, root=None) -> bool:
         return False
     legacy_db = sqlite3.connect(legacy_path)
     try:
-        try:
-            rows = legacy_db.execute("SELECT event_id, wire FROM events").fetchall()
-        except sqlite3.OperationalError:
-            rows = []  # no events table: nothing to relocate
+        # A legacy file may hold its events in any of the three shapes this
+        # store has had: the original `events` table, the interim
+        # `ledger_events` table, or -- for a file written after the
+        # conversion -- the Settings rows that are now the only storage.
+        rows: list = []
+        for statement in (
+            "SELECT event_id, wire FROM events",
+            "SELECT event_id, wire FROM ledger_events",
+        ):
+            try:
+                rows = legacy_db.execute(statement).fetchall()
+            except sqlite3.OperationalError:
+                continue
+            if rows:
+                break
+        if not rows:
+            from .settings_bridge import read_event_wires
+
+            rows = [
+                (event_id, wire.encode("utf-8"))
+                for event_id, wire in read_event_wires(legacy_db).items()
+            ]
     finally:
         legacy_db.close()
     if not rows:

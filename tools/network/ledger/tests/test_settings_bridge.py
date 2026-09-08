@@ -1,13 +1,15 @@
-"""Ledger events ride Settings (auto-dqemk): publish on append, absorb on arrival.
+"""Ledger events ARE Settings rows (design of record graph://53b5bb04-bc0).
 
-Two "machines" are two orgs roots (AUTONOMY_ORGS_DIR switched between them);
-row arrival on machine 2 is simulated by writing the same rows into its own
-settings table — exactly what fleet-sync materialization produces.
+One home: appending an event writes exactly one Settings row, loading a store
+reads its events from those rows, and a co-member's events arrive as ordinary
+replicated rows into the same place. Two "machines" are two org roots
+(AUTONOMY_ORGS_DIR switched between them); row arrival on machine 2 is
+simulated by writing the same rows into its own settings table — exactly what
+fleet-sync materialization produces.
 """
 from __future__ import annotations
 
-import hashlib
-import time
+import sqlite3
 
 import pytest
 
@@ -55,87 +57,107 @@ def machine1(tmp_path, monkeypatch):
     GraphDB.close_all_pooled()
 
 
-def test_append_publishes_a_row_per_event(machine1):
+def test_an_event_is_stored_as_exactly_one_settings_row(machine1):
+    """The row is the storage, not a copy of it."""
     with LedgerStore(org_ledger_db_path(SLUG)) as store:
         events = store.events()
     rows = _rows()
-    assert set(rows) == {e.event_id for e in events}
-    for event_id, wire in rows.items():
-        assert hashlib.sha256(wire.encode("utf-8")).hexdigest() == event_id
+    assert {e.event_id for e in events} == set(rows)
+    for event in events:
+        assert rows[event.event_id] == event.to_json().decode("utf-8")
 
 
-def test_reconcile_backfills_missed_events(machine1, monkeypatch):
-    # Wipe the set to model events appended while publish was impossible.
-    db = GraphDB.for_org(SLUG)
-    db.conn.execute(
-        "DELETE FROM settings WHERE set_id = ?", (settings_bridge.SET_ID,)
-    )
-    db.conn.commit()
-    GraphDB.close_all_pooled()
-    assert _rows() == {}
-    report = settings_bridge.reconcile(SLUG)
+def test_the_store_reloads_its_events_from_the_rows(machine1):
     with LedgerStore(org_ledger_db_path(SLUG)) as store:
-        event_ids = {e.event_id for e in store.events()}
-    assert report["published"] == len(event_ids)
-    assert set(_rows()) == event_ids
-
-
-def test_rows_absorb_into_a_second_founded_store(machine1, tmp_path, monkeypatch):
-    rows = _rows()
+        before = {e.event_id for e in store.events()}
+        genesis = store.ledger.genesis_id
+    # A fresh store object reads the same rows and rebuilds the same graph.
     with LedgerStore(org_ledger_db_path(SLUG)) as store:
-        genesis_id = store.ledger.genesis_id
-        fold1 = store.fold(now=NOW_MS + 10)
-
-    # Machine 2: fresh root, org DB present, genesis delivered by the join
-    # flow (simulated by feeding exactly the genesis wire), rows arriving
-    # via sync materialization (simulated by add_setting of the same rows).
-    _use_root(monkeypatch, tmp_path / "m2")
-    GraphDB.create_org_db(SLUG, root=tmp_path / "m2", org_id=ORG_ID).close()
-    with LedgerStore(org_ledger_db_path(SLUG)) as store2:
-        store2.append_wire(rows[genesis_id].encode("utf-8"))
-    for key, wire in rows.items():
-        settings_bridge.publish_event(SLUG, key, wire)
-
-    report = settings_bridge.reconcile(SLUG)
-    assert report["unappendable"] == 0
-    with LedgerStore(org_ledger_db_path(SLUG)) as store2:
-        assert {e.event_id for e in store2.events()} == set(rows)
-        fold2 = store2.fold(now=NOW_MS + 10)
-    assert fold1.members.keys() == fold2.members.keys()
-    assert fold1.invites == fold2.invites
+        assert {e.event_id for e in store.events()} == before
+        assert store.ledger.genesis_id == genesis
+        assert set(store.ledger.heads())  # heads computed from the graph
 
 
-def test_corrupt_row_is_unappendable_and_isolates(machine1, tmp_path, monkeypatch):
-    # Corrupt the chain's LEAF (the store's single head): exactly that one
-    # row fails to absorb, and every other event still converges. A corrupt
-    # mid-chain row would honestly orphan its descendants too.
-    rows = _rows()
-    with LedgerStore(org_ledger_db_path(SLUG)) as store:
-        genesis_wire = rows[store.ledger.genesis_id]
-        (leaf_id,) = store.ledger.heads()
+def test_there_is_no_second_copy_to_diverge(machine1):
+    """Nothing writes ledger_events any more, so nothing can drift from it."""
+    with sqlite3.connect(org_ledger_db_path(SLUG)) as conn:
+        legacy = conn.execute(
+            "SELECT COUNT(*) FROM ledger_events"
+        ).fetchone()[0]
+    assert legacy == 0
+    assert len(_rows()) >= 4
+
+
+def test_a_co_members_events_arrive_as_ordinary_rows(tmp_path, monkeypatch, machine1):
+    """Replication delivers rows into the place the store reads from, so a
+    second machine needs no absorb step at all."""
+    wires = _rows()
+    assert wires
 
     _use_root(monkeypatch, tmp_path / "m2")
     GraphDB.create_org_db(SLUG, root=tmp_path / "m2", org_id=ORG_ID).close()
-    with LedgerStore(org_ledger_db_path(SLUG)) as store2:
-        store2.append_wire(genesis_wire.encode("utf-8"))
-    for key, wire in rows.items():
-        settings_bridge.publish_event(
-            SLUG, key, '{"corrupt": true}' if key == leaf_id else wire
+    # Exactly what fleet-sync materialization produces on the receiver.
+    for event_id, wire in wires.items():
+        settings_ops.add_setting(
+            settings_bridge.SET_ID, settings_bridge.REVISION, event_id,
+            {"wire": wire}, org=SLUG, state="published",
         )
-    report = settings_bridge.reconcile(SLUG)
-    assert report["unappendable"] == 1
-    with LedgerStore(org_ledger_db_path(SLUG)) as store2:
-        assert len(store2.events()) == len(rows) - 1
-        assert leaf_id not in store2.ledger
+    with LedgerStore(org_ledger_db_path(SLUG)) as store:
+        assert {e.event_id for e in store.events()} == set(wires)
+        assert store.ledger.genesis_id is not None
 
 
-def test_unfounded_store_ignores_rows(machine1, tmp_path, monkeypatch):
-    rows = _rows()
-    _use_root(monkeypatch, tmp_path / "m2")
-    GraphDB.create_org_db(SLUG, root=tmp_path / "m2", org_id=ORG_ID).close()
-    for key, wire in rows.items():
-        settings_bridge.publish_event(SLUG, key, wire)
-    report = settings_bridge.reconcile(SLUG)
-    assert report == {"published": 0, "absorbed": 0, "unappendable": 0}
-    with LedgerStore(org_ledger_db_path(SLUG)) as store2:
-        assert store2.ledger.genesis_id is None
+def test_a_legacy_store_is_carried_across_on_open(tmp_path, monkeypatch):
+    """A store written before the conversion holds its events in the old
+    table; opening it moves them into the rows, once and idempotently."""
+    _use_root(monkeypatch, tmp_path / "m3")
+    _found(tmp_path / "m3")
+    path = org_ledger_db_path(SLUG)
+    wires = _rows()
+    assert wires
+
+    # Rewind to the pre-conversion shape: events in the table, no rows.
+    db = GraphDB(path)
+    try:
+        for event_id, wire in wires.items():
+            db.conn.execute(
+                "INSERT OR IGNORE INTO ledger_events(event_id, event_type,"
+                " author_key, hlc_ts, hlc_count, wire) VALUES(?,?,?,?,?,?)",
+                (event_id, "genesis", "aa" * 32, 1, 0, wire.encode("utf-8")),
+            )
+        db.conn.execute(
+            "DELETE FROM settings WHERE set_id=?", (settings_bridge.SET_ID,)
+        )
+        db.conn.commit()
+    finally:
+        db.close()
+    assert _rows() == {}
+
+    with LedgerStore(path) as store:
+        assert {e.event_id for e in store.events()} == set(wires)
+    assert set(_rows()) == set(wires)
+    # Idempotent: a second open carries nothing and changes nothing.
+    with sqlite3.connect(path) as conn:
+        assert settings_bridge.migrate_events_to_settings(conn) == 0
+    assert set(_rows()) == set(wires)
+
+
+def test_a_failed_write_is_raised_not_swallowed(machine1, monkeypatch):
+    """Storing an event is the append; a failure must reach the caller
+    rather than leaving an event that exists in memory and nowhere else."""
+    from tools.network.ledger.events import make_event
+    from tools.network.ledger.hlc import HLC
+
+    def boom(*a, **k):
+        raise RuntimeError("settings write refused")
+
+    with LedgerStore(org_ledger_db_path(SLUG)) as store:
+        monkeypatch.setattr(settings_bridge, "write_event", boom)
+        event = make_event(
+            KeyPair.generate(),
+            {"type": "role.define", "name": "reader", "scope_set": ["read"],
+             "claim_requires": "self", "version": 1},
+            list(store.ledger.heads()), HLC(NOW_MS + 1, 0),
+        )
+        with pytest.raises(RuntimeError, match="settings write refused"):
+            store.append(event)
