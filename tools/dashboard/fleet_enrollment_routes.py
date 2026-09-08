@@ -280,6 +280,9 @@ def _reachability_peer_addresses(credential, root_pub, *, pull_direct=True):
         ),
         advertise_addrs=_fleet_advertise_addrs,
         relay_url=_own_standing_route_hint,
+        # Off the event loop: a due refresh runs on its own thread and the
+        # scheduler gets the last map at once (auto-8dw0w).
+        background=True,
     )
     _reachability_cache = cache
     # The relay puller follows the origin's published standing route over the
@@ -404,6 +407,11 @@ def _activate_runtime(
             # identical to the sync-only path.
             peer_addresses=_reachability_peer_addresses(
                 credential, root_pub, pull_direct=direct.pull_direct,
+            ),
+            # A failed pull re-looks that peer up before the next interval.
+            on_peer_failure=lambda pub: (
+                _reachability_cache.note_failed(pub)
+                if _reachability_cache is not None else None
             ),
             personal_db_path=_org_db_path("personal"),
             telemetry_recorder=fleet_sync_telemetry.record_iteration,

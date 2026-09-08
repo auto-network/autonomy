@@ -107,6 +107,10 @@ def _tailscale_addresses() -> list[str]:
     return [line.strip() for line in out.stdout.splitlines() if line.strip()]
 
 
+#: Interface-name prefixes whose addresses no peer off this host can dial.
+_UNDIALABLE_IFNAME_PREFIXES = ("docker", "br-", "veth", "virbr", "lxc", "lxd", "cni", "flannel")
+
+
 def _ip_command_addresses() -> list[str]:
     binary = shutil.which("ip")
     if not binary:
@@ -121,7 +125,16 @@ def _ip_command_addresses() -> list[str]:
         return []
     found = []
     for link in links if isinstance(links, list) else []:
-        for info in (link.get("addr_info") or []) if isinstance(link, dict) else []:
+        if not isinstance(link, dict):
+            continue
+        # Container bridges and virtual NICs (docker0, br-*, veth*, virbr*)
+        # are addresses only this host's containers can reach; announcing
+        # them made every peer burn a connect attempt on ws://172.16.0.2
+        # (auto-8dw0w, 2026-09-07).
+        ifname = str(link.get("ifname") or "")
+        if ifname.startswith(_UNDIALABLE_IFNAME_PREFIXES):
+            continue
+        for info in (link.get("addr_info") or []):
             local = info.get("local") if isinstance(info, dict) else None
             if isinstance(local, str):
                 found.append(local)
