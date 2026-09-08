@@ -2,8 +2,9 @@
 
 ## Ops view
 
-`/mission/<uuid>#view=ops` opens the organization-wide operational view inside
-the selected mission. It reads all tasks from that org's tracker (including
+`/mission/<uuid>#view=ops` defaults to the selected mission's tasks and open
+questions. The scope selector can explicitly include all organization work.
+The read API still supplies all tasks from that org's tracker (including
 unallocated work), questions from its missions, and that org's live sessions.
 Other organizations and personal host sessions are not imported. Missing
 tracker data and coordinator seats remain visible as unknown/vacant.
@@ -27,6 +28,15 @@ tracker field, not a second ownership field in metadata.
 Ready means an open task has specification and known-clear blocking
 prerequisites, not approval to execute. Parent-child edges do not block work.
 Closed tasks and confirmed acceptance criteria remain distinct.
+
+Counts, the featured question, and work filters respect the selected scope.
+Headers sort by issue, phase, session IDs, or updated/completed time, with
+unknown values last. Default order is blocking questions, priority, newest
+update (completion time in Recently completed). The unlinked-session list
+is explicitly organization-wide; ownership elsewhere is not counted missing.
+Where replies go lists coordinator destinations for the selected scope.
+Persisted discussion is visible in the detail view after reopening; an open
+question with a member reply is marked Reply saved, not silently called new.
 
 Send and Needs clarification append a reply; only explicit Resolve answers
 the question. Receipts distinguish stored text from relay confirmation and
