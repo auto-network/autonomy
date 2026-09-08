@@ -31,7 +31,7 @@
   }
   global.missionOps = function (config) {
     // Browser objects and unsubscribe handles must not be Alpine-proxied.
-    let capture = null;
+    let capture = null, unsubscribeItems = null, itemRefreshTimer = null, itemRead = 0;
     function voiceContext() {
       try {
         let win = global;
@@ -55,8 +55,31 @@
       talking: false, voiceError: '', reportTitle: '', reportBody: '',
       filters: [['focus', 'In focus'], ['all', 'All open'], ['ready', 'Ready to pick up'],
         ['spec', 'Needs shaping'], ['check', 'Ready to check'], ['completed', 'Recently completed']],
-      init() { this.refresh(); this.clock = setInterval(() => { this.now = Date.now(); }, 60000); },
-      destroy() { this.stopDictation(); clearInterval(this.clock); },
+      init() {
+        this.refresh(); this.clock = setInterval(() => { this.now = Date.now(); }, 60000);
+        const events = voiceContext()?.root.dashboardEvents;
+        if (events?.onSettingChanged) unsubscribeItems = events.onSettingChanged('mission.item', event => {
+          if (event?.org && event.org !== config.org) return;
+          clearTimeout(itemRefreshTimer);
+          itemRefreshTimer = setTimeout(() => this.refreshConversation(), 250);
+        });
+      },
+      destroy() { itemRead++; this.stopDictation(); clearInterval(this.clock); clearTimeout(itemRefreshTimer); if (unsubscribeItems) unsubscribeItems(); },
+      async refreshConversation() {
+        const issue = this.current;
+        if (this.view !== 'detail' || !issue?.item || !this.raw) return;
+        const read = ++itemRead;
+        try {
+          const response = await fetch('/api/mission/items/' + enc(issue.missionId), {credentials:'same-origin'});
+          if (!response.ok) throw new Error('Conversation update unavailable.');
+          const data = await response.json();
+          if (!Array.isArray(data.items)) throw new Error('Conversation update unavailable.');
+          if (read !== itemRead || this.view !== 'detail' || this.selectedId !== issue.id) return;
+          this.raw.items = this.raw.items.filter(i => i.mission_id !== issue.missionId).concat(data.items.map(i => ({...i,mission_id:issue.missionId})));
+          this.now = Date.now(); this.project();
+          if (!this.current) { this.stopDictation(); this.view = 'overview'; this.notice = 'The question has been resolved or removed.'; }
+        } catch (_) { /* Keep the current question and draft; explicit refresh retries. */ }
+      },
       async refresh() {
         if (this._fetching) return;
         this._fetching = true; this.loading = true;
@@ -66,6 +89,7 @@
           const data = await r.json();
           if (!Array.isArray(data.tasks) || !Array.isArray(data.items) || !Array.isArray(data.sessions)) throw new Error('Invalid Ops response.');
           this.now = Date.now();
+          itemRead++; // A full refresh supersedes any older conversation read.
           this.raw = data; this.errors = data.errors || []; this.sessions = data.sessions;
           this.project();
           if (this.view === 'detail' && (!this.current || !this.current.canSend)) this.stopDictation();
@@ -210,7 +234,7 @@
       dictate() {
         if (this.talking) { this.stopDictation(); return; }
         this.voiceError = '';
-        if (this.view !== 'detail' || !this.current?.canSend || this.sending || this.answers[this.selectedId]) return;
+        if (this.view !== 'detail' || !this.current?.canSend || this.sending) return;
         const context = voiceContext();
         if (!context?.voice?.enabled) { this.voiceError = 'Capsule dictation is unavailable. Open Ops inside Mission Control with voice enabled.'; return; }
         if (!context.voice.boundSessionId) { this.voiceError = 'Start the capsule on a live session first, then return here and tap Dictate.'; return; }
@@ -293,17 +317,18 @@
         this.stopDictation();
         const issue = this.current, text = override === null ? this.draft.trim() : override;
         if (!issue?.canSend || !text || this.sending || (action === 'answer' && !issue.canResolve)) return;
-        const id = issue.id;
+        const id = issue.id, submittedDraft = this.draft;
         this.sending = true; this.sendError = '';
         try {
           const payload = issue.item ? text : '[' + issue.task.id + '] ' + text;
           const receipt = await this.post(this.endpoint(issue, action), payload);
           this.answers[id] = {text, receipt};
-          this.notice = receipt;
-          await this.$nextTick();
-          this.drafts[id] = '';
+          // A successful send is one conversation turn, not a terminal UI state.
+          // Do not erase a follow-up typed while the request was in flight.
+          if (this.drafts[id] === submittedDraft) this.drafts[id] = '';
           if (action === 'answer') { issue.canResolve = false; issue.canSend = false; }
           await this.refresh();
+          if (this.selectedId === id && this.view === 'detail') this.$nextTick(() => this.$refs.answer?.focus());
         } catch (e) { this.sendError = e.message; }
         finally { this.sending = false; }
       },
