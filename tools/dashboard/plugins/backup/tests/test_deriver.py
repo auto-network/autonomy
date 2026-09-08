@@ -182,8 +182,31 @@ class TestFleetNonSourceMachine:
     """A fleet machine with no backup configuration must not alarm about
     a job it was never given (operator-observed on SJC, 2026-09-08)."""
 
-    def test_no_evidence_means_no_conditions(self):
-        assert D.derive_conditions([], {}, now=NOW, reports_exist=False) == []
+    def test_no_evidence_retracts_rather_than_falling_silent(self):
+        """SJC carried two open needs_attention rows written before the
+        source check existed; silence would strand them (host-measured
+        2026-09-08). Every emitted row is a resolve, never a raise."""
+        conditions = D.derive_conditions([], {}, now=NOW,
+                                         reports_exist=False)
+        assert conditions, "must retract, not return nothing"
+        assert all(c["attention_state"] == "resolved" for c in conditions)
+        assert {c["attention_id"] for c in conditions} >= {
+            "backup:stale:hourly", "backup:stale:daily"}
+
+    def test_retraction_clears_an_open_item_and_is_a_noop_otherwise(self):
+        index = _index()
+        # A machine that raised while it looked like a source...
+        D.publish_conditions(index, D.derive_conditions(
+            [], {}, now=NOW, reports_exist=True))
+        assert "backup:stale:hourly" in _open_ids(index)
+        # ...and is then recognized as a non-source, clears itself.
+        D.publish_conditions(index, D.derive_conditions(
+            [], {}, now=NOW, reports_exist=False))
+        assert _open_ids(index) == set()
+        # A second pass writes nothing: nothing is open to resolve.
+        outcome = D.publish_conditions(index, D.derive_conditions(
+            [], {}, now=NOW, reports_exist=False))
+        assert outcome["published"] == []
 
     def test_one_past_run_makes_it_a_source_forever(self):
         runs = [_run("hourly", "20260901-110000",
