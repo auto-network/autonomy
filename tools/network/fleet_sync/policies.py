@@ -219,9 +219,10 @@ TABLE_POLICIES: Final[dict[str, TablePolicy]] = {
 }
 
 
-#: Logical tables that no longer exist in schema.sql and are dropped from
-#: every store on open (GraphDB._migrate_drop_entities), with their addresses
-#: purged from fleet_sync_catalog and fleet_sync_quarantine.
+#: Logical tables that no longer exist in schema.sql. Their DERIVED policy
+#: below is what stops them replicating; physically dropping them from an
+#: existing store is separate HOUSEKEEPING, run deliberately via
+#: GraphDB.drop_retired_entity_tables and never on an open or request path.
 #:
 #: `entities` / `entity_mentions` were a regex index over thoughts and
 #: derivations text -- backticked terms, pairs of capitalised words, a seed
