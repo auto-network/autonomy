@@ -50,7 +50,16 @@ function _bindMarkdownLinks(el, scope, baseUrl) {
   scope = scope || {};
   el.querySelectorAll('a[href]').forEach(a => {
     const raw = a.getAttribute('href');
-    const href = _artifactHref(raw, scope._tmuxSession, baseUrl);
+    let href = _artifactHref(raw, scope._tmuxSession, baseUrl);
+    // Match the session header's existing Design Studio contribution action:
+    // linked entry supplies the originating session and Studio already keeps
+    // it across revisions and exposes its Back to session control.
+    if (/^\/design\/[^/?#]+(?:[?#]|$)/.test(href) &&
+        /^[A-Za-z0-9._-]{1,160}$/.test(scope._tmuxSession || '')) {
+      const designUrl = new URL(href, window.location.origin);
+      designUrl.searchParams.set('from_session', scope._tmuxSession);
+      href = designUrl.pathname + designUrl.search + designUrl.hash;
+    }
     if (!href) { a.removeAttribute('href'); return; }
     a.setAttribute('href', href);
     if (_isAllowedExternalAppHref(href)) {
