@@ -707,18 +707,39 @@
       lightboxFileState: 'idle',
       lightboxFileError: '',
       _lightboxFileRequest: 0,
-      // Rendered markdown HTML when lightboxKind === 'markdown'. Browsers have
+      // Markdown source when lightboxKind === 'markdown'. Browsers have
       // no native text/markdown renderer, so we fetch the raw bytes and render
       // client-side with marked + DOMPurify rather than dropping the file into
       // an iframe (which white-screens).
-      lightboxHtml: '',
+      lightboxMarkdown: '',
       _lightboxPrevViewport: null,
+      async openOutputLink(src) {
+        // Only the existing authorized session-output endpoint may feed this
+        // preview. The endpoint retains its organization and traversal guards.
+        if (!/^\/api\/session\/[^/]+\/output\//.test(src)) return;
+        const request = ++this._lightboxFileRequest;
+        let name = src.split('/').pop().split(/[?#]/)[0];
+        try { name = decodeURIComponent(name); } catch (_) {}
+        this.openLightbox(src, name, { kind: 'markdown', name, loading: true });
+        this.lightboxMarkdown = 'Loading…';
+        try {
+          const response = await fetch(src, { method: 'HEAD', credentials: 'same-origin' });
+          if (request !== this._lightboxFileRequest || this.lightboxSrc !== src) return;
+          if (!response.ok) throw new Error('File unavailable (HTTP ' + response.status + ')');
+          const mime = (response.headers.get('Content-Type') || '').split(';')[0].trim();
+          const kind = /\.md$/i.test(name) ? 'markdown' : this.lightboxKindForMime(mime, name);
+          this.openLightbox(src, name, { kind, name });
+        } catch (err) {
+          if (request !== this._lightboxFileRequest || this.lightboxSrc !== src) return;
+          this.lightboxMarkdown = String(err.message || 'Could not load this file.');
+        }
+      },
       lightboxKindForMime(mime, name) {
         if (typeof name === 'string' && /\.shortcut$/i.test(name)) return 'shortcut';
         if (typeof mime !== 'string' || !mime) return 'download';
         if (mime.indexOf('image/') === 0) return 'image';
         if (mime === 'text/markdown' || mime === 'text/x-markdown') return 'markdown';
-        if (mime === 'application/pdf' || mime.indexOf('text/') === 0) return 'iframe';
+        if (mime === 'application/pdf' || mime === 'application/json' || mime.indexOf('text/') === 0) return 'iframe';
         return 'download';
       },
       _prepareShortcutFile(src, name) {
@@ -811,23 +832,18 @@
         if (this.lightboxKind === 'shortcut') {
           this._prepareShortcutFile(src, this.lightboxName);
         }
-        if (this.lightboxKind === 'markdown') {
-          this.lightboxHtml = '';
+        if (this.lightboxKind === 'markdown' && !opts.loading) {
+          const request = ++this._lightboxFileRequest;
+          this.lightboxMarkdown = 'Loading…';
           fetch(src, { credentials: 'same-origin' })
             .then((r) => (r.ok ? r.text() : Promise.reject(r.status)))
             .then((md) => {
-              if (window.marked && window.DOMPurify) {
-                this.lightboxHtml = window.DOMPurify.sanitize(window.marked.parse(md));
-              } else {
-                // Graceful fallback if marked/DOMPurify aren't loaded yet
-                this.lightboxHtml =
-                  '<pre style="white-space:pre-wrap">' +
-                  md.replace(/[&<>]/g, (s) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[s])) +
-                  '</pre>';
-              }
+              if (request !== this._lightboxFileRequest || this.lightboxSrc !== src) return;
+              this.lightboxMarkdown = md;
             })
             .catch((err) => {
-              this.lightboxHtml = '<div style="color:#f87171">Failed to load: ' + err + '</div>';
+              if (request !== this._lightboxFileRequest || this.lightboxSrc !== src) return;
+              this.lightboxMarkdown = 'Failed to load file (HTTP ' + String(err) + ').';
             });
         }
         // The base layout pins the viewport to maximum-scale=1,
@@ -850,7 +866,7 @@
         this.lightboxAlt = '';
         this.lightboxKind = 'image';
         this.lightboxName = '';
-        this.lightboxHtml = '';
+        this.lightboxMarkdown = '';
         this.lightboxFile = null;
         this.lightboxFileState = 'idle';
         this.lightboxFileError = '';
