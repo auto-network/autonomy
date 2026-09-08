@@ -102,3 +102,60 @@ def test_a_blind_process_scan_is_surfaced_per_machine(capsys):
     home.report["process_scan_unavailable"] = "no readable process entries"
     render([home], compare([home]))
     assert "process scan unavailable" in capsys.readouterr().out
+
+
+def _with_frontier(name, scope, origin, newest_ns, age_s, *, empty=None):
+    t = Target(name=name)
+    t.report = {
+        "verdict": {"top_line": "OK"},
+        "sync_frontiers": {
+            scope: {"origins": [{
+                "origin": origin, "newest_ns": newest_ns,
+                "age_s": age_s, "transactions": 10,
+            }]}
+        },
+        "empty_pull_channels": empty or [],
+    }
+    return t
+
+
+def test_an_idle_scope_is_not_reported_as_a_fault(capsys):
+    """Both machines at the same frontier for an origin that has not written:
+    correct, and must not be flagged. This is the false positive the operator
+    named — absence of updates is not staleness."""
+    from tools.network.fleet_sync_report import compare_frontiers, render_frontiers
+
+    old = 1_000_000_000_000_000_000
+    a = _with_frontier("home", "dynbench", "aa" * 6, old, 61200)
+    b = _with_frontier("sjc-2", "dynbench", "aa" * 6, old, 61200,
+                       empty=["dynbench/direct"])
+    rc = render_frontiers(compare_frontiers([a, b]))
+    assert rc == 0
+    assert "FAIL" not in capsys.readouterr().out
+
+
+def test_a_real_lag_is_reported_with_the_empty_pull_that_explains_it(capsys):
+    from tools.network.fleet_sync_report import (
+        _EMPTY_BY_MACHINE, compare_frontiers, render_frontiers,
+    )
+
+    now = 1_000_000_000_000_000_000
+    day = 24 * 3600 * 1_000_000_000
+    a = _with_frontier("home", "autonomy", "bb" * 6, now, 0)
+    b = _with_frontier("sjc-2", "autonomy", "bb" * 6, now - day, 88300,
+                       empty=["autonomy/direct"])
+    _EMPTY_BY_MACHINE.clear()
+    _EMPTY_BY_MACHINE["sjc-2"] = ["autonomy/direct"]
+    rc = render_frontiers(compare_frontiers([a, b]))
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "sjc-2 24h behind" in out
+    assert "got NOTHING" in out and "autonomy/direct" in out
+
+
+def test_a_single_machine_holding_an_origin_is_not_compared(capsys):
+    from tools.network.fleet_sync_report import compare_frontiers, render_frontiers
+
+    a = _with_frontier("home", "autonomy", "cc" * 6, 1_000_000_000_000_000_000, 0)
+    assert render_frontiers(compare_frontiers([a])) == 0
+    assert "FAIL" not in capsys.readouterr().out

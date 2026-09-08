@@ -744,6 +744,7 @@ def check_sync_data(report: dict) -> None:
             row for row in fleet_sync_telemetry.read_channel_rows()
             if row["direction"] == "pull"
         ]
+        empty_scopes: list[str] = []
         if rows:
             _section("Per-channel sync traffic (pull)")
         by_peer: dict[str, list[dict]] = {}
@@ -763,17 +764,49 @@ def check_sync_data(report: dict) -> None:
                 marker = (
                     "  <- carried last sync" if row is freshest else ""
                 )
+                outcome = payload.get("last_outcome", "?")
+                got = int(payload.get("last_bytes_received", 0) or 0)
+                frames = int(payload.get("last_mutation_frames", 0) or 0)
+                # A pull that completed the handshake and carried no content
+                # is stated as a FACT, not a fault. On an idle scope it is the
+                # correct outcome. It only becomes evidence of a fault when a
+                # peer is known to hold newer writes, and this machine cannot
+                # know that -- fleet_sync_report decides it by comparing
+                # frontiers. Calling it success hides it; calling it a warning
+                # cries wolf on every quiet scope.
+                empty = (
+                    outcome == "success" and frames == 0
+                    and got <= EMPTY_PULL_BYTES
+                )
+                if empty:
+                    outcome = "success, EMPTY (handshake only, no data moved)"
                 _line(
                     f"{peer[:12]} {row['scope']}/{row['channel']}",
-                    f"last {payload.get('last_outcome', '?')}, "
-                    f"last {payload.get('last_bytes_received', 0):,}B in/"
+                    f"last {outcome}, "
+                    f"last {got:,}B in/"
                     f"{payload.get('last_bytes_sent', 0):,}B out, "
                     f"total {payload.get('total_bytes_received', 0):,}B in"
                     f"{marker}",
                 )
+                if empty:
+                    empty_scopes.append(f"{row['scope']}/{row['channel']}")
         report["per_channel_pull_rows"] = len(rows)
+        report["empty_pull_channels"] = empty_scopes
+        if empty_scopes:
+            _detail(
+                "        EMPTY means the server agreed there was nothing past "
+                "the position this machine claimed. On an idle scope that is "
+                "correct. It is a fault ONLY if a peer holds newer writes, "
+                "which one machine cannot know -- run fleet_sync_report to "
+                "compare frontiers and decide."
+            )
     except Exception as exc:
         _line("per-channel check", f"FAILED to run: {exc!r}", warn=True)
+
+
+#: A pull carrying no mutation frames and at most this many bytes moved no
+#: data: it is a handshake and a done frame. Measured live at 418-420 bytes.
+EMPTY_PULL_BYTES = 2048
 
 
 def check_sync_frontiers(report: dict) -> None:
@@ -880,6 +913,100 @@ def check_sync_frontiers(report: dict) -> None:
                 _line(f"  {slug} newest thought", str(newest_thought))
     except Exception as exc:
         _line("sync frontier check", f"FAILED to run: {exc!r}", fail=True)
+
+
+def check_sync_internals(report: dict) -> None:
+    """Dump the engine's own state for each scope: what this machine would
+    SEND on its next pull, and what it has agreed with each peer.
+
+    An empty pull -- success, handshake only, no data -- means the server
+    agreed there was nothing past the position this machine claimed. So the
+    claim is the evidence. Without it, an empty pull is indistinguishable
+    from a healthy idle one and there is nothing to reason about, which is
+    how four scopes stayed a day behind while every check read green.
+
+    Per scope: the compatibility digest (a mismatch pauses that scope), the
+    per-origin watermark map the puller sends, the resume breadcrumb trail,
+    and the peer-state rows. All read-only.
+    """
+    _section("Sync engine internals (what this machine claims, per scope)")
+    internals: dict = {}
+    report["sync_internals"] = internals
+    try:
+        import sqlite3
+
+        from tools.graph.db import _org_db_path, _orgs_dir
+        from tools.network.fleet_sync_scheduler import SQLiteFleetSyncStore
+
+        candidates = [("personal", Path(_org_db_path("personal")))]
+        orgs_dir = _orgs_dir()
+        if orgs_dir.is_dir():
+            for path in sorted(orgs_dir.glob("*.db")):
+                if path.stem not in ("personal", "machine"):
+                    candidates.append((path.stem, path))
+        for slug, path in candidates:
+            if not path.exists():
+                continue
+            entry: dict = {"path": str(path)}
+            internals[slug] = entry
+            try:
+                store = SQLiteFleetSyncStore(path)
+                entry["compatibility_digest"] = store.compatibility_digest()
+                entry["watermarks"] = {
+                    origin: int(ts) for origin, ts in
+                    (store.origin_watermarks() or {}).items()
+                }
+                entry["has_state"] = bool(store.has_state())
+            except Exception as exc:
+                entry["error"] = repr(exc)
+                _line(f"scope {slug}", f"unreadable: {exc!r}", warn=True)
+                continue
+            conn = _observe(path)
+            try:
+                tables = {
+                    str(r[0]) for r in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    )
+                }
+                if "fleet_sync_peer_state" in tables:
+                    entry["peer_state"] = [
+                        {
+                            "peer": str(r[0])[:16],
+                            "epoch": str(r[1])[:12],
+                            "last_success_ns": int(r[2] or 0),
+                            "peer_watermark": r[3],
+                            "local_watermark": r[4],
+                            "checkpoints_received": int(r[5] or 0),
+                            "last_error": r[6],
+                        }
+                        for r in conn.execute(
+                            "SELECT machine_public_key,roster_epoch,last_success_ns,"
+                            "peer_watermark,local_watermark,checkpoints_received,"
+                            "last_error_code FROM fleet_sync_peer_state"
+                        )
+                    ]
+            except sqlite3.Error as exc:
+                entry["peer_state_error"] = repr(exc)
+            finally:
+                conn.close()
+            marks = entry.get("watermarks") or {}
+            _line(
+                f"scope {slug}",
+                f"compat={entry['compatibility_digest'][:12]} "
+                f"has_state={entry['has_state']} "
+                f"watermarks={len(marks)} origin(s)",
+            )
+            for origin, ts in sorted(marks.items()):
+                _detail(f"        claims through {origin[:12]} @ {ts}")
+            for peer in entry.get("peer_state", []):
+                _detail(
+                    f"        peer {peer['peer']} epoch={peer['epoch']} "
+                    f"local_wm={peer['local_watermark']} "
+                    f"ckpts={peer['checkpoints_received']} "
+                    f"err={peer['last_error'] or '-'}"
+                )
+    except Exception as exc:
+        _line("sync internals", f"FAILED to run: {exc!r}", fail=True)
 
 
 def check_org_sync(report: dict) -> None:
@@ -1560,6 +1687,7 @@ def main() -> int:
     check_org_resolution(report)
     check_sync_data(report)
     check_sync_frontiers(report)
+    check_sync_internals(report)
     check_org_sync(report)
     check_catalog_canary(report)
     check_recent_errors(report)
