@@ -118,7 +118,7 @@ async function main() {
   box.checked = true;
   box.dispatchEvent(new w.Event('change', { bubbles: true }));
   await settle();
-  assert.match(pane().querySelector('[data-testid="role-preview"]').textContent, /reviewer: invite people as member\. Joins after 1 approval\./);
+  assert.match(pane().querySelector('[data-testid="role-preview"]').textContent, /Reviewer: invite people as member\. Joins after 1 approval\./);
   pane().querySelector('[data-action="role-submit"]').click();
   await settle(); await settle(); await settle();
   assert.equal(ceremony.defines.length, 1);
@@ -143,7 +143,7 @@ async function main() {
   narrow.checked = false;
   narrow.dispatchEvent(new w.Event('change', { bubbles: true }));
   await settle();
-  assert.match(pane().querySelector('[data-testid="role-loss"]').textContent, /Removing invite people as member from everyone who holds member/);
+  assert.match(pane().querySelector('[data-testid="role-loss"]').textContent, /Removing invite people as member from everyone who holds Member/);
   assert.match(pane().querySelector('[data-testid="role-loss"]').textContent, /contraction/);
   pane().querySelector('[data-action="role-submit"]').click();
   await settle(); await settle(); await settle();
@@ -180,11 +180,11 @@ async function main() {
   const options = Array.from(select.options).map((o) => o.value);
   assert.deepEqual(options, ['admin', 'member'], 'owner is not inviteable by this viewer');
   assert.equal(select.value, 'member', 'defaults to the least-privileged role');
-  assert.match(text(), /This invitation grants member: invite people as member\. Joins after 1 approval\./);
+  assert.match(text(), /This invitation grants Member: invite people as member\. Joins after 1 approval\./);
   select.value = 'admin';
   select.dispatchEvent(new w.Event('change', { bubbles: true }));
   await settle();
-  assert.match(text(), /This invitation grants admin: invite people as member, approve and grant member\. Joins after 2 approvals\./);
+  assert.match(text(), /This invitation grants Admin: invite people as member, approve and grant member\. Joins after 2 approvals\./);
 
   // ── Starter roles appear only when Owner is alone ──
   {
@@ -195,7 +195,7 @@ async function main() {
     m.w.document.querySelector('[data-tab="roles"]').click();
     await settle();
     const p = m.w.document.querySelector('.org-membership');
-    assert.match(p.querySelector('[data-action="starter-roles"]').textContent, /Add the member role/);
+    assert.match(p.querySelector('[data-action="starter-roles"]').textContent, /Add the Member role/);
     p.querySelector('[data-action="starter-roles"]').click();
     await settle(); await settle(); await settle(); await settle();
     // The starter action signs exactly the ruled set: Member alone today.
