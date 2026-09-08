@@ -60,7 +60,12 @@ class TestDerivation:
         assert failed["source_version"] == 20260906110000
 
     def test_no_runs_means_stale_not_failed(self):
-        conditions = _by_id(D.derive_conditions([], {}, now=NOW))
+        # reports_exist declares a SOURCE machine: a machine that is
+        # supposed to back up and never has is stale. A machine with no
+        # backup configuration at all is a different case entirely
+        # (TestFleetNonSourceMachine).
+        conditions = _by_id(D.derive_conditions([], {}, now=NOW,
+                                                reports_exist=True))
         assert conditions["backup:stale:hourly"]["attention_state"] == "needs_attention"
         assert "backup:failed:hourly" not in conditions
 
@@ -140,8 +145,9 @@ class TestPublication:
 
     def test_stale_reraises_after_a_resolve(self):
         index = _index()
-        # 1: stale (no runs at all)
-        D.publish_conditions(index, D.derive_conditions([], {}, now=NOW))
+        # 1: stale (a source machine that has never captured)
+        D.publish_conditions(index, D.derive_conditions(
+            [], {}, now=NOW, reports_exist=True))
         assert "backup:stale:hourly" in _open_ids(index)
         # 2: fresh capture resolves it
         fresh = [_run("hourly", "20260906-120000", at=NOW),
@@ -170,3 +176,36 @@ class TestPublication:
         outcome = D.publish_conditions(index, conditions)
         assert outcome["errors"]
         assert "backup:failed:hourly" in outcome["published"]
+
+
+class TestFleetNonSourceMachine:
+    """A fleet machine with no backup configuration must not alarm about
+    a job it was never given (operator-observed on SJC, 2026-09-08)."""
+
+    def test_no_evidence_means_no_conditions(self):
+        assert D.derive_conditions([], {}, now=NOW, reports_exist=False) == []
+
+    def test_one_past_run_makes_it_a_source_forever(self):
+        runs = [_run("hourly", "20260901-110000",
+                     at=NOW - timedelta(days=5))]
+        conditions = D.derive_conditions(runs, {}, now=NOW,
+                                         reports_exist=False)
+        assert any(c["attention_state"] == "needs_attention"
+                   for c in conditions)
+
+    def test_configured_provider_makes_it_a_source_before_any_run(self):
+        conditions = D.derive_conditions(
+            [], {"offsite_provider": "b2"}, now=NOW, reports_exist=False)
+        assert any(c["attention_id"] == "backup:stale:hourly"
+                   and c["attention_state"] == "needs_attention"
+                   for c in conditions)
+
+    def test_report_directory_alone_makes_it_a_source(self):
+        conditions = D.derive_conditions([], {}, now=NOW, reports_exist=True)
+        assert any(c["attention_state"] == "needs_attention"
+                   for c in conditions)
+
+    def test_is_backup_source_predicate(self):
+        assert not D.is_backup_source([], {}, reports_exist=False)
+        assert D.is_backup_source([], {"offsite_provider": "b2"},
+                                  reports_exist=False)
