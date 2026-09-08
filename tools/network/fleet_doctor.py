@@ -355,27 +355,57 @@ def check_roster(report: dict) -> None:
 
 # ── connector subprocesses ──────────────────────────────────────────────
 
+class ProcessScanUnavailable(RuntimeError):
+    """The process table could not be read, so nothing can be concluded."""
+
+
 def _running_connectors() -> dict[str, dict]:
-    """org_uuid -> {pid, graph_org, started} for every live link_serving connector."""
-    try:
-        out = subprocess.run(
-            ["ps", "-eo", "pid,args"], capture_output=True, text=True, timeout=5,
-        ).stdout
-    except Exception:
-        return {}
-    found = {}
-    for raw_line in out.splitlines():
-        if "tools.dashboard.link_serving" not in raw_line or "--org" not in raw_line:
+    """org_uuid -> {pid, graph_org} for every live link_serving connector.
+
+    Reads /proc directly rather than shelling ``ps``. The autonomy node image
+    carries no ``ps`` binary, so the old implementation returned {} on every
+    containerized node -- which is every node -- and a failed scan was
+    indistinguishable from "no connectors are running". Downstream that
+    inverted the serving verdict: home had FIVE live connectors while --json
+    reported none and the human output printed "expected to be serving but
+    isn't" for three organizations, all false (auto-kqpfw, found by
+    host-0906-222509 on 2026-09-08).
+
+    Raises ProcessScanUnavailable when /proc cannot be read at all, so a
+    caller reports that it could not look instead of reporting an absence.
+    """
+    proc = Path("/proc")
+    if not proc.is_dir():
+        raise ProcessScanUnavailable("/proc is not available on this system")
+    found: dict[str, dict] = {}
+    seen_any = False
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
             continue
-        m_pid = re.match(r"\s*(\d+)", raw_line)
-        m_org = re.search(r"--org\s+(\S+)", raw_line)
-        m_graph_org = re.search(r"--graph-org\s+(\S+)", raw_line)
-        if not (m_pid and m_org):
+        try:
+            raw = (entry / "cmdline").read_bytes()
+        except (OSError, PermissionError):
             continue
-        found[m_org.group(1)] = {
-            "pid": int(m_pid.group(1)),
-            "graph_org": m_graph_org.group(1) if m_graph_org else None,
-        }
+        seen_any = True
+        if not raw:
+            continue
+        argv = [part for part in raw.decode("utf-8", "replace").split("\0") if part]
+        line = " ".join(argv)
+        if "tools.dashboard.link_serving" not in line or "--org" not in argv:
+            continue
+        try:
+            org = argv[argv.index("--org") + 1]
+        except (ValueError, IndexError):
+            continue
+        graph_org = None
+        if "--graph-org" in argv:
+            try:
+                graph_org = argv[argv.index("--graph-org") + 1]
+            except IndexError:
+                graph_org = None
+        found[org] = {"pid": int(entry.name), "graph_org": graph_org}
+    if not seen_any:
+        raise ProcessScanUnavailable("no readable process entries under /proc")
     return found
 
 
@@ -406,6 +436,7 @@ def check_serving_readiness(report: dict) -> None:
         from tools.graph import org_ops
 
         running = report.get("running_connectors", {})
+        scan_blind = bool(report.get("process_scan_unavailable"))
         now = time.time()
         scopes: list[tuple[str, str | None]] = [("personal (scopeless)", None)]
         try:
@@ -435,6 +466,15 @@ def check_serving_readiness(report: dict) -> None:
             personal_aliases = {None, "personal"}
             aliases = personal_aliases if org in personal_aliases else {org}
             is_running = any(info.get("graph_org") in aliases for info in running.values())
+            if should_run and not is_running and scan_blind:
+                # The scan could not read the process table, so "not running"
+                # is not a finding (auto-kqpfw).
+                _line(
+                    f"{label}: should be serving; cannot confirm",
+                    "process scan unavailable -- not a fault, just unknown",
+                    warn=True,
+                )
+                continue
             if should_run and not is_running:
                 _line(
                     f"{label}: expected to be serving but isn't",
@@ -501,8 +541,23 @@ def check_serving_readiness(report: dict) -> None:
 
 def check_connectors(report: dict) -> None:
     _section("Serving connector subprocesses")
-    connectors = _running_connectors()
+    try:
+        connectors = _running_connectors()
+    except ProcessScanUnavailable as exc:
+        # Could not look is not the same as nothing is there. Say which,
+        # and mark the report so every downstream serving conclusion knows
+        # it is unfounded rather than negative (auto-kqpfw).
+        report["running_connectors"] = {}
+        report["process_scan_unavailable"] = str(exc)
+        _line(
+            "connector subprocesses",
+            f"UNKNOWN -- process scan unavailable: {exc}. Serving conclusions "
+            "below are not evidence of absence.",
+            warn=True,
+        )
+        return
     report["running_connectors"] = connectors
+    report.pop("process_scan_unavailable", None)
     if not connectors:
         _line("connector subprocesses", "NONE running", warn=True)
     for org_uuid, info in connectors.items():
@@ -543,6 +598,7 @@ def check_org_resolution(report: dict) -> None:
         _line("shell_default_org() resolves to", default_org_slug)
 
         running = report.get("running_connectors", {})
+        scan_blind = bool(report.get("process_scan_unavailable"))
         # Map the default org's slug -> its org_uuid so we can compare against
         # the (org_uuid-keyed) running-connector set.
         from tools.graph.db import _org_db_path
@@ -718,6 +774,224 @@ def check_sync_data(report: dict) -> None:
         report["per_channel_pull_rows"] = len(rows)
     except Exception as exc:
         _line("per-channel check", f"FAILED to run: {exc!r}", warn=True)
+
+
+def check_sync_frontiers(report: dict) -> None:
+    """How far behind is this machine, per scope, per origin — the question
+    nobody could answer when the graph fell a day and a half stale.
+
+    A scope's frontier is the newest write this machine holds FROM EACH
+    ORIGIN. ``fleet_sync_transactions`` records one row per applied
+    transaction with its origin and the origin's own timestamp, so the newest
+    timestamp per origin is exactly "how current am I with that machine".
+    Its age against the wall clock is the lag, and lag is the thing a person
+    actually wants: rows exist, counts match, and the data is still stale.
+
+    Also reports the newest THOUGHT and SOURCE in the store, because that is
+    the demonstration this exists for — a session's thoughts captured on one
+    machine appearing on another within seconds. A frontier that is current
+    while thoughts are old means something upstream of sync stopped feeding
+    it, which is a different fault and should not be diagnosed as sync lag.
+
+    One machine cannot say whether its lag is acceptable; it does not know
+    what its peers have written. tools/network/fleet_sync_report compares
+    frontiers across machines and turns lag into a verdict.
+    """
+    _section("Sync frontiers (how current is this machine, per origin)")
+    frontiers: dict = {}
+    report["sync_frontiers"] = frontiers
+    try:
+        import sqlite3
+        import time as _time
+
+        from tools.graph.db import _org_db_path, _orgs_dir
+
+        now_ns = _time.time_ns()
+        candidates = [("personal", Path(_org_db_path("personal")))]
+        orgs_dir = _orgs_dir()
+        if orgs_dir.is_dir():
+            for path in sorted(orgs_dir.glob("*.db")):
+                if path.stem not in ("personal", "machine"):
+                    candidates.append((path.stem, path))
+        for slug, path in candidates:
+            if not path.exists():
+                continue
+            conn = _observe(path)
+            entry: dict = {}
+            try:
+                tables = {
+                    str(r[0]) for r in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    )
+                }
+                if {"fleet_sync_transactions", "fleet_sync_origins"} <= tables:
+                    entry["origins"] = [
+                        {
+                            "origin": str(r[0]),
+                            "newest_ns": int(r[1]),
+                            "age_s": max(0, (now_ns - int(r[1])) // 1_000_000_000),
+                            "transactions": int(r[2]),
+                        }
+                        for r in conn.execute(
+                            "SELECT o.incarnation, MAX(t.timestamp_ns), COUNT(*) "
+                            "FROM fleet_sync_transactions t "
+                            "JOIN fleet_sync_origins o ON o.id=t.origin_id "
+                            "GROUP BY o.incarnation ORDER BY o.incarnation"
+                        )
+                    ]
+                else:
+                    entry["origins"] = None  # sync never activated here
+                for table, column in (("thoughts", "created_at"),
+                                      ("sources", "ingested_at")):
+                    if table not in tables:
+                        continue
+                    row = conn.execute(
+                        f'SELECT COUNT(*), MAX("{column}") FROM "{table}"'
+                    ).fetchone()
+                    entry[table] = {"rows": int(row[0] or 0), "newest": row[1]}
+            except sqlite3.Error as exc:
+                entry["error"] = repr(exc)
+            finally:
+                conn.close()
+            frontiers[slug] = entry
+
+            origins = entry.get("origins")
+            if origins is None:
+                _line(f"scope {slug}", "fleet sync not activated here", warn=True)
+                continue
+            if not origins:
+                _line(f"scope {slug}", "no transactions from any origin yet", warn=True)
+                continue
+            for origin in origins:
+                age = origin["age_s"]
+                human = (
+                    f"{age}s" if age < 120
+                    else f"{age // 60}m" if age < 7200
+                    else f"{age // 3600}h" if age < 172800
+                    else f"{age // 86400}d"
+                )
+                _line(
+                    f"  {slug} <- {origin['origin'][:12]}",
+                    f"newest write {human} old, {origin['transactions']} txn(s)",
+                    warn=age >= 3600,
+                )
+            newest_thought = (entry.get("thoughts") or {}).get("newest")
+            if newest_thought:
+                _line(f"  {slug} newest thought", str(newest_thought))
+    except Exception as exc:
+        _line("sync frontier check", f"FAILED to run: {exc!r}", fail=True)
+
+
+def check_org_sync(report: dict) -> None:
+    """Per-scope evidence for whether organization data is actually MOVING.
+
+    Every other section here reports what is present. This one reports what
+    corresponds and what crossed, because the failures this system actually
+    has are correspondence failures — two things that should match with
+    nothing asserting they do — and they are invisible from a single side.
+
+    Per scope it collects, and puts in ``report["org_sync"]``:
+
+    * ``ledger_events`` / ``published`` / ``captured`` — the authority events
+      this store holds, how many exist as replicated rows, and how many of
+      those rows the catalog covers. Rows without catalog coverage can never
+      cross no matter how many pulls run.
+    * ``row_ids`` — the row uuid per event key. A settings row's frame carries
+      every column including ``id``, and materialization matches on the
+      logical address, so a row bearing ANOTHER machine's uuid is one this
+      machine RECEIVED. Counting rows cannot tell delivery from a local
+      migration; comparing uuids across machines can, which is the whole
+      reason this is collected rather than summarized.
+    * ``peers`` — per peer: last outcome, cumulative bytes in, and the newest
+      success. Cumulative, so identical totals between two runs mean nothing
+      moved.
+
+    The verdict is deliberately NOT computed here: one machine cannot know
+    whether it should have received something. tools/network/fleet_sync_report
+    compares the collected reports across machines and decides.
+    """
+    _section("Org sync evidence (what corresponds, and what crossed)")
+    collected: dict = {}
+    report["org_sync"] = collected
+    try:
+        import sqlite3
+
+        from tools.graph.db import _org_db_path, _orgs_dir
+        from tools.network.ledger.settings_bridge import SET_ID
+
+        candidates = [("personal", Path(_org_db_path("personal")))]
+        orgs_dir = _orgs_dir()
+        if orgs_dir.is_dir():
+            for path in sorted(orgs_dir.glob("*.db")):
+                if path.stem not in ("personal", "machine"):
+                    candidates.append((path.stem, path))
+        for slug, path in candidates:
+            if not path.exists():
+                continue
+            entry: dict = {"path": str(path)}
+            collected[slug] = entry
+            conn = _observe(path)
+            try:
+                tables = {
+                    str(row[0]) for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    )
+                }
+                entry["ledger_events"] = (
+                    int(conn.execute("SELECT COUNT(*) FROM ledger_events").fetchone()[0])
+                    if "ledger_events" in tables else None
+                )
+                rows = conn.execute(
+                    'SELECT "key", id FROM settings WHERE set_id=?', (SET_ID,)
+                ).fetchall() if "settings" in tables else []
+                entry["published"] = len(rows)
+                entry["row_ids"] = {str(k): str(v) for k, v in rows}
+                if "fleet_sync_catalog" in tables:
+                    entry["captured"] = int(conn.execute(
+                        "SELECT COUNT(*) FROM fleet_sync_catalog "
+                        "WHERE instr(address, CAST(? AS BLOB)) > 0",
+                        (SET_ID.encode(),),
+                    ).fetchone()[0])
+                else:
+                    entry["captured"] = None  # writers not active: cannot judge
+                if "fleet_sync_peer_state" in tables:
+                    entry["peers"] = [
+                        {
+                            "machine": str(r[0])[:16],
+                            "last_success_ns": int(r[1] or 0),
+                            "bytes_received": int(r[2] or 0),
+                            "checkpoints_received": int(r[3] or 0),
+                        }
+                        for r in conn.execute(
+                            "SELECT machine_public_key,last_success_ns,"
+                            "bytes_received,checkpoints_received "
+                            "FROM fleet_sync_peer_state"
+                        )
+                    ]
+                else:
+                    entry["peers"] = []
+            finally:
+                conn.close()
+            captured = entry["captured"]
+            published = entry["published"]
+            events = entry["ledger_events"]
+            if events is None and not published:
+                _line(f"scope {slug}", "no ledger, no rows")
+                continue
+            note = f"{events if events is not None else 0} event(s), {published} row(s)"
+            if captured is None:
+                _line(f"scope {slug}", f"{note}, fleet writers NOT active", warn=True)
+            elif published and captured < published:
+                _line(
+                    f"scope {slug}",
+                    f"{note}, only {captured} captured -- the uncaptured rows "
+                    "can never cross",
+                    fail=True,
+                )
+            else:
+                _line(f"scope {slug}", f"{note}, {captured} captured")
+    except Exception as exc:
+        _line("org-sync evidence", f"FAILED to run: {exc!r}", fail=True)
 
 
 def check_catalog_canary(report: dict) -> None:
@@ -1285,6 +1559,8 @@ def main() -> int:
     check_serving_readiness(report)
     check_org_resolution(report)
     check_sync_data(report)
+    check_sync_frontiers(report)
+    check_org_sync(report)
     check_catalog_canary(report)
     check_recent_errors(report)
 
