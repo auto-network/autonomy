@@ -1,5 +1,44 @@
 # Mission Control (the `mission` plugin)
 
+## Ops view
+
+`/mission/<uuid>#view=ops` opens the organization-wide operational view inside
+the selected mission. It reads all tasks from that org's tracker (including
+unallocated work), questions from its missions, and that org's live sessions.
+Other organizations and personal host sessions are not imported. Missing
+tracker data and coordinator seats remain visible as unknown/vacant.
+
+Existing question `title`, `body`, `ask`, `refs`, `asked_by`, `discussion` and
+coordinator routing drive the detail view. Optional `briefing` on a question,
+checkpoint or status may contain `subtitle`, `recommendation`, `impact`,
+`options: [{label, consequence, text}]`, `artifacts: [{label, href}]`,
+`generated_at` and `source_refs`. Supply it through existing `add/update --from`;
+the schema validates types, bounds and safe links. Do not put task status in
+briefing prose or invent context when the source is insufficient.
+
+Task phase is optional existing bead metadata under `mission_ops`:
+`{headline, subtitle, phase, phase_at, reported_by}`. Phases are `designing`,
+`implementing`, `debugging`, `testing`, `verifying`, `waiting`, `unknown`.
+`phase_at` is a timezone-qualified ISO timestamp; `reported_by` identifies the
+reporting session. Missing or older-than-24-hour phase evidence is labeled
+unknown/stale. A stage bar is not percent completion. Assignee remains the
+tracker field, not a second ownership field in metadata.
+
+Ready means an open task has specification and known-clear blocking
+prerequisites, not approval to execute. Parent-child edges do not block work.
+Closed tasks and confirmed acceptance criteria remain distinct.
+
+Send and Needs clarification append a reply; only explicit Resolve answers
+the question. Receipts distinguish stored text from relay confirmation and
+never claim owner acknowledgment. General reports target the selected
+mission's actual `mc-infra` pillar; without that coordinator no report route
+is invented. Keyboard dictation focuses the answer field; the voice capsule
+integration remains separate.
+
+Read API: `GET /api/mission/ops/{mission_id}`; document:
+`GET /api/mission/ops/{mission_id}/screen`. Both require visibility of the
+selected mission and resolve its owning organization server-side.
+
 Skill revision: **2026-09-06.1** — coordinator seats: how relays route,
 how to take or hand over a seat on a live mission, where the
 session-viewer icon comes from. Prior: 2026-08-24.1 (chat bake bounded

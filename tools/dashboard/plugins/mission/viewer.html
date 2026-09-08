@@ -1418,6 +1418,7 @@
     {id: "questions", label: "Blockers"},
     {id: "feed",      label: "Feed"},
     {id: "chat",      label: "Chat"},
+    {id: "ops",       label: "Ops"},
   ];
   var tabsHost = document.getElementById("mc-tabs");
   TABS.forEach(function (t) {
@@ -2569,6 +2570,9 @@
 
   // ── assemble views + nav ────────────────────────────────────────
   var views = document.getElementById("mc-views");
+  var opsView = el("div", "mc-view");
+  opsView.id = "view-ops";
+  views.appendChild(opsView);
   views.appendChild(overviewView());
   PILLARS.forEach(function (p) { views.appendChild(surfaceView(p.pillar_id)); });
   if (liveItems.some(function (it) { return it.surface_id === MID; }))
@@ -2812,11 +2816,18 @@
   }
   var currentView = null;
   function show(id){
+    if (id === "ops" && !opsView.firstChild) {
+      var opsFrame = document.createElement("iframe");
+      opsFrame.title = "Mission Control Ops";
+      opsFrame.src = "/api/mission/ops/" + encodeURIComponent(MID) + "/screen";
+      opsFrame.style.cssText = "display:block;border:0;width:100%;height:calc(100vh - 90px);min-height:540px;background:#111619";
+      opsView.appendChild(opsFrame);
+    }
     currentView = id;
     document.querySelectorAll(".mc-view").forEach(function (n) {
       n.classList.toggle("on", n.id === "view-"+id);
     });
-    var named = {questions:"Questions", feed:"Feed", chat:"Chat"};
+    var named = {questions:"Questions", feed:"Feed", chat:"Chat", ops:"Ops"};
     var fam = named[id] ? id
       : (id === MID ? "overview" : "pillars");
     document.querySelectorAll(".mc-tabs button").forEach(function (b) {
@@ -2849,7 +2860,12 @@
   // baked focus stays in the data for anything that wants it, but the
   // reader always starts at the summary and taps into a pillar from
   // there — arriving somewhere unnameable was worse than one extra tap.
-  show(MID);
+  var initialView = MID;
+  try {
+    var initialHash = window.parent !== window ? window.parent.location.hash : location.hash;
+    if (new URLSearchParams(initialHash.replace(/^#/, "")).get("view") === "ops") initialView = "ops";
+  } catch (e) {}
+  show(initialView);
 
   // ── load diagnostics — visible, so a slow open can be read off the
   //    screen instead of guessed at. All times are ms since navigation
