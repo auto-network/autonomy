@@ -80,7 +80,7 @@ GENESIS_ID_HEX_LEN = 64
 #: into existence either by founding an org or by claiming membership.
 PERSONA_SOURCES = ("found", "join")
 NETWORK_LINK_GRANT_SET_ID = "autonomy.network.link-grant"
-NETWORK_LINK_GRANT_REVISION = 4
+NETWORK_LINK_GRANT_REVISION = 5
 NETWORK_PUBLIC_LINK_BASE_URL = "https://relay.auto.network"
 NETWORK_SERVE_CERT_SET_ID = "autonomy.network.serve-cert"
 NETWORK_SERVE_CERT_REVISION = 2
@@ -720,7 +720,7 @@ class NetworkLinkGrantV4(NetworkLinkGrantV3):
     """
 
     set_id = NETWORK_LINK_GRANT_SET_ID
-    schema_revision = NETWORK_LINK_GRANT_REVISION
+    schema_revision = 4
 
     channel_pub: str = field(
         required=False,
@@ -746,6 +746,57 @@ class NetworkLinkGrantV4(NetworkLinkGrantV3):
     @classmethod
     def upconvert_from_prev(cls, payload: dict) -> dict:
         return dict(payload)  # absent channel_pub == legacy link, by design
+
+
+class NetworkLinkGrantV5(NetworkLinkGrantV4):
+    """Current share-link grant, retaining an invitation's bearer.
+
+    Decision of record graph://e75ebdde-6df. An ``org:join`` link's bearer
+    is the secret that lets its holder ASK to join: the fold accepts a
+    token-bound claim when ``sha256(token)`` equals the invite's stored
+    ``token_hash`` and the persona signed the claim, and B6 then requires a
+    countersignature before anyone is admitted. Possession therefore buys
+    the right to ask, not membership, which is why the bearer is retained
+    here in the clear rather than vaulted: the organization can re-render a
+    working link instead of losing it after one showing.
+
+    Only ``org:join`` grants carry it — those links have no channel keypair
+    (``CHANNEL_KEY_TARGET_TYPES`` excludes them), so the bearer is the only
+    secret in their fragment. A row without one is a link minted before this
+    revision: it keeps working and simply cannot be re-rendered.
+    """
+
+    set_id = NETWORK_LINK_GRANT_SET_ID
+    schema_revision = NETWORK_LINK_GRANT_REVISION
+
+    bearer: str = field(
+        required=False,
+        description=(
+            "The invitation's bearer token, 64 lowercase hex. Present only "
+            "when target_type is org:join. Written only through the route "
+            "that first verifies it against the invite event's token_hash."
+        ),
+    )
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        super().validate(payload)
+        if not isinstance(payload, dict):
+            return
+        if "bearer" not in payload:
+            return
+        if payload.get("target_type") != "org:join":
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'bearer' is only valid for "
+                "target_type='org:join'"
+            )
+        _require_hex(
+            payload, "bearer", cls.__name__, length=NETWORK_PUB_HEX_LEN,
+        )
+
+    @classmethod
+    def upconvert_from_prev(cls, payload: dict) -> dict:
+        return dict(payload)  # absent bearer == minted before this revision
 
 
 # ── autonomy.network.link-channel-key ─────────────────────────

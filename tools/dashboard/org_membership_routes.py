@@ -54,11 +54,14 @@ def _member_profiles(slug: str) -> dict:
 
 
 def _link_grants(slug: str) -> dict:
-    """invite_ref -> {url, label} from the org's own grant cache.
+    """invite_ref -> {url, label, bearer} from the org's own grant cache.
 
-    The cache row never contains the bearer (it rides only the minting
-    browser's URL fragment), so this join is safe to serve. The label is the
-    human name the operator gave the link at publish time (meta.label).
+    The bearer is retained on the grant row (graph://e75ebdde-6df) so the
+    screen can re-render a redeemable link rather than losing it after one
+    showing; possession of a link buys only the right to ask, because
+    admission still requires a countersignature. It is absent on invitations
+    minted before that ruling. The label is the human name the operator gave
+    the link at publish time (meta.label).
     """
     from tools.graph import settings_ops
     from tools.graph.schemas.network_identity import (
@@ -81,9 +84,11 @@ def _link_grants(slug: str) -> dict:
         url = payload.get("url")
         if payload.get("target_type") == "org:join" and invite_ref and url:
             label = (payload.get("meta") or {}).get("label")
+            bearer = payload.get("bearer")
             grants[str(invite_ref)] = {
                 "url": str(url),
                 "label": str(label) if label else None,
+                "bearer": str(bearer) if bearer else None,
             }
     return grants
 
@@ -204,6 +209,10 @@ def _membership_view(slug: str) -> dict:
                 # used counts admitted members only (autonomy@f60c26a).
                 "uses": invite_uses.get(invite_id),
                 "join_url": (grants.get(invite_id) or {}).get("url"),
+                # The retained bearer, so the screen can re-render a
+                # redeemable link (graph://e75ebdde-6df). Absent on
+                # invitations minted before bearers were retained.
+                "bearer": (grants.get(invite_id) or {}).get("bearer"),
                 "label": (grants.get(invite_id) or {}).get("label"),
             })
         pending = []
