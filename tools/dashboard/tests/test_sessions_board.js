@@ -580,3 +580,50 @@ test('the layout member carries the boards, and a drag never paints a selection'
   assert.match(js, /_blockSelection\(\);/);
   assert.match(js, /_allowSelection\(\);/);
 });
+
+test('a column created while on another board stays on that board', () => {
+  const grp = (slug) => ({ slug, name: slug, color: '', why: '' });
+  const sessions = {
+    s1: { isLive: true, groupId: 'a', group: grp('a'), entries: [{}] },
+    s2: { isLive: true, groupId: null, group: null, entries: [{}] },
+    s3: { isLive: true, groupId: 'a', group: grp('a'), entries: [{}] },
+  };
+  const { board } = makeBoard({ rows: ['s1', 's2', 's3'], sessions });
+  board.refresh({ columns: [{ id: 'a', members: [] }], widths: {} });
+  board.boards = [{ id: 'b1', name: 'Board 1' }, { id: 'b2', name: 'Ops' }];
+  board.activeBoard = 'b2';
+
+  // Dragging a card to the new-group zone while on Ops must not drop the new
+  // group onto Board 1 — the operator watched groups vanish to another screen.
+  board.assignColumnBoard('g-new', board.activeBoard);
+  assert.equal(board.boardOf['g-new'], 'b2');
+
+  // ⤢ from Ungrouped mints a column; it belongs here too.
+  board.assignColumnBoard('g-focus', board.activeBoard);
+  assert.equal(board.boardOf['g-focus'], 'b2');
+
+  // Belonging to the FIRST board is recorded as absence, so it stays small and
+  // "no entry" means exactly one thing.
+  board.assignColumnBoard('g-new', 'b1');
+  assert.ok(!('g-new' in plain(board.boardOf)));
+
+  // Ungrouped is never assignable — it is pinned to every board.
+  board.assignColumnBoard('solo', 'b2');
+  assert.ok(!('solo' in plain(board.boardOf)));
+});
+
+test('every place that mints a column claims a board for it', () => {
+  const js = fs.readFileSync(BOARD_JS, 'utf8');
+  const sites = js.split("id: 'g-' + Date.now()").slice(1);
+  // Three: the new-group drop zone, ⤢ on an ungrouped card, and the spill
+  // column ⤢ leaves behind. Each must claim a board within its own statement,
+  // or the group it creates lands on board one and vanishes from view.
+  assert.equal(sites.length, 3);
+  sites.forEach((tail, i) => {
+    const stmt = tail.slice(0, 400);
+    assert.ok(
+      /this\.(claimForActiveBoard|assignColumnBoard)\(/.test(stmt),
+      `column creation site ${i + 1} does not claim a board`,
+    );
+  });
+});
