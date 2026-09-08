@@ -145,6 +145,23 @@ def test_a_session_with_no_credential_is_its_own_bucket_not_a_guess():
     assert payload["entries"][0]["account"] == tr.UNATTRIBUTED_ACCOUNT
 
 
+def test_the_unattributed_bucket_is_kept_separate_from_real_accounts():
+    """Observed in the first live row: it appears beside real accounts. A
+    reader must not coalesce it into one of them, and must not drop it -- the
+    spend is genuine, only its owner is unknown."""
+    payload, _, _ = _settle([
+        _session("a", out=10, turns=1, account="acct-A"),
+        _session("b", out=90, turns=1, account=None),
+    ])
+    by = {e["account"]: e["output_tokens"] for e in payload["entries"]}
+    assert by == {"acct-A": 10, tr.UNATTRIBUTED_ACCOUNT: 90}
+
+
+def test_the_schema_warns_readers_that_unattributed_is_not_a_null():
+    described = tr.DashboardTokensRollupV1._field_metadata["entries"]["description"]
+    assert tr.UNATTRIBUTED_ACCOUNT in described
+
+
 def test_only_what_was_billed_since_the_last_settlement_is_counted():
     """The property that makes a multi-day session honest: yesterday's row
     must not re-bill what the day before already settled."""
