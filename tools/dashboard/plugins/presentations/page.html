@@ -1,53 +1,36 @@
 <link rel="stylesheet" href="/static/plugins/presentations/page.css">
 <div data-testid="presentations-fragment-root"
      x-data="presentationsPage()"
-     x-init="init()"
      class="present-page pb-safe"
      :class="{ 'present-page-deck': mode === 'deck' }">
 
   <template x-if="mode === 'library'">
     <section class="present-library" data-testid="present-library">
-      <div class="present-toolbar">
-        <div>
-          <h1>Slides</h1>
-          <p x-text="decks.length + ' shown'"></p>
-        </div>
-        <button type="button" class="present-refresh" @click="loadLibrary()" title="Refresh" data-testid="present-refresh">
-          Refresh
-        </button>
-      </div>
-
       <template x-if="loading">
         <div class="present-empty" data-testid="present-loading">Loading decks...</div>
       </template>
 
-      <template x-if="!loading && decks.length === 0">
-        <div class="present-empty" data-testid="present-empty">No slides have been shown yet.</div>
+      <template x-if="!loading && !error && decks.length === 0">
+        <div class="present-empty" data-testid="present-empty">No slide decks in this organization yet.</div>
       </template>
 
       <div class="present-deck-list" x-show="!loading && decks.length > 0" data-testid="present-deck-list">
         <template x-for="deck in decks" :key="deck.design_id || deck.key">
-          <article class="present-deck-card" data-testid="present-deck-card">
-            <button type="button" class="present-deck-thumb" x-show="thumbnailUrl(deck)" @click="openDeck(deck)" :aria-label="'Open ' + (deck.name || 'deck')">
-              <img :src="thumbnailUrl(deck)" alt="" loading="lazy" decoding="async"
-                   @error="$el.parentElement.style.display = 'none'">
-            </button>
-            <button type="button" class="present-deck-main" @click="openDeck(deck)">
+          <a class="present-deck-card" data-testid="present-deck-card" :href="deckHref(deck)">
+            <div class="present-deck-thumb">
+              <span class="present-deck-blank" aria-hidden="true" x-text="(deck.name || '?').trim().charAt(0).toUpperCase()"></span>
+              <img x-show="thumbnailUrl(deck) && !failedThumbnails[deck.latest_revision_id]" :src="thumbnailUrl(deck)" alt="" loading="lazy" decoding="async"
+                   @error="failedThumbnails[deck.latest_revision_id] = true">
+            </div>
+            <div class="present-deck-main">
               <span class="present-deck-name" x-text="deck.name || 'Untitled deck'"></span>
-              <span class="present-deck-subtitle" x-show="deck.subtitle" x-text="deck.subtitle"></span>
-            </button>
-            <div class="present-deck-meta">
-              <span x-text="'Modified ' + formatDate(deck.modified_at || deck.created_at)"></span>
-              <span x-show="deck.last_shown_at" x-text="'Opened ' + formatDate(deck.last_shown_at)"></span>
-              <span x-show="creatorLabel(deck)" x-text="creatorLabel(deck)"></span>
-              <span x-text="(deck.slide_count || 1) + ' slides'"></span>
+              <span class="present-deck-meta">
+                <span x-text="(deck.slide_count || 1) + ((deck.slide_count || 1) === 1 ? ' slide' : ' slides')"></span>
+                <span aria-hidden="true">·</span>
+                <time :datetime="deck.modified_at || deck.created_at" :title="deck.modified_at || deck.created_at" x-text="formatDate(deck.modified_at || deck.created_at)"></time>
+              </span>
             </div>
-            <div class="present-deck-links">
-              <button type="button" @click="openDeck(deck)">Open</button>
-              <button type="button" @click="openDesign(deck)">Design</button>
-              <button type="button" x-show="deck.creator_session_id" @click="openSession(deck)">Session</button>
-            </div>
-          </article>
+          </a>
         </template>
       </div>
     </section>
