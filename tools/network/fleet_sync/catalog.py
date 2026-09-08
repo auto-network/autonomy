@@ -2563,9 +2563,17 @@ def attach_active_production_catalog(
         # time (a package upgrade classified it) and already holds rows.
         # Running the full reconcile on every refresh cost ~165 s per org
         # store inside dashboard startup, twice on 2026-09-07 (auto-boa0j).
+        # NEVER backfill a retired table. Its triggers can reappear whenever a
+        # process still running pre-retirement code re-attaches: that build's
+        # TABLE_POLICIES still calls the table replicated, so it computes the
+        # table as newly captured and installs capture again. On sjc-2 that
+        # cost a 39.5s backfill of 325k junk winner rows (2026-09-08). Filter
+        # here so a current build never adds to the mess a stale one makes,
+        # and the state settles as soon as every process is on this code.
         untracked = {
             table: int(conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
             for table in sorted(getattr(catalog, "newly_captured_tables", ()))
+            if table not in RETIRED_LOGICAL_TABLES
         }
         untracked = {t: n for t, n in untracked.items() if n}
         if untracked:
