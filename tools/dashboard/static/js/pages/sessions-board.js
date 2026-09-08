@@ -464,11 +464,22 @@
         this.ensureBoards();
         this.persist();
       },
+      // Put a column on a board. A column born on the board the operator is
+      // looking at STAYS there: without an assignment boardIdFor falls back to
+      // the first board, so every group made by dragging to the new-group zone
+      // silently appeared on another screen. Belonging to the FIRST board is
+      // recorded as the ABSENCE of an entry, which keeps the layout member
+      // small and makes "no assignment" mean exactly one thing.
+      assignColumnBoard(colId, boardId) {
+        if (!colId || colId === 'solo') return;
+        if (boardId && boardId !== (this.boards[0] || {}).id) this.boardOf[colId] = boardId;
+        else delete this.boardOf[colId];
+      },
+      claimForActiveBoard(colId) { this.assignColumnBoard(colId, this.activeBoard); },
       moveColumnToBoard(col, boardId) {
         if (!col || col.id === 'solo' || !boardId) return false;
         if (this.boardIdFor(col) === boardId) return false;
-        if (boardId === (this.boards[0] || {}).id) delete this.boardOf[col.id];
-        else this.boardOf[col.id] = boardId;
+        this.assignColumnBoard(col.id, boardId);
         if (col.focus) { col.focus = null; this._focusSession = ''; }
         this.persist();
         return true;
@@ -503,6 +514,7 @@
         if (col.id === 'solo') {
           // An ungrouped session becomes a one-session group titled by its label, in Ungrouped's slot.
           target = { id: 'g-' + Date.now().toString(36), title: this.labelFor(id), color: orgColor(this.rowFor(id)), width: Math.max(col.width, 640), _sized: true, members: [] };
+          this.claimForActiveBoard(target.id);
           this.columns.splice(idx, 0, target);
           this.placeCard(id, target.id, 0);
           target = this.columns.filter(function (c) { return c.id === target.id; })[0];
@@ -510,6 +522,8 @@
         } else if (others.length) {
           // The focused session keeps the group; the others move to a new group to its right that keeps the title.
           var spill = { id: 'g-' + Date.now().toString(36), title: col.title, color: col.color, width: col.width, _sized: col._sized, members: [] };
+          // The spill belongs beside the column it came from, not on board one.
+          this.assignColumnBoard(spill.id, this.boardIdFor(col));
           this.columns.splice(idx + 1, 0, spill);
           others.forEach(function (m) { self.placeCard(m, spill.id, 1e9); });
           target = this.columns.filter(function (c) { return c.id === col.id; })[0] || target;
@@ -762,6 +776,7 @@
           if (!this._provisional) {
             var col = { id: 'g-' + Date.now().toString(36), title: 'New group', color: orgColor(this.rowFor(id)), width: DEFAULT_COL, members: [] };
             this.columns.push(col); this._provisional = col.id;
+            this.claimForActiveBoard(col.id);
             this.ensureGroup(col);
           }
           if ((this.columnOf(id) || {}).id !== this._provisional) this.placeCard(id, this._provisional, 0);
