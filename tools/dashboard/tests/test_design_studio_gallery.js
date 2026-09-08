@@ -116,6 +116,23 @@ describe('Design Studio gallery strip', () => {
     assert.equal(page.blankNote(design), 'Rendering');
   });
 
+  it('disables the render button when the host cannot render, and explains why', () => {
+    const { page } = makeLibrary();
+    page.renderStatus = { available: true, running: true };
+    assert.equal(page.canRenderHere, true);
+    assert.equal(page.isDesignActionBusy(DESIGNS[2], 'render'), false);
+    assert.equal(page.renderActionTitle(DESIGNS[2]), 'Render thumbnail');
+
+    page.renderStatus = { available: false };
+    assert.equal(page.canRenderHere, false);
+    // Disabled rather than a button that can only ever come back 503.
+    assert.equal(page.isDesignActionBusy(DESIGNS[2], 'render'), true);
+    assert.match(page.renderActionTitle(DESIGNS[2]), /no headless browser/);
+    assert.match(page.renderActionTitle(DESIGNS[2]), /--remote/);
+    // Other tile actions stay usable.
+    assert.equal(page.isDesignActionBusy(DESIGNS[2], 'librarian'), false);
+  });
+
   it('posts a render request for the latest revision and surfaces a refusal', async () => {
     const ok = makeLibrary({ responses: {
       '/api/design-studio/revisions/r-desk/render': { ok: true, queued: true, status: { available: true, running: true, pending: 1 } },

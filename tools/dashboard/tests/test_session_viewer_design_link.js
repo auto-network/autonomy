@@ -349,6 +349,26 @@ describe('linked Design Studio viewer mode', () => {
     assert.equal(h.bodyClasses.has('route-design-linked'), false);
   });
 
+  it('gives capture a deadline so a hung picker cannot disable the button forever', async () => {
+    const h = makeLinkedDesignHarness('');
+    h.page.init();
+    // A capture that never settles: the real getDisplayMedia does this when
+    // the browser shows no picker.
+    h.sandbox.manualCaptureScreenshot = () => new Promise(() => {});
+    const timers = [];
+    h.sandbox.setTimeout = (fn, ms) => { timers.push({fn, ms}); return timers.length; };
+    h.page.captureScreenshot();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(h.page.captureState, 'working');
+    const deadline = timers.find((t) => t.ms === 45000);
+    assert.ok(deadline, 'capture arms a deadline');
+    deadline.fn();
+    assert.equal(h.page.captureState, 'error');   // no longer stuck disabled
+    timers.filter((t) => t.ms === 3000).forEach((t) => t.fn());
+    assert.equal(h.page.captureState, 'idle');
+    h.page.destroy();
+  });
+
   it('never requests a screen-share stream when a chat session connects', () => {
     const h = makeLinkedDesignHarness('');
     h.page.init();
