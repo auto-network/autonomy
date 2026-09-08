@@ -132,9 +132,38 @@ def derive_conditions(runs: list[dict], config: dict,
     condition it evaluates; ``publish_conditions`` drops resolved rows
     whose item is not currently open.
     """
-    if not is_backup_source(runs, config, reports_exist):
-        return []
     now = now or datetime.now(timezone.utc)
+    if not is_backup_source(runs, config, reports_exist):
+        # RETRACT, don't merely fall silent. A machine that already
+        # raised these before the source check existed (SJC carried two
+        # open needs_attention rows from 2026-09-06) would otherwise
+        # keep them forever — and they would then propagate the moment
+        # its personal sync starts delivering. publish_conditions only
+        # publishes a resolved row when the item is currently open, so
+        # a machine that never raised anything writes nothing here.
+        #
+        # ORDERING CONSTRAINT: this is safe only while attention ids are
+        # not yet machine-scoped BECAUSE no fleet machine delivers into
+        # another's store today (measured: SJC->home transactions_applied
+        # =0). Once any machine's personal state flows back, a non-source
+        # retracting the shared id `backup:stale:hourly` would clear a
+        # REAL alarm on the source machine. auto-l1n6t's machine-scoped
+        # ids must land before bidirectional personal sync does.
+        return [
+            _condition(kind, attention_id, object_ref, "resolved",
+                       "This machine does not run backups",
+                       "No backup is configured on this machine; the "
+                       "earlier alert was raised in error.",
+                       now.timestamp(), int(now.timestamp()))
+            for kind, attention_id, object_ref in (
+                ("backup.stale", "backup:stale:hourly", "backup:tier:hourly"),
+                ("backup.stale", "backup:stale:daily", "backup:tier:daily"),
+                ("backup.failed", "backup:failed:hourly", "backup:tier:hourly"),
+                ("backup.failed", "backup:failed:daily", "backup:tier:daily"),
+                ("backup.offsite_unreachable", "backup:offsite",
+                 "backup:offsite"),
+            )
+        ]
     conditions: list[dict] = []
     newest_complete_overall: dict | None = None
     for tier in TIERS:
