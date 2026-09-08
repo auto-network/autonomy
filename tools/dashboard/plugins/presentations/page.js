@@ -278,6 +278,15 @@
         loading: false,
         error: '',
         decks: [],
+        org: '',
+        organizations: [],
+        failedThumbnails: {},
+        _destroyed: false,
+        _initialized: false,
+        _libraryGeneration: 0,
+        _librarySubscriptions: [],
+        _libraryTimer: null,
+        _libraryTopbarHtml: '',
         deck: {},
         ownerPresence: null,
         design: null,
@@ -298,16 +307,52 @@
         },
 
         init: function () {
+          if (this._initialized || this._destroyed) return;
+          this._initialized = true;
           var route = parsePresentPath(window.location.pathname);
           this.mode = route.mode;
           if (route.mode === 'deck') {
             this.loadDeck(route.designId, route.slideIndex);
           } else {
+            var self = this;
+            this._registryHandler = function () { self.updateTopbar(); };
+            this._focusHandler = function () {
+              if (document.visibilityState !== 'hidden') self._scheduleLibraryRefresh();
+            };
+            if (window.registerHandler) window.registerHandler('session:registry', this._registryHandler);
+            document.addEventListener('visibilitychange', this._focusHandler);
+            window.addEventListener('focus', this._focusHandler);
+            this._dismissLibraryPresence = function (event) {
+              var menu = document.querySelector('.present-library-presence');
+              if (menu && (event.key === 'Escape' || (event.type === 'click' && !menu.contains(event.target)))) menu.open = false;
+            };
+            document.addEventListener('click', this._dismissLibraryPresence);
+            document.addEventListener('keydown', this._dismissLibraryPresence);
+            if (window.dashboardEvents && window.dashboardEvents.onSettingChanged) {
+              this._settingCleanup = window.dashboardEvents.onSettingChanged('dashboard.presentation.deck', function () {
+                self._scheduleLibraryRefresh();
+              });
+            }
             this.loadLibrary();
+            this.loadOrganizations();
           }
         },
 
         destroy: function () {
+          this._destroyed = true;
+          this._libraryGeneration += 1;
+          clearTimeout(this._libraryTimer);
+          this._clearLibrarySubscriptions();
+          if (this._registryHandler && window.unregisterHandler) window.unregisterHandler('session:registry', this._registryHandler);
+          if (this._settingCleanup) this._settingCleanup();
+          if (this._focusHandler) {
+            document.removeEventListener('visibilitychange', this._focusHandler);
+            window.removeEventListener('focus', this._focusHandler);
+          }
+          if (this._dismissLibraryPresence) {
+            document.removeEventListener('click', this._dismissLibraryPresence);
+            document.removeEventListener('keydown', this._dismissLibraryPresence);
+          }
           if (this._presence) { this._presence.destroy(); this._presence = null; }
           if (this._messageHandler) window.removeEventListener('message', this._messageHandler);
           if (this._keydownHandler) window.removeEventListener('keydown', this._keydownHandler);
@@ -315,18 +360,75 @@
           this._keydownHandler = null;
         },
 
-        loadLibrary: async function () {
-          this.mode = 'library';
-          this.loading = true;
-          this.error = '';
+        loadOrganizations: async function () {
           try {
-            var response = await window.Autonomy.fetch('/api/presentations/decks');
+            var response = await window.Autonomy.fetch('/api/orgs');
+            if (!response.ok) return;
             var data = await response.json();
+            if (this._destroyed) return;
+            this.organizations = (data.orgs || []).map(function (row) {
+              var org = row.org || {};
+              return { slug: org.slug, name: (row.identity_resolved || {}).name || org.slug };
+            }).filter(function (row) { return !!row.slug; });
+            this.updateTopbar();
+          } catch (_) { /* Current organization remains selectable. */ }
+        },
+
+        _scheduleLibraryRefresh: function () {
+          if (this._destroyed || this.mode !== 'library') return;
+          clearTimeout(this._libraryTimer);
+          var self = this;
+          this._libraryTimer = setTimeout(function () { self.loadLibrary(true); }, 250);
+        },
+
+        _clearLibrarySubscriptions: function () {
+          if (window.unregisterHandler) this._librarySubscriptions.forEach(function (sub) {
+            window.unregisterHandler(sub[0], sub[1]);
+          });
+          this._librarySubscriptions = [];
+        },
+
+        _subscribeLibrary: function () {
+          if (!window.registerHandler) return;
+          // Retain existing handlers: registering a topic can synchronously
+          // replay its last event, so re-registering after every GET loops.
+          var self = this;
+          var topics = this.decks.map(function (deck) { return 'design:' + (deck.design_id || deck.key); });
+          this._librarySubscriptions = this._librarySubscriptions.filter(function (sub) {
+            if (topics.indexOf(sub[0]) >= 0) return true;
+            window.unregisterHandler(sub[0], sub[1]);
+            return false;
+          });
+          topics.forEach(function (topic) {
+            if (self._librarySubscriptions.some(function (sub) { return sub[0] === topic; })) return;
+            var handler = function () { self.failedThumbnails = {}; self._scheduleLibraryRefresh(); };
+            self._librarySubscriptions.push([topic, handler]);
+            window.registerHandler(topic, handler);
+          });
+        },
+
+        loadLibrary: async function (background) {
+          if (this._destroyed) return;
+          var generation = ++this._libraryGeneration;
+          this.mode = 'library';
+          this.loading = !background;
+          this.error = '';
+          this.updateTopbar();
+          try {
+            var response = await window.Autonomy.fetch('/api/presentations/decks', this.org ? { headers: { 'X-Graph-Org': this.org } } : {});
+            if (!response.ok) throw new Error('Could not load decks');
+            var data = await response.json();
+            if (this._destroyed || generation !== this._libraryGeneration) return;
+            this.org = data.org || this.org;
             this.decks = Array.isArray(data.decks) ? data.decks : [];
+            this._subscribeLibrary();
           } catch (err) {
-            this.error = 'Could not load decks';
+            if (!this._destroyed && generation === this._libraryGeneration) this.error = 'Could not load decks. Reopen Slides to retry.';
           } finally {
-            this.loading = false;
+            if (!this._destroyed && generation === this._libraryGeneration) {
+              this.loading = false;
+              this.updateTopbar();
+            }
           }
         },
 
@@ -459,6 +561,11 @@
         },
 
         updateTopbar: function () {
+          if (this._destroyed) return;
+          var path = String(window.location.pathname || '');
+          if (!/^\/(present|presentations)(\/|$)/.test(path)) return;
+          if (parsePresentPath(path).mode !== this.mode) return;
+          if (this.mode === 'library') { this.updateLibraryTopbar(); return; }
           var deckName = (this.deck && this.deck.name) || '';
           document.title = deckName ? deckName + ' · Slides' : 'Slides';
           if (!window.Autonomy || typeof window.Autonomy.setTopbar !== 'function') return;
@@ -472,6 +579,46 @@
             ),
           });
           this._mountPresence();
+        },
+
+        updateLibraryTopbar: function () {
+          document.title = 'Slides';
+          if (!window.Autonomy || typeof window.Autonomy.setTopbar !== 'function') return;
+          if (this._presence) { this._presence.destroy(); this._presence = null; }
+          var self = this;
+          var sessions = (window.Alpine && window.Alpine.store('sessions')) || {};
+          var rows = this.decks.filter(function (deck) {
+            return sessions[deck.creator_session_id] && sessions[deck.creator_session_id].isLive;
+          });
+          var liveCount = new Set(rows.map(function (deck) { return deck.creator_session_id; })).size;
+          var organizations = this.organizations.slice();
+          if (this.org && !organizations.some(function (org) { return org.slug === self.org; })) {
+            organizations.push({ slug: this.org, name: this.org });
+          }
+          var options = organizations.map(function (org) {
+            return '<option value="' + escapeHtml(org.slug) + '"' + (org.slug === self.org ? ' selected' : '') + '>' + escapeHtml(org.name) + '</option>';
+          }).join('');
+          var live = rows.map(function (deck) {
+            var session = sessions[deck.creator_session_id];
+            return '<div class="present-library-session"><a href="' + self.deckHref(deck) + '">' + escapeHtml(deck.name) + '</a>' +
+              '<a class="present-library-session-label" href="/session/' + encodeURIComponent(deck.org || self.org || 'autonomy') + '/' + encodeURIComponent(deck.creator_session_id) + '">' + escapeHtml(session.label || deck.creator_session_label || deck.creator_session_id) + '</a></div>';
+          }).join('');
+          var html = '<div class="present-library-topbar" data-testid="present-library-topbar"><div class="present-library-heading"><strong>Slides</strong><span>' +
+            (this.loading ? 'Loading…' : this.error ? 'Unavailable' : this.decks.length + (this.decks.length === 1 ? ' deck' : ' decks')) + '</span></div>' +
+            '<div class="present-topbar-side"><select data-testid="present-org" aria-label="Organization">' + (options || '<option>Organization</option>') + '</select>' +
+            '<details class="present-library-presence"><summary aria-label="Live slide sessions">' +
+            '<span class="present-library-live-dot' + (liveCount ? ' is-live' : '') + '"></span>' + liveCount + '</summary>' +
+            '<div class="present-library-presence-menu"><strong>Designing now</strong>' + (live || '<p>No live sessions working on these decks</p>') + '</div></details></div></div>';
+          if (html === this._libraryTopbarHtml && document.querySelector('[data-testid="present-library-topbar"]')) return;
+          this._libraryTopbarHtml = html;
+          window.Autonomy.setTopbar({ html: html });
+          var select = document.querySelector('[data-testid="present-org"]');
+          if (select) select.addEventListener('change', function () {
+            self.org = select.value;
+            self.decks = [];
+            self._clearLibrarySubscriptions();
+            self.loadLibrary();
+          });
         },
 
         // The shared AssetPresence control (same as Design Studio and Notes)
@@ -516,6 +663,10 @@
           if (id) navigateTo('/presentations/' + encodeURIComponent(id));
         },
 
+        deckHref: function (deck) {
+          return '/presentations/' + encodeURIComponent(deck.design_id || deck.key || '');
+        },
+
         thumbnailUrl: function (deck) {
           var rev = deck && deck.latest_revision_id;
           return rev ? '/api/design-studio/revisions/' + encodeURIComponent(rev) + '/thumbnail' : '';
@@ -535,7 +686,7 @@
         },
 
         formatDate: function (value) {
-          if (!value) return 'not shown';
+          if (!value) return 'Unknown date';
           var raw = String(value);
           var date = new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(raw) ? raw : raw.replace(' ', 'T') + 'Z');
           if (Number.isNaN(date.getTime())) return value;
@@ -544,8 +695,6 @@
             day: 'numeric',
             hour: 'numeric',
             minute: '2-digit',
-            timeZone: 'UTC',
-            timeZoneName: 'short',
           });
         },
       };

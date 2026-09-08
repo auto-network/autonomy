@@ -123,7 +123,9 @@ def test_presentations_api_reads_design_and_records_shown(tmp_path, monkeypatch)
     assert shown_response.json()["deck"]["last_shown_at"].endswith("Z")
 
     assert library_response.status_code == 200
+    assert library_response.json()["org"] == "autonomy"
     decks = library_response.json()["decks"]
+    assert decks[0]["org"] == "autonomy"
     assert [d["design_id"] for d in decks] == [TEST_EXPERIMENT_ID]
 
     persisted = json.loads(fixture_path.read_text())["settings"][PRESENTATION_DECK_SET_ID]
@@ -397,7 +399,7 @@ assert(doc.includes('<section>Right</section>'));
 assert(!doc.includes('<section>Wrong</section>'));
 assert(doc.includes('scroll-snap-type:y mandatory'));
 assert(
-  fs.readFileSync({str(PLUGIN_DIR / 'page.js')!r}, 'utf8').includes("document.title = deckName ? deckName + ' \\u00b7 Present' : 'Present'"),
+  fs.readFileSync({str(PLUGIN_DIR / 'page.js')!r}, 'utf8').includes("document.title = deckName ? deckName + ' \\u00b7 Slides' : 'Slides'"),
   'opening a deck must surface its name in the page title',
 );
 assert(doc.includes('applySnapMode'), 'runtime must relax snapping for slides taller than the viewport');
@@ -427,8 +429,7 @@ const topbar = helpers.topbarHtml(
   {{ participant_id: 'owner', participant_label: 'Owner', is_owner: true, is_live: true, is_active: true, intent: 'listening' }},
 );
 assert(topbar.includes('present-topbar-presence'));
-assert(topbar.includes('present-topbar-owner is-live'));
-assert(topbar.includes('Owner'));
+assert(topbar.includes('present-topbar-presence-host'));
 assert(topbar.includes('2 / 3'));
 assert.equal(helpers.progressIndexFromPosition(0, {{ left: 0, width: 100 }}, 11), 0);
 assert.equal(helpers.progressIndexFromPosition(49, {{ left: 0, width: 100 }}, 11), 5);

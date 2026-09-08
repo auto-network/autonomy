@@ -278,11 +278,12 @@ async def list_decks(request: Request) -> JSONResponse:
     for row in rows:
         payload = row.get("payload") or {}
         deck = _hydrate_deck_record(payload)
+        deck["org"] = org
         deck["key"] = row.get("key") or deck.get("design_id") or ""
         deck["updated_at"] = deck.get("modified_at") or deck.get("created_at") or ""
         decks.append(deck)
     decks.sort(key=lambda d: d.get("modified_at") or d.get("created_at") or "", reverse=True)
-    return JSONResponse({"decks": decks})
+    return JSONResponse({"decks": decks, "org": org})
 
 
 async def get_deck(request: Request) -> JSONResponse:
