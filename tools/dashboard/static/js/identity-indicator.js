@@ -426,17 +426,40 @@
   }
 
   function loadUpdateStatus() {
-    // Cheap cached read for the badge (fetch=0): the panel opening should not
-    // block on a GitHub round-trip. The actual update re-fetches under the hood.
-    fetch('/api/software/update-status?fetch=0', {
+    // TWO reads, and both are load-bearing.
+    //
+    // The cheap cached one (fetch=0) renders instantly, because opening the
+    // panel must never block on a GitHub round-trip.
+    //
+    // But `behind` is computed against this checkout's LOCAL origin/master
+    // ref, which is a cached pointer that only moves when git actually
+    // fetches. With only the cached read, a follower node could never
+    // discover it was behind: the button renders only when can_update is
+    // true, can_update needs behind > 0, behind needs a fresh ref, and the
+    // sole fetch=1 caller was perform_update — reachable only by clicking the
+    // button that had not rendered. sjc-2 sat at 8 commits behind showing no
+    // option for exactly this reason (2026-09-08).
+    //
+    // So follow up with a real fetch and re-render when it lands. Slow is
+    // fine here; it is off the render path and the panel is already drawn.
+    var opts = {
       credentials: 'same-origin', headers: { 'Accept': 'application/json' },
-    })
+    };
+    var apply = function (body) {
+      if (!body) return;
+      updateStatus = body;
+      if (panelOpen) render();
+    };
+    fetch('/api/software/update-status?fetch=0', opts)
       .then(function (res) { return res.ok ? res.json() : null; })
-      .then(function (body) {
-        updateStatus = body || null;
-        if (panelOpen) render();
-      })
-      .catch(function () { /* absent badge is fine — never block the panel */ });
+      .then(apply)
+      .catch(function () { /* absent badge is fine — never block the panel */ })
+      .then(function () {
+        return fetch('/api/software/update-status', opts)
+          .then(function (res) { return res.ok ? res.json() : null; })
+          .then(apply)
+          .catch(function () { /* the cached answer still stands */ });
+      });
   }
 
   async function runUpdate() {
