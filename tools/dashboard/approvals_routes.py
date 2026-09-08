@@ -506,7 +506,10 @@ async def _get_approval_legacy(request: Request) -> JSONResponse:
         enrich = ENRICH.get(r["kind"])
     if not enrich_from_request and enrich:
         try:
-            extra = enrich(r) or {}
+            # Enrichers do blocking store reads (e.g. the mcp-peer link/
+            # crosstalk enrichers open org stores via list_orgs + a
+            # dashboard.db get_session) — off the loop thread (auto-gwdqq).
+            extra = await asyncio.to_thread(enrich, r) or {}
         except Exception:
             extra = {}
     return JSONResponse({

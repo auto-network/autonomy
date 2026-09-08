@@ -12,6 +12,8 @@ the trusted organization scope — no org ever arrives in a path or body.
 """
 from __future__ import annotations
 
+import asyncio
+
 from starlette.requests import Request
 from starlette.responses import (
     HTMLResponse,
@@ -345,12 +347,18 @@ async def allocation(request: Request) -> JSONResponse:
     labels: dict[str, dict] = {}
     try:
         from tools.dashboard.dao import dashboard_db
-        for row in dashboard_db.get_all_sessions():
+        # dashboard.db reads (get_all_sessions is a SELECT * over every row)
+        # off the loop thread so a busy DB can't stall the request (auto-gwdqq).
+        all_rows, live_rows = await asyncio.gather(
+            asyncio.to_thread(dashboard_db.get_all_sessions),
+            asyncio.to_thread(dashboard_db.get_live_sessions),
+        )
+        for row in all_rows:
             name = row.get("tmux_name") or ""
             if name:
                 labels[name] = {"label": row.get("label") or "",
                                 "live": bool(row.get("is_live"))}
-        live = {r.get("tmux_name") for r in dashboard_db.get_live_sessions()}
+        live = {r.get("tmux_name") for r in live_rows}
         for name in labels:
             labels[name]["live"] = name in live
     except Exception:

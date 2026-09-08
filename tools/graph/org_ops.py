@@ -349,7 +349,13 @@ def show_org(slug: str, *, root: Path | str | None = None) -> dict | None:
     org = get_org(slug, root=root)
     if org is None:
         return None
-    db = _open_org_db(Path(org.db_path))
+    # Read-only: show_org only SELECTs the identity Setting. A read-write open
+    # runs schema init + the fleet-sync catalog attach, and when it is the
+    # first RW open after a trigger/schema bump it recompiles every trigger
+    # inline — a 20 s+ loop stall on GET /api/orgs, 2026-09-07 (auto-gwdqq).
+    # get_org already confirmed the store exists with a bootstrap row, so the
+    # ro open (create=False) is safe.
+    db = _open_org_db_ro(Path(org.db_path))
     try:
         row = db.conn.execute(
             "SELECT id, set_id, schema_revision, key, payload, "
