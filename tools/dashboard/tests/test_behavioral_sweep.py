@@ -10960,7 +10960,7 @@ SEARCH_DROPDOWN_POSITIONING_CHECKS = """(async () => {
     return el ? el.getBoundingClientRect() : null;
   }
   async function dropdownRect(testid) {
-    var el = spRoot.querySelector('[data-testid="' + testid + '"]');
+    var el = spRoot.ownerDocument.querySelector('[data-testid="' + testid + '"]');
     if (!el) return null;
     // x-show toggles display on the next Alpine tick; getBoundingClientRect on
     // a display:none element returns all zeros. Wait for a REAL box (non-zero
@@ -11004,14 +11004,19 @@ SEARCH_DROPDOWN_POSITIONING_CHECKS = """(async () => {
 
   // ── 3. Open the Org dropdown ──────────────────────────────────────
   var orgChip = chipRect('sp-org-chip');
-  spScope.toggleOrgDropdown();
+  spScope.orgList = spScope.orgList.length ? spScope.orgList : [{slug:'autonomy',name:'Autonomy'}];
+  await Alpine.nextTick();
+  spRoot.querySelector('[data-testid="sp-org-chip"]').click();
   var orgDD = await dropdownRect('sp-org-dropdown');
   r.org_chip_left = orgChip ? orgChip.left : null;
   r.org_dd_left = orgDD ? orgDD.left : null;
   if (orgChip && orgDD) {
-    r.org_dd_anchored = Math.abs(orgDD.left - orgChip.left) <= 6;
+    // The shared picker uses a viewport-clamped body popup: it must overlap
+    // its own trigger horizontally and sit directly below it, not another chip.
+    r.org_dd_anchored = orgDD.left <= orgChip.right && orgDD.right >= orgChip.left
+      && Math.abs(orgDD.top - orgChip.bottom) <= 8;
   }
-  spScope.orgDropdownOpen = false;
+  spRoot.querySelector('[data-testid="sp-org-chip"]').click();
 
   // Every chip+dropdown pair sits inside a .sp-filter-anchor wrapper.
   // The wrapper IS the dropdown's positioning ancestor — so the row's

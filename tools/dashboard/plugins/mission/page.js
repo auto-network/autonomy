@@ -47,10 +47,11 @@ window.missionPage = function () {
         const d = await fetch("/api/orgs").then((r) => r.ok ? r.json() : {});
         this.orgs = (d.orgs || []).map((e) => {
           const b = (e && e.org) || {};
-          const idp = (e && e.identity && e.identity.payload) || {};
+          const idp = (e && e.identity_resolved) || (e && e.identity && e.identity.payload) || {};
           return {slug: b.slug || idp.slug || "",
                   name: idp.name || b.slug || "?",
                   color: idp.color || "#64748b",
+                  favicon: idp.favicon || null,
                   initial: idp.initial || (idp.name || "?")[0]};
         }).filter((o) => o.slug && o.slug !== "personal");
       } catch (e) {}

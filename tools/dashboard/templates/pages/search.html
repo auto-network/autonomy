@@ -425,58 +425,8 @@
          ``.sp-filter-anchor`` (position:relative) so the dropdown panel
          anchors under its OWN button instead of the row's left edge. -->
     <div class="sp-filter-row-1">
-      <!-- Org pin chip — opens dropdown to pin search caller to one org -->
-      <div class="sp-filter-anchor">
-        <button class="sp-filter-chip"
-                data-testid="sp-org-chip"
-                @click.stop="toggleOrgDropdown()"
-                :title="orgChip.title">
-          <span class="sp-filter-chip-glyph"
-                :class="orgChip.allOrgs ? 'sp-filter-chip-all' : ''"
-                :style="orgChip.glyphStyle">
-            <template x-if="!orgChip.favicon">
-              <span x-text="orgChip.initial"></span>
-            </template>
-            <template x-if="orgChip.favicon">
-              <img :src="orgChip.favicon" :alt="orgChip.label">
-            </template>
-          </span>
-          <span class="sp-filter-chip-value" x-text="orgChip.label"></span>
-        </button>
-
-        <!-- Org dropdown panel (open state) -->
-        <div class="sp-org-dropdown"
-             data-testid="sp-org-dropdown"
-             x-show="orgDropdownOpen"
-             @click.outside="orgDropdownOpen = false"
-             x-cloak>
-          <button class="sp-org-option"
-                  :class="!selectedOrg ? 'sp-org-option-selected' : ''"
-                  @click="pickOrg('')">
-            <span class="sp-org-option-glyph sp-org-option-glyph-all">∞</span>
-            <span>All orgs</span>
-            <span class="sp-org-option-meta">default</span>
-          </button>
-          <template x-for="o in orgList" :key="o.slug">
-            <button class="sp-org-option"
-                    :class="selectedOrg === o.slug ? 'sp-org-option-selected' : ''"
-                    @click="pickOrg(o.slug)">
-              <span class="sp-org-option-glyph"
-                    :style="o.favicon ? '' : `background:${o.color}`">
-                <template x-if="!o.favicon">
-                  <span x-text="o.initial"></span>
-                </template>
-                <template x-if="o.favicon">
-                  <img :src="o.favicon" :alt="o.name">
-                </template>
-              </span>
-              <span x-text="o.name"></span>
-              <span class="sp-org-option-meta" x-text="o.kind"></span>
-            </button>
-          </template>
-        </div>
-      </div>
-
+      <div class="sp-filter-anchor"
+           x-org-picker="{orgs: orgList, value: selectedOrg, allowAll: true, allLabel: 'All orgs', compactOnMobile: true, testId: 'sp-org-chip', menuTestId: 'sp-org-dropdown', onChange: slug => pickOrg(slug)}"></div>
       <!-- Publication-state chip — minimum-state filter. Picking a state
            clamps results to that state OR more restrictive. Raw is the
            floor (everything qualifies, including raw rows from other

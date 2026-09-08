@@ -150,6 +150,7 @@
     if (owner) {
       seen[owner] = true;
       rows.push({ id: owner, label: ownerPresence.participant_label || owner,
+                  participant_kind: ownerPresence.participant_kind || 'agent',
                   last_push: (deck && (deck.modified_at || deck.created_at)) || '', count: 0 });
     } else if (deck && deck.creator_session_id && !seen[deck.creator_session_id]) {
       seen[deck.creator_session_id] = true;
@@ -160,7 +161,7 @@
       var id = p && p.participant_id;
       if (!id || seen[id]) return;
       seen[id] = true;
-      rows.push({ id: id, label: p.participant_label || id, last_push: p.heartbeat_at || '', count: 0 });
+      rows.push({ id: id, label: p.participant_label || id, participant_kind: p.participant_kind || 'operator', last_push: p.heartbeat_at || '', count: 0 });
     });
     return rows;
   }
@@ -339,6 +340,7 @@
         },
 
         destroy: function () {
+          if (this._orgPicker) { this._orgPicker.destroy(); this._orgPicker = null; }
           this._destroyed = true;
           this._libraryGeneration += 1;
           clearTimeout(this._libraryTimer);
@@ -366,10 +368,7 @@
             if (!response.ok) return;
             var data = await response.json();
             if (this._destroyed) return;
-            this.organizations = (data.orgs || []).map(function (row) {
-              var org = row.org || {};
-              return { slug: org.slug, name: (row.identity_resolved || {}).name || org.slug };
-            }).filter(function (row) { return !!row.slug; });
+            this.organizations = window.OrgPicker.normalize(data.orgs || []);
             this.updateTopbar();
           } catch (_) { /* Current organization remains selectable. */ }
         },
@@ -566,6 +565,7 @@
           if (!/^\/(present|presentations)(\/|$)/.test(path)) return;
           if (parsePresentPath(path).mode !== this.mode) return;
           if (this.mode === 'library') { this.updateLibraryTopbar(); return; }
+          if (this._orgPicker) { this._orgPicker.destroy(); this._orgPicker = null; }
           var deckName = (this.deck && this.deck.name) || '';
           document.title = deckName ? deckName + ' · Slides' : 'Slides';
           if (!window.Autonomy || typeof window.Autonomy.setTopbar !== 'function') return;
@@ -595,30 +595,39 @@
           if (this.org && !organizations.some(function (org) { return org.slug === self.org; })) {
             organizations.push({ slug: this.org, name: this.org });
           }
-          var options = organizations.map(function (org) {
-            return '<option value="' + escapeHtml(org.slug) + '"' + (org.slug === self.org ? ' selected' : '') + '>' + escapeHtml(org.name) + '</option>';
-          }).join('');
           var live = rows.map(function (deck) {
             var session = sessions[deck.creator_session_id];
             return '<div class="present-library-session"><a href="' + self.deckHref(deck) + '">' + escapeHtml(deck.name) + '</a>' +
               '<a class="present-library-session-label" href="/session/' + encodeURIComponent(deck.org || self.org || 'autonomy') + '/' + encodeURIComponent(deck.creator_session_id) + '">' + escapeHtml(session.label || deck.creator_session_label || deck.creator_session_id) + '</a></div>';
           }).join('');
-          var html = '<div class="present-library-topbar" data-testid="present-library-topbar"><div class="present-library-heading"><strong>Slides</strong><span>' +
-            (this.loading ? 'Loading…' : this.error ? 'Unavailable' : this.decks.length + (this.decks.length === 1 ? ' deck' : ' decks')) + '</span></div>' +
-            '<div class="present-topbar-side"><select data-testid="present-org" aria-label="Organization">' + (options || '<option>Organization</option>') + '</select>' +
-            '<details class="present-library-presence"><summary aria-label="Live slide sessions">' +
-            '<span class="present-library-live-dot' + (liveCount ? ' is-live' : '') + '"></span>' + liveCount + '</summary>' +
-            '<div class="present-library-presence-menu"><strong>Designing now</strong>' + (live || '<p>No live sessions working on these decks</p>') + '</div></details></div></div>';
-          if (html === this._libraryTopbarHtml && document.querySelector('[data-testid="present-library-topbar"]')) return;
-          this._libraryTopbarHtml = html;
-          window.Autonomy.setTopbar({ html: html });
-          var select = document.querySelector('[data-testid="present-org"]');
-          if (select) select.addEventListener('change', function () {
-            self.org = select.value;
+          var root = document.querySelector('[data-testid="present-library-topbar"]');
+          if (!root) {
+            if (this._orgPicker) this._orgPicker.destroy();
+            this._orgPicker = null;
+            window.Autonomy.setTopbar({html: '<div class="present-library-topbar" data-testid="present-library-topbar"><div class="present-library-heading"><strong>Slides</strong><span data-library-count></span></div><div class="present-topbar-side"><div class="present-library-org-host"></div><details class="present-library-presence"><summary aria-label="Live slide sessions"></summary><div class="present-library-presence-menu"></div></details></div></div>'});
+            root = document.querySelector('[data-testid="present-library-topbar"]');
+          }
+          if (!root) return;
+          root.querySelector('[data-library-count]').textContent = this.loading ? 'Loading…' : this.error ? 'Unavailable' : this.decks.length + (this.decks.length === 1 ? ' deck' : ' decks');
+          var summary = root.querySelector('summary');
+          var summaryHtml = '<span class="present-library-live-dot' + (liveCount ? ' is-live' : '') + '"></span>' + liveCount;
+          if (summary.innerHTML !== summaryHtml) summary.innerHTML = summaryHtml;
+          var menu = root.querySelector('.present-library-presence-menu');
+          var menuHtml = '<strong>Designing now</strong>' + (live || '<p>No live sessions working on these decks</p>');
+          if (menu.innerHTML !== menuHtml) menu.innerHTML = menuHtml;
+          if (!window.OrgPicker) return;
+          var host = root.querySelector('.present-library-org-host');
+          var opts = {orgs: organizations, value: this.org, testId: 'present-org', onChange: function (slug) {
+            self.org = slug;
             self.decks = [];
             self._clearLibrarySubscriptions();
             self.loadLibrary();
-          });
+          }};
+          if (this._orgPicker && this._orgPicker.el === host) this._orgPicker.update(opts);
+          else {
+            if (this._orgPicker) this._orgPicker.destroy();
+            this._orgPicker = window.OrgPicker.mount(host, opts);
+          }
         },
 
         // The shared AssetPresence control (same as Design Studio and Notes)

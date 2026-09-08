@@ -85,6 +85,18 @@ const SESSIONS = [
 ];
 
 describe('AssetPresence', () => {
+  it('renders people as text while retaining actual session links', () => {
+    makeWindow();
+    const el = new FakeEl();
+    const ctl = AssetPresence.mount(el, {sessions: [
+      {id: 'person-key', label: 'Operator', participant_kind: 'operator'},
+      {id: 'auto-editor', label: 'Editor', participant_kind: 'agent'},
+    ]});
+    assert.match(el.html, /<div class="design-presence-row"[^>]*data-session="person-key">/);
+    assert.doesNotMatch(el.html, /href="[^"]*person-key/);
+    assert.match(el.html, /href="\/session\/autonomy\/auto-editor"/);
+    ctl.destroy();
+  });
   it('resolves sessions live-first and renders initials, rows, and the share button', async () => {
     const { win } = makeWindow({ sessions: { 'auto-live': { isLive: true, label: 'Live designer' } } });
     const el = new FakeEl();

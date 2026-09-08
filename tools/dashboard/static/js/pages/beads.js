@@ -742,6 +742,7 @@
               slug,
               name,
               color: ident.color || '#64748b',
+              favicon: ident.favicon || null,
               initial: ident.initial || (name ? name[0].toUpperCase() : '?'),
             };
           }).filter(o => o.slug && o.slug !== 'personal');
