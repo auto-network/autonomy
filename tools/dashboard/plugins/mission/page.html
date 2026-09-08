@@ -157,23 +157,14 @@
       <!-- Inside a mission the org slot becomes the PRESENCE
            indicator (standard avatar stack, surface "mission:<id>");
            the org selector belongs to the list level only. -->
-      <div class="nx-avatar-stack shrink-0" x-show="current" x-cloak
-           aria-label="Who is on this mission">
-        <template x-for="p in peeps.slice(0, 6)"
-                  :key="p.participant_id + ':' + p.surface_id">
-          <span class="nx-avatar"
-                :style="'background:' + peepColor(p)
-                        + (peepStale(p) ? ';opacity:.38' : '')"
-                :title="(p.participant_label || p.participant_id)
-                        + (peepStale(p) ? ' — away' : '')"
-                x-text="(p.participant_label || p.participant_id || '?')
-                        .slice(0, 1).toUpperCase()"></span>
-        </template>
-        <span class="nx-avatar nx-avatar-overflow" x-show="peeps.length > 6"
-              x-text="'+' + (peeps.length - 6)"></span>
-      </div>
+      <template x-if="current">
+        <div x-asset-presence="missionPresenceOptions()" data-testid="mission-item-presence"></div>
+      </template>
       <template x-if="!current">
-        <div x-org-picker="{orgs, value: org, testId: 'mission-org-select', onChange: slug => setOrg(slug)}"></div>
+        <div x-org-picker="{orgs, value: org, compactOnMobile:true, testId: 'mission-org-select', onChange: slug => setOrg(slug)}"></div>
+      </template>
+      <template x-if="!current">
+        <div x-asset-presence="missionActivityOptions()" data-testid="mission-library-presence"></div>
       </template>
     </div>
   </template>

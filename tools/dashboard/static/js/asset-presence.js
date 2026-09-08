@@ -77,20 +77,20 @@
   // Sessions with live state resolved, live first, newest push first.
   function resolveSessions(input, org) {
     var out = (input || []).filter(function (s) { return s && s.id; }).map(function (s) {
-      var live = liveSession(s.id);
-      var label = (live && live.label) || s.label || s.id;
       // Human presence is not a session route. Keep names as plain text until
       // a real person/messaging destination exists. Older session-only callers
       // omit kind, so preserve their links.
       var kind = s.participant_kind || s.kind || 'agent';
       var isSession = kind === 'agent' || kind === 'session';
+      var live = isSession ? liveSession(s.id) : null;
+      var label = (live && live.label) || s.label || s.id;
       return {
         id: s.id,
         label: label,
         initial: String(label).trim().charAt(0).toUpperCase() || '?',
         last_push: s.last_push || '',
         count: Number(s.count) || 0,
-        live: !!live,
+        live: typeof s.live === 'boolean' ? s.live : !!live,
         href: isSession ? '/session/' + encodeURIComponent(org || 'autonomy') + '/' + encodeURIComponent(s.id) : null,
       };
     });
@@ -105,6 +105,25 @@
   var OPEN_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 5h5v5M19 5l-9 9"/><path d="M19 13v6H5V5h6"/></svg>';
   var MANAGE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>';
   var CHAT_SVG = '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 3h14v9H6l-4 4V3z"/></svg>';
+  var DOCUMENT_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M3 1.5h6l4 4v9H3zM9 1.5v4h4M5 8h6M5 11h4"/></svg>';
+  var SESSION_SVG = '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="6.2" stroke="currentColor" stroke-width="1.5"/><circle cx="8" cy="8" r="2.4" fill="currentColor"/></svg>';
+
+  function activityEntries(input) {
+    var seen = new Set();
+    return (Array.isArray(input) ? input : []).filter(function (entry) {
+      if (!entry || !entry.session_id || !entry.artifact_id || !entry.org) return false;
+      var href = String(entry.artifact_href || '');
+      if (!/^\/(?!\/)/.test(href) || /[\\\x00-\x20]/.test(href)) return false;
+      try {
+        var origin = (window.location && window.location.origin) || 'https://local.invalid';
+        var parsed = new URL(href, origin);
+        if (parsed.origin !== origin || !/^https?:$/.test(parsed.protocol)) return false;
+      } catch (_) { return false; }
+      var key = JSON.stringify([entry.org, entry.session_id, entry.artifact_id]);
+      if (seen.has(key)) return false;
+      seen.add(key); return true;
+    });
+  }
 
   function Control(el, opts) {
     this.el = el;
@@ -119,6 +138,7 @@
     this._onToggle = this._onToggle.bind(this);
     this._onDocumentClick = this._onDocumentClick.bind(this);
     this._onKeydown = this._onKeydown.bind(this);
+    this._positionMenu = this._positionMenu.bind(this);
     el.classList.add('asset-presence-host');
     el.addEventListener('click', this._onClick);
     // The shell is built ONCE and never replaced. Re-creating the <details>
@@ -128,6 +148,10 @@
     this._buildShell();
     document.addEventListener('click', this._onDocumentClick, true);
     document.addEventListener('keydown', this._onKeydown);
+    if (window.addEventListener) {
+      window.addEventListener('resize', this._positionMenu);
+      window.addEventListener('scroll', this._positionMenu, true);
+    }
     this.render();
     this.refresh();
   }
@@ -159,6 +183,10 @@
     this.el.removeEventListener('click', this._onClick);
     document.removeEventListener('click', this._onDocumentClick, true);
     document.removeEventListener('keydown', this._onKeydown);
+    if (window.removeEventListener) {
+      window.removeEventListener('resize', this._positionMenu);
+      window.removeEventListener('scroll', this._positionMenu, true);
+    }
     this.el.innerHTML = '';
     this.details = this.summary = this.menu = null;
   };
@@ -177,20 +205,71 @@
     var live = sessions.filter(function (s) { return s.live; }).length;
     var text = sessions.length === 0 ? 'No sessions on this ' + (this.opts.noun || 'item')
       : sessions.length + (sessions.length === 1 ? ' session' : ' sessions') + (live ? ', ' + live + ' live' : '');
-    return text + (this.share.shared ? ' · shared by link' : ' · not shared');
+    if (this.opts.people) text = sessions.length + (sessions.length === 1 ? ' person' : ' people') + (live ? ', ' + live + ' live' : '');
+    return text + (this.opts.sharing === false ? '' : this.share.shared ? ' · shared by link' : ' · not shared');
+  };
+
+  // Do not destroy a focused link merely because the sessions store emitted
+  // an unchanged snapshot. Changed lists preserve the same destination key.
+  Control.prototype._fill = function (summary, menu, title, live) {
+    this.details.classList.toggle('is-live', !!live);
+    this.summary.setAttribute('title', title);
+    this.summary.setAttribute('aria-label', title);
+    if (this._summaryHtml !== summary) { this._summaryHtml = summary; this.summary.innerHTML = summary; }
+    if (this._menuHtml !== menu) {
+      var focused = document.activeElement;
+      var key = focused && focused.getAttribute && focused.getAttribute('data-activity-key');
+      var inside = focused && this.menu.contains(focused);
+      this._menuHtml = menu; this.menu.innerHTML = menu;
+      if (inside) {
+        var match = key && Array.from(this.menu.querySelectorAll('[data-activity-key]')).find(function (a) { return a.getAttribute('data-activity-key') === key; });
+        (match || this.summary).focus({preventScroll: true});
+      }
+    }
+    this._positionMenu();
+  };
+
+  Control.prototype._renderActivity = function () {
+    var entries = activityEntries(this.opts.entries), seen = new Set(), sessions = [];
+    entries.forEach(function (e) {
+      var key = JSON.stringify([e.org, e.session_id]);
+      if (!seen.has(key)) { seen.add(key); sessions.push(e); }
+    });
+    var avatars = sessions.slice(0, 3).map(function (e) {
+      return '<span class="design-presence-avatar is-live" title="' + esc(e.session_label || e.session_id) + '">' + esc(String(e.session_label || e.session_id).trim().charAt(0).toUpperCase()) + '</span>';
+    }).join('');
+    var rows = entries.map(function (e) {
+      var key = JSON.stringify([e.org, e.session_id, e.artifact_id]);
+      var sessionHref = '/session/' + encodeURIComponent(e.org) + '/' + encodeURIComponent(e.session_id);
+      return '<div class="asset-activity-row">'
+        + '<a class="asset-activity-link is-artifact" data-testid="activity-artifact" data-activity-key="' + esc(key + ':artifact') + '" href="' + esc(e.artifact_href) + '" title="Open ' + esc(e.artifact_kind || 'Artifact') + ': ' + esc(e.artifact_title) + '">'
+        + DOCUMENT_SVG + '<span><small>' + esc(e.artifact_kind || 'Artifact') + '</small><strong>' + esc(e.artifact_title || 'Untitled') + '</strong></span></a>'
+        + '<a class="asset-activity-link is-session" data-testid="activity-session" data-activity-key="' + esc(key + ':session') + '" href="' + esc(sessionHref) + '" title="Open session: ' + esc(e.session_label || e.session_id) + '">'
+        + SESSION_SVG + '<span><small>Session</small><span>' + esc(e.session_label || e.session_id) + '</span></span></a></div>';
+    }).join('');
+    var heading = this.opts.heading || 'Designing now';
+    var title = sessions.length + (sessions.length === 1 ? ' live session' : ' live sessions') + ' · ' + heading;
+    this._fill('<span class="design-topbar-live-dot"></span><span class="design-presence-stack">' + avatars + '</span>'
+      + '<span class="asset-activity-mobile-count">' + sessions.length + '</span>'
+      + (sessions.length > 3 ? '<span class="design-presence-count">+' + (sessions.length - 3) + '</span>' : sessions.length ? '' : '<span class="design-presence-count">—</span>'),
+      '<div class="design-presence-section">' + esc(heading) + '</div>' + (rows || '<div class="design-presence-empty">' + esc(this.opts.emptyText || 'No live session is designing right now') + '</div>'), title, sessions.length > 0);
   };
 
   Control.prototype.render = function () {
     if (this._destroyed || !this.summary) return;
+    this.details.classList.toggle('is-activity', this.opts.mode === 'activity');
+    if (this.opts.mode === 'activity') { this._renderActivity(); return; }
     var sessions = this.sessions();
     var chat = this.opts.chat;
     var avatars = sessions.slice(0, 3).map(function (s) {
       return '<span class="design-presence-avatar' + (s.live ? ' is-live' : '') + '" title="' + esc(s.label + (s.live ? ' (live)' : '')) + '">' + esc(s.initial) + '</span>';
     }).join('');
     if (!sessions.length) avatars = '<span class="design-presence-avatar is-empty" title="No session has touched this yet">·</span>';
+    var people = this.opts.people;
     var rows = sessions.map(function (s) {
       var meta = (s.live ? 'live · ' : '') + (s.last_push ? formatAgo(s.last_push) : 'no push recorded')
         + (s.count ? ' · ' + s.count + (s.count === 1 ? ' rev' : ' revs') : '');
+      if (people) meta = s.live ? 'Here now' : 'Away';
       return '<' + (s.href ? 'a' : 'div') + ' class="design-presence-row" data-testid="asset-presence-session" data-session="' + esc(s.id) + '"'
         + (s.href ? ' href="' + esc(s.href) + '" data-action="open-session" title="Open session ' + esc(s.label) + '"' : '') + '>'
         + '<span class="design-presence-avatar' + (s.live ? ' is-live' : '') + '">' + esc(s.initial) + '</span>'
@@ -230,23 +309,37 @@
           : '');
     }
     var error = this.shareError ? '<div class="design-presence-note is-error">' + esc(this.shareError) + '</div>' : '';
-    var title = esc(this.summaryTitle());
-    this.details.classList.toggle('is-live', sessions.some(function (s) { return s.live; }));
-    this.summary.setAttribute('title', title);
-    this.summary.setAttribute('aria-label', title);
-    this.summary.innerHTML = '<span class="design-presence-stack">' + avatars + '</span>'
+    var title = this.summaryTitle();
+    var summaryHtml = '<span class="design-presence-stack">' + avatars + '</span>'
       + (sessions.length > 3 ? '<span class="design-presence-count">+' + (sessions.length - 3) + '</span>' : '')
-      + (this.share.shared ? '<span class="design-presence-sharemark" title="Shared by link">↗</span>' : '');
-    this.menu.innerHTML = '<div class="design-presence-section">Sessions on this ' + esc(this.opts.noun || 'item') + '</div>'
+      + (this.opts.sharing !== false && this.share.shared ? '<span class="design-presence-sharemark" title="Shared by link">↗</span>' : '');
+    var menuHtml = '<div class="design-presence-section">' + (this.opts.people ? 'People' : 'Sessions') + ' on this ' + esc(this.opts.noun || 'item') + '</div>'
       + rows + chatRow
-      + '<div class="design-presence-section">Sharing</div>'
-      + sharing + error;
+      + (this.opts.sharing === false ? '' : '<div class="design-presence-section">Sharing</div>' + sharing + error);
+    this._fill(summaryHtml, menuHtml, title, sessions.some(function (s) { return s.live; }));
+  };
+
+  Control.prototype._positionMenu = function () {
+    if (this._destroyed || !this.open || !this.summary.getBoundingClientRect) return;
+    var r = this.summary.getBoundingClientRect();
+    if (!this.summary.isConnected || r.bottom <= 0 || r.top >= window.innerHeight || r.right <= 0 || r.left >= window.innerWidth) {
+      if (document.activeElement && this.menu.contains(document.activeElement)) this.summary.focus({preventScroll:true});
+      this.open = false; return;
+    }
+    var width = Math.min(320, window.innerWidth - 16);
+    this.menu.style.width = width + 'px';
+    this.menu.style.left = Math.max(8, Math.min(r.right - width, window.innerWidth - width - 8)) + 'px';
+    this.menu.style.right = 'auto';
+    var below = Math.max(0, window.innerHeight - r.bottom - 14), above = Math.max(0, r.top - 14);
+    var down = below >= Math.min(360, this.menu.scrollHeight) || below >= above;
+    this.menu.style.maxHeight = Math.min(360, down ? below : above) + 'px';
+    this.menu.style.top = (down ? r.bottom + 6 : Math.max(8, r.top - 6 - this.menu.getBoundingClientRect().height)) + 'px';
   };
 
   Control.prototype._onToggle = function () {
     // Safe now that render() fills the shell instead of replacing it: this
     // fires only on a real open/close, never as a side effect of rendering.
-    if (this.open) this.refresh();
+    if (this.open) { this._positionMenu(); this.refresh(); }
   };
 
   // A <details> does not close on an outside click or Escape; every other
@@ -297,7 +390,7 @@
   // ── Share state ─────────────────────────────────────────────────
 
   Control.prototype.refresh = async function () {
-    if (this._destroyed || !this.opts.targetUuid) return;
+    if (this._destroyed || this.opts.mode === 'activity' || this.opts.sharing === false || !this.opts.targetUuid) return;
     try {
       var ids = (this.opts.extraIds || []).filter(Boolean).join(',');
       var url = '/api/share-state/' + encodeURIComponent(this.opts.targetType) + '/' + encodeURIComponent(this.opts.targetUuid)
@@ -319,6 +412,7 @@
   };
 
   Control.prototype.requestShare = async function () {
+    if (this.opts.mode === 'activity' || this.opts.sharing === false) return;
     if (this.shareState === 'requesting' || this.shareState === 'awaiting') return;
     this.shareError = '';
     this.shareState = 'requesting';
@@ -439,4 +533,14 @@
 
   if (typeof module !== 'undefined' && module.exports) module.exports = AssetPresence;
   if (typeof window !== 'undefined') window.AssetPresence = AssetPresence;
+  if (typeof document !== 'undefined' && document.addEventListener) document.addEventListener('alpine:init', function () {
+    window.Alpine.directive('asset-presence', function (el, binding, u) {
+      var handle, disposed = false, read = u.evaluateLater(binding.expression);
+      u.effect(function () { read(function (opts) {
+        if (disposed) return;
+        if (handle) handle.update(opts); else handle = AssetPresence.mount(el, opts);
+      }); });
+      u.cleanup(function () { disposed = true; if (handle) handle.destroy(); });
+    });
+  });
 })();

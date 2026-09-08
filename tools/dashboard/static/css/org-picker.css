@@ -19,5 +19,8 @@
 .org-picker-detail { font-size:11px; color:#94a3b8; }
 .org-picker-check { color:#7dd3fc; width:12px; flex-shrink:0; }
 @media (max-width:430px) {
+  .org-picker.is-compact-mobile { flex:0 0 36px; min-width:36px; width:36px; }
   .org-picker-trigger.is-compact-mobile .org-picker-label { display:none; }
+  .org-picker-trigger.is-compact-mobile .org-picker-chevron { display:none; }
+  .org-picker-trigger.is-compact-mobile { width:36px; min-width:36px; padding:7px; }
 }

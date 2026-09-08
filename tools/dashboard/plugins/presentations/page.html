@@ -21,6 +21,8 @@
               <span class="present-deck-blank" aria-hidden="true" x-text="(deck.name || '?').trim().charAt(0).toUpperCase()"></span>
               <img x-show="thumbnailUrl(deck) && !failedThumbnails[deck.latest_revision_id]" :src="thumbnailUrl(deck)" alt="" loading="lazy" decoding="async"
                    @error="failedThumbnails[deck.latest_revision_id] = true">
+              <span class="asset-live-marker" data-testid="present-deck-live" x-show="deckLive(deck)"
+                    role="img" :aria-label="deckLiveLabel(deck)" :title="deckLiveLabel(deck)"></span>
             </div>
             <div class="present-deck-main">
               <span class="present-deck-name" x-text="deck.name || 'Untitled deck'"></span>

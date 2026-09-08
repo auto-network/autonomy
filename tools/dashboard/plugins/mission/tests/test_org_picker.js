@@ -10,6 +10,7 @@ test('Mission consumes shared picker with resolved icons and removes it inside a
     {org:{slug:'personal'},identity_resolved:{name:'Personal'}},
   ]}:{missions:[]}});
   w.eval(fs.readFileSync(path.join(__dirname,'../../../static/js/org-picker.js'),'utf8'));
+  w.eval(fs.readFileSync(path.join(__dirname,'../../../static/js/asset-presence.js'),'utf8'));
   w.eval(fs.readFileSync(path.join(__dirname,'../page.js'),'utf8'));
   w.eval(fs.readFileSync(path.join(__dirname,'../../../static/vendor/alpine-3.15.12.min.js'),'utf8'));
   await new Promise(r=>setTimeout(r,40));
@@ -18,11 +19,20 @@ test('Mission consumes shared picker with resolved icons and removes it inside a
   assert.ok(trigger);assert.equal(trigger.querySelector('img').getAttribute('src'),'/real.png');
   const menu=w.document.getElementById(trigger.getAttribute('aria-controls'));
   assert.equal(menu.querySelector('[data-slug=personal]'),null);
+  d.alloc=[{mission_id:'m1',org:'autonomy',name:'Mission',status:'active',pillars:[{session:'agent',session_title:'Coordinator',live:true}]}];
+  await w.Alpine.nextTick();
+  assert.match(w.document.querySelector('[data-testid=mission-library-presence]').textContent,/Working now/);
+  assert.equal(w.document.querySelector('[data-testid=activity-session]').getAttribute('href'),'/session/autonomy/agent');
   menu.querySelector('[data-slug=beta]').click();await w.Alpine.nextTick();
   assert.equal(d.org,'beta');assert.equal(w.localStorage.getItem('msn.org'),'beta');
   d.current='mission-one';await w.Alpine.nextTick();
   assert.equal(w.document.querySelector('[data-testid=mission-org-select]'),null);
   assert.equal(menu.isConnected,false);
+  d.peeps=[{participant_id:'human',participant_kind:'operator',participant_label:'Operator',heartbeat_at:new Date().toISOString()}];
+  await w.Alpine.nextTick();
+  const presence=w.document.querySelector('[data-testid=mission-item-presence]');
+  assert.match(presence.textContent,/People on this mission/);assert.equal(presence.querySelector('a'),null);
+  assert.doesNotMatch(presence.textContent,/Sharing|Share by link/);
   await new Promise(r=>setTimeout(r,0));
   w.Alpine.stopObservingMutations();dom.window.close();
 });

@@ -865,6 +865,10 @@ function designStudioPage() {
     dynamicOnly: false,
     sharedOnly: false,
     org: 'all',
+    organizations: [],
+    _activity: null,
+    _orgPicker: null,
+    _destroyed: false,
     remoteShares: [],
     renderStatus: {},
     actionStates: {},
@@ -881,6 +885,9 @@ function designStudioPage() {
         this._updateTopbar();
         this.loadDesigns({ background: hydrated });
         this._refreshPresenceDesigns();
+        this._loadOrganizations();
+        if (this.$watch) this.$watch('org', () => this._updateTopbar());
+        if (this.$watch) this.$watch('_liveDesignSessions()', () => this._updateTopbar());
         this._pollRenderStatus();
         var self = this;
         this._sessionRegistryHandler = function () {
@@ -893,6 +900,9 @@ function designStudioPage() {
     },
 
     destroy: function () {
+      this._destroyed = true;
+      if (this._activity) { this._activity.destroy(); this._activity = null; }
+      if (this._orgPicker) { this._orgPicker.destroy(); this._orgPicker = null; }
       if (this._loadTimer) {
         clearTimeout(this._loadTimer);
         this._loadTimer = null;
@@ -1173,7 +1183,7 @@ function designStudioPage() {
 
     openSession: function (design) {
       if (!design || !design.creator_session_id) return;
-      navigateTo('/session/autonomy/' + encodeURIComponent(design.creator_session_id));
+      navigateTo('/session/' + encodeURIComponent(design.org || 'autonomy') + '/' + encodeURIComponent(design.creator_session_id));
     },
 
     setDesignStatus: async function (design, status) {
@@ -1302,23 +1312,27 @@ function designStudioPage() {
     },
 
     _liveDesignSessions: function () {
-      var seen = {};
-      var out = [];
-      var source = this.presenceDesigns.length ? this.presenceDesigns : this.designs;
-      for (var i = 0; i < source.length; i++) {
-        var design = source[i];
-        var id = design && design.creator_session_id;
-        if (!id || seen[id]) continue;
-        var live = this._liveSession(id);
-        if (!live) continue;
-        seen[id] = true;
-        out.push({
-          id: id,
-          label: live.label || design.creator_session_label || id,
-          title: design.title || 'Untitled Design',
-        });
-      }
-      return out;
+      var self = this, source = this.presenceDesigns.length ? this.presenceDesigns : this.designs;
+      return source.filter(function (design) {
+        return design && self._liveSession(design.creator_session_id)
+          && (self.org === 'all' || (design.org || 'autonomy') === self.org);
+      }).map(function (design) {
+        var live = self._liveSession(design.creator_session_id);
+        return {session_id:design.creator_session_id, session_label:live.label || design.creator_session_label,
+          org:design.org || 'autonomy', artifact_id:design.design_id || design.latest_revision_id,
+          artifact_title:design.title, artifact_href:'/design/' + encodeURIComponent(design.latest_revision_id || design.design_id), artifact_kind:'Design'};
+      });
+    },
+
+    _loadOrganizations: async function () {
+      try {
+        var res = await ((window.Autonomy && window.Autonomy.fetch) || window.fetch)('/api/orgs');
+        if (!res.ok) return;
+        var data = await res.json();
+        if (this._destroyed) return;
+        this.organizations = window.OrgPicker.normalize(data.orgs || []);
+        this._updateTopbar();
+      } catch (_) { /* Catalog remains usable if identities are unavailable. */ }
     },
 
     _refreshPresenceDesigns: async function () {
@@ -1424,34 +1438,11 @@ function designStudioPage() {
     },
 
     _topbarStatsHtml: function () {
-      var live = this._liveDesignSessions();
-      var avatarHtml = live.slice(0, 3).map(function (s) {
-        var initial = (s.label || s.id || '?').trim().charAt(0).toUpperCase() || '?';
-        return '<span class="nx-avatar design-presence-avatar is-live" title="' + _escapeDesignHtml(s.label || s.id) + '">' + _escapeDesignHtml(initial) + '</span>';
-      }).join('');
-      var liveRows = live.map(function (s) {
-        var initial = (s.label || s.id || '?').trim().charAt(0).toUpperCase() || '?';
-        return '<a class="design-presence-row" href="/session/autonomy/' + encodeURIComponent(s.id) + '">'
-          + '<span class="design-topbar-avatar is-row">' + _escapeDesignHtml(initial) + '</span>'
-          + '<span class="design-presence-copy"><strong>' + _escapeDesignHtml(s.title || 'Untitled Design') + '</strong>'
-          + '<span>' + _escapeDesignHtml(s.label || s.id) + '</span></span>'
-          + '</a>';
-      }).join('');
-      var presenceBody = liveRows || '<div class="design-presence-empty">No live session is designing right now</div>';
-      var title = live.length === 0 ? 'No live design sessions'
-        : live.length + (live.length === 1 ? ' live design session' : ' live design sessions');
-      return '<details class="design-topbar-presence is-topbar' + (live.length ? ' is-live' : '') + '" data-testid="design-topbar-presence">'
-        + '<summary class="design-presence-pill" title="' + _escapeDesignHtml(title) + '" aria-label="' + _escapeDesignHtml(title) + '">'
-        + '<span class="design-topbar-live-dot"></span>'
-        + '<span class="nx-avatar-stack design-presence-stack" style="--nx-stack-cap: 3;">' + avatarHtml + '</span>'
-        + (live.length > 3 ? '<span class="design-presence-count">+' + (live.length - 3) + '</span>' : '')
-        + (live.length === 0 ? '<span class="design-presence-count is-empty">—</span>' : '')
-        + '</summary>'
-        + '<div class="design-presence-menu"><div class="design-presence-section">Designing now</div>' + presenceBody + '</div>'
-        + '</details>';
+      return '<div class="design-library-controls"><div data-studio-org></div><div data-studio-activity></div></div>';
     },
 
     _updateTopbar: function () {
+      if (this._destroyed) return;
       // Own the shared app topbar ONLY while on the Design library page.
       // session:registry and design-revision events keep calling this after
       // navigation (the component/handlers can outlive the page on mobile SPA
@@ -1459,6 +1450,8 @@ function designStudioPage() {
       // Design one — the "design presence on /sessions" corruption. Off /design,
       // release our handle and no-op so the current page keeps its own topbar.
       if (window.location.pathname !== '/design') {
+        if (this._activity) { this._activity.destroy(); this._activity = null; }
+        if (this._orgPicker) { this._orgPicker.destroy(); this._orgPicker = null; }
         if (this.topbarHandle && typeof this.topbarHandle.destroy === 'function') {
           this.topbarHandle.destroy();
         }
@@ -1469,16 +1462,27 @@ function designStudioPage() {
           || typeof window.Autonomy.topbar.set !== 'function') {
         return;
       }
-      var options = {
-        title: 'Design Studio',
-        left: [
-          { type: 'html', id: 'design-stats', html: this._topbarStatsHtml() },
-        ],
-      };
-      if (this.topbarHandle && typeof this.topbarHandle.update === 'function') {
-        this.topbarHandle.update(options);
-      } else {
-        this.topbarHandle = window.Autonomy.topbar.set(options);
+      var activityHost = document.querySelector('[data-studio-activity]');
+      if (!activityHost) {
+        this.topbarHandle = window.Autonomy.topbar.set({title:'Design Studio', controls:[
+          {type:'html',id:'design-stats',html:this._topbarStatsHtml()}
+        ]});
+        activityHost = document.querySelector('[data-studio-activity]');
+      }
+      if (!activityHost || !window.AssetPresence || !window.OrgPicker) return;
+      var activityOptions = {mode:'activity', entries:this._liveDesignSessions()};
+      if (this._activity && this._activity.el === activityHost) this._activity.update(activityOptions);
+      else {
+        if (this._activity) this._activity.destroy();
+        this._activity = window.AssetPresence.mount(activityHost, activityOptions);
+      }
+      var orgHost = document.querySelector('[data-studio-org]'), self = this;
+      var orgOptions = {orgs:this.organizations, value:this.org === 'all' ? '' : this.org, allowAll:true, compactOnMobile:true, testId:'design-org',
+        onChange:function (slug) { self.org = slug || 'all'; self._updateTopbar(); }};
+      if (this._orgPicker && this._orgPicker.el === orgHost) this._orgPicker.update(orgOptions);
+      else {
+        if (this._orgPicker) this._orgPicker.destroy();
+        this._orgPicker = window.OrgPicker.mount(orgHost, orgOptions);
       }
     },
   };

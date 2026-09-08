@@ -354,25 +354,17 @@
 }
 
 .present-deck-blank { display: grid; height: 100%; place-items: center; color: #334155; font-size: 3rem; }
-.present-deck-card:hover .present-deck-thumb { border-color: #475569; }
+.present-deck-thumb { transition:border-color 120ms ease,box-shadow 120ms ease; }
+.present-deck-card:hover .present-deck-thumb,
+.present-deck-card:focus-visible .present-deck-thumb { border-color:#64748b; box-shadow:0 0 0 2px #64748b40; }
+.present-deck-card:hover .present-deck-name,
+.present-deck-card:focus-visible .present-deck-name { color:#bbf7d0; }
 .present-deck-card:focus-visible { outline: 2px solid #818cf8; outline-offset: 4px; border-radius: 0.625rem; }
 .present-library-topbar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; width: 100%; min-width: 0; }
 .present-library-heading { display: flex; align-items: baseline; gap: 0.5rem; white-space: nowrap; }
 .present-library-heading strong { font-size: 0.875rem; color: #f1f5f9; }
 .present-library-heading span { font-size: 0.6875rem; color: #64748b; }
 .present-library-org-host { min-width: 0; }
-.present-library-presence { position: relative; }
-.present-library-presence summary { display: flex; align-items: center; gap: 0.4rem; cursor: pointer; list-style: none; padding: 0.5rem; border: 1px solid #334155; border-radius: 9999px; color: #94a3b8; font-size: 0.75rem; }
-.present-library-presence summary::-webkit-details-marker { display: none; }
-.present-library-live-dot { width: 0.4rem; height: 0.4rem; border-radius: 50%; background: #64748b; }
-.present-library-live-dot.is-live { background: #34d399; }
-.present-library-presence-menu { position: absolute; right: 0; top: calc(100% + 0.5rem); width: min(20rem, calc(100vw - 2rem)); padding: 0.75rem; border: 1px solid #334155; border-radius: 0.75rem; background: #0f172a; box-shadow: 0 16px 48px #0008; z-index: 50; max-height: 65vh; overflow: auto; }
-.present-library-presence-menu > strong { color: #94a3b8; font-size: 0.6875rem; text-transform: uppercase; letter-spacing: 0.06em; }
-.present-library-presence-menu p { color: #64748b; font-size: 0.75rem; padding: 0.75rem 0 0; }
-.present-library-session { display: flex; flex-direction: column; gap: 0.125rem; padding-top: 0.75rem; }
-.present-library-session a { font-size: 0.8125rem; color: #e2e8f0; overflow-wrap: anywhere; }
-.present-library-session a:hover { text-decoration: underline; }
-.present-library-session .present-library-session-label { font-size: 0.6875rem; color: #94a3b8; }
 
 @media (max-width: 639px) {
   .present-library-topbar { gap: 0.25rem; }
@@ -381,7 +373,6 @@
   .present-library-heading span { font-size: 0.625rem; }
   .present-library-topbar .present-topbar-side { gap: 0.25rem; }
   .present-library-org-host .org-picker-label { max-width: 4rem; }
-  .present-library-presence summary { padding: 0.35rem; gap: 0.25rem; font-size: 0.6875rem; }
 }
 
 .present-topbar-presence-host {

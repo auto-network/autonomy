@@ -323,12 +323,6 @@
             if (window.registerHandler) window.registerHandler('session:registry', this._registryHandler);
             document.addEventListener('visibilitychange', this._focusHandler);
             window.addEventListener('focus', this._focusHandler);
-            this._dismissLibraryPresence = function (event) {
-              var menu = document.querySelector('.present-library-presence');
-              if (menu && (event.key === 'Escape' || (event.type === 'click' && !menu.contains(event.target)))) menu.open = false;
-            };
-            document.addEventListener('click', this._dismissLibraryPresence);
-            document.addEventListener('keydown', this._dismissLibraryPresence);
             if (window.dashboardEvents && window.dashboardEvents.onSettingChanged) {
               this._settingCleanup = window.dashboardEvents.onSettingChanged('dashboard.presentation.deck', function () {
                 self._scheduleLibraryRefresh();
@@ -336,10 +330,12 @@
             }
             this.loadLibrary();
             this.loadOrganizations();
+            if (this.$watch) this.$watch('libraryActivityEntries()', function () { self.updateTopbar(); });
           }
         },
 
         destroy: function () {
+          if (this._activity) { this._activity.destroy(); this._activity = null; }
           if (this._orgPicker) { this._orgPicker.destroy(); this._orgPicker = null; }
           this._destroyed = true;
           this._libraryGeneration += 1;
@@ -350,10 +346,6 @@
           if (this._focusHandler) {
             document.removeEventListener('visibilitychange', this._focusHandler);
             window.removeEventListener('focus', this._focusHandler);
-          }
-          if (this._dismissLibraryPresence) {
-            document.removeEventListener('click', this._dismissLibraryPresence);
-            document.removeEventListener('keydown', this._dismissLibraryPresence);
           }
           if (this._presence) { this._presence.destroy(); this._presence = null; }
           if (this._messageHandler) window.removeEventListener('message', this._messageHandler);
@@ -565,6 +557,7 @@
           if (!/^\/(present|presentations)(\/|$)/.test(path)) return;
           if (parsePresentPath(path).mode !== this.mode) return;
           if (this.mode === 'library') { this.updateLibraryTopbar(); return; }
+          if (this._activity) { this._activity.destroy(); this._activity = null; }
           if (this._orgPicker) { this._orgPicker.destroy(); this._orgPicker = null; }
           var deckName = (this.deck && this.deck.name) || '';
           document.title = deckName ? deckName + ' · Slides' : 'Slides';
@@ -586,38 +579,31 @@
           if (!window.Autonomy || typeof window.Autonomy.setTopbar !== 'function') return;
           if (this._presence) { this._presence.destroy(); this._presence = null; }
           var self = this;
-          var sessions = (window.Alpine && window.Alpine.store('sessions')) || {};
-          var rows = this.decks.filter(function (deck) {
-            return sessions[deck.creator_session_id] && sessions[deck.creator_session_id].isLive;
-          });
-          var liveCount = new Set(rows.map(function (deck) { return deck.creator_session_id; })).size;
           var organizations = this.organizations.slice();
           if (this.org && !organizations.some(function (org) { return org.slug === self.org; })) {
             organizations.push({ slug: this.org, name: this.org });
           }
-          var live = rows.map(function (deck) {
-            var session = sessions[deck.creator_session_id];
-            return '<div class="present-library-session"><a href="' + self.deckHref(deck) + '">' + escapeHtml(deck.name) + '</a>' +
-              '<a class="present-library-session-label" href="/session/' + encodeURIComponent(deck.org || self.org || 'autonomy') + '/' + encodeURIComponent(deck.creator_session_id) + '">' + escapeHtml(session.label || deck.creator_session_label || deck.creator_session_id) + '</a></div>';
-          }).join('');
           var root = document.querySelector('[data-testid="present-library-topbar"]');
           if (!root) {
             if (this._orgPicker) this._orgPicker.destroy();
             this._orgPicker = null;
-            window.Autonomy.setTopbar({html: '<div class="present-library-topbar" data-testid="present-library-topbar"><div class="present-library-heading"><strong>Slides</strong><span data-library-count></span></div><div class="present-topbar-side"><div class="present-library-org-host"></div><details class="present-library-presence"><summary aria-label="Live slide sessions"></summary><div class="present-library-presence-menu"></div></details></div></div>'});
+            window.Autonomy.setTopbar({html: '<div class="present-library-topbar" data-testid="present-library-topbar"><div class="present-library-heading"><strong>Slides</strong><span data-library-count></span></div><div class="present-topbar-side"><div class="present-library-org-host"></div><div class="present-library-activity-host"></div></div></div>'});
             root = document.querySelector('[data-testid="present-library-topbar"]');
           }
           if (!root) return;
           root.querySelector('[data-library-count]').textContent = this.loading ? 'Loading…' : this.error ? 'Unavailable' : this.decks.length + (this.decks.length === 1 ? ' deck' : ' decks');
-          var summary = root.querySelector('summary');
-          var summaryHtml = '<span class="present-library-live-dot' + (liveCount ? ' is-live' : '') + '"></span>' + liveCount;
-          if (summary.innerHTML !== summaryHtml) summary.innerHTML = summaryHtml;
-          var menu = root.querySelector('.present-library-presence-menu');
-          var menuHtml = '<strong>Designing now</strong>' + (live || '<p>No live sessions working on these decks</p>');
-          if (menu.innerHTML !== menuHtml) menu.innerHTML = menuHtml;
+          var activityHost = root.querySelector('.present-library-activity-host');
+          if (window.AssetPresence) {
+            var activityOpts = {mode:'activity', entries:this.libraryActivityEntries()};
+            if (this._activity && this._activity.el === activityHost) this._activity.update(activityOpts);
+            else {
+              if (this._activity) this._activity.destroy();
+              this._activity = window.AssetPresence.mount(activityHost, activityOpts);
+            }
+          }
           if (!window.OrgPicker) return;
           var host = root.querySelector('.present-library-org-host');
-          var opts = {orgs: organizations, value: this.org, testId: 'present-org', onChange: function (slug) {
+          var opts = {orgs: organizations, value: this.org, compactOnMobile:true, testId: 'present-org', onChange: function (slug) {
             self.org = slug;
             self.decks = [];
             self._clearLibrarySubscriptions();
@@ -628,6 +614,26 @@
             if (this._orgPicker) this._orgPicker.destroy();
             this._orgPicker = window.OrgPicker.mount(host, opts);
           }
+        },
+
+        deckLive: function (deck) {
+          var sessions = (window.Alpine && window.Alpine.store('sessions')) || {};
+          return !!(deck && sessions[deck.creator_session_id] && sessions[deck.creator_session_id].isLive);
+        },
+
+        deckLiveLabel: function (deck) {
+          var sessions = (window.Alpine && window.Alpine.store('sessions')) || {};
+          var session = sessions[deck.creator_session_id] || {};
+          return 'Live session: ' + (session.label || deck.creator_session_label || deck.creator_session_id);
+        },
+
+        libraryActivityEntries: function () {
+          var self = this, sessions = (window.Alpine && window.Alpine.store('sessions')) || {};
+          return this.decks.filter(function (deck) { return self.deckLive(deck); }).map(function (deck) {
+            return {session_id:deck.creator_session_id, session_label:sessions[deck.creator_session_id].label || deck.creator_session_label,
+              org:deck.org || self.org || 'autonomy', artifact_id:deck.design_id || deck.key,
+              artifact_title:deck.name, artifact_href:self.deckHref(deck), artifact_kind:'Slides'};
+          });
         },
 
         // The shared AssetPresence control (same as Design Studio and Notes)
