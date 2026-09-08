@@ -139,6 +139,11 @@
       organize: { state: 'idle', status: '', runId: '' }, commitTick: 0,
       menuFor: '', menuActions: [],
       modelMenuFor: '', modelOptions: [], modelBusy: '', _modelCache: {},
+      // Boards are the operator's screens, like macOS Spaces: each holds some
+      // columns. A board is LAYOUT ONLY — moving a column between boards never
+      // touches its group, so nothing an agent wrote changes. The Ungrouped
+      // column is pinned to every board because it is where new sessions land.
+      boards: [], activeBoard: '', boardOf: {}, _tabDropBoard: '',
       commits: {}, workspaces: {},
       // session -> column slug the operator just moved it to, held until the
       // store's groupId agrees. Without it a registry broadcast that lands
@@ -146,7 +151,23 @@
       // STALE groupId, so the card snaps back to its old column and then
       // forward again — the operator saw it in two places at once.
       _pending: {},
-      _dragSource: null, _provisional: null, _frame: null, _drag: null,
+      _dragSource: null, _provisional: null, _frame: null, _drag: null, _noSelect: null,
+      // A pointer drag must not paint a text selection across whatever it
+      // passes over. user-select alone is not enough: the browser starts the
+      // selection on the first move, before the 6px threshold makes it a drag.
+      // Blocking selectstart for the life of the gesture stops it at the source
+      // while leaving ordinary clicks and focus untouched.
+      _blockSelection() {
+        if (this._noSelect) return;
+        this._noSelect = function (e) { e.preventDefault(); };
+        document.addEventListener('selectstart', this._noSelect, true);
+        try { var s = window.getSelection(); if (s && s.removeAllRanges) s.removeAllRanges(); } catch (e) {}
+      },
+      _allowSelection() {
+        if (!this._noSelect) return;
+        document.removeEventListener('selectstart', this._noSelect, true);
+        this._noSelect = null;
+      },
       _resourceTipOpen: null, _diskRefreshing: {}, resumeError: {}, resuming: {}, resumed: {},
       _workspaceStatusByTmux: {},
 
@@ -217,6 +238,10 @@
           self.cardHeights = layout.heights || {};
           self.cardPresentations = layout.presentations || {};
           self._focusSession = layout.focus_session || '';
+          self.boards = (layout.boards || []).slice();
+          self.boardOf = Object.assign({}, layout.board_of || {});
+          self.activeBoard = layout.active_board || '';
+          self.ensureBoards();
           self._ready = true;
           self.refresh({ columns: (layout.column_order || []).map(function (id) { return { id: id, members: [] }; }), widths: layout.widths || {} });
         });
@@ -387,6 +412,68 @@
       panelConfig(id) { var r = this.rowFor(id); return { sessionId: id, project: r.project || 'default', tmuxSession: id, _isLive: true }; },
       columnOf(id) { return this.columns.filter(function (c) { return c.members.indexOf(id) !== -1; })[0] || null; },
 
+      // ── boards (the operator's screens) ──
+      ensureBoards() {
+        if (!this.boards.length) this.boards = [{ id: 'b1', name: 'Board 1' }];
+        var ids = this.boards.map(function (b) { return b.id; });
+        if (ids.indexOf(this.activeBoard) === -1) this.activeBoard = ids[0];
+        // A column pointing at a board that no longer exists falls back to the first.
+        var self = this;
+        Object.keys(this.boardOf).forEach(function (slug) {
+          if (ids.indexOf(self.boardOf[slug]) === -1) delete self.boardOf[slug];
+        });
+      },
+      boardIdFor(col) {
+        if (!col || col.id === 'solo') return this.activeBoard;   // the inbox is on every board
+        return this.boardOf[col.id] || (this.boards[0] || {}).id || '';
+      },
+      // What the board renders: the columns on the active board, in global order.
+      visibleColumns() {
+        var self = this;
+        return this.columns.filter(function (c) { return self.boardIdFor(c) === self.activeBoard; });
+      },
+      switchBoard(id) {
+        if (!id || id === this.activeBoard) return;
+        this.activeBoard = id;
+        this.menuFor = ''; this.modelMenuFor = '';
+        this.persist();
+      },
+      addBoard() {
+        var id = 'b' + Date.now().toString(36);
+        this.boards.push({ id: id, name: 'Board ' + (this.boards.length + 1) });
+        this.activeBoard = id;
+        this.persist();
+        var self = this;
+        setTimeout(function () {
+          var el = document.querySelector('.sb-tab[data-board="' + id + '"] .sb-tab-name');
+          if (el) { el.focus(); el.select(); }
+        }, 60);
+      },
+      renameBoard(b, name) {
+        name = (name || '').trim();
+        if (!name) return;
+        b.name = name.slice(0, 60);
+        this.persist();
+      },
+      // Removing a board never removes columns: they fall back to the first board.
+      removeBoard(id) {
+        if (this.boards.length < 2) return;
+        var self = this;
+        Object.keys(this.boardOf).forEach(function (slug) { if (self.boardOf[slug] === id) delete self.boardOf[slug]; });
+        this.boards = this.boards.filter(function (b) { return b.id !== id; });
+        this.ensureBoards();
+        this.persist();
+      },
+      moveColumnToBoard(col, boardId) {
+        if (!col || col.id === 'solo' || !boardId) return false;
+        if (this.boardIdFor(col) === boardId) return false;
+        if (boardId === (this.boards[0] || {}).id) delete this.boardOf[col.id];
+        else this.boardOf[col.id] = boardId;
+        if (col.focus) { col.focus = null; this._focusSession = ''; }
+        this.persist();
+        return true;
+      },
+
       // ── columns ──
       normalise(cols) {
         var keep = {};
@@ -526,6 +613,7 @@
             if (Math.abs(e.clientX - sx) + Math.abs(e.clientY - sy) < 6) return;
             started = true;
             frame = self.snapshotColumnFrame(col.id);
+            self._blockSelection();
             self.movingCol = col.id;
             ghost = self.makeColumnGhost(col);
             document.body.classList.add('sb-moving');
@@ -533,10 +621,22 @@
           if (!raf) raf = requestAnimationFrame(function () {
             raf = 0; if (!last) return;
             ghost.style.transform = 'translate(' + (last.clientX + 14) + 'px,' + (last.clientY - 12) + 'px)';
+            // Over a board tab, the drop sends the whole column to that board
+            // rather than reordering it here.
+            var over = document.elementFromPoint(last.clientX, last.clientY);
+            var tab = over && over.closest ? over.closest('.sb-tab') : null;
+            var overBoard = tab ? tab.dataset.board : '';
+            if (overBoard !== self._tabDropBoard) self._tabDropBoard = overBoard || '';
+            if (self._tabDropBoard) return;
             var idx = columnSlotFor(frame.mids, last.clientX + (self.$refs.board.scrollLeft - frame.scrollLeft0));
-            var cur = self.columns.indexOf(col);
-            if (cur === -1 || cur === idx) return;
-            var cols = self.columns.slice(); cols.splice(cur, 1); cols.splice(idx, 0, col);
+            // frame.mids covers the columns visible when the drag began, so the
+            // slot is an index among THOSE; translate it back to a position in
+            // the full ordered list, which also holds the other boards' columns.
+            var visible = self.visibleColumns().filter(function (c) { return c !== col; });
+            var anchor = visible[idx];
+            var cols = self.columns.slice();
+            cols.splice(cols.indexOf(col), 1);
+            cols.splice(anchor ? cols.indexOf(anchor) : cols.length, 0, col);
             self.columns = cols;
           });
         };
@@ -549,7 +649,13 @@
           if (!started) return;
           if (ghost) ghost.remove();
           document.body.classList.remove('sb-moving');
+          self._allowSelection();
           self.movingCol = '';
+          if (self._tabDropBoard) {
+            var to = self._tabDropBoard;
+            self._tabDropBoard = '';
+            if (self.moveColumnToBoard(col, to)) { self.switchBoard(to); return; }
+          }
           self.persist();
         };
         window.addEventListener('pointermove', onMove, true);
@@ -586,6 +692,7 @@
             if (Math.abs(e.clientX - sx) + Math.abs(e.clientY - sy) < 6) return;
             started = true;
             self._frame = self.snapshotFrame(id);
+            self._blockSelection();
             self.dragId = id; self.dragging = true; self._dragSource = (self.columnOf(id) || {}).id || null;
             ghost = self.makeGhost(id);
             document.body.classList.add('sb-moving');
@@ -605,6 +712,7 @@
           if (!started) return;
           if (ghost) ghost.remove();
           document.body.classList.remove('sb-moving');
+          self._allowSelection();
           self.endMove(id);
         };
         window.addEventListener('pointermove', onMove, true);
@@ -685,6 +793,7 @@
         ev.preventDefault();
         var self = this, raf = 0, last = null, body = document.body, handle = spec.handle;
         body.classList.add('sb-resizing', spec.axis === 'x' ? 'sb-resizing-col' : 'sb-resizing-row');
+        this._blockSelection();
         handle.classList.add('active');
         try { handle.setPointerCapture(ev.pointerId); } catch (e) {}
         var apply = function () { raf = 0; if (last) spec.apply(last); };
@@ -700,6 +809,7 @@
           handle.removeEventListener('lostpointercapture', onEnd);
           try { handle.releasePointerCapture(ev.pointerId); } catch (e2) {}
           body.classList.remove('sb-resizing', 'sb-resizing-col', 'sb-resizing-row');
+          self._allowSelection();
           handle.classList.remove('active');
           spec.commit();
           self._drag = null;
@@ -765,7 +875,8 @@
         this.columns.forEach(function (c) { if (c._sized) widths[c.id] = c.width; if (c.focus) focus = c.focus; });
         return { presentation: this.presentation, presentations: this.cardPresentations,
                  column_order: this.columns.map(function (c) { return c.id; }), widths: widths,
-                 heights: this.cardHeights, focus_session: focus };
+                 heights: this.cardHeights, focus_session: focus,
+                 boards: this.boards, active_board: this.activeBoard, board_of: this.boardOf };
       },
       persist() {
         if (!this._ready || this._suppressPersist) return;   // never write a pre-roster or echoed layout

@@ -181,6 +181,7 @@ test('the layout payload carries everything a refresh must restore, and nothing 
   assert.deepEqual(payload, {
     presentation: 'stats', presentations: { s1: 'stats' }, column_order: ['solo', 'g'],
     widths: { g: 600 }, heights: { s1: 500 }, focus_session: 's2',
+    boards: [], active_board: '', board_of: {},
   });
   // Membership is never part of the layout — it is the group record's.
   assert.ok(!('columns' in payload) && !('members' in payload));
@@ -519,4 +520,63 @@ test('a harness with no known switch command gets no model menu', async () => {
   rows[0].is_live = false; rows[0].harness = 'claude';
   await board.openModelMenu('c1');
   assert.equal(board.modelMenuFor, '');
+});
+
+test('boards are layout only: a column moves between them without touching its group', () => {
+  const grp = (slug) => ({ slug, name: slug, color: '', why: '' });
+  const sessions = {
+    s1: { isLive: true, groupId: 'a', group: grp('a'), entries: [{}] },
+    s2: { isLive: true, groupId: 'b', group: grp('b'), entries: [{}] },
+    s3: { isLive: true, groupId: null, group: null, entries: [{}] },
+  };
+  const { board } = makeBoard({ rows: ['s1', 's2', 's3'], sessions });
+  board.refresh({ columns: [{ id: 'a', members: [] }, { id: 'b', members: [] }], widths: {} });
+  board.boards = []; board.boardOf = {}; board.activeBoard = '';
+  board.ensureBoards();
+  assert.deepEqual(plain(board.boards), [{ id: 'b1', name: 'Board 1' }]);
+  assert.equal(board.activeBoard, 'b1');
+  assert.deepEqual(board.visibleColumns().map((c) => c.id), ['solo', 'a', 'b']);
+
+  board.addBoard();
+  const second = board.boards[1].id;
+  assert.equal(board.activeBoard, second);
+  // Ungrouped is the inbox: it is on every board. Nothing else has moved yet.
+  assert.deepEqual(board.visibleColumns().map((c) => c.id), ['solo']);
+
+  // Moving a column is a layout write: membership is untouched.
+  const before = plain(board.columns.filter((c) => c.id === 'a')[0].members);
+  assert.equal(board.moveColumnToBoard(board.columns.filter((c) => c.id === 'a')[0], second), true);
+  assert.deepEqual(plain(board.columns.filter((c) => c.id === 'a')[0].members), before);
+  assert.equal(sessions.s1.groupId, 'a', 'the session is still in its group');
+  board.switchBoard(second);
+  assert.deepEqual(board.visibleColumns().map((c) => c.id), ['solo', 'a']);
+  board.switchBoard('b1');
+  assert.deepEqual(board.visibleColumns().map((c) => c.id), ['solo', 'b']);
+
+  // The Ungrouped column can never be assigned away from a board.
+  assert.equal(board.moveColumnToBoard(board.columns.filter((c) => c.id === 'solo')[0], second), false);
+
+  // Removing a board keeps its columns — they fall back to the first.
+  board.removeBoard(second);
+  assert.deepEqual(plain(board.boards).map((b) => b.id), ['b1']);
+  assert.deepEqual(board.visibleColumns().map((c) => c.id), ['solo', 'a', 'b']);
+  assert.deepEqual(plain(board.boardOf), {});
+});
+
+test('the layout member carries the boards, and a drag never paints a selection', () => {
+  const { board } = makeBoard({ rows: ['s1'] });
+  board.boards = [{ id: 'b1', name: 'Board 1' }, { id: 'b2', name: 'Ops' }];
+  board.activeBoard = 'b2';
+  board.boardOf = { deploy: 'b2' };
+  const payload = plain(board.layoutPayload());
+  assert.deepEqual(payload.boards, [{ id: 'b1', name: 'Board 1' }, { id: 'b2', name: 'Ops' }]);
+  assert.equal(payload.active_board, 'b2');
+  assert.deepEqual(payload.board_of, { deploy: 'b2' });
+
+  const js = fs.readFileSync(BOARD_JS, 'utf8');
+  // user-select alone is not enough: the browser starts selecting before the
+  // 6px threshold turns the gesture into a drag.
+  assert.match(js, /document\.addEventListener\('selectstart', this\._noSelect, true\)/);
+  assert.match(js, /_blockSelection\(\);/);
+  assert.match(js, /_allowSelection\(\);/);
 });

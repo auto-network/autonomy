@@ -4378,6 +4378,22 @@ async def api_session_board_layout_put(request):
         if not isinstance(body["focus_session"], str):
             return JSONResponse({"error": "focus_session must be a session name or empty"}, status_code=400)
         fields["focus_session"] = body["focus_session"][:128]
+    if "boards" in body:
+        v = body["boards"]
+        if not isinstance(v, list) or not all(
+                isinstance(d, dict) and isinstance(d.get("id"), str) and d.get("id")
+                and isinstance(d.get("name"), str) for d in v):
+            return JSONResponse({"error": "boards must be a list of {id, name}"}, status_code=400)
+        fields["boards"] = [{"id": d["id"][:64], "name": (d["name"] or "")[:60]} for d in v[:12]]
+    if "active_board" in body:
+        if not isinstance(body["active_board"], str):
+            return JSONResponse({"error": "active_board must be a board id or empty"}, status_code=400)
+        fields["active_board"] = body["active_board"][:64]
+    if "board_of" in body:
+        v = body["board_of"]
+        if not isinstance(v, dict) or not all(isinstance(x, str) for x in v.values()):
+            return JSONResponse({"error": "board_of must map column slugs to board ids"}, status_code=400)
+        fields["board_of"] = {str(k)[:64]: x[:64] for k, x in list(v.items())[:400]}
     if "column_order" in body:
         if not isinstance(body["column_order"], list) or not all(isinstance(x, str) for x in body["column_order"]):
             return JSONResponse({"error": "column_order must be a list of slugs"}, status_code=400)

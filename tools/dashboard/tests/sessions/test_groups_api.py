@@ -90,7 +90,8 @@ class TestGroupRecord:
     def test_layout_round_trip(self, board_settings):
         s = board_settings
         assert s.read_layout() == {"presentation": "transcript", "presentations": {}, "column_order": [],
-                                   "widths": {}, "heights": {}, "focus_session": "", "updated_at": 0}
+                                   "widths": {}, "heights": {}, "focus_session": "",
+                                   "boards": [], "active_board": "", "board_of": {}, "updated_at": 0}
         s.write_layout({"column_order": ["deploy", "solo"], "widths": {"deploy": 700}})
         s.write_layout({"presentation": "stats", "heights": {"auto-a": 540}})
         s.write_layout({"presentations": {"auto-a": "stats"}, "focus_session": "auto-b"})
@@ -100,6 +101,13 @@ class TestGroupRecord:
         # The card face and the full-height card are part of the member: a
         # refresh must put the screen back exactly as the operator left it.
         assert got["presentations"] == {"auto-a": "stats"} and got["focus_session"] == "auto-b"
+        # Boards are layout too: the screens, which one is showing, and where
+        # each column lives all follow the operator between machines.
+        s.write_layout({"boards": [{"id": "b1", "name": "Board 1"}, {"id": "b2", "name": "Ops"}],
+                        "active_board": "b2", "board_of": {"deploy": "b2"}})
+        got = s.read_layout()
+        assert [b["name"] for b in got["boards"]] == ["Board 1", "Ops"]
+        assert got["active_board"] == "b2" and got["board_of"] == {"deploy": "b2"}
 
 
 # ── HTTP API ─────────────────────────────────────────────────────────────
