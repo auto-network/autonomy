@@ -103,6 +103,13 @@ CREATE TABLE IF NOT EXISTS tmux_sessions (
     usage_cache_read_tokens     INTEGER DEFAULT 0,
     usage_output_tokens         INTEGER DEFAULT 0,
     usage_turns                 INTEGER DEFAULT 0,
+    -- How much of the counters above has already been settled into a
+    -- dashboard.tokens.rollup row, and for which day. The difference is what
+    -- the next settled day owes, which is what lets a session spanning several
+    -- days be attributed to each of them rather than to whichever day it ends
+    -- on. JSON because it is one opaque bookkeeping snapshot written whole,
+    -- never queried by component.
+    usage_flushed       TEXT,
     label               TEXT DEFAULT '',
     topics              TEXT DEFAULT '[]',
     role                TEXT DEFAULT '',
@@ -515,6 +522,12 @@ def init_db(db_path: Path | None = None) -> None:
             _conn.execute(
                 f"ALTER TABLE tmux_sessions ADD COLUMN {column} INTEGER DEFAULT 0"
             )
+        _conn.commit()
+    # Migrate: token-ledger settlement watermark (auto-pbrhs / rollup).
+    try:
+        _conn.execute("SELECT usage_flushed FROM tmux_sessions LIMIT 0")
+    except sqlite3.OperationalError:
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN usage_flushed TEXT")
         _conn.commit()
     logger.info("dashboard_db: initialised at %s", path)
 
@@ -1309,6 +1322,32 @@ def persist_tail_state(
     )
     conn.commit()
     return cur.rowcount > 0
+
+
+def get_sessions_for_settlement() -> list[dict[str, Any]]:
+    """Every session row carrying token counters, live or ended.
+
+    Ended sessions keep their row, and an ended session's final tokens still
+    have to be settled, so this deliberately does not filter on ``is_live``.
+    """
+    conn = get_conn()
+    cols = ", ".join(USAGE_LEDGER_COLUMNS)
+    rows = conn.execute(
+        f"SELECT tmux_name, harness, harness_token, model, project, type, "
+        f"usage_flushed, {cols} FROM tmux_sessions "
+        f"WHERE COALESCE(usage_turns,0) > 0"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_usage_watermark(tmux_name: str, watermark: str) -> None:
+    """Record how much of a session's ledger has been settled."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE tmux_sessions SET usage_flushed=? WHERE tmux_name=?",
+        (watermark, tmux_name),
+    )
+    conn.commit()
 
 
 def increment_entry_count(

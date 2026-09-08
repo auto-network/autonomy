@@ -15586,6 +15586,33 @@ def _fetch_claude_oauth_usage(
     return body, headers
 
 
+#: How often the settler looks for a closed day. It writes at most one row
+#: per machine per day, so this only decides how soon after midnight
+#: yesterday appears -- not how much work is done.
+_TOKENS_ROLLUP_POLL_INTERVAL = 1800.0
+
+
+async def _tokens_rollup_poller() -> None:
+    """Settle each closed day of token spend into Settings, once.
+
+    Not gated on operator idleness: a day has to settle whether or not anyone
+    is watching, and it costs one small write. Not gated on the Fleet
+    singular-ownership check either, which is the opposite of the Claude probe
+    right above -- every machine settles its OWN rows, keyed by its own
+    machine id, so a gate here would silently discard every other machine's
+    spend rather than deduplicate anything.
+    """
+    from tools.dashboard import tokens_rollup
+    while True:
+        try:
+            await asyncio.to_thread(tokens_rollup.promote_closed_days)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("tokens rollup poller tick failed")
+        await asyncio.sleep(_TOKENS_ROLLUP_POLL_INTERVAL)
+
+
 async def _harness_usage_poller() -> None:
     while True:
         try:
@@ -21244,6 +21271,7 @@ routes = route_policy.apply_default_deny(routes)
 _dispatch_watcher_task: asyncio.Task | None = None
 _mock_event_watcher_task: asyncio.Task | None = None
 _harness_usage_poller_task: asyncio.Task | None = None
+_tokens_rollup_poller_task: asyncio.Task | None = None
 _serving_bootstrap_task: asyncio.Task | None = None
 _event_proxy_task: asyncio.Task | None = None
 _claude_credentials_refresh_task: asyncio.Task | None = None
@@ -21428,6 +21456,7 @@ _design_lifecycle_task: asyncio.Task | None = None
 
 async def _on_startup():
     global _dispatch_watcher_task, _mock_event_watcher_task, _harness_usage_poller_task
+    global _tokens_rollup_poller_task
     global _claude_credentials_refresh_task, _codex_credentials_refresh_task
     global _event_loop_watchdog_task
     global _serving_bootstrap_task
@@ -21839,6 +21868,7 @@ async def _on_startup():
     # "revoked" until an operator reinstalls it.
     if _should_run_harness_usage_poller():
         _harness_usage_poller_task = asyncio.create_task(_harness_usage_poller())
+        _tokens_rollup_poller_task = asyncio.create_task(_tokens_rollup_poller())
     if os.environ.get("DASHBOARD_MOCK_EVENTS"):
         from tools.dashboard.dao.mock import mock_event_watcher
         _mock_event_watcher_task = asyncio.create_task(mock_event_watcher())
@@ -21950,6 +21980,7 @@ async def _on_startup():
 async def _on_shutdown():
     global _dispatch_watcher_task, _mock_event_watcher_task
     global _harness_usage_poller_task, _claude_credentials_refresh_task
+    global _tokens_rollup_poller_task
     global _codex_credentials_refresh_task
     global _settings_mediator_started, _serving_bootstrap_task
     global _event_proxy_task
@@ -22065,6 +22096,7 @@ async def _on_shutdown():
             _dispatch_watcher_task,
             _mock_event_watcher_task,
             _harness_usage_poller_task,
+            _tokens_rollup_poller_task,
             _claude_credentials_refresh_task,
             _codex_credentials_refresh_task,
             _event_loop_watchdog_task,
@@ -22082,6 +22114,7 @@ async def _on_shutdown():
     _dispatch_watcher_task = None
     _mock_event_watcher_task = None
     _harness_usage_poller_task = None
+    _tokens_rollup_poller_task = None
     _claude_credentials_refresh_task = None
     _codex_credentials_refresh_task = None
     _vault_release_sweeper_task = None
