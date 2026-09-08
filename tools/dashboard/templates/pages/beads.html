@@ -3,31 +3,7 @@
   {# Page-owned control projected into the persistent shell action slot, which
      sits immediately before the profile indicator. #}
   <template x-teleport="#header-actions">
-    <div class="relative shrink-0" @click.outside="orgOpen = false">
-      <button type="button" aria-label="Organization"
-              data-testid="beads-org-select"
-              class="grid h-10 w-10 place-items-center rounded-lg text-[11px] font-bold leading-none text-white transition hover:ring-2 hover:ring-gray-600"
-              :style="'background:' + ((selectedOrgIdentity || {}).color || '#64748b')"
-              @click="orgOpen = !orgOpen">
-        <span x-text="(selectedOrgIdentity || {}).initial || '?'">?</span>
-      </button>
-      <div x-show="orgOpen" x-cloak
-           data-testid="beads-org-menu"
-           class="absolute right-0 z-50 mt-1 w-64 rounded-xl border border-gray-700 bg-gray-900 p-1 shadow-2xl shadow-black/50">
-        <template x-for="o in orgs" :key="o.slug">
-          <button type="button"
-                  class="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2.5 text-left hover:bg-gray-800"
-                  :class="o.slug === selectedOrg ? 'bg-gray-800' : ''"
-                  @click="setOrg(o.slug)">
-            <span class="grid h-5 w-5 shrink-0 place-items-center rounded-full text-[10px] font-bold leading-none text-white"
-                  :style="'background:' + (o.color || '#64748b')">
-              <span x-text="o.initial || '?'">?</span>
-            </span>
-            <span class="truncate text-sm font-semibold text-gray-200" x-text="o.name"></span>
-          </button>
-        </template>
-      </div>
-    </div>
+    <div x-org-picker="{orgs, value: selectedOrg, iconOnly: true, testId: 'beads-org-select', menuTestId: 'beads-org-menu', onChange: slug => setOrg(slug)}"></div>
   </template>
 
   <!-- View switcher tabs -->

@@ -79,6 +79,11 @@
     var out = (input || []).filter(function (s) { return s && s.id; }).map(function (s) {
       var live = liveSession(s.id);
       var label = (live && live.label) || s.label || s.id;
+      // Human presence is not a session route. Keep names as plain text until
+      // a real person/messaging destination exists. Older session-only callers
+      // omit kind, so preserve their links.
+      var kind = s.participant_kind || s.kind || 'agent';
+      var isSession = kind === 'agent' || kind === 'session';
       return {
         id: s.id,
         label: label,
@@ -86,7 +91,7 @@
         last_push: s.last_push || '',
         count: Number(s.count) || 0,
         live: !!live,
-        href: '/session/' + encodeURIComponent(org || 'autonomy') + '/' + encodeURIComponent(s.id),
+        href: isSession ? '/session/' + encodeURIComponent(org || 'autonomy') + '/' + encodeURIComponent(s.id) : null,
       };
     });
     out.sort(function (a, b) {
@@ -186,11 +191,11 @@
     var rows = sessions.map(function (s) {
       var meta = (s.live ? 'live · ' : '') + (s.last_push ? formatAgo(s.last_push) : 'no push recorded')
         + (s.count ? ' · ' + s.count + (s.count === 1 ? ' rev' : ' revs') : '');
-      return '<a class="design-presence-row" data-testid="asset-presence-session" data-session="' + esc(s.id) + '"'
-        + ' href="' + esc(s.href) + '" data-action="open-session" title="Open session ' + esc(s.label) + '">'
+      return '<' + (s.href ? 'a' : 'div') + ' class="design-presence-row" data-testid="asset-presence-session" data-session="' + esc(s.id) + '"'
+        + (s.href ? ' href="' + esc(s.href) + '" data-action="open-session" title="Open session ' + esc(s.label) + '"' : '') + '>'
         + '<span class="design-presence-avatar' + (s.live ? ' is-live' : '') + '">' + esc(s.initial) + '</span>'
         + '<span class="design-presence-copy"><strong>' + esc(s.label) + '</strong><span>' + esc(meta) + '</span></span>'
-        + '</a>';
+        + (s.href ? '</a>' : '</div>');
     }).join('');
     if (!rows) rows = '<div class="design-presence-empty">No session has touched this yet</div>';
     // ONE chat action, named for what it will do. Connecting a particular

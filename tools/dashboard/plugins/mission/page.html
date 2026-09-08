@@ -172,31 +172,9 @@
         <span class="nx-avatar nx-avatar-overflow" x-show="peeps.length > 6"
               x-text="'+' + (peeps.length - 6)"></span>
       </div>
-      <div class="relative shrink-0" x-show="!current"
-           @click.outside="orgOpen = false">
-        <button type="button" aria-label="Organization"
-                class="grid h-8 w-8 place-items-center rounded-full text-[11px] font-bold leading-none text-white"
-                :style="'background:' + ((curOrg() || {}).color || '#64748b')"
-                @click="orgOpen = !orgOpen">
-          <span x-text="(curOrg() || {}).initial || '?'"></span>
-        </button>
-        <div x-show="orgOpen" x-cloak
-             class="absolute right-0 z-50 mt-1 w-64 rounded-xl border border-gray-700 bg-gray-900 p-1 shadow-2xl shadow-black/50">
-          <template x-for="o in orgs" :key="o.slug">
-            <button type="button"
-                    class="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2.5 text-left hover:bg-gray-800"
-                    :class="o.slug === org ? 'bg-gray-800' : ''"
-                    @click="setOrg(o.slug)">
-              <span class="grid h-5 w-5 shrink-0 place-items-center rounded-full text-[10px] font-bold leading-none text-white"
-                    :style="'background:' + o.color">
-                <span x-text="o.initial"></span>
-              </span>
-              <span class="truncate text-sm font-semibold text-gray-200"
-                    x-text="o.name"></span>
-            </button>
-          </template>
-        </div>
-      </div>
+      <template x-if="!current">
+        <div x-org-picker="{orgs, value: org, testId: 'mission-org-select', onChange: slug => setOrg(slug)}"></div>
+      </template>
     </div>
   </template>
 

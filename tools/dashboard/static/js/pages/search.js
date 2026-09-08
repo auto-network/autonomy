@@ -179,8 +179,8 @@
         // Sync the global header input with our query so it isn't blank
         // when the page lands via deep link.
         this._syncGlobalInput();
-        // Populate org list for the dropdown (best-effort; chip still works
-        // with an empty list — only "All orgs" is selectable).
+        // Populate identities for the shared picker; an empty inventory leaves
+        // the trigger disabled instead of inventing a selectable organization.
         fetch('/api/orgs')
           .then(r => r.ok ? r.json() : { orgs: [] })
           .then(d => { this.orgList = this._normalizeOrgs(d && d.orgs || []); })

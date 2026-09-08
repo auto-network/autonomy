@@ -360,7 +360,7 @@
 .present-library-heading { display: flex; align-items: baseline; gap: 0.5rem; white-space: nowrap; }
 .present-library-heading strong { font-size: 0.875rem; color: #f1f5f9; }
 .present-library-heading span { font-size: 0.6875rem; color: #64748b; }
-.present-library-topbar select { max-width: 9rem; min-width: 0; border: 1px solid #334155; border-radius: 0.5rem; padding: 0.4rem; background: #111827; color: #cbd5e1; font-size: 0.75rem; }
+.present-library-org-host { min-width: 0; }
 .present-library-presence { position: relative; }
 .present-library-presence summary { display: flex; align-items: center; gap: 0.4rem; cursor: pointer; list-style: none; padding: 0.5rem; border: 1px solid #334155; border-radius: 9999px; color: #94a3b8; font-size: 0.75rem; }
 .present-library-presence summary::-webkit-details-marker { display: none; }
@@ -380,7 +380,7 @@
   .present-library-heading strong, .present-library-heading span { display: block; }
   .present-library-heading span { font-size: 0.625rem; }
   .present-library-topbar .present-topbar-side { gap: 0.25rem; }
-  .present-library-topbar select { width: 3rem; flex-shrink: 0; padding: 0.35rem 0.15rem; font-size: 0.6875rem; }
+  .present-library-org-host .org-picker-label { max-width: 4rem; }
   .present-library-presence summary { padding: 0.35rem; gap: 0.25rem; font-size: 0.6875rem; }
 }
 

@@ -8,69 +8,8 @@
     {% include 'partials/zoom-toggle.html' %}
     <div class="sessions-toolbar-actions">
 
-    <!-- Org filter — pins the Active + Recent sections to one organization,
-         or shows all (default). Mirrors the org chip pattern used on the
-         search page (search.js/_normalizeOrgs, search.html sp-org-dropdown)
-         but styled with this page's own sort-toggle/sort-menu chrome so it
-         matches the Sort/Since dropdowns already in this toolbar. -->
-    <div class="sort-wrap sessions-org-filter" data-testid="org-filter">
-      <button type="button"
-              class="sort-toggle sessions-org-filter-toggle"
-              @click="orgFilterOpen = !orgFilterOpen"
-              data-testid="org-filter-toggle">
-        <span class="sc-org" style="width:14px;height:14px"
-              :class="orgFilterPicked && orgFilterPicked.favicon ? 'sc-org-favicon' : ''"
-              :style="orgFilterPicked && !orgFilterPicked.favicon ? `background:${orgFilterPicked.color}` : (orgFilterPicked ? '' : 'background:#2a3441')">
-          <template x-if="orgFilterPicked && orgFilterPicked.favicon">
-            <img class="sc-org-img" :src="orgFilterPicked.favicon" :alt="orgFilterPicked.name">
-          </template>
-          <template x-if="!(orgFilterPicked && orgFilterPicked.favicon)">
-            <span class="sc-org-initial" style="font-size:9px;line-height:14px" x-text="orgFilterPicked ? orgFilterPicked.initial : '∞'"></span>
-          </template>
-        </span>
-        <span class="sort-toggle-value sessions-org-filter-value"
-              x-text="orgFilterPicked ? orgFilterPicked.name : 'All Orgs'"></span>
-        <span class="sort-toggle-icon">▾</span>
-      </button>
-      <div class="sort-menu"
-           x-show="orgFilterOpen"
-           x-cloak
-           @click.away="orgFilterOpen = false"
-           data-testid="org-filter-menu">
-        <div class="sort-option"
-             :class="!selectedOrg ? 'selected' : ''"
-             @click="pickOrgFilter('')"
-             data-testid="org-filter-option-all">
-          <span class="flex items-center gap-2">
-            <span class="sc-org" style="width:14px;height:14px;background:#2a3441">
-              <span class="sc-org-initial" style="font-size:9px;line-height:14px">∞</span>
-            </span>
-            <span>All Orgs</span>
-          </span>
-          <span class="sort-option-check">✓</span>
-        </div>
-        <template x-for="o in orgFilterList" :key="o.slug">
-          <div class="sort-option"
-               :class="selectedOrg === o.slug ? 'selected' : ''"
-               @click="pickOrgFilter(o.slug)"
-               :data-testid="'org-filter-option-' + o.slug">
-            <span class="flex items-center gap-2">
-              <span class="sc-org" style="width:14px;height:14px"
-                    :class="o.favicon ? 'sc-org-favicon' : ''"
-                    :style="o.favicon ? '' : `background:${o.color}`">
-                <template x-if="!o.favicon">
-                  <span class="sc-org-initial" style="font-size:9px;line-height:14px" x-text="o.initial"></span>
-                </template>
-                <img class="sc-org-img" :src="o.favicon" x-show="o.favicon" :alt="o.name">
-              </span>
-              <span x-text="o.name"></span>
-            </span>
-            <span class="sort-option-check">✓</span>
-          </div>
-        </template>
-      </div>
-    </div>
-
+    <div class="sessions-org-filter" data-testid="org-filter"
+         x-org-picker="{orgs: orgFilterList, value: selectedOrg, allowAll: true, allLabel: 'All Orgs', testId: 'org-filter-toggle', menuTestId: 'org-filter-menu', optionTestPrefix: 'org-filter-option-', onChange: slug => pickOrgFilter(slug)}"></div>
     <div x-data="{ open: false }" class="relative sessions-launch-control" data-testid="session-launch-dropdown">
       <button @click="open = !open"
               class="w-8 h-8 flex items-center justify-center rounded-lg

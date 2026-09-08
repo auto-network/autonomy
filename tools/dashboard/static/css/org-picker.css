@@ -1,0 +1,23 @@
+/* One organization picker for page toolbars and plugin-generated chrome. */
+.org-picker { display:inline-flex; min-width:0; max-width:100%; flex-shrink:1; }
+.org-picker-trigger { display:inline-flex; align-items:center; gap:8px; min-width:0; max-width:100%; height:36px; padding:0 10px; border:1px solid #334155; border-radius:8px; background:#1e293b; color:#e2e8f0; font-family:inherit; font-size:12px; font-weight:500; line-height:1.2; cursor:pointer; }
+.org-picker-trigger:hover { background:#293548; border-color:#475569; }
+.org-picker-trigger:focus-visible,.org-picker-option:focus-visible { outline:2px solid #7dd3fc; outline-offset:2px; }
+.org-picker-trigger:disabled { opacity:.6; cursor:default; }
+.org-picker-label { min-width:0; max-width:10rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; }
+.org-picker-chevron { flex-shrink:0; color:#94a3b8; font-size:10px; }
+.org-picker-glyph { width:20px; height:20px; flex:0 0 20px; display:inline-flex; align-items:center; justify-content:center; border-radius:5px; overflow:hidden; color:white; font-size:11px; font-weight:700; }
+.org-picker-image { display:block; width:100%; height:100%; object-fit:contain; }
+.org-picker [hidden],.org-picker-menu[hidden],.org-picker-menu [hidden] { display:none!important; }
+.org-picker-trigger.is-icon-only { width:36px; padding:7px; }
+.org-picker-trigger.is-icon-only .org-picker-label,.org-picker-trigger.is-icon-only .org-picker-chevron { display:none; }
+.org-picker-menu { position:fixed; z-index:10000; box-sizing:border-box; overflow-y:auto; overscroll-behavior:contain; padding:5px; background:#111827; border:1px solid #334155; border-radius:10px; box-shadow:0 12px 32px #0008; }
+.org-picker-option { display:flex; align-items:center; gap:10px; width:100%; min-height:42px; padding:9px; border:0; border-radius:6px; background:transparent; color:#e2e8f0; text-align:left; cursor:pointer; font-family:inherit; }
+.org-picker-option:hover,.org-picker-option:focus,.org-picker-option[aria-selected=true] { background:#243043; }
+.org-picker-copy { display:flex; flex:1; min-width:0; flex-direction:column; gap:3px; }
+.org-picker-name { font-size:13px; line-height:1.3; overflow-wrap:anywhere; }
+.org-picker-detail { font-size:11px; color:#94a3b8; }
+.org-picker-check { color:#7dd3fc; width:12px; flex-shrink:0; }
+@media (max-width:430px) {
+  .org-picker-trigger.is-compact-mobile .org-picker-label { display:none; }
+}
