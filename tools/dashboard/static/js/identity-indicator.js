@@ -40,6 +40,11 @@
   // The restart button's in-flight guard: true from the moment the root
   // ceremony succeeds until the restore finishes and the flags are re-read.
   var restartBusy = false;
+  // Software-update state: /api/software/update-status (null until loaded).
+  // An author machine reports mode=author/can_update=false, so the action
+  // never renders there — the guard is git history, surfaced by the server.
+  var updateStatus = null;
+  var updateBusy = false;
   var FLAG_NS = 'http://www.w3.org/2000/svg';
   // id -> {key on the unlock-state payload, title, plain-language detail, icon shapes}.
   // Order = tray order. Icons are the design's outline glyphs (placeholders to refine).
@@ -420,6 +425,53 @@
       });
   }
 
+  function loadUpdateStatus() {
+    // Cheap cached read for the badge (fetch=0): the panel opening should not
+    // block on a GitHub round-trip. The actual update re-fetches under the hood.
+    fetch('/api/software/update-status?fetch=0', {
+      credentials: 'same-origin', headers: { 'Accept': 'application/json' },
+    })
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (body) {
+        updateStatus = body || null;
+        if (panelOpen) render();
+      })
+      .catch(function () { /* absent badge is fine — never block the panel */ });
+  }
+
+  async function runUpdate() {
+    if (updateBusy) return;
+    updateBusy = true;
+    loadError = null;
+    render();
+    try {
+      var res = await root.fetch('/api/software/update', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Accept': 'application/json' },
+      });
+      var body = await res.json().catch(function () { return {}; });
+      if (!res.ok) throw new Error(body.error || ('Update failed (HTTP ' + res.status + ')'));
+      if (body.updated) {
+        // The code hot-reloads on its own; a deploy/ change needs a recreate.
+        loadError = 'Updated ' + body.count + ' commit' + (body.count === 1 ? '' : 's')
+          + ' (' + body.from + '→' + body.to + '). '
+          + (body.deploy_changed
+              ? 'Deploy files changed — a container recreate is needed to fully apply.'
+              : 'Reloading…');
+      } else {
+        loadError = body.reason || 'Already up to date.';
+      }
+      updateStatus = await (await root.fetch('/api/software/update-status?fetch=0', {
+        credentials: 'same-origin', headers: { 'Accept': 'application/json' },
+      })).json().catch(function () { return null; });
+    } catch (error) {
+      loadError = (error && error.message) || String(error);
+    } finally {
+      updateBusy = false;
+      render();
+    }
+  }
+
   function flagNeeds(f) {
     if (!unlockState) return false;   // unknown / not loaded -> dim, never lit
     var s = unlockState[f.key];
@@ -776,6 +828,7 @@
     if (state !== 'bootstrap' && state !== 'locked' && state !== 'error') {
       panel.appendChild(orgSection());
       if (orgs === null && !orgsError) loadOrgs();
+      if (updateStatus === null) loadUpdateStatus();
     }
 
     var actions = el('div', 'identity-panel-actions');
@@ -804,6 +857,17 @@
         'Your password and passkeys', function () { openCredentials(); }));
       actions.appendChild(actionButton('lock', lockBusy ? 'Locking...' : 'Lock dashboard',
         'This session only', lockDashboard));
+    }
+    // Update software — only when this machine can cleanly fast-forward onto
+    // origin (behind, not ahead, clean tree). An author machine never sees it.
+    if (updateStatus && updateStatus.can_update) {
+      var behind = updateStatus.behind || 0;
+      actions.appendChild(actionButton(
+        'update-software',
+        updateBusy ? 'Updating…' : 'Update software',
+        updateBusy ? 'Fast-forwarding onto origin'
+          : (behind + ' commit' + (behind === 1 ? '' : 's') + ' behind — click to update'),
+        runUpdate));
     }
     // Accept invitation (auto-a1xq3): opens the full-page flow — the
     // paste screen at /network/join owns the input and everything after.
