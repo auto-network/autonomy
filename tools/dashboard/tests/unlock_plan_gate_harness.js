@@ -109,6 +109,32 @@ const PLANS = {
       })),
     };
   }
+  // ROUND-TRIP COUNT for the whole ceremony, driving the REAL
+  // repairAllServeCredentialsWithRootSeed rather than the step runner alone.
+  // This is the bead's actual claim — one prefetched call replaces the
+  // per-step-per-org probes — so it is measured, not asserted.
+  const wrs = globalThis.window.AutonomyNetworkSession
+    .repairAllServeCredentialsWithRootSeed;
+  const PLANNED = {
+    acme: {
+      org_uuid: "11111111-1111-1111-1111-111111111111",
+      root_pub: "cc".repeat(32),
+      registry_url: "https://registry.invalid",
+      binding_expires_at: "2099-01-01T00:00:00Z",
+      recovery_policy: {},
+      genesis_id: "dd".repeat(32),
+      committed_membership_org: true,
+      serve_cert: { required: false, status: "ok", days_remaining: 25.0 },
+      checkpoint: { needed: false, checkpointer_pubs: [] },
+      rekey: { due: false, reason: "no-interval-configured" },
+    },
+  };
+  for (const [name, plan] of [["with_plan", PLANNED], ["without_plan", null]]) {
+    events.length = 0;
+    await wrs(new Uint8Array(32), { orgs: ["acme"], plan: plan });
+    proof[name] = { fetched: events.slice() };
+  }
+
   console.log(JSON.stringify(proof));
   // The signer module keeps handles open in a browser; exit explicitly rather
   // than waiting for an event loop that has no reason to drain under node.
