@@ -99,104 +99,6 @@ def parse_musing(text: str, file_path: str) -> tuple[dict, list[str]]:
     return meta, sections
 
 
-# ── Entity Extraction ────────────────────────────────────────
-
-# Key concepts from the Autonomy vision (bootstrap vocabulary)
-SEED_ENTITIES = {
-    "Autonomy Network": "project",
-    "Autonomy Core": "concept",
-    "Autonomy Runtime": "concept",
-    "Autonomy Surface": "concept",
-    "Autonomy Infra": "concept",
-    "Autonomy Modules": "concept",
-    "Alice": "concept",
-    "sovereignty line": "concept",
-    "CRDT": "technology",
-    "Automerge": "technology",
-    "Peritext": "technology",
-    "Pijul": "technology",
-    "Yjs": "technology",
-    "Loro": "technology",
-    "BlindHash": "concept",
-    "Signpost": "concept",
-    "Uni.Lat": "concept",
-    "autoresearch": "project",
-    "program.md": "concept",
-    "knowledge graph": "concept",
-    "claims": "concept",
-    "provenance": "concept",
-    "trust vector": "concept",
-    "feature flag": "concept",
-    "workstream": "concept",
-    "malleable software": "concept",
-    "sovereignty": "concept",
-    "gossip": "concept",
-    "agentic loop": "concept",
-    "harness": "concept",
-}
-
-# Common words to exclude from entity extraction
-STOP_WORDS = {
-    "the", "this", "that", "these", "those", "here", "there", "when", "where",
-    "what", "which", "who", "how", "why", "will", "would", "could", "should",
-    "have", "has", "had", "been", "being", "are", "were", "was", "not", "but",
-    "and", "for", "with", "from", "into", "over", "under", "then", "than",
-    "very", "just", "also", "only", "even", "still", "much", "more", "most",
-    "some", "any", "all", "each", "every", "both", "few", "many", "well",
-    "yes", "right", "okay", "sure", "let", "get", "got", "set", "put",
-    "use", "used", "using", "make", "made", "take", "give", "keep",
-    "want", "need", "know", "think", "mean", "say", "see", "look",
-    "come", "going", "way", "thing", "point", "example", "instead",
-    "because", "since", "already", "really", "actually", "basically",
-    "probably", "exactly", "essentially", "specifically", "particularly",
-    "important", "different", "possible", "necessary", "interesting",
-    "first", "second", "third", "last", "next", "new", "old", "good",
-    "bad", "big", "small", "long", "short", "high", "low",
-    "true", "false", "null", "none", "something", "everything", "nothing",
-    "user", "system", "data", "model", "layer", "level", "part",
-    "note", "see", "like", "else", "case", "work", "done",
-    "start", "end", "run", "call", "read", "write", "create",
-}
-
-# Pattern for capitalized terms (potential entities)
-CAPITALIZED_TERM = re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b")
-# Pattern for technical terms in backticks
-BACKTICK_TERM = re.compile(r"`([^`]+)`")
-# Bold terms
-BOLD_TERM = re.compile(r"\*\*([^*]+)\*\*")
-
-
-def extract_entities(text: str) -> list[tuple[str, str]]:
-    """Extract potential entity names from text. Returns (name, type) tuples."""
-    found = {}
-
-    # First: seed vocabulary matches
-    text_lower = text.lower()
-    for name, etype in SEED_ENTITIES.items():
-        if name.lower() in text_lower:
-            found[name.lower()] = (name, etype)
-
-    # Backtick terms (likely technical)
-    for match in BACKTICK_TERM.finditer(text):
-        term = match.group(1).strip()
-        if len(term) >= 2 and len(term) <= 50 and term.lower() not in STOP_WORDS:
-            key = term.lower()
-            if key not in found:
-                found[key] = (term, "concept")
-
-    # Multi-word capitalized terms only (single caps words are mostly sentence starts)
-    for match in CAPITALIZED_TERM.finditer(text):
-        term = match.group(1).strip()
-        words = term.split()
-        if len(words) >= 2 and len(term) >= 5:
-            if all(w.lower() not in STOP_WORDS for w in words):
-                key = term.lower()
-                if key not in found:
-                    found[key] = (term, "concept")
-
-    return list(found.values())
-
-
 # ── Ingestion Pipeline ───────────────────────────────────────
 
 def ingest_conversation(db: GraphDB, file_path: str | Path, force: bool = False) -> dict:
@@ -228,17 +130,9 @@ def ingest_conversation(db: GraphDB, file_path: str | Path, force: bool = False)
 
     thoughts = []
     derivations = []
-    all_entities = {}
     last_thought_id = None
 
     for turn in turns:
-        # Extract entities from content
-        ents = extract_entities(turn["content"])
-        for name, etype in ents:
-            key = name.lower()
-            if key not in all_entities:
-                all_entities[key] = (name, etype)
-
         if turn["role"] == "user":
             t = Thought(
                 source_id=source.id,
@@ -249,11 +143,6 @@ def ingest_conversation(db: GraphDB, file_path: str | Path, force: bool = False)
             db.insert_thought(t)
             thoughts.append(t)
             last_thought_id = t.id
-
-            # Link entities to thought
-            for name, etype in ents:
-                eid = db.upsert_entity(name, etype)
-                db.add_mention(eid, t.id, "thought")
 
         elif turn["role"] == "assistant":
             d = Derivation(
@@ -266,11 +155,6 @@ def ingest_conversation(db: GraphDB, file_path: str | Path, force: bool = False)
             )
             db.insert_derivation(d)
             derivations.append(d)
-
-            # Link entities to derivation
-            for name, etype in ents:
-                eid = db.upsert_entity(name, etype)
-                db.add_mention(eid, d.id, "derivation")
 
             # Edge: derivation responds_to thought
             if last_thought_id:
@@ -286,7 +170,6 @@ def ingest_conversation(db: GraphDB, file_path: str | Path, force: bool = False)
         "source_id": source.id,
         "thoughts": len(thoughts),
         "derivations": len(derivations),
-        "entities": len(all_entities),
     }
 
 
@@ -314,7 +197,6 @@ def ingest_musing(db: GraphDB, file_path: str | Path, force: bool = False) -> di
     db.insert_source(source)
 
     thoughts = []
-    all_entities = {}
 
     for i, section in enumerate(sections):
         t = Thought(
@@ -326,20 +208,11 @@ def ingest_musing(db: GraphDB, file_path: str | Path, force: bool = False) -> di
         db.insert_thought(t)
         thoughts.append(t)
 
-        ents = extract_entities(section)
-        for name, etype in ents:
-            key = name.lower()
-            if key not in all_entities:
-                all_entities[key] = (name, etype)
-            eid = db.upsert_entity(name, etype)
-            db.add_mention(eid, t.id, "thought")
-
     db.commit()
     return {
         "status": "ingested",
         "source_id": source.id,
         "thoughts": len(thoughts),
-        "entities": len(all_entities),
     }
 
 
@@ -1248,7 +1121,7 @@ def _ingest_agentic_session(
     max_turn = db.get_max_turn(source_id)
     new_turns = _dedup_new_turns(db, source_id, turns, max_turn)
 
-    thoughts, derivations, all_entities = _write_new_turns(
+    thoughts, derivations = _write_new_turns(
         db, source_id, new_turns, model=meta.get("model", default_model),
         persona_id=_ingest_persona(), session_id=Path(file_path).stem,
     )
@@ -1276,7 +1149,6 @@ def _ingest_agentic_session(
         "session_id": meta["session_id"],
         "new_thoughts": len(thoughts),
         "new_derivations": len(derivations),
-        "new_entities": len(all_entities),
         "from_turn": max_turn + 1,
         "to_turn": turns[-1]["turn_number"],
     }
@@ -1376,7 +1248,7 @@ def _write_new_turns(
     db: GraphDB, source_id: str, new_turns: list[dict], *, model: str | None,
     persona_id: str | None = None, session_id: str | None = None,
 ) -> tuple[list[Thought], list[Derivation], dict]:
-    """Write a batch of new turns (thoughts/derivations/entities/edges) onto
+    """Write a batch of new turns (thoughts/derivations/edges) onto
     an existing source. Shared by the full-reparse incremental path
     (``_ingest_text_session``'s existing branch) and the tail-primary
     ``GraphAppender`` (W3) — identical writes, identical role branching
@@ -1389,16 +1261,14 @@ def _write_new_turns(
     this function does no deduping of its own beyond the message-id/turn-
     number identity SQLite enforces via each turn's own insert.
 
-    Returns ``(thoughts, derivations, all_entities)`` — ``all_entities``
-    maps lowercased entity name → ``(name, type)`` for the caller's
-    entity-count bookkeeping. Caller owns the transaction (commit/rollback);
-    this function only executes/queues writes on ``db.conn``.
+    Returns ``(thoughts, derivations)``. Caller owns the transaction
+    (commit/rollback); this function only executes/queues writes on
+    ``db.conn``.
     """
     thoughts: list[Thought] = []
     derivations: list[Derivation] = []
-    all_entities: dict = {}
     if not new_turns:
-        return thoughts, derivations, all_entities
+        return thoughts, derivations
 
     last_thought_row = db.conn.execute(
         "SELECT id FROM thoughts WHERE source_id = ? ORDER BY turn_number DESC LIMIT 1",
@@ -1429,8 +1299,8 @@ def _write_new_turns(
         if turn["role"] == "injected":
             # Codex operator briefs (W1 §12.3) — kept searchable via FTS
             # but role-filtered out of attention/title-probe like
-            # compact_summary. No entity extraction, no thread edge: these
-            # aren't part of the user<->assistant exchange.
+            # compact_summary. No thread edge: these aren't part of the
+            # user<->assistant exchange.
             t = Thought(
                 source_id=source_id,
                 content=turn["content"],
@@ -1445,12 +1315,6 @@ def _write_new_turns(
             db.insert_thought(t)
             thoughts.append(t)
             continue
-
-        ents = extract_entities(turn["content"])
-        for name, etype in ents:
-            key = name.lower()
-            if key not in all_entities:
-                all_entities[key] = (name, etype)
 
         if turn["role"] == "user":
             t = Thought(
@@ -1467,10 +1331,6 @@ def _write_new_turns(
             thoughts.append(t)
             last_thought_id = t.id
 
-            for name, etype in ents:
-                eid = db.upsert_entity(name, etype)
-                db.add_mention(eid, t.id, "thought")
-
         elif turn["role"] == "assistant":
             d = Derivation(
                 source_id=source_id,
@@ -1485,10 +1345,6 @@ def _write_new_turns(
             db.insert_derivation(d)
             derivations.append(d)
 
-            for name, etype in ents:
-                eid = db.upsert_entity(name, etype)
-                db.add_mention(eid, d.id, "derivation")
-
             if last_thought_id:
                 db.insert_edge(Edge(
                     source_id=d.id, source_type="derivation",
@@ -1496,7 +1352,7 @@ def _write_new_turns(
                     relation="responds_to",
                 ))
 
-    return thoughts, derivations, all_entities
+    return thoughts, derivations
 
 
 def _ingest_text_session(
@@ -1570,7 +1426,7 @@ def _ingest_text_session(
         max_turn = db.get_max_turn(source_id)
         new_turns = _dedup_new_turns(db, source_id, turns, max_turn)
 
-        thoughts, derivations, all_entities = _write_new_turns(
+        thoughts, derivations = _write_new_turns(
             db, source_id, new_turns, model=meta.get("model", default_model),
             persona_id=persona_id, session_id=session_uuid,
         )
@@ -1584,7 +1440,7 @@ def _ingest_text_session(
         # (server.py's update_source_title), not by re-deriving here on
         # every tick. Passing the re-read existing["title"] instead would be
         # a read-modify-write race: write-through can rename the source
-        # mid-pass (entity extraction on a big delta takes seconds) and this
+        # mid-pass (a big delta takes seconds to write) and this
         # update would then clobber the new title with the stale value.
         #
         # W2 exception: a source eager-created at session init (before any
@@ -1612,7 +1468,6 @@ def _ingest_text_session(
             "session_id": meta["session_id"],
             "new_thoughts": len(thoughts),
             "new_derivations": len(derivations),
-            "new_entities": len(all_entities),
             "from_turn": max_turn + 1,
             "to_turn": turns[-1]["turn_number"],
         }
@@ -1635,7 +1490,6 @@ def _ingest_text_session(
 
     thoughts = []
     derivations = []
-    all_entities = {}
     last_thought_id = None
 
     for turn in turns:
@@ -1661,8 +1515,8 @@ def _ingest_text_session(
         if turn["role"] == "injected":
             # Codex operator briefs (W1 §12.3) — kept searchable via FTS but
             # role-filtered out of attention/title-probe like compact_summary.
-            # No entity extraction, no thread edge: these aren't part of the
-            # user<->assistant exchange.
+            # No thread edge: these aren't part of the user<->assistant
+            # exchange.
             t = Thought(
                 source_id=source.id,
                 content=turn["content"],
@@ -1677,12 +1531,6 @@ def _ingest_text_session(
             db.insert_thought(t)
             thoughts.append(t)
             continue
-
-        ents = extract_entities(turn["content"])
-        for name, etype in ents:
-            key = name.lower()
-            if key not in all_entities:
-                all_entities[key] = (name, etype)
 
         if turn["role"] == "user":
             t = Thought(
@@ -1699,10 +1547,6 @@ def _ingest_text_session(
             thoughts.append(t)
             last_thought_id = t.id
 
-            for name, etype in ents:
-                eid = db.upsert_entity(name, etype)
-                db.add_mention(eid, t.id, "thought")
-
         elif turn["role"] == "assistant":
             d = Derivation(
                 source_id=source.id,
@@ -1716,10 +1560,6 @@ def _ingest_text_session(
             )
             db.insert_derivation(d)
             derivations.append(d)
-
-            for name, etype in ents:
-                eid = db.upsert_entity(name, etype)
-                db.add_mention(eid, d.id, "derivation")
 
             if last_thought_id:
                 db.insert_edge(Edge(
@@ -1736,7 +1576,6 @@ def _ingest_text_session(
         "title": title,
         "thoughts": len(thoughts),
         "derivations": len(derivations),
-        "entities": len(all_entities),
         "model": meta.get("model"),
         "tokens": meta.get("total_input_tokens", 0) + meta.get("total_output_tokens", 0),
     }
@@ -2082,7 +1921,6 @@ def ingest_doc_file(db: GraphDB, file_path: str | Path, force: bool = False) -> 
     sections = [s.strip() for s in sections if s.strip() and len(s.strip()) > 10]
 
     thoughts = []
-    all_entities = {}
 
     for i, section in enumerate(sections):
         t = Thought(
@@ -2094,21 +1932,12 @@ def ingest_doc_file(db: GraphDB, file_path: str | Path, force: bool = False) -> 
         db.insert_thought(t)
         thoughts.append(t)
 
-        ents = extract_entities(section)
-        for name, etype in ents:
-            key = name.lower()
-            if key not in all_entities:
-                all_entities[key] = (name, etype)
-            eid = db.upsert_entity(name, etype)
-            db.add_mention(eid, t.id, "thought")
-
     db.commit()
     return {
         "status": "ingested",
         "source_id": source.id,
         "title": title,
         "thoughts": len(thoughts),
-        "entities": len(all_entities),
     }
 
 
@@ -2177,7 +2006,6 @@ def ingest_status_file(db: GraphDB, file_path: str | Path, authorship: str = "mi
     sections = [s.strip() for s in sections if s.strip() and len(s.strip()) > 10]
 
     thoughts = []
-    all_entities = {}
 
     for i, section in enumerate(sections):
         t = Thought(
@@ -2189,14 +2017,6 @@ def ingest_status_file(db: GraphDB, file_path: str | Path, authorship: str = "mi
         db.insert_thought(t)
         thoughts.append(t)
 
-        ents = extract_entities(section)
-        for name, etype in ents:
-            key = name.lower()
-            if key not in all_entities:
-                all_entities[key] = (name, etype)
-            eid = db.upsert_entity(name, etype)
-            db.add_mention(eid, t.id, "thought")
-
     db.commit()
     return {
         "status": "ingested",
@@ -2204,7 +2024,6 @@ def ingest_status_file(db: GraphDB, file_path: str | Path, authorship: str = "mi
         "title": title,
         "category": category,
         "thoughts": len(thoughts),
-        "entities": len(all_entities),
     }
 
 
@@ -2316,7 +2135,6 @@ def ingest_git_commits(
         db.update_source_metadata(source_id, existing_meta)
 
     thoughts = []
-    all_entities = {}
 
     # Commits are newest-first from git log; reverse for chronological turn numbering
     base_turn = db.get_max_turn(source_id) if existing else 0
@@ -2337,19 +2155,10 @@ def ingest_git_commits(
         db.insert_thought(t)
         thoughts.append(t)
 
-        ents = extract_entities(commit["subject"] + " " + commit["body"])
-        for name, etype in ents:
-            key = name.lower()
-            if key not in all_entities:
-                all_entities[key] = (name, etype)
-            eid = db.upsert_entity(name, etype)
-            db.add_mention(eid, t.id, "thought")
-
     db.commit()
     return {
         "status": "ingested" if not existing else "updated",
         "source_id": source_id,
         "commits": len(commits),
-        "entities": len(all_entities),
         "repo": str(repo_path),
     }

@@ -4,6 +4,7 @@ import pytest
 
 from tools.graph.db import GraphDB
 from tools.network.fleet_sync.policies import (
+    RETIRED_LOGICAL_TABLES,
     PolicyKind,
     TABLE_POLICIES,
     audit_schema,
@@ -35,7 +36,11 @@ def test_current_graph_schema_is_completely_classified(tmp_path: Path) -> None:
     finally:
         db.close()
 
-    assert set(TABLE_POLICIES).issubset(classified)
+    # Retired tables keep their policy entry (so an unmigrated store still
+    # classifies and the compat digest does not move again) but are gone from
+    # the current schema, so they are the one permitted absence.
+    assert set(TABLE_POLICIES) - RETIRED_LOGICAL_TABLES <= set(classified)
+    assert not (RETIRED_LOGICAL_TABLES & set(classified))
     # Classified LOCAL via a frozenset, deliberately NOT in TABLE_POLICIES, so
     # a non-replicated table never enters the replication surface / compat
     # digest (which would force a spurious fleet-wide sync pause).

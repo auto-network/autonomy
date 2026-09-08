@@ -1307,7 +1307,7 @@ class HttpClient:
     def get_dispatch_wait_status(self, bead_id):
         return self._get(f"/api/dispatch/wait/{bead_id}") or {}
 
-    # ── stats / tree / entities ────────────────────────────
+    # ── stats / tree ────────────────────────────────────────
 
     def stats(self, *, org=None):
         return self._get("/api/graph/stats", org=org) or {}
@@ -1320,36 +1320,6 @@ class HttpClient:
         if isinstance(result, dict) and "nodes" in result:
             return result["nodes"]
         return result if isinstance(result, list) else []
-
-    def list_entities(self, *, entity_type=None, limit=20, org=None):
-        params: dict[str, Any] = {"limit": str(limit)}
-        if entity_type:
-            params["type"] = entity_type
-        result = self._get("/api/graph/entities", params, org=org)
-        if isinstance(result, dict) and "entities" in result:
-            return result["entities"]
-        return result if isinstance(result, list) else []
-
-    def search_entities(self, query, *, limit=20, org=None):
-        params: dict[str, Any] = {"query": query, "limit": str(limit)}
-        result = self._get("/api/graph/entities", params, org=org)
-        if isinstance(result, dict) and "entities" in result:
-            return result["entities"]
-        return result if isinstance(result, list) else []
-
-    def entity_thoughts(self, entity_id, *, limit=20, org=None):
-        params = {"limit": str(limit)}
-        result = self._get(f"/api/graph/entity/{entity_id}/thoughts", params, org=org)
-        if isinstance(result, dict) and "thoughts" in result:
-            return result["thoughts"]
-        return result if isinstance(result, list) else []
-
-    def entity_mention_count(self, entity_id, *, org=None):
-        """On host callers short-circuit; container uses annotated entities."""
-        raise NotImplementedError(
-            "container callers should read the 'mentions' field embedded in "
-            "list_entities / search_entities output; this helper stays host-only.",
-        )
 
 
 # ── helpers ─────────────────────────────────────────────────────

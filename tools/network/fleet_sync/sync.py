@@ -973,13 +973,20 @@ def install_checkpoint(
                     stage.conn, unrealized,
                     watermark=winners.through_watermark,
                 )
+                # Name every category. A count that sums to more than its
+                # parts is a tool reporting a cause it did not establish.
                 _log.warning(
                     "fleet checkpoint install skipped %d row(s) it cannot yet "
-                    "realize (%d foreign-key orphan(s), %d attachment(s) awaiting "
-                    "bytes); quarantined in fleet_sync_quarantine",
+                    "realize (%d foreign-key orphan(s), %d attachment(s) "
+                    "awaiting bytes, %d rejected: %s); quarantined in "
+                    "fleet_sync_quarantine",
                     skip_count,
                     len(report.skipped_orphans),
                     len(report.pending_attachments),
+                    len(report.rejected_signatures),
+                    ", ".join(sorted({
+                        reason for _t, _a, reason in report.rejected_signatures
+                    })) or "none",
                 )
             _copy_peer_state(target_path, stage.conn)
             if merge_existing:

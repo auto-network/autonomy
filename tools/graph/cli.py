@@ -246,7 +246,7 @@ def cmd_ingest(args):
                 if title:
                     title = f" — {title[:60]}"
                 print(f"  + {Path(f).name}: {r.get('thoughts', 0)} thoughts, "
-                      f"{r.get('derivations', 0)} derivations, {r.get('entities', 0)} entities{title}")
+                      f"{r.get('derivations', 0)} derivations{title}")
             else:
                 print(f"  ~ {Path(f).name}: {status} ({r.get('reason', '')})")
     elif path.is_file():
@@ -1845,28 +1845,6 @@ def _read_source_full_via_api(
     if tail_n is not None:
         kwargs["tail_n"] = tail_n
     return client.read_source_full(source_id, **kwargs)
-
-
-def cmd_entities(args):
-    """List or search entities."""
-    client = get_client()
-    if args.query:
-        entities = client.search_entities(args.query, limit=args.limit)
-    else:
-        entities = client.list_entities(entity_type=args.type, limit=args.limit)
-    if not entities:
-        print("No entities found.")
-        return
-    # Host path: pre-fetch mention counts inline. Container path: the server
-    # annotates each row with ``mentions`` so no per-entity round-trip needed.
-    for e in entities:
-        if "mentions" in e:
-            mentions = int(e["mentions"] or 0)
-        elif isinstance(client, HttpClient):
-            mentions = 0
-        else:
-            mentions = client.entity_mention_count(e["id"])
-        print(f"  {e['name']:40s}  [{e['type']:12s}]  {mentions:3d} mentions")
 
 
 def cmd_stats(args):
@@ -4636,27 +4614,6 @@ def cmd_ui_design(args):
         print(f"\n  Stopped watching. Design: {design_id}")
 
 
-def cmd_related(args):
-    """Find content related to a search term."""
-    client = get_client()
-    entities = client.search_entities(args.term)
-    if not entities:
-        print(f"No entity found matching '{args.term}'")
-        return
-
-    entity = entities[0]
-    print(f"Entity: {entity['name']} [{entity['type']}]\n")
-
-    thoughts = client.entity_thoughts(entity["id"])
-    if thoughts:
-        print(f"Referenced in {len(thoughts)} thought(s):")
-        for t in thoughts[:10]:
-            snippet = textwrap.shorten(t["content"], width=100, placeholder="…")
-            print(f"  [{t['platform']}/{t['source_title']}] turn {t.get('turn_number', '?')}")
-            print(f"    {snippet}")
-            print()
-
-
 def _cmd_primer(args):
     """Generate primer with the requested format."""
     data = collect_primer_data(
@@ -5961,18 +5918,6 @@ def main():
     p.add_argument("--max-chars", type=int, default=0,
                    help="Max chars per turn (0=unlimited)")
     p.set_defaults(func=cmd_tail)
-
-    # entities
-    p = sub.add_parser("entities", help="List or search entities")
-    p.add_argument("--query", "-q", help="Filter by name")
-    p.add_argument("--type", "-t", help="Filter by entity type")
-    p.add_argument("--limit", type=int, default=50, help="Max results")
-    p.set_defaults(func=cmd_entities)
-
-    # related
-    p = sub.add_parser("related", help="Find content related to a term")
-    p.add_argument("term", help="Entity name to find")
-    p.set_defaults(func=cmd_related)
 
     # stats
     p = sub.add_parser("stats", help="Database statistics")

@@ -41,12 +41,12 @@ _U32 = struct.Struct(">I")
 # Dependency-safe numeric table order for canonical bases.  The number is the
 # tuple position; production code generation can freeze those IDs explicitly.
 BASE_TABLE_ORDER = (
-    "sources", "entities", "nodes", "tags", "threads",
+    "sources", "nodes", "tags", "threads",
     "root_anchors", "vault_factors", "policy_classes", "vault_secrets",
     "vault_content_bodies", "keycontrol_state", "keycontrol_grant",
     "keycontrol_credential",
     "keycontrol_bridge", "vault_content_objects", "settings",
-    "thoughts", "derivations", "claims", "edges", "entity_mentions",
+    "thoughts", "derivations", "claims", "edges",
     "node_refs", "note_comments", "note_reads", "captures", "attachments",
     "note_versions",
 )
@@ -493,6 +493,7 @@ def materialize_catalog(
     deleted = 0
     pending: set[str] = set()
     skipped: list[tuple[str, tuple]] = []
+    rejected: list[tuple[str, tuple, str]] = []
 
     def flush() -> None:
         nonlocal applied, deleted
@@ -503,6 +504,11 @@ def materialize_catalog(
         deleted += report.deleted
         pending.update(report.pending_attachments)
         skipped.extend(report.skipped_orphans)
+        # Carry the REASONED rejections too. Dropping them here silently
+        # discarded every signature verdict and every secondary-identity
+        # conflict a checkpoint install hit, so the caller could not tell an
+        # unrealized row from one that never arrived.
+        rejected.extend(report.rejected_signatures)
         batch.clear()
 
     duplicate_records = 0
@@ -523,5 +529,6 @@ def materialize_catalog(
     if stats is not None:
         stats["duplicate_records"] = duplicate_records
     return MaterializationReport(
-        applied, deleted, tuple(sorted(pending)), tuple(skipped)
+        applied, deleted, tuple(sorted(pending)), tuple(skipped),
+        tuple(rejected),
     )

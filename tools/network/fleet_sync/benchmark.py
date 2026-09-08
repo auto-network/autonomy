@@ -19,8 +19,6 @@ LIVE_ROWS = {
     "claims": 0,
     "derivations": 43_377,
     "edges": 83_727,
-    "entities": 45_943,
-    "entity_mentions": 509_690,
     "node_refs": 0,
     "nodes": 0,
     "note_comments": 15,
@@ -51,10 +49,6 @@ def _mutations(scale: float) -> Iterator[Mutation]:
                           ("source_id", address[0]), ("source_type", "thought"),
                           ("target_id", address[1]), ("target_type", "entity"),
                           ("weight", 1.0))
-            elif table == "entity_mentions":
-                address = (f"entity-{index}", f"thought-{index}")
-                values = (("content_id", address[1]), ("content_type", "thought"),
-                          ("count", 1), ("entity_id", address[0]))
             elif table == "note_versions":
                 content = "v" * 512 + str(index)
                 address = ("source-0", f"2026-08-19T00:00:{index % 60:02d}Z",

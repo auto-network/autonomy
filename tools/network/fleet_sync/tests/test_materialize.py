@@ -342,10 +342,6 @@ def _seed_every_logical_table(db: GraphDB, blob: bytes, local_root: Path) -> str
         ("INSERT INTO derivations(id,source_id,thought_id,content,model,created_at) "
          "VALUES(?,?,?,?,?,?)",
          ("d1", "s1", "t1", "An answer", "model", "2026-08-19T10:00:04Z")),
-        ("INSERT INTO entities(id,name,canonical_name,type,metadata,created_at) "
-         "VALUES(?,?,?,?,?,?)",
-         ("e1", "RaptorQ", "raptorq", "technology", '{}',
-          "2026-08-19T10:00:05Z")),
         ("INSERT INTO claims(id,subject_id,predicate,object_val,source_id,metadata,created_at) "
          "VALUES(?,?,?,?,?,?,?)",
          ("c1", "e1", "supports", "streaming", "s1", '{}',
@@ -354,8 +350,6 @@ def _seed_every_logical_table(db: GraphDB, blob: bytes, local_root: Path) -> str
          "VALUES(?,?,?,?,?,?,?,?)",
          ("random-local-edge-id", "t1", "thought", "e1", "entity", "mentions", '{}',
           "2026-08-19T10:00:07Z")),
-        ("INSERT INTO entity_mentions(entity_id,content_id,content_type,count) VALUES(?,?,?,?)",
-         ("e1", "t1", "thought", 4)),
         ("INSERT INTO nodes(id,type,title,metadata,created_at,updated_at) VALUES(?,?,?,?,?,?)",
          ("n1", "reference", "Sync", '{}', "2026-08-19T10:00:08Z",
           "2026-08-19T10:00:08Z")),

@@ -63,8 +63,11 @@ TABLE_POLICIES: Final[dict[str, TablePolicy]] = {
     "derivations": TablePolicy(
         "derivations", PolicyKind.LWW, ("id",), ("metadata",)
     ),
+    # RETIRED 2026-09-08 -- see RETIRED_LOGICAL_TABLES below. The tables are
+    # gone from schema.sql; these entries stay so an unmigrated store still
+    # classifies and the digest does not move a second time.
     "entities": TablePolicy(
-        "entities", PolicyKind.LWW, ("id",), ("metadata",),
+        "entities", PolicyKind.DERIVED, ("id",), ("metadata",),
     ),
     "claims": TablePolicy(
         "claims", PolicyKind.LWW, ("id",), ("metadata",)
@@ -76,8 +79,9 @@ TABLE_POLICIES: Final[dict[str, TablePolicy]] = {
         ("created_at",),
         "matches the table's declared uniqueness rather than a random row id",
     ),
+    # RETIRED 2026-09-08 with entities (foreign key into entities(id)).
     "entity_mentions": TablePolicy(
-        "entity_mentions", PolicyKind.LWW, ("entity_id", "content_id")
+        "entity_mentions", PolicyKind.DERIVED, ("entity_id", "content_id")
     ),
     "nodes": TablePolicy(
         "nodes", PolicyKind.LWW, ("id",), ("metadata",)
@@ -214,6 +218,36 @@ TABLE_POLICIES: Final[dict[str, TablePolicy]] = {
     ),
 }
 
+
+#: Logical tables that no longer exist in schema.sql and are dropped from
+#: every store on open (GraphDB._migrate_drop_entities), with their addresses
+#: purged from fleet_sync_catalog and fleet_sync_quarantine.
+#:
+#: `entities` / `entity_mentions` were a regex index over thoughts and
+#: derivations text -- backticked terms, pairs of capitalised words, a seed
+#: vocabulary -- minted per-turn by ingest.extract_entities. Nothing read
+#: them: no dashboard page, no search path, no agent workflow; the only
+#: readers were two CLI verbs and one unreferenced HTTP route, all removed
+#: with the tables.
+#:
+#: They also could not replicate. `db.upsert_entity` deduped on
+#: canonical_name (UNIQUE in schema.sql) but minted `id` with a random uuid,
+#: and `id` was the replication key. Two machines that independently
+#: regex-matched the same string produced two rows distinct under the key and
+#: identical under the constraint, so the INSERT failed UNIQUE and materialize
+#: aborted the WHOLE batch: the watermark never advanced and the same batch
+#: replayed every 24s forever. One row for the string `auto-0905-212833`
+#: blocked 2.8M rows of real content on the autonomy scope for a day.
+#:
+#: Their policy entries remain in TABLE_POLICIES, deliberately. They keep an
+#: unmigrated store classifying under audit_schema, they give a legacy peer's
+#: frame a typed refusal instead of an unknown-table error, and -- because
+#: the digest folds the policy inventory and skips DERIVED shapes -- they keep
+#: the compatibility digest fixed across the drop, so this deploy needs no
+#: second coordinated pause.
+RETIRED_LOGICAL_TABLES: Final[frozenset[str]] = frozenset({
+    "entities", "entity_mentions",
+})
 
 DERIVED_TABLE_PREFIXES: Final[tuple[str, ...]] = (
     "thoughts_fts",

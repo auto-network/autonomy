@@ -1325,27 +1325,6 @@ def test_cmd_tree_routes_through_api(
     capsys.readouterr()
 
 
-def test_cmd_entities_routes_through_api(
-    api_client, forbid_cli_sqlite, capsys, monkeypatch,
-):
-    """``graph entities`` lists / searches via the server."""
-    monkeypatch.setenv("GRAPH_ORG", "autonomy")
-    args = _cli_args(query=None, type=None, limit=20)
-    graph_cli.cmd_entities(args)
-    capsys.readouterr()
-
-
-def test_cmd_related_routes_through_api(
-    api_client, forbid_cli_sqlite, capsys, monkeypatch,
-):
-    """``graph related <term>`` resolves an entity and its thoughts via API."""
-    monkeypatch.setenv("GRAPH_ORG", "autonomy")
-    args = _cli_args()
-    args.term = "nothing-here"
-    graph_cli.cmd_related(args)
-    capsys.readouterr()
-
-
 def test_cmd_read_routes_through_api(
     api_client, forbid_cli_sqlite, seeded_source_id, capsys, monkeypatch,
 ):

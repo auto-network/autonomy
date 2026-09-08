@@ -173,7 +173,11 @@ class TestAnchoredGraphComments:
         finally:
             conn.close()
         assert "anchor_json" in columns
-        assert version == 10
+        # Compare against the constant, not a literal: this test is about the
+        # migration running to completion, not about which version is current.
+        from tools.graph.db import _SCHEMA_USER_VERSION
+
+        assert version == _SCHEMA_USER_VERSION
 
     def test_malformed_stored_anchor_degrades_to_null(self, orgs_root):
         GraphDB.create_org_db("personal", type_="personal").close()

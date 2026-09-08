@@ -13,9 +13,8 @@ The unit is the entire logical personal graph.  The codec currently carries
 the durable rows from these tables:
 
 `attachments` (metadata), `captures`, `claims`, `derivations`, `edges`,
-`entities`, `entity_mentions`, `node_refs`, `nodes`, `note_comments`,
-`note_reads`, `note_versions`, `settings`, `sources`, `tags`, `thoughts`, and
-`threads`; encrypted `vault_content_bodies` and `vault_content_objects`; and
+`node_refs`, `nodes`, `note_comments`, `note_reads`, `note_versions`,
+`settings`, `sources`, `tags`, `thoughts`, and `threads`; encrypted `vault_content_bodies` and `vault_content_objects`; and
 the `policy_classes`, `root_anchors`, `vault_factors`, `vault_secrets`,
 `keycontrol_state`, `keycontrol_credential`, and `keycontrol_bridge` records
 required to open those secrets on another fleet machine.

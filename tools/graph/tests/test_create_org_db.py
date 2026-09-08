@@ -85,8 +85,8 @@ def test_create_org_db_produces_file_with_full_schema(orgs_root):
         db.close()
     # Canonical tables must all be present.
     for required in (
-        "sources", "thoughts", "derivations", "entities", "claims",
-        "edges", "entity_mentions", "nodes", "node_refs",
+        "sources", "thoughts", "derivations", "claims",
+        "edges", "nodes", "node_refs",
         "note_comments", "note_versions", "attachments", "note_reads",
         "tags", "threads", "captures",
         "orgs", "settings",

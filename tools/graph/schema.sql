@@ -82,19 +82,6 @@ CREATE INDEX IF NOT EXISTS idx_derivations_source_turn ON derivations(source_id,
 CREATE INDEX IF NOT EXISTS idx_derivations_thought ON derivations(thought_id);
 
 -- ============================================================
--- ENTITIES — named concepts (Autonomy Core, CRDT, sovereignty line, etc.)
--- ============================================================
-CREATE TABLE IF NOT EXISTS entities (
-    id              TEXT PRIMARY KEY,
-    name            TEXT NOT NULL,
-    canonical_name  TEXT NOT NULL UNIQUE,   -- lowercased, for dedup
-    type            TEXT DEFAULT 'concept', -- 'concept', 'person', 'technology', 'project', 'organization'
-    description     TEXT,
-    metadata        TEXT DEFAULT '{}',
-    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-);
-
--- ============================================================
 -- CLAIMS — structured assertions with provenance
 -- ============================================================
 CREATE TABLE IF NOT EXISTS claims (
@@ -133,18 +120,6 @@ CREATE TABLE IF NOT EXISTS edges (
 CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_id, source_type);
 CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id, target_type);
 CREATE INDEX IF NOT EXISTS idx_edges_relation ON edges(relation);
-
--- ============================================================
--- ENTITY MENTIONS — junction: which entities appear in which content
--- ============================================================
-CREATE TABLE IF NOT EXISTS entity_mentions (
-    entity_id   TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
-    content_id  TEXT NOT NULL,           -- thought or derivation ID
-    content_type TEXT NOT NULL,          -- 'thought' or 'derivation'
-    count       INTEGER DEFAULT 1,
-    PRIMARY KEY (entity_id, content_id)
-);
-CREATE INDEX IF NOT EXISTS idx_mentions_content ON entity_mentions(content_id);
 
 -- ============================================================
 -- FTS5 — full-text search

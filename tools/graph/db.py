@@ -64,7 +64,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # as one).
 # v9: first-class persona_id/session_id on authored graph content.
 # v10 (auto-52j7e): optional durable selected-text anchors on note comments.
-_SCHEMA_USER_VERSION = 10
+# v11: drop the retired entities / entity_mentions tables.
+_SCHEMA_USER_VERSION = 11
 
 #: Captured data-phase migrations: ``(schema_user_version, rewrite)`` pairs,
 #: run in order for every version above the database's previous stamp.  The
@@ -611,6 +612,7 @@ class GraphDB:
         self._migrate_source_short_description()
         self._migrate_source_keywords()
         self._migrate_drop_source_project()
+        self._migrate_drop_entities()
         # sources_fts depends on `short_description` + `keywords` columns, so
         # it must run AFTER both column migrations above.
         self._migrate_sources_fts()
@@ -834,6 +836,43 @@ class GraphDB:
         if "project" in scols:
             self.conn.execute("ALTER TABLE sources DROP COLUMN project")
             self.conn.commit()
+
+    def _migrate_drop_entities(self):
+        """Drop the retired ``entities`` / ``entity_mentions`` tables.
+
+        They were a regex index over thought/derivation text that nothing
+        read, and they could not replicate: ``upsert_entity`` deduped on the
+        UNIQUE ``canonical_name`` while minting the replication key ``id`` at
+        random, so two machines matching the same string produced rows that
+        were distinct under the key and identical under the constraint. One
+        such row stalled the autonomy scope for a day. See
+        ``RETIRED_LOGICAL_TABLES`` in fleet_sync/policies.py.
+
+        Dropping the tables is not enough on an activated store: the winner
+        catalog and the quarantine still address rows in them, and both are
+        audited against the live schema. Purge those addresses in the same
+        transaction, or the next catalog verification raises.
+        """
+        from tools.network.fleet_sync.catalog import (
+            purge_retired_catalog_addresses,
+        )
+        from tools.network.fleet_sync.policies import RETIRED_LOGICAL_TABLES
+
+        present = {
+            r[0] for r in self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+                f"({','.join('?' * len(RETIRED_LOGICAL_TABLES))})",
+                tuple(sorted(RETIRED_LOGICAL_TABLES)),
+            ).fetchall()
+        }
+        if not present:
+            return
+        # entity_mentions holds the foreign key, so it goes first.
+        for table in ("entity_mentions", "entities"):
+            if table in present:
+                self.conn.execute(f'DROP TABLE IF EXISTS "{table}"')
+        purge_retired_catalog_addresses(self.conn, sorted(present))
+        self.conn.commit()
 
     def _migrate_sources_fts(self):
         """Create the sources_fts FTS5 table + sync triggers (idempotent).
@@ -1491,52 +1530,6 @@ class GraphDB:
              d.message_id, json.dumps(d.metadata), d.created_at),
         )
         return d
-
-    # ── Entities ─────────────────────────────────────────────
-
-    def upsert_entity(self, name: str, entity_type: str = "concept", description: str | None = None) -> str:
-        canonical = name.lower().strip()
-        row = self.conn.execute(
-            "SELECT id FROM entities WHERE canonical_name = ?", (canonical,)
-        ).fetchone()
-        if row:
-            return row["id"]
-        eid = new_id()
-        self.conn.execute(
-            """INSERT INTO entities (id, name, canonical_name, type, description)
-               VALUES (?, ?, ?, ?, ?)""",
-            (eid, name, canonical, entity_type, description),
-        )
-        return eid
-
-    def get_entity(self, canonical_name: str) -> dict | None:
-        row = self.conn.execute(
-            "SELECT * FROM entities WHERE canonical_name = ?", (canonical_name.lower().strip(),)
-        ).fetchone()
-        return dict(row) if row else None
-
-    def list_entities(self, entity_type: str | None = None, limit: int = 100) -> list[dict]:
-        if entity_type:
-            rows = self.conn.execute(
-                "SELECT * FROM entities WHERE type = ? ORDER BY name LIMIT ?",
-                (entity_type, limit),
-            ).fetchall()
-        else:
-            rows = self.conn.execute(
-                "SELECT * FROM entities ORDER BY name LIMIT ?", (limit,)
-            ).fetchall()
-        return [dict(r) for r in rows]
-
-    # ── Entity Mentions ──────────────────────────────────────
-
-    def add_mention(self, entity_id: str, content_id: str, content_type: str, count: int = 1):
-        self.conn.execute(
-            """INSERT INTO entity_mentions (entity_id, content_id, content_type, count)
-               VALUES (?, ?, ?, ?)
-               ON CONFLICT(entity_id, content_id)
-               DO UPDATE SET count = count + excluded.count""",
-            (entity_id, content_id, content_type, count),
-        )
 
     # ── Claims ───────────────────────────────────────────────
 
@@ -2494,19 +2487,11 @@ class GraphDB:
 
         return results[:limit]
 
-    def search_entities(self, query: str, limit: int = 20) -> list[dict]:
-        """Search entities by name."""
-        rows = self.conn.execute(
-            "SELECT * FROM entities WHERE canonical_name LIKE ? ORDER BY name LIMIT ?",
-            (f"%{query.lower()}%", limit),
-        ).fetchall()
-        return [dict(r) for r in rows]
-
     # ── Stats ────────────────────────────────────────────────
 
     def stats(self) -> dict:
         result = {}
-        for table in ["sources", "thoughts", "derivations", "entities", "claims", "edges", "entity_mentions", "nodes"]:
+        for table in ["sources", "thoughts", "derivations", "claims", "edges", "nodes"]:
             row = self.conn.execute(f"SELECT COUNT(*) as cnt FROM {table}").fetchone()
             result[table] = row["cnt"]
         return result
@@ -2529,19 +2514,6 @@ class GraphDB:
                    LIMIT ?""",
                 (node_id, node_id, limit),
             ).fetchall()
-        return [dict(r) for r in rows]
-
-    def entity_thoughts(self, entity_id: str) -> list[dict]:
-        """Find all thoughts that mention a given entity."""
-        rows = self.conn.execute(
-            """SELECT t.*, s.title as source_title, s.platform
-               FROM entity_mentions em
-               JOIN thoughts t ON t.id = em.content_id AND em.content_type = 'thought'
-               JOIN sources s ON s.id = t.source_id
-               WHERE em.entity_id = ?
-               ORDER BY t.created_at""",
-            (entity_id,),
-        ).fetchall()
         return [dict(r) for r in rows]
 
     # ── Source Reading ─────────────────────────────────────────

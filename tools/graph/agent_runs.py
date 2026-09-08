@@ -19,7 +19,7 @@ from pathlib import Path
 
 from .models import Source, Thought, Derivation, Edge, new_id, now_iso
 from .db import GraphDB
-from .ingest import extract_entities, SYSTEM_NOISE, REQUEST_INTERRUPTED
+from .ingest import SYSTEM_NOISE, REQUEST_INTERRUPTED
 
 
 # ── AgentRun Dataclass ────────────────────────────────────────
@@ -219,16 +219,9 @@ def ingest_agent_run(db: GraphDB, run: AgentRun, force: bool = False) -> dict:
 
     thoughts = []
     derivations = []
-    all_entities = {}
     last_thought_id = None
 
     for turn in turns:
-        ents = extract_entities(turn["content"])
-        for name, etype in ents:
-            key = name.lower()
-            if key not in all_entities:
-                all_entities[key] = (name, etype)
-
         if turn["role"] == "user":
             t = Thought(
                 source_id=source.id,
@@ -240,10 +233,6 @@ def ingest_agent_run(db: GraphDB, run: AgentRun, force: bool = False) -> dict:
             db.insert_thought(t)
             thoughts.append(t)
             last_thought_id = t.id
-
-            for name, etype in ents:
-                eid = db.upsert_entity(name, etype)
-                db.add_mention(eid, t.id, "thought")
 
         elif turn["role"] == "assistant":
             d = Derivation(
@@ -257,10 +246,6 @@ def ingest_agent_run(db: GraphDB, run: AgentRun, force: bool = False) -> dict:
             )
             db.insert_derivation(d)
             derivations.append(d)
-
-            for name, etype in ents:
-                eid = db.upsert_entity(name, etype)
-                db.add_mention(eid, d.id, "derivation")
 
             if last_thought_id:
                 db.insert_edge(Edge(
@@ -301,7 +286,6 @@ def ingest_agent_run(db: GraphDB, run: AgentRun, force: bool = False) -> dict:
         "bead_id": run.bead_id,
         "thoughts": len(thoughts),
         "derivations": len(derivations),
-        "entities": len(all_entities),
         "tool_uses": run.total_tool_uses,
         "tokens": run.total_input_tokens + run.total_output_tokens,
     }
