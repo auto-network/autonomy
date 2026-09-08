@@ -31,7 +31,7 @@
   }
   global.missionOps = function (config) {
     return {
-      config, view: 'overview', filter: 'focus', search: '', limit: 100, selectedId: '',
+      config, view: 'overview', filter: 'focus', scope: 'mission', sortKey: 'default', sortDirection: 'asc', search: '', limit: 100, selectedId: '',
       issues: [], sessions: [], seats: [], raw: null, errors: [], loading: true,
       drafts: {}, answers: {}, sending: false, sendError: '', notice: '', now: Date.now(), clock: null,
       dictationHint: false, reportTitle: '', reportBody: '',
@@ -67,7 +67,7 @@
         const missions = new Map((data.missions || []).map(m => [m.mission_id, m]));
         const pillars = data.pillars || [];
         const live = new Set(this.sessions.map(s => s.id));
-        this.seats = pillars.map(p => ({key: p.mission_id + ':' + p.pillar_id,
+        this.seats = pillars.map(p => ({key: p.mission_id + ':' + p.pillar_id, missionId: p.mission_id,
           label: (missions.get(p.mission_id)?.name || p.mission_id) + ' · ' + p.name,
           session: p.coordinator_session || '',
           status: !p.coordinator_session ? 'Vacant' : this.errors.some(e => e.source === 'sessions') ? 'Liveness unknown' : live.has(p.coordinator_session) ? 'Live coordinator' : 'Coordinator not in live roster'}));
@@ -80,7 +80,7 @@
           issue.task = t; issue.priority = Number.isFinite(t.priority) ? t.priority : 2;
           issue.people = this.people([sessionId(t.assignee)]);
           issue.focus = t.status !== 'closed' && issue.people.some(p => live.has(p[3]));
-          const mid = t.mission_ids.find(m => missions.has(m));
+          const mid = t.mission_ids.includes(config.mission_id) ? config.mission_id : t.mission_ids.find(m => missions.has(m));
           const pillar = pillars.find(p => p.mission_id === mid && (p.bead_labels || []).some(lb => t.pillar_labels.includes(lb)));
           issue.missionId = mid || ''; issue.pillarId = pillar?.pillar_id || '';
           issue.canSend = !!pillar?.coordinator_session;
@@ -110,6 +110,9 @@
           const pillar = pillars.find(p => p.mission_id === i.mission_id && p.pillar_id === i.surface_id);
           const linked = (i.refs || []).filter(r => r.startsWith('bead:')).map(r => tasks.get(r.slice(5))).filter(Boolean);
           issue.item = i; issue.missionId = i.mission_id; issue.pillarId = i.surface_id;
+          issue.conversation = (i.discussion || []).map(d => ({text:d.text || '', at:d.at || '', kind:d.type || 'reply',
+            author: /^[0-9a-f]{64}$/i.test(d.by || '') ? 'Member' : d.by || 'Unknown author'}));
+          issue.hasMemberReply = (i.discussion || []).some(d => /^[0-9a-f]{64}$/i.test(d.by || ''));
           issue.question = i.ask || ''; issue.background = i.body || 'Background has not been supplied. Ask for clarification.';
           issue.subtitle = b.subtitle || (missions.get(i.mission_id)?.name || '') + (pillar ? ' · ' + pillar.name : '');
           issue.impact = b.impact || ''; issue.recommendation = b.recommendation || '';
@@ -135,15 +138,29 @@
           (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0) || a.id.localeCompare(b.id));
       },
       get current() { return this.issues.find(i => i.id === this.selectedId) || null; },
-      get featured() { return this.issues.find(i => i.question && i.focus); },
-      get scopeLabel() { return this.raw ? this.raw.org + ' · ' + this.raw.tasks.length + ' tasks · ' + this.sessions.length + ' live sessions · refreshed ' + this.ago(this.raw.generated_at) : 'Reading organization records'; },
+      get conversation() { return [...(this.current?.conversation || [])].reverse(); },
+      get scopedIssues() { return this.scope === 'org' ? this.issues : this.issues.filter(i => i.task ? i.task.mission_ids.includes(config.mission_id) : i.missionId === config.mission_id); },
+      get scopedSeats() { return this.scope === 'org' ? this.seats : this.seats.filter(s => s.missionId === config.mission_id); },
+      get featured() { return this.scopedIssues.find(i => i.question && i.focus); },
+      get scopeLabel() { return this.raw ? (this.scope === 'org' ? this.raw.org + ' · all organization work' : (this.raw.missions || []).find(m => m.mission_id === config.mission_id)?.name || 'This mission') + ' · ' + this.scopedIssues.filter(i => i.task).length + ' tasks · refreshed ' + this.ago(this.raw.generated_at) : 'Reading organization records'; },
       matches(issue, group) { return group === 'focus' ? issue.focus : group === 'all' ? issue.group !== 'completed' : issue.group === group; },
-      count(group) { return this.issues.filter(i => this.matches(i, group)).length; },
+      count(group) { return this.scopedIssues.filter(i => this.matches(i, group)).length; },
+      sortBy(key) { this.sortDirection = this.sortKey === key ? (this.sortDirection === 'asc' ? 'desc' : 'asc') : key === 'updated' ? 'desc' : 'asc'; this.sortKey = key; this.limit = 100; },
+      sortMark(key) { return this.sortKey === key ? (this.sortDirection === 'asc' ? ' ↑' : ' ↓') : ''; },
+      sortAria(key) { return this.sortKey === key ? (this.sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'; },
+      get sortLabel() { return this.sortKey === 'default' ? (this.filter === 'completed' ? 'Sorted by completion time · newest first' : 'Sorted by blocking questions, priority, then newest update') : 'Sorted by ' + ({headline:'issue', phase:'phase', sessions:'session ID', updated:this.filter === 'completed' ? 'completion time' : 'updated time'}[this.sortKey]) + ' · ' + (this.sortDirection === 'asc' ? 'ascending' : 'descending'); },
       get filteredRows() {
-        let rows = this.issues.filter(i => this.matches(i, this.filter));
+        let rows = this.scopedIssues.filter(i => this.matches(i, this.filter));
         const q = this.search.trim().toLowerCase();
         if (q) rows = rows.filter(i => [i.headline, i.subtitle, ...i.people.map(p => p[3]), ...i.refs].join(' ').toLowerCase().includes(q));
-        return this.filter === 'completed' ? rows.sort((a, b) => (Date.parse(b.completedAt) || 0) - (Date.parse(a.completedAt) || 0)) : rows;
+        if (this.sortKey === 'default') return this.filter === 'completed' ? rows.sort((a, b) => (Date.parse(b.completedAt) || 0) - (Date.parse(a.completedAt) || 0)) : rows;
+        const value = i => this.sortKey === 'updated' ? (Date.parse(this.filter === 'completed' ? i.completedAt : i.updatedAt) || null) : this.sortKey === 'sessions' ? i.people.map(p => p[3]).sort().join(', ') || null : this.sortKey === 'phase' ? (i.phase === 'Phase unknown' || i.phase === 'Phase report stale' ? null : i.phase) : i.headline;
+        return rows.sort((a, b) => {
+          const av = value(a), bv = value(b);
+          if (av == null || bv == null) return av == null && bv == null ? a.id.localeCompare(b.id) : av == null ? 1 : -1;
+          const diff = typeof av === 'number' ? av - bv : av.localeCompare(bv, undefined, {numeric:true, sensitivity:'base'});
+          return diff * (this.sortDirection === 'asc' ? 1 : -1) || a.id.localeCompare(b.id);
+        });
       },
       get rows() { return this.filteredRows.slice(0, this.limit); },
       get unlinkedSessions() { const ids = new Set(this.issues.filter(i => i.task && i.group !== 'completed').flatMap(i => i.people.map(p => p[3]))); return this.sessions.filter(s => !ids.has(s.id)); },

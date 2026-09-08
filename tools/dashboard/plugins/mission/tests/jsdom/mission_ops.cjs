@@ -56,6 +56,35 @@ const click = text => {
   assert.equal(vm.unlinkedSessions[0].id, 'auto-789');
   assert.equal(vm.issues.find(i => i.id === 'task:task-0').phase, 'Testing');
   assert.equal(vm.issues.find(i => i.id === 'task:task-2').phase, 'Phase unknown');
+  // Mission is the default scope; the organization-wide source is retained,
+  // but neither its counts nor its other questions leak into this view.
+  vm.raw.tasks.push({...vm.raw.tasks[2], id:'outside', mission_ids:[], assignee:'auto-789'});
+  vm.raw.items.push({...vm.raw.items[0], key:'other:q', mission_id:'other', title:'Other mission question'});
+  vm.project();
+  assert.equal(vm.scopedIssues.length, 121);
+  assert.equal(vm.count('all'), 120);
+  assert(!vm.scopeLabel.includes('121 tasks'));
+  assert.equal(vm.unlinkedSessions.length, 0, 'other-scope ownership is not misreported as unlinked');
+  vm.scope = 'org'; assert.equal(vm.scopedIssues.length, 123);
+  vm.scope = 'mission';
+  vm.filter = 'all'; vm.sortBy('headline');
+  assert.equal(vm.sortAria('headline'), 'ascending');
+  assert.equal(vm.rows[0].headline, 'Concrete work 0');
+  vm.sortBy('headline'); assert.equal(vm.rows[0].headline, 'Keep your words through a restart');
+  vm.sortBy('updated'); assert.equal(vm.sortDirection, 'desc');
+  assert.equal(vm.filteredRows.at(-1).item?.key, 'mc-infra:q', 'unknown timestamps remain last');
+  vm.sortBy('sessions'); assert.equal(vm.rows[0].people[0][3], 'auto-123');
+  vm.sortBy('phase'); assert.equal(vm.rows[0].phase, 'Decision needed');
+  vm.sortKey = 'default';
+  // Existing persisted replies must be visible without the in-memory receipt.
+  data.items[0].discussion = [{by:'a'.repeat(64),at:new Date().toISOString(),text:'Merge it'},
+    {by:'auto-123',at:new Date().toISOString(),text:'Which merge did you mean?'}];
+  await vm.refresh(); await vm.open(vm.featured.id); await tick();
+  assert.equal(vm.current.hasMemberReply, true);
+  assert.equal(vm.conversation[0].text, 'Which merge did you mean?');
+  assert(w.document.querySelector('[data-testid="saved-conversation"]').textContent.includes('Merge it'));
+  assert.equal(Object.keys(vm.answers).length, 0);
+  vm.back();
   vm.filter = 'all'; await tick();
   assert.equal(vm.rows.length, 100); click('Load more'); await tick(); assert.equal(vm.rows.length, 120);
   vm.search = 'Concrete work 118'; await tick(); assert.equal(vm.rows.length, 1); vm.search = '';
