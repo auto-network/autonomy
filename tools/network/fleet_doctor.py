@@ -720,6 +720,115 @@ def check_sync_data(report: dict) -> None:
         _line("per-channel check", f"FAILED to run: {exc!r}", warn=True)
 
 
+#: A founded ledger's events are only durable once they are published into
+#: the replicated set. Publishing is asynchronous -- inline at append, or at
+#: the next reconcile pass -- so a freshly founded org legitimately shows a
+#: shortfall for a few minutes. Grace before that counts as a finding.
+LEDGER_PUBLISH_GRACE_S = 15 * 60
+
+
+def check_ledger_publication(report: dict) -> None:
+    """Every founded ledger's events must exist in the replicated set.
+
+    The correspondence this asserts: for a store holding a FOUNDED ledger,
+    the number of ``autonomy.org.ledger-event`` rows must be at least the
+    number of rows in ``ledger_events``. The events are the organization's
+    authority -- genesis, roles, invites, claims, membership -- and the set
+    is the only thing that carries them to another machine (design of
+    record graph://53b5bb04-bc0).
+
+    Nothing asserted this before, and the consequence was that the
+    transport had never once carried an organization event while every
+    surface reported the system healthy: an empty set is indistinguishable
+    from a set with nothing to say. It took a hand comparison of two
+    databases at 02:30 to find (auto-azzvp, 2026-09-08). This is that
+    comparison, run every time.
+
+    Greater-or-equal, never equality: the set is append-only and keyed by
+    the event's content hash, so it can legitimately hold more rows than
+    the ledger currently has -- a store pruned locally, or one that has
+    received a co-member's events it has not yet absorbed.
+    """
+    _section("Ledger publication (are this machine's authority events replicated?)")
+    try:
+        import sqlite3
+        import time as _time
+
+        from tools.graph.db import _org_db_path, _orgs_dir
+        from tools.network.ledger.settings_bridge import SET_ID
+
+        candidates = [("personal", _org_db_path("personal"))]
+        orgs_dir = _orgs_dir()
+        if orgs_dir.is_dir():
+            for path in sorted(orgs_dir.glob("*.db")):
+                if path.stem not in ("personal", "machine"):
+                    candidates.append((path.stem, path))
+        checked = 0
+        for slug, path in candidates:
+            if not path.exists():
+                continue
+            conn = _observe(path)
+            try:
+                tables = {
+                    str(row[0]) for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    )
+                }
+                if "ledger_events" not in tables:
+                    continue  # never held a ledger; nothing to correspond
+                events = int(conn.execute(
+                    "SELECT COUNT(*) FROM ledger_events"
+                ).fetchone()[0])
+                if not events:
+                    continue  # unfounded: legitimately has neither side
+                if "fleet_sync_catalog" not in tables:
+                    _line(
+                        f"{slug}", f"{events} event(s), fleet writers not active "
+                        "-- publication cannot be judged", warn=True,
+                    )
+                    checked += 1
+                    continue
+                published = int(conn.execute(
+                    'SELECT COUNT(*) FROM settings WHERE set_id=?', (SET_ID,),
+                ).fetchone()[0])
+                newest = conn.execute(
+                    "SELECT MAX(hlc_ts) FROM ledger_events"
+                ).fetchone()[0]
+                fresh = (
+                    newest is not None
+                    and (_time.time() - float(newest)) < LEDGER_PUBLISH_GRACE_S
+                )
+                checked += 1
+                if published >= events:
+                    _line(slug, f"{published} published >= {events} event(s)")
+                elif fresh:
+                    _line(
+                        slug,
+                        f"{published} published < {events} event(s) -- within the "
+                        f"{LEDGER_PUBLISH_GRACE_S // 60}m grace after a recent append",
+                        warn=True,
+                    )
+                else:
+                    _line(
+                        slug,
+                        f"{published} published < {events} event(s) -- this "
+                        "machine's authority events are NOT replicated; another "
+                        "machine cannot receive them and losing this store loses "
+                        "them",
+                        fail=True,
+                    )
+                    _detail(
+                        "        the scheduler republishes every 300s; if this "
+                        "persists, reconcile is failing (see auto-azzvp)"
+                    )
+            finally:
+                conn.close()
+        if not checked:
+            _line("founded ledgers", "none on this machine")
+    except Exception as exc:
+        _line("ledger publication check", f"FAILED to run: {exc!r}", fail=True)
+
+
 def check_catalog_canary(report: dict) -> None:
     """Cheap, approximate signal for whether a checkpoint would even build.
 
@@ -1285,6 +1394,7 @@ def main() -> int:
     check_serving_readiness(report)
     check_org_resolution(report)
     check_sync_data(report)
+    check_ledger_publication(report)
     check_catalog_canary(report)
     check_recent_errors(report)
 
