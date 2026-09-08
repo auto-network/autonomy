@@ -215,7 +215,14 @@ def _membership_view(slug: str) -> dict:
                 "persona_pub": record["persona_pub"],
                 "invite_ref": record["invite_ref"],
                 "submitted_at": record["staged_at"],
-                "body": body,
+                # The staged claim body is deliberately NOT served. A
+                # token-bound claim carries the invitation's bearer secret in
+                # ``body["token"]`` (events.py ``_v_member_claim``), and the
+                # screen never reads the body: countersigning needs only
+                # ``invite_ref`` and ``persona_pub``, which it signs over
+                # (ceremony/claim.js ``signClaimApproval``). Serving the body
+                # published a live credential to every reader of this route
+                # for no consumer.
                 # The claimant's persona-signed self-introduction ("I am
                 # Dean" + optional avatar). Interim source: the claim body's
                 # vestigial profile field; auto-zxcvr moves it to the
