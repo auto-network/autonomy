@@ -139,7 +139,9 @@ class ServiceCertificateManager:
 
     async def reconcile_once(self) -> bool:
         async with self._lock:
-            desired = sorted(self._desired())
+            # _desired() folds every shared org's Settings (org-store opens +
+            # reservation/target reads) — off the loop thread (auto-gwdqq).
+            desired = sorted(await asyncio.to_thread(self._desired))
             for org, persona in desired:
                 identity = (org, persona)
                 if self.hold_until.get(identity, 0.0) > float(self._now()):

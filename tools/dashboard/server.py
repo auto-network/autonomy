@@ -3826,7 +3826,7 @@ async def api_active_sessions(request):
 async def api_terminals(request):
     """List active terminal sessions (tmux-backed, DB-sourced)."""
     live_tmux = set(_list_dashboard_tmux())
-    db_sessions = dashboard_db.get_live_sessions()
+    db_sessions = await asyncio.to_thread(dashboard_db.get_live_sessions)
     result = []
     for row in db_sessions:
         name = row["tmux_name"]
@@ -6521,7 +6521,10 @@ async def api_session_tail(request):
     # SAME 404 an unknown session returns, so existence never leaks. An
     # org-stamped caller therefore never triggers the fallback tree scan for a
     # session outside its org.
-    org_row = dashboard_db.get_session(db_row["tmux_name"]) if db_row else None
+    org_row = (
+        await asyncio.to_thread(dashboard_db.get_session, db_row["tmux_name"])
+        if db_row else None
+    )
     if _session_hidden_cross_org(request, org_row):
         return JSONResponse(
             {"error": "Session not found", "session_id": session_id},
@@ -7033,7 +7036,7 @@ async def api_terminal_unclaimed(request):
     GET /api/terminal/unclaimed
     Returns live host sessions from dashboard.db that don't yet have a JSONL link.
     """
-    sessions = dashboard_db.get_live_sessions()
+    sessions = await asyncio.to_thread(dashboard_db.get_live_sessions)
     now = time.time()
     result = []
     for row in sessions:
@@ -7206,7 +7209,7 @@ async def api_session_get(request):
             "nag_last_sent": mock_session.get("nag_last_sent"),
         })
 
-    session = dashboard_db.get_session(tmux_name)
+    session = await asyncio.to_thread(dashboard_db.get_session, tmux_name)
     # Cross-org guard BEFORE reconcile/approval lookup (auto-49esb): a cross-org
     # session is refused as the same 404 a nonexistent one returns, so existence
     # never leaks. A missing session and a hidden one are one branch on purpose.
@@ -9650,7 +9653,7 @@ async def _recover_stuck_lifecycle_rows() -> None:
     setup_failed rows are skipped: sticky, already operator-visible.
     """
     try:
-        rows = dashboard_db.get_live_sessions()
+        rows = await asyncio.to_thread(dashboard_db.get_live_sessions)
     except Exception:
         logger.exception("startup_recovery: could not list live sessions")
         return
@@ -19786,16 +19789,27 @@ def _enrich_org_identity(detail: dict) -> dict:
     return detail
 
 
-async def api_orgs_list(request):
-    """GET /api/orgs — enumerate orgs with bootstrap row + cascade identity."""
+def _collect_orgs_list() -> list[dict]:
+    """Enumerate orgs with bootstrap row + cascade identity (off-loop body).
+
+    list_orgs + one show_org per org each open and close an org store; run
+    on the loop this hung every request ~20 s on the first RW open after a
+    schema bump (auto-gwdqq). show_org now opens ro, and the whole fold runs
+    in a worker thread.
+    """
     from tools.graph import org_ops
-    orgs = org_ops.list_orgs()
     entries = []
-    for ref in orgs:
+    for ref in org_ops.list_orgs():
         detail = org_ops.show_org(ref.slug)
         if detail is None:
             continue
         entries.append(_enrich_org_identity(detail))
+    return entries
+
+
+async def api_orgs_list(request):
+    """GET /api/orgs — enumerate orgs with bootstrap row + cascade identity."""
+    entries = await asyncio.to_thread(_collect_orgs_list)
     return JSONResponse({"orgs": entries})
 
 
