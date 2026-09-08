@@ -248,6 +248,10 @@ from tools.dashboard import notifications_actions as _notifications_actions  # n
 # composing under it via ``set_id_suffix`` registers before
 # ``flush_schema_meta_machine_store`` runs at lifespan startup.
 from tools.dashboard import crosstalk_directive as _crosstalk_directive  # noqa: E402, F401
+# Fleet crosstalk (Path A): the personal-homed FleetCrosstalkV1 directive must
+# register alongside the base, and its synced-delivery bridge wires onto the
+# sync-materialization hook in _on_startup.
+from tools.dashboard import fleet_crosstalk as _fleet_crosstalk  # noqa: E402, F401
 
 # Settings Nexus plugin schemas (bead auto-ct3ey) — imported eagerly so
 # ``dashboard.nexus.scene#1`` + ``dashboard.nexus.tile#1`` are in the
@@ -21644,7 +21648,39 @@ async def _on_startup():
         dashboard_fleet_sync_service,
         set_settings_materialization_hook,
     )
-    set_settings_materialization_hook(attention_routes.emit_personal_sync_change)
+    # Chain the sync-materialization hook: keep the approval-reconciler hint,
+    # and ALSO deliver any FleetCrosstalk row that just arrived by sync. Both
+    # ride the same event-based signal the scheduler fires on every apply — no
+    # timer, no poll. The crosstalk delivery is async (a tmux paste), so it is
+    # scheduled onto this loop; the hook itself may be called from the sync
+    # worker's thread. Scoped: it only schedules work when a materialized
+    # address is in the fleet-crosstalk set, so no other set pays any cost.
+    _materialization_loop = asyncio.get_running_loop()
+
+    def _settings_sync_materialized(addresses=(), gap=False):
+        try:
+            attention_routes.emit_personal_sync_change(addresses=addresses, gap=gap)
+        except Exception:
+            logger.warning("personal-sync approval hint failed", exc_info=True)
+        try:
+            from tools.dashboard.fleet_crosstalk import (
+                FLEET_CROSSTALK_SET_ID,
+                deliver_synced_crosstalk,
+            )
+            if not gap and any(
+                getattr(a, "set_id", None) == FLEET_CROSSTALK_SET_ID
+                for a in addresses
+            ):
+                asyncio.run_coroutine_threadsafe(
+                    deliver_synced_crosstalk(addresses, gap=gap),
+                    _materialization_loop,
+                )
+        except Exception:
+            logger.warning(
+                "fleet crosstalk sync delivery scheduling failed", exc_info=True,
+            )
+
+    set_settings_materialization_hook(_settings_sync_materialized)
     # The scheduler itself starts at ACTIVATION (see _activate_worker): its
     # checkpoint install swaps the personal database file under a quiescence
     # gate that only sees this process's handles, so it must never run while
