@@ -179,6 +179,29 @@ async def list_tasks(request: Request) -> JSONResponse:
         {"tasks": compose.load_beads(org, mission_id, pillars)})
 
 
+async def ops_data(request: Request) -> JSONResponse:
+    from tools.dashboard.plugins.mission.ops import load_ops
+    mission_id = request.path_params["mission_id"]
+    org = await asyncio.to_thread(_owning_org, request, mission_id)
+    if org is None:
+        return JSONResponse({"error": "unknown mission"}, status_code=404)
+    return JSONResponse(await asyncio.to_thread(load_ops, org, mission_id),
+                        headers={"Cache-Control": "no-store"})
+
+
+async def ops_screen(request: Request) -> HTMLResponse:
+    from pathlib import Path
+    mission_id = request.path_params["mission_id"]
+    org = await asyncio.to_thread(_owning_org, request, mission_id)
+    if org is None:
+        return JSONResponse({"error": "unknown mission"}, status_code=404)
+    root = Path(__file__).resolve().parent.parent
+    doc = (root / "ops.html").read_text(encoding="utf-8")
+    doc = doc.replace("__OPS_SCRIPT__", (root / "ops.js").read_text(encoding="utf-8"))
+    doc = doc.replace("__OPS_CONFIG__", compose._blob({"mission_id": mission_id, "org": org}))
+    return HTMLResponse(doc, headers={"Cache-Control": "no-store"})
+
+
 async def task_detail(request: Request) -> JSONResponse:
     """Detail for the beads a reader opened: ``?ids=a,b,c``.
 
@@ -500,6 +523,8 @@ async def post_mission_status(request: Request) -> JSONResponse:
 _ITEM = "/api/mission/item/{mission_id}/{pillar_id}/{item_id}"
 
 routes: list = [
+    Route("/api/mission/ops/{mission_id}", ops_data, methods=["GET"]),
+    Route("/api/mission/ops/{mission_id}/screen", ops_screen, methods=["GET"]),
     Route("/api/mission/missions", list_missions, methods=["GET"]),
     Route("/api/mission/screen/{mission_id}", mission_screen, methods=["GET"]),
     Route("/api/mission/status/{mission_id}", post_mission_status,

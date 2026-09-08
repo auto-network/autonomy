@@ -62,9 +62,9 @@ function openPillar(name) {
 
 const SCENARIOS = {
   async full() {
-    // ── chrome: the five mission tabs ──
+    // ── chrome: the six mission tabs ──
     check("top tabs", texts(document, ".mc-tabs button").join("|") ===
-      "Activity|Pillars|Blockers|Feed|Chat");
+      "Activity|Pillars|Blockers|Feed|Chat|Ops");
 
     // ── pillar view: subtabs + amber attention counts ──
     const v = openPillar("Relay");
@@ -307,7 +307,7 @@ const SCENARIOS = {
   },
 
   empty() {
-    check("tabs render", texts(document, ".mc-tabs button").length === 5);
+    check("tabs render", texts(document, ".mc-tabs button").length === 6);
     const v = openPillar("Solo");
     check("pillar renders", !!v);
     check("all subtabs off", Array.from(
