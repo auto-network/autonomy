@@ -47,6 +47,7 @@
           if (!r.ok) throw new Error('Cannot load Ops (' + r.status + ').');
           const data = await r.json();
           if (!Array.isArray(data.tasks) || !Array.isArray(data.items) || !Array.isArray(data.sessions)) throw new Error('Invalid Ops response.');
+          this.now = Date.now();
           this.raw = data; this.errors = data.errors || []; this.sessions = data.sessions;
           this.project();
           if (this.view === 'detail' && !this.current) this.view = 'overview';
