@@ -111,9 +111,31 @@ def test_without_a_plan_every_step_falls_back_to_its_own_probe(proof):
     assert any("membership-checkpoint/decision" in u for u in case["fetched"])
 
 
+def test_a_planned_unlock_makes_ZERO_round_trips(proof):
+    """THE BEAD'S CLAIM, MEASURED. Driving the real
+    repairAllServeCredentialsWithRootSeed: an org with nothing due used to cost
+    five calls (binding, ledger/heads, rekey-policy, serve-cert,
+    membership-checkpoint/decision). With the plan in hand it costs NONE — the
+    binding and genesis come from the plan, and every step's precondition is
+    answered locally."""
+    assert proof["with_plan"]["fetched"] == []
+
+
+def test_without_a_plan_the_ceremony_still_fetches_what_it_needs(proof):
+    """The fallback is not theoretical: with no plan the loop fetches the
+    binding and the ledger heads per org exactly as it did before, so an older
+    server or a failed prefetch loses nothing."""
+    fetched = proof["without_plan"]["fetched"]
+
+    assert any("/api/network/binding" in u for u in fetched)
+    assert any("/api/network/ledger/heads" in u for u in fetched)
+
+
 def test_no_step_failed_in_any_case(proof):
     """Isolation holds: a skipped step is a SUCCESS with a reason, never an
     error, so a skip can never read as a failure in the unlock report."""
-    for name, case in proof.items():
+    step_cases = {n: c for n, c in proof.items() if "steps" in c}
+    assert step_cases, "the harness reported no step-bearing cases"
+    for name, case in step_cases.items():
         for step in case["steps"]:
             assert step["ok"] is True, f"{name}/{step['step']}"

@@ -1473,15 +1473,36 @@ var signRegistryRequestCore;
       for (var i = 0; i < slugs.length; i++) {
         var slug = slugs[i];
         try {
-          var binding = await _fetchJsonOrNull(
-            '/api/network/binding?org=' + encodeURIComponent(slug), slug);
-          var heads = await _fetchJsonOrNull(
-            '/api/network/ledger/heads?org=' + encodeURIComponent(slug), slug);
+          // THE PLAN ALREADY CARRIES BOTH OF THESE. It is computed from the
+          // same binding row and the same ledger store these two endpoints
+          // read, so fetching them again per org asked the server to repeat
+          // work it had already done and reported. Sourcing them from the plan
+          // removes two round-trips PER ORG from every unlock.
+          var entry = (plan && plan[slug]) || null;
+          var binding = entry && entry.org_uuid ? {
+            org_uuid: entry.org_uuid,
+            root_pub: entry.root_pub,
+            registry_url: entry.registry_url,
+            binding_expires_at: entry.binding_expires_at,
+            recovery_policy: entry.recovery_policy,
+          } : null;
+          var genesisId = entry ? entry.genesis_id : null;
+          // NO PLAN, NO SHORTCUT: an older server, the mock, or a failed
+          // prefetch falls back to the probes exactly as before, so this can
+          // only ever remove work the plan had already answered.
+          if (!entry) {
+            binding = await _fetchJsonOrNull(
+              '/api/network/binding?org=' + encodeURIComponent(slug), slug);
+            var headsRow = await _fetchJsonOrNull(
+              '/api/network/ledger/heads?org=' + encodeURIComponent(slug), slug);
+            genesisId = headsRow && headsRow.genesis_id;
+          }
           if (!(binding && binding.org_uuid) ||
-              !(heads && typeof heads.genesis_id === 'string')) {
+              typeof genesisId !== 'string' || !genesisId) {
             ready.push(slug + ' (unregistered)');
             continue;
           }
+          var heads = { genesis_id: genesisId };
           var persona = await derivePersona(personalRootSeed, heads.genesis_id);
           var stepOutcomes = await _reconcileOrgUnderRoot({
             slug: slug, binding: binding, heads: heads,
