@@ -68,14 +68,20 @@ async function browser(...args) { return (await run('agent-browser', ['--session
       [...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='Send ↑').click();
       for(let n=0;n<40&&vm.sending;n++)await new Promise(r=>setTimeout(r,50));await Alpine.nextTick();
       out.receipt=document.body.textContent.includes('Saved; relay not confirmed');
-      out.stillOpen=vm.current.item.state==='open';vm.edit();vm.back();return out;
+      out.composerVisible=ta.getClientRects().length>0&&!document.querySelector('.receipt');
+      ta.value='And keep the existing behavior';ta.dispatchEvent(new Event('input',{bubbles:true}));await Alpine.nextTick();
+      [...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='Send ↑').click();
+      for(let n=0;n<40&&vm.sending;n++)await new Promise(r=>setTimeout(r,50));await Alpine.nextTick();
+      out.followupSent=vm.draft===''&&vm.answers[vm.selectedId].text==='And keep the existing behavior';
+      out.stillOpen=vm.current.item.state==='open';vm.back();return out;
     })()`);
     const parsed = JSON.parse(result);
     assert.equal(parsed.loaded, true); assert.equal(parsed.overflow, false);
     assert.equal(parsed.question, true); assert.equal(parsed.background, true); assert.equal(parsed.design, true);
     assert.equal(parsed.detailOverflow, false); assert.equal(parsed.receipt, true); assert.equal(parsed.stillOpen, true);
+    assert.equal(parsed.composerVisible,true); assert.equal(parsed.followupSent,true);
   }
-  assert.equal(posted.length, 2); assert(posted.every(p => p.path.endsWith('/q/reply')));
+  assert.equal(posted.length, 4); assert(posted.every(p => p.path.endsWith('/q/reply')));
   await browser('open', 'http://127.0.0.1:' + server.address().port + '/capsule-test');
   const dictation = JSON.parse(await browser('eval', `(async()=>{
     let win,vm;
@@ -120,7 +126,7 @@ async function browser(...args) { return (await run('agent-browser', ['--session
     if (!passed) console.error('Voice diagnostic', await browser('eval', 'window.__voiceDiagnostic'), dictation);
     assert.equal(passed, true, check);
   }
-  assert.equal(posted.length, 3, 'only the explicit failed Send added a request');
+  assert.equal(posted.length, 5, 'only the explicit failed Send added a request');
   assert(posted.every(p=>p.path.endsWith('/q/reply')), 'no session send or implicit question resolution');
   console.log('PASS Ops Chromium desktop/mobile behavioral sweep');
 })().catch(e => { console.error(e); process.exitCode = 1; }).finally(async () => {

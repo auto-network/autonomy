@@ -29,11 +29,15 @@ const data = {
 let failWrite = false, posts = [];
 const dom = new JSDOM(html, {url: 'https://dashboard.test/api/mission/screen/m/ops', runScripts: 'outside-only', pretendToBeVisual: true});
 const w = dom.window;
+let itemChanged, unsubscribed = false;
+w.Autonomy = {_activePluginId:'mission',voice:{}};
+w.dashboardEvents = {onSettingChanged(set, callback) {assert.equal(set,'mission.item');itemChanged=callback;return ()=>{unsubscribed=true;};}};
 w.confirm = () => true;
 w.fetch = async (url, options = {}) => {
   if (options.method === 'POST') {
     posts.push({url, body: JSON.parse(options.body)});
     if (!failWrite && url.endsWith('/answer')) data.items[0].state = 'answered';
+    if (!failWrite && url.endsWith('/reply')) (data.items[0].discussion ||= []).push({by:'a'.repeat(64),at:new Date().toISOString(),text:JSON.parse(options.body).text});
     return {ok: !failWrite, status: failWrite ? 503 : 200, json: async () => ({ok: true, relayed: false})};
   }
   if (url.includes('/detail?')) return {ok: true, json: async () => ({tasks: {'task-0': {desc: 'Actual task specification', comments: []}}})};
@@ -95,7 +99,17 @@ const click = text => {
   failWrite = false; click('Send ↑'); await tick();
   assert(posts.at(-1).url.endsWith('/q/reply')); assert.equal(vm.current.item.state, 'open');
   assert.equal(vm.answers[vm.selectedId].receipt, 'Saved; relay not confirmed'); assert.equal(vm.draft, '');
-  click('Write a follow-up'); await tick(); vm.draft = 'Explain the options'; click('Needs clarification'); await tick();
+  assert.equal(vm.notice, '', 'no duplicate persistent toast for a reply');
+  assert.equal(w.document.getElementById('answer').parentElement.style.display, '', 'composer stays available');
+  assert.equal(w.document.querySelectorAll('.receipt').length, 0, 'no receipt panels replace the conversation');
+  vm.draft = 'A second message'; await tick(); click('Send ↑'); await tick();
+  assert.equal(posts.at(-1).body.text, 'A second message'); assert.equal(vm.draft,'');
+  assert.equal(vm.current.item.state,'open');
+  vm.draft = 'Keep this follow-up draft'; data.items[0].ask = 'A clearer follow-up from the owner';
+  itemChanged({org:'autonomy'}); await new Promise(r=>setTimeout(r,300)); await tick();
+  assert.equal(vm.current.question,'A clearer follow-up from the owner');
+  assert.equal(vm.draft,'Keep this follow-up draft');
+  vm.draft = 'Explain the options'; click('Needs clarification'); await tick();
   assert(posts.at(-1).url.endsWith('/reply')); assert(posts.at(-1).body.text.startsWith('[Needs clarification]'));
   vm.edit(); vm.draft = 'Ship separately'; await tick(); click('Resolve question'); await tick();
   assert(posts.at(-1).url.endsWith('/answer')); assert.equal(vm.current, null); assert.equal(vm.view, 'overview');
@@ -106,5 +120,5 @@ const click = text => {
   assert.equal(vm.refHref('javascript:alert(1)'), '');
   assert.equal(vm.refHref('graph:abc-123'), 'graph://abc-123');
   assert(!w.document.body.textContent.includes('Saved locally'));
-  vm.destroy(); w.Alpine.stopObservingMutations(); dom.window.close(); console.log('PASS Ops production adapter and controls');
+  vm.destroy(); assert.equal(unsubscribed,true); w.Alpine.stopObservingMutations(); dom.window.close(); console.log('PASS Ops production adapter and controls');
 })().catch(e => { console.error(e); w.Alpine.stopObservingMutations(); dom.window.close(); process.exitCode = 1; });
