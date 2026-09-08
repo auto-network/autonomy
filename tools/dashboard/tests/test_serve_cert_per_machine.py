@@ -125,6 +125,34 @@ def test_a_mint_on_one_machine_cannot_evict_another(keydir, monkeypatch):
     assert mine[0]["not_after"] == 2_000_000_000
 
 
+def test_the_schema_declares_per_machine_cardinality():
+    """THE GAP THAT SHIPPED. auto-527te changed the WRITE to key per machine but
+    left both schemas `@singleton(key="default")`, so the first real mint 400'd:
+    "declares a single row keyed 'default', so it cannot also be written at
+    '282ecce1…'". The reader change and the key resolution both verified clean —
+    nothing exercised the write, because the machines under test had nothing to
+    mint yet. The cardinality DECLARATION is the thing to pin.
+    """
+    from tools.graph.schemas.network_identity import (
+        NetworkServeCertV2, NetworkServeCertV3)
+
+    for schema in (NetworkServeCertV2, NetworkServeCertV3):
+        assert schema._access_pattern == "keyed_per_entity", (
+            f"{schema.__name__} must be keyed per machine: it names a "
+            f"machine-local serving key file, and this set replicates")
+        assert schema._key_strategy == "machine_id"
+
+
+def test_the_checkpoint_cache_stays_a_singleton():
+    """Do not over-correct. The adopted-checkpoint cache IS one row per org —
+    it records what the REGISTRY adopted, which is an org-wide fact and
+    identical on every machine. Only things naming machine-local state are
+    per-machine."""
+    from tools.graph.schemas.network_identity import NetworkMembershipCheckpointV1
+
+    assert NetworkMembershipCheckpointV1._access_pattern == "singleton"
+
+
 def test_local_key_falls_back_to_legacy_when_unenrolled(monkeypatch):
     """A single-machine install has no machine id and no peer to collide with;
     it must keep using the legacy key rather than crash or invent one."""
