@@ -26,9 +26,15 @@ from typing import Any
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
-# The remote we follow. Already configured on host and node
-# (git@github-autonomy:auto-network/autonomy.git).
+# The remote we follow, and the branch on it. A follower tracks the branch the
+# author PUSHES (origin/master) regardless of what it named its own local
+# checkout — a node may check its release branch out as "shipped", and deriving
+# the ref from the local branch name fetches an origin ref that does not exist.
+# The origin is the PUBLIC repo over HTTPS, so a follower pulls with no key and
+# no credentials (the SSH remote is only the author machine's push path).
 _ORIGIN = "origin"
+_TRACK_BRANCH = "master"
+_PUBLIC_ORIGIN_URL = "https://github.com/auto-network/autonomy.git"
 
 # git commands are bounded so a network or lock hiccup can never wedge the
 # request thread. The fetch reaches GitHub, so it gets a real network budget;
@@ -67,16 +73,6 @@ def _git(*args: str, timeout: int = _LOCAL_TIMEOUT_S, check: bool = True) -> str
     return result.stdout
 
 
-def _tracked_branch() -> str:
-    """This checkout's branch (the origin ref we compare against is
-    ``origin/<branch>``). Falls back to ``master`` for a detached HEAD."""
-    try:
-        branch = _git("rev-parse", "--abbrev-ref", "HEAD").strip()
-    except (SoftwareUpdateError, subprocess.SubprocessError, OSError):
-        return "master"
-    return branch if branch and branch != "HEAD" else "master"
-
-
 def _short(sha: str) -> str:
     return sha[:10]
 
@@ -103,17 +99,16 @@ def update_status(*, fetch: bool = True) -> dict[str, Any]:
     failure degrades to a status carrying ``error`` rather than raising, so the
     profile dropdown can always render *something*.
     """
-    branch = _tracked_branch()
-    origin_ref = f"{_ORIGIN}/{branch}"
+    origin_ref = f"{_ORIGIN}/{_TRACK_BRANCH}"
     status: dict[str, Any] = {
-        "branch": branch,
+        "track_branch": _TRACK_BRANCH,
         "origin_ref": origin_ref,
         "fetched": False,
         "error": None,
     }
     if fetch:
         try:
-            _git("fetch", _ORIGIN, branch, timeout=_FETCH_TIMEOUT_S)
+            _git("fetch", _ORIGIN, _TRACK_BRANCH, timeout=_FETCH_TIMEOUT_S)
             status["fetched"] = True
         except (SoftwareUpdateError, subprocess.SubprocessError, OSError) as exc:
             # Fall through to a cached read: a stale behind-count still beats a
