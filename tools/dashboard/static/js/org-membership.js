@@ -172,6 +172,11 @@
       // The bearer existed only in the minting browser; without a published
       // link this invitation can never be redeemed.
       parts.push('No link was published — unusable, deactivate it');
+    } else {
+      // The link was shown once, at mint time, and cannot be shown again:
+      // its secret never reached the server. Say so, rather than offering a
+      // control that would hand out the URL without it.
+      parts.push('Link shown once when created — to send it again, deactivate and invite anew');
     }
     return parts.filter(Boolean).join(' · ');
   };
@@ -319,11 +324,13 @@
         + '<div class="mem-main"><div class="mem-line1"><strong>' + esc(self.inviteTitle(invite)) + '</strong></div>'
         + '<div class="mem-line2">' + esc(self.inviteLine(invite)) + '</div></div>';
       if (!confirming) {
+        // No share or copy control here, deliberately. The redeemable link
+        // is the stored URL plus the bearer, and the bearer exists only in
+        // the minting browser's fragment — never in the grant cache this row
+        // reads (see _link_grants). A control here could only ever hand out
+        // the URL without its secret: a link that looks right and cannot be
+        // redeemed. Sharing again means deactivating and minting anew.
         html += '<span class="mem-actions-row">'
-          + (invite.join_url
-            ? '<button type="button" class="mem-icon-btn" data-action="share" aria-label="Share ' + esc(self.inviteTitle(invite)) + '">' + ICONS.share + '</button>'
-              + '<button type="button" class="mem-icon-btn" data-action="copy" aria-label="Copy link for ' + esc(self.inviteTitle(invite)) + '">' + ICONS.copy + '</button>'
-            : '')
           + '<button type="button" class="mem-icon-btn danger" data-action="deactivate" aria-label="Deactivate ' + esc(self.inviteTitle(invite)) + '">' + ICONS.x + '</button>'
           + '</span>';
       } else {
@@ -741,24 +748,6 @@
 
   Controller.prototype.inviteAction = function (action, invite, button) {
     var self = this;
-    if (action === 'copy') {
-      if (!invite.join_url || !navigator.clipboard) return;
-      navigator.clipboard.writeText(invite.join_url);
-      button.classList.add('copied');
-      setTimeout(function () { button.classList.remove('copied'); }, 1600);
-      return;
-    }
-    if (action === 'share') {
-      var title = this.inviteTitle(invite);
-      if (navigator.share) {
-        navigator.share({ title: title, url: invite.join_url }).catch(function (error) {
-          if (!error || error.name !== 'AbortError') { self.error = error.message; self.render(); }
-        });
-      } else if (navigator.clipboard) {
-        navigator.clipboard.writeText(invite.join_url);
-      }
-      return;
-    }
     if (action === 'deactivate') { this.confirmDeactivate = invite.invite_id; return this.render(); }
     if (action === 'keep') { this.confirmDeactivate = null; return this.render(); }
     if (action === 'confirm-deactivate') return this.deactivate(invite);

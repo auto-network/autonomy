@@ -100,8 +100,12 @@ async function main() {
   assert.equal(pane().querySelectorAll('[data-invite]').length, 1);
   assert.match(text(), /Dean's invite/);
   assert.match(text(), /Owner · Expires in 3 days · 1 of 5 used/);
-  assert.ok(pane().querySelector('[data-action="share"]'));
-  assert.ok(pane().querySelector('[data-action="copy"]'));
+  // No share or copy on a live row: the redeemable link needs the bearer,
+  // which lives only in the minting browser's fragment, so either control
+  // could only hand out a URL that cannot be redeemed (auto-c7xbs).
+  assert.equal(pane().querySelector('[data-action="share"]'), null);
+  assert.equal(pane().querySelector('[data-action="copy"]'), null);
+  assert.match(text(), /Link shown once when created/);
   assert.ok(pane().querySelector('[data-action="deactivate"]'));
 
   // Deactivate needs a confirm step before any ceremony.
