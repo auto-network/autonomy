@@ -44,6 +44,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 VECTOR = REPO_ROOT / "tools/dashboard/static/js/ceremony/node/lesser-role-join-vector.mjs"
 OPERATOR_SEED = bytes(reversed(range(32)))
 JOINER_SEED = bytes((i * 7 + 3) % 251 for i in range(32))
+THIRD_SEED = bytes((i * 11 + 5) % 251 for i in range(32))
 
 GOVERNANCE_SCOPES = (
     "invite:member", "role:grant:member", "role:grant:*",
@@ -108,11 +109,13 @@ def test_a_second_persona_joins_as_member_and_holds_no_governance(tmp_path, monk
 
     operator = derive_persona(OPERATOR_SEED, founded.genesis_id)
     joiner = derive_persona(JOINER_SEED, founded.genesis_id)
-    assert joiner.public_hex != operator.public_hex, "two distinct personas"
+    third = derive_persona(THIRD_SEED, founded.genesis_id)
+    assert len({operator.public_hex, joiner.public_hex, third.public_hex}) == 3
 
     env = os.environ.copy()
     env["AUTONOMY_OPERATOR_SEED_HEX"] = OPERATOR_SEED.hex()
     env["AUTONOMY_JOINER_SEED_HEX"] = JOINER_SEED.hex()
+    env["AUTONOMY_THIRD_SEED_HEX"] = THIRD_SEED.hex()
     app = Starlette(routes=network_routes.ROUTES)
     with _live_server(app, _free_port()) as server_url:
         proc = subprocess.run(
@@ -134,14 +137,13 @@ def test_a_second_persona_joins_as_member_and_holds_no_governance(tmp_path, monk
         assert member.claim_requires == "admin-ack"
         assert member.approver_threshold == 1
 
-        # THE CLAIM: a second persona is a member, holding exactly `member`.
+        # THE CLAIM: a second persona joined as an ordinary member. (It is
+        # later promoted to Admin below, so the END-STATE role set is checked
+        # there; the strict "no governance at all" proof lives on the third
+        # persona, which stays a plain member for the whole run.)
         view = state.members.get(joiner.public_hex)
         assert view is not None, "the joiner did not become a member"
-        assert set(view.roles) == {"member"}
-
-        # THE AUTHORITY CLAIM: no governance scope, by any path.
-        for scope in GOVERNANCE_SCOPES:
-            assert not state.holds(joiner.public_hex, scope), scope
+        assert "member" in view.roles
 
         # The operator still holds everything, so the org is not weakened.
         assert state.holds(operator.public_hex, "*")
@@ -158,3 +160,30 @@ def test_a_second_persona_joins_as_member_and_holds_no_governance(tmp_path, monk
         assert steps["narrow"]["version"] == 3
         assert steps["narrow"]["eventId"] in state.loss_heads
         assert steps["widen"]["eventId"] not in state.loss_heads
+
+        # A NON-OWNER INVITES (capstone live case 3). The joiner was granted
+        # Admin and minted the second invitation from their own authority;
+        # the invite event's author is the joiner, not the root or operator.
+        second_invite = store.get(steps["member_invites_member"]["inviteId"])
+        assert second_invite.author_key == joiner.public_hex
+        assert second_invite.payload["granted_role"] == "member"
+        assert set(state.members[joiner.public_hex].roles) == {"member", "admin"}
+        assert state.holds(joiner.public_hex, "invite:member")
+        assert state.holds(joiner.public_hex, "role:grant:member")
+        # Admin confers no more than it declares.
+        assert not state.holds(joiner.public_hex, "role:define")
+        assert not state.holds(joiner.public_hex, "*")
+
+        # A NON-ROOT APPROVER ADMITS (the eligibility half of live case 5):
+        # the third persona was admitted on the JOINER's countersignature,
+        # which counts only because Admin carries role:grant:member.
+        assert steps["third_status"]["have"] == steps["third_status"]["need"] == 1
+        assert steps["third_finalize"]["status"] == "admitted"
+        third_view = state.members.get(third.public_hex)
+        assert third_view is not None, "the third persona did not become a member"
+        assert set(third_view.roles) == {"member"}
+        for scope in GOVERNANCE_SCOPES:
+            assert not state.holds(third.public_hex, scope), scope
+        third_claim = store.get(third_view.claim_id)
+        approver_keys = {a["key"] for a in third_claim.payload["approvals"]}
+        assert approver_keys == {joiner.public_hex}, "admitted by the joiner, not the root"
