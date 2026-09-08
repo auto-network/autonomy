@@ -191,9 +191,11 @@ def test_staged_bearer_claim_surfaces_progress_and_signed_profile(founded):
     assert pending["have"] == 0
     assert pending["need"] == 1
     assert pending["ready"] is False
-    # The exact staged body rides along: the countersign ceremony signs over
-    # these canonical bytes and nothing else.
-    assert pending["body"]["profile"] == {"display_name": "Dean"}
+    # The staged body is deliberately NOT served (autonomy@24ee8ae): a
+    # token-bound claim carries the invitation's bearer in body["token"],
+    # and countersigning needs only the invite_ref and persona_pub. The
+    # projection must not hand a caller the secret it does not need.
+    assert "body" not in pending
 
 
 def test_authority_refusal_short_circuits(founded, monkeypatch):

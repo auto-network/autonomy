@@ -27,7 +27,7 @@ function baseView() {
     ],
     role_defs: [{ name: 'owner', claim_requires: 'self', approver_threshold: 1, scope_set: ['*'] }],
     invites: [
-      { invite_id: INVITE_LIVE, status: 'live', granted_role: 'owner', expiry: Date.now() + 3 * 86400000, sponsor: PERSONA_ME, binding: 'bearer', uses: { max_uses: 5, used: 1, remaining: 4 }, join_url: 'https://auto.network/l/' + '9f'.repeat(16), label: "Dean's invite" },
+      { invite_id: INVITE_LIVE, status: 'live', granted_role: 'owner', expiry: Date.now() + 3 * 86400000, sponsor: PERSONA_ME, binding: 'bearer', uses: { max_uses: 5, used: 1, remaining: 4 }, join_url: 'https://auto.network/l/' + '9f'.repeat(16), bearer: '7a'.repeat(32), label: "Dean's invite" },
       { invite_id: 'd6'.repeat(32), status: 'claimed', granted_role: 'owner', expiry: Date.now() - 86400000, sponsor: PERSONA_ME, binding: 'key', uses: { max_uses: 1, used: 1, remaining: 0 }, join_url: null, label: null },
       { invite_id: 'e7'.repeat(32), status: 'expired', granted_role: 'owner', expiry: Date.now() - 2 * 86400000, sponsor: PERSONA_ME, binding: 'bearer', uses: { max_uses: 1, used: 0, remaining: 1 }, join_url: null, label: null },
     ],
@@ -100,12 +100,13 @@ async function main() {
   assert.equal(pane().querySelectorAll('[data-invite]').length, 1);
   assert.match(text(), /Dean's invite/);
   assert.match(text(), /Owner · Expires in 3 days · 1 of 5 used/);
-  // No share or copy on a live row: the redeemable link needs the bearer,
-  // which lives only in the minting browser's fragment, so either control
-  // could only hand out a URL that cannot be redeemed (auto-c7xbs).
-  assert.equal(pane().querySelector('[data-action="share"]'), null);
-  assert.equal(pane().querySelector('[data-action="copy"]'), null);
-  assert.match(text(), /Link shown once when created/);
+  // Share and copy are offered ONLY when the bearer was retained, because
+  // the redeemable link is the stored URL plus that bearer
+  // (graph://e75ebdde-6df). This fixture's live invite carries one.
+  assert.ok(pane().querySelector('[data-action="share"]'));
+  assert.ok(pane().querySelector('[data-action="copy"]'));
+  assert.ok(!/Link shown once when created/.test(text()),
+    'a retained bearer means the link is re-renderable, so do not say otherwise');
   assert.ok(pane().querySelector('[data-action="deactivate"]'));
 
   // Deactivate needs a confirm step before any ceremony.

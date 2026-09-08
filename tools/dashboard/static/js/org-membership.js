@@ -129,6 +129,13 @@
     this.mintRole = null;      // the picker's current choice
   }
 
+  Controller.prototype.inviteLink = function (invite) {
+    // The redeemable link is the canonical URL plus the bearer in the
+    // fragment; the fragment never reaches a server. Null when the bearer
+    // was not retained, which is every invitation minted before it was.
+    if (!invite || !invite.join_url || !invite.bearer) return null;
+    return invite.join_url + '#t=' + invite.bearer;
+  };
   Controller.prototype.liveInvites = function () {
     return (this.view.invites || []).filter(function (invite) { return invite.status === 'live'; });
   };
@@ -172,10 +179,11 @@
       // The bearer existed only in the minting browser; without a published
       // link this invitation can never be redeemed.
       parts.push('No link was published — unusable, deactivate it');
-    } else {
-      // The link was shown once, at mint time, and cannot be shown again:
-      // its secret never reached the server. Say so, rather than offering a
-      // control that would hand out the URL without it.
+    } else if (!invite.bearer) {
+      // Minted before bearers were retained (graph://e75ebdde-6df): the
+      // secret never reached the org, so this link cannot be re-rendered.
+      // Say so, rather than offering a control that would hand out the URL
+      // without it.
       parts.push('Link shown once when created — to send it again, deactivate and invite anew');
     }
     return parts.filter(Boolean).join(' · ');
@@ -324,13 +332,16 @@
         + '<div class="mem-main"><div class="mem-line1"><strong>' + esc(self.inviteTitle(invite)) + '</strong></div>'
         + '<div class="mem-line2">' + esc(self.inviteLine(invite)) + '</div></div>';
       if (!confirming) {
-        // No share or copy control here, deliberately. The redeemable link
-        // is the stored URL plus the bearer, and the bearer exists only in
-        // the minting browser's fragment — never in the grant cache this row
-        // reads (see _link_grants). A control here could only ever hand out
-        // the URL without its secret: a link that looks right and cannot be
-        // redeemed. Sharing again means deactivating and minting anew.
+        // Share and copy hand out the FULL link — the stored URL plus the
+        // retained bearer (graph://e75ebdde-6df). An invitation minted
+        // before bearers were retained has none, and offers neither
+        // control rather than a link that cannot be redeemed.
+        var full = self.inviteLink(invite);
         html += '<span class="mem-actions-row">'
+          + (full
+            ? '<button type="button" class="mem-icon-btn" data-action="share" aria-label="Share ' + esc(self.inviteTitle(invite)) + '">' + ICONS.share + '</button>'
+              + '<button type="button" class="mem-icon-btn" data-action="copy" aria-label="Copy link for ' + esc(self.inviteTitle(invite)) + '">' + ICONS.copy + '</button>'
+            : '')
           + '<button type="button" class="mem-icon-btn danger" data-action="deactivate" aria-label="Deactivate ' + esc(self.inviteTitle(invite)) + '">' + ICONS.x + '</button>'
           + '</span>';
       } else {
@@ -748,6 +759,26 @@
 
   Controller.prototype.inviteAction = function (action, invite, button) {
     var self = this;
+    var link = this.inviteLink(invite);
+    if (action === 'copy') {
+      if (!link || !navigator.clipboard) return;
+      navigator.clipboard.writeText(link);
+      button.classList.add('copied');
+      setTimeout(function () { button.classList.remove('copied'); }, 1600);
+      return;
+    }
+    if (action === 'share') {
+      if (!link) return;
+      var title = this.inviteTitle(invite);
+      if (navigator.share) {
+        navigator.share({ title: title, url: link }).catch(function (error) {
+          if (!error || error.name !== 'AbortError') { self.error = error.message; self.render(); }
+        });
+      } else if (navigator.clipboard) {
+        navigator.clipboard.writeText(link);
+      }
+      return;
+    }
     if (action === 'deactivate') { this.confirmDeactivate = invite.invite_id; return this.render(); }
     if (action === 'keep') { this.confirmDeactivate = null; return this.render(); }
     if (action === 'confirm-deactivate') return this.deactivate(invite);
@@ -977,7 +1008,18 @@
       self.pendingMint = null;
       self.mintStep = 'show-once';
       self.render();
-      return self.refresh();
+      // Retain the bearer on the org's grant row so the invitation can be
+      // handed out again (graph://e75ebdde-6df). The route proves the token
+      // against the invite's own token_hash before storing it, so a failure
+      // here costs only re-shareability — the link on screen still works.
+      return request('/api/network/ledger/invite/bearer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          org: self.slug, invite_ref: minted.inviteId, token: minted.bearer,
+        }),
+      }).catch(function () { /* the shown link is unaffected */ })
+        .then(function () { return self.refresh(); });
     }).catch(function (error) {
       self.error = (error && error.message) || String(error);
       self.render();

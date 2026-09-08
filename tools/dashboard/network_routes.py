@@ -44,6 +44,7 @@ import asyncio
 import contextlib
 import logging
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -1410,6 +1411,122 @@ async def _append_role_event(request: Request, kind: str) -> JSONResponse:
             status_code=400,
         )
     return JSONResponse({"ok": True, "event_id": event_id})
+
+
+async def post_ledger_invite_bearer(request: Request) -> JSONResponse:
+    """Retain an invitation's bearer on its grant row, after proving it.
+
+    Decision of record graph://e75ebdde-6df. The bearer is what lets its
+    holder ASK to join; admission still needs a countersignature, so the
+    organization keeps it rather than showing it once and losing it. It does
+    NOT ride the ``link_publish`` approval request — that would persist a
+    secret in the approval record too — so the minting browser posts it here
+    once the link exists.
+
+    This route stores nothing it has not verified: it hashes the submitted
+    token and refuses unless the digest equals the ``token_hash`` on the
+    named invite event in the org's own ledger. A wrong or malicious bearer
+    cannot be written, and a caller learns nothing from a refusal it did not
+    already know.
+    """
+    if _mock_mode():
+        return JSONResponse(
+            {"ok": False, "error": "mock dashboard has no authority ledger"},
+            status_code=502,
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "body must be JSON"},
+                            status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"ok": False, "error": "body must be a JSON object"},
+                            status_code=400)
+    requested_org = body.get("org")
+    if not isinstance(requested_org, str) or not requested_org:
+        return JSONResponse(
+            {"ok": False, "error": "body must carry the local org slug"},
+            status_code=400,
+        )
+    _org, refused = resolve_scoped_org(requested_org, request=request)
+    if refused is not None:
+        return refused
+    invite_ref = body.get("invite_ref")
+    token = body.get("token")
+    if not isinstance(invite_ref, str) or not re.fullmatch(r"[0-9a-f]{64}", invite_ref):
+        return JSONResponse({"ok": False, "error": "invite_ref must be 64 lowercase hex"},
+                            status_code=400)
+    if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{64}", token):
+        return JSONResponse({"ok": False, "error": "token must be 64 lowercase hex"},
+                            status_code=400)
+
+    from tools.graph import settings_ops
+    from tools.graph.schemas.network_identity import (
+        NETWORK_LINK_GRANT_REVISION,
+        NETWORK_LINK_GRANT_SET_ID,
+    )
+    from tools.network.ledger import LedgerStore, org_ledger_db_path
+
+    store_path = org_ledger_db_path(requested_org)
+    if not store_path.exists():
+        return JSONResponse({"ok": False, "error": "organization ledger is not founded"},
+                            status_code=404)
+    try:
+        with LedgerStore(store_path) as store:
+            try:
+                invite = store.get(invite_ref)
+            except Exception:
+                invite = None
+            if invite is None or invite.type != "invite":
+                return JSONResponse({"ok": False, "error": "no such invitation"},
+                                    status_code=404)
+            token_hash = invite.payload.get("token_hash")
+            if not isinstance(token_hash, str) or not token_hash:
+                return JSONResponse(
+                    {"ok": False, "error": "that invitation is key-bound and has no bearer"},
+                    status_code=400,
+                )
+            digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+            if not hmac.compare_digest(digest, token_hash):
+                return JSONResponse(
+                    {"ok": False, "error": "that token is not this invitation's bearer"},
+                    status_code=403,
+                )
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": f"could not read the invitation: {exc}"},
+                            status_code=400)
+
+    try:
+        members = settings_ops.read_owned_set(
+            NETWORK_LINK_GRANT_SET_ID, org=requested_org,
+            target_revision=NETWORK_LINK_GRANT_REVISION,
+        ).members
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": f"could not read the grant cache: {exc}"},
+                            status_code=400)
+    grant = None
+    for member in members:
+        payload = member.payload or {}
+        if (payload.get("target_type") == "org:join"
+                and payload.get("invite_ref") == invite_ref):
+            grant = payload
+            break
+    if grant is None:
+        return JSONResponse(
+            {"ok": False, "error": "that invitation has no published link"},
+            status_code=404,
+        )
+    if grant.get("bearer") == token:
+        return JSONResponse({"ok": True, "token": grant["token"], "stored": False})
+    try:
+        settings_ops.upsert_by_key(
+            NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION,
+            grant["token"], {**grant, "bearer": token}, org=requested_org,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": f"could not retain the bearer: {exc}"},
+                            status_code=400)
+    return JSONResponse({"ok": True, "token": grant["token"], "stored": True})
 
 
 async def post_ledger_role_define(request: Request) -> JSONResponse:
@@ -3163,6 +3280,7 @@ ROUTES = [
     Route("/api/network/ledger/delegate", post_ledger_delegate, methods=["POST"]),
     Route("/api/network/ledger/invite", post_ledger_invite, methods=["POST"]),
     Route("/api/network/ledger/revoke", post_ledger_revoke, methods=["POST"]),
+    Route("/api/network/ledger/invite/bearer", post_ledger_invite_bearer, methods=["POST"]),
     Route("/api/network/ledger/role-define", post_ledger_role_define, methods=["POST"]),
     Route("/api/network/ledger/role-grant", post_ledger_role_grant, methods=["POST"]),
     Route("/api/network/ledger/role-revoke", post_ledger_role_revoke, methods=["POST"]),
