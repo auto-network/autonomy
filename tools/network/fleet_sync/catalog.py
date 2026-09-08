@@ -65,12 +65,15 @@ def purge_retired_catalog_addresses(
     raises on the first one ("catalog address names non-replicated table").
 
     BOUNDED BY CONSTRUCTION. A live store carries hundreds of thousands of
-    these addresses, and deleting them in one statement holds the single
-    SQLite write lock for far longer than a concurrent reader's busy timeout
-    -- which is exactly how an unbounded version of this took the dashboard's
-    graph API down on 2026-09-08. Each batch is its own transaction and the
-    lock is released between them, so a busy database keeps serving while
-    the purge makes progress. Interrupting it is safe: the next call resumes.
+    these addresses, and deleting them in one statement would hold the single
+    SQLite write lock far longer than a concurrent reader's busy timeout.
+    Each batch is its own transaction and the lock is released between them,
+    so a busy database keeps serving while the purge makes progress.
+    Interrupting it is safe: the next call resumes.
+
+    (A precaution, not a post-mortem: the 2026-09-08 graph-API outage was NOT
+    caused by this delete. See GraphDB.drop_retired_entity_tables for what
+    actually happened.)
 
     Refuses any table that is not declared retired, so a live table can never
     be silently unwound by a typo.
