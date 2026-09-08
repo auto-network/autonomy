@@ -60,7 +60,6 @@ import re
 import time
 import uuid
 
-import httpx
 
 from tools.dashboard.dao import approval_requests as ar
 from tools.graph import settings_ops
