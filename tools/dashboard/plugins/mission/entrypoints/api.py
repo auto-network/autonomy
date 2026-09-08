@@ -524,7 +524,7 @@ _ITEM = "/api/mission/item/{mission_id}/{pillar_id}/{item_id}"
 
 routes: list = [
     Route("/api/mission/ops/{mission_id}", ops_data, methods=["GET"]),
-    Route("/api/mission/ops/{mission_id}/screen", ops_screen, methods=["GET"]),
+    Route("/api/mission/screen/{mission_id}/ops", ops_screen, methods=["GET"]),
     Route("/api/mission/missions", list_missions, methods=["GET"]),
     Route("/api/mission/screen/{mission_id}", mission_screen, methods=["GET"]),
     Route("/api/mission/status/{mission_id}", post_mission_status,

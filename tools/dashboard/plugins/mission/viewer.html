@@ -2819,7 +2819,7 @@
     if (id === "ops" && !opsView.firstChild) {
       var opsFrame = document.createElement("iframe");
       opsFrame.title = "Mission Control Ops";
-      opsFrame.src = "/api/mission/ops/" + encodeURIComponent(MID) + "/screen";
+      opsFrame.src = "/api/mission/screen/" + encodeURIComponent(MID) + "/ops";
       opsFrame.style.cssText = "display:block;border:0;width:100%;height:calc(100vh - 90px);min-height:540px;background:#111619";
       opsView.appendChild(opsFrame);
     }
