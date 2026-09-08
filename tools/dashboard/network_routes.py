@@ -1995,7 +1995,11 @@ async def _post_serve_cert_v3(request: Request, body: dict) -> JSONResponse:
             "across local organizations"
         )}, status_code=409)
 
-    previous_serve = _first_member(NETWORK_SERVE_CERT_SET_ID, org)
+    # THIS machine's own credential — never a peer's (auto-527te). Rows are
+    # keyed per machine now, so the lexically-first member can belong to
+    # another node entirely.
+    from tools.dashboard.link_serving_supervisor import local_serve_cert_member
+    previous_serve = local_serve_cert_member(org)
     if previous_serve is not None and \
             previous_serve.payload.get("cert") == body["cert"]:
         return JSONResponse({"ok": True, "child_pub": cert.child_pub,
@@ -2013,9 +2017,16 @@ async def _post_serve_cert_v3(request: Request, body: dict) -> JSONResponse:
                "persona_pub": body["persona_pub"], "not_after": cert.not_after}
     if body.get("dns01_cert") is not None:
         payload["dns01_cert"] = body["dns01_cert"]
+    # KEYED BY MACHINE, never fleet-wide. The credential's private key is a
+    # mode-0600 local file that must never replicate, so the row naming it
+    # belongs to this machine alone; a single shared key made every other
+    # machine in the fleet read `key-missing` and made each mint evict the last
+    # working machine (graph://90ba11c8-3d3, auto-527te).
+    from tools.dashboard.link_serving_supervisor import local_serve_cert_key
     try:
         settings_ops.upsert_by_key(
-            NETWORK_SERVE_CERT_SET_ID, 3, "default", payload, org=write_org,
+            NETWORK_SERVE_CERT_SET_ID, 3, local_serve_cert_key(), payload,
+            org=write_org,
         )
     except Exception as e:
         with contextlib.suppress(Exception):
@@ -2418,7 +2429,11 @@ async def post_serve_cert(request: Request) -> JSONResponse:
     # Persist only the portable basename in Settings. The current node's
     # manifest-rooted serving-key directory is resolved at every read, so a
     # restored volume does not retain the source node's absolute path.
-    previous_serve = _first_member(NETWORK_SERVE_CERT_SET_ID, org)
+    # THIS machine's own credential — never a peer's (auto-527te). Rows are
+    # keyed per machine now, so the lexically-first member can belong to
+    # another node entirely.
+    from tools.dashboard.link_serving_supervisor import local_serve_cert_member
+    previous_serve = local_serve_cert_member(org)
     if previous_serve is not None:
         try:
             previous_cert = DelegationCert.from_json(
@@ -2465,9 +2480,12 @@ async def post_serve_cert(request: Request) -> JSONResponse:
     # personal serve-cert POST 500s ("declares no single home"), the browser's
     # best-effort provisioning swallows it, and the tunnel never comes up.
     write_org = "personal" if settings_ops._resolve_org_arg(org) is None else org
+    # Keyed by machine (auto-527te) — see the revision-3 write above.
+    from tools.dashboard.link_serving_supervisor import local_serve_cert_key
     try:
         settings_ops.upsert_by_key(
-            NETWORK_SERVE_CERT_SET_ID, NETWORK_SERVE_CERT_REVISION, "default",
+            NETWORK_SERVE_CERT_SET_ID, NETWORK_SERVE_CERT_REVISION,
+            local_serve_cert_key(),
             {"cert": body["cert"], "viewer_cert": body["viewer_cert"],
              "dns01_cert": body["dns01_cert"],
              "key_path": key_file,

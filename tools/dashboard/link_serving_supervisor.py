@@ -181,6 +181,95 @@ def _resolve_key_path(stored: object) -> tuple[str | None, str | None]:
     return str(resolved), None
 
 
+#: The settings key legacy serving credentials were stored under — ONE row per
+#: org for the whole fleet. That cardinality was the bug: a serving credential
+#: is per MACHINE (its private key is a mode-0600 local file that must never
+#: replicate), but the org settings store replicates, so the single row landed
+#: on every machine and only the minting machine held the key. Every other
+#: machine read `key-missing` and could neither serve nor run DNS-01 issuance,
+#: and each new mint evicted whichever machine last worked. Evidence and the
+#: full audit: graph://90ba11c8-3d3.
+LEGACY_SERVE_CERT_KEY = "default"
+
+
+def local_serve_cert_key() -> str:
+    """The settings key THIS machine's serving credential belongs under.
+
+    The machine id when this node is enrolled in a fleet; otherwise the legacy
+    key, which is correct for a single-machine install — there is no second
+    machine for it to collide with.
+    """
+    try:
+        from tools.network import machine_boot
+        machine_id = machine_boot.machine_id(org="machine")
+    except Exception:
+        machine_id = None
+    return machine_id or LEGACY_SERVE_CERT_KEY
+
+
+def local_serve_cert_member(org: str | None, *, revision: int | None = None):
+    """THIS machine's serving-credential member, or None.
+
+    The mint path uses it to find the credential it is replacing — which must
+    be its own. ``_first_member`` returns the lexically first key, and once
+    rows are keyed per machine that can be a PEER's row: the mint would then
+    compare its idempotency check against a peer's certificate and try to
+    unlink a key file that is not its own.
+    """
+    try:
+        result = settings_ops.read_owned_set(
+            NETWORK_SERVE_CERT_SET_ID, org=org,
+            **({"target_revision": revision} if revision is not None else {}),
+        )
+    except Exception:
+        return None
+    local_key = local_serve_cert_key()
+    legacy = None
+    for member in result.members:
+        if not isinstance(member.payload, dict):
+            continue
+        member_key = getattr(member, "key", LEGACY_SERVE_CERT_KEY)
+        if member_key == local_key:
+            return member
+        if member_key == LEGACY_SERVE_CERT_KEY:
+            key_path, key_error = _resolve_key_path(member.payload.get("key_path"))
+            if key_error is None and key_path and os.path.isfile(key_path):
+                legacy = member
+    return legacy
+
+
+def _rows_owned_by_this_machine(members) -> list:
+    """The credential rows this machine may actually use.
+
+    A peer's row must never make this machine look provisioned NOR make it look
+    broken: it is simply not ours, so it reads as absent and the next unlock
+    mints our own. Two things count as ours:
+
+    * a row keyed by this machine's id — the post-fix shape; and
+    * a legacy ``default`` row WHOSE KEY FILE IS PRESENT HERE. That file test is
+      the honest ownership question during migration: the machine holding the
+      key is the one that minted it, so it keeps serving uninterrupted, while
+      every other machine correctly ignores the same row.
+    """
+    local_key = local_serve_cert_key()
+    mine = []
+    for member in members:
+        payload = member.payload
+        if not isinstance(payload, dict):
+            continue
+        # A member carrying no key at all predates keying and IS the legacy
+        # shape, so it takes the legacy path's ownership test.
+        member_key = getattr(member, "key", LEGACY_SERVE_CERT_KEY)
+        if member_key == local_key:
+            mine.append(payload)
+            continue
+        if member_key == LEGACY_SERVE_CERT_KEY:
+            key_path, key_error = _resolve_key_path(payload.get("key_path"))
+            if key_error is None and key_path and os.path.isfile(key_path):
+                mine.append(payload)
+    return mine
+
+
 def serve_cert_state(org: str | None, *, now: float | None = None) -> dict:
     """The org's serve-cert provisioning state → ``{status, ...}``.
 
@@ -213,13 +302,13 @@ fresh serving credential iff the status is anything but ``ok``.
             ).members
         except Exception:
             continue
-        rows.extend(m.payload for m in members if isinstance(m.payload, dict))
+        rows.extend(_rows_owned_by_this_machine(members))
         if rows:
             break
     if not rows:
         return {"status": "missing"}
-    # The keyed set keeps one credential per org. If corrupt storage contains
-    # several rows, select the freshest valid candidate deterministically.
+    # One credential per org PER MACHINE. If corrupt storage contains several
+    # rows for this machine, select the freshest valid candidate deterministically.
     row = max(rows, key=lambda p: p.get("not_after") or 0)
     not_after = row.get("not_after")
     if not isinstance(not_after, int) or now >= not_after:
