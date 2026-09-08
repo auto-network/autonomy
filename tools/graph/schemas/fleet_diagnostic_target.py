@@ -44,7 +44,7 @@ class FleetDiagnosticTargetV1(SettingSchema):
             "type": "string", "required": False,
             "description": (
                 "Destination exactly as `ssh` would take it, flags folded in "
-                "(e.g. '-i ~/.ssh/sjc -p 11222 root@100.68.240.25'). Omit for "
+                "(e.g. '-i ~/.ssh/sjc -p 11222 root@<tailnet-ip>'). Omit for "
                 "the machine the command runs on."
             ),
         },
