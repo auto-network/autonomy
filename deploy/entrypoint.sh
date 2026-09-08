@@ -38,6 +38,18 @@ done
 # Only the operator-copied data/orgs (ownership we don't control) and the runtime
 # keycache ramfs still need a runtime chown.
 
+# Node data-store bootstrap: create the platform's required data subdirectories
+# so a FRESH node has them with no manual step. These accrete runtime state and
+# are NOT shipped in the image; on sjc-2 (2026-09-08) their absence meant the
+# serving-key store was missing (serve_cert_state -> key-missing for every
+# scope) and the beads mount source was missing (first session launch refused,
+# no container created). Idempotent, autonomy-owned; a fast no-op once present.
+for d in /app/data/network /app/data/.beads; do
+    mkdir -p "$d" 2>/dev/null || true
+    chown autonomy:autonomy "$d" 2>/dev/null || true
+done
+chmod 700 /app/data/network 2>/dev/null || true
+
 # Grant autonomy the HOST Docker group: the node launches every session as a
 # host-level sibling container through this socket (see docker-compose.yml). The
 # host gid varies per machine, so resolve it from the socket at runtime.
