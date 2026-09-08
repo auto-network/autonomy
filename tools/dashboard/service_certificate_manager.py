@@ -101,7 +101,9 @@ def _import_legacy_pair(org: str, persona_label: str) -> dict | None:
         # Refuse before the write so periodic retries cannot accumulate sealed
         # sibling rows while waiting for an operator unlock.
         raise service_certificate.ServiceCertificateError(
-            "certificate vault is locked; unlock before importing the legacy pair"
+            "this process holds no warm audited delegate key, so it cannot "
+            "read the imported pair back. A property of THIS PROCESS, not "
+            "of the operator's vault."
         )
     verified = service_certificate._verify_pair(
         service_certificate.GATEWAY_CERT,

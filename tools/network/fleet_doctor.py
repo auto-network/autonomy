@@ -1351,7 +1351,22 @@ def check_recent_errors(report: dict, *, tail_lines: int = 4000) -> None:
 
         def _scan(label: str, log_path: Path) -> None:
             if not log_path.exists():
-                _line(label, "not found at this path (may be elsewhere in a container)", warn=True)
+                # "Not found" used to be the end of it, so on every
+                # containerized node -- which is every node -- this section
+                # scanned nothing and printed a shrug. The dashboard logs to
+                # stdout in a container, so the file genuinely does not
+                # exist and the errors are all in the container's log
+                # stream. Say plainly that this check DID NOT LOOK, and how
+                # to look, rather than implying there was nothing to find.
+                _line(
+                    label,
+                    "NOT SCANNED -- no such file. In a container the "
+                    "dashboard logs to stdout; this check saw nothing and "
+                    "proves nothing. Use: docker logs <container> | "
+                    "grep -E 'fleet sync|Error'",
+                    warn=True,
+                )
+                report.setdefault("unscanned_log_sources", []).append(str(log_path))
                 return
             lines = log_path.read_text(errors="replace").splitlines()[-tail_lines:]
             counts: dict[str, int] = {}
