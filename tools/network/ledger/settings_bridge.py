@@ -102,15 +102,8 @@ def read_event_wires(conn) -> dict:
     return out
 
 
-def write_event(conn, event_id: str, wire: str) -> bool:
-    """Store one event as its Settings row, on the caller's connection.
-
-    Returns False when the row is already there. The caller supplies the
-    transaction, so the event is stored atomically -- there is no second
-    connection and no window in which the event exists in one place and not
-    another. On a real organization database this INSERT is what the capture
-    triggers replicate, so an event is on the wire by virtue of being stored.
-    """
+def _insert(conn, event_id: str, wire: str) -> bool:
+    """The row itself. False when it is already there."""
     import uuid
 
     from tools.graph.schemas.org_ledger_event import OrgLedgerEventV1
@@ -132,7 +125,39 @@ def write_event(conn, event_id: str, wire: str) -> bool:
     return True
 
 
-def migrate_events_to_settings(conn, label: str = "") -> int:
+def write_event(path, event_id: str, wire: str) -> bool:
+    """Store one event as its Settings row in the database at *path*.
+
+    The write goes through the graph's own connection, because that is the
+    connection whose capture functions and catalog are attached. A settings
+    trigger on a fleet-activated database calls ``fleet_sync_capture_enabled``
+    and friends; a bare ``sqlite3.connect`` has none of them, so an INSERT on
+    it dies with "no such function" and the append fails outright (live 500 on
+    every invite mint, 2026-09-08).
+
+    Registering inert stubs on a bare connection would silence that and is
+    exactly wrong: on an actively syncing database it converts a loud failure
+    into events that never replicate -- the silent, permanent divergence
+    ``tools/graph/db.py`` reserves those stubs to avoid.
+
+    There is only ONE write for an event, so nothing needs to be atomic with
+    anything else; the requirement is capture, not a shared transaction.
+    Returns False when the row is already there, and raises on a real failure:
+    this IS the persistence of an authority event.
+    """
+    from tools.graph.db import GraphDB
+
+    db = GraphDB(path)
+    try:
+        written = _insert(db.conn, event_id, wire)
+        if written:
+            db.conn.commit()
+        return written
+    finally:
+        db.close()
+
+
+def migrate_events_to_settings(conn, path, label: str = "") -> int:
     """Carry a legacy ``ledger_events`` table into the Settings set.
 
     Returns the number of events carried. Idempotent, and a no-op for a store
@@ -158,10 +183,9 @@ def migrate_events_to_settings(conn, label: str = "") -> int:
     if not legacy:
         return 0
     carried = 0
-    with conn:
-        for event_id, wire in legacy.items():
-            if write_event(conn, event_id, wire):
-                carried += 1
+    for event_id, wire in legacy.items():
+        if write_event(path, event_id, wire):
+            carried += 1
     if carried:
         logger.info(
             "ledger migration: carried %d legacy event(s) of %s into %s",

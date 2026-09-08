@@ -237,7 +237,7 @@ class LedgerStore:
         )
 
         ensure_settings_table(self.db)
-        migrate_events_to_settings(self.db, label=Path(self.path).stem)
+        migrate_events_to_settings(self.db, self.path, label=Path(self.path).stem)
         wires = read_event_wires(self.db)
         events = []
         for event_id, wire in wires.items():
@@ -273,8 +273,7 @@ class LedgerStore:
         # nothing to reconcile later.
         from .settings_bridge import write_event
 
-        with self.db:
-            write_event(self.db, event.event_id, event.to_json().decode("utf-8"))
+        write_event(self.path, event.event_id, event.to_json().decode("utf-8"))
         return event.event_id
 
     def append_wire(self, raw) -> str:
