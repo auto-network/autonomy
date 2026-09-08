@@ -14,7 +14,81 @@ function _isAllowedExternalAppHref(href) {
   return /^shortcuts:\/\/run-shortcut(?:[/?#]|$)/i.test(href || '');
 }
 
+// Resolve artifact addresses against the viewer's session, never against the
+// browser's filesystem or whichever session currently owns dictation.
+function _artifactHref(href, session, baseUrl) {
+  if (href.startsWith('#') && !baseUrl) return href;
+  const graph = /^graph:\/\/([0-9a-f]{8}[-0-9a-f]*)([?#].*)?$/i.exec(href);
+  if (graph) return '/graph/' + graph[1] + (graph[2] || '');
+  if (href.startsWith('/workspace/output/')) {
+    if (!session) return '';
+    let path;
+    try { path = decodeURIComponent(href.slice('/workspace/output/'.length)); }
+    catch (_) { return ''; }
+    path = path.replace(/:\d+(?::\d+)?$/, '');
+    if (!path || path.split('/').some(p => p === '..' || p === '.') || /[\\\x00]/.test(path)) return '';
+    return '/api/session/' + encodeURIComponent(session) + '/output/' + path.split('/').map(encodeURIComponent).join('/');
+  }
+  let url;
+  try { url = new URL(href, baseUrl || window.location.href); }
+  catch (_) { return href; }
+  const artifactPath = /^\/(?:graph|source|design|present|mission|bead|session)\//.test(url.pathname)
+    || /^\/api\/session\/[^/]+\/output\//.test(url.pathname);
+  // Agents have historically printed their container's Tailnet name and
+  // internal dashboard aliases. Only known artifact routes are rebased;
+  // ordinary external web links retain their destination.
+  const dashboardAlias = /^(?:localhost|127\.0\.0\.1|host\.docker\.internal|dashboard)$/.test(url.hostname)
+    || /^[a-z0-9-]+\.tail[a-z0-9]+\.ts\.net$/i.test(url.hostname);
+  if (url.origin === window.location.origin ||
+      (artifactPath && dashboardAlias && /^https?:$/.test(url.protocol) && (!url.port || url.port === '8080'))) {
+    return url.pathname + url.search + url.hash;
+  }
+  return href;
+}
+
+function _bindMarkdownLinks(el, scope, baseUrl) {
+  scope = scope || {};
+  el.querySelectorAll('a[href]').forEach(a => {
+    const raw = a.getAttribute('href');
+    const href = _artifactHref(raw, scope._tmuxSession, baseUrl);
+    if (!href) { a.removeAttribute('href'); return; }
+    a.setAttribute('href', href);
+    if (_isAllowedExternalAppHref(href)) {
+      a.setAttribute('rel', 'noopener noreferrer');
+      a.removeAttribute('target');
+      a.setAttribute('data-external-app', 'shortcuts');
+      if (!a.title) a.title = 'Open in Shortcuts';
+      return;
+    }
+    if (/^[a-z][a-z0-9+.\-]*:/i.test(href) && !/^(?:https?|mailto|tel|callto|sms|cid|xmpp):/i.test(href)) {
+      a.removeAttribute('href');
+      return;
+    }
+    if (href.startsWith('/') && !href.startsWith('//')) {
+      a.removeAttribute('target');
+      a.addEventListener('click', e => {
+        if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || a.hasAttribute('download')) return;
+        if (/^\/api\/session\/[^/]+\/output\//.test(href) && typeof scope.openOutputLink === 'function') {
+          e.preventDefault();
+          scope.openOutputLink(href);
+        } else if (!href.startsWith('/api/')) {
+          e.preventDefault();
+          if (typeof scope.closeLightbox === 'function') scope.closeLightbox();
+          navigateTo(href);
+        }
+      });
+    } else if (!href.startsWith('#')) {
+      a.setAttribute('rel', 'noopener noreferrer');
+      a.setAttribute('target', '_blank');
+    }
+  });
+}
+window.AutonomyMarkdownLinks = { resolve: _artifactHref, bind: _bindMarkdownLinks };
+
 DOMPurify.addHook('uponSanitizeAttribute', (node, data) => {
+  if (node.nodeName === 'A' && data.attrName === 'href' && /^graph:\/\//i.test(data.attrValue)) {
+    data.attrValue = _artifactHref(data.attrValue);
+  }
   if (node.nodeName === 'A' && data.attrName === 'href' &&
       _isAllowedExternalAppHref(data.attrValue)) {
     data.forceKeepAttr = true;
@@ -296,37 +370,6 @@ document.addEventListener('alpine:init', () => {
       queueMicrotask(() => {
         el.querySelectorAll('pre code').forEach(b => hljs.highlightElement(b));
       });
-      // Post-process links
-      el.querySelectorAll('a').forEach(a => {
-        const href = a.getAttribute('href') || '';
-        if (!href) return;
-        if (/^shortcuts:/i.test(href)) {
-          // A direct anchor click is the user gesture iOS needs to leave the
-          // standalone PWA and open Shortcuts. Do not use target=_blank: that
-          // can strand a blank Safari tab behind the app handoff. Limit the
-          // newly admitted scheme to running an installed shortcut; all other
-          // Shortcuts deep-link commands remain non-clickable.
-          if (!_isAllowedExternalAppHref(href)) {
-            a.removeAttribute('href');
-            return;
-          }
-          a.setAttribute('rel', 'noopener noreferrer');
-          a.removeAttribute('target');
-          a.setAttribute('data-external-app', 'shortcuts');
-          if (!a.getAttribute('title')) a.setAttribute('title', 'Open in Shortcuts');
-        } else if (/^[a-z][a-z0-9+.\-]*:/i.test(href) &&
-                   !/^(?:https?|mailto|tel|callto|sms|cid|xmpp):/i.test(href)) {
-          // Defense in depth if the sanitizer's URI policy changes: never
-          // turn an unknown protocol into an actionable chat link.
-          a.removeAttribute('href');
-        } else if (href.startsWith('/')) {
-          // Internal SPA link — use navigateTo() (app.js)
-          a.addEventListener('click', e => { e.preventDefault(); navigateTo(href); });
-        } else {
-          a.setAttribute('rel', 'noopener noreferrer');
-          a.setAttribute('target', '_blank');
-        }
-      });
       // Linkify references — bead IDs, graph:// URIs, source IDs
       // Each rule: regex source contributes one capture group; group index maps to href/text
       const LINK_RULES = [
@@ -340,7 +383,7 @@ document.addEventListener('alpine:init', () => {
       const textNodes = [];
       while (walker.nextNode()) textNodes.push(walker.currentNode);
       for (const node of textNodes) {
-        if (node.parentElement && (node.parentElement.tagName === 'A' || node.parentElement.tagName === 'PRE' || node.parentElement.closest('pre'))) continue;
+        if (node.parentElement && node.parentElement.closest('a, pre')) continue;
         if (!COMBINED_RE.test(node.textContent)) continue;
         COMBINED_RE.lastIndex = 0;
         const frag = document.createDocumentFragment();
@@ -355,13 +398,17 @@ document.addEventListener('alpine:init', () => {
           a.href = rule.href(id);
           a.textContent = rule.display(m[0], id);
           a.className = 'text-indigo-400 hover:underline';
-          a.addEventListener('click', e => { e.preventDefault(); navigateTo(a.getAttribute('href')); });
           frag.appendChild(a);
           last = m.index + m[0].length;
         }
         if (last < node.textContent.length) frag.appendChild(document.createTextNode(node.textContent.slice(last)));
         node.parentNode.replaceChild(frag, node);
       }
+
+      const scope = typeof Alpine.$data === 'function' ? Alpine.$data(el) : {};
+      const baseUrl = el.classList.contains('sc-va-lightbox-md') && scope.lightboxSrc
+        ? new URL(scope.lightboxSrc, window.location.href).href : undefined;
+      _bindMarkdownLinks(el, scope, baseUrl);
 
       // Async-resolve embeds
       if (embedIds.length > 0) {

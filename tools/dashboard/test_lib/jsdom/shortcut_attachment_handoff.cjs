@@ -8,7 +8,7 @@ const vm = require("node:vm");
 
 const viewerPath = resolve(__dirname, "../../static/js/pages/session-viewer.js");
 const entriesPath = resolve(__dirname, "../../templates/partials/session-entries.html");
-const pagePath = resolve(__dirname, "../../templates/pages/session-view.html");
+const pagePath = resolve(__dirname, "../../templates/partials/session-lightbox.html");
 
 const components = {};
 const listeners = {};

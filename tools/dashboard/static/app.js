@@ -2387,6 +2387,7 @@ if (globalSearchIcon) {
 // Client-side nav (no full page reload)
 document.addEventListener('click', (e) => {
   if (e.defaultPrevented) return;        // another handler already handled this click
+  if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
   const link = e.target.closest('a[href]');
   if (!link) return;
   // Hash-only links (in-page anchors): let the browser handle native scroll +
@@ -2397,7 +2398,7 @@ document.addEventListener('click', (e) => {
   if (link.hasAttribute('data-hard-reload')) return;
   if (link.origin === window.location.origin && !link.pathname.startsWith('/api/') && !link.hasAttribute('download')) {
     e.preventDefault();
-    navigateTo(link.pathname + link.search);
+    navigateTo(link.pathname + link.search + link.hash);
   }
 });
 
