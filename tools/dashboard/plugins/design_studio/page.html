@@ -32,12 +32,6 @@
                 :aria-pressed="sharedOnly ? 'true' : 'false'" @click="sharedOnly = !sharedOnly" data-testid="design-shared-toggle">Shared</button>
         <button type="button" class="design-studio-toggle" :class="status !== 'pending' ? 'is-on' : ''"
                 :aria-pressed="status !== 'pending' ? 'true' : 'false'" @click="toggleArchived()" data-testid="design-archived-toggle">Archived</button>
-        <select class="design-studio-select" x-model="org" x-show="orgOptions.length > 1" data-testid="design-org" aria-label="Organization">
-          <option value="all">All orgs</option>
-          <template x-for="slug in orgOptions" :key="slug">
-            <option :value="slug" x-text="slug"></option>
-          </template>
-        </select>
         <select class="design-studio-select" x-model="sort" @change="loadDesigns()" data-testid="design-sort" aria-label="Sort">
           <option value="updated">Latest update</option>
           <option value="created">First created</option>

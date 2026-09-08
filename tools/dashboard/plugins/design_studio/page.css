@@ -842,3 +842,5 @@ body.route-design-linked .design-surface {
 @keyframes design-card-action-spin {
   to { transform: rotate(360deg); }
 }
+.design-library-controls { display:flex; align-items:center; gap:.5rem; min-width:0; }
+.design-library-controls [data-studio-org] { min-width:0; }

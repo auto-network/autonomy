@@ -89,6 +89,7 @@
     }
     this.trigger.classList.toggle('is-icon-only', !!this.opts.iconOnly);
     this.trigger.classList.toggle('is-compact-mobile', !!this.opts.compactOnMobile);
+    this.el.classList.toggle('is-compact-mobile', !!this.opts.compactOnMobile);
     this.trigger.title = selected.name;
     this.trigger.setAttribute('aria-label', 'Organization: ' + selected.name);
     this.trigger.disabled = this.orgs.length === 0;

@@ -85,6 +85,27 @@ const SESSIONS = [
 ];
 
 describe('AssetPresence', () => {
+  it('activity mode shares chrome, counts sessions once and separates artifact and session links', async () => {
+    const {requests}=makeWindow();const el=new FakeEl();
+    const entry={session_id:'auto-edit',session_label:'Review layout',org:'example',artifact_id:'deck1',artifact_title:'Title bar <review>',artifact_href:'/presentations/deck1',artifact_kind:'Slides'};
+    const ctl=AssetPresence.mount(el,{mode:'activity',entries:[entry,entry,{...entry,artifact_id:'deck2',artifact_href:'/presentations/deck2'}]});
+    await new Promise(r=>setTimeout(r,0));
+    assert.match(el.html,/Designing now/);assert.match(el.html,/Slides/);assert.match(el.html,/Session/);
+    assert.match(el.html,/href="\/presentations\/deck1"/);assert.match(el.html,/href="\/session\/example\/auto-edit"/);
+    assert.equal((el.html.match(/data-testid="activity-artifact"/g)||[]).length,2);
+    assert.match(el.summary.getAttribute('title'),/1 live session/);
+    assert.doesNotMatch(el.html,/asset-share|Share by link/);assert.equal(requests.length,0);
+    assert.match(el.html,/Title bar &lt;review&gt;/);ctl.destroy();
+  });
+  it('read-only mission presence honors explicit human liveness and offers no sharing',async()=>{
+    const {requests}=makeWindow({sessions:{agent:{isLive:true}}});const el=new FakeEl();
+    const ctl=AssetPresence.mount(el,{sharing:false,targetUuid:'mission',people:true,noun:'mission',sessions:[{id:'person',label:'Operator',participant_kind:'operator',live:true},{id:'agent',participant_kind:'agent',live:false}]});
+    await new Promise(r=>setTimeout(r,0));
+    assert.equal(ctl.sessions().find(s=>s.id==='person').live,true);
+    assert.equal(ctl.sessions().find(s=>s.id==='agent').live,false);
+    assert.match(el.html,/People on this mission/);assert.doesNotMatch(el.html,/Sharing|Share by link/);
+    assert.equal(requests.length,0);ctl.destroy();
+  });
   it('renders people as text while retaining actual session links', () => {
     makeWindow();
     const el = new FakeEl();

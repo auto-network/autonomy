@@ -12,10 +12,12 @@ function harness() {
   const subscriptions = new Map();
   const dom = new JSDOM('<div id="topbar"></div>', {url:'https://example.test',runScripts:'outside-only'});
   dom.window.eval(fs.readFileSync(path.join(__dirname,'../../../static/js/org-picker.js'),'utf8'));
+  dom.window.eval(fs.readFileSync(path.join(__dirname,'../../../static/js/asset-presence.js'),'utf8'));
   const sandbox = {
     console, setTimeout, clearTimeout,
     document: dom.window.document,
     OrgPicker: dom.window.OrgPicker,
+    AssetPresence: dom.window.AssetPresence,
     location: { pathname: '/presentations' },
     addEventListener() {}, removeEventListener() {},
     Alpine: { data(name, fn) { factory = fn; }, store() { return { live: { isLive: true, label: 'Editor' } }; } },

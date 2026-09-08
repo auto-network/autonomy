@@ -116,6 +116,32 @@ window.missionPage = function () {
       return this.orgs.find((o) => o.slug === this.org) || null;
     },
 
+    missionActivityOptions() {
+      const sessions = (window.Alpine && window.Alpine.store('sessions')) || {};
+      const entries = [];
+      this.alloc.filter(m => (!this.org || m.org === this.org) && (m.status || 'active') === 'active').forEach(m => {
+        (m.pillars || []).forEach(p => {
+          const session = sessions[p.session];
+          if (!p.session || !(session ? session.isLive : p.live)) return;
+          entries.push({session_id:p.session, session_label:(session && session.label) || p.session_title,
+            org:m.org, artifact_id:m.mission_id, artifact_title:m.name,
+            artifact_href:'/mission/' + encodeURIComponent(m.mission_id), artifact_kind:'Mission'});
+        });
+      });
+      return {mode:'activity', heading:'Working now', emptyText:'No live pillar coordinators in this organization', entries};
+    },
+
+    missionPresenceOptions() {
+      const mission = this.missions.find(m => m.mission_id === this.current) || {};
+      const seen = new Set();
+      const sessions = this.peeps.filter(p => {
+        if (!p.participant_id || seen.has(p.participant_id)) return false;
+        seen.add(p.participant_id); return true;
+      }).map(p => ({id:p.participant_id,label:p.participant_label || p.participant_id,
+        participant_kind:p.participant_kind || 'operator',live:!this.peepStale(p)}));
+      return {org:mission.org || this.org, noun:'mission', people:true, sharing:false, sessions};
+    },
+
     setOrg(slug) {
       this.org = slug;
       this.orgOpen = false;
