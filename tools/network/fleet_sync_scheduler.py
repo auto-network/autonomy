@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import logging
 import struct
 import time
@@ -155,6 +156,16 @@ class FleetSyncProtocolError(ValueError):
     """A peer sent malformed, inconsistent, or unsupported sync data."""
 
 
+class FleetSyncPeerUnreachable(FleetSyncProtocolError):
+    """No candidate address for this peer accepted a connection.
+
+    Distinct from every other failure because it is a property of the PEER,
+    not of the scope: trying the remaining scopes would repeat the same
+    failed dial once per scope. Every other failure belongs to its scope
+    alone and must not decide the fate of the others.
+    """
+
+
 class FleetSyncSchemaMismatch(FleetSyncProtocolError):
     """The peer's replicated schema differs; synchronization is paused.
 
@@ -283,6 +294,16 @@ class FleetSyncRuntimeConfig:
     on_peer_failure: Callable[[str], None] | None = None
 
 
+#: File stems in data/orgs/ that are never an organization scope. "personal"
+#: and "machine" are the operator's local stores, which live beside the
+#: directory; the rest are artefacts of a path resolver that creates what it
+#: is asked to resolve.
+_NON_SCOPE_STEMS: frozenset[str] = frozenset({"personal", "machine", "None", "none", ""})
+#: An organization slug: lowercase alphanumeric with dashes. Deliberately
+#: refuses a bare uuid, which is how the same org appeared twice.
+_SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
+
+
 def discover_org_sync_scopes() -> dict[str, Path]:
     """Organization databases present on this machine, by slug.
 
@@ -298,8 +319,16 @@ def discover_org_sync_scopes() -> dict[str, Path]:
     scopes: dict[str, Path] = {}
     for candidate in sorted(orgs_dir.glob("*.db")):
         slug = candidate.stem
-        if slug and slug != "personal" and ":" not in slug:
-            scopes[slug] = candidate
+        if slug in _NON_SCOPE_STEMS or ":" in slug or not _SLUG_RE.match(slug):
+            # A file in this directory is only a scope if its name is a real
+            # organization slug. Path resolution can MINT a database at a
+            # computed path (GraphDB defaults to create=True), so a bad path
+            # leaves a stray file here rather than raising -- observed as
+            # 'None.db' from a str(None) path and as a uuid-named file beside
+            # the slug-named one. Surfacing those as scopes made the sync
+            # engine try to pull organizations that do not exist.
+            continue
+        scopes[slug] = candidate
     return scopes
 
 
@@ -2766,18 +2795,46 @@ class FleetSyncScheduler:
         recorded and the remaining scopes still sync. Any other failure is
         transport-level and backs off the whole peer.
         """
+        # A failure on ONE scope must not skip the others. It used to
+        # `return`, so a single unpullable scope silently starved every scope
+        # after it in the iteration order -- and the order is sorted, so a
+        # stray database named 'None' sorted ahead of every real org and
+        # stopped all four of them dead for 24h while personal (iterated
+        # first) kept working and every check read green. Transport failures
+        # still back the peer off through the caller's normal path; they no
+        # longer decide the fate of unrelated scopes.
         for scope in self._scope_paths():
-            if not await self._sync_scope(machine_pub, addresses, scope):
+            outcome = await self._sync_scope(machine_pub, addresses, scope)
+            if outcome == "peer_unreachable":
+                # The peer itself is not answering. Trying the remaining
+                # scopes would just repeat the same failed dial per scope,
+                # so stop and let the ordinary backoff handle the peer.
                 return
+            if outcome == "scope_failed":
+                # This scope alone failed while the peer is reachable. It
+                # must NOT decide the fate of the others: a single unpullable
+                # scope used to `return` here, and a stray database named
+                # 'None' sorted ahead of every real organization and starved
+                # all four of them for 24h while personal, iterated first,
+                # kept working (live 2026-09-07/08).
+                logger.warning(
+                    "fleet sync peer %s scope %r failed; continuing with the "
+                    "remaining scopes", machine_pub[:12], scope,
+                )
+                continue
 
     async def _sync_scope(
         self, machine_pub: str, addresses: Sequence[str], scope: str,
         *, org_channel: "OrgFleetAuthenticator | None" = None,
-    ) -> bool:
-        """Pull one scope from one peer, then absorb any ledger-event rows
-        it carried. False when the failure was transport-level (the caller
-        stops trying this peer for the round); True after success or a
-        schema-mismatch pause, which affects only this scope."""
+    ) -> str:
+        """Pull one scope from one peer, then absorb any ledger-event rows.
+
+        Returns ``"ok"``, ``"scope_failed"`` (this scope only; the peer is
+        reachable and the others should still be tried), or
+        ``"peer_unreachable"`` (the dial itself failed, so trying the rest
+        would repeat it per scope). Conflating those two is what let one bad
+        scope starve every scope after it.
+        """
         try:
             await self._pull_scope(
                 machine_pub, addresses, scope, org_channel=org_channel
@@ -2786,10 +2843,27 @@ class FleetSyncScheduler:
             logger.info(
                 "fleet sync scope %r paused on schema mismatch", scope
             )
-            return True
+            return "ok"
+        except FleetSyncPeerUnreachable as exc:
+            logger.info(
+                "fleet sync peer %s unreachable on scope %r: %s",
+                machine_pub[:12], scope, exc,
+            )
+            return "peer_unreachable"
         except Exception:
-            return False
-        return True
+            logger.warning(
+                "fleet sync peer %s scope %r pull failed",
+                machine_pub[:12], scope, exc_info=True,
+            )
+            return "scope_failed"
+        # A pulled scope may carry ledger-event rows. Since the conversion
+        # (d5f0558c) an event IS its Settings row, so replication delivers it
+        # into the store directly and there is nothing to absorb -- the
+        # reconcile step was removed with the mirror it repaired. Left as a
+        # comment rather than a dangling call: the call outlived the method
+        # and raised AttributeError on every successful pull, which aborted
+        # the peer's remaining scopes (2026-09-08, mine).
+        return "ok"
 
     async def _pull_scope(
         self, machine_pub: str, addresses: Sequence[str], scope: str,
@@ -2909,7 +2983,9 @@ class FleetSyncScheduler:
                     machine_pub[:12], scope,
                     "; ".join(f"{a} -> {e}" for a, e in candidate_failures),
                 )
-                raise last_error
+                raise FleetSyncPeerUnreachable(
+                    f"no candidate address connected: {last_error!r}"
+                ) from last_error
 
             await asyncio.to_thread(
                 store.record_peer, machine_pub, state_epoch, online=True
@@ -2936,7 +3012,24 @@ class FleetSyncScheduler:
                 watermarks=watermarks,
             )
             sent += len(request)
+            # The line that was missing. A SUCCESSFUL pull logged nothing, so
+            # a pull that asked correctly and came back empty was invisible on
+            # the side that noticed it -- which is how four org scopes stayed
+            # a day behind while every check read green. This states exactly
+            # what was claimed, so an empty answer is immediately either "my
+            # claim was wrong" or "the server did not serve".
             await channel.send_message(request)
+            # Logged AFTER the send, never before: a line that announces an
+            # intention lies the moment the code beneath it changes. This one
+            # said "asking" while an edit had removed the send, and the puller
+            # sat silent for an hour looking like a server fault (2026-09-08).
+            logger.warning(
+                "fleet sync pull %s scope %r: asked v%d, %d watermark(s) "
+                "newest=%s, resume=%d crumb(s), bootstrap=%s accept_ckpt=%s",
+                machine_pub[:12], scope, protocol_version, len(watermarks or {}),
+                max(watermarks.values()) if watermarks else None,
+                len(resume_trail), bootstrap, founded_rows == 0,
+            )
 
             digest = hashlib.sha256()
             message_count = 0
@@ -3282,6 +3375,13 @@ class FleetSyncScheduler:
             if not saw_done:
                 raise FleetSyncProtocolError("fleet stream ended without summary")
 
+            logger.warning(
+                "fleet sync pull %s scope %r: got %d transaction(s), %d "
+                "frame(s), %dB in%s",
+                machine_pub[:12], scope, transactions, mutation_frames, received,
+                "  <- EMPTY: server had nothing past the claim above"
+                if transactions == 0 and mutation_frames == 0 else "",
+            )
             await asyncio.to_thread(
                 store.record_peer,
                 machine_pub,
@@ -3419,10 +3519,17 @@ class FleetSyncScheduler:
                 )
             await record("failed", type(exc).__name__)
             logger.warning(
-                "fleet sync peer %s scope %r failed (%s)",
+                # The MESSAGE, not just the class. "failed
+                # (MaterializationError)" names a category and hides the one
+                # fact that identifies the row -- which table had no
+                # materializer, which address orphaned. Live 2026-09-08: an
+                # org scope failed every 24s for an hour and the log never
+                # said on what.
+                "fleet sync peer %s scope %r failed (%s: %s)",
                 machine_pub[:12],
                 scope,
                 type(exc).__name__,
+                exc,
             )
             # Re-raise so the scope loop distinguishes a per-scope schema
             # pause (continue with the other scopes) from a transport

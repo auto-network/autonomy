@@ -683,8 +683,19 @@ async def issue(org: str, identity: str, *, staging: bool = False) -> dict:
         # A production order is useful only if its account state and verified
         # pair can be read back and committed. Refuse before contacting ACME
         # when this process cannot complete that transaction.
+        # State what was actually checked. This tests whether THIS PROCESS
+        # holds the warm audited delegate key in memory -- a per-process
+        # registration that a fresh process legitimately lacks until it is
+        # handed one. It is NOT a reading of the operator's vault state, and
+        # saying "the vault is locked" sent a live diagnosis down the wrong
+        # path for half an hour (2026-09-08): the vault was warm the whole
+        # time and a restarted process simply had not been given the key.
         raise ServiceCertificateError(
-            "certificate vault is locked; unlock before issuing a certificate"
+            "this process holds no warm audited delegate key, so it cannot "
+            "read back and commit the issued pair. This is a property of "
+            "THIS PROCESS, not of the vault: a process restarted since the "
+            "last unlock has not been handed one. It does not mean the "
+            "operator's vault is locked."
         )
     metadata, cert_bytes, key_bytes = await obtain(
         org, identity, staging=staging
