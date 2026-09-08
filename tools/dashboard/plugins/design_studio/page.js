@@ -513,16 +513,30 @@
           if (this.captureState === 'working') return; // prevent double-click
           this.captureState = 'working';
           var self = this;
+          // The capture path can hang indefinitely: getDisplayMedia never
+          // settles if the browser shows no picker (headless, some embedded
+          // webviews) and the button is disabled while working, so without a
+          // deadline one click kills capture for the life of the page.
+          var settled = false;
+          var deadline = setTimeout(function () {
+            if (settled || self._destroyed) return;
+            settled = true;
+            self.captureState = 'error';
+            setTimeout(function () { if (!self._destroyed) self.captureState = 'idle'; }, 3000);
+          }, 45000);
           try {
             var targetSession = this.linkedSessionLive
               ? this.linkedSessionId
               : (this._tmuxSession || '');
             await manualCaptureScreenshot(this.revisionId, targetSession);
-            self.captureState = 'success';
+            if (!settled) self.captureState = 'success';
           } catch (e) {
-            self.captureState = 'error';
+            if (!settled) self.captureState = 'error';
           }
-          setTimeout(function () { self.captureState = 'idle'; }, 3000);
+          if (settled) return;
+          settled = true;
+          clearTimeout(deadline);
+          setTimeout(function () { if (!self._destroyed) self.captureState = 'idle'; }, 3000);
         },
 
         // ── Primer injection ─────────────────────────────────────────────
@@ -1010,7 +1024,18 @@ function designStudioPage() {
       if (state === 'working') return 'Queueing render';
       if (state === 'done') return 'Render queued';
       if (state === 'error') return 'Render failed';
+      if (!this.canRenderHere) {
+        return 'This dashboard host has no headless browser, so it cannot render a thumbnail. '
+          + 'The session that next pushes this design renders it, or run: '
+          + 'python -m tools.dashboard.design_thumbnails --remote https://localhost:8080';
+      }
       return 'Render thumbnail';
+    },
+
+    // False when the host renderer is unavailable: the button would only
+    // ever come back 503, so it is disabled and says why instead.
+    get canRenderHere() {
+      return (this.renderStatus || {}).available !== false;
     },
 
     renderDesignThumbnail: async function (design) {
@@ -1220,6 +1245,7 @@ function designStudioPage() {
     },
 
     isDesignActionBusy: function (design, action) {
+      if (action === 'render' && !this.canRenderHere) return true;
       return this.actionStates[this._designActionKey(design, action)] === 'working';
     },
 
