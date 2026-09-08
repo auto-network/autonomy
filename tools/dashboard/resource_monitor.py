@@ -352,7 +352,7 @@ class ResourceMonitor:
             try:
                 # Agentic actions are deliberately absent from interactive
                 # session lists but still need cgroup telemetry for Activity.
-                rows = get_live_sessions(include_agentic=True)
+                rows = await asyncio.to_thread(get_live_sessions, include_agentic=True)
                 await asyncio.to_thread(self._tick, rows, time.time())
                 # Push the latest samples (no history — the frontend keeps
                 # its own ring buffer by appending these) over the shared
@@ -597,7 +597,7 @@ class ResourceMonitor:
         """
         from tools.dashboard.dao.dashboard_db import get_session
         from tools.dashboard.session_lifecycle_worker import derive_lifecycle_state
-        row = get_session(tmux_name)
+        row = await asyncio.to_thread(get_session, tmux_name)
         if row is None or derive_lifecycle_state(row) in ("ENDED", "FAILED"):
             return None
         state = self._states.setdefault(tmux_name, _SessionState())

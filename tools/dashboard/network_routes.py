@@ -1989,7 +1989,7 @@ async def _post_serve_cert_v3(request: Request, body: dict) -> JSONResponse:
         return JSONResponse({"ok": False, "error": (
             f"private_key does not match the cert's delegate key: {e}"
         )}, status_code=400)
-    if _serve_child_used_by_another_local_org(cert.child_pub, org):
+    if await asyncio.to_thread(_serve_child_used_by_another_local_org, cert.child_pub, org):
         return JSONResponse({"ok": False, "error": (
             "serving child keys are organization-scoped and cannot be reused "
             "across local organizations"
@@ -2384,7 +2384,7 @@ async def post_serve_cert(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": (
             f"private_key does not match the cert's delegate key: {e}"
         )}, status_code=400)
-    if _serve_child_used_by_another_local_org(cert.child_pub, org):
+    if await asyncio.to_thread(_serve_child_used_by_another_local_org, cert.child_pub, org):
         return JSONResponse({"ok": False, "error": (
             "serving child keys are organization-scoped and cannot be reused "
             "across local organizations"
