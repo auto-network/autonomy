@@ -24,6 +24,10 @@ version trail in the store.
 """
 from __future__ import annotations
 
+from datetime import datetime
+import re
+from urllib.parse import urlsplit
+
 from tools.graph.schemas.registry import (
     append_only_log,
     publication_band,
@@ -53,6 +57,66 @@ ITEM_KINDS = (
 #: Per-kind state vocabularies. Stateless kinds carry the empty string.
 CHECKPOINT_STATES = ("confirmed", "in_progress", "pending")
 QUESTION_STATES = ("open", "answered")
+
+
+def safe_artifact_href(value: str) -> bool:
+    if not isinstance(value, str) or not value or len(value) > 2048:
+        return False
+    if re.search(r"[\x00-\x20\x7f\\]", value) or value.startswith("//"):
+        return False
+    try:
+        parsed = urlsplit(value)
+        if parsed.username or parsed.password:
+            return False
+        if parsed.scheme in ("http", "https"):
+            return bool(parsed.hostname)
+        if parsed.scheme == "graph":
+            return bool(re.fullmatch(r"graph://[a-zA-Z0-9-]+", value))
+        return not parsed.scheme and bool(re.match(
+            r"^/(?:design/|bead/|session/|mission/|api/session/[^/]+/output/)", value))
+    except ValueError:
+        return False
+
+
+def valid_iso(value: str) -> bool:
+    try:
+        return isinstance(value, str) and len(value) <= 64 and \
+            datetime.fromisoformat(value.replace("Z", "+00:00")).tzinfo is not None
+    except (ValueError, TypeError):
+        return False
+
+
+def validate_briefing(value: dict) -> None:
+    """A bounded display brief, never authority or a second task record."""
+    caps = {"subtitle": 240, "recommendation": 4000, "impact": 4000,
+            "generated_at": 64}
+    allowed = set(caps) | {"options", "artifacts", "source_refs"}
+    if not isinstance(value, dict) or set(value) - allowed:
+        raise SchemaValidationError("briefing contains unsupported fields")
+    for key, limit in caps.items():
+        if key in value and (not isinstance(value[key], str) or len(value[key]) > limit):
+            raise SchemaValidationError(f"briefing {key} exceeds its string bound")
+    if "generated_at" in value and not valid_iso(value["generated_at"]):
+        raise SchemaValidationError("briefing generated_at requires an ISO timestamp with timezone")
+    for key, count, fields, required in (
+        ("options", 8, {"label": 160, "consequence": 1000, "text": 4000}, {"label", "text"}),
+        ("artifacts", 12, {"label": 160, "href": 2048}, {"label", "href"}),
+    ):
+        entries = value.get(key, [])
+        if not isinstance(entries, list) or len(entries) > count:
+            raise SchemaValidationError(f"briefing {key} exceeds its list bound")
+        for entry in entries:
+            if not isinstance(entry, dict) or set(entry) - set(fields) or not required <= set(entry):
+                raise SchemaValidationError(f"briefing {key} entry has invalid fields")
+            if any(not isinstance(v, str) or len(v) > fields[k] for k, v in entry.items()):
+                raise SchemaValidationError(f"briefing {key} entry exceeds string bound")
+            if key == "artifacts" and not safe_artifact_href(entry["href"]):
+                raise SchemaValidationError("briefing artifact href is unsafe")
+    refs = value.get("source_refs", [])
+    if not isinstance(refs, list) or len(refs) > 40 or any(
+        not isinstance(v, str) or len(v) > 2048 for v in refs
+    ):
+        raise SchemaValidationError("briefing source_refs exceeds its bound")
 
 _ENTRY_ELEMENT = {
     "by": {"type": "string", "required": True,
@@ -161,6 +225,9 @@ class MissionContentV1(SettingSchema):
         default="",
         description="Supporting prose; markdown subset (headings, lists, "
                     "fences, links, graph://ids, images -> gallery)")
+    briefing: dict = field(
+        default_factory=dict,
+        description="Optional Ops subtitle, recommendation, impact, options and artifact links; display advice, not authority")
     order: float = field(
         default=0.0,
         description="Explicit pin within a tab; 0 defers to the tab's "
@@ -275,6 +342,10 @@ class MissionContentV1(SettingSchema):
         """Per-kind rules a field declaration cannot express."""
         super().validate(payload)
         kind = payload.get("kind")
+        if "briefing" in payload:
+            if kind not in ("question", "checkpoint", "status"):
+                raise SchemaValidationError("briefing belongs to question/checkpoint/status")
+            validate_briefing(payload["briefing"])
         state = payload.get("state", "")
         if kind == "checkpoint":
             if state not in CHECKPOINT_STATES:
