@@ -108,17 +108,40 @@
     this.shareState = 'idle'; // idle | requesting | awaiting | error
     this.shareError = '';
     this.approvalId = '';
-    this.open = false;
     this._pollTimer = null;
     this._destroyed = false;
     this._onClick = this._onClick.bind(this);
     this._onToggle = this._onToggle.bind(this);
+    this._onDocumentClick = this._onDocumentClick.bind(this);
+    this._onKeydown = this._onKeydown.bind(this);
     el.classList.add('asset-presence-host');
     el.addEventListener('click', this._onClick);
-    el.addEventListener('toggle', this._onToggle, true);
+    // The shell is built ONCE and never replaced. Re-creating the <details>
+    // on each render fired a fresh toggle event, whose handler refreshed,
+    // whose success re-rendered: an unbounded render/refresh loop that made
+    // every control in it unclickable (the button was destroyed mid-click).
+    this._buildShell();
+    document.addEventListener('click', this._onDocumentClick, true);
+    document.addEventListener('keydown', this._onKeydown);
     this.render();
     this.refresh();
   }
+
+  Control.prototype._buildShell = function () {
+    this.el.innerHTML = '<details class="design-topbar-presence design-viewer-presence" data-testid="asset-presence">'
+      + '<summary class="design-presence-pill"></summary>'
+      + '<div class="design-presence-menu" data-testid="asset-presence-menu"></div>'
+      + '</details>';
+    this.details = this.el.querySelector('details');
+    this.summary = this.el.querySelector('summary');
+    this.menu = this.el.querySelector('.design-presence-menu');
+    this.details.addEventListener('toggle', this._onToggle);
+  };
+
+  Object.defineProperty(Control.prototype, 'open', {
+    get: function () { return !!(this.details && this.details.open); },
+    set: function (value) { if (this.details) this.details.open = !!value; },
+  });
 
   Control.prototype.update = function (opts) {
     Object.assign(this.opts, opts || {});
@@ -129,8 +152,10 @@
     this._destroyed = true;
     this._stopPoll();
     this.el.removeEventListener('click', this._onClick);
-    this.el.removeEventListener('toggle', this._onToggle, true);
+    document.removeEventListener('click', this._onDocumentClick, true);
+    document.removeEventListener('keydown', this._onKeydown);
     this.el.innerHTML = '';
+    this.details = this.summary = this.menu = null;
   };
 
   Control.prototype.sessions = function () {
@@ -151,23 +176,26 @@
   };
 
   Control.prototype.render = function () {
+    if (this._destroyed || !this.summary) return;
     var sessions = this.sessions();
     var chat = this.opts.chat;
-    var wasOpen = this.open;
     var avatars = sessions.slice(0, 3).map(function (s) {
       return '<span class="design-presence-avatar' + (s.live ? ' is-live' : '') + '" title="' + esc(s.label + (s.live ? ' (live)' : '')) + '">' + esc(s.initial) + '</span>';
     }).join('');
     if (!sessions.length) avatars = '<span class="design-presence-avatar is-empty" title="No session has touched this yet">·</span>';
     var rows = sessions.map(function (s) {
-      var meta = (s.live ? 'live · ' : '') + (s.last_push ? 'last push ' + formatAgo(s.last_push) : 'no push recorded')
+      var meta = (s.live ? 'live · ' : '') + (s.last_push ? formatAgo(s.last_push) : 'no push recorded')
         + (s.count ? ' · ' + s.count + (s.count === 1 ? ' rev' : ' revs') : '');
-      return '<div class="design-presence-row' + (s.live ? ' is-live' : '') + '" data-testid="asset-presence-session" data-session="' + esc(s.id) + '">'
-        + '<span class="design-topbar-avatar is-row">' + esc(s.initial) + '</span>'
-        + '<a class="design-presence-copy" href="' + esc(s.href) + '" data-action="open-session"><strong>' + esc(s.label) + '</strong><span>' + esc(meta) + '</span></a>'
-        + (chat && s.live ? '<button type="button" class="design-presence-action" data-action="chat-with" title="Chat with ' + esc(s.label) + '" aria-label="Chat with ' + esc(s.label) + '">' + CHAT_SVG + '</button>' : '')
-        + '</div>';
+      return '<a class="design-presence-row" data-testid="asset-presence-session" data-session="' + esc(s.id) + '"'
+        + ' href="' + esc(s.href) + '" data-action="open-session" title="Open session ' + esc(s.label) + '">'
+        + '<span class="design-presence-avatar' + (s.live ? ' is-live' : '') + '">' + esc(s.initial) + '</span>'
+        + '<span class="design-presence-copy"><strong>' + esc(s.label) + '</strong><span>' + esc(meta) + '</span></span>'
+        + '</a>';
     }).join('');
     if (!rows) rows = '<div class="design-presence-empty">No session has touched this yet</div>';
+    // ONE chat action, named for what it will do. Connecting a particular
+    // session is the picker's job, so a per-row chat button (which read the
+    // same as this one) is deliberately not offered.
     var chatRow = '';
     if (chat) {
       var label = chat.open ? 'Close chat' : (chat.connected ? 'Open chat' : 'Chat with a session…');
@@ -177,7 +205,7 @@
     var grant = this.primaryGrant();
     if (this.share.shared && grant) {
       sharing = '<div class="design-presence-row is-share" data-testid="asset-share-row">'
-        + '<span class="design-topbar-avatar is-row is-share">↗</span>'
+        + '<span class="design-presence-avatar is-share">↗</span>'
         + '<span class="design-presence-copy"><strong>Shared by link</strong><span>' + esc(expiryText(grant)) + '</span></span>'
         + '<span class="design-presence-share-actions">'
         + '<button type="button" class="design-presence-action" data-action="share-link" title="Share link" aria-label="Share link">' + SHARE_SVG + '</button>'
@@ -198,25 +226,36 @@
     }
     var error = this.shareError ? '<div class="design-presence-note is-error">' + esc(this.shareError) + '</div>' : '';
     var title = esc(this.summaryTitle());
-    this.el.innerHTML = '<details class="design-topbar-presence design-viewer-presence' + (sessions.some(function (s) { return s.live; }) ? ' is-live' : '') + (wasOpen ? ' " open="open' : '') + '" data-testid="asset-presence">'
-      + '<summary class="design-presence-pill" title="' + title + '" aria-label="' + title + '">'
-      + '<span class="design-presence-stack">' + avatars + '</span>'
+    this.details.classList.toggle('is-live', sessions.some(function (s) { return s.live; }));
+    this.summary.setAttribute('title', title);
+    this.summary.setAttribute('aria-label', title);
+    this.summary.innerHTML = '<span class="design-presence-stack">' + avatars + '</span>'
       + (sessions.length > 3 ? '<span class="design-presence-count">+' + (sessions.length - 3) + '</span>' : '')
-      + (this.share.shared ? '<span class="design-presence-sharemark" title="Shared by link">↗</span>' : '')
-      + '</summary>'
-      + '<div class="design-presence-menu" data-testid="asset-presence-menu">'
-      + '<div class="design-presence-section">Sessions on this ' + esc(this.opts.noun || 'item') + '</div>'
+      + (this.share.shared ? '<span class="design-presence-sharemark" title="Shared by link">↗</span>' : '');
+    this.menu.innerHTML = '<div class="design-presence-section">Sessions on this ' + esc(this.opts.noun || 'item') + '</div>'
       + rows + chatRow
       + '<div class="design-presence-section">Sharing</div>'
-      + sharing + error
-      + '</div></details>';
+      + sharing + error;
   };
 
-  Control.prototype._onToggle = function (event) {
-    var details = event.target;
-    if (!details || details.tagName !== 'DETAILS') return;
-    this.open = !!details.open;
+  Control.prototype._onToggle = function () {
+    // Safe now that render() fills the shell instead of replacing it: this
+    // fires only on a real open/close, never as a side effect of rendering.
     if (this.open) this.refresh();
+  };
+
+  // A <details> does not close on an outside click or Escape; every other
+  // menu on the dashboard does, so this one must too.
+  Control.prototype._onDocumentClick = function (event) {
+    if (this._destroyed || !this.open) return;
+    if (this.el.contains(event.target)) return;
+    this.open = false;
+  };
+
+  Control.prototype._onKeydown = function (event) {
+    if (this._destroyed || !this.open || event.key !== 'Escape') return;
+    this.open = false;
+    if (this.summary && this.summary.focus) this.summary.focus();
   };
 
   Control.prototype._onClick = function (event) {
@@ -262,12 +301,15 @@
       if (this._destroyed || !res.ok) return;
       var data = await res.json();
       if (this._destroyed) return;
-      this.share = data && typeof data === 'object' ? { shared: !!data.shared, grants: data.grants || [] } : this.share;
+      var next = data && typeof data === 'object' ? { shared: !!data.shared, grants: data.grants || [] } : this.share;
+      var changed = JSON.stringify(next) !== JSON.stringify(this.share);
+      this.share = next;
       if (this.share.shared && this.shareState === 'awaiting') {
         this.shareState = 'idle';
         this._stopPoll();
+        changed = true;
       }
-      this.render();
+      if (changed) this.render();
     } catch (e) { /* keep the last known state */ }
   };
 
