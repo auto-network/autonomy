@@ -21,8 +21,11 @@ from tools.network.fleet_sync.sweep_receive import (
     resume_cursor,
 )
 
-SOURCE_ORIGIN = "machine-source"
-TARGET_ORIGIN = "machine-target"
+# Origin incarnations are 64 hex characters. A readable placeholder passes
+# the merge, which never parses them, but fails wire validation -- so a
+# fixture built on one exercises a different path than production does.
+SOURCE_ORIGIN = "a1" * 32
+TARGET_ORIGIN = "b2" * 32
 WIDE = 1 << 40
 
 
@@ -33,6 +36,15 @@ def _insert_source(conn: sqlite3.Connection, identity: str, title: str) -> None:
         (identity, "note", title, "{}", "2026-08-19T00:00:00Z",
          "2026-08-19T00:00:00Z"),
     )
+
+
+def _anchored(db, frontier=None) -> None:
+    """Record a bootstrap so swept rows may be applied.
+
+    Every apply_live_page caller needs this now: a store may not hold swept
+    rows without recording the frontier they were taken against.
+    """
+    begin_bootstrap(db.conn, frontier or {SOURCE_ORIGIN: WIDE})
 
 
 def _store(path: Path, origin: str) -> tuple[GraphDB, MutationCatalog]:
@@ -57,6 +69,7 @@ def test_swept_page_applies_through_the_existing_merge(tmp_path: Path) -> None:
     the existing merge accepts them, provenance intact."""
     source, _ = _seeded_source(tmp_path / "source.db")
     target, target_catalog = _store(tmp_path / "target.db", TARGET_ORIGIN)
+    _anchored(target)
     try:
         page = read_live_authored_page(
             source.conn, frontier={SOURCE_ORIGIN: WIDE},
@@ -91,6 +104,7 @@ def test_reapplying_a_page_is_inert(tmp_path: Path) -> None:
     """Resume re-delivers rows across a restart; they must merge inert."""
     source, _ = _seeded_source(tmp_path / "source.db", count=3)
     target, target_catalog = _store(tmp_path / "target.db", TARGET_ORIGIN)
+    _anchored(target)
     try:
         page = read_live_authored_page(
             source.conn, frontier={SOURCE_ORIGIN: WIDE},
@@ -282,6 +296,7 @@ def test_commits_are_contiguous_address_prefixes_not_transaction_major(
     a contiguous prefix, so the furthest row implies all earlier ones."""
     source, source_catalog = _store(tmp_path / "source.db", SOURCE_ORIGIN)
     target, target_catalog = _store(tmp_path / "target.db", TARGET_ORIGIN)
+    _anchored(target)
     try:
         # Interleave two transactions across canonical address order: tx1
         # owns the outer addresses, tx2 the middle one. Local writes must
@@ -329,6 +344,7 @@ def test_crash_mid_page_leaves_a_resumable_prefix(tmp_path: Path) -> None:
     """
     source, source_catalog = _store(tmp_path / "source.db", SOURCE_ORIGIN)
     target, target_catalog = _store(tmp_path / "target.db", TARGET_ORIGIN)
+    _anchored(target)
     try:
         # Interleave two transactions across canonical address order: tx1
         # owns the outer addresses, tx2 the middle one. Local writes must
@@ -428,6 +444,7 @@ def test_oversize_page_applies_nothing(tmp_path: Path) -> None:
 
     source, _ = _seeded_source(tmp_path / "source.db", count=3)
     target, target_catalog = _store(tmp_path / "target.db", TARGET_ORIGIN)
+    _anchored(target)
     try:
         page = read_live_authored_page(
             source.conn, frontier={SOURCE_ORIGIN: WIDE},
@@ -499,3 +516,152 @@ def test_bootstrap_table_is_classified_local_and_survives_reopen(
         assert read_bootstrap(reopened.conn).phase is Phase.SWEEPING
     finally:
         reopened.close()
+
+
+# ── sweep.begin: the shared validator, and applying without it ───────────
+
+def _begin_record(frontier, *, scope="personal", source=SOURCE_ORIGIN, v=None):
+    from tools.network.fleet_sync.sweep_receive import (
+        SWEEP_BEGIN_KIND, SWEEP_PROTOCOL_VERSION,
+    )
+    return {
+        "v": SWEEP_PROTOCOL_VERSION if v is None else v,
+        "kind": SWEEP_BEGIN_KIND,
+        "scope": scope,
+        "source_machine_pub": source,
+        "frontier": frontier,
+    }
+
+
+def test_applying_before_the_frontier_is_recorded_is_refused(
+    tmp_path: Path,
+) -> None:
+    """A store must not hold swept rows without recording where they came from.
+    F is not derivable from the receiving database, so a crash would leave it
+    unable to know which frontier its partial copy was taken against."""
+    from tools.network.fleet_sync.sweep_receive import BootstrapNotRecorded
+
+    source, _ = _seeded_source(tmp_path / "source.db", count=3)
+    target, target_catalog = _store(tmp_path / "target.db", TARGET_ORIGIN)
+    try:
+        page = read_live_authored_page(
+            source.conn, frontier={SOURCE_ORIGIN: WIDE},
+            max_records=100, max_bytes=1 << 20,
+        )
+        assert page.records
+        with pytest.raises(BootstrapNotRecorded):
+            apply_live_page(target_catalog, page.records)
+        assert target.conn.execute(
+            "SELECT COUNT(*) FROM sources"
+        ).fetchone()[0] == 0, "rows landed without a recorded frontier"
+    finally:
+        source.close()
+        target.close()
+
+
+def test_sweep_begin_persists_the_frontier_before_any_apply(
+    tmp_path: Path,
+) -> None:
+    from tools.network.fleet_sync.sweep_receive import handle_sweep_begin
+
+    source, _ = _seeded_source(tmp_path / "source.db", count=3)
+    target, target_catalog = _store(tmp_path / "target.db", TARGET_ORIGIN)
+    try:
+        state = handle_sweep_begin(
+            target.conn, _begin_record({SOURCE_ORIGIN: 10}),
+            expected_scope="personal", expected_source_pub=SOURCE_ORIGIN,
+        )
+        assert state.phase is Phase.SWEEPING
+        assert state.frontier == {SOURCE_ORIGIN: 10}
+
+        page = read_live_authored_page(
+            source.conn, frontier={SOURCE_ORIGIN: WIDE},
+            max_records=100, max_bytes=1 << 20,
+        )
+        assert apply_live_page(target_catalog, page.records).applied == 3
+    finally:
+        source.close()
+        target.close()
+
+
+@pytest.mark.parametrize("mutate,why", [
+    ({"kind": "sweep.end"}, "wrong kind"),
+    ({"v": 4}, "a v4 record cannot anchor a v5 sweep"),
+    ({"source_machine_pub": "c3" * 32}, "source is not the authenticated peer"),
+    ({"scope": "other"}, "scope is not the requested one"),
+    ({"frontier": []}, "frontier is not a mapping"),
+    ({"frontier": {"not-hex": 10}}, "origin malformed"),
+    ({"frontier": {SOURCE_ORIGIN: -1}}, "negative timestamp"),
+    ({"frontier": {SOURCE_ORIGIN: "10"}}, "non-integer timestamp"),
+    ({"frontier": {SOURCE_ORIGIN: True}}, "bool is not a timestamp"),
+])
+def test_malformed_sweep_begin_anchors_nothing(
+    tmp_path: Path, mutate: dict, why: str
+) -> None:
+    """Every check runs before anything is written: a rejected record must
+    leave no bootstrap row, so a later valid one still anchors correctly."""
+    from tools.network.fleet_sync.sweep_receive import (
+        SweepBeginInvalid, handle_sweep_begin,
+    )
+
+    db, _ = _store(tmp_path / "target.db", TARGET_ORIGIN)
+    try:
+        record = _begin_record({SOURCE_ORIGIN: 10})
+        record.update(mutate)
+        with pytest.raises(SweepBeginInvalid):
+            handle_sweep_begin(
+                db.conn, record,
+                expected_scope="personal", expected_source_pub=SOURCE_ORIGIN,
+            )
+        assert read_bootstrap(db.conn) is None, f"{why}: it anchored anyway"
+    finally:
+        db.close()
+
+
+def test_frontier_is_bounded(tmp_path: Path) -> None:
+    """A hostile or corrupt record must not make the receiver allocate."""
+    from tools.network.fleet_sync.sweep_receive import (
+        MAX_FRONTIER_ORIGINS, SweepBeginInvalid, handle_sweep_begin,
+    )
+
+    db, _ = _store(tmp_path / "target.db", TARGET_ORIGIN)
+    try:
+        huge = {f"{i:064x}": 1 for i in range(MAX_FRONTIER_ORIGINS + 1)}
+        with pytest.raises(SweepBeginInvalid):
+            handle_sweep_begin(
+                db.conn, _begin_record(huge),
+                expected_scope="personal", expected_source_pub=SOURCE_ORIGIN,
+            )
+        assert read_bootstrap(db.conn) is None
+    finally:
+        db.close()
+
+
+def test_resume_keeps_the_original_frontier(tmp_path: Path) -> None:
+    """F is immutable across a resume. Re-anchoring would move the partition
+    boundary and strand every key between the old frontier and the new."""
+    from tools.network.fleet_sync.sweep_receive import (
+        BootstrapPhaseError, handle_sweep_begin,
+    )
+
+    db, _ = _store(tmp_path / "target.db", TARGET_ORIGIN)
+    try:
+        handle_sweep_begin(
+            db.conn, _begin_record({SOURCE_ORIGIN: 10}),
+            expected_scope="personal", expected_source_pub=SOURCE_ORIGIN,
+        )
+        # Same F on resume is idempotent.
+        again = handle_sweep_begin(
+            db.conn, _begin_record({SOURCE_ORIGIN: 10}),
+            expected_scope="personal", expected_source_pub=SOURCE_ORIGIN,
+        )
+        assert again.frontier == {SOURCE_ORIGIN: 10}
+        # A different F is refused outright.
+        with pytest.raises(BootstrapPhaseError):
+            handle_sweep_begin(
+                db.conn, _begin_record({SOURCE_ORIGIN: 99}),
+                expected_scope="personal", expected_source_pub=SOURCE_ORIGIN,
+            )
+        assert read_bootstrap(db.conn).frontier == {SOURCE_ORIGIN: 10}
+    finally:
+        db.close()

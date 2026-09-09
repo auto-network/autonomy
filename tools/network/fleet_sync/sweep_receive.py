@@ -41,6 +41,12 @@ from .compaction import AuthoredMutation
 from .policies import PolicyKind, TABLE_POLICIES
 from .streaming import BASE_TABLE_ORDER, _key_expressions
 
+#: Protocol version at which a peer is asking for, and can handle, a
+#: keyspace sweep. A v3/v4 peer neither requests nor receives one: their
+#: decoder rejects unknown fields outright, so "additive and ignored" is
+#: not available and silence is the only safe treatment.
+SWEEP_PROTOCOL_VERSION = 5
+
 
 class BootstrapError(Exception):
     """Base for typed bootstrap-state failures."""
@@ -60,6 +66,21 @@ class CallerTransactionActive(BootstrapError):
 
 class PageTooLarge(BootstrapError):
     """A page exceeds the record or encoded-byte bound, so none of it is applied."""
+
+
+class SweepBeginInvalid(BootstrapError):
+    """A sweep.begin control record was absent, malformed, or not this peer's."""
+
+
+class BootstrapNotRecorded(BootstrapError):
+    """Swept rows were offered to a store that has not recorded where they came from.
+
+    ``F`` is not derivable from the receiving database. A store holding swept
+    rows without it cannot know, after a restart, which frontier the partial
+    copy was taken against -- and choosing a new one strands every key between
+    the old frontier and the new. Refusing is what makes that state
+    unreachable rather than merely discouraged.
+    """
 
 
 def _require_no_caller_transaction(conn: sqlite3.Connection) -> None:
@@ -99,6 +120,15 @@ class AppliedPage:
     #: transaction whose rows are not adjacent yields one run per stretch.
     groups: int
 
+
+#: Wire kind carrying the serving store's frontier, once, before any page.
+SWEEP_BEGIN_KIND = "sweep.begin"
+#: Wire kind closing the sweep. Not completion -- the PULL half still owes.
+SWEEP_END_KIND = "sweep.end"
+
+#: A frontier names one entry per origin the serving store knows. Bounded so a
+#: malformed or hostile record cannot make the receiver allocate without limit.
+MAX_FRONTIER_ORIGINS = 4096
 
 _TABLE = """
     CREATE TABLE IF NOT EXISTS fleet_sync_bootstrap(
@@ -245,6 +275,12 @@ def apply_live_page(
     adjacent is applied in several calls, which is already permitted -- partial
     transactions are why the frontier gate exists.
     """
+    if read_bootstrap(catalog.conn) is None:
+        raise BootstrapNotRecorded(
+            "cannot apply a swept page before begin_bootstrap has recorded "
+            "the frontier this sweep is anchored to"
+        )
+
     runs: list[list[AuthoredMutation]] = []
     identity: tuple[str, str, int] | None = None
     count = 0
@@ -318,3 +354,84 @@ def resume_cursor(
         if row is not None:
             return table, tuple(row)
     return None
+
+
+def _hex64(value: object) -> bool:
+    return (
+        isinstance(value, str) and len(value) == 64
+        and all(ch in "0123456789abcdef" for ch in value)
+    )
+
+
+def handle_sweep_begin(
+    conn: sqlite3.Connection,
+    record: Mapping[str, Any],
+    *,
+    expected_scope: str,
+    expected_source_pub: str,
+) -> BootstrapState:
+    """Validate one ``sweep.begin`` and persist its frontier. ONE implementation.
+
+    Both the direct and relay receivers call this. Parsing a control record
+    that decides what a store believes about its own coverage is not something
+    to write twice -- two copies drift, and the drift is silent until a store
+    holds rows under a frontier it never agreed to.
+
+    Everything is checked before anything is written:
+
+    * the record is this kind, at the sweep-capable protocol version;
+    * its source is the peer the transport actually authenticated, and its
+      scope is the scope that was asked for -- a record from elsewhere never
+      anchors this store;
+    * the frontier is a bounded map of origin incarnation to a non-negative
+      timestamp, so a malformed or hostile record cannot allocate without
+      limit or poison the partition boundary with a negative or non-integer.
+
+    Persistence is delegated to ``begin_bootstrap``, which already refuses a
+    second, different frontier. A resume therefore keeps the ``F`` it started
+    with: re-anchoring mid-sweep would move the partition boundary and strand
+    every key between the old frontier and the new.
+    """
+    if not isinstance(record, Mapping):
+        raise SweepBeginInvalid("sweep.begin must be a mapping")
+    if record.get("kind") != SWEEP_BEGIN_KIND:
+        raise SweepBeginInvalid(
+            f"expected {SWEEP_BEGIN_KIND!r}, got {record.get('kind')!r}"
+        )
+    if record.get("v") != SWEEP_PROTOCOL_VERSION:
+        raise SweepBeginInvalid(
+            f"sweep.begin requires protocol v{SWEEP_PROTOCOL_VERSION}, "
+            f"got {record.get('v')!r}"
+        )
+    source = record.get("source_machine_pub")
+    if source != expected_source_pub:
+        raise SweepBeginInvalid(
+            "sweep.begin source is not the authenticated peer"
+        )
+    scope = record.get("scope")
+    if scope != expected_scope:
+        raise SweepBeginInvalid(
+            f"sweep.begin scope {scope!r} is not the requested {expected_scope!r}"
+        )
+    frontier = record.get("frontier")
+    if not isinstance(frontier, Mapping):
+        raise SweepBeginInvalid("sweep.begin frontier must be a mapping")
+    if len(frontier) > MAX_FRONTIER_ORIGINS:
+        raise SweepBeginInvalid(
+            f"sweep.begin frontier names {len(frontier)} origins, "
+            f"bound is {MAX_FRONTIER_ORIGINS}"
+        )
+    captured: dict[str, int] = {}
+    for origin, timestamp in frontier.items():
+        if not _hex64(origin):
+            raise SweepBeginInvalid("sweep.begin frontier origin is malformed")
+        if isinstance(timestamp, bool) or not isinstance(timestamp, int):
+            raise SweepBeginInvalid(
+                "sweep.begin frontier timestamp must be an integer"
+            )
+        if timestamp < 0:
+            raise SweepBeginInvalid(
+                "sweep.begin frontier timestamp must not be negative"
+            )
+        captured[origin] = timestamp
+    return begin_bootstrap(conn, captured)
