@@ -171,7 +171,7 @@ class TestFleetPluginL2B:
         result = _navigate_and_check(
             "/fleet",
             """
-            r.rows = Array.from(document.querySelectorAll('.fleet-machine')).map(function(row) {
+            r.rows = Array.from(document.querySelectorAll('[data-row-kind]')).map(function(row) {
               return {kind: row.dataset.rowKind, standing: row.dataset.standing,
                       visible: row.offsetParent !== null};
             });
@@ -213,8 +213,7 @@ class TestFleetPluginL2B:
             "/fleet",
             """
             r.text = document.querySelector('[data-testid="fleet-fragment-root"]').innerText;
-            r.invite = document.querySelector('.fleet-invite-code').innerText;
-            r.verdict = document.querySelector('.fleet-verdict').innerText;
+            r.invite = document.querySelector('.invitation-code').innerText;
             r.source_ids_visible = r.text.indexOf('fleet-one') !== -1
               || r.text.indexOf('fleet-two') !== -1
               || r.text.indexOf('fleet-three') !== -1;
@@ -222,5 +221,8 @@ class TestFleetPluginL2B:
             wait_ms=300,
         )
         assert result["invite"] == VIEW["invitation"]["url"]
-        assert "1 machine" in result["verdict"]
+        # The fleet-wide "N machines" verdict line is gone: the approved design
+        # answers "is my fleet converged" with the Sync activity block and the
+        # per-machine status word instead of a header count. Nothing replaced
+        # it, so there is no element to re-point this at.
         assert result["source_ids_visible"] is False
