@@ -1338,10 +1338,12 @@ async def pull_checkpoint_once(
         # server sends only what is missing and never this machine's own
         # writes (graph://1155b8f4-8cf). Empty on a brand-new store.
         try:
+            # Same shared gate as the direct transport: an incomplete
+            # bootstrap publishes nothing. Not reimplemented here.
             watermarks = await asyncio.to_thread(
                 lambda: _scoped_store(
                     scope, credential.machine_pub
-                ).origin_watermarks()
+                ).advertisable_origin_watermarks()
             )
         except Exception:
             watermarks = {}
