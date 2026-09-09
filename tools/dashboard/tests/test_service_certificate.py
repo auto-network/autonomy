@@ -344,11 +344,18 @@ def test_a_legacy_machine_row_is_promoted_so_other_machines_can_see_it(
     machine that could no longer see its own certificate would issue a
     duplicate. The legacy row is therefore read AND promoted, making the move
     self-healing and one-way."""
-    def _read(_set_id, key, *, org=None, peers=None):
-        return None if org is None else {"payload": _record(serial="cd")}
-
+    # Stubbed at `_legacy_machine_rows`, NOT at read_set_key(org="machine").
+    # The earlier version of this test stubbed the latter and passed while
+    # production returned None for all three real identities: settings_ops
+    # DISCARDS org="machine" once the set declares a personal home, so that
+    # call never reached the machine store at all. The test encoded the same
+    # false assumption as the code, so it could not fail.
     writes = []
-    monkeypatch.setattr(certs.settings_ops, "read_set_key", _read)
+    monkeypatch.setattr(
+        certs.settings_ops, "read_set_key", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        certs, "_legacy_machine_rows",
+        lambda: {"autonomy:autonomy.taplink.net": _record(serial="cd")})
     monkeypatch.setattr(
         certs.settings_ops, "write_by_key",
         lambda *a, **kw: writes.append({"org": kw.get("org"), "payload": a[3]}))
@@ -365,13 +372,14 @@ def test_a_failed_promotion_still_serves_this_machine(monkeypatch):
     """Promotion is best-effort. If it fails this machine must still get its
     certificate — degrading sharing is acceptable, dropping a certificate this
     machine already holds is not."""
-    def _read(_set_id, key, *, org=None, peers=None):
-        return None if org is None else {"payload": _record(serial="ef")}
-
     def _explode(*_a, **_kw):
         raise RuntimeError("fleet store unavailable")
 
-    monkeypatch.setattr(certs.settings_ops, "read_set_key", _read)
+    monkeypatch.setattr(
+        certs.settings_ops, "read_set_key", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        certs, "_legacy_machine_rows",
+        lambda: {"autonomy:x.example.com": _record(serial="ef")})
     monkeypatch.setattr(certs.settings_ops, "write_by_key", _explode)
 
     assert certs.certificate_metadata("autonomy", "x.example.com")["serial"] == "ef"
@@ -385,3 +393,31 @@ def test_no_record_anywhere_still_returns_none(monkeypatch):
         lambda *a, **kw: None)
 
     assert certs.certificate_metadata("autonomy", "new.example.com") is None
+
+
+def test_the_legacy_read_does_not_go_through_the_redirected_api(monkeypatch):
+    """THE TEST THAT WOULD HAVE CAUGHT IT, and did not exist.
+
+    `settings_ops._open_read` resolves the store through the schema's declared
+    home: `if home in ("personal", "machine"): org = home`. Once this set
+    declared `personal`, `read_set_key(..., org="machine")` was SILENTLY
+    redirected to the personal store — so the legacy fallback read the wrong
+    database, found nothing, and returned None with no error. Three intact
+    machine rows, zero promotions, and every unit test green, because the
+    tests stubbed the same call the code wrongly relied on.
+
+    So this asserts the shape rather than the value: the legacy path must not
+    depend on an `org=` argument the substrate is free to discard. If someone
+    reintroduces `read_set_key(org="machine")` here, this fails.
+    """
+    seen = []
+    monkeypatch.setattr(
+        certs.settings_ops, "read_set_key",
+        lambda *a, **kw: seen.append(kw.get("org")) or None)
+    monkeypatch.setattr(certs, "_legacy_machine_rows", lambda: {})
+
+    assert certs.certificate_metadata("autonomy", "autonomy.taplink.net") is None
+    assert "machine" not in seen, (
+        "the legacy read must not pass org='machine' to a resolver that "
+        "discards it — that argument is why the migration silently did nothing"
+    )
