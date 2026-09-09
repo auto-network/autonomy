@@ -219,15 +219,25 @@ def test_completion_without_a_bootstrap_is_typed(tmp_path: Path) -> None:
 
 
 def test_frontier_is_captured_once_and_never_advanced(tmp_path: Path) -> None:
-    """Re-anchoring mid-bootstrap would move the partition boundary and strand
-    every key between the old and new F."""
+    """F NEVER advances, whoever offers what.
+
+    Re-anchoring mid-bootstrap would move the partition boundary and strand
+    every key between the old and new F. A dominating source may continue the
+    sweep (see the source-switch controls below) but even then F is kept; a
+    source that cannot cover F is refused outright.
+    """
     db, _ = _store(tmp_path / "target.db", TARGET_ORIGIN)
     try:
         begin_bootstrap(db.conn, {SOURCE_ORIGIN: 10})
         again = begin_bootstrap(db.conn, {SOURCE_ORIGIN: 10})
         assert again.phase is Phase.SWEEPING, "idempotent for the same F"
+        # Further along: allowed to continue, but F is unmoved.
+        ahead = begin_bootstrap(db.conn, {SOURCE_ORIGIN: 99})
+        assert ahead.frontier == {SOURCE_ORIGIN: 10}, "F must never advance"
+        # Behind F: cannot serve the <= F half, refused.
         with pytest.raises(BootstrapPhaseError):
-            begin_bootstrap(db.conn, {SOURCE_ORIGIN: 99})
+            begin_bootstrap(db.conn, {SOURCE_ORIGIN: 9})
+        assert read_bootstrap(db.conn).frontier == {SOURCE_ORIGIN: 10}
     finally:
         db.close()
 
@@ -675,6 +685,68 @@ def test_frontier_is_bounded(tmp_path: Path) -> None:
         db.close()
 
 
+def test_a_dominating_source_may_continue_the_sweep_keeping_f(
+    tmp_path: Path,
+) -> None:
+    """A joiner interrupted mid-sweep may resume against a DIFFERENT machine.
+
+    The new source announces its own frontier. If it covers every origin at or
+    above the original F it can still serve the whole `<= F` half, so the
+    switch is allowed -- but F is KEPT. Adopting the new, higher frontier would
+    move the partition boundary and strand every key between the two.
+    """
+    db, _ = _store(tmp_path / "target.db", TARGET_ORIGIN)
+    try:
+        begin_bootstrap(db.conn, {SOURCE_ORIGIN: 10, TARGET_ORIGIN: 5})
+        # Source B is further along on every origin in F.
+        state = begin_bootstrap(db.conn, {SOURCE_ORIGIN: 40, TARGET_ORIGIN: 5})
+        assert state.frontier == {SOURCE_ORIGIN: 10, TARGET_ORIGIN: 5}, (
+            "the switch must keep the ORIGINAL F, not adopt the new one"
+        )
+        assert read_bootstrap(db.conn).frontier == {
+            SOURCE_ORIGIN: 10, TARGET_ORIGIN: 5,
+        }
+    finally:
+        db.close()
+
+
+def test_a_source_behind_f_on_any_origin_cannot_continue(
+    tmp_path: Path,
+) -> None:
+    """Dominance is per-origin and total: ahead on one origin does not buy
+    being behind on another. Such a source cannot serve the whole `<= F` half,
+    so it is refused rather than silently leaving a hole."""
+    db, _ = _store(tmp_path / "target.db", TARGET_ORIGIN)
+    try:
+        begin_bootstrap(db.conn, {SOURCE_ORIGIN: 10, TARGET_ORIGIN: 20})
+        with pytest.raises(BootstrapPhaseError):
+            begin_bootstrap(db.conn, {SOURCE_ORIGIN: 99, TARGET_ORIGIN: 19})
+        assert read_bootstrap(db.conn).frontier == {
+            SOURCE_ORIGIN: 10, TARGET_ORIGIN: 20,
+        }
+    finally:
+        db.close()
+
+
+def test_a_source_missing_an_origin_entirely_cannot_continue(
+    tmp_path: Path,
+) -> None:
+    """An origin absent from the offered frontier is a source that cannot
+    serve that origin at all -- not one at position zero. Treating absence as
+    zero would admit a source guaranteed to leave that origin's keys missing.
+    """
+    db, _ = _store(tmp_path / "target.db", TARGET_ORIGIN)
+    try:
+        begin_bootstrap(db.conn, {SOURCE_ORIGIN: 10, TARGET_ORIGIN: 5})
+        with pytest.raises(BootstrapPhaseError):
+            begin_bootstrap(db.conn, {SOURCE_ORIGIN: 99})
+        assert read_bootstrap(db.conn).frontier == {
+            SOURCE_ORIGIN: 10, TARGET_ORIGIN: 5,
+        }
+    finally:
+        db.close()
+
+
 def test_resume_keeps_the_original_frontier(tmp_path: Path) -> None:
     """F is immutable across a resume. Re-anchoring would move the partition
     boundary and strand every key between the old frontier and the new."""
@@ -694,12 +766,18 @@ def test_resume_keeps_the_original_frontier(tmp_path: Path) -> None:
             expected_scope="personal", expected_source_pub=SOURCE_ORIGIN,
         )
         assert again.frontier == {SOURCE_ORIGIN: 10}
-        # A different F is refused outright.
+        # A frontier that cannot cover F is refused outright.
         with pytest.raises(BootstrapPhaseError):
             handle_sweep_begin(
-                db.conn, _begin_record({SOURCE_ORIGIN: 99}),
+                db.conn, _begin_record({SOURCE_ORIGIN: 9}),
                 expected_scope="personal", expected_source_pub=SOURCE_ORIGIN,
             )
+        # One that dominates may continue, and still does not move F.
+        ahead = handle_sweep_begin(
+            db.conn, _begin_record({SOURCE_ORIGIN: 99}),
+            expected_scope="personal", expected_source_pub=SOURCE_ORIGIN,
+        )
+        assert ahead.frontier == {SOURCE_ORIGIN: 10}
         assert read_bootstrap(db.conn).frontier == {SOURCE_ORIGIN: 10}
     finally:
         db.close()

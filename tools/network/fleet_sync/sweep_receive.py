@@ -167,6 +167,21 @@ def _table_present(conn: sqlite3.Connection) -> bool:
     ).fetchone() is not None
 
 
+def _dominates(offered: Mapping[str, int], original: Mapping[str, int]) -> bool:
+    """Whether *offered* can serve everything at or below *original*.
+
+    Per-origin: a continuing source must hold each origin's writes at least as
+    far as the original F did. An origin absent from *offered* is not treated
+    as zero -- it is a source that cannot serve that origin at all, which is
+    exactly the case the condition exists to reject. Origins the offered
+    frontier has BEYOND F are irrelevant: those keys are above the partition
+    boundary and belong to the delta half.
+    """
+    for origin, floor in original.items():
+        if int(offered.get(origin, -1)) < int(floor):
+            return False
+    return True
+
 def begin_bootstrap(
     conn: sqlite3.Connection, frontier: Mapping[str, int]
 ) -> BootstrapState:
@@ -181,10 +196,21 @@ def begin_bootstrap(
     existing = read_bootstrap(conn)
     if existing is not None:
         if existing.frontier != captured:
-            raise BootstrapPhaseError(
-                "a bootstrap is already in progress under a different "
-                "frontier; F is captured once and never advanced"
-            )
+            # A CONTINUING SOURCE, not a re-anchor. A joiner interrupted
+            # mid-sweep may resume against a different machine, which
+            # announces its OWN frontier. That is legitimate only if the new
+            # source can still serve everything at or below the original F --
+            # the per-origin dominance condition W_B >= F. When it holds the
+            # switch is accepted and F is KEPT: the partition boundary must
+            # not move, or every key between the old and new frontier is
+            # stranded. When it does not hold the new source cannot complete
+            # the sweep this store started, so it is refused.
+            if not _dominates(captured, existing.frontier):
+                raise BootstrapPhaseError(
+                    "a bootstrap is already in progress and the offered "
+                    "frontier does not dominate it; a continuing source must "
+                    "cover every origin at or above F"
+                )
         return existing
     conn.execute(
         "INSERT INTO fleet_sync_bootstrap(singleton,phase,frontier) "
