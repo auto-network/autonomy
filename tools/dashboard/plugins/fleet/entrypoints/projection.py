@@ -422,6 +422,26 @@ def _admission_row(
     }
 
 
+def _organizations(traffic_rows, machines) -> list[dict]:
+    """Visual identity for every scope this view mentions.
+
+    The by-organization table renders a name and an icon per row, so a scope
+    that appears in the data and not here would render as a blank label. The
+    set is taken from the data itself rather than from the org directory, so
+    the two can never disagree: every scope shown has an identity, and no
+    identity is shipped for a scope nothing references.
+    """
+    from tools.dashboard.org_identity import resolve_org_identity
+
+    slugs = {row.get("scope") for row in traffic_rows}
+    for machine in machines:
+        slugs.update(scope.get("scope") for scope in machine.get("scopes") or [])
+    return [
+        resolve_org_identity(slug)
+        for slug in sorted(slug for slug in slugs if slug)
+    ]
+
+
 def project(inputs: ProjectionInputs) -> dict:
     active: dict[str, fleet_roster.RosterEntry] = {}
     if inputs.root_pub is not None:
@@ -605,6 +625,7 @@ def project(inputs: ProjectionInputs) -> dict:
         # stamp equals the epoch it is drawing, so a row written by an older
         # build cannot present stale slots as live.
         "trafficHistory": [dict(row) for row in inputs.traffic_rows],
+        "organizations": _organizations(inputs.traffic_rows, roster_rows),
         "invitation": invitation_view,
         "activity": {
             "transactionsApplied": sum(row["transactionsApplied"] for row in roster_rows),
