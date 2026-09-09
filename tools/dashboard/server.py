@@ -17795,6 +17795,29 @@ async def api_graph_setting_create(request):
             {"error": f"missing fields: {missing}"}, status_code=400,
         )
     org = api_auth.organization_scope_from_request(request)
+    # A PINNED HOME IS THE DESTINATION, even when the request carries an org.
+    #
+    # This is the one write path whose org is AMBIENT — it comes from the page
+    # the browser happens to be on (X-Graph-Org), not from a caller choosing a
+    # store. For a set that declares a single home there is no choice to make,
+    # and `_assert_home` refuses the mismatch rather than routing it, so an
+    # org-scoped page writing a machine-homed set gets a 400. The read side
+    # already resolves this exact way (`_open_read`: a home that names one
+    # database wins over the org asked for); this makes the write agree.
+    #
+    # Found while machine-homing `dashboard.session.upload` (auto-wilkh): every
+    # upload posted from an org-scoped viewer would have failed. Library callers
+    # are unaffected — they name their org deliberately.
+    from tools.graph import schemas as _schemas
+    _pinned = _schemas.declared_home(body["set_id"])
+    # `None` here must stay a LITERAL None ("scopeless explicit", which is the
+    # personal store at this layer) and must not fall through to CALLER_ORG
+    # below, which would consult the ambient cascade and land back on a slug.
+    write_org: object = org or graph_ops.CALLER_ORG
+    if _pinned == "machine":
+        org = write_org = "machine"
+    elif _pinned == "personal":
+        org = write_org = None
     if os.environ.get("DASHBOARD_MOCK"):
         from tools.dashboard.dao import mock as dao_mock
         sid = dao_mock.add_setting_member(
@@ -17837,7 +17860,7 @@ async def api_graph_setting_create(request):
             body["key"],
             body["payload"],
             state=body.get("state", "raw"),
-            org=org or graph_ops.CALLER_ORG,
+            org=write_org,
             vault_policy_class_id=body.get("vault_policy_class_id"),
         )
     except SchemaValidationError as e:
