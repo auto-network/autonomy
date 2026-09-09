@@ -87,3 +87,59 @@ export function makeCeremony({
     }
   };
 }
+
+/* The same ceremony, opened through the STANDARD root control.
+ *
+ * :func:`makeCeremony` above takes a passphrase, which is right for a caller
+ * that already collected one. The join page must not: constraint I1 forbids a
+ * password field on it, and a passphrase box assumes one factor when an
+ * identity may be opened by a passkey or a recovery code instead. ``openRoot``
+ * is the shared control that presents whichever factors this identity has,
+ * pins the one the session signed in with, and returns the opened seed — so
+ * the page invokes it rather than reimplementing a narrower version of it.
+ *
+ * The seed is zeroed on every path, as above; the caller never sees it.
+ */
+export function makeRootCeremony({
+  openRoot,
+  mintMemberClaim = realMint,
+  randomSeed = defaultRandomSeed,
+}) {
+  if (typeof openRoot !== 'function') {
+    throw new Error('makeRootCeremony needs the openRoot control');
+  }
+  return async function runCeremony({
+    context, inputs, approvals = [], position = null, title, detail,
+  }) {
+    const opened = await openRoot({
+      title: title || 'Ask to join',
+      detail: detail || 'Unlock your identity to sign your request to join.',
+    });
+    // null is the operator cancelling the ceremony — not an error, and not
+    // something to retry or report as a failure.
+    if (!opened) return null;
+    let kemSeed = null;
+    try {
+      kemSeed = randomSeed();
+      const minted = await mintMemberClaim({
+        context,
+        personalRootSeed: opened.seed,
+        inviteRef: inputs.inviteRef,
+        token: inputs.bearer || null,
+        kemSeed,
+        approvals,
+        position,
+      });
+      return {
+        event: minted.event,
+        personaPub: minted.personaPub,
+        claimKey: minted.claimKey,
+        kemPrivateKey: minted.kemPrivateKey,
+        kemCredential: minted.kemCredential,
+      };
+    } finally {
+      if (opened && opened.seed) opened.seed.fill(0);
+      if (kemSeed) kemSeed.fill(0);
+    }
+  };
+}

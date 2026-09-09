@@ -143,14 +143,25 @@ class TestI1Constraints:
         assert 'query.get("t")' not in PAGE_JS
 
     def test_nothing_is_promised_that_does_not_work(self):
-        # Operator product rule: UI shows what works. The paste step's
-        # Next button is fully functional; the ORGANIZATION step carries
-        # no controls until the ceremony makes accepting real (auto-9rw91
-        # adds control and function together). No internal narration in
-        # user copy.
+        # Operator product rule: UI shows what works. auto-9rw91 added the
+        # accept control AND its function together, which is what this test
+        # now holds: the organization step carries exactly one control, and
+        # the page wires it to a real join session rather than rendering a
+        # button that does nothing. The previous form of this test asserted
+        # the step had NO controls, which was correct only while accepting
+        # was unimplemented — it is superseded, not loosened.
         org_step = TEMPLATE[TEMPLATE.index('id="step-org"'):
                             TEMPLATE.index('id="step-broken"')]
-        assert "<button" not in org_step.lower()
+        assert org_step.lower().count("<button") == 1
+        assert 'id="accept"' in org_step
+        # The control's function: a session is connected, the action is
+        # bound, and admission finalizes with the countersignature rather
+        # than re-accepting (which would discard it).
+        assert "connectSession(" in PAGE_JS
+        assert 'button.addEventListener("click"' in PAGE_JS
+        assert "session.finalize()" in PAGE_JS
+        # The control appears only once the organization has answered.
+        assert 'show("accept-block", true)' in PAGE_JS
         for leaked in ("under review", "still being finished", "ceremony",
                        "passphrase", "held", "pending ruling"):
             assert leaked not in TEMPLATE.lower(), leaked
