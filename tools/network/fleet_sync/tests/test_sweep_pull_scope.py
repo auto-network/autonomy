@@ -75,7 +75,14 @@ class _FakeChannel:
         return None
 
 
-def _scheduler(tmp_path: Path):
+def _scheduler(tmp_path: Path, *, settled: bool = False):
+    """``settled``: give the store real sync state.
+
+    Without this the fixture builds an EMPTY store, which is a store that
+    NEEDS a bootstrap -- not a settled one. Two controls asserted "settled"
+    behaviour against it and only noticed when fresh-joiner initiation
+    changed what an empty store asks for.
+    """
     root = KeyPair.generate()
     persona = KeyPair.generate()
     machine = KeyPair.generate()
@@ -87,7 +94,16 @@ def _scheduler(tmp_path: Path):
     )
     personal = tmp_path / "personal.db"
     db = GraphDB(personal)
-    MutationCatalog(db.conn, machine.public_hex).install()
+    catalog = MutationCatalog(db.conn, machine.public_hex)
+    catalog.install()
+    if settled:
+        with catalog.transaction(10, "tx-settled"):
+            db.conn.execute(
+                "INSERT INTO sources(id,type,title,metadata,created_at,"
+                "ingested_at) VALUES(?,?,?,?,?,?)",
+                ("s-settled", "note", "t", "{}", "2026-08-19T00:00:00Z",
+                 "2026-08-19T00:00:00Z"),
+            )
     db.close()
 
     # Both this machine and the peer must be roster members, or the pull
@@ -210,8 +226,14 @@ def test_a_delivered_begin_anchors_the_store_through_the_real_receiver(
 
 
 def test_a_settled_store_is_unaffected(tmp_path: Path, monkeypatch) -> None:
-    """No bootstrap, no pin: ordinary behaviour must not change."""
-    scheduler, _ = _scheduler(tmp_path)
+    """No bootstrap AND real state: ordinary behaviour must not change.
+
+    The store must be genuinely settled. An empty store is one that NEEDS a
+    bootstrap, and asking v5 there is correct -- so testing "unaffected"
+    against an empty fixture proved nothing.
+    """
+    scheduler, personal = _scheduler(tmp_path, settled=True)
+    assert read_bootstrap(sqlite3.connect(personal)) is None
     channel = _FakeChannel([])
     _drive(monkeypatch, scheduler, channel)
 
@@ -226,12 +248,12 @@ def test_an_unsolicited_begin_on_a_v4_pull_anchors_nothing(
 ) -> None:
     """The sweep is an OPT-IN, so a peer must not anchor one unilaterally.
 
-    A store with no bootstrap asks the default version. Accepting a v5
-    sweep.begin there would anchor a bootstrap this client never requested --
-    and having not asked for v5 it has no sweep receive path to finish with,
-    so it would sit anchored and never complete.
+    A SETTLED store asks the default version -- it needs no bootstrap at all.
+    Accepting a v5 sweep.begin there would anchor a bootstrap this client
+    never requested, and having not asked for v5 it has no sweep receive path
+    to finish with, so it would sit anchored and never complete.
     """
-    scheduler, personal = _scheduler(tmp_path)
+    scheduler, personal = _scheduler(tmp_path, settled=True)
     begin = json.dumps({
         "v": SWEEP_PROTOCOL_VERSION,
         "kind": SWEEP_BEGIN_KIND,
@@ -251,5 +273,62 @@ def test_an_unsolicited_begin_on_a_v4_pull_anchors_nothing(
         assert read_bootstrap(conn) is None, (
             "an unsolicited sweep.begin anchored a store that never asked"
         )
+    finally:
+        conn.close()
+
+
+def test_a_fresh_joiner_asks_for_the_sweep_without_pre_seeding(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Bootstrap must be startable from an EMPTY store.
+
+    The receiver enforces the opt-in on the requested version, so a store with
+    no bootstrap row would ask v4, be refused a sweep.begin, and have no way to
+    anchor one. The version pin would then only ever protect bootstraps that
+    somehow already existed -- and nothing could create the first.
+
+    Asking is not committing: a fresh joiner still accepts a checkpoint, so
+    meeting a v4 server it takes whatever that server can serve.
+    """
+    scheduler, personal = _scheduler(tmp_path)
+    assert read_bootstrap(sqlite3.connect(personal)) is None, (
+        "this control is worthless if the fixture pre-seeds a bootstrap"
+    )
+
+    channel = _FakeChannel([])
+    _drive(monkeypatch, scheduler, channel)
+
+    decoded = fss.decode_pull_request(channel.sent[0])
+    assert decoded[5] >= SWEEP_PROTOCOL_VERSION, (
+        f"a fresh joiner asked v{decoded[5]}, so it can never be served a "
+        f"sweep and bootstrap cannot start"
+    )
+    assert decoded[6] is True, (
+        "asking for a sweep is not committing to one; a fresh joiner must "
+        "still accept a checkpoint from a server that cannot sweep"
+    )
+
+
+def test_a_fresh_joiner_can_anchor_from_a_delivered_begin(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """End to end on the initiation path: empty store in, anchored store out,
+    with nothing pre-seeded."""
+    scheduler, personal = _scheduler(tmp_path)
+    begin = json.dumps({
+        "v": SWEEP_PROTOCOL_VERSION,
+        "kind": SWEEP_BEGIN_KIND,
+        "scope": "personal",
+        "source_machine_pub": PEER,
+        "frontier": {PEER: 77},
+    }).encode()
+
+    _drive(monkeypatch, scheduler, _FakeChannel([begin]))
+
+    conn = sqlite3.connect(personal)
+    try:
+        state = read_bootstrap(conn)
+        assert state is not None, "a fresh joiner could not anchor a bootstrap"
+        assert state.frontier == {PEER: 77}
     finally:
         conn.close()
