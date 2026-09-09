@@ -110,7 +110,15 @@ _TABLE = """
 
 
 def _ensure_table(conn: sqlite3.Connection) -> None:
+    """Create the table. Only the write/init path may call this."""
     conn.execute(_TABLE)
+
+
+def _table_present(conn: sqlite3.Connection) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='fleet_sync_bootstrap'"
+    ).fetchone() is not None
 
 
 def begin_bootstrap(
@@ -142,7 +150,14 @@ def begin_bootstrap(
 
 
 def read_bootstrap(conn: sqlite3.Connection) -> BootstrapState | None:
-    _ensure_table(conn)
+    """Read the bootstrap row, or None. Genuinely READ-ONLY.
+
+    This is reached by diagnostics and by the frontier gate on every outward
+    request, so it must not mutate a healthy store. An absent table means no
+    bootstrap, not an invitation to create one.
+    """
+    if not _table_present(conn):
+        return None
     row = conn.execute(
         "SELECT phase,frontier FROM fleet_sync_bootstrap WHERE singleton=1"
     ).fetchone()

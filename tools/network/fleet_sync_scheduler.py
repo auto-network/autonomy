@@ -1092,18 +1092,27 @@ class SQLiteFleetSyncStore:
 
         A store that never bootstrapped this way is unaffected.
 
-        The phase check and the catalog read share ONE connection opened and
-        closed here, so callers hand this whole operation to a worker thread
-        rather than passing a live connection across threads. Both transports
-        call this; the gate is not reimplemented per transport.
+        The phase check and the catalog read share one owned READ
+        TRANSACTION, not merely one connection. Separate autocommit reads
+        would let a bootstrap begin between them, so a phase check taken
+        while the store was healthy could escort a map that is no longer
+        earned. One snapshot closes that window.
+
+        The whole operation is opened and closed here, so callers hand it to
+        a worker thread rather than passing a live connection across threads.
+        Both transports call this; the gate is not reimplemented per transport.
         """
         from tools.network.fleet_sync.sweep_receive import may_advertise_frontier
 
         conn, catalog = self._open()
         try:
-            if not may_advertise_frontier(conn):
-                return {}
-            return catalog.origin_watermarks()
+            conn.execute("BEGIN")
+            try:
+                if not may_advertise_frontier(conn):
+                    return {}
+                return catalog.origin_watermarks()
+            finally:
+                conn.rollback()
         finally:
             conn.close()
 
