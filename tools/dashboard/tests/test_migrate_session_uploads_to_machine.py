@@ -101,6 +101,83 @@ def test_an_agent_runs_root_it_cannot_see_is_refused(tmp_path, monkeypatch, stat
     assert str(root) in str(exc.value)
 
 
+def _seed(orgs, key, payload, *, deprecated=0, supersedes=None, excludes=None):
+    """Insert a legacy row directly: `_open` would refuse this now, which is
+    exactly why these rows are stranded."""
+    import json
+    import uuid
+
+    from tools.graph.db import GraphDB
+
+    db = GraphDB(orgs / "autonomy.db")
+    try:
+        db.conn.execute(
+            "INSERT INTO settings (id, set_id, schema_revision, key, payload,"
+            " publication_state, deprecated, supersedes, excludes)"
+            " VALUES (?, ?, 1, ?, ?, 'raw', ?, ?, ?)",
+            (str(uuid.uuid4()), mig.SESSION_UPLOAD_SET_ID, key,
+             json.dumps(payload), deprecated, supersedes, excludes),
+        )
+        db.conn.commit()
+    finally:
+        db.close()
+
+
+@pytest.fixture
+def org_store(tmp_path, monkeypatch):
+    from tools.graph.db import GraphDB
+
+    orgs = tmp_path / "orgs"
+    orgs.mkdir()
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    GraphDB.close_all_pooled()
+    GraphDB.create_org_db("autonomy").close()
+    yield orgs
+    GraphDB.close_all_pooled()
+
+
+def test_the_count_gap_is_named_and_classified(org_store):
+    """A raw `count(*)` and this tool's total differ by the non-base rows, and
+    the difference was noticed by hand on the first real run (107 vs 106).
+    Three things land there and only ONE is safe to ignore, so the tool reports
+    the classification rather than a number."""
+    _seed(org_store, "live", _payload())
+    _seed(org_store, "gone", _payload(), deprecated=1)
+    _seed(org_store, "patched", _payload(), supersedes="some-base-id")
+    _seed(org_store, "removed", _payload(), excludes="some-base-id")
+
+    assert [k for k, _ in mig.legacy_rows("autonomy")] == ["live"]
+    assert {e["key"]: e["kind"] for e in mig.non_base_rows("autonomy")} == {
+        "gone": "deprecated", "patched": "override", "removed": "exclusion",
+    }
+
+
+def test_applying_a_key_whose_value_is_not_its_base_is_refused(
+    org_store, tmp_path, monkeypatch,
+):
+    """THE ONE THAT MATTERS for --apply. This tool copies BASE rows. When a key
+    also has an override, the value in force is base + patch, so copying the
+    base migrates a STALE PAYLOAD — one wrong row inside an otherwise correct
+    migration, which is where it would never be found. Refuse the run."""
+    _seed(org_store, "patched", _payload())
+    _seed(org_store, "patched", _payload(), supersedes="some-base-id")
+    root = tmp_path / "agent-runs"
+    (root / "auto-0101-000000" / ".uploads").mkdir(parents=True)
+    (root / "auto-0101-000000" / ".uploads" / "shot.png").write_bytes(b"png")
+    monkeypatch.setattr(
+        "tools.dashboard.session_monitor._agent_runs_root", lambda: root)
+
+    # The dry run is still allowed to report it — refusing to LOOK would hide
+    # the very thing an operator needs to see before deciding.
+    dry = mig.migrate("autonomy", apply=False)
+    assert dry["claimed"] == ["patched"]
+
+    with pytest.raises(mig.MigrationRefused) as exc:
+        mig.migrate("autonomy", apply=True)
+    assert "patched" in str(exc.value)
+
+
 def test_enumeration_sees_rows_the_ordinary_read_cannot(tmp_path, monkeypatch):
     """THE BUG THIS TOOL SHIPPED WITH. `read_set` resolves the store through
     the schema's declared home, which is now `machine` — so the ordinary read

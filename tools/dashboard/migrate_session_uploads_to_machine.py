@@ -108,10 +108,13 @@ def legacy_rows(org: str) -> list[tuple[str, dict]]:
     `set_id=None` to the opener asks for the named org's database and nothing
     else; the redirect keys on the set_id it is not given.
 
-    Base rows only, which is all an append-only log with uuid keys has. This
-    deliberately does NOT reimplement override/exclusion resolution: a set that
-    had those would need more than a payload copy, and silently copying half a
-    resolution is worse than refusing.
+    Base rows only, which is all an append-only log with uuid keys SHOULD
+    have. This deliberately does NOT reimplement override/exclusion
+    resolution -- but skipping quietly is its own defect, so anything that is
+    not a live base row is reported by :func:`non_base_rows` rather than
+    subtracted from a total nobody can see. The first real dry run enumerated
+    106 where raw SQL counted 107, and the gap was only noticed because
+    somebody cross-checked by hand.
     """
     import json
 
@@ -138,6 +141,47 @@ def legacy_rows(org: str) -> list[tuple[str, dict]]:
     return out
 
 
+def non_base_rows(org: str) -> list[dict]:
+    """Rows this tool will NOT copy, each classified — the count gap, named.
+
+    Three things land here and they do not mean the same thing:
+
+    * ``deprecated`` — correctly skipped. The row is retired; copying it would
+      un-retire it in the new store.
+    * ``override`` (``supersedes``) — **copying the base would migrate a STALE
+      PAYLOAD**, because the value in force is base + patch and this tool
+      copies bases. Not a skip to shrug at.
+    * ``exclusion`` (``excludes``) — the key is excluded from resolution;
+      copying its base would resurrect a row somebody removed.
+
+    Only the first is safe to ignore, which is why the classification is
+    reported rather than the count.
+    """
+    from tools.graph import settings_ops as ops
+
+    db = ops._open_read(org, None)
+    try:
+        rows = db.conn.execute(
+            "SELECT key, id, deprecated, supersedes, excludes FROM settings"
+            "  WHERE set_id = ?"
+            "    AND NOT (deprecated = 0 AND supersedes IS NULL"
+            "             AND excludes IS NULL)",
+            (SESSION_UPLOAD_SET_ID,),
+        ).fetchall()
+    finally:
+        db.close()
+    out = []
+    for row in rows:
+        if row["excludes"] is not None:
+            kind = "exclusion"
+        elif row["supersedes"] is not None:
+            kind = "override"
+        else:
+            kind = "deprecated"
+        out.append({"key": row["key"], "id": row["id"], "kind": kind})
+    return out
+
+
 def migrate(org: str, *, apply: bool) -> dict:
     from tools.dashboard.session_monitor import _agent_runs_root
     from tools.graph import settings_ops as ops
@@ -157,6 +201,7 @@ def migrate(org: str, *, apply: bool) -> dict:
             f"the host)."
         )
     rows = legacy_rows(org)
+    skipped = non_base_rows(org)
     claimed: list[str] = []
     absent: list[str] = []
     for key, payload in rows:
@@ -164,6 +209,19 @@ def migrate(org: str, *, apply: bool) -> dict:
             absent.append(key)
             continue
         claimed.append(key)
+        if apply and any(
+            entry["key"] == key and entry["kind"] in ("override", "exclusion")
+            for entry in skipped
+        ):
+            # This key's value in force is NOT its base row, and a base copy
+            # would migrate a stale or resurrected value. Refuse the whole run
+            # rather than write the wrong payload for one key inside an
+            # otherwise correct migration, where it would be invisible.
+            raise MigrationRefused(
+                f"key {key} has an override or exclusion in the {org!r} store, "
+                f"so its base row is not the value in force. Resolve that key "
+                f"by hand before applying; this tool copies bases."
+            )
         if apply:
             # A LITERAL org=None, never CALLER_ORG: `org` is required here on
             # purpose, and the sentinel would consult the ambient cascade and
@@ -175,7 +233,7 @@ def migrate(org: str, *, apply: bool) -> dict:
                 SESSION_UPLOAD_SET_ID, SCHEMA_REVISION, key, payload,
                 org=None,
             )
-    return {"root": str(root), "total": len(rows),
+    return {"root": str(root), "total": len(rows), "skipped": skipped,
             "claimed": claimed, "absent": absent, "applied": apply}
 
 
@@ -200,6 +258,16 @@ def main() -> None:
           f"machine; {len(result['absent'])} left for another machine")
     for key in result["absent"]:
         print(f"  not here: {key}")
+    # Printed ALWAYS, including when empty: the number a raw `count(*)` gives
+    # differs from `total` by exactly these rows, and an unexplained gap is
+    # how somebody ends up cross-checking by hand.
+    skipped = result["skipped"]
+    print(f"{len(skipped)} non-base row(s) not copied "
+          f"(raw count = {result['total'] + len(skipped)})")
+    for entry in skipped:
+        note = "" if entry["kind"] == "deprecated" else \
+            "  <-- value in force is NOT this base; resolve by hand"
+        print(f"  {entry['kind']}: {entry['key']}{note}")
 
 
 if __name__ == "__main__":
