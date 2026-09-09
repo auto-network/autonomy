@@ -11,7 +11,8 @@ available.** The row carries no machine identity — only `target_session` and a
 `rel_path` under that session's run dir. So this tool asks the only question
 that can be answered locally and correctly: *is the file here?* A row whose
 file resolves under this machine's `agent-runs` belongs to this machine and is
-copied; a row whose file is absent is left alone and reported. Run it on each
+copied; a row whose file is absent is left alone and reported AS ABSENT — never
+as belonging to some other machine, which this tool cannot see. Run it on each
 machine; each one claims its own rows and no row is claimed twice.
 
 Deliberately NOT done here:
@@ -22,14 +23,17 @@ Deliberately NOT done here:
   deleting replicated rows across a fleet is a separate decision with a
   separate blast radius. A later sweep can remove them once every machine has
   claimed what is its.
-* **No guessing.** A file that is absent here might be on another machine or
-  might be genuinely gone; this tool never decides which, it reports the row
-  and moves on.
+* **No guessing about destination.** An absent file might be on another machine
+  or might be genuinely gone. The tool reports which of the two it can actually
+  distinguish — whether the session's run directory still exists — and never
+  claims a machine holds it. The first 13 unclaimed rows were reported as
+  "left for another machine"; all 13 were deleted uploads from two old host
+  sessions, and the machine implied had never run a session at all.
 
 **Run it where the session run dirs are.** That is the dashboard container
 (`/app/data/agent-runs`), NOT the host — on the host `_agent_runs_root()`
 resolves to a directory that exists and is empty, which would report every row
-as belonging to another machine. The tool refuses rather than reporting that.
+as unclaimed. The tool refuses rather than reporting that.
 
 **Legacy rows live in more than one store.** Measured 2026-09-09:
 `autonomy.db` 107, `personal.db` 10, `machine.db` 0. Pass each source store in
@@ -54,19 +58,75 @@ from tools.dashboard.session_upload_settings import (
 )
 
 
-def _run_dirs(root: Path, session: str) -> list[Path]:
-    """Every run dir for *session*: the bare name and its timestamped forms.
+def _host_uploads_dir() -> Path:
+    """Where HOST-terminal sessions keep their uploads.
 
-    A run dir is `agent-runs/<tmux_name>` or `agent-runs/<tmux_name>-<stamp>`,
-    and one session can have several. All are candidates; the file is looked
-    for in each.
+    A host session has no run dir at all, so its uploads live under
+    `data/host-uploads/<tmux_name>/`. Mirrors `HOST_UPLOADS_DIR` in
+    ``server.py``, which is the path the viewer actually serves from.
     """
-    if not root.is_dir():
-        return []
-    return sorted(
-        p for p in root.iterdir()
-        if p.is_dir() and (p.name == session or p.name.startswith(session + "-"))
-    )
+    from tools.dashboard.server import HOST_UPLOADS_DIR
+
+    return HOST_UPLOADS_DIR
+
+
+def _run_dirs(root: Path, session: str) -> list[Path]:
+    """Every directory that could hold *session*'s uploads.
+
+    TWO KINDS OF SESSION, and searching only one of them is what made this
+    tool wrong three times about the same 13 rows. A CONTAINER session stores
+    uploads under `agent-runs/<tmux_name>` or `agent-runs/<tmux_name>-<stamp>`
+    (several are possible). A HOST-terminal session has no run dir and stores
+    them under `data/host-uploads/<tmux_name>/`.
+
+    `server.py` has searched both since it served the first tile
+    (`base_dirs` in the output route); this tool searched only the first, so
+    every host-session upload looked absent. Both are candidates here for the
+    same reason they are there: the row does not record which kind of session
+    wrote it.
+    """
+    found = []
+    if root.is_dir():
+        found.extend(sorted(
+            p for p in root.iterdir()
+            if p.is_dir() and (p.name == session or p.name.startswith(session + "-"))
+        ))
+    host_dir = _host_uploads_dir() / session
+    if host_dir.is_dir():
+        found.append(host_dir)
+    return found
+
+
+def classify(root: Path, payload: dict) -> str:
+    """Why this row was not claimed -- `here`, `orphaned`, or `file-missing`.
+
+    ABSENCE IS NOT A DESTINATION, and this function exists because the same 13
+    rows drew three wrong explanations in one afternoon:
+
+    1. "left for another machine" -- an inference printed as a finding. The
+       operator refuted it: no session had ever run on the machine implied.
+    2. "orphaned, the files were deleted" -- also wrong, and worse for being
+       written into this docstring as settled.
+    3. The truth: 11 of the 13 were on this machine the whole time, under
+       `data/host-uploads/<session>/`, because they came from HOST sessions
+       and `_run_dirs` searched only `agent-runs`. The bug was never in the
+       data.
+
+    So this reports only what it can see, and the reader should note that even
+    `orphaned` means "no directory of either kind is here", never "deleted":
+
+    * ``orphaned`` -- no directory of EITHER kind exists here for that session.
+      Nothing on this machine will ever claim the row. Whether the file was
+      deleted or lives somewhere this tool cannot see is not decided here.
+    * ``file-missing`` -- the run directory IS here but the file is not. That
+      is the genuinely odd case and the only one worth chasing.
+
+    Neither names a machine.
+    """
+    session = payload.get("target_session") or ""
+    if _file_is_here(root, payload) is not None:
+        return "here"
+    return "orphaned" if not _run_dirs(root, session) else "file-missing"
 
 
 def _file_is_here(root: Path, payload: dict) -> Path | None:
@@ -202,13 +262,26 @@ def migrate(org: str, *, apply: bool) -> dict:
         )
     rows = legacy_rows(org)
     skipped = non_base_rows(org)
+    # What the machine store ALREADY holds, read once rather than per row.
+    already = {key for key, _ in legacy_rows("machine")} if apply else set()
+    skipped_present: list[str] = []
     claimed: list[str] = []
-    absent: list[str] = []
+    unclaimed: list[dict] = []
     for key, payload in rows:
-        if _file_is_here(root, payload) is None:
-            absent.append(key)
+        kind = classify(root, payload)
+        if kind != "here":
+            unclaimed.append({"key": key, "kind": kind})
             continue
         claimed.append(key)
+        if apply and key in already:
+            # IDEMPOTENCE ACROSS OVERLAPPING STORES. The same key exists in
+            # more than one legacy store (9 of personal's 10 were also in
+            # autonomy), and `add_setting` inserts unconditionally -- so the
+            # second pass hit a UNIQUE violation and died PART-WAY THROUGH,
+            # having already written some rows. A migration that cannot be
+            # re-run is a migration you cannot finish after any interruption.
+            skipped_present.append(key)
+            continue
         if apply and any(
             entry["key"] == key and entry["kind"] in ("override", "exclusion")
             for entry in skipped
@@ -234,7 +307,8 @@ def migrate(org: str, *, apply: bool) -> dict:
                 org=None,
             )
     return {"root": str(root), "total": len(rows), "skipped": skipped,
-            "claimed": claimed, "absent": absent, "applied": apply}
+            "claimed": claimed, "unclaimed": unclaimed, "applied": apply,
+            "already_present": skipped_present}
 
 
 def main() -> None:
@@ -254,10 +328,26 @@ def main() -> None:
         print(f"no legacy rows in the {args.org!r} store — nothing to migrate "
               f"from here")
         return
+    unclaimed = result["unclaimed"]
+    orphaned = [e for e in unclaimed if e["kind"] == "orphaned"]
+    missing = [e for e in unclaimed if e["kind"] == "file-missing"]
+    present = result["already_present"]
     print(f"{len(result['claimed'])} of {result['total']} rows {verb} by this "
-          f"machine; {len(result['absent'])} left for another machine")
-    for key in result["absent"]:
-        print(f"  not here: {key}")
+          f"machine; {len(unclaimed)} not claimed"
+          + (f"; {len(present)} already in the machine store" if present else ""))
+    # Say what is KNOWN (the file is not here) and never where it went. The
+    # previous wording, "left for another machine", asserted a destination this
+    # tool cannot see and got it wrong on every row it was applied to.
+    if orphaned:
+        print(f"  {len(orphaned)} orphaned — no run directory survives for the "
+              f"session, so the upload is gone and the row outlived it:")
+        for entry in orphaned:
+            print(f"    {entry['key']}")
+    if missing:
+        print(f"  {len(missing)} file-missing — the run directory IS here but "
+              f"the file is not; worth chasing:")
+        for entry in missing:
+            print(f"    {entry['key']}")
     # Printed ALWAYS, including when empty: the number a raw `count(*)` gives
     # differs from `total` by exactly these rows, and an unexplained gap is
     # how somebody ends up cross-checking by hand.
