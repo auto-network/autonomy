@@ -223,9 +223,15 @@ async def test_direct_pull_records_the_connected_address_and_path(direct):
 
 @pytest.mark.asyncio
 async def test_connect_failure_before_any_frame_reports_the_real_error(direct, caplog):
-    """A round that fails at connect must surface the connect error itself,
+    """A round that fails at connect must surface the REAL connect error,
     not an UnboundLocalError from the commit-on-failure handler reading
-    state the receive loop never created (SJC-2, 2026-09-07)."""
+    state the receive loop never created (SJC-2, 2026-09-07).
+
+    Since 2eb363f9 an exhausted candidate list raises the typed
+    FleetSyncPeerUnreachable so one dead peer is not hammered once per scope.
+    That must not cost the original cause, so this asserts the chain as well:
+    the connect error stays reachable through __cause__ and is named in the
+    message."""
     import logging
 
     from tools.network import fleet_sync_scheduler as fss
@@ -238,7 +244,10 @@ async def test_connect_failure_before_any_frame_reports_the_real_error(direct, c
     caplog.set_level(logging.WARNING)
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(fss, "fleet_direct_connect", refuse)
-        with pytest.raises(ConnectionRefusedError):
+        with pytest.raises(fss.FleetSyncPeerUnreachable) as caught:
             await sched._pull_scope(server_pub, ["ws://172.16.0.2:9410"], "personal")
+    # The typed wrapper must not swallow what actually happened.
+    assert isinstance(caught.value.__cause__, ConnectionRefusedError)
+    assert "Connect call failed" in str(caught.value)
     assert not any("UnboundLocalError" in (r.exc_text or "") for r in caplog.records)
     assert not any("could not commit" in r.getMessage() for r in caplog.records)

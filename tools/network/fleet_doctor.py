@@ -438,6 +438,27 @@ def check_serving_readiness(report: dict) -> None:
         running = report.get("running_connectors", {})
         scan_blind = bool(report.get("process_scan_unavailable"))
         now = time.time()
+        # THE DESIGNATION GATE, and it must come before any other verdict.
+        # Fleet members are designated NON-TUNNEL-SERVERS: the synced Setting
+        # names one authorized machine and every other machine correctly runs
+        # no connector (fleet_tunnel_server; auto-clune.7 removes this when
+        # cooperative pools ship). Without this check, every non-designated
+        # node reported "expected to be serving but isn't ... check the
+        # watchdog / restart timing" -- a FABRICATED cause for the system
+        # working as designed, and it cost about an hour on 2026-09-08.
+        try:
+            from tools.network import fleet_tunnel_server
+            is_designated = bool(fleet_tunnel_server.state().allowed)
+        except Exception as exc:
+            # Say we could not look. Never assume designated: that reinstates
+            # exactly the false FAIL this gate exists to remove.
+            is_designated = None
+            _line(
+                "tunnel-server designation",
+                f"UNREADABLE ({exc!r}) -- serving verdicts below are "
+                "suppressed, not passed",
+                warn=True,
+            )
         scopes: list[tuple[str, str | None]] = [("personal (scopeless)", None)]
         try:
             scopes.extend((ref.slug, ref.slug) for ref in org_ops.list_orgs())
@@ -451,7 +472,27 @@ def check_serving_readiness(report: dict) -> None:
             except Exception as exc:
                 _line(f"{label}: readiness check", f"FAILED to run: {exc!r}", fail=True)
                 continue
-            should_run = cert_state["status"] == "ok" and has_grant
+            eligible_by_credentials = cert_state["status"] == "ok" and has_grant
+            if is_designated is None:
+                _line(
+                    f"{label}: serving readiness",
+                    f"cert={cert_state['status']} live_grant={has_grant}; "
+                    "designation unreadable, so whether this machine SHOULD "
+                    "serve is unknown -- not a fault",
+                    warn=True,
+                )
+                continue
+            if not is_designated:
+                # Not a warning and not a failure: this is the designed state
+                # for every machine that is not the selected tunnel server.
+                _line(
+                    f"{label}: not serving by design",
+                    f"cert={cert_state['status']} live_grant={has_grant} -- "
+                    "this machine is not the selected tunnel server, so it "
+                    "correctly runs no connector",
+                )
+                continue
+            should_run = eligible_by_credentials
             # org=None (settings_ops' "explicit scopeless write") and
             # org="personal" resolve to the exact same underlying database
             # (settings_ops(org=None) deterministically opens the personal
