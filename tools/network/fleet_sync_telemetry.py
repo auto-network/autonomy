@@ -6,6 +6,8 @@ and its authored journal are never opened by this module.
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import threading
 import time
 from typing import Mapping
@@ -27,6 +29,21 @@ _OUTCOMES = {"success", "failed", "cancelled"}
 MAX_RESUME_BREADCRUMBS = 64
 _CONTIGUOUS_BREADCRUMBS = 8
 _lock = threading.RLock()
+logger = logging.getLogger(__name__)
+
+
+@contextlib.contextmanager
+def _suppressed():
+    """Swallow a derived-record failure, but say so.
+
+    These records decorate the Fleet view; the sync they describe has already
+    succeeded and must not be failed by a bookkeeping error. Silence would
+    turn a broken counter into an invisible one, so the exception is logged.
+    """
+    try:
+        yield
+    except Exception:
+        logger.warning("fleet sync derived statistics write failed", exc_info=True)
 
 
 def _validated_breadcrumb(value: object) -> dict | None:
@@ -264,7 +281,99 @@ def record_iteration(
             org=org,
             state="raw",
         )
-        return payload
+    _record_derived(
+        peer_machine_public_key,
+        channel=channel, scope=scope, org=org,
+        bytes_sent=bytes_sent, bytes_received=bytes_received,
+    )
+    return payload
+
+
+def _record_derived(
+    peer_machine_public_key: str, *, channel: str, scope: str, org: str,
+    bytes_sent: int, bytes_received: int,
+) -> None:
+    """Fan this attempt's bytes out to the windowed and per-peer records.
+
+    Every production path that accounts bytes already routes through
+    ``record_iteration``, so deriving here keeps one accounting site instead
+    of three in the scheduler, and makes it impossible for a new caller to
+    record a total without recording the window it belongs to.
+
+    Note the direction change. Telemetry keys on the sync ROLE (pull/serve);
+    these records key on BYTE direction, always from this machine's point of
+    view, because one attempt moves bytes both ways and a reader cannot
+    recover "sent" from "the attempt was a pull". That single perspective is
+    what lets the fleet-wide rate chart and the per-peer totals agree.
+
+    A failure here must never fail the sync it is describing, nor lose the
+    telemetry row already committed above.
+    """
+    from tools.network import fleet_sync_peer_scope, fleet_sync_traffic
+
+    for direction, amount in (
+        ("sent", bytes_sent), ("received", bytes_received),
+    ):
+        with _suppressed():
+            fleet_sync_traffic.record_bytes(
+                transport=channel, direction=direction, scope=scope,
+                amount=amount, org=org,
+            )
+    with _suppressed():
+        fleet_sync_peer_scope.record_bytes(
+            peer_machine_public_key, scope=scope,
+            bytes_in=bytes_received, bytes_out=bytes_sent, org=org,
+        )
+
+
+#: What the operator's counter reset zeroes. Everything absent from this set
+#: survives, and that is the point: the same row carries
+#: ``acknowledged_transaction_ref`` and the resume breadcrumb trail, which a
+#: restored source uses to recompute its position from content rather than
+#: from renumbered row ids. Clearing a displayed counter must never cost a
+#: peer its place in the stream and force a full re-seed.
+RESETTABLE_COUNTERS = (
+    "total_bytes_sent",
+    "total_bytes_received",
+    "last_bytes_sent",
+    "last_bytes_received",
+    "failed_iterations",
+)
+
+
+def reset_byte_totals(*, org: str = "machine") -> int:
+    """Zero the displayed cumulative counters; return the rows changed.
+
+    A field-level write, never a row delete and never ``_zero_payload()``.
+    """
+    changed = 0
+    with _lock:
+        members = settings_ops.read_owned_set(
+            FLEET_SYNC_TELEMETRY_SET_ID,
+            org=org,
+            target_revision=FLEET_SYNC_TELEMETRY_REVISION,
+        ).members
+        for member in members:
+            payload = dict(member.payload or {})
+            if not any(payload.get(name) for name in RESETTABLE_COUNTERS):
+                continue
+            for name in RESETTABLE_COUNTERS:
+                payload[name] = 0
+            # Per-path totals are the same bytes counted a second way, so they
+            # clear together or the two readouts disagree after a reset.
+            if payload.get("bytes_by_path_class"):
+                payload["bytes_by_path_class"] = {}
+            FleetSyncTelemetryV1.validate(payload)
+            settings_ops.upsert_by_key(
+                FLEET_SYNC_TELEMETRY_SET_ID,
+                FLEET_SYNC_TELEMETRY_REVISION,
+                member.key,
+                payload,
+                org=org,
+                state="raw",
+            )
+            changed += 1
+    return changed
 
 
 def read_peer_totals(*, org: str = "machine") -> dict[str, dict]:
@@ -301,7 +410,29 @@ def read_peer_totals(*, org: str = "machine") -> dict[str, dict]:
             "last_success_at_ns": 0,
             "last_outcome": None,
             "last_error_code": None,
+            # PER-TRANSPORT BREAKDOWN, kept alongside the totals.
+            #
+            # `channel` is parsed out of the key three lines above and was then
+            # discarded, so every caller could see how much a peer moved but
+            # never whether it went over the direct listener or the relay --
+            # a distinction the writer records and the key encodes. Answering
+            # "direct or relay?" needed a raw settings read, which is why it
+            # went unanswered.
+            "by_transport": {},
         })
+        transport = current["by_transport"].setdefault(channel, {
+            "bytes_sent": 0,
+            "bytes_received": 0,
+            "iterations": 0,
+            "transactions": 0,
+        })
+        for target, source in (
+            ("bytes_sent", "total_bytes_sent"),
+            ("bytes_received", "total_bytes_received"),
+            ("iterations", "iterations"),
+            ("transactions", "total_transactions"),
+        ):
+            transport[target] += int(payload.get(source) or 0)
         for target, source in (
             ("iterations", "iterations"),
             ("successful_iterations", "successful_iterations"),

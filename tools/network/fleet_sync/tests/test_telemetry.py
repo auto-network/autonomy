@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
@@ -142,3 +143,61 @@ def test_breadcrumb_trail_replaces_position_and_thins_exponentially(local_stores
     smaller = ack(101, ref=40)
     assert smaller["acknowledged_transaction_ref"] == 40
     assert fleet_sync_telemetry.read_resume_breadcrumbs(peer)[0][2] == 101
+
+
+def test_peer_totals_keep_the_transport_breakdown(tmp_path, monkeypatch):
+    """THE ONE THAT MATTERS for "direct or relay?".
+
+    `read_peer_totals` parses `channel` out of the key and used to discard it,
+    summing every transport into one bucket per peer. So a caller could see
+    that a peer moved 30 GB and never whether it went over the direct listener
+    or the relay — a distinction the writer records and the key encodes. On
+    2026-09-09 answering that question needed a raw settings read.
+    """
+    import tools.network.fleet_sync_telemetry as tel
+
+    peer = "aa" * 32
+    rows = [
+        SimpleNamespace(
+            key=f"direct:pull:{peer}:personal",
+            payload={"total_bytes_sent": 10, "total_bytes_received": 100,
+                     "iterations": 2, "total_transactions": 5},
+        ),
+        SimpleNamespace(
+            key=f"relay:pull:{peer}:personal",
+            payload={"total_bytes_sent": 1, "total_bytes_received": 7,
+                     "iterations": 1, "total_transactions": 2},
+        ),
+    ]
+    monkeypatch.setattr(
+        tel.settings_ops, "read_owned_set",
+        lambda *a, **k: SimpleNamespace(members=rows))
+
+    totals = tel.read_peer_totals()[peer]
+
+    # The aggregate is unchanged — existing callers keep working.
+    assert totals["bytes_received"] == 107
+    # And the split is now available.
+    assert totals["by_transport"]["direct"]["bytes_received"] == 100
+    assert totals["by_transport"]["relay"]["bytes_received"] == 7
+    assert totals["by_transport"]["direct"]["transactions"] == 5
+
+
+def test_a_single_transport_still_reports_only_itself(tmp_path, monkeypatch):
+    """NEGATIVE CONTROL: a peer reached only one way must not appear to have
+    used both. An empty bucket for the unused transport would read as "we
+    tried direct and moved nothing", which is a different claim."""
+    import tools.network.fleet_sync_telemetry as tel
+
+    peer = "bb" * 32
+    monkeypatch.setattr(
+        tel.settings_ops, "read_owned_set",
+        lambda *a, **k: SimpleNamespace(members=[SimpleNamespace(
+            key=f"relay:serve:{peer}:personal",
+            payload={"total_bytes_sent": 9, "total_bytes_received": 0,
+                     "iterations": 1, "total_transactions": 1},
+        )]))
+
+    totals = tel.read_peer_totals()[peer]
+
+    assert set(totals["by_transport"]) == {"relay"}
