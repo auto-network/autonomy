@@ -496,6 +496,18 @@ class ConnectorFleetRuntime:
             logger.warning("fleet runtime warm-cache read failed", exc_info=True)
             return False
         if payload is None:
+            # LOUD, because this is the path that actually happened and it was
+            # the only silent one. Home stopped re-arming at 2026-09-09
+            # 07:19:33Z and every connector restart after that came up with no
+            # machine key -- which downgrades its hello to v1 and puts it on
+            # the shared empty-machine relay slot. Nothing said so; the last
+            # success was visible in the log and the failures were not, which
+            # is the worst possible arrangement for diagnosis.
+            logger.warning(
+                "fleet runtime warm cache is EMPTY — this connector starts "
+                "UNARMED (no machine key), so its hello degrades to v1 and it "
+                "shares the legacy empty-machine relay slot. A fresh operator "
+                "unlock re-mints it")
             return False
         try:
             self.configure(payload)

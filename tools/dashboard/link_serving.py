@@ -1921,6 +1921,37 @@ def main() -> None:
                     or personal_runtime.machine_key
                 )
 
+    if machine_key is None:
+        # DO NOT DEGRADE SILENTLY (auto-clune.7 rollout, 2026-09-09).
+        #
+        # With no machine key the hello is v1, and v1 carries no machine
+        # identity — so the relay slots this connector under (persona, "") ,
+        # the shared legacy slot. One unarmed connector there is survivable.
+        # TWO unarmed connectors for the same persona are not: the second
+        # REPLACES the first, which is precisely the cross-machine takeover
+        # that per-(persona, machine) slotting exists to prevent.
+        #
+        # This is NOT a refusal to start. Refusing would take a serving
+        # machine offline outright, which is a worse failure than a shared
+        # slot, and legacy non-fleet publishers legitimately have no machine
+        # key at all. It is a refusal to be QUIET about it: an operator asking
+        # why two machines fight over one slot should find the answer in the
+        # log of the machine that caused it.
+        fleet_managed = False
+        with contextlib.suppress(Exception):
+            from tools.network import fleet_tunnel_server
+
+            fleet_managed = bool(fleet_tunnel_server.state().managed)
+        if fleet_managed:
+            logger.warning(
+                "serving connector for org=%s is starting UNARMED: this "
+                "machine is fleet-managed but no runtime machine key is "
+                "available, so the hello degrades to v1 and takes the SHARED "
+                "empty-machine relay slot. A second unarmed machine on this "
+                "persona would replace it. Re-arm with an operator unlock.",
+                args.org,
+            )
+
     from tools.network.relaykit.connector import Publisher
 
     # One Publisher shared by both halves of live push: the connector
