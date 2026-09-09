@@ -57,9 +57,61 @@ def _stub_serving(monkeypatch, *, scopes, cert_status, replies, disk="c0ffee",
     # Keep the tunnel probe from touching a real supervisor singleton. The
     # serving() value is a test parameter: hardcoding True here is what let the
     # missing-serving()-method bug (permanent false-green) slip past every test.
+    # serving(scope) is per-scope: since auto-clune.7 a machine runs a
+    # connector per org it is provisioned for, and each can fail alone. A bool
+    # keeps the old all-or-nothing cases; a dict expresses "personal up, org
+    # down", which is the state that used to render green.
+    def _serving(self, scope=None):
+        if isinstance(tunnel_serving, dict):
+            return tunnel_serving.get(scope, True)
+        return tunnel_serving
+
     monkeypatch.setattr(
         sup, "get_supervisor",
-        lambda: type("S", (), {"serving": lambda self: tunnel_serving})())
+        lambda: type("S", (), {"serving": _serving})())
+
+
+def test_tunnel_degrades_when_only_an_org_connector_is_down(client, monkeypatch):
+    """The state that rendered fully green on sjc-2 for 30+ minutes.
+
+    Personal serves (its credential survives a restart via the ramfs warm
+    cache and the "a personal fleet with members always serves" rule), while
+    every collaborative org connector exits on a cold vault and is relaunched
+    each watchdog interval. The tile asked serving() with no argument, which
+    means personal, so it reported Up while two thirds of serving was down.
+    """
+    _stub_serving(
+        monkeypatch,
+        scopes=[None, "autonomy", "dynbench"],
+        cert_status={None: "ok", "autonomy": "ok", "dynbench": "ok"},
+        replies={None: {"fleet_runtime_configured": True,
+                        "process_commit": "c0ffee"}},
+        may_serve=True,
+        tunnel_serving={None: True, "autonomy": False, "dynbench": False},
+    )
+    tunnel = client.get("/api/identity/unlock-state").json()["tunnel"]
+    assert tunnel["needs"] is True, "an org connector is down and nothing lit"
+    assert tunnel["value"] == "Degraded"
+    assert sorted(tunnel["scopes"]) == ["autonomy", "dynbench"]
+    assert "autonomy" in tunnel["detail"] and "dynbench" in tunnel["detail"]
+
+
+def test_tunnel_ignores_a_scope_never_provisioned_to_serve(client, monkeypatch):
+    """A scope with no cert row is a quiet fact, not a fault (auto-sdrsa).
+    It must not light the tile just because it has no connector."""
+    _stub_serving(
+        monkeypatch,
+        scopes=[None, "blindhash"],
+        cert_status={None: "ok"},          # blindhash: no cert row at all
+        replies={None: {"fleet_runtime_configured": True,
+                        "process_commit": "c0ffee"}},
+        may_serve=True,
+        tunnel_serving={None: True, "blindhash": False},
+    )
+    tunnel = client.get("/api/identity/unlock-state").json()["tunnel"]
+    assert tunnel["needs"] is False
+    assert tunnel["value"] == "Up"
+    assert tunnel["scopes"] == []
 
 
 def test_sync_dim_when_every_connector_armed_and_current(client, monkeypatch):

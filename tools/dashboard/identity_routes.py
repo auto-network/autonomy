@@ -1526,6 +1526,7 @@ async def get_unlock_state(request: Request) -> JSONResponse:
     cert_states: list[dict] = []  # actual state of every relevant certificate
     cert_never: list = []       # scopes never provisioned to serve (quiet note)
     serving_setup: list = []    # scopes provisioned to serve (any cert row)
+    provisioned: list = []      # (raw scope, label) for every scope above
     sync_unarmed: list = []     # serving scopes holding no credential
     sync_stale: list = []       # serving scopes running older code than on disk
     sync_refusals = 0
@@ -1553,6 +1554,7 @@ async def get_unlock_state(request: Request) -> JSONResponse:
                 cert_never.append(label)
                 continue
             serving_setup.append(label)
+            provisioned.append((scope, label))
             if cert_status == "ok":
                 cert_states.append({"scope": label, "state": "current",
                                     "reason": "The serving delegation certificate is current."})
@@ -1710,20 +1712,64 @@ async def get_unlock_state(request: Request) -> JSONResponse:
     else:
         try:
             from tools.dashboard.link_serving_supervisor import get_supervisor
-            serving = bool(get_supervisor().serving())
-            flags["tunnel"] = {
-                "needs": not serving,
-                "value": "Up" if serving else "Down",
-                "scopes": [] if serving else ["personal"],
-                "detail": ("The connection your other devices use to reach "
-                           "this dashboard." if serving
-                           else "Your other devices can't reach this dashboard "
-                           "from outside. Bringing the tunnel back needs your "
-                           "root key."),
-            }
+            supervisor = get_supervisor()
         except Exception:
+            supervisor = None
+        if supervisor is None:
             flags["tunnel"] = {"needs": False, "value": "",
                                "detail": "Tunnel state is unavailable."}
+        else:
+            # serving() is contractually non-raising, so it is called OUTSIDE a
+            # blanket except. Wrapping it was how the missing-method bug read as
+            # a green tile for weeks; a contract violation should surface, not
+            # be laundered into "unavailable".
+            # ASK EVERY PROVISIONED SCOPE, not only personal. Since auto-clune.7
+            # (46eed6d5) a machine serves each org it holds a cert and grant
+            # for, as its own connector process that can fail on its own. This
+            # tile asked serving() with no argument, which defaults to the
+            # personal scope, so an org connector could be dead for hours while
+            # the tile read "Up" -- observed live on sjc-2 2026-09-09, three org
+            # connectors exiting every watchdog interval on a cold vault
+            # ("no runtime machine key is available for this scope") with every
+            # indicator green.
+            #
+            # A scope never provisioned to serve is NOT included: `provisioned`
+            # is built from the cert loop above, which already drops the
+            # no-cert-row case as a quiet fact (auto-sdrsa). And this asks only
+            # "does this connector answer as serving", never the fleet-sync
+            # question -- org connectors report fleet_runtime_configured=False
+            # BY DESIGN, and asking them that invented a fault that could not
+            # exist. Liveness and armed-for-sync are different questions.
+            checked = provisioned or [(None, "personal")]
+            down = [label for scope_, label in checked
+                    if not bool(supervisor.serving(scope_))]
+            personal_down = any(
+                label in ("personal",) for label in down
+            )
+            serving = not down
+            if serving:
+                detail = ("The connection your other devices use to reach "
+                          "this dashboard.")
+            elif personal_down:
+                detail = ("Your other devices can't reach this dashboard from "
+                          "outside. Bringing the tunnel back needs your root "
+                          "key.")
+            else:
+                plural = "s" if len(down) != 1 else ""
+                detail = (
+                    f"{len(down)} organisation connector{plural} "
+                    f"({', '.join(down)}) are not running, so this dashboard "
+                    "is not reachable for them. They cannot start while the "
+                    "vault is cold — unlock with your root key to restore "
+                    "them. Personal sync is unaffected."
+                )
+            flags["tunnel"] = {
+                "needs": bool(down),
+                "value": "Up" if serving else ("Down" if personal_down
+                                               else "Degraded"),
+                "scopes": down,
+                "detail": detail,
+            }
 
     # sync — can the fleet's other machines sync WITH this one. Lit ONLY when a
     # serving connector is unarmed (holds no credential — the memory-only one
