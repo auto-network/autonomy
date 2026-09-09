@@ -63,8 +63,34 @@ async def rename_machine(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+async def reset_counters(request: Request) -> JSONResponse:
+    """Zero this machine's cumulative Fleet counters.
+
+    Machine-local: it clears what this dashboard has counted, and says so in
+    the confirmation. It does not reach another machine and does not touch
+    sync position — the resume trail and watermarks beside these counters are
+    what a peer needs to keep its place in the stream.
+    """
+    refusal = api_auth.require_global_api_authority(request)
+    if refusal is not None:
+        return refusal
+    from tools.network import fleet_sync_counters
+
+    try:
+        cleared = await asyncio.to_thread(fleet_sync_counters.reset_counters)
+    except Exception:
+        logger.exception("Fleet counter reset failed")
+        return JSONResponse(
+            {"error": "Counters could not be reset"}, status_code=503
+        )
+    return JSONResponse({"ok": True, "cleared": cleared})
+
+
 routes = [
     Route("/api/plugins/fleet/view", fleet_view, methods=["GET"]),
+    Route(
+        "/api/plugins/fleet/counters/reset", reset_counters, methods=["POST"]
+    ),
     Route(
         "/api/plugins/fleet/machines/{machine_id}/name",
         rename_machine,

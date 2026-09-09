@@ -24,7 +24,9 @@ from tools.network import (
     fleet_machine_profile,
     fleet_roster,
     fleet_sync_scheduler,
+    fleet_sync_peer_scope,
     fleet_sync_telemetry,
+    fleet_sync_traffic,
     fleet_tunnel_server,
     machine_boot,
 )
@@ -47,6 +49,10 @@ class ProjectionInputs:
     invitation_publication: Mapping | None = None
     publishing_org: str = "personal"
     telemetry_rows: Mapping[str, Mapping] = field(default_factory=dict)
+    #: {peer: [{scope, frontier_ns, observed_at_ns, bytes_in, bytes_out}]}
+    peer_scope_rows: Mapping[str, list] = field(default_factory=dict)
+    #: One row per transport/direction/scope, each carrying its two rings.
+    traffic_rows: tuple = ()
     local_verdict: Mapping | None = None
     serve_cert: Mapping | None = None
     tunnel_serving: bool | None = None
@@ -76,6 +82,7 @@ def _peer_rows(epoch: str | None) -> dict[str, dict]:
         rows = conn.execute(
             "SELECT machine_public_key,last_success_ns,bytes_sent,"
             "bytes_received,transactions_applied,retries,last_error_code,"
+            "peer_watermark,"
             f"updated_at_ns{built} FROM fleet_sync_peer_state WHERE roster_epoch=?",
             (epoch,),
         ).fetchall()
@@ -162,6 +169,8 @@ def _load_inputs(*, now_ms: int) -> ProjectionInputs:
         invitation_publication=invitation_publication,
         publishing_org="personal",
         telemetry_rows=fleet_sync_telemetry.read_peer_totals(org="machine"),
+        peer_scope_rows=fleet_sync_peer_scope.read_peer_scopes(org="machine"),
+        traffic_rows=tuple(fleet_sync_traffic.read_traffic_rows(org="machine")),
         local_verdict=local_verdict,
         serve_cert=serve_cert,
         tunnel_serving=tunnel_serving,
@@ -179,7 +188,34 @@ def _milliseconds(value) -> int | None:
     return number // 1_000_000 if number > 1_000_000_000_000_000 else number
 
 
-def _observation(peer: Mapping | None, telemetry: Mapping | None = None) -> dict:
+def _scope_rows(rows: list | None, *, server_time: int) -> list[dict]:
+    """One row per organization for one peer, as the Fleet view reads them.
+
+    Lag is ``now - frontier_ns``. A peer that has never advertised a frontier
+    for a scope has none to be behind, so its lag is null rather than the age
+    of the epoch -- rendering a machine that has simply not pulled yet as
+    fifty-six years behind is worse than rendering it as unknown.
+    """
+    out: list[dict] = []
+    for row in rows or []:
+        # Nanoseconds by schema contract, so convert outright. _milliseconds
+        # guesses the unit from magnitude, which is right for columns that
+        # have carried both and wrong for a field that never will.
+        frontier_ms = int(row.get("frontier_ns") or 0) // 1_000_000
+        out.append({
+            "scope": row.get("scope"),
+            "lag": max(0, server_time - frontier_ms) if frontier_ms else None,
+            "bytesIn": int(row.get("bytes_in") or 0),
+            "bytesOut": int(row.get("bytes_out") or 0),
+        })
+    return out
+
+
+def _observation(
+    peer: Mapping | None,
+    telemetry: Mapping | None = None,
+    scopes: list | None = None,
+) -> dict:
     peer = peer or {}
     telemetry = telemetry or {}
     has_telemetry = bool(telemetry.get("iterations"))
@@ -203,6 +239,20 @@ def _observation(peer: Mapping | None, telemetry: Mapping | None = None) -> dict
             telemetry.get("bytes_received") if has_telemetry
             else peer.get("bytes_received") or 0
         ),
+        # Per-transport bytes, so the fleet view can show how much of a
+        # peer's traffic went over the direct listener versus the relay.
+        # Empty when only the peer_state fallback is available: that table is
+        # keyed by peer alone and has no transport dimension to report.
+        "bytesByTransport": {
+            transport: {
+                "sent": int(counts.get("bytes_sent") or 0),
+                "received": int(counts.get("bytes_received") or 0),
+                "transactions": int(counts.get("transactions") or 0),
+            }
+            for transport, counts in sorted(
+                (telemetry.get("by_transport") or {}).items()
+            )
+        },
         "retryCount": int(peer.get("retries") or 0),
         "lastErrorCode": peer.get("last_error_code"),
         # The peer's build (committer date), learned from a schema refusal, so a
@@ -218,6 +268,18 @@ def _observation(peer: Mapping | None, telemetry: Mapping | None = None) -> dict
         "mutationFrames": int(telemetry.get("mutation_frames") or 0),
         "transactionsTransferred": int(telemetry.get("transactions") or 0),
         "lastSyncOutcome": telemetry.get("last_outcome"),
+        # The names the Fleet view actually reads. "attempts" rather than
+        # "iterations" because the screen is about what this peer tried, and
+        # a failed attempt is the fact an operator is looking for.
+        "attemptsFailed": int(telemetry.get("failed_iterations") or 0),
+        "lastOutcome": telemetry.get("last_outcome"),
+        # How far this peer's own promise reaches, per scope, and the bytes
+        # exchanged for it. Lag is derived against this response's serverTime
+        # and never stored -- storing it would age.
+        "scopes": scopes or [],
+        # The peer's receive progress from this machine's journal, distinct
+        # from the frontier above: this is how far WE got with that peer.
+        "peerWatermarkAt": _milliseconds(peer.get("peer_watermark")),
     }
 
 
@@ -230,6 +292,7 @@ def _machine_row(
     peer: Mapping | None,
     telemetry: Mapping | None,
     display_name: str | None,
+    scopes: list | None = None,
 ) -> dict:
     local = entry.machine_id == local_machine_id
     return {
@@ -254,6 +317,7 @@ def _machine_row(
         **_observation(
             peer if standing == "authorized" else None,
             telemetry if standing == "authorized" else None,
+            scopes if standing == "authorized" else None,
         ),
         # The browser-root removal command is deliberately not invented by
         # this read-only slice.
@@ -373,6 +437,10 @@ def project(inputs: ProjectionInputs) -> dict:
             peer=inputs.peer_rows.get(machine_pub),
             telemetry=inputs.telemetry_rows.get(machine_pub),
             display_name=inputs.machine_names.get(entry.machine_id),
+            scopes=_scope_rows(
+                inputs.peer_scope_rows.get(machine_pub),
+                server_time=inputs.server_time,
+            ),
         )
         for machine_pub, entry in active.items()
     ]
@@ -532,6 +600,11 @@ def project(inputs: ProjectionInputs) -> dict:
             "joinRequests": len(admission_rows),
         },
         "machines": [*roster_rows, *admission_rows, *revoked_rows],
+        # The rate rings, verbatim. Slot selection and staleness are the
+        # reader's job on both sides: the browser counts a slot only when its
+        # stamp equals the epoch it is drawing, so a row written by an older
+        # build cannot present stale slots as live.
+        "trafficHistory": [dict(row) for row in inputs.traffic_rows],
         "invitation": invitation_view,
         "activity": {
             "transactionsApplied": sum(row["transactionsApplied"] for row in roster_rows),

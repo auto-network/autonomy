@@ -2065,6 +2065,20 @@ class FleetSyncScheduler:
         )
         self._confine_scope(scope, admitted_org)
         store = await asyncio.to_thread(self._store_for, scope)
+        # The peer's frontier arrives here on every pull because the server
+        # cannot page a delta without it. Keeping it is what lets the Fleet
+        # view say how far behind a peer IS, rather than only when it last
+        # connected -- a peer can pull every twenty seconds and be sixteen
+        # hours behind. Nothing new crosses the wire; this only stops
+        # discarding what already did. It must never fail the serve.
+        if watermarks:
+            from tools.network import fleet_sync_peer_scope
+
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(
+                    fleet_sync_peer_scope.record_frontier,
+                    peer_pub, scope=scope, watermarks=watermarks,
+                )
         epoch, state_epoch = self._scope_epochs(scope)
         record_here = telemetry_stats is None
         stats = telemetry_stats if telemetry_stats is not None else {}
