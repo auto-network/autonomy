@@ -119,19 +119,34 @@ def canonical_relay_origin(relay_base: str) -> str:
     arbitrary dial target chosen by a descriptor. Userinfo, a non-root path, a
     query and a fragment are all refused rather than stripped: stripping would
     silently accept a row whose signer meant something else.
+
+    The canonical form omits a default port and re-brackets an IPv6 host, so
+    ``wss://[::1]:443`` and ``wss://[::1]`` are one value rather than two that
+    compare unequal while naming the same endpoint.
     """
-    split = urlsplit(relay_base)
+    if not isinstance(relay_base, str) or not relay_base:
+        raise SchemaValidationError("relay_base must be a non-empty string")
+    try:
+        split = urlsplit(relay_base)
+        port = split.port
+        host = split.hostname
+    except ValueError as exc:
+        # urlsplit and .port raise on a malformed authority; a signed row must
+        # not be able to escape verification through an uncaught exception.
+        raise SchemaValidationError(f"relay_base is malformed: {exc}") from exc
     if split.scheme not in ("https", "wss"):
         raise SchemaValidationError("relay_base must be an https:// or wss:// origin")
     if split.username or split.password:
         raise SchemaValidationError("relay_base must not carry userinfo")
     if split.path not in ("", "/") or split.query or split.fragment:
         raise SchemaValidationError("relay_base must be a bare origin")
-    if not split.hostname:
+    if not host:
         raise SchemaValidationError("relay_base must have a host")
-    origin = f"{split.scheme}://{split.hostname}"
-    if split.port is not None:
-        origin = f"{origin}:{split.port}"
+    if ":" in host:  # IPv6 literal — urlsplit strips the brackets
+        host = f"[{host}]"
+    origin = f"{split.scheme}://{host}"
+    if port is not None and port != 443:
+        origin = f"{origin}:{port}"
     if len(origin.encode("utf-8")) > MAX_RELAY_BASE_BYTES:
         raise SchemaValidationError("relay_base exceeds its byte ceiling")
     return origin
@@ -221,9 +236,7 @@ def publish_if_changed(
     # The baseline is the last VERIFIED own row, not merely the last stored one.
     # A corrupt or tampered stored row must cause a republish, never suppress
     # one: comparing against something unverified could hold back a real change.
-    stored = verify_row(
-        stored_row(machine_key.public_hex), machine_key.public_hex,
-        active_machine_pubs=[machine_key.public_hex])
+    stored = verify_own_row(stored_row(machine_key.public_hex), machine_key.public_hex)
     if stored is not None and semantic_tuple(stored) == semantic_tuple(wanted):
         return False
     settings_ops.upsert_by_key(
@@ -234,6 +247,34 @@ def publish_if_changed(
         org="personal",
     )
     return True
+
+
+def verify_own_row(row: Any, machine_pub: str) -> dict[str, Any] | None:
+    """Integrity check of THIS machine's own stored row, for change detection.
+
+    Deliberately NOT :func:`verify_row`. That function answers "is this peer's
+    descriptor usable here", and fails closed without local relay context — the
+    right answer for a peer, and the wrong one for our own baseline, where
+    absent context would make every relay-bearing row look unverifiable and
+    republish on every call, destroying the change-only property.
+
+    This answers the narrower question the writer actually asks: is the stored
+    row a well-formed row that THIS machine signed? Shape, row key and
+    signature; no relay binding, because the writer is not deciding usability.
+    """
+    if row is None:
+        return None
+    try:
+        PersonalFleetReachabilityV1.validate(row)
+    except SchemaValidationError:
+        return None
+    if row.get("machine_pub") != machine_pub:
+        return None
+    try:
+        verify_signature(machine_pub, row["sig"], _signing_input(row))
+    except Exception:
+        return None
+    return row
 
 
 def verify_row(
@@ -277,15 +318,24 @@ def verify_row(
 
     relay = row.get("relay")
     if relay is not None:
-        # Routing only. Binding the origin and org to locally configured
-        # authority stops a descriptor naming a relay this node never agreed to.
-        if configured_relay_origin is not None:
-            try:
-                if canonical_relay_origin(relay["relay_base"]) != canonical_relay_origin(
-                        configured_relay_origin):
-                    return None
-            except SchemaValidationError:
+        # FAIL CLOSED. A relay-bearing row is only usable when this node has the
+        # local context to bind it. Treating absent context as "skip the check"
+        # would return a signed locator as usable without ever confirming it
+        # names a relay and org this node agreed to — which is the whole point
+        # of binding it.
+        if configured_relay_origin is None or configured_org_uuid is None:
+            return None
+        try:
+            received = relay["relay_base"]
+            # The RECEIVED value must already be canonical. Canonicalizing it
+            # and then comparing would accept a body the signer never produced.
+            if received != canonical_relay_origin(received):
                 return None
-        if configured_org_uuid is not None and relay["org_uuid"] != configured_org_uuid:
+            if canonical_relay_origin(received) != canonical_relay_origin(
+                    configured_relay_origin):
+                return None
+        except SchemaValidationError:
+            return None
+        if relay["org_uuid"] != configured_org_uuid:
             return None
     return row

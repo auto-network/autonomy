@@ -189,17 +189,33 @@ def test_publication_without_signing_authority_is_unavailable(machine):
         pr.publish_if_changed(machine, None, ["wss://a.example/s"])
 
 
+def test_a_relay_bearing_row_FAILS_CLOSED_without_local_context(machine):
+    """THE SECOND ONE THAT MATTERS. A correctly signed relay row must be
+    unusable when this node lacks the context to bind it. Defaulting the
+    bindings to "absent means skip" would hand back a signed locator as usable
+    without ever confirming it names a relay and org this node agreed to."""
+    row = pr.build_row(machine, [], _relay())
+    roster = [machine.public_hex]
+
+    assert pr.verify_row(row, machine.public_hex, active_machine_pubs=roster) is None
+    assert pr.verify_row(
+        row, machine.public_hex, active_machine_pubs=roster,
+        configured_relay_origin=ORIGIN) is None
+    assert pr.verify_row(
+        row, machine.public_hex, active_machine_pubs=roster,
+        configured_org_uuid=ORG_UUID) is None
+    assert pr.verify_row(
+        row, machine.public_hex, active_machine_pubs=roster,
+        configured_relay_origin=ORIGIN, configured_org_uuid=ORG_UUID) is not None
+
+
 def test_a_relay_naming_an_unconfigured_origin_is_rejected(machine):
-    """The locator is routing only, and it may not name a relay this node never
-    agreed to use."""
     row = pr.build_row(machine, [], _relay())
 
     assert pr.verify_row(
         row, machine.public_hex, active_machine_pubs=[machine.public_hex],
-        configured_relay_origin="wss://other.relay.invalid") is None
-    assert pr.verify_row(
-        row, machine.public_hex, active_machine_pubs=[machine.public_hex],
-        configured_relay_origin=ORIGIN) is not None
+        configured_relay_origin="wss://other.relay.invalid",
+        configured_org_uuid=ORG_UUID) is None
 
 
 def test_a_relay_org_uuid_must_match_the_local_binding(machine):
@@ -207,7 +223,65 @@ def test_a_relay_org_uuid_must_match_the_local_binding(machine):
 
     assert pr.verify_row(
         row, machine.public_hex, active_machine_pubs=[machine.public_hex],
+        configured_relay_origin=ORIGIN,
         configured_org_uuid="11111111-1111-1111-1111-111111111111") is None
+
+
+def _resign(machine, row):
+    """Re-sign a hand-built body so the fixture is CORRECTLY SIGNED and
+    malformed, rather than tampered-and-invalid. A tampered row fails on the
+    signature and masks whether validation would have caught the malformation."""
+    body = {k: v for k, v in row.items() if k != "sig"}
+    body["sig"] = machine.sign_hex(pr._signing_input(body))
+    return body
+
+
+@pytest.mark.parametrize("bad_address", [
+    "wss://user:pw@host/s",
+    "wss:///s",
+    "https://host/s",
+    "wss://host:99999/s",
+    "wss://host/s#frag",
+])
+def test_a_correctly_signed_malformed_address_is_still_refused(machine, bad_address):
+    """Signed by the real key, so only validation can catch it."""
+    row = _resign(machine, {
+        "v": 1, "machine_pub": machine.public_hex, "addresses": [bad_address],
+        "relay": None, "updated_at": 100,
+    })
+
+    with pytest.raises(SchemaValidationError):
+        PersonalFleetReachabilityV1.validate(row)
+    assert pr.verify_row(
+        row, machine.public_hex, active_machine_pubs=[machine.public_hex]) is None
+
+
+def test_a_correctly_signed_noncanonical_relay_base_is_refused(machine):
+    """The received relay_base must ALREADY be canonical. Canonicalizing it and
+    then comparing would accept a body the signer never produced."""
+    relay = dict(_relay())
+    relay["relay_base"] = "wss://relay.auto.network:443"  # canonical form omits :443
+    row = _resign(machine, {
+        "v": 1, "machine_pub": machine.public_hex, "addresses": [],
+        "relay": relay, "updated_at": 100,
+    })
+
+    assert pr.verify_row(
+        row, machine.public_hex, active_machine_pubs=[machine.public_hex],
+        configured_relay_origin=ORIGIN, configured_org_uuid=ORG_UUID) is None
+
+
+def test_an_ipv6_relay_origin_round_trips_with_brackets():
+    """urlsplit strips the brackets; losing them would make two spellings of one
+    endpoint compare unequal."""
+    assert pr.canonical_relay_origin("wss://[::1]:8443") == "wss://[::1]:8443"
+    assert pr.canonical_relay_origin("wss://[::1]:443") == "wss://[::1]"
+
+
+def test_a_malformed_authority_cannot_escape_as_an_exception():
+    """A signed row must not be able to escape verification by raising."""
+    with pytest.raises(SchemaValidationError):
+        pr.canonical_relay_origin("wss://host:notaport")
 
 
 @pytest.mark.parametrize("bad", [
@@ -279,14 +353,25 @@ def test_a_corrupt_stored_row_causes_a_republish_not_a_suppressed_write(store, m
     assert pr.publish_if_changed(machine, cert, ["wss://a.example/s"]) is True
 
 
-def test_a_row_one_byte_over_the_ceiling_is_refused(machine):
-    """The ceiling is enforced on the final canonical bytes, not estimated."""
-    row = pr.build_row(machine, ["wss://a.example/s"])
-    room = MAX_ROW_BYTES - row_bytes(row)
-    row["addresses"] = ["wss://" + ("x" * (room + 8)) + ".example/s"]
+def test_the_row_ceiling_is_not_reachable_by_any_schema_valid_row(machine):
+    """Reports the true maximum rather than asserting an unreachable bound.
 
-    with pytest.raises(SchemaValidationError):
-        PersonalFleetReachabilityV1.validate(row)
+    With 8 addresses at 256 bytes plus a maximal relay, the largest row a valid
+    descriptor can produce is well under MAX_ROW_BYTES, so the row ceiling is
+    defence in depth and not a binding constraint. Stated as a measurement so a
+    later bound change cannot quietly make it binding without this failing.
+    """
+    host = "w" * (MAX_ADDRESS_BYTES - len("wss://") - len(".example/s"))
+    addresses = [f"wss://{host[:-2]}{i:02d}.example/s" for i in range(MAX_ADDRESSES)]
+    relay = dict(_relay())
+    relay["relay_base"] = "wss://" + ("r" * 200) + ".example"
+    row = pr.build_row(machine, addresses, relay, now=9999999999)
+
+    largest = row_bytes(row)
+    assert largest <= MAX_ROW_BYTES
+    assert largest < MAX_ROW_BYTES, (
+        f"largest schema-valid row is {largest}B; the {MAX_ROW_BYTES}B ceiling "
+        f"is now binding and must be reviewed rather than silently truncating")
 
 
 @pytest.mark.parametrize("field,value", [
