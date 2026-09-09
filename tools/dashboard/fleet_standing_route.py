@@ -51,7 +51,9 @@ class StandingRouteError(RuntimeError):
 def _grant_cached(token: str, org) -> bool:
     from tools.dashboard.link_serving import check_grant
 
-    return check_grant(token, org=org, now=time.time()) is not None
+    return check_grant(
+        token, org=org, now=time.time(), for_serving=False
+    ) is not None
 
 
 def _relay_knows(rendezvous: str, *, timeout: float = 10.0) -> bool | None:
