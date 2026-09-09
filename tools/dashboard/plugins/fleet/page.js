@@ -96,7 +96,6 @@ function fleetPage() {
       if (row.isLocalMachine) {
         const local = (this.view && this.view.localMachine) || {};
         adapted.connectorArmed = local.connectorArmed;
-        adapted.mayServe = local.mayServe;
         adapted.tunnelServing = local.tunnelServing;
         adapted.runningStale = local.runningStale === true;
         adapted.certStatus = local.certStatus || null;
@@ -151,12 +150,10 @@ function fleetPage() {
     machineState(machine) {
       let id; let tone;
       if (machine.isLocalMachine) {
-        // Every authorized machine serves (auto-clune.7), so this asks
-        // whether THIS machine may serve -- not whether it won the
-        // singular-ownership election. Gating on the election rendered a dead
-        // connector, a down tunnel and an expired certificate as a healthy
-        // idle machine on every box except the elected one.
-        const serving = machine.mayServe !== false;
+        // Every authorized machine serves (auto-clune.7). There is no gate:
+        // a dead connector, a down tunnel or an expired certificate is a
+        // fault on any machine, not only on an elected one.
+        const serving = true;
         if (serving && machine.connectorArmed === false) { id = 'locked'; tone = 'failed'; }
         else if (serving && machine.tunnelServing === false) { id = 'tunnel'; tone = 'failed'; }
         else if (serving && this.certExpired(machine)) { id = 'cert'; tone = 'failed'; }

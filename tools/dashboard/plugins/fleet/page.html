@@ -78,9 +78,9 @@
                   <template x-if="machine.isLocalMachine">
                     <dl>
                       <div><dt>Synced</dt><dd x-text="timeLabel(localLastSync(), 'never')"></dd></div>
-                      <div x-show="machine.mayServe !== false && machine.connectorArmed != null"><dt>Connector</dt><dd :class="machine.connectorArmed ? '' : 'error-code'" x-text="machine.connectorArmed ? 'Online' : 'Not armed'"></dd></div>
-                      <div x-show="machine.mayServe !== false && machine.tunnelServing != null"><dt>Tunnel</dt><dd :class="machine.tunnelServing ? '' : 'error-code'" x-text="machine.tunnelServing ? 'Serving' : 'Down'"></dd></div>
-                      <div x-show="machine.mayServe !== false && machine.certStatus"><dt>Certificate</dt><dd :class="certExpired(machine) ? 'error-code' : ''"
+                      <div x-show="machine.connectorArmed != null"><dt>Connector</dt><dd :class="machine.connectorArmed ? '' : 'error-code'" x-text="machine.connectorArmed ? 'Online' : 'Not armed'"></dd></div>
+                      <div x-show="machine.tunnelServing != null"><dt>Tunnel</dt><dd :class="machine.tunnelServing ? '' : 'error-code'" x-text="machine.tunnelServing ? 'Serving' : 'Down'"></dd></div>
+                      <div x-show="machine.certStatus"><dt>Certificate</dt><dd :class="certExpired(machine) ? 'error-code' : ''"
                            x-text="machine.certValidUntil == null ? 'None' : certExpired(machine) ? 'Expired' : remainingLabel(machine.certValidUntil)"></dd></div>
                       <div x-show="machine.runningStale"><dt>Software</dt><dd class="error-code">Restart needed</dd></div>
                       <div><dt>Changes</dt><dd class="mono" x-text="numberLabel(fleetChanges())"></dd></div>
