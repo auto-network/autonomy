@@ -7,7 +7,6 @@ import logging
 import math
 import os
 import secrets
-import functools
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -70,149 +69,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # a bump would have forced every live store to re-run the whole schema
 # script under the write lock for nothing.
 _SCHEMA_USER_VERSION = 10
-
-#: Schema-phase migrations as ``(introduced_in, method_name)``, run in order
-#: for every entry whose version EXCEEDS the database's previous stamp --
-#: the same gating ``_DATA_PHASE_MIGRATIONS`` has always had, which the
-#: schema phase never got.
-#:
-#: Why it matters, from the 2026-09-08 outage: this was a flat sequence of
-#: unconditional calls, so ANY bump of _SCHEMA_USER_VERSION re-ran all
-#: fourteen on every store. One of them could no longer succeed, and because
-#: the version is stamped only after the WHOLE chain, its failure un-ran the
-#: thirteen that had just worked and the next open repeated it. Every
-#: writable open failed until the constant was reverted. Gating means a
-#: failure costs one migration instead of rewinding the pass, and a chain
-#: can finally answer "did this already run?" -- previously there was one
-#: integer for fourteen migrations, so it could not.
-#:
-#: Every pre-existing entry is tagged with the CURRENT baseline rather than
-#: the version that introduced it. That needs no archaeology and is exactly
-#: right at both ends: a store already at the baseline runs none of them
-#: (they are applied), and any store BELOW it still runs all of them, which
-#: is precisely today's behaviour. New migrations carry the version that
-#: adds them.
-#: schema.sql in two halves. Everything below the sentinel depends on a
-#: column a migration adds, so it cannot run before them on a legacy store.
-_SCHEMA_SECTION_SENTINEL = "-- >>> DERIVED SCHEMA OBJECTS <<<"
-
-
-@functools.lru_cache(maxsize=1)
-def _schema_sections() -> tuple[str, str]:
-    text = SCHEMA_PATH.read_text()
-    head, sep, tail = text.partition(_SCHEMA_SECTION_SENTINEL)
-    if not sep:
-        return text, ""
-    return head, sep + tail
-
-
-def _normalize_ddl(sql: str | None) -> str:
-    """Whitespace-insensitive form, so reformatting schema.sql is not a change."""
-    return " ".join((sql or "").split())
-
-
-@functools.lru_cache(maxsize=1)
-def _expected_schema_shape() -> tuple[dict, dict]:
-    """The shape schema.sql PRODUCES: {(type, name): ddl}, {table: columns}.
-
-    Built once by executing schema.sql into an in-memory database, so it is
-    derived from the file rather than restated beside it. Nothing to keep in
-    sync and nothing to forget.
-    """
-    conn = sqlite3.connect(":memory:")
-    try:
-        base, derived = _schema_sections()
-        conn.executescript(base)
-        conn.executescript(derived)
-        objects = {
-            (str(t), str(n)): _normalize_ddl(sql)
-            for t, n, sql in conn.execute(
-                "SELECT type,name,sql FROM sqlite_master "
-                "WHERE name NOT LIKE 'sqlite_%'"
-            )
-        }
-        columns = {}
-        for _t, name in [k for k in objects if k[0] == "table"]:
-            columns[name] = {
-                str(r[1]) for r in conn.execute(f'PRAGMA table_info("{name}")')
-            }
-        return objects, columns
-    finally:
-        conn.close()
-
-
-def schema_fingerprint() -> str:
-    """Content hash of the shape schema.sql produces.
-
-    Changes the moment the schema does, and cannot change without it. This is
-    the number nobody has to remember to bump.
-    """
-    objects, columns = _expected_schema_shape()
-    payload = json.dumps(
-        {
-            "objects": sorted([f"{t}:{n}", d] for (t, n), d in objects.items()),
-            "columns": sorted([t, sorted(c)] for t, c in columns.items()),
-        },
-        sort_keys=True, separators=(",", ":"),
-    ).encode()
-    return hashlib.sha256(payload).hexdigest()
-
-
-def schema_is_current(conn) -> bool:
-    """Whether this database already HAS everything schema.sql defines.
-
-    The structural replacement for "is the stamped integer equal to the
-    constant". A stale stamp with a current shape is not work to do, and a
-    current stamp with a missing object is not something to skip -- and only
-    this function can tell those apart, because it asks the database instead
-    of asking a number someone maintained by hand.
-
-    Extra objects are fine: fleet-sync, vault and key-control tables live in
-    the same file and schema.sql knows nothing about them.
-    """
-    objects, columns = _expected_schema_shape()
-    try:
-        live = {
-            (str(t), str(n)): _normalize_ddl(sql)
-            for t, n, sql in conn.execute(
-                "SELECT type,name,sql FROM sqlite_master "
-                "WHERE name NOT LIKE 'sqlite_%'"
-            )
-        }
-    except sqlite3.Error:
-        return False
-    for key, ddl in objects.items():
-        if live.get(key) != ddl:
-            return False
-    for table, expected in columns.items():
-        try:
-            found = {str(r[1]) for r in conn.execute(f'PRAGMA table_info("{table}")')}
-        except sqlite3.Error:
-            return False
-        if not expected <= found:
-            return False
-    return True
-
-
-_SCHEMA_PHASE_MIGRATIONS: tuple[tuple[int, str], ...] = (
-    (10, "_migrate_attachments_alt_text"),
-    (10, "_migrate_content_attribution"),
-    (10, "_migrate_comment_anchors"),
-    (10, "_migrate_sources_last_activity"),
-    (10, "_migrate_publication_state"),
-    (10, "_migrate_source_moves"),
-    (10, "_migrate_source_short_description"),
-    (10, "_migrate_source_keywords"),
-    (10, "_migrate_drop_source_project"),
-    # sources_fts depends on `short_description` + `keywords`, so it must
-    # follow both column migrations above. Order here IS the run order.
-    (10, "_migrate_sources_fts"),
-    (10, "_migrate_sources_type_index"),
-    (10, "_migrate_settings"),
-    (10, "_migrate_orgs"),
-    (10, "_migrate_keycontrol_credential_wire"),
-    (10, "_migrate_message_id_unique"),
-)
 
 #: Captured data-phase migrations: ``(schema_user_version, rewrite)`` pairs,
 #: run in order for every version above the database's previous stamp.  The
@@ -741,60 +597,32 @@ class GraphDB:
         previous_version = int(
             self.conn.execute("PRAGMA user_version").fetchone()[0]
         )
-        # STRUCTURAL CURRENCY CHECK. "Is this database current?" is answered
-        # by asking the DATABASE whether it already holds everything
-        # schema.sql defines -- not by comparing a hand-maintained integer.
-        #
-        # The integer alone got this wrong in both directions. A stale stamp
-        # with a current shape made every store re-run fourteen migrations
-        # for nothing (and on 2026-09-08 one of them could not complete, so
-        # every writable open failed). A current stamp with a MISSING object
-        # -- someone edits schema.sql and forgets to bump -- silently skipped
-        # the work forever, and nothing anywhere would have noticed.
-        #
-        # The shape check cannot be forgotten, because it is derived from
-        # schema.sql itself. The version is retained only to ORDER migrations
-        # for a store that genuinely needs them.
-        shape_is_current = schema_is_current(self.conn)
-        if previous_version == _SCHEMA_USER_VERSION and shape_is_current:
+        if previous_version == _SCHEMA_USER_VERSION:
             return
         self._pending_data_migrations = [
             rewrite for version, rewrite in _DATA_PHASE_MIGRATIONS
             if version > previous_version
         ]
-        # A BRAND NEW DATABASE HAS NOTHING TO MIGRATE. schema.sql IS the
-        # current shape, so a fresh file gets it and stops — it must never
-        # run a single historical migration. Detected before the script
-        # runs, because after it every table exists.
-        #
-        # Without this a new install executed all fourteen, relying on each
-        # one's precondition check to no-op. That is a lot of trust placed in
-        # code whose only job is to reshape data that cannot be present, and
-        # it means a new install shares a failure path with a decade-old
-        # store for no reason. A fresh install now touches none of it.
-        fresh = self.conn.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
-            "AND name NOT LIKE 'sqlite_%'"
-        ).fetchone()[0] == 0
-        base, derived = _schema_sections()
-        self.conn.executescript(base)
-        if not fresh:
-            # Run a migration when the version says it is new, OR when the
-            # shape has DRIFTED from schema.sql. The second clause matters:
-            # several of these are self-healing REPAIRS, not one-way
-            # reshapes -- _migrate_message_id_unique dedupes before it can
-            # index, the settings ones heal duplicates. They were relied on
-            # to re-run on every open, and version-gating alone silently
-            # stopped repairing a store whose stamp was current but whose
-            # index had gone. Drift is the honest trigger for a repair:
-            # something is missing, and we do not know which one fixes it.
-            for introduced_in, name in _SCHEMA_PHASE_MIGRATIONS:
-                if introduced_in > previous_version or not shape_is_current:
-                    getattr(self, name)()
-        # The derived objects come LAST because each depends on a column a
-        # migration adds to a legacy store. A fresh database already has
-        # those columns from the base, so both paths land identically.
-        self.conn.executescript(derived)
+        schema = SCHEMA_PATH.read_text()
+        self.conn.executescript(schema)
+        self._migrate_attachments_alt_text()
+        self._migrate_content_attribution()
+        self._migrate_comment_anchors()
+        self._backfill_content_persona()
+        self._migrate_sources_last_activity()
+        self._migrate_publication_state()
+        self._migrate_source_moves()
+        self._migrate_source_short_description()
+        self._migrate_source_keywords()
+        self._migrate_drop_source_project()
+        # sources_fts depends on `short_description` + `keywords` columns, so
+        # it must run AFTER both column migrations above.
+        self._migrate_sources_fts()
+        self._migrate_sources_type_index()
+        self._migrate_settings()
+        self._migrate_orgs()
+        self._migrate_keycontrol_credential_wire()
+        self._migrate_message_id_unique()
         self._seed_tags()
         # NOTE (auto-06ziz): schema-meta Settings are intentionally NOT flushed
         # here. Materializing them is decoupled from _SCHEMA_USER_VERSION and now
@@ -885,42 +713,20 @@ class GraphDB:
             )
             self.conn.commit()
 
-    def backfill_content_persona(self):
-        """Stamp unattributed authored rows with THIS machine's persona.
+    def _backfill_content_persona(self):
+        """Provision legacy authored rows from one cached Settings lookup.
 
-        NOT A MIGRATION, and no longer in the schema-phase chain. It was, and
-        it took the graph API down on 2026-09-08. It fails all three tests of
-        one:
+        This is deliberately a migration, not a schema default: the personal
+        Settings value is read once, then each table is updated in bulk. It
+        never embeds an operator-specific value in source code.
 
-        - **Not deterministic.** It writes ``local_persona_pub()``, a
-          machine-specific value, so two machines "applying" it to the same
-          rows produce different results. That is also why it cannot simply
-          move to ``_DATA_PHASE_MIGRATIONS``, which requires entries
-          deterministic on row content.
-        - **No completion condition.** It fills NULLs, and new NULLs arrive
-          whenever content is written before a persona is known. It is never
-          done, only done for now — a recurring reconciliation, not a
-          one-time reshape.
-        - **Its trigger was unrelated to its purpose.** It fired on a schema
-          version bump, which has nothing to do with persona attribution. It
-          lived in the chain because the chain was a convenient thing that
-          occasionally ran.
-
-        It also cannot succeed where it most needed to. On a fleet-activated
-        store these five tables are replicated, and the pre-attach window
-        fails closed for exactly this kind of write:
-        ``uncaptured write to a replicated table during schema migration``.
-
-        Default policy is now to leave historical NULLs alone: ``persona_id``
-        is nullable on every write path, so NULL already means "author
-        unknown", which for those rows is TRUE. Retroactively stamping them
-        would attribute old content to whoever happens to be configured now,
-        which is the one irreversible option available. This method remains
-        for an operator who deliberately wants that.
-
-        Read-first, kept from the 2026-08-28 incident: an UPDATE takes the
-        write lock even when zero rows match, and under mass-dispatch
-        contention these writes were the statistically losing writer.
+        Read-first, because this runs on every version-mismatch open: an
+        UPDATE takes the write lock even when zero rows match, and under
+        mass-dispatch contention these five unconditional writes were the
+        statistically losing writer — each loss 500'd the open BEFORE the
+        version stamp could land, so every subsequent open retried the
+        whole chain (2026-08-28 incident, host session 9bfefa6d t3565).
+        A backfilled table now costs one indexed read and no lock.
         """
         org_row = self.conn.execute("SELECT type FROM orgs LIMIT 1").fetchone()
         if not org_row or org_row["type"] != "shared":

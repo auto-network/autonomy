@@ -253,16 +253,6 @@ def test_full_upgrade_lifecycle_pauses_then_converges(tmp_path, monkeypatch):
             monkeypatch.setattr(
                 GraphDBClass, "_migrate_message_id_unique", ddl_plus_column
             )
-            # Schema-phase migrations are version-gated now, so a simulated
-            # "version N+1 ships DDL" must REGISTER at N+1 like a real one.
-            # Patching the method alone no longer runs it: its existing entry
-            # is tagged at the old baseline, and the gate correctly declines
-            # to re-run an already-applied migration.
-            monkeypatch.setattr(
-                db_module, "_SCHEMA_PHASE_MIGRATIONS",
-                db_module._SCHEMA_PHASE_MIGRATIONS
-                + ((version, "_migrate_message_id_unique"),),
-            )
             monkeypatch.setattr(
                 db_module, "_DATA_PHASE_MIGRATIONS", ((version, backfill),)
             )
