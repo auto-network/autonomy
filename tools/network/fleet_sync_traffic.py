@@ -34,7 +34,9 @@ _lock = threading.RLock()
 
 def traffic_key(transport: str, direction: str, scope: str) -> str:
     if transport not in TRANSPORTS:
-        raise ValueError("Fleet traffic transport must be direct or relay")
+        raise ValueError(
+            "Fleet traffic transport must be one of " + ", ".join(TRANSPORTS)
+        )
     if direction not in DIRECTIONS:
         raise ValueError("Fleet traffic direction must be sent or received")
     if not isinstance(scope, str) or not scope or ":" in scope:

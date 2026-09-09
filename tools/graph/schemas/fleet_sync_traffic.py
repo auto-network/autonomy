@@ -40,7 +40,12 @@ FLEET_SYNC_TRAFFIC_REVISION = 1
 MINUTE_SLOTS = 60
 HOUR_SLOTS = 24
 
-TRANSPORTS = ("direct", "relay")
+#: ``relay`` is READ-ONLY HISTORY. It names the viewer-link broker, which
+#: dropped a slow consumer and killed a multi-GB fleet transfer, and it is
+#: being removed. The carrier that replaces it records as ``directed`` so old
+#: and new rows stay distinguishable in exactly the dimension this record
+#: exists to separate; reusing ``relay`` would erase that.
+TRANSPORTS = ("direct", "directed", "relay")
 #: Byte direction, not sync role. One pull attempt both sends and receives, so
 #: "pull"/"serve" cannot be recovered from a byte count and would force every
 #: reader to guess which half of an attempt a number came from.
