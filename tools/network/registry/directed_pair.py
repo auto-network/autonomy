@@ -98,3 +98,166 @@ def resolve_directed_pair(
         return None, PAIR_DESTINATION_CAPABILITY
 
     return destination, PAIR_OK
+
+
+#: Pair lifecycle. A pair is OFFERED until both legs accept, ACTIVE only
+#: after a successful ``activate``, and TERMINAL once closed for any
+#: reason including a failed activation.
+PAIR_OFFERED = "offered"
+PAIR_ACTIVE = "active"
+PAIR_TERMINAL = "terminal"
+
+#: Lifecycle refusals, distinct from the resolution reasons above.
+PAIR_NOT_A_LEG = "tunnel-is-not-a-leg-of-this-pair"
+PAIR_NOT_OFFERED = "pair-is-no-longer-offered"
+PAIR_AWAITING_ACCEPT = "both-legs-have-not-accepted"
+PAIR_SOURCE_REPLACED = "source-tunnel-replaced-since-resolution"
+PAIR_DESTINATION_REPLACED = "destination-tunnel-replaced-since-resolution"
+PAIR_NOT_ACTIVE = "pair-is-not-active"
+
+
+class DirectedPair:
+    """Lifecycle state for one directed pair of pinned tunnels.
+
+    Pure state. It performs no I/O, encodes no frames, and owns no
+    queues, credit or reservations. What it records is what the relay
+    TOLD it; it cannot observe a socket.
+
+    Two things it deliberately does NOT prove, because pure state
+    cannot:
+
+    * that both READY controls were enqueued before any DATA was
+      accepted. Ordering is a property of the caller's enqueue path.
+      This object only refuses DATA before activation and records READY
+      receipt when told.
+    * that resources were released concurrently. ``close`` gives
+      logical idempotence -- exactly one caller observes the terminal
+      transition -- not proof of I/O cleanup.
+
+    EVENTS ARE FENCED BY TUNNEL IDENTITY, not by leg label. Every method
+    takes the pinned ``Tunnel`` object and rejects any other, so an
+    event from a superseded tunnel can still terminate ITS OWN pair and
+    release what that pair holds, while being structurally unable to
+    address the replacement pair, which pins a different object. A
+    blanket "ignore stale events" rule would instead leak the old pair.
+    """
+
+    def __init__(self, source: "Tunnel", destination: "Tunnel"):
+        self.source = source
+        self.destination = destination
+        self.state = PAIR_OFFERED
+        self.terminal_reason: Optional[str] = None
+        self._accepted: set = set()
+        self._ready: set = set()
+
+    # ── leg identity ────────────────────────────────────────────────
+
+    def _is_leg(self, tunnel: "Tunnel") -> bool:
+        return tunnel is self.source or tunnel is self.destination
+
+    # ── transitions ─────────────────────────────────────────────────
+
+    def leg_accepted(self, tunnel: "Tunnel") -> str:
+        """Record one leg's OPEN_OK. Idempotent per leg."""
+        if not self._is_leg(tunnel):
+            return PAIR_NOT_A_LEG
+        if self.state != PAIR_OFFERED:
+            return PAIR_NOT_OFFERED
+        self._accepted.add(id(tunnel))
+        return PAIR_OK
+
+    def activate(self, hub: "TunnelHub") -> str:
+        """Go ACTIVE, or terminate with a reason.
+
+        Resolution was instantaneous, not a lease: either tunnel may
+        have been replaced in its slot since. Both are rechecked here,
+        along with the capability that made them eligible. A failed
+        activation is terminal -- the pair does not linger for a retry.
+        """
+        if self.state == PAIR_TERMINAL:
+            return self.terminal_reason or PAIR_NOT_OFFERED
+        if self.state == PAIR_ACTIVE:
+            return PAIR_OK
+        if len(self._accepted) < 2:
+            return PAIR_AWAITING_ACCEPT
+
+        for tunnel, replaced, missing in (
+            (self.source, PAIR_SOURCE_REPLACED, PAIR_SOURCE_CAPABILITY),
+            (self.destination, PAIR_DESTINATION_REPLACED,
+             PAIR_DESTINATION_CAPABILITY),
+        ):
+            current = hub.get_slot(
+                tunnel.org, tunnel.persona_pub, tunnel.machine
+            )
+            if current is not tunnel:
+                self._terminate(replaced)
+                return replaced
+            if CAP_FLEET_DIRECTED_STREAM not in (tunnel.caps or ()):
+                self._terminate(missing)
+                return missing
+
+        self.state = PAIR_ACTIVE
+        return PAIR_OK
+
+    def ready_delivered(self, tunnel: "Tunnel") -> str:
+        """Record that this leg was SENT its READY control.
+
+        Named for what it is: the caller reporting what it enqueued.
+        This object cannot observe delivery.
+        """
+        if not self._is_leg(tunnel):
+            return PAIR_NOT_A_LEG
+        if self.state != PAIR_ACTIVE:
+            return PAIR_NOT_ACTIVE
+        self._ready.add(id(tunnel))
+        return PAIR_OK
+
+    def close(self, tunnel: "Optional[Tunnel]", reason: str) -> bool:
+        """Terminate. True only for the caller that made it terminal.
+
+        A superseded tunnel closing its own pair is legitimate and is
+        how that pair's resources are released. Passing ``None`` closes
+        on the relay's own initiative.
+        """
+        if tunnel is not None and not self._is_leg(tunnel):
+            return False
+        if self.state == PAIR_TERMINAL:
+            return False
+        self._terminate(reason)
+        return True
+
+    def _terminate(self, reason: str) -> None:
+        self.state = PAIR_TERMINAL
+        self.terminal_reason = reason
+
+    # ── gates ───────────────────────────────────────────────────────
+
+    def may_send(self, tunnel: "Tunnel") -> bool:
+        """A leg may send only once it has been told READY."""
+        return (
+            self._is_leg(tunnel)
+            and self.state == PAIR_ACTIVE
+            and id(tunnel) in self._ready
+        )
+
+    def may_receive(self, tunnel: "Tunnel") -> bool:
+        """A leg may receive from its own acceptance onward.
+
+        Receiving is deliberately NOT gated on READY: the peer that is
+        told first will send while this side's READY is still in flight,
+        and refusing that frame would fail the first message of every
+        pair whose legs are told microseconds apart.
+        """
+        return (
+            self._is_leg(tunnel)
+            and self.state != PAIR_TERMINAL
+            and id(tunnel) in self._accepted
+        )
+
+    def accepts_data(self, tunnel: "Tunnel") -> str:
+        """Whether DATA from *tunnel* is admissible right now."""
+        if not self._is_leg(tunnel):
+            return PAIR_NOT_A_LEG
+        if self.state != PAIR_ACTIVE:
+            return PAIR_NOT_ACTIVE
+        return PAIR_OK
