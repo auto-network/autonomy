@@ -539,52 +539,68 @@ class FleetDirectServer:
         await self._server.stop()
 
     async def _serve(self, *, token: str, recv, send, handler, close=None) -> None:
-        """``close(code=, reason=)`` is the transport's close, used to end an
-        org-admitted connection whose membership proof went stale past the
-        re-prove deadline with CLOSE_MEMBERSHIP_STALE (4417), the code the
-        registry uses for the same condition."""
-        raw = await recv()
-        if raw is None:
-            return
-        admission = accept_client_hello(
-            raw, session=token, authenticator=self.authenticator,
+        await serve_fleet_transport(
+            token=token, recv=recv, send=send, handler=handler, close=close,
+            authenticator=self.authenticator,
             org_channel_for=self._org_channel_for,
         )
-        client_pub = admission.client_pub
-        await send(tag_viewer_message(VIEWER_KIND_RECORD, admission.server_hello))
-        crypto = ChannelCrypto.server(
-            admission.private_key, admission.client_eph, admission.transcript,
+
+
+async def serve_fleet_transport(
+    *, token: str, recv, send, handler, close=None,
+    authenticator: FleetAuthenticator,
+    org_channel_for: "Callable[[str], OrgFleetAuthenticator | None] | None" = None,
+) -> None:
+    """Serve the existing fleet handshake and records on carrier callbacks.
+
+    The adapter owns connection lifetime, including failure/cancellation
+    cleanup, just as DirectChannelServer does. ``close(code=, reason=)``
+    is the transport's close, used to end an
+    org-admitted connection whose membership proof went stale past the
+    re-prove deadline with CLOSE_MEMBERSHIP_STALE (4417), the code the
+    registry uses for the same condition."""
+    raw = await recv()
+    if raw is None:
+        return
+    admission = accept_client_hello(
+        raw, session=token, authenticator=authenticator,
+        org_channel_for=org_channel_for,
+    )
+    client_pub = admission.client_pub
+    await send(tag_viewer_message(VIEWER_KIND_RECORD, admission.server_hello))
+    crypto = ChannelCrypto.server(
+        admission.private_key, admission.client_eph, admission.transcript,
+    )
+    # An org-admitted connection tells the handler which organization
+    # admitted it; a personal one passes exactly what it always did.
+    extra = {} if admission.org is None else {
+        "authorize": admission.authorize, "admitted_org": admission.org,
+    }
+
+    async def authorized_handler(channel_token: str, message: bytes):
+        # Re-resolve on every application message. A kick takes effect on
+        # an already-open socket before any further data is accepted.
+        admission.authorize(client_pub)
+        response = handler(channel_token, message, client_pub, **extra)
+        if inspect.isawaitable(response):
+            response = await response
+        return response
+
+    try:
+        await serve_established_channel(
+            crypto,
+            token=token,
+            recv=recv,
+            send=send,
+            handler=authorized_handler,
         )
-        # An org-admitted connection tells the handler which organization
-        # admitted it; a personal one passes exactly what it always did.
-        extra = {} if admission.org is None else {
-            "authorize": admission.authorize, "admitted_org": admission.org,
-        }
-
-        async def authorized_handler(channel_token: str, message: bytes):
-            # Re-resolve on every application message. A kick takes effect on
-            # an already-open socket before any further data is accepted.
-            admission.authorize(client_pub)
-            response = handler(channel_token, message, client_pub, **extra)
-            if inspect.isawaitable(response):
-                response = await response
-            return response
-
-        try:
-            await serve_established_channel(
-                crypto,
-                token=token,
-                recv=recv,
-                send=send,
-                handler=authorized_handler,
-            )
-        except HandshakeError as exc:
-            code = getattr(exc, "close_code", None)
-            if code is None or close is None:
-                raise
-            with contextlib.suppress(Exception):
-                await close(code=int(code), reason=str(exc)[:120])
+    except HandshakeError as exc:
+        code = getattr(exc, "close_code", None)
+        if code is None or close is None:
             raise
+        with contextlib.suppress(Exception):
+            await close(code=int(code), reason=str(exc)[:120])
+        raise
 
 
 async def authenticate_fleet_transport(
