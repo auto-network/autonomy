@@ -201,13 +201,28 @@ def test_graph_tags_omitted_when_empty():
 
 # ── Host network gating ──────────────────────────────────────────────
 
-def test_host_network_section_when_enabled():
-    out = render_workspace_primer(_cfg(network_host=True))
-    assert "### Host Network\n" in out
-    assert "`--network=host`" in out
-    assert "`https://localhost:8080`" in out
-    assert "bridge mode" not in out
-    assert "Reach host services via `host.docker.internal`" not in out
+def test_the_primer_never_hardcodes_a_dashboard_address():
+    """The primer must point at $GRAPH_API, whatever the config says.
+
+    It used to choose an address from ``network_host``, a two-valued flag that
+    cannot express the three real modes -- so a COMPOSE session was told to use
+    host.docker.internal, where nothing listens. Probing it returns "connection
+    refused", which reads like an outage and was reported as one.
+
+    Only the launcher knows the mode (session_launcher.py derives it from
+    topology and exports GRAPH_API unconditionally), so the primer must not
+    re-derive it under either setting of the old flag.
+    """
+    for network_host in (True, False):
+        out = render_workspace_primer(_cfg(network_host=network_host))
+        assert 'curl -sk "$GRAPH_API/api/..."' in out
+        assert "Never hardcode a host" in out
+        # No INSTRUCTION to use a literal address. The explanatory paragraph
+        # names all three so a reader can recognise their own, which is why
+        # this checks the directive lines rather than mere substrings.
+        assert "- Dashboard: `https://localhost:8080`" not in out
+        assert "- Dashboard: `https://host.docker.internal:8080`" not in out
+        assert "agent-browser open https://localhost:8080" not in out
 
 
 def test_operator_dashboard_url_prefers_configured_tailnet_domain(monkeypatch):
@@ -231,12 +246,16 @@ def test_operator_dashboard_url_derives_magicdns_name(monkeypatch):
     ) == "https://desktop-example.tailabcd.ts.net:8080"
 
 
-def test_bridge_network_section_when_disabled():
-    out = render_workspace_primer(_cfg(network_host=False))
-    assert "### Host Network (bridge mode)" in out
-    assert "`--network=host`" not in out
-    assert "host.docker.internal" in out
-    assert "`https://host.docker.internal:8080`" in out
+def test_the_network_section_is_identical_under_both_flag_values():
+    """The old two-branch section is gone, so the flag changes nothing here."""
+    enabled = render_workspace_primer(_cfg(network_host=True))
+    disabled = render_workspace_primer(_cfg(network_host=False))
+    marker = "### Reaching the dashboard"
+    assert marker in enabled and marker in disabled
+    assert (
+        enabled[enabled.index(marker):enabled.index(marker) + 900]
+        == disabled[disabled.index(marker):disabled.index(marker) + 900]
+    )
 
 
 # ── End-to-end parity with real project configs ──────────────────────
@@ -278,9 +297,9 @@ def test_enterprise_ng_shape(shipped_workspaces):
     # 6. CrossTalk legitimized
     assert "not prompt injection" in out
 
-    # 7. Bridge networking — NG runs with network_host: false
-    assert "`--network=host`" not in out
-    assert "`https://host.docker.internal:8080`" in out
+    # 7. Networking — the address comes from $GRAPH_API, not this document
+    assert 'curl -sk "$GRAPH_API/api/..."' in out
+    assert "- Dashboard: `https://host.docker.internal:8080`" not in out
 
 
 def test_autonomy_shape(shipped_workspaces):
@@ -610,30 +629,16 @@ def test_writable_session_branch_uses_session_prefix():
     assert "agent/<session>" not in out
 
 
-def test_host_dashboard_and_operator_link_rule_render_on_separate_lines():
-    """Jinja trimming must not join the internal URL to the link rule."""
-    out = render_workspace_primer(_cfg(
-        repos=(RepoMount(host="example.com", repo="o/r", mount="/workspace/foo", writable=True),),
-        network_host=True,
-    ))
-    assert (
-        "- Dashboard: `https://localhost:8080`\n\n"
-        "**OPERATOR-FACING LINKS MUST USE" in out
-    )
-    assert "https://localhost:8080`**OPERATOR" not in out
-
-
-def test_bridge_dashboard_and_operator_link_rule_render_on_separate_lines():
-    """Bridge-network internal and operator URLs remain distinct lines."""
-    out = render_workspace_primer(_cfg(
-        repos=(RepoMount(host="example.com", repo="o/r", mount="/workspace/foo", writable=True),),
-        network_host=False,
-    ))
-    assert (
-        "- Dashboard: `https://host.docker.internal:8080`\n\n"
-        "**OPERATOR-FACING LINKS MUST USE" in out
-    )
-    assert "host.docker.internal:8080`**OPERATOR" not in out
+def test_graph_api_guidance_and_operator_link_rule_render_on_separate_lines():
+    """Jinja trimming must not join the network section to the link rule."""
+    for network_host in (True, False):
+        out = render_workspace_primer(_cfg(
+            repos=(RepoMount(host="example.com", repo="o/r",
+                             mount="/workspace/foo", writable=True),),
+            network_host=network_host,
+        ))
+        assert "\n\n**OPERATOR-FACING LINKS MUST USE" in out
+        assert "`**OPERATOR" not in out
 
 
 def test_capability_with_missing_primer_file_still_renders_heading(tmp_path, monkeypatch):

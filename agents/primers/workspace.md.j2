@@ -320,7 +320,7 @@ drawing conclusions from local history.
 Pre-configured: dark mode, PNG screenshots to `/tmp/screenshots/`, `--no-sandbox`.
 
 ```bash
-agent-browser open https://localhost:8080 --ignore-https-errors
+agent-browser open "$GRAPH_API" --ignore-https-errors
 agent-browser snapshot -i             # interactive elements with refs
 agent-browser screenshot --annotate   # labeled visual screenshot
 agent-browser eval "document.title"   # run JS in page context
@@ -400,15 +400,30 @@ graph crosstalk send <target-session> "reply"
 graph crosstalk broadcast "message to all live sessions"
 ```
 
-{% if config.network_host %}
-### Host Network
-`--network=host` — all host localhost services reachable directly:
-- Dashboard: `https://localhost:8080`
-{% else %}
-### Host Network (bridge mode)
-Container is on a bridge network. Reach host services via `host.docker.internal`:
-- Dashboard: `https://host.docker.internal:8080`
-{% endif %}
+### Reaching the dashboard — always `$GRAPH_API`
+
+**Use `$GRAPH_API` for every dashboard call. Never hardcode a host.**
+
+```bash
+curl -sk "$GRAPH_API/api/..."          # correct on every session type
+```
+
+The address depends on how this session is networked, and the launcher already
+resolved it: compose sessions reach the dashboard by its service name
+(`https://dashboard:8080`), `--network=host` sessions by `https://localhost:8080`,
+and bridge sessions by `https://host.docker.internal:8080`. Only the launcher
+knows which applies, so it exports the answer as `GRAPH_API` rather than leaving
+this document to guess.
+
+This primer used to print one of those addresses directly, chosen from a
+two-valued config flag that could not express the three real modes — so a
+compose session was told to use `host.docker.internal`, where nothing listens.
+Probing it returned "connection refused", which reads exactly like an outage
+and was reported as one. If a dashboard call fails, echo `$GRAPH_API` before
+concluding anything about dashboard health.
+
+Tools that take a dashboard URL should be given `$GRAPH_API` too — for example
+`graph ui-design ... --api "$GRAPH_API"`, whose own default is `localhost`.
 {% if operator_dashboard_url %}
 
 **OPERATOR-FACING LINKS MUST USE `{{ operator_dashboard_url }}` — NEVER `localhost` OR `host.docker.internal`.** Those internal names are for agent tool calls only. Build every clickable dashboard, Design Studio, Present, session, or artifact URL by appending its path to this Tailnet base URL.
@@ -596,7 +611,7 @@ graph set add autonomy.workspace.primer#1 --key {{ config.id }}:<block> --from /
 graph set override autonomy.workspace.primer {{ config.id }}:<block> --inline '{"enabled": false}'
 
 # preview the render without starting a session
-curl -sk -H "X-Graph-Org: {{ org }}" https://localhost:8080/api/primers/workspace/{{ config.id }}
+curl -sk -H "X-Graph-Org: {{ org }}" "$GRAPH_API/api/primers/workspace/{{ config.id }}"
 ```
 
 Leave overlay rows at `raw` — promoting pushes the content onto peer orgs and undoes the isolation the Setting exists to provide. And a Setting edit only reaches *new* sessions; your own primer is fixed for the rest of this one, so verify with the preview above rather than re-reading this file.
