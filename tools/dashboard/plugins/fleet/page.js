@@ -96,6 +96,7 @@ function fleetPage() {
       if (row.isLocalMachine) {
         const local = (this.view && this.view.localMachine) || {};
         adapted.connectorArmed = local.connectorArmed;
+        adapted.mayServe = local.mayServe;
         adapted.tunnelServing = local.tunnelServing;
         adapted.runningStale = local.runningStale === true;
         adapted.certStatus = local.certStatus || null;
@@ -150,7 +151,12 @@ function fleetPage() {
     machineState(machine) {
       let id; let tone;
       if (machine.isLocalMachine) {
-        const serving = this.servingMachineId === machine.entryId;
+        // Every authorized machine serves (auto-clune.7), so this asks
+        // whether THIS machine may serve -- not whether it won the
+        // singular-ownership election. Gating on the election rendered a dead
+        // connector, a down tunnel and an expired certificate as a healthy
+        // idle machine on every box except the elected one.
+        const serving = machine.mayServe !== false;
         if (serving && machine.connectorArmed === false) { id = 'locked'; tone = 'failed'; }
         else if (serving && machine.tunnelServing === false) { id = 'tunnel'; tone = 'failed'; }
         else if (serving && this.certExpired(machine)) { id = 'cert'; tone = 'failed'; }
@@ -230,8 +236,13 @@ function fleetPage() {
     },
 
     subLine(machine) {
-      if (machine.isLocalMachine) return 'This machine';
-      return this.servingMachineId === machine.entryId ? 'Serves your fleet' : '';
+      // "Serves your fleet" is deleted rather than relabelled: every
+      // authorized machine serves (auto-clune.7), so it was false on the one
+      // machine it named and implied the rest did not. What that machine
+      // actually holds is the singular-ownership election (credential
+      // refresh, usage-row maintenance, enrollment targeting), which is not
+      // a fleet-page fact and has no honest one-line name yet.
+      return machine.isLocalMachine ? 'This machine' : '';
     },
 
     unhealthyMachines() { return this.machines.filter((machine) => !this.machineHealthy(machine)); },
@@ -373,58 +384,6 @@ function fleetPage() {
 
     // ── unlock: re-arm the serving connector with a freshly opened root,
     // the same maintenance sequence a sign-in unlock performs ──
-    async beginUnlock(machine) {
-      if (this.actionBusy) return;
-      this.actionBusy = 'unlock';
-      this.actionErrors = {};
-      let opened = null;
-      try {
-        const { openRoot } = await import('/static/js/ceremony/open-root.js');
-        opened = await openRoot({
-          title: 'Unlock this dashboard',
-          detail: 'Unlock your personal root to bring the serving connector back online.',
-        });
-        if (!opened) return;
-        let rc = await this._fetchJson('/api/fleet/runtime');
-        if (!rc.enabled) throw new Error('the fleet runtime is not enabled on this machine');
-        if (rc.personal_org_uuid && (!rc.org_uuid || rc.serves)) {
-          try {
-            const signon = window.AutonomyNetworkSession && window.AutonomyNetworkSession._internals;
-            if (signon) {
-              await signon.provisionPersonalNetworkIdentity({
-                personalRootSeed: new Uint8Array(opened.seed),
-                orgUuid: rc.personal_org_uuid,
-                rootPub: rc.personal_root_pub,
-                serve: !!rc.serves,
-              });
-              rc = await this._fetchJson('/api/fleet/runtime');
-            }
-          } catch (error) {
-            if (window.console && console.warn) {
-              console.warn('personal tunnel provisioning failed:',
-                (error && error.message) || error);
-            }
-          }
-        }
-        const ceremony = await import('/static/js/ceremony/fleet-enrollment.js');
-        const credential = await ceremony.mintFleetRuntimeCredential({
-          personalRootSeed: new Uint8Array(opened.seed),
-          rootPub: rc.personal_root_pub,
-          machineId: rc.machine_id,
-          machinePub: rc.machine_pub,
-          orgUuid: rc.org_uuid || null,
-        });
-        await this._postJson('/api/fleet/runtime', credential);
-        await this.load({ quiet: true });
-      } catch (error) {
-        this.actionErrors = Object.assign({}, this.actionErrors, {
-          [machine.entryId]: (error && error.message) || String(error),
-        });
-      } finally {
-        if (opened && opened.seed) { opened.seed.fill(0); opened.seed = null; }
-        this.actionBusy = null;
-      }
-    },
 
     // ── remove: root-signed KICK tombstone via the fleet-kick ceremony ──
     async beginRemove(machine) {
