@@ -165,7 +165,13 @@ Every one of these is a `fail`/`warn` we actually hit. Group = screen section.
 | `cred.persisted` | (future `auto-oj5pt`) | memory-only → dies on restart |
 | `cred.reachability` | reachability cert present | discovery disabled |
 
-### C. Serving (this machine, if designated tunnel server)
+### C. Serving (this machine)
+
+> Superseded 2026-09-09: this section was written when exactly one
+> roster member was designated to serve. `auto-clune.7` activated at
+> `46eed6d5` and every authorized machine now runs its own connector;
+> the predicate is `fleet_tunnel_server.tunnel_serving_permitted()`.
+> See `graph://65e49c78-f53`.
 | Flag | Probe | Fail means |
 |---|---|---|
 | `serving.designated` | `fleet_tunnel_server.state()` | not this machine's job (`n/a`) or unassigned |

@@ -443,14 +443,14 @@ def check_serving_readiness(report: dict) -> None:
         running = report.get("running_connectors", {})
         scan_blind = bool(report.get("process_scan_unavailable"))
         now = time.time()
-        # THE DESIGNATION GATE, and it must come before any other verdict.
-        # Fleet members are designated NON-TUNNEL-SERVERS: the synced Setting
-        # names one authorized machine and every other machine correctly runs
-        # no connector (fleet_tunnel_server; auto-clune.7 removes this when
-        # cooperative pools ship). Without this check, every non-designated
-        # node reported "expected to be serving but isn't ... check the
-        # watchdog / restart timing" -- a FABRICATED cause for the system
-        # working as designed, and it cost about an hour on 2026-09-08.
+        # THE SERVING-ELIGIBILITY GATE, and it must come before any other
+        # verdict. Since auto-clune.7 activated at 46eed6d5, EVERY authorized
+        # machine runs its own connector; a machine is ineligible only when it
+        # is mid-join, holds no personal root, or is absent from the active
+        # roster. The gate exists because without it the doctor invented a
+        # cause ("expected to be serving but isn't ... check the watchdog")
+        # for a machine that was behaving correctly, which cost about an hour
+        # on 2026-09-08.
         try:
             from tools.network import fleet_tunnel_server
             # DESIGNATION NO LONGER DECIDES SERVING (auto-clune.7). This gate

@@ -1,12 +1,19 @@
-"""Temporary roster-based gate for singular auto.network tunnel ownership.
+"""Roster-based election of one machine for singular-ownership duties.
 
-This module deliberately has one job: while the registry still replaces an
-organization's prior tunnel, determine whether THIS Fleet machine may run the
-serving connector.  It does not elect a leader and it grants no authority.
-The synced personal Setting names one already-authorized roster machine.
+**This module no longer decides who may serve.** ``auto-clune.7`` activated at
+46eed6d5: every authorized Fleet machine runs its own connector, and
+:func:`tunnel_serving_permitted` is the serving predicate. A machine is
+refused only when it is mid-join, holds no personal root, or is absent from
+the active roster.
 
-``auto-clune.7`` removes this module and its schema when cooperative tunnel
-pools ship.
+What ``state()`` and its ``allowed`` field still answer is which single
+machine owns the duties that must not run concurrently across a fleet:
+credential refresh, usage-row maintenance, and enrollment targeting. Reading
+``allowed`` as "may this machine serve" is the defect that made a dead
+connector read as expected; ask :func:`tunnel_serving_permitted` instead.
+
+Renaming the Setting and its reason values to match this narrower meaning is
+tracked separately as ``auto-2fz3b``.
 """
 
 from __future__ import annotations

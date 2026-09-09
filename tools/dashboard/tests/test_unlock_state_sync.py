@@ -18,23 +18,27 @@ def client():
 
 
 def _stub_serving(monkeypatch, *, scopes, cert_status, replies, disk="c0ffee",
-                  designated=True, tunnel_serving=True):
+                  may_serve=True, tunnel_serving=True):
     """Stub the serving-scope reads get_unlock_state makes.
 
     scopes: list of org scopes (None == personal); cert_status: {scope: status};
     replies: {scope: connector-status dict} — a scope absent from replies has no
-    reachable connector. designated: whether this machine is the fleet's
-    designated tunnel server (a managed fleet with allowed=False means it is
-    NOT, so holding no serving credential is expected, not a fault)."""
+    reachable connector. may_serve: whether this machine is permitted to serve
+    at all. Since auto-clune.7 every authorized machine is, so False means the
+    machine is mid-join, holds no personal root, or is absent from the active
+    roster — the only cases where holding no serving credential is expected."""
     import types
     from tools.dashboard import link_serving_supervisor as sup
     from tools.dashboard import service_certificate_manager
     from tools.network import build_version
     from tools.network import fleet_tunnel_server
 
+    # The serving predicate, not the singular-ownership election: reading
+    # state().allowed as "may this machine serve" is the defect that made a
+    # dead connector render as expected.
     monkeypatch.setattr(
-        fleet_tunnel_server, "state",
-        lambda: types.SimpleNamespace(managed=True, allowed=bool(designated)),
+        fleet_tunnel_server, "tunnel_serving_permitted",
+        lambda: (bool(may_serve), "stubbed"),
     )
     monkeypatch.setattr(sup, "_discover_startup_orgs", lambda: list(scopes))
     monkeypatch.setattr(
@@ -176,16 +180,17 @@ def test_never_set_up_scope_is_a_quiet_note_not_a_lit_flag(client, monkeypatch):
     assert "blindhash" in flags["certificates"].get("note", "")
 
 
-def test_non_designated_tunnel_server_does_not_light_sync(client, monkeypatch):
-    # A machine that is not the fleet's designated tunnel server holds no serving
-    # credential by design. Its unarmed connector must NOT be reported as a fault,
-    # and no root-unlock remedy is offered — unlocking cannot arm a non-server.
+def test_a_machine_not_permitted_to_serve_does_not_light_sync(client, monkeypatch):
+    # A machine that may not serve — mid-join, no personal root, or absent from
+    # the active roster — holds no serving credential by design. Its unarmed
+    # connector must NOT be reported as a fault, and no root-unlock remedy is
+    # offered, because unlocking cannot make it eligible.
     _stub_serving(
         monkeypatch,
         scopes=[None],
         cert_status={None: "ok"},
         replies={None: {"fleet_runtime_configured": False, "process_commit": "c0ffee"}},
-        designated=False,
+        may_serve=False,
     )
     sync = client.get("/api/identity/unlock-state").json()["sync"]
     assert sync["needs"] is False
@@ -293,10 +298,10 @@ def test_certificate_flag_projects_each_manager_state(
     assert cert["needs"] is (state != "current")
 
 
-def test_tunnel_lights_down_when_the_designated_server_is_not_serving(
+def test_tunnel_lights_down_when_a_serving_machine_is_not_serving(
     client, monkeypatch
 ):
-    """The false-green regression: a designated tunnel server whose connector
+    """The false-green regression: a serving machine whose connector
     is dead must show the tunnel tile RED ('Down', needs=True) — not the old
     swallowed 'Tunnel state is unavailable' dim tile. This is the exact state
     the operator hit: home serving nothing, UI must say so."""
@@ -305,7 +310,7 @@ def test_tunnel_lights_down_when_the_designated_server_is_not_serving(
         scopes=[None],
         cert_status={None: "ok"},
         replies={},          # personal connector unreachable
-        designated=True,
+        may_serve=True,
         tunnel_serving=False,  # ServingSupervisor.serving() -> False (dead)
     )
     tunnel = client.get("/api/identity/unlock-state").json()["tunnel"]
@@ -314,13 +319,13 @@ def test_tunnel_lights_down_when_the_designated_server_is_not_serving(
     assert "unavailable" not in tunnel["detail"].lower()
 
 
-def test_tunnel_up_when_the_designated_server_is_serving(client, monkeypatch):
+def test_tunnel_up_when_a_serving_machine_is_serving(client, monkeypatch):
     _stub_serving(
         monkeypatch,
         scopes=[None],
         cert_status={None: "ok"},
         replies={None: {"fleet_runtime_configured": True, "process_commit": "c0ffee"}},
-        designated=True,
+        may_serve=True,
         tunnel_serving=True,
     )
     tunnel = client.get("/api/identity/unlock-state").json()["tunnel"]
@@ -328,19 +333,22 @@ def test_tunnel_up_when_the_designated_server_is_serving(client, monkeypatch):
     assert tunnel["value"] == "Up"
 
 
-def test_tunnel_quiet_on_a_non_designated_machine(client, monkeypatch):
-    """No false RED either: a machine that is not the designated tunnel server
-    runs no tunnel of its own, so a missing one is expected — quiet, never
-    lit (the operator's no-false-alarm rule, applied to the tunnel tile too)."""
+def test_tunnel_quiet_on_a_machine_not_permitted_to_serve(client, monkeypatch):
+    """No false RED either: a machine that may not serve runs no tunnel of its
+    own, so a missing one is expected — quiet, never lit (the operator's
+    no-false-alarm rule, applied to the tunnel tile too).
+
+    The inverse is the point: on a machine that MAY serve, a missing tunnel is
+    a fault. Every authorized machine may, since auto-clune.7."""
     _stub_serving(
         monkeypatch,
         scopes=[None],
         cert_status={None: "ok"},
         replies={},
-        designated=False,
+        may_serve=False,
         tunnel_serving=False,
     )
     tunnel = client.get("/api/identity/unlock-state").json()["tunnel"]
     assert tunnel["needs"] is False
     assert tunnel["value"] == ""
-    assert "designated tunnel server" in tunnel["detail"]
+    assert "not permitted to serve" in tunnel["detail"]

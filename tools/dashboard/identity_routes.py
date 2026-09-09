@@ -1678,30 +1678,34 @@ async def get_unlock_state(request: Request) -> JSONResponse:
     # (644c88d74). Only a MANAGED fleet has a designated leader; an unmanaged
     # (legacy single-node) install keeps the original serve-everywhere behavior.
     # Computed BEFORE the tunnel/sync flags because both gate on it.
-    tunnel_designated = True
+    # May this machine serve at all? Since auto-clune.7 (activated at
+    # 46eed6d5) every authorized machine runs its own connector, so this is
+    # tunnel_serving_permitted() and NOT state().allowed. The latter is the
+    # singular-ownership election for credential refresh, usage-row
+    # maintenance and enrollment targeting -- gating the tunnel tile on it
+    # told every machine but one that having no tunnel was expected, which
+    # made a genuinely dead connector read as normal.
+    tunnel_permitted = True
     try:
         from tools.network import fleet_tunnel_server
-        _ts = fleet_tunnel_server.state()
-        if _ts.managed and not _ts.allowed:
-            tunnel_designated = False
+        tunnel_permitted = fleet_tunnel_server.tunnel_serving_permitted()[0]
     except Exception:
         pass
 
-    # tunnel — is THIS dashboard reachable from outside. Only the designated
-    # tunnel server runs a tunnel; a non-designated machine reaches the fleet
-    # THROUGH the server and has none of its own, so a missing tunnel there is
-    # expected, not a fault (same rule as the sync flag). For the designated
-    # server, serving() is a deterministic control-socket handshake: a dead
+    # tunnel — is THIS dashboard reachable from outside. Every authorized
+    # machine runs its own tunnel now, so a missing tunnel here is
+    # expected, not a fault (same rule as the sync flag). Where serving is
+    # permitted, serving() is a deterministic control-socket handshake: a dead
     # connector reads Down, never a swallowed "unavailable". (Before
     # ServingSupervisor.serving() existed this call AttributeError'd every
     # time and the except below silently degraded the tile to "unavailable",
     # so it could never show Down — the false-green root cause.)
-    if not tunnel_designated:
+    if not tunnel_permitted:
         flags["tunnel"] = {
             "needs": False, "value": "",
-            "detail": ("Your other devices reach the fleet through its "
-                       "designated tunnel server, not this machine — it runs "
-                       "no tunnel of its own, which is expected."),
+            "detail": ("This machine is not permitted to serve — it is "
+                       "mid-join, holds no personal root, or is not in the "
+                       "active roster — so it runs no tunnel of its own."),
         }
     else:
         try:
@@ -1736,15 +1740,15 @@ async def get_unlock_state(request: Request) -> JSONResponse:
     # sync_stale (connector commit != disk) is intentionally NOT surfaced here;
     # it remains a fleet_doctor developer diagnostic.
     stale_scopes = sorted(set(sync_stale))
-    if not tunnel_designated:
-        # This machine is not the designated tunnel server, so holding no serving
-        # credential is expected, not a fault. Report it quietly and never light.
+    if not tunnel_permitted:
+        # This machine may not serve at all, so holding no serving credential
+        # is expected, not a fault. Report it quietly and never light.
         flags["sync"] = {
             "needs": False,
             "value": "",
-            "detail": ("Your other machines sync through the fleet's designated "
-                       "tunnel server, not directly with this one, so it holds "
-                       "no serving credential — that's expected, not a problem."),
+            "detail": ("This machine is not permitted to serve, so it holds "
+                       "no serving credential — that's expected, not a "
+                       "problem."),
             "unarmed": [],
             "stale": [],
             "scopes": [],
