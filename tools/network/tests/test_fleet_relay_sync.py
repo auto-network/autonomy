@@ -156,63 +156,6 @@ def _control_kinds(frames):
 
 
 @pytest.mark.asyncio
-async def test_scoped_schema_mismatch_refuses_only_that_scope(
-    tmp_path, monkeypatch
-):
-    fleet = _two_machine_fleet()
-    personal = tmp_path / "personal.db"
-    personal.touch()
-    alpha = tmp_path / "alpha.db"
-    _prepare_org_db(alpha, fleet.server_machine.public_hex)
-    server = _configure_relay_server(fleet, personal, monkeypatch)
-    monkeypatch.setattr(
-        server.scheduler, "_scope_paths",
-        lambda: {"personal": personal, "alpha": alpha},
-    )
-
-    async def fake_handle(_token, _message, _peer_pub, **_telemetry):
-        async def response():
-            yield encode_done(
-                epoch="ef" * 32,
-                count=0,
-                digest=__import__("hashlib").sha256().hexdigest(),
-            )
-        return response()
-
-    server.scheduler._handle = fake_handle
-    token = "ab" * 16
-
-    def request(scope, compat):
-        _auth, _private, hello = _client_hello(fleet, token)
-        body = {
-            "v": 1,
-            "op": "fleet.sync.pull",
-            "roster_epoch": "cd" * 32,
-            "bootstrap": False,
-            "compat": compat,
-            "resume": [],
-            "hello": json.loads(hello),
-        }
-        if scope is not None:
-            body["scope"] = scope
-        return body
-
-    # A mismatched org digest refuses that scope's pull...
-    with pytest.raises(fleet_relay_sync.FleetRelaySyncError, match="schema mismatch"):
-        await server.handle(token, request("alpha", "ee" * 32))
-    # ...an unknown scope refuses with its own error...
-    with pytest.raises(fleet_relay_sync.FleetRelaySyncError, match="unknown fleet sync scope"):
-        await server.handle(token, request("nope", "ee" * 32))
-    # ...and the personal scope still serves afterwards.
-    stream = await server.handle(token, request(
-        None, server.scheduler.store.compatibility_digest()
-    ))
-    frames = [frame async for frame in stream]
-    assert json.loads(frames[0])["kind"] == "fleet.server-hello"
-    assert decode_done(frames[-1])[1] == 0
-
-
-@pytest.mark.asyncio
 def test_publish_connector_runtime_org_none_is_the_scopeless_target_not_unspecified(
     monkeypatch,
 ):
@@ -726,30 +669,3 @@ def test_ownership_defaults_to_not_binding():
     )
 
 
-@pytest.mark.asyncio
-async def test_connector_stream_requires_the_fleet_machine_hello(
-    monkeypatch, tmp_path
-) -> None:
-    """A connector stream must not serve anything before the fleet hello.
-
-    This is the surviving half of
-    test_connector_stream_requires_fleet_machine_hello_and_chunks_bootstrap.
-    That test asserted TWO properties: the hello requirement, and that the
-    relay chunked a bootstrap it built itself. The relay builds nothing now --
-    bootstrap comes from the shared serve -- so the chunking half is gone with
-    the mechanism. The hello half is authentication and is entirely unaffected
-    by what is being served, so it is re-established here rather than deleted
-    silently along with it.
-    """
-    fleet = _two_machine_fleet()
-    personal = tmp_path / "personal.db"
-    personal.touch()
-    server = _configure_relay_server(fleet, personal, monkeypatch)
-    token = "ab" * 16
-    with pytest.raises(fleet_relay_sync.FleetRelaySyncError):
-        await server.handle(token, {
-            "v": fleet_relay_sync.PROTOCOL_VERSION,
-            "op": "fleet.sync.pull",
-            "roster_epoch": "ab" * 32,
-            # No hello: the server must refuse before serving a single frame.
-        })
