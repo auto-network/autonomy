@@ -428,11 +428,12 @@ def _activate_runtime(
     )
     fleet_relay_sync.dashboard_relay_sync_service.configure(credential)
     if publish_connector is None:
-        tunnel = fleet_tunnel_server.state()
-        publish_connector = bool(
-            tunnel.allowed
-            and tunnel.selected_machine_id == credential.machine_id
-        )
+        # THIRD designation gate. This one is machine-local — it only decides
+        # whether the LOCAL serving subprocess is handed its process credential
+        # over the control socket (no fleet-wide row is written) — so a
+        # non-designated machine could launch a connector and then never feed
+        # it. Same predicate as the other two so the three cannot disagree.
+        publish_connector = fleet_tunnel_server.tunnel_serving_permitted()[0]
     if publish_connector:
         # Serve the fleet connector on the PERSONAL tunnel (org=None →
         # personal.db), never a shared org's: the fleet is anchored on the
@@ -652,7 +653,6 @@ async def local_runtime_context(request: Request) -> JSONResponse:
         return JSONResponse({"ok": True, "enabled": False})
     root_pub, entry = context
     binding = _reachability_binding()
-    tunnel = fleet_tunnel_server.state()
     return JSONResponse({
         "ok": True,
         "enabled": True,
@@ -668,12 +668,23 @@ async def local_runtime_context(request: Request) -> JSONResponse:
         # can register it at unlock — idempotently — whenever org_uuid is still
         # null, and every machine derives the same value.
         "personal_org_uuid": fleet_runtime.personal_org_uuid(root_pub),
-        # True only for the machine currently selected to serve the tunnel: only
-        # it provisions a serving delegate. A joiner registers the org (so its
-        # reachability cert verifies) but never serves.
-        "serves": bool(
-            tunnel.allowed and tunnel.selected_machine_id == entry.machine_id
-        ),
+        # Whether THIS machine may serve, and therefore whether the browser
+        # mints it a personal serving delegate at unlock.
+        #
+        # This is the SECOND designation gate, and the one that actually strands
+        # a machine. The supervisor's gate only decides whether to launch a
+        # connector; this one decides whether the serving CERTIFICATE is ever
+        # minted, and the key material for that mint exists only in the
+        # operator's browser during unlock. A non-designated machine answered
+        # False here forever, so it never acquired a personal serve-cert — and
+        # relaxing the supervisor alone would leave it launching nothing,
+        # because there is no credential to launch with. Observed on SJC
+        # (fleet_doctor: personal serving cert missing, no local serve artifact).
+        #
+        # The joiner property the old expression protected is preserved by the
+        # predicate itself, not by designation: a mid-join machine fails closed
+        # (`fleet-member-provisioning`), as does one absent from the roster.
+        "serves": fleet_tunnel_server.tunnel_serving_permitted()[0],
     })
 
 
