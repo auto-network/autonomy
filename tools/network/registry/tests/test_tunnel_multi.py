@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import contextlib
 
+import json
 import pytest
 from fastapi.testclient import TestClient  # noqa: F401  (fixture plumbing)
 
 from tools.network.idkit import KeyPair, Subject, issue_cert
 from tools.network.relaykit import hello as hello_mod
-from tools.network.relaykit.hello import build_tunnel_hello
+from tools.network.relaykit.hello import HelloError
 from tools.network.registry import relay as relay_mod
 from tools.network.registry.relay import CLOSE_REPLACED, _verify_tunnel_hello
 
@@ -71,15 +72,28 @@ def test_verify_returns_machine_and_caps(app, clock, client, root):
     assert verified.version == 2
 
 
-def test_v1_hello_verifies_with_empty_machine_slot(app, clock, client, root):
+def test_a_hello_without_a_machine_identity_is_refused(app, clock, client, root):
+    """INVERTED: this asserted that a v1 hello verified into an EMPTY machine
+    slot. That slot is exactly what let two machines of one org overwrite each
+    other, and v1 carried no machine identity and could carry no capabilities.
+    It is deleted; a hello that cannot name its machine is now refused."""
     register(client, clock, root, org_uuid=ORG)
     serve_key = KeyPair.generate()
     cert = _serve_cert(root, serve_key)
-    raw = build_tunnel_hello(serve_key, cert, org=ORG, ts=clock.now)
-    verified = _verify_tunnel_hello(raw, ORG, app.state.store, clock.now)
-    assert verified.machine == ""
-    assert verified.caps == ()
-    assert verified.version == 1
+    # Build a REAL hello and relabel it v1, so the refusal is proven against
+    # a well-formed message rather than a malformed one.
+    from tools.network.relaykit.hello import (
+        SERVING_MACHINE_HELLO_DOMAIN, build_tunnel_hello_v2,
+    )
+    payload = json.loads(build_tunnel_hello_v2(
+        serve_key, cert, machine_key=KeyPair.generate(), org=ORG,
+        ts=clock.now, machine_hello_domain=SERVING_MACHINE_HELLO_DOMAIN,
+    ))
+    payload["v"] = 1
+    raw = json.dumps(payload)
+
+    with pytest.raises(HelloError):
+        _verify_tunnel_hello(raw, ORG, app.state.store, clock.now)
 
 
 def test_bad_machine_signature_is_refused(app, clock, client, root):

@@ -26,7 +26,7 @@ from tools.network.relaykit.connector import (
     TunnelConnector,
     TunnelProtocolVersionError,
 )
-from tools.network.relaykit.hello import HELLO_VERSION
+from tools.network.relaykit.hello import HELLO_VERSION_2
 
 TARGET = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
@@ -83,7 +83,8 @@ async def _connected_connector(port: int, root: KeyPair, org: str):
     connector = TunnelConnector(
         f"ws://127.0.0.1:{port}", org, serve_key, cert,
         min_backoff=0.05, max_backoff=0.2,
-    )
+                machine_key=KeyPair.generate(),
+            )
     task = asyncio.create_task(connector.run())
     await asyncio.wait_for(connector.connected.wait(), timeout=10)
     return connector, task
@@ -161,7 +162,9 @@ def test_control_without_tunnel_raises():
     root = KeyPair.generate()
     connector = TunnelConnector(
         "ws://127.0.0.1:1", "11111111-1111-4111-8111-111111111111",
-        root, _serve_cert(root, root, "11111111-1111-4111-8111-111111111111"))
+        root, _serve_cert(root, root, "11111111-1111-4111-8111-111111111111"),
+        machine_key=KeyPair.generate(),
+    )
 
     async def run():
         with pytest.raises(ConnectionError):
@@ -190,22 +193,23 @@ def _connector_for_handshake():
     return TunnelConnector(
         "ws://registry.invalid", org, child,
         _serve_cert(root, child, org),
-    )
+                machine_key=KeyPair.generate(),
+            )
 
 
 @pytest.mark.parametrize(
     ("reply", "remote"),
     [
         ({"ok": True}, None),  # old registry: acknowledgement has no version
-        ({"ok": True, "v": HELLO_VERSION + 1}, HELLO_VERSION + 1),
+        ({"ok": True, "v": HELLO_VERSION_2 + 1}, HELLO_VERSION_2 + 1),
         ({
             "ok": False,
             "error": {
                 "code": "protocol_version_mismatch",
-                "connector_version": HELLO_VERSION,
-                "registry_version": HELLO_VERSION + 1,
+                "connector_version": HELLO_VERSION_2,
+                "registry_version": HELLO_VERSION_2 + 1,
             },
-        }, HELLO_VERSION + 1),
+        }, HELLO_VERSION_2 + 1),
     ],
 )
 def test_connector_rejects_missing_or_unequal_registry_version(reply, remote):
@@ -215,9 +219,9 @@ def test_connector_rejects_missing_or_unequal_registry_version(reply, remote):
     async def run():
         with pytest.raises(TunnelProtocolVersionError) as mismatch:
             await connector._handshake(socket)
-        assert mismatch.value.local_version == HELLO_VERSION
+        assert mismatch.value.local_version == HELLO_VERSION_2
         assert mismatch.value.remote_version == remote
-        assert f"connector={HELLO_VERSION}" in str(mismatch.value)
+        assert f"connector={HELLO_VERSION_2}" in str(mismatch.value)
         assert "registry=" in str(mismatch.value)
 
     asyncio.run(run())
@@ -228,7 +232,7 @@ def test_connector_accepts_exact_registry_protocol_version():
     connector = _connector_for_handshake()
     socket = _HelloSocket({
         "ok": True,
-        "v": HELLO_VERSION,
+        "v": HELLO_VERSION_2,
         # Diagnostics may grow independently; build identity is not authority.
         "build": "different-commit-is-irrelevant",
     })

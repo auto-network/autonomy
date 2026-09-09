@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from tools.network.idkit import KeyPair
 from tools.network.relaykit import connector as connector_module
 from tools.network.relaykit.connector import TunnelConnector
 
@@ -32,7 +33,8 @@ def _connector() -> TunnelConnector:
     return TunnelConnector(
         "ws://relay.invalid", "test-org", object(), object(),
         min_backoff=0.2, max_backoff=0.8,
-    )
+                machine_key=KeyPair.generate(),
+            )
 
 
 def _install_common_fakes(monkeypatch, connector: TunnelConnector, clock: _Clock):

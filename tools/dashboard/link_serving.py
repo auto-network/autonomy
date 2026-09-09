@@ -1878,7 +1878,6 @@ def main() -> None:
     # nobody present. Keyed by --org, so only the connector that was armed
     # re-arms; the personal fleet connector is the one that ever holds it.
     from tools.network.fleet_relay_sync import (
-        ConnectorFleetRuntime,
         FleetRuntimeWarmCache,
         connector_runtime,
     )
@@ -1901,70 +1900,24 @@ def main() -> None:
         connector_runtime.attach_warm_cache(FleetRuntimeWarmCache(args.org))
         connector_runtime.rearm_from_cache()
 
-    # The enrolled machine signer is node-wide, while the Fleet runtime cache
-    # that carries it belongs to the PERSONAL tunnel. Organization connectors
-    # previously looked only at their own org-keyed cache, found nothing, and
-    # silently emitted hello v1 with zero capabilities. Reuse the already-
-    # verified personal warm credential solely to recover its machine signer;
-    # do not invent or persist another machine key.
-    # auto-e2ufw: prefer the per-org SERVING key for the tunnel hello when the
-    # browser delivered one; fall back to the fleet machine key (transitional)
-    # otherwise. This changes only which machine identity the serving hello
-    # presents — reachability node:announce is unaffected (it never uses this
-    # key). The registry's serving-domain verify accepts either under the
-    # per-org allow-set (empty set -> transitional accept).
+    # ONE source, no hunting. The connector cannot run without a machine
+    # identity: a tunnel that cannot name its machine is refused by the relay
+    # and could carry no capabilities anyway. So this either finds a key or
+    # the process exits, and the supervisor's 20s watchdog starts it again
+    # when the key is there.
+    #
+    # This replaced a fallback chain that searched the org cache, then the
+    # personal cache, then gave up and downgraded to an anonymous hello. The
+    # downgrade is what turned "my key is not ready yet" into a machine that
+    # served anonymously while every status surface reported success.
     machine_key = (
         connector_runtime.serving_machine_key or connector_runtime.machine_key
     )
     if machine_key is None:
-        with contextlib.suppress(Exception):
-            from tools.dashboard.link_approvals import _load_binding
-
-            personal_binding, _error = _load_binding(None)
-            personal_org_uuid = (
-                personal_binding.get("org_uuid") if personal_binding else None
-            )
-            if personal_org_uuid:
-                personal_runtime = ConnectorFleetRuntime()
-                personal_runtime.attach_warm_cache(
-                    FleetRuntimeWarmCache(personal_org_uuid)
-                )
-                personal_runtime.rearm_from_cache()
-                machine_key = (
-                    personal_runtime.serving_machine_key
-                    or personal_runtime.machine_key
-                )
-
-    if machine_key is None:
-        # DO NOT DEGRADE SILENTLY (auto-clune.7 rollout, 2026-09-09).
-        #
-        # With no machine key the hello is v1, and v1 carries no machine
-        # identity — so the relay slots this connector under (persona, "") ,
-        # the shared legacy slot. One unarmed connector there is survivable.
-        # TWO unarmed connectors for the same persona are not: the second
-        # REPLACES the first, which is precisely the cross-machine takeover
-        # that per-(persona, machine) slotting exists to prevent.
-        #
-        # This is NOT a refusal to start. Refusing would take a serving
-        # machine offline outright, which is a worse failure than a shared
-        # slot, and legacy non-fleet publishers legitimately have no machine
-        # key at all. It is a refusal to be QUIET about it: an operator asking
-        # why two machines fight over one slot should find the answer in the
-        # log of the machine that caused it.
-        fleet_managed = False
-        with contextlib.suppress(Exception):
-            from tools.network import fleet_tunnel_server
-
-            fleet_managed = bool(fleet_tunnel_server.state().managed)
-        if fleet_managed:
-            logger.warning(
-                "serving connector for org=%s is starting UNARMED: this "
-                "machine is fleet-managed but no runtime machine key is "
-                "available, so the hello degrades to v1 and takes the SHARED "
-                "empty-machine relay slot. A second unarmed machine on this "
-                "persona would replace it. Re-arm with an operator unlock.",
-                args.org,
-            )
+        parser.error(
+            "no runtime machine key is available for this scope — the vault "
+            "is not warm yet. Not starting; the supervisor retries."
+        )
 
     from tools.network.relaykit.connector import Publisher
 

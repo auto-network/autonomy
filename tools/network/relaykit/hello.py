@@ -64,11 +64,9 @@ SERVING_MACHINE_HELLO_DOMAIN = b"autonomy.network.tunnel.hello.serving-machine.v
 #: Merkle proof checked against state the registry verified independently —
 #: but riding the core means a middlebox cannot strip or swap it.
 TUNNEL_HELLO_DOMAIN_V3 = b"autonomy.network.tunnel.hello.v3\n"
-HELLO_VERSION = 1
 HELLO_VERSION_2 = 2
 HELLO_VERSION_3 = 3
 
-HELLO_FIELDS = frozenset({"v", "org", "signer", "ts", "cert", "sig"})
 HELLO_FIELDS_V2 = frozenset(
     {"v", "org", "signer", "machine", "machine_sig", "caps", "ts",
      "cert", "sig"}
@@ -118,26 +116,10 @@ class HelloError(Exception):
 
 
 def hello_signing_input(
-    org: str, signer: str, ts: int, *, version: int = HELLO_VERSION
+    org: str, signer: str, ts: int, *, version: int = 1
 ) -> bytes:
     return TUNNEL_HELLO_DOMAIN + canonical_json(
         {"v": version, "org": org, "signer": signer, "ts": ts}
-    )
-
-
-def build_tunnel_hello(key: KeyPair, cert: DelegationCert, *, org: str, ts: int) -> str:
-    """Connector side: the signed hello for ``/t/{org}``."""
-    if cert.child_pub != key.public_hex:
-        raise HelloError("cert does not delegate to the signing key")
-    return json.dumps(
-        {
-            "v": HELLO_VERSION,
-            "org": org,
-            "signer": key.public_hex,
-            "ts": ts,
-            "cert": cert.to_json().decode("ascii"),
-            "sig": key.sign_hex(hello_signing_input(org, key.public_hex, ts)),
-        }
     )
 
 
@@ -279,7 +261,7 @@ def parse_tunnel_hello(raw, *, allow_version_mismatch: bool = False) -> dict:
         raise HelloError("hello v must be an integer")
     version = data["v"]
     if not allow_version_mismatch and version not in (
-        HELLO_VERSION, HELLO_VERSION_2, HELLO_VERSION_3,
+        HELLO_VERSION_2, HELLO_VERSION_3,
     ):
         raise HelloError(f"unsupported hello version: {version!r}")
 
@@ -296,10 +278,17 @@ def parse_tunnel_hello(raw, *, allow_version_mismatch: bool = False) -> dict:
                 f"v2 hello must carry exactly {sorted(HELLO_FIELDS_V2)}"
             )
     else:
-        if set(data) != HELLO_FIELDS:
-            raise HelloError(
-                f"hello must carry exactly {sorted(HELLO_FIELDS)}"
-            )
+        # UNKNOWN VERSION: return it unshaped so the caller can answer with a
+        # typed protocol_version_mismatch.
+        #
+        # This branch used to enforce the v1 field set, which worked only
+        # while v1 was the floor. With v1 deleted there is no shape to check
+        # an unknown version against — by definition we do not know it — and
+        # enforcing the old one turned "your version is unsupported" into
+        # "your fields are wrong", which tells an operator of a future
+        # connector nothing useful. Nothing downstream reads these fields:
+        # the caller rejects on version first.
+        return data
     if type(data["ts"]) is not int:
         raise HelloError("hello ts must be an integer unix timestamp")
     for field in ("org", "signer", "cert", "sig"):

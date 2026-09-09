@@ -68,10 +68,8 @@ from .frames import (
 from .stream_adapter import StreamAdapter
 from .stream_wire import CAP_TLS_STREAM
 from .hello import (
-    HELLO_VERSION,
     HELLO_VERSION_2,
     HELLO_VERSION_3,
-    build_tunnel_hello,
     build_tunnel_hello_v2,
     build_tunnel_hello_v3,
     SERVING_MACHINE_HELLO_DOMAIN,
@@ -109,7 +107,7 @@ class TunnelProtocolVersionError(ConnectionError):
     """The connector and registry implement different strict wire versions."""
 
     def __init__(self, remote_version):
-        self.local_version = HELLO_VERSION
+        self.local_version = HELLO_VERSION_2
         self.remote_version = remote_version
         remote = "missing" if remote_version is None else repr(remote_version)
         super().__init__(
@@ -867,10 +865,24 @@ class TunnelConnector:
             ))
             expected_version = HELLO_VERSION_2
         else:
-            await ws.send(build_tunnel_hello(
-                self._key, self._cert, org=self._org, ts=int(time.time())
-            ))
-            expected_version = HELLO_VERSION
+            # NO ANONYMOUS FALLBACK. A hello without a machine identity is
+            # filed by the relay under an empty machine name, so two machines
+            # of the same org land on ONE slot and silently replace each
+            # other — and such a tunnel can carry no capabilities anyway
+            # (host leases, TLS streaming, DNS-01 all require a machine key;
+            # __init__ already refuses that combination).
+            #
+            # This branch used to downgrade instead of refusing, which turned
+            # "my key was not ready yet" into "I am an old client". The
+            # machine then served anonymously while every status surface
+            # reported success, because the identity is fixed at the handshake
+            # and nothing revisits it. Refusing makes a missing key loud and
+            # immediate instead of silent and permanent.
+            raise ConnectionError(
+                "refusing to open a tunnel with no machine identity: this "
+                "connector was constructed without a machine key, so it "
+                "cannot identify itself to the relay"
+            )
         reply = json.loads(await ws.recv())
         if not isinstance(reply, dict):
             raise ConnectionError(f"hello rejected: {reply!r}")
@@ -1099,8 +1111,16 @@ def main() -> None:
     else:
         handler = echo_handler
 
+    # Every tunnel names a machine, so this demo/test entry point mints an
+    # EPHEMERAL one rather than connecting anonymously — that is refused now,
+    # because an unnamed tunnel shares one relay slot with every other unnamed
+    # tunnel of the same org and they replace each other. Production serving
+    # does not come through here; it goes through
+    # tools/dashboard/link_serving.py, which supplies the machine's real
+    # durable key.
     connector = TunnelConnector(
         args.relay, args.org, key, cert, handler, channel_cert=channel_cert,
+        machine_key=KeyPair.generate(),
         min_backoff=args.min_backoff, max_backoff=args.max_backoff,
     )
     asyncio.run(connector.run())

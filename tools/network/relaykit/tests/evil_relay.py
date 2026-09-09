@@ -41,7 +41,7 @@ from tools.network.relaykit.frames import (
     encode_frame,
     new_channel_id,
 )
-from tools.network.relaykit.hello import HELLO_VERSION
+from tools.network.relaykit.hello import HELLO_VERSION_2
 
 
 class EvilRelay:
@@ -104,7 +104,7 @@ class EvilRelay:
 
     async def _handle_tunnel(self, ws) -> None:
         await ws.recv()  # the hello — an evil relay doesn't check anything
-        await ws.send(json.dumps({"ok": True, "v": HELLO_VERSION}))
+        await ws.send(json.dumps({"ok": True, "v": HELLO_VERSION_2}))
         self._tunnel = ws
         try:
             async for raw in ws:

@@ -256,6 +256,7 @@ class TestMitmI5:
             connector = TunnelConnector(
                 f"ws://127.0.0.1:{port}", ORG, session_key, session_cert,
                 min_backoff=0.1, max_backoff=0.5,
+                machine_key=KeyPair.generate(),
             )
             task = asyncio.create_task(connector.run())
             try:

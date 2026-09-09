@@ -95,9 +95,13 @@ class _Node:
         self.serve_key = KeyPair.generate()
         self.machine = machine
         cert = _serve_cert(root, self.serve_key, persona)
-        kwargs = {}
+        # Every tunnel names its machine now, so the no-machine case supplies
+        # a generated one rather than connecting anonymously — that path is
+        # refused. `caps` still only comes with an explicitly passed machine,
+        # which is what these tests vary.
+        kwargs = {"machine_key": machine or KeyPair.generate()}
         if machine is not None:
-            kwargs = {"machine_key": machine, "caps": CAPS}
+            kwargs["caps"] = CAPS
         self.connector = TunnelConnector(
             relay_url, ORG, self.serve_key, cert,
             min_backoff=0.1, max_backoff=0.5, **kwargs,

@@ -62,6 +62,7 @@ class NodeServer:
         announce_ttl: int = 3600,
         min_backoff: float = 0.2,
         max_backoff: float = 5.0,
+        machine_key: KeyPair | None = None,
     ):
         # The base node certificate is emitted to direct/peer viewers. A
         # persona-bearing certificate belongs only in registry admission and
@@ -99,11 +100,21 @@ class NodeServer:
                                 host=listen_host, port=listen_port)
             if listen_port is not None else None
         )
+        #: This node's machine identity for its outbound tunnels. Ephemeral
+        #: unless the caller supplies one — the node is a peer relay, not an
+        #: enrolled fleet machine.
+        self._machine_key = machine_key or KeyPair.generate()
         self._connectors = []
         if floor_url:
+            # Every tunnel names a machine. The floor tunnel is this node's
+            # own serving tunnel, so it carries a machine identity like any
+            # other; an unnamed one would share a single relay slot with every
+            # other unnamed tunnel of the org and they would replace each
+            # other.
             self._connectors.append(TunnelConnector(
                 floor_url, org, self._floor_key, self._floor_cert, handler,
                 channel_cert=self._floor_channel_cert,
+                machine_key=self._machine_key,
                 min_backoff=min_backoff, max_backoff=max_backoff,
             ))
         for relay_url in peer_relay_urls:

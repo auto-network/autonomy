@@ -94,7 +94,15 @@ from .frames import (
     encode_frame,
     new_channel_id,
 )
-from .hello import HELLO_VERSION, HelloError, hello_signing_input, parse_tunnel_hello
+from .hello import (
+    MACHINE_HELLO_DOMAIN,
+    TUNNEL_HELLO_DOMAIN_V2,
+    HELLO_VERSION_2,
+    HelloError,
+    build_tunnel_hello_v2,
+    hello_core,
+    parse_tunnel_hello,
+)
 
 RELAY_HELLO_DOMAIN = b"autonomy.network.relay.hello.v1\n"
 RELAY_HELLO_VERSION = 1
@@ -368,7 +376,7 @@ class PeerRelay:
         if replaced is not None:
             with contextlib.suppress(Exception):
                 await replaced.ws.close(code=CLOSE_REPLACED)
-        await ws.send(json.dumps({"ok": True, "v": HELLO_VERSION}))
+        await ws.send(json.dumps({"ok": True, "v": HELLO_VERSION_2}))
 
         try:
             async for raw in ws:
@@ -408,8 +416,15 @@ class PeerRelay:
         if abs(now - data["ts"]) > MAX_RELAY_SKEW:
             raise HelloError(f"hello ts outside ±{MAX_RELAY_SKEW}s freshness window")
         try:
+            core = hello_core(
+                org=data["org"], signer=data["signer"],
+                machine=data["machine"], caps=data["caps"], ts=data["ts"],
+                version=data["v"],
+            )
             verify_signature(data["signer"], data["sig"],
-                             hello_signing_input(data["org"], data["signer"], data["ts"]))
+                             TUNNEL_HELLO_DOMAIN_V2 + core)
+            verify_signature(data["machine"], data["machine_sig"],
+                             MACHINE_HELLO_DOMAIN + core)
             cert = DelegationCert.from_json(data["cert"])
             if cert.child_pub != data["signer"]:
                 raise HelloError("cert does not delegate to the hello signer")
@@ -481,6 +496,11 @@ class PeerParkConnector(TunnelConnector):
                  root_pub: str, **kwargs):
         super().__init__(relay_url, org, key, cert, handler, **kwargs)
         self._root_pub = root_pub
+        # Parking presents v2 like everything else. The park GATE does not
+        # decide on the machine — it verifies tunnel:serve against a pinned
+        # org root — but there is no reason for this path to be the last
+        # thing on the old identity-free hello, so it carries one.
+        self._park_machine_key = KeyPair.generate()
 
     async def _handshake(self, ws) -> None:
         nonce = secrets.token_hex(NONCE_HEX_LEN // 2)
@@ -491,7 +511,28 @@ class PeerParkConnector(TunnelConnector):
             await ws.recv(), root_pub=self._root_pub, org=self._org,
             purpose="park", nonce=nonce,
         )
-        await super()._handshake(ws)
+        # PARKING PRESENTS ITS OWN HELLO, deliberately without a machine
+        # identity, and does NOT delegate to TunnelConnector._handshake.
+        #
+        # These are two different protocols that happen to share a class. The
+        # registry tunnel identifies a MACHINE — its slot is (persona,
+        # machine), and a hello that cannot name one is now refused there,
+        # because two machines sharing an anonymous slot replace each other.
+        # The park gate asks a different question: it verifies `tunnel:serve`
+        # against a pinned org root (`_verify_tunnel_hello` above), and the
+        # parking node's machine is not part of that decision.
+        #
+        # Inheriting the tunnel's handshake meant deleting the tunnel's
+        # anonymous fallback also broke parking, which is a coupling that
+        # should never have existed.
+        machine_key = self._machine_key or self._park_machine_key
+        await ws.send(build_tunnel_hello_v2(
+            self._key, self._cert, machine_key=machine_key,
+            org=self._org, ts=int(time.time()),
+        ))
+        reply = json.loads(await ws.recv())
+        if not isinstance(reply, dict) or reply.get("ok") is not True:
+            raise ConnectionError(f"park hello rejected: {reply!r}")
 
 
 def main() -> None:

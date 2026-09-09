@@ -16,9 +16,8 @@ import pytest
 from tools.network.idkit import KeyPair, Subject, canonical_json, issue_cert
 from tools.network.relaykit import hello as hello_mod
 from tools.network.relaykit.hello import (
-    HELLO_VERSION,
+    HELLO_VERSION_2,
     HelloError,
-    build_tunnel_hello,
     parse_tunnel_hello,
 )
 
@@ -154,14 +153,20 @@ def test_signatures_are_not_interchangeable_across_domains():
         )
 
 
-def test_v1_build_and_parse_are_byte_for_byte_unchanged():
-    root = KeyPair.generate()
-    serve_key = KeyPair.generate()
-    cert = _serve_cert(root, serve_key)
-    raw = build_tunnel_hello(serve_key, cert, org=ORG, ts=NOW)
-    data = parse_tunnel_hello(raw)
-    assert data["v"] == HELLO_VERSION
-    assert set(data) == {"v", "org", "signer", "ts", "cert", "sig"}
+def test_an_unknown_version_parses_unshaped_for_a_typed_mismatch():
+    """REPLACES a test that v1 round-tripped byte-for-byte. v1 is deleted, so
+    there is nothing to round-trip.
+
+    What must survive is the behaviour that made version negotiation useful:
+    an unsupported version parses far enough for the caller to answer with a
+    typed protocol_version_mismatch naming both sides, instead of being
+    rejected as a field-shape error that tells a future connector's operator
+    nothing."""
+    raw = json.dumps({"v": 99, "org": ORG, "anything": "at all"})
+
+    data = parse_tunnel_hello(raw, allow_version_mismatch=True)
+
+    assert data["v"] == 99
 
 
 @pytest.mark.parametrize(
