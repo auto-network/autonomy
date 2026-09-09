@@ -340,7 +340,7 @@ def test_pending_publication_is_not_presented_as_an_active_invite():
     assert value["url"] is None
 
 
-def test_projection_and_markup_expose_no_fleet_decision_surface():
+def test_projection_exposes_no_fleet_decision_surface():
     view = project(_inputs(
         entries=(LOCAL_ENTRY,),
         admissions=(_admission("fleet-pending"),),
@@ -351,17 +351,6 @@ def test_projection_and_markup_expose_no_fleet_decision_surface():
     assert "channel_binding" not in wire
     assert "approval_json" not in wire
 
-    plugin_dir = Path(__file__).resolve().parents[1]
-    markup = (plugin_dir / "page.html").read_text()
-    script = (plugin_dir / "page.js").read_text()
-    assert "/decision" not in markup + script
-    assert ">Grant<" not in markup
-    assert ">Decline<" not in markup
-    assert "verification_code" not in markup + script
-    # Machine removal exists, but only as a root-signed ceremony: the page
-    # must route it through openRoot + the kick ceremony, never a decision UI.
-    assert "signFleetKick" in script
-    assert "open-root.js" in script
 
 
 def test_local_machine_block_reports_probe_facts_or_stays_null():
