@@ -193,7 +193,7 @@ class HarnessOrg:
         path = self.members[member_index].fleet.org_db_path(machine_index, self.slug)
         with sqlite3.connect(path) as conn:
             return conn.execute(
-                "SELECT machine_public_key,roster_epoch,checkpoints_received,"
+                "SELECT machine_public_key,roster_epoch,"
                 "COALESCE(last_success_ns,0) FROM fleet_sync_peer_state "
                 "ORDER BY machine_public_key"
             ).fetchall()

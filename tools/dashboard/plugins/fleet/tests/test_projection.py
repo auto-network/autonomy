@@ -120,7 +120,6 @@ def test_machine_local_telemetry_drives_transfer_and_iteration_counters():
                 "bytes_received": 512,
                 "mutation_frames": 347_760,
                 "transactions": 64_579,
-                "checkpoint_bytes": 0,
                 "last_outcome": "success",
                 "last_success_at_ns": (NOW - 500) * 1_000_000,
             },

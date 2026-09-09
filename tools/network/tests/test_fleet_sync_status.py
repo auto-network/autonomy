@@ -79,6 +79,6 @@ def test_human_render_names_errors_and_staleness(personal_db):
     _activate(personal_db)
     now = time.time_ns()
     _insert(personal_db, "cc" * 32, online=False, last_success_ns=now, wm=1200,
-            err="checkpoint-stale")
+            err="watermark-stale")
     text = st.format_human(st.read_status(personal_db), now_ns=now)
-    assert "stale" in text and "checkpoint-stale" in text
+    assert "stale" in text and "watermark-stale" in text

@@ -65,7 +65,7 @@ def _encoded_watermarks(store: SQLiteFleetSyncStore):
         EPOCH, compat=COMPAT,
         watermarks=store.advertisable_origin_watermarks(),
     )
-    # watermarks is slot 6 since accept_checkpoint left the wire.
+    # watermarks is slot 6 since the retired field left the wire.
     return decode_pull_request(request)[6]
 
 
@@ -221,15 +221,15 @@ def test_direct_sender_uses_the_gate_not_the_raw_read() -> None:
 
 
 def test_relay_sender_uses_the_gate_not_the_raw_read() -> None:
-    """Fails if relay.pull_checkpoint_once reverts to origin_watermarks.
+    """Fails if relay.pull_once reverts to origin_watermarks.
 
     Named explicitly rather than searching for any function that happens to
     reference the gate -- a search would silently pass if the call site moved
     to some other function, or vanished.
     """
-    from tools.network.fleet_relay_sync import pull_checkpoint_once
+    from tools.network.fleet_relay_sync import pull_once
 
-    names = _referenced_names(pull_checkpoint_once)
+    names = _referenced_names(pull_once)
     assert "advertisable_origin_watermarks" in names
     assert "origin_watermarks" not in names, (
         "the relay sender must not read the ungated map"

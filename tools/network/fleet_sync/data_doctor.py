@@ -1,13 +1,12 @@
-"""Scan a personal/org GraphDB for data that will break a fleet-sync
-checkpoint install, in one pass, instead of discovering each class one
-failed install at a time.
+"""Scan a personal/org GraphDB for data that will break fleet sync, in
+one pass, instead of discovering each class one failure at a time.
 
-Two independent invariant classes the checkpoint installer depends on:
+Two independent invariant classes fleet sync depends on:
 
 1. Foreign-key orphans in NOT NULL FK tables -- a row whose required
    parent is absent. These are permanently unrepresentable on a fresh
-   receiver and get skipped+quarantined during install (see sync.py);
-   they are real, safe-to-delete corruption (see graph note on the
+   receiver and get skipped+quarantined on arrival; they are real,
+   safe-to-delete corruption (see graph note on the
    2026-04-20/21 per-org DB migration, which already treated this
    exact shape as droppable debris and just didn't fully apply it here).
 
@@ -34,8 +33,8 @@ from tools.graph.db import GraphDB
 
 #: (table, fk_column, parent_table) for every NOT NULL foreign key in
 #: schema.sql. A row here whose fk_column value has no matching parent
-#: row is unrepresentable and safe to delete -- the same class sync.py
-#: already skips+quarantines on the receiving side.
+#: row is unrepresentable and safe to delete -- the same class the
+#: receiving side already skips+quarantines.
 NOT_NULL_FKS = (
     ("thoughts", "source_id", "sources"),
     ("derivations", "source_id", "sources"),
@@ -45,8 +44,8 @@ NOT_NULL_FKS = (
 )
 
 #: (table, fk_column, parent_table) for nullable FKs (ON DELETE SET
-#: NULL / plain nullable). A dangling value here is not fatal to a
-#: checkpoint install, but it is still a real inconsistency worth
+#: NULL / plain nullable). A dangling value here is not fatal to
+#: replication, but it is still a real inconsistency worth
 #: reporting -- report only, no delete mode, since NULLing the column
 #: is the correct repair, not removing the row.
 NULLABLE_FKS = (

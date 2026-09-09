@@ -140,7 +140,7 @@ def _control_kinds(frames):
     """Every JSON control record in a served stream, in order.
 
     The bootstrap frame used to sit at a fixed index because the relay emitted
-    its own checkpoint header immediately after the hello. Bootstrap now comes
+    its own header immediately after the hello. Bootstrap now comes
     from the shared serve, so its position depends on what else that serve
     emits. Position was never the property under test -- presence is.
     """
@@ -188,7 +188,7 @@ async def test_scoped_schema_mismatch_refuses_only_that_scope(
             "v": 1,
             "op": "fleet.sync.pull",
             "roster_epoch": "cd" * 32,
-            "checkpoint": False,
+            "bootstrap": False,
             "compat": compat,
             "resume": [],
             "hello": json.loads(hello),
@@ -213,148 +213,6 @@ async def test_scoped_schema_mismatch_refuses_only_that_scope(
 
 
 @pytest.mark.asyncio
-async def test_org_write_crosses_the_relay_path_with_isolation(
-    tmp_path, monkeypatch
-):
-    """The acceptance shape of test_org_scope_sync, at the relay layer: an
-    org row crosses via a real scoped checkpoint + install while the
-    personal database and a second org stay untouched."""
-    fleet = _two_machine_fleet()
-    server_dir = tmp_path / "server"
-    client_dir = tmp_path / "client"
-    server_dir.mkdir()
-    client_dir.mkdir()
-    server_personal = server_dir / "personal.db"
-    server_personal.touch()
-    server_alpha = server_dir / "alpha.db"
-    server_beta = server_dir / "beta.db"
-    _prepare_org_db(server_alpha, fleet.server_machine.public_hex)
-    _prepare_org_db(server_beta, fleet.server_machine.public_hex)
-    _insert_note(server_alpha, "a-note", "alpha crossing")
-    _insert_note(server_beta, "b-note", "beta crossing")
-    client_personal = client_dir / "personal.db"
-    _prepare_org_db(client_personal, fleet.client_machine.public_hex)
-    client_alpha = client_dir / "alpha.db"
-    client_beta = client_dir / "beta.db"
-
-    server = _configure_relay_server(fleet, server_personal, monkeypatch)
-    server_paths = {
-        "personal": server_personal,
-        "alpha": server_alpha,
-        "beta": server_beta,
-    }
-    monkeypatch.setattr(
-        server.scheduler, "_scope_paths", lambda: dict(server_paths)
-    )
-
-    # Client side: repoint the module's path resolution at the client's
-    # databases. The server's paths were captured at configure time.
-    monkeypatch.setattr(
-        fleet_relay_sync, "_org_db_path", lambda _org: client_personal
-    )
-    monkeypatch.setattr(
-        fleet_relay_sync,
-        "discover_org_sync_scopes",
-        lambda: {"alpha": client_alpha, "beta": client_beta},
-    )
-    token = "ab" * 16
-    monkeypatch.setattr(
-        fleet_relay_sync, "_route_location",
-        lambda _rendezvous: ("https://relay", "wss://relay", token),
-    )
-
-    async def fake_envelope(_base, _token):
-        return {
-            "target_type": "fleet:join",
-            "root_pub": fleet.root.public_hex,
-            "org": "personal",
-        }
-
-    monkeypatch.setattr(fleet_relay_sync, "_fetch_envelope", fake_envelope)
-
-    class LoopbackChannel:
-        """Drives server.handle directly — the transport under test is the
-        fleet application protocol, not the WebSocket relay beneath it."""
-
-        def __init__(self):
-            self._stream = None
-
-        @classmethod
-        async def connect(cls, *_args, **_kwargs):
-            return cls()
-
-        async def send_message(self, raw):
-            message = json.loads(raw)
-            try:
-                self._stream = await server.handle(token, message)
-            except fleet_relay_sync.FleetRelaySyncError as exc:
-                async def refused():
-                    yield fleet_relay_sync.canonical_json({
-                        "kind": "fleet.server-error", "error": str(exc),
-                    })
-                self._stream = refused()
-
-        async def recv_message_stream(self):
-            async for frame in self._stream:
-                yield frame, False
-
-        async def close(self):
-            pass
-
-    monkeypatch.setattr(fleet_relay_sync, "ViewerChannel", LoopbackChannel)
-    from tools.network import fleet_route, fleet_runtime
-
-    _process, _cert, payload = fleet.runtime(
-        fleet.client_machine, fleet.client_id, "70" * 32
-    )
-    credential = fleet_runtime.FleetRuntimeCredential.from_browser_payload(
-        payload,
-        personal_root_pub=fleet.root.public_hex,
-        roster_entries=fleet.entries,
-    )
-    route = fleet_route.FleetRoute(
-        rendezvous="https://relay/l/" + token,
-        origin_machine_pub=fleet.server_machine.public_hex,
-    )
-
-    await fleet_relay_sync.pull_checkpoint_once(
-        credential, route, include_checkpoint=True, scope="alpha",
-    )
-    assert _has_note(client_alpha, "a-note"), "org write must cross the relay"
-    assert not _has_note(client_personal, "a-note")
-    assert not _has_note(client_beta, "a-note")
-    assert not _has_note(client_beta, "b-note")
-
-    await fleet_relay_sync.pull_checkpoint_once(
-        credential, route, include_checkpoint=True, scope="beta",
-    )
-    assert _has_note(client_beta, "b-note")
-    assert not _has_note(client_alpha, "b-note")
-    assert not _has_note(client_personal, "b-note")
-
-    # The double-receipt guard (the 64963898 class) counted checkpoint
-    # receipts. Bootstrap is a sweep now and records its position in the
-    # bootstrap row, not as a peer-state count, so the count is zero. The
-    # property this test is named for -- each scope received its OWN rows and
-    # no other scope's -- is asserted above and is unchanged.
-    with sqlite3.connect(
-        f"file:{client_alpha}?mode=ro&immutable=1", uri=True
-    ) as conn:
-        assert conn.execute(
-            "SELECT COALESCE(SUM(checkpoints_received),0) "
-            "FROM fleet_sync_peer_state"
-        ).fetchone()[0] == 0
-
-
-def test_checkpoint_file_frame_refuses_traversal_and_digest_tamper():
-    frame = fleet_relay_sync._encode_file("../escape", b"body")
-    with pytest.raises(fleet_relay_sync.FleetRelaySyncError):
-        fleet_relay_sync._decode_file(frame)
-    valid = fleet_relay_sync._encode_file("base/one", b"body")
-    with pytest.raises(fleet_relay_sync.FleetRelaySyncError):
-        fleet_relay_sync._decode_file(valid[:-1] + b"x")
-
-
 def test_publish_connector_runtime_org_none_is_the_scopeless_target_not_unspecified(
     monkeypatch,
 ):
@@ -387,7 +245,7 @@ def _pull_message(fleet, alpha_path, hello, scope="alpha"):
         "v": 1,
         "op": "fleet.sync.pull",
         "roster_epoch": "cd" * 32,
-        "checkpoint": True,
+        "bootstrap": True,
         "compat": SQLiteFleetSyncStore(alpha_path).compatibility_digest(),
         "resume": [],
         "hello": json.loads(hello),
@@ -483,10 +341,10 @@ async def test_per_origin_watermarks_serve_each_author_once_and_never_echo(
 async def test_server_rebuilds_retired_frames_from_its_rows(
     tmp_path, monkeypatch
 ):
-    """A machine that received an origin's early writes as a checkpoint (or
+    """A machine that received an origin's early writes as a bootstrap (or
     pruned their journal frames after every peer acknowledged) holds those
     writes only as catalog rows plus live rows. It serves them anyway: the
-    frames are rebuilt from the rows, exactly as a checkpoint is built, so
+    frames are rebuilt from the rows, exactly as a swept page is built, so
     a puller below that prefix receives it here and nothing is skipped."""
     from tools.network.fleet_sync_scheduler import (
         _TRANSACTION_MAGIC, _OPERATION_MAGIC, encode_pull_request,
@@ -640,13 +498,6 @@ def test_discovered_standing_route_rotates_the_stored_bootstrap_route(monkeypatc
     # Already on the discovered route: no write.
     assert fleet_relay_sync.rotate_route_if_discovered(rotated) is rotated
     assert stored == [rotated]
-
-
-def test_redelivery_window_escalates_and_caps():
-    w = fleet_relay_sync._redelivery_window_s
-    base = fleet_relay_sync.REDELIVERY_GUARD_S
-    assert [w(0), w(1), w(2), w(3)] == [base, 2 * base, 4 * base, 8 * base]
-    assert w(50) == fleet_relay_sync.REDELIVERY_GUARD_MAX_S
 
 
 @pytest.mark.asyncio
@@ -941,9 +792,9 @@ async def test_connector_stream_requires_the_fleet_machine_hello(
     """A connector stream must not serve anything before the fleet hello.
 
     This is the surviving half of
-    test_connector_stream_requires_fleet_machine_hello_and_chunks_checkpoint.
+    test_connector_stream_requires_fleet_machine_hello_and_chunks_bootstrap.
     That test asserted TWO properties: the hello requirement, and that the
-    relay chunked a checkpoint it built itself. The relay builds nothing now --
+    relay chunked a bootstrap it built itself. The relay builds nothing now --
     bootstrap comes from the shared serve -- so the chunking half is gone with
     the mechanism. The hello half is authentication and is entirely unaffected
     by what is being served, so it is re-established here rather than deleted

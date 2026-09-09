@@ -1,7 +1,7 @@
 """Where the direct listener lives, and who pulls.
 
 Default: the connector subprocess binds the listener (it already builds and
-streams checkpoints for relay serves and carries no operator UI); the
+streams relay serves and carries no operator UI); the
 dashboard binds only loopback-ephemeral. A machine may also opt out of
 pulling over direct while still announcing and serving.
 """

@@ -31,7 +31,7 @@ It deliberately does not carry:
   target path is published only after hash/size verification and atomic rename.
 
 `audit_schema()` fails when a new durable table lacks an explicit policy.  A
-schema migration therefore cannot silently fall outside the checkpoint.
+schema migration therefore cannot silently fall outside replication.
 
 ## Strict byte algorithm
 
@@ -67,8 +67,8 @@ order, and RaptorQ transport order are three separate concerns.
 
 For one logical address, the winner is the maximum `(timestamp,
 candidate_hash)`.  This timestamp LWW rule is associative, commutative, and
-idempotent.  A checkpoint is fed through the same inbox as live mutations and
-is always a bulk merge, never a database replacement.
+idempotent.  A bootstrap sweep is fed through the same inbox as live
+mutations and is always a bulk merge, never a database replacement.
 
 The vault families intentionally narrow that general rule. Ciphertext bodies,
 object headers, and state descriptors are immutable: a byte-identical replay
@@ -133,9 +133,9 @@ the canonical candidate hash; replay is inert.
 
 There is no separate history of wire frames. A delta is served by rebuilding
 each frame from the catalog row (address, timestamp, tombstone, transaction,
-operation) and the live row it points at — exactly how a checkpoint is built —
+operation) and the live row it points at — exactly how a swept page is built —
 so any machine can serve any origin's writes from any watermark, whether it
-learned them by delta or by installing a checkpoint. A transaction none of
+learned them by delta or by a bootstrap sweep. A transaction none of
 whose rows survive (every one overwritten later) is named to the puller with
 its timestamp so the puller's watermark still passes it. Rows a receiver could
 not realize yet (an attachment awaiting bytes) are forwarded from the frame the
@@ -158,10 +158,10 @@ On 100,000 400-byte source rows, normalization reduced current-winner tracking
 allocation from 269 to 141 bytes per address. Canonical logical-key indexes
 remain a separate ~24 bytes/address on the million-row source corpus.
 
-The payload-free winner artifact measured 229 bytes/address. That is checkpoint
-wire metadata, not another persistent payload copy: each live row's values
-appear only in the canonical base, while the winner stream supplies the LWW
-timestamp/provenance and tombstones needed to merge it correctly.
+The payload-free winner artifact measured 229 bytes/address: wire metadata,
+not another persistent payload copy. A row's values cross the wire once, while
+the winner metadata supplies the LWW timestamp/provenance and tombstones
+needed to merge it correctly.
 
 ## Indexed bounded-memory base codec
 
@@ -185,79 +185,45 @@ at 7,570 rows/s with the same 187 MiB peak. The earlier oracle used about
 23.0 MiB (5.3%) to the million-row database and every query plan is an index
 walk with no temporary sort.
 
-## 1.0-alpha checkpoint lifecycle
+## Bootstrap by sweep
 
-`sync.py` composes the pieces into one lifecycle:
+A machine that holds no sync state bootstraps by **sweeping** the serving
+store's keyspace, never by installing a copy of its database. Bulk database
+snapshots ("checkpoints") are retired and deleted.
 
-1. persist the no-more-before floor and establish a frozen WAL read snapshot;
-2. release writers and stream the snapshot into key-ordered base chunks;
-3. stream one payload-free current winner/tombstone record per logical address
-   from that same cut;
-4. commit every immutable chunk and strict catalog by SHA-256 root;
-5. reconstruct each immutable object through real RaptorQ;
-6. validate and realize the base in bounded batches into a staging GraphDB;
-7. apply transaction-grouped deltas, preserving origin and tombstones;
-8. publish the completed SQLite file only after validation and fsync.
+The partition is the whole design, and it rests on one value:
 
-The alpha manifest commits the frozen roster epoch and hash, origin
-incarnation, watermark, base root, and payload-free winner root. The winner
-stream carries address, timestamp, tombstone, origin/transaction identity,
-operation index, and candidate hash. The installer recomputes every live
-candidate hash from the realized base and refuses a mismatch. Consequently a
-full checkpoint contains each live payload once rather than duplicating the
-database in a second mutation stream. Incremental hot deltas still carry
-payload, because they must be applicable without a new base.
+```
+F = the serving store's per-origin frontier, read ONCE at sweep start
+    SWEEP delivers every key <= F
+    PULL  delivers every key >  F
+```
 
-Base order, delta/winner order, and RaptorQ packet order are independent.
-Decoders reject wrong versions, policies, sequences, framing, canonical bytes,
-hashes, and trailing input.
+`F` is captured before the first page is served and is **never advanced**. A
+frontier read later would move the boundary and strand every key written
+between the two readings. Anything landing after that read is above `F` by
+construction and belongs to the joiner's ordinary delta.
 
-The alpha is an embedded library. It adds no process, daemon, port, external
-service, or dependency beyond the repository's existing SQLite, GraphDB,
-RelayKit/swarmkit, and pinned `raptorq` runtime. The current installer requires
-the target personal database to be offline during atomic replacement. Before
-production activation, catalog installation must become a GraphDB migration
-and every production personal-store writer must enter the authored transaction
-adapter; installing the triggers first would intentionally reject legacy direct
-writes.
+The serving side emits `sweep.begin` carrying `F` exactly once, before any
+page, then pages the live rows at or below it in canonical address order. The
+framing is the v4 delta framing unchanged: a swept page is contiguous runs of
+one `(origin, transaction)`, which is exactly what a transaction group already
+is. `sweep.end` closes the `<= F` half; the `> F` half then arrives as a
+normal delta.
 
-`live_workload.py` runs actual concurrent SQLite writer and reader connections
-while repeatedly freezing checkpoints, reconstructing every artifact through
-RaptorQ, and installing them on a receiver. It asserts coherent cuts, no read
-errors, dependency-safe transactions, retained tombstones, and zero final lag
-after the writer stops. This is sustained-load evidence, not a pre-generated
-event schedule.
+The joiner persists `F` and its phase (`sweeping` → `pulling` → `complete`) in
+`fleet_sync_bootstrap`, because `F` is not derivable from the database. Until
+the phase reaches `complete` the store **must not advertise its frontier**: it
+holds rows anchored to a boundary it has not finished honouring. That gate is
+durable, so a crash mid-sweep resumes rather than silently claiming coverage
+it lacks. A store with a bootstrap in progress also refuses to negotiate below
+`SWEEP_PROTOCOL_VERSION`, since a downgrade would abandon `F` while keeping
+the rows anchored to it.
 
-The final six-second Alpha run committed 507 eight-row transactions while 900
-source reads and 900 receiver reads ran concurrently. Thirteen incremental
-installs bounded observed lag at 73 transactions; the final reliable delta
-drained it to zero in 1.27 seconds. Both databases ended with the same 3,551
-rows and no read errors. The measured authored rate was 81.7 transactions/s
-(about 654 inserted rows/s, plus deletes) with the current Python trigger and
-compression path.
-
-`alpha_benchmark.py` drives the complete authored-write → frozen checkpoint →
-RaptorQ reconstruction → verified staging install lifecycle with a configurable
-real-schema corpus and records per-stage wall/CPU time, artifact/database size,
-logical digest, and peak RSS. `chain_benchmark.py` holds the logical corpus
-constant while sweeping 2/4/8/16/32/64 MiB objects and one/two/four RaptorQ
-workers. On exactly 524,000,000 logical bytes (one million rows), 4 MiB was the
-best measured lifecycle balance: 125 objects, 216/392/590 MiB/s at one/two/four
-workers, a 297 MiB conservative four-worker RSS upper bound, and 163.65 seconds
-for encode, RaptorQ, and verified realization. Two MiB improved four-worker
-coding to 670 MiB/s and reduced that memory bound to 215 MiB, but doubled the
-object count to 250 and slowed encoding enough to make the lifecycle 166.78
-seconds. The Alpha checkpoint default is therefore 4 MiB. These are local
-coding rates, not a claim about production network capacity; an actual channel
-remains bounded by its transport and TURN allocation limits.
-
-The final 100,000-row Alpha lifecycle used 400-byte payloads and the 4 MiB
-default. It produced a 102,188,863-byte checkpoint from a 116,568,064-byte
-tracked database: 12.93 seconds to author the corpus, 8.36 seconds to freeze
-and encode the exact base plus winner metadata, 0.74 seconds to reconstruct
-all immutable artifacts through RaptorQ, and 17.93 seconds to verify, realize,
-fsync, and atomically publish the receiver. Peak process RSS was 218.4 MiB and
-the receiver's logical digest matched the source.
+Bootstrap is requested with the `bootstrap` flag and granted only to a puller
+whose resume trail resolves to nothing — see `serve_bootstrap_decision`. An
+empty server has nothing to deliver, so two freshly prepared machines meet
+through (empty) deltas instead of seeding each other's blank databases.
 
 ## Installation and operational boundary
 
@@ -268,7 +234,7 @@ listener and adds no daemon, service unit, background process, account, port,
 or external database.
 
 GraphDB schema version 8 creates the scoped vault and key-control tables so a
-fresh checkpoint receiver has the exact durable schema before materializing
+fresh joiner has the exact durable schema before materializing
 records. `GraphDB.migrate_fleet_sync_catalog(origin_incarnation)` is the
 explicit production preparation step: one SQLite transaction installs the
 five Alpha tracking tables, one machine-local peer-state table, catalog and
@@ -300,8 +266,9 @@ Calling `FleetSyncAlpha` still uses its explicit caller-supplied authored
 context. Production activation is explicit and is not run by ordinary startup.
 Once active, ad-hoc `executescript` is refused because SQLite would commit it
 outside the connection lifecycle; future schema upgrades require a coordinated
-writer-gated path. The Alpha refuses to checkpoint a populated database whose
-live-row count is not completely covered by its catalog.
+writer-gated path. A populated database whose live-row count is not
+completely covered by its catalog cannot serve its rows: everything that
+reads through the catalog would silently omit the untracked ones.
 
 The Dashboard lifespan now owns one `DashboardFleetSyncService`. Before an
 unlocked fleet runtime is supplied it is an idle task: it opens no database,
@@ -340,20 +307,16 @@ crosses one graph note, restarts the receiver, crosses another, and reports the
 two machine ids, byte totals, retry count, applied transactions, completed
 pulls, final note-table digests, and post-shutdown connection count as JSON.
 
-Checkpoint creation is online: it briefly serializes an `IMMEDIATE` cut,
-persists the no-more-before floor, establishes a WAL snapshot, and releases
-writers before streaming. Alpha installation is offline: it realizes into a
-new staging database, preserves the receiving machine's local `orgs` bootstrap
-row, validates and fsyncs the result, then replaces
-the target through a recoverable backup. The Dashboard handoff wraps that
-primitive in an explicit process-wide writer gate, merges authenticated local
-winners into staging, records a durable local checkpoint receipt, publishes
-atomically, recovers crashes on either side of the swap, and resumes reliable
-delta replay. Production now supplies the browser-to-process handoff as a
-short-lived machine-signed idkit delegation and uses the enrolled machine's
-local RelayKit route for the first roster-authenticated checkpoint pull. Exact
-remote ACK floors, dedicated post-enrollment route rotation, continuous
-multi-peer discovery, and exact-base round coordination remain outside this
+Bootstrap is online on both sides. The serving store reads its frontier and
+pages live rows while writers keep running; the joiner merges each page
+through the ordinary mutation inbox and commits in bounded batches. Nothing is
+staged and no database file is ever replaced, so there is no swap window, no
+recoverable backup, and no writer-gate ceremony to recover from. A joiner
+killed mid-sweep restarts from its persisted phase and frontier. Production
+supplies the browser-to-process handoff as a short-lived machine-signed idkit
+delegation and uses the enrolled machine's local RelayKit route for the first
+roster-authenticated pull. Exact remote ACK floors, dedicated post-enrollment
+route rotation, and continuous multi-peer discovery remain outside this
 package.
 
 Attachment graph metadata participates in the base. Attachment bytes are
@@ -380,11 +343,9 @@ python3 -m tools.network.fleet_sync.perf run --scale quick   # smoke, ~15 s
 python3 -m tools.network.fleet_sync.perf run                 # full baselines
 ```
 
-It runs five benchmarks — `kernel` (insert/update throughput with the
-served-ack floor active, steady tracking overhead),
-`storage` (tracked-vs-indexed on-disk cost), `checkpoint` (seed → freeze →
-RaptorQ transport → install lifecycle), `live` (concurrent
-writer/reader/delta lag), and the `crsqlite` yardstick (auto-skipped unless
+It runs two benchmarks — `kernel` (insert/update throughput with the
+served-ack floor active, steady tracking overhead)
+and the `crsqlite` yardstick (auto-skipped unless
 the loadable extension is present; set `FLEET_SYNC_CRSQLITE_EXT` or place it
 under `<baseline store>/crsqlite/`) — then prints a direction-aware
 comparison against the retained baseline for that scale and promotes the new
@@ -411,9 +372,9 @@ experiment on 2026-09-03):
   while its event loop keeps answering pongs — belong to the client's
   silence bounds in `bounded_stream_frames`, configured on
   `FleetSyncRuntimeConfig`. The first frame of a pull gets
-  `pull_first_frame_allowance_s` (default 900 s): a checkpoint serve is
-  legitimately silent for its whole build phase, ~60 s/GB measured, so the
-  default covers a ~15 GB database. Every later gap is structurally one
+  `pull_first_frame_allowance_s` (default 900 s): a bootstrap serve can be
+  legitimately silent while it reads the frontier and assembles its first
+  page, so the default is generous. Every later gap is structurally one
   bounded DB query or one ≤4 MB file read and gets
   `pull_stream_silence_limit_s` (default 60 s, just above the transport's
   50 s so a dead transport still surfaces as the more diagnostic

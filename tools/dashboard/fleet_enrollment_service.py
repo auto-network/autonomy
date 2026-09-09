@@ -807,8 +807,7 @@ def handle_request(
                     "this Dashboard has no active Fleet roster identity"
                 )
             # Deliver the WHOLE active roster, not just the origin pair, so a
-            # joining machine knows every peer it may fetch a first checkpoint
-            # from (fountain_fetch: every symbol any peer emits is useful). The
+            # joining machine knows every peer it may bootstrap from. The
             # joiner's own entry was committed before this reply is assembled,
             # so it resolves into this set alongside the origin and any other
             # active members. Each entry is independently root-signed and the

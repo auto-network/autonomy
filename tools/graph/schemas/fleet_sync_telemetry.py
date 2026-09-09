@@ -37,7 +37,7 @@ SYNOPSIS = {
 }
 
 _OUTCOMES = {"success", "failed", "cancelled"}
-_MODES = {"delta", "checkpoint"}
+_MODES = {"delta"}
 
 
 def _counter(payload: dict, name: str) -> None:
@@ -69,12 +69,10 @@ class FleetSyncTelemetryV1(SettingSchema):
     last_mutation_frames: int = field(required=True, description="Mutation frames transferred by the newest attempt.")
     total_transactions: int = field(required=True, description="Cumulative authored transactions transferred.")
     last_transactions: int = field(required=True, description="Authored transactions transferred by the newest attempt.")
-    total_checkpoint_bytes: int = field(required=True, description="Cumulative checkpoint file payload bytes transferred.")
-    last_checkpoint_bytes: int = field(required=True, description="Checkpoint file payload bytes in the newest attempt.")
     acknowledged_transaction_ref: int = field(required=True, description="Newest fully verified source-journal transaction position.")
     resume_breadcrumbs: list = field(required=False, description="Resume breadcrumbs, each naming one verified transaction (origin, transaction id, timestamp), newest first: the recent few contiguously plus an exponentially thinned history. Presented on pull so a restored source recomputes the resume position from content, never from its renumbered row ids.")
     resume_breadcrumb_seq: int = field(required=False, description="Monotonic acknowledgement counter that ages the breadcrumb trail.")
-    last_mode: str = field(required=True, description="Newest attempt mode: delta or checkpoint.")
+    last_mode: str = field(required=True, description="Newest attempt mode.")
     last_outcome: str = field(required=True, description="Newest terminal outcome.")
     last_error_code: str = field(required=True, description="Bounded failure classification, empty after success.")
     last_started_at_ns: int = field(required=True, description="Wall-clock nanoseconds when the newest attempt started.")
@@ -97,7 +95,6 @@ class FleetSyncTelemetryV1(SettingSchema):
             "total_bytes_sent", "total_bytes_received", "last_bytes_sent",
             "last_bytes_received", "total_mutation_frames",
             "last_mutation_frames", "total_transactions", "last_transactions",
-            "total_checkpoint_bytes", "last_checkpoint_bytes",
             "acknowledged_transaction_ref",
             "last_started_at_ns", "last_finished_at_ns", "last_success_at_ns",
         ):
@@ -154,7 +151,7 @@ class FleetSyncTelemetryV1(SettingSchema):
                 "resume_breadcrumb_seq must be a non-negative integer"
             )
         if payload.get("last_mode") not in _MODES:
-            raise SchemaValidationError("last_mode must be delta or checkpoint")
+            raise SchemaValidationError("last_mode must be delta")
         if payload.get("last_outcome") not in _OUTCOMES:
             raise SchemaValidationError("last_outcome is invalid")
         error = payload.get("last_error_code")

@@ -1,4 +1,4 @@
-"""Order-independent mutation inbox used by stream and checkpoint paths."""
+"""Order-independent mutation inbox used by the stream and sweep paths."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def _address_key(mutation: Mutation) -> bytes:
 class MutationInbox:
     """Merge mutations without touching foreign-key-constrained graph tables.
 
-    Every streamed record and every decoded checkpoint segment enters this
+    Every streamed record and every swept page entry enters this
     inbox first.  The winner for one logical address is the maximum
     ``(timestamp, candidate_hash)``; this makes ingestion associative,
     commutative, and idempotent, including tombstones.

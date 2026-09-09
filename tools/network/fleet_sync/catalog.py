@@ -186,7 +186,7 @@ def quarantine_unrealized(
     """Retain rows the receiver could not realize, for observability and repair.
 
     Each entry is ``(table, address, reason)``. ``reason`` is ``fk_orphan`` (a
-    NOT-NULL parent absent from the checkpoint — the origin keeps its own copy;
+    NOT-NULL parent absent from the transfer — the origin keeps its own copy;
     repair re-materializes it once the parent is recovered),
     ``attachment_bytes_unavailable`` (external content-addressed bytes not yet
     fetched — the row lands once blob transfer backfills it), or
@@ -199,9 +199,9 @@ def quarantine_unrealized(
     replay identity ``(frame, origin, transaction_id, operation_index)``: a
     delta-deferred row is never re-served (the peer's trail advances past
     it), so the drain rebuilds the originated mutation from the stored frame
-    and re-applies it through ordinary last-writer-wins; checkpoint entries
-    store NULLs because the next checkpoint carries the row again.
-    Rewritable per address: a later install that finally realizes the row
+    and re-applies it through ordinary last-writer-wins; swept entries
+    store NULLs because a later sweep carries the row again.
+    Rewritable per address: a later transfer that finally realizes the row
     makes the entry stale, and the drain clears it.
     """
     ensure_quarantine_table(conn)
@@ -288,7 +288,7 @@ def _capture_statement(
     # The catalog row is the whole capture: address, timestamp, tombstone
     # and the (transaction, operation) that wrote it. Wire frames are
     # rebuilt from this row plus the live row when served
-    # (transaction_items) -- exactly how a checkpoint is built. The
+    # (transaction_items) -- exactly how a swept page is built. The
     # per-row frame callback that used to fill fleet_sync_journal was the
     # write path's largest cost (tracked ingestion 0.41x of untracked).
     del columns  # the column list still shapes the trigger's NEW/OLD refs
@@ -770,8 +770,6 @@ class MutationCatalog:
                 local_watermark INTEGER,
                 bytes_sent INTEGER NOT NULL DEFAULT 0 CHECK(bytes_sent>=0),
                 bytes_received INTEGER NOT NULL DEFAULT 0 CHECK(bytes_received>=0),
-                checkpoints_sent INTEGER NOT NULL DEFAULT 0 CHECK(checkpoints_sent>=0),
-                checkpoints_received INTEGER NOT NULL DEFAULT 0 CHECK(checkpoints_received>=0),
                 deltas_sent INTEGER NOT NULL DEFAULT 0 CHECK(deltas_sent>=0),
                 deltas_received INTEGER NOT NULL DEFAULT 0 CHECK(deltas_received>=0),
                 transactions_applied INTEGER NOT NULL DEFAULT 0
@@ -788,7 +786,7 @@ class MutationCatalog:
             # The former order index (timestamp_ns,transaction_ref,
             # operation_index,address) is retired: every consumer's ORDER BY
             # needs joined-table columns and sorts in a temp B-tree anyway,
-            # its range predicate spans the whole catalog at checkpoint
+            # its range predicate spans the whole catalog at serve
             # time, and — this being a WITHOUT ROWID table — it duplicated
             # the full address blob per row on every captured write.
             """DROP INDEX IF EXISTS idx_fleet_sync_catalog_order""",
@@ -1294,9 +1292,10 @@ class MutationCatalog:
         It repairs a production catalog that an earlier buggy bootstrap left
         incomplete -- e.g. the SQLite < 3.38 RETURNING-on-upsert gap that
         silently dropped colliding-timestamp rows during the original
-        activation -- which otherwise fails closed forever at checkpoint time
-        (``AlphaError: checkpoint contains untracked logical rows``) with no
-        self-healing path, because migration early-skips once triggers exist.
+        activation -- which otherwise leaves rows the catalog never tracks,
+        invisible to every reader that goes through it (a bootstrap sweep
+        included), with no self-healing path, because migration early-skips
+        once triggers exist.
 
         Only synchronization metadata is written, never a replicated table,
         so no capture trigger fires. The legacy repair preserves the original
@@ -1411,29 +1410,6 @@ class MutationCatalog:
         finally:
             self._context = None
 
-    def freeze_cut(self) -> FrozenCatalogCut:
-        if self._context is not None or self.conn.in_transaction:
-            raise WatermarkError("cannot freeze during a write transaction")
-        self.conn.execute("BEGIN IMMEDIATE")
-        try:
-            last = int(self.conn.execute(
-                "SELECT last_timestamp FROM fleet_sync_state WHERE singleton=1"
-            ).fetchone()[0])
-            self.conn.execute(
-                "UPDATE fleet_sync_state SET write_floor=? WHERE singleton=1", (last,)
-            )
-            path = Path(self.conn.execute("PRAGMA database_list").fetchone()[2])
-            reader = sqlite3.connect(path)
-            reader.row_factory = sqlite3.Row
-            reader.execute("BEGIN")
-            # Establish the snapshot before releasing the local writer barrier.
-            reader.execute("SELECT COUNT(*) FROM fleet_sync_catalog").fetchone()
-            self.conn.commit()
-            return FrozenCatalogCut(last, reader)
-        except Exception:
-            self.conn.rollback()
-            raise
-
     @staticmethod
     def _decode_address(blob: bytes) -> tuple[str, tuple[object, ...]]:
         value = decode_value(blob)
@@ -1506,7 +1482,7 @@ class MutationCatalog:
                 # accumulated duplicate base rows makes this ``.fetchone()`` pick
                 # an arbitrary sibling, so the winner catalog's candidate hash
                 # (built through this resolver) disagrees with the materialized
-                # base row and the checkpoint fails install with a winner/base
+                # base row and the transfer fails with a winner/base
                 # hash mismatch.
                 clauses.extend([
                     "supersedes IS NULL", "excludes IS NULL", "deprecated = 0",
@@ -1574,7 +1550,7 @@ class MutationCatalog:
         """Verify a realized exact base and install its skinny winner state.
 
         ``skip_addresses`` names rows the materializer could not represent —
-        foreign-key orphans whose parent is absent from the checkpoint (see
+        foreign-key orphans whose parent is absent from the transfer (see
         ``ForeignKeyOrphanError``). Their winner metadata is not verified,
         installed, or counted, so the catalog stays exactly consistent with the
         rows that actually landed. The count this returns therefore excludes
@@ -1681,15 +1657,13 @@ class MutationCatalog:
                 str(origin), str(transaction), int(operation), mutation,
             )
 
-    def origin_watermarks(self, through_ref: int | None = None) -> dict[str, int]:
+    def origin_watermarks(self) -> dict[str, int]:
         """``{origin incarnation: max timestamp_ns held}`` over every
         transaction this database has learned. Under the per-origin
         write-floor promise this is W[origin]: every origin-originated
-        transaction at or below it is held. ``through_ref`` restricts the
-        map to transactions learned at or below that local row id: the
-        frontier a checkpoint cut at that position carried."""
-        clause = "" if through_ref is None else "WHERE t.id<=? "
-        params: tuple = () if through_ref is None else (int(through_ref),)
+        transaction at or below it is held."""
+        clause = ""
+        params: tuple = ()
         return {
             str(row[0]): int(row[1])
             for row in self.conn.execute(
@@ -1714,7 +1688,7 @@ class MutationCatalog:
         lazily in operation order from the rows that still cite the
         transaction in fleet_sync_catalog (plus rows parked in the
         quarantine with their frame) and their live rows -- exactly how a
-        checkpoint is built. A row overwritten by a later transaction is
+        swept page is built. A row overwritten by a later transaction is
         absent and arrives under that later transaction. Lazy so that a
         transaction with tens of thousands of surviving rows can be served
         in bounded groups while it is built, instead of after minutes of
@@ -2077,11 +2051,11 @@ class MutationCatalog:
     def newest_transaction_ref(self) -> int:
         """The newest transaction row id, journal-backed or not.
 
-        A served checkpoint delivers content through the freeze cut, so its
+        A served bootstrap delivers content through the frontier, so its
         done-summary may acknowledge through this row even when the journal
-        is empty (fully pruned, or a checkpoint receiver): resume trails
+        is empty (fully pruned, or a fresh joiner): resume trails
         resolve against transaction rows, not journal frames, so the next
-        pull becomes a delta from here instead of another full checkpoint.
+        pull becomes a delta from here instead of another bootstrap.
         """
         row = self.conn.execute(
             "SELECT MAX(id) FROM fleet_sync_transactions"

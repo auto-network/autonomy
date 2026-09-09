@@ -168,7 +168,7 @@ async def _worker(config_path: Path) -> int:
     machine_key = KeyPair.from_private_hex(payload["machine_private"])
     # In-memory resume trails, as production keeps durably: without a trail
     # every pull presents position zero, and against a gap-pruned journal
-    # the continuity decision would re-checkpoint on every poll. Losing the
+    # the continuity decision would re-bootstrap on every poll. Losing the
     # trail on process death is correct — the restarted worker re-bootstraps
     # once and resumes.
     acknowledged: dict[tuple[str, str], list] = {}
@@ -382,7 +382,7 @@ def run_process_acceptance(root_dir: Path) -> dict:
     _prepare(right_db, right_key)
     _insert(right_db, "process-first", "first process crossing")
     # Authored-then-deleted local state keeps the probe on the delta path
-    # it exists to prove (checkpoint bootstrap has its own harness coverage)
+    # it exists to prove (sweep bootstrap has its own harness coverage)
     # without a live row that would diverge the final digests.
     _insert(left_db, "left-local-seed", "keeps the delta path")
     _delete(left_db, "left-local-seed")

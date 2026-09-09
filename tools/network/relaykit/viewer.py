@@ -180,7 +180,7 @@ class ViewerChannel:
         ping_timeout: Optional[float] = 20.0,
     ) -> "ViewerChannel":
         # ping_interval/ping_timeout default to the library's 20s/20s. A
-        # caller that receives bulk data (a fleet checkpoint pull) must raise
+        # caller that receives bulk data (a fleet bootstrap pull) must raise
         # ping_timeout: the relay's pong queues behind gigabytes of data
         # frames, and 20s killed a 2.27GB transfer 3.5 minutes in while its
         # frames were still flowing (live 2026-09-06, close 1011). Frame

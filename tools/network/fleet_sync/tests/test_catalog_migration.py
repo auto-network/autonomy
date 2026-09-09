@@ -130,33 +130,6 @@ def test_personal_catalog_migration_bootstraps_once_and_remains_writable(
         reopened.close()
 
 
-def test_peer_state_is_one_local_table_without_replicated_foreign_keys(
-    tmp_path: Path,
-) -> None:
-    db = GraphDB(tmp_path / "personal.db")
-    try:
-        db.migrate_fleet_sync_catalog(ORIGIN)
-        columns = {
-            str(row[1]): (str(row[2]), int(row[5]))
-            for row in db.conn.execute("PRAGMA table_info(fleet_sync_peer_state)")
-        }
-        assert columns["machine_public_key"] == ("TEXT", 1)
-        assert columns["roster_epoch"] == ("TEXT", 2)
-        assert {
-            "online", "last_success_ns", "peer_watermark", "local_watermark",
-            "bytes_sent", "bytes_received", "checkpoints_sent",
-            "checkpoints_received", "deltas_sent", "deltas_received",
-            "transactions_applied", "acknowledgements", "retries", "lag_ns",
-            "last_error_code", "updated_at_ns",
-        }.issubset(columns)
-        assert db.conn.execute(
-            "PRAGMA foreign_key_list(fleet_sync_peer_state)"
-        ).fetchall() == []
-        assert audit_schema(db.conn)["fleet_sync_peer_state"].value == "local-only"
-    finally:
-        db.close()
-
-
 def test_catalog_migration_includes_identity_settings(tmp_path: Path) -> None:
     db = GraphDB(tmp_path / "personal.db")
     try:
@@ -312,7 +285,7 @@ def test_reconcile_backfills_untracked_rows_with_triggers_active(
 
     Reproduces the production failure: after writers are activated (capture
     triggers installed), some live rows are missing winner metadata -- as the
-    SQLite < 3.38 RETURNING-on-upsert gap left them -- so a checkpoint fails
+    SQLite < 3.38 RETURNING-on-upsert gap left them -- so a serve fails
     closed and migration can no longer help (it early-skips / rolls back once
     triggers exist). reconcile_catalog() backfills exactly the missing rows,
     additively and with triggers intact.
@@ -376,8 +349,8 @@ def test_snapshot_skips_deprecated_duplicate_settings_base_rows(
     partial unique indexes gated on ``deprecated = 0``). Those deprecated rows
     share the single 'base' catalog address with the live winner, so the base
     snapshot must skip them -- otherwise base.total_records exceeds the
-    catalog's one-per-address count and the checkpoint fails closed
-    (AlphaError: checkpoint contains untracked logical rows). Override and
+    catalog's one-per-address count and the serve fails closed
+    (untracked logical rows). Override and
     exclusion rows keep their own per-id addresses and all stream.
     """
     from tools.network.fleet_sync.streaming import (
@@ -415,7 +388,7 @@ def test_snapshot_skips_deprecated_duplicate_settings_base_rows(
 
         # Only the live base + the override stream: 2, not 4.
         assert len(settings_muts) == 2
-        # Every emitted address is unique -- the exact invariant the checkpoint
+        # Every emitted address is unique -- the exact invariant the serve
         # asserts (base.total_records == one-per-address catalog count).
         addresses = [m.address for m in settings_muts]
         assert len(set(addresses)) == len(addresses)

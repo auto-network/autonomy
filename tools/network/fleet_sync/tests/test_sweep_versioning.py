@@ -246,8 +246,8 @@ def test_an_incomplete_bootstrap_refuses_to_downgrade(tmp_path: Path) -> None:
     """Implemented, not merely asserted.
 
     A store part-way through a sweep pins its negotiation: falling back to v4
-    would let it install a checkpoint over a keyspace it partially swept
-    against a frontier the checkpoint path never saw -- discarding F while
+    would strand a keyspace it only partially swept
+    against F -- discarding F while
     keeping the rows anchored to it.
     """
     from tools.network.fleet_sync.sweep_receive import (

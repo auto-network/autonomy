@@ -1,4 +1,4 @@
-"""Checkpoint bootstrap over the direct path, and serve-onward through it."""
+"""Sweep bootstrap over the direct path, and serve-onward through it."""
 
 import sqlite3
 from pathlib import Path
@@ -6,24 +6,11 @@ from pathlib import Path
 from tools.network.fleet_sync.harness import HarnessFleet
 
 
-def _checkpoints_received(db_path: Path) -> int:
-    try:
-        with sqlite3.connect(
-            f"file:{db_path}?mode=ro&immutable=1", uri=True
-        ) as conn:
-            return int(conn.execute(
-                "SELECT COALESCE(SUM(checkpoints_received),0) "
-                "FROM fleet_sync_peer_state"
-            ).fetchone()[0])
-    except sqlite3.Error:
-        return 0
-
-
 def test_bootstrap_chain_without_relay(tmp_path: Path) -> None:
-    """A joins nothing; B bootstraps from A via a direct checkpoint; A goes
-    away; empty C bootstraps FROM B — possible only because B, whose
-    installed journal cannot replay retired history, serves a checkpoint it
-    builds from its own live state. Deltas then flow to C normally."""
+    """A joins nothing; B bootstraps from A over the direct path; A goes
+    away; empty C bootstraps FROM B — possible only because B, whose journal
+    cannot replay retired history, sweeps its own live state. Deltas then
+    flow to C normally."""
     fleet = HarnessFleet(tmp_path / "fleet", size=3).build()
     try:
         # A starts alone and authors state before anyone else exists online.

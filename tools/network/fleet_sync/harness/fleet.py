@@ -339,10 +339,9 @@ class HarnessFleet:
         self._write_row(self.machines[index].db_path, source_id, title)
 
     def _write_row(self, db_path: Path, source_id: str, title: str) -> None:
-        # The parent writes cross-process while the machine's worker may be
-        # atomically replacing the database (checkpoint install) — a race
-        # production does not have (its writer shares the installer's
-        # process and quiescence gate). A connection landing in the swap
+        # The parent writes cross-process while the machine's worker is
+        # writing too — a race production does not have (its writer shares
+        # the process and quiescence gate). A connection landing in a busy
         # window fails once and succeeds on a fresh connection.
         import sqlite3 as _sqlite3
 
@@ -383,8 +382,8 @@ class HarnessFleet:
 
         Content convergence can arrive indirectly through a third machine,
         leaving a pair that never pulled each other directly; that pair's
-        first contact is trail-less and is legitimately served a
-        checkpoint. Scenarios asserting delta-only behavior (for example
+        first contact is trail-less and is legitimately served a bootstrap
+        sweep. Scenarios asserting delta-only behavior (for example
         journal retention under a frozen acknowledgement) must start from
         an established fleet, which this waits for.
         """
@@ -394,8 +393,7 @@ class HarnessFleet:
                     with self._read_only(machine.db_path) as conn:
                         rows = dict(conn.execute(
                             "SELECT machine_public_key,"
-                            "COALESCE(SUM(deltas_received),0)"
-                            "+COALESCE(SUM(checkpoints_received),0) "
+                            "COALESCE(SUM(deltas_received),0) "
                             "FROM fleet_sync_peer_state "
                             "GROUP BY machine_public_key"
                         ).fetchall())
@@ -413,18 +411,18 @@ class HarnessFleet:
     def _read_only(self, path: Path) -> sqlite3.Connection:
         # immutable=1 takes no locks and maps no WAL shared memory: a plain
         # read-only WAL connection mmaps the -shm file, and a concurrent
-        # checkpoint install replacing the database underneath that mapping
-        # is a SIGBUS (observed as "Fatal Python error: Bus error" under
-        # xdist). Immutable reads degrade a torn mid-swap read into an
+        # writer replacing the database underneath that mapping is a SIGBUS
+        # (observed as "Fatal Python error: Bus error" under
+        # xdist). Immutable reads degrade a torn read into an
         # sqlite3.Error, which every caller already treats as
         # "not yet observable".
         return sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)
 
     def has(self, index: int, source_id: str) -> bool:
-        # Read-only and swap-tolerant: a checkpoint install atomically
-        # replaces the database file, and mid-swap is by definition not yet
-        # the observed state (a plain connect would even create a parasite
-        # empty file at the momentarily absent path).
+        # Read-only and swap-tolerant: a database file being replaced
+        # mid-read is by definition not yet the observed state (a plain
+        # connect would even create a parasite empty file at the
+        # momentarily absent path).
         try:
             with self._read_only(self.machines[index].db_path) as conn:
                 return conn.execute(
@@ -439,8 +437,7 @@ class HarnessFleet:
             try:
                 with self._read_only(machine.db_path) as conn:
                     total += int(conn.execute(
-                        "SELECT COALESCE(SUM(deltas_received),0)"
-                        "+COALESCE(SUM(checkpoints_received),0) "
+                        "SELECT COALESCE(SUM(deltas_received),0) "
                         "FROM fleet_sync_peer_state"
                     ).fetchone()[0])
             except sqlite3.Error:
@@ -468,9 +465,9 @@ class HarnessFleet:
         """Everything that observably advances while the fleet works.
 
         Includes each database file's stat, which changes on every write
-        AND every checkpoint-install swap — during install churn the digest
-        observer legitimately fails constant and the counters are briefly
-        unreadable, which must never read as a stall.
+        — during write churn the digest observer legitimately fails
+        constant and the counters are briefly unreadable, which must never
+        read as a stall.
         """
         signal = []
         for machine in self.machines:

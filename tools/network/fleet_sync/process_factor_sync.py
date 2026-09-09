@@ -102,8 +102,8 @@ def run_factor_process_acceptance(root_dir: Path) -> dict:
     _prepare(source_db, source_key)
     _prepare(receiver_db, receiver_key)
     # Authored-then-deleted local state keeps the receiver on the delta path
-    # this probe asserts (transactions_applied counters); checkpoint
-    # bootstrap has its own harness coverage.
+    # this probe asserts (transactions_applied counters); sweep bootstrap
+    # has its own harness coverage.
     _insert(receiver_db, "receiver-local-seed", "keeps the delta path")
     _delete(receiver_db, "receiver-local-seed")
 

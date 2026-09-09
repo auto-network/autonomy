@@ -4,7 +4,7 @@ Operator requirement (2026-09-06): once a byte is synchronized to a machine
 it must never cross the wire to that machine again, and more members must
 make distribution faster. This driver measures how close the engine gets:
 bytes moved per ordered peer pair, the ratio of bytes moved to the
-theoretical minimum (unique payload bytes x (N-1)), snapshots served, and
+theoretical minimum (unique payload bytes x (N-1)) and
 settle time -- on the real code path (HarnessFleet: real scheduler
 processes, real WebSocket transport, per-direction proxies).
 
@@ -50,7 +50,6 @@ def _machine_counters(db_path: Path, own_pub: str) -> dict:
     try:
         row = conn.execute(
             "SELECT COALESCE(SUM(bytes_sent),0), COALESCE(SUM(bytes_received),0),"
-            " COALESCE(SUM(checkpoints_sent),0), COALESCE(SUM(checkpoints_received),0),"
             " COALESCE(SUM(deltas_sent),0), COALESCE(SUM(deltas_received),0),"
             " COALESCE(SUM(transactions_applied),0) FROM fleet_sync_peer_state"
         ).fetchone()
@@ -66,9 +65,8 @@ def _machine_counters(db_path: Path, own_pub: str) -> dict:
         conn.close()
     return {
         "bytes_sent": row[0], "bytes_received": row[1],
-        "checkpoints_sent": row[2], "checkpoints_received": row[3],
-        "deltas_sent": row[4], "deltas_received": row[5],
-        "transactions_applied": row[6],
+        "deltas_sent": row[2], "deltas_received": row[3],
+        "transactions_applied": row[4],
         "catalog_rows": catalog_rows, "transactions": transactions,
         "authored_transactions": authored_tx, "authored_payload_bytes": authored_bytes,
         "sources": sources,
@@ -207,7 +205,6 @@ def run(args: argparse.Namespace) -> dict:
         evidence["bytes_matrix"] = matrix
         total = sum(sum(row) for row in matrix)
         machines = []
-        snapshots_served = 0
         # Unique payload: every distinct (origin, transaction) in the fleet,
         # with its wire bytes rebuilt from catalog + live rows on whichever
         # machine still cites the transaction (a row overwritten everywhere
@@ -218,7 +215,6 @@ def run(args: argparse.Namespace) -> dict:
             counters.update(_proc_stats(machine.process.pid if machine.process else None))
             counters["index"] = machine.index
             machines.append(counters)
-            snapshots_served += counters["checkpoints_sent"]
             conn = sqlite3.connect(f"file:{machine.db_path}?mode=ro", uri=True)
             try:
                 for origin, tx, size in _transaction_frame_sizes(
@@ -265,10 +261,8 @@ def run(args: argparse.Namespace) -> dict:
                 1 for p in pulls if p.get("outcome") == "failed"
                 and "Quiescence" in str(p.get("error_code"))
             ),
-            "checkpoint_pulls": sum(1 for p in ok if (p.get("checkpoint_bytes") or 0) > 0),
             "delta_pulls_with_frames": sum(
                 1 for p in ok if (p.get("mutation_frames") or 0) > 0
-                and not (p.get("checkpoint_bytes") or 0)
             ),
         }
         evidence["machines"] = machines
@@ -277,8 +271,6 @@ def run(args: argparse.Namespace) -> dict:
         minimum = unique_payload * (args.size - 1)
         evidence["theoretical_minimum_bytes"] = minimum
         evidence["efficiency_ratio"] = round(total / minimum, 3) if minimum else None
-        evidence["snapshots_served"] = snapshots_served
-        evidence["snapshots_received"] = sum(m["checkpoints_received"] for m in machines)
         unique_tx = unique_tx_distinct
         evidence["unique_transactions"] = unique_tx
         evidence["transactions_duplication"] = (
@@ -310,16 +302,15 @@ def _report(e: dict) -> str:
         f"{e['pulls']['with_frames']} carried data; transactions received {e['pulls']['transactions_received']:,} "
         f"vs unique {e['unique_transactions']:,} x (N-1) -> duplication {e['transactions_duplication']}x; "
         f"app bytes received {e['pulls']['app_bytes_received']:,}",
-        f"- snapshots served: {e['snapshots_served']}  received: {e['snapshots_received']}"
-        + (f"  (late join at {e['late_joined_at_s']:.1f}s)" if e.get('late_joined_at_s') else ""),
+        (f"- late join at {e['late_joined_at_s']:.1f}s" if e.get('late_joined_at_s') else ""),
         "",
-        "| machine | sent | received | ckpt sent | ckpt recv | deltas recv | catalog rows | authored tx | cpu s | peak rss MB |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "| machine | sent | received | deltas recv | catalog rows | authored tx | cpu s | peak rss MB |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for m in e["machines"]:
         lines.append(
-            f"| {m['index']} | {m['bytes_sent']:,} | {m['bytes_received']:,} | {m['checkpoints_sent']} |"
-            f" {m['checkpoints_received']} | {m['deltas_received']} | {m['catalog_rows']:,} |"
+            f"| {m['index']} | {m['bytes_sent']:,} | {m['bytes_received']:,} |"
+            f" {m['deltas_received']} | {m['catalog_rows']:,} |"
             f" {m['authored_transactions']} | {m.get('cpu_s','?')} | {round(m.get('peak_rss_kb',0)/1024)} |"
         )
     lines += ["", "## Bytes per dial (row = dialer, column = target)", ""]
@@ -351,11 +342,10 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps({k: evidence[k] for k in (
         "size", "writes", "converged", "settle_s", "total_bytes_on_wire",
         "unique_payload_bytes", "efficiency_ratio", "copies_per_write_per_machine",
-        "snapshots_served", "snapshots_received", "transactions_duplication",
+        "transactions_duplication",
     ) if k in evidence} | {
         "quiescence_collisions": evidence["pulls"]["quiescence_collisions"],
         "failed_pulls": evidence["pulls"]["failed"],
-        "checkpoint_pulls": evidence["pulls"]["checkpoint_pulls"],
         "delta_pulls_with_frames": evidence["pulls"]["delta_pulls_with_frames"],
     } if "pulls" in evidence else {k: evidence[k] for k in ("size", "converged") if k in evidence}, sort_keys=True))
     return 0 if evidence.get("converged") else 1
