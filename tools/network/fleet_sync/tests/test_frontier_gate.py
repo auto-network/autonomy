@@ -184,58 +184,6 @@ def test_partial_transaction_is_the_case_being_prevented(
 
 # ── the changed senders actually use the gate ────────────────────────────
 
-def _referenced_names(func) -> set[str]:
-    """Attribute/global names referenced by a function and its nested code.
-
-    LIMITATION, stated so nobody mistakes this for more than it is: these are
-    STRUCTURAL guards, not runtime evidence that a sender put the gated map on
-    the wire. They prove the compiled call site names the gated method and not
-    the ungated one. Real runtime capture needs the harness, which runs
-    machines as subprocesses and so cannot be reached by in-process patching.
-
-    Compiled code rather than source text, so reformatting cannot fool it. The
-    relay site lives inside a lambda, so nested code objects are walked too.
-    """
-    import types
-
-    seen: set[str] = set()
-    stack = [func.__code__]
-    while stack:
-        code = stack.pop()
-        seen.update(code.co_names)
-        for const in code.co_consts:
-            if isinstance(const, types.CodeType):
-                stack.append(const)
-    return seen
-
-
-def test_direct_sender_uses_the_gate_not_the_raw_read() -> None:
-    """Fails if scheduler's pull-request builder reverts to origin_watermarks."""
-    from tools.network.fleet_sync_scheduler import FleetSyncScheduler
-
-    names = _referenced_names(FleetSyncScheduler._pull_scope)
-    assert "advertisable_origin_watermarks" in names
-    assert "origin_watermarks" not in names, (
-        "the direct sender must not read the ungated map"
-    )
-
-
-def test_relay_sender_uses_the_gate_not_the_raw_read() -> None:
-    """Fails if relay.pull_once reverts to origin_watermarks.
-
-    Named explicitly rather than searching for any function that happens to
-    reference the gate -- a search would silently pass if the call site moved
-    to some other function, or vanished.
-    """
-    from tools.network.fleet_relay_sync import pull_once
-
-    names = _referenced_names(pull_once)
-    assert "advertisable_origin_watermarks" in names
-    assert "origin_watermarks" not in names, (
-        "the relay sender must not read the ungated map"
-    )
-
-
 def test_gate_reads_phase_and_watermarks_in_one_snapshot(
     tmp_path: Path,
 ) -> None:

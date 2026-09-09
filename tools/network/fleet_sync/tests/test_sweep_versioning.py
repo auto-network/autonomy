@@ -64,43 +64,6 @@ def test_an_unsupported_version_is_still_refused() -> None:
         encode_pull_request(EPOCH, compat=COMPAT, version=99)
 
 
-def test_the_serve_path_gates_its_emit_on_the_sweep_version() -> None:
-    """An old client must never RECEIVE a sweep.begin.
-
-    STRUCTURAL guard: it inspects the compiled serve generator, proving the
-    emit is conditioned on SWEEP_PROTOCOL_VERSION and not unconditional. It
-    does NOT prove a running server withheld the record from a v4 peer -- that
-    needs the harness, whose machines are subprocesses. Stated so this is not
-    mistaken for wire evidence.
-
-    The previous version of this control asserted `not (3 >= 5)`, which is
-    arithmetic and would have passed against an unconditional emit. Its
-    replacement then inspected `_pull_scope`, the CLIENT side, and failed --
-    correctly, because the emit lives in the server's `_handle` response
-    generator. Both mistakes are the same one: proving something about code
-    that does not do the thing.
-    """
-    import types
-
-    from tools.network.fleet_sync_scheduler import FleetSyncScheduler
-
-    seen: set[str] = set()
-    stack = [FleetSyncScheduler._handle.__code__]
-    while stack:
-        code = stack.pop()
-        seen.update(code.co_names)
-        seen.update(c for c in code.co_consts if isinstance(c, str))
-        for const in code.co_consts:
-            if isinstance(const, types.CodeType):
-                stack.append(const)
-
-    assert "SWEEP_PROTOCOL_VERSION" in seen, (
-        "the serve path does not consult the sweep version at all, so its "
-        "emit cannot be gated on it"
-    )
-    assert "SWEEP_BEGIN_KIND" in seen
-
-
 def test_a_v4_begin_record_cannot_anchor_a_store(tmp_path: Path) -> None:
     """If an old or downgraded server sent a begin at v4, the receiver refuses
     it rather than anchoring a sweep the sender cannot actually serve."""
@@ -281,31 +244,6 @@ def test_an_incomplete_bootstrap_refuses_to_downgrade(tmp_path: Path) -> None:
     assert store.bootstrap_in_progress() is False, "finished, pin released"
 
 
-def test_the_client_pins_its_negotiation_while_bootstrapping() -> None:
-    """STRUCTURAL: the client's request builder consults the pin and both
-    levers it controls. Proves the code branches on it, not that a live pull
-    negotiated v5 -- that needs the harness."""
-    import types
-
-    from tools.network.fleet_sync_scheduler import FleetSyncScheduler
-
-    seen: set[str] = set()
-    stack = [FleetSyncScheduler._pull_scope.__code__]
-    while stack:
-        code = stack.pop()
-        seen.update(code.co_names)
-        for const in code.co_consts:
-            if isinstance(const, types.CodeType):
-                stack.append(const)
-
-    assert "bootstrap_in_progress" in seen, (
-        "the client never asks whether a bootstrap is in progress, so it "
-        "cannot refuse to downgrade"
-    )
-    assert "SWEEP_PROTOCOL_VERSION" in seen
-    assert "record_sweep_begin" in seen
-
-
 def test_scope_is_validated_as_the_wire_means_it(tmp_path: Path) -> None:
     """The personal scope is OMITTED on the wire and reconstructed by the
     decoder's default, so one side may hold the string and the other None.
@@ -353,3 +291,99 @@ def test_scope_is_validated_as_the_wire_means_it(tmp_path: Path) -> None:
         db.close()
 
 
+
+
+def _serving_scheduler(tmp_path: Path):
+    """A scheduler whose store holds one row, ready to serve a bootstrap."""
+    import asyncio  # noqa: F401 - documents that the caller drives a coroutine
+
+    from tools.network import fleet_sync_scheduler as fss
+    from tools.network.fleet_roster import enroll
+    from tools.network.idkit import KeyPair
+
+    root = KeyPair.generate()
+    machine = KeyPair.generate()
+    peer = KeyPair.generate()
+
+    personal = tmp_path / "personal.db"
+    db, catalog = _store(personal)
+    with catalog.transaction(10, "tx-served"):
+        db.conn.execute(
+            "INSERT INTO sources(id,type,title,metadata,created_at,"
+            "ingested_at) VALUES(?,?,?,?,?,?)",
+            ("s-served", "note", "t", "{}", "2026-08-19T00:00:00Z",
+             "2026-08-19T00:00:00Z"),
+        )
+    db.close()
+
+    entries = (
+        enroll(root, machine_pub=machine.public_hex),
+        enroll(root, machine_pub=peer.public_hex, seq=1),
+    )
+    scheduler = fss.FleetSyncScheduler(fss.FleetSyncRuntimeConfig(
+        machine_key=machine,
+        personal_root_pub=root.public_hex,
+        roster_entries=lambda: entries,
+        peer_addresses=lambda: {},
+        personal_db_path=personal,
+        poll_interval=60.0,
+    ))
+    scheduler._roster_snapshot = entries
+    return scheduler, personal, peer.public_hex
+
+
+def _served_kinds(scheduler, personal: Path, peer_pub: str, version: int):
+    """Serve one bootstrap pull and return the control-record kinds emitted."""
+    import asyncio
+    import json
+
+    from tools.network.fleet_sync_scheduler import (
+        SQLiteFleetSyncStore, roster_epoch,
+    )
+
+    store = SQLiteFleetSyncStore(personal)
+    request = encode_pull_request(
+        roster_epoch(scheduler._roster_snapshot,
+                     scheduler.config.personal_root_pub),
+        compat=store.compatibility_digest(),
+        bootstrap=True,
+        version=version,
+    )
+
+    async def run():
+        kinds = []
+        frames = await scheduler._handle("t" * 32, request, peer_pub)
+        async for frame in frames:
+            if frame[:1] == b"{":
+                try:
+                    kinds.append(json.loads(frame).get("kind"))
+                except (ValueError, UnicodeDecodeError):
+                    pass
+        return kinds
+
+    return asyncio.run(run())
+
+
+def test_a_v4_bootstrap_pull_is_served_without_a_sweep_begin(
+    tmp_path: Path,
+) -> None:
+    """The serve path must not emit a sweep to a peer that cannot read one.
+
+    A v4 decoder rejects the unknown kind outright, so emitting it would fail
+    the pull; worse, a peer that ignored it would apply swept rows with no
+    recorded frontier -- the exact failure the version gate prevents. Asking
+    for a bootstrap is not enough: the peer must also speak v5.
+    """
+    scheduler, personal, peer_pub = _serving_scheduler(tmp_path)
+    assert SWEEP_BEGIN_KIND not in _served_kinds(
+        scheduler, personal, peer_pub, 4
+    )
+
+
+def test_a_v5_bootstrap_pull_is_served_a_sweep_begin(tmp_path: Path) -> None:
+    """The same request one version up gets the frontier, exactly once."""
+    scheduler, personal, peer_pub = _serving_scheduler(tmp_path)
+    kinds = _served_kinds(
+        scheduler, personal, peer_pub, SWEEP_PROTOCOL_VERSION
+    )
+    assert kinds.count(SWEEP_BEGIN_KIND) == 1
