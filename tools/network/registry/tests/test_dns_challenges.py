@@ -113,4 +113,4 @@ def test_zone_state_endpoint_serves_live_challenges(client, store):
     dc.present(app_store, NAME, "tok",
                now_fn=lambda: client.app.state.now_fn())
     body = client.get("/v1/dns/zone-state").json()
-    assert body == {"challenges": {NAME + ".": {"values": ["tok"], "ttl": 60}}, "zones": []}
+    assert body == {"challenges": {NAME + ".": {"values": ["tok"], "ttl": 60}}, "zones": [], "zone_ns": {}}
