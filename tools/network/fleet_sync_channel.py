@@ -587,6 +587,46 @@ class FleetDirectServer:
             raise
 
 
+async def authenticate_fleet_transport(
+    transport,
+    *,
+    authenticator: "FleetAuthenticator | OrgFleetAuthenticator",
+    expected_machine_pub: str,
+    session: str,
+) -> ViewerChannel:
+    """Authenticate an already-open message transport as an exact fleet peer.
+
+    Like ViewerChannel.authenticate, this consumes send/recv/close rather
+    than choosing a carrier. The carrier establishes routing first; this
+    handshake independently proves the expected durable machine identity.
+    Each invocation creates fresh ephemeral keys and record sequence state.
+    The caller owns the handshake deadline. Failure, including cancellation,
+    closes the supplied transport before propagating.
+    """
+    try:
+        private_key, hello = authenticator.build_client_hello(session)
+        client_eph = json.loads(hello)["eph_pub"]
+        await transport.send(hello)
+        server_hello = await transport.recv()
+        if isinstance(server_hello, str):
+            raise HandshakeError("expected binary FLEET_SERVER_HELLO")
+        server_eph, transcript = authenticator.verify_server(
+            read_viewer_record(server_hello),
+            session=session,
+            client_eph=client_eph,
+            expected_machine_pub=expected_machine_pub,
+        )
+        return ViewerChannel(
+            transport, ChannelCrypto.client(private_key, server_eph, transcript)
+        )
+    except BaseException:
+        with contextlib.suppress(Exception):
+            result = transport.close()
+            if inspect.isawaitable(result):
+                await result
+        raise
+
+
 async def fleet_direct_connect(
     addr: str,
     *,
@@ -615,24 +655,13 @@ async def fleet_direct_connect(
         )
         try:
             await ws.send(json.dumps({"v": DIRECT_VERSION, "session": session}))
-            private_key, hello = authenticator.build_client_hello(session)
-            client_eph = json.loads(hello)["eph_pub"]
-            await ws.send(hello)
-            server_hello = await ws.recv()
-            if isinstance(server_hello, str):
-                raise HandshakeError("expected binary FLEET_SERVER_HELLO")
-            server_eph, transcript = authenticator.verify_server(
-                read_viewer_record(server_hello),
-                session=session,
-                client_eph=client_eph,
-                expected_machine_pub=expected_machine_pub,
-            )
-            return ViewerChannel(
-                ws, ChannelCrypto.client(private_key, server_eph, transcript)
-            )
         except BaseException:
             with contextlib.suppress(Exception):
                 await ws.close()
             raise
+        return await authenticate_fleet_transport(
+            ws, authenticator=authenticator,
+            expected_machine_pub=expected_machine_pub, session=session,
+        )
 
     return await asyncio.wait_for(attempt(), timeout=timeout)
