@@ -3159,15 +3159,19 @@ class FleetSyncScheduler:
             resuming_sweep = await asyncio.to_thread(
                 store.bootstrap_in_progress
             )
+            # Computed ONCE and used everywhere below. The first version of
+            # this assigned a local that encode_pull_request never read, so
+            # the refusal was stated in the code and absent from the wire --
+            # the exact shape of claim this whole bead exists to prevent.
+            accept_checkpoint = founded_rows == 0 and not resuming_sweep
             if resuming_sweep:
                 protocol_version = max(
                     protocol_version, SWEEP_PROTOCOL_VERSION
                 )
-                accept_checkpoint = False
             request = encode_pull_request(
                 epoch, compat=local_digest, resume=resume_trail,
                 scope=scope, bootstrap=bootstrap, version=protocol_version,
-                accept_checkpoint=founded_rows == 0,
+                accept_checkpoint=accept_checkpoint,
                 watermarks=watermarks,
             )
             sent += len(request)
@@ -3187,7 +3191,7 @@ class FleetSyncScheduler:
                 "newest=%s, resume=%d crumb(s), bootstrap=%s accept_ckpt=%s",
                 machine_pub[:12], scope, protocol_version, len(watermarks or {}),
                 max(watermarks.values()) if watermarks else None,
-                len(resume_trail), bootstrap, founded_rows == 0,
+                len(resume_trail), bootstrap, accept_checkpoint,
             )
 
             digest = hashlib.sha256()
