@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 from tools.graph.schemas.registry import (
     SettingSchema,
@@ -158,8 +159,24 @@ class PersonalFleetReachabilityV1(SettingSchema):
                 raise SchemaValidationError(
                     f"{name}: every address must be at most {MAX_ADDRESS_BYTES} UTF-8 bytes"
                 )
-            if not (address.startswith("ws://") or address.startswith("wss://")):
-                raise SchemaValidationError(f"{name}: every address must be a ws:// or wss:// URL")
+            # PARSE, do not prefix-check. A correctly signed but malformed URL
+            # would otherwise pass validation and reach a dialer.
+            try:
+                split = urlsplit(address)
+                port = split.port
+            except ValueError as exc:
+                raise SchemaValidationError(
+                    f"{name}: address is malformed: {exc}") from exc
+            if split.scheme not in ("ws", "wss"):
+                raise SchemaValidationError(f"{name}: every address must be ws:// or wss://")
+            if not split.hostname:
+                raise SchemaValidationError(f"{name}: every address must have a host")
+            if split.username or split.password:
+                raise SchemaValidationError(f"{name}: an address must not carry userinfo")
+            if split.fragment:
+                raise SchemaValidationError(f"{name}: an address must not carry a fragment")
+            if port is not None and not (0 < port < 65536):
+                raise SchemaValidationError(f"{name}: address port out of range")
         # Uniqueness is required of the RECEIVED row, not imposed on it. A
         # verifier that deduplicated untrusted input would be verifying a body
         # the signer never produced.
