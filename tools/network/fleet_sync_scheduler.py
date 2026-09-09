@@ -2778,12 +2778,21 @@ class FleetSyncScheduler:
                 # off the event loop and shared by every peer in it, rather
                 # than a blocking read inside the gather. A failed read
                 # yields no rows, which leaves the existing order intact.
-                try:
-                    hint_rows = await asyncio.to_thread(
-                        fleet_sync_telemetry.read_channel_rows
-                    )
-                except Exception:
-                    hint_rows = ()
+                # Nothing to order unless some selected peer has a choice
+                # to make, so skip the store read entirely in that case.
+                # The helper already returns early for a single candidate;
+                # this keeps the round from paying for the read at all.
+                hint_rows: object = ()
+                if any(
+                    len(addresses.get(machine_pub, ())) > 1
+                    for machine_pub in selected
+                ):
+                    try:
+                        hint_rows = await asyncio.to_thread(
+                            fleet_sync_telemetry.read_channel_rows
+                        )
+                    except Exception:
+                        hint_rows = ()
                 await asyncio.gather(
                     *(self._sync_peer(
                         machine_pub,

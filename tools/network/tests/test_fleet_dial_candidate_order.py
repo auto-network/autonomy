@@ -175,3 +175,35 @@ def test_a_hint_dated_ahead_of_the_clock_is_not_promoted_on_the_dial_path(monkey
     seen = _run_one_round(monkeypatch, [_row(BRIDGE, at_ns=ahead)])
 
     assert seen == [(PEER, (TAILNET, BRIDGE))]
+
+
+def test_no_telemetry_read_when_no_peer_has_a_choice(monkeypatch):
+    """The round pays nothing when there is nothing to order.
+
+    `order_candidates` already returns early below two candidates, but
+    the caller reads the store BEFORE calling it, so a round in which
+    every selected peer has one address or none would otherwise pay for
+    a blocking read that cannot change any outcome.
+    """
+    reads: list[int] = []
+    seen = _run_one_round(
+        monkeypatch, [_row(BRIDGE)], reads=reads,
+        peers={PEER: (TAILNET,), PEER_B: ()},
+    )
+
+    assert reads == []
+    assert dict(seen)[PEER] == (TAILNET,)
+
+
+def test_one_peer_with_a_choice_still_earns_the_read(monkeypatch):
+    """The skip must not suppress ordering for the peers that can use it."""
+    reads: list[int] = []
+    seen = _run_one_round(
+        monkeypatch, [_row(BRIDGE)], reads=reads,
+        peers={PEER: (TAILNET, BRIDGE), PEER_B: (TAILNET,)},
+    )
+
+    assert len(reads) == 1
+    by_peer = dict(seen)
+    assert by_peer[PEER] == (BRIDGE, TAILNET)
+    assert by_peer[PEER_B] == (TAILNET,)
