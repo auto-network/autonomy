@@ -1883,6 +1883,20 @@ def main() -> None:
         connector_runtime,
     )
 
+    # The PERSONAL connector owns the machine-wide inbound listener; org
+    # connectors must not bind it. Declared BEFORE re-arming, because
+    # rearm_from_cache() runs configure(), which is where the bind is decided
+    # — set it afterwards and the org connector has already taken the port.
+    _personal_org_uuid = None
+    with contextlib.suppress(Exception):
+        from tools.dashboard.link_approvals import _load_binding
+
+        _binding, _err = _load_binding(None)
+        _personal_org_uuid = _binding.get("org_uuid") if _binding else None
+    connector_runtime.set_owns_inbound_listener(
+        args.org is None or args.org == _personal_org_uuid
+    )
+
     with contextlib.suppress(Exception):
         connector_runtime.attach_warm_cache(FleetRuntimeWarmCache(args.org))
         connector_runtime.rearm_from_cache()
