@@ -212,11 +212,41 @@ def _fleet_advertise_addrs():
 _reachability_cache = None
 
 
-def _own_standing_route_hint():
+def _own_standing_route_hint(credential=None):
     """This machine's own standing relay route in the ws spelling the
-    registry admits as a hint, or None when it has none to announce."""
+    registry admits as a hint, or None when it has none to announce.
+
+    Mints the route when this machine has none. An invitation link expires;
+    a fleet that only ever stored the invitation loses relay connectivity the
+    moment the relay forgets it, and nothing re-establishes a route because
+    peers rotate onto a *published* standing route and there is none to find
+    (the 2026-09-06 incident, and SJC-2 again on 2026-09-09 -- its stored
+    token 404s and the reachability set is empty fleet-wide).
+
+    ``ensure_standing_route`` is idempotent and refuses to re-mint when the
+    relay cannot be asked, so calling it on the cache's throttled refresh is
+    safe: it is one envelope GET once a route is valid. Any failure is
+    swallowed -- announcing no relay hint is the pre-existing behaviour and
+    must never break announcement of the direct addresses.
+    """
     from tools.network import fleet_route
 
+    if credential is not None:
+        try:
+            from tools.dashboard import fleet_standing_route
+            from tools.network import machine_boot
+
+            machine_id = machine_boot.machine_id(org="machine")
+            if machine_id is not None:
+                fleet_standing_route.ensure_standing_route(
+                    machine_id=machine_id,
+                    machine_pub=credential.machine_key.public_hex,
+                )
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "fleet standing route could not be ensured; announcing "
+                "without a relay hint", exc_info=True,
+            )
     try:
         own = fleet_route.load_self(org="machine")
     except Exception:
@@ -279,7 +309,7 @@ def _reachability_peer_addresses(credential, root_pub, *, pull_direct=True):
             ).keys()
         ),
         advertise_addrs=_fleet_advertise_addrs,
-        relay_url=_own_standing_route_hint,
+        relay_url=lambda: _own_standing_route_hint(credential),
         # Off the event loop: a due refresh runs on its own thread and the
         # scheduler gets the last map at once (auto-8dw0w).
         background=True,
