@@ -65,12 +65,17 @@ FLEET_SYNC_PROTOCOL_VERSION = 4
 #: against a v4 server syncs unchanged. v3 repeats the full transaction
 #: header on every operation; v4 sends one transaction-header frame followed
 #: by bare operation frames.
-SUPPORTED_PROTOCOL_VERSIONS = frozenset({3, 4})
+SUPPORTED_PROTOCOL_VERSIONS = frozenset({3, 4, 5})
 _REQUEST_FIELDS = frozenset({
     "v", "op", "roster_epoch", "resume", "compat",
 })
 _REQUEST_OPTIONAL_FIELDS = frozenset({"scope", "bootstrap", "accept_checkpoint", "watermarks"})
 FILE_MAGIC = b"FSB1"
+from tools.network.fleet_sync.sweep_receive import (
+    SWEEP_BEGIN_KIND,
+    SWEEP_PROTOCOL_VERSION,
+)
+
 _REFUSAL_FIELDS = frozenset({"v", "kind", "digest"})
 _DONE_FIELDS = frozenset(
     {
@@ -1069,6 +1074,26 @@ class SQLiteFleetSyncStore:
         conn, catalog = self._open()
         try:
             return catalog.origin_watermarks()
+        finally:
+            conn.close()
+
+    def record_sweep_begin(
+        self, control: dict, scope: str, peer_pub: str
+    ) -> None:
+        """Persist a sweep.begin frontier. Both transports route through here.
+
+        Opens and closes its own connection so the caller hands the whole
+        operation to a worker thread rather than passing a live connection
+        across threads, matching advertisable_origin_watermarks.
+        """
+        from tools.network.fleet_sync.sweep_receive import handle_sweep_begin
+
+        conn, _ = self._open()
+        try:
+            handle_sweep_begin(
+                conn, control,
+                expected_scope=scope, expected_source_pub=peer_pub,
+            )
         finally:
             conn.close()
 
@@ -2168,6 +2193,33 @@ class FleetSyncScheduler:
                         "(founded origin); serving deltas from position %d",
                         peer_pub[:12], scope, cursor,
                     )
+                    wants_checkpoint = False
+                sweep_capable = protocol_version >= SWEEP_PROTOCOL_VERSION
+                if wants_checkpoint and sweep_capable and server_has_content:
+                    # A v5 peer asked for a bootstrap and can handle a sweep,
+                    # so it gets the frontier its sweep is anchored to instead
+                    # of a checkpoint. Emitted ONCE, before any page.
+                    #
+                    # Read BEFORE serving anything, and never advanced: the
+                    # partition is SWEEP <= F / PULL > F, so a frontier taken
+                    # later would move the boundary and strand every key
+                    # between the two readings. Anything landing after this
+                    # read is above F and belongs to the peer's delta.
+                    sweep_frontier = await asyncio.to_thread(
+                        store.origin_watermarks
+                    )
+                    begin = canonical_json({
+                        "v": protocol_version,
+                        "kind": SWEEP_BEGIN_KIND,
+                        "scope": scope,
+                        "source_machine_pub": self.authenticator.machine_pub,
+                        "frontier": sweep_frontier,
+                    })
+                    stats["bytes_sent"] += len(begin)
+                    yield begin
+                    # Pages follow in a later slice; the frontier is durable
+                    # on the peer from this point, so an interrupted sweep
+                    # resumes against the SAME F rather than re-anchoring.
                     wants_checkpoint = False
                 if allow_checkpoint and server_has_content and wants_checkpoint:
                     served_checkpoint = True
@@ -3345,6 +3397,19 @@ class FleetSyncScheduler:
                             ) from exc
                         if len(empty_transactions) >= APPLY_BATCH_TRANSACTIONS:
                             await flush_batch()
+                        continue
+                    if kind == SWEEP_BEGIN_KIND:
+                        # The serving store's frontier, once, before any page.
+                        # Persisted through the SHARED validator -- this
+                        # receiver does not parse the record itself, so the
+                        # direct and relay paths cannot drift into disagreeing
+                        # about what anchors a store. Applying a page before
+                        # this lands raises BootstrapNotRecorded, so a
+                        # reordered stream fails loudly instead of leaving
+                        # rows with no recorded origin.
+                        await asyncio.to_thread(
+                            store.record_sweep_begin, control, scope, peer_pub,
+                        )
                         continue
                     if kind == "retired":
                         # The server skipped these origins for this pull
