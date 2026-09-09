@@ -455,13 +455,27 @@ def check_serving_readiness(report: dict) -> None:
         # working as designed, and it cost about an hour on 2026-09-08.
         try:
             from tools.network import fleet_tunnel_server
-            is_designated = bool(fleet_tunnel_server.state().allowed)
+            # DESIGNATION NO LONGER DECIDES SERVING (auto-clune.7). This gate
+            # was added to stop the doctor fabricating a cause on a machine
+            # that correctly ran no connector, and it read `state().allowed`
+            # because at the time that WAS the serving rule. It is not any
+            # more, and a check that outlives its premise does not become
+            # harmless -- it becomes the same defect pointed the other way.
+            # Witnessed on sjc-2 minutes after the rollout: three connectors
+            # listed as running, and two lines below, "not serving by design:
+            # this machine is not the selected tunnel server, so it correctly
+            # runs no connector".
+            #
+            # `state().allowed` is still the right question for SINGLE-OWNER
+            # reporting (credential refresh, usage maintenance) and is still
+            # reported as such above. It is the wrong question for serving.
+            may_serve = bool(fleet_tunnel_server.tunnel_serving_permitted()[0])
         except Exception as exc:
             # Say we could not look. Never assume designated: that reinstates
             # exactly the false FAIL this gate exists to remove.
-            is_designated = None
+            may_serve = None
             _line(
-                "tunnel-server designation",
+                "serving eligibility",
                 f"UNREADABLE ({exc!r}) -- serving verdicts below are "
                 "suppressed, not passed",
                 warn=True,
@@ -480,23 +494,25 @@ def check_serving_readiness(report: dict) -> None:
                 _line(f"{label}: readiness check", f"FAILED to run: {exc!r}", fail=True)
                 continue
             eligible_by_credentials = cert_state["status"] == "ok" and has_grant
-            if is_designated is None:
+            if may_serve is None:
                 _line(
                     f"{label}: serving readiness",
                     f"cert={cert_state['status']} live_grant={has_grant}; "
-                    "designation unreadable, so whether this machine SHOULD "
-                    "serve is unknown -- not a fault",
+                    "serving eligibility unreadable, so whether this machine "
+                    "SHOULD serve is unknown -- not a fault",
                     warn=True,
                 )
                 continue
-            if not is_designated:
-                # Not a warning and not a failure: this is the designed state
-                # for every machine that is not the selected tunnel server.
+            if not may_serve:
+                # Not a warning and not a failure: this machine is refused for
+                # a SAFETY reason (mid-join, roster unreadable, not rostered,
+                # no durable identity...). Designation alone no longer lands
+                # here, which is the whole point of auto-clune.7.
                 _line(
                     f"{label}: not serving by design",
                     f"cert={cert_state['status']} live_grant={has_grant} -- "
-                    "this machine is not the selected tunnel server, so it "
-                    "correctly runs no connector",
+                    "this machine is not eligible to serve, so it correctly "
+                    "runs no connector",
                 )
                 continue
             should_run = eligible_by_credentials
