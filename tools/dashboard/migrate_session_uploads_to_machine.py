@@ -26,9 +26,20 @@ Deliberately NOT done here:
   might be genuinely gone; this tool never decides which, it reports the row
   and moves on.
 
+**Run it where the session run dirs are.** That is the dashboard container
+(`/app/data/agent-runs`), NOT the host — on the host `_agent_runs_root()`
+resolves to a directory that exists and is empty, which would report every row
+as belonging to another machine. The tool refuses rather than reporting that.
+
+**Legacy rows live in more than one store.** Measured 2026-09-09:
+`autonomy.db` 107, `personal.db` 10, `machine.db` 0. Pass each source store in
+turn; `--org` names where the OLD rows are read from, never where they land
+(that is always the machine store, decided by the schema's home).
+
 Usage — DRY RUN IS THE DEFAULT, and prints exactly what a real run would do::
 
     python -m tools.dashboard.migrate_session_uploads_to_machine --org autonomy
+    python -m tools.dashboard.migrate_session_uploads_to_machine --org personal
     python -m tools.dashboard.migrate_session_uploads_to_machine --org autonomy --apply
 """
 
@@ -76,20 +87,83 @@ def _file_is_here(root: Path, payload: dict) -> Path | None:
     return None
 
 
+class MigrationRefused(RuntimeError):
+    """The tool cannot see one of its inputs, so it refuses to report a result.
+
+    Every failure this guards produces the SAME observable output as a
+    completed migration -- "0 of 0 rows" -- which a reader would reasonably
+    read as "already done". Both were hit for real on the first run
+    (host-0906-222509, 2026-09-09): the host's agent-runs resolved to an empty
+    directory while the real store was the container's, and the enumeration
+    returned nothing while 117 rows existed.
+    """
+
+
+def legacy_rows(org: str) -> list[tuple[str, dict]]:
+    """`(key, payload)` for the ORG-HOMED rows, read past the home redirect.
+
+    `read_set` resolves the store through the schema's declared home, and this
+    set's home is now `machine` -- so the ordinary read cannot see the very
+    rows this tool exists to move, and returns zero without complaint. Passing
+    `set_id=None` to the opener asks for the named org's database and nothing
+    else; the redirect keys on the set_id it is not given.
+
+    Base rows only, which is all an append-only log with uuid keys has. This
+    deliberately does NOT reimplement override/exclusion resolution: a set that
+    had those would need more than a payload copy, and silently copying half a
+    resolution is worse than refusing.
+    """
+    import json
+
+    from tools.graph import settings_ops as ops
+
+    db = ops._open_read(org, None)
+    try:
+        rows = db.conn.execute(
+            "SELECT key, payload FROM settings"
+            "  WHERE set_id = ? AND deprecated = 0"
+            "    AND supersedes IS NULL AND excludes IS NULL",
+            (SESSION_UPLOAD_SET_ID,),
+        ).fetchall()
+    finally:
+        db.close()
+    out = []
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(payload, dict):
+            out.append((row["key"], payload))
+    return out
+
+
 def migrate(org: str, *, apply: bool) -> dict:
     from tools.dashboard.session_monitor import _agent_runs_root
     from tools.graph import settings_ops as ops
 
     root = _agent_runs_root()
-    members = ops.read_set(SESSION_UPLOAD_SET_ID, org=org).members
+    # REFUSE rather than report zero. An agent-runs directory that is missing
+    # or empty means this process is not looking at the machine store it
+    # thinks it is -- on the host it resolves to an empty
+    # /opt/autonomy/code/data/agent-runs while the real one, with 2991
+    # entries, is the dashboard container's /app/data/agent-runs. Reporting
+    # "0 claimed" there is indistinguishable from an honest nothing-to-do.
+    if not root.is_dir() or not any(root.iterdir()):
+        raise MigrationRefused(
+            f"agent-runs resolves to {root}, which is missing or empty -- this "
+            f"is not the machine store that holds the uploads. Run this where "
+            f"the session run dirs actually are (the dashboard container, not "
+            f"the host)."
+        )
+    rows = legacy_rows(org)
     claimed: list[str] = []
     absent: list[str] = []
-    for member in members:
-        payload = member.payload or {}
+    for key, payload in rows:
         if _file_is_here(root, payload) is None:
-            absent.append(member.key)
+            absent.append(key)
             continue
-        claimed.append(member.key)
+        claimed.append(key)
         if apply:
             # A LITERAL org=None, never CALLER_ORG: `org` is required here on
             # purpose, and the sentinel would consult the ambient cascade and
@@ -98,23 +172,30 @@ def migrate(org: str, *, apply: bool) -> dict:
             # machine home IS the destination). The key is preserved, so
             # re-running claims nothing new.
             ops.add_setting(
-                SESSION_UPLOAD_SET_ID, SCHEMA_REVISION, member.key, payload,
+                SESSION_UPLOAD_SET_ID, SCHEMA_REVISION, key, payload,
                 org=None,
             )
-    return {"root": str(root), "total": len(members),
+    return {"root": str(root), "total": len(rows),
             "claimed": claimed, "absent": absent, "applied": apply}
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--org", required=True,
-                        help="organization store holding the legacy rows")
+                        help="store the LEGACY rows are read from (e.g. "
+                             "autonomy, personal) — never where they land")
     parser.add_argument("--apply", action="store_true",
                         help="actually write; omitted means dry run")
     args = parser.parse_args()
     result = migrate(args.org, apply=args.apply)
     verb = "claimed" if args.apply else "would claim"
     print(f"agent-runs: {result['root']}")
+    if result["total"] == 0:
+        # Said plainly, because this is the sentence a stale tool would have
+        # printed while 117 rows sat unread.
+        print(f"no legacy rows in the {args.org!r} store — nothing to migrate "
+              f"from here")
+        return
     print(f"{len(result['claimed'])} of {result['total']} rows {verb} by this "
           f"machine; {len(result['absent'])} left for another machine")
     for key in result["absent"]:
