@@ -18,6 +18,7 @@ import types
 from tools.network import fleet_sync_scheduler as fss
 
 PEER = "aa" * 32
+PEER_B = "dd" * 32
 SELF = "bb" * 32
 TAILNET = "ws://100.122.70.30:9410"
 BRIDGE = "ws://172.16.0.2:9410"
@@ -29,17 +30,23 @@ def _recently():
     return time.time_ns() - 1_000_000_000
 
 
-def _row(address, at_ns=None):
+def _row(address, at_ns=None, peer=PEER):
     at_ns = _recently() if at_ns is None else at_ns
-    return {"peer": PEER, "channel": "personal", "direction": "pull",
+    return {"peer": peer, "channel": "personal", "direction": "pull",
             "scope": "personal",
             "payload": {"last_success_address": address,
                         "last_success_at_ns": at_ns}}
 
 
 def _run_one_round(monkeypatch, rows, addresses=(TAILNET, BRIDGE),
-                   reads=None):
-    """Drive one round of `_run` and return what `_sync_peer` received."""
+                   reads=None, peers=None):
+    """Drive one round of `_run` and return what `_sync_peer` received.
+
+    *peers* maps machine key to that peer's advertised addresses; the
+    default is the single PEER. Multi-peer rounds matter for the
+    once-per-round read assertion, which a single peer cannot prove.
+    """
+    peer_map = {PEER: tuple(addresses)} if peers is None else dict(peers)
     seen: list[tuple[str, tuple[str, ...]]] = []
     stopping = asyncio.Event()
 
@@ -57,7 +64,10 @@ def _run_one_round(monkeypatch, rows, addresses=(TAILNET, BRIDGE),
             raise rows
         return rows
 
-    monkeypatch.setattr(fss, "resolve", lambda entries, anchor_root_pub: {PEER: object()})
+    monkeypatch.setattr(
+        fss, "resolve",
+        lambda entries, anchor_root_pub: {p: object() for p in peer_map},
+    )
     monkeypatch.setattr(
         "tools.network.fleet_sync_telemetry.read_channel_rows", read_channel_rows
     )
@@ -72,7 +82,7 @@ def _run_one_round(monkeypatch, rows, addresses=(TAILNET, BRIDGE),
         store=types.SimpleNamespace(peer_last_success=lambda: {}),
         config=types.SimpleNamespace(
             personal_root_pub="cc" * 32,
-            peer_addresses=lambda: {PEER: tuple(addresses)},
+            peer_addresses=lambda: dict(peer_map),
             max_concurrent_pulls=4,
             poll_interval=0.01,
         ),
@@ -105,11 +115,39 @@ def test_a_telemetry_failure_does_not_break_the_round(monkeypatch):
 
 
 def test_telemetry_is_read_once_per_round_not_once_per_peer(monkeypatch):
-    """The read is a blocking store call; it belongs outside the gather."""
+    """The read is a blocking store call; it belongs outside the gather.
+
+    This needs TWO selected peers to mean anything: with one peer, a
+    per-peer implementation also reads exactly once and the assertion
+    passes while proving nothing. Each peer must additionally receive
+    its OWN order from that single read.
+    """
     reads: list[int] = []
-    _run_one_round(monkeypatch, [_row(BRIDGE)], reads=reads)
+    seen = _run_one_round(
+        monkeypatch,
+        [_row(BRIDGE, peer=PEER)],          # a hint for PEER only
+        reads=reads,
+        peers={PEER: (TAILNET, BRIDGE), PEER_B: (TAILNET, BRIDGE)},
+    )
 
     assert len(reads) == 1
+    by_peer = dict(seen)
+    assert set(by_peer) == {PEER, PEER_B}
+    assert by_peer[PEER] == (BRIDGE, TAILNET)    # promoted from its hint
+    assert by_peer[PEER_B] == (TAILNET, BRIDGE)  # no hint, order untouched
+
+
+def test_two_peers_are_promoted_independently(monkeypatch):
+    """One shared read must not leak one peer's hint onto another."""
+    seen = _run_one_round(
+        monkeypatch,
+        [_row(BRIDGE, peer=PEER), _row(TAILNET, peer=PEER_B)],
+        peers={PEER: (TAILNET, BRIDGE), PEER_B: (BRIDGE, TAILNET)},
+    )
+
+    by_peer = dict(seen)
+    assert by_peer[PEER] == (BRIDGE, TAILNET)
+    assert by_peer[PEER_B] == (TAILNET, BRIDGE)
 
 
 def test_no_candidate_is_added_or_dropped_on_the_dial_path(monkeypatch):
