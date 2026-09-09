@@ -277,6 +277,9 @@ class ConnectorFleetRuntime:
         #: None on any node without a ramfs keycache — arming still works, it
         #: just does not survive a restart there.
         self._warm_cache: "FleetRuntimeWarmCache | None" = None
+        #: Only the personal connector binds the machine-wide inbound
+        #: listener; org connectors get identity and caps but never the port.
+        self._owns_inbound_listener: bool = False
         #: How many sync pulls this process has turned away because it holds no
         #: credential (scheduler is None), and when the first one arrived. This
         #: is the "764 requests refused since 8pm" the profile sync flag reports:
@@ -370,6 +373,23 @@ class ConnectorFleetRuntime:
         listen_host, listen_port = fleet_direct_config.listener_bind(
             direct, "connector"
         )
+        # ONE INBOUND LISTENER PER MACHINE, and only the personal connector
+        # owns it.
+        #
+        # Outbound tunnels are per-organization by design: each is
+        # authenticated AS that org by its own tunnel:serve certificate, and
+        # one socket cannot present four org identities. The INBOUND direct
+        # listener is the opposite — it is machine-wide and multiplexes every
+        # org by channel (FleetSyncScheduler / org_channel_for), so exactly one
+        # process may bind it.
+        #
+        # Every connector computed the same bind from the same machine-scoped
+        # row, so four org connectors raced for port 9410. Whichever started
+        # first won and the rest died with EADDRINUSE — measured 2026-09-09,
+        # anchore holding the port while the PERSONAL connector, the one that
+        # actually owns fleet sync, could not bind at all.
+        if not self._owns_inbound_listener:
+            listen_host, listen_port = fleet_direct_config.DEFAULT_LISTEN_HOST, 0
         config = FleetSyncRuntimeConfig(
             machine_key=credential.process_key,
             roster_machine_pub=credential.machine_pub,
@@ -473,6 +493,12 @@ class ConnectorFleetRuntime:
                 logger.warning("fleet direct listener maintenance failed",
                                exc_info=True)
             await asyncio.sleep(interval_s)
+
+    def set_owns_inbound_listener(self, owns: bool) -> None:
+        """Declare whether THIS connector process owns the machine-wide
+        inbound direct listener. Set once at startup from the connector's
+        scope; the personal connector owns it, org connectors do not."""
+        self._owns_inbound_listener = bool(owns)
 
     def attach_warm_cache(self, cache: "FleetRuntimeWarmCache | None") -> None:
         """Bind a ramfs warm cache so configure() persists the credential and

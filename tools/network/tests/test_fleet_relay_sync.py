@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import sqlite3
 import time
@@ -1381,3 +1383,154 @@ async def test_serve_ends_right_after_its_done_frame_even_when_the_prune_is_slow
     assert elapsed < 1.0, f"generator held its done frame for {elapsed:.1f}s"
     # The prune still happens, off the response path.
     await asyncio.wait_for(pruned.wait(), 5.0)
+
+
+# ── One inbound listener per machine (2026-09-09) ───────────────────────
+#
+# Outbound tunnels are per-org by design — each authenticates AS that org.
+# The INBOUND direct listener is machine-wide and multiplexes every org by
+# channel, so exactly one process may bind it. Every connector computed the
+# same bind from the same machine-scoped row, so four org connectors raced
+# for the port: anchore won and the PERSONAL connector, which actually owns
+# fleet sync, could not bind at all.
+
+
+def _configure_and_capture(runtime, monkeypatch, port):
+    """Run the REAL configure() and return the port it resolved to.
+
+    Exercised rather than flag-asserted: the earlier version of these tests
+    checked the ownership boolean, which cannot show that a port was not
+    taken.
+    """
+    from tools.network import fleet_direct_config, fleet_relay_sync as frs
+    from tools.network import fleet_roster as fr, fleet_runtime, machine_boot
+
+    captured = {}
+
+    monkeypatch.setattr(
+        fleet_direct_config, "load",
+        lambda *a, **k: fleet_direct_config.FleetDirectConfig(
+            "0.0.0.0", port, (), advertise_auto=False, serve_in="connector"))
+    # configure() imports fleet_tunnel_server lazily inside the function, so
+    # patch the module itself rather than an attribute of fleet_relay_sync.
+    from tools.network import fleet_tunnel_server as fts
+    monkeypatch.setattr(fts, "_personal_root_pub", lambda: "aa" * 32)
+    monkeypatch.setattr(fr, "load_entries", lambda **k: ())
+    monkeypatch.setattr(
+        fleet_runtime.FleetRuntimeCredential, "from_browser_payload",
+        classmethod(lambda cls, payload, **kw: SimpleNamespace(
+            process_key=SimpleNamespace(private_hex="11" * 32),
+            machine_pub="bb" * 32, delegation_cert=None, machine_id="m-1",
+            machine_key=None, serving_machine_key=None,
+            reachability_cert=None)))
+    monkeypatch.setattr(
+        frs, "FleetSyncRuntimeConfig",
+        lambda **kw: captured.update(kw) or SimpleNamespace(**kw))
+    class _Server:
+        """Records whether the listener was actually started."""
+
+        def __init__(self):
+            self.running = False
+            self.started = 0
+            self.host = "0.0.0.0"
+            self.port = 0
+
+        async def start(self):
+            self.started += 1
+            self.running = True
+            self.port = port
+            return port
+
+        async def stop(self):
+            self.running = False
+
+    class _Auth:
+        """configure() authorizes this machine on the scheduler before it is
+        installed; without it configure raises and the runtime is never armed
+        — which is precisely what the removed suppress was hiding."""
+
+        def __init__(self):
+            self.authorized = []
+            self.machine_pub = "bb" * 32
+
+        def authorize(self, pub):
+            self.authorized.append(pub)
+
+    monkeypatch.setattr(
+        frs, "FleetSyncScheduler",
+        lambda config: SimpleNamespace(
+            config=config, server=_Server(), authenticator=_Auth()))
+    # NO SUPPRESS. configure() raising must FAIL this test: the config lambda
+    # captures the port before the rest of configure() runs, so a swallowed
+    # exception left the port assertions passing while the runtime was never
+    # actually armed — the scheduler unset and nothing installed. That is the
+    # test agreeing with broken code, which is the failure mode these tests
+    # exist to catch.
+    result = runtime.configure({"machine_id": "m-1"})
+    assert result["ok"] is True, result
+    assert runtime.scheduler is not None, (
+        "configure() returned without installing the scheduler")
+    return captured.get("listen_port"), captured.get("listen_host")
+
+
+def test_an_org_connector_starting_first_does_not_take_the_port(monkeypatch):
+    """THE ONE THAT MATTERS, in the order that actually broke: the ORG
+    connector configures FIRST and must still resolve to an ephemeral
+    loopback port, leaving the machine-wide port free for the personal
+    connector that starts later."""
+    port = 19410
+    org_runtime = fleet_relay_sync.ConnectorFleetRuntime()
+    org_runtime.set_owns_inbound_listener(False)
+
+    org_port, org_host = _configure_and_capture(org_runtime, monkeypatch, port)
+
+    # 0 means the bind is DISABLED for this process (ensure_direct_listener
+    # stops/skips the server at <= 0), not "pick an ephemeral port".
+    assert org_port == 0, "an org connector must not take the machine port"
+    assert org_host != "0.0.0.0"
+
+    # And it must not start a server at all.
+    listener = asyncio.run(org_runtime.ensure_direct_listener())
+    assert listener is None
+    assert org_runtime.scheduler.server.started == 0
+
+
+def test_the_personal_connector_still_gets_the_port(monkeypatch):
+    """PRESERVATION, not recovery: direct sync currently works, so the owner
+    must still bind exactly the configured address."""
+    port = 19410
+    personal = fleet_relay_sync.ConnectorFleetRuntime()
+    personal.set_owns_inbound_listener(True)
+
+    got_port, got_host = _configure_and_capture(personal, monkeypatch, port)
+
+    assert (got_host, got_port) == ("0.0.0.0", port)
+
+    # The owner genuinely starts it — preservation, not just non-contention.
+    listener = asyncio.run(personal.ensure_direct_listener())
+    assert listener == ("0.0.0.0", port)
+    assert personal.scheduler.server.started == 1
+
+
+def test_org_first_then_personal_do_not_contend(monkeypatch):
+    """Both together, in the failing order. The org connector resolving to 0
+    is what leaves the port available for the personal one."""
+    port = 19411
+    org = fleet_relay_sync.ConnectorFleetRuntime()
+    org.set_owns_inbound_listener(False)
+    personal = fleet_relay_sync.ConnectorFleetRuntime()
+    personal.set_owns_inbound_listener(True)
+
+    org_port, _ = _configure_and_capture(org, monkeypatch, port)
+    personal_port, _ = _configure_and_capture(personal, monkeypatch, port)
+
+    assert org_port == 0 and personal_port == port
+    assert org_port != personal_port, "they must not want the same port"
+
+
+def test_ownership_defaults_to_not_binding():
+    """Fail closed: a connector that never declares its scope must not take
+    the machine's port by accident."""
+    assert (
+        fleet_relay_sync.ConnectorFleetRuntime()._owns_inbound_listener is False
+    )
