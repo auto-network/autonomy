@@ -2507,10 +2507,29 @@ class FleetSyncScheduler:
                         while more:
                             authorize(peer_pub)
                             phase_started = time.monotonic()
+                            # v3 has NO grouping concept: every frame
+                            # declares the transaction's operation count, and
+                            # its receiver rejects a second frame of the same
+                            # transaction declaring a different one. Paging a
+                            # transaction at SERVE_GROUP_OPERATIONS therefore
+                            # declares the size of each PAGE (2000, then the
+                            # remainder), so any transaction with more than
+                            # 2000 surviving operations broke every v3 pull
+                            # permanently. Serve v3 the whole transaction in
+                            # one group: MutationCatalog._next_operation caps
+                            # locally authored transactions at
+                            # MAX_TRANSACTION_OPERATIONS, so one group always
+                            # suffices. v4 keeps its paging -- each group
+                            # carries its own header and the receiver applies
+                            # them as they land.
+                            group_limit = (
+                                SERVE_GROUP_OPERATIONS if protocol_version >= 4
+                                else MAX_TRANSACTION_OPERATIONS
+                            )
                             items, more = await asyncio.to_thread(
                                 store.transaction_group, ref, origin_key,
                                 transaction_id, offset=offset,
-                                limit=SERVE_GROUP_OPERATIONS,
+                                limit=group_limit,
                             )
                             phase_s = time.monotonic() - phase_started
                             if phase_s > slowest_phase[1]:
@@ -2524,7 +2543,7 @@ class FleetSyncScheduler:
                                     scope, len(items), transaction_id, offset,
                                     ",".join(tables), phase_s,
                                 )
-                            offset += SERVE_GROUP_OPERATIONS
+                            offset += group_limit
                             if not items:
                                 continue
                             served_any = True
@@ -3712,8 +3731,16 @@ class FleetSyncScheduler:
                     pending = []
                 pending_identity = identity
                 if pending and pending_count != operation_count:
+                    # Name what changed. This raised anonymously, so a live
+                    # occurrence could not be attributed without reproducing
+                    # it: no transaction, no counts. Metadata only.
                     raise FleetSyncProtocolError(
-                        "fleet transaction operation count changed"
+                        "fleet transaction operation count changed: "
+                        f"origin={item.origin_incarnation[:12]} "
+                        f"transaction={item.transaction_id} "
+                        f"declared_before={pending_count} "
+                        f"declared_now={operation_count} "
+                        f"received_so_far={len(pending)}"
                     )
                 pending_count = operation_count
                 pending.append(item)
