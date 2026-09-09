@@ -64,6 +64,25 @@ def example_schema():
 
 
 @pytest.fixture
+def machine_homed_schema():
+    """A set that pins `machine` as its home, registered for this test only.
+
+    Declared rather than imported: the autouse fixture above restores SCHEMAS
+    around every test, and re-importing an already-imported module does not
+    re-register its classes — so an imported schema's presence depends on
+    which test ran first. Returns the set_id."""
+    from tools.graph.schemas.registry import home
+
+    @home("machine")
+    class MachineHomedV1(schemas.SettingSchema):
+        set_id = "autonomy.test.machine-homed"
+        schema_revision = 1
+
+    schemas.register_schema("autonomy.test.machine-homed", 1, MachineHomedV1)
+    return "autonomy.test.machine-homed"
+
+
+@pytest.fixture
 def strict_schema():
     class StrictV1(schemas.SettingSchema):
         set_id = "autonomy.test.strict"
@@ -175,6 +194,73 @@ def test_secured_create_failure_never_echoes_the_secret(
     assert response.status_code == 423
     assert secret not in response.text
     assert response.json() == {"error": "vault storage author is unavailable"}
+
+
+def test_a_pinned_home_beats_the_requests_ambient_org(
+    graph_db_env, client, monkeypatch, machine_homed_schema,
+):
+    """THE ONE THAT MATTERS for machine-homed sets written from the browser.
+
+    This route's org is AMBIENT — it is whatever org the page is scoped to,
+    not a caller choosing a store. `_assert_home` refuses a mismatch rather
+    than routing it, so before this fix an org-scoped viewer posting a
+    machine-homed row got a 400. The fixture's caller org is 'autonomy'; the
+    write must still be aimed at the machine store.
+
+    Both halves are asserted, because either alone would pass while broken:
+    the org CHOSEN, and that the substrate actually accepts it.
+
+    The schema is DECLARED HERE rather than imported from
+    `session_upload_settings`, which is the set that motivated the fix. The
+    autouse registry-isolation fixture restores SCHEMAS around every test, and
+    a module already in `sys.modules` does not re-register on a second import —
+    so an imported schema is present or absent depending on collection order.
+    Declaring it makes the test about the ROUTING LAW, which is what changed."""
+    from tools.dashboard import server
+
+    captured = {}
+    monkeypatch.setattr(
+        server.graph_ops, "write_by_key",
+        lambda *a, **kw: captured.update(kwargs=kw) or "setting-1")
+    monkeypatch.setattr(server.graph_ops, "take_shadowed_write", lambda *_: None)
+
+    response = client.post("/api/graph/setting", json={
+        "set_id": machine_homed_schema,
+        "schema_revision": 1,
+        "key": "row-1",
+        "payload": {"x": 1},
+    })
+
+    assert response.status_code == 201
+    assert captured["kwargs"]["org"] == "machine"
+    # Not merely different from the ambient org — legal. A value the substrate
+    # would refuse is the bug this test exists to catch.
+    settings_ops._assert_home(machine_homed_schema, captured["kwargs"]["org"])
+
+
+def test_an_unpinned_set_still_follows_the_requests_org(
+    graph_db_env, example_schema, client, monkeypatch,
+):
+    """NEGATIVE CONTROL: the redirect applies ONLY to a set that pins a single
+    home. Everything else keeps resolving through the caller cascade, or the
+    fix would silently re-home every org-owned setting the dashboard writes."""
+    from tools.dashboard import server
+
+    captured = {}
+    monkeypatch.setattr(
+        server.graph_ops, "write_by_key",
+        lambda *a, **kw: captured.update(kwargs=kw) or "setting-2")
+    monkeypatch.setattr(server.graph_ops, "take_shadowed_write", lambda *_: None)
+
+    response = client.post("/api/graph/setting", json={
+        "set_id": "autonomy.test.api",
+        "schema_revision": 1,
+        "key": "k",
+        "payload": {"x": 1},
+    })
+
+    assert response.status_code == 201
+    assert captured["kwargs"]["org"] != "machine"
 
 
 def test_get_setting_by_id_404(graph_db_env, example_schema, client):

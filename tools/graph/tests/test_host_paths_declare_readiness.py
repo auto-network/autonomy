@@ -59,7 +59,11 @@ NOT_A_HOST_PATH = {
     ("autonomy.capability.impl", "package_root"):
         "repo-local, so it resolves against a checkout rather than a machine",
     ("dashboard.session.upload", "rel_path"):
-        "relative to the session run dir, and served through a route",
+        "relative to the session run dir, and served through a route -- but "
+        "that run dir is on the machine that received the upload, so the ROW "
+        "is @home('machine') to follow its bytes (auto-wilkh). A relative "
+        "path is exempt from this sweep; it is not exempt from living with "
+        "the file it names",
     ("autonomy.vault.release-lease", "host_path"):
         "an operational ledger locator: the platform creates the delivered "
         "file and the sweeper destroys it; nothing is operator-provisioned "

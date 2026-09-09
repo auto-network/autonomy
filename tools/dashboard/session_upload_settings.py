@@ -31,17 +31,28 @@ SESSION_UPLOAD_SET_ID = "dashboard.session.upload"
 SCHEMA_REVISION = 1
 
 
-#: Not forced into any one store. This records that the question was
-#: ASKED -- must this live in the operator's own database, or on
-#: this machine alone? -- and answered no, which is different
-#: from nobody having considered it.
+#: THIS MACHINE ALONE, because the FILE is on this machine alone.
 #:
-#: It is not a prohibition. The operator owns workspaces, so
-#: their database is the organizational home of their own
-#: things; reading this as "anywhere but personal" refuses
-#: writes that are correct.
+#: This was ``@home("organization")``, and the reasoning recorded here was
+#: about OWNERSHIP -- "the operator owns workspaces, so their database is the
+#: organizational home of their own things". That is a fair principle and the
+#: wrong axis for this decision. The question is not who owns the row, it is
+#: where the BYTES are: ``api_upload`` writes the file to local disk on the
+#: machine that received it, and it cannot be produced anywhere else.
+#:
+#: Replicating the row without the bytes did not make the upload available
+#: elsewhere -- it made every other machine render a viewer_attachment TILE FOR
+#: A FILE THAT IS NOT THERE, because the session viewer merges each row in as a
+#: tile at its timestamp. 106 such rows were replicated to sjc-2 (auto-wilkh).
+#: Machine-homing the row makes it follow the file, converting a falsely
+#: present attachment into an honestly absent one, with no transport work.
+#:
+#: The general rule this violated: a replicated row must never point at a
+#: machine-local file. It either carries the content, or it lives with the
+#: file. See graph://f331232d-fd4 -- this is one of three instances found in
+#: one night, alongside the serve-cert outage (auto-527te).
 @publication_band(min="raw", max="curated")
-@home("organization")
+@home("machine")
 @append_only_log
 class SessionUploadV1(SettingSchema):
     """One row per dashboard-uploaded file."""
