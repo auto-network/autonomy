@@ -6,7 +6,11 @@ import pytest
 
 from tools.network.idkit import KeyPair, Subject, issue_cert
 from tools.network.registry.relay import _verify_tunnel_hello
-from tools.network.relaykit.hello import HelloError, build_tunnel_hello
+from tools.network.relaykit.hello import (
+    HelloError,
+    SERVING_MACHINE_HELLO_DOMAIN,
+    build_tunnel_hello_v2,
+)
 
 from .conftest import DAY, NOW, ORG
 
@@ -31,8 +35,15 @@ def _cert(
     )
 
 
-def _verify(app, key, cert):
-    hello = build_tunnel_hello(key, cert, org=ORG, ts=NOW)
+def _verify(app, key, cert, machine_key=None):
+    # v2: these tests are about PERSONA routing identity, not the hello
+    # version. v1 is deleted, so they present a machine identity like every
+    # real tunnel does; a fresh machine key per call keeps two devices of one
+    # persona distinct, which is what several of them assert.
+    hello = build_tunnel_hello_v2(
+        key, cert, machine_key=machine_key or KeyPair.generate(),
+        org=ORG, ts=NOW, machine_hello_domain=SERVING_MACHINE_HELLO_DOMAIN,
+    )
     return _verify_tunnel_hello(hello, ORG, app.state.store, NOW)
 
 

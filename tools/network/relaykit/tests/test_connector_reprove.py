@@ -26,7 +26,9 @@ def _connector(on_reprove=None):
     cert = issue_cert(root, key.public_hex, scope=("tunnel:serve",), org=ORG,
                       subject=Subject("persona", "ab" * 32),
                       not_before=0, not_after=2**40)
-    return TunnelConnector("ws://x", ORG, key, cert, on_reprove=on_reprove)
+    return TunnelConnector("ws://x", ORG, key, cert, on_reprove=on_reprove,
+                machine_key=KeyPair.generate(),
+            )
 
 
 def test_push_routes_to_responder_and_sends_reprove():

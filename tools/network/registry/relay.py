@@ -67,7 +67,6 @@ from tools.network.relaykit.stream_wire import (
 from tools.network.relaykit.hello import (
     HELLO_FIELDS_V2,
     HELLO_FIELDS_V3,
-    HELLO_VERSION,
     HELLO_VERSION_2,
     HELLO_VERSION_3,
     SERVING_MACHINE_HELLO_DOMAIN,
@@ -594,9 +593,9 @@ class TunnelHub:
     restart.
 
     Reconnect replaces only the same (persona, machine) slot — distinct
-    machines and personas of one org coexist (auto-0zdky). v1 connectors
-    occupy the empty-machine slot, preserving legacy replacement
-    semantics among themselves. Org-level viewer selection is the
+    machines and personas of one org coexist (auto-0zdky). Every tunnel
+    names its machine, so there is no shared empty-machine slot for two
+    machines to collide on. Org-level viewer selection is the
     TLA-verified pool rule: least-loaded live tunnel, pinned by the
     caller for the connection's lifetime.
     """
@@ -721,8 +720,31 @@ def _verify_tunnel_hello(
     if binding is None or binding.expires_at < now:
         raise HelloError("no live binding for org")
 
+    # VERSION FIRST, before any signature work. A hello whose version we do
+    # not speak gets a typed protocol_version_mismatch naming both sides —
+    # that is what tells the operator of an old connector what to do. Trying
+    # to verify a signature whose scheme we do not know first would answer a
+    # version problem with a signature error, which explains nothing.
     is_v2 = data["v"] == HELLO_VERSION_2 and set(data) == HELLO_FIELDS_V2
     is_v3 = data["v"] == HELLO_VERSION_3 and set(data) == HELLO_FIELDS_V3
+    # AN UNSUPPORTED VERSION AND A TAMPERED ONE ARE DIFFERENT, and the FIELD
+    # SHAPE tells them apart: it is what the sender actually built, while `v`
+    # is only what they claim.
+    #
+    # Shape we do not recognise -> a genuinely different protocol version, so
+    # answer with a typed protocol_version_mismatch naming both sides. That is
+    # what tells the operator of an old connector what to do, and answering it
+    # with a signature or field error tells them nothing.
+    #
+    # Shape we DO recognise but a version that contradicts it -> the version
+    # was altered after signing. Fall through: the signature covers the
+    # version, so verification fails and it is reported as tampering rather
+    # than as benign negotiation.
+    if (
+        data["v"] not in (HELLO_VERSION_2, HELLO_VERSION_3)
+        and set(data) not in (HELLO_FIELDS_V2, HELLO_FIELDS_V3)
+    ):
+        raise _ProtocolVersionMismatch(data["v"])
     try:
         if is_v2 or is_v3:
             core = hello_core(
@@ -751,12 +773,18 @@ def _verify_tunnel_hello(
                     "claimed serving machine key"
                 ) from exc
         else:
+            # A v2/v3 SHAPE whose version does not match it: the version was
+            # altered after signing. Verify against the claimed version so the
+            # failure is reported as a signature failure, which is what it is.
             verify_signature(
-                data["signer"],
-                data["sig"],
-                hello_signing_input(
-                    org, data["signer"], data["ts"], version=data["v"]
+                data["signer"], data["sig"],
+                TUNNEL_HELLO_DOMAIN_V2 + hello_core(
+                    org=org, signer=data["signer"], machine=data["machine"],
+                    caps=data["caps"], ts=data["ts"], version=data["v"],
                 ),
+            )
+            raise HelloError(
+                f"hello v{data['v']} did not match its own field set"
             )
         cert = DelegationCert.from_json(data["cert"])
         if cert.child_pub != data["signer"]:
@@ -817,8 +845,6 @@ def _verify_tunnel_hello(
                 "(no registered serving-key set yet; backfill pending)",
                 org[:8], data["machine"][:16],
             )
-    if data["v"] not in (HELLO_VERSION, HELLO_VERSION_2, HELLO_VERSION_3):
-        raise _ProtocolVersionMismatch(data["v"])
     proven_seq = None
     if is_v3:
         # The rider proves the serve cert's subject persona under the
@@ -844,8 +870,8 @@ def _verify_tunnel_hello(
     return VerifiedTunnelHello(
         persona_pub=verified.subject_id,
         signer_pub=data["signer"],
-        machine=data["machine"] if (is_v2 or is_v3) else "",
-        caps=tuple(data["caps"]) if (is_v2 or is_v3) else (),
+        machine=data["machine"],
+        caps=tuple(data["caps"]),
         version=data["v"],
         proven_seq=proven_seq,
     )
@@ -1980,12 +2006,11 @@ async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
         if host_routes is not None:
             host_routes.drop_connection(replaced)
         await _close_quietly(replaced.ws, CLOSE_REPLACED)
-    if verified.version in (HELLO_VERSION_2, HELLO_VERSION_3):
-        await websocket.send_json({
-            "ok": True, "v": verified.version, "caps": list(accepted_caps),
-        })
-    else:
-        await websocket.send_json({"ok": True, "v": HELLO_VERSION})
+    # Every accepted hello is v2 or v3 now, so the reply always carries the
+    # negotiated capabilities; there is no versionless branch left.
+    await websocket.send_json({
+        "ok": True, "v": verified.version, "caps": list(accepted_caps),
+    })
 
     try:
         while True:

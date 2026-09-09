@@ -8,6 +8,7 @@ import logging
 
 import pytest
 
+from tools.network.idkit import KeyPair
 from tools.network.relaykit import connector as connector_module
 from tools.network.relaykit.connector import TunnelConnector
 from tools.network.relaykit.frames import decode_frame
@@ -17,7 +18,8 @@ def _connector() -> TunnelConnector:
     return TunnelConnector(
         "ws://relay.invalid", "test-org", object(), object(),
         min_backoff=0.2, max_backoff=0.8,
-    )
+                machine_key=KeyPair.generate(),
+            )
 
 
 class _Closed(ConnectionError):

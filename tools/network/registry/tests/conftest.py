@@ -25,7 +25,11 @@ from tools.network.relaykit.frames import (
     decode_frame,
     encode_frame,
 )
-from tools.network.relaykit.hello import HELLO_VERSION, build_tunnel_hello
+from tools.network.relaykit.hello import (
+    HELLO_VERSION_2,
+    SERVING_MACHINE_HELLO_DOMAIN,
+    build_tunnel_hello_v2,
+)
 
 NOW = 1_800_000_000
 HOUR = 3600
@@ -194,11 +198,19 @@ def open_tunnel(client, clock, root, org=ORG, *, register_org=False):
         register(client, clock, root, org_uuid=org)
     serve_key = KeyPair.generate()
     cert = serve_cert(root, serve_key, org)
-    hello = build_tunnel_hello(serve_key, cert, org=org, ts=clock.now)
+    # v2: every tunnel names its machine. v1 carried no machine identity, so
+    # all of an org's tunnels shared one empty-machine slot and replaced each
+    # other; it has been deleted, and this fixture is what most of the suite
+    # connects through.
+    machine_key = KeyPair.generate()
+    hello = build_tunnel_hello_v2(
+        serve_key, cert, machine_key=machine_key, org=org, ts=clock.now,
+        machine_hello_domain=SERVING_MACHINE_HELLO_DOMAIN,
+    )
     with client.websocket_connect(f"/t/{org}") as ws:
         ws.send_text(hello)
         ack = ws.receive_json()
-        assert ack == {"ok": True, "v": HELLO_VERSION}, ack
+        assert ack["ok"] is True and ack["v"] == HELLO_VERSION_2, ack
         yield ws
 
 

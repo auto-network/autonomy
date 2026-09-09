@@ -962,10 +962,6 @@ class ServingSupervisor:
     """
 
     def __init__(self, *, spawn=None, now=None):
-        #: Orgs whose connector was just (re)started and has not yet been
-        #: handed the runtime credential. Drained by _reconcile once the
-        #: child has written its control descriptor.
-        self._needs_runtime: set = set()
         self._spawn = spawn or _default_spawn
         self._now = now or time.time
         self._procs: dict = {}       # org -> handle
@@ -1062,11 +1058,6 @@ class ServingSupervisor:
             return self._stop_for_fleet_assignment(org, eligibility, reason=why)
         state = serve_cert_state(org, now=now)
         proc = self._procs.get(org)
-        # Drain the hand-off queued by _launch/_adopt. Done here rather than in
-        # the launch path because the child needs a moment to write its control
-        # descriptor; this retries every reconcile until it takes.
-        if org in self._needs_runtime and proc is not None and proc.alive():
-            self._feed_pending_runtime(org)
         # The personal fleet's tunnel must stay online whenever the fleet has
         # members, independent of any transient invite grant: fleet sync rides
         # the STABLE personal_org_uuid + machine_id, and the invite link is only
@@ -1486,7 +1477,6 @@ class ServingSupervisor:
         # now — record it and walk away.
         adopted = self._adopt_incumbent(org, state)
         if adopted is not None:
-            self._needs_runtime.add(org)
             return adopted
         # We hold the per-org ownership lock, so every OTHER connector for this
         # org is a stray — an orphan a dead dashboard left behind (a live sibling
@@ -1532,99 +1522,7 @@ class ServingSupervisor:
         # generation until the watchdog sees the disk head move.
         from tools.network import build_version
         self._boot_commit[org] = build_version.disk_head()
-        # A FRESH CONNECTOR IS UNARMED UNTIL SOMEONE FEEDS IT.
-        #
-        # Replacing a stale incumbent is correct and deliberate
-        # (test_stale_incumbent_is_replaced_not_adopted: one answered
-        # serving=True while crashing every fleet stream). The defect is what
-        # happens next -- the successor starts with no runtime machine key,
-        # degrades its hello to v1 and shares the anonymous relay slot, while
-        # the dashboard is holding the very credential it needs.
-        #
-        # Until now the successor's only hope was the ramfs warm cache, which
-        # is empty after a reboot and stale after the credential ages out. On
-        # 2026-09-09 home was armed at 13:54Z and every later generation came
-        # up cold; six connector restarts, no re-arm, and the machine stayed
-        # anonymous to the relay for forty minutes.
-        #
-        # Deferred, not immediate: the child has not written its control
-        # descriptor yet, so publishing here would always fail. `_reconcile`
-        # retries it once the connector is alive.
-        self._needs_runtime.add(org)
         return {"running": True, "reason": "launched"}
-
-    def _feed_pending_runtime(self, org) -> None:
-        """Hand a freshly (re)started connector the runtime credential.
-
-        Reads the DASHBOARD's own cached payload -- never the connector's cache
-        entry. That distinction is the point of auto-5er0n: the connector's
-        entry is written only on a machine that actually runs a connector, so a
-        supervisor reading it would find nothing on exactly the machines that
-        need this most, and would then report the absence as normal.
-
-        Best effort and self-retrying: a child that has not yet written its
-        control descriptor raises TunnelUnavailable, the org stays pending, and
-        the next reconcile tries again. Isolated per org so one failure cannot
-        skip the others.
-        """
-        from tools.dashboard import fleet_enrollment_routes
-        from tools.network import fleet_relay_sync
-
-        # THREE FAILURES, THREE LINES. They need different fixes from different
-        # people: an unreadable cache is this machine's storage, a missing
-        # payload needs a human unlock, and a refusal is the connector's own
-        # verdict on a credential we DO hold. Collapsing them is the exact
-        # defect this whole change exists to remove, and the first draft of
-        # this function did it -- one try around both steps.
-        try:
-            payload = fleet_enrollment_routes._dashboard_runtime_cache().load()
-        except Exception as exc:
-            self._needs_runtime.discard(org)
-            _log.warning(
-                "connector for org=%s started unarmed and the dashboard's "
-                "runtime cache could not be READ (%r) — storage problem on "
-                "THIS machine; an unlock will not help", org, exc)
-            return
-        if payload is None:
-            self._needs_runtime.discard(org)
-            _log.warning(
-                "connector for org=%s started unarmed and the dashboard has "
-                "NO cached runtime credential to give it — nothing is broken "
-                "here; this machine stays anonymous to the relay until a "
-                "human unlock", org)
-            return
-        try:
-            fleet_relay_sync.publish_connector_runtime(payload, org=org)
-        except TunnelUnavailable:
-            # EVERY kind is retryable AT THIS CALL SITE, and that is a decision
-            # rather than an oversight -- it was an oversight until
-            # host-0906-002433 read the taxonomy and asked.
-            #
-            # `no-listener`/`unreachable`/`no-tunnel` are the ordinary
-            # pre-write cases: the child is alive but has not written its .ctl
-            # descriptor yet. `closed` is ambiguous ("the frame may have been
-            # sent"), so a retry can deliver twice -- harmless here, because
-            # ConnectorFleetRuntime.configure() rebuilds its whole state from
-            # the payload and accumulates nothing, so applying the same
-            # credential twice is the same as once. `no-delegate` is
-            # not-retryable in general, but is close to unreachable here: this
-            # runs only for a connector the supervisor has alive, and it
-            # cannot launch one without a valid serve cert.
-            #
-            # Staying queued is the conservative direction in every case:
-            # dropping is the cold start this exists to remove.
-            return
-        except Exception as exc:
-            self._needs_runtime.discard(org)
-            _log.warning(
-                "the connector for org=%s REFUSED the runtime credential "
-                "(%r) — we hold a credential it will not accept, so it keeps "
-                "serving unarmed (hello v1, shared relay slot)", org, exc)
-            return
-        self._needs_runtime.discard(org)
-        _log.warning(
-            "handed the runtime credential to the restarted connector for "
-            "org=%s — armed without a human unlock", org)
 
     def _owned_pids(self) -> set[int]:
         """The pids of connectors THIS supervisor spawned — the reap exclusion

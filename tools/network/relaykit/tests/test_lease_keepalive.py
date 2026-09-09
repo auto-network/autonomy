@@ -27,8 +27,9 @@ class _Clock:
 def _connector() -> connector_mod.TunnelConnector:
     key = KeyPair.generate()
     return connector_mod.TunnelConnector(
-        "ws://registry.invalid", "org", key, cert=object()
-    )
+        "ws://registry.invalid", "org", key, cert=object(),
+                machine_key=KeyPair.generate(),
+            )
 
 
 def _run(desired: dict, replies, *, virtual_seconds: float,

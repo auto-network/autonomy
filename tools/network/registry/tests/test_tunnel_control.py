@@ -17,9 +17,9 @@ from fastapi.testclient import TestClient
 
 from tools.network.idkit import KeyPair
 from tools.network.relaykit.hello import (
-    HELLO_VERSION,
     HELLO_VERSION_2,
-    build_tunnel_hello,
+    build_tunnel_hello_v2,
+    SERVING_MACHINE_HELLO_DOMAIN,
     hello_signing_input,
 )
 from tools.network.registry.relay import (
@@ -42,11 +42,27 @@ def _open_tunnel(client, clock, root, org=ORG):
 
 
 def _hello_with_version(serve_key, cert, *, org, ts, version):
-    payload = json.loads(build_tunnel_hello(
-        serve_key, cert, org=org, ts=ts))
-    payload["v"] = version
-    payload["sig"] = serve_key.sign_hex(hello_signing_input(
-        org, serve_key.public_hex, ts, version=version))
+    """A well-formed hello relabelled to *version*, correctly signed for it.
+
+    Built on v2 because v1 is deleted; these tests are about how the registry
+    answers an unsupported version, not about v1 itself.
+    """
+    # An OLD connector sends the OLD SHAPE — six fields, no machine identity —
+    # signed for the version it claims. Relabelling a v2-shaped hello would be
+    # something else entirely: a recognised shape carrying a contradictory
+    # version is TAMPERING, and the registry answers that with a signature
+    # failure rather than a version negotiation.
+    payload = {
+        "v": version,
+        "org": org,
+        "signer": serve_key.public_hex,
+        "ts": ts,
+        # to_json() returns BYTES; the hello field is a string.
+        "cert": cert.to_json().decode(),
+        "sig": serve_key.sign_hex(
+            hello_signing_input(org, serve_key.public_hex, ts, version=version)
+        ),
+    }
     return json.dumps(payload)
 
 
@@ -57,7 +73,7 @@ def test_authenticated_old_connector_gets_typed_version_mismatch(
     serve_key = KeyPair.generate()
     cert = _serve_cert(root, serve_key)
     hello = _hello_with_version(
-        serve_key, cert, org=ORG, ts=clock.now, version=HELLO_VERSION - 1)
+        serve_key, cert, org=ORG, ts=clock.now, version=0)
 
     with client.websocket_connect(f"/t/{ORG}") as ws:
         ws.send_text(hello)
@@ -65,7 +81,7 @@ def test_authenticated_old_connector_gets_typed_version_mismatch(
             "ok": False,
             "error": {
                 "code": "protocol_version_mismatch",
-                "connector_version": HELLO_VERSION - 1,
+                "connector_version": 0,
                 "registry_version": HELLO_VERSION_2,
             },
         }
@@ -81,9 +97,11 @@ def test_tampered_connector_version_fails_signature_not_version_negotiation(
     register(client, clock, root, org_uuid=ORG)
     serve_key = KeyPair.generate()
     cert = _serve_cert(root, serve_key)
-    payload = json.loads(build_tunnel_hello(
-        serve_key, cert, org=ORG, ts=clock.now))
-    payload["v"] = HELLO_VERSION - 1  # signature still covers HELLO_VERSION
+    payload = json.loads(build_tunnel_hello_v2(
+        serve_key, cert, machine_key=KeyPair.generate(), org=ORG,
+        ts=clock.now, machine_hello_domain=SERVING_MACHINE_HELLO_DOMAIN,
+    ))
+    payload["v"] = 0  # signature still covers the real version
 
     with client.websocket_connect(f"/t/{ORG}") as ws:
         ws.send_text(json.dumps(payload))
