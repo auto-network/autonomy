@@ -244,8 +244,9 @@ class AdmissionTicket:
     network: bytes
     #: A designated identity (an exempt source today; a premium org later)
     #: whose admission/byte limits are not charged. This is the principled
-    #: replacement for hardcoded one-off exemptions like the fleet:join
-    #: exempt_bytes special-case, and the seed of per-identity premium
+    #: replacement for hardcoded one-off exemptions (the fleet exempt_bytes
+    #: special-case was one, now removed with fleet sync's departure from the
+    #: viewer path), and the seed of per-identity premium
     #: budgets (auto-ejvzt). Off by default; only set for configured
     #: identities.
     exempt: bool = False
