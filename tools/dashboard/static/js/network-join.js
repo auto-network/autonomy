@@ -13,8 +13,10 @@
  * The bearer (#t=) is HELD in this page and never sent to any server,
  * including our own dashboard — it is the ceremony's secret and stays in
  * the browser (I1-adjacent). Controls appear only when their function
- * exists: the accept action arrives WITH the acceptance ceremony
- * (auto-9rw91). No password anything, ever (I1).
+ * exists: the accept action appears once the organization has answered
+ * over its own tunnel and said what you would be joining as. Accepting
+ * opens the SHARED root control, which presents whichever factors this
+ * identity has. No password anything, ever, on this page (I1).
  */
 (function () {
   "use strict";
@@ -172,6 +174,152 @@
         })
         .catch(function () {});
     }
+    // Open the org's own channel to learn what this invitation grants. The
+    // accept control appears only if that answer arrives; an organization we
+    // cannot reach offers no action, which is the honest state.
+    connectSession(inputs)
+      .then(function (state) {
+        if (!state) return;
+        if (state.state === "org") {
+          if (session.brand && session.brand.orgName) {
+            renderVerifiedHeader({
+              org_name: session.brand.orgName,
+              org_description: session.brand.orgDescription,
+              org_icon: session.brand.orgIcon,
+            });
+          }
+          session.grantedRole = state.grantedRole;
+          offerAccept(state);
+          wireAccept(inputs);
+          return;
+        }
+        reportTerminal(state);
+      })
+      .catch(function () { /* unreachable org: the minimal step stands */ });
+  }
+
+  // ---- accepting --------------------------------------------------------
+  // The join session, once connected. Held so the page can be closed and
+  // reopened on the same link without re-deriving anything it already knows.
+  var session = null;
+
+  function show(id, on) {
+    var node = $(id);
+    if (node) node.classList[on ? "remove" : "add"]("hidden");
+  }
+
+  function article(word) {
+    return /^[aeiou]/i.test(String(word || "")) ? "an" : "a";
+  }
+
+  function say(id, text) {
+    var node = $(id);
+    if (node) node.textContent = text;
+  }
+
+  // The org answered: we now know the role, so the action can appear.
+  function offerAccept(context) {
+    var role = context && context.grantedRole;
+    if (!role) return;
+    say("joins-line", "You would join as " + article(role) + " " + role + ".");
+    show("accept-block", true);
+  }
+
+  function showWaiting(orgName) {
+    show("accept-block", false);
+    show("waiting-block", true);
+    say("waiting-line", "Waiting for " + (orgName || "the organization")
+      + " to approve you");
+  }
+
+  function showAdmitted(orgName, role) {
+    show("accept-block", false);
+    show("waiting-block", false);
+    show("done-block", true);
+    say("done-line", "You joined " + (orgName || "the organization")
+      + (role ? " as " + article(role) + " " + role : "") + ".");
+  }
+
+  // One live join session over the org's own channel. Every module is
+  // imported here rather than at load: this page is a classic script, and
+  // nothing below is needed until someone actually accepts.
+  function connectSession(inputs) {
+    return Promise.all([
+      import("/static/js/join/accept-controller.js"),
+      import("/static/js/join/channel-factory.js"),
+      import("/static/js/join/ceremony.js"),
+      import("/static/js/ceremony/open-root.js"),
+    ]).then(function (mods) {
+      var JoinSession = mods[0].JoinSession;
+      var openChannel = mods[1].openChannel;
+      var makeRootCeremony = mods[2].makeRootCeremony;
+      var openRoot = mods[3].openRoot;
+      session = new JoinSession({
+        inputs: inputs,
+        openChannel: openChannel,
+        runCeremony: makeRootCeremony({ openRoot: openRoot }),
+      });
+      return session.connect();
+    });
+  }
+
+  function reportTerminal(state) {
+    show("accept-block", false);
+    show("waiting-block", false);
+    say("accept-hint", state && state.reason
+      ? "This invitation cannot be used: " + state.reason
+      : "This invitation cannot be used.");
+    show("accept-block", true);
+    var button = $("accept");
+    if (button) button.classList.add("hidden");
+  }
+
+  function wireAccept(inputs) {
+    var button = $("accept");
+    if (!button) return;
+    button.addEventListener("click", function () {
+      button.disabled = true;
+      say("accept-hint", "");
+      var brandName = ($("org-name") && $("org-name").textContent) || "";
+      var role = (session && session.brand && session.grantedRole) || null;
+      session.accept()
+        .then(function (result) {
+          // Cancelled ceremony: nothing was signed and nothing was sent.
+          if (result === null) { button.disabled = false; return null; }
+          if (result.state === "pending") { showWaiting(brandName); return poll(brandName, role); }
+          if (result.state === "admitted") { showAdmitted(brandName, role); return null; }
+          if (result.state === "already-approved") { return finalize(brandName, role); }
+          reportTerminal(result);
+          return null;
+        })
+        .catch(function (error) {
+          button.disabled = false;
+          say("accept-hint", (error && error.message) || String(error));
+        });
+    });
+  }
+
+  // Approval is somebody else's action, so this waits rather than asking the
+  // user to. Admission needs a second submit carrying the countersignature,
+  // which finalize() does; accept() would discard it.
+  function poll(brandName, role) {
+    return session.pollUntilTerminal({
+      onProgress: function () {},
+    }).then(function (result) {
+      if (!result) return null;
+      if (result.state === "admitted") { showAdmitted(brandName, role); return null; }
+      if (result.state === "pending" || result.state === "pending-timeout") return null;
+      reportTerminal(result);
+      return null;
+    });
+  }
+
+  function finalize(brandName, role) {
+    return session.finalize().then(function (result) {
+      if (result && result.state === "admitted") { showAdmitted(brandName, role); return null; }
+      showWaiting(brandName);
+      return poll(brandName, role);
+    });
   }
 
   function render() {
