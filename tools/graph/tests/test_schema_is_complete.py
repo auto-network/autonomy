@@ -14,12 +14,7 @@ from pathlib import Path
 import sqlite3
 
 from tools.graph import db as dbmod
-from tools.graph.db import (
-    GraphDB,
-    _SCHEMA_USER_VERSION,
-    schema_fingerprint,
-    schema_is_current,
-)
+from tools.graph.db import GraphDB, _SCHEMA_USER_VERSION
 
 
 def _shape(conn) -> tuple[set, dict]:
@@ -88,7 +83,6 @@ def test_a_new_install_runs_no_migrations(tmp_path: Path, monkeypatch) -> None:
     db = GraphDB(tmp_path / "new.db")
     try:
         version = db.conn.execute("PRAGMA user_version").fetchone()[0]
-        assert schema_is_current(db.conn)
     finally:
         db.close()
 
@@ -108,42 +102,8 @@ def test_an_older_store_still_migrates(tmp_path: Path) -> None:
     db = GraphDB(path)
     try:
         assert db.conn.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_USER_VERSION
-        assert schema_is_current(db.conn)
     finally:
         db.close()
-
-
-def test_a_missing_object_is_repaired_even_when_the_stamp_says_current(
-    tmp_path: Path,
-) -> None:
-    """The forgotten-bump case, which the integer alone could never catch.
-
-    A store whose stamp equals the constant but whose shape has drifted is
-    NOT current, and saying so is the whole point of asking the database.
-    """
-    path = tmp_path / "drift.db"
-    GraphDB(path).close()
-
-    conn = sqlite3.connect(path)
-    conn.execute("DROP INDEX idx_sources_type")
-    conn.commit()
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_USER_VERSION
-    assert not schema_is_current(conn)
-    conn.close()
-
-    db = GraphDB(path)
-    try:
-        assert schema_is_current(db.conn), "the open did not repair the drift"
-    finally:
-        db.close()
-
-
-def test_the_fingerprint_is_derived_and_stable() -> None:
-    """It is a hash OF schema.sql's product, not a value restated beside it,
-    so it cannot disagree with the file and cannot be forgotten."""
-    first = schema_fingerprint()
-    assert first == schema_fingerprint()
-    assert len(first) == 64 and int(first, 16) >= 0
 
 
 def test_the_retired_backfill_is_not_in_the_migration_chain() -> None:

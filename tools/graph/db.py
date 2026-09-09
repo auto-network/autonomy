@@ -106,94 +106,6 @@ def _schema_sections() -> tuple[str, str]:
     return head, sep + tail
 
 
-def _normalize_ddl(sql: str | None) -> str:
-    """Whitespace-insensitive form, so reformatting schema.sql is not a change."""
-    return " ".join((sql or "").split())
-
-
-@functools.lru_cache(maxsize=1)
-def _expected_schema_shape() -> tuple[dict, dict]:
-    """The shape schema.sql PRODUCES: {(type, name): ddl}, {table: columns}.
-
-    Built once by executing schema.sql into an in-memory database, so it is
-    derived from the file rather than restated beside it. Nothing to keep in
-    sync and nothing to forget.
-    """
-    conn = sqlite3.connect(":memory:")
-    try:
-        base, derived = _schema_sections()
-        conn.executescript(base)
-        conn.executescript(derived)
-        objects = {
-            (str(t), str(n)): _normalize_ddl(sql)
-            for t, n, sql in conn.execute(
-                "SELECT type,name,sql FROM sqlite_master "
-                "WHERE name NOT LIKE 'sqlite_%'"
-            )
-        }
-        columns = {}
-        for _t, name in [k for k in objects if k[0] == "table"]:
-            columns[name] = {
-                str(r[1]) for r in conn.execute(f'PRAGMA table_info("{name}")')
-            }
-        return objects, columns
-    finally:
-        conn.close()
-
-
-def schema_fingerprint() -> str:
-    """Content hash of the shape schema.sql produces.
-
-    Changes the moment the schema does, and cannot change without it. This is
-    the number nobody has to remember to bump.
-    """
-    objects, columns = _expected_schema_shape()
-    payload = json.dumps(
-        {
-            "objects": sorted([f"{t}:{n}", d] for (t, n), d in objects.items()),
-            "columns": sorted([t, sorted(c)] for t, c in columns.items()),
-        },
-        sort_keys=True, separators=(",", ":"),
-    ).encode()
-    return hashlib.sha256(payload).hexdigest()
-
-
-def schema_is_current(conn) -> bool:
-    """Whether this database already HAS everything schema.sql defines.
-
-    The structural replacement for "is the stamped integer equal to the
-    constant". A stale stamp with a current shape is not work to do, and a
-    current stamp with a missing object is not something to skip -- and only
-    this function can tell those apart, because it asks the database instead
-    of asking a number someone maintained by hand.
-
-    Extra objects are fine: fleet-sync, vault and key-control tables live in
-    the same file and schema.sql knows nothing about them.
-    """
-    objects, columns = _expected_schema_shape()
-    try:
-        live = {
-            (str(t), str(n)): _normalize_ddl(sql)
-            for t, n, sql in conn.execute(
-                "SELECT type,name,sql FROM sqlite_master "
-                "WHERE name NOT LIKE 'sqlite_%'"
-            )
-        }
-    except sqlite3.Error:
-        return False
-    for key, ddl in objects.items():
-        if live.get(key) != ddl:
-            return False
-    for table, expected in columns.items():
-        try:
-            found = {str(r[1]) for r in conn.execute(f'PRAGMA table_info("{table}")')}
-        except sqlite3.Error:
-            return False
-        if not expected <= found:
-            return False
-    return True
-
-
 _SCHEMA_PHASE_MIGRATIONS: tuple[tuple[int, str], ...] = (
     (10, "_migrate_attachments_alt_text"),
     (10, "_migrate_content_attribution"),
@@ -741,37 +653,17 @@ class GraphDB:
         previous_version = int(
             self.conn.execute("PRAGMA user_version").fetchone()[0]
         )
-        # STRUCTURAL CURRENCY CHECK. "Is this database current?" is answered
-        # by asking the DATABASE whether it already holds everything
-        # schema.sql defines -- not by comparing a hand-maintained integer.
-        #
-        # The integer alone got this wrong in both directions. A stale stamp
-        # with a current shape made every store re-run fourteen migrations
-        # for nothing (and on 2026-09-08 one of them could not complete, so
-        # every writable open failed). A current stamp with a MISSING object
-        # -- someone edits schema.sql and forgets to bump -- silently skipped
-        # the work forever, and nothing anywhere would have noticed.
-        #
-        # The shape check cannot be forgotten, because it is derived from
-        # schema.sql itself. The version is retained only to ORDER migrations
-        # for a store that genuinely needs them.
-        shape_is_current = schema_is_current(self.conn)
-        if previous_version == _SCHEMA_USER_VERSION and shape_is_current:
+        if previous_version == _SCHEMA_USER_VERSION:
             return
         self._pending_data_migrations = [
             rewrite for version, rewrite in _DATA_PHASE_MIGRATIONS
             if version > previous_version
         ]
-        # A BRAND NEW DATABASE HAS NOTHING TO MIGRATE. schema.sql IS the
-        # current shape, so a fresh file gets it and stops — it must never
-        # run a single historical migration. Detected before the script
-        # runs, because after it every table exists.
-        #
-        # Without this a new install executed all fourteen, relying on each
-        # one's precondition check to no-op. That is a lot of trust placed in
-        # code whose only job is to reshape data that cannot be present, and
-        # it means a new install shares a failure path with a decade-old
-        # store for no reason. A fresh install now touches none of it.
+        # A brand new database has nothing to migrate: schema.sql IS the
+        # current shape. Checked before the script runs, because afterwards
+        # every table exists. This is what makes it structurally impossible
+        # for a new install to think it needs updating — it does not depend
+        # on anyone remembering to bump a number.
         fresh = self.conn.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
             "AND name NOT LIKE 'sqlite_%'"
@@ -779,17 +671,10 @@ class GraphDB:
         base, derived = _schema_sections()
         self.conn.executescript(base)
         if not fresh:
-            # Run a migration when the version says it is new, OR when the
-            # shape has DRIFTED from schema.sql. The second clause matters:
-            # several of these are self-healing REPAIRS, not one-way
-            # reshapes -- _migrate_message_id_unique dedupes before it can
-            # index, the settings ones heal duplicates. They were relied on
-            # to re-run on every open, and version-gating alone silently
-            # stopped repairing a store whose stamp was current but whose
-            # index had gone. Drift is the honest trigger for a repair:
-            # something is missing, and we do not know which one fixes it.
+            # Only the migrations newer than this store's stamp. The same
+            # gating _DATA_PHASE_MIGRATIONS has always had.
             for introduced_in, name in _SCHEMA_PHASE_MIGRATIONS:
-                if introduced_in > previous_version or not shape_is_current:
+                if introduced_in > previous_version:
                     getattr(self, name)()
         # The derived objects come LAST because each depends on a column a
         # migration adds to a legacy store. A fresh database already has
