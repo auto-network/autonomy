@@ -179,9 +179,14 @@ def test_partial_transaction_is_the_case_being_prevented(
 def _referenced_names(func) -> set[str]:
     """Attribute/global names referenced by a function and its nested code.
 
-    Compiled code, not source text, so reformatting cannot fool it and a
-    reverted call site cannot hide. The relay site lives inside a lambda, so
-    nested code objects are walked too.
+    LIMITATION, stated so nobody mistakes this for more than it is: these are
+    STRUCTURAL guards, not runtime evidence that a sender put the gated map on
+    the wire. They prove the compiled call site names the gated method and not
+    the ungated one. Real runtime capture needs the harness, which runs
+    machines as subprocesses and so cannot be reached by in-process patching.
+
+    Compiled code rather than source text, so reformatting cannot fool it. The
+    relay site lives inside a lambda, so nested code objects are walked too.
     """
     import types
 
@@ -208,20 +213,17 @@ def test_direct_sender_uses_the_gate_not_the_raw_read() -> None:
 
 
 def test_relay_sender_uses_the_gate_not_the_raw_read() -> None:
-    """Fails if the relay pull-request builder reverts to origin_watermarks."""
-    import tools.network.fleet_relay_sync as relay
+    """Fails if relay.pull_checkpoint_once reverts to origin_watermarks.
 
-    target = None
-    for name in dir(relay):
-        candidate = getattr(relay, name)
-        if callable(candidate) and getattr(candidate, "__code__", None):
-            if "advertisable_origin_watermarks" in _referenced_names(candidate):
-                target = candidate
-                break
-    assert target is not None, (
-        "no relay function references the gate; the call site was removed"
-    )
-    assert "origin_watermarks" not in _referenced_names(target), (
+    Named explicitly rather than searching for any function that happens to
+    reference the gate -- a search would silently pass if the call site moved
+    to some other function, or vanished.
+    """
+    from tools.network.fleet_relay_sync import pull_checkpoint_once
+
+    names = _referenced_names(pull_checkpoint_once)
+    assert "advertisable_origin_watermarks" in names
+    assert "origin_watermarks" not in names, (
         "the relay sender must not read the ungated map"
     )
 
@@ -229,29 +231,60 @@ def test_relay_sender_uses_the_gate_not_the_raw_read() -> None:
 def test_gate_reads_phase_and_watermarks_in_one_snapshot(
     tmp_path: Path,
 ) -> None:
-    """One connection is not one snapshot. If the phase check and the catalog
-    read were separate autocommit reads, a bootstrap beginning between them
-    would let a permitting check escort a claim that is no longer earned."""
+    """One connection is not one snapshot.
+
+    Between the phase check and the catalog read, a side connection begins a
+    bootstrap AND applies a record that moves the watermark map from 10 to 20.
+    Under one read transaction the catalog read must still see 10 -- the state
+    the permitting phase check was taken against. Seeing 20 would mean the gate
+    published a map that materialized after it decided publishing was allowed.
+
+    WAL so the side connection can commit while a read transaction is open, and
+    the side commit is REQUIRED to succeed: swallowing its failure would let
+    this pass without ever creating the race.
+    """
     path = tmp_path / "personal.db"
     _seed(path)
+    with sqlite3.connect(path) as prep:
+        prep.execute("PRAGMA journal_mode=WAL")
+
     store = SQLiteFleetSyncStore(path)
+    assert store.origin_watermarks() == {ORIGIN: 10}
 
     import tools.network.fleet_sync.sweep_receive as receive
+    from tools.network.fleet_sync.codec import Mutation
+    from tools.network.fleet_sync.compaction import AuthoredMutation
 
     real = receive.may_advertise_frontier
     fired = {"n": 0}
 
     def interleaving(conn):
-        # Permit, then start a bootstrap before the watermark read -- the race
-        # the snapshot must exclude.
         allowed = real(conn)
         if fired["n"] == 0:
             fired["n"] = 1
-            side = sqlite3.connect(path, timeout=5.0)
+            side = GraphDB(path)
             try:
-                begin_bootstrap(side, {ORIGIN: 10})
-            except Exception:
-                pass
+                side_catalog = MutationCatalog(side.conn, ORIGIN)
+                side_catalog.install()
+                begin_bootstrap(side.conn, {ORIGIN: 10})
+                side_catalog.apply_remote_batch([
+                    AuthoredMutation(
+                        ORIGIN, "tx-late", 0,
+                        Mutation(
+                            "sources", ("s-late",), 20, False,
+                            (("created_at", "2026-08-19T00:00:00Z"),
+                             ("deprecated", 0), ("id", "s-late"),
+                             ("ingested_at", "2026-08-19T00:00:00Z"),
+                             ("keywords", None), ("last_activity_at", None),
+                             ("metadata", {}), ("moved_to_org", None),
+                             ("persona_id", None), ("platform", None),
+                             ("publication_state", "curated"),
+                             ("session_id", None), ("short_description", None),
+                             ("successor_id", None), ("title", "late"),
+                             ("type", "note"), ("url", None)),
+                        ),
+                    )
+                ])
             finally:
                 side.close()
         return allowed
@@ -262,11 +295,19 @@ def test_gate_reads_phase_and_watermarks_in_one_snapshot(
     finally:
         receive.may_advertise_frontier = real
 
-    assert fired["n"] == 1, "the interleaving control never ran"
-    # Whatever the snapshot saw, the answer must be internally consistent:
-    # either the pre-bootstrap map or nothing -- never a map read after a
-    # bootstrap the phase check did not see.
-    assert result in ({ORIGIN: 10}, {}), result
+    assert fired["n"] == 1, "the interleaving never ran"
+    # The side writes must have LANDED, or the race was never created.
+    assert SQLiteFleetSyncStore(path).origin_watermarks() == {ORIGIN: 20}
+    assert receive.read_bootstrap.__module__  # bootstrap row exists below
+
+    assert result == {ORIGIN: 10}, (
+        "the gate published a map that materialized after its phase check "
+        f"permitted publishing; got {result}"
+    )
+    assert result != {ORIGIN: 20}
+
+    # And the next request sees the bootstrap and suppresses entirely.
+    assert not SQLiteFleetSyncStore(path).advertisable_origin_watermarks()
 
 
 def test_read_path_does_not_create_the_bootstrap_table(tmp_path: Path) -> None:
