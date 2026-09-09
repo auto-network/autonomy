@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Iterable, Mapping, Sequence
 
+from tools.network import fleet_sync_telemetry
+from tools.network.fleet_candidate_order import order_candidates
 from tools.network.fleet_roster import RosterEntry, resolve
 from tools.network.fleet_sync_channel import (
     FleetAuthenticator,
@@ -2771,10 +2773,25 @@ class FleetSyncScheduler:
                 )
                 self._last_round_selection = tuple(selected)
             if selected:
+                # Try the address that last carried a successful sync with
+                # each peer first (auto-fpjdr). One telemetry read per round,
+                # off the event loop and shared by every peer in it, rather
+                # than a blocking read inside the gather. A failed read
+                # yields no rows, which leaves the existing order intact.
+                try:
+                    hint_rows = await asyncio.to_thread(
+                        fleet_sync_telemetry.read_channel_rows
+                    )
+                except Exception:
+                    hint_rows = ()
                 await asyncio.gather(
                     *(self._sync_peer(
                         machine_pub,
-                        tuple(addresses.get(machine_pub, ())),
+                        tuple(order_candidates(
+                            machine_pub,
+                            addresses.get(machine_pub, ()),
+                            read_rows=lambda **_: hint_rows,
+                        )),
                     ) for machine_pub in selected),
                     return_exceptions=True,
                 )
