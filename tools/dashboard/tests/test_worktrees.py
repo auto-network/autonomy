@@ -1173,8 +1173,23 @@ class TestWorktreePage:
         # the list view and the operator has to find their row.
         assert "_handleDeeplink()" in js
         assert "params.get('session')" in js
-        assert "const withPrs = matches.find((r) => this.rowPrs(r).length > 0);" in js
-        assert "await this.openReviewDefault(withPrs);" in js
+        assert "this.sessionReviewItems = this.buildSessionReviewItems(this.sessionReviewRows);" in js
+        assert "await this.openSessionReviewAt(0);" in js
+
+    def test_session_overlay_navigation_spans_rows_and_dirty_changes(self):
+        js = (JS_DIR / "pages" / "worktrees.js").read_text()
+        overlay = (TEMPLATE_DIR / "partials" / "worktree-review-overlays.html").read_text()
+
+        assert "sessionReviewItems: []" in js
+        assert "buildSessionReviewItems(rows)" in js
+        assert "if (row.is_dirty) items.push({ kind: 'dirty', row });" in js
+        assert "await this.openSessionReviewAt(0);" in js
+        assert "detailGeneration = ++this.reviewDetailGeneration" in js
+        assert "this.reviewDetailGeneration !== detailGeneration" in js
+        assert 'data-testid="session-review-pager"' in overlay
+        assert "'change ' + (sessionReviewIndex + 1) + ' of ' + sessionReviewItems.length" in overlay
+        assert "!sessionReviewActive && selectedCommit.row.session_live" in overlay
+        assert '@click="closeReviewOverlay()"' in overlay
 
     def test_mcp_approval_uses_request_and_dashboard_defaults(self):
         js = (JS_DIR / "pages" / "worktrees.js").read_text()

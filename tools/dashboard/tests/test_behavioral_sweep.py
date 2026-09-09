@@ -1645,6 +1645,31 @@ SWEEP_WORKTREE_ROWS = [
         "source_control_repo_slug": "anchore/enterprise",
     },
     {
+        "session_name": "auto-sweep-alpha",
+        "session_title": "Alpha — second branch",
+        "repo_name": "encore-service",
+        "worktree_path": "/tmp/worktrees/auto-sweep-alpha/encore-service",
+        "managed_clone": "/tmp/repos/encore-service.git",
+        "branch": "feature/reporting",
+        "target_branch": "main",
+        "commits_ahead": 1,
+        "is_dirty": False,
+        "ff_eligible": False,
+        "clone_stale": False,
+        "rebase_required": False,
+        "session_live": True,
+        "commits": [{
+            "sha": "7777777ddddddddddddddddddddddddddddddddd",
+            "short_sha": "7777777",
+            "subject": "Render report status",
+            "author": "Alpha Agent",
+            "date": "2026-04-24 05:00",
+            "body": "A commit on the session's second repository branch.",
+            "files": [{"status": "M", "path": "src/report.ts", "additions": 4, "deletions": 1}],
+        }],
+        "dirty_files": [],
+    },
+    {
         "session_name": "auto-sweep-delta",
         "session_title": "Delta — stacked PR review",
         "repo_name": "enterprise_ng",
@@ -1738,6 +1763,10 @@ def branch_title(branch_name):
 +
      return branch_name""",
     },
+    "auto-sweep-alpha/encore-service/7777777ddddddddddddddddddddddddddddddddd": {
+        **SWEEP_WORKTREE_ROWS[2]["commits"][0],
+        "patch": "diff --git a/src/report.ts b/src/report.ts\n+export const status = 'ready';\n",
+    },
 }
 
 SWEEP_WORKTREE_CHANGES_DETAILS = {
@@ -1755,7 +1784,7 @@ index 9999999..8888888 100644
        }""",
     },
     "auto-sweep-gamma/autonomy": {
-        "files": SWEEP_WORKTREE_ROWS[2]["dirty_files"],
+        "files": SWEEP_WORKTREE_ROWS[4]["dirty_files"],
         "patch": """diff --git a/agents/session_launcher.py b/agents/session_launcher.py
 index 7654321..1234567 100644
 --- a/agents/session_launcher.py
@@ -7122,6 +7151,36 @@ class TestSessionViewerWorktreeOverlay:
                 r.commit_detail_open = !!overlay;
                 r.path_after_open = window.location.pathname + window.location.search;
 
+                var pager = document.querySelector('[data-testid="session-review-pager"]');
+                r.pager_initial = pager ? pager.textContent.replace(/\s+/g, ' ').trim() : '';
+                r.session_badge_omitted = overlay
+                    ? !overlay.querySelector('a[href*="/session/autonomy/auto-sweep-alpha"]')
+                    : false;
+                var next = document.querySelector('[aria-label="View next change"]');
+                if (next) next.click();
+                await waitFor(function() {{
+                    var p = document.querySelector('[data-testid="session-review-pager"]');
+                    return p && p.textContent.indexOf('change 2 of 4') !== -1;
+                }}, 2000);
+                next = document.querySelector('[aria-label="View next change"]');
+                if (next) next.click();
+                await waitFor(function() {{ return !!document.querySelector('[data-testid="worktree-dirty-detail"]'); }}, 2000);
+                r.reached_dirty = !!document.querySelector('[data-testid="worktree-dirty-detail"]');
+                next = document.querySelector('[aria-label="View next change"]');
+                if (next) next.click();
+                await waitFor(function() {{
+                    var detail = document.querySelector('[data-testid="worktree-commit-detail"]');
+                    return detail && detail.textContent.indexOf('encore-service') !== -1;
+                }}, 2000);
+                overlay = document.querySelector('[data-testid="worktree-commit-detail"]');
+                r.reached_second_row = !!(overlay && overlay.textContent.indexOf('encore-service') !== -1
+                    && overlay.textContent.indexOf('feature/reporting') !== -1);
+                var previous = document.querySelector('[aria-label="View previous change"]');
+                if (previous) previous.click();
+                await waitFor(function() {{ return !!document.querySelector('[data-testid="worktree-dirty-detail"]'); }}, 2000);
+                r.reverse_reached_dirty = !!document.querySelector('[data-testid="worktree-dirty-detail"]');
+
+                overlay = document.querySelector('[data-testid="worktree-dirty-detail"]');
                 var closeBtn = overlay ? findButtonByText(overlay, 'Close') : null;
                 if (closeBtn) closeBtn.click();
                 await waitFor(function() {{
@@ -7146,6 +7205,14 @@ class TestSessionViewerWorktreeOverlay:
 
     def test_commit_overlay_opens(self):
         assert self._checks.get("commit_detail_open"), "Worktree commit review overlay did not open from session viewer"
+
+    def test_session_pager_reaches_other_rows_and_dirty_changes(self):
+        c = self._checks
+        assert "change 1 of 4" in c.get("pager_initial", "")
+        assert c.get("session_badge_omitted")
+        assert c.get("reached_dirty")
+        assert c.get("reached_second_row")
+        assert c.get("reverse_reached_dirty")
 
     def test_route_stays_on_session(self):
         c = self._checks

@@ -14,8 +14,8 @@
 <template x-if="selectedCommit">
   <div class="worktree-review-overlay fixed inset-0 z-50 overflow-y-auto bg-gray-950"
        x-ref="commitDetailScroller"
-       @click.self="selectedCommit = null"
-       @keydown.escape.window="selectedCommit = null"
+       @click.self="closeReviewOverlay()"
+       @keydown.escape.window="closeReviewOverlay()"
        @scroll.passive="syncReviewHeaderState()"
        data-testid="worktree-commit-detail">
     <template x-if="selectedCommit.signMode">
@@ -80,7 +80,7 @@
         <div class="-mx-4 mb-4 px-4 pt-1 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
           <div class="mx-auto max-w-6xl">
             <div class="mb-2 flex min-w-0 flex-wrap items-center gap-2">
-              <template x-if="selectedCommit.row.session_live && selectedCommit.row.session_project">
+              <template x-if="!sessionReviewActive && selectedCommit.row.session_live && selectedCommit.row.session_project">
                 <a :href="'/session/' + encodeURIComponent(selectedCommit.row.session_project) + '/' + encodeURIComponent(selectedCommit.row.session_name)"
                    class="inline-flex min-w-0 items-center gap-1.5 rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200 hover:bg-indigo-500/20"
                    :title="'Open session viewer: ' + selectedCommit.row.session_name">
@@ -88,7 +88,7 @@
                   <span x-text="selectedCommit.row.session_name"></span>
                 </a>
               </template>
-              <template x-if="!(selectedCommit.row.session_live && selectedCommit.row.session_project)">
+              <template x-if="!sessionReviewActive && !(selectedCommit.row.session_live && selectedCommit.row.session_project)">
                 <span class="inline-flex min-w-0 items-center gap-1.5 rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200">
                   <template x-if="selectedCommit.row.session_live">
                     <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400"></span>
@@ -96,10 +96,20 @@
                   <span x-text="selectedCommit.row.session_name"></span>
                 </span>
               </template>
-              <template x-if="statusLabel(selectedCommit.row) !== 'LIVE'">
+              <template x-if="!sessionReviewActive && statusLabel(selectedCommit.row) !== 'LIVE'">
                 <span class="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
                       :class="statusClass(selectedCommit.row)"
                       x-text="statusLabel(selectedCommit.row)"></span>
+              </template>
+              <template x-if="sessionReviewActive">
+                <div class="inline-flex items-center gap-2 rounded-full border border-white/10 bg-slate-950/80 px-2 py-0.5 text-[10px] font-semibold text-slate-300"
+                     data-testid="session-review-pager">
+                  <button type="button" class="rounded-full border border-white/10 px-1.5 py-0.5 disabled:opacity-40"
+                          :disabled="!hasEarlierCommit()" @click="viewEarlierCommit()" aria-label="View previous change">←</button>
+                  <span class="font-mono text-slate-200" x-text="'change ' + (sessionReviewIndex + 1) + ' of ' + sessionReviewItems.length"></span>
+                  <button type="button" class="rounded-full border border-white/10 px-1.5 py-0.5 disabled:opacity-40"
+                          :disabled="!hasLaterCommit()" @click="viewLaterCommit()" aria-label="View next change">→</button>
+                </div>
               </template>
               <template x-if="isPrReview()">
                 <span class="inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-semibold"
@@ -120,11 +130,11 @@
                 </template>
                 <button type="button"
                         class="h-10 w-10 shrink-0 rounded-full border border-white/10 bg-white/[0.03] text-slate-300"
-                        @click="selectedCommit = null">×</button>
+                        @click="closeReviewOverlay()">×</button>
               </div>
             </div>
 
-            <template x-if="!isPrReview() && selectedCommit.total > 1">
+            <template x-if="!sessionReviewActive && !isPrReview() && selectedCommit.total > 1">
               <div class="mb-2 flex justify-center sm:justify-start">
                 <div class="inline-flex items-center gap-2 rounded-full border border-white/10 bg-slate-950/80 px-2 py-0.5 text-[10px] font-semibold text-slate-300">
                   <button type="button"
@@ -416,7 +426,7 @@
               </template>
               <button type="button"
                       class="h-11 rounded-2xl border border-white/10 px-4 text-sm font-semibold text-slate-300"
-                      @click="selectedCommit = null">Close</button>
+                      @click="closeReviewOverlay()">Close</button>
             </div>
           </template>
 
@@ -424,7 +434,7 @@
             <div class="mx-auto flex max-w-6xl justify-end">
               <button type="button"
                       class="h-11 rounded-2xl border border-white/10 px-4 text-sm font-semibold text-slate-300"
-                      @click="selectedCommit = null">Close</button>
+                      @click="closeReviewOverlay()">Close</button>
             </div>
           </template>
         </div>
@@ -436,15 +446,16 @@
 <template x-if="selectedDirtyRow">
   <div class="worktree-review-overlay fixed inset-0 z-50 overflow-y-auto bg-gray-950"
        x-ref="dirtyDetailScroller"
+       @keydown.escape.window="closeReviewOverlay()"
        @scroll.passive="syncReviewHeaderState()"
        data-testid="worktree-dirty-detail">
     <section class="worktree-review-shell min-h-screen bg-gray-950">
       <div class="mx-auto max-w-6xl px-4 pb-8 pt-4 sm:px-6 lg:px-8">
         <div class="-mx-4 mb-4 px-4 pt-1 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
           <div class="mx-auto max-w-6xl">
-            <div class="relative mb-2 pr-12">
+            <div class="relative mb-2" :class="sessionReviewActive ? 'pr-32' : 'pr-12'">
               <div class="flex min-w-0 flex-wrap items-center gap-2">
-                <template x-if="selectedDirtyRow.session_live && selectedDirtyRow.session_project">
+                <template x-if="!sessionReviewActive && selectedDirtyRow.session_live && selectedDirtyRow.session_project">
                   <a :href="'/session/' + encodeURIComponent(selectedDirtyRow.session_project) + '/' + encodeURIComponent(selectedDirtyRow.session_name)"
                      class="inline-flex min-w-0 items-center gap-1.5 rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200 hover:bg-indigo-500/20"
                      :title="'Open session viewer: ' + selectedDirtyRow.session_name">
@@ -452,7 +463,7 @@
                     <span x-text="selectedDirtyRow.session_name"></span>
                   </a>
                 </template>
-                <template x-if="!(selectedDirtyRow.session_live && selectedDirtyRow.session_project)">
+                <template x-if="!sessionReviewActive && !(selectedDirtyRow.session_live && selectedDirtyRow.session_project)">
                   <span class="inline-flex min-w-0 items-center gap-1.5 rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200">
                     <template x-if="selectedDirtyRow.session_live">
                       <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400"></span>
@@ -460,20 +471,35 @@
                     <span x-text="selectedDirtyRow.session_name"></span>
                   </span>
                 </template>
+                <template x-if="sessionReviewActive">
+                  <div class="inline-flex items-center gap-2 rounded-full border border-white/10 bg-slate-950/80 px-2 py-0.5 text-[10px] font-semibold text-slate-300"
+                       data-testid="session-review-pager">
+                    <button type="button" class="rounded-full border border-white/10 px-1.5 py-0.5 disabled:opacity-40"
+                            :disabled="!hasEarlierCommit()" @click="viewEarlierCommit()" aria-label="View previous change">←</button>
+                    <span class="font-mono text-slate-200" x-text="'change ' + (sessionReviewIndex + 1) + ' of ' + sessionReviewItems.length"></span>
+                    <button type="button" class="rounded-full border border-white/10 px-1.5 py-0.5 disabled:opacity-40"
+                            :disabled="!hasLaterCommit()" @click="viewLaterCommit()" aria-label="View next change">→</button>
+                  </div>
+                </template>
                 <span class="inline-flex overflow-hidden rounded-full border border-white/10 text-[10px] font-semibold">
                   <span class="bg-slate-800 px-2 py-0.5 uppercase tracking-wider text-slate-500">repo</span>
                   <span class="bg-slate-900 px-2 py-0.5 font-mono text-slate-200"
                         x-text="repoName(selectedDirtyRow)"></span>
                 </span>
-                <template x-if="statusLabel(selectedDirtyRow) !== 'LIVE'">
+                <template x-if="!sessionReviewActive && statusLabel(selectedDirtyRow) !== 'LIVE'">
                   <span class="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
                         :class="statusClass(selectedDirtyRow)"
                         x-text="statusLabel(selectedDirtyRow)"></span>
                 </template>
               </div>
-              <button type="button"
-                      class="absolute right-0 top-0 h-10 w-10 shrink-0 rounded-full border border-white/10 bg-white/[0.03] text-slate-300"
-                      @click="selectedDirtyRow = null">×</button>
+              <div class="absolute right-0 top-0 flex items-center gap-2">
+                <template x-if="sessionReviewActive && canRefreshSelectedRow()">
+                  <button type="button" class="h-10 rounded-2xl border border-white/10 bg-white/[0.03] px-3 text-xs font-semibold text-slate-300 disabled:opacity-50"
+                          :disabled="rowRefreshing" @click="refreshSelectedRow()" x-text="rowRefreshing ? 'Refreshing...' : 'Refresh'"></button>
+                </template>
+                <button type="button" class="h-10 w-10 shrink-0 rounded-full border border-white/10 bg-white/[0.03] text-slate-300"
+                        @click="closeReviewOverlay()">×</button>
+              </div>
             </div>
           </div>
         </div>
@@ -549,7 +575,7 @@
           <div class="mx-auto flex max-w-6xl justify-end">
             <button type="button"
                     class="h-11 rounded-2xl border border-white/10 px-4 text-sm font-semibold text-slate-300"
-                    @click="selectedDirtyRow = null">Close</button>
+                    @click="closeReviewOverlay()">Close</button>
           </div>
         </div>
       </div>

@@ -686,6 +686,11 @@
       lastUpdated: '',
       viewMode: 'commits',
       selectedCommit: null,
+      sessionReviewItems: [],
+      sessionReviewRows: [],
+      sessionReviewIndex: -1,
+      sessionReviewActive: false,
+      reviewDetailGeneration: 0,
       // commit-signing overlay state
       signPassphrase: '',
       signing: false,
@@ -1455,7 +1460,9 @@
       // the diff to that single PR's commit range via the binding's
       // ``base_sha``. Default callers (single-PR badge click) get the
       // first PR.
-      async openReviewPr(row, pr) {
+      async openReviewPr(row, pr, options) {
+        const opts = options || {};
+        if (!opts.preserveSessionContext) this.clearSessionReview();
         if (!pr) pr = this.rowPr(row);
         if (!pr) {
           await this.openReviewCommit(row, 0);
@@ -1475,6 +1482,7 @@
         // ``prMode: true`` is the marker the template guards on; ``sha``
         // is prefixed so it can never collide with a real commit key.
         const requestKey = '_pr_/' + (pr.head_sha || pr.number || '') + '/' + Date.now();
+        const detailGeneration = ++this.reviewDetailGeneration;
         this.selectedCommit = {
           row,
           commit: {
@@ -1510,7 +1518,8 @@
           const resp = await fetch(url);
           const detail = await _jsonOrError(resp);
           // Bail if user navigated away while the fetch was in flight.
-          if (!this.selectedCommit || this.selectedCommit.commit.sha !== requestKey) return;
+          if (!this.selectedCommit || this.selectedCommit.commit.sha !== requestKey ||
+              this.reviewDetailGeneration !== detailGeneration) return;
           const files = detail.files || [];
           this.selectedCommit = {
             ...this.selectedCommit,
@@ -1535,7 +1544,8 @@
         } catch (err) {
           _toast('PR diff failed: ' + (err.message || String(err)), 'error');
         } finally {
-          if (this.selectedCommit && this.selectedCommit.commit.sha === requestKey) {
+          if (this.selectedCommit && this.selectedCommit.commit.sha === requestKey &&
+              this.reviewDetailGeneration === detailGeneration) {
             this.detailLoading = false;
           }
         }
@@ -1973,6 +1983,61 @@
         return !!(this.selectedCommit || this.selectedDirtyRow || this.confirmDiscardRow || this.rebaseRequiredDialog);
       },
 
+      clearSessionReview() {
+        this.sessionReviewItems = [];
+        this.sessionReviewRows = [];
+        this.sessionReviewIndex = -1;
+        this.sessionReviewActive = false;
+        this.reviewDetailGeneration += 1;
+      },
+
+      closeReviewOverlay() {
+        this.selectedCommit = null;
+        this.selectedDirtyRow = null;
+        this.clearSessionReview();
+      },
+
+      sessionReviewKey(item) {
+        if (!item || !item.row) return '';
+        const row = this.rowKey(item.row);
+        if (item.kind === 'pr') {
+          const pr = item.pr || {};
+          return 'pr:' + row + ':' + (pr.review_id || pr.number || 'default');
+        }
+        if (item.kind === 'commit') return 'commit:' + row + ':' + (item.commit && item.commit.sha || '');
+        return 'dirty:' + row;
+      },
+
+      buildSessionReviewItems(rows) {
+        const items = [];
+        (rows || []).forEach((row) => {
+          const prs = this.rowPrs(row);
+          if (prs.length) {
+            items.push({ kind: 'pr', row, pr: prs[0] });
+          } else {
+            this.commitList(row).forEach((commit, commitIndex) => {
+              items.push({ kind: 'commit', row, commit, commitIndex });
+            });
+          }
+          if (row.is_dirty) items.push({ kind: 'dirty', row });
+        });
+        return items;
+      },
+
+      async openSessionReviewAt(index) {
+        if (!this.sessionReviewActive || !this.sessionReviewItems.length) return;
+        const safeIndex = Math.max(0, Math.min(index, this.sessionReviewItems.length - 1));
+        const item = this.sessionReviewItems[safeIndex];
+        this.sessionReviewIndex = safeIndex;
+        if (item.kind === 'pr') {
+          await this.openReviewPr(item.row, item.pr, { preserveSessionContext: true });
+        } else if (item.kind === 'commit') {
+          await this.openCommitAt(item.row, item.commitIndex, { preserveSessionContext: true, preserveShowDiff: true });
+        } else {
+          await this.selectDirtyRow(item.row, { preserveSessionContext: true });
+        }
+      },
+
       async openSessionOverlay(sessionName) {
         if (!sessionName) return false;
         await this.refresh(false);
@@ -1993,26 +2058,17 @@
           }
         }
         if (!matches.length) return false;
-        const withPrs = matches.find((row) => this.rowPrs(row).length > 0);
-        if (withPrs) {
-          await this.openReviewDefault(withPrs);
-          return true;
-        }
-        const withCommits = matches.find((row) => (this.commitList(row) || []).length > 0);
-        if (withCommits) {
-          await this.openReviewDefault(withCommits);
-          return true;
-        }
-        const dirtyMatch = matches.find((row) => row.is_dirty);
-        if (dirtyMatch) {
-          await this.selectDirtyRow(dirtyMatch);
-          return true;
-        }
-        return false;
+        this.sessionReviewRows = matches;
+        this.sessionReviewItems = this.buildSessionReviewItems(this.sessionReviewRows);
+        if (!this.sessionReviewItems.length) return false;
+        this.sessionReviewActive = true;
+        this.sessionReviewIndex = 0;
+        await this.openSessionReviewAt(0);
+        return true;
       },
 
       canRefreshSelectedRow() {
-        const row = this.selectedCommit && this.selectedCommit.row;
+        const row = (this.selectedCommit && this.selectedCommit.row) || this.selectedDirtyRow;
         return !!(row && row.session_name && row.repo_name);
       },
 
@@ -2217,14 +2273,32 @@
       // overlay so the new source_control snapshot renders
       // immediately.
       async refreshSelectedRow() {
-        if (!this.selectedCommit || !this.selectedCommit.row) return;
+        const selectedRow = (this.selectedCommit && this.selectedCommit.row) || this.selectedDirtyRow;
+        if (!selectedRow) return;
         if (this.rowRefreshing) return;
-        const row = this.selectedCommit.row;
-        const prMode = !!this.selectedCommit.prMode;
+        const row = selectedRow;
+        const prMode = !!(this.selectedCommit && this.selectedCommit.prMode);
         const currentPr = prMode ? this.selectedCommit.pr : null;
+        const previousKey = this.sessionReviewActive
+          ? this.sessionReviewKey(this.sessionReviewItems[this.sessionReviewIndex]) : '';
+        const previousIndex = this.sessionReviewIndex;
         this.rowRefreshing = true;
         try {
           const updated = await this._refreshRowFromServer(row);
+          if (this.sessionReviewActive) {
+            this.sessionReviewRows = this.sessionReviewRows.map((item) =>
+              this.rowKey(item) === this.rowKey(updated) ? updated : item);
+            this.sessionReviewItems = this.buildSessionReviewItems(this.sessionReviewRows);
+            if (!this.sessionReviewItems.length) {
+              this.closeReviewOverlay();
+              return;
+            }
+            const surviving = this.sessionReviewItems.findIndex((item) => this.sessionReviewKey(item) === previousKey);
+            await this.openSessionReviewAt(surviving >= 0
+              ? surviving
+              : Math.min(Math.max(previousIndex, 0), this.sessionReviewItems.length - 1));
+            return;
+          }
           if (prMode) {
             const refreshedPr = this.matchingRowPr(updated, currentPr);
             if (refreshedPr) {
@@ -3182,6 +3256,7 @@
 
       async openCommitAt(row, index, options) {
         const opts = options || {};
+        if (!opts.preserveSessionContext) this.clearSessionReview();
         const next = this.commitAt(row, index);
         if (!next) {
           this.selectedCommit = null;
@@ -3203,6 +3278,7 @@
         this.queuePathMeasurements();
         this.queueReviewHeaderState();
         const requestKey = this.commitKey(next);
+        const detailGeneration = ++this.reviewDetailGeneration;
 
         try {
           const resp = await fetch(
@@ -3211,7 +3287,8 @@
               encodeURIComponent(next.commit.sha),
           );
           const detail = await _jsonOrError(resp);
-          if (!this.selectedCommit || this.commitKey(this.selectedCommit) !== requestKey) return;
+          if (!this.selectedCommit || this.commitKey(this.selectedCommit) !== requestKey ||
+              this.reviewDetailGeneration !== detailGeneration) return;
           this.selectedCommit = {
             ...this.selectedCommit,
             commit: {
@@ -3229,7 +3306,8 @@
         } catch (err) {
           _toast('Commit detail failed: ' + (err.message || String(err)), 'error');
         } finally {
-          if (this.selectedCommit && this.commitKey(this.selectedCommit) === requestKey) {
+          if (this.selectedCommit && this.commitKey(this.selectedCommit) === requestKey &&
+              this.reviewDetailGeneration === detailGeneration) {
             this.detailLoading = false;
           }
         }
@@ -3241,25 +3319,37 @@
       },
 
       hasEarlierCommit() {
+        if (this.sessionReviewActive) return this.sessionReviewIndex > 0;
         return !!this.selectedCommit && this.selectedCommit.commitIndex > 0;
       },
 
       hasLaterCommit() {
+        if (this.sessionReviewActive) return this.sessionReviewIndex < (this.sessionReviewItems.length - 1);
         return !!this.selectedCommit && this.selectedCommit.commitIndex < (this.selectedCommit.total - 1);
       },
 
       async viewEarlierCommit() {
         if (!this.hasEarlierCommit()) return;
+        if (this.sessionReviewActive) {
+          await this.openSessionReviewAt(this.sessionReviewIndex - 1);
+          return;
+        }
         await this.openCommitAt(this.selectedCommit.row, this.selectedCommit.commitIndex - 1, { preserveShowDiff: true });
       },
 
       async viewLaterCommit() {
         if (!this.hasLaterCommit()) return;
+        if (this.sessionReviewActive) {
+          await this.openSessionReviewAt(this.sessionReviewIndex + 1);
+          return;
+        }
         await this.openCommitAt(this.selectedCommit.row, this.selectedCommit.commitIndex + 1, { preserveShowDiff: true });
       },
 
-      async selectDirtyRow(row) {
+      async selectDirtyRow(row, options) {
         if (!row) return;
+        const opts = options || {};
+        if (!opts.preserveSessionContext) this.clearSessionReview();
         this.selectedCommit = null;
         this.confirmDiscardRow = null;
         this.mergeState = 'idle';
@@ -3276,13 +3366,15 @@
         this.queuePathMeasurements();
         this.queueReviewHeaderState();
         const requestKey = this.rowKey(row);
+        const detailGeneration = ++this.reviewDetailGeneration;
         try {
           const resp = await fetch(
             '/api/worktrees/' + encodeURIComponent(row.session_name) + '/' +
               encodeURIComponent(row.repo_name) + '/changes',
           );
           const detail = await _jsonOrError(resp);
-          if (!this.selectedDirtyRow || this.rowKey(this.selectedDirtyRow) !== requestKey) return;
+          if (!this.selectedDirtyRow || this.rowKey(this.selectedDirtyRow) !== requestKey ||
+              this.reviewDetailGeneration !== detailGeneration) return;
           this.selectedDirtyRow = {
             ...row,
             files: detail.files || this.dirtyFiles(row),
@@ -3294,7 +3386,8 @@
         } catch (err) {
           _toast('Dirty diff detail failed: ' + (err.message || String(err)), 'error');
         } finally {
-          if (this.selectedDirtyRow && this.rowKey(this.selectedDirtyRow) === requestKey) {
+          if (this.selectedDirtyRow && this.rowKey(this.selectedDirtyRow) === requestKey &&
+              this.reviewDetailGeneration === detailGeneration) {
             this.dirtyDetailLoading = false;
           }
         }
