@@ -1077,6 +1077,23 @@ class SQLiteFleetSyncStore:
         finally:
             conn.close()
 
+    def bootstrap_in_progress(self) -> bool:
+        """Whether a sweep is anchored here and not yet finished.
+
+        True from the moment a frontier is recorded until the PULL half is
+        durably applied. While true this store must not downgrade its
+        negotiation or accept a checkpoint: either would discard ``F`` while
+        keeping the rows that were anchored to it.
+        """
+        from tools.network.fleet_sync.sweep_receive import Phase, read_bootstrap
+
+        conn, _ = self._open()
+        try:
+            state = read_bootstrap(conn)
+            return state is not None and state.phase is not Phase.COMPLETE
+        finally:
+            conn.close()
+
     def record_sweep_begin(
         self, control: dict, scope: str, peer_pub: str
     ) -> None:
@@ -3133,6 +3150,20 @@ class FleetSyncScheduler:
             watermarks = await asyncio.to_thread(
                 store.advertisable_origin_watermarks
             )
+            # A bootstrap already in progress pins the negotiation. Falling
+            # back to v4 would let this store install a checkpoint over a
+            # keyspace it has partially swept against a frontier the
+            # checkpoint path never saw -- abandoning F while keeping the rows
+            # it anchored. Refusing the downgrade keeps the sweep the only way
+            # this store can finish what it started.
+            resuming_sweep = await asyncio.to_thread(
+                store.bootstrap_in_progress
+            )
+            if resuming_sweep:
+                protocol_version = max(
+                    protocol_version, SWEEP_PROTOCOL_VERSION
+                )
+                accept_checkpoint = False
             request = encode_pull_request(
                 epoch, compat=local_digest, resume=resume_trail,
                 scope=scope, bootstrap=bootstrap, version=protocol_version,
@@ -3408,7 +3439,7 @@ class FleetSyncScheduler:
                         # reordered stream fails loudly instead of leaving
                         # rows with no recorded origin.
                         await asyncio.to_thread(
-                            store.record_sweep_begin, control, scope, peer_pub,
+                            store.record_sweep_begin, control, scope, machine_pub,
                         )
                         continue
                     if kind == "retired":
