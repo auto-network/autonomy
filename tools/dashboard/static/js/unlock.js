@@ -167,8 +167,29 @@
       });
       await _postJson('/api/fleet/enrollment/local-completion', proof);
     } else {
-      var rc = await _fetchJson('/api/fleet/runtime');
-      if (rc.enabled) {
+      // ARMING IS REPORTED WHETHER OR NOT IT HAPPENS.
+      //
+      // This block is the ONLY thing that arms the machine's fleet runtime,
+      // and it was gated behind `rc.enabled` with no else. A 401 before the
+      // session cookie settled, or any failure of this one GET, made
+      // `rc.enabled` falsy and the ceremony completed happily WITHOUT
+      // minting — no error, no log, nothing in the UI. The operator saw
+      // "unlocked" and the machine stayed anonymous to the relay.
+      //
+      // That is exactly what happened on 2026-09-09: a login at 14:21Z
+      // produced no POST at all, while the last real activation was 13:54Z,
+      // and it cost hours because "unlocked" and "armed" are different states
+      // that looked identical from outside. Every outcome now reaches the
+      // server through the existing unlock-report sink.
+      var arming = { attempted: false, outcome: 'unknown' };
+      var rc = null;
+      try {
+        rc = await _fetchJson('/api/fleet/runtime');
+      } catch (e) {
+        arming = { attempted: false, outcome: 'runtime-status-unreadable',
+                   error: (e && e.message) || String(e) };
+      }
+      if (rc && rc.enabled) {
         // Bring the PERSONAL TUNNEL online before minting the runtime
         // credential. When the personal org is not yet registered (org_uuid is
         // null), register it — and, on the serving machine, provision its
@@ -203,7 +224,9 @@
           }
         }
         var frc = await import('./ceremony/fleet-enrollment.js');
-        var cred = await frc.mintFleetRuntimeCredential({
+        var cred;
+        try {
+        cred = await frc.mintFleetRuntimeCredential({
           personalRootSeed: new Uint8Array(seed),   // fresh copy; mint zeroes it
           rootPub: rc.personal_root_pub,
           machineId: rc.machine_id,
@@ -214,6 +237,32 @@
           orgUuid: rc.org_uuid || null,
         });
         await _postJson('/api/fleet/runtime', cred);
+        arming = { attempted: true, outcome: 'armed',
+                   machine_id: rc.machine_id || null };
+        } catch (e) {
+          // REPORT, THEN RETHROW. The visibility is new; the behaviour is
+          // not. A mint that throws here used to vanish into whatever caught
+          // it upstream, leaving the same "unlocked but not armed" state with
+          // no trace of an attempt.
+          arming = { attempted: true, outcome: 'mint-failed',
+                     error: (e && e.message) || String(e) };
+          try {
+            await _postJson('/api/network/unlock-report', { fleet_arming: arming });
+          } catch (ignored) { /* reporting must never mask the real failure */ }
+          seed.fill(0);
+          throw e;
+        }
+      } else if (rc) {
+        // A REAL answer that says this machine has no fleet runtime. Benign,
+        // and still reported: "fleet is not enabled here" and "we could not
+        // ask" are different facts and only one of them is a problem.
+        arming = { attempted: false, outcome: 'fleet-not-enabled' };
+      }
+      try { await _postJson('/api/network/unlock-report', { fleet_arming: arming }); }
+      catch (e) {
+        if (window.console && console.warn) {
+          console.warn('fleet arming report failed:', (e && e.message) || e);
+        }
       }
       seed.fill(0);   // original consumed only via fresh copies above; drop it
     }
