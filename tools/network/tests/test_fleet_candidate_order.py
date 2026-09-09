@@ -155,3 +155,25 @@ def test_duplicate_candidate_is_not_dropped():
     assert result == [TAILNET, PRIVATE, TAILNET]
     assert len(result) == len(candidates)
     assert sorted(result) == sorted(candidates)
+
+
+def test_a_record_dated_in_the_future_is_treated_as_stale():
+    """A clock jump must not pin an address at the front forever.
+
+    `last_success_at_ns` ahead of now yields a negative age, which would
+    pass a `> max_age_ns` freshness test and promote the address
+    permanently. It is this machine's own telemetry, so this guards a
+    local clock jump rather than untrusted input.
+    """
+    candidates = [TAILNET, PRIVATE]
+    ahead = [_row(PEER, PRIVATE, NOW + 1)]
+    assert _order(candidates, ahead) == candidates
+
+    far_ahead = [_row(PEER, PRIVATE, NOW + fco.DEFAULT_MAX_AGE_NS * 10)]
+    assert _order(candidates, far_ahead) == candidates
+
+
+def test_a_record_at_exactly_now_is_still_promoted():
+    """The future guard must not reject a record written this instant."""
+    result = _order([TAILNET, PRIVATE], [_row(PEER, PRIVATE, NOW)])
+    assert result == [PRIVATE, TAILNET]

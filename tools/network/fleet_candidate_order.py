@@ -92,8 +92,9 @@ def order_candidates(
 
     Returns the input unchanged when there is no usable record, when the
     recorded address is no longer a candidate, when the record is older
-    than ``max_age_ns``, or when the telemetry read fails for any
-    reason. Ordering must never be able to break dialing.
+    than ``max_age_ns``, when it is dated ahead of the clock, or when the
+    telemetry read fails for any reason. Ordering must never be able to
+    break dialing.
     """
     candidates = list(addresses or ())
     if len(candidates) < 2 or not peer_machine_pub:
@@ -123,7 +124,15 @@ def order_candidates(
         import time
 
         now_ns = time.time_ns()
-    if max_age_ns > 0 and (now_ns - at_ns) > max_age_ns:
+    age_ns = now_ns - at_ns
+    # A record dated ahead of the clock is stale, not fresh. Treating a
+    # negative age as "recent" would hold a promoted address past the
+    # window forever after a clock jump. The value comes from this
+    # machine's own telemetry, so this is a local clock defence, not an
+    # untrusted-input one.
+    if age_ns < 0:
+        return candidates
+    if max_age_ns > 0 and age_ns > max_age_ns:
         return candidates
 
     promoted = list(candidates)
