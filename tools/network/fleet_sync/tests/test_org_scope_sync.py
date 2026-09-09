@@ -108,3 +108,44 @@ def test_schema_mismatch_pauses_only_that_org(tmp_path: Path) -> None:
         assert not fleet.has_org(1, "alpha", "a-1")
     finally:
         fleet.shutdown()
+
+
+def test_a_legacy_peer_sending_accept_checkpoint_is_still_admitted() -> None:
+    """An un-updated peer puts accept_checkpoint on the wire; we must admit it.
+
+    The old encoder sends the field ONLY when False, so every peer holding a
+    founded ledger sends it. The request decoder's allow-list is strict, so
+    removing the key from that list refused those requests before admission
+    and took fleet sync down with every peer that had not updated (live
+    2026-09-09T17:31Z, four scopes, 20 minutes; the one scope that kept
+    working was the one where the field is omitted).
+
+    Deleting the field from the ENCODER was safe. Deleting it from the DECODER
+    is a wire break. It is accepted, shape-checked, and ignored.
+    """
+    import json
+
+    from tools.network.fleet_sync_scheduler import canonical_json
+
+    epoch, compat = "ab" * 32, "cd" * 32
+    body = json.loads(encode_pull_request(epoch, compat=compat, version=3))
+    body["accept_checkpoint"] = False          # exactly what an old peer sends
+    decoded = decode_pull_request(canonical_json(body))
+    assert decoded[0] == epoch and decoded[5] == 3
+    assert len(decoded) == 7, "the legacy key must not re-enter the tuple"
+
+    # True is equally legal on the wire.
+    body["accept_checkpoint"] = True
+    assert decode_pull_request(canonical_json(body))[5] == 3
+
+    # Shape is still enforced, and unknown fields are still refused.
+    body["accept_checkpoint"] = "no"
+    with pytest.raises(FleetSyncProtocolError):
+        decode_pull_request(canonical_json(body))
+    body.pop("accept_checkpoint")
+    body["invented_field"] = 1
+    with pytest.raises(FleetSyncProtocolError):
+        decode_pull_request(canonical_json(body))
+
+    # And we never emit it ourselves.
+    assert b"accept_checkpoint" not in encode_pull_request(epoch, compat=compat)
