@@ -318,9 +318,15 @@ def test_commits_are_contiguous_address_prefixes_not_transaction_major(
         target.close()
 
 
-def test_partial_page_leaves_a_resumable_prefix(tmp_path: Path) -> None:
-    """The invariant that matters after a crash: whatever committed is a
-    prefix, so the furthest row never implies a skipped earlier address."""
+def test_crash_mid_page_leaves_a_resumable_prefix(tmp_path: Path) -> None:
+    """Hand apply_live_page the WHOLE interleaved page and fail the second real
+    commit, so the prefix property is proven by the implementation's own commit
+    ordering rather than by a pre-sliced input.
+
+    With a(tx1) b(tx2) c(tx1), the transaction-major split this replaced would
+    have committed a and c first; the crash would then leave c as the furthest
+    row and resume would skip b forever.
+    """
     source, source_catalog = _store(tmp_path / "source.db", SOURCE_ORIGIN)
     target, target_catalog = _store(tmp_path / "target.db", TARGET_ORIGIN)
     try:
@@ -337,18 +343,43 @@ def test_partial_page_leaves_a_resumable_prefix(tmp_path: Path) -> None:
             source.conn, frontier={SOURCE_ORIGIN: WIDE},
             max_records=100, max_bytes=1 << 20,
         )
-        # Simulate a crash after the first prefix commit only.
-        apply_live_page(target_catalog, page.records[:1])
+        assert [i.mutation.address[0] for i in page.records] == [
+            "s-a", "s-b", "s-c"
+        ]
+
+        real_apply = target_catalog.apply_remote_batch
+        calls = {"n": 0}
+
+        def failing(batch):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("simulated crash after the first commit")
+            return real_apply(batch)
+
+        target_catalog.apply_remote_batch = failing
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            apply_live_page(target_catalog, page.records)
+        target_catalog.apply_remote_batch = real_apply
+
+        landed = [
+            row[0] for row in target.conn.execute(
+                "SELECT id FROM sources ORDER BY id"
+            )
+        ]
+        assert landed == ["s-a"], (
+            "the crash must leave a contiguous prefix; a transaction-major "
+            f"split would have left ['s-a', 's-c'], got {landed}"
+        )
+
         cursor = resume_cursor(target.conn)
         assert cursor == ("sources", ("s-a",))
-
         rest = read_live_authored_page(
             source.conn, frontier={SOURCE_ORIGIN: WIDE},
             start_after=cursor, max_records=100, max_bytes=1 << 20,
         )
         assert [i.mutation.address[0] for i in rest.records] == ["s-b", "s-c"], (
-            "resume must pick up s-b; a transaction-major commit would have "
-            "skipped it"
+            "resume must recover s-b, the row a transaction-major commit "
+            "would have stranded"
         )
         apply_live_page(target_catalog, rest.records)
         assert [
