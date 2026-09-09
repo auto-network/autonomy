@@ -5,9 +5,10 @@
 This alpha is an executable, bounded-memory synchronization engine over the
 complete logical personal GraphDB schema. Production personal stores prepare
 its catalogue and can explicitly activate the authored-write boundary; the
-Dashboard owns its idle-safe authenticated delta scheduler. Checkpoint
-publication remains an offline acceptance path rather than a live Dashboard
-handoff.
+Dashboard owns its idle-safe authenticated delta scheduler. A joining
+machine bootstraps by sweeping the serving store's keyspace beneath a
+frontier F captured once at sweep start (SWEEP gives all keys <= F, PULL
+gives all keys > F); database snapshots are retired.
 
 The exercised lifecycle is:
 
@@ -31,7 +32,7 @@ hash tie-break.
 
 ## Correctness boundaries
 
-- The active roster epoch and hash are committed by every full checkpoint.
+- The active roster epoch and hash are committed by every bootstrap sweep.
 - The scalar compaction frontier is the minimum *earned* watermark of the
   frozen active roster. An earned watermark requires an atomic writer cut, a
   persistent no-more-before floor, a sealed prefix, and a second durable
@@ -92,7 +93,6 @@ Deliberately deferred to production/native work:
 - native systematic-first RaptorQ with arbitrary repair ESI ranges;
 - record/key-aware stable chunk boundaries;
 - compression selection (including zstd) from a whole-chain benchmark;
-- remote checkpoint offer and address negotiation;
 - durable ACK exchange and RelayKit address discovery; and
 - a startup write gate after an externally restored machine snapshot. The
   alpha persists and enforces its floor across ordinary restarts, but only the
@@ -122,13 +122,13 @@ unrecognized writes fail closed, and ordinary startup never activates a
 prepared store implicitly. The Dashboard now owns an idle-safe scheduler that
 uses the active personal-root roster, mutual machine-key proof, RelayKit direct
 channels, transaction-atomic journal replay, bounded retry, and durable local
-peer counters. The Dashboard service can now stop its scheduler, close its
-pooled personal store, prove that no production writer remains, merge a
-received checkpoint with locally authored winners in staging, publish it
-recoverably, record a durable local install receipt, and resume delta pulls.
+peer counters. A bootstrap sweep merges through the ordinary mutation inbox
+and commits in bounded batches -- nothing is staged and no database file is
+ever replaced, so there is no swap window to recover from and a joiner killed
+mid-sweep resumes from its persisted phase and frontier.
 The unlock boundary now hands Python only a short-lived process key plus a
 machine-signed ``fleet:sync`` delegation, and an enrolled machine can use its
-machine-local RelayKit route for a roster-authenticated remote checkpoint.
+machine-local route for a roster-authenticated remote bootstrap.
 Remaining work is exact remote ACK floors, dedicated route rotation and
 continuous multi-peer discovery, attachment-object transport, and the live
 multi-node acceptance. No new daemon or network service is required by the
