@@ -1447,3 +1447,192 @@ def test_a_designation_change_alone_no_longer_stops_a_live_connector(env, monkey
     assert supervisor.ensure(ORG)["running"] is True
     assert proc.alive() is True
 
+
+
+# ── A replaced connector must be re-fed (auto-5er0n / auto-clune.7) ─────
+#
+# Replacing a stale incumbent is deliberate and correct. The defect is what
+# happens next: the successor starts with no runtime machine key, degrades its
+# hello to v1 and shares the anonymous relay slot, while the dashboard holds
+# the very credential it needs. Home was armed at 13:54Z on 2026-09-09 and
+# every later generation came up cold — six restarts, forty minutes anonymous.
+
+
+def _capture_publish(monkeypatch, *, payload, raises=None):
+    calls = []
+
+    def _publish(sent, org=None):
+        calls.append({"payload": sent, "org": org})
+        if raises is not None:
+            raise raises
+
+    from tools.network import fleet_relay_sync
+    from tools.dashboard import fleet_enrollment_routes
+
+    monkeypatch.setattr(fleet_relay_sync, "publish_connector_runtime", _publish)
+    monkeypatch.setattr(
+        fleet_enrollment_routes, "_dashboard_runtime_cache",
+        lambda: SimpleNamespace(load=lambda: payload))
+    return calls
+
+
+def test_a_started_connector_is_handed_the_runtime_credential(env, monkeypatch):
+    """THE ONE THAT MATTERS. Launch queues the hand-off; the next reconcile
+    completes it once the child is listening. Without this the machine is armed
+    and its connector is not, which is indistinguishable from the outside."""
+    _provision_serve_cert(env)
+    _put_grant()
+    _seed_tunnel_inputs(
+        monkeypatch, local="local-machine",
+        roster=["local-machine"], selected="local-machine")
+    calls = _capture_publish(monkeypatch, payload={"machine_id": "m"})
+    supervisor = sup.ServingSupervisor(spawn=FakeSpawn())
+
+    assert supervisor.ensure(ORG)["running"] is True
+    assert ORG in supervisor._needs_runtime, "launch must queue the hand-off"
+
+    supervisor.ensure(ORG)          # the next reconcile drains it
+
+    assert calls and calls[0]["payload"] == {"machine_id": "m"}
+    assert calls[0]["org"] == ORG
+    assert ORG not in supervisor._needs_runtime
+
+
+def test_the_handoff_retries_while_the_child_is_not_listening(env, monkeypatch):
+    """A freshly spawned child has not written its control descriptor yet, so
+    the first attempt legitimately fails. It must stay queued rather than be
+    dropped — dropping it is the cold start we are fixing."""
+    _provision_serve_cert(env)
+    _put_grant()
+    _seed_tunnel_inputs(
+        monkeypatch, local="local-machine",
+        roster=["local-machine"], selected="local-machine")
+    calls = _capture_publish(
+        monkeypatch, payload={"machine_id": "m"},
+        raises=sup.TunnelUnavailable("no control listener", kind="no-listener"))
+    supervisor = sup.ServingSupervisor(spawn=FakeSpawn())
+    supervisor.ensure(ORG)
+
+    supervisor.ensure(ORG)
+
+    assert calls, "it must have tried"
+    assert ORG in supervisor._needs_runtime, "a not-yet-listening child stays queued"
+
+
+def test_no_cached_credential_is_reported_and_not_retried_forever(env, monkeypatch):
+    """'Nothing cached' and 'hand-off refused' need different fixes from
+    different people, so they must not look the same. Nothing cached is
+    terminal until a human unlocks; it is said once, not retried silently."""
+    _provision_serve_cert(env)
+    _put_grant()
+    _seed_tunnel_inputs(
+        monkeypatch, local="local-machine",
+        roster=["local-machine"], selected="local-machine")
+    calls = _capture_publish(monkeypatch, payload=None)
+    supervisor = sup.ServingSupervisor(spawn=FakeSpawn())
+    supervisor.ensure(ORG)
+
+    with caplog_at_warning(sup) as records:
+        supervisor.ensure(ORG)
+
+    assert not calls, "nothing to publish, so nothing may be published"
+    assert ORG not in supervisor._needs_runtime
+    assert any("NO cached runtime credential" in r.getMessage() for r in records)
+
+
+def test_an_unreadable_cache_is_distinct_from_an_absent_one(env, monkeypatch):
+    """Verifier item 3: the outcomes must be legible APART, not one message
+    reworded. An unreadable cache is a storage fault on THIS machine and an
+    unlock will not help; an absent one needs exactly that unlock. A reader
+    must be able to tell which without the code in hand."""
+    _provision_serve_cert(env)
+    _put_grant()
+    _seed_tunnel_inputs(
+        monkeypatch, local="local-machine",
+        roster=["local-machine"], selected="local-machine")
+
+    def _explode():
+        raise OSError("ramfs is gone")
+
+    from tools.dashboard import fleet_enrollment_routes
+    monkeypatch.setattr(
+        fleet_enrollment_routes, "_dashboard_runtime_cache",
+        lambda: SimpleNamespace(load=_explode))
+    supervisor = sup.ServingSupervisor(spawn=FakeSpawn())
+    supervisor.ensure(ORG)
+
+    with caplog_at_warning(sup) as records:
+        supervisor.ensure(ORG)
+
+    message = " ".join(r.getMessage() for r in records)
+    assert "could not be READ" in message and "an unlock will not help" in message
+    assert "NO cached runtime credential" not in message
+
+
+def test_a_refused_credential_is_distinct_from_a_missing_one(env, monkeypatch):
+    """The third outcome: we HOLD a credential and the connector will not take
+    it. That is the connector's verdict, not a missing-unlock problem, and
+    sending an operator to unlock again would waste their time."""
+    _provision_serve_cert(env)
+    _put_grant()
+    _seed_tunnel_inputs(
+        monkeypatch, local="local-machine",
+        roster=["local-machine"], selected="local-machine")
+    _capture_publish(
+        monkeypatch, payload={"machine_id": "m"},
+        raises=ValueError("delegation cert is expired"))
+    supervisor = sup.ServingSupervisor(spawn=FakeSpawn())
+    supervisor.ensure(ORG)
+
+    with caplog_at_warning(sup) as records:
+        supervisor.ensure(ORG)
+
+    message = " ".join(r.getMessage() for r in records)
+    assert "REFUSED" in message
+    assert ORG not in supervisor._needs_runtime, (
+        "a refusal is the connector's verdict on a credential we hold; "
+        "retrying it forever would spin")
+
+
+def test_an_armed_connector_is_not_re_published_every_reconcile(env, monkeypatch):
+    """Verifier item 3, second half: idempotent. Once the hand-off lands the
+    org leaves the queue, so a healthy machine does not re-publish on every
+    watchdog tick."""
+    _provision_serve_cert(env)
+    _put_grant()
+    _seed_tunnel_inputs(
+        monkeypatch, local="local-machine",
+        roster=["local-machine"], selected="local-machine")
+    calls = _capture_publish(monkeypatch, payload={"machine_id": "m"})
+    supervisor = sup.ServingSupervisor(spawn=FakeSpawn())
+    supervisor.ensure(ORG)
+    supervisor.ensure(ORG)
+    assert len(calls) == 1
+
+    supervisor.ensure(ORG)
+    supervisor.ensure(ORG)
+
+    assert len(calls) == 1, "an armed connector must not be re-fed on every tick"
+
+
+import contextlib as _contextlib
+
+
+@_contextlib.contextmanager
+def caplog_at_warning(module):
+    """Collect the module logger's WARNING records."""
+    records: list = []
+
+    class _Sink(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    handler = _Sink(level=logging.WARNING)
+    module._log.addHandler(handler)
+    previous = module._log.level
+    module._log.setLevel(logging.WARNING)
+    try:
+        yield records
+    finally:
+        module._log.removeHandler(handler)
+        module._log.setLevel(previous)
