@@ -1312,7 +1312,7 @@ class GraphDB:
 
         Repairs a production personal store whose catalog an earlier buggy
         bootstrap left incomplete (the SQLite < 3.38 RETURNING-on-upsert gap),
-        which otherwise fails closed at checkpoint time and cannot self-heal
+        which otherwise fails closed at serve time and cannot self-heal
         because migration early-skips once capture triggers exist. Additive
         and trigger-safe: only synchronization metadata is written, never a
         replicated table, so authored history is untouched.
