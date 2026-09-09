@@ -18,7 +18,7 @@ import logging
 from .frames import FRAME_CLOSE, FRAME_DATA, FRAME_STREAM_CTRL
 from .stream_wire import (
     CreditWindow,
-    ReplenishTracker,
+    ReceiveBuffer,
     RESET_ORDERLY,
     RESET_PROTOCOL,
     RESET_ROUTE_RELEASED,
@@ -65,9 +65,7 @@ class _ConnectorStream:
         self.send_credit_event = asyncio.Event()
         #: what we granted the relay (Caddy-bound bytes), replenished
         #: after each local write completes
-        self.granted_outstanding = STREAM_INITIAL_CREDIT
-        self.replenish = ReplenishTracker()
-        self.inbound: asyncio.Queue = asyncio.Queue()
+        self.inbound = ReceiveBuffer()
         self.tasks: list[asyncio.Task] = []
         self.closed = asyncio.Event()
         self._sent_eof = False
@@ -76,13 +74,16 @@ class _ConnectorStream:
     # -- frame entry (called from the connector serve loop; never blocks) --
 
     def on_data(self, payload: bytes) -> None:
-        self.inbound.put_nowait(("data", payload))
+        self.inbound.put_data(payload)
 
     def on_ctrl(self, msg: dict) -> None:
+        if msg["op"] == "reset":
+            self.inbound.stop()
+            return
         self.inbound.put_nowait(("ctrl", msg))
 
     def on_close(self) -> None:
-        self.inbound.put_nowait(("close", None))
+        self.inbound.stop()
 
     # -- pumps -------------------------------------------------------------
 
@@ -94,6 +95,7 @@ class _ConnectorStream:
             asyncio.create_task(self._pump_to_relay()),
             asyncio.create_task(self._pump_from_relay()),
         ]
+        self.inbound.bind(self.tasks[1])
         try:
             await self.tasks[1]
         except asyncio.CancelledError:
@@ -135,16 +137,10 @@ class _ConnectorStream:
             while True:
                 kind, payload = await self.inbound.get()
                 if kind == "data":
-                    if len(payload) > STREAM_MAX_DATA or \
-                            len(payload) > self.granted_outstanding:
-                        await self._reset(RESET_PROTOCOL)
-                        return
-                    self.granted_outstanding -= len(payload)
                     self.writer.write(payload)
                     await self.writer.drain()
-                    grant = self.replenish.consumed(len(payload))
+                    grant = self.inbound.drained(len(payload))
                     if grant is not None:
-                        self.granted_outstanding += grant
                         await send(FRAME_STREAM_CTRL, self.channel_id,
                                    build_ctrl_credit(grant))
                 elif kind == "ctrl":
@@ -183,9 +179,13 @@ class _ConnectorStream:
             )
 
     async def _teardown(self) -> None:
+        self.inbound.stop()
         for task in self.tasks:
             if not task.done():
                 task.cancel()
+        await asyncio.gather(*self.tasks, return_exceptions=True)
+        if self.inbound.reset_code is not None:
+            await self._reset(self.inbound.reset_code)
         with contextlib.suppress(Exception):
             self.writer.close()
             await self.writer.wait_closed()
