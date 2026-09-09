@@ -199,7 +199,6 @@ from tools.network.registry.directed_pair import (  # noqa: E402
     PAIR_NOT_A_LEG,
     PAIR_NOT_ACTIVE,
     PAIR_OFFERED,
-    PAIR_SOURCE_REPLACED,
     PAIR_TERMINAL,
 )
 
@@ -242,7 +241,7 @@ def test_activation_rechecks_that_each_leg_still_holds_its_slot():
     hub2 = _hub(source2, dest2)
     pair2 = _offered(hub2, source2, dest2)
     hub2.register(_tunnel(machine=MACHINE_A))       # source reconnects
-    assert pair2.activate(hub2) == PAIR_SOURCE_REPLACED
+    assert pair2.activate(hub2) == PAIR_SOURCE_STALE
 
 
 def test_activation_rechecks_negotiated_eligibility():
@@ -278,7 +277,7 @@ def test_sending_waits_for_this_leg_s_own_ready_but_receiving_does_not():
 
     assert pair.may_send(source) is False
     assert pair.may_receive(source) is True         # since its own OPEN_OK
-    pair.ready_delivered(source)
+    pair.ready_enqueued(source)
     assert pair.may_send(source) is True
     assert pair.may_send(dest) is False             # not told yet
 
@@ -288,7 +287,7 @@ def test_ready_is_only_recorded_for_an_active_pair():
     hub = _hub(source, dest)
     pair = _offered(hub, source, dest)
 
-    assert pair.ready_delivered(source) == PAIR_NOT_ACTIVE
+    assert pair.ready_enqueued(source) == PAIR_NOT_ACTIVE
 
 
 def test_a_foreign_tunnel_cannot_drive_the_pair():
@@ -300,7 +299,7 @@ def test_a_foreign_tunnel_cannot_drive_the_pair():
     stranger = _tunnel(persona=PERSONA_B, machine=MACHINE_A)
 
     assert pair.leg_accepted(stranger) == PAIR_NOT_A_LEG
-    assert pair.ready_delivered(stranger) == PAIR_NOT_A_LEG
+    assert pair.ready_enqueued(stranger) == PAIR_NOT_A_LEG
     assert pair.accepts_data(stranger) == PAIR_NOT_A_LEG
     assert pair.may_send(stranger) is False
     assert pair.may_receive(stranger) is False
@@ -355,4 +354,76 @@ def test_a_terminal_pair_admits_nothing_further():
     assert pair.accepts_data(source) == PAIR_NOT_ACTIVE
     assert pair.may_send(source) is False
     assert pair.may_receive(source) is False
-    assert pair.ready_delivered(source) == PAIR_NOT_ACTIVE
+    assert pair.ready_enqueued(source) == PAIR_NOT_ACTIVE
+
+
+def test_a_hand_built_cross_org_pair_cannot_activate():
+    """A DirectedPair can be built without the resolver.
+
+    Validating each leg under its OWN org would let two live tunnels
+    from different organizations activate, each checking out happily.
+    Activation re-runs the resolver's rule, which looks the destination
+    up under the SOURCE's org.
+    """
+    source = _tunnel(org=ORG_A, machine=MACHINE_A)
+    foreign = _tunnel(org=ORG_B, machine=MACHINE_B)
+    hub = _hub(source, foreign)
+    pair = _offered(hub, source, foreign)
+
+    assert pair.activate(hub) == PAIR_DESTINATION_ABSENT
+    assert pair.state == PAIR_TERMINAL
+
+
+def test_a_hand_built_empty_identity_pair_cannot_activate():
+    """The resolver refuses the legacy shared slot; activation must too."""
+    source = _tunnel(machine="")
+    dest = _tunnel(machine=MACHINE_B)
+    hub = _hub(source, dest)
+    pair = _offered(hub, source, dest)
+
+    assert pair.activate(hub) == PAIR_SOURCE_IDENTITY_MISSING
+    assert pair.state == PAIR_TERMINAL
+
+
+def test_a_hand_built_pair_without_the_capability_cannot_activate():
+    source = _tunnel(machine=MACHINE_A)
+    plain = _tunnel(machine=MACHINE_B, caps=())
+    hub = _hub(source, plain)
+    pair = _offered(hub, source, plain)
+
+    assert pair.activate(hub) == PAIR_DESTINATION_CAPABILITY
+    assert pair.state == PAIR_TERMINAL
+
+
+def test_cleanup_is_claimable_after_a_failed_activation():
+    """THE LEAK close() WOULD CAUSE.
+
+    activate() terminates internally, so nobody's close() returns True
+    and a caller releasing on that signal strands the failed offer.
+    claim_cleanup answers the other question: who releases, exactly once.
+    """
+    source, dest = _tunnel(machine=MACHINE_A), _tunnel(machine=MACHINE_B)
+    hub = _hub(source, dest)
+    pair = _offered(hub, source, dest)
+    hub.register(_tunnel(machine=MACHINE_B))
+
+    assert pair.activate(hub) == PAIR_DESTINATION_REPLACED
+    assert pair.close(source, "too late") is False      # nobody caused it
+    assert pair.claim_cleanup() is True                 # somebody still must
+    assert pair.claim_cleanup() is False
+
+
+def test_cleanup_is_claimable_exactly_once_however_the_pair_ended():
+    for ender in ("closed", "failed", "never-activated"):
+        source, dest = _tunnel(machine=MACHINE_A), _tunnel(machine=MACHINE_B)
+        hub = _hub(source, dest)
+        pair = _offered(hub, source, dest)
+        if ender == "closed":
+            pair.activate(hub)
+            pair.close(source, "reset")
+        elif ender == "failed":
+            hub.register(_tunnel(machine=MACHINE_B))
+            pair.activate(hub)
+
+        assert pair.claim_cleanup() is True, ender
+        assert pair.claim_cleanup() is False, ender
