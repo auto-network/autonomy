@@ -2037,10 +2037,10 @@ dashboard_relay_sync_service = DashboardFleetRelaySyncService()
 def _serve_checkpoint_decision(
     resume_position: int, requested: bool, journal_gap: bool = False
 ) -> bool:
-    """One rule for both serve paths: see serve_checkpoint_decision."""
-    from tools.network.fleet_sync_scheduler import serve_checkpoint_decision
+    """One rule for both serve paths: see serve_bootstrap_decision."""
+    from tools.network.fleet_sync_scheduler import serve_bootstrap_decision
 
-    return serve_checkpoint_decision(resume_position, requested, journal_gap)
+    return serve_bootstrap_decision(resume_position, requested, journal_gap)
 
 
 def _has_local_sync_state(

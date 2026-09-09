@@ -31,13 +31,12 @@ def test_bootstrap_chain_without_relay(tmp_path: Path) -> None:
         for note in range(5):
             fleet.write(0, f"seed-{note}", f"pre-fleet note {note}")
 
-        # B starts empty: its pull declares bootstrap, installs a checkpoint.
+        # B starts empty: its pull declares bootstrap and sweeps.
         fleet.start(1)
         fleet.wait(
             lambda: all(fleet.has(1, f"seed-{n}") for n in range(5)),
             timeout=120.0, label="B bootstrap",
         )
-        assert _checkpoints_received(fleet.machines[1].db_path) >= 1
 
         # A leaves. C starts empty and can only reach B.
         fleet.stop(0, kill=True)
@@ -46,7 +45,6 @@ def test_bootstrap_chain_without_relay(tmp_path: Path) -> None:
             lambda: all(fleet.has(2, f"seed-{n}") for n in range(5)),
             timeout=120.0, label="C bootstrap via B",
         )
-        assert _checkpoints_received(fleet.machines[2].db_path) >= 1
 
         # Post-bootstrap deltas flow from B to C.
         fleet.write(1, "after-chain", "authored after the chain")

@@ -65,7 +65,8 @@ def _encoded_watermarks(store: SQLiteFleetSyncStore):
         EPOCH, compat=COMPAT,
         watermarks=store.advertisable_origin_watermarks(),
     )
-    return decode_pull_request(request)[7]
+    # watermarks is slot 6 since accept_checkpoint left the wire.
+    return decode_pull_request(request)[6]
 
 
 def _bootstrap_conn(path: Path):
