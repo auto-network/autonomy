@@ -138,6 +138,70 @@ def test_flap_during_bootstrap(tmp_path: Path) -> None:
         fleet.shutdown()
 
 
+def test_writes_during_a_bootstrap_arrive_in_the_above_f_half(
+    tmp_path: Path,
+) -> None:
+    """auto-5j6o0: the partition holds against a source that keeps writing.
+
+    F is the serving store's frontier captured ONCE when the sweep starts, so
+    anything authored after that instant is above F by construction and the
+    sweep must not carry it -- the sweep walks live rows at or below F. Those
+    rows are owed by the delta half, and the joiner must not report COMPLETE
+    until it has them.
+
+    The failure this excludes is the quiet one: a joiner that finishes its
+    sweep, declares itself complete, and is permanently missing every row
+    written while it was copying. Convergence alone would hide it, because the
+    ordinary delta loop would eventually deliver them anyway -- so the check is
+    that completion did not happen BEFORE they landed.
+    """
+    fleet = HarnessFleet(tmp_path / "fleet", size=2).build()
+    try:
+        fleet.start(0)
+        for note in range(40):
+            fleet.write(0, f"before-{note:02d}", "authored before the sweep")
+
+        # The joiner begins bootstrapping; the source keeps authoring while it
+        # copies. These land above whatever F the sweep captured.
+        fleet.start(1)
+        fleet.run_timeline([
+            Step(0.3, lambda f: [
+                f.write(0, f"during-{n:02d}", "authored mid-bootstrap")
+                for n in range(10)
+            ], "author above F while the joiner sweeps"),
+        ])
+        fleet.wait_converged(timeout=120.0)
+
+        import json as _json
+        import sqlite3 as _sq
+
+        conn = _sq.connect(f"file:{fleet.machines[1].db_path}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT phase,frontier FROM fleet_sync_bootstrap WHERE singleton=1"
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row is not None, "the joiner bootstrapped, so it holds the row"
+        phase, frontier = str(row[0]), _json.loads(row[1])
+        assert phase == "complete", f"bootstrap did not finish: {phase}"
+        assert frontier, "a completed bootstrap retains the F it ran under"
+
+        # Both halves are present: swept (<= F) and delta (> F).
+        for note in range(40):
+            assert fleet.has(1, f"before-{note:02d}"), (
+                f"the sweep half lost before-{note:02d}"
+            )
+        for note in range(10):
+            assert fleet.has(1, f"during-{note:02d}"), (
+                f"the above-F half lost during-{note:02d}; a write made while "
+                "the joiner swept was dropped by both halves"
+            )
+        fleet.write_evidence(tmp_path / "above-f-half.json")
+    finally:
+        fleet.shutdown()
+
+
 def test_partition_during_prune_retains_needed_frames(tmp_path: Path) -> None:
     """Scenario (d): the ack floor's safety, live — a partitioned peer's
     frozen acknowledgement blocks retirement of the frames it still needs,
