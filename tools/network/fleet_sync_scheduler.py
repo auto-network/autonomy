@@ -2201,7 +2201,18 @@ class FleetSyncScheduler:
                 floor_ref = resume_floor_ref
                 checkpoint_frontier: dict[str, int] = {}
                 wants_checkpoint = serve_checkpoint_decision(cursor, bootstrap)
-                if wants_checkpoint and not accept_checkpoint:
+                # Decided BEFORE the checkpoint refusal below, because
+                # accept_checkpoint=False means "no CHECKPOINT", not "no
+                # bootstrap". A resuming sweep sets that flag precisely to
+                # refuse a checkpoint -- and if the refusal ran first it would
+                # clear wants_checkpoint and the sweep branch would never
+                # fire, so a resuming sweep could never be served. The pin
+                # meant to protect the sweep would have disabled it.
+                sweep_capable = protocol_version >= SWEEP_PROTOCOL_VERSION
+                serve_sweep = (
+                    wants_checkpoint and sweep_capable and server_has_content
+                )
+                if wants_checkpoint and not accept_checkpoint and not serve_sweep:
                     # A founded origin never installs a checkpoint; serve it
                     # deltas from its watermarks instead. Rows it already
                     # holds merge inert.
@@ -2211,8 +2222,7 @@ class FleetSyncScheduler:
                         peer_pub[:12], scope, cursor,
                     )
                     wants_checkpoint = False
-                sweep_capable = protocol_version >= SWEEP_PROTOCOL_VERSION
-                if wants_checkpoint and sweep_capable and server_has_content:
+                if serve_sweep:
                     # A v5 peer asked for a bootstrap and can handle a sweep,
                     # so it gets the frontier its sweep is anchored to instead
                     # of a checkpoint. Emitted ONCE, before any page.
