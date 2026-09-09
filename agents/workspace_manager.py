@@ -42,6 +42,7 @@ import subprocess
 import tempfile
 import threading
 import sys
+import time
 import traceback
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -552,12 +553,27 @@ def create_worktree(
             # recreation could bury data and ``git worktree add`` refuses
             # non-empty dirs anyway.
             if any(worktree_dir.iterdir()):
-                raise WorkspaceError(
-                    f"worktree dir {worktree_dir} exists without .git and is "
-                    "not empty — broken by a partial cleanup; inspect and "
-                    "remove it manually"
+                # Quarantine, don't refuse. ``git worktree remove`` deletes
+                # the .git link and unregisters the worktree BEFORE it fails
+                # on files it cannot unlink, so a husk is unrecoverable by
+                # retry -- no .git means no resolvable clone, which sends
+                # cleanup down the rmtree path that already failed -- and it
+                # blocks EVERY future launch of that session, permanently.
+                # Renaming buries nothing: the tree stays on disk beside its
+                # replacement for a human to inspect, and the launch
+                # proceeds. auto-0908-130313 sat unresumable for an hour on
+                # 2026-09-09 until this was done by hand.
+                quarantine = worktree_dir.with_name(
+                    f"{worktree_dir.name}.husk-{time.strftime('%Y%m%dT%H%M%S')}"
                 )
-            worktree_dir.rmdir()
+                worktree_dir.rename(quarantine)
+                logger.warning(
+                    "workspace: %s was a husk (no .git, not empty) left by a "
+                    "partial cleanup; moved aside to %s and recreating",
+                    worktree_dir, quarantine,
+                )
+            else:
+                worktree_dir.rmdir()
         else:
             if refresh_existing:
                 _refresh_existing_worktree(
@@ -1608,13 +1624,18 @@ def _force_rmtree(path: Path) -> None:
     fails with EACCES partway through, leaving a half-deleted worktree
     that the next launch silently bind-mounts.
 
-    The escalation path mounts ``path``'s parent into an ``alpine``
-    container and runs ``rm -rf``. The docker daemon runs as host root,
-    and the container's UID 0 is the same UID realm that wrote the
-    files in the first place, so deletions that EACCES'd at the host
-    level succeed. The mount is scoped to the parent so the rm target
-    can only resolve to a single named child, not arbitrary host
-    paths.
+    The escalation reaches UID 0 -- the same UID realm that wrote the
+    files -- but HOW depends on whether this node is itself a container,
+    because a path only means something in the namespace that holds it:
+
+    - host process: mount ``path``'s parent into an ``alpine`` container
+      and ``rm -rf`` the named child. Scoped to the parent so the target
+      resolves to one child, not an arbitrary host path.
+    - containerized node: ``docker exec --user 0`` back into our OWN
+      container. Our /app/data is a volume; asking the daemon to bind
+      that container path gets a phantom empty host dir instead (see the
+      comment on the call), so the only namespace where the tree exists
+      is ours.
 
     Raises ``OSError`` if both paths fail or if the directory still
     exists after the docker fallback.
@@ -1627,15 +1648,26 @@ def _force_rmtree(path: Path) -> None:
             "workspace cleanup: host rmtree hit EACCES on %s; "
             "escalating via docker rm", path,
         )
-    parent = path.parent
-    name = path.name
+    # WHERE the escalation runs depends on where WE run. ``docker run -v
+    # <path>`` hands <path> to the daemon, which resolves it on the HOST --
+    # so from inside a container, whose /app/data is a VOLUME, the daemon
+    # creates an EMPTY host directory, bind-mounts that, and ``rm -rf``
+    # succeeds against nothing: rc=0, tree untouched, plus a phantom host
+    # dir. Silent, and it produced three husks (2026-09-03 x2, 2026-09-09)
+    # that the GC retried 141 times and that blocked every resume of those
+    # sessions until a human moved them aside. Inside a container the only
+    # place the path is real is our own mount namespace -- re-enter it as
+    # uid 0 instead of asking the daemon for a host path we do not have.
+    topo = mount_plan.discover_topology()
+    cid = None if topo.is_host_process else mount_plan._own_container_id()
+    if cid:
+        cmd = ["docker", "exec", "--user", "0", cid, "rm", "-rf", str(path)]
+    else:
+        cmd = ["docker", "run", "--rm",
+               "-v", f"{path.parent}:/wt",
+               "alpine", "rm", "-rf", f"/wt/{path.name}"]
     try:
-        r = subprocess.run(
-            ["docker", "run", "--rm",
-             "-v", f"{parent}:/wt",
-             "alpine", "rm", "-rf", f"/wt/{name}"],
-            capture_output=True, text=True, timeout=120,
-        )
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     except subprocess.TimeoutExpired:
         raise OSError(f"docker rmtree timed out for {path}") from None
     except FileNotFoundError as e:
