@@ -48,6 +48,7 @@ from tools.network.fleet_sync.catalog import (
     MutationCatalog,
     WatermarkError,
     attach_active_production_catalog,
+    MAX_TRANSACTION_FRAME_BYTES,
 )
 from tools.network.fleet_sync.codec import (
     decode_mutation_frame,
@@ -73,6 +74,7 @@ _REQUEST_OPTIONAL_FIELDS = frozenset({"scope", "bootstrap", "accept_checkpoint",
 FILE_MAGIC = b"FSB1"
 from tools.network.fleet_sync.sweep_receive import (
     SWEEP_BEGIN_KIND,
+    SWEEP_END_KIND,
     SWEEP_PROTOCOL_VERSION,
 )
 
@@ -902,6 +904,23 @@ def decode_operation_frame(raw: bytes):
     return operation, mutation
 
 
+def _sweep_run_frames(run):
+    """One contiguous run of a single transaction, as v4 frames.
+
+    Yields ``(frame, counted)``. Both kinds enter the digest, but only
+    OPERATION frames are counted -- the receiver increments its message count
+    on operation frames alone, and the delta serve matches that (its header
+    gets a digest add and no count). Counting headers too made every summary
+    over by one per run, so the receiver rejected the pull, discarded the rows,
+    and retried forever without converging.
+    """
+    yield encode_transaction_header(
+        run[0].origin_incarnation, run[0].transaction_id, len(run),
+    ), False
+    for item in run:
+        yield encode_operation_frame(item), True
+
+
 def encode_done(
     *,
     epoch: str,
@@ -1074,6 +1093,37 @@ class SQLiteFleetSyncStore:
         conn, catalog = self._open()
         try:
             return catalog.origin_watermarks()
+        finally:
+            conn.close()
+
+    def apply_swept_page(self, items) -> None:
+        """Apply one swept run through the sweep's own apply path."""
+        from tools.network.fleet_sync.sweep_receive import apply_live_page
+
+        conn, catalog = self._open()
+        try:
+            apply_live_page(catalog, items)
+        finally:
+            conn.close()
+
+    def sweep_page(
+        self, frontier: dict, start_after, max_records: int, max_bytes: int
+    ):
+        """One bounded page of live rows at or below ``frontier``.
+
+        Opens and closes its own connection so the caller hands the whole
+        read to a worker thread, matching the other store methods here.
+        """
+        from tools.network.fleet_sync.authored_sweep import (
+            read_live_authored_page,
+        )
+
+        conn, _ = self._open()
+        try:
+            return read_live_authored_page(
+                conn, frontier=frontier, start_after=start_after,
+                max_records=max_records, max_bytes=max_bytes,
+            )
         finally:
             conn.close()
 
@@ -2244,9 +2294,67 @@ class FleetSyncScheduler:
                     })
                     stats["bytes_sent"] += len(begin)
                     yield begin
-                    # Pages follow in a later slice; the frontier is durable
-                    # on the peer from this point, so an interrupted sweep
-                    # resumes against the SAME F rather than re-anchoring.
+
+                    # Pages, in canonical address order. The framing is the
+                    # v4 delta framing unchanged: a swept page is contiguous
+                    # runs of one (origin, transaction), which is exactly what
+                    # a transaction group already is. Reusing it means no
+                    # second codec to drift, and the receiver applies each run
+                    # as it lands -- so what is committed is always a
+                    # contiguous prefix of the address order, which is the
+                    # property a crashed sweep resumes on.
+                    sweep_cursor = None
+                    swept_records = 0
+                    while True:
+                        authorize(peer_pub)
+                        page = await asyncio.to_thread(
+                            store.sweep_page, sweep_frontier, sweep_cursor,
+                            SERVE_GROUP_OPERATIONS, MAX_TRANSACTION_FRAME_BYTES,
+                        )
+                        run: list = []
+                        run_identity = None
+                        for item in page.records:
+                            identity = (
+                                item.origin_incarnation, item.transaction_id
+                            )
+                            if identity != run_identity:
+                                if run:
+                                    for frame, counted in _sweep_run_frames(run):
+                                        # Swept frames must enter the digest,
+                                        # and OPERATION frames the count, on
+                                        # exactly the terms the receiver uses.
+                                        # A summary that disagrees with what
+                                        # the receiver computed rejects the
+                                        # pull and discards every row.
+                                        _digest_add(digest, frame)
+                                        if counted:
+                                            count += 1
+                                        stats["bytes_sent"] += len(frame)
+                                        yield frame
+                                run = []
+                                run_identity = identity
+                            run.append(item)
+                        if run:
+                            for frame, counted in _sweep_run_frames(run):
+                                _digest_add(digest, frame)
+                                if counted:
+                                    count += 1
+                                stats["bytes_sent"] += len(frame)
+                                yield frame
+                        swept_records += len(page.records)
+                        if page.exhausted:
+                            break
+                        sweep_cursor = page.examined_through
+                        if sweep_cursor is None:
+                            break
+
+                    end = canonical_json({
+                        "v": protocol_version,
+                        "kind": SWEEP_END_KIND,
+                        "records": swept_records,
+                    })
+                    stats["bytes_sent"] += len(end)
+                    yield end
                     wants_checkpoint = False
                 if allow_checkpoint and server_has_content and wants_checkpoint:
                     served_checkpoint = True
@@ -3174,7 +3282,17 @@ class FleetSyncScheduler:
             # the refusal was stated in the code and absent from the wire --
             # the exact shape of claim this whole bead exists to prevent.
             accept_checkpoint = founded_rows == 0 and not resuming_sweep
-            if resuming_sweep:
+            if resuming_sweep or bootstrap:
+                # A FRESH joiner must ask v5 too, or bootstrap can never
+                # start: the sweep is an opt-in the receiver enforces on the
+                # requested version, so a store with no bootstrap row would
+                # ask v4, be refused a sweep.begin, and have no way to anchor
+                # one -- the version pin would only ever protect bootstraps
+                # that somehow already existed. `bootstrap` is this store
+                # having no state at all; `resuming_sweep` is one already
+                # anchored. Asking is not committing: only a RESUMING sweep
+                # refuses checkpoints, so a fresh joiner meeting a v4 server
+                # still takes whatever that server can serve.
                 protocol_version = max(
                     protocol_version, SWEEP_PROTOCOL_VERSION
                 )
@@ -3211,6 +3329,10 @@ class FleetSyncScheduler:
             checkpoint_seen = [0, 0]
             installed_checkpoint = False
             pending: list[AuthoredMutation] = []
+            # True between sweep.begin and sweep.end. While set, completed
+            # runs go to apply_swept (contiguous prefixes) rather than the
+            # delta batcher (which reorders across transactions).
+            sweeping = False
             pending_identity = None
             pending_count: int | None = None
             transaction_group: tuple[str, str] | None = None
@@ -3261,6 +3383,18 @@ class FleetSyncScheduler:
                     )
 
             last_flush_at = asyncio.get_running_loop().time()
+
+            async def apply_swept(items: list[AuthoredMutation]) -> None:
+                """Apply one swept run immediately, in arrival order.
+
+                NOT the delta batcher: that accumulates across transactions
+                and flushes on its own schedule, so what reaches the store is
+                not necessarily a contiguous prefix of the address order. A
+                sweep's crash-resume reads the furthest row present and
+                continues past it, so a non-contiguous commit leaves a hole
+                the cursor steps straight over and never revisits.
+                """
+                await asyncio.to_thread(store.apply_swept_page, items)
 
             async def apply_pending(items: list[AuthoredMutation]) -> None:
                 nonlocal batch_bytes, last_flush_at
@@ -3360,7 +3494,10 @@ class FleetSyncScheduler:
                     )
                     if pending:
                         validate_pending()
-                        await apply_pending(pending)
+                        if sweeping:
+                            await apply_swept(pending)
+                        else:
+                            await apply_pending(pending)
                         pending = []
                     pending_identity = None
                     transaction_group = (origin, transaction_id)
@@ -3389,7 +3526,7 @@ class FleetSyncScheduler:
                         # waiting for a header that never came (SJC-2
                         # autonomy, 2026-09-07).
                         validate_pending()
-                        await apply_pending(pending)
+                        await (apply_swept(pending) if sweeping else apply_pending(pending))
                         pending = []
                         transaction_group = None
                         pending_count = None
@@ -3443,6 +3580,17 @@ class FleetSyncScheduler:
                         if len(empty_transactions) >= APPLY_BATCH_TRANSACTIONS:
                             await flush_batch()
                         continue
+                    if kind == SWEEP_END_KIND:
+                        # The live keyspace is exhausted. NOT bootstrap
+                        # completion: the > F half still owes, and the
+                        # frontier stays unadvertised until it lands.
+                        if pending:
+                            validate_pending()
+                            await apply_swept(pending)
+                            pending = []
+                        transaction_group = None
+                        sweeping = False
+                        continue
                     if kind == SWEEP_BEGIN_KIND:
                         # The sweep is an OPT-IN. Accepting a begin this
                         # client never asked for would let a peer anchor a
@@ -3468,6 +3616,7 @@ class FleetSyncScheduler:
                         await asyncio.to_thread(
                             store.record_sweep_begin, control, scope, machine_pub,
                         )
+                        sweeping = True
                         continue
                     if kind == "retired":
                         # The server skipped these origins for this pull
