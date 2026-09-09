@@ -97,8 +97,11 @@ fi
 # In-memory (ramfs) secret stores need root/the socket to provision; best-effort
 # and LOUD (the vault re-checks the filesystem class on every write and fails
 # closed, so a miss degrades secret features rather than downing the node).
-python3 -m agents.secret_ramfs || \
-    echo "WARNING: secret ramfs provisioning failed — secret delivery and the key cache will fail closed until resolved" >&2
+# Provisioning is its own script so it can be run and TESTED directly rather
+# than only by starting a container. It retries while the Docker daemon comes
+# up; a single attempt once left this machine with no ramfs carrier for an
+# hour (2026-09-09).
+"$(dirname "$0")/provision-secret-ramfs.sh" || true
 
 # The key cache is a dashboard-owned memory-class store. The dashboard runs
 # as autonomy, so hand the mounted root to it after the ramfs provisioner
