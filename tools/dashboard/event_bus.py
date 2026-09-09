@@ -29,6 +29,7 @@ Usage::
 import asyncio
 import json
 import logging
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -88,6 +89,24 @@ class EventBus:
         # Last RESTORE_HISTORY_MAX restore() calls — circular buffer.
         # Each entry: {ts, success, seq_after, epoch_after}.
         self._restore_history: deque[dict] = deque(maxlen=_RESTORE_HISTORY_MAX)
+        # Guards every traversal and every mutation of the shared cache state
+        # (_seq, _last, _last_seq, _buffer, _buffer_bytes).
+        #
+        # This bus is NOT single-threaded: broadcast_sync exists precisely so a
+        # caller in a sync context (a settings_ops commit-then-emit hook on a
+        # worker thread) can publish without hopping to the event loop. Its
+        # ``self._buffer.append`` therefore races every reader that walks the
+        # deque. CPython raises "deque mutated during iteration" for exactly
+        # that race, and the reader it hit was the startup privacy scrub:
+        # discard_cached died, _on_startup logged "private Central Attention
+        # EventBus scrub failed; refusing to serve", and the worker exited.
+        # Live on sjc-2 2026-09-09 that turned every hot reload into a silent
+        # no-op — uvicorn kept the incumbent worker on 41-minute-old code while
+        # the deployed fix sat unread on disk.
+        #
+        # Reentrant because the guarded paths nest (broadcast_sync holds it
+        # across _trim_buffer).
+        self._lock = threading.RLock()
 
     def subscribe(self, client_id: str | None = None) -> asyncio.Queue:
         """Subscribe to all topics.
@@ -110,7 +129,9 @@ class EventBus:
         # Replay cached state for all known topics.
         # seq=0 signals "cached state, not a live event" — prevents the client's
         # gap detector from seeing non-contiguous seqs and firing a false alarm.
-        for topic, serialised in self._last.items():
+        with self._lock:
+            cached = list(self._last.items())
+        for topic, serialised in cached:
             q.put_nowait((topic, json.loads(serialised), 0))
         return q
 
@@ -142,7 +163,10 @@ class EventBus:
         carries activity_state, so session:registry cache just needs to
         stay fresh for new connections).
         """
-        self._last[topic] = json.dumps(data, separators=(",", ":"), sort_keys=True)
+        with self._lock:
+            self._last[topic] = json.dumps(
+                data, separators=(",", ":"), sort_keys=True,
+            )
 
     async def broadcast(self, topic: str, data: Any, dedup: bool = True) -> int:
         """Broadcast data to all subscribers tagged with topic name.
@@ -166,28 +190,29 @@ class EventBus:
         commit-then-emit ordering observable to subscribers.
         """
         serialised = json.dumps(data, separators=(",", ":"), sort_keys=True)
-        if dedup and self._last.get(topic) == serialised:
-            self._dedup_skipped_total += 1
-            self._record_recent_broadcast(
-                topic=topic, seq=self._last_seq.get(topic, 0),
-                size=len(serialised), dedup_skipped=True,
+        with self._lock:
+            if dedup and self._last.get(topic) == serialised:
+                self._dedup_skipped_total += 1
+                self._record_recent_broadcast(
+                    topic=topic, seq=self._last_seq.get(topic, 0),
+                    size=len(serialised), dedup_skipped=True,
+                )
+                return 0
+            self._last[topic] = serialised
+
+            # Assign global seq
+            self._seq += 1
+            seq = self._seq
+            self._last_seq[topic] = seq
+
+            # Store in ring buffer
+            entry = _BufferEntry(
+                seq=seq, topic=topic, serialised=serialised,
+                timestamp=time.monotonic(), size=len(serialised),
             )
-            return 0
-        self._last[topic] = serialised
-
-        # Assign global seq
-        self._seq += 1
-        seq = self._seq
-        self._last_seq[topic] = seq
-
-        # Store in ring buffer
-        entry = _BufferEntry(
-            seq=seq, topic=topic, serialised=serialised,
-            timestamp=time.monotonic(), size=len(serialised),
-        )
-        self._buffer.append(entry)
-        self._buffer_bytes += entry.size
-        self._trim_buffer()
+            self._buffer.append(entry)
+            self._buffer_bytes += entry.size
+            self._trim_buffer()
 
         # Track wall-clock broadcast time for /api/diag rate stats.
         self._broadcast_log.append(time.time())
@@ -301,18 +326,20 @@ class EventBus:
         Timestamps are wall-clock seconds (Unix epoch), converted from
         ``_BufferEntry.timestamp`` (monotonic) using the current offset.
         """
-        if not self._buffer:
-            return (None, None, None, None)
-        first = self._buffer[0]
-        last = self._buffer[-1]
+        with self._lock:
+            if not self._buffer:
+                return (None, None, None, None)
+            first = self._buffer[0]
+            last = self._buffer[-1]
         offset = time.time() - time.monotonic()
         return (first.seq, last.seq, first.timestamp + offset, last.timestamp + offset)
 
     def _trim_buffer(self) -> None:
         """Evict oldest entries when memory budget is exceeded."""
-        while self._buffer and self._buffer_bytes > self._BUFFER_MAX_BYTES:
-            evicted = self._buffer.popleft()
-            self._buffer_bytes -= evicted.size
+        with self._lock:
+            while self._buffer and self._buffer_bytes > self._BUFFER_MAX_BYTES:
+                evicted = self._buffer.popleft()
+                self._buffer_bytes -= evicted.size
 
     def replay(self, from_seq: int, to_seq: int) -> tuple[list[dict], bool]:
         """Return events in [from_seq, to_seq] range from buffer.
@@ -323,16 +350,17 @@ class EventBus:
         fall back to full re-fetch from disk.
         """
         events = []
-        for entry in self._buffer:
-            if entry.seq < from_seq:
-                continue
-            if entry.seq > to_seq:
-                break
-            events.append({
-                "seq": entry.seq,
-                "topic": entry.topic,
-                "data": json.loads(entry.serialised),
-            })
+        with self._lock:
+            for entry in self._buffer:
+                if entry.seq < from_seq:
+                    continue
+                if entry.seq > to_seq:
+                    break
+                events.append({
+                    "seq": entry.seq,
+                    "topic": entry.topic,
+                    "data": json.loads(entry.serialised),
+                })
 
         # A scrubbed or otherwise missing entry in the middle of the requested
         # range is just as incomplete as an evicted first entry.  Checking only
@@ -379,27 +407,35 @@ class EventBus:
             return bool(predicate(topic, decoded, decoded_ok))
 
         removed = 0
-        for topic, serialised in list(self._last.items()):
-            if should_discard(topic, serialised):
-                self._last.pop(topic, None)
-                self._last_seq.pop(topic, None)
-                removed += 1
+        # One critical section for the whole scrub. Held across the rebuild so
+        # a concurrent broadcast_sync cannot append into the buffer being
+        # walked (the crash) nor land in the old deque that the reassignment
+        # below discards (silent event loss). Predicate evaluation happens
+        # inside it, which is deliberate: the predicate is a pure decode-and-
+        # test over one entry, it does not call back into the bus.
+        with self._lock:
+            for topic, serialised in list(self._last.items()):
+                if should_discard(topic, serialised):
+                    self._last.pop(topic, None)
+                    self._last_seq.pop(topic, None)
+                    removed += 1
 
-        kept: deque[_BufferEntry] = deque()
-        kept_bytes = 0
-        for entry in self._buffer:
-            if should_discard(entry.topic, entry.serialised):
-                removed += 1
-                continue
-            kept.append(entry)
-            kept_bytes += entry.size
-        self._buffer = kept
-        self._buffer_bytes = kept_bytes
+            kept: deque[_BufferEntry] = deque()
+            kept_bytes = 0
+            for entry in self._buffer:
+                if should_discard(entry.topic, entry.serialised):
+                    removed += 1
+                    continue
+                kept.append(entry)
+                kept_bytes += entry.size
+            self._buffer = kept
+            self._buffer_bytes = kept_bytes
         return removed
 
     def all_cached_topics(self) -> list[str]:
         """Return topics that have cached state."""
-        return list(self._last.keys())
+        with self._lock:
+            return list(self._last.keys())
 
     def snapshot(self, path: str | Path) -> None:
         """Persist bus state + module epoch to ``path`` atomically.
@@ -410,23 +446,24 @@ class EventBus:
         try:
             target = Path(path)
             target.parent.mkdir(parents=True, exist_ok=True)
-            state = {
-                "version": _SNAPSHOT_VERSION,
-                "epoch": _SERVER_EPOCH,
-                "seq": self._seq,
-                "last_seq": dict(self._last_seq),
-                "last": dict(self._last),
-                "buffer": [
-                    {
-                        "seq": e.seq,
-                        "topic": e.topic,
-                        "serialised": e.serialised,
-                        "timestamp": e.timestamp,
-                        "size": e.size,
-                    }
-                    for e in self._buffer
-                ],
-            }
+            with self._lock:
+                state = {
+                    "version": _SNAPSHOT_VERSION,
+                    "epoch": _SERVER_EPOCH,
+                    "seq": self._seq,
+                    "last_seq": dict(self._last_seq),
+                    "last": dict(self._last),
+                    "buffer": [
+                        {
+                            "seq": e.seq,
+                            "topic": e.topic,
+                            "serialised": e.serialised,
+                            "timestamp": e.timestamp,
+                            "size": e.size,
+                        }
+                        for e in self._buffer
+                    ],
+                }
             tmp = target.with_suffix(target.suffix + ".tmp")
             tmp.write_text(json.dumps(state))
             tmp.replace(target)
@@ -497,11 +534,12 @@ class EventBus:
             logger.exception("EventBus.restore(%s): malformed payload, ignoring", path)
             _record(False)
             return False
-        self._seq = new_seq
-        self._last_seq = new_last_seq
-        self._last = new_last
-        self._buffer = new_buffer
-        self._buffer_bytes = new_buffer_bytes
+        with self._lock:
+            self._seq = new_seq
+            self._last_seq = new_last_seq
+            self._last = new_last
+            self._buffer = new_buffer
+            self._buffer_bytes = new_buffer_bytes
         # A clean reload keeps the replay buffer and sequence, but must still
         # be observable by connected clients.  Increment the persisted epoch
         # (or keep the newer process timestamp) so the next SSE frame triggers
