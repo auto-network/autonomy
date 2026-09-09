@@ -1,200 +1,71 @@
-<div x-data="fleetPage()" class="fleet-page pb-safe" data-testid="fleet-fragment-root">
-  <div class="fleet-shell">
-    <header class="fleet-header">
-      <div class="min-w-0 flex-1">
-        <h1>Your fleet</h1>
-        <p class="fleet-verdict" :class="fleetTone()" x-show="view"><i></i><span x-text="fleetStatusLine()"></span></p>
-      </div>
-      <button type="button" class="fleet-refresh" @click="load()" :disabled="loading" aria-label="Refresh fleet">
-        <span :class="loading ? 'animate-spin' : ''">↻</span>
-      </button>
-    </header>
+<div x-data="fleetPage()" class="fv pb-safe" data-testid="fleet-fragment-root" @keydown.escape="confirmRemove=null;renamingId=null">
 
-    <div x-show="loading && !view" class="fleet-state" data-testid="fleet-loading">Loading fleet…</div>
-    <div x-show="error && !view" class="fleet-state fleet-state-error" data-testid="fleet-error">
-      <strong>Fleet is unavailable</strong>
-      <span x-text="error"></span>
-      <button type="button" @click="load()">Try again</button>
+<section class="activity" aria-label="Synchronization activity">
+ <div class="activity-top"><h2>Sync activity</h2>
+  <div class="segments" role="group" aria-label="Activity time range"><template x-for="w in ['1h','24h']"><button :aria-pressed="period===w" @click="period=w" x-text="w"></button></template></div>
+ </div>
+ <div class="activity-meta">
+  <div><div class="activity-value num" x-text="bytesLabel(windowTraffic())"></div><div class="activity-caption" x-text="'Transferred'"></div></div>
+  <div class="fleet-org-picker" x-effect="if($el._orgPicker) $el._orgPicker.update(pickerOptions()); else $el._orgPicker=window.OrgPicker.mount($el,pickerOptions())"></div>
+ </div>
+ <div class="chart" role="img" :aria-label="'Transfer activity over '+periodLabel()+', '+bytesLabel(windowTraffic())">
+  <div class="direction-totals"><span><i class="key direct"></i>Received <strong x-text="bytesLabel(directionTotal('received'))"></strong></span><span><i class="key sent"></i>Sent <strong x-text="bytesLabel(directionTotal('sent'))"></strong></span></div><div class="plot"><span class="plot-max num" x-text="bytesLabel(chartMax())+'/s'"></span><div class="plot-svg" x-html="chartSvg()"></div><span class="plot-zero">0</span></div>
+  <div class="chart-axis"><span x-text="axisStart()"></span><span x-text="bytesLabel(averageRate())+'/s average'"></span><span x-text="axisEnd()"></span></div>
+ </div>
+ <div class="path-heading"><span>Connection path</span><span class="muted" x-text="directPercent()+'% direct'"></span></div>
+ <div class="path-track" role="img" :aria-label="directPercent()+' percent direct'"><div class="path-direct" :style="'width:'+directPercent()+'%'"></div><div class="path-relay" :style="'width:'+(100-directPercent())+'%'"></div></div>
+ <div class="path-legend"><span><i class="key direct"></i>Direct <span class="num" x-text="bytesLabel(windowTraffic('direct'))"></span></span><span><i class="key relay"></i>Relay <span class="num" x-text="bytesLabel(windowTraffic('relay'))"></span></span></div>
+ <p class="activity-caption" style="margin-top:12px">Traffic observed by this dashboard</p>
+</section>
+<div class="section-head"><h2>Machines</h2><button type="button" class="reset-button" @click="$refs.counterReset.showModal()">Reset counters</button></div>
+<dialog class="reset-dialog" x-ref="counterReset" aria-labelledby="counter-reset-title">
+ <h2 id="counter-reset-title" x-text="'Reset counters on '+(machines.find(m=>m.isLocalMachine)?.displayLabel || 'this dashboard')+'?'"></h2>
+ <p>Received, sent, changes and failures will start at zero for every listed machine.</p>
+ <div class="reset-dialog-actions"><button type="button" class="reset-button" @click="$refs.counterReset.close()">Cancel</button><button type="button" class="reset-button" @click="resetCounters();$refs.counterReset.close()">Reset counters</button></div>
+</dialog>
+<div class="machines">
+ <template x-for="admission in admissions" :key="admission.sourceApprovalId"><button class="small-btn" data-row-kind="pending_admission" :data-standing="admission.standing" @click="reviewApproval(admission)">New machine · <span x-text="admissionWord(admission)"></span> →</button></template>
+ <template x-for="machine in orderedMachines()" :key="machine.entryId">
+  <article class="machine" data-row-kind="roster_machine" :data-standing="machine.standing" :class="{attention:peerMaxLag(machine)>300000 || !machineHealthy(machine)}">
+   <button class="machine-toggle" @click="expandedId=expandedId===machine.entryId?null:machine.entryId" :aria-expanded="expandedId===machine.entryId">
+    <div class="machine-identity"><div class="machine-title"><strong :title="machine.displayLabel" x-text="machine.displayLabel"></strong><span class="state" :class="cardTone(machine)" x-text="cardStatus(machine)"></span><span class="chevron">⌄</span></div>
     </div>
-
-    <div x-show="view" class="fleet-body">
-      <div class="fleet-content-grid">
-        <main class="min-w-0">
-          <div class="fleet-section-heading">
-            <h2>Machines</h2>
-          </div>
-          <div class="fleet-machine-list" data-testid="fleet-machine-list">
-            <template x-for="admission in admissions" :key="admission.sourceApprovalId || admission.standingChangedAt">
-              <article class="fleet-machine" data-row-kind="pending_admission" :data-standing="admission.standing" :class="admission.standing === 'admission_failed' ? 'failed' : 'warn'">
-                <div class="fleet-machine-toggle" role="button" tabindex="0"
-                     @click="reviewApproval(admission)"
-                     @keydown.enter="reviewApproval(admission)">
-                  <span class="fleet-line1">
-                    <span class="fleet-dot" :class="admission.standing === 'admission_failed' ? 'failed' : 'warn'"></span>
-                    <strong>New machine</strong>
-                    <span class="fleet-face-status" :class="admission.standing === 'admission_failed' ? 'failed' : 'warn'"
-                          x-text="admissionWord(admission)"></span>
-                  </span>
-                  <span class="fleet-line2">
-                    <span x-text="admissionLine(admission)"></span>
-                  </span>
-                </div>
-              </article>
-            </template>
-            <template x-for="machine in orderedMachines()" :key="machine.entryId">
-              <article class="fleet-machine" data-row-kind="roster_machine" data-standing="authorized" :class="machineClass(machine)">
-                <div class="fleet-machine-toggle" role="button" tabindex="0"
-                     @click="expandedId = expandedId===machine.entryId ? null : machine.entryId"
-                     @keydown.enter="expandedId = expandedId===machine.entryId ? null : machine.entryId"
-                     :aria-expanded="expandedId === machine.entryId">
-                  <span class="fleet-line1">
-                    <span class="fleet-dot" :class="dotClass(machine)"></span>
-                    <template x-if="renamingId === machine.entryId">
-                      <input class="fleet-rename-in" x-model="renameDraft" maxlength="80" aria-label="Machine name"
-                             x-init="$nextTick(() => { $el.focus(); $el.select(); })"
-                             @click.stop @keydown.enter.stop.prevent="commitRename(machine)"
-                             @keydown.escape.stop="renamingId = null"
-                             @blur="commitRename(machine)">
-                    </template>
-                    <template x-if="renamingId !== machine.entryId">
-                      <strong x-text="machine.displayLabel"></strong>
-                    </template>
-                    <button x-show="expandedId === machine.entryId && renamingId !== machine.entryId"
-                            class="fleet-rename-btn" aria-label="Rename machine" @click.stop="beginRename(machine)">
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
-                    </button>
-                    <span class="fleet-face-status" x-show="statusWord(machine)" :class="statusTone(machine)" x-text="statusWord(machine)"></span>
-                  </span>
-                  <span class="fleet-line2" x-show="subLine(machine) || (!machine.isLocalMachine && machine.lastSuccessfulSyncAt)">
-                    <span x-text="subLine(machine)"></span>
-                    <span x-show="!machine.isLocalMachine && machine.lastSuccessfulSyncAt"
-                          x-text="(machineState(machine).id === 'synced' ? '' : 'Synced ') + timeLabel(machine.lastSuccessfulSyncAt, 'never')"></span>
-                  </span>
-                </div>
-                <div x-show="expandedId === machine.entryId" class="fleet-machine-detail">
-                  <p x-show="machineState(machine).note" class="fleet-reason"
-                     :class="machineState(machine).tone === 'failed' ? 'err' : ''"
-                     x-text="machineState(machine).note"></p>
-                  <template x-if="machine.isLocalMachine">
-                    <dl>
-                      <div><dt>Synced</dt><dd x-text="timeLabel(localLastSync(), 'never')"></dd></div>
-                      <div x-show="machine.connectorArmed != null"><dt>Connector</dt><dd :class="machine.connectorArmed ? '' : 'error-code'" x-text="machine.connectorArmed ? 'Online' : 'Not armed'"></dd></div>
-                      <div x-show="machine.tunnelServing != null"><dt>Tunnel</dt><dd :class="machine.tunnelServing ? '' : 'error-code'" x-text="machine.tunnelServing ? 'Serving' : 'Down'"></dd></div>
-                      <div x-show="machine.certStatus"><dt>Certificate</dt><dd :class="certExpired(machine) ? 'error-code' : ''"
-                           x-text="machine.certValidUntil == null ? 'None' : certExpired(machine) ? 'Expired' : remainingLabel(machine.certValidUntil)"></dd></div>
-                      <div x-show="machine.runningStale"><dt>Software</dt><dd class="error-code">Restart needed</dd></div>
-                      <div><dt>Changes</dt><dd class="mono" x-text="numberLabel(fleetChanges())"></dd></div>
-                      <div><dt>Received</dt><dd class="mono" x-text="bytesLabel(fleetReceived())"></dd></div>
-                      <div><dt>Sent</dt><dd class="mono" x-text="bytesLabel(fleetSent())"></dd></div>
-                    </dl>
-                  </template>
-
-                  <template x-if="!machine.isLocalMachine">
-                    <div>
-                      <dl x-show="machineState(machine).id !== 'first'">
-                        <div><dt>Synced</dt><dd x-text="timeLabel(machine.lastSuccessfulSyncAt, 'never')"></dd></div>
-                        <div><dt>Received</dt><dd class="mono" x-text="bytesLabel(machine.bytesReceived)"></dd></div>
-                        <div><dt>Sent</dt><dd class="mono" x-text="bytesLabel(machine.bytesSent)"></dd></div>
-                        <div><dt>Changes</dt><dd class="mono" x-text="numberLabel(machine.transactionsApplied)"></dd></div>
-                        <div><dt>Failures</dt><dd class="mono" x-text="numberLabel(machine.attemptsFailed)"></dd></div>
-                        <div x-show="machine.lastErrorCode"><dt>Error</dt><dd class="error-code mono" x-text="machine.lastErrorCode"></dd></div>
-                        <div class="fleet-remove-cell" :class="confirmRemove===machine.entryId ? 'confirming' : ''"
-                             x-show="machine.entryId !== servingMachineId">
-                          <button x-show="confirmRemove!==machine.entryId" type="button" class="fleet-remove"
-                                  @click="confirmRemove=machine.entryId">Remove from fleet…</button>
-                          <template x-if="confirmRemove===machine.entryId">
-                            <span style="display:flex;gap:.5rem">
-                              <button type="button" class="fleet-keep" @click="confirmRemove=null">Keep</button>
-                              <button type="button" class="fleet-danger" :disabled="actionBusy"
-                                      @click="beginRemove(machine)"
-                                      x-text="actionBusy === 'remove' ? 'Removing…' : 'Remove machine'"></button>
-                            </span>
-                          </template>
-                        </div>
-                      </dl>
-                      <div class="fleet-detail-actions" x-show="machineState(machine).id === 'first' && machine.entryId !== servingMachineId">
-                        <button x-show="confirmRemove!==machine.entryId" type="button" class="fleet-remove"
-                                @click="confirmRemove=machine.entryId">Remove from fleet…</button>
-                        <template x-if="confirmRemove===machine.entryId">
-                          <span style="display:flex;gap:.5rem">
-                            <button type="button" class="fleet-keep" @click="confirmRemove=null">Keep</button>
-                            <button type="button" class="fleet-danger" :disabled="actionBusy"
-                                    @click="beginRemove(machine)"
-                                    x-text="actionBusy === 'remove' ? 'Removing…' : 'Remove machine'"></button>
-                          </span>
-                        </template>
-                      </div>
-                      <p x-show="actionErrors[machine.entryId]" class="fleet-inline-error"
-                         x-text="actionErrors[machine.entryId]"></p>
-                    </div>
-                  </template>
-                  <p x-show="machine.isLocalMachine && actionErrors[machine.entryId]" class="fleet-inline-error"
-                     x-text="actionErrors[machine.entryId]"></p>
-                </div>
-              </article>
-            </template>
-            <div x-show="!machines.length && !admissions.length" class="fleet-empty">No authorized machines or active admission requests.</div>
-          </div>
-        </main>
-
-        <aside class="fleet-aside">
-          <div class="fleet-side-card">
-            <div class="fleet-side-title">
-              <h2>Invitation</h2>
-              <span :class="invitation.status === 'active' ? 'active' : ''"
-                    x-text="invitation.status === 'active' ? 'Active' : invitation.status === 'publishing' ? 'Waiting' : invitation.status === 'awaiting_signature' ? 'Finish' : invitation.status === 'inactive' ? 'Off' : 'Inactive'"></span>
-            </div>
-            <template x-if="invitation.status === 'active'">
-              <div>
-                <p class="fleet-no-invite" style="margin-top:.5rem">A new machine can use this link to ask to join your fleet.</p>
-                <button type="button" class="fleet-invite-code" @click="copyInvitation()"
-                        x-text="invitation.url" aria-label="Copy fleet invitation link"></button>
-                <div class="fleet-invite-meta">
-                  <span x-text="expiryLabel()"></span>
-                </div>
-                <button type="button" class="fleet-primary-action" @click="copyInvitation()"
-                        x-text="copied ? 'Link copied' : 'Copy invitation link'"></button>
-                <button type="button" class="fleet-secondary-action" @click="copyBootstrapCode()"
-                        x-text="bootstrapCopied ? 'Install code copied' : 'Copy install code'"></button>
-                <button type="button" class="fleet-remove" style="width:100%;margin-top:.45rem;min-height:2.4rem"
-                        :disabled="inviteBusy" @click="disableInvitation()"
-                        x-text="inviteBusy ? 'Disabling…' : 'Disable invitation…'"></button>
-              </div>
-            </template>
-            <template x-if="invitation.status === 'publishing'">
-              <p class="fleet-no-invite">Publication is waiting in the approval inbox. No machine can request access yet.</p>
-            </template>
-            <template x-if="invitation.status === 'awaiting_signature'">
-              <div>
-                <p class="fleet-no-invite">The route is published. Sign the invitation with your personal root to activate it.</p>
-                <button type="button" class="fleet-primary-action"
-                        :disabled="inviteBusy" @click="finishInvitation()"
-                        x-text="inviteBusy ? 'Signing…' : 'Activate invitation'"></button>
-              </div>
-            </template>
-            <template x-if="invitation.status === 'inactive'">
-              <div>
-                <p class="fleet-no-invite">This invitation is deactivated. Reactivate it to let a machine that already joined through it finish and start syncing.</p>
-                <button type="button" class="fleet-invite-code" @click="copyInvitation()"
-                        x-text="invitation.url" aria-label="Copy fleet invitation link"></button>
-                <button type="button" class="fleet-primary-action"
-                        :disabled="inviteBusy" @click="reactivateInvitation()"
-                        x-text="inviteBusy ? 'Reactivating…' : 'Reactivate invitation'"></button>
-              </div>
-            </template>
-            <template x-if="invitation.status === 'none' || invitation.status === 'failed'">
-              <div>
-                <p class="fleet-no-invite">No invitation is active. New machines can't join.</p>
-                <button type="button" class="fleet-primary-action"
-                        :disabled="inviteBusy" @click="createInvitation()"
-                        x-text="inviteBusy ? 'Requesting…' : 'Create invitation'"></button>
-              </div>
-            </template>
-            <p x-show="invitation.error || invitationError" class="fleet-inline-error"
-               x-text="invitationError || invitation.error"></p>
-          </div>
-        </aside>
-      </div>
+    <dl class="kpis"><div class="kpi"><dt>Worst lag</dt><dd :class="peerMaxLag(machine)>300000?'warn':''" x-text="machine.scopes?.length ? lagLabel(peerMaxLag(machine)) : '—'"></dd></div>
+    <div class="kpi"><dt>Last sync</dt><dd x-text="shortSync(machine)"></dd></div>
+    <div class="kpi"><dt>Data in sync</dt><dd x-text="currentScopes(machine)+' / '+scopeRows(machine).length"></dd></div></dl>
+   </button>
+   <div x-show="expandedId===machine.entryId" class="detail">
+    <div><h3>By organization</h3><table class="table"><thead><tr><th>Organization</th><th>Lag</th><th>Received</th><th>Sent</th></tr></thead><tbody><template x-for="row in scopeRows(machine)" :key="row.scope"><tr x-data="{org:orgIdentity(row.scope)}"><td><span class="org-name" :title="org.name">
+<span class="sc-org" :class="org.favicon ? 'sc-org-favicon' : ''" :style="org.favicon ? '' : 'background:'+org.color" :title="org.name">
+<template x-if="!org.favicon"><svg class="sc-org-initial" width="16" height="16" viewBox="0 0 16 16" preserveAspectRatio="xMidYMid meet"><text x="8" y="8" text-anchor="middle" dominant-baseline="central" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="11" font-weight="700" fill="#ffffff" x-text="org.initial"></text></svg></template>
+<img class="sc-org-img" :src="org.favicon" x-show="org.favicon" :alt="org.name">
+</span><span class="org-title" x-data="orgLabelFit()" x-text="org.name" x-effect="org.name; $nextTick(()=>fit())"></span></span></td><td :class="row.lag>300000?'warn':'good'" x-text="lagLabel(row.lag)"></td><td x-text="bytesLabel(row.bytesIn)"></td><td x-text="bytesLabel(row.bytesOut)"></td></tr></template></tbody></table></div>
+    <div><div class="totals-title"><h3>Transfer totals</h3></div>
+     <dl class="totals"><div><dt>Received</dt><dd x-text="bytesLabel(machine.bytesReceived || (machine.isLocalMachine?fleetReceived():0))"></dd></div><div><dt>Sent</dt><dd x-text="bytesLabel(machine.bytesSent || (machine.isLocalMachine?fleetSent():0))"></dd></div><div><dt>Changes applied</dt><dd x-text="numberLabel(machine.transactionsApplied || (machine.isLocalMachine?fleetChanges():0))"></dd></div><div><dt>Failed attempts</dt><dd :class="machine.attemptsFailed?'warn':''" x-text="numberLabel(machine.attemptsFailed)"></dd></div></dl>
     </div>
-  </div>
+    <div class="local-info"><span>Connector: <span :class="machine.connectorArmed==null ? 'muted' : machine.connectorArmed ? 'good' : 'warn'" x-text="machine.connectorArmed==null ? 'Unknown' : machine.connectorArmed ? 'Online' : 'Needs Unlock'"></span></span><span>Tunnel: <span :class="machine.tunnelServing==null ? 'muted' : machine.tunnelServing ? 'good' : 'bad'" x-text="machine.tunnelServing==null ? 'Unknown' : machine.tunnelServing ? 'Serving' : 'Down'"></span></span></div>
+    <div class="foot-actions">
+     <button type="button" class="action-btn" x-show="renamingId!==machine.entryId" @click="beginRename(machine)">Rename machine</button>
+     <template x-if="renamingId===machine.entryId"><form class="rename-form" @submit.prevent="commitRename(machine)" @keydown.escape.stop.prevent="renamingId=null" x-init="$nextTick(()=>{const input=$el.querySelector('input');input.focus();input.select();})">
+      <input class="rename-input" aria-label="Machine name" maxlength="80" x-model="renameDraft">
+      <button type="submit" class="action-btn" :disabled="!renameDraft.trim()">OK</button>
+      <button type="button" class="action-btn" @click="renamingId=null">Cancel</button>
+     </form></template>
+     <button type="button" x-show="!machine.isLocalMachine && confirmRemove!==machine.entryId && renamingId!==machine.entryId" class="action-btn danger" @click="confirmRemove=machine.entryId">Remove from fleet</button>
+     <div class="action-confirm" x-show="confirmRemove===machine.entryId && renamingId!==machine.entryId"><button type="button" class="action-btn" @click="confirmRemove=null">Keep machine</button><button type="button" class="action-btn danger" @click="beginRemove(machine)">Confirm removal</button></div>
+    </div>
+   </div>
+  </article>
+ </template>
 </div>
+<section class="invitation-card" aria-label="Fleet invitation">
+ <div class="invitation-heading"><h2>Invitation</h2><span class="invitation-status" :class="invitation.status==='active'?'good':'muted'" x-text="invitation.status==='active'?'Active':'Inactive'"></span></div>
+ <div class="invitation-code" x-show="invitation.url" x-text="invitation.url"></div>
+ <div class="invitation-buttons">
+  <button type="button" x-show="invitation.url" @click="copyValue(invitation.url,'link')" x-text="copied?'Link copied':'Copy invitation link'"></button>
+  <button type="button" x-show="invitation.bootstrapCode" @click="copyValue(invitation.bootstrapCode,'install')" x-text="bootstrapCopied?'Code copied':'Copy install code'"></button>
+  <button type="button" class="invite-toggle" :class="{deactivate:invitation.status==='active'}" @click="invitation.status==='active'?beginDisableInvite():beginActivateInvite()" x-text="invitation.status==='active'?'Deactivate invitation':'Activate invitation'"></button>
+ </div>
+ <p class="activity-caption" x-show="copyError" x-text="copyError"></p>
+</section>
+    </div>
