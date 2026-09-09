@@ -112,41 +112,6 @@ BAD_REQUEST = _response(400, b"bad request")
 # ── the I9 gate ───────────────────────────────────────────────
 
 
-def _grant_is_for_this_machine(payload: dict) -> bool:
-    """A machine-subject grant is servable only by that machine.
-
-    ``autonomy.network.link-grant`` is @home("organization"), so a grant
-    written on one machine replicates to every other machine in the org. That
-    is right for an artifact link -- any member may serve those bytes -- and
-    wrong for a machine's STANDING SYNC ROUTE, which is that machine's own
-    address. Without this check every member admitted every other member's
-    fleet:sync token, so the relay attached an arbitrary member as the
-    endpoint: SJC-2 dialled home's standing route on 2026-09-09 and reached
-    its own connector ("expected 3996513b…, got 571d62ab…").
-
-    Only machine-subject grants are constrained. A grant with no subject, or
-    a persona subject, is unchanged -- this must not narrow artifact serving.
-    """
-    subject = payload.get("subject")
-    if not isinstance(subject, dict) or subject.get("kind") != "machine":
-        return True
-    owner = subject.get("id")
-    if not isinstance(owner, str) or not owner:
-        return True
-    try:
-        from tools.network import machine_boot
-
-        local = machine_boot.machine_id(org="machine")
-    except Exception:
-        local = None
-    if not isinstance(local, str) or not local:
-        # This machine has no identity yet (pre-enrolment, or a bare store).
-        # It cannot be the machine that mis-served a peer's route, and
-        # refusing here would break serving during enrolment. Unchanged.
-        return True
-    return local == owner
-
-
 def _grant_valid(payload, token: str, now: float):
     """Pure validity check for one cached grant payload → payload or None.
 
@@ -191,19 +156,9 @@ def _grant_valid(payload, token: str, now: float):
     return payload
 
 
-def check_grant(
-    token: str,
-    *,
-    org: str | None = None,
-    now: float | None = None,
-    for_serving: bool = True,
-):
+def check_grant(token: str, *, org: str | None = None, now: float | None = None):
     """THE I9 gate: token → valid LOCAL grant payload, or None.
 
-    ``for_serving=False`` asks only "is this grant row present and well
-    formed here", skipping the machine-ownership rule. The owner of a
-    machine-subject grant needs that to check its own row without the answer
-    depending on the serving rule it is exempt from.
 
     Only the dashboard's own ``autonomy.network.link-grant`` cache is
     consulted — never the registry. A row that isn't there (never
@@ -227,13 +182,8 @@ def check_grant(
         return None  # unreadable cache → no grant → no bytes (fail closed)
     for member in members:
         if member.key == token:
-            grant = _grant_valid(member.payload, token,
-                                 time.time() if now is None else now)
-            if grant is None:
-                return None
-            if for_serving and not _grant_is_for_this_machine(grant):
-                return None
-            return grant
+            return _grant_valid(member.payload, token,
+                                time.time() if now is None else now)
     return None
 
 
@@ -796,7 +746,6 @@ JOIN_OPS = ("context", "submit", "status")
 # It shares RelayKit's established channel but has its own grant type and
 # operation vocabulary.
 FLEET_JOIN_OPS = ("fleet.request", "fleet.resume")
-FLEET_SYNC_OPS = ("fleet.sync.pull",)
 
 
 def _claim_service():
@@ -1167,28 +1116,6 @@ def make_grant_handler(org: str | None = None, *, now=None):
         except Exception:
             return REFUSED
 
-    async def _fleet_sync(token: str, request: dict):
-        from tools.network.fleet_route import FLEET_SYNC_TARGET_TYPES
-
-        grant = await asyncio.to_thread(check_grant, token, org=org, now=clock())
-        if grant is None or grant["target_type"] not in FLEET_SYNC_TARGET_TYPES:
-            return REFUSED
-        try:
-            from tools.network.fleet_relay_sync import connector_runtime
-
-            return await connector_runtime.handle(token, request)
-        except Exception as exc:
-            logger.warning("fleet relay sync request refused", exc_info=True)
-            # The caller here already proved it holds a valid fleet:join
-            # grant (checked above) -- unlike REFUSED elsewhere in this
-            # module, there is no anonymous-prober oracle risk in telling
-            # a roster-authenticated peer why the pull was refused (locked
-            # machine, expired delegation, etc.) instead of a bare
-            # "unavailable" it cannot distinguish from an unknown token.
-            return canonical_json({
-                "v": 1, "kind": "fleet.server-error", "error": str(exc),
-            }) + b"\n"
-
     async def _handle(
         token: str, message: bytes, channel_state: dict
     ) -> bytes:
@@ -1211,8 +1138,6 @@ def make_grant_handler(org: str | None = None, *, now=None):
             return await asyncio.to_thread(
                 _fleet_join, token, request, channel_state
             )
-        if op in FLEET_SYNC_OPS:
-            return await _fleet_sync(token, request)
         if op in WRITE_OPS:
             return await _serve_write(token, org, request, clock)
         if op in READ_OPS:

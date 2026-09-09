@@ -9,7 +9,7 @@ derived from ``personal_root + machine_id`` and is never stored separately.
 
 from __future__ import annotations
 
-from tools.network import fleet_enroll, fleet_roster, fleet_route
+from tools.network import fleet_enroll, fleet_roster
 from tools.network.fleet_enroll import EnrollmentDelivery, EnrollmentRequest
 from tools.network.fleet_invite import FleetInvite
 from tools.network.idkit import KeyPair, derive_machine_key
@@ -170,16 +170,13 @@ def accept_browser_completion(
             f"could not accept browser fleet completion: {exc}"
         ) from exc
     # Each public record self-verifies against the personal root. Store the
-    # first-peer pair, the rest of the delivered active roster, and this
-    # machine's route before adopting the local identity; a crash can leave
-    # harmless authorization evidence but never an identity unable to
-    # authenticate the origin peer.
+    # first-peer pair and the rest of the delivered active roster before
+    # adopting the local identity; a crash can leave harmless authorization
+    # evidence but never an identity unable to authenticate the origin peer.
+    # The invitation rendezvous is NOT persisted: it is enrollment-only and
+    # must not become a standing address (identity contract, section 2).
     _store_delivered_roster(
         delivery, origin, anchor_root_pub=invite.personal_root_pub,
-    )
-    fleet_route.store(
-        fleet_route.FleetRoute(invite.rendezvous, origin.machine_pub),
-        org=org,
     )
     _write_row({"machine_id": machine_id_value}, org=org)
     clear_joining(org=org)
