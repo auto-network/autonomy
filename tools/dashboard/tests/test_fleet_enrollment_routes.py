@@ -378,7 +378,12 @@ def test_generic_approval_commits_exact_request(operator_api, monkeypatch):
 
     # The same process-only handoff is reminted after every later unlock.
     runtime_context = client.get("/api/fleet/runtime")
-    _tunnel = fleet_enrollment_routes.fleet_tunnel_server.state()
+    # `serves` is the serving PREDICATE, not the designation election — the two
+    # differ on every non-selected machine. Restating the expression here would
+    # only mirror the implementation, so the property itself is pinned by
+    # test_a_non_designated_machine_is_told_to_mint_its_serving_cert and its
+    # negative control below.
+    _serves = fleet_enrollment_routes.fleet_tunnel_server.tunnel_serving_permitted()[0]
     assert runtime_context.json() == {
         "ok": True,
         "enabled": True,
@@ -389,9 +394,7 @@ def test_generic_approval_commits_exact_request(operator_api, monkeypatch):
         # The deterministic org_uuid the browser registers the personal tunnel
         # under, and whether this machine is the selected tunnel server.
         "personal_org_uuid": fleet_runtime.personal_org_uuid(root.public_hex),
-        "serves": bool(
-            _tunnel.allowed and _tunnel.selected_machine_id == machine_id
-        ),
+        "serves": _serves,
     }
     activated = client.post("/api/fleet/runtime", json=runtime_payload)
     assert activated.status_code == 200, activated.text
@@ -743,6 +746,45 @@ def test_current_generic_dialogue_owns_pin_and_browser_root_ceremony():
     assert "approval-fleet-pin" in template
     assert "Machine comparison code" in template
     assert "/api/fleet/enrollment/requests/" not in js
+
+
+def _runtime_serves(client, monkeypatch, *, allowed, reason):
+    """Read `serves` off /api/fleet/runtime with the election forced."""
+    from tools.network import fleet_tunnel_server as fts
+
+    entry = SimpleNamespace(machine_id="local-machine", machine_pub="bb" * 32)
+    monkeypatch.setattr(
+        fleet_enrollment_routes, "_runtime_context", lambda: ("aa" * 32, entry))
+    monkeypatch.setattr(fleet_enrollment_routes, "_reachability_binding", lambda: None)
+    monkeypatch.setattr(fts, "state", lambda: SimpleNamespace(
+        allowed=allowed, reason=reason, managed=True,
+        selected_machine_id="other-machine"))
+    body = client.get("/api/fleet/runtime").json()
+    return body["serves"]
+
+
+def test_a_non_designated_machine_is_told_to_mint_its_serving_cert(
+    operator_api, monkeypatch
+):
+    """THE ONE THAT MATTERS for SJC. `serves` is the browser's mint trigger, and
+    the key material for that mint exists only in the operator's browser during
+    unlock — so a machine told False here never acquires a personal serving
+    certificate, and relaxing the supervisor's launch gate alone leaves it with
+    nothing to launch. Observed on SJC: personal serving cert missing, no local
+    serve artifact, while the machine is rostered and healthy.
+
+    The election itself stays singular: `allowed` is False in this test."""
+    assert _runtime_serves(
+        operator_api[0], monkeypatch, allowed=False, reason="not-designated") is True
+
+
+def test_a_mid_join_machine_is_still_not_told_to_serve(operator_api, monkeypatch):
+    """NEGATIVE CONTROL. The old expression protected this by way of
+    designation; the predicate must protect it directly, or a machine would mint
+    a serving delegate before its roster has arrived."""
+    assert _runtime_serves(
+        operator_api[0], monkeypatch, allowed=False,
+        reason="fleet-member-provisioning") is False
 
 
 def test_deactivate_invitation_stops_new_requests_locally(operator_api):

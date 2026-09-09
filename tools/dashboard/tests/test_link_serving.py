@@ -83,18 +83,7 @@ def env(tmp_path, monkeypatch):
     GraphDB.close_all_pooled()
 
 
-def test_direct_connector_entrypoint_refuses_non_designated_machine(
-    monkeypatch, capsys,
-):
-    """A manual module launch cannot bypass the supervisor's Fleet gate."""
-    monkeypatch.setattr(
-        "tools.network.fleet_tunnel_server.state",
-        lambda: SimpleNamespace(
-            allowed=False,
-            reason="not-designated",
-            selected_machine_id="a" * 64,
-        ),
-    )
+def _launch_argv(monkeypatch):
     monkeypatch.setattr(
         "sys.argv",
         [
@@ -107,12 +96,56 @@ def test_direct_connector_entrypoint_refuses_non_designated_machine(
         ],
     )
 
+
+def test_direct_connector_entrypoint_no_longer_refuses_for_designation_alone(
+    monkeypatch,
+):
+    """THE INVERTED PREMISE, stated explicitly (auto-clune.7).
+
+    This test previously asserted the opposite: that a non-designated machine
+    could not launch a connector manually. Designation no longer gates SERVING,
+    so the entrypoint must fall through its gate. Proven by WHERE it fails —
+    reading the key file named on the command line, which is well past the
+    check — rather than by an argparse refusal."""
+    monkeypatch.setattr(
+        "tools.network.fleet_tunnel_server.state",
+        lambda: SimpleNamespace(
+            allowed=False,
+            reason="not-designated",
+            selected_machine_id="a" * 64,
+        ),
+    )
+    _launch_argv(monkeypatch)
+
+    with pytest.raises(FileNotFoundError) as exc:
+        link_serving.main()
+
+    assert "/does/not/matter" in str(exc.value)
+
+
+def test_direct_connector_entrypoint_still_refuses_an_unsafe_machine(
+    monkeypatch, capsys,
+):
+    """THE ONE THAT MATTERS, and the property the old test was really
+    protecting: a manual module launch is still not a bypass. Only designation
+    was relaxed — a mid-join machine, whose roster has not arrived, must not be
+    able to start a second primary by running the module directly."""
+    monkeypatch.setattr(
+        "tools.network.fleet_tunnel_server.state",
+        lambda: SimpleNamespace(
+            allowed=False,
+            reason="fleet-member-provisioning",
+            selected_machine_id="a" * 64,
+        ),
+    )
+    _launch_argv(monkeypatch)
+
     with pytest.raises(SystemExit) as exc:
         link_serving.main()
 
     assert exc.value.code == 2
     error = capsys.readouterr().err
-    assert "not-designated" in error
+    assert "fleet-member-provisioning" in error
     assert "a" * 64 in error
 
 

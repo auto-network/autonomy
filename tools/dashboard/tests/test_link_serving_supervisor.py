@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import logging
 import os
 import signal
 import subprocess
@@ -593,54 +594,54 @@ def test_launch_reaps_strays_before_spawning(env):
             stray.kill()
 
 
-def test_roster_assignment_stops_a_connector_owned_by_another_machine(
-    env, monkeypatch,
-):
-    """The watchdog enforces a changed synced selection on a live child."""
+def test_losing_roster_membership_stops_a_live_connector(env, monkeypatch):
+    """The watchdog enforces a changed synced roster on a live child.
+
+    This test previously asserted that a changed SELECTION stopped the
+    connector. Under all-machine serving (auto-clune.7) designation alone must
+    not stop it — that inversion is asserted in
+    `test_a_designation_change_alone_no_longer_stops_a_live_connector`. What
+    still holds, and is enforced here, is the stronger condition: a machine
+    REMOVED FROM THE ACTIVE ROSTER loses serving on the next reconcile.
+    """
     _provision_serve_cert(env)
     _put_grant()
     spawn = FakeSpawn()
     supervisor = sup.ServingSupervisor(spawn=spawn)
+    _seed_tunnel_inputs(
+        monkeypatch, local="local-machine",
+        roster=["local-machine", "other-machine"], selected="local-machine")
     assert supervisor.ensure(ORG)["reason"] == "launched"
     proc = spawn.procs[0]
 
-    monkeypatch.setattr(
-        supervisor,
-        "_fleet_eligibility",
-        lambda: SimpleNamespace(
-            allowed=False,
-            reason="not-designated",
-            selected_machine_id="22" * 32,
-        ),
-    )
-    assert supervisor.ensure(ORG) == {
-        "running": False,
-        "reason": "not-designated",
-        "selected_machine_id": "22" * 32,
-    }
+    _seed_tunnel_inputs(
+        monkeypatch, local="local-machine",
+        roster=["other-machine"], selected="other-machine")
+
+    assert supervisor.ensure(ORG)["running"] is False
     assert proc.alive() is False
     assert supervisor.running_orgs() == []
     assert len(spawn.calls) == 1
 
 
-def test_first_publish_cannot_bypass_roster_assignment(env, monkeypatch):
-    """The no-live-grant start path is gated exactly like reconciliation."""
+def test_first_publish_cannot_bypass_roster_membership(env, monkeypatch):
+    """The no-live-grant start path is gated exactly like reconciliation.
+
+    Designation no longer gates serving (auto-clune.7), so the assertion moves
+    to the property this test was actually protecting: a machine that is NOT IN
+    THE ACTIVE ROSTER cannot start a connector by taking the first-publish
+    path. Real state() is driven to tunnel-server-unassigned, which returns
+    before it validates local identity, so the predicate's re-validation is
+    what refuses here.
+    """
     _provision_serve_cert(env)
     spawn = FakeSpawn()
     supervisor = sup.ServingSupervisor(spawn=spawn)
-    monkeypatch.setattr(
-        supervisor,
-        "_fleet_eligibility",
-        lambda: SimpleNamespace(
-            allowed=False,
-            reason="tunnel-server-unassigned",
-            selected_machine_id=None,
-        ),
-    )
-    assert supervisor.start(ORG) == {
-        "running": False,
-        "reason": "tunnel-server-unassigned",
-    }
+    _seed_tunnel_inputs(
+        monkeypatch, local="stranger", roster=["a-machine", "b-machine"],
+        selected=None)
+
+    assert supervisor.start(ORG)["running"] is False
     assert spawn.calls == []
 
 
@@ -1302,3 +1303,147 @@ def test_stale_incumbent_with_a_stuck_stream_counter_is_replaced(env, monkeypatc
     assert supervisor._launch(ORG, state)["reason"] == "launched"
     assert reaped == [ORG] and len(spawn.calls) == 1
     assert ORG not in supervisor._lame_duck_since
+
+# -- activation: real predicate, faked inputs (auto-clune.7) -------------------
+#
+# These drive the REAL fleet_tunnel_server.state() and the REAL
+# tunnel_serving_permitted() by faking their INPUTS — roster, local identity,
+# stored selection. Patching `_serving_permitted` to return a bool would test
+# supervisor branching only and would never exercise the roster re-validation
+# that is this change's entire safety property.
+
+
+def _seed_tunnel_inputs(monkeypatch, *, local, roster, selected, joining=False):
+    """Make the real state() reach a chosen designation outcome."""
+    from tools.network import fleet_tunnel_server as fts
+
+    entries = tuple(roster)
+    monkeypatch.setattr(fts.machine_boot, "machine_id", lambda **k: local)
+    monkeypatch.setattr(fts.machine_boot, "is_joining", lambda **k: joining)
+    monkeypatch.setattr(fts, "_personal_root_pub", lambda: "aa" * 32)
+    monkeypatch.setattr(fts.fleet_roster, "load_entries", lambda **k: entries)
+    monkeypatch.setattr(
+        fts.fleet_roster, "resolve",
+        lambda entries, anchor_root_pub: {
+            m: SimpleNamespace(machine_id=m) for m in roster})
+    monkeypatch.setattr(fts, "_stored_selection", lambda: (selected, None))
+
+
+def test_an_active_non_selected_member_may_now_serve(env, monkeypatch):
+    """Designation alone no longer withholds serving. Real state() returns
+    not-designated here — this machine is rostered but another is selected —
+    and the connector launches anyway."""
+    _provision_serve_cert(env)
+    _put_grant()
+    spawn = FakeSpawn()
+    _seed_tunnel_inputs(
+        monkeypatch, local="local-machine",
+        roster=["local-machine", "other-machine"], selected="other-machine")
+    from tools.network import fleet_tunnel_server as fts
+    assert fts.state().reason == "not-designated"      # the real gate is exercised
+    assert fts.state().allowed is False                # election unchanged
+
+    assert sup.ServingSupervisor(spawn=spawn).ensure(ORG)["running"] is True
+
+
+def test_a_machine_absent_from_the_roster_still_refuses(env, monkeypatch):
+    """NEGATIVE CONTROL, and the property the old test was protecting. With no
+    selection assigned, state() returns tunnel-server-unassigned BEFORE it
+    validates local identity, so the predicate re-validates roster membership.
+    A machine that is not in the active roster must not serve."""
+    _provision_serve_cert(env)
+    _put_grant()
+    spawn = FakeSpawn()
+    _seed_tunnel_inputs(
+        monkeypatch, local="stranger", roster=["a-machine", "b-machine"],
+        selected=None)
+
+    result = sup.ServingSupervisor(spawn=spawn).ensure(ORG)
+
+    assert result["running"] is False
+    # The refusal must name the ACTUAL cause. state() returns
+    # tunnel-server-unassigned before it validates membership, so reporting the
+    # election's reason here would send an operator looking for a missing
+    # assignment when the machine simply is not in the roster.
+    assert result["reason"] == "machine-not-rostered"
+    assert spawn.calls == []
+
+
+def test_the_stop_log_names_the_actual_cause(env, monkeypatch, caplog):
+    """The RETURN value is read by an API caller; the LOG is what an operator
+    reads when asking why a connector is not running. Both must carry the same
+    effective reason, or the likelier diagnostic path is the misleading one: a
+    machine dropped from the roster would be logged as an assignment problem and
+    send the operator after a selection that is not the cause."""
+    _provision_serve_cert(env)
+    _put_grant()
+    spawn = FakeSpawn()
+    supervisor = sup.ServingSupervisor(spawn=spawn)
+    _seed_tunnel_inputs(
+        monkeypatch, local="local-machine",
+        roster=["local-machine", "other-machine"], selected="local-machine")
+    assert supervisor.ensure(ORG)["running"] is True   # a live proc to stop
+
+    # Dropped from the roster with no selection stored: state() reports
+    # tunnel-server-unassigned, the predicate reports machine-not-rostered.
+    _seed_tunnel_inputs(
+        monkeypatch, local="local-machine", roster=["other-machine"], selected=None)
+    with caplog.at_level(logging.WARNING, logger=sup._log.name):
+        result = supervisor.ensure(ORG)
+
+    assert result["reason"] == "machine-not-rostered"
+    stops = [r.getMessage() for r in caplog.records
+             if "stopping serving connector" in r.getMessage()]
+    assert stops, "a stop must never be silent"
+    assert "machine-not-rostered" in stops[-1]
+    assert "tunnel-server-unassigned" not in stops[-1]
+
+
+def test_a_machine_with_no_durable_identity_still_refuses(env, monkeypatch):
+    """The second condition state() had not reached at tunnel-server-unassigned."""
+    _provision_serve_cert(env)
+    _put_grant()
+    spawn = FakeSpawn()
+    _seed_tunnel_inputs(
+        monkeypatch, local=None, roster=["a-machine", "b-machine"], selected=None)
+    result = sup.ServingSupervisor(spawn=spawn).ensure(ORG)
+
+    assert result["running"] is False
+    assert result["reason"] == "machine-identity-missing"
+    assert spawn.calls == []
+
+
+def test_a_machine_mid_join_still_refuses(env, monkeypatch):
+    """Preserved negative control: a joining machine fails closed so it never
+    serves as a second primary before its roster arrives."""
+    _provision_serve_cert(env)
+    _put_grant()
+    spawn = FakeSpawn()
+    _seed_tunnel_inputs(
+        monkeypatch, local="local-machine", roster=[], selected=None, joining=True)
+
+    assert sup.ServingSupervisor(spawn=spawn).ensure(ORG)["running"] is False
+    assert spawn.calls == []
+
+
+def test_a_designation_change_alone_no_longer_stops_a_live_connector(env, monkeypatch):
+    """The inverted premise, stated explicitly. The watchdog used to stop a
+    connector when the synced selection named another machine; under
+    all-machine serving it must not, provided this machine is still rostered."""
+    _provision_serve_cert(env)
+    _put_grant()
+    spawn = FakeSpawn()
+    supervisor = sup.ServingSupervisor(spawn=spawn)
+    _seed_tunnel_inputs(
+        monkeypatch, local="local-machine",
+        roster=["local-machine", "other-machine"], selected="local-machine")
+    assert supervisor.ensure(ORG)["running"] is True
+    proc = spawn.procs[0]
+
+    _seed_tunnel_inputs(
+        monkeypatch, local="local-machine",
+        roster=["local-machine", "other-machine"], selected="other-machine")
+
+    assert supervisor.ensure(ORG)["running"] is True
+    assert proc.alive() is True
+

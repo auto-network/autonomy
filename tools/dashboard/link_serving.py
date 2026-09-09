@@ -1837,8 +1837,20 @@ def main() -> None:
     # helper itself.
     from tools.network import fleet_tunnel_server
 
-    tunnel_server = fleet_tunnel_server.state()
-    if not tunnel_server.allowed:
+    # Designation no longer gates SERVING (auto-clune.7): every authorized
+    # machine may run a connector. Safety reasons still block — mid-join,
+    # missing personal root, unreadable/empty/invalid roster, inactive
+    # assignment, missing identity, non-rostered machine.
+    #
+    # This rests on TunnelHub slotting tunnels by (persona, machine) so distinct
+    # machines coexist, which IS implemented and tested in source. What is not
+    # yet established is the DEPLOYED picture: the rollout check is the deployed
+    # revision plus live connector hello evidence, since the production path is
+    # TunnelConnector v2/v3 carrying machine_key rather than the v1 generic
+    # relay proof, and only v1 shares the empty-machine slot.
+    permitted, reason = fleet_tunnel_server.tunnel_serving_permitted()
+    if not permitted:
+        tunnel_server = fleet_tunnel_server.state()
         selected = (
             f"; selected machine is {tunnel_server.selected_machine_id}"
             if tunnel_server.selected_machine_id is not None
@@ -1846,7 +1858,7 @@ def main() -> None:
         )
         parser.error(
             "this Fleet machine may not serve auto.network tunnels "
-            f"({tunnel_server.reason}{selected})"
+            f"({reason}{selected})"
         )
 
     with open(args.key_file) as fh:

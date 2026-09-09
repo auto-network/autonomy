@@ -1007,9 +1007,10 @@ class ServingSupervisor:
         interval it takes the publish to cache its grant. Idempotent."""
         with self._lock:
             self._managed.add(org)
-            eligibility = self._fleet_eligibility()
-            if not eligibility.allowed:
-                return self._stop_for_fleet_assignment(org, eligibility)
+            permitted, why = self._serving_permitted()
+            if not permitted:
+                return self._stop_for_fleet_assignment(
+                    org, self._fleet_eligibility(), reason=why)
             proc = self._procs.get(org)
             if proc is not None and proc.alive():
                 state = serve_cert_state(org, now=self._now())
@@ -1048,9 +1049,13 @@ class ServingSupervisor:
 
     def _reconcile(self, org: str | None) -> dict:
         now = self._now()
+        # `eligibility` is still needed below for active_machine_count, and it
+        # remains the singular-ownership election. Only the SERVING GATE moves
+        # to the narrower predicate.
         eligibility = self._fleet_eligibility()
-        if not eligibility.allowed:
-            return self._stop_for_fleet_assignment(org, eligibility)
+        permitted, why = self._serving_permitted()
+        if not permitted:
+            return self._stop_for_fleet_assignment(org, eligibility, reason=why)
         state = serve_cert_state(org, now=now)
         proc = self._procs.get(org)
         # The personal fleet's tunnel must stay online whenever the fleet has
@@ -1212,6 +1217,19 @@ class ServingSupervisor:
         return self._launch(org, state)
 
     @staticmethod
+    def _serving_permitted():
+        """Whether THIS machine may run a connector at all.
+
+        Narrower than :func:`_fleet_eligibility`, which reports the fleet's
+        SINGULAR-OWNERSHIP election and is still what every non-tunnel consumer
+        gates on. Designation alone no longer withholds serving; every safety
+        reason still does.
+        """
+        from tools.network import fleet_tunnel_server
+
+        return fleet_tunnel_server.tunnel_serving_permitted()
+
+    @staticmethod
     def _fleet_eligibility():
         """Read the temporary personal Fleet assignment at reconciliation.
 
@@ -1223,13 +1241,28 @@ class ServingSupervisor:
 
         return fleet_tunnel_server.state()
 
-    def _stop_for_fleet_assignment(self, org, eligibility) -> dict:
-        """Stop local ownership when another roster machine is selected."""
+    def _stop_for_fleet_assignment(self, org, eligibility, reason=None) -> dict:
+        """Stop local ownership when this machine may not serve.
+
+        *reason* overrides ``eligibility.reason`` when the refusal came from the
+        serving predicate rather than the election. They can differ, and the
+        election's reason is the misleading one: ``state()`` returns
+        ``tunnel-server-unassigned`` BEFORE it validates identity or roster
+        membership, so a machine refused for NOT BEING ROSTERED would otherwise
+        report a missing assignment and send an operator after the wrong thing.
+
+        ONE effective reason serves the log and the return value. The log is the
+        likelier path for an operator asking why a connector is not running, so
+        it must not be the one carrying the misleading reason, and it names
+        SERVING ELIGIBILITY rather than assignment alone — assignment is only
+        one of the things that can refuse.
+        """
+        effective_reason = reason or eligibility.reason
         proc = self._procs.pop(org, None)
         if proc is not None:
             _log.warning(
-                "stopping serving connector for org=%s: fleet assignment "
-                "(%s, selected=%s)", org, eligibility.reason,
+                "stopping serving connector for org=%s: not eligible to serve "
+                "(%s, selected=%s)", org, effective_reason,
                 eligibility.selected_machine_id,
             )
             with contextlib.suppress(Exception):
@@ -1240,7 +1273,7 @@ class ServingSupervisor:
         self._lame_duck_since.pop(org, None)
         self._boot_commit.pop(org, None)
         self._release_lock(org)
-        result = {"running": False, "reason": eligibility.reason}
+        result = {"running": False, "reason": effective_reason}
         if eligibility.selected_machine_id is not None:
             result["selected_machine_id"] = eligibility.selected_machine_id
         return result
