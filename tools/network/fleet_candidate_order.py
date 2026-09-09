@@ -41,8 +41,9 @@ from typing import Callable, Iterable, Sequence
 
 #: Ignore a recorded address older than this for ordering purposes. The
 #: record is never deleted; it simply stops being promoted, so an address
-#: that has stopped working is not tried first indefinitely. PROPOSED
-#: VALUE, NOT APPROVED.
+#: that has stopped working is not tried first indefinitely. Explicitly
+#: selected for the fleet dial integration (auto-fpjdr, 2026-09-09); it
+#: is a decay bound and carries no performance guarantee.
 DEFAULT_MAX_AGE_NS = 24 * 60 * 60 * 1_000_000_000
 
 
