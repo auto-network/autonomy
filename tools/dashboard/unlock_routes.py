@@ -1318,7 +1318,42 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
         # Strictly after _install_personal_audited_delegate: the audited
         # write is a cold delegate seal against the recipient just published.
         _ensure_sealed_settings_pepper()
-    return JSONResponse({"ok": True, "generations": loaded})
+    # PERSIST THE CARRIER AT UNLOCK, not only at shutdown.
+    #
+    # MEASURED: the only production writer of the ramfs snapshot is the
+    # graceful-shutdown hook (server.py:22257), and it writes only when the
+    # process is already warm. So an unlock warms this process and persists
+    # nothing; a process killed before any graceful shutdown carries nothing
+    # forward.
+    #
+    # NOT ESTABLISHED: that this is what happened on 2026-09-09. Whether either
+    # of that day's two unlocks reached a shutdown that wrote is unrecoverable
+    # — save's bool is discarded at server.py:22257 and restore's missing-files
+    # branch is silent. This is a behaviour change that removes a dependency on
+    # a clean shutdown; it is not a proven incident root cause.
+    #
+    # Same ramfs carrier, same policy, no disk fallback: this adds no storage,
+    # only a second moment at which the existing carrier is written.
+    snapshot = False
+    try:
+        snapshot = save_vault_across_hot_reload()
+    except Exception:
+        logger.exception("unlock: vault snapshot write raised")
+    if not snapshot:
+        # SAY SO IN THE RESPONSE. The UI reported "unlocked" five times while
+        # the log said the next process would boot locked; that gap is what
+        # made repeated unlock requests look reasonable.
+        logger.warning(
+            "unlock: this process is warm but NO ramfs snapshot was written — "
+            "nothing is carried forward unless a later graceful shutdown "
+            "writes one")
+    return JSONResponse({
+        "ok": True,
+        "generations": loaded,
+        # False means warm-but-not-durable: this process can serve, and a
+        # restart returns to locked.
+        "snapshot_persisted": snapshot,
+    })
 
 
 def _validate_audited_delegate_pair(private_hex: object,
@@ -1545,17 +1580,42 @@ def save_vault_across_hot_reload() -> bool:
     kem_private = _VAULT_CACHE.get("kem_private")
     audited_delegate = _VAULT_CACHE.get("audited_delegate")
     if delegate is None or not kem_private or not audited_delegate:
+        # OBSERVABILITY. This return value is discarded by the sole production
+        # caller (server.py:22257), so the documented "a locked or partially
+        # warmed process writes nothing" case has always been silent — one of
+        # the two links that made 2026-09-09 unrecoverable. Reports the
+        # MEASURED outcome only: which of the three parts was absent. Never
+        # any key bytes, and no claim about what a later process will do —
+        # another carrier may exist.
+        missing = [
+            name for name, present in (
+                ("delegate", delegate is not None),
+                ("kem_private", bool(kem_private)),
+                ("audited_delegate", bool(audited_delegate)),
+            ) if not present
+        ]
+        logger.warning(
+            "vault snapshot NOT written (pid=%s): missing %s",
+            os.getpid(), ",".join(missing),
+        )
         return False
+    # A True return was silent too, so "snapshot written" was as invisible as
+    # "snapshot declined". Logged at the same level for the same reason.
     try:
         _keycache_write(_HOTRELOAD_DELEGATE, delegate.private_hex.encode("ascii"))
         _keycache_write(_HOTRELOAD_KEM, kem_private.encode("ascii"))
         _keycache_write(
             _HOTRELOAD_AUDITED_DELEGATE, audited_delegate.encode("ascii")
         )
+        logger.warning(
+            "vault snapshot written (pid=%s): delegate + kem + audited-delegate",
+            os.getpid(),
+        )
         return True
     except Exception:
         logger.exception(
-            "vault hot-reload snapshot failed; the next process will boot locked"
+            "vault snapshot write FAILED (pid=%s): nothing was carried forward "
+            "by this attempt", os.getpid()
         )
         _keycache_clear(_HOTRELOAD_DELEGATE)
         _keycache_clear(_HOTRELOAD_KEM)
@@ -1576,6 +1636,23 @@ def restore_vault_across_hot_reload() -> bool:
     kem_raw = _keycache_read(_HOTRELOAD_KEM)
     audited_raw = _keycache_read(_HOTRELOAD_AUDITED_DELEGATE)
     if not delegate_raw or not kem_raw or not audited_raw:
+        # OBSERVABILITY. This branch returned False with no log, so "no restore
+        # line" was ambiguous between never-called, files-absent and
+        # process-died-earlier. NONE present and a PARTIAL set are different
+        # diagnoses and are now distinguished.
+        present = [
+            name for name, raw in (
+                ("delegate", delegate_raw),
+                ("kem", kem_raw),
+                ("audited-delegate", audited_raw),
+            ) if raw
+        ]
+        logger.warning(
+            "vault snapshot NOT restored (pid=%s): %s",
+            os.getpid(),
+            ("no snapshot files present" if not present
+             else f"PARTIAL snapshot, only {','.join(present)} present"),
+        )
         # Never leave a partial snapshot for a later process to mistake for a
         # complete hand-off (including one written by the pre-recipient code).
         _keycache_clear(_HOTRELOAD_DELEGATE)
@@ -1620,16 +1697,27 @@ def restore_vault_across_hot_reload() -> bool:
             "key-holder present",
             len(generation_keys),
         )
+        # CONSUME on success. These used to sit in a `finally`, which also ran
+        # on failure and destroyed a complete snapshot that had merely failed
+        # to APPLY. Moving them here keeps the consume and drops the destroy —
+        # but they must be INSIDE the success path, because this `return True`
+        # would otherwise skip them entirely (caught in review).
+        _keycache_clear(_HOTRELOAD_DELEGATE)
+        _keycache_clear(_HOTRELOAD_KEM)
+        _keycache_clear(_HOTRELOAD_AUDITED_DELEGATE)
         return True
     except Exception:
         logger.exception(
             "vault hot-reload restore failed; leaving the vault locked"
         )
+        # DO NOT CLEAR. The snapshot was COMPLETE; applying it failed, which
+        # can be transient (the grants store briefly unavailable, a partially
+        # started process). Clearing here destroyed the only carrier and made
+        # a transient failure permanent — the next process then had nothing to
+        # restore and only a human could recover it. A complete snapshot is
+        # kept so the next start can retry; it lives in ramfs and dies with
+        # the machine anyway.
         return False
-    finally:
-        _keycache_clear(_HOTRELOAD_DELEGATE)
-        _keycache_clear(_HOTRELOAD_KEM)
-        _keycache_clear(_HOTRELOAD_AUDITED_DELEGATE)
 
 
 def _fold_for(slug):
