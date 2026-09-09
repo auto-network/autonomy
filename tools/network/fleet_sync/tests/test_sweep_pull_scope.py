@@ -174,14 +174,14 @@ def test_a_bootstrapping_store_asks_v5_and_refuses_a_checkpoint(
 
     assert channel.sent, "the client never sent a request"
     decoded = fss.decode_pull_request(channel.sent[0])
-    version, accept_checkpoint = decoded[5], decoded[6]
+    version = decoded[5]
     assert version >= SWEEP_PROTOCOL_VERSION, (
         f"a resuming sweep must not negotiate below v{SWEEP_PROTOCOL_VERSION}, "
         f"asked v{version}"
     )
-    assert accept_checkpoint is False, (
-        "a store part-way through a sweep offered to accept a checkpoint"
-    )
+    # There is no accept_checkpoint to assert: sync checkpoints are deleted,
+    # so a resuming sweep has nothing to refuse and the field is off the wire.
+    assert b"accept_checkpoint" not in channel.sent[0]
 
 
 def test_a_delivered_begin_anchors_the_store_through_the_real_receiver(
@@ -240,7 +240,6 @@ def test_a_settled_store_is_unaffected(tmp_path: Path, monkeypatch) -> None:
     assert channel.sent
     decoded = fss.decode_pull_request(channel.sent[0])
     assert decoded[5] == fss.FLEET_SYNC_PROTOCOL_VERSION
-    assert decoded[6] is True, "an ordinary store still accepts checkpoints"
 
 
 def test_an_unsolicited_begin_on_a_v4_pull_anchors_nothing(
@@ -303,9 +302,8 @@ def test_a_fresh_joiner_asks_for_the_sweep_without_pre_seeding(
         f"a fresh joiner asked v{decoded[5]}, so it can never be served a "
         f"sweep and bootstrap cannot start"
     )
-    assert decoded[6] is True, (
-        "asking for a sweep is not committing to one; a fresh joiner must "
-        "still accept a checkpoint from a server that cannot sweep"
+    assert b"accept_checkpoint" not in channel.sent[0], (
+        "the request still carries a checkpoint concept"
     )
 
 
@@ -330,5 +328,139 @@ def test_a_fresh_joiner_can_anchor_from_a_delivered_begin(
         state = read_bootstrap(conn)
         assert state is not None, "a fresh joiner could not anchor a bootstrap"
         assert state.frontier == {PEER: 77}
+    finally:
+        conn.close()
+
+
+# ── auto-5j6o0: the > F half and durable completion ──────────────────────
+
+def _sweep_stream(frontier, *, records=(), end=True):
+    """A server stream: begin, optional pages, optional end."""
+    frames = [json.dumps({
+        "v": SWEEP_PROTOCOL_VERSION, "kind": SWEEP_BEGIN_KIND,
+        "scope": "personal", "source_machine_pub": PEER,
+        "frontier": frontier,
+    }).encode()]
+    for header, ops in records:
+        frames.append(header)
+        frames.extend(ops)
+    if end:
+        frames.append(json.dumps({
+            "v": SWEEP_PROTOCOL_VERSION, "kind": "sweep.end",
+            "records": sum(len(o) for _, o in records),
+        }).encode())
+    return frames
+
+
+def test_completion_requires_the_whole_stream_not_a_timestamp(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A pull that never reaches its summary must NOT complete a bootstrap.
+
+    Completion is recorded only after the receiver has verified the summary's
+    count and digest against what it decoded itself. Anything short of that --
+    including a stream that simply stops -- leaves the phase where it was and
+    the frontier suppressed.
+    """
+    from tools.network.fleet_sync.sweep_receive import (
+        Phase, may_advertise_frontier,
+    )
+
+    scheduler, personal = _scheduler(tmp_path)
+
+    class _Truncated(_FakeChannel):
+        def recv_message_stream(self):
+            frames = list(self._script)
+
+            async def stream():
+                for index, frame in enumerate(frames):
+                    yield frame, index == len(frames) - 1
+            return stream()   # NO summary frame: the stream just ends
+
+    channel = _Truncated(_sweep_stream({PEER: 42}))
+    _drive(monkeypatch, scheduler, channel, expect=fss.FleetSyncProtocolError)
+
+    conn = sqlite3.connect(personal)
+    try:
+        state = read_bootstrap(conn)
+        assert state is not None, "the begin should still have anchored"
+        assert state.phase is not Phase.COMPLETE, (
+            "a truncated stream completed a bootstrap"
+        )
+        assert may_advertise_frontier(conn) is False, (
+            "an incomplete bootstrap is advertising its frontier"
+        )
+    finally:
+        conn.close()
+
+
+def test_interruption_leaves_the_frontier_suppressed_then_resume_completes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The reviewer's sequence: interrupt before the final apply, confirm the
+    bootstrap is incomplete and silent, then resume and complete correctly --
+    against the SAME F, which must not move."""
+    from tools.network.fleet_sync.sweep_receive import (
+        Phase, may_advertise_frontier,
+    )
+
+    scheduler, personal = _scheduler(tmp_path)
+
+    # 1. Interrupted: begin arrives, stream dies before the summary.
+    class _Truncated(_FakeChannel):
+        def recv_message_stream(self):
+            frames = list(self._script)
+
+            async def stream():
+                for index, frame in enumerate(frames):
+                    yield frame, index == len(frames) - 1
+            return stream()
+
+    # begin THEN sweep.end, and the stream stops before its summary. The
+    # begin must not be the final frame: the receiver rejects any stream whose
+    # last frame is not the summary BEFORE dispatching control records, so a
+    # lone begin correctly anchors nothing. That is a malformed stream, not an
+    # interruption -- the case under test is a stream that got somewhere and
+    # then died.
+    _drive(monkeypatch, scheduler,
+           _Truncated(_sweep_stream({PEER: 42})),
+           expect=fss.FleetSyncProtocolError)
+
+    conn = sqlite3.connect(personal)
+    try:
+        interrupted = read_bootstrap(conn)
+        assert interrupted.phase is Phase.SWEEPING
+        assert interrupted.frontier == {PEER: 42}
+        assert may_advertise_frontier(conn) is False
+    finally:
+        conn.close()
+
+    # 2. Resume: a complete stream, terminating in a valid summary.
+    _drive(monkeypatch, scheduler, _FakeChannel(_sweep_stream({PEER: 42})))
+
+    conn = sqlite3.connect(personal)
+    try:
+        done = read_bootstrap(conn)
+        assert done.frontier == {PEER: 42}, (
+            "F moved across the resume; every key between the old and new "
+            "frontier would be stranded"
+        )
+        assert done.phase is Phase.COMPLETE, "the resume did not complete"
+        assert may_advertise_frontier(conn) is True, (
+            "a completed bootstrap is still suppressing its frontier"
+        )
+    finally:
+        conn.close()
+
+
+def test_a_settled_store_completion_path_is_untouched(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A store with no bootstrap must not gain one from a successful pull."""
+    scheduler, personal = _scheduler(tmp_path, settled=True)
+    _drive(monkeypatch, scheduler, _FakeChannel([]))
+    conn = sqlite3.connect(personal)
+    try:
+        assert read_bootstrap(conn) is None
     finally:
         conn.close()

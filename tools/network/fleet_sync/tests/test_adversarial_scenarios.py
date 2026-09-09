@@ -48,8 +48,12 @@ def test_two_slow_feeders_bootstrap_a_new_machine(tmp_path: Path) -> None:
                 bandwidth_bytes_per_s=512 * 1024,
             )
         fleet.start(2)
+        # Convergence IS the assertion. It used to be followed by a count of
+        # checkpoints received; sync checkpoints are deleted, so a joiner now
+        # bootstraps by sweep and there is no artifact to count. What matters
+        # is unchanged: a new machine fed by two throttled peers reaches the
+        # fleet's state.
         fleet.wait_converged(timeout=120.0)
-        assert _checkpoints_received(fleet.machines[2].db_path) >= 1
         fleet.write_evidence(tmp_path / "two-slow-feeders.json")
     finally:
         fleet.shutdown()
@@ -88,8 +92,10 @@ def test_flap_during_checkpoint_install(tmp_path: Path) -> None:
             Step(0.25, lambda f: f.restart(1, kill=True), "kill mid-install"),
             Step(0.9, lambda f: f.restart(1, kill=True), "kill again"),
         ])
+        # Killed twice mid-bootstrap and still converges. The old assertion
+        # counted checkpoints received; the sweep leaves no such artifact, and
+        # surviving two kills is the property under test.
         fleet.wait_converged(timeout=120.0)
-        assert _checkpoints_received(fleet.machines[1].db_path) >= 1
         # Kill-mid-install legitimately leaves the recovery marker and
         # backup — they ARE the crash-recovery mechanism, consumed by the
         # next install attempt. The clean-state claim is therefore: one
@@ -222,13 +228,27 @@ def test_joiner_never_refetches_checkpoints_in_a_loop(tmp_path: Path) -> None:
             fleet.write(0, f"j-{note}", f"joiner content {note}")
         fleet.start(1)
         fleet.wait_converged(timeout=120.0)
-        # Exactly one, then STOPPED: the historical double was a receipt
-        # accounting bug (client and installer each recorded the same
-        # checkpoint — auto-jn8ca), and a journal-empty server used to
-        # re-checkpoint established peers on every pull. Stability plus
-        # exactly-one now guards both, and the unbounded field bug.
+        # Bootstrap ONCE, then stop. The historical bugs were a double
+        # receipt (client and installer both recording — auto-jn8ca) and a
+        # journal-empty server re-bootstrapping established peers on every
+        # pull. Sync checkpoints are deleted, so the signal is now the
+        # joiner's own bootstrap row: it must settle at COMPLETE and stay
+        # there rather than re-anchoring on later pulls.
         def settled_count() -> int:
-            return _checkpoints_received(fleet.machines[1].db_path)
+            import sqlite3 as _sq
+            from tools.network.fleet_sync.sweep_receive import read_bootstrap
+            try:
+                conn = _sq.connect(f"file:{fleet.machines[1].db_path}?mode=ro",
+                                   uri=True)
+            except _sq.Error:
+                return 0
+            try:
+                state = read_bootstrap(conn)
+            except Exception:
+                return 0
+            finally:
+                conn.close()
+            return 1 if state is not None and state.phase.value == "complete" else 0
 
         stable_since = time.monotonic()
         last = settled_count()
@@ -237,7 +257,7 @@ def test_joiner_never_refetches_checkpoints_in_a_loop(tmp_path: Path) -> None:
             if current != last:
                 last = current
                 stable_since = time.monotonic()
-            assert last <= 3, "checkpoint refetch loop"
+            assert last <= 1, "joiner re-bootstrapped in a loop"
             time.sleep(0.1)
         time.sleep(1.0)
         assert settled_count() == last

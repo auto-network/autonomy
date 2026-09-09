@@ -15,31 +15,33 @@ from tools.network.fleet_sync_scheduler import (
 
 
 def test_scope_field_roundtrip_and_personal_bytes_unchanged() -> None:
+    """The request carries no checkpoint concept: sync checkpoints are gone.
+
+    ``accept_checkpoint`` used to ride here so a founded origin could refuse a
+    checkpoint install. There is no checkpoint to refuse, so the field and its
+    tuple slot are removed rather than left as a permanently-true vestige.
+    """
     epoch = "ab" * 32
     compat = "cd" * 32
     personal = encode_pull_request(epoch, compat=compat)
     assert b"scope" not in personal  # request shape shared with v3 fleets
+    assert b"accept_checkpoint" not in personal
     assert decode_pull_request(personal) == (
-        epoch, (), compat, "personal", False, 4, True, None
+        epoch, (), compat, "personal", False, 4, None
     )
     scoped = encode_pull_request(epoch, compat=compat, scope="alpha")
     assert decode_pull_request(scoped) == (
-        epoch, (), compat, "alpha", False, 4, True, None
+        epoch, (), compat, "alpha", False, 4, None
     )
     boot = encode_pull_request(epoch, compat=compat, bootstrap=True)
     assert decode_pull_request(boot) == (
-        epoch, (), compat, "personal", True, 4, True, None
-    )
-    origin = encode_pull_request(epoch, compat=compat, accept_checkpoint=False)
-    assert b"accept_checkpoint" in origin
-    assert decode_pull_request(origin) == (
-        epoch, (), compat, "personal", False, 4, False, None
+        epoch, (), compat, "personal", True, 4, None
     )
     marked = encode_pull_request(epoch, compat=compat, watermarks={"ab" * 32: 5})
-    assert decode_pull_request(marked)[7] == {"ab" * 32: 5}
+    assert decode_pull_request(marked)[6] == {"ab" * 32: 5}
     legacy = encode_pull_request(epoch, compat=compat, version=3)
     assert decode_pull_request(legacy) == (
-        epoch, (), compat, "personal", False, 3, True, None
+        epoch, (), compat, "personal", False, 3, None
     )
     with pytest.raises(FleetSyncProtocolError):
         encode_pull_request(epoch, compat=compat, scope="bad:scope")
