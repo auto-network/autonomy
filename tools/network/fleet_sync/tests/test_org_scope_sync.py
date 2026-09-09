@@ -149,3 +149,32 @@ def test_a_legacy_peer_sending_accept_checkpoint_is_still_admitted() -> None:
 
     # And we never emit it ourselves.
     assert b"accept_checkpoint" not in encode_pull_request(epoch, compat=compat)
+
+
+#: Optional request fields that peers in the field still SEND, and which this
+#: decoder must therefore keep accepting even after we stop emitting them.
+#: Removing an entry here is a WIRE BREAK for every peer that has not updated.
+RETIRED_BUT_STILL_ACCEPTED = frozenset({"accept_checkpoint"})
+
+
+def test_retired_request_fields_stay_accepted_by_the_decoder() -> None:
+    """A strict allow-list makes every removed optional field a breaking change.
+
+    ``decode_pull_request`` refuses any request whose key set is not a subset
+    of the allow-list. So a field can be dropped from the ENCODER freely -- it
+    only governs what we send -- but dropping it from the DECODER refuses every
+    peer that still sends it. Those are two changes, and only the send half is
+    ever safe to make unilaterally: the receive half has to wait until no peer
+    emits the field, which means a fleet-wide version in between.
+
+    Doing both at once took fleet sync down for 23 minutes across four scopes
+    (2026-09-09T17:31Z). This guard fails if someone repeats it.
+    """
+    from tools.network.fleet_sync_scheduler import _REQUEST_OPTIONAL_FIELDS
+
+    missing = RETIRED_BUT_STILL_ACCEPTED - set(_REQUEST_OPTIONAL_FIELDS)
+    assert not missing, (
+        f"removed from the decoder allow-list: {sorted(missing)}. Peers still "
+        "send these; refusing them breaks sync with every un-updated machine. "
+        "Retire the ENCODER first, wait for the fleet, then the decoder."
+    )
