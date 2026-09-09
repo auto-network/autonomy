@@ -258,7 +258,7 @@ def test_initialized_read_only_fallback_still_serves_reads(
 
 
 def test_persona_backfill_is_read_first_when_nothing_pending(tmp_path, monkeypatch):
-    """A backfilled DB takes NO write lock in _backfill_content_persona.
+    """A backfilled DB takes NO write lock in backfill_content_persona.
 
     The 2026-08-28 mass-dispatch incident: five unconditional UPDATEs ran
     on every version-mismatch open, lost the lock race under load, 500'd
@@ -284,7 +284,7 @@ def test_persona_backfill_is_read_first_when_nothing_pending(tmp_path, monkeypat
         monkeypatch.setattr(org_ops, "local_persona_pub", lambda: "persona-x")
 
         # First pass genuinely backfills the NULL row.
-        db._backfill_content_persona()
+        db.backfill_content_persona()
         row = db.conn.execute(
             "SELECT persona_id FROM sources WHERE id = 's1'").fetchone()
         assert row[0] == "persona-x"
@@ -292,7 +292,7 @@ def test_persona_backfill_is_read_first_when_nothing_pending(tmp_path, monkeypat
         # Second pass: nothing pending — assert zero writes issued.
         statements: list[str] = []
         db.conn.set_trace_callback(statements.append)
-        db._backfill_content_persona()
+        db.backfill_content_persona()
         db.conn.set_trace_callback(None)
         writes = [s for s in statements
                   if s.strip().upper().startswith(("UPDATE", "COMMIT",

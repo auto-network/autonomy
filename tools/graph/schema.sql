@@ -31,7 +31,9 @@ CREATE TABLE IF NOT EXISTS sources (
     successor_id      TEXT,                   -- loose reference to another source (promotion succession)
     moved_to_org      TEXT,
     persona_id        TEXT,                   -- org-scoped human persona; nullable for legacy/imports
-    session_id        TEXT                    -- submitting tmux session; nullable for direct browser writes
+    session_id        TEXT,                   -- submitting tmux session; nullable for direct browser writes
+    short_description TEXT,                   -- one or two sentences explaining the source's purpose
+    keywords          TEXT                    -- comma-separated synonym/alias list, indexed by sources_fts
 );
 -- The ``type`` column is an open string; common values include the ones
 -- listed above. The ``agentic`` value identifies short-lived agent-action
@@ -504,3 +506,87 @@ CREATE TABLE IF NOT EXISTS keycontrol_pending_usage (
     pending_rows  INTEGER NOT NULL,
     pending_bytes INTEGER NOT NULL
 );
+
+-- >>> DERIVED SCHEMA OBJECTS <<<
+-- ============================================================
+-- INDEXES, FTS AND TRIGGERS THAT ONCE EXISTED ONLY IN MIGRATIONS
+-- ============================================================
+-- EXECUTED AFTER the migrations, never before: every statement below
+-- depends on a column that a migration adds to a LEGACY store (sources
+-- .publication_state / .short_description / .keywords, settings
+-- .terminal_persona and the envelope columns). Running them first raises
+-- 'no such column' and aborts the whole open. On a FRESH database the base
+-- above already creates those columns, so the split is invisible there and
+-- both paths finish in the same shape -- which test_schema_is_complete
+-- asserts.
+-- These were created by _migrate_* methods and NOT by this file, so a
+-- database built from schema.sql alone was missing 21 objects and two
+-- columns -- including sources_fts and the uniqueness indexes the
+-- (source_id, message_id) dedup depends on. A new install was correct only
+-- because it also ran fourteen historical migrations.
+--
+-- This file is now the complete current shape, which is what makes a fresh
+-- install structurally current instead of accidentally current.
+-- test_schema_is_complete.py fails if a migration ever adds an object this
+-- file does not.
+
+CREATE INDEX IF NOT EXISTS idx_sources_last_activity ON sources(last_activity_at);
+CREATE INDEX IF NOT EXISTS idx_sources_publication_state ON sources(publication_state);
+CREATE INDEX IF NOT EXISTS idx_sources_type ON sources(type);
+
+-- Defence in depth against a re-ingest writing a turn twice; partial so
+-- rows with no message_id (rare, legitimate) are unconstrained.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_thoughts_source_message_unique
+    ON thoughts(source_id, message_id) WHERE message_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_derivations_source_message_unique
+    ON derivations(source_id, message_id) WHERE message_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_settings_set ON settings(set_id, key);
+CREATE INDEX IF NOT EXISTS idx_settings_schema ON settings(set_id, schema_revision);
+CREATE INDEX IF NOT EXISTS idx_settings_state ON settings(publication_state);
+CREATE INDEX IF NOT EXISTS idx_settings_expires_at ON settings(expires_at)
+    WHERE expires_at IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_settings_one_base
+    ON settings(set_id, schema_revision, key, publication_state)
+    WHERE supersedes IS NULL AND excludes IS NULL AND deprecated = 0
+      AND terminal_persona IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_settings_one_slot
+    ON settings(set_id, schema_revision, key, publication_state, terminal_persona)
+    WHERE supersedes IS NULL AND excludes IS NULL AND deprecated = 0
+      AND terminal_persona IS NOT NULL;
+
+-- A settings envelope is all-NULL (unsigned) or complete (witness optional).
+CREATE TRIGGER IF NOT EXISTS trg_settings_envelope_insert
+BEFORE INSERT ON settings WHEN NOT (
+    (NEW.signed_at IS NULL AND NEW.signing_key IS NULL AND NEW.signature IS NULL
+     AND NEW.witness IS NULL AND NEW.terminal_persona IS NULL)
+ OR (NEW.signed_at IS NOT NULL AND NEW.signing_key IS NOT NULL
+     AND NEW.signature IS NOT NULL AND NEW.terminal_persona IS NOT NULL))
+BEGIN SELECT RAISE(ABORT, 'settings envelope columns must be all NULL (unsigned) or complete (witness optional)'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_settings_envelope_update
+BEFORE UPDATE ON settings WHEN NOT (
+    (NEW.signed_at IS NULL AND NEW.signing_key IS NULL AND NEW.signature IS NULL
+     AND NEW.witness IS NULL AND NEW.terminal_persona IS NULL)
+ OR (NEW.signed_at IS NOT NULL AND NEW.signing_key IS NOT NULL
+     AND NEW.signature IS NOT NULL AND NEW.terminal_persona IS NOT NULL))
+BEGIN SELECT RAISE(ABORT, 'settings envelope columns must be all NULL (unsigned) or complete (witness optional)'); END;
+
+CREATE VIRTUAL TABLE IF NOT EXISTS sources_fts USING fts5(
+    id UNINDEXED, title, short_description, keywords,
+    content='sources', content_rowid='rowid', tokenize='unicode61'
+);
+CREATE TRIGGER IF NOT EXISTS sources_ai AFTER INSERT ON sources BEGIN
+    INSERT INTO sources_fts(rowid, id, title, short_description, keywords)
+    VALUES (new.rowid, new.id, new.title, new.short_description, new.keywords);
+END;
+CREATE TRIGGER IF NOT EXISTS sources_ad AFTER DELETE ON sources BEGIN
+    INSERT INTO sources_fts(sources_fts, rowid, id, title, short_description, keywords)
+    VALUES ('delete', old.rowid, old.id, old.title, old.short_description, old.keywords);
+END;
+CREATE TRIGGER IF NOT EXISTS sources_au AFTER UPDATE ON sources BEGIN
+    INSERT INTO sources_fts(sources_fts, rowid, id, title, short_description, keywords)
+    VALUES ('delete', old.rowid, old.id, old.title, old.short_description, old.keywords);
+    INSERT INTO sources_fts(rowid, id, title, short_description, keywords)
+    VALUES (new.rowid, new.id, new.title, new.short_description, new.keywords);
+END;
