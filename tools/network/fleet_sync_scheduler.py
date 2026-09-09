@@ -3009,7 +3009,25 @@ class FleetSyncScheduler:
             local_digest = await asyncio.to_thread(
                 store.compatibility_digest
             )
-            bootstrap = not await asyncio.to_thread(store.has_state)
+            # A bootstrap already in progress pins the negotiation. Falling
+            # back to v4 would strand a keyspace this store has only
+            # partially swept -- abandoning F while keeping the rows it
+            # anchored. Refusing the downgrade keeps the sweep the only way
+            # this store can finish what it started.
+            resuming_sweep = await asyncio.to_thread(
+                store.bootstrap_in_progress
+            )
+            # ASK FOR THE SWEEP AGAIN WHILE ONE IS UNFINISHED. `has_state` is
+            # true the moment the interrupted sweep applied its first row, so
+            # keying the request on it alone made a killed joiner stop asking
+            # and finish by delta. Its data converged and its bootstrap row
+            # stayed at SWEEPING forever, so may_advertise_frontier was
+            # permanently false: the machine held every row and could never
+            # serve one. Found by test_flap_during_bootstrap, which kills a
+            # joiner twice mid-sweep (2026-09-09).
+            bootstrap = resuming_sweep or not await asyncio.to_thread(
+                store.has_state
+            )
             from tools.network.fleet_sync.sync import founded_ledger_rows
 
             founded_rows = await asyncio.to_thread(
@@ -3019,14 +3037,6 @@ class FleetSyncScheduler:
             # store method owns the phase check and the catalog read.
             watermarks = await asyncio.to_thread(
                 store.advertisable_origin_watermarks
-            )
-            # A bootstrap already in progress pins the negotiation. Falling
-            # back to v4 would strand a keyspace this store has only
-            # partially swept -- abandoning F while keeping the rows it
-            # anchored. Refusing the downgrade keeps the sweep the only way
-            # this store can finish what it started.
-            resuming_sweep = await asyncio.to_thread(
-                store.bootstrap_in_progress
             )
             # Computed ONCE and used everywhere below. The first version of
             # this assigned a local that encode_pull_request never read, so
