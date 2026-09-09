@@ -10,6 +10,14 @@ machine yields nothing.
 Scope of this module is deliberately schema, writer and verifier. It performs no
 registry publication, no enrollment change, no supervisor or selector change.
 
+TRUSTED INPUTS, stated because this module verifies against them and does not
+establish them. ``machine_key`` and ``reachability_cert`` are supplied together
+by an authorized runtime payload (``FleetRuntimeCredential``), which is where
+that pairing is validated; absence here means publication is unavailable, not
+that authority is checked here. ``active_machine_pubs`` is a RESOLVED roster
+supplied by the caller; this module does not resolve, refresh or re-derive it,
+and adding a second roster path here would create a competing authority.
+
 Two rules here are load-bearing and easy to lose:
 
 * **Address order is signed candidate priority.** Deduplication preserves first
@@ -95,6 +103,51 @@ def _raw_bounds(addresses: Sequence[str], relay: dict | None) -> None:
         raise SchemaValidationError("reachability input exceeds the raw byte ceiling")
 
 
+#: A fixed-length stand-in so the body can be validated — bounds included —
+#: BEFORE any real signing happens. The signature is always 128 hex chars, so
+#: the placeholder measures exactly what the signed row will measure.
+_SIG_PLACEHOLDER = "0" * 128
+
+
+def normalize_address(address: str) -> str:
+    """Canonical spelling of one direct address.
+
+    Shared by the writer (which dedupes on it) and required by the verifier
+    (which refuses a received address that is not already in this form).
+    Without one shared definition `wss://Host:443/s` and `wss://host/s` are two
+    raw spellings of one endpoint: the writer would keep both as distinct
+    candidates and the verifier would accept either.
+
+    Scheme and host are lowercased and a default port is dropped. PATH AND
+    QUERY ARE PRESERVED — they address a listener, not decoration — and so is
+    position, which is candidate preference.
+    """
+    if not isinstance(address, str) or not address:
+        raise SchemaValidationError("address must be a non-empty string")
+    try:
+        split = urlsplit(address)
+        port = split.port
+        host = split.hostname
+    except ValueError as exc:
+        raise SchemaValidationError(f"address is malformed: {exc}") from exc
+    if split.scheme not in ("ws", "wss"):
+        raise SchemaValidationError("address must be ws:// or wss://")
+    if not host:
+        raise SchemaValidationError("address must have a host")
+    if split.username or split.password:
+        raise SchemaValidationError("address must not carry userinfo")
+    if split.fragment:
+        raise SchemaValidationError("address must not carry a fragment")
+    if ":" in host:
+        host = f"[{host}]"
+    default = 80 if split.scheme == "ws" else 443
+    authority = host if port in (None, default) else f"{host}:{port}"
+    out = f"{split.scheme}://{authority}{split.path}"
+    if split.query:
+        out = f"{out}?{split.query}"
+    return out
+
+
 def canonical_addresses(addresses: Iterable[str]) -> list[str]:
     """Normalize WRITER-SUPPLIED addresses: validate, dedupe, cap.
 
@@ -108,10 +161,11 @@ def canonical_addresses(addresses: Iterable[str]) -> list[str]:
             continue
         if len(address.encode("utf-8")) > MAX_ADDRESS_BYTES:
             continue
-        split = urlsplit(address)
-        if split.scheme not in ("ws", "wss") or not split.hostname:
+        try:
+            address = normalize_address(address)
+        except SchemaValidationError:
             continue
-        if address in out:
+        if address in out:  # dedupe on the NORMALIZED spelling, not the raw one
             continue
         out.append(address)
         if len(out) == MAX_ADDRESSES:
@@ -198,8 +252,12 @@ def build_row(
         },
         "updated_at": int(time.time() if now is None else now),
     }
-    body["sig"] = machine_key.sign_hex(_signing_input(body))
+    # Validate the complete bounded body BEFORE signing. Signing first and
+    # validating after would still raise, but it would have already performed a
+    # private-key operation on input we had not accepted.
+    body["sig"] = _SIG_PLACEHOLDER
     PersonalFleetReachabilityV1.validate(body)
+    body["sig"] = machine_key.sign_hex(_signing_input(body))
     return body
 
 
@@ -273,7 +331,10 @@ def verify_own_row(row: Any, machine_pub: str) -> dict[str, Any] | None:
         return None
     try:
         PersonalFleetReachabilityV1.validate(row)
-    except SchemaValidationError:
+    except (SchemaValidationError, UnicodeError, ValueError, TypeError):
+        # Same malformed-value boundary as the peer verifier. A stored own row
+        # carrying malformed Unicode or an unencodable integer must be REJECTED
+        # and republished, never allowed to abort publication.
         return None
     if row.get("machine_pub") != machine_pub:
         return None
@@ -310,6 +371,17 @@ def verify_row(
         # Malformed Unicode or a failed value conversion is INVALID INPUT, not
         # an exception for a caller to handle. Anything that cannot be
         # canonicalized cannot have been signed in this form.
+        return None
+
+    # Received addresses must ALREADY be canonical. Normalizing them here and
+    # then verifying would check a body the signer never produced, and accepting
+    # un-normalized spellings would let one endpoint appear as several
+    # candidates.
+    try:
+        for address in row["addresses"]:
+            if address != normalize_address(address):
+                return None
+    except (SchemaValidationError, UnicodeError, ValueError, TypeError):
         return None
 
     machine_pub = row["machine_pub"]
