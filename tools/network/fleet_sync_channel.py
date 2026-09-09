@@ -377,7 +377,15 @@ class FleetAuthenticator:
         if data["client_machine_pub"] != self.machine_pub:
             raise HandshakeError("server hello names another client machine")
         if data["machine_pub"] != expected_machine_pub:
-            raise HandshakeError("server hello is from an unexpected machine")
+            # Name both keys: the bare message cannot distinguish "dialed the
+            # wrong machine's route" from "this machine serves under a
+            # different key than the roster entry names", and those have
+            # opposite fixes.
+            raise HandshakeError(
+                "server hello is from an unexpected machine: expected "
+                f"{str(expected_machine_pub)[:16]}, got "
+                f"{str(data['machine_pub'])[:16]}"
+            )
         signer_pub = self._signing_pub(
             data["machine_pub"], data["delegate_cert"]
         )
