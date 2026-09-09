@@ -205,10 +205,14 @@ def record_pull_complete(conn: sqlite3.Connection) -> BootstrapState:
 def may_advertise_frontier(conn: sqlite3.Connection) -> bool:
     """Whether this store's watermarks may be published to anyone.
 
-    **UNWIRED.** No frontier reader consults this yet; wiring every producer
-    and consumer of ``origin_watermarks`` is integration work and is not done
-    here. Until then this predicate documents and tests the rule rather than
-    enforcing it.
+    Consumed by ``SQLiteFleetSyncStore.advertisable_origin_watermarks``, which
+    both the direct and relay request builders call, so an incomplete bootstrap
+    publishes nothing on either transport.
+
+    Scope, so this is not read as more than it is: it gates the OUTWARD claim.
+    Internal and repair reads of ``origin_watermarks`` are deliberately
+    ungated and still see true state, and a store that never bootstrapped this
+    way is unaffected.
 
     False for every incomplete bootstrap, and durably so -- a crash mid-sweep
     leaves the row in SWEEPING, so the answer survives restart rather than
