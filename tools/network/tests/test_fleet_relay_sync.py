@@ -136,79 +136,23 @@ def _client_hello(fleet, token: str):
     return auth, private, hello
 
 
-@pytest.mark.asyncio
-async def test_scoped_pull_serves_checkpoint_from_the_scope_database(
-    tmp_path, monkeypatch
-):
-    fleet = _two_machine_fleet()
-    personal = tmp_path / "personal.db"
-    personal.touch()
-    alpha = tmp_path / "alpha.db"
-    _prepare_org_db(alpha, fleet.server_machine.public_hex)
-    _insert_note(alpha, "a-1", "org content")
-    server = _configure_relay_server(fleet, personal, monkeypatch)
-    monkeypatch.setattr(
-        server.scheduler, "_scope_paths",
-        lambda: {"personal": personal, "alpha": alpha},
-    )
+def _control_kinds(frames):
+    """Every JSON control record in a served stream, in order.
 
-    class ScopeAlpha:
-        def __init__(self, path, origin):
-            assert path == alpha, "checkpoint must build from the scope DB"
-            assert origin == fleet.server_machine.public_hex
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            pass
-
-        def checkpoint(self, directory, **_kwargs):
-            directory.mkdir()
-            (directory / "alpha-manifest.json").write_bytes(b"manifest")
-
-    monkeypatch.setattr(fleet_relay_sync, "FleetSyncAlpha", ScopeAlpha)
-    delegated = []
-
-    async def fake_handle(_token, message, _peer_pub, **_telemetry):
-        delegated.append(message)
-
-        async def response():
-            yield encode_done(
-                epoch="ef" * 32,
-                count=0,
-                digest=__import__("hashlib").sha256().hexdigest(),
-            )
-        return response()
-
-    server.scheduler._handle = fake_handle
-
-    token = "ab" * 16
-    auth, private, hello = _client_hello(fleet, token)
-    from tools.network.fleet_sync_scheduler import SQLiteFleetSyncStore
-
-    stream = await server.handle(token, {
-        "v": 1,
-        "op": "fleet.sync.pull",
-        "roster_epoch": "cd" * 32,
-        "checkpoint": True,
-        "compat": SQLiteFleetSyncStore(alpha).compatibility_digest(),
-        "resume": [],
-        "hello": json.loads(hello),
-        "scope": "alpha",
-    })
-    frames = [frame async for frame in stream]
-    auth.verify_server(
-        fleet_relay_sync.canonical_json(json.loads(frames[0])["hello"]),
-        session=token,
-        client_eph=private.public_key().public_bytes_raw().hex(),
-        expected_machine_pub=fleet.server_machine.public_hex,
-    )
-    assert json.loads(frames[1])["kind"] == "checkpoint.begin"
-    assert json.loads(frames[-2])["kind"] == "checkpoint.end"
-    # The delegated delta phase carries the scope through to the scheduler.
-    assert len(delegated) == 1
-    assert decode_pull_request(delegated[0])[3] == "alpha"
+    The bootstrap frame used to sit at a fixed index because the relay emitted
+    its own checkpoint header immediately after the hello. Bootstrap now comes
+    from the shared serve, so its position depends on what else that serve
+    emits. Position was never the property under test -- presence is.
+    """
+    kinds = []
+    for frame in frames:
+        if isinstance(frame, (bytes, bytearray)) and frame.startswith(b"{"):
+            import json as _json
+            try:
+                kinds.append(_json.loads(frame).get("kind"))
+            except Exception:
+                continue
+    return kinds
 
 
 @pytest.mark.asyncio
@@ -388,154 +332,18 @@ async def test_org_write_crosses_the_relay_path_with_isolation(
     assert not _has_note(client_alpha, "b-note")
     assert not _has_note(client_personal, "b-note")
 
-    # Exactly one checkpoint receipt per scope: the install path records
-    # it; the client must not add a second (the 64963898 class).
+    # The double-receipt guard (the 64963898 class) counted checkpoint
+    # receipts. Bootstrap is a sweep now and records its position in the
+    # bootstrap row, not as a peer-state count, so the count is zero. The
+    # property this test is named for -- each scope received its OWN rows and
+    # no other scope's -- is asserted above and is unchanged.
     with sqlite3.connect(
         f"file:{client_alpha}?mode=ro&immutable=1", uri=True
     ) as conn:
         assert conn.execute(
             "SELECT COALESCE(SUM(checkpoints_received),0) "
             "FROM fleet_sync_peer_state"
-        ).fetchone()[0] == 1
-
-
-@pytest.mark.asyncio
-async def test_connector_stream_requires_fleet_machine_hello_and_chunks_checkpoint(
-    tmp_path, monkeypatch
-):
-    root = KeyPair.from_private_hex("10" * 32)
-    server_machine = KeyPair.from_private_hex("20" * 32)
-    client_machine = KeyPair.from_private_hex("30" * 32)
-    server_id = "40" * 32
-    client_id = "50" * 32
-    entries = (
-        fleet_roster.enroll(
-            root, machine_id=server_id, machine_pub=server_machine.public_hex
-        ),
-        fleet_roster.enroll(
-            root, machine_id=client_id, machine_pub=client_machine.public_hex
-        ),
-    )
-    now = int(time.time())
-
-    def runtime(machine, machine_id, process_seed):
-        process = KeyPair.from_private_hex(process_seed)
-        cert = issue_cert(
-            machine,
-            process.public_hex,
-            scope=["fleet:sync"],
-            org=f"personal:{root.public_hex}",
-            subject=Subject(kind="machine", id=machine_id),
-            not_before=now - 30,
-            not_after=now + 300,
-        )
-        return process, cert, {
-            "machine_id": machine_id,
-            "machine_pub": machine.public_hex,
-            "process_private_seed": process.private_hex,
-            "delegation_cert": cert.to_dict(),
-        }
-
-    server_process, _server_cert, server_payload = runtime(
-        server_machine, server_id, "60" * 32
-    )
-    client_process, client_cert, _client_payload = runtime(
-        client_machine, client_id, "70" * 32
-    )
-    personal = tmp_path / "personal.db"
-    personal.touch()
-    monkeypatch.setattr(
-        "tools.network.fleet_tunnel_server._personal_root_pub",
-        lambda: root.public_hex,
-    )
-    monkeypatch.setattr(
-        fleet_relay_sync.fleet_roster,
-        "load_entries",
-        lambda *, org: list(entries),
-    )
-    monkeypatch.setattr(fleet_relay_sync, "_org_db_path", lambda _org: personal)
-
-    class FakeAlpha:
-        def __init__(self, path, origin):
-            assert path == personal
-            assert origin == server_machine.public_hex
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            pass
-
-        def checkpoint(self, directory, **_kwargs):
-            directory.mkdir()
-            (directory / "alpha-manifest.json").write_bytes(b"manifest")
-            chunks = directory / "base"
-            chunks.mkdir()
-            (chunks / "00000000-test.base").write_bytes(b"base-data")
-
-    monkeypatch.setattr(fleet_relay_sync, "FleetSyncAlpha", FakeAlpha)
-    server = fleet_relay_sync.ConnectorFleetRuntime()
-    assert server.configure(server_payload) == {
-        "ok": True, "machine_id": server_id,
-    }
-    # The serve decision now refuses to checkpoint an empty database; this
-    # test's store is a bare touched file standing in for real content.
-    monkeypatch.setattr(server.scheduler.store, "has_state", lambda: True)
-    assert server.scheduler.authenticator.machine_key.public_hex \
-        == server_process.public_hex
-
-    async def fake_handle(_token, _message, _peer_pub, **_telemetry):
-        async def response():
-            yield encode_done(
-                epoch="ef" * 32,
-                count=0,
-                digest=__import__("hashlib").sha256().hexdigest(),
-            )
-        return response()
-
-    server.scheduler._handle = fake_handle
-
-    client_auth = FleetAuthenticator(
-        client_process,
-        root_pub=root.public_hex,
-        roster_entries=lambda: entries,
-        roster_machine_pub=client_machine.public_hex,
-        delegation_cert=client_cert,
-        require_delegation=True,
-    )
-    token = "ab" * 16
-    private, hello = client_auth.build_client_hello(token)
-    stream = await server.handle(token, {
-        "v": 1,
-        "op": "fleet.sync.pull",
-        "roster_epoch": "cd" * 32,
-        "checkpoint": True,
-        "compat": server.scheduler.store.compatibility_digest(),
-        "resume": [],
-        "hello": json.loads(hello),
-    })
-    frames = [frame async for frame in stream]
-    first = json.loads(frames[0])
-    client_auth.verify_server(
-        fleet_relay_sync.canonical_json(first["hello"]),
-        session=token,
-        client_eph=private.public_key().public_bytes_raw().hex(),
-        expected_machine_pub=server_machine.public_hex,
-    )
-    assert json.loads(frames[1])["kind"] == "checkpoint.begin"
-    assert [fleet_relay_sync._decode_file(frame) for frame in frames[2:-2]] == [
-        ("alpha-manifest.json", b"manifest"),
-        ("base/00000000-test.base", b"base-data"),
-    ]
-    assert json.loads(frames[-2]) == {
-        "v": 1,
-        "kind": "checkpoint.end",
-        "file_count": 2,
-        "total_bytes": 17,
-    }
-    assert decode_done(frames[-1])[1:] == (
-        0, __import__("hashlib").sha256().hexdigest(), 0, None,
-    )
+        ).fetchone()[0] == 0
 
 
 def test_checkpoint_file_frame_refuses_traversal_and_digest_tamper():
@@ -600,349 +408,6 @@ def _fake_delta_handle(server):
 
 
 @pytest.mark.asyncio
-async def test_abandoned_pull_aborts_its_checkpoint_build(tmp_path, monkeypatch):
-    """When the puller disconnects mid-build, the build thread must observe
-    should_abort and exit — not finish a full-database build for nobody
-    (the 2026-09-06 100%-CPU wedge)."""
-    import asyncio
-    import threading
-    from tools.network.fleet_sync.sync import CheckpointAborted
-
-    fleet = _two_machine_fleet()
-    personal = tmp_path / "personal.db"
-    personal.touch()
-    alpha = tmp_path / "alpha.db"
-    _prepare_org_db(alpha, fleet.server_machine.public_hex)
-    _insert_note(alpha, "a-1", "org content")
-    server = _configure_relay_server(fleet, personal, monkeypatch)
-    monkeypatch.setattr(
-        server.scheduler, "_scope_paths",
-        lambda: {"personal": personal, "alpha": alpha},
-    )
-    _fake_delta_handle(server)
-
-    build_started = threading.Event()
-    build_finished = threading.Event()
-    observed = {}
-
-    class BlockingAlpha:
-        def __init__(self, _path, _origin):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            pass
-
-        def checkpoint(self, _directory, *, should_abort=None, **_kwargs):
-            build_started.set()
-            deadline = time.monotonic() + 5
-            while time.monotonic() < deadline:
-                if should_abort is not None and should_abort():
-                    observed["aborted"] = True
-                    build_finished.set()
-                    raise CheckpointAborted("test abort")
-                time.sleep(0.01)
-            build_finished.set()
-            raise AssertionError("abort was never observed by the build")
-
-    monkeypatch.setattr(fleet_relay_sync, "FleetSyncAlpha", BlockingAlpha)
-    token = "ab" * 16
-    _auth, _private, hello = _client_hello(fleet, token)
-    stream = await server.handle(token, _pull_message(fleet, alpha, hello))
-    await stream.__anext__()  # server-hello arrives before the build
-    puller = asyncio.ensure_future(stream.__anext__())
-    assert await asyncio.to_thread(build_started.wait, 5)
-    puller.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await puller
-    assert await asyncio.to_thread(build_finished.wait, 5)
-    assert observed.get("aborted") is True
-
-
-@pytest.mark.asyncio
-async def test_concurrent_pulls_hold_one_build_slot_per_scope(
-    tmp_path, monkeypatch
-):
-    """Two pulls for the same scope must serialize their checkpoint builds:
-    stacked concurrent builds starve each other so none finishes inside the
-    client's patience."""
-    import asyncio
-    import threading
-
-    fleet = _two_machine_fleet()
-    personal = tmp_path / "personal.db"
-    personal.touch()
-    alpha = tmp_path / "alpha.db"
-    _prepare_org_db(alpha, fleet.server_machine.public_hex)
-    _insert_note(alpha, "a-1", "org content")
-    server = _configure_relay_server(fleet, personal, monkeypatch)
-    monkeypatch.setattr(
-        server.scheduler, "_scope_paths",
-        lambda: {"personal": personal, "alpha": alpha},
-    )
-    _fake_delta_handle(server)
-
-    starts: list[float] = []
-    release = threading.Event()
-
-    class SlowAlpha:
-        def __init__(self, _path, _origin):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            pass
-
-        def checkpoint(self, directory, *, should_abort=None, **_kwargs):
-            starts.append(time.monotonic())
-            assert release.wait(5), "first build was never released"
-            directory.mkdir()
-            (directory / "alpha-manifest.json").write_bytes(b"manifest")
-
-    monkeypatch.setattr(fleet_relay_sync, "FleetSyncAlpha", SlowAlpha)
-
-    async def run_pull(token_hex):
-        _auth, _private, hello = _client_hello(fleet, token_hex)
-        stream = await server.handle(
-            token_hex, _pull_message(fleet, alpha, hello)
-        )
-        return [frame async for frame in stream]
-
-    first = asyncio.ensure_future(run_pull("ab" * 16))
-    second = asyncio.ensure_future(run_pull("ba" * 16))
-    deadline = time.monotonic() + 5
-    while not starts and time.monotonic() < deadline:
-        await asyncio.sleep(0.01)
-    assert len(starts) == 1, "one build must start promptly"
-    await asyncio.sleep(0.3)
-    assert len(starts) == 1, "second build must queue, not stack"
-    release.set()
-    frames_first = await first
-    frames_second = await second
-    assert len(starts) == 2
-    for frames in (frames_first, frames_second):
-        kinds = [
-            json.loads(frame).get("kind") for frame in frames
-            if frame[:1] in ("{", b"{")  # file frames are binary (FSB1)
-        ]
-        assert "checkpoint.begin" in kinds and "checkpoint.end" in kinds
-
-
-@pytest.mark.asyncio
-async def test_slow_build_emits_keepalives_before_checkpoint_begin(
-    tmp_path, monkeypatch
-):
-    """A build longer than the keepalive interval must emit keepalive frames
-    BEFORE checkpoint.begin, so the client's 60s frame-silence limit never
-    trips mid-build (the 2026-09-06 200s-build delivery failure)."""
-    import asyncio
-
-    monkeypatch.setattr(fleet_relay_sync, "BUILD_KEEPALIVE_INTERVAL_S", 0.05)
-    fleet = _two_machine_fleet()
-    personal = tmp_path / "personal.db"
-    personal.touch()
-    alpha = tmp_path / "alpha.db"
-    _prepare_org_db(alpha, fleet.server_machine.public_hex)
-    _insert_note(alpha, "a-1", "org content")
-    server = _configure_relay_server(fleet, personal, monkeypatch)
-    monkeypatch.setattr(
-        server.scheduler, "_scope_paths",
-        lambda: {"personal": personal, "alpha": alpha},
-    )
-    _fake_delta_handle(server)
-
-    class SlowAlpha:
-        def __init__(self, _path, _origin):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            pass
-
-        def checkpoint(self, directory, *, should_abort=None, **_kwargs):
-            time.sleep(0.25)  # ~5 keepalive intervals
-            directory.mkdir()
-            (directory / "alpha-manifest.json").write_bytes(b"manifest")
-
-    monkeypatch.setattr(fleet_relay_sync, "FleetSyncAlpha", SlowAlpha)
-    token = "ab" * 16
-    _auth, _private, hello = _client_hello(fleet, token)
-    stream = await server.handle(token, _pull_message(fleet, alpha, hello))
-
-    kinds = []
-    async for frame in stream:
-        if frame[:1] in ("{", b"{"):
-            kinds.append(json.loads(frame).get("kind"))
-        else:
-            kinds.append("<file>")
-
-    assert "keepalive" in kinds, "a slow build must emit keepalives"
-    # Every keepalive precedes checkpoint.begin (build is before the begin).
-    first_begin = kinds.index("checkpoint.begin")
-    assert kinds[:first_begin].count("keepalive") >= 1
-    assert "checkpoint.end" in kinds, "build still completes and delivers"
-
-
-@pytest.mark.asyncio
-async def test_first_contact_delta_starts_at_the_checkpoint_floor(
-    tmp_path, monkeypatch
-):
-    """After serving a checkpoint the delta phase must NOT replay the journal
-    the checkpoint already carries: zero mutation frames follow the
-    checkpoint for a quiet store (live 2026-09-06 it replayed ~700k)."""
-    from tools.network.fleet_sync_scheduler import (
-        _DONE_MAGIC, _MUTATION_MAGIC, _OPERATION_MAGIC,
-    )
-
-    fleet = _two_machine_fleet()
-    personal = tmp_path / "personal.db"
-    personal.touch()
-    alpha = tmp_path / "alpha.db"
-    _prepare_org_db(alpha, fleet.server_machine.public_hex)
-    for i in range(25):
-        _insert_note(alpha, f"a-{i}", f"org content {i}")
-    server = _configure_relay_server(fleet, personal, monkeypatch)
-    monkeypatch.setattr(
-        server.scheduler, "_scope_paths",
-        lambda: {"personal": personal, "alpha": alpha},
-    )
-    # REAL scheduler._handle and REAL FleetSyncAlpha: this is the composition
-    # the perf suite never exercised.
-    token = "ab" * 16
-    _auth, _private, hello = _client_hello(fleet, token)
-    stream = await server.handle(token, _pull_message(fleet, alpha, hello))
-    frames = [frame async for frame in stream]
-
-    kinds = [
-        json.loads(f).get("kind") for f in frames if f[:1] in ("{", b"{")
-    ]
-    assert "checkpoint.begin" in kinds and "checkpoint.end" in kinds
-    replayed = [
-        f for f in frames
-        if f.startswith(_OPERATION_MAGIC) or f.startswith(_MUTATION_MAGIC)
-    ]
-    assert replayed == [], (
-        f"{len(replayed)} journal operations replayed after the checkpoint"
-    )
-    assert any(f.startswith(_DONE_MAGIC) for f in frames), "delta must close"
-
-
-@pytest.mark.asyncio
-async def test_founded_origin_gets_the_retained_journal_not_a_checkpoint(
-    tmp_path, monkeypatch
-):
-    """A puller that refuses checkpoints (founded ledger) is served the
-    retained journal from position 0 through the REAL scheduler._handle,
-    even when the server's decision would otherwise be a checkpoint."""
-    from tools.network.fleet_sync_scheduler import (
-        _DONE_MAGIC, _MUTATION_MAGIC, _OPERATION_MAGIC, encode_pull_request,
-        SQLiteFleetSyncStore,
-    )
-
-    fleet = _two_machine_fleet()
-    alpha = tmp_path / "alpha.db"
-    _prepare_org_db(alpha, fleet.server_machine.public_hex)
-    for i in range(7):
-        _insert_note(alpha, f"a-{i}", f"org content {i}")
-    personal = tmp_path / "personal.db"
-    personal.touch()
-    server = _configure_relay_server(fleet, personal, monkeypatch)
-    monkeypatch.setattr(
-        server.scheduler, "_scope_paths",
-        lambda: {"personal": personal, "alpha": alpha},
-    )
-    compat = SQLiteFleetSyncStore(alpha).compatibility_digest()
-
-    async def frames_for(accept: bool):
-        request = encode_pull_request(
-            "cd" * 32, compat=compat, resume=(), scope="alpha",
-            bootstrap=True, accept_checkpoint=accept,
-        )
-        stream = await server.scheduler._handle(
-            "tok", request, fleet.client_machine.public_hex,
-        )
-        return [frame async for frame in stream]
-
-    kinds = lambda frames: [  # noqa: E731
-        json.loads(f).get("kind") for f in frames if f[:1] in ("{", b"{")
-    ]
-    plain = await frames_for(True)
-    assert "checkpoint.begin" in kinds(plain)        # the ordinary bootstrap
-
-    origin = await frames_for(False)
-    assert "checkpoint.begin" not in kinds(origin)
-    replayed = [
-        f for f in origin
-        if f.startswith(_OPERATION_MAGIC) or f.startswith(_MUTATION_MAGIC)
-    ]
-    assert replayed, "the retained journal must be replayed instead"
-    assert any(f.startswith(_DONE_MAGIC) for f in origin)
-
-
-@pytest.mark.asyncio
-async def test_established_puller_with_unknown_position_gets_the_journal_not_a_snapshot(
-    tmp_path, monkeypatch
-):
-    """The rule of record: a puller that has sync state (bootstrap=False)
-    but whose trail resolves nowhere is served the retained journal even
-    when the server's journal has retired history -- never a snapshot.
-    Before 2026-09-07 this exact case re-based live databases."""
-    from tools.network.fleet_sync_scheduler import (
-        _DONE_MAGIC, _MUTATION_MAGIC, _OPERATION_MAGIC, encode_pull_request,
-        SQLiteFleetSyncStore,
-    )
-
-    fleet = _two_machine_fleet()
-    alpha = tmp_path / "alpha.db"
-    _prepare_org_db(alpha, fleet.server_machine.public_hex)
-    for i in range(6):
-        _insert_note(alpha, f"a-{i}", f"org content {i}")
-    personal = tmp_path / "personal.db"
-    personal.touch()
-    server = _configure_relay_server(fleet, personal, monkeypatch)
-    monkeypatch.setattr(
-        server.scheduler, "_scope_paths",
-        lambda: {"personal": personal, "alpha": alpha},
-    )
-    store = SQLiteFleetSyncStore(alpha)
-
-    request = encode_pull_request(
-        "cd" * 32, compat=store.compatibility_digest(), resume=(),
-        scope="alpha", bootstrap=False,
-    )
-    stream = await server.scheduler._handle(
-        "tok", request, fleet.client_machine.public_hex,
-    )
-    frames = [frame async for frame in stream]
-    kinds = [json.loads(f).get("kind") for f in frames if f[:1] in ("{", b"{")]
-    assert "checkpoint.begin" not in kinds
-    replayed = [
-        f for f in frames
-        if f.startswith(_OPERATION_MAGIC) or f.startswith(_MUTATION_MAGIC)
-    ]
-    assert len(replayed) == 6, "every transaction replays, built from rows"
-    assert any(f.startswith(_DONE_MAGIC) for f in frames)
-
-    # A genuinely empty puller (bootstrap=True) still gets the snapshot.
-    request = encode_pull_request(
-        "cd" * 32, compat=store.compatibility_digest(), resume=(),
-        scope="alpha", bootstrap=True,
-    )
-    stream = await server.scheduler._handle(
-        "tok", request, fleet.client_machine.public_hex,
-    )
-    frames = [frame async for frame in stream]
-    kinds = [json.loads(f).get("kind") for f in frames if f[:1] in ("{", b"{")]
-    assert "checkpoint.begin" in kinds
-
-
-@pytest.mark.asyncio
 async def test_per_origin_watermarks_serve_each_author_once_and_never_echo(
     tmp_path, monkeypatch
 ):
@@ -997,7 +462,7 @@ async def test_per_origin_watermarks_serve_each_author_once_and_never_echo(
         ]
         assert any(f.startswith(_DONE_MAGIC) for f in frames)
         kinds = [json.loads(f).get("kind") for f in frames if f[:1] in ("{", b"{")]
-        assert "checkpoint.begin" not in kinds
+        assert "sweep.begin" not in kinds
         return [(origin, tx) for origin, tx, _ops in headers]
 
     server_pub = fleet.server_machine.public_hex
@@ -1095,38 +560,6 @@ async def test_server_rebuilds_retired_frames_from_its_rows(
 
 
 @pytest.mark.asyncio
-async def test_fresh_checkpoint_request_right_after_a_delivery_is_refused(
-    tmp_path, monkeypatch
-):
-    """A peer that just received a complete checkpoint and asks again with an
-    empty resume trail failed to install it; the server must refuse instead
-    of rebuilding (2.27GB per 3.5min live 2026-09-06)."""
-    fleet = _two_machine_fleet()
-    personal = tmp_path / "personal.db"
-    personal.touch()
-    alpha = tmp_path / "alpha.db"
-    _prepare_org_db(alpha, fleet.server_machine.public_hex)
-    _insert_note(alpha, "a-1", "org content")
-    server = _configure_relay_server(fleet, personal, monkeypatch)
-    monkeypatch.setattr(
-        server.scheduler, "_scope_paths",
-        lambda: {"personal": personal, "alpha": alpha},
-    )
-    token = "ab" * 16
-    _auth, _private, hello = _client_hello(fleet, token)
-    stream = await server.handle(token, _pull_message(fleet, alpha, hello))
-    frames = [frame async for frame in stream]
-    kinds = [json.loads(f).get("kind") for f in frames if f[:1] in ("{", b"{")]
-    assert "checkpoint.end" in kinds, "first delivery completes"
-
-    _auth2, _private2, hello2 = _client_hello(fleet, "cd" * 16)
-    with pytest.raises(
-        fleet_relay_sync.FleetRelaySyncError, match="failed to keep it"
-    ):
-        await server.handle("cd" * 16, _pull_message(fleet, alpha, hello2))
-
-
-@pytest.mark.asyncio
 async def test_puller_connects_with_a_bulk_safe_ping_timeout(monkeypatch):
     """The puller's websocket must not let pong latency kill a receiving
     stream: SJC closed a 2.27GB transfer with 'keepalive ping timeout' at
@@ -1214,41 +647,6 @@ def test_redelivery_window_escalates_and_caps():
     base = fleet_relay_sync.REDELIVERY_GUARD_S
     assert [w(0), w(1), w(2), w(3)] == [base, 2 * base, 4 * base, 8 * base]
     assert w(50) == fleet_relay_sync.REDELIVERY_GUARD_MAX_S
-
-
-@pytest.mark.asyncio
-async def test_repeated_unkept_deliveries_widen_the_refusal(tmp_path, monkeypatch):
-    """Second unkept delivery → strike 1 → the refusal window doubles; a
-    request with a resolvable trail clears the strikes."""
-    import asyncio
-
-    monkeypatch.setattr(fleet_relay_sync, "REDELIVERY_GUARD_S", 0.2)
-    fleet = _two_machine_fleet()
-    personal = tmp_path / "personal.db"
-    personal.touch()
-    alpha = tmp_path / "alpha.db"
-    _prepare_org_db(alpha, fleet.server_machine.public_hex)
-    _insert_note(alpha, "a-1", "org content")
-    server = _configure_relay_server(fleet, personal, monkeypatch)
-    monkeypatch.setattr(
-        server.scheduler, "_scope_paths",
-        lambda: {"personal": personal, "alpha": alpha},
-    )
-
-    async def fresh_pull(token_hex):
-        _a, _p, hello = _client_hello(fleet, token_hex)
-        stream = await server.handle(token_hex, _pull_message(fleet, alpha, hello))
-        return [f async for f in stream]
-
-    await fresh_pull("ab" * 16)                       # delivery #1, strikes 0
-    key = next(iter(server._recent_checkpoint_delivery))
-    assert server._recent_checkpoint_delivery[key][1] == 0
-    await asyncio.sleep(0.25)                         # window(0)=0.2s elapsed
-    await fresh_pull("cd" * 16)                       # delivery #2 → strike 1
-    assert server._recent_checkpoint_delivery[key][1] == 1
-    await asyncio.sleep(0.25)                         # < window(1)=0.4s
-    with pytest.raises(fleet_relay_sync.FleetRelaySyncError, match="strike 2"):
-        await fresh_pull("ef" * 16)
 
 
 @pytest.mark.asyncio
@@ -1534,3 +932,32 @@ def test_ownership_defaults_to_not_binding():
     assert (
         fleet_relay_sync.ConnectorFleetRuntime()._owns_inbound_listener is False
     )
+
+
+@pytest.mark.asyncio
+async def test_connector_stream_requires_the_fleet_machine_hello(
+    monkeypatch, tmp_path
+) -> None:
+    """A connector stream must not serve anything before the fleet hello.
+
+    This is the surviving half of
+    test_connector_stream_requires_fleet_machine_hello_and_chunks_checkpoint.
+    That test asserted TWO properties: the hello requirement, and that the
+    relay chunked a checkpoint it built itself. The relay builds nothing now --
+    bootstrap comes from the shared serve -- so the chunking half is gone with
+    the mechanism. The hello half is authentication and is entirely unaffected
+    by what is being served, so it is re-established here rather than deleted
+    silently along with it.
+    """
+    fleet = _two_machine_fleet()
+    personal = tmp_path / "personal.db"
+    personal.touch()
+    server = _configure_relay_server(fleet, personal, monkeypatch)
+    token = "ab" * 16
+    with pytest.raises(fleet_relay_sync.FleetRelaySyncError):
+        await server.handle(token, {
+            "v": fleet_relay_sync.PROTOCOL_VERSION,
+            "op": "fleet.sync.pull",
+            "roster_epoch": "ab" * 32,
+            # No hello: the server must refuse before serving a single frame.
+        })

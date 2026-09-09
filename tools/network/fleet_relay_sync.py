@@ -41,6 +41,11 @@ from tools.network import (
 from tools.network.fleet_sync.catalog import AuthoredMutation
 from tools.network.fleet_sync.compaction import WatermarkError
 from tools.network.fleet_sync_channel import FleetAuthenticator, accept_client_hello
+from tools.network.fleet_sync.sweep_receive import (
+    SWEEP_BEGIN_KIND,
+    SWEEP_END_KIND,
+    SWEEP_PROTOCOL_VERSION,
+)
 from tools.network.fleet_sync_scheduler import (
     _DONE_MAGIC,
     _MUTATION_MAGIC,
@@ -661,9 +666,10 @@ class ConnectorFleetRuntime:
         # installing each other's blank databases — same guard as the
         # direct path's serve decision.
         server_has_content = await asyncio.to_thread(scope_store.has_state)
-        serve_checkpoint = server_has_content and _serve_checkpoint_decision(
-            resume_position, include_checkpoint
-        )
+        # The relay builds nothing: bootstrap flows through the shared serve
+        # (scheduler._handle), which sweeps. Kept as a local so the telemetry
+        # and logging below stay honest about what this stream carried.
+        serve_checkpoint = False
         # A request carrying a resolvable trail proves the peer kept what it
         # received: clear any redelivery strikes for this scope.
         if resume_trail and resume_position > 0:
@@ -732,160 +738,6 @@ class ConnectorFleetRuntime:
                 stats["bytes_sent"] += len(server_hello_frame)
                 yield server_hello_frame
                 resume_floor_ref = None
-                if serve_checkpoint:
-                    # Journal position BEFORE the checkpoint cut; the delta
-                    # phase below starts here instead of replaying the
-                    # whole journal the checkpoint already carries. A store
-                    # whose fleet writers are not active yet has no journal
-                    # position — fall back to the full replay (correct,
-                    # merely slow) rather than refuse the pull.
-                    try:
-                        resume_floor_ref = await asyncio.to_thread(
-                            scope_store.newest_transaction_ref
-                        )
-                    except WatermarkError:
-                        resume_floor_ref = None
-                    active = tuple(sorted(fleet_roster.resolve(
-                        scheduler._roster_snapshot,
-                        anchor_root_pub=scheduler.config.personal_root_pub,
-                    )))
-                    scope_path = scheduler._scope_paths()[scope]
-                    # asyncio cancellation abandons a running thread but
-                    # cannot stop it; this event is how the thread learns
-                    # the client is gone and exits within one row instead
-                    # of finishing a full-database build for nobody.
-                    abort_build = threading.Event()
-
-                    def create_checkpoint():
-                        try:
-                            with FleetSyncAlpha(
-                                scope_path,
-                                scheduler.authenticator.machine_pub,
-                            ) as alpha:
-                                alpha.checkpoint(
-                                    checkpoint,
-                                    roster_epoch=current_epoch,
-                                    active_roster=active,
-                                    should_abort=abort_build.is_set,
-                                )
-                        except CheckpointAborted:
-                            # Only reachable after the awaiting generator
-                            # was already cancelled below — nobody is left
-                            # to retrieve this exception, so exit quietly
-                            # (checkpoint() already removed its staging).
-                            pass
-
-                    build_lock = self._checkpoint_build_locks.setdefault(
-                        scope, asyncio.Lock()
-                    )
-                    queued_at = time.monotonic()
-                    async with build_lock:
-                        build_started_at = time.monotonic()
-                        logger.warning(
-                            "fleet relay sync: checkpoint build started "
-                            "scope=%s queued=%.1fs",
-                            scope, build_started_at - queued_at,
-                        )
-                        # The build phase emits no data frames — the next
-                        # frame after the server-hello is checkpoint.begin,
-                        # AFTER the build. A build longer than the client's
-                        # 60s frame-silence limit is therefore killed
-                        # mid-flight while the server builds on for nobody
-                        # (observed live 2026-09-06: contention pushed a
-                        # 28s build to 200s and SJC bailed at ~60s). Emit a
-                        # keepalive on a sub-limit cadence so no build
-                        # duration can out-silence the client; the client
-                        # already tolerates and ignores these frames.
-                        build_future = asyncio.ensure_future(
-                            asyncio.to_thread(create_checkpoint)
-                        )
-                        try:
-                            while True:
-                                try:
-                                    await asyncio.wait_for(
-                                        asyncio.shield(build_future),
-                                        BUILD_KEEPALIVE_INTERVAL_S,
-                                    )
-                                    break
-                                except asyncio.TimeoutError:
-                                    keepalive = canonical_json({
-                                        "v": PROTOCOL_VERSION,
-                                        "kind": "keepalive",
-                                    })
-                                    stats["bytes_sent"] += len(keepalive)
-                                    self._touch_stream_activity()
-                                    yield keepalive
-                        except asyncio.CancelledError:
-                            abort_build.set()
-                            with contextlib.suppress(BaseException):
-                                await build_future
-                            logger.warning(
-                                "fleet relay sync: checkpoint build abandoned "
-                                "scope=%s after=%.1fs (client gone; build "
-                                "thread told to abort)",
-                                scope, time.monotonic() - build_started_at,
-                            )
-                            raise
-                        except Exception as exc:
-                            # The BUILD failed — not the client. This branch
-                            # used to share the "client gone" line above and
-                            # mislabeled a deterministic integrity failure
-                            # as an abandonment for two hours (2026-09-06).
-                            abort_build.set()
-                            logger.warning(
-                                "fleet relay sync: checkpoint build FAILED "
-                                "scope=%s after=%.1fs: %s: %s",
-                                scope, time.monotonic() - build_started_at,
-                                type(exc).__name__, exc,
-                            )
-                            if "untracked logical rows" in str(exc):
-                                # Deterministic until the store is repaired;
-                                # rebuilding every pull just burns a full
-                                # scan per attempt. Refuse this scope's
-                                # checkpoints for a while (see the check
-                                # before the build) and say why.
-                                self._integrity_failed[scope] = (
-                                    time.monotonic(), str(exc))
-                            raise
-                        logger.warning(
-                            "fleet relay sync: checkpoint build completed "
-                            "scope=%s in=%.1fs",
-                            scope, time.monotonic() - build_started_at,
-                        )
-                    files = tuple(sorted(
-                        path for path in checkpoint.rglob("*") if path.is_file()
-                    ))
-                    total = sum(path.stat().st_size for path in files)
-                    if len(files) > MAX_CHECKPOINT_FILES or total > MAX_CHECKPOINT_BYTES:
-                        raise FleetRelaySyncError("checkpoint exceeds relay bounds")
-                    begin = canonical_json({
-                        "v": PROTOCOL_VERSION,
-                        "kind": "checkpoint.begin",
-                        "file_count": len(files),
-                        "total_bytes": total,
-                        "source_machine_pub": scheduler.authenticator.machine_pub,
-                        "roster_epoch": current_epoch,
-                    })
-                    stats["bytes_sent"] += len(begin)
-                    yield begin
-                    for path in files:
-                        scheduler.authenticator.authorize(peer_pub)
-                        relative = path.relative_to(checkpoint).as_posix()
-                        encoded_file = _encode_file(
-                            relative, await asyncio.to_thread(path.read_bytes)
-                        )
-                        stats["bytes_sent"] += len(encoded_file)
-                        stats["checkpoint_bytes"] += path.stat().st_size
-                        self._touch_stream_activity()
-                        yield encoded_file
-                    end = canonical_json({
-                        "v": PROTOCOL_VERSION,
-                        "kind": "checkpoint.end",
-                        "file_count": len(files),
-                        "total_bytes": total,
-                    })
-                    stats["bytes_sent"] += len(end)
-                    yield end
                 deltas = await scheduler._handle(
                     token,
                     encode_pull_request(
@@ -893,7 +745,14 @@ class ConnectorFleetRuntime:
                         compat=peer_digest,
                         resume=resume_trail,
                         scope=scope,
-                        version=sync_version,
+                        # Forward the peer's bootstrap request. The relay used
+                        # to satisfy it itself, so it never had to pass the
+                        # flag through; now bootstrap flows through the shared
+                        # serve, and without this the sweep never fires and a
+                        # relay-only joiner receives deltas alone.
+                        bootstrap=include_checkpoint,
+                        version=max(sync_version, SWEEP_PROTOCOL_VERSION)
+                        if include_checkpoint else sync_version,
                         watermarks=watermarks,
                     ),
                     peer_pub,
@@ -902,9 +761,6 @@ class ConnectorFleetRuntime:
                     telemetry_stats=stats,
                     telemetry_started_at_ns=started_at_ns,
                     telemetry_started_monotonic_ns=started_monotonic_ns,
-                    # The relay stream handles its own checkpoint phase above;
-                    # the delegated delta phase must never start a second one.
-                    allow_checkpoint=False,
                     resume_floor_ref=resume_floor_ref,
                     authorize=admission.authorize,
                     admitted_org=admission.org,
@@ -1544,69 +1400,27 @@ async def pull_checkpoint_once(
                 # a long build phase live with these. Outside the summary
                 # digest and count.
                 continue
-            if kind == "checkpoint.begin":
-                # Refuse at the offer when this store holds a founded
-                # ledger: the install would refuse it (ca33ba7) and the
-                # transfer would be wasted. An origin syncs by delta only.
-                founded = await asyncio.to_thread(
-                    founded_ledger_rows, _scope_db_path(scope)
+            if kind == SWEEP_BEGIN_KIND:
+                # The serving store's frontier, once, before any page. Routed
+                # through the SAME shared validator the direct receiver uses:
+                # two parsers of the record that decides what a store believes
+                # about its own coverage would drift, and the drift is silent
+                # until a store holds rows under a frontier it never agreed to.
+                await asyncio.to_thread(
+                    store.record_sweep_begin, value, scope,
+                    route.origin_machine_pub,
                 )
-                if founded:
-                    raise FleetRelaySyncError(
-                        f"peer offered a checkpoint for scope {scope!r} but "
-                        f"this store holds a founded ledger ({founded} rows); "
-                        "refusing before transfer"
-                    )
-                # A server may initiate a checkpoint this machine did not
-                # request: an unresolvable trail against a pruned journal
-                # makes a checkpoint the only honest recovery, and the
-                # stream below verifies it exactly like a requested one.
-                expected = {
-                    "v", "kind", "file_count", "total_bytes",
-                    "source_machine_pub", "roster_epoch",
-                }
-                if set(value) != expected or value["source_machine_pub"] != route.origin_machine_pub:
-                    raise FleetRelaySyncError("checkpoint header is malformed")
-                expected_files = value["file_count"]
-                expected_bytes = value["total_bytes"]
-                if (
-                    not isinstance(expected_files, int)
-                    or not isinstance(expected_bytes, int)
-                    or expected_files < 1
-                    or expected_files > MAX_CHECKPOINT_FILES
-                    or expected_bytes < 1
-                    or expected_bytes > MAX_CHECKPOINT_BYTES
-                ):
-                    raise FleetRelaySyncError("checkpoint header exceeds bounds")
-                seen_files = seen_bytes = 0
                 continue
-            if kind == "checkpoint.end":
-                if (
-                    expected_files is None
-                    or seen_files != expected_files
-                    or seen_bytes != expected_bytes
-                    or value.get("file_count") != seen_files
-                    or value.get("total_bytes") != seen_bytes
-                ):
-                    raise FleetRelaySyncError("checkpoint stream is incomplete")
-                if scope == "personal":
-                    await dashboard_fleet_sync_service.install_checkpoint(
-                        checkpoint,
-                        source_machine_pub=route.origin_machine_pub,
-                    )
-                else:
-                    await _install_scoped_checkpoint(
-                        checkpoint, scope, credential,
-                        route.origin_machine_pub,
-                    )
-                store = SQLiteFleetSyncStore(_scope_db_path(scope))
-                installed_checkpoint = True
+            if kind == SWEEP_END_KIND:
+                # Keyspace half delivered. NOT bootstrap completion -- the
+                # > F half still owes, and the frontier stays unadvertised
+                # until it lands.
+                await apply_pending()
+                await asyncio.to_thread(store.record_sweep_delivered)
                 continue
             raise FleetRelaySyncError("checkpoint stream has an unknown control")
         if not saw_done:
             raise FleetRelaySyncError("fleet relay stream ended without delta summary")
-        if include_checkpoint and not installed_checkpoint:
-            raise FleetRelaySyncError("fleet relay stream ended without checkpoint")
     finally:
         await channel.close()
 
