@@ -1,4 +1,4 @@
-"""Fleet-authenticated checkpoint pull over an ordinary RelayKit link.
+"""Fleet-authenticated sync pull over an ordinary RelayKit link.
 
 The outer ViewerChannel already supplies encrypted, integrity-protected
 transport pinned to the serving organization. Fleet authentication is a
@@ -21,14 +21,12 @@ import json
 import logging
 import os
 import sqlite3
-import shutil
 import struct
 import sys
-import tempfile
 import threading
 import time
 import urllib.parse
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Callable
 
 from tools.graph.db import _org_db_path
@@ -67,13 +65,7 @@ from tools.network.fleet_sync_scheduler import (
     MAX_RESUME_BREADCRUMBS,
     SQLiteFleetSyncStore,
     SUPPORTED_PROTOCOL_VERSIONS,
-    dashboard_fleet_sync_service,
     roster_epoch,
-)
-from tools.network.fleet_sync.sync import (
-    CheckpointAborted,
-    FleetSyncAlpha,
-    founded_ledger_rows,
 )
 from tools.network.idkit import canonical_json
 from tools.network.relaykit.viewer import ViewerChannel
@@ -108,12 +100,11 @@ PROTOCOL_VERSION = 1
 #: forever; the run loop's backoff retries after a timeout. Mid-transfer
 #: inactivity is the stream liveness policy's job — this is the outer floor.
 #:
-#: 30 minutes, not less: the serving side builds the full checkpoint BEFORE the
-#: first content frame, and over a tombstone-bloated catalog (708k rows, ~half
-#: uncollected tombstones — semantic GC unimplemented, auto-yl0r6) that build
-#: alone exceeded 600s on real hardware (2026-09-06, home pid at 107% CPU).
-#: Timing out mid-build is the worst outcome: the receiver walks away, retries,
-#: and STACKS another build on the server. The deadline must comfortably exceed
+#: 30 minutes, not less: a bootstrap sweep over a tombstone-bloated catalog
+#: (708k rows, ~half uncollected tombstones — semantic GC unimplemented,
+#: auto-yl0r6) can run long on real hardware. Timing out mid-sweep is the worst
+#: outcome: the receiver walks away, retries, and STACKS another sweep on the
+#: server. The deadline must comfortably exceed
 #: one honest build+transfer; shrinking the catalog (GC) is the real cure.
 PULL_DEADLINE_S = 1800.0
 PULL_OP = "fleet.sync.pull"
@@ -121,16 +112,13 @@ PULL_OP = "fleet.sync.pull"
 DIRECT_FRESHNESS_WINDOW_S = 30.0
 BLOB_OP = "fleet.sync.blob"
 CONTROL_OP = "fleet-runtime"
-FILE_MAGIC = b"FSB1"
-MAX_CHECKPOINT_FILES = 4096
-MAX_CHECKPOINT_BYTES = 4 * 1024 * 1024 * 1024
 _REQUEST_FIELDS = {
-    "v", "op", "roster_epoch", "checkpoint", "compat", "resume", "hello",
+    "v", "op", "roster_epoch", "bootstrap", "compat", "resume", "hello",
 }
 
 
 class FleetRelaySyncError(RuntimeError):
-    """The route, Fleet proof, or checkpoint stream was invalid."""
+    """The route, Fleet proof, or sync stream was invalid."""
 
 
 def _json(raw: object, what: str) -> dict:
@@ -141,39 +129,6 @@ def _json(raw: object, what: str) -> dict:
     if not isinstance(value, dict):
         raise FleetRelaySyncError(f"{what} must be an object")
     return value
-
-
-def _encode_file(relative: str, body: bytes) -> bytes:
-    header = canonical_json({
-        "path": relative,
-        "size": len(body),
-        "sha256": hashlib.sha256(body).hexdigest(),
-    })
-    return FILE_MAGIC + struct.pack(">I", len(header)) + header + body
-
-
-def _decode_file(raw: bytes) -> tuple[str, bytes]:
-    if not isinstance(raw, bytes) or not raw.startswith(FILE_MAGIC) or len(raw) < 8:
-        raise FleetRelaySyncError("checkpoint file frame is malformed")
-    header_size = struct.unpack(">I", raw[4:8])[0]
-    if header_size > 4096 or 8 + header_size > len(raw):
-        raise FleetRelaySyncError("checkpoint file header is malformed")
-    header = _json(raw[8:8 + header_size], "checkpoint file header")
-    if set(header) != {"path", "size", "sha256"}:
-        raise FleetRelaySyncError("checkpoint file header has unknown fields")
-    relative = header["path"]
-    path = PurePosixPath(relative) if isinstance(relative, str) else None
-    if (
-        path is None
-        or path.is_absolute()
-        or not path.parts
-        or any(part in {"", ".", ".."} for part in path.parts)
-    ):
-        raise FleetRelaySyncError("checkpoint file path escapes its stage")
-    body = raw[8 + header_size:]
-    if header["size"] != len(body) or header["sha256"] != hashlib.sha256(body).hexdigest():
-        raise FleetRelaySyncError("checkpoint file digest does not match")
-    return path.as_posix(), body
 
 
 def _keycache_dir() -> Path:
@@ -294,13 +249,12 @@ class ConnectorFleetRuntime:
         #: — a fresh arm starts a new "since".
         self.locked_refusals: int = 0
         self.first_locked_refusal_at: float | None = None
-        #: One checkpoint build per scope at a time. A client that retries
-        #: while its previous build is still running must queue behind it,
-        #: not stack another full-database build beside it — N stacked
-        #: builds GIL-starve each other so NONE finishes inside the client
+        #: One serve per scope at a time. A client that retries while its
+        #: previous serve is still running must queue behind it, not stack
+        #: another full-database sweep beside it — N stacked sweeps
+        #: GIL-starve each other so NONE finishes inside the client
         #: deadline, and the retry cadence turns that into a permanent
         #: 100%-CPU wedge (observed live 2026-09-06).
-        self._checkpoint_build_locks: dict[str, asyncio.Lock] = {}
         #: Live pull/blob streams right now. Reported in connector-status so
         #: the supervisor can DRAIN a stale-code incumbent (wait for zero, or
         #: a deadline) instead of severing mid-transfer on every merge.
@@ -311,26 +265,6 @@ class ConnectorFleetRuntime:
         #: at 1 for 5+ minutes with no stream, live 2026-09-06), and a stuck
         #: counter must not keep a stale-code connector alive.
         self.last_stream_activity: float | None = None
-        #: scope -> (monotonic, reason) of the last checkpoint build that
-        #: failed the untracked-rows integrity check. Until repaired, every
-        #: rebuild fails identically after a full scan (156s on a 1.5GB store,
-        #: live 2026-09-06) — so refuse the scope for a backoff instead.
-        self._integrity_failed: dict[str, tuple[float, str]] = {}
-        #: (scope, peer_pub) -> monotonic of the last checkpoint this process
-        #: delivered to that peer with outcome=success. A fresh first-contact
-        #: request (empty trail) for the same scope shortly after that means
-        #: the RECEIVER failed to install what it fully received — rebuilding
-        #: cannot help, only burn (2.27GB per 3.5min, live 2026-09-06 when
-        #: SJC ran a pre-fix install invariant).
-        #: value = (monotonic of that delivery, strikes) where strikes counts
-        #: deliveries this peer has already failed to keep; the refusal
-        #: window doubles per strike (see _redelivery_window_s) and resets
-        #: when a request finally carries a resolvable trail. Without the
-        #: escalation a 600s window still meant 2.27 GB rebuilt and uploaded
-        #: every ten minutes all night (≈13 GB/h) with no chance of success
-        #: until the transport fix lands (2026-09-06).
-        self._recent_checkpoint_delivery: dict[
-            tuple[str, str], tuple[float, int]] = {}
         #: Listeners of replaced schedulers, stopped on the next ensure pass.
         self._retired_listeners: list = []
         #: (host, port) the direct listener is bound to right now, or None.
@@ -368,8 +302,8 @@ class ConnectorFleetRuntime:
             org_uuid=org_uuid,
         )
         # The direct listener lives HERE by default (fleet-direct row
-        # serve_in=connector): this process already builds and streams
-        # checkpoints for relay serves and carries no operator UI. The
+        # serve_in=connector): this process already streams relay serves
+        # and carries no operator UI. The
         # listener itself is bound by ensure_direct_listener() on the
         # connector's loop, never in this synchronous configure().
         from tools.network import fleet_direct_config
@@ -483,7 +417,7 @@ class ConnectorFleetRuntime:
         self.direct_listener = (scheduler.config.listen_host, port)
         logger.info(
             "fleet direct listener bound %s:%d in the connector "
-            "(roster-authenticated; serves checkpoints and deltas here, "
+            "(roster-authenticated; serves sweeps and deltas here, "
             "never on the dashboard loop)",
             scheduler.config.listen_host, port,
         )
@@ -593,9 +527,9 @@ class ConnectorFleetRuntime:
         requested_epoch = message.get("roster_epoch")
         if not isinstance(requested_epoch, str) or len(requested_epoch) != 64:
             raise FleetRelaySyncError("fleet sync pull has no roster epoch")
-        include_checkpoint = message.get("checkpoint")
-        if not isinstance(include_checkpoint, bool):
-            raise FleetRelaySyncError("fleet sync pull checkpoint flag must be bool")
+        request_bootstrap = message.get("bootstrap")
+        if not isinstance(request_bootstrap, bool):
+            raise FleetRelaySyncError("fleet sync pull bootstrap flag must be bool")
         raw_resume = message.get("resume")
         if not isinstance(raw_resume, list) or len(raw_resume) > MAX_RESUME_BREADCRUMBS:
             raise FleetRelaySyncError("fleet sync pull resume trail is malformed")
@@ -642,70 +576,10 @@ class ConnectorFleetRuntime:
         # The scope's wire epoch: the personal roster hash, or the org
         # epoch for an org scope with an org channel (auto-coea3 step 3).
         current_epoch, _state_epoch = scheduler._scope_epochs(scope)
-        # Continuity decides the transfer, not the request alone: a
-        # resolvable breadcrumb trail proves the peer consumed this
-        # journal's prefix, so deltas suffice regardless of roster changes;
-        # an unresolvable trail against a gapped (pruned or
-        # checkpoint-installed) journal needs a checkpoint even when the
-        # peer did not ask, because a replay would silently omit retired
-        # history.
-        # An empty trail is position zero by definition — no store access,
-        # which also keeps a not-yet-activated serving store out of the
-        # decision path for first-contact pulls.
-        resume_position = 0
-        if resume_trail:
-            resume_position = await asyncio.to_thread(
-                scope_store.resume_ref, resume_trail
-            )
-        if watermarks:
-            # A watermark map is continuity in itself: the peer holds state
-            # and is served deltas from it (per-origin, from catalog rows).
-            resume_position = max(resume_position, 1)
-        # An empty server has nothing a checkpoint delivers; two freshly
-        # prepared machines must meet through (empty) deltas, not by
-        # installing each other's blank databases — same guard as the
-        # direct path's serve decision.
-        server_has_content = await asyncio.to_thread(scope_store.has_state)
-        # The relay builds nothing: bootstrap flows through the shared serve
-        # (scheduler._handle), which sweeps. Kept as a local so the telemetry
-        # and logging below stay honest about what this stream carried.
-        serve_checkpoint = False
-        # A request carrying a resolvable trail proves the peer kept what it
-        # received: clear any redelivery strikes for this scope.
-        if resume_trail and resume_position > 0:
-            self._recent_checkpoint_delivery.pop((scope, peer_pub), None)
-        # Refusals decided here, BEFORE the stream: the client logs them as
-        # 'fleet server refused: <reason>' instead of a mid-stream failure.
-        if serve_checkpoint:
-            if not resume_trail:
-                record = self._recent_checkpoint_delivery.get(
-                    (scope, peer_pub))
-                if record is not None:
-                    delivered_at, strikes = record
-                    window = _redelivery_window_s(strikes)
-                    age = time.monotonic() - delivered_at
-                    if age < window:
-                        raise FleetRelaySyncError(
-                            f"scope {scope!r}: checkpoint refused — this "
-                            f"peer received a complete checkpoint {age:.0f}s "
-                            "ago and is asking for a fresh one with no "
-                            "resume trail, so it failed to keep it "
-                            f"(strike {strikes + 1}; next attempt allowed "
-                            f"after {window:.0f}s); fix the receiver or "
-                            "the transport, rebuilding cannot help"
-                        )
-            failed = self._integrity_failed.get(scope)
-            if failed is not None:
-                failed_at, reason = failed
-                if (time.monotonic() - failed_at
-                        < INTEGRITY_FAILURE_BACKOFF_S):
-                    raise FleetRelaySyncError(
-                        f"scope {scope!r}: checkpoint refused — last "
-                        f"build failed integrity ({reason}); repair "
-                        "the store (fleet_doctor --repair-catalog) "
-                        "before it can be served"
-                    )
-                self._integrity_failed.pop(scope, None)
+        # The relay decides nothing about the shape of the transfer: the
+        # peer's bootstrap flag and its resume trail both go to the shared
+        # serve (scheduler._handle), which sweeps or sends deltas. This path
+        # only authenticates, forwards, and counts.
         logger.warning(
             "fleet relay sync: accept_client ok, peer_pub=%s, entering stream",
             peer_pub[:16] if isinstance(peer_pub, str) else peer_pub,
@@ -722,12 +596,9 @@ class ConnectorFleetRuntime:
                 "bytes_received": len(canonical_json(message)),
                 "mutation_frames": 0,
                 "transactions": 0,
-                "checkpoint_bytes": 0,
             }
             outcome = "failed"
             error_code = "stream_incomplete"
-            root = Path(tempfile.mkdtemp(prefix="fleet-relay-checkpoint-"))
-            checkpoint = root / "checkpoint"
             try:
                 server_hello_frame = canonical_json({
                     "v": PROTOCOL_VERSION,
@@ -737,7 +608,6 @@ class ConnectorFleetRuntime:
                 })
                 stats["bytes_sent"] += len(server_hello_frame)
                 yield server_hello_frame
-                resume_floor_ref = None
                 deltas = await scheduler._handle(
                     token,
                     encode_pull_request(
@@ -750,18 +620,17 @@ class ConnectorFleetRuntime:
                         # flag through; now bootstrap flows through the shared
                         # serve, and without this the sweep never fires and a
                         # relay-only joiner receives deltas alone.
-                        bootstrap=include_checkpoint,
+                        bootstrap=request_bootstrap,
                         version=max(sync_version, SWEEP_PROTOCOL_VERSION)
-                        if include_checkpoint else sync_version,
+                        if request_bootstrap else sync_version,
                         watermarks=watermarks,
                     ),
                     peer_pub,
                     telemetry_channel="relay",
-                    telemetry_mode="checkpoint" if serve_checkpoint else "delta",
+                    telemetry_mode="delta",
                     telemetry_stats=stats,
                     telemetry_started_at_ns=started_at_ns,
                     telemetry_started_monotonic_ns=started_monotonic_ns,
-                    resume_floor_ref=resume_floor_ref,
                     authorize=admission.authorize,
                     admitted_org=admission.org,
                 )
@@ -769,14 +638,6 @@ class ConnectorFleetRuntime:
                     self._touch_stream_activity()
                     yield frame
                 outcome = "success"
-                if serve_checkpoint:
-                    prior = self._recent_checkpoint_delivery.get(
-                        (scope, peer_pub))
-                    # A prior record still present means the peer never came
-                    # back with a trail after that delivery: one more strike.
-                    strikes = prior[1] + 1 if prior is not None else 0
-                    self._recent_checkpoint_delivery[(scope, peer_pub)] = (
-                        time.monotonic(), strikes)
                 error_code = ""
             except asyncio.CancelledError:
                 outcome = "cancelled"
@@ -800,16 +661,13 @@ class ConnectorFleetRuntime:
                 self.active_streams -= 1
                 self._touch_stream_activity()
                 _disarm_stall_dump()
-                shutil.rmtree(root, ignore_errors=True)
-                # One greppable delivery line per stream: "build completed"
-                # only proves the artifact existed — this is the line that
-                # says whether the peer actually received it (outcome=success
-                # means the delta phase finished; checkpoint bytes counted).
+                # One greppable delivery line per stream: this is the line
+                # that says whether the peer actually received the stream
+                # (outcome=success means the delta phase finished).
                 logger.warning(
                     "fleet relay sync: stream finished scope=%s outcome=%s "
-                    "sent=%dB checkpoint=%dB in=%.1fs",
+                    "sent=%dB in=%.1fs",
                     scope, outcome, stats["bytes_sent"],
-                    stats["checkpoint_bytes"],
                     (time.monotonic_ns() - started_monotonic_ns) / 1e9,
                 )
                 recorder = scheduler.config.telemetry_recorder
@@ -821,7 +679,7 @@ class ConnectorFleetRuntime:
                             channel="relay",
                             direction="serve",
                             scope=scope,
-                            mode="checkpoint" if serve_checkpoint else "delta",
+                            mode="delta",
                             outcome=outcome,
                             started_at_ns=started_at_ns,
                             duration_ms=max(
@@ -899,7 +757,7 @@ class ConnectorFleetRuntime:
 #: (Removed 2026-09-06.) A periodic faulthandler.dump_traceback_later here
 #: correlated with two connector deaths mid-dump: that watchdog dumps from a C
 #: thread WITHOUT the GIL while asyncio.to_thread workers are created and torn
-#: down under a checkpoint build — the case CPython documents as unsafe. The
+#: down under heavy transfer — the case CPython documents as unsafe. The
 #: CPU-gated sampler in link_serving (synchronous dump, GIL held) and the
 #: SIGUSR1 on-demand dump replace it.
 def _arm_stall_dump() -> None:
@@ -910,33 +768,8 @@ def _disarm_stall_dump() -> None:
     return None
 
 
-#: Keepalive cadence during the frame-silent checkpoint build phase. Well
-#: under the client's 60s frame-silence limit so even a badly contended
-#: multi-minute build never trips it; the client ignores keepalive frames.
-BUILD_KEEPALIVE_INTERVAL_S = 20.0
-
-#: After a checkpoint build fails the untracked-rows integrity check, refuse
-#: that scope's checkpoints for this long before trying once more (the store
-#: may have been repaired meanwhile). Only that scope is affected.
-INTEGRITY_FAILURE_BACKOFF_S = 600.0
-
-#: A peer that fully received a checkpoint and immediately asks for another
-#: with no resume trail failed to install it; refuse that scope for this long
-#: rather than rebuild the same multi-GB artifact every pull.
-REDELIVERY_GUARD_S = 600.0
-#: Ceiling for the escalating window (see _redelivery_window_s).
-REDELIVERY_GUARD_MAX_S = 6 * 3600.0
-
-
-def _redelivery_window_s(strikes: int) -> float:
-    """Refusal window after a delivery the peer failed to keep: doubles per
-    prior strike (600s, 1200s, 2400s, …) up to REDELIVERY_GUARD_MAX_S, so a
-    receiver that can never keep a checkpoint costs a handful of rebuilds,
-    not one every ten minutes all night."""
-    return min(REDELIVERY_GUARD_S * (2 ** max(0, strikes)), REDELIVERY_GUARD_MAX_S)
-
 #: Websocket pong deadline for the PULLER's relay connection. Under a bulk
-#: checkpoint receive the relay's pong queues behind data frames, so the
+#: receive the relay's pong queues behind data frames, so the
 #: library default (20s) closed a 2.27GB transfer at minute 3.5 with 1011
 #: 'keepalive ping timeout' while frames were still arriving (SJC log,
 #: 2026-09-06). The 60s frame-silence rule remains the liveness check for a
@@ -1117,58 +950,11 @@ def _scoped_store(scope: str, machine_pub: str) -> SQLiteFleetSyncStore:
     return SQLiteFleetSyncStore(path)
 
 
-async def _install_scoped_checkpoint(
-    checkpoint: Path,
-    scope: str,
-    credential: fleet_runtime.FleetRuntimeCredential,
-    source_machine_pub: str,
-) -> None:
-    """Quiesce one organization database and publish a received checkpoint.
-
-    The personal scope installs through ``dashboard_fleet_sync_service``,
-    which pauses the whole runtime; an organization scope quiesces only its
-    own database, mirroring the direct path's ``_install_direct_checkpoint``.
-    """
-    from tools.graph.db import GraphDB
-    from tools.network.fleet_checkpoint_handoff import (
-        install_quiesced_checkpoint,
-    )
-    from tools.network.fleet_sync_connection import (
-        acquire_database_quiescence,
-    )
-
-    scope_path = _scope_db_path(scope)
-    entries = tuple(fleet_roster.load_entries(org=None))
-    root_pub = credential.delegation_cert.org.removeprefix("personal:")
-    active = tuple(sorted(fleet_roster.resolve(
-        entries, anchor_root_pub=root_pub
-    )))
-    epoch = roster_epoch(entries, root_pub)
-
-    def install() -> None:
-        GraphDB.close_pooled_path(scope_path)
-        token = acquire_database_quiescence(scope_path)
-        try:
-            install_quiesced_checkpoint(
-                checkpoint,
-                scope_path,
-                quiescence=token,
-                target_origin_incarnation=credential.machine_pub,
-                expected_roster_epoch=epoch,
-                expected_active_roster=active,
-                source_machine_pub=source_machine_pub,
-            )
-        finally:
-            token.release()
-
-    await asyncio.to_thread(install)
-
-
-async def pull_checkpoint_once(
+async def pull_once(
     credential: fleet_runtime.FleetRuntimeCredential,
     route: fleet_route.FleetRoute,
     *,
-    include_checkpoint: bool = True,
+    bootstrap: bool = True,
     metrics: dict[str, int] | None = None,
     scope: str = "personal",
 ) -> dict[str, int]:
@@ -1178,7 +964,6 @@ async def pull_checkpoint_once(
         "bytes_received": 0,
         "mutation_frames": 0,
         "transactions": 0,
-        "checkpoint_bytes": 0,
     })
     entries = tuple(fleet_roster.load_entries(org=None))
     root_pub = credential.delegation_cert.org.removeprefix("personal:")
@@ -1200,9 +985,6 @@ async def pull_checkpoint_once(
         org=envelope["org"],
         ping_timeout=PULL_PING_TIMEOUT_S,
     )
-    stage_root = Path(tempfile.mkdtemp(prefix="fleet-received-checkpoint-"))
-    checkpoint = stage_root / "checkpoint"
-    checkpoint.mkdir()
     try:
         private, hello = auth.build_client_hello(token)
         client_eph = _json(hello, "fleet client hello")["eph_pub"]
@@ -1236,7 +1018,7 @@ async def pull_checkpoint_once(
             "v": PROTOCOL_VERSION,
             "op": PULL_OP,
             "roster_epoch": epoch,
-            "checkpoint": include_checkpoint,
+            "bootstrap": bootstrap,
             "compat": local_digest,
             "watermarks": watermarks,
             "resume": [
@@ -1254,9 +1036,7 @@ async def pull_checkpoint_once(
         request = canonical_json(body)
         metrics["bytes_sent"] += len(request)
         await channel.send_message(request)
-        expected_files = expected_bytes = seen_files = seen_bytes = None
         saw_hello = False
-        installed_checkpoint = False
         store = SQLiteFleetSyncStore(_scope_db_path(scope))
         pending = []
         pending_identity = None
@@ -1379,21 +1159,7 @@ async def pull_checkpoint_once(
                     )
                 saw_done = True
                 break
-            if raw.startswith(FILE_MAGIC):
-                if expected_files is None:
-                    raise FleetRelaySyncError("checkpoint file arrived before its header")
-                relative, body = _decode_file(raw)
-                target = checkpoint.joinpath(*PurePosixPath(relative).parts)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with target.open("xb") as handle:
-                    handle.write(body)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                seen_files += 1
-                seen_bytes += len(body)
-                metrics["checkpoint_bytes"] += len(body)
-                continue
-            value = _json(raw, "checkpoint control")
+            value = _json(raw, "fleet sync control")
             kind = value.get("kind")
             if kind == "keepalive":
                 # Tolerated, never emitted (yet): a future server may keep
@@ -1418,40 +1184,33 @@ async def pull_checkpoint_once(
                 await apply_pending()
                 await asyncio.to_thread(store.record_sweep_delivered)
                 continue
-            raise FleetRelaySyncError("checkpoint stream has an unknown control")
+            raise FleetRelaySyncError("fleet sync stream has an unknown control")
         if not saw_done:
             raise FleetRelaySyncError("fleet relay stream ended without delta summary")
     finally:
         await channel.close()
 
+    entries = tuple(fleet_roster.load_entries(org=None))
+    epoch = roster_epoch(entries, root_pub)
+    await asyncio.to_thread(
+        SQLiteFleetSyncStore(_scope_db_path(scope)).record_peer,
+        route.origin_machine_pub,
+        epoch,
+        online=False,
+        deltas_received=1,
+        acknowledgements=1,
+        success=True,
+    )
+    # Best-effort: a drain failure never fails the pull that preceded
+    # it, but it is logged rather than swallowed.
     try:
-        entries = tuple(fleet_roster.load_entries(org=None))
-        epoch = roster_epoch(entries, root_pub)
-        # No checkpoint receipt here: the install path's
-        # _record_checkpoint_receipt already recorded it durably with source
-        # attribution — a second additive write double-counted every relay
-        # install (the same class 64963898 removed on the direct path).
-        await asyncio.to_thread(
-            SQLiteFleetSyncStore(_scope_db_path(scope)).record_peer,
-            route.origin_machine_pub,
-            epoch,
-            online=False,
-            deltas_received=1,
-            acknowledgements=1,
-            success=True,
+        await _drain_attachments_via_relay(
+            route, auth, ws_base, token, envelope, scope=scope,
         )
-        # Best-effort: a drain failure never fails the pull that preceded
-        # it, but it is logged rather than swallowed.
-        try:
-            await _drain_attachments_via_relay(
-                route, auth, ws_base, token, envelope, scope=scope,
-            )
-        except Exception:
-            logger.warning(
-                "fleet relay attachment drain failed", exc_info=True
-            )
-    finally:
-        shutil.rmtree(stage_root, ignore_errors=True)
+    except Exception:
+        logger.warning(
+            "fleet relay attachment drain failed", exc_info=True
+        )
     return metrics
 
 
@@ -1605,7 +1364,7 @@ class DashboardFleetRelaySyncService:
         delay = 0.5
         while self._credential is credential:
             route = None
-            include_checkpoint = False
+            bootstrap = False
             started_at_ns = time.time_ns()
             started_monotonic_ns = time.monotonic_ns()
             metrics: dict[str, int] = {}
@@ -1650,25 +1409,25 @@ class DashboardFleetRelaySyncService:
                     delay = 0.5
                     await asyncio.sleep(10.0)
                     continue
-                include_checkpoint = not await asyncio.to_thread(
+                bootstrap = not await asyncio.to_thread(
                     _has_local_sync_state,
                     route.origin_machine_pub,
                     credential.delegation_cert.org.removeprefix("personal:"),
                 )
-                # HARD DEADLINE. pull_checkpoint_once had none, so a peer (or
+                # HARD DEADLINE. pull_once had none, so a peer (or
                 # relay hop) that accepts the connection and then never answers
                 # left this task hung FOREVER on an established socket — armed,
                 # connected, transferring nothing, logging nothing (observed
                 # live on SJC 2026-09-06: 474 B/s keepalive trickle, zero pull
                 # lines). A bounded pull dies loudly instead and the loop's
-                # existing backoff retries it. Generous bound: a full checkpoint
+                # existing backoff retries it. Generous bound: a full bootstrap
                 # is hundreds of MB; ten minutes of NO COMPLETION with the
                 # in-stream liveness policy handling mid-transfer stalls.
                 async with asyncio.timeout(PULL_DEADLINE_S):
-                    await pull_checkpoint_once(
+                    await pull_once(
                         credential,
                         route,
-                        include_checkpoint=include_checkpoint,
+                        bootstrap=bootstrap,
                         metrics=metrics,
                     )
                 duration_ms = max(
@@ -1680,7 +1439,7 @@ class DashboardFleetRelaySyncService:
                         route.origin_machine_pub,
                         channel="relay",
                         direction="pull",
-                        mode="checkpoint" if include_checkpoint else "delta",
+                        mode="delta",
                         outcome="success",
                         address=_relay_address(route),
                         path_class="relay",
@@ -1697,7 +1456,7 @@ class DashboardFleetRelaySyncService:
                 # (failures already log loudly below) -- just proof of life.
                 logger.info(
                     "fleet relay sync: pull succeeded (%s)",
-                    "checkpoint" if include_checkpoint else "delta",
+                    "delta",
                 )
                 # Organization scopes ride the same route after the
                 # personal pull; each failure pauses only its own scope,
@@ -1713,7 +1472,7 @@ class DashboardFleetRelaySyncService:
                             route.origin_machine_pub,
                             channel="relay",
                             direction="pull",
-                            mode="checkpoint" if include_checkpoint else "delta",
+                            mode="delta",
                             outcome="cancelled",
                             started_at_ns=started_at_ns,
                             duration_ms=max(
@@ -1733,7 +1492,7 @@ class DashboardFleetRelaySyncService:
                             route.origin_machine_pub,
                             channel="relay",
                             direction="pull",
-                            mode="checkpoint" if include_checkpoint else "delta",
+                            mode="delta",
                             outcome="failed",
                             address=_relay_address(route),
                             path_class="relay",
@@ -1752,7 +1511,7 @@ class DashboardFleetRelaySyncService:
                     "detail": str(exc)[:300],
                     "at": time.time(),
                 }
-                logger.warning("Fleet relay checkpoint pull failed", exc_info=True)
+                logger.warning("Fleet relay sync pull failed", exc_info=True)
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 30.0)
 
@@ -1783,7 +1542,7 @@ class DashboardFleetRelaySyncService:
             started_at_ns = time.time_ns()
             started_monotonic_ns = time.monotonic_ns()
             metrics: dict[str, int] = {}
-            include_checkpoint = False
+            bootstrap = False
             outcome = "success"
             error_code = ""
             try:
@@ -1794,7 +1553,7 @@ class DashboardFleetRelaySyncService:
                     scope=scope,
                 ):
                     continue
-                include_checkpoint = not await asyncio.to_thread(
+                bootstrap = not await asyncio.to_thread(
                     _has_local_sync_state,
                     route.origin_machine_pub,
                     credential.delegation_cert.org.removeprefix("personal:"),
@@ -1803,10 +1562,10 @@ class DashboardFleetRelaySyncService:
                 # Same hard deadline as the personal pull: a hung org-scope
                 # pull must fail this scope loudly, not hang the whole loop.
                 async with asyncio.timeout(PULL_DEADLINE_S):
-                    await pull_checkpoint_once(
+                    await pull_once(
                         credential,
                         route,
-                        include_checkpoint=include_checkpoint,
+                        bootstrap=bootstrap,
                         metrics=metrics,
                         scope=scope,
                     )
@@ -1832,7 +1591,7 @@ class DashboardFleetRelaySyncService:
                     channel="relay",
                     direction="pull",
                     scope=scope,
-                    mode="checkpoint" if include_checkpoint else "delta",
+                    mode="delta",
                     outcome=outcome,
                     started_at_ns=started_at_ns,
                     duration_ms=max(
@@ -1848,15 +1607,6 @@ class DashboardFleetRelaySyncService:
 dashboard_relay_sync_service = DashboardFleetRelaySyncService()
 
 
-def _serve_checkpoint_decision(
-    resume_position: int, requested: bool, journal_gap: bool = False
-) -> bool:
-    """One rule for both serve paths: see serve_bootstrap_decision."""
-    from tools.network.fleet_sync_scheduler import serve_bootstrap_decision
-
-    return serve_bootstrap_decision(resume_position, requested, journal_gap)
-
-
 def _has_local_sync_state(
     machine_pub: str, root_pub: str, db_path: Path | None = None
 ) -> bool:
@@ -1864,22 +1614,15 @@ def _has_local_sync_state(
 
     A machine with state syncs by deltas: its breadcrumb trail is
     epoch-independent continuity proof, so a roster change must never force
-    a fleet-wide re-checkpoint (the old check keyed receipts on the current
-    epoch and did exactly that). State is a checkpoint receipt from ANY
-    epoch, or any applied/originated transaction. The peer arguments are kept
-    for call-site continuity; state is a property of this machine, not of
-    one peer. ``db_path`` selects the scope database; None means personal.
+    a fleet-wide re-bootstrap. State is any applied or originated
+    transaction. The peer arguments are kept for call-site continuity;
+    state is a property of this machine, not of one peer. ``db_path``
+    selects the scope database; None means personal.
     """
     del machine_pub, root_pub
     path = db_path if db_path is not None else _org_db_path("personal")
     try:
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
-            receipt = conn.execute(
-                "SELECT 1 FROM fleet_sync_peer_state "
-                "WHERE checkpoints_received>0 LIMIT 1"
-            ).fetchone()
-            if receipt is not None:
-                return True
             applied = conn.execute(
                 "SELECT 1 FROM fleet_sync_transactions LIMIT 1"
             ).fetchone()

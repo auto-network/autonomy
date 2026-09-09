@@ -725,7 +725,7 @@ def _probe_ctl_status(ctl_path: str) -> dict | None:
             "op": "connector-status",
             "args": {},
         }) + "\n"
-        # A connector mid-checkpoint-build pegs the GIL and answers slowly;
+        # A connector under heavy serve load pegs the GIL and answers slowly;
         # 0.5s misread a busy, healthy process as unreachable (2026-09-06).
         with socket.create_connection(
             ("127.0.0.1", int(descriptor["port"])), timeout=CTL_PROBE_TIMEOUT_S
@@ -869,7 +869,7 @@ def _default_spawn(argv: list, env: dict, *, log_path: str | None = None,
             # worker deaths. The previous PR_SET_PDEATHSIG tie meant every
             # hot reload (uvicorn --reload fires on every code merge) SIGTERMed
             # the serving connector MID-STREAM: a fleet member pulling a large
-            # checkpoint lost its transfer on every merge and re-pulled from
+            # bootstrap lost its transfer on every merge and re-pulled from
             # scratch, forever (observed live 2026-09-05: repeated connector
             # instances, 3.7GB transferred for a 217MB database, sync never
             # completing during active development). Orphan protection moves to
@@ -1359,9 +1359,9 @@ class ServingSupervisor:
                 # dead dashboard's leftover) — the reap path is right.
                 return None
             if status is None:
-                # UNREACHABLE is not DEAD. A connector mid-build pegs the GIL
+                # UNREACHABLE is not DEAD. A busy connector pegs the GIL
                 # and misses the probe; reaping it here (as this did) killed
-                # the 1.5GB autonomy-scope checkpoint build nine times in one
+                # the 1.5GB autonomy-scope serve nine times in one
                 # night. Adopt it provisionally as a lame duck: the watchdog
                 # keeps probing, and the drain deadline bounds a truly wedged
                 # process.
@@ -1382,7 +1382,7 @@ class ServingSupervisor:
                 _log.warning(
                     "adopting UNREACHABLE incumbent connector pid=%s for "
                     "org=%s provisionally as a lame duck (control probe timed "
-                    "out — likely busy, e.g. a checkpoint build); not reaping",
+                    "out — likely busy, e.g. a bootstrap sweep); not reaping",
                     pid, org_uuid,
                 )
                 return {"running": True, "reason": "lame-duck-unreachable"}

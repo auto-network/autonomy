@@ -46,7 +46,7 @@ def _store_delivered_roster(
     always stored -- a crash can leave harmless authorization evidence, but
     never an identity unable to authenticate the origin peer. The additional
     ``delivery.active_roster`` entries carry the rest of the fleet so a new
-    machine can fetch a first checkpoint from any peer, not only the origin.
+    machine can bootstrap from any peer, not only the origin.
     Each is independently personal-root-signed; verify each against the anchor
     and skip any that does not, so one malformed extra entry can never abort an
     otherwise-complete enrollment (``fleet_roster.resolve`` would drop it on

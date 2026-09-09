@@ -143,7 +143,7 @@ def test_connector_survives_its_parent_death(tmp_path):
 
     The old PR_SET_PDEATHSIG tie meant every hot reload (fired by every code
     merge) SIGTERMed the serving connector mid-stream — a fleet member pulling
-    a checkpoint lost its transfer on every merge and re-pulled from scratch,
+    a bootstrap lost its transfer on every merge and re-pulled from scratch,
     forever. The connector now detaches (start_new_session); orphan protection
     is the successor supervisor's job: adopt a healthy incumbent
     (_adopt_incumbent), reap only the genuinely sick (_reap_strays).

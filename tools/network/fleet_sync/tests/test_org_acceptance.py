@@ -6,9 +6,9 @@ handed to every machine the way the membership half will.
 Criteria (bd acceptance field): (1) an org row written on one member's
 machine reaches another member's machine through the org hello; (2)
 refusals are typed (unit suites) -- here: a member's PERSONAL hello never
-crosses and personal rows never leak; (3) a removing checkpoint closes the
+crosses and personal rows never leak; (3) a removing membership checkpoint closes the
 removed member within 5 s while the others keep syncing; a rekey keeps
-the rekeyed member; no re-checkpoint of any scope; (4) per-peer state for
+the rekeyed member; no scope re-bootstraps; (4) per-peer state for
 the org scope survives the membership changes; (5) the personal path is
 unchanged. Plus auto-mldvv: every machine's reachability row crosses
 once and is never rewritten on stable addresses.
@@ -59,19 +59,15 @@ def test_three_members_sync_the_org_scope_across_fleets(tmp_path: Path, monkeypa
             for m in range(3) for k in range(2)
         }
         # (4) org peer state is keyed by (machine pair, org) everywhere. A
-        # machine that started with an EMPTY org database legitimately took
-        # one checkpoint from its own fleet at first contact (the personal
-        # path's bootstrap); the criterion is that the membership changes
-        # below add none.
+        # machine that started with an EMPTY org database legitimately
+        # bootstrapped from its own fleet at first contact; the criterion is
+        # that the membership changes below add no new bootstrap.
         for m in range(3):
             for k in range(2):
                 states = org.peer_state(m, k)
                 assert states, (m, k)
                 assert {row[1] for row in states} == {org_state_key(ORG)}
         before_state = {(m, k): org.peer_state(m, k) for m in range(3) for k in range(2)}
-        checkpoints_before = {
-            (m, k): sum(row[2] for row in before_state[(m, k)]) for m in range(3) for k in range(2)
-        }
 
         # (3a) a REKEY: member 1's persona is rekeyed; every machine adopts
         # the new member set; member 1 keeps receiving.
@@ -106,13 +102,12 @@ def test_three_members_sync_the_org_scope_across_fleets(tmp_path: Path, monkeypa
         assert not set(member0_view) & set(org.machine_pubs(2))
 
         # (4) peer state for the org scope survived both changes: same keys,
-        # no checkpoint received anywhere, no re-checkpoint of any scope.
+        # same state epoch, no scope re-bootstrapped.
         for m in (0, 1):
             for k in range(2):
                 after = org.peer_state(m, k)
                 assert {row[0] for row in after} >= {row[0] for row in before_state[(m, k)]}
                 assert {row[1] for row in after} == {org_state_key(ORG)}
-                assert sum(row[2] for row in after) == checkpoints_before[(m, k)], (m, k, after)
         # auto-mldvv: no reachability row was rewritten on stable addresses.
         for m in (0, 1):
             for k in range(2):

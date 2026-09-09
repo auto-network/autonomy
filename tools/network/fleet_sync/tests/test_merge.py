@@ -41,12 +41,12 @@ def test_independent_addresses_are_union_not_replacement() -> None:
     local = Mutation(
         "sources", ("local",), 50, False, (("title", "local-only"),)
     )
-    checkpoint = Mutation(
-        "sources", ("remote",), 10, False, (("title", "checkpoint"),)
+    remote = Mutation(
+        "sources", ("remote",), 10, False, (("title", "remote"),)
     )
     inbox = MutationInbox()
     inbox.ingest([local])
-    inbox.ingest([checkpoint])
+    inbox.ingest([remote])
     assert {mutation.address for mutation in inbox.winners()} == {
         ("local",), ("remote",)
     }

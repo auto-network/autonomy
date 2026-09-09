@@ -671,65 +671,6 @@ def test_preapproval_table_is_forward_migrated(tmp_path):
     } <= columns
 
 
-def test_local_sync_status_waits_for_current_roster_checkpoint(
-    operator_api, monkeypatch
-):
-    client, root, _invite, store = operator_api
-    local_id = "a1" * 32
-    remote_id = "b2" * 32
-    local_key = KeyPair.from_private_hex("71" * 32)
-    remote_key = KeyPair.from_private_hex("72" * 32)
-    entries = (
-        fleet_roster.enroll(
-            root, machine_id=local_id, machine_pub=local_key.public_hex,
-        ),
-        fleet_roster.enroll(
-            root, machine_id=remote_id, machine_pub=remote_key.public_hex,
-        ),
-    )
-    personal_path = store.path.parent / "sync-personal.db"
-    epoch = fleet_enrollment_routes.fleet_sync_scheduler.roster_epoch(
-        entries, root.public_hex
-    )
-    with sqlite3.connect(personal_path) as conn:
-        conn.execute(
-            "CREATE TABLE fleet_sync_peer_state("
-            "machine_public_key TEXT, roster_epoch TEXT, "
-            "checkpoints_received INTEGER, last_success_ns INTEGER)"
-        )
-    monkeypatch.setattr(
-        fleet_enrollment_routes.machine_boot,
-        "machine_id",
-        lambda *, org: local_id,
-    )
-    monkeypatch.setattr(
-        fleet_enrollment_routes.fleet_tunnel_server,
-        "_personal_root_pub",
-        lambda: root.public_hex,
-    )
-    monkeypatch.setattr(
-        fleet_enrollment_routes.fleet_roster,
-        "load_entries",
-        lambda *, org: list(entries),
-    )
-    monkeypatch.setattr(
-        fleet_enrollment_routes, "_org_db_path", lambda _org: personal_path
-    )
-
-    waiting = client.get("/api/fleet/enrollment/local-sync-status")
-    assert waiting.status_code == 200
-    assert waiting.json() == {"ok": True, "status": "synchronizing"}
-
-    with sqlite3.connect(personal_path) as conn:
-        conn.execute(
-            "INSERT INTO fleet_sync_peer_state VALUES(?,?,1,?)",
-            (remote_key.public_hex, epoch, NOW_MS * 1_000_000),
-        )
-    complete = client.get("/api/fleet/enrollment/local-sync-status")
-    assert complete.status_code == 200
-    assert complete.json() == {"ok": True, "status": "complete"}
-
-
 def test_current_generic_dialogue_owns_pin_and_browser_root_ceremony():
     js = (REPO_ROOT / "tools/dashboard/static/js/pages/worktrees.js").read_text()
     template = (

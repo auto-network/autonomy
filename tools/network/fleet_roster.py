@@ -413,7 +413,7 @@ def own_entry(
 def active_machines(entries, *, anchor_root_pub: str) -> set[str]:
     """The set of machine authorization keys currently in the fleet — the
     thin read the sync layer's compaction frontier keys on (auto-q9ic5: one
-    checkpoint position per active roster machine). A machine leaves this set
+    acknowledged position per active roster machine). A machine leaves this set
     exactly when an uncited kick revokes it; that is what "remove the kicked
     entry after every peer incorporates the kick" observes."""
     return set(resolve(entries, anchor_root_pub=anchor_root_pub))

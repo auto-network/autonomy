@@ -37,7 +37,6 @@ from tools.network.fleet_sync_channel import (
 )
 from tools.network.fleet_sync_connection import (
     FleetSyncConnection,
-    FleetSyncQuiescenceError,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -70,18 +69,7 @@ SUPPORTED_PROTOCOL_VERSIONS = frozenset({3, 4, 5})
 _REQUEST_FIELDS = frozenset({
     "v", "op", "roster_epoch", "resume", "compat",
 })
-#: ``accept_checkpoint`` is ACCEPTED AND IGNORED. Sync checkpoints are
-#: deleted and this encoder never sends the field, but the old encoder
-#: sends it whenever it is False -- so every un-updated peer holding a
-#: founded ledger puts it on the wire. This allow-list is strict, so
-#: removing the key here refused those requests before admission and
-#: took fleet sync down with every peer that had not updated (live
-#: 2026-09-09T17:31Z, four scopes, 20 minutes). Deleting the field from
-#: the ENCODER was safe; deleting it from the DECODER is a wire break.
-#: It stays until no peer sends it, and it means nothing when present.
-_REQUEST_OPTIONAL_FIELDS = frozenset(
-    {"scope", "bootstrap", "accept_checkpoint", "watermarks"}
-)
+_REQUEST_OPTIONAL_FIELDS = frozenset({"scope", "bootstrap", "watermarks"})
 from tools.network.fleet_sync.sweep_receive import (
     SWEEP_BEGIN_KIND,
     SWEEP_END_KIND,
@@ -124,7 +112,7 @@ def set_settings_materialization_hook(hook: Callable[..., object] | None) -> Non
 
     The hook is a wake hint, never synchronization authority.  It receives at
     most 256 payload-free Settings addresses and a ``gap`` flag after a delta
-    transaction commits or a checkpoint is published.  Hook failure can never
+    transaction commits or a bootstrap sweep completes.  Hook failure can never
     fail or roll back Fleet synchronization.
     """
     global _settings_materialization_hook
@@ -210,23 +198,14 @@ class FleetSyncStreamSilence(FleetSyncProtocolError):
     """
 
 
-class FleetSyncFoundedLedgerRefusal(FleetSyncProtocolError):
-    """The peer offered a checkpoint to a store that holds a founded ledger.
-
-    A checkpoint never carries the ledger, so installing it would be refused
-    (sync.py install guard); refusing at the offer saves the transfer. This
-    machine is an origin of authority for that scope and syncs by delta only.
-    """
-
-
 class FleetSyncFirstFrameSilence(FleetSyncStreamSilence):
-    """No first frame within the pull's checkpoint-build allowance.
+    """No first frame within the pull's bootstrap allowance.
 
-    The one legitimately long silence in the protocol: a checkpoint serve
-    sends nothing between the pull request and ``checkpoint.begin`` for
-    the whole build (~60s/GB measured). The allowance is sized for that
-    phase; every later gap is a single bounded DB query or file read and
-    gets the much tighter inter-frame bound.
+    The one legitimately long silence in the protocol: a bootstrap serve can
+    take a while to produce its first frame while it reads the frontier and
+    assembles the first page. The allowance is sized for that phase; every
+    later gap is a single bounded DB query or file read and gets the much
+    tighter inter-frame bound.
     """
 
 
@@ -274,8 +253,8 @@ class FleetSyncRuntimeConfig:
     #: 1-10 s apart and starvation-free, so every peer is still reached.
     max_concurrent_pulls: int = 1
     #: Stream liveness policy (auto-fzy8s). The first frame of a pull may
-    #: lag for an entire server-side checkpoint build (~60s/GB measured),
-    #: so it gets its own allowance: 900s covers a ~15GB database, an
+    #: lag for an entire server-side bootstrap sweep, so it gets its own
+    #: allowance: 900s covers a ~15GB database, an
     #: order of magnitude above today's production size. Every later gap
     #: is structurally one DB query or one <=4MB file read; 60s is
     #: generous under load and sits just above the transport keepalive's
@@ -582,23 +561,15 @@ def watermarks_from_trail(
     return out
 
 
-def serve_bootstrap_decision(
-    resume_position: int, requested: bool, journal_gap: bool = False
-) -> bool:
-    """A snapshot goes ONLY to a machine that declares it holds no sync
-    state (``requested`` = the puller's bootstrap flag) and whose trail
+def serve_bootstrap_decision(resume_position: int, requested: bool) -> bool:
+    """A bootstrap sweep goes ONLY to a machine that declares it holds no
+    sync state (``requested`` = the puller's bootstrap flag) and whose trail
     resolves to nothing. Every other unresolved puller is served the
     retained journal from its oldest surviving frame.
 
-    ``journal_gap`` is accepted for call compatibility and ignored. It used
-    to select a checkpoint ("replay would omit retired history"), which is
-    true of every store that has ever pruned or installed -- so any first
-    contact between two established machines, and any restore, re-based a
-    live database (design of record graph://1155b8f4-8cf: a checkpoint is a
-    bulk-transfer optimization, never the answer to an unknown position;
-    measured 2026-09-06: 1,365 snapshots for 103 writes at N=50). Under the
-    served-ack pruning invariant no active peer is ever behind the retained
-    floor, so the omitted prefix is content the puller already holds.
+    Under the served-ack pruning invariant no active peer is ever behind the
+    retained floor, so the prefix a replay omits is content the puller
+    already holds.
     """
     return resume_position == 0 and requested
 
@@ -692,11 +663,6 @@ def decode_pull_request(
     bootstrap = value.get("bootstrap", False)
     if not isinstance(bootstrap, bool):
         raise FleetSyncProtocolError("fleet sync bootstrap flag must be bool")
-    legacy_accept = value.get("accept_checkpoint")
-    if legacy_accept is not None and not isinstance(legacy_accept, bool):
-        raise FleetSyncProtocolError("fleet sync accept_checkpoint flag must be bool")
-    # Deliberately not returned: sync checkpoints are deleted, so the value
-    # cannot influence anything. It is validated and dropped.
     watermarks = value.get("watermarks")
     if watermarks is not None:
         if (
@@ -962,9 +928,9 @@ async def bounded_stream_frames(
 
     The timeout measures exactly the await for the peer's next frame —
     the consumer's own work between frames (applying a transaction,
-    writing a checkpoint file) never counts against the peer. A first
+    writing a swept page) never counts against the peer. A first
     silence past the bound raises :class:`FleetSyncFirstFrameSilence`
-    (the checkpoint-build allowance); any later one raises
+    (the bootstrap allowance); any later one raises
     :class:`FleetSyncStreamSilence`. On timeout the stream is abandoned,
     never resumed — the caller tears the channel down.
 
@@ -1142,8 +1108,8 @@ class SQLiteFleetSyncStore:
 
         True from the moment a frontier is recorded until the PULL half is
         durably applied. While true this store must not downgrade its
-        negotiation or accept a checkpoint: either would discard ``F`` while
-        keeping the rows that were anchored to it.
+        negotiation: doing so would discard ``F`` while keeping the rows
+        that were anchored to it.
         """
         from tools.network.fleet_sync.sweep_receive import Phase, read_bootstrap
 
@@ -1220,13 +1186,6 @@ class SQLiteFleetSyncStore:
         finally:
             conn.close()
 
-    def origin_watermarks_through(self, through_ref: int) -> dict[str, int]:
-        conn, catalog = self._open()
-        try:
-            return catalog.origin_watermarks(through_ref=through_ref)
-        finally:
-            conn.close()
-
     def origin_list(self) -> list[str]:
         conn, catalog = self._open()
         try:
@@ -1294,7 +1253,7 @@ class SQLiteFleetSyncStore:
         """The replicated-surface digest for this database.
 
         Uses a plain connection: the digest is meaningful (and needed, for
-        the first checkpoint pull) before fleet writers are activated.
+        the first bootstrap pull) before fleet writers are activated.
         """
         import sqlite3
         from tools.network.fleet_sync.policies import compatibility_digest
@@ -1427,12 +1386,6 @@ class SQLiteFleetSyncStore:
             return False
         conn = _sqlite3.connect(f"file:{self.path}?mode=ro", uri=True)
         try:
-            receipt = conn.execute(
-                "SELECT 1 FROM fleet_sync_peer_state "
-                "WHERE checkpoints_received>0 LIMIT 1"
-            ).fetchone()
-            if receipt is not None:
-                return True
             return conn.execute(
                 "SELECT 1 FROM fleet_sync_transactions LIMIT 1"
             ).fetchone() is not None
@@ -1520,7 +1473,6 @@ class SQLiteFleetSyncStore:
         online: bool,
         bytes_sent: int = 0,
         bytes_received: int = 0,
-        checkpoints_received: int = 0,
         deltas_received: int = 0,
         transactions_applied: int = 0,
         acknowledgements: int = 0,
@@ -1536,10 +1488,10 @@ class SQLiteFleetSyncStore:
             conn.execute(
                 "INSERT INTO fleet_sync_peer_state("
                 "machine_public_key,roster_epoch,online,last_success_ns,"
-                "peer_watermark,bytes_sent,bytes_received,checkpoints_received,"
+                "peer_watermark,bytes_sent,bytes_received,"
                 "deltas_received,transactions_applied,acknowledgements,retries,"
                 "last_error_code,peer_built_at,updated_at_ns) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(machine_public_key,roster_epoch) DO UPDATE SET "
                 "online=excluded.online,"
                 # A pull that isn't a schema refusal carries no peer build, so
@@ -1558,8 +1510,6 @@ class SQLiteFleetSyncStore:
                 "ELSE fleet_sync_peer_state.peer_watermark END,"
                 "bytes_sent=fleet_sync_peer_state.bytes_sent+excluded.bytes_sent,"
                 "bytes_received=fleet_sync_peer_state.bytes_received+excluded.bytes_received,"
-                "checkpoints_received=fleet_sync_peer_state.checkpoints_received+"
-                "excluded.checkpoints_received,"
                 "deltas_received=fleet_sync_peer_state.deltas_received+"
                 "excluded.deltas_received,"
                 "transactions_applied=fleet_sync_peer_state.transactions_applied+"
@@ -1572,7 +1522,7 @@ class SQLiteFleetSyncStore:
                 (
                     machine_pub, epoch, int(online), now if success else None,
                     peer_watermark, bytes_sent, bytes_received,
-                    checkpoints_received, deltas_received, transactions_applied,
+                    deltas_received, transactions_applied,
                     acknowledgements, retries, error, peer_built_at, now,
                     int(success),
                 ),
@@ -1581,10 +1531,6 @@ class SQLiteFleetSyncStore:
         finally:
             conn.close()
 
-
-#: Minimum wait before re-pulling from a peer after a pull that received a
-#: full checkpoint and still failed (mirrors the relay redelivery guard).
-CHECKPOINT_FAILURE_BACKOFF_S = 600.0
 
 #: Harness forensics: when the per-pull ledger is on, each pull's record
 #: lists the transactions it received.
@@ -1610,8 +1556,8 @@ APPLY_FLUSH_INTERVAL_S = 5.0
 APPLY_BATCH_TRANSACTIONS = 200
 APPLY_BATCH_OPERATIONS = 5_000
 
-#: While a direct serve is silent (a checkpoint build sends nothing for
-#: minutes), the observer is touched this often so the supervisor's
+#: While a direct serve is silent (a bootstrap sweep can send nothing for
+#: a while), the observer is touched this often so the supervisor's
 #: activity window sees a LIVE stream, not a stuck counter.
 DIRECT_STREAM_HEARTBEAT_S = 10.0
 
@@ -1655,27 +1601,6 @@ async def _observe_stream(stream, observer):
         observer.end()
 
 
-async def _install_personal_handoff(installer, stage: Path, source_machine_pub: str) -> None:
-    """Run the service installer for a direct-path personal checkpoint and
-    always clean the staged files; a failure is logged, never raised into
-    the loop (the next pull, after the backoff, tells the truth again)."""
-    import shutil as _shutil
-
-    try:
-        await installer(stage, source_machine_pub=source_machine_pub)
-        logger.info(
-            "fleet sync: direct-path personal checkpoint from %s installed",
-            source_machine_pub[:12],
-        )
-    except Exception:
-        logger.warning(
-            "fleet sync: direct-path personal checkpoint from %s failed to install",
-            source_machine_pub[:12], exc_info=True,
-        )
-    finally:
-        _shutil.rmtree(stage, ignore_errors=True)
-
-
 def _transaction_identity(item: AuthoredMutation) -> tuple[str, str, int]:
     return (
         item.origin_incarnation,
@@ -1695,8 +1620,8 @@ PRUNE_MIN_INTERVAL_S = 60.0
 #: right to pull, not the power to freeze another member's compaction. A
 #: still-member machine that has not completed a pull of an org scope for
 #: this long stops holding that store's served-ack retirement; its row is
-#: kept, so its own next pull resumes from its watermark (a checkpoint if
-#: the rows are gone).
+#: kept, so its own next pull resumes from its watermark (a bootstrap
+#: sweep if the rows are gone).
 ORG_PRUNE_ABSENCE_S = 7 * 24 * 3600.0
 
 #: How long the served-ack prune waits for a store's write lock before it
@@ -1800,7 +1725,6 @@ class FleetSyncScheduler:
         #: so an inline quiesce always refuses there; the service's install
         #: pauses this scheduler, quiesces, installs, and resumes -- the same
         #: path the relay puller uses. None (connector, tests) installs inline.
-        self.personal_checkpoint_installer = None
         #: Optional ``begin()/touch()/end()`` observer for DIRECT-path serves
         #: (the connector installs one). It is how a serving connector's
         #: supervisor learns a direct stream is live: relay streams already
@@ -1820,7 +1744,6 @@ class FleetSyncScheduler:
     async def start(self) -> None:
         if self.running:
             return
-        await asyncio.to_thread(self._recover_interrupted_installs)
         self._roster_snapshot = await asyncio.to_thread(
             lambda: tuple(self.config.roster_entries())
         )
@@ -1872,47 +1795,6 @@ class FleetSyncScheduler:
                 )
         epoch = self._current_epoch()
         return epoch, epoch
-
-    def _recover_interrupted_installs(self) -> None:
-        """Consume any crashed install's marker and backup before syncing.
-
-        Recovery normally runs at the next install attempt, but a machine
-        that crashed mid-install and thereafter syncs by deltas may never
-        install again — leaving a stale marker and a full database backup
-        on disk indefinitely. Startup is the natural recovery moment: no
-        connections exist yet, and recover_checkpoint_handoff's own
-        contract (inode-checked publish/restore/clean) decides the rest.
-        """
-        from tools.network.fleet_checkpoint_handoff import (
-            _backup_path,
-            _marker_path,
-            recover_checkpoint_handoff,
-        )
-        from tools.network.fleet_sync_connection import (
-    FleetSyncQuiescenceError,
-            acquire_database_quiescence,
-        )
-
-        for scope, path in self._scope_paths().items():
-            if not (_marker_path(path).exists() or _backup_path(path).exists()):
-                continue
-            try:
-                token = acquire_database_quiescence(path)
-                try:
-                    outcome = recover_checkpoint_handoff(
-                        path, quiescence=token
-                    )
-                finally:
-                    token.release()
-                logger.warning(
-                    "fleet sync scope %r recovered interrupted install: %s",
-                    scope, outcome,
-                )
-            except Exception:
-                logger.warning(
-                    "fleet sync scope %r startup install recovery failed",
-                    scope, exc_info=True,
-                )
 
     def _scope_paths(self) -> dict[str, Path]:
         """Synchronized databases by scope slug, personal always first."""
@@ -2146,8 +2028,6 @@ class FleetSyncScheduler:
         telemetry_stats: dict[str, int] | None = None,
         telemetry_started_at_ns: int | None = None,
         telemetry_started_monotonic_ns: int | None = None,
-        allow_checkpoint: bool = True,
-        resume_floor_ref: int | None = None,
         authorize: Callable[[str], None] | None = None,
         admitted_org: str | None = None,
     ):
@@ -2157,14 +2037,7 @@ class FleetSyncScheduler:
         confined to the admitted organization's scope. Absent, the
         connection is a personal-roster one and behaves exactly as before.
 
-        ``resume_floor_ref``: a caller that already served this peer a
-        checkpoint passes the journal's newest transaction ref captured
-        BEFORE that checkpoint's cut. The delta then starts there instead of
-        at the peer's (empty, first-contact) trail — everything at or below
-        the floor is inside the checkpoint by construction, and every later
-        transaction is still replayed. Without it a first-contact pull sent
-        the checkpoint AND the entire journal (~700k operations live
-        2026-09-06), authorizing each one on the way."""
+"""
         from tools.network.fleet_sync.blob_transport import peek_request_op
 
         if authorize is None:
@@ -2199,7 +2072,6 @@ class FleetSyncScheduler:
         stats.setdefault("bytes_received", len(message))
         stats.setdefault("mutation_frames", 0)
         stats.setdefault("transactions", 0)
-        stats.setdefault("checkpoint_bytes", 0)
         started_at_ns = telemetry_started_at_ns or time.time_ns()
         started_monotonic_ns = (
             telemetry_started_monotonic_ns or time.monotonic_ns()
@@ -2250,18 +2122,13 @@ class FleetSyncScheduler:
                 cursor = await asyncio.to_thread(
                     store.implied_ack_ref, origin_watermarks
                 )
-                # An empty server has nothing a checkpoint delivers; two
+                # An empty server has nothing a bootstrap delivers; two
                 # freshly prepared machines must meet through (empty) deltas,
-                # not by installing each other's blank databases.
+                # not by seeding each other's blank databases.
                 server_has_content = await asyncio.to_thread(store.has_state)
                 served_bootstrap = False
                 sweep_frontier: dict[str, int] = {}
-                # Local alias: assigning the parameter name inside this
-                # generator would make it generator-local (unbound on the
-                # no-checkpoint path).
-                floor_ref = resume_floor_ref
                 needs_bootstrap = serve_bootstrap_decision(cursor, bootstrap)
-                # Decided BEFORE the checkpoint refusal below, because
                 # One question, one answer: a peer that needs a bootstrap and
                 # can speak the sweep gets the sweep. There is no second
                 # bootstrap mechanism to negotiate against any more.
@@ -2271,9 +2138,9 @@ class FleetSyncScheduler:
                     and server_has_content
                 )
                 if serve_sweep:
-                    # A v5 peer asked for a bootstrap and can handle a sweep,
-                    # so it gets the frontier its sweep is anchored to instead
-                    # of a checkpoint. Emitted ONCE, before any page.
+                    # A v5 peer asked for a bootstrap and can handle a
+                    # sweep, so it gets the frontier its sweep is anchored
+                    # to. Emitted ONCE, before any page.
                     #
                     # Read BEFORE serving anything, and never advanced: the
                     # partition is SWEEP <= F / PULL > F, so a frontier taken
@@ -2369,12 +2236,6 @@ class FleetSyncScheduler:
                             "fleet sync served-ack record failed",
                             exc_info=True,
                         )
-                # The ack above records only what the peer PROVED it holds
-                # (its trail). The checkpoint floor is applied after it so a
-                # transfer that dies mid-stream never advances the pruning
-                # frontier past what the peer actually installed.
-                if floor_ref is not None:
-                    cursor = max(cursor, floor_ref)
                 if served_bootstrap:
                     # THE PARTITION. The sweep delivered every key at or below
                     # F, so the delta serves strictly above it. F was read once
@@ -2382,16 +2243,6 @@ class FleetSyncScheduler:
                     # halves meet exactly: nothing is served twice and nothing
                     # falls between them.
                     origin_watermarks = sweep_frontier
-                elif floor_ref:
-                    # The caller (relay path) served the checkpoint itself
-                    # and names the position it was cut at: serve above
-                    # the per-origin frontier that position carried.
-                    carried = await asyncio.to_thread(
-                        store.origin_watermarks_through, floor_ref
-                    )
-                    for origin_key, ts in carried.items():
-                        if ts > origin_watermarks.get(origin_key, 0):
-                            origin_watermarks[origin_key] = ts
                 # Every origin is served from the puller's watermark, the
                 # puller's own included (a machine restored from a backup
                 # has lost its own newest writes). Frames are built from
@@ -2753,52 +2604,6 @@ class FleetSyncScheduler:
         if observer is None or telemetry_channel != "direct":
             return stream
         return _observe_stream(stream, observer)
-
-    async def _install_direct_checkpoint(
-        self, stage: Path, scope: str, source_machine_pub: str, epoch: str
-    ) -> None:
-        """Quiesce the scope database and publish a received checkpoint.
-
-        The scheduler's own store connections are short-lived, so between
-        stream messages nothing of ours holds the database; any OTHER live
-        production handle makes the quiescence gate refuse, the pull fails,
-        and the ordinary backoff retries.
-        """
-        from tools.graph.db import GraphDB
-        from tools.network.fleet_checkpoint_handoff import (
-            install_quiesced_checkpoint,
-        )
-        from tools.network.fleet_sync_connection import (
-            acquire_database_quiescence,
-        )
-
-        scope_path = self._scope_paths()[scope]
-        active = tuple(sorted(resolve(
-            self._roster_snapshot,
-            anchor_root_pub=self.config.personal_root_pub,
-        )))
-
-        def install() -> None:
-            GraphDB.close_pooled_path(scope_path)
-            token = acquire_database_quiescence(scope_path)
-            try:
-                install_quiesced_checkpoint(
-                    stage,
-                    scope_path,
-                    quiescence=token,
-                    target_origin_incarnation=(
-                        self.config.roster_machine_pub
-                        or self.config.machine_key.public_hex
-                    ),
-                    expected_roster_epoch=epoch,
-                    expected_active_roster=active,
-                    source_machine_pub=source_machine_pub,
-                )
-            finally:
-                token.release()
-
-        await asyncio.to_thread(install)
-        _emit_settings_materialized(gap=True)
 
     async def _drain_attachment_backlog(
         self, machine_pub: str, addresses: Sequence[str],
@@ -3202,10 +3007,9 @@ class FleetSyncScheduler:
                 store.advertisable_origin_watermarks
             )
             # A bootstrap already in progress pins the negotiation. Falling
-            # back to v4 would let this store install a checkpoint over a
-            # keyspace it has partially swept against a frontier the
-            # checkpoint path never saw -- abandoning F while keeping the rows
-            # it anchored. Refusing the downgrade keeps the sweep the only way
+            # back to v4 would strand a keyspace this store has only
+            # partially swept -- abandoning F while keeping the rows it
+            # anchored. Refusing the downgrade keeps the sweep the only way
             # this store can finish what it started.
             resuming_sweep = await asyncio.to_thread(
                 store.bootstrap_in_progress
@@ -3223,8 +3027,8 @@ class FleetSyncScheduler:
                 # that somehow already existed. `bootstrap` is this store
                 # having no state at all; `resuming_sweep` is one already
                 # anchored. Asking is not committing: only a RESUMING sweep
-                # refuses checkpoints, so a fresh joiner meeting a v4 server
-                # still takes whatever that server can serve.
+                # refuses the downgrade, so a fresh joiner meeting a v4
+                # server still takes whatever that server can serve.
                 protocol_version = max(
                     protocol_version, SWEEP_PROTOCOL_VERSION
                 )
@@ -3691,7 +3495,7 @@ class FleetSyncScheduler:
                 self.config.min_backoff * (2 ** min(failures - 1, 16)),
             )
             transient = isinstance(exc, (
-                FleetSyncQuiescenceError, ConnectionError, OSError,
+                ConnectionError, OSError,
             )) or type(exc).__name__.startswith("ConnectionClosed")
             self._next_attempt[machine_pub] = (
                 asyncio.get_running_loop().time() + delay
@@ -3767,86 +3571,6 @@ class DashboardFleetSyncService:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
-    async def install_checkpoint(
-        self, checkpoint_directory: Path, *, source_machine_pub: str
-    ):
-        """Pause this runtime, publish a received base, then resume deltas.
-
-        Closing the scheduler and pooled GraphDB handle is the cooperative
-        quiescence path. Any other live production store handle causes the
-        process-wide gate to refuse publication instead of swapping beneath
-        an unknown writer.
-        """
-        config = self._config
-        if config is None:
-            raise RuntimeError("fleet sync runtime is not configured")
-        from tools.graph.db import GraphDB
-        from tools.network.fleet_checkpoint_handoff import (
-            install_quiesced_checkpoint,
-        )
-        from tools.network.fleet_sync_connection import (
-            acquire_database_quiescence,
-        )
-
-        async with self._transition:
-            if self._scheduler is not None:
-                await self._scheduler.stop()
-                self._scheduler = None
-            token = None
-            installed = None
-            epoch = None
-            try:
-                await asyncio.to_thread(
-                    GraphDB.close_pooled_path, config.personal_db_path
-                )
-                token = await asyncio.to_thread(
-                    acquire_database_quiescence, config.personal_db_path
-                )
-                entries = await asyncio.to_thread(
-                    lambda: tuple(config.roster_entries())
-                )
-                active = tuple(sorted(resolve(
-                    entries, anchor_root_pub=config.personal_root_pub
-                )))
-                if (
-                    source_machine_pub not in active
-                    or source_machine_pub == (
-                        config.roster_machine_pub or config.machine_key.public_hex
-                    )
-                ):
-                    raise RuntimeError(
-                        "checkpoint source is not an active remote fleet machine"
-                    )
-                epoch = roster_epoch(entries, config.personal_root_pub)
-                installed = await asyncio.to_thread(
-                    install_quiesced_checkpoint,
-                    checkpoint_directory,
-                    config.personal_db_path,
-                    quiescence=token,
-                    target_origin_incarnation=(
-                        config.roster_machine_pub or config.machine_key.public_hex
-                    ),
-                    expected_roster_epoch=epoch,
-                    expected_active_roster=active,
-                    source_machine_pub=source_machine_pub,
-                )
-            finally:
-                if token is not None:
-                    token.release()
-                if not self._stopping and self._config is config:
-                    self._scheduler = FleetSyncScheduler(config)
-                    self._scheduler.personal_checkpoint_installer = (
-                        self.install_checkpoint
-                    )
-                    await self._scheduler.start()
-            assert installed is not None and epoch is not None
-            # A checkpoint replaces the personal database as one published
-            # snapshot.  Enumerating every changed address would be both
-            # expensive and misleading, so receivers get one bounded gap hint
-            # and reconcile durable truth through their own Settings reader.
-            _emit_settings_materialized(gap=True)
-            return installed
-
     async def _run(self) -> None:
         current: FleetSyncRuntimeConfig | None = None
         while not self._stopping:
@@ -3860,9 +3584,6 @@ class DashboardFleetSyncService:
                     current = desired
                     if desired is not None:
                         self._scheduler = FleetSyncScheduler(desired)
-                        self._scheduler.personal_checkpoint_installer = (
-                            self.install_checkpoint
-                        )
                         await self._scheduler.start()
             await self._changed.wait()
         async with self._transition:

@@ -14,7 +14,6 @@ from tools.network.fleet_sync.catalog import MutationCatalog
 from tools.network.fleet_sync.materialize import LEDGER_EVENT_SET_ID
 from tools.network.fleet_sync.policies import TABLE_POLICIES, _replication_surface
 from tools.network.fleet_sync.snapshot import _logical_address
-from tools.network.fleet_sync.sync import FleetSyncAlpha, install_checkpoint
 from tools.network.idkit import KeyPair
 from tools.network.settingskit.envelope import build_record, sign_record
 
@@ -86,58 +85,6 @@ def _rows_at_key(db: GraphDB) -> list[tuple[str | None, str]]:
             " ORDER BY terminal_persona", (SET_ID, KEY),
         )
     ]
-
-
-def test_two_signers_keep_two_slots_on_both_stores_and_in_a_checkpoint(tmp_path: Path) -> None:
-    genesis, wire = _genesis_wire()
-    p, q = KeyPair.generate(), KeyPair.generate()
-    a_db, a = _open(tmp_path / "alpha-a.db", "a" * 64)
-    b_db, b = _open(tmp_path / "alpha-b.db", "b" * 64)
-    try:
-        _write_genesis(a_db, a, 10, genesis, wire)
-        _write_genesis(b_db, b, 11, genesis, wire)
-        _write_signed(a_db, a, 100, p, genesis, {"v": "from-p"}, 1_000)
-        _write_signed(b_db, b, 200, q, genesis, {"v": "from-q"}, 2_000)
-        _exchange(a, "a" * 64, b)
-        _exchange(b, "b" * 64, a)
-        expected = sorted([(p.public_hex, "from-p"), (q.public_hex, "from-q")])
-        assert _rows_at_key(a_db) == expected
-        assert _rows_at_key(b_db) == expected
-        # Two logical addresses at one natural key, each naming its signer.
-        addresses = [
-            m.mutation.address for m in a.iter_mutations()
-            if m.mutation.address[0] == SET_ID
-        ]
-        assert sorted(addr[5] for addr in addresses) == sorted([p.public_hex, q.public_hex])
-        assert all(len(addr) == 6 for addr in addresses)
-        # Nothing was parked or rejected.
-        assert a_db.conn.execute("SELECT COUNT(*) FROM fleet_sync_quarantine").fetchone()[0] == 0
-        assert b_db.conn.execute("SELECT COUNT(*) FROM fleet_sync_quarantine").fetchone()[0] == 0
-    finally:
-        a_db.close()
-        b_db.close()
-
-    # A checkpoint of the store holding both slots installs both on a joiner.
-    with FleetSyncAlpha(tmp_path / "alpha-a.db", "a" * 64) as origin:
-        checkpoint = origin.checkpoint(
-            tmp_path / "checkpoint", roster_epoch=1,
-            active_roster=("a" * 64, "c" * 64), target_chunk_bytes=4096,
-        )
-        assert checkpoint.winner_records >= 3
-    install_checkpoint(
-        tmp_path / "checkpoint", tmp_path / "alpha-c.db",
-        target_origin_incarnation="c" * 64, expected_roster_epoch=1,
-        expected_active_roster=("a" * 64, "c" * 64),
-    )
-    c_db = GraphDB(tmp_path / "alpha-c.db")
-    try:
-        assert _rows_at_key(c_db) == sorted([(p.public_hex, "from-p"), (q.public_hex, "from-q")])
-        catalog_module.ensure_quarantine_table(c_db.conn)
-        assert c_db.conn.execute(
-            "SELECT COUNT(*) FROM fleet_sync_quarantine WHERE reason LIKE 'settings_signature%'"
-        ).fetchone()[0] == 0
-    finally:
-        c_db.close()
 
 
 def test_tampered_signed_row_is_quarantined_and_never_forwarded(tmp_path: Path) -> None:

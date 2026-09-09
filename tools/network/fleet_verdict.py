@@ -49,7 +49,7 @@ def _connector_version_check(org: str | None) -> dict:
 
 def _dashboard_process_version_check() -> dict:
     """Same STALE-CODE question, but for THIS process (the dashboard
-    itself, which runs the checkpoint-pull loop) rather than the
+    itself, which runs the sync-pull loop) rather than the
     connector subprocess -- the two can be stale independently."""
     disk_commit = build_version.disk_head()
     if build_version.PROCESS_COMMIT is None or disk_commit is None:
@@ -74,7 +74,7 @@ def _cred_check(org: str | None) -> dict:
 
 def _last_pull_check() -> dict:
     """The money line: this process's own record of its most recent
-    checkpoint-pull attempt, with a distinct machine-readable reason --
+    sync-pull attempt, with a distinct machine-readable reason --
     not "check the logs and guess from the traceback"."""
     try:
         from tools.network.fleet_relay_sync import dashboard_relay_sync_service

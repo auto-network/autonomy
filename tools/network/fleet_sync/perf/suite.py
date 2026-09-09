@@ -29,7 +29,6 @@ from tools.graph.db import GraphDB
 
 from ..catalog import MutationCatalog
 from ..streaming import ensure_streaming_indexes
-from .. import alpha_benchmark, live_workload, overhead_benchmark
 
 
 @dataclass(frozen=True)
@@ -38,11 +37,6 @@ class Scale:
     kernel_rows: int
     kernel_updates: int
     kernel_batch: int
-    storage_rows: int
-    checkpoint_rows: int
-    payload_bytes: int
-    batch_rows: int
-    live_duration_s: float
     crsqlite_rows: int
     crsqlite_updates: int
 
@@ -50,14 +44,10 @@ class Scale:
 SCALES = {
     "quick": Scale(
         "quick", kernel_rows=5_000, kernel_updates=10_000, kernel_batch=2_500,
-        storage_rows=10_000, checkpoint_rows=10_000, payload_bytes=400,
-        batch_rows=2_500, live_duration_s=1.5,
         crsqlite_rows=5_000, crsqlite_updates=10_000,
     ),
     "full": Scale(
         "full", kernel_rows=50_000, kernel_updates=100_000, kernel_batch=10_000,
-        storage_rows=100_000, checkpoint_rows=100_000, payload_bytes=400,
-        batch_rows=5_000, live_duration_s=5.0,
         crsqlite_rows=50_000, crsqlite_updates=100_000,
     ),
 }
@@ -175,63 +165,6 @@ def bench_kernel(scratch: Path, scale: Scale) -> dict[str, Any]:
     }
 
 
-def bench_storage(scratch: Path, scale: Scale) -> dict[str, Any]:
-    detail = overhead_benchmark.run(
-        scratch / "storage", scale.storage_rows, scale.payload_bytes,
-        scale.batch_rows,
-    )
-    return {
-        "metrics": {
-            "storage_overhead_percent_vs_indexed":
-                detail["storage_overhead_percent_vs_indexed"],
-            "steady_file_delta_bytes_per_row":
-                detail["steady_file_delta_bytes_per_row"],
-            "catalog_bytes_per_row": detail["catalog_bytes_per_row"],
-            "write_rate_ratio_tracked_to_indexed":
-                detail["write_rate_ratio_tracked_to_indexed"],
-            "tracked_rows_per_s": detail["tracked"]["rows_per_second"],
-        },
-        "detail": detail,
-    }
-
-
-def bench_checkpoint(scratch: Path, scale: Scale) -> dict[str, Any]:
-    detail = alpha_benchmark.run(
-        scratch / "checkpoint", rows=scale.checkpoint_rows,
-        payload_bytes=scale.payload_bytes, batch_rows=scale.batch_rows,
-        segment_bytes=4 * 1024 * 1024, symbol_size=8192,
-    )
-    seed_wall = float(detail["seed"]["wall_seconds"])
-    return {
-        "metrics": {
-            "seed_rows_per_s": scale.checkpoint_rows / seed_wall,
-            "checkpoint_wall_s": detail["checkpoint"]["wall_seconds"],
-            "raptorq_transport_wall_s":
-                detail["raptorq_transport"]["wall_seconds"],
-            "install_wall_s": detail["install"]["wall_seconds"],
-            "checkpoint_artifact_bytes": detail["checkpoint_artifact_bytes"],
-        },
-        "detail": detail,
-    }
-
-
-def bench_live(scratch: Path, scale: Scale) -> dict[str, Any]:
-    report = live_workload.run_live_workload(
-        scratch / "live", duration_seconds=scale.live_duration_s,
-    )
-    detail = report.as_dict()
-    return {
-        "metrics": {
-            "writer_transactions_per_s":
-                detail["writer_transactions_per_second"],
-            "max_lag_transactions": detail["max_lag_transactions"],
-            "read_errors": detail["read_errors"],
-            "final_drain_s": detail["final_drain_seconds"],
-        },
-        "detail": detail,
-    }
-
-
 def _find_crsqlite_extension() -> Path | None:
     candidates = [os.environ.get("FLEET_SYNC_CRSQLITE_EXT")]
     from .baseline import default_store
@@ -326,9 +259,6 @@ def bench_crsqlite(scratch: Path, scale: Scale) -> dict[str, Any]:
 
 BENCHMARKS: dict[str, Callable[[Path, Scale], dict[str, Any]]] = {
     "kernel": bench_kernel,
-    "storage": bench_storage,
-    "checkpoint": bench_checkpoint,
-    "live": bench_live,
     "crsqlite": bench_crsqlite,
 }
 

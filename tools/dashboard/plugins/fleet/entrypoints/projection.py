@@ -217,7 +217,6 @@ def _observation(peer: Mapping | None, telemetry: Mapping | None = None) -> dict
         "lastSyncDurationMs": int(telemetry.get("last_duration_ms") or 0),
         "mutationFrames": int(telemetry.get("mutation_frames") or 0),
         "transactionsTransferred": int(telemetry.get("transactions") or 0),
-        "checkpointBytes": int(telemetry.get("checkpoint_bytes") or 0),
         "lastSyncOutcome": telemetry.get("last_outcome"),
     }
 
@@ -354,7 +353,6 @@ def _admission_row(
         "lastSyncDurationMs": 0,
         "mutationFrames": 0,
         "transactionsTransferred": 0,
-        "checkpointBytes": 0,
         "lastSyncOutcome": None,
         "canRemove": False,
     }

@@ -41,19 +41,6 @@ METRIC_DIRECTIONS: dict[str, dict[str, tuple[str, str]]] = {
         "write_rate_ratio_tracked_to_indexed": ("higher", "ratio"),
         "tracked_rows_per_s": ("higher", "rows/s"),
     },
-    "checkpoint": {
-        "seed_rows_per_s": ("higher", "rows/s"),
-        "checkpoint_wall_s": ("lower", "s"),
-        "raptorq_transport_wall_s": ("lower", "s"),
-        "install_wall_s": ("lower", "s"),
-        "checkpoint_artifact_bytes": ("lower", "B"),
-    },
-    "live": {
-        "writer_transactions_per_s": ("higher", "tx/s"),
-        "max_lag_transactions": ("lower", "tx"),
-        "read_errors": ("lower", "count"),
-        "final_drain_s": ("lower", "s"),
-    },
     "crsqlite": {
         "insert_rows_per_s": ("higher", "rows/s"),
         "update_rows_per_s": ("higher", "rows/s"),

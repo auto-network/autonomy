@@ -13,22 +13,9 @@ from pathlib import Path
 from tools.network.fleet_sync.harness import HarnessFleet, Step
 
 
-def _checkpoints_received(db_path: Path) -> int:
-    try:
-        with sqlite3.connect(
-            f"file:{db_path}?mode=ro&immutable=1", uri=True
-        ) as conn:
-            return int(conn.execute(
-                "SELECT COALESCE(SUM(checkpoints_received),0) "
-                "FROM fleet_sync_peer_state"
-            ).fetchone()[0])
-    except sqlite3.Error:
-        return 0
-
-
 def test_two_slow_feeders_bootstrap_a_new_machine(tmp_path: Path) -> None:
     """Scenario (a): a joiner fed by two throttled peers — collaborative
-    checkpoint-plus-delta from two sources, admission ordering and
+    bootstrap-plus-delta from two sources, admission ordering and
     duplicate-inert merge under way."""
     fleet = HarnessFleet(tmp_path / "fleet", size=3).build()
     try:
@@ -49,8 +36,8 @@ def test_two_slow_feeders_bootstrap_a_new_machine(tmp_path: Path) -> None:
             )
         fleet.start(2)
         # Convergence IS the assertion. It used to be followed by a count of
-        # checkpoints received; sync checkpoints are deleted, so a joiner now
-        # bootstraps by sweep and there is no artifact to count. What matters
+        # bootstraps received; a joiner bootstraps by sweep and there is no
+        # artifact to count. What matters
         # is unchanged: a new machine fed by two throttled peers reaches the
         # fleet's state.
         fleet.wait_converged(timeout=120.0)
@@ -78,7 +65,7 @@ def test_asymmetric_loss_on_one_peer(tmp_path: Path) -> None:
         fleet.shutdown()
 
 
-def test_flap_during_checkpoint_install(tmp_path: Path) -> None:
+def test_flap_during_bootstrap(tmp_path: Path) -> None:
     """Scenario (c): a joiner killed repeatedly while bootstrapping leaves
     no staging debris or stale backups and still converges cleanly."""
     fleet = HarnessFleet(tmp_path / "fleet", size=2).build()
@@ -93,10 +80,10 @@ def test_flap_during_checkpoint_install(tmp_path: Path) -> None:
             Step(0.9, lambda f: f.restart(1, kill=True), "kill again"),
         ])
         # Killed twice mid-bootstrap and still converges. The old assertion
-        # counted checkpoints received; the sweep leaves no such artifact, and
+        # counted bootstraps received; the sweep leaves no such artifact, and
         # surviving two kills is the property under test.
         fleet.wait_converged(timeout=120.0)
-        # Kill-mid-install legitimately leaves the recovery marker and
+        # Kill-mid-bootstrap legitimately leaves the recovery marker and
         # backup — they ARE the crash-recovery mechanism, consumed by the
         # next install attempt. The clean-state claim is therefore: one
         # further graceful cycle recovers to zero debris.
@@ -122,14 +109,14 @@ def test_flap_during_checkpoint_install(tmp_path: Path) -> None:
 def test_partition_during_prune_retains_needed_frames(tmp_path: Path) -> None:
     """Scenario (d): the ack floor's safety, live — a partitioned peer's
     frozen acknowledgement blocks retirement of the frames it still needs,
-    so healing converges by DELTAS (no new checkpoint)."""
+    so healing converges by DELTAS (no new bootstrap)."""
     fleet = HarnessFleet(tmp_path / "fleet", size=3).build()
     try:
         fleet.start_all()
         fleet.write(0, "pre-part", "before partition")
         fleet.wait_converged(timeout=120.0)
         # Retention-under-frozen-ack presumes an ESTABLISHED fleet: a pair
-        # that converged only indirectly gets a legitimate checkpoint on
+        # that converged only indirectly gets a legitimate bootstrap on
         # first direct contact, which resets a journal mid-scenario.
         fleet.wait_pairwise_established()
 
@@ -179,8 +166,8 @@ def test_restored_backup_server_reconverges(tmp_path: Path) -> None:
     """Scenario (e): a machine restored from an old snapshot rejoins and
     reconverges without divergence.
 
-    This is the heaviest scenario in the suite — two full checkpoint
-    installs plus a restore cycle — and under a loaded xdist sweep it has
+    This is the heaviest scenario in the suite — two full bootstraps
+    plus a restore cycle — and under a loaded xdist sweep it has
     legitimately exceeded a 120s ceiling while making continuous forward
     progress (retained history: passes solo in 12-38s, both historical
     failures hit the ceiling exactly). The stall detector remains the real
@@ -217,10 +204,10 @@ def test_restored_backup_server_reconverges(tmp_path: Path) -> None:
         fleet.shutdown()
 
 
-def test_joiner_never_refetches_checkpoints_in_a_loop(tmp_path: Path) -> None:
+def test_joiner_never_rebootstraps_in_a_loop(tmp_path: Path) -> None:
     """Regression for the 3b2f0526 field bug: a joiner re-fetched and
-    discarded the full checkpoint on every retry (316 MB per attempt in
-    production). Exactly one checkpoint installs; steady state adds none."""
+    discarded the whole bootstrap on every retry (316 MB per attempt in
+    production). It bootstraps once; steady state adds none."""
     fleet = HarnessFleet(tmp_path / "fleet", size=2).build()
     try:
         fleet.start(0)
@@ -231,9 +218,9 @@ def test_joiner_never_refetches_checkpoints_in_a_loop(tmp_path: Path) -> None:
         # Bootstrap ONCE, then stop. The historical bugs were a double
         # receipt (client and installer both recording — auto-jn8ca) and a
         # journal-empty server re-bootstrapping established peers on every
-        # pull. Sync checkpoints are deleted, so the signal is now the
-        # joiner's own bootstrap row: it must settle at COMPLETE and stay
-        # there rather than re-anchoring on later pulls.
+        # pull. The signal is the joiner's own bootstrap row: it must
+        # settle at COMPLETE and stay there rather than re-anchoring on
+        # later pulls.
         def settled_count() -> int:
             import sqlite3 as _sq
             from tools.network.fleet_sync.sweep_receive import read_bootstrap
@@ -262,7 +249,7 @@ def test_joiner_never_refetches_checkpoints_in_a_loop(tmp_path: Path) -> None:
         time.sleep(1.0)
         assert settled_count() == last
         assert last == 1
-        fleet.evidence["settled_checkpoints"] = last
+        fleet.evidence["settled_bootstraps"] = last
         fleet.write_evidence(tmp_path / "no-refetch-loop.json")
     finally:
         fleet.shutdown()

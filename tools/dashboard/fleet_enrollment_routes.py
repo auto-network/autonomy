@@ -500,9 +500,10 @@ def _local_sync_phase() -> str:
 
     A successful delta pull is not enough for a newly enrolled Dashboard: it
     may contain only writes made after catalog activation.  The onboarding
-    completion boundary is therefore a validated checkpoint receipt from one
-    active remote roster member in the current roster epoch.  Until that
-    receipt exists the truthful state remains ``synchronizing``.
+    completion boundary is therefore a COMPLETE bootstrap sweep -- both the
+    ``<= F`` and ``> F`` halves durably applied -- together with a successful
+    pull from one active remote roster member in the current roster epoch.
+    Until both hold the truthful state remains ``synchronizing``.
     """
     local_id = machine_boot.machine_id(org="machine")
     root_pub = fleet_tunnel_server._personal_root_pub()
@@ -539,10 +540,20 @@ def _local_sync_phase() -> str:
         row = conn.execute(
             "SELECT 1 FROM fleet_sync_peer_state "
             f"WHERE roster_epoch=? AND machine_public_key IN ({placeholders}) "
-            "AND checkpoints_received>0 AND last_success_ns IS NOT NULL LIMIT 1",
+            "AND last_success_ns IS NOT NULL LIMIT 1",
             (epoch, *remote_keys),
         ).fetchone()
-        return "complete" if row is not None else "synchronizing"
+        if row is None:
+            return "synchronizing"
+        # A pull succeeded; the bootstrap it carried must also have finished.
+        # An absent row means this store never bootstrapped by sweep, which
+        # for a freshly enrolled dashboard is not yet complete.
+        from tools.network.fleet_sync.sweep_receive import Phase, read_bootstrap
+
+        state = read_bootstrap(conn)
+        if state is None or state.phase is not Phase.COMPLETE:
+            return "synchronizing"
+        return "complete"
     except sqlite3.Error:
         return "synchronizing"
     finally:

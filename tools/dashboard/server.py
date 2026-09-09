@@ -21675,10 +21675,9 @@ async def _on_startup():
             )
 
     set_settings_materialization_hook(_settings_sync_materialized)
-    # The scheduler itself starts at ACTIVATION (see _activate_worker): its
-    # checkpoint install swaps the personal database file under a quiescence
-    # gate that only sees this process's handles, so it must never run while
-    # the predecessor worker still holds the old file open.
+    # The scheduler itself starts at ACTIVATION (see _activate_worker): it
+    # must never run while the predecessor worker still holds the personal
+    # database open.
     _mark("fleet_sync_scheduler.configure")
 
     # Replay the Dashboard's OWN Fleet runtime credential from the warm ramfs

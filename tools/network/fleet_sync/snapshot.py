@@ -3,8 +3,8 @@
 Snapshots are a bootstrap input to fleet synchronization, not a substitute for the
 production mutation log: a current SQLite image cannot reconstruct historical
 tombstones or overwritten values.  Every projected live row nevertheless uses
-the exact same :class:`Mutation` envelope as streamed changes and decoded
-checkpoint segments.
+the exact same :class:`Mutation` envelope as streamed changes and swept
+pages.
 """
 
 from __future__ import annotations

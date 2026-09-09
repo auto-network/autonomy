@@ -1,8 +1,8 @@
 """Apply converged logical mutations to a real GraphDB schema.
 
 This module applies the wire codec to the logical graph rather than merely
-round-tripping an invented object model. Checkpoint and streaming records first converge in a
-``MutationInbox``; only its winners are applied here.
+round-tripping an invented object model. Swept and streamed records first
+converge in a ``MutationInbox``; only its winners are applied here.
 """
 
 from __future__ import annotations
@@ -38,16 +38,16 @@ class MaterializationError(ValueError):
 
 class ForeignKeyOrphanError(MaterializationError):
     """A NOT-NULL foreign key points at a parent absent from the whole
-    checkpoint — referentially-orphaned debris, not a fresh conflict.
+    transfer — referentially-orphaned debris, not a fresh conflict.
 
     The canonical example is a ``thoughts`` row whose ``sources`` conversation
     was deleted long ago without cascading (SQLite ships with foreign keys
     OFF, so such orphans accumulate silently in a source database and then
     surface only when a strict receiver replays them). Because ``_TABLE_ORDER``
     loads every parent table before its children, an insert that still fails a
-    foreign key means the parent is genuinely not in the checkpoint at all.
+    foreign key means the parent is genuinely not in the transfer at all.
     The receiver skips and quarantines the row rather than aborting the entire
-    checkpoint over origin-side referential debris."""
+    transfer over origin-side referential debris."""
 
 
 @dataclass(frozen=True)
@@ -413,7 +413,7 @@ def _upsert(conn: sqlite3.Connection, mutation: Mutation, row: dict[str, object]
             if "FOREIGN KEY constraint failed" in str(exc):
                 raise ForeignKeyOrphanError(
                     f"{mutation.table} row at {mutation.address!r} references a "
-                    f"parent absent from the checkpoint: {exc}"
+                    f"parent absent from the transfer: {exc}"
                 ) from exc
             if "UNIQUE constraint failed" in str(exc):
                 # The arriving row is distinct under the REPLICATION key but
@@ -622,7 +622,7 @@ def materialize(
     # The envelope of a signed settings row covers the organization's genesis
     # id. Read it once: from this store's own ledger, from ledger events
     # already replicated into it, or from a genesis event inside this very
-    # batch (a joiner's checkpoint carries both in one pass).
+    # batch (a joiner's bootstrap carries both in one pass).
     genesis = store_genesis_id(conn) or genesis_from_mutations(grouped["settings"])
     transaction = conn if manage_transaction else nullcontext()
     with transaction:
@@ -660,9 +660,9 @@ def materialize(
                 try:
                     _upsert(conn, mutation, row)
                 except ForeignKeyOrphanError:
-                    # A NOT-NULL parent is absent from the whole checkpoint:
-                    # skip the row, record it for the caller to exclude from
-                    # the winner catalog and to quarantine. A statement-level
+                    # A NOT-NULL parent is absent from the whole transfer:
+                    # skip the row, record it for the caller to exclude and
+                    # to quarantine. A statement-level
                     # constraint abort leaves the transaction usable, so the
                     # rest of the batch still applies.
                     skipped.append((mutation.table, tuple(mutation.address)))

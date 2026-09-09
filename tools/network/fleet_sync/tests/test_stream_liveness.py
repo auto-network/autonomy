@@ -1,7 +1,7 @@
 """Stream liveness policy (auto-fzy8s) on the direct pull channel.
 
 Two client-side bounds with distinct rationales: a first-frame allowance
-sized for the server's silent checkpoint-build phase, and a tight
+sized for the server's silent bootstrap phase, and a tight
 inter-frame bound for the structurally small gaps everywhere else.
 Transport ping/pong (pinned at both direct-channel endpoints) already
 covers dead and frozen peers; these bounds cover the one class it cannot
@@ -214,7 +214,7 @@ def test_slow_silent_first_frame_completes_without_a_kill(
     tmp_path: Path,
 ) -> None:
     """The revert's lesson, encoded: a silence several times the
-    inter-frame bound — the shape of a checkpoint build — completes
+    inter-frame bound — the shape of a bootstrap serve — completes
     untouched because only the first-frame allowance applies to it."""
     async def run() -> None:
         root, puller_key, (server_key,), puller_db, entries = (
@@ -254,7 +254,7 @@ def test_slow_silent_first_frame_completes_without_a_kill(
 def test_mid_stream_silence_is_bounded_by_the_inter_frame_limit(
     tmp_path: Path,
 ) -> None:
-    """After the first frame the checkpoint-build allowance no longer
+    """After the first frame the bootstrap allowance no longer
     shields the peer: silence is caught at the tight inter-frame bound,
     far below the first-frame allowance."""
     async def run() -> None:
@@ -344,7 +344,7 @@ def test_silence_timeout_never_downgrades_the_protocol(
 
 def test_stop_is_bounded_while_a_pull_is_wedged(tmp_path: Path) -> None:
     """The shutdown promise from the design review: a wedged in-flight
-    pull must never block scheduler.stop() — checkpoint installs pause
+    pull must never block scheduler.stop() — bulk applies pause
     the runtime through exactly this path."""
     async def run() -> None:
         root, puller_key, (wedged_key,), puller_db, entries = (

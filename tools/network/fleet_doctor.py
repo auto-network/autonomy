@@ -61,11 +61,9 @@ def _observe(path) -> "sqlite3.Connection":
     Deliberately NOT immutable=1: immutable ignores the WAL, and a live
     dashboard's long-lived connections keep real state in the WAL for long
     stretches — an immutable doctor would chronically misreport a healthy
-    machine as empty. The residual risk is the checkpoint-install swap
-    window: the doctor runs outside the dashboard's quiescence gate, and a
-    swap underneath a mapped -shm is an uncatchable SIGBUS. That window is
-    sub-second and rare; check_sync_data detects the install marker and
-    says readings may be unstable instead of pretending the risk away.
+    machine as empty. The doctor runs outside the dashboard's quiescence
+    gate, so a reading can race a concurrent writer; check_sync_data says
+    readings may be unstable instead of pretending the risk away.
     """
     import sqlite3
 
@@ -730,21 +728,6 @@ def check_org_resolution(report: dict) -> None:
 def check_sync_data(report: dict) -> None:
     _section("Personal-DB sync state")
     try:
-        from tools.network.fleet_checkpoint_handoff import _marker_path
-        from tools.graph.db import _org_db_path as _odp
-
-        marker = _marker_path(Path(_odp("personal")))
-        if marker.exists():
-            _line(
-                "checkpoint install in progress",
-                "handoff marker present -- readings below may be unstable "
-                "and this process may crash on the swap window; rerun after",
-                warn=True,
-            )
-            report["checkpoint_install_in_progress"] = True
-    except Exception:
-        pass
-    try:
         from tools.graph.db import _org_db_path
         import sqlite3
 
@@ -1101,12 +1084,11 @@ def check_sync_internals(report: dict) -> None:
                             "last_success_ns": int(r[2] or 0),
                             "peer_watermark": r[3],
                             "local_watermark": r[4],
-                            "checkpoints_received": int(r[5] or 0),
-                            "last_error": r[6],
+                            "last_error": r[5],
                         }
                         for r in conn.execute(
                             "SELECT machine_public_key,roster_epoch,last_success_ns,"
-                            "peer_watermark,local_watermark,checkpoints_received,"
+                            "peer_watermark,local_watermark,"
                             "last_error_code FROM fleet_sync_peer_state"
                         )
                     ]
@@ -1127,7 +1109,6 @@ def check_sync_internals(report: dict) -> None:
                 _detail(
                     f"        peer {peer['peer']} epoch={peer['epoch']} "
                     f"local_wm={peer['local_watermark']} "
-                    f"ckpts={peer['checkpoints_received']} "
                     f"err={peer['last_error'] or '-'}"
                 )
     except Exception as exc:
@@ -1212,11 +1193,10 @@ def check_org_sync(report: dict) -> None:
                             "machine": str(r[0])[:16],
                             "last_success_ns": int(r[1] or 0),
                             "bytes_received": int(r[2] or 0),
-                            "checkpoints_received": int(r[3] or 0),
                         }
                         for r in conn.execute(
                             "SELECT machine_public_key,last_success_ns,"
-                            "bytes_received,checkpoints_received "
+                            "bytes_received "
                             "FROM fleet_sync_peer_state"
                         )
                     ]
@@ -1247,12 +1227,13 @@ def check_org_sync(report: dict) -> None:
 
 
 def check_catalog_canary(report: dict) -> None:
-    """Cheap, approximate signal for whether a checkpoint would even build.
+    """Cheap, approximate signal for whether this store can serve its rows.
 
     Found live 2026-08-23, hours into diagnosing a totally silent Fleet-sync
-    failure: sync.py's real checkpoint builder refuses (AlphaError:
-    "checkpoint contains untracked logical rows") whenever
-    fleet_sync_catalog's live-row count doesn't match the actual row count
+    failure: a row the catalog does not track is invisible to everything
+    that reads through the catalog -- including a bootstrap sweep, which
+    then delivers a keyspace that silently omits it. The trigger is
+    fleet_sync_catalog's live-row count not matching the actual row count
     across the replicated tables -- a real, versioned mismatch, not a
     phantom, caused here by rows bootstrapped before an earlier SQLite
     RETURNING-on-upsert fix landed. That failure is invisible anywhere
@@ -1306,10 +1287,10 @@ def check_catalog_canary(report: dict) -> None:
         else:
             _line(
                 "tracked_live vs real row count",
-                f"{tracked_live:,} != {real_total:,} -- MISMATCH. A real checkpoint attempt "
-                "will likely fail with AlphaError('checkpoint contains untracked logical "
-                "rows'), refusing silently from the operator's view (only the serving "
-                "connector's own log shows it). Run --verify-catalog for the authoritative "
+                f"{tracked_live:,} != {real_total:,} -- MISMATCH. Rows the catalog "
+                "does not track are omitted from everything that reads through it, "
+                "including a bootstrap sweep, with nothing said in the operator's view. "
+                "Run --verify-catalog for the authoritative "
                 "check and exact discrepancy before assuming this is real -- this canary "
                 "isn't watermark-aware and can false-positive on rows mutated concurrently "
                 "with this scan.",
@@ -1354,8 +1335,8 @@ def verify_catalog(*, org: str = "personal") -> dict:
     except Exception as exc:
         _line(
             "integrity check",
-            f"FAILED: {exc!r} -- this is very likely the same class of problem blocking "
-            "a real checkpoint; the exact failure text here is the authoritative answer",
+            f"FAILED: {exc!r} -- the exact failure text here is the "
+            "authoritative answer",
             fail=True,
         )
         return {"ok": False, "error": repr(exc)}
@@ -1465,12 +1446,10 @@ def check_recent_errors(report: dict, *, tail_lines: int = 4000) -> None:
             "POST /api/network/register 5",
             "POST /api/network/serve-cert 5",
             "post_serve_cert:",
-            # A checkpoint that can't actually be built -- see
-            # check_catalog_canary. Only ever appears in a CONNECTOR's own
-            # log (below), never dashboard.log -- this exact class of gap
-            # (deep, connector-log-only errors invisible to every other
-            # check) is why this function now reads connector logs at all.
-            "AlphaError", "checkpoint contains untracked logical rows",
+            # Deep, connector-log-only errors invisible to every other
+            # check -- this class of gap is why this function reads
+            # connector logs at all.
+            "AlphaError",
             "fleet relay sync stream failed", "fleet relay sync request refused",
         ]
 
@@ -1510,7 +1489,7 @@ def check_recent_errors(report: dict, *, tail_lines: int = 4000) -> None:
         _scan("dashboard.log", DATA_ROOT / "dashboard.log")
         # A connector subprocess is a SEPARATE long-running process with its
         # own log file (data/network/serve-<org_uuid>-<pub>.log) -- every
-        # deep exception tonight (the scheduler-config gap, the checkpoint
+        # deep exception tonight (the scheduler-config gap, the catalog
         # AlphaError) only ever showed up there, never in dashboard.log.
         # check_connectors already discovers these paths; do the same scan
         # here instead of leaving connector logs as a manual-grep-only spot.

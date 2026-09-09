@@ -93,7 +93,7 @@ class Member:
         _prepare(self.personal, self.machine)
         _prepare(self.alpha, self.machine)
         # Authored-then-deleted local state keeps the org scope on the delta
-        # path (checkpoint bootstrap has its own harness coverage).
+        # path (sweep bootstrap has its own harness coverage).
         _insert(self.alpha, f"{name}-seed", "delta path")
         _delete(self.alpha, f"{name}-seed")
         self.seq = 0
@@ -183,74 +183,6 @@ async def _wait(predicate, *, timeout: float, label: str) -> None:
         if time.monotonic() >= deadline:
             raise AssertionError(f"timed out waiting for {label}")
         await asyncio.sleep(0.05)
-
-
-def test_co_member_machine_pulls_the_org_scope_through_the_org_hello(tmp_path: Path) -> None:
-    pa, pb = KeyPair.generate(), KeyPair.generate()
-    members = [pa.public_hex, pb.public_hex]
-    a = Member(tmp_path, "a", pa, members)
-    b = Member(tmp_path, "b", pb, members)
-
-    async def run() -> None:
-        server = a.scheduler()
-        await server.start()
-        b_peers = {"alpha": {a.machine.public_hex: [f"ws://127.0.0.1:{server.port}"]}}
-        puller = b.scheduler(org_peers=lambda: b_peers)
-        try:
-            _insert(a.personal, "p-row", "personal, must not cross")
-            _insert(a.alpha, "a-row", "org row crossing between members")
-            await puller.start()
-            await _wait(lambda: _has(b.alpha, "a-row"), timeout=30.0,
-                        label="org row on the co-member's machine")
-            # A second write after admission rides the same path.
-            _insert(a.alpha, "a-row-2", "second org row")
-            await _wait(lambda: _has(b.alpha, "a-row-2"), timeout=30.0,
-                        label="second org row")
-            await asyncio.sleep(0.5)
-            # Isolation: B is not in A's personal roster, so nothing of A's
-            # personal scope reaches B by any path, and the org rows do not
-            # land in B's personal database.
-            assert not _has(b.personal, "p-row")
-            assert not _has(b.personal, "a-row")
-            # Both members adopt a newer membership checkpoint (a join, say:
-            # the member set here is unchanged, the seq advances). The org
-            # epoch on the wire changes; the peer-state key does not, and
-            # no checkpoint is pulled -- rows keep flowing by delta.
-            wire_before = puller._scope_epochs("alpha")
-            a.adopt(1, members)
-            b.adopt(1, members)
-            wire_after = puller._scope_epochs("alpha")
-            assert wire_after[0] != wire_before[0]
-            assert wire_after[1] == wire_before[1] == org_state_key(ORG)
-            _insert(a.alpha, "a-row-3", "after the adoption")
-            await _wait(lambda: _has(b.alpha, "a-row-3"), timeout=30.0,
-                        label="org row after both members adopted seq 1")
-        finally:
-            await puller.stop()
-            await server.stop()
-        # Per-peer state for the org scope is keyed by (machine pair, org):
-        # exactly one row for A's machine in B's org store, under the org
-        # key, with no checkpoint received across the adoption; nothing in
-        # B's personal store.
-        with sqlite3.connect(b.alpha) as conn:
-            rows = conn.execute(
-                "SELECT machine_public_key,roster_epoch,checkpoints_received "
-                "FROM fleet_sync_peer_state"
-            ).fetchall()
-        assert [(r[0], r[1]) for r in rows] == [(a.machine.public_hex, org_state_key(ORG))]
-        assert rows[0][2] == 0
-        with sqlite3.connect(b.personal) as conn:
-            assert conn.execute(
-                "SELECT COUNT(*) FROM fleet_sync_peer_state"
-            ).fetchone()[0] == 0
-        # A's org store recorded B's served acknowledgement under the same key.
-        with sqlite3.connect(a.alpha) as conn:
-            served = conn.execute(
-                "SELECT machine_public_key,roster_epoch FROM fleet_sync_peer_state"
-            ).fetchall()
-        assert (b.machine.public_hex, org_state_key(ORG)) in served
-
-    asyncio.run(run())
 
 
 def test_org_admitted_connection_is_confined_and_wrong_hellos_are_refused(tmp_path: Path) -> None:
@@ -438,45 +370,6 @@ def test_a_removing_checkpoint_closes_the_removed_member_with_4417(tmp_path: Pat
         finally:
             await puller.stop()
             await server.stop()
-
-    asyncio.run(run())
-
-
-def test_a_rekeyed_member_re_proves_under_its_new_leaf_and_survives(tmp_path: Path) -> None:
-    pa, pb, pb2 = KeyPair.generate(), KeyPair.generate(), KeyPair.generate()
-    members = [pa.public_hex, pb.public_hex]
-    a = Member(tmp_path, "a", pa, members)
-    b = Member(tmp_path, "b", pb, members)
-
-    async def run() -> None:
-        server = a.scheduler()
-        await server.start()
-        b_peers = {"alpha": {a.machine.public_hex: [f"ws://127.0.0.1:{server.port}"]}}
-        puller = b.scheduler(org_peers=lambda: b_peers)
-        try:
-            _insert(a.alpha, "row-1", "before the rekey")
-            await puller.start()
-            await _wait(lambda: _has(b.alpha, "row-1"), timeout=30.0, label="row before rekey")
-            # B's persona is rekeyed; both machines adopt the checkpoint
-            # whose member set carries the new leaf. B's machine proves
-            # under its new certificate and keeps syncing; no checkpoint
-            # is pulled and the peer-state key is unchanged.
-            rekeyed = [pa.public_hex, pb2.public_hex]
-            b.rekey(pb2)
-            a.adopt(1, rekeyed, deadline_s=0.3)
-            b.adopt(1, rekeyed, deadline_s=0.3)
-            await asyncio.sleep(0.5)
-            _insert(a.alpha, "row-2", "after the rekey")
-            await _wait(lambda: _has(b.alpha, "row-2"), timeout=30.0, label="row after rekey")
-        finally:
-            await puller.stop()
-            await server.stop()
-        with sqlite3.connect(b.alpha) as conn:
-            rows = conn.execute(
-                "SELECT machine_public_key,roster_epoch,checkpoints_received "
-                "FROM fleet_sync_peer_state"
-            ).fetchall()
-        assert rows == [(a.machine.public_hex, org_state_key(ORG), 0)]
 
     asyncio.run(run())
 

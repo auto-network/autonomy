@@ -68,9 +68,9 @@ class BacklogEntry:
 def pending_attachment_backlog(conn: sqlite3.Connection) -> list[BacklogEntry]:
     """Quarantined attachment entries that carry a replay identity.
 
-    Checkpoint-quarantined entries store no frame — the next checkpoint
-    carries their row again, and locally present bytes realize it then —
-    so only delta-deferred entries are drainable here.
+    Sweep-quarantined entries store no frame — a later sweep carries their
+    row again, and locally present bytes realize it then — so only
+    delta-deferred entries are drainable here.
     """
     ensure_quarantine_table(conn)
     entries: list[BacklogEntry] = []

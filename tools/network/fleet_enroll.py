@@ -140,9 +140,8 @@ class EnrollmentDelivery:
     origin_entry: fleet_roster.RosterEntry | None = None
     #: Every active roster entry as the approving machine resolves it, so a
     #: joiner learns the WHOLE fleet at enrollment rather than only the origin
-    #: pair. Without it a new machine knows only two peers and cannot fetch a
-    #: first checkpoint from anyone else (see fountain_fetch: every symbol any
-    #: peer emits is useful). Each entry is independently root-signed and
+    #: pair. Without it a new machine knows only two peers and cannot
+    #: bootstrap from anyone else. Each entry is independently root-signed and
     #: ``fleet_roster.resolve`` re-verifies and drops the unverifiable, so a
     #: larger delivery adds no new trust requirement. Empty for legacy
     #: deliveries built before this field existed.

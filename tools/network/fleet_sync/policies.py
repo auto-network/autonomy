@@ -3,7 +3,7 @@
 The inventory is executable documentation: opening a current GraphDB and
 calling :func:`audit_schema` fails if a durable table is neither replicated nor
 explicitly classified as derived/local.  That keeps a schema migration from
-quietly creating graph state the checkpoint codec never carries.
+quietly creating graph state the replication codec never carries.
 
 Policies describe logical identity, not raw SQLite layout.  Mutation time and
 tombstones live in the replication envelope; many existing tables do not keep

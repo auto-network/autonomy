@@ -44,29 +44,6 @@ def _mutation(identity: str, timestamp: int) -> Mutation:
     )
 
 
-def test_watermark_is_earned_not_assigned(tmp_path: Path) -> None:
-    origin = DurableOrigin(tmp_path / "A", "A", 1)
-    custodian = PrefixStore(tmp_path / "B" / "prefixes")
-    try:
-        origin.author(_mutation("one", 10))
-        cut = origin.freeze_cut()
-        assert cut == 10
-        assert origin.advertised_watermark == 0
-        with pytest.raises(WatermarkError, match="write refused before time 11"):
-            origin.author(_mutation("late", 10))
-        artifact = origin.seal_cut(cut)
-        with pytest.raises(WatermarkError, match="surviving durable holder"):
-            origin.advertise(artifact, {"A": origin.store, "B": custodian})
-        custodian.copy_from(artifact, origin.store)
-        receipt = origin.advertise(
-            artifact, {"A": origin.store, "B": custodian}
-        )
-        assert receipt.watermark == 10
-        assert receipt.holders == ("A", "B")
-    finally:
-        origin.close()
-
-
 def test_uncertain_restore_cannot_author_until_floor_recovered(tmp_path: Path) -> None:
     origin = DurableOrigin(tmp_path / "A", "A", 1, uncertain_startup=True)
     try:

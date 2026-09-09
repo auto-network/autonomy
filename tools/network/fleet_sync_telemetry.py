@@ -115,8 +115,6 @@ def _zero_payload() -> dict:
         "last_mutation_frames": 0,
         "total_transactions": 0,
         "last_transactions": 0,
-        "total_checkpoint_bytes": 0,
-        "last_checkpoint_bytes": 0,
         "acknowledged_transaction_ref": 0,
         "resume_breadcrumbs": [],
         "resume_breadcrumb_seq": 0,
@@ -142,7 +140,6 @@ def record_iteration(
     bytes_received: int = 0,
     mutation_frames: int = 0,
     transactions: int = 0,
-    checkpoint_bytes: int = 0,
     error_code: str = "",
     acknowledged_transaction_ref: int | None = None,
     acknowledged_breadcrumb: Mapping | None = None,
@@ -159,8 +156,8 @@ def record_iteration(
     are accumulated per class on success.
     """
     key = telemetry_key(peer_machine_public_key, channel, direction, scope)
-    if mode not in {"delta", "checkpoint"}:
-        raise ValueError("Fleet telemetry mode must be delta or checkpoint")
+    if mode != "delta":
+        raise ValueError("Fleet telemetry mode must be delta")
     if outcome not in _OUTCOMES:
         raise ValueError("Fleet telemetry outcome is invalid")
     values = {
@@ -169,7 +166,6 @@ def record_iteration(
         "bytes_received": bytes_received,
         "mutation_frames": mutation_frames,
         "transactions": transactions,
-        "checkpoint_bytes": checkpoint_bytes,
         "started_at_ns": started_at_ns,
     }
     if acknowledged_transaction_ref is not None:
@@ -209,8 +205,6 @@ def record_iteration(
             "last_mutation_frames": mutation_frames,
             "total_transactions": payload["total_transactions"] + transactions,
             "last_transactions": transactions,
-            "total_checkpoint_bytes": payload["total_checkpoint_bytes"] + checkpoint_bytes,
-            "last_checkpoint_bytes": checkpoint_bytes,
             "last_mode": mode,
             "last_outcome": outcome,
             "last_error_code": str(error_code)[:160] if outcome != "success" else "",
@@ -302,7 +296,6 @@ def read_peer_totals(*, org: str = "machine") -> dict[str, dict]:
             "bytes_received": 0,
             "mutation_frames": 0,
             "transactions": 0,
-            "checkpoint_bytes": 0,
             "last_duration_ms": 0,
             "last_finished_at_ns": 0,
             "last_success_at_ns": 0,
@@ -319,7 +312,6 @@ def read_peer_totals(*, org: str = "machine") -> dict[str, dict]:
             ("bytes_received", "total_bytes_received"),
             ("mutation_frames", "total_mutation_frames"),
             ("transactions", "total_transactions"),
-            ("checkpoint_bytes", "total_checkpoint_bytes"),
         ):
             current[target] += int(payload.get(source) or 0)
         finished = int(payload.get("last_finished_at_ns") or 0)

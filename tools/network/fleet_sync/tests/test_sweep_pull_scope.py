@@ -2,7 +2,7 @@
 
 Every earlier control for this work tested a store method or a compiled name.
 None ran the caller, so none could see that the receive hunk passed an
-undefined `peer_pub`, or that a computed `accept_checkpoint` never reached
+undefined `peer_pub`, or that a computed bootstrap flag never reached
 `encode_pull_request`. Both defects survived a green suite. These controls
 execute the actual client path and read what it puts on the wire.
 """
@@ -152,14 +152,14 @@ def _drive(monkeypatch, scheduler, channel, *, expect=None):
     return caught.value
 
 
-def test_a_bootstrapping_store_asks_v5_and_refuses_a_checkpoint(
+def test_a_bootstrapping_store_asks_v5_and_refuses_a_downgrade(
     tmp_path: Path, monkeypatch
 ) -> None:
     """The refusal must reach the WIRE, not merely a local variable.
 
-    The first version computed accept_checkpoint into a local that
+    The first version computed the flag into a local that
     encode_pull_request never read, so the request still offered to accept a
-    checkpoint while the code claimed it refused.
+    downgrade while the code claimed it refused.
     """
     scheduler, personal = _scheduler(tmp_path)
 
@@ -179,7 +179,7 @@ def test_a_bootstrapping_store_asks_v5_and_refuses_a_checkpoint(
         f"a resuming sweep must not negotiate below v{SWEEP_PROTOCOL_VERSION}, "
         f"asked v{version}"
     )
-    # There is no accept_checkpoint to assert: sync checkpoints are deleted,
+    # There is no checkpoint field to assert: sync checkpoints are deleted,
     # so a resuming sweep has nothing to refuse and the field is off the wire.
     assert b"accept_checkpoint" not in channel.sent[0]
 
@@ -286,7 +286,7 @@ def test_a_fresh_joiner_asks_for_the_sweep_without_pre_seeding(
     anchor one. The version pin would then only ever protect bootstraps that
     somehow already existed -- and nothing could create the first.
 
-    Asking is not committing: a fresh joiner still accepts a checkpoint, so
+    Asking is not committing: a fresh joiner still accepts a sweep, so
     meeting a v4 server it takes whatever that server can serve.
     """
     scheduler, personal = _scheduler(tmp_path)
@@ -303,7 +303,7 @@ def test_a_fresh_joiner_asks_for_the_sweep_without_pre_seeding(
         f"sweep and bootstrap cannot start"
     )
     assert b"accept_checkpoint" not in channel.sent[0], (
-        "the request still carries a checkpoint concept"
+        "the request still carries a retired checkpoint concept"
     )
 
 

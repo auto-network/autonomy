@@ -87,9 +87,9 @@ class FleetDirectV1(SettingSchema):
         required=False,
         description=(
             "Which process hosts the direct listener: 'connector' (default; "
-            "the serving connector subprocess, which already builds and "
-            "streams checkpoints for relay serves and carries no operator "
-            "UI) or 'dashboard' (the dashboard process itself)."
+            "the serving connector subprocess, which already streams "
+            "relay serves and carries no operator UI) or 'dashboard' (the "
+            "dashboard process itself)."
         ),
     )
     pull_direct: bool = field(

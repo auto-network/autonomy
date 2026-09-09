@@ -166,8 +166,8 @@ class _ViewerRelayChannel:
         self._on_writer_failure = on_writer_failure
         self._abuse_lease = abuse_lease
         # A fleet:join channel is a roster-authenticated peer doing bulk
-        # replication (bounded by the checkpoint codec's own MAX_CHECKPOINT_*
-        # limits, not this org's public-viewer byte buckets). It is
+        # replication (bounded by the frame codec's own limits, not this
+        # org's public-viewer byte buckets). It is
         # categorically not the anonymous bootloader/attachment traffic the
         # abuse limiter's byte buckets exist to bound -- active-connection
         # and admission-rate accounting still apply via abuse_lease, only

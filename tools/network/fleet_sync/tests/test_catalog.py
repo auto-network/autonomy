@@ -57,7 +57,7 @@ def test_live_row_settings_base_resolves_the_deprecated_zero_winner(
     ``deprecated = 0`` winner, not an arbitrary deprecated sibling — the base
     snapshot filters to ``deprecated = 0`` with the same predicate, so if this
     resolver (which builds the winner catalog's candidate hash) picked a
-    different physical row the checkpoint would fail install with a winner/base
+    different physical row the transfer would fail with a winner/base
     hash mismatch.
     """
     db = GraphDB(tmp_path / "personal.db")
@@ -257,34 +257,6 @@ def test_reconcile_repairs_legacy_live_encoding_of_deprecated_base(
             "SELECT tombstone FROM fleet_sync_catalog WHERE address=?",
             (address_blob,),
         ).fetchone()[0] == 1
-    finally:
-        db.close()
-
-
-def test_frozen_cut_is_a_coherent_wal_snapshot_and_advances_floor(
-    tmp_path: Path,
-) -> None:
-    db = GraphDB(tmp_path / "personal.db")
-    try:
-        catalog = MutationCatalog(db.conn, "machine-a")
-        catalog.install()
-        with catalog.transaction(10, "tx-1"):
-            _insert_source(db.conn, "s1", "before cut")
-        cut = catalog.freeze_cut()
-        try:
-            with catalog.transaction(20, "tx-2"):
-                db.conn.execute("UPDATE sources SET title='after cut' WHERE id='s1'")
-            frozen = list(catalog.iter_mutations(cut))[0].mutation
-            current = list(catalog.iter_mutations())[0].mutation
-            assert dict(frozen.values)["title"] == "before cut"
-            assert frozen.timestamp_ns == 10
-            assert dict(current.values)["title"] == "after cut"
-            assert current.timestamp_ns == 20
-        finally:
-            cut.close()
-        with pytest.raises(WatermarkError, match="write refused"):
-            with catalog.transaction(10, "tx-backward"):
-                pass
     finally:
         db.close()
 
