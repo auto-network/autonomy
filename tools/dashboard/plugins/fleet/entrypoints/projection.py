@@ -56,7 +56,6 @@ class ProjectionInputs:
     local_verdict: Mapping | None = None
     serve_cert: Mapping | None = None
     tunnel_serving: bool | None = None
-    may_serve: bool | None = None
 
 
 def _peer_rows(epoch: str | None) -> dict[str, dict]:
@@ -154,13 +153,6 @@ def _load_inputs(*, now_ms: int) -> ProjectionInputs:
         tunnel_serving = bool(get_supervisor().serving())
     except Exception:
         tunnel_serving = None
-    may_serve = None
-    try:
-        from tools.network import fleet_tunnel_server
-
-        may_serve = bool(fleet_tunnel_server.tunnel_serving_permitted()[0])
-    except Exception:
-        may_serve = None
     return ProjectionInputs(
         server_time=now_ms,
         root_pub=root_pub,
@@ -182,7 +174,6 @@ def _load_inputs(*, now_ms: int) -> ProjectionInputs:
         local_verdict=local_verdict,
         serve_cert=serve_cert,
         tunnel_serving=tunnel_serving,
-        may_serve=may_serve,
     )
 
 
@@ -613,12 +604,6 @@ def project(inputs: ProjectionInputs) -> dict:
             cert_not_after * 1000 if isinstance(cert_not_after, int) else None
         ),
         "tunnelServing": inputs.tunnel_serving,
-        # Whether THIS machine may serve at all. Since auto-clune.7 every
-        # authorized machine does, so the page must not gate its connector,
-        # tunnel and certificate readouts on being the elected
-        # singular-ownership machine -- doing so rendered a dead connector as
-        # a healthy idle machine on every box but one.
-        "mayServe": inputs.may_serve,
         "verdictTopLine": verdict.get("top_line"),
     }
     from tools.network import build_version
