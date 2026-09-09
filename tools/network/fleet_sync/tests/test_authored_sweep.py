@@ -25,6 +25,7 @@ from tools.network.fleet_sync.authored_sweep import (
     read_live_authored_page,
 )
 from tools.network.fleet_sync.catalog import MutationCatalog
+from tools.network.fleet_sync.codec import encode_value
 
 ORIGIN = "machine-a"
 WIDE = 1 << 40  # a frontier no test timestamp reaches
@@ -147,25 +148,91 @@ def test_provenance_is_the_catalog_not_application_columns(
 def test_untracked_live_row_fails_the_whole_page_after_valid_rows(
     tmp_path: Path,
 ) -> None:
-    """A row written before its table gained capture has no provenance.
-    Returning the valid prefix plus a counter would let a caller bootstrap a
-    hole, so the entire page fails and no cursor is produced."""
-    db = GraphDB(tmp_path / "personal.db")
+    """A live row with no catalog provenance fails the ENTIRE page, including
+    the valid prefix already accumulated.
+
+    The store is fully tracked and then exactly one later canonical catalog
+    address is removed, so the untracked row is reached after a valid record
+    has been collected. Nothing here can skip, and the assertion is about the
+    SELECTED address rather than the catalog being globally empty.
+    """
+    db, catalog = _store(tmp_path / "personal.db")
     try:
-        _insert_source(db.conn, "s-untracked", "written before capture")
+        with catalog.transaction(10, "tx-1"):
+            _insert_source(db.conn, "s-00", "tracked, emitted first")
+            _insert_source(db.conn, "s-01", "provenance about to be removed")
+
+        target = encode_value(["sources", ["s-01"]])
+        removed = db.conn.execute(
+            "DELETE FROM fleet_sync_catalog WHERE address=?", (target,)
+        ).rowcount
         db.conn.commit()
-        catalog = MutationCatalog(db.conn, ORIGIN)
-        catalog.install()
-        untracked = db.conn.execute(
-            "SELECT COUNT(*) FROM sources WHERE id='s-untracked' AND NOT EXISTS("
-            " SELECT 1 FROM fleet_sync_catalog)"
-        ).fetchone()[0]
-        if not untracked:
-            pytest.skip("install() backfilled the row; untracked case needs "
-                        "a store where backfill has not yet reached it")
-        with pytest.raises(UntrackedLiveRow):
+        assert removed == 1, "the specific address was not the one removed"
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM fleet_sync_catalog WHERE address=?", (target,)
+        ).fetchone()[0] == 0
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM fleet_sync_catalog"
+        ).fetchone()[0] > 0, "the rest of the catalog must remain tracked"
+
+        with pytest.raises(UntrackedLiveRow, match="s-01"):
             _page(db.conn, {ORIGIN: WIDE})
         assert not db.conn.in_transaction, "read view must close on error"
+    finally:
+        db.close()
+
+
+def test_schema_prevents_a_broken_provenance_join(tmp_path: Path) -> None:
+    """The reader is not the only thing standing between a catalog row and an
+    unresolvable transaction -- the foreign key is, and it is the stronger
+    guarantee. Attempting to orphan ``transaction_ref`` is refused outright.
+    """
+    db, catalog = _store(tmp_path / "personal.db")
+    try:
+        with catalog.transaction(10, "tx-1"):
+            _insert_source(db.conn, "s-00", "tracked")
+
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            db.conn.execute(
+                "UPDATE fleet_sync_catalog SET transaction_ref="
+                "(SELECT COALESCE(MAX(id),0)+1000 FROM fleet_sync_transactions)"
+            )
+        db.conn.rollback()
+    finally:
+        db.close()
+
+
+def test_unresolvable_provenance_still_fails_whole_page_without_fk_enforcement(
+    tmp_path: Path,
+) -> None:
+    """Defence in depth. SQLite enforces foreign keys only when the pragma is
+    on, so a store opened without it could hold a catalog row whose transaction
+    does not resolve. The reader must still refuse the whole page rather than
+    emit a record with no honest origin.
+    """
+    db, catalog = _store(tmp_path / "personal.db")
+    try:
+        with catalog.transaction(10, "tx-1"):
+            _insert_source(db.conn, "s-00", "tracked, emitted first")
+            _insert_source(db.conn, "s-01", "provenance about to dangle")
+
+        target = encode_value(["sources", ["s-01"]])
+        db.conn.execute("PRAGMA foreign_keys=off")
+        try:
+            changed = db.conn.execute(
+                "UPDATE fleet_sync_catalog SET transaction_ref="
+                "(SELECT COALESCE(MAX(id),0)+1000 FROM fleet_sync_transactions) "
+                "WHERE address=?",
+                (target,),
+            ).rowcount
+            db.conn.commit()
+        finally:
+            db.conn.execute("PRAGMA foreign_keys=on")
+        assert changed == 1, "the specific address was not the one dangled"
+
+        with pytest.raises(UntrackedLiveRow, match="s-01"):
+            _page(db.conn, {ORIGIN: WIDE})
+        assert not db.conn.in_transaction
     finally:
         db.close()
 

@@ -89,8 +89,12 @@ class LivePage:
     exhausted: bool
     #: Addresses this page examined and assigned to PULL.
     filtered: int
-    #: Rows read from the store, emitted plus filtered. Bounded independently
-    #: of ``max_records`` so an all-newer store cannot be scanned end to end
+    #: Rows READ from the store this page -- emitted, filtered, and a
+    #: non-fitting lookahead if one was reached. It is a scan-cost measure,
+    #: NOT cursor progress: a looked-ahead record is counted here but
+    #: deliberately not covered by ``examined_through``, so the two can
+    #: disagree by one and that is correct. Bounded independently of
+    #: ``max_records`` so an all-newer store cannot be walked end to end
     #: inside one read view.
     examined: int
 
