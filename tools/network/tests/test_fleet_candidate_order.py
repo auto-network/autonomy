@@ -14,7 +14,11 @@ OTHER_PEER = "b" * 64
 TAILNET = "ws://100.122.70.30:9410"
 PRIVATE = "ws://172.16.0.2:9410"
 LAN = "ws://192.168.1.50:9410"
-NOW = 10_000_000_000_000
+# A realistic epoch value in nanoseconds. It must exceed DEFAULT_MAX_AGE_NS,
+# or `NOW - age` goes negative and is rejected as "no record" rather than
+# exercising the decay boundary. That mistake made the stale-record test
+# pass for the wrong reason until the boundary test caught it.
+NOW = 1_800_000_000_000_000_000
 
 
 def _row(peer, address, at_ns, **extra):
