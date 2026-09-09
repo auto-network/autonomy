@@ -401,3 +401,70 @@ def test_tombstones_are_absent_because_a_live_walk_cannot_find_them(
         )
     finally:
         db.close()
+
+
+def test_all_filtered_store_still_pages_and_makes_progress(
+    tmp_path: Path,
+) -> None:
+    """Filtered rows emit nothing, so `max_records` alone never trips on a
+    store whose keyspace is entirely newer than F -- it would be walked end to
+    end under one read view. `max_examined` bounds rows READ, and an
+    all-filtered page still returns a position so the caller advances."""
+    db, catalog = _store(tmp_path / "personal.db")
+    try:
+        for index in range(9):
+            with catalog.transaction(100 + index, f"tx-{index}"):
+                _insert_source(db.conn, f"s-{index:02d}", "newer than F")
+
+        seen = 0
+        pages = 0
+        cursor = None
+        while True:
+            page = _page(db.conn, {ORIGIN: 5}, start_after=cursor,
+                         max_records=100, max_examined=2)
+            pages += 1
+            seen += page.examined
+            assert page.records == (), "every row here is PULL's"
+            if page.exhausted:
+                break
+            assert page.examined_through is not None, (
+                "an all-filtered page must still report a position"
+            )
+            cursor = page.examined_through
+            assert pages < 20, "all-filtered paging failed to terminate"
+
+        assert seen == 9
+        assert pages > 1, "max_examined did not bound the scan"
+    finally:
+        db.close()
+
+
+def test_unsigned_settings_cursor_round_trips(tmp_path: Path) -> None:
+    """An unsigned settings row's logical address carries no persona, so a
+    cursor derived from it is one part short of the key arity. That shape must
+    be accepted, not rejected before the reader pads it."""
+    db, catalog = _store(tmp_path / "personal.db")
+    try:
+        with catalog.transaction(10, "tx-1"):
+            db.conn.execute(
+                "INSERT INTO settings(id,set_id,schema_revision,key,payload,"
+                "publication_state,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                ("one", "example", 1, "k1", '{"v":1}', "raw",
+                 "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+            )
+        page = _page(db.conn, {ORIGIN: WIDE})
+        settings = [
+            item for item in page.records if item.mutation.table == "settings"
+        ]
+        assert settings, "the settings row must be swept"
+        full = settings[0].mutation.address
+        short = full[:-1] if full[-1] == "" else full
+        resumed = _page(db.conn, {ORIGIN: WIDE},
+                        start_after=("settings", tuple(short)))
+        assert all(
+            item.mutation.address != full
+            for item in resumed.records
+        ), "the resumed page re-delivered the cursor row"
+    finally:
+        db.close()

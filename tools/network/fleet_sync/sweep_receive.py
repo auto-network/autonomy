@@ -31,7 +31,12 @@ import json
 import sqlite3
 from typing import Any, Iterable, Mapping
 
-from .catalog import MutationCatalog
+from .catalog import (
+    MAX_TRANSACTION_FRAME_BYTES,
+    MAX_TRANSACTION_OPERATIONS,
+    MutationCatalog,
+)
+from .delta import encode_authored_frame
 from .compaction import AuthoredMutation
 from .policies import PolicyKind, TABLE_POLICIES
 from .streaming import BASE_TABLE_ORDER, _key_expressions
@@ -47,6 +52,26 @@ class BootstrapPhaseError(BootstrapError):
 
 class BootstrapAbsent(BootstrapError):
     """An operation needs a bootstrap that was never begun."""
+
+
+class CallerTransactionActive(BootstrapError):
+    """The caller owns a transaction; these writers commit and must not steal it."""
+
+
+class PageTooLarge(BootstrapError):
+    """A page exceeds the record or encoded-byte bound, so none of it is applied."""
+
+
+def _require_no_caller_transaction(conn: sqlite3.Connection) -> None:
+    """These functions commit, so a caller's open transaction would be stolen.
+
+    Refusing leaves it exactly as found -- neither committed nor rolled back.
+    """
+    if conn.in_transaction:
+        raise CallerTransactionActive(
+            "bootstrap state writers require a connection with no open "
+            "transaction; the caller's transaction was left untouched"
+        )
 
 
 class Phase(str, Enum):
@@ -70,8 +95,8 @@ class BootstrapState:
 class AppliedPage:
     applied: int
     ignored: int
-    #: Distinct (origin, transaction) groups this page was split into. A single
-    #: transaction straddling pages yields a group in each.
+    #: Contiguous address-prefix runs this page was committed as. A
+    #: transaction whose rows are not adjacent yields one run per stretch.
     groups: int
 
 
@@ -96,6 +121,7 @@ def begin_bootstrap(
     ``F`` is the SERVING store's frontier at sweep start, not this store's own
     (which is empty for a new joiner, and would make the PULL half unbounded).
     """
+    _require_no_caller_transaction(conn)
     _ensure_table(conn)
     captured = {str(k): int(v) for k, v in frontier.items()}
     existing = read_bootstrap(conn)
@@ -126,6 +152,7 @@ def read_bootstrap(conn: sqlite3.Connection) -> BootstrapState | None:
 
 
 def _advance(conn: sqlite3.Connection, expected: Phase, target: Phase) -> BootstrapState:
+    _require_no_caller_transaction(conn)
     state = read_bootstrap(conn)
     if state is None:
         raise BootstrapAbsent(f"cannot enter {target.value} with no bootstrap")
@@ -150,12 +177,23 @@ def record_sweep_complete(conn: sqlite3.Connection) -> BootstrapState:
 
 
 def record_pull_complete(conn: sqlite3.Connection) -> BootstrapState:
-    """The ``> F`` half is durably applied. Only now may the frontier be served."""
+    """The caller certifies the ``> F`` half is durably applied.
+
+    This records an assertion; it does not verify one. Nothing here proves the
+    delta covered every address the sweep assigned to PULL -- that coverage
+    proof belongs to the caller that ran the delta, and calling this without it
+    advertises a frontier the store has not earned.
+    """
     return _advance(conn, Phase.PULLING, Phase.COMPLETE)
 
 
 def may_advertise_frontier(conn: sqlite3.Connection) -> bool:
     """Whether this store's watermarks may be published to anyone.
+
+    **UNWIRED.** No frontier reader consults this yet; wiring every producer
+    and consumer of ``origin_watermarks`` is integration work and is not done
+    here. Until then this predicate documents and tests the rule rather than
+    enforcing it.
 
     False for every incomplete bootstrap, and durably so -- a crash mid-sweep
     leaves the row in SWEEPING, so the answer survives restart rather than
@@ -169,29 +207,57 @@ def may_advertise_frontier(conn: sqlite3.Connection) -> bool:
 def apply_live_page(
     catalog: MutationCatalog, records: Iterable[AuthoredMutation]
 ) -> AppliedPage:
-    """Apply one swept page by splitting it into originated transactions.
+    """Apply one swept page as CONTIGUOUS ADDRESS-PREFIX commits.
 
     ``apply_remote_batch`` requires every item of a call to share
-    ``(origin, transaction_id, timestamp)``; a page ordered by address spans
-    many, so it is grouped. Order within a group is preserved -- the callee
-    sorts by operation index and rejects a repeated one.
+    ``(origin, transaction_id, timestamp)``, and a page ordered by address
+    spans many transactions -- so the page must be split. The split must
+    preserve address order, NOT gather a transaction's scattered rows.
+
+    Regrouping by transaction breaks the database-as-cursor invariant. Given
+    addresses ``a(tx1) b(tx2) c(tx1)``, a transaction-major split commits
+    ``a, c`` before ``b``; a crash there leaves ``c`` as the furthest row, so
+    resume continues past ``b`` and ``b`` is never fetched again. A permanent
+    hole, and exactly the failure the cursor exists to prevent.
+
+    Splitting instead on each change of transaction identity keeps every commit
+    a contiguous prefix of the page, so the furthest row present always implies
+    every earlier address is present too. A transaction whose rows are not
+    adjacent is applied in several calls, which is already permitted -- partial
+    transactions are why the frontier gate exists.
     """
-    grouped: dict[tuple[str, str, int], list[AuthoredMutation]] = {}
+    runs: list[list[AuthoredMutation]] = []
+    identity: tuple[str, str, int] | None = None
+    count = 0
+    encoded = 0
     for item in records:
+        # Bound the input WHILE collecting, before anything is applied: an
+        # arbitrary iterable must not be able to commit a partial page and
+        # then fail. Same ceilings the merge itself enforces per call.
+        count += 1
+        encoded += len(encode_authored_frame(item))
+        if count > MAX_TRANSACTION_OPERATIONS or encoded > MAX_TRANSACTION_FRAME_BYTES:
+            raise PageTooLarge(
+                f"page exceeds the apply bounds at record {count} "
+                f"({encoded} encoded bytes); nothing was applied"
+            )
         key = (
             item.origin_incarnation,
             item.transaction_id,
             item.mutation.timestamp_ns,
         )
-        grouped.setdefault(key, []).append(item)
+        if key != identity:
+            runs.append([])
+            identity = key
+        runs[-1].append(item)
 
     applied = 0
     ignored = 0
-    for group in grouped.values():
-        group_applied, group_ignored = catalog.apply_remote_batch(group)
-        applied += group_applied
-        ignored += group_ignored
-    return AppliedPage(applied, ignored, len(grouped))
+    for run in runs:
+        run_applied, run_ignored = catalog.apply_remote_batch(run)
+        applied += run_applied
+        ignored += run_ignored
+    return AppliedPage(applied, ignored, len(runs))
 
 
 def resume_cursor(
@@ -222,9 +288,13 @@ def resume_cursor(
                 " WHERE (supersedes IS NOT NULL OR excludes IS NOT NULL"
                 " OR deprecated = 0)"
             )
+        # DESC binds to ONE term: `ORDER BY a,b,c DESC` reverses only c and
+        # would return a row that is not the composite maximum. Every key
+        # expression must carry its own DESC.
+        descending = ",".join(f"{expression} DESC" for expression in expressions)
         row = conn.execute(
             f'SELECT {",".join(expressions)} FROM "{table}"{where} '
-            f'ORDER BY {",".join(expressions)} DESC LIMIT 1'
+            f'ORDER BY {descending} LIMIT 1'
         ).fetchone()
         if row is not None:
             return table, tuple(row)
