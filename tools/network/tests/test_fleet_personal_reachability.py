@@ -19,6 +19,7 @@ import pytest
 from tools.graph.schemas.personal_fleet_reachability import (
     MAX_ADDRESSES,
     MAX_ADDRESS_BYTES,
+    MAX_RELAY_BASE_BYTES,
     MAX_ROW_BYTES,
     PersonalFleetReachabilityV1,
     row_bytes,
@@ -353,25 +354,119 @@ def test_a_corrupt_stored_row_causes_a_republish_not_a_suppressed_write(store, m
     assert pr.publish_if_changed(machine, cert, ["wss://a.example/s"]) is True
 
 
-def test_the_row_ceiling_is_not_reachable_by_any_schema_valid_row(machine):
-    """Reports the true maximum rather than asserting an unreachable bound.
+def test_the_writer_refuses_to_sign_a_row_over_the_aggregate_cap(machine):
+    """Every field here is individually permitted — `updated_at` is only
+    required to be a non-negative integer, with no digit bound — so this row
+    violates nothing except the TOTAL. The writer must refuse to sign it rather
+    than emit a row no verifier will accept."""
+    with pytest.raises(SchemaValidationError):
+        pr.build_row(machine, ["wss://a.example/s"], now=10 ** 4000)
 
-    With 8 addresses at 256 bytes plus a maximal relay, the largest row a valid
-    descriptor can produce is well under MAX_ROW_BYTES, so the row ceiling is
-    defence in depth and not a binding constraint. Stated as a measurement so a
-    later bound change cannot quietly make it binding without this failing.
+
+def test_the_verifier_refuses_a_correctly_signed_row_over_the_aggregate_cap(machine):
+    """The receiving half of the same property. Hand-built and CORRECTLY
+    SIGNED, so only the aggregate cap can reject it — a tampered row would fail
+    on the signature and prove nothing about the cap."""
+    body = {
+        "v": 1, "machine_pub": machine.public_hex, "addresses": ["wss://a.example/s"],
+        "relay": None, "updated_at": 10 ** 4000,
+    }
+    body["sig"] = machine.sign_hex(pr._signing_input(body))
+
+    assert row_bytes(body) > MAX_ROW_BYTES
+    with pytest.raises(SchemaValidationError):
+        PersonalFleetReachabilityV1.validate(body)
+    assert pr.verify_row(
+        body, machine.public_hex, active_machine_pubs=[machine.public_hex]) is None
+
+
+def test_an_integer_too_large_to_encode_is_invalid_input_not_a_crash(machine):
+    """CPython refuses integer-to-string conversion beyond 4300 digits, so such
+    a row cannot be canonicalized at all — it raises rather than producing
+    oversized bytes. The verifier must treat that as invalid input, because a
+    value that cannot be canonicalized cannot have been signed in this form.
+    """
+    row = {
+        "v": 1, "machine_pub": machine.public_hex, "addresses": [],
+        "relay": None, "updated_at": 10 ** 5000, "sig": "ff" * 64,
+    }
+
+    assert pr.verify_row(
+        row, machine.public_hex, active_machine_pubs=[machine.public_hex]) is None
+
+
+def test_a_maximal_address_and_relay_fixture_stays_within_the_cap(machine):
+    """A SIZING FIXTURE, not a proof of the maximum.
+
+    It maximizes addresses (8 x MAX_ADDRESS_BYTES) and relay_base, but it does
+    NOT establish an upper bound on a valid row: `updated_at` is unbounded and
+    JSON escaping can expand encoded bytes, so no fixture can. It records what
+    this shape costs, so a bound change that makes THIS shape exceed the cap is
+    caught rather than discovered in production.
     """
     host = "w" * (MAX_ADDRESS_BYTES - len("wss://") - len(".example/s"))
     addresses = [f"wss://{host[:-2]}{i:02d}.example/s" for i in range(MAX_ADDRESSES)]
     relay = dict(_relay())
-    relay["relay_base"] = "wss://" + ("r" * 200) + ".example"
+    relay["relay_base"] = "wss://" + ("r" * (MAX_RELAY_BASE_BYTES - len("wss://") - len(".example"))) + ".example"
     row = pr.build_row(machine, addresses, relay, now=9999999999)
 
-    largest = row_bytes(row)
-    assert largest <= MAX_ROW_BYTES
-    assert largest < MAX_ROW_BYTES, (
-        f"largest schema-valid row is {largest}B; the {MAX_ROW_BYTES}B ceiling "
-        f"is now binding and must be reviewed rather than silently truncating")
+    assert len(row["addresses"]) == MAX_ADDRESSES
+    assert row_bytes(row) <= MAX_ROW_BYTES
+
+
+def test_the_relay_key_must_be_present_even_when_null(machine):
+    """An absent key and an explicit null are different bodies with different
+    canonical bytes, so one of them must be the only accepted spelling."""
+    row = pr.build_row(machine, ["wss://a.example/s"])
+    del row["relay"]
+
+    with pytest.raises(SchemaValidationError):
+        PersonalFleetReachabilityV1.validate(row)
+
+
+def test_a_boolean_version_is_refused(machine):
+    """True == 1 in Python, so an equality check alone accepts a bool."""
+    row = pr.build_row(machine, ["wss://a.example/s"])
+    row["v"] = True
+
+    with pytest.raises(SchemaValidationError):
+        PersonalFleetReachabilityV1.validate(row)
+
+
+@pytest.mark.parametrize("field", ["machine_pub", "sig"])
+def test_a_trailing_newline_in_hex_is_refused(machine, field):
+    """`$` matches before a final newline; only fullmatch refuses this."""
+    row = pr.build_row(machine, ["wss://a.example/s"])
+    row[field] = row[field] + "\n"
+
+    with pytest.raises(SchemaValidationError):
+        PersonalFleetReachabilityV1.validate(row)
+
+
+def test_a_non_string_org_uuid_is_refused_not_coerced(machine):
+    """Coercing with str() would turn a non-string into a passing value."""
+    row = pr.build_row(machine, [], _relay())
+    row["relay"]["org_uuid"] = 12345
+
+    with pytest.raises(SchemaValidationError):
+        PersonalFleetReachabilityV1.validate(row)
+
+
+def test_malformed_unicode_is_invalid_input_not_an_exception(machine):
+    """A lone surrogate cannot be encoded; the verifier must treat that as
+    invalid input rather than letting it escape as an exception."""
+    row = pr.build_row(machine, ["wss://a.example/s"])
+    row["addresses"] = ["wss://a.example/\ud800"]
+
+    assert pr.verify_row(
+        row, machine.public_hex, active_machine_pubs=[machine.public_hex]) is None
+
+
+def test_a_nested_relay_object_is_refused_before_canonicalization(machine):
+    """Primitive shape and length are checked before anything serializes an
+    arbitrary nested object merely to measure it."""
+    with pytest.raises(SchemaValidationError):
+        pr.build_row(machine, [], {"relay_base": {"nested": ["deep"] * 100}})
 
 
 @pytest.mark.parametrize("field,value", [
