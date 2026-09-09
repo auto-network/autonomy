@@ -57,10 +57,10 @@ MAX_RELAY_BASE_BYTES = 256
 #: does not, a bound changes explicitly rather than anything being truncated.
 MAX_ROW_BYTES = 4096
 
-_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
-_HEX128_RE = re.compile(r"^[0-9a-f]{128}$")
+_HEX64_RE = re.compile(r"[0-9a-f]{64}")
+_HEX128_RE = re.compile(r"[0-9a-f]{128}")
 _UUID_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 )
 
 _ROW_FIELDS = frozenset({"v", "machine_pub", "addresses", "relay", "updated_at", "sig"})
@@ -132,17 +132,20 @@ class PersonalFleetReachabilityV1(SettingSchema):
         # would be covered by the signature on one side and dropped on the
         # other, so two honest parties would disagree about what was signed.
         unknown = sorted(set(payload) - _ROW_FIELDS)
-        missing = sorted(_ROW_FIELDS - set(payload) - {"relay"})
+        # relay is REQUIRED and may be null. An absent key and an explicit
+        # null are different bodies with different canonical bytes.
+        missing = sorted(_ROW_FIELDS - set(payload))
         if unknown or missing:
             raise SchemaValidationError(
                 f"{name}: field set must be exactly {sorted(_ROW_FIELDS)}"
                 + (f" (unknown {unknown})" if unknown else "")
                 + (f" (missing {missing})" if missing else "")
             )
-        if payload.get("v") != ROW_VERSION:
+        version = payload.get("v")
+        if isinstance(version, bool) or type(version) is not int or version != ROW_VERSION:
             raise SchemaValidationError(f"{name}: 'v' must be {ROW_VERSION}")
         machine_pub = payload.get("machine_pub")
-        if not isinstance(machine_pub, str) or not _HEX64_RE.match(machine_pub):
+        if not isinstance(machine_pub, str) or not _HEX64_RE.fullmatch(machine_pub):
             raise SchemaValidationError(
                 f"{name}: 'machine_pub' must be 64 lowercase hex chars"
             )
@@ -196,11 +199,12 @@ class PersonalFleetReachabilityV1(SettingSchema):
                     f"{name}: 'relay.relay_base' must be at most "
                     f"{MAX_RELAY_BASE_BYTES} UTF-8 bytes"
                 )
-            if not _UUID_RE.match(str(relay.get("org_uuid"))):
+            org_uuid = relay.get("org_uuid")
+            if not isinstance(org_uuid, str) or not _UUID_RE.fullmatch(org_uuid):
                 raise SchemaValidationError(f"{name}: 'relay.org_uuid' must be a canonical uuid")
             for field in ("persona_pub", "serving_machine_pub"):
                 value = relay.get(field)
-                if not isinstance(value, str) or not _HEX64_RE.match(value):
+                if not isinstance(value, str) or not _HEX64_RE.fullmatch(value):
                     raise SchemaValidationError(
                         f"{name}: 'relay.{field}' must be 64 lowercase hex chars"
                     )
@@ -211,7 +215,7 @@ class PersonalFleetReachabilityV1(SettingSchema):
                 f"{name}: 'updated_at' must be a non-negative integer"
             )
         sig = payload.get("sig")
-        if not isinstance(sig, str) or not _HEX128_RE.match(sig):
+        if not isinstance(sig, str) or not _HEX128_RE.fullmatch(sig):
             raise SchemaValidationError(f"{name}: 'sig' must be 128 lowercase hex chars")
 
         if row_bytes(payload) > MAX_ROW_BYTES:
@@ -221,7 +225,7 @@ class PersonalFleetReachabilityV1(SettingSchema):
 
     @classmethod
     def validate_member_key(cls, key: str) -> None:
-        if not _HEX64_RE.match(key or ""):
+        if not _HEX64_RE.fullmatch(key or ""):
             raise SchemaValidationError(
                 f"{cls.__name__}: keys are machine public keys (64 lowercase hex), got {key!r}"
             )

@@ -81,9 +81,16 @@ def _raw_bounds(addresses: Sequence[str], relay: dict | None) -> None:
             raise SchemaValidationError("every address must be a string")
         total += len(address.encode("utf-8"))
     if relay is not None:
-        if not isinstance(relay, dict):
-            raise SchemaValidationError("relay must be an object or None")
-        total += len(canonical_json(relay))
+        # Validate the PRIMITIVE shape and lengths before canonicalizing, so an
+        # arbitrary nested object cannot be serialized just to measure it.
+        if not isinstance(relay, dict) or len(relay) > 8:
+            raise SchemaValidationError("relay must be a small object or None")
+        for key, value in relay.items():
+            if not isinstance(key, str) or len(key) > 32:
+                raise SchemaValidationError("relay keys must be short strings")
+            if not isinstance(value, str) or len(value.encode("utf-8")) > MAX_RELAY_BASE_BYTES:
+                raise SchemaValidationError("relay values must be bounded strings")
+            total += len(key.encode("utf-8")) + len(value.encode("utf-8"))
     if total > _MAX_RAW_INPUT_BYTES:
         raise SchemaValidationError("reachability input exceeds the raw byte ceiling")
 
@@ -297,9 +304,12 @@ def verify_row(
     """
     try:
         PersonalFleetReachabilityV1.validate(row)
-    except SchemaValidationError:
-        return None
-    if row_bytes(row) > MAX_ROW_BYTES:
+        if row_bytes(row) > MAX_ROW_BYTES:
+            return None
+    except (SchemaValidationError, UnicodeError, ValueError, TypeError):
+        # Malformed Unicode or a failed value conversion is INVALID INPUT, not
+        # an exception for a caller to handle. Anything that cannot be
+        # canonicalized cannot have been signed in this form.
         return None
 
     machine_pub = row["machine_pub"]
