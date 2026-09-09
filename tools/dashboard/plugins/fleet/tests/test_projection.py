@@ -364,6 +364,10 @@ def test_local_machine_block_reports_probe_facts_or_stays_null():
         "certValidUntil": None,
         "tunnelServing": None,
         "verdictTopLine": None,
+        # Unreadable serving-eligibility probe. None, never True: guessing
+        # "may serve" would make a dead connector classify as healthy, which
+        # is the failure this whole block exists to refuse.
+        "mayServe": None,
     }
 
     view = project(_inputs(
@@ -383,5 +387,8 @@ def test_local_machine_block_reports_probe_facts_or_stays_null():
         "certStatus": "ok",
         "certValidUntil": 1_777_086_400_000,
         "tunnelServing": False,
+        # _inputs supplies no serving-eligibility probe, so this stays None
+        # for the same reason as the block above.
+        "mayServe": None,
         "verdictTopLine": "LOCKED",
     }
