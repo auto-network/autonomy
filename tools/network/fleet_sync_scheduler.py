@@ -70,7 +70,18 @@ SUPPORTED_PROTOCOL_VERSIONS = frozenset({3, 4, 5})
 _REQUEST_FIELDS = frozenset({
     "v", "op", "roster_epoch", "resume", "compat",
 })
-_REQUEST_OPTIONAL_FIELDS = frozenset({"scope", "bootstrap", "watermarks"})
+#: ``accept_checkpoint`` is ACCEPTED AND IGNORED. Sync checkpoints are
+#: deleted and this encoder never sends the field, but the old encoder
+#: sends it whenever it is False -- so every un-updated peer holding a
+#: founded ledger puts it on the wire. This allow-list is strict, so
+#: removing the key here refused those requests before admission and
+#: took fleet sync down with every peer that had not updated (live
+#: 2026-09-09T17:31Z, four scopes, 20 minutes). Deleting the field from
+#: the ENCODER was safe; deleting it from the DECODER is a wire break.
+#: It stays until no peer sends it, and it means nothing when present.
+_REQUEST_OPTIONAL_FIELDS = frozenset(
+    {"scope", "bootstrap", "accept_checkpoint", "watermarks"}
+)
 from tools.network.fleet_sync.sweep_receive import (
     SWEEP_BEGIN_KIND,
     SWEEP_END_KIND,
@@ -681,6 +692,11 @@ def decode_pull_request(
     bootstrap = value.get("bootstrap", False)
     if not isinstance(bootstrap, bool):
         raise FleetSyncProtocolError("fleet sync bootstrap flag must be bool")
+    legacy_accept = value.get("accept_checkpoint")
+    if legacy_accept is not None and not isinstance(legacy_accept, bool):
+        raise FleetSyncProtocolError("fleet sync accept_checkpoint flag must be bool")
+    # Deliberately not returned: sync checkpoints are deleted, so the value
+    # cannot influence anything. It is validated and dropped.
     watermarks = value.get("watermarks")
     if watermarks is not None:
         if (
