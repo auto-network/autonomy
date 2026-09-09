@@ -42,10 +42,17 @@ import json
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
 _QUIET = False  # set True in main() for --json: report data still collected, nothing printed but the JSON
+
+#: How recently a connector's own log must have been written for its tail to
+#: describe the CURRENT state. Older than this and the tail is history: the
+#: connector is still up (its pid was just listed), it simply has not logged
+#: lately, so an alarming tail is not evidence of a live fault.
+_CONNECTOR_LOG_FRESH_S = 30 * 60.0
 
 
 def _observe(path) -> "sqlite3.Connection":
@@ -611,17 +618,35 @@ def check_connectors(report: dict) -> None:
             from tools.data_paths import DATA_ROOT
 
             net_dir = DATA_ROOT / "network"
-            matches = sorted(net_dir.glob(f"serve-{org_uuid}-*.log"))
+            matches = list(net_dir.glob(f"serve-{org_uuid}-*.log"))
             if matches:
-                log_path = matches[-1]
+                # By MTIME, not by name. Each serve-cert rotation opens a new
+                # log whose suffix is a key hash, so name order is arbitrary
+                # with respect to time: on 2026-09-08 sorted()[-1] picked a
+                # log last written 11 days earlier, whose tail was 5/5 4409,
+                # and reported it as "recent tunnel churn" while the live log
+                # had none. A stale log read as current is a fabricated
+                # verdict of exactly the kind this file exists to avoid.
+                log_path = max(matches, key=lambda p: p.stat().st_mtime)
+                age_s = max(0.0, time.time() - log_path.stat().st_mtime)
                 tail = log_path.read_text(errors="replace").splitlines()[-5:]
                 recent_4409 = sum(1 for l in tail if "close_code=4409" in l)
-                if recent_4409:
+                if recent_4409 and age_s <= _CONNECTOR_LOG_FRESH_S:
                     _line(
                         f"  recent tunnel churn ({org_uuid[:8]}...)",
                         f"{recent_4409}/5 of last lines are 4409 (CLOSE_REPLACED) -- "
                         "another peer may be fighting for this org's serving slot",
                         warn=True,
+                    )
+                elif recent_4409:
+                    # Say the age rather than the alarm: the connector is up
+                    # (we just listed its pid) but its newest log is cold, so
+                    # the churn is history, not a live fault.
+                    _line(
+                        f"  tunnel churn ({org_uuid[:8]}...) is HISTORICAL",
+                        f"{recent_4409}/5 of last lines are 4409, but the newest "
+                        f"connector log was last written {age_s / 3600:.1f}h ago "
+                        "-- not evidence of current churn",
                     )
         except Exception:
             pass
