@@ -8,11 +8,13 @@ browser↔local-Caddy TLS *is* the content encryption; this layer supplies
 framing, explicit credit, half-close/reset semantics, and the bounded
 ClientHello/SNI peek the ingress routes on.
 
-Nothing here logs, retains, or interprets payload bytes.
+Nothing here logs or interprets stream payload bytes. ReceiveBuffer retains
+only DATA admitted against issued byte credit until the endpoint drains it.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import struct
@@ -298,3 +300,59 @@ class ReplenishTracker:
             grant, self._pending = self._pending, 0
             return grant
         return None
+
+
+class ReceiveBuffer(asyncio.Queue):
+    """Debit issued byte credit before retaining DATA, including queued bytes.
+
+    Nonempty frames consume at least one credit byte, so object count is also
+    bounded by the existing grant without rejecting legal one-byte frames.
+    Empty DATA is a no-op. Terminal notifications bypass a blocked drain by
+    cancelling the lifetime-owning receive pump once; they create no tasks.
+    Socket and tunnel shutdown remain the stream owner's responsibility.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.credit = STREAM_INITIAL_CREDIT
+        self.replenish = ReplenishTracker()
+        self.stopped = False
+        self.reset_code = None
+        self._pump = None
+
+    def bind(self, pump: asyncio.Task) -> None:
+        self._pump = pump
+        if self.stopped:
+            pump.cancel()
+
+    def put_nowait(self, item) -> None:
+        if not self.stopped:
+            super().put_nowait(item)
+
+    def put_data(self, payload: bytes) -> None:
+        if self.stopped or not payload:
+            return
+        if len(payload) > STREAM_MAX_DATA or len(payload) > self.credit:
+            self.stop(RESET_PROTOCOL)
+            return
+        self.credit -= len(payload)
+        self.put_nowait(("data", payload))
+
+    def drained(self, n: int) -> int | None:
+        if self.stopped:
+            return None
+        grant = self.replenish.consumed(n)
+        if grant is not None:
+            self.credit += grant
+        return grant
+
+    def stop(self, code: int | None = None) -> None:
+        if self.stopped:
+            return
+        self.stopped = True
+        self.reset_code = code
+        while not self.empty():
+            self.get_nowait()
+        if self._pump is not None and not self._pump.done():
+            if self._pump is not asyncio.current_task():
+                self._pump.cancel()

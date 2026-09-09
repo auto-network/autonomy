@@ -30,7 +30,7 @@ from tools.network.relaykit.stream_wire import (
     CAP_TLS_STREAM,
     CreditWindow,
     NeedMoreData,
-    ReplenishTracker,
+    ReceiveBuffer,
     RESET_BYTE_BUDGET,
     RESET_ORDERLY,
     RESET_PROTOCOL,
@@ -76,14 +76,12 @@ class RelayRawStream:
         self.abuse_lease = abuse_lease
         self.idle_timeout = idle_timeout
         self.charge_starvation = charge_starvation
-        self.inbound: asyncio.Queue = asyncio.Queue()
+        #: Our connector→browser grant, charged before queue admission.
+        self.inbound = ReceiveBuffer()
         self.open_ok: asyncio.Future = asyncio.get_event_loop().create_future()
         #: connector's grant for browser→connector bytes; set by open-ok
         self.send_window = CreditWindow(0)
         self.send_credit_event = asyncio.Event()
-        #: our grant for connector→browser bytes
-        self.granted_outstanding = STREAM_INITIAL_CREDIT
-        self.replenish = ReplenishTracker()
         self.last_activity = asyncio.get_event_loop().time()
         self._sent_eof = False
         self._recv_eof = False
@@ -93,9 +91,13 @@ class RelayRawStream:
     # -- entry points from the tunnel receive loop (never block) -----------
 
     def on_data(self, payload: bytes) -> None:
-        self.inbound.put_nowait(("data", payload))
+        self.inbound.put_data(payload)
+        if self.inbound.stopped and not self.open_ok.done():
+            self.open_ok.set_exception(_Refused(RESET_PROTOCOL))
 
     def on_ctrl_raw(self, payload: bytes) -> None:
+        if self.inbound.stopped:
+            return
         try:
             msg = parse_ctrl(payload)
         except StreamProtocolError:
@@ -103,19 +105,23 @@ class RelayRawStream:
         if msg["op"] == "open-ok" and not self.open_ok.done():
             self.open_ok.set_result(msg["credit"])
             return
-        if msg["op"] == "reset" and not self.open_ok.done():
-            self.open_ok.set_exception(_Refused(msg["code"]))
+        if msg["op"] == "reset":
+            if not self.open_ok.done():
+                self.open_ok.set_exception(_Refused(msg["code"]))
+            self.inbound.stop()
             return
         self.inbound.put_nowait(("ctrl", msg))
 
     def on_close(self) -> None:
         if not self.open_ok.done():
             self.open_ok.set_exception(_Refused(RESET_PROTOCOL))
-        self.inbound.put_nowait(("close", None))
+        self.inbound.stop()
 
     def signal_reset(self, code: int) -> None:
         """Route removal (release/revoke): reset from the relay side."""
-        self.inbound.put_nowait(("local-reset", code))
+        if not self.open_ok.done():
+            self.open_ok.set_exception(_Refused(code))
+        self.inbound.stop(code)
 
     # -- pumps -------------------------------------------------------------
 
@@ -128,9 +134,12 @@ class RelayRawStream:
             asyncio.create_task(self._pump_from_tunnel()),
             asyncio.create_task(self._idle_watchdog()),
         ]
-        with contextlib.suppress(asyncio.CancelledError):
-            await self._tasks[1]
-        await self.teardown()
+        self.inbound.bind(self._tasks[1])
+        try:
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._tasks[1]
+        finally:
+            await self.teardown()
 
     def _touch(self) -> None:
         self.last_activity = asyncio.get_event_loop().time()
@@ -215,23 +224,17 @@ class RelayRawStream:
             while True:
                 kind, payload = await self.inbound.get()
                 if kind == "data":
-                    if len(payload) > STREAM_MAX_DATA or \
-                            len(payload) > self.granted_outstanding:
-                        await self._send_reset(RESET_PROTOCOL)
-                        return
                     if not await self._charge(len(payload)):
                         await self._send_reset(RESET_BYTE_BUDGET)
                         return
-                    self.granted_outstanding -= len(payload)
                     self._touch()
                     if self._metrics is not None:
                         self._metrics.stream_bytes(
                             self._org, "out", len(payload))
                     self.writer.write(payload)
                     await self.writer.drain()
-                    grant = self.replenish.consumed(len(payload))
+                    grant = self.inbound.drained(len(payload))
                     if grant is not None:
-                        self.granted_outstanding += grant
                         await self.tunnel.send_frame(
                             FRAME_STREAM_CTRL, self.channel_id,
                             build_ctrl_credit(grant),
@@ -285,15 +288,22 @@ class RelayRawStream:
         if self._done.is_set():
             return
         self._done.set()
+        self.inbound.stop()
         if self.tunnel.raw_streams.get(self.channel_id) is self:
             del self.tunnel.raw_streams[self.channel_id]
         current = asyncio.current_task()
         for task in self._tasks:
             if task is not current and not task.done():
                 task.cancel()
+        await asyncio.gather(
+            *(task for task in self._tasks if task is not current),
+            return_exceptions=True,
+        )
         if self.abuse_lease is not None:
             self.abuse_lease.release()
             self.abuse_lease = None
+        if self.inbound.reset_code is not None:
+            await self._send_reset(self.inbound.reset_code)
         with contextlib.suppress(Exception):
             await self.tunnel.send_frame(FRAME_CLOSE, self.channel_id)
         with contextlib.suppress(Exception):
