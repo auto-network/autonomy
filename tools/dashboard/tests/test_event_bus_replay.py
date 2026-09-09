@@ -373,3 +373,95 @@ class TestSnapshotRoundtrip:
         assert snapshot_path.exists()
         leftovers = list(tmp_path.glob("*.tmp"))
         assert leftovers == []
+
+
+class TestConcurrentPublishDuringScrub:
+    """A publish from another thread must not break a reader walking the buffer.
+
+    broadcast_sync exists so a sync caller (a settings_ops commit-then-emit
+    hook, which runs on a worker thread) can publish without hopping to the
+    event loop, so the bus is genuinely multi-threaded. Before the bus took a
+    lock, an append landing inside discard_cached's traversal raised
+    "deque mutated during iteration"; the startup privacy scrub is a caller,
+    so the whole worker refused to serve and uvicorn silently kept the
+    incumbent process on stale code (sjc-2, 2026-09-09).
+    """
+
+    def _hammer(self, bus, reader, *, publishes=400):
+        """Run *reader* repeatedly while another thread publishes."""
+        import threading
+
+        errors = []
+        stop = threading.Event()
+
+        def publish():
+            try:
+                for i in range(publishes):
+                    bus.broadcast_sync(f"topic:{i}", {"i": i})
+            except Exception as exc:  # pragma: no cover - failure path
+                errors.append(exc)
+            finally:
+                stop.set()
+
+        writer = threading.Thread(target=publish)
+        writer.start()
+        try:
+            while not stop.is_set():
+                try:
+                    reader()
+                except Exception as exc:
+                    errors.append(exc)
+                    break
+        finally:
+            writer.join()
+        # The writer can finish before the loop is entered, so run the reader
+        # once more unconditionally: every caller asserts on what the reader
+        # produced, and "it never ran" must not read as "it worked".
+        try:
+            reader()
+        except Exception as exc:
+            errors.append(exc)
+        return errors
+
+    def test_discard_cached_survives_a_concurrent_publish(self, bus):
+        errors = self._hammer(
+            bus, lambda: bus.discard_cached(lambda topic, data, ok: False),
+        )
+        assert errors == []
+
+    def test_replay_survives_a_concurrent_publish(self, bus):
+        errors = self._hammer(bus, lambda: bus.replay(1, 10_000))
+        assert errors == []
+
+    def test_snapshot_survives_a_concurrent_publish(self, bus, tmp_path):
+        # snapshot() swallows its own exceptions, so assert on the OUTCOME:
+        # the file it promises to write must exist and parse.
+        target = tmp_path / "event_bus.state"
+        errors = self._hammer(bus, lambda: bus.snapshot(target))
+        assert errors == []
+        assert json.loads(target.read_text())["version"] == 1
+
+    def test_a_scrub_keeps_every_event_published_during_it(self, bus):
+        """The rebuild must not drop entries appended while it runs.
+
+        Replacing self._buffer wholesale is only safe if no append can land in
+        the deque being discarded — a lock-free "iterate a copy" fix would stop
+        the crash and lose those events instead.
+        """
+        errors = self._hammer(
+            bus, lambda: bus.discard_cached(lambda topic, data, ok: False),
+            publishes=200,
+        )
+        assert errors == []
+        seqs = [entry.seq for entry in bus._buffer]
+        assert seqs == list(range(1, 201))
+
+    def test_a_scrub_still_removes_what_the_predicate_names(self, bus):
+        asyncio.run(_broadcast_n(bus, 4))
+        bus.broadcast_sync("private:secret", {"x": 1})
+        removed = bus.discard_cached(
+            lambda topic, data, ok: topic.startswith("private:"),
+        )
+        assert removed == 2  # the cached-state entry and the buffer entry
+        assert "private:secret" not in bus.all_cached_topics()
+        assert all(not e.topic.startswith("private:") for e in bus._buffer)
