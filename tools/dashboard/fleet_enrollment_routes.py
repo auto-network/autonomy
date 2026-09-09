@@ -334,10 +334,41 @@ def rearm_local_runtime_from_cache() -> bool:
     through ``_activate_runtime`` also re-arms all three runtime consumers, so
     no consumer needs re-arming code of its own.
     """
-    payload = _dashboard_runtime_cache().load()
-    if payload is None:
+    log = logging.getLogger(__name__)
+    try:
+        payload = _dashboard_runtime_cache().load()
+    except Exception:
+        log.warning(
+            "fleet runtime replay: the dashboard runtime cache could not be "
+            "READ; this machine stays locked until a human unlock",
+            exc_info=True)
         return False
-    _activate_runtime(payload)
+    if payload is None:
+        # Distinct from a failed replay and from a successful one, and until
+        # now indistinguishable from both: all three returned quietly.
+        log.warning(
+            "fleet runtime replay: NO cached payload — this machine was never "
+            "unlocked, or ramfs was cleared. Connectors will start UNARMED "
+            "(hello v1, shared empty-machine relay slot) until a human unlock")
+        return False
+    try:
+        _activate_runtime(payload)
+    except Exception:
+        # THE PATH THAT ACTUALLY HAPPENED (2026-09-09). Home activated at
+        # 13:54:07Z and every connector generation after it started cold. The
+        # caller wraps this whole function in contextlib.suppress(Exception),
+        # so a replay that threw — a delegation cert that has since expired,
+        # a de-rostered machine — was indistinguishable from one that was
+        # never attempted. Four connector restarts, no explanation anywhere.
+        log.warning(
+            "fleet runtime replay FAILED from a cached payload; the credential "
+            "is stale (expired cert or de-rostered machine) and a fresh "
+            "operator unlock is required. Connectors start UNARMED until then",
+            exc_info=True)
+        return False
+    log.warning(
+        "fleet runtime replayed from the dashboard cache — Fleet sync re-armed "
+        "with nobody present")
     return True
 
 

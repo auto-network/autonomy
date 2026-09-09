@@ -12,6 +12,9 @@ refused rather than arming the machine with a credential the fleet dropped.
 
 from __future__ import annotations
 
+import logging
+from types import SimpleNamespace
+
 import time
 import types
 
@@ -67,7 +70,14 @@ def _wire_runtime(tmp_path, monkeypatch, *, machine_id, root, roster_entries,
     )
     monkeypatch.setattr(
         fleet_enrollment_routes.fleet_tunnel_server, "state",
-        lambda: types.SimpleNamespace(allowed=False, selected_machine_id=None),
+        # `reason` and `managed` are REQUIRED of this double since
+        # auto-clune.7: `_activate_runtime` now asks
+        # `tunnel_serving_permitted()`, which reads `.reason`. A stub missing
+        # it raises AttributeError from inside activation, which presents as
+        # "the machine did not arm" — the exact symptom under investigation.
+        lambda: types.SimpleNamespace(
+            allowed=False, reason="not-designated", managed=True,
+            selected_machine_id=None),
     )
 
 
@@ -161,7 +171,7 @@ def test_activate_runtime_warms_the_dashboard_cache(tmp_path, monkeypatch):
 
 
 def test_a_payload_naming_an_off_roster_machine_does_not_activate(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, caplog
 ):
     root = KeyPair.from_private_hex("11" * 32)
     on_roster = KeyPair.from_private_hex("22" * 32)
@@ -183,6 +193,77 @@ def test_a_payload_naming_an_off_roster_machine_does_not_activate(
         "org-x", name_prefix="fleet-dashboard-runtime"
     ).store(payload)
 
-    with pytest.raises(Exception):
-        fleet_enrollment_routes.rearm_local_runtime_from_cache()
+    # The PROPERTY is that a de-rostered payload does not arm the machine.
+    # Raising was the old mechanism; the replay now reports the failure and
+    # returns False instead, because its only caller wraps it in
+    # contextlib.suppress(Exception) and swallowed the distinction anyway.
+    # Returning False and SAYING SO is strictly more informative than raising
+    # into a suppressor.
+    with caplog.at_level(logging.WARNING, logger=fleet_enrollment_routes.__name__):
+        assert fleet_enrollment_routes.rearm_local_runtime_from_cache() is False
     assert fleet_sync_scheduler.dashboard_fleet_sync_service._config is None
+    assert any("FAILED" in r.getMessage() for r in caplog.records), (
+        "a stale payload must not fail silently — that silence is what made "
+        "home's unarmed connectors undiagnosable for six hours")
+
+
+# ── The replay must say which of three things happened (2026-09-09) ─────
+#
+# Home activated at 13:54:07Z and every connector generation after it started
+# cold, with no explanation anywhere. `rearm_local_runtime_from_cache` returned
+# False for "nothing cached" and RAISED for "cached but unusable", and its only
+# caller wraps it in contextlib.suppress(Exception) — so a stale credential, an
+# empty cache, and a successful replay were mutually indistinguishable from
+# outside. Four restarts, four silences.
+
+
+def test_an_empty_cache_says_so(monkeypatch, caplog):
+    """Distinct from a failed replay, and previously identical to it."""
+    from tools.dashboard import fleet_enrollment_routes as routes
+
+    monkeypatch.setattr(
+        routes, "_dashboard_runtime_cache",
+        lambda: SimpleNamespace(load=lambda: None))
+
+    with caplog.at_level(logging.WARNING, logger=routes.__name__):
+        assert routes.rearm_local_runtime_from_cache() is False
+
+    assert any("NO cached payload" in r.getMessage() for r in caplog.records)
+
+
+def test_a_stale_credential_is_reported_not_swallowed(monkeypatch, caplog):
+    """THE ONE THAT MATTERS. An expired delegation cert makes `_activate_runtime`
+    raise; the caller suppresses every exception, so this was silent. It must
+    name the cause and that a human unlock is required."""
+    from tools.dashboard import fleet_enrollment_routes as routes
+
+    monkeypatch.setattr(
+        routes, "_dashboard_runtime_cache",
+        lambda: SimpleNamespace(load=lambda: {"machine_id": "m"}))
+
+    def _expired(_payload):
+        raise ValueError("delegation cert is expired")
+
+    monkeypatch.setattr(routes, "_activate_runtime", _expired)
+
+    with caplog.at_level(logging.WARNING, logger=routes.__name__):
+        assert routes.rearm_local_runtime_from_cache() is False
+
+    message = " ".join(r.getMessage() for r in caplog.records)
+    assert "FAILED" in message and "unlock" in message
+
+
+def test_a_successful_replay_is_also_visible(monkeypatch, caplog):
+    """Success was silent too, which is why the last known-good re-arm was six
+    hours stale and sent the first diagnosis to the wrong event."""
+    from tools.dashboard import fleet_enrollment_routes as routes
+
+    monkeypatch.setattr(
+        routes, "_dashboard_runtime_cache",
+        lambda: SimpleNamespace(load=lambda: {"machine_id": "m"}))
+    monkeypatch.setattr(routes, "_activate_runtime", lambda _p: None)
+
+    with caplog.at_level(logging.WARNING, logger=routes.__name__):
+        assert routes.rearm_local_runtime_from_cache() is True
+
+    assert any("replayed" in r.getMessage() for r in caplog.records)
