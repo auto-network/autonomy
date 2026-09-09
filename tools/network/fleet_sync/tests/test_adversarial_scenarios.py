@@ -83,25 +83,57 @@ def test_flap_during_bootstrap(tmp_path: Path) -> None:
         # counted bootstraps received; the sweep leaves no such artifact, and
         # surviving two kills is the property under test.
         fleet.wait_converged(timeout=120.0)
-        # Kill-mid-bootstrap legitimately leaves the recovery marker and
-        # backup — they ARE the crash-recovery mechanism, consumed by the
-        # next install attempt. The clean-state claim is therefore: one
-        # further graceful cycle recovers to zero debris.
         fleet.restart(1, kill=False)
         fleet.wait_converged(timeout=120.0)
-        def stray() -> list:
-            joiner_dir = fleet.machines[1].db_path.parent
-            return [
-                path.name for path in joiner_dir.iterdir()
-                if ".fleet-sync-install-" in path.name
-                or path.name.endswith(".pre-fleet-sync")
-                or ".fleet-sync-handoff" in path.name
-            ]
-        fleet.wait(
-            lambda: stray() == [], timeout=120.0,
-            label="recovery consumes debris",
+
+        # THE PROPERTY (auto-14bxm): the joiner resumed under the SAME F it
+        # first anchored, rather than re-anchoring on a later one. Two kills
+        # mid-sweep and a graceful restart are three chances to adopt a fresh
+        # frontier from the serving store, which by then holds strictly more.
+        # Re-anchoring would strand every key between the old F and the new,
+        # and the store would look converged while missing them.
+        import json as _json
+        import sqlite3 as _sq
+
+        def _bootstrap_row(path) -> tuple[str, dict] | None:
+            conn = _sq.connect(f"file:{path}?mode=ro", uri=True)
+            try:
+                present = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='fleet_sync_bootstrap'"
+                ).fetchone()
+                if present is None:
+                    return None
+                row = conn.execute(
+                    "SELECT phase,frontier FROM fleet_sync_bootstrap "
+                    "WHERE singleton=1"
+                ).fetchone()
+                return None if row is None else (str(row[0]), _json.loads(row[1]))
+            finally:
+                conn.close()
+
+        final = _bootstrap_row(fleet.machines[1].db_path)
+        assert final is not None, (
+            "the joiner bootstrapped by sweep, so it must hold a bootstrap row"
         )
-        fleet.write_evidence(tmp_path / "flap-install.json")
+        phase, frontier = final
+        assert phase == "complete", f"joiner did not finish its sweep: {phase}"
+        assert frontier, "a completed bootstrap must retain the F it ran under"
+
+        # And the debris claim, now that installs are gone: a sweep stages
+        # nothing and replaces no file, so there is no crash-recovery artifact
+        # to consume in the first place.
+        joiner_dir = fleet.machines[1].db_path.parent
+        assert [
+            path.name for path in joiner_dir.iterdir()
+            if ".fleet-sync-install-" in path.name
+            or path.name.endswith(".pre-fleet-sync")
+            or ".fleet-sync-handoff" in path.name
+        ] == [], "a sweep must never leave install/handoff staging debris"
+
+        fleet.evidence["joiner_bootstrap_phase"] = phase
+        fleet.evidence["joiner_retained_frontier_origins"] = len(frontier)
+        fleet.write_evidence(tmp_path / "flap-bootstrap.json")
     finally:
         fleet.shutdown()
 
