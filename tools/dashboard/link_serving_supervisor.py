@@ -1596,8 +1596,23 @@ class ServingSupervisor:
         try:
             fleet_relay_sync.publish_connector_runtime(payload, org=org)
         except TunnelUnavailable:
-            # The child has not written its control descriptor yet. Stay
-            # QUEUED: dropping it here is the cold start being fixed.
+            # EVERY kind is retryable AT THIS CALL SITE, and that is a decision
+            # rather than an oversight -- it was an oversight until
+            # host-0906-002433 read the taxonomy and asked.
+            #
+            # `no-listener`/`unreachable`/`no-tunnel` are the ordinary
+            # pre-write cases: the child is alive but has not written its .ctl
+            # descriptor yet. `closed` is ambiguous ("the frame may have been
+            # sent"), so a retry can deliver twice -- harmless here, because
+            # ConnectorFleetRuntime.configure() rebuilds its whole state from
+            # the payload and accumulates nothing, so applying the same
+            # credential twice is the same as once. `no-delegate` is
+            # not-retryable in general, but is close to unreachable here: this
+            # runs only for a connector the supervisor has alive, and it
+            # cannot launch one without a valid serve cert.
+            #
+            # Staying queued is the conservative direction in every case:
+            # dropping is the cold start this exists to remove.
             return
         except Exception as exc:
             self._needs_runtime.discard(org)
