@@ -149,6 +149,7 @@ class DirectedPair:
         self.terminal_reason: Optional[str] = None
         self._accepted: set = set()
         self._ready: set = set()
+        self._cleanup_claimed = False
 
     # ── leg identity ────────────────────────────────────────────────
 
@@ -170,9 +171,18 @@ class DirectedPair:
         """Go ACTIVE, or terminate with a reason.
 
         Resolution was instantaneous, not a lease: either tunnel may
-        have been replaced in its slot since. Both are rechecked here,
-        along with the capability that made them eligible. A failed
-        activation is terminal -- the pair does not linger for a retry.
+        have been replaced in its slot since. This re-runs the SAME
+        admission rule rather than a weaker copy of it, because a
+        ``DirectedPair`` can be constructed without going through the
+        resolver -- and a hand-built pair of live tunnels from two
+        different organizations would otherwise activate, each leg
+        validating happily under its own org.
+
+        The resolver answers "which tunnel is the destination for this
+        source, right now". Pinned-identity equality on its answer is
+        what turns that into "and it is still the one we pinned".
+
+        A failed activation is terminal; the pair does not linger.
         """
         if self.state == PAIR_TERMINAL:
             return self.terminal_reason or PAIR_NOT_OFFERED
@@ -181,29 +191,27 @@ class DirectedPair:
         if len(self._accepted) < 2:
             return PAIR_AWAITING_ACCEPT
 
-        for tunnel, replaced, missing in (
-            (self.source, PAIR_SOURCE_REPLACED, PAIR_SOURCE_CAPABILITY),
-            (self.destination, PAIR_DESTINATION_REPLACED,
-             PAIR_DESTINATION_CAPABILITY),
-        ):
-            current = hub.get_slot(
-                tunnel.org, tunnel.persona_pub, tunnel.machine
-            )
-            if current is not tunnel:
-                self._terminate(replaced)
-                return replaced
-            if CAP_FLEET_DIRECTED_STREAM not in (tunnel.caps or ()):
-                self._terminate(missing)
-                return missing
+        current, reason = resolve_directed_pair(
+            hub, self.source,
+            self.destination.persona_pub, self.destination.machine,
+        )
+        if reason != PAIR_OK:
+            self._terminate(reason)
+            return reason
+        if current is not self.destination:
+            self._terminate(PAIR_DESTINATION_REPLACED)
+            return PAIR_DESTINATION_REPLACED
 
         self.state = PAIR_ACTIVE
         return PAIR_OK
 
-    def ready_delivered(self, tunnel: "Tunnel") -> str:
-        """Record that this leg was SENT its READY control.
+    def ready_enqueued(self, tunnel: "Tunnel") -> str:
+        """Record that this leg's READY control was ENQUEUED.
 
-        Named for what it is: the caller reporting what it enqueued.
-        This object cannot observe delivery.
+        Named for the boundary it actually sits on. The caller reports
+        what it put on the queue; nothing here observes delivery, and
+        ``may_send`` therefore means "we have enqueued this leg's
+        READY", not "this leg has it".
         """
         if not self._is_leg(tunnel):
             return PAIR_NOT_A_LEG
@@ -230,10 +238,29 @@ class DirectedPair:
         self.state = PAIR_TERMINAL
         self.terminal_reason = reason
 
+    def claim_cleanup(self) -> bool:
+        """True for exactly one caller, for the pair's whole lifetime.
+
+        ``close`` answers a different question -- "did I cause the
+        terminal transition" -- and it is the WRONG hook to release
+        resources on. ``activate`` terminates the pair internally when
+        admission fails, so a caller that released only when ``close``
+        returned True would strand every failed offer: nobody caused
+        that transition from outside.
+
+        Call this from an unconditional ``finally`` covering every
+        outcome, including a failed activation and a pair that never
+        activated at all.
+        """
+        if self._cleanup_claimed:
+            return False
+        self._cleanup_claimed = True
+        return True
+
     # ── gates ───────────────────────────────────────────────────────
 
     def may_send(self, tunnel: "Tunnel") -> bool:
-        """A leg may send only once it has been told READY."""
+        """A leg may send once its READY has been enqueued."""
         return (
             self._is_leg(tunnel)
             and self.state == PAIR_ACTIVE
