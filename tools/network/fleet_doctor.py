@@ -1044,6 +1044,28 @@ def check_sync_internals(report: dict) -> None:
                     (store.origin_watermarks() or {}).items()
                 }
                 entry["has_state"] = bool(store.has_state())
+                # Diagnostics report TRUE state, so watermarks above are the
+                # real map, never the gated one. Surface the bootstrap phase
+                # beside it: while this is not "complete", the store
+                # deliberately publishes {} to peers, and without this line
+                # that suppression looks like a fault.
+                try:
+                    from tools.network.fleet_sync.sweep_receive import (
+                        read_bootstrap,
+                    )
+                    conn, _ = store._open()
+                    try:
+                        bootstrap = read_bootstrap(conn)
+                    finally:
+                        conn.close()
+                    entry["bootstrap_phase"] = (
+                        bootstrap.phase.value if bootstrap else "none"
+                    )
+                    entry["advertises_frontier"] = (
+                        bootstrap is None or bootstrap.phase.value == "complete"
+                    )
+                except Exception as bootstrap_exc:
+                    entry["bootstrap_phase"] = f"unreadable: {bootstrap_exc!r}"
             except Exception as exc:
                 entry["error"] = repr(exc)
                 _line(f"scope {slug}", f"unreadable: {exc!r}", warn=True)

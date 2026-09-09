@@ -1070,6 +1070,43 @@ class SQLiteFleetSyncStore:
         finally:
             conn.close()
 
+    def advertisable_origin_watermarks(self) -> dict[str, int]:
+        """This store's frontier as it may be published to a peer.
+
+        A store part-way through a bootstrap sweep holds partially applied
+        transactions: applying one record creates its origin/frontier entry
+        before its siblings arrive, so the computed map does NOT satisfy the
+        per-origin write-floor promise. Publishing it would make a peer serve
+        only what is newer -- permanently withholding rows below the claim --
+        and would feed that peer's served-ack prune floor, so the rows could be
+        retired while still missing here.
+
+        Until bootstrap completes this therefore claims nothing. An empty map
+        is inert: the server serves from 0 per origin, which over-covers and
+        merges last-writer-wins.
+
+        This suppresses an unearned *complete-progress claim*. It does not
+        change how a bootstrap repairs itself -- the bootstrap PULL half is
+        still bounded by the fixed frontier F recorded at sweep start, which is
+        receive integration and is deliberately not this function's business.
+
+        A store that never bootstrapped this way is unaffected.
+
+        The phase check and the catalog read share ONE connection opened and
+        closed here, so callers hand this whole operation to a worker thread
+        rather than passing a live connection across threads. Both transports
+        call this; the gate is not reimplemented per transport.
+        """
+        from tools.network.fleet_sync.sweep_receive import may_advertise_frontier
+
+        conn, catalog = self._open()
+        try:
+            if not may_advertise_frontier(conn):
+                return {}
+            return catalog.origin_watermarks()
+        finally:
+            conn.close()
+
     def origin_watermarks_through(self, through_ref: int) -> dict[str, int]:
         conn, catalog = self._open()
         try:
@@ -3004,7 +3041,11 @@ class FleetSyncScheduler:
             founded_rows = await asyncio.to_thread(
                 founded_ledger_rows, self._scope_paths()[scope]
             )
-            watermarks = await asyncio.to_thread(store.origin_watermarks)
+            # Gated: an incomplete bootstrap publishes nothing. One shared
+            # store method owns the phase check and the catalog read.
+            watermarks = await asyncio.to_thread(
+                store.advertisable_origin_watermarks
+            )
             request = encode_pull_request(
                 epoch, compat=local_digest, resume=resume_trail,
                 scope=scope, bootstrap=bootstrap, version=protocol_version,
