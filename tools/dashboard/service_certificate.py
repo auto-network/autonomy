@@ -501,6 +501,66 @@ def activate_pair(
     return value
 
 
+class _LegacyRow:
+    """Minimal stand-in matching the `.key`/`.payload` shape callers expect."""
+
+    __slots__ = ("key", "payload")
+
+    def __init__(self, key: str, payload: dict):
+        self.key = key
+        self.payload = payload
+
+
+def _legacy_machine_rows() -> dict:
+    """Legacy machine-homed certificate records, read PAST the home redirect.
+
+    `read_set_key`/`read_owned_set` resolve the store through the schema's
+    declared home (settings_ops `_open_read`: ``if home in ("personal",
+    "machine"): org = home``). Now that this set declares `personal`, passing
+    ``org="machine"`` is silently DISCARDED and the read lands on the personal
+    store — so the legacy fallback could never see the very rows it exists to
+    find, and returned None with no error.
+
+    Confirmed live on 2026-09-09: three intact machine rows, zero personal
+    rows, zero promotions, and `certificate_metadata` returning None for all
+    three. That is the whole migration defeated by one silent override.
+
+    Passing ``set_id=None`` to the opener asks for the named database and
+    nothing else; the redirect keys on the set_id it is not given. Same
+    technique as `migrate_session_uploads_to_machine.legacy_rows`, which
+    exists for exactly this reason.
+    """
+    import json as _json
+
+    from tools.graph import settings_ops as _ops
+
+    try:
+        db = _ops._open_read("machine", None)
+    except Exception:
+        return {}
+    try:
+        rows = db.conn.execute(
+            "SELECT key, payload FROM settings"
+            "  WHERE set_id = ? AND deprecated = 0"
+            "    AND supersedes IS NULL AND excludes IS NULL",
+            (SERVICE_CERTIFICATE_SET_ID,),
+        ).fetchall()
+    except Exception:
+        return {}
+    finally:
+        with contextlib.suppress(Exception):
+            db.close()
+    out = {}
+    for row in rows:
+        try:
+            payload = _json.loads(row["payload"])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(payload, dict):
+            out[row["key"]] = payload
+    return out
+
+
 def certificate_metadata(org: str, identity: str) -> dict | None:
     """The active certificate record for *identity*, fleet-wide.
 
@@ -518,12 +578,9 @@ def certificate_metadata(org: str, identity: str) -> dict | None:
     )
     if row is not None:
         return dict(row["payload"])
-    legacy = settings_ops.read_set_key(
-        SERVICE_CERTIFICATE_SET_ID, key, org="machine", peers=[],
-    )
-    if legacy is None:
+    payload = _legacy_machine_rows().get(key)
+    if payload is None:
         return None
-    payload = dict(legacy["payload"])
     try:
         settings_ops.write_by_key(
             SERVICE_CERTIFICATE_SET_ID,
@@ -561,20 +618,16 @@ def materialize_active_pairs() -> list[dict]:
         target_revision=SERVICE_CERTIFICATE_REVISION,
     ).members)
     seen = {row.key for row in rows}
-    try:
-        rows.extend(
-            row for row in settings_ops.read_owned_set(
-                SERVICE_CERTIFICATE_SET_ID,
-                org="machine",
-                target_revision=SERVICE_CERTIFICATE_REVISION,
-            ).members
-            if row.key not in seen
-        )
-    except Exception:
-        logger.warning(
-            "legacy machine-homed certificate rows could not be read; any "
-            "identity only recorded there will not be materialized",
-            exc_info=True)
+    # Same redirect trap as the fallback above: read_owned_set(org="machine")
+    # is silently redirected to the personal store now that this set declares
+    # `personal`, so it would return the rows we ALREADY have and none of the
+    # legacy ones. Read the machine database directly instead.
+    legacy = [
+        _LegacyRow(key, payload)
+        for key, payload in _legacy_machine_rows().items()
+        if key not in seen
+    ]
+    rows.extend(legacy)
     for row in rows:
         metadata = dict(row.payload)
         bundle = _read_bundle(metadata["vault_key"])
