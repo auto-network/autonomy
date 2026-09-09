@@ -493,3 +493,89 @@ def test_a_noncanonical_relay_uuid_is_refused(machine, bad_uuid):
 
     with pytest.raises(SchemaValidationError):
         PersonalFleetReachabilityV1.validate(row)
+
+
+# -- review 3: signing discipline, shared normalization, own-baseline boundary --
+
+
+class _SpyKey:
+    """Wraps a real key and counts private-key operations."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.signings = 0
+
+    @property
+    def public_hex(self):
+        return self._inner.public_hex
+
+    def sign_hex(self, data):
+        self.signings += 1
+        return self._inner.sign_hex(data)
+
+
+def test_an_over_cap_row_is_refused_WITHOUT_ever_signing(machine):
+    """Validate before signing. Raising after signing still raises, but it has
+    already performed a private-key operation on input never accepted."""
+    spy = _SpyKey(machine)
+
+    with pytest.raises(SchemaValidationError):
+        pr.build_row(spy, ["wss://a.example/s"], now=10 ** 4000)
+    assert spy.signings == 0
+
+
+def test_a_valid_row_signs_exactly_once(machine):
+    spy = _SpyKey(machine)
+    pr.build_row(spy, ["wss://a.example/s"])
+
+    assert spy.signings == 1
+
+
+def test_one_endpoint_spelled_two_ways_is_one_candidate(machine):
+    """Without shared normalization the writer keeps both raw spellings as
+    distinct candidates and dials the same endpoint twice."""
+    row = pr.build_row(machine, ["wss://Host:443/s", "wss://host/s"])
+
+    assert row["addresses"] == ["wss://host/s"]
+
+
+def test_a_received_unnormalized_address_is_refused(machine):
+    """Normalizing received input and then verifying would check a body the
+    signer never produced."""
+    body = {
+        "v": 1, "machine_pub": machine.public_hex,
+        "addresses": ["wss://Host:443/s"], "relay": None, "updated_at": 100,
+    }
+    body["sig"] = machine.sign_hex(pr._signing_input(body))
+
+    assert pr.verify_row(
+        body, machine.public_hex, active_machine_pubs=[machine.public_hex]) is None
+
+
+def test_verify_own_row_treats_an_unencodable_value_as_invalid_not_fatal(machine):
+    """The own-baseline check must use the same malformed-value boundary as the
+    peer verifier: return None so the writer republishes, never raise and abort
+    publication.
+
+    Exercised directly rather than through the store, because the settings
+    store ALSO refuses to serialize such a value on write — so this row cannot
+    arrive by the normal path and the boundary is defence in depth against a
+    row corrupted at rest or written by something with different limits. That
+    bound is worth stating: it is why this is a unit test and not a
+    storage-backed one.
+    """
+    row = {
+        "v": 1, "machine_pub": machine.public_hex, "addresses": [],
+        "relay": None, "updated_at": 10 ** 5000, "sig": "ff" * 64,
+    }
+
+    assert pr.verify_own_row(row, machine.public_hex) is None
+
+
+def test_verify_own_row_rejects_a_row_signed_by_another_machine(machine):
+    """The baseline must be OUR row. Accepting another machine's row as the
+    comparison point would let a peer's descriptor suppress our publication."""
+    other = KeyPair.generate()
+    row = pr.build_row(other, ["wss://a.example/s"])
+
+    assert pr.verify_own_row(row, machine.public_hex) is None
