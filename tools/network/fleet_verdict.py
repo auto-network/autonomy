@@ -72,21 +72,6 @@ def _cred_check(org: str | None) -> dict:
     return {"configured": status.get("fleet_runtime_configured")}
 
 
-def _last_pull_check() -> dict:
-    """The money line: this process's own record of its most recent
-    sync-pull attempt, with a distinct machine-readable reason --
-    not "check the logs and guess from the traceback"."""
-    try:
-        from tools.network.fleet_relay_sync import dashboard_relay_sync_service
-
-        result = dashboard_relay_sync_service.last_result
-    except Exception as exc:
-        return {"outcome": "unknown", "detail": f"could not read pull state: {exc!r}"}
-    if result is None:
-        return {"outcome": "never_attempted"}
-    return dict(result)
-
-
 def _data_check(org: str | None) -> dict:
     try:
         from tools.graph.db import _org_db_path
@@ -193,7 +178,6 @@ def compute_verdict(org: str | None = None) -> dict:
     connector_version = _connector_version_check(org)
     dashboard_version = _dashboard_process_version_check()
     cred = _cred_check(org)
-    last_pull = _last_pull_check()
     data = _data_check(org)
     direct = _direct_check()
     direct["connector_listener"] = _connector_direct_listener(org)
@@ -204,11 +188,11 @@ def compute_verdict(org: str | None = None) -> dict:
         top_line = "STALE-CODE"
     elif cred.get("configured") is False:
         top_line = "LOCKED"
-    elif last_pull.get("outcome") == "failed":
-        top_line = f"BLOCKED:{last_pull.get('reason', 'unknown')}"
-    elif last_pull.get("outcome") == "success":
-        top_line = "SYNCED-OK"
     else:
+        # No per-attempt outcome is recorded on the direct path. The relay
+        # pull used to supply it; fleet sync no longer rides the viewer link
+        # broker, so this reports UNKNOWN rather than a stale claim. A direct
+        # last-attempt record belongs with the directed carrier work.
         top_line = "UNKNOWN"
 
     return {
@@ -217,7 +201,6 @@ def compute_verdict(org: str | None = None) -> dict:
         "connector_version": connector_version,
         "dashboard_version": dashboard_version,
         "credential": cred,
-        "last_pull": last_pull,
         "data": data,
         "direct": direct,
         "paths": _paths_check(),

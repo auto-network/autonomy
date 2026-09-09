@@ -128,7 +128,6 @@ from . import service_certificate  # noqa: F401 — autonomy.network.service-cer
 from . import fleet_joining  # noqa: F401 — autonomy.machine.fleet-joining#1
 from . import fleet_tunnel_server  # noqa: F401 — autonomy.fleet.tunnel-server#1
 from . import fleet_machine_profile  # noqa: F401 — autonomy.fleet.machine-profile#1
-from . import fleet_route  # noqa: F401 — autonomy.machine.fleet-route#1
 from . import fleet_direct  # noqa: F401 — autonomy.machine.fleet-direct#1
 from . import fleet_sync_telemetry  # noqa: F401 — autonomy.machine.fleet-sync-telemetry#1
 from . import fleet_sync_traffic  # noqa: F401 — autonomy.machine.fleet-sync-traffic#1

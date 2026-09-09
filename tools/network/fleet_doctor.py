@@ -107,11 +107,6 @@ def check_verdict(report: dict, *, org: str | None = None) -> None:
         print(f"  connector is running {cv.get('process_commit')}, disk has {cv.get('disk_commit')} -- reload it")
     if dv.get("status") == "stale":
         print(f"  this dashboard process is running {dv.get('process_commit')}, disk has {dv.get('disk_commit')} -- reload it")
-    lp = verdict["last_pull"]
-    if lp.get("outcome") == "failed":
-        print(f"  last pull: {lp.get('reason')} -- {lp.get('detail', '')}")
-    elif lp.get("outcome") == "success":
-        print("  last pull: succeeded")
     counts = verdict["data"].get("counts")
     if counts:
         print(f"  local data: {counts}")

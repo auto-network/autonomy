@@ -68,7 +68,6 @@ CHANNELS: dict[str, tuple[str, ...]] = {
         "tools.dashboard.fleet_enrollment_routes",
         "tools.dashboard.fleet_enrollment_service",
         "tools.dashboard.fleet_enrollment_approvals",
-        "tools.dashboard.fleet_standing_route",
     ),
 }
 
