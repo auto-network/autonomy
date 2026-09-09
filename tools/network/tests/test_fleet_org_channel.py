@@ -10,9 +10,11 @@ import time
 
 import pytest
 
+from tools.network import clock
+
 from tools.dashboard.tests.membership_sim._harness import Org, RoleSpec
 from tools.network.fleet_org_channel import (
-    CLOSE_MEMBERSHIP_STALE, MembershipStaleError, ORG_HELLO_MAX_SKEW_S,
+    CLOSE_MEMBERSHIP_STALE, MembershipStaleError,
     OrgFleetAuthenticator,
 )
 from tools.network.idkit import KeyPair, Subject, issue_cert
@@ -127,7 +129,7 @@ def test_refusals_are_typed_and_name_the_check(org):
         _handshake(alice, bob)
 
     # A replayed capture: a valid hello whose ts is outside the window.
-    stale = Node(org.founder, members, now=lambda: time.time() - ORG_HELLO_MAX_SKEW_S - 60)
+    stale = Node(org.founder, members, now=lambda: time.time() - clock.MAX_CLOCK_SKEW - 60)
     with pytest.raises(HandshakeError, match="freshness"):
         _handshake(stale, bob)
 

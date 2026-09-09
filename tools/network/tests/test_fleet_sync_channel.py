@@ -5,6 +5,7 @@ import time
 
 import pytest
 
+from tools.network import clock as _clock
 from tools.network.clock import FLEET_RUNTIME_DELEGATION_TTL_SECONDS
 from tools.network.fleet_roster import enroll, kick
 from tools.network.fleet_sync_channel import (
@@ -98,7 +99,7 @@ def test_kick_closes_an_already_authenticated_fleet_channel(monkeypatch) -> None
     # roster is cached per stream, see authorize()). Pin the window to zero
     # here to assert the enforcement path itself, not the bound.
     from tools.network import fleet_sync_channel
-    monkeypatch.setattr(fleet_sync_channel, "AUTHORIZE_CACHE_TTL_S", 0.0)
+    monkeypatch.setattr(_clock, "AUTHORIZE_CACHE_TTL_S", 0.0)
 
     async def run() -> None:
         root = KeyPair.generate()
@@ -268,7 +269,7 @@ def test_authorize_caches_the_resolved_roster_within_the_ttl(monkeypatch):
 
     entries.append(fleet_roster.kick(root, machine_pub=peer.public_hex, seq=1))
     auth.authorize(peer.public_hex)  # still inside the window: cached
-    clock["t"] += fleet_sync_channel.AUTHORIZE_CACHE_TTL_S + 0.01
+    clock["t"] += _clock.AUTHORIZE_CACHE_TTL_S + 0.01
     with pytest.raises(HandshakeError):
         auth.authorize(peer.public_hex)
     assert calls["n"] == 2

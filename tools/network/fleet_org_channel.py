@@ -20,7 +20,7 @@ defined here instead:
   checkpoint this node has ADOPTED under that seq -- never against the raw
   ledger fold, which advances the moment a claim folds while a checkpoint
   is adopted only at the operator's root ceremony.
-- ``ts`` gives ±ORG_HELLO_MAX_SKEW_S freshness (the registry's rule); the
+- ``ts`` gives ±clock.MAX_CLOCK_SKEW freshness (the registry's rule); the
   ephemeral key binds the channel to the party that produced the hello.
 - ``sig`` is the machine key's signature over the domain-separated payload.
 
@@ -53,11 +53,11 @@ from tools.network.ledger import membership_commitment as mc
 from tools.network.relaykit.channel import HandshakeError
 from tools.network.relaykit.hello import HelloError, validate_membership_proof
 
+from tools.network import clock
+
 ORG_HANDSHAKE_VERSION = 1
 ORG_HANDSHAKE_DOMAIN = b"autonomy.network.fleet-org-channel.handshake.v1\n"
 ORG_SYNC_SCOPE = "fleet:sync"
-#: ±freshness on the hello's ts (the registry's MAX_CLOCK_SKEW discipline).
-ORG_HELLO_MAX_SKEW_S = 300
 #: Grace for a peer admitted under an older adopted checkpoint to re-prove
 #: under the newer one (the registry's MEMBERSHIP_REPROVE_DEADLINE_S).
 REPROVE_DEADLINE_S = 5.0
@@ -67,7 +67,7 @@ CLOSE_MEMBERSHIP_STALE = 4417
 #: A client hello's ephemeral key is remembered this long: a captured hello
 #: replayed inside the ts freshness window is refused by it, and one that
 #: arrives later is refused by the ts check.
-HELLO_REPLAY_MEMORY_S = 2 * ORG_HELLO_MAX_SKEW_S
+HELLO_REPLAY_MEMORY_S = 2 * clock.MAX_CLOCK_SKEW
 ORG_EPOCH_DOMAIN = b"autonomy.network.fleet-sync.org-epoch.v1\n"
 ORG_PEER_STATE_DOMAIN = b"autonomy.network.fleet-sync.org-peer-state.v1\n"
 
@@ -275,9 +275,9 @@ class OrgFleetAuthenticator:
             raise HandshakeError(f"{what} persona_cert chain failed: {exc}") from exc
         if verified.leaf_pub != data["machine_pub"]:
             raise HandshakeError(f"{what} persona_cert names another machine")
-        if abs(int(self._now()) - data["ts"]) > ORG_HELLO_MAX_SKEW_S:
+        if abs(int(self._now()) - data["ts"]) > clock.MAX_CLOCK_SKEW:
             raise HandshakeError(
-                f"{what} ts outside ±{ORG_HELLO_MAX_SKEW_S}s freshness window"
+                f"{what} ts outside ±{clock.MAX_CLOCK_SKEW}s freshness window"
             )
         try:
             rider = validate_membership_proof(data["membership_proof"])

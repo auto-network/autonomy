@@ -113,6 +113,15 @@ MAX_RELAY_SKEW = MAX_CLOCK_SKEW
 #: An attestation minted further in the future than this is junk, not skew.
 MAX_ATTESTATION_FUTURE_TS = MAX_CLOCK_SKEW
 
+#: Upper bound on how long a KICKED machine can keep an already-open fleet
+#: stream alive: authorize() re-derives the roster at most this often per
+#: stream. Adversarial, so it lives here and not beside the cache it happens
+#: to be implemented as -- the quantity being bounded is a removed machine's
+#: remaining access, not a lookup cost. The scheduler owns the roster change
+#: point and calls invalidate_authorization_cache() to make a kick land at
+#: once; this is the backstop for every path that does not.
+AUTHORIZE_CACHE_TTL_S = 1.0
+
 # -- Deferred-eligibility gates -----------------------------------------------
 
 #: The settings resolution plausibility window, seconds. ONE-SIDED, applied at
