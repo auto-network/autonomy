@@ -1,4 +1,11 @@
-"""The frontier gate, inspected on the ACTUAL encoded pull requests.
+"""The frontier gate.
+
+Two kinds of control here, and they prove different things. Most encode a real
+pull request and read the watermark map back off the wire bytes, which proves
+what the gate PRODUCES. Two others inspect the compiled code of the direct and
+relay request builders, which proves only that those call sites NAME the gated
+method -- not that a running sender put those bytes on a socket. Real sender
+capture needs the harness, whose machines are subprocesses.
 
 An incomplete bootstrap holds partially applied transactions, so its computed
 watermarks do not satisfy the per-origin write-floor promise. Publishing them
