@@ -252,6 +252,44 @@ def test_resume_cursor_is_derived_from_the_store(tmp_path: Path) -> None:
         db.close()
 
 
+def test_a_quarantined_row_does_not_move_the_resume_cursor(
+    tmp_path: Path,
+) -> None:
+    """A row the receiver could not realize is not progress through the keyspace.
+
+    The cursor is the store's own furthest LIVE row. A quarantined row never
+    became one -- it is parked with its reason for the drain to retry. If it
+    advanced the cursor anyway, the sweep would resume past a key this store
+    never stored and every key between would be skipped permanently, which is
+    the silent hole the database-as-cursor rule exists to make impossible.
+    """
+    from tools.network.fleet_sync.catalog import quarantine_unrealized
+
+    db, catalog = _store(tmp_path / "target.db", TARGET_ORIGIN)
+    try:
+        for index in range(3):
+            with catalog.transaction(10 + index, f"tx-{index}"):
+                _insert_source(db.conn, f"s-{index:02d}", "x")
+        before = resume_cursor(db.conn)
+        assert before == ("sources", ("s-02",))
+
+        # A row FURTHER along the keyspace than every live row, deferred
+        # rather than applied. If quarantine counted as progress this would
+        # move the cursor to s-99 and strand s-03..s-98 forever.
+        quarantine_unrealized(
+            db.conn,
+            [("sources", ("s-99",), "fk_orphan")],
+            watermark=99,
+        )
+
+        assert resume_cursor(db.conn) == before, (
+            "a quarantined row advanced the cursor; the sweep would resume "
+            "past rows it never stored"
+        )
+    finally:
+        db.close()
+
+
 def test_resume_cursor_round_trips_into_the_reader(tmp_path: Path) -> None:
     """The derived cursor must be exactly what the producer accepts, so a
     restart continues without duplicating or skipping a row."""
