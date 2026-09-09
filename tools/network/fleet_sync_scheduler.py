@@ -3434,6 +3434,19 @@ class FleetSyncScheduler:
                             await flush_batch()
                         continue
                     if kind == SWEEP_BEGIN_KIND:
+                        # The sweep is an OPT-IN. Accepting a begin this
+                        # client never asked for would let a peer anchor a
+                        # bootstrap unilaterally -- and a store that did not
+                        # request v5 has no sweep receive path to finish it
+                        # with, so it would sit anchored and never complete.
+                        # Refuse on the version this request actually carried,
+                        # not on the record's own claim.
+                        if protocol_version < SWEEP_PROTOCOL_VERSION:
+                            raise FleetSyncProtocolError(
+                                "peer sent a sweep.begin for a pull that asked "
+                                f"v{protocol_version}; the sweep requires "
+                                f"v{SWEEP_PROTOCOL_VERSION}"
+                            )
                         # The serving store's frontier, once, before any page.
                         # Persisted through the SHARED validator -- this
                         # receiver does not parse the record itself, so the

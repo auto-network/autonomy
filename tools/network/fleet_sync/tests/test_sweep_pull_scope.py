@@ -10,6 +10,8 @@ execute the actual client path and read what it puts on the wire.
 from __future__ import annotations
 
 import asyncio
+import json
+import sqlite3
 import time
 from pathlib import Path
 
@@ -113,17 +115,25 @@ def _scheduler(tmp_path: Path):
     return scheduler, personal
 
 
-def _drive(monkeypatch, scheduler, channel):
+def _drive(monkeypatch, scheduler, channel, *, expect=None):
+    """Run the real pull. Exceptions are NOT swallowed.
+
+    A broad catch here hid post-anchor failures: the stream now terminates
+    with a valid summary, so a success path that raises is a defect, not
+    scaffolding noise. ``expect`` names the refusal a control requires, and
+    anything else propagates.
+    """
     async def fake_connect(*args, **kwargs):
         return channel
 
     monkeypatch.setattr(fss, "fleet_direct_connect", fake_connect)
-    try:
-        asyncio.run(scheduler._pull_scope(PEER, ["127.0.0.1:1"], "personal"))
-    except Exception:
-        # The pull fails once the scripted stream runs out; the wire bytes and
-        # any durable state are what this control reads.
-        pass
+    coro = scheduler._pull_scope(PEER, ["127.0.0.1:1"], "personal")
+    if expect is None:
+        asyncio.run(coro)
+        return None
+    with pytest.raises(expect) as caught:
+        asyncio.run(coro)
+    return caught.value
 
 
 def test_a_bootstrapping_store_asks_v5_and_refuses_a_checkpoint(
@@ -136,7 +146,6 @@ def test_a_bootstrapping_store_asks_v5_and_refuses_a_checkpoint(
     checkpoint while the code claimed it refused.
     """
     scheduler, personal = _scheduler(tmp_path)
-    import sqlite3
 
     conn = sqlite3.connect(personal)
     try:
@@ -169,10 +178,15 @@ def test_a_delivered_begin_anchors_the_store_through_the_real_receiver(
     _pull_scope -- a NameError on the first begin. No store-method or
     compiled-name control could see it, because none of them ran the call.
     """
-    import json
-    import sqlite3
-
     scheduler, personal = _scheduler(tmp_path)
+    # A client only asks v5 when it is already resuming a sweep, so anchor
+    # first. Delivering the SAME frontier is idempotent, which is what makes
+    # this a legitimate v5 exchange rather than an unsolicited one.
+    conn = sqlite3.connect(personal)
+    try:
+        begin_bootstrap(conn, {PEER: 42})
+    finally:
+        conn.close()
     begin = json.dumps({
         "v": SWEEP_PROTOCOL_VERSION,
         "kind": SWEEP_BEGIN_KIND,
@@ -205,3 +219,37 @@ def test_a_settled_store_is_unaffected(tmp_path: Path, monkeypatch) -> None:
     decoded = fss.decode_pull_request(channel.sent[0])
     assert decoded[5] == fss.FLEET_SYNC_PROTOCOL_VERSION
     assert decoded[6] is True, "an ordinary store still accepts checkpoints"
+
+
+def test_an_unsolicited_begin_on_a_v4_pull_anchors_nothing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The sweep is an OPT-IN, so a peer must not anchor one unilaterally.
+
+    A store with no bootstrap asks the default version. Accepting a v5
+    sweep.begin there would anchor a bootstrap this client never requested --
+    and having not asked for v5 it has no sweep receive path to finish with,
+    so it would sit anchored and never complete.
+    """
+    scheduler, personal = _scheduler(tmp_path)
+    begin = json.dumps({
+        "v": SWEEP_PROTOCOL_VERSION,
+        "kind": SWEEP_BEGIN_KIND,
+        "scope": "personal",
+        "source_machine_pub": PEER,
+        "frontier": {PEER: 42},
+    }).encode()
+
+    channel = _FakeChannel([begin])
+    error = _drive(
+        monkeypatch, scheduler, channel, expect=fss.FleetSyncProtocolError,
+    )
+    assert "sweep.begin" in str(error)
+
+    conn = sqlite3.connect(personal)
+    try:
+        assert read_bootstrap(conn) is None, (
+            "an unsolicited sweep.begin anchored a store that never asked"
+        )
+    finally:
+        conn.close()
