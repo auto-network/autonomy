@@ -320,3 +320,61 @@ def preserve_single_member_selection(
         state="raw",
     )
     return selected
+
+#: Reasons that withhold ``allowed`` for DESIGNATION alone. Everything else in
+#: :func:`state` withholds it for a safety reason and keeps withholding it.
+_DESIGNATION_ONLY = frozenset({"not-designated", "tunnel-server-unassigned"})
+
+
+def tunnel_serving_permitted() -> tuple[bool, str]:
+    """May THIS machine run a serving connector? -> ``(permitted, reason)``.
+
+    Narrower than :func:`state`, and deliberately additive: ``state()`` and its
+    ``allowed`` field are untouched, because they are the fleet's SINGULAR
+    OWNERSHIP election and several consumers that have nothing to do with
+    tunnels depend on exactly one machine answering True — credential refresh
+    (claude and codex), usage-row maintenance, enrollment targeting. Widening
+    ``allowed`` to enable tunnels would let every machine refresh a
+    single-use credential concurrently.
+
+    Only two of ``state()``'s reasons are about designation. This permits those
+    and nothing else, so a machine that is mid-join, holds no personal root, or
+    has an unreadable, empty or invalid roster still may not serve.
+
+    ONE OF THE TWO NEEDS EXTRA VALIDATION. ``not-designated`` is returned only
+    AFTER ``state()`` has checked that this machine has a durable identity and
+    is in the active roster, so it is safe on its own. ``tunnel-server-unassigned``
+    is returned BEFORE either check, so permitting it directly would let a
+    machine with no identity, or one absent from the roster, start serving. It
+    is therefore re-validated here against the same two conditions.
+    """
+    current = state()
+    if current.allowed:
+        return True, current.reason
+    if current.reason not in _DESIGNATION_ONLY:
+        return False, current.reason
+    if current.reason == "not-designated":
+        return True, "designation-not-required"
+
+    # tunnel-server-unassigned: establish local identity and roster membership,
+    # which state() had not yet reached when it returned.
+    try:
+        local = machine_boot.machine_id(org="machine")
+    except Exception:
+        return False, "machine-identity-unreadable"
+    if local is None:
+        return False, "machine-identity-missing"
+    root_pub = _personal_root_pub()
+    if root_pub is None:
+        return False, "personal-root-missing"
+    try:
+        entries = fleet_roster.load_entries(org=None)
+        active = {
+            entry.machine_id
+            for entry in fleet_roster.resolve(entries, anchor_root_pub=root_pub).values()
+        }
+    except Exception:
+        return False, "roster-unreadable"
+    if local not in active:
+        return False, "machine-not-rostered"
+    return True, "designation-not-required"
