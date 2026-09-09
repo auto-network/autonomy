@@ -402,3 +402,75 @@ def test_v4_operation_count_mismatch_is_refused(tmp_path: Path) -> None:
 
     left_path = _crafted_server_test(tmp_path, frames)
     assert _title(left_path, "crafted-row") is None
+
+
+def _insert_together(path: Path, rows) -> None:
+    """Insert every row inside a SINGLE database transaction — what a real
+    multi-row write (a note: sources + content + thoughts) actually is."""
+    db = GraphDB(path)
+    try:
+        db.conn.execute("BEGIN")
+        for source_id, title in rows:
+            db.conn.execute(
+                "INSERT INTO sources (id, type, title) VALUES (?,?,?)",
+                (source_id, "note", title),
+            )
+        db.conn.commit()
+    finally:
+        db.close()
+
+
+def test_a_transaction_larger_than_one_serve_group_arrives(
+    tmp_path: Path,
+) -> None:
+    """v4 carries a transaction that spans several serve groups.
+
+    Written to reproduce the 2026-09-09 autonomy-scope outage and it did NOT
+    — it passed, which is what proved the fault was v3-only. v4 handles the
+    group boundary correctly at :3486-3505 ("the header opens a group; a
+    previous group must be complete before it applies"), and that is why this
+    passes. The outage was fixed on the serve side in ecefaf6b: v3 has no
+    grouping concept, so v3 must not page a transaction at all.
+
+    Kept because the coverage gap was real even though my diagnosis was not.
+    No test in this suite had ever built a transaction large enough to span a
+    serve group, so the v4 group boundary was exercised by nothing. Both
+    paths are now covered: v3 by test_v3_transaction_grouping.py, v4 here.
+    """
+    from tools.network.fleet_sync_scheduler import SERVE_GROUP_OPERATIONS
+
+    async def run() -> None:
+        root, left_key, right_key, left_path, right_path, entries = (
+            _pair_configs(tmp_path)
+        )
+        rows = [
+            (f"big-{i:05d}", f"row {i}")
+            for i in range(SERVE_GROUP_OPERATIONS + 1)
+        ]
+        _insert_together(right_path, rows)
+        transactions = _journal_transactions(right_path)
+        assert len(transactions) == 1, (
+            f"the fixture must build ONE transaction, got {len(transactions)}")
+        assert len(transactions[0]) > SERVE_GROUP_OPERATIONS, (
+            "the fixture must exceed one serve group or it proves nothing")
+
+        right = _scheduler(right_key, root, entries, right_path)
+        await right.start()
+        left = _scheduler(
+            left_key, root, entries, left_path,
+            peers={right_key.public_hex: [f"ws://127.0.0.1:{right.port}"]},
+        )
+        _insert(left_path, "left-seed", "keeps the delta path")
+        await left.start()
+        try:
+            # The LAST row: it lands only if every group of the transaction
+            # was accepted.
+            await _eventually(
+                lambda: _title(left_path, rows[-1][0]) is not None,
+                timeout=30.0,
+            )
+        finally:
+            await left.stop()
+            await right.stop()
+
+    asyncio.run(run())
