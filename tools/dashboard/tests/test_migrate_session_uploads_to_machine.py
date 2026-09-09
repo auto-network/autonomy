@@ -2,8 +2,11 @@
 
 The interesting property is not "it copies rows" — it is that attribution is
 decided by the FILE, since the row carries no machine identity. A tool that got
-this wrong would claim every row on the first machine that ran it and leave the
-other machine's uploads pointing at a store that does not have them.
+this wrong would claim every row on the first machine that ran it, leaving rows
+in a machine store whose disk cannot serve them.
+
+The second property, learned the hard way: a row this tool does not claim is
+reported as ABSENT, never as another machine's. It cannot see other machines.
 """
 
 from __future__ import annotations
@@ -29,10 +32,12 @@ def test_a_row_whose_file_is_here_is_claimed(tmp_path):
     assert mig._file_is_here(tmp_path, _payload()) == run / "shot.png"
 
 
-def test_a_row_whose_file_is_elsewhere_is_left_alone(tmp_path):
-    """THE ONE THAT MATTERS. This machine must not claim another machine's
-    upload: the row would then live in a machine store whose disk cannot serve
-    it, which is the same falsely-present tile the schema change removed."""
+def test_a_row_whose_file_is_not_here_is_left_alone(tmp_path):
+    """THE ONE THAT MATTERS. This machine must not claim a row whose file it
+    does not have: the row would then live in a machine store whose disk cannot
+    serve it, which is the same falsely-present tile the schema change removed.
+    Where the file actually is — another machine, or nowhere — is a question
+    this tool does not answer; see the classification tests below."""
     (tmp_path / "auto-0101-000000").mkdir()
 
     assert mig._file_is_here(tmp_path, _payload()) is None
@@ -99,6 +104,59 @@ def test_an_agent_runs_root_it_cannot_see_is_refused(tmp_path, monkeypatch, stat
         mig.migrate("autonomy", apply=False)
 
     assert str(root) in str(exc.value)
+
+
+# ── Absence is not a destination (operator correction, 2026-09-09) ──────
+#
+# The tool reported 13 rows as "left for another machine". The operator knew no
+# session had ever run on that machine, and was right: all 13 were deleted
+# uploads from two old HOST sessions whose run dirs are gone. The tool could
+# not see a destination and should never have named one.
+
+
+def test_a_host_session_upload_is_found_in_host_uploads(tmp_path, monkeypatch):
+    """THE ONE THAT MATTERS, and the bug behind three wrong explanations of the
+    same 13 rows. A HOST-terminal session has no run dir at all: its uploads
+    live under `data/host-uploads/<session>/`, which `server.py` has always
+    searched when serving the tile. This tool searched only `agent-runs`, so
+    every host-session upload looked absent — and each time it looked absent I
+    invented a different reason (another machine; then deleted) instead of
+    checking where the server looks."""
+    host_uploads = tmp_path / "host-uploads"
+    (host_uploads / "host-0727-205647").mkdir(parents=True)
+    (host_uploads / "host-0727-205647" / "shot.png").write_bytes(b"png")
+    monkeypatch.setattr(mig, "_host_uploads_dir", lambda: host_uploads)
+
+    payload = _payload(session="host-0727-205647", rel="shot.png")
+    assert mig.classify(tmp_path / "agent-runs", payload) == "here"
+
+
+def test_a_row_with_no_directory_of_either_kind_is_orphaned(tmp_path, monkeypatch):
+    """`orphaned` means only that neither an agent-runs run dir nor a
+    host-uploads dir is here — never that the file was deleted."""
+    monkeypatch.setattr(mig, "_host_uploads_dir", lambda: tmp_path / "host-uploads")
+    (tmp_path / "some-other-session").mkdir()
+
+    assert mig.classify(tmp_path, _payload()) == "orphaned"
+
+
+def test_a_surviving_run_dir_without_the_file_is_a_different_finding(
+    tmp_path, monkeypatch,
+):
+    """The genuinely odd case, and the only one worth chasing: the session's
+    directory IS here, so this machine ran it, but the upload is not in it."""
+    monkeypatch.setattr(mig, "_host_uploads_dir", lambda: tmp_path / "host-uploads")
+    (tmp_path / "auto-0101-000000" / ".uploads").mkdir(parents=True)
+
+    assert mig.classify(tmp_path, _payload()) == "file-missing"
+
+
+def test_a_present_file_is_here(tmp_path):
+    run = tmp_path / "auto-0101-000000" / ".uploads"
+    run.mkdir(parents=True)
+    (run / "shot.png").write_bytes(b"png")
+
+    assert mig.classify(tmp_path, _payload()) == "here"
 
 
 def _seed(orgs, key, payload, *, deprecated=0, supersedes=None, excludes=None):
