@@ -494,7 +494,7 @@ def activate_pair(
         SERVICE_CERTIFICATE_REVISION,
         certificate_key(org, identity),
         value,
-        org="machine",
+        org=None,          # personal: the record is a fleet fact (auto-7jhm3)
         state="raw",
     )
     _retire_old_ramfs(value)
@@ -502,23 +502,79 @@ def activate_pair(
 
 
 def certificate_metadata(org: str, identity: str) -> dict | None:
+    """The active certificate record for *identity*, fleet-wide.
+
+    Reads the personal (replicated) store, then falls back to the LEGACY
+    machine-homed row and promotes it. The fallback is not optional: this
+    record moved home in auto-7jhm3, and a machine that could no longer see
+    its own existing certificate would conclude none existed and go to ACME
+    for a duplicate — turning a sharing fix into exactly the rate-limit burn
+    it exists to prevent. Promotion makes the move self-healing and one-way;
+    once promoted the row replicates and every other machine finds it.
+    """
+    key = certificate_key(org, identity)
     row = settings_ops.read_set_key(
-        SERVICE_CERTIFICATE_SET_ID,
-        certificate_key(org, identity),
-        org="machine",
-        peers=[],
+        SERVICE_CERTIFICATE_SET_ID, key, org=None, peers=[],
     )
-    return dict(row["payload"]) if row is not None else None
+    if row is not None:
+        return dict(row["payload"])
+    legacy = settings_ops.read_set_key(
+        SERVICE_CERTIFICATE_SET_ID, key, org="machine", peers=[],
+    )
+    if legacy is None:
+        return None
+    payload = dict(legacy["payload"])
+    try:
+        settings_ops.write_by_key(
+            SERVICE_CERTIFICATE_SET_ID,
+            SERVICE_CERTIFICATE_REVISION,
+            key,
+            payload,
+            org=None,
+            state="raw",
+        )
+        logger.warning(
+            "promoted the certificate record for %s/%s from this machine's "
+            "store to the fleet's — other machines can now find it instead of "
+            "issuing a duplicate", org, identity)
+    except Exception:
+        # The legacy row still answers this call, so serving is unaffected;
+        # only the sharing is deferred to the next attempt.
+        logger.warning(
+            "could not promote the certificate record for %s/%s to the fleet "
+            "store; this machine still serves, but another machine asking for "
+            "the same identity will still issue its own", org, identity,
+            exc_info=True)
+    return payload
 
 
 def materialize_active_pairs() -> list[dict]:
     """Restore every active pair from the warm audited vault into ramfs."""
     result = []
-    rows = settings_ops.read_owned_set(
+    # Fleet store first, then LEGACY machine rows for identities the fleet
+    # store does not yet carry. Union rather than either alone: dropping the
+    # legacy half would stop materializing certificates this machine already
+    # holds, and dropping the fleet half would defeat the sharing.
+    rows = list(settings_ops.read_owned_set(
         SERVICE_CERTIFICATE_SET_ID,
-        org="machine",
+        org=None,
         target_revision=SERVICE_CERTIFICATE_REVISION,
-    ).members
+    ).members)
+    seen = {row.key for row in rows}
+    try:
+        rows.extend(
+            row for row in settings_ops.read_owned_set(
+                SERVICE_CERTIFICATE_SET_ID,
+                org="machine",
+                target_revision=SERVICE_CERTIFICATE_REVISION,
+            ).members
+            if row.key not in seen
+        )
+    except Exception:
+        logger.warning(
+            "legacy machine-homed certificate rows could not be read; any "
+            "identity only recorded there will not be materialized",
+            exc_info=True)
     for row in rows:
         metadata = dict(row.payload)
         bundle = _read_bundle(metadata["vault_key"])

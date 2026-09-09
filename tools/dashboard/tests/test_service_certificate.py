@@ -295,3 +295,93 @@ def test_obtain_runs_the_preflight_before_starting_certbot(monkeypatch, tmp_path
     with pytest.raises(certs.ServiceCertificateError, match="DNS-01 preflight"):
         asyncio.run(certs.obtain("autonomy", "jeremy-77827e972ba4c37d4215"))
     assert started == []
+
+
+# ── The certificate record is a FLEET fact (auto-7jhm3) ─────────────────
+#
+# The bundle has always gone to the audited vault at @home("personal"), so it
+# already replicated. The POINTER row was @home("machine"), so a second
+# serving machine looked up the identity, found nothing, concluded no
+# certificate existed and went to ACME for a duplicate — with the good bundle
+# sitting in the shared vault, unreachable because nothing on that machine
+# knew its key. Measured 2026-09-09: sjc-2 wanted three identities including
+# the same wildcard zone home already held.
+
+
+def _record(org="autonomy", identity="autonomy.taplink.net", serial="ab"):
+    return {
+        "org": org, "zone": identity, "apex": identity,
+        "sans": [identity, f"*.{identity}"],
+        "not_before": 1, "not_after": 2 ** 31, "serial": serial,
+        "vault_key": f"vault/{org}/{identity}/{serial}", "staging": False,
+        "activated_at": 1,
+    }
+
+
+def test_another_machines_certificate_is_found_instead_of_reissued(monkeypatch):
+    """THE ONE THAT MATTERS. A machine that has never issued anything must
+    find the fleet's record and materialize from the shared vault. If this
+    returns None the manager orders a duplicate from ACME, which is the
+    rate-limit burn the operator set this as a precondition to prevent."""
+    reads = {}
+
+    def _read(_set_id, key, *, org=None, peers=None):
+        reads[org] = key
+        return {"payload": _record()} if org is None else None
+
+    monkeypatch.setattr(certs.settings_ops, "read_set_key", _read)
+
+    got = certs.certificate_metadata("autonomy", "autonomy.taplink.net")
+
+    assert got is not None and got["serial"] == "ab"
+    assert None in reads, "the fleet store must be consulted"
+
+
+def test_a_legacy_machine_row_is_promoted_so_other_machines_can_see_it(
+    monkeypatch,
+):
+    """Re-homing strands existing rows, and here that is ACTIVELY harmful: a
+    machine that could no longer see its own certificate would issue a
+    duplicate. The legacy row is therefore read AND promoted, making the move
+    self-healing and one-way."""
+    def _read(_set_id, key, *, org=None, peers=None):
+        return None if org is None else {"payload": _record(serial="cd")}
+
+    writes = []
+    monkeypatch.setattr(certs.settings_ops, "read_set_key", _read)
+    monkeypatch.setattr(
+        certs.settings_ops, "write_by_key",
+        lambda *a, **kw: writes.append({"org": kw.get("org"), "payload": a[3]}))
+
+    got = certs.certificate_metadata("autonomy", "autonomy.taplink.net")
+
+    assert got["serial"] == "cd", "the legacy row must still answer"
+    assert len(writes) == 1
+    assert writes[0]["org"] is None, "promotion must write to the FLEET store"
+    assert writes[0]["payload"]["serial"] == "cd"
+
+
+def test_a_failed_promotion_still_serves_this_machine(monkeypatch):
+    """Promotion is best-effort. If it fails this machine must still get its
+    certificate — degrading sharing is acceptable, dropping a certificate this
+    machine already holds is not."""
+    def _read(_set_id, key, *, org=None, peers=None):
+        return None if org is None else {"payload": _record(serial="ef")}
+
+    def _explode(*_a, **_kw):
+        raise RuntimeError("fleet store unavailable")
+
+    monkeypatch.setattr(certs.settings_ops, "read_set_key", _read)
+    monkeypatch.setattr(certs.settings_ops, "write_by_key", _explode)
+
+    assert certs.certificate_metadata("autonomy", "x.example.com")["serial"] == "ef"
+
+
+def test_no_record_anywhere_still_returns_none(monkeypatch):
+    """NEGATIVE CONTROL: a genuinely new identity must still report absence,
+    or nothing would ever be issued at all."""
+    monkeypatch.setattr(
+        certs.settings_ops, "read_set_key",
+        lambda *a, **kw: None)
+
+    assert certs.certificate_metadata("autonomy", "new.example.com") is None
