@@ -44,7 +44,28 @@ def certificate_identity(payload: dict) -> str:
     return zone if isinstance(zone, str) else payload["persona_label"]
 
 
-@home("machine")
+#: PERSONAL, not machine — this row is a FLEET FACT (auto-7jhm3).
+#:
+#: Every field here describes the CERTIFICATE, not the machine holding it:
+#: which identity it covers, its serial and validity, and the audited-vault
+#: key its bundle lives under. The bundle itself has always been written to
+#: the audited vault at @home("personal"), so it already replicates.
+#:
+#: While this pointer was machine-homed, a second serving machine looked up
+#: the identity, found nothing, concluded no certificate existed, and went to
+#: ACME for a fresh one — with the perfectly good bundle sitting in the shared
+#: vault the whole time, unreachable because nothing on that machine knew its
+#: key. Measured 2026-09-09: sjc-2 wanted three identities including the same
+#: wildcard zone home already held.
+#:
+#: That is the correspondence-failure class (graph://f331232d-fd4) pointing the
+#: other way: not a replicated row naming a machine-local file, but a
+#: machine-local row naming replicated content. The pointer and the thing it
+#: points at have to live in the same scope.
+#:
+#: Which machine has MATERIALIZED a serial into its own ramfs is a genuine
+#: machine fact, and it is not stored here — the manager tracks it in memory.
+@home("personal")
 @publication_band(max="raw")
 @keyed_per_entity(key_strategy="certificate_identity")
 class ServiceCertificateV1(SettingSchema):

@@ -130,7 +130,15 @@ def test_legacy_import_refuses_cold_vault_before_writing(monkeypatch, tmp_path):
     writes = []
     monkeypatch.setattr(certs, "activate_pair", lambda *_args: writes.append(True))
 
-    with pytest.raises(certs.ServiceCertificateError, match="vault is locked"):
+    # The message deliberately stopped saying "the vault is locked" in
+    # 2eb363f9 (2026-09-08): this tests a per-PROCESS key, not the operator's
+    # vault, and the old wording sent a live diagnosis down the wrong path.
+    # This assertion kept the old wording and has been red since. Assert the
+    # PROPERTY — it refuses before writing — and match the part of the message
+    # that carries the meaning.
+    with pytest.raises(
+        certs.ServiceCertificateError, match="no warm audited delegate key"
+    ):
         manager._import_legacy_pair("anchore", "persona-abc")
 
     assert writes == []
@@ -321,3 +329,76 @@ def test_failure_hold_policy():
     assert manager.failure_hold_seconds("Certbot failed (1): hook unavailable", 1, now) == 60.0
     assert manager.failure_hold_seconds("Certbot failed (1): hook unavailable", 3, now) == 240.0
     assert manager.failure_hold_seconds("Certbot failed (1): hook unavailable", 9, now) == 900.0
+
+
+# ── A shared certificate must not be re-ordered (auto-7jhm3) ────────────
+
+
+@pytest.mark.asyncio
+async def test_a_shared_record_prevents_any_acme_order(monkeypatch):
+    """THE ONE THE OPERATOR SET AS A PRECONDITION. Once a second machine can
+    SEE the fleet's certificate record, it must materialize the shared bundle
+    and never place an ACME order. Let's Encrypt allows five duplicate
+    certificates per identical name set per week, so two machines racing the
+    same wildcard zone burns the quota quickly.
+
+    Asserted as an absence, deliberately: the property is that `issue` is
+    NEVER called, which no amount of checking the happy path would establish.
+    """
+    ordered = []
+
+    async def issue(org, persona, *, staging):
+        ordered.append((org, persona))
+        return metadata(not_after=10_000)
+
+    monkeypatch.setattr(certs, "issue", issue)
+    # What another machine already published, found through the fleet store.
+    monkeypatch.setattr(
+        certs, "certificate_metadata",
+        # vault_key is REQUIRED here: it is the locator the materialize path
+        # reads the shared bundle by, and it is the whole point of the record
+        # being fleet-visible. The shared helper omits it.
+        lambda *_args: metadata(not_after=10_000_000, vault_key="vault/k"))
+    monkeypatch.setattr(certs, "_read_bundle", lambda _key: {"pem": "x"})
+    monkeypatch.setattr(certs, "_materialize_bundle", lambda *_a: None)
+    monkeypatch.setattr(
+        manager, "_import_legacy_pair",
+        lambda *_a: pytest.fail("a shared record must not trigger a legacy import"))
+
+    lifecycle = manager.ServiceCertificateManager(
+        now=lambda: 1000,
+        desired_fn=lambda: {("autonomy", "autonomy.taplink.net")},
+    )
+
+    healthy = await lifecycle.reconcile_once()
+
+    assert ordered == [], (
+        "a certificate another machine already holds was re-ordered from ACME "
+        "— this is the rate-limit burn auto-7jhm3 exists to prevent")
+    assert healthy is True
+
+
+@pytest.mark.asyncio
+async def test_an_expiring_shared_record_is_still_renewed(monkeypatch):
+    """NEGATIVE CONTROL. Sharing must not become a reason never to renew: a
+    record inside the renewal window is still re-issued, or the fleet would
+    coast on a certificate until it expired."""
+    ordered = []
+
+    async def issue(org, persona, *, staging):
+        ordered.append((org, persona))
+        return metadata(not_after=10_000_000)
+
+    monkeypatch.setattr(certs, "issue", issue)
+    monkeypatch.setattr(
+        certs, "certificate_metadata", lambda *_args: metadata(not_after=1100))
+    monkeypatch.setattr(manager, "_import_legacy_pair", lambda *_a: None)
+
+    lifecycle = manager.ServiceCertificateManager(
+        now=lambda: 1000,
+        desired_fn=lambda: {("autonomy", "autonomy.taplink.net")},
+    )
+
+    await lifecycle.reconcile_once()
+
+    assert ordered == [("autonomy", "autonomy.taplink.net")]
