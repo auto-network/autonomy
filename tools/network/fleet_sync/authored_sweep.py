@@ -89,6 +89,10 @@ class LivePage:
     exhausted: bool
     #: Addresses this page examined and assigned to PULL.
     filtered: int
+    #: Rows read from the store, emitted plus filtered. Bounded independently
+    #: of ``max_records`` so an all-newer store cannot be scanned end to end
+    #: inside one read view.
+    examined: int
 
 
 def _positive(value: object, label: str) -> int:
@@ -111,6 +115,7 @@ def read_live_authored_page(
     start_after: tuple[str, tuple[Any, ...]] | None = None,
     max_records: int,
     max_bytes: int,
+    max_examined: int | None = None,
 ) -> LivePage:
     """Read one bounded page of live rows at or below ``frontier``.
 
@@ -128,6 +133,16 @@ def read_live_authored_page(
     )
     max_bytes = min(
         _positive(max_bytes, "max_bytes"), MAX_TRANSACTION_FRAME_BYTES
+    )
+    # Emitting is bounded by max_records, but FILTERED rows emit nothing, so a
+    # store whose keyspace is entirely newer than F would be walked end to end
+    # under one read view. Bound rows READ as well, and return the position so
+    # an all-filtered page still makes progress.
+    max_examined = min(
+        _positive(
+            max_records if max_examined is None else max_examined, "max_examined"
+        ),
+        MAX_TRANSACTION_OPERATIONS,
     )
     if conn.in_transaction:
         raise CallerTransactionActive(
@@ -150,6 +165,15 @@ def read_live_authored_page(
             raise MalformedCursor("resume address must be a tuple")
         start_address = tuple(raw_address)
         expected = len(_key_expressions(TABLE_POLICIES[start_table]))
+        # An unsigned settings row's logical address carries no persona, so a
+        # cursor derived from it is one part short. Normalize that supported
+        # arity here -- validating first would reject a cursor this reader
+        # goes on to pad anyway.
+        if (
+            start_table == "settings"
+            and len(start_address) == expected - 1
+        ):
+            start_address += ("",)
         if len(start_address) != expected:
             raise MalformedCursor(
                 f"resume address for {start_table!r} needs {expected} parts, "
@@ -161,6 +185,7 @@ def read_live_authored_page(
     examined: tuple[str, tuple[CanonicalValue, ...]] | None = None
     used = 0
     filtered = 0
+    examined_rows = 0
     exhausted = True
 
     previous_row_factory = conn.row_factory
@@ -188,10 +213,9 @@ def read_live_authored_page(
                     f"({','.join('?' for _ in expressions)})"
                 )
                 where += (" AND " if where else " WHERE ") + comparison
-                resume = start_address
-                if table == "settings" and len(resume) == len(expressions) - 1:
-                    resume += ("",)  # an unsigned row's address has no persona
-                params += tuple(resume)
+                # Arity was normalized at validation, including the
+                # unsigned-settings persona.
+                params += tuple(start_address)
             query = (
                 f'SELECT * FROM "{table}"{where} '
                 f'ORDER BY {",".join(expressions)}'
@@ -225,9 +249,15 @@ def read_live_authored_page(
                 origin = str(entry["incarnation"])
                 # THE PARTITION. ts <= F[origin] is SWEEP's; anything newer
                 # belongs to PULL and is deliberately not served here.
+                examined_rows += 1
                 if timestamp > int(frontier.get(origin, 0)):
                     filtered += 1
                     examined = (table, address)
+                    if examined_rows >= max_examined:
+                        return LivePage(
+                            tuple(records), tuple(frames), examined, False,
+                            filtered, examined_rows,
+                        )
                     continue
                 item = AuthoredMutation(
                     origin,
@@ -254,15 +284,17 @@ def read_live_authored_page(
                     # Left unconsumed for the next page; the cursor must NOT
                     # advance over a record this page did not deliver.
                     return LivePage(
-                        tuple(records), tuple(frames), examined, False, filtered
+                        tuple(records), tuple(frames), examined, False,
+                        filtered, examined_rows,
                     )
                 records.append(item)
                 frames.append(frame)
                 used += len(frame)
                 examined = (table, address)
-                if len(records) >= max_records:
+                if len(records) >= max_records or examined_rows >= max_examined:
                     return LivePage(
-                        tuple(records), tuple(frames), examined, False, filtered
+                        tuple(records), tuple(frames), examined, False,
+                        filtered, examined_rows,
                     )
             start_table = None
             start_address = ()
@@ -272,4 +304,7 @@ def read_live_authored_page(
         conn.rollback()
         conn.row_factory = previous_row_factory
 
-    return LivePage(tuple(records), tuple(frames), examined, exhausted, filtered)
+    return LivePage(
+        tuple(records), tuple(frames), examined, exhausted, filtered,
+        examined_rows,
+    )

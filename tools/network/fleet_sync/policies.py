@@ -258,6 +258,11 @@ DERIVED_TABLE_PREFIXES: Final[tuple[str, ...]] = (
 )
 
 LOCAL_SYNC_TABLES: Final[frozenset[str]] = frozenset({
+    # Bootstrap frontier and phase. Node-local by construction: F is the
+    # frontier of the store this joiner swept FROM, and the phase gates this
+    # machine's own frontier advertisement. Replicating either would export
+    # one machine's bootstrap position as though it were fleet state.
+    "fleet_sync_bootstrap",
     "fleet_sync_catalog",
     # Retired 2026-09-07 (frames are rebuilt from rows). Still classified so
     # the schema audit never fails on a store that has not yet been opened
