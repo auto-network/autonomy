@@ -180,3 +180,174 @@ def test_an_incomplete_bootstrap_still_suppresses_its_frontier(
         assert may_advertise_frontier(db.conn) is False
     finally:
         db.close()
+
+
+# ── runtime receive path, not name inspection ────────────────────────────
+
+def test_record_sweep_begin_runs_on_the_real_store_object(
+    tmp_path: Path,
+) -> None:
+    """Exercise the store method the receiver actually calls.
+
+    The previous controls proved the validator worked and that the call site
+    NAMED it. Neither would have caught the call passing an undefined
+    variable: `peer_pub` does not exist in `_pull_scope`, whose authenticated
+    peer is `machine_pub`. That was a NameError on the first sweep.begin and
+    no test touched it.
+    """
+    from tools.network.fleet_sync_scheduler import SQLiteFleetSyncStore
+
+    path = tmp_path / "t.db"
+    db, _ = _store(path)
+    db.close()
+
+    store = SQLiteFleetSyncStore(path)
+    store.record_sweep_begin(
+        {"v": SWEEP_PROTOCOL_VERSION, "kind": SWEEP_BEGIN_KIND,
+         "scope": "personal", "source_machine_pub": ORIGIN,
+         "frontier": {ORIGIN: 10}},
+        "personal", ORIGIN,
+    )
+    conn = sqlite3.connect(path)
+    try:
+        state = read_bootstrap(conn)
+        assert state is not None and state.frontier == {ORIGIN: 10}
+    finally:
+        conn.close()
+
+
+def test_record_sweep_begin_rejects_a_record_from_another_peer(
+    tmp_path: Path,
+) -> None:
+    """The authenticated peer is what the receiver passes; a record naming
+    someone else must not anchor this store."""
+    from tools.network.fleet_sync_scheduler import SQLiteFleetSyncStore
+
+    path = tmp_path / "t.db"
+    db, _ = _store(path)
+    db.close()
+
+    store = SQLiteFleetSyncStore(path)
+    with pytest.raises(SweepBeginInvalid):
+        store.record_sweep_begin(
+            {"v": SWEEP_PROTOCOL_VERSION, "kind": SWEEP_BEGIN_KIND,
+             "scope": "personal", "source_machine_pub": "c3" * 32,
+             "frontier": {ORIGIN: 10}},
+            "personal", ORIGIN,
+        )
+    conn = sqlite3.connect(path)
+    try:
+        assert read_bootstrap(conn) is None
+    finally:
+        conn.close()
+
+
+def test_an_incomplete_bootstrap_refuses_to_downgrade(tmp_path: Path) -> None:
+    """Implemented, not merely asserted.
+
+    A store part-way through a sweep pins its negotiation: falling back to v4
+    would let it install a checkpoint over a keyspace it partially swept
+    against a frontier the checkpoint path never saw -- discarding F while
+    keeping the rows anchored to it.
+    """
+    from tools.network.fleet_sync.sweep_receive import (
+        Phase, record_pull_complete, record_sweep_complete,
+    )
+    from tools.network.fleet_sync_scheduler import SQLiteFleetSyncStore
+
+    path = tmp_path / "t.db"
+    db, _ = _store(path)
+    db.close()
+    store = SQLiteFleetSyncStore(path)
+    assert store.bootstrap_in_progress() is False, "no bootstrap, no pin"
+
+    store.record_sweep_begin(
+        {"v": SWEEP_PROTOCOL_VERSION, "kind": SWEEP_BEGIN_KIND,
+         "scope": "personal", "source_machine_pub": ORIGIN,
+         "frontier": {ORIGIN: 10}},
+        "personal", ORIGIN,
+    )
+    assert store.bootstrap_in_progress() is True
+
+    conn = sqlite3.connect(path)
+    try:
+        record_sweep_complete(conn)
+        assert store.bootstrap_in_progress() is True, (
+            "sweep-complete is not bootstrap-complete; the PULL half still owes"
+        )
+        record_pull_complete(conn)
+    finally:
+        conn.close()
+    assert store.bootstrap_in_progress() is False, "finished, pin released"
+
+
+def test_the_client_pins_its_negotiation_while_bootstrapping() -> None:
+    """STRUCTURAL: the client's request builder consults the pin and both
+    levers it controls. Proves the code branches on it, not that a live pull
+    negotiated v5 -- that needs the harness."""
+    import types
+
+    from tools.network.fleet_sync_scheduler import FleetSyncScheduler
+
+    seen: set[str] = set()
+    stack = [FleetSyncScheduler._pull_scope.__code__]
+    while stack:
+        code = stack.pop()
+        seen.update(code.co_names)
+        for const in code.co_consts:
+            if isinstance(const, types.CodeType):
+                stack.append(const)
+
+    assert "bootstrap_in_progress" in seen, (
+        "the client never asks whether a bootstrap is in progress, so it "
+        "cannot refuse to downgrade"
+    )
+    assert "SWEEP_PROTOCOL_VERSION" in seen
+    assert "record_sweep_begin" in seen
+
+
+def test_scope_is_validated_as_the_wire_means_it(tmp_path: Path) -> None:
+    """The personal scope is OMITTED on the wire and reconstructed by the
+    decoder's default, so one side may hold the string and the other None.
+    Comparing raw values would reject a valid record; comparing normalized
+    values must still reject a genuinely different scope.
+
+    The scope here is taken from a real encoded/decoded request rather than a
+    hardcoded fixture, so the test uses whatever representation the wire
+    actually produces.
+    """
+    from tools.network.fleet_sync.sweep_receive import handle_sweep_begin
+
+    wire_scope = decode_pull_request(
+        encode_pull_request(EPOCH, compat=COMPAT)
+    )[3]
+
+    for record_scope in (wire_scope, None, "personal"):
+        db, _ = _store(tmp_path / f"t-{record_scope}.db")
+        try:
+            state = handle_sweep_begin(
+                db.conn,
+                {"v": SWEEP_PROTOCOL_VERSION, "kind": SWEEP_BEGIN_KIND,
+                 "scope": record_scope, "source_machine_pub": ORIGIN,
+                 "frontier": {ORIGIN: 10}},
+                expected_scope=None if record_scope is None else wire_scope,
+                expected_source_pub=ORIGIN,
+            )
+            assert state.frontier == {ORIGIN: 10}
+        finally:
+            db.close()
+
+    # A genuinely different scope is still refused.
+    db, _ = _store(tmp_path / "t-org.db")
+    try:
+        with pytest.raises(SweepBeginInvalid):
+            handle_sweep_begin(
+                db.conn,
+                {"v": SWEEP_PROTOCOL_VERSION, "kind": SWEEP_BEGIN_KIND,
+                 "scope": "some-org", "source_machine_pub": ORIGIN,
+                 "frontier": {ORIGIN: 10}},
+                expected_scope=wire_scope, expected_source_pub=ORIGIN,
+            )
+        assert read_bootstrap(db.conn) is None
+    finally:
+        db.close()

@@ -121,6 +121,22 @@ class AppliedPage:
     groups: int
 
 
+#: The personal scope is OMITTED from the wire (`if scope != "personal"`),
+#: and reconstructed by the decoder's default. So a caller may legitimately
+#: hold it as either the string or None depending on which side of that
+#: round-trip it sits. Comparing the two raw would reject a valid record.
+DEFAULT_SCOPE = "personal"
+
+
+def normalize_scope(scope: object) -> str:
+    """The scope as the wire means it. ``None`` and absence are personal."""
+    if scope is None:
+        return DEFAULT_SCOPE
+    if not isinstance(scope, str) or not scope:
+        raise SweepBeginInvalid(f"scope is malformed: {scope!r}")
+    return scope
+
+
 #: Wire kind carrying the serving store's frontier, once, before any page.
 SWEEP_BEGIN_KIND = "sweep.begin"
 #: Wire kind closing the sweep. Not completion -- the PULL half still owes.
@@ -408,10 +424,11 @@ def handle_sweep_begin(
         raise SweepBeginInvalid(
             "sweep.begin source is not the authenticated peer"
         )
-    scope = record.get("scope")
-    if scope != expected_scope:
+    scope = normalize_scope(record.get("scope"))
+    if scope != normalize_scope(expected_scope):
         raise SweepBeginInvalid(
-            f"sweep.begin scope {scope!r} is not the requested {expected_scope!r}"
+            f"sweep.begin scope {scope!r} is not the requested "
+            f"{normalize_scope(expected_scope)!r}"
         )
     frontier = record.get("frontier")
     if not isinstance(frontier, Mapping):
