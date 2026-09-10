@@ -548,13 +548,66 @@ def test_the_backfill_tool_refuses_a_genesis_id(tmp_path, monkeypatch):
     store = RegistryStore(str(db))
     assert store.count_orgs_with_serving_keys() == 0
 
-    # The org_uuid form writes exactly one row, and is idempotent.
+    # Uppercase either value and the row would be written but never matched:
+    # the lookup is a literal string compare and the hello's machine field is
+    # pinned lowercase. Both refused.
+    with pytest.raises(SystemExit) as exc:
+        run("C8E5CD04-8F19-4BC2-8951-A6B6B80B2699")
+    assert "LOWERCASE" in str(exc.value)
+    store = RegistryStore(str(db))
+    assert store.count_orgs_with_serving_keys() == 0
+
     org_uuid = "c8e5cd04-8f19-4bc2-8951-a6b6b80b2699"
+    monkeypatch.setattr("sys.argv", [
+        "backfill", "--db", str(db), "--org", org_uuid,
+        "--machine", "m1", "--serving-pub", machine_pub.upper(),
+    ])
+    with pytest.raises(SystemExit) as exc:
+        backfill.main()
+    assert "LOWERCASE" in str(exc.value)
+    store = RegistryStore(str(db))
+    assert store.count_orgs_with_serving_keys() == 0
+
+    # The org_uuid form writes exactly one row, and is idempotent.
     run(org_uuid)
     run(org_uuid)
     store = RegistryStore(str(db))
     assert store.registered_serving_keys(org_uuid) == {machine_pub}
     assert store.count_orgs_with_serving_keys() == 1
+
+
+def test_the_backfill_tool_reads_back_what_relay_will_look_up(
+    tmp_path, monkeypatch, capsys,
+):
+    """It reports what it ACHIEVED, not what it attempted.
+
+    A write followed by a lookup through the same function relay.py calls is
+    what catches the mistakes no guard anticipated. Driven here by making that
+    lookup answer wrongly: the tool must refuse to call it a backfill.
+    """
+    from tools.network.registry import backfill_serving_keys as backfill
+    from tools.network.registry.store import RegistryStore
+
+    db = tmp_path / "registry.db"
+    RegistryStore(str(db))
+    org_uuid = "2d4b90cb-1e89-452b-82cb-68ca44fd8e52"
+    machine_pub = "ab" * 32
+    argv = ["backfill", "--db", str(db), "--org", org_uuid,
+            "--machine", "m1", "--serving-pub", machine_pub]
+
+    monkeypatch.setattr("sys.argv", argv)
+    backfill.main()
+    out = capsys.readouterr().out
+    assert machine_pub in out and org_uuid in out, out
+
+    # Now make the read-back disagree with the write, the way a wrong key or a
+    # second database would. The tool must NOT report success.
+    monkeypatch.setattr(
+        RegistryStore, "registered_serving_keys", lambda self, org: set())
+    monkeypatch.setattr("sys.argv", argv)
+    with pytest.raises(SystemExit) as exc:
+        backfill.main()
+    assert "READ-BACK FAILED" in str(exc.value)
 
 
 def _hello_for(root, clock, serve_key, machine_key, persona=PERSONA_A):

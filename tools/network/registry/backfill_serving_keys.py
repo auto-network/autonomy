@@ -46,8 +46,16 @@ import time
 from tools.network.registry.store import RegistryStore
 
 
-_UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
-                   r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
+#: LOWERCASE only, both of these. The registry stores what it is given and
+#: compares it literally: `WHERE org_uuid = ?`, and `data["machine"] not in
+#: allowed` against a wire value the hello parser already pinned to
+#: `^[0-9a-f]{64}$`. So an uppercase input writes a row that is never matched
+#: and never looked up -- a third way for this tool to confirm a no-op. Refused
+#: rather than silently lowercased: a tool that reports a value it did not use
+#: is the next bug.
+_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                   r"[0-9a-f]{4}-[0-9a-f]{12}\Z")
+_HEX64 = re.compile(r"^[0-9a-f]{64}\Z")
 
 
 def _require_org_uuid(org: str) -> None:
@@ -70,10 +78,36 @@ def _require_org_uuid(org: str) -> None:
             "would stay open while this tool reported success. Pass the "
             "org_uuid -- serving_org_targets() returns both per serving org."
         )
+    if _UUID.match(org.lower()):
+        raise SystemExit(
+            f"--org must be LOWERCASE, got {org!r}. The lookup is a literal "
+            "string comparison (WHERE org_uuid = ?) against the value the "
+            "connector dialed, which is lowercase. An uppercase row is written "
+            "and never read."
+        )
     raise SystemExit(
         f"--org must be an org_uuid, got {org[:32]!r}. The allow-set column is "
         "serve_machine_keys.org_uuid and relay.py looks up the value the "
         "connector dialed with."
+    )
+
+
+def _require_serving_pub(pub: str) -> None:
+    """64 LOWERCASE hex. The hello parser pins the wire form to
+    ``^[0-9a-f]{64}$`` and enforcement is ``data["machine"] not in allowed``,
+    so an uppercase row is written and never matched -- the same no-op that
+    reports success."""
+    if _HEX64.match(pub):
+        return
+    if _HEX64.match(pub.lower()):
+        raise SystemExit(
+            f"--serving-pub must be LOWERCASE hex, got {pub[:12]}... The "
+            "allow-set is compared against the hello's machine field, which "
+            "the parser pins to lowercase. An uppercase row never matches."
+        )
+    raise SystemExit(
+        f"--serving-pub must be 64 lowercase hex characters, got "
+        f"{pub[:32]!r} ({len(pub)} chars)."
     )
 
 
@@ -88,12 +122,30 @@ def main() -> None:
                         "operator with derive_serving_machine_key")
     a = p.parse_args()
     _require_org_uuid(a.org)
+    _require_serving_pub(a.serving_pub)
     store = RegistryStore(a.db)
     store.register_serving_machine_key(
         a.org, a.serving_pub, now=int(time.time()))
-    n = len(store.registered_serving_keys(a.org))
-    print(f"registered serving key for org={a.org[:8]} machine={a.machine[:8]}"
-          f"; org now has {n} registered serving key(s)")
+    # READ BACK THROUGH THE FUNCTION RELAY.PY CALLS, and report what was
+    # ACHIEVED rather than what was attempted. A refusal above catches the
+    # mistakes we know about; this catches the ones we do not -- suggested by
+    # host-0906-222509, who pointed out that the same shape (a tool reporting
+    # its own action instead of the resulting state) is what let deploy.sh
+    # print success without restarting the service and let a docker rmtree
+    # return zero having deleted nothing.
+    allowed = store.registered_serving_keys(a.org)
+    if a.serving_pub not in allowed:
+        raise SystemExit(
+            "READ-BACK FAILED: wrote the row, then looked the allow-set up the "
+            f"way relay.py does (registered_serving_keys({a.org!r})) and the "
+            f"key is not in it. Found {len(allowed)} key(s). Enforcement would "
+            "NOT be on for this org. Do not treat this run as a backfill."
+        )
+    print(f"registered serving key for org_uuid={a.org} machine={a.machine[:8]}"
+          f"\n  read back via registered_serving_keys(): {len(allowed)} key(s) "
+          f"for this org, including {a.serving_pub}"
+          f"\n  relay.py will now ENFORCE the allow-set for this org "
+          f"(transitional accept closed)")
 
 
 if __name__ == "__main__":
