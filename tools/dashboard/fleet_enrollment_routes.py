@@ -969,10 +969,19 @@ async def relay_probe(request: Request) -> JSONResponse:
         body = {}
     if not isinstance(body, dict):
         body = {}
+    args = {k: v for k, v in body.items() if k in ("targets", "timeout")}
+    # The locators come from THIS dashboard's reachability cache, never from
+    # the request body: they are peers' own signed descriptors as this machine
+    # verified them, and an operator must not be able to hand the probe a slot
+    # mapping. Absent cache -> absent key -> the probe's roster scan, unchanged.
+    if _reachability_cache is not None:
+        with contextlib.suppress(Exception):
+            locators = _reachability_cache.relay_locators()
+            if locators:
+                args["locators"] = locators
     try:
         reply = link_serving_supervisor.control(
-            None, "fleet-relay-probe",
-            {k: v for k, v in body.items() if k in ("targets", "timeout")},
+            None, "fleet-relay-probe", args,
             timeout=float(body.get("timeout") or 10.0) + 5.0,
         )
     except link_serving_supervisor.TunnelUnavailable as exc:

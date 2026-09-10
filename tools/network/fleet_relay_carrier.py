@@ -30,7 +30,7 @@ import asyncio
 import contextlib
 import logging
 import time
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Mapping, Optional
 
 from tools.network.fleet_roster import resolve as resolve_roster
 from tools.network.fleet_sync_channel import (
@@ -149,12 +149,26 @@ async def list_org_slots(connector, *, timeout: float = 10.0) -> list:
 
 
 async def relay_probe(connector, runtime, *, targets: Optional[list] = None,
+                      locators: Optional[Mapping] = None,
                       timeout: float = 10.0) -> dict:
     """Prove the carrier end to end from THIS machine: for every other slot
     of this org on the relay (or the given *targets*), open a pair and run
     the fleet handshake against the roster's other machines. Returns one
     record per slot with what was exercised and what was seen; never raises
-    for a peer's refusal."""
+    for a peer's refusal.
+
+    ``locators`` is ``{durable machine_pub: relay locator}`` from peers'
+    VERIFIED reachability descriptors (auto-e38g4). A slot named by one is
+    proven against that peer's durable key and nothing else, and the record
+    says ``source="descriptor"``. Without one the probe falls back to trying
+    each roster machine in turn until the handshake proves one --
+    ``source="roster"`` -- which is a guess that costs a connect and a
+    handshake round trip per wrong answer.
+
+    The locator decides nothing about membership. It selects WHICH durable key
+    to prove; ``FleetAuthenticator`` still proves it, so a locator naming the
+    wrong peer makes the probe fail and can never make it admit.
+    """
     scheduler = getattr(runtime, "scheduler", None)
     if scheduler is None:
         return {"ok": False, "error": "this process is not armed for fleet sync"}
@@ -164,6 +178,17 @@ async def relay_probe(connector, runtime, *, targets: Optional[list] = None,
         authenticator._roster_entries(), anchor_root_pub=authenticator.root_pub)
     candidates = [pub for pub in active if pub != own_durable]
     own_slot = getattr(connector, "serving_slot", None) or {}
+    # Invert the locators: a slot a peer PUBLISHED maps to the durable key of
+    # the machine that signed it. Only roster candidates are admitted, so a
+    # locator for a machine that has left the roster resolves to nothing and
+    # the slot falls back to the roster scan rather than to a stale identity.
+    slot_owner = {}
+    for durable, locator in (locators or {}).items():
+        if durable not in candidates or not isinstance(locator, Mapping):
+            continue
+        persona, machine = locator.get("persona_pub"), locator.get("serving_machine_pub")
+        if persona and machine:
+            slot_owner[(persona, machine)] = durable
     try:
         slots = targets if targets is not None else await list_org_slots(
             connector, timeout=timeout)
@@ -176,9 +201,12 @@ async def relay_probe(connector, runtime, *, targets: Optional[list] = None,
             continue
         if (persona_pub, machine) == (own_slot.get("persona_pub"), own_slot.get("machine")):
             continue
+        owner = slot_owner.get((persona_pub, machine))
+        expected_keys = [owner] if owner is not None else candidates
         record = {"persona_pub": persona_pub, "machine": machine,
-                  "ok": False, "attempts": []}
-        for expected in candidates:
+                  "ok": False, "attempts": [],
+                  "source": "descriptor" if owner is not None else "roster"}
+        for expected in expected_keys:
             started = time.monotonic()
             try:
                 channel = await fleet_relay_connect(
@@ -201,7 +229,8 @@ async def relay_probe(connector, runtime, *, targets: Optional[list] = None,
         results.append(record)
     return {"ok": all(r["ok"] for r in results) and bool(results),
             "own_slot": own_slot, "own_durable": own_durable,
-            "slots": len(slots), "results": results}
+            "slots": len(slots), "locators": len(slot_owner),
+            "results": results}
 
 #: Delegated relay pulls, by operation id (auto-ew9wf). In memory and
 #: process-local by design: the DASHBOARD owns the controller and mints the
