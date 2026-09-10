@@ -39,6 +39,8 @@ def _clean():
 
 
 async def _start(runtime, operation_id="op-1"):
+    # Slot supplied explicitly here so these tests cover the JOB machinery;
+    # resolution from the relay's slot list is covered separately.
     return await carrier.start_relay_pull(
         None, runtime, peer_machine_pub=PEER, persona_pub=PERSONA,
         machine=SLOT, scope="autonomy", operation_id=operation_id,
@@ -134,3 +136,39 @@ def test_a_finished_job_is_retained_so_a_late_poll_still_learns():
     assert carrier.RELAY_PULL_RETENTION_S >= 60, (
         "a poller must not race the reaper"
     )
+
+
+def test_the_slot_source_is_recorded_not_assumed():
+    """Which source answered — the relay's live slot list today, the
+    descriptor's locator once that lands — is carried on the job so a reader
+    can tell the two apart instead of inferring it from dates."""
+    async def pull(machine_pub, addresses, scope, **kw):
+        return None
+
+    async def run():
+        await _start(_runtime(pull))
+        await carrier._RELAY_PULLS["op-1"]["task"]
+        return carrier.relay_pull_status("op-1")
+
+    assert asyncio.run(run())["slot_source"] == "caller"
+
+
+def test_a_peer_outside_the_roster_gets_no_slot():
+    """The roster says who is a peer. A slot for a machine it does not carry
+    is not a peer's slot, and resolution must refuse rather than dial it."""
+    authenticator = types.SimpleNamespace(
+        _roster_entries=lambda: (), root_pub="cc" * 32,
+    )
+    runtime = types.SimpleNamespace(
+        scheduler=types.SimpleNamespace(authenticator=authenticator),
+    )
+
+    async def run():
+        return await carrier.start_relay_pull(
+            None, runtime, peer_machine_pub=PEER, scope="autonomy",
+            operation_id="op-outside",
+        )
+
+    reply = asyncio.run(run())
+    assert reply["ok"] is False and reply["error_kind"] == "no-slot"
+    assert "not in the active roster" in reply["error"]

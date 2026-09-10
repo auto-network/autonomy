@@ -213,9 +213,57 @@ def _reap_relay_pulls(now: float) -> None:
             _RELAY_PULLS.pop(operation_id, None)
 
 
+async def resolve_peer_slot(connector, runtime, peer_machine_pub: str, *,
+                            timeout: float = 10.0) -> tuple:
+    """The peer's exact serving slot, and where the answer came from.
+
+    Returns ``((persona_pub, machine), source)``. Slot resolution belongs on
+    THIS side of the socket: the relay connection is here, and the dashboard
+    knows a peer by its durable roster key, not by which slot that peer
+    happens to be serving under right now.
+
+    Interim source is the relay's own live slot list filtered to the roster.
+    The descriptor's relay locator replaces it when the descriptor-locator
+    bead lands, which is why the source is RETURNED rather than assumed — the
+    telemetry row records which one answered, so a later reader can tell a
+    locator-routed pull from a slot-list-routed one instead of inferring it
+    from dates.
+
+    Filtering to the roster is not authority and does not pretend to be: it
+    only narrows which slot to dial. The fleet handshake still proves WHO,
+    exactly as on the direct path.
+    """
+    scheduler = getattr(runtime, "scheduler", None)
+    if scheduler is None:
+        raise ConnectionError("this process is not armed for fleet sync")
+    authenticator = scheduler.authenticator
+    active = resolve_roster(
+        authenticator._roster_entries(), anchor_root_pub=authenticator.root_pub)
+    if peer_machine_pub not in active:
+        # The roster says who is a peer (contract §1). A slot for a machine
+        # the roster does not carry is not a peer's slot.
+        raise ConnectionError(
+            f"peer {peer_machine_pub[:12]} is not in the active roster")
+    slots = await list_org_slots(connector, timeout=timeout)
+    own = (getattr(connector, "serving_slot", None) or {}).get("machine")
+    for slot in slots:
+        machine = slot.get("machine")
+        if not machine or machine == own:
+            continue
+        if machine == peer_machine_pub:
+            return (slot.get("persona_pub"), machine), "org-slots"
+    # A peer whose slot the relay does not report is not reachable by relay
+    # right now. Say which peer, rather than returning an empty slot that
+    # would fail later as a confusing handshake mismatch.
+    raise ConnectionError(
+        f"the relay reports no serving slot for peer {peer_machine_pub[:12]}")
+
+
 async def start_relay_pull(connector, runtime, *, peer_machine_pub: str,
-                           persona_pub: str, machine: str, scope: str,
-                           operation_id: str, timeout: float = 10.0) -> dict:
+                           scope: str, operation_id: str,
+                           persona_pub: str | None = None,
+                           machine: str | None = None,
+                           timeout: float = 10.0) -> dict:
     """Begin one delegated scope pull over the relay; return immediately.
 
     A pull runs for minutes and the control protocol is one request/reply, so
@@ -240,8 +288,19 @@ async def start_relay_pull(connector, runtime, *, peer_machine_pub: str,
         return {"ok": True, "operation_id": operation_id,
                 "state": existing["state"], "duplicate": True}
 
+    slot_source = "caller"
+    if persona_pub is None or machine is None:
+        try:
+            (persona_pub, machine), slot_source = await resolve_peer_slot(
+                connector, runtime, peer_machine_pub, timeout=timeout,
+            )
+        except Exception as exc:
+            return {"ok": False, "error_kind": "no-slot",
+                    "error": f"{type(exc).__name__}: {exc}"}
+
     job: dict = {"state": "running", "started_at": now, "done_at": None,
-                 "scope": scope, "peer": peer_machine_pub}
+                 "scope": scope, "peer": peer_machine_pub,
+                 "slot_source": slot_source}
     _RELAY_PULLS[operation_id] = job
 
     async def _run() -> None:
@@ -281,7 +340,7 @@ def relay_pull_status(operation_id: str) -> dict:
         return {"ok": False, "error_kind": "unknown-operation",
                 "error": "no such relay pull on this connector"}
     reply = {"ok": True, "operation_id": operation_id, "state": job["state"],
-             "scope": job["scope"]}
+             "scope": job["scope"], "slot_source": job.get("slot_source")}
     for field in ("error", "reason", "pair_id", "code"):
         if field in job:
             reply[field] = job[field]

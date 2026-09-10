@@ -1755,10 +1755,14 @@ async def _serve_control_listener(connector, ctl_path: str,
                         reply = await start_relay_pull(
                             connector, connector_runtime,
                             peer_machine_pub=str(args["peer_machine_pub"]),
-                            persona_pub=str(args["persona_pub"]),
-                            machine=str(args["machine"]),
                             scope=str(args["scope"]),
                             operation_id=str(args["operation_id"]),
+                            # Optional: the dashboard knows a peer by its
+                            # durable roster key, not by which slot it serves
+                            # under. When absent this process resolves the
+                            # slot, because the relay connection is here.
+                            persona_pub=args.get("persona_pub"),
+                            machine=args.get("machine"),
                             timeout=float(args.get("timeout") or 10.0),
                         )
                     except KeyError as exc:

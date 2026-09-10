@@ -9,6 +9,7 @@ authenticate an API caller but cannot exercise personal-root authority.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -298,6 +299,82 @@ def _reachability_peer_addresses(credential, root_pub, *, pull_direct=True):
     return peers
 
 
+def _relay_pull_delegate(poll_interval: float = 2.0, deadline: float = 900.0):
+    """The dashboard's half of the relay fallback (auto-ew9wf).
+
+    Returns an async callable the scheduler invokes when every direct address
+    for a peer has failed. It does not dial: `fleet_relay_connect` needs the
+    adapter in the CONNECTOR process, so this sends the personal connector an
+    operation and polls for its outcome.
+
+    The controller stays here. This side decided the peer and minted the
+    operation id; the connector is told, never choosing — so there is still
+    exactly one opener per peer on this machine.
+
+    A failure is RAISED with the carrier's own fields attached rather than
+    returned flat, because the caller maps reason/pair_id/code onto three
+    different decisions. Flattening would turn losing a race into a retry.
+    """
+    from tools.dashboard import link_serving_supervisor
+
+    class RelayPullFailed(Exception):
+        def __init__(self, message, *, reason=None, pair_id=None, code=None):
+            super().__init__(message)
+            self.reason = reason
+            self.pair_id = pair_id
+            self.code = code
+
+    async def delegate(*, peer_machine_pub: str, scope: str,
+                       operation_id: str):
+        def _control(op, args, timeout=30.0):
+            return link_serving_supervisor.control(
+                None, op, args, timeout=timeout,
+            )
+
+        started = await asyncio.to_thread(
+            _control, "fleet-relay-pull",
+            {"peer_machine_pub": peer_machine_pub, "scope": scope,
+             "operation_id": operation_id},
+        )
+        if not (isinstance(started, dict) and started.get("ok") is True):
+            detail = (started or {}).get("error") if isinstance(started, dict) else started
+            raise RelayPullFailed(f"relay pull refused: {detail!r}")
+
+        loop = asyncio.get_running_loop()
+        stop_at = loop.time() + deadline
+        while True:
+            await asyncio.sleep(poll_interval)
+            status = await asyncio.to_thread(
+                _control, "fleet-relay-pull-status",
+                {"operation_id": operation_id},
+            )
+            if not isinstance(status, dict):
+                raise RelayPullFailed(f"relay pull status unreadable: {status!r}")
+            state = status.get("state")
+            if state == "done":
+                return {"outcome": "ok", "channel": "relay",
+                        "slot_source": status.get("slot_source")}
+            if state == "failed":
+                raise RelayPullFailed(
+                    status.get("error") or "relay pull failed",
+                    reason=status.get("reason"),
+                    pair_id=status.get("pair_id"),
+                    code=status.get("code"),
+                )
+            if status.get("ok") is False:
+                # Unknown operation: the connector restarted mid-pull, or
+                # retention expired. Distinct from failure and not retried
+                # under the same id — the controller mints a fresh one.
+                raise RelayPullFailed(
+                    f"relay pull is not known to the connector: "
+                    f"{status.get('error_kind')}")
+            if loop.time() >= stop_at:
+                raise RelayPullFailed(
+                    f"relay pull did not finish within {deadline:.0f}s")
+
+    return delegate
+
+
 def _dashboard_runtime_cache() -> fleet_relay_sync.FleetRuntimeWarmCache:
     """The Dashboard's own copy of the Fleet runtime credential (auto-5er0n).
 
@@ -555,6 +632,11 @@ def _activate_runtime(
             peer_addresses=_reachability_peer_addresses(
                 credential, root_pub, pull_direct=direct.pull_direct,
             ),
+            # When every direct address for a peer fails, delegate that one
+            # scope pull to the connector, which is where the relay adapter
+            # lives (auto-ew9wf). Direct stays first; this never runs while a
+            # direct address works.
+            relay_pull=_relay_pull_delegate(),
             # A failed pull re-looks that peer up before the next interval.
             on_peer_failure=lambda pub: (
                 _reachability_cache.note_failed(pub)
