@@ -152,6 +152,25 @@ async def _scenario(root, port, broker):
         assert record["handshake_ms"] >= 0
         assert probe["own_durable"] == fleet_a.public_hex
 
+        # auto-e38g4: given B's own descriptor locator, the probe proves B's
+        # durable key directly instead of scanning the roster for it. Same
+        # relay, same handshake -- only the guessing is gone.
+        located = await carrier.relay_probe(
+            a, runtime_a, timeout=5,
+            locators={fleet_b.public_hex: {
+                "relay_base": b.relay_base,
+                "org_uuid": b.org,
+                "persona_pub": b.serving_slot["persona_pub"],
+                "serving_machine_pub": b.serving_slot["machine"],
+            }},
+        )
+        assert located["ok"] is True, located
+        assert located["locators"] == 1
+        (record,) = located["results"]
+        assert record["source"] == "descriptor"
+        assert record["attempts"] == []
+        assert record["durable_peer"] == fleet_b.public_hex
+
         # The initiator's channel is the pull path's ViewerChannel; the
         # responder is the runtime's own handler, on the relay channel.
         channel = await carrier.fleet_relay_connect(

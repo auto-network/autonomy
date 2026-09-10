@@ -1746,6 +1746,13 @@ async def _serve_control_listener(connector, ctl_path: str,
                         reply = await relay_probe(
                             connector, connector_runtime,
                             targets=args.get("targets"),
+                            # Peers' verified relay locators, resolved by the
+                            # DASHBOARD (auto-e38g4): this process holds no
+                            # reachability cache of its own, and the control
+                            # socket is the dashboard's own authenticated seam.
+                            # They are routing hints -- the handshake still
+                            # proves every durable key.
+                            locators=args.get("locators"),
                             timeout=float(args.get("timeout") or 10.0),
                         )
                     except Exception as exc:
