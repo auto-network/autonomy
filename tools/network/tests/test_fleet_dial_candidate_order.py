@@ -76,6 +76,8 @@ def _run_one_round(monkeypatch, rows, addresses=(TAILNET, BRIDGE),
         _stopping=stopping,
         _roster_snapshot=(),
         _next_attempt={},
+        _failures={},
+        _discovery_unavailable={},
         _rng=random.Random(0),
         _last_round_selection=(),
         authenticator=types.SimpleNamespace(machine_pub=SELF),
@@ -85,9 +87,21 @@ def _run_one_round(monkeypatch, rows, addresses=(TAILNET, BRIDGE),
             peer_addresses=lambda: dict(peer_map),
             max_concurrent_pulls=4,
             poll_interval=0.01,
+            # The retry envelope _resolve_peers uses when a rostered peer has
+            # no address at all; these are the scheduler's own defaults.
+            min_backoff=0.25,
+            max_backoff=5.0,
         ),
         _sync_peer=fake_sync_peer,
         _sync_org_peers=fake_sync_org_peers,
+    )
+    # Bind the REAL selection methods rather than stand-ins. This suite exists
+    # to cover the WIRING in _run, so a fake here would let the wiring pass
+    # against logic that is not the logic that ships — and _resolve_peers is
+    # where peer authority is now decided.
+    stub._resolve_peers = fss.FleetSyncScheduler._resolve_peers.__get__(stub)
+    stub._record_discovery_unavailable = (
+        fss.FleetSyncScheduler._record_discovery_unavailable.__get__(stub)
     )
     asyncio.run(fss.FleetSyncScheduler._run(stub))
     return seen
