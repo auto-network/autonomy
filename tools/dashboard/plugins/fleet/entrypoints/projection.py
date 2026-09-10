@@ -63,7 +63,22 @@ class ProjectionInputs:
 
 
 def _peer_rows(epoch: str | None) -> dict[str, dict]:
-    """Current-epoch observations from this Dashboard's personal database."""
+    """Per-peer observations from this Dashboard's personal database.
+
+    Aggregated across EVERY roster epoch, not just the current one.
+    fleet_sync_peer_state is keyed (machine_public_key, roster_epoch), so a
+    roster change -- a machine joining, a kick -- starts a fresh row at zero
+    for every peer. Reading only the current epoch made "Changes applied"
+    restart while the byte totals beside it, which come from epoch-free
+    telemetry, kept climbing. The screen showed 49 GB sent and 0 changes
+    applied to the same peer, and the honest reading of that pair is that
+    synchronization is broken, which it was not.
+
+    Counters sum and point-in-time facts take their newest value. The
+    scheduler still reads this table by exact epoch for its own decisions;
+    this function is the display view and wants the machine's whole history
+    with that peer, on the same footing as everything rendered next to it.
+    """
     if epoch is None:
         return {}
     path = _org_db_path("personal")
@@ -83,14 +98,36 @@ def _peer_rows(epoch: str | None) -> dict[str, dict]:
             for row in conn.execute("PRAGMA table_info(fleet_sync_peer_state)")
         }
         built = ",peer_built_at" if "peer_built_at" in cols else ""
+        # last_error_code is the one field that must come from the NEWEST
+        # row rather than an aggregate: an error from a retired epoch is not
+        # this peer's current state, and MAX() over text would pick by
+        # alphabetical order, which means nothing.
+        built_agg = ",MAX(peer_built_at) AS peer_built_at" if "peer_built_at" in cols else ""
         rows = conn.execute(
-            "SELECT machine_public_key,last_success_ns,bytes_sent,"
-            "bytes_received,transactions_applied,retries,last_error_code,"
-            "peer_watermark,"
-            f"updated_at_ns{built} FROM fleet_sync_peer_state WHERE roster_epoch=?",
-            (epoch,),
+            "SELECT machine_public_key,"
+            " MAX(last_success_ns) AS last_success_ns,"
+            " SUM(bytes_sent) AS bytes_sent,"
+            " SUM(bytes_received) AS bytes_received,"
+            " SUM(transactions_applied) AS transactions_applied,"
+            " SUM(retries) AS retries,"
+            " MAX(peer_watermark) AS peer_watermark,"
+            f" MAX(updated_at_ns) AS updated_at_ns{built_agg}"
+            " FROM fleet_sync_peer_state GROUP BY machine_public_key"
         ).fetchall()
-        return {str(row["machine_public_key"]): dict(row) for row in rows}
+        current = {
+            str(row["machine_public_key"]): row["last_error_code"]
+            for row in conn.execute(
+                "SELECT machine_public_key,last_error_code FROM "
+                "fleet_sync_peer_state WHERE roster_epoch=?", (epoch,),
+            )
+        }
+        out: dict[str, dict] = {}
+        for row in rows:
+            peer = str(row["machine_public_key"])
+            record = dict(row)
+            record["last_error_code"] = current.get(peer)
+            out[peer] = record
+        return out
     finally:
         if "conn" in locals():
             conn.close()

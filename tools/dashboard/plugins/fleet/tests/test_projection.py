@@ -403,3 +403,56 @@ def test_the_card_names_the_scopes_that_are_not_serving():
     ))["localMachine"]
     assert view["tunnelServing"] is False
     assert view["tunnelScopesDown"] == ["anchore", "dynbench"]
+
+def test_peer_counters_survive_a_roster_epoch_change(tmp_path, monkeypatch):
+    """The card must not restart its counters when the roster changes.
+
+    fleet_sync_peer_state is keyed (machine_public_key, roster_epoch), so a
+    join or a kick starts a fresh row at zero. While this view read only the
+    current epoch, "Changes applied" reset while the byte totals beside it --
+    epoch-free telemetry -- kept climbing. On 2026-09-09 that rendered as
+    49 GB sent to a peer and 0 changes applied to it, whose honest reading is
+    that synchronization is broken. It was not.
+    """
+    import sqlite3
+
+    from tools.dashboard.plugins.fleet.entrypoints import projection as proj
+
+    path = tmp_path / "personal.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE fleet_sync_peer_state("
+        " machine_public_key TEXT, roster_epoch TEXT, last_success_ns INTEGER,"
+        " bytes_sent INTEGER, bytes_received INTEGER, transactions_applied INTEGER,"
+        " acknowledgements INTEGER, retries INTEGER, last_error_code TEXT,"
+        " peer_watermark INTEGER, local_watermark INTEGER, online INTEGER,"
+        " lag_ns INTEGER, updated_at_ns INTEGER,"
+        " PRIMARY KEY(machine_public_key, roster_epoch))"
+    )
+    peer = "cd" * 32
+    # An older epoch carrying the bulk of the history, and the current one
+    # holding only what has happened since the roster changed.
+    conn.execute(
+        "INSERT INTO fleet_sync_peer_state VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (peer, "old" + "0" * 61, 1_000, 900, 90, 500, 0, 7, "stale_error",
+         5_000, 0, 1, 0, 1_000),
+    )
+    conn.execute(
+        "INSERT INTO fleet_sync_peer_state VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (peer, "new" + "0" * 61, 2_000, 100, 10, 3, 0, 1, None,
+         9_000, 0, 1, 0, 2_000),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(proj, "_org_db_path", lambda name: path)
+
+    row = proj._peer_rows("new" + "0" * 61)[peer]
+
+    assert row["transactions_applied"] == 503, "counters restarted at the epoch"
+    assert row["retries"] == 8
+    assert row["bytes_sent"] == 1000
+    # Point-in-time facts take their newest value, not their sum.
+    assert row["last_success_ns"] == 2_000
+    assert row["peer_watermark"] == 9_000
+    # An error from a retired epoch is not this peer's current state.
+    assert row["last_error_code"] is None
