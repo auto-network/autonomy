@@ -121,6 +121,27 @@ def _locator_key(locator: Optional[Mapping]) -> Optional[tuple]:
     )
 
 
+def locator_is_current(locator: Optional[Mapping], now_ns: int) -> bool:
+    """Whether a relay locator has outlived the slot it names.
+
+    ``expires_at_ns == 0`` means NO EXPIRY and is what every publisher writes
+    today: the descriptor's own generation orders it, and a slot's lifetime is
+    not a decision this module gets to invent. The field was validated on the
+    wire and read by nothing, which auto-0831-221227 flagged while validating
+    auto-e38g4 -- a field that promises a guarantee the system does not make is
+    the same defect class as a record asserting an absence nobody observed.
+
+    So the READER enforces what the publisher states, and states nothing more.
+    A non-zero expiry that has passed drops the locator (the peer stays
+    reachable by its direct addresses; contract §6). Zero is honoured as
+    written. Nothing here manufactures an expiry for a publisher that set none.
+    """
+    if not locator:
+        return False
+    expires = locator.get("expires_at_ns") or 0
+    return not (0 < expires <= now_ns)
+
+
 def announce(
     registry_url: str,
     org_uuid: str,
@@ -482,12 +503,33 @@ class ReachabilityCache:
         that names the wrong slot can only make a probe fail, never admit.
         """
         self._maybe_refresh()
+        now_ns = _time.time_ns()
         out = {}
         for pub, hint in self._hints.items():
             descriptor = hint.get("descriptor") or {}
             locator = descriptor.get("relay")
-            if isinstance(locator, Mapping) and locator:
-                out[pub] = dict(locator)
+            if not (isinstance(locator, Mapping) and locator):
+                continue
+            # An expiry is a STEADY STATE, not an event: it is permanent until
+            # the peer republishes, and this method runs once per scheduler
+            # round plus once per delegated pull. Logging per call would make a
+            # peer that simply has not republished into the log -- the same
+            # reason `_record_discovery_unavailable` rations its warning and
+            # `_state` exists at all. So: once per distinct expiry, and the
+            # slot is forgotten when the locator comes back, so a LATER expiry
+            # is heard again instead of being suppressed forever.
+            slot = f"locator:{pub[:12]}"
+            if not locator_is_current(locator, now_ns):
+                # Expired by its own statement. The peer is not unreachable --
+                # its direct addresses are untouched (§6) -- only this slot is.
+                self._state(
+                    slot, f"expired:{locator.get('expires_at_ns')}",
+                    "fleet reachability: peer %s relay locator expired at %s",
+                    pub[:12], locator.get("expires_at_ns"),
+                )
+                continue
+            self._logged.pop(slot, None)
+            out[pub] = dict(locator)
         return out
 
     def announced_relay_url(self) -> Optional[str]:
