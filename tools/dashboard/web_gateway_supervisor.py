@@ -75,6 +75,40 @@ CERT_SOURCE_PATH = "/run/autonomy-keycache/service-gateway/tls.crt"
 KEY_SOURCE_PATH = "/run/autonomy-keycache/service-gateway/tls.key"
 
 
+
+def _local_reservation_ids(org: str) -> set:
+    """Reservations whose target names THIS machine.
+
+    ServiceTargetV1 freezes a machine, and the row replicates so every member
+    can SEE the binding -- not so every member can act on it. Serving a host
+    named by another machine's row is not a race to be resolved, it is a claim
+    that was never this machine's to make: the relay routes a hostname to
+    exactly one tunnel and refuses everyone else with lease-held, forever,
+    because the condition never clears.
+
+    Before auto-clune.7 one machine per fleet ran a connector, so acting on
+    every row was harmless -- only one machine could act at all. Enabling
+    all-machine serving made the missing check a permanent storm: 716 refusals
+    against 16 successes for one org in an hour on registry-ash-1.
+
+    An unreadable local identity yields an EMPTY set, not every row. A machine
+    that cannot say who it is must not claim to be the owner of anything.
+    """
+    local = service_publication._read_local_machine_id()
+    if not local:
+        logger.warning(
+            "web gateway: local machine identity unavailable; serving no "
+            "published hosts for org %s rather than claiming another "
+            "machine's", org,
+        )
+        return set()
+    return {
+        row.get("reservation_id")
+        for row in service_publication.list_service_targets(org)
+        if isinstance(row, dict) and row.get("machine_id") == local
+    }
+
+
 def _discover_orgs() -> list[str]:
     from tools.graph import org_ops
 
@@ -102,11 +136,7 @@ def _desired_hostname_leases() -> dict[str, dict[str, str]]:
     """
     desired: dict[str, dict[str, str]] = {}
     for org in _discover_orgs():
-        target_ids = {
-            row.get("reservation_id")
-            for row in service_publication.list_service_targets(org)
-            if isinstance(row, dict)
-        }
+        target_ids = _local_reservation_ids(org)
         leases: dict[str, str] = {}
         for row in service_publication.list_reservations(org):
             if (
@@ -237,11 +267,7 @@ async def _build_desired_state() -> GatewayDesiredState:
     # cold call belongs off the loop.
     for org in await asyncio.to_thread(_discover_orgs):
         reservations = service_publication.list_reservations(org)
-        target_ids = {
-            row.get("reservation_id")
-            for row in service_publication.list_service_targets(org)
-            if isinstance(row, dict)
-        }
+        target_ids = _local_reservation_ids(org)
         candidates = sorted(
             (
                 row

@@ -355,8 +355,28 @@ async def _validated_live_target(
 
 
 def target_projection(key: str, payload: dict) -> dict:
+    """One target row, as every reader sees it.
+
+    ``machine_id`` is carried, not dropped. ServiceTargetV1 requires it and
+    its docstring says the row "freezes the local machine, Dashboard session,
+    container incarnation, and TCP port" -- so the binding to a machine IS the
+    row's meaning, and a projection that discards it hands every reader a row
+    that looks like it belongs to everyone.
+
+    It did. The row is @home("organization") so it replicates to every member
+    machine, and with machine_id stripped the gateway supervisor asked its
+    connector to serve every reservation in the org. The relay grants a
+    hostname to one tunnel and refuses the rest, so on registry-ash-1 that was
+    716 refusals against 16 successes for one org in an hour.
+
+    Invisible until 2026-09-10 because auto-clune.7 landed that day: before it,
+    one machine per fleet ran a connector, so only one machine could act on the
+    row whatever the projection said. Enabling all-machine serving turned a
+    dropped field into a permanent storm.
+    """
     return {
         "reservation_id": key,
+        "machine_id": payload["machine_id"],
         "session_id": payload["session_id"],
         "port": payload["port"],
         "created_at": payload["created_at"],
