@@ -477,6 +477,7 @@ class TunnelConnector:
         on_reprove=None,
         link_key_for=None,
         membership_proof_for=None,
+        fleet_stream_window=None,
         fleet_stream_offer=None,
     ):
         self._url = f"{relay_url.rstrip('/')}/t/{org}"
@@ -522,6 +523,14 @@ class TunnelConnector:
         #: registry authenticates the acting PERSONA by committed membership
         #: (auto-tmers). None falls back to the v2/v1 hello unchanged.
         self._membership_proof_for = membership_proof_for
+        #: Receive window this tunnel's fleet adapter OFFERS its peers.
+        #: Defaults come from fleet_stream_wire's constants; passing them
+        #: explicitly exists so a caller can exercise a window NARROWER than a
+        #: message, which is the shape that found the credit deadlock in
+        #: auto-z49ee's soak and which module-level defaults cannot express —
+        #: they bind at import, so neither an env change nor a monkeypatch
+        #: after import can move them.
+        self._fleet_stream_window = dict(fleet_stream_window or {})
         #: async (FleetStreamEndpoint) -> bool: whether to accept an inbound
         #: fleet-directed-stream/1 offer as its DESTINATION (auto-fh2nv). The
         #: fleet runtime supplies it; None refuses every offer while still
@@ -955,6 +964,7 @@ class TunnelConnector:
         if CAP_FLEET_DIRECTED_STREAM in self.accepted_caps:
             fleet = FleetStreamAdapter(
                 send_frame, self.control, on_offer=self._fleet_stream_offer,
+                **self._fleet_stream_window,
             )
         self.fleet_streams = fleet
         open_tasks: set = set()

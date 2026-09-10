@@ -29,6 +29,7 @@ from tools.network.fleet_sync_scheduler import (
 from tools.network.idkit import KeyPair
 
 from tools.network.relaykit.connector import TunnelConnector
+from tools.network.relaykit.stream_wire import STREAM_MAX_DATA
 from tools.network.registry.tests.test_directed_stream_e2e import (  # noqa: E402
     CAP,
     ORG,
@@ -240,3 +241,107 @@ def test_the_same_single_row_over_direct_reports_the_same_count(tmp_path):
         # Recorded, not asserted, for the same reason as the relay case: this
         # test exists to COMPARE, and the comparison is the finding.
         assert pulls[-1]["mutation_frames"] >= 1
+
+
+#: A receive window of EXACTLY ONE FRAME, narrower than the messages this pull
+#: carries. The sender chunks at ``STREAM_MAX_DATA`` (64 KiB) and
+#: ``FleetWindow.can_send`` requires the whole chunk to fit in the remaining
+#: credit, so one slot of exactly one frame means every frame after the first
+#: waits for the receiver to absorb its predecessor. Crediting on message
+#: DELIVERY instead of frame absorption deadlocks here; that is the shape
+#: auto-z49ee's soak found (fixed in 9fa08a19), and module-level constants
+#: cannot express it because they bind at import.
+#:
+#: Not lower: an offer below one frame is UNSATISFIABLE rather than narrow —
+#: the first chunk can never fit and the transfer stalls silently until the
+#: stream-silence bound fires. Reported to auto-0909-161758; the wire accepts
+#: any window above zero today.
+_NARROW_WINDOW = {"window_bytes": STREAM_MAX_DATA, "window_slots": 1}
+
+
+@pytest.mark.timeout(180)
+def test_a_scope_pull_completes_when_the_window_is_narrower_than_a_message(
+    tmp_path,
+):
+    """The same relay pull, with the puller offering a window no message can
+    fit in. Nothing about sync changes; only the credit arithmetic is put
+    under pressure, and a regression there is a hang rather than an error —
+    so the timeout IS the assertion for the deadlock, and the row crossing is
+    the assertion for correctness."""
+    payload = "x" * (200 * 1024)
+
+    async def scenario():
+        port = _free_port()
+        root = KeyPair.generate()
+        left_key, right_key = KeyPair.generate(), KeyPair.generate()
+        left_path, right_path = tmp_path / "nl.db", tmp_path / "nr.db"
+        _prepare(left_path, left_key)
+        _prepare(right_path, right_key)
+        entries = [
+            enroll(root, machine_pub=left_key.public_hex),
+            enroll(root, machine_pub=right_key.public_hex),
+        ]
+
+        rows = []
+        left = _scheduler(
+            left_key, root, entries, left_path,
+            telemetry=lambda peer, **values: rows.append(values),
+        )
+        right = _scheduler(right_key, root, entries, right_path)
+        left._roster_snapshot = tuple(entries)
+        right._roster_snapshot = tuple(entries)
+
+        _insert(right_path, "narrow-window", payload)
+        assert "narrow-window" not in _titles(left_path)
+
+        with _live_registry(port):
+            _register(port, root)
+            puller = Machine(root, port)
+            server = Machine(root, port)
+            runtime = type("_R", (), {"scheduler": right,
+                                      "locked_refusals": 0,
+                                      "first_locked_refusal_at": None})()
+            offer = fleet_stream_offer_handler(runtime)
+
+            def _connector(machine, on_offer):
+                return TunnelConnector(
+                    f"ws://127.0.0.1:{port}", ORG, machine.serve_key,
+                    machine.cert, machine_key=machine.serving_machine,
+                    caps=(CAP,), fleet_stream_offer=on_offer,
+                    fleet_stream_window=_NARROW_WINDOW,
+                    min_backoff=0.05, max_backoff=0.2,
+                )
+
+            # BOTH sides narrow: the reply carries the bulk, but the request
+            # crosses the same credit machinery in the other direction and a
+            # one-sided test would leave half of it unexercised.
+            puller.connector = _connector(puller, None)
+            server.connector = _connector(server, offer)
+            puller.task = asyncio.create_task(puller.connector.run())
+            server.task = asyncio.create_task(server.connector.run())
+            for machine in (puller, server):
+                await asyncio.wait_for(
+                    machine.connector.connected.wait(), timeout=10)
+                assert CAP in machine.connector.accepted_caps
+
+            try:
+                await left._pull_scope(
+                    right_key.public_hex, (), "personal",
+                    relay_slot=(PERSONA, server.slot),
+                    relay_connector=puller.connector,
+                )
+            finally:
+                await puller.stop()
+                await server.stop()
+
+        assert _titles(left_path).get("narrow-window") == payload, (
+            "the row did not cross a window narrower than its own message"
+        )
+        pulls = [r for r in rows if r.get("direction") == "pull"]
+        assert pulls and pulls[-1]["outcome"] == "success"
+        assert pulls[-1]["channel"] == "relay"
+        assert pulls[-1]["bytes_received"] > len(payload), (
+            "the bulk did not cross this pull"
+        )
+
+    asyncio.run(scenario())
