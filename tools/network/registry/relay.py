@@ -1935,6 +1935,14 @@ async def _handle_ctrl_frame(tunnel: "Tunnel", payload: bytes,
                 for t in hub_for_slots.tunnels_for(tunnel.org)
                 if t.persona_pub and t.machine
             ]}
+        elif op == "fleet-pairs":
+            # Custody readout for this org's directed pairs (auto-z49ee):
+            # counts and retained bytes/slots, never payload or peers' keys.
+            if args != {}:
+                raise _CtrlError("fleet-pairs takes no arguments")
+            if directed_streams is None:
+                raise _CtrlError("directed streams are not enabled on this relay")
+            result = directed_streams.snapshot(tunnel.org)
         elif op == "fleet-open":
             # fleet-directed-stream/1 (auto-fh2nv): pair this tunnel with
             # the exact destination slot it names. The broker answers with a
