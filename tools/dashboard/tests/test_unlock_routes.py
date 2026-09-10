@@ -96,6 +96,9 @@ def _build_app():
         Route("/missions/{mission_id}", _page),
         Route("/mission-control", _page),
         Route("/design/{rev}", _page),
+        Route("/present/{rev}", _page),
+        Route("/presentations", _page),
+        Route("/pages/presentations", _fragment),
         Route("/api/graph/search", _agent_api),
         Route("/api/worktrees", _agent_api, methods=["GET", "POST"]),
         WebSocketRoute("/ws/terminal", _ws_echo),
@@ -1595,7 +1598,10 @@ def test_root_releasing_unlock_routes_are_public_exceptions():
 # (Removed with the Design-Studio-to-full-plugin migration.)
 
 
-def test_design_render_admits_a_valid_agent_bearer(env, root, monkeypatch):
+@pytest.mark.parametrize("path", [
+    "/design/rev-1", "/present/deck-1", "/presentations", "/pages/presentations",
+])
+def test_design_render_admits_a_valid_agent_bearer(env, root, monkeypatch, path):
     """An authenticated agent bearer (no operator cookie) reaches the /design
     render page — so an agent can view its OWN org's design. The design DATA
     stays org-scoped at the /api layer; the gate only opens the shell."""
@@ -1606,28 +1612,34 @@ def test_design_render_admits_a_valid_agent_bearer(env, root, monkeypatch):
         auth_db, "resolve_token", lambda h: ("agent-1", "anchore") if h else None)
 
     admitted = env.get(
-        "/design/rev-1", headers={"Authorization": "Bearer good-token"},
+        path, headers={"Authorization": "Bearer good-token"},
         follow_redirects=False)
     assert admitted.status_code == 200
 
     # No bearer → still bounced to /unlock.
-    bounced = env.get("/design/rev-1", follow_redirects=False)
-    assert bounced.status_code == 302
+    bounced = env.get(path, follow_redirects=False)
+    assert bounced.status_code == (401 if path.startswith("/pages/") else 302)
 
     # A bearer does NOT open a non-render gated page (an operator surface).
     other = env.get(
         "/mission-control", headers={"Authorization": "Bearer good-token"},
         follow_redirects=False)
     assert other.status_code == 302
+    fragment = env.get(
+        "/pages/beads", headers={"Authorization": "Bearer good-token"})
+    assert fragment.status_code == 401
 
 
-def test_design_render_rejects_an_invalid_or_revoked_bearer(env, root, monkeypatch):
+@pytest.mark.parametrize("path", [
+    "/design/rev-1", "/present/deck-1", "/presentations", "/pages/presentations",
+])
+def test_design_render_rejects_an_invalid_or_revoked_bearer(env, root, monkeypatch, path):
     from tools.dashboard.dao import auth_db
     _store_identity(env, root)
     env.cookies.clear()
     monkeypatch.setattr(auth_db, "resolve_token", lambda h: None)
 
     bounced = env.get(
-        "/design/rev-1", headers={"Authorization": "Bearer bad-token"},
+        path, headers={"Authorization": "Bearer bad-token"},
         follow_redirects=False)
-    assert bounced.status_code == 302
+    assert bounced.status_code == (401 if path.startswith("/pages/") else 302)

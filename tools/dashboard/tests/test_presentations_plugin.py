@@ -28,6 +28,81 @@ from tools.graph.schemas.registry import SchemaValidationError
 PLUGIN_DIR = Path(__file__).resolve().parents[1] / "plugins" / "presentations"
 
 
+@pytest.fixture
+def scoped_present_client(monkeypatch):
+    from tools.dashboard import api_auth, route_policy
+    from tools.graph import org_ops
+
+    designs = {
+        key: {"id": key, "design_id": key, "org": org, "title": key,
+              "variants": [{"id": "main", "html": "<section>Slide</section>"}]}
+        for key, org in [("own", "anchore"), ("foreign", "autonomy"), ("legacy", None)]
+    }
+    monkeypatch.setattr(present_api, "_get_design_by_revision_or_design_id", designs.get)
+    monkeypatch.setattr(present_api, "_active_sessions", lambda: [])
+    monkeypatch.setattr(org_ops, "local_persona_pub", lambda: None)
+
+    def members(org):
+        assert org == "anchore"
+        # A stale library pointer must not expose another organization's deck.
+        return [{"key": key, "payload": {"design_id": key}}
+                for key in ["own", "foreign", "legacy", "missing"]]
+
+    monkeypatch.setattr(present_api, "_read_deck_members", members)
+
+    def authenticate(request):
+        if request.headers.get("authorization") == "Bearer anchore-token":
+            return ("anchore-session", "anchore"), None
+        return None, None
+
+    app = Starlette(routes=route_policy.apply_default_deny(present_api.routes, plugin=True))
+    app.add_middleware(
+        api_auth.ApiIdentityMiddleware, authenticate_bearer=authenticate,
+        verify_cookie=lambda token: None, cookie_name="test-session",
+    )
+    with TestClient(app) as client:
+        yield client
+
+
+def test_org_bearer_reads_own_deck_and_scoped_library(scoped_present_client):
+    client = scoped_present_client
+    headers = {"Authorization": "Bearer anchore-token"}
+    response = client.get("/api/presentations/deck/own", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["design"]["org"] == "anchore"
+    library = client.get("/api/presentations/decks", headers=headers)
+    assert library.status_code == 200
+    assert [deck["design_id"] for deck in library.json()["decks"]] == ["own"]
+    assert library.json()["org"] == "anchore"
+
+
+@pytest.mark.parametrize("design_id", ["foreign", "legacy", "missing"])
+def test_org_bearer_cannot_read_or_publish_outside_own_org(scoped_present_client, design_id):
+    client = scoped_present_client
+    headers = {"Authorization": "Bearer anchore-token"}
+    response = client.get(f"/api/presentations/deck/{design_id}", headers=headers)
+    assert response.status_code == 404
+    assert response.json() == {"error": "design not found"}
+    shown = client.post(f"/api/presentations/deck/{design_id}/shown", headers=headers)
+    assert shown.status_code == 404
+    assert shown.json() == response.json()
+
+
+@pytest.mark.parametrize("token", [None, "invalid-token"])
+def test_deck_reads_require_valid_credentials(scoped_present_client, token):
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    for path in ["/api/presentations/decks", "/api/presentations/deck/own"]:
+        assert scoped_present_client.get(path, headers=headers).status_code == 401
+
+
+def test_deck_bearer_cannot_widen_org_with_header(scoped_present_client):
+    response = scoped_present_client.get(
+        "/api/presentations/deck/foreign",
+        headers={"Authorization": "Bearer anchore-token", "X-Graph-Org": "autonomy"},
+    )
+    assert response.status_code == 403
+
+
 def test_presentations_manifest_declares_library_and_deck_paths():
     manifest = PluginManifest.model_validate(
         yaml.safe_load((PLUGIN_DIR / "plugin.yaml").read_text())

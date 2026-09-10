@@ -236,9 +236,13 @@ def _deck_record_payload(design: dict, *, last_shown_at: str | None = None) -> d
     return payload
 
 
-def _hydrate_deck_record(payload: dict) -> dict:
+def _hydrate_deck_record(payload: dict, *, request: Request | None = None) -> dict | None:
     design_id = payload.get("design_id") or payload.get("latest_revision_id") or ""
     design = _get_design_by_revision_or_design_id(design_id)
+    if request is not None and api_auth.caller_org_scope_hides(
+        request, (design or {}).get("org"),
+    ):
+        return None
     if not design:
         return dict(payload)
 
@@ -277,7 +281,9 @@ async def list_decks(request: Request) -> JSONResponse:
     decks = []
     for row in rows:
         payload = row.get("payload") or {}
-        deck = _hydrate_deck_record(payload)
+        deck = _hydrate_deck_record(payload, request=request)
+        if deck is None:
+            continue
         deck["org"] = org
         deck["key"] = row.get("key") or deck.get("design_id") or ""
         deck["updated_at"] = deck.get("modified_at") or deck.get("created_at") or ""
@@ -289,7 +295,7 @@ async def list_decks(request: Request) -> JSONResponse:
 async def get_deck(request: Request) -> JSONResponse:
     raw_id = request.path_params["design_id"]
     design = _get_design_by_revision_or_design_id(raw_id)
-    if not design:
+    if not design or api_auth.caller_org_scope_hides(request, design.get("org")):
         return JSONResponse({"error": "design not found"}, status_code=404)
     deck = _deck_payload(design)
     return JSONResponse({
@@ -303,7 +309,7 @@ async def mark_shown(request: Request) -> JSONResponse:
     org = api_auth.organization_scope_from_request(request) or "autonomy"
     raw_id = request.path_params["design_id"]
     design = _get_design_by_revision_or_design_id(raw_id)
-    if not design:
+    if not design or api_auth.caller_org_scope_hides(request, design.get("org")):
         return JSONResponse({"error": "design not found"}, status_code=404)
     payload = _deck_record_payload(design, last_shown_at=_iso_now())
     duplicates = _same_name_decks(payload["name"], payload["design_id"], org)
