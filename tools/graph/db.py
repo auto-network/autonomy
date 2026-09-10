@@ -279,7 +279,31 @@ def _local_store_db_path(name: str, root: Path | str | None = None) -> Path:
 
 def _org_db_path(slug: str, root: Path | str | None = None) -> Path:
     """Return ``<orgs_dir>/<slug>.db`` — or the local store's own home for
-    the two reserved local-store names, which are not organizations."""
+    the two reserved local-store names, which are not organizations.
+
+    REFUSES a slug that is not a usable name, because this function formats
+    whatever it is given straight into a filename. ``_org_db_path(None)``
+    returned ``orgs/None.db``, and something created it: sjc-2 still carries
+    ``None.db-wal`` (4.1 MB) and ``None.db.stray-probe-artifact-...`` beside
+    the four real org databases, and its telemetry holds a ``scope=None`` pull
+    row with 5078 iterations and 5078 failures. That ghost database also
+    sorted ahead of every real org in the sync scope order and starved all
+    four of them for 24 hours (the incident recorded at
+    fleet_sync_scheduler's _sync_peer).
+
+    A caller with a None-able org is a bug at the CALL SITE, and formatting it
+    into a path hid that bug behind a plausible-looking file. Raising names the
+    caller instead. Checked before the reserved-name lookup so an unhashable
+    value cannot raise TypeError from the ``in`` test first.
+    """
+    if not isinstance(slug, str) or not slug or "/" in slug or slug == ".":
+        raise ValueError(
+            f"org slug must be a non-empty name without a path separator, got "
+            f"{slug!r}. This formats directly into a database filename: a None "
+            "or empty slug creates a ghost database (orgs/None.db) that no org "
+            "owns, that sync will discover and fail on forever, and that sorts "
+            "ahead of every real org. Fix the caller."
+        )
     if slug in LOCAL_STORE_SLUGS:
         return _local_store_db_path(slug, root)
     return _orgs_dir(root) / f"{slug}.db"
