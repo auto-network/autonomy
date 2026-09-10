@@ -25,7 +25,9 @@ import struct
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Iterable, Mapping, Sequence
+from typing import (
+    TYPE_CHECKING, Awaitable, Callable, Iterable, Mapping, Sequence,
+)
 
 from tools.network import fleet_sync_telemetry
 from tools.network.fleet_candidate_order import order_candidates
@@ -259,6 +261,18 @@ class FleetSyncRuntimeConfig:
     listen_port: int = 0
     poll_interval: float = 10.0
     connect_timeout: float = 3.0
+    #: async (peer_machine_pub, scope, operation_id) -> outcome mapping, or
+    #: None. Set ONLY on the puller (the dashboard). When every direct address
+    #: fails, the pull is delegated through this rather than dialled here:
+    #: `fleet_relay_connect` needs `connector.fleet_streams`, which lives in
+    #: the CONNECTOR process, and the process that pulls is not the process
+    #: that holds the adapter (measured on sjc-2 2026-09-10 — the dashboard
+    #: logs "fleet sync pull", the connector logs "PULL REQUEST from").
+    #:
+    #: Delegation rather than relocation keeps ONE controller: the puller
+    #: still decides which peer and mints the operation id, and the connector
+    #: is told, never choosing. Its own `peer_addresses` stays empty.
+    relay_pull: "Callable[..., Awaitable[Mapping]] | None" = None
     min_backoff: float = 0.25
     max_backoff: float = 5.0
     telemetry_recorder: Callable[..., object] | None = None
@@ -1740,6 +1754,10 @@ class FleetSyncScheduler:
         #: is explicit that a discovery miss "must not exit the service, mint a
         #: link, or write a new durable retry database".
         self._discovery_unavailable: dict[str, dict] = {}
+        #: peer -> PeerPathController. One per peer, which is the guarantee
+        #: auto-ieh3l gave auto-fh2nv: this machine never has two concurrent
+        #: opens for the same peer.
+        self._peer_paths: dict = {}
         self._activated_scopes: set[Path] = set()
         #: Per-peer declared pull version. A peer whose server rejected a v4
         #: request before serving any frame is retried at v3 for the rest of
@@ -2774,6 +2792,81 @@ class FleetSyncScheduler:
             and now >= self._next_attempt.get(machine_pub, 0.0)
         ]
 
+    async def _relay_fallback(self, machine_pub: str, scope: str, direct_error):
+        """Delegate one scope pull to the relay after direct is exhausted.
+
+        Returns the connector's outcome mapping, or None when the relay is not
+        available or declined — in which case the caller raises the direct
+        error it already has, so a peer with no relay path fails exactly as it
+        does today.
+
+        WHY DELEGATION RATHER THAN A DIAL HERE. `fleet_relay_connect` needs
+        `connector.fleet_streams`, and that adapter lives in the CONNECTOR
+        process; this scheduler instance is the DASHBOARD's. Measured on sjc-2
+        2026-09-10: the dashboard logs "fleet sync pull", the connector logs
+        "PULL REQUEST from". Dialling from here would be dialling from the
+        wrong process.
+
+        ONE CONTROLLER IS PRESERVED, which is the property that matters. This
+        side still decides which peer and mints the operation id; the
+        connector is told and never selects. Its own `peer_addresses` stays
+        empty, so there is no second peer selector and no second opener for
+        the same peer — the promise auto-ieh3l made to auto-fh2nv holds.
+
+        The three carrier failures map through fleet_peer_path so a refusal,
+        a reset and a transport fault produce different decisions rather than
+        collapsing into "it failed".
+        """
+        delegate = self.config.relay_pull
+        if delegate is None:
+            return None
+        from tools.network import fleet_peer_path as fpp
+
+        controller = self._peer_paths.get(machine_pub)
+        if controller is None:
+            controller = fpp.PeerPathController(
+                authority_domain="personal", peer_machine_pub=machine_pub,
+            )
+            self._peer_paths[machine_pub] = controller
+        operation_id = new_session_id()
+        try:
+            outcome = await delegate(
+                peer_machine_pub=machine_pub,
+                scope=scope,
+                operation_id=operation_id,
+            )
+        except Exception as exc:
+            decision = self._relay_decision(controller, exc)
+            logger.warning(
+                "fleet sync peer %s scope %r: relay fallback %s after direct "
+                "failed (%s: %s); direct error was %r",
+                machine_pub[:12], scope, decision,
+                type(exc).__name__, exc, direct_error,
+            )
+            return None
+        if not isinstance(outcome, Mapping):
+            return None
+        return dict(outcome)
+
+    @staticmethod
+    def _relay_decision(controller, exc) -> str:
+        """Map one carrier failure onto the controller's decision.
+
+        Kept separate from the transport so the mapping is exercised without a
+        relay: the three types auto-fh2nv raises are deliberately distinct and
+        collapsing them turns losing a race into a retry storm.
+        """
+        from tools.network import fleet_peer_path as fpp
+
+        reason = getattr(exc, "reason", None)
+        if reason is not None:
+            return controller.open_refused(str(reason))
+        pair_id = getattr(exc, "pair_id", None)
+        code = getattr(exc, "code", None)
+        if pair_id is not None and code is not None:
+            return controller.reset(str(pair_id), int(code))
+        return controller.transport_failed()
+
     def _record_discovery_unavailable(self, machine_pub: str, now: float) -> None:
         """Record that a rostered peer could not be addressed, and when we
         will look again (auto-ieh3l, contract section 7).
@@ -3138,6 +3231,18 @@ class FleetSyncScheduler:
                     machine_pub[:12], scope,
                     "; ".join(f"{a} -> {e}" for a, e in candidate_failures),
                 )
+                # DIRECT IS EXHAUSTED, NOT THE PEER (auto-ew9wf). Direct stays
+                # first and this only runs when every address has failed, so a
+                # working direct path is never displaced by the relay.
+                delegated = await self._relay_fallback(
+                    machine_pub, scope, last_error,
+                )
+                if delegated is not None:
+                    await record(
+                        delegated.get("outcome", "ok"),
+                        error_code=str(delegated.get("error_code") or ""),
+                    )
+                    return delegated
                 raise FleetSyncPeerUnreachable(
                     f"no candidate address connected: {last_error!r}"
                 ) from last_error
