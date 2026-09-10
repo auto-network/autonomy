@@ -92,7 +92,10 @@ function fleetPage() {
       const adapted = Object.assign({}, row, {
         displayLabel: this.pendingNames[row.machineId] || row.displayLabel,
         attemptsOk: row.successfulIterations || 0,
-        attemptsFailed: row.failedIterations || 0,
+        // attemptsFailed is NOT re-derived from failedIterations here: the
+        // projection already subtracts the operator's reset baseline from it,
+        // and rebuilding it from the raw lifetime counter put that number
+        // straight back on the card after a reset.
         lastOutcome: row.lastSyncOutcome || null,
       });
       if (row.isLocalMachine) {
