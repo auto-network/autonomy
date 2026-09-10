@@ -17,8 +17,9 @@ import pytest
 from tools.network.fleet_peer_path import (
     IGNORE,
     RESET_OPEN_TIMEOUT,
-    RESET_PEER_CLOSED,
+    RESET_ORDERLY,
     RESET_PROTOCOL,
+    RESET_ROUTE_RELEASED,
     RESET_TUNNEL_LOST,
     RETRY,
     STAND_DOWN,
@@ -57,7 +58,9 @@ def test_our_own_reset_clears_the_pair():
     assert c.pair_id is None, "we are no longer holding a connection"
 
 
-@pytest.mark.parametrize("code", [RESET_TUNNEL_LOST, RESET_OPEN_TIMEOUT])
+@pytest.mark.parametrize(
+    "code", [RESET_TUNNEL_LOST, RESET_OPEN_TIMEOUT, RESET_ROUTE_RELEASED],
+)
 def test_transport_failures_retry(code):
     """6 and 2 are the transport saying 'not now'. Not retrying turns a
     recoverable outage into a permanent one."""
@@ -66,7 +69,7 @@ def test_transport_failures_retry(code):
     assert c.reset(MINE, code) == RETRY
 
 
-@pytest.mark.parametrize("code", [RESET_PEER_CLOSED, RESET_PROTOCOL])
+@pytest.mark.parametrize("code", [RESET_ORDERLY, RESET_PROTOCOL])
 def test_deliberate_and_protocol_closes_do_not_retry(code):
     """1 and 7 are the peer or the protocol saying 'stop'. Retrying hammers a
     peer that meant to hang up, or repeats a malformed exchange."""
@@ -159,3 +162,25 @@ def test_downgrades_are_empty_on_the_healthy_path():
     for generation in (1, 2, 3, 10):
         assert c.descriptor(generation) is True
     assert c.downgrades() == []
+
+
+def test_a_released_route_retries_rather_than_giving_up():
+    """Code 5 — the destination slot went away, or activate's recheck failed
+    because the destination was replaced between admission and activation.
+    Both are fixed by resolving again, so stopping here would strand a peer
+    whose route was merely REPLACED. Caught reviewing fh2nv's contract: their
+    summary to me listed 1/2/6/7 and omitted 5, and my table inherited the
+    omission."""
+    c = _controller()
+    c.opened(MINE)
+    assert c.reset(MINE, RESET_ROUTE_RELEASED) == RETRY
+
+
+def test_every_code_the_carrier_defines_has_a_decision():
+    """No carrier-defined code may fall through to a default. An unknown code
+    stopping by accident is how a transient becomes permanent."""
+    c = _controller()
+    for code in (RESET_ORDERLY, RESET_OPEN_TIMEOUT, RESET_ROUTE_RELEASED,
+                 RESET_TUNNEL_LOST, RESET_PROTOCOL):
+        c.opened(MINE)
+        assert c.reset(MINE, code) in (RETRY, STOP)
