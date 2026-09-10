@@ -494,11 +494,23 @@ def direct_pull_fresh(
 ) -> bool:
     """Whether a direct pull from this peer succeeded within the window.
 
-    The relay loop consults this to defer to the direct path: when direct
-    is carrying the scope's traffic, relay pulls for it are redundant
-    bandwidth through the public relay. Absence of telemetry, a failed
-    last outcome, or a stale success all answer False — the relay then
-    proceeds, which is the safe direction.
+    NOTHING CALLS THIS. It has no production caller — only
+    test_direct_preference — and this docstring previously said "the relay
+    loop consults this to defer to the direct path" in the present tense. It
+    does not. Two sessions spent time on this function on the strength of that
+    sentence (auto-0831-221227 and auto-0905-002201, 2026-09-10), and one of
+    them went on to describe a live misrouting that could not happen.
+
+    A statement of behaviour nothing establishes, sitting in the most
+    authoritative place a reader looks, is the same defect as a record
+    asserting an absence nobody observed. So: this is the answer a relay loop
+    WOULD want in order to skip a scope direct is already carrying — redundant
+    bandwidth through the public relay — and that consumer does not exist.
+    Wire it or delete the function; do not leave it describing a caller.
+
+    Absence of telemetry, a failed last outcome, or a stale success all answer
+    False, so a future consumer fails toward proceeding with the relay, which
+    is the safe direction.
     """
     key = telemetry_key(peer_machine_public_key, "direct", "pull", scope)
     row = settings_ops.read_set_key(

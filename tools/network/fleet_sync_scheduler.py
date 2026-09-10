@@ -3403,12 +3403,23 @@ class FleetSyncScheduler:
                     # this process could only be wrong in one of two ways:
                     # channel="relay" would overwrite the connector's real
                     # measurements with zero bytes, and channel="direct" --
-                    # which is what it did -- refreshes the DIRECT key's
-                    # last_outcome=success and last_success_at_ns for a pull
-                    # direct had just failed to carry. fleet_sync_telemetry
-                    # .direct_is_carrying reads exactly those two fields to
-                    # decide that relay pulls are redundant, so the phantom row
-                    # taught the relay loop to defer to a dead direct path.
+                    # which is what it did -- credits the DIRECT key with an
+                    # iteration and a success, and refreshes its last_outcome
+                    # and last_success_at_ns, for a pull direct had just failed
+                    # to carry. So the direct channel's readout -- what an
+                    # operator and fleet_doctor read -- claimed successes that
+                    # never happened, with zero bytes to show for them.
+                    #
+                    # `fleet_sync_telemetry.direct_pull_fresh` is built on
+                    # exactly those two fields, to let a relay loop defer to a
+                    # working direct path. It has NO production caller today
+                    # (only a test), so the phantom row corrupted the readout
+                    # rather than misrouting anything live -- but it pre-armed
+                    # that gate to answer "direct is fine" the moment anything
+                    # consults it. Stated at that strength deliberately: I
+                    # first described the live misrouting as fact, and
+                    # auto-0905-002201 caught that the function I named did not
+                    # even exist under that name.
                     # Found by auto-0909-161758 reviewing auto-ew9wf.
                     return delegated
                 raise FleetSyncPeerUnreachable(
