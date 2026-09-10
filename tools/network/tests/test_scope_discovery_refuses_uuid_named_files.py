@@ -1,9 +1,10 @@
 """A uuid-named database in orgs/ must never become a sync scope.
 
-`discover_org_sync_scopes` filters by `_SLUG_RE`, and its comment has claimed
-that this excludes "a uuid-named file beside the slug-named one". It did so only
-by accident, and by TWO different accidents. Measured 2026-09-10 against the
-fleet's real identifiers, running the real regex:
+`discover_org_sync_scopes` now filters by the shared `db.is_org_slug`. It used
+to carry its OWN `^[a-z][a-z0-9-]{0,62}$`, with a comment claiming that excluded
+"a uuid-named file beside the slug-named one". It did so only by accident, and by
+TWO different accidents. Measured 2026-09-10 against the fleet's real
+identifiers, running that regex:
 
     ORG_UUIDS (36 chars) — `^[a-z][a-z0-9-]{0,62}$` needs a leading LETTER:
         2d4b90cb-…  leading '2'  rejected   <- home's stray file, excluded by
@@ -89,15 +90,27 @@ def test_a_uuid_named_database_is_not_a_scope(stem, orgs_dir):
     assert sorted(scopes) == ["anchore"], "the real org is unaffected"
 
 
-def test_exactly_one_real_org_uuid_gets_through_the_slug_regex():
-    """Pins WHY the explicit check was needed, so nobody removes it believing
-    _SLUG_RE already covers uuids. One of four today — and which one is an
-    accident of anchore's uuid beginning with a letter."""
-    admitted = [stem for stem in UUID_STEMS if fss._SLUG_RE.match(stem)]
+def test_exactly_one_real_org_uuid_gets_through_the_old_slug_regex():
+    """Pins WHY the explicit check was needed, so nobody reintroduces a
+    leading-letter-only regex believing it covers uuids. One of four today —
+    and which one is an accident of anchore's uuid beginning with a letter.
+
+    The regex is written out here rather than imported because the module no
+    longer has one: the site now uses `db.is_org_slug`, which is the whole
+    point. This test documents what the replaced check did.
+    """
+    import re
+
+    old_slug_re = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
+    admitted = [stem for stem in UUID_STEMS if old_slug_re.match(stem)]
     assert admitted == ["c8e5cd04-8f19-4bc2-8951-a6b6b80b2699"], (
-        "the slug regex alone admits a uuid that begins with a letter; six of "
-        "sixteen first-character classes do"
+        "a leading-letter-only slug regex admits a uuid beginning with a "
+        "letter; six of sixteen first-character classes do"
     )
+    # And the predicate that replaced it rejects every one of them.
+    from tools.graph.db import is_org_slug
+
+    assert not any(is_org_slug(stem) for stem in UUID_STEMS)
 
 
 @pytest.mark.parametrize("genesis", GENESIS_IDS)
@@ -109,12 +122,21 @@ def test_a_genesis_id_is_excluded_by_LENGTH_which_is_not_a_guard(genesis):
     person widen the bound to 64 for an unrelated reason and silently open the
     door — so the cause is pinned too.
     """
+    import re
+
+    from tools.graph.db import is_org_slug
+
+    old_slug_re = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
     assert len(genesis) == 64
-    assert not fss._SLUG_RE.match(genesis)
-    # Not the character class: one character shorter and it would pass.
-    assert fss._SLUG_RE.match(genesis[:63]) if genesis[0].isalpha() else True
-    # And the bound is the only thing doing the work.
-    assert fss._SLUG_RE.match("a" * 63) and not fss._SLUG_RE.match("a" * 64)
+    assert not old_slug_re.match(genesis)
+    # Not the character class: one character shorter and it would have passed.
+    if genesis[0].isalpha():
+        assert old_slug_re.match(genesis[:63])
+    # The bound was the only thing doing the work — 63 in, 64 out.
+    assert old_slug_re.match("a" * 63) and not old_slug_re.match("a" * 64)
+    # The predicate that replaced it rejects a genesis id for its SHAPE, so the
+    # exclusion no longer rests on that accident.
+    assert not is_org_slug(genesis)
 
 
 def test_the_none_stem_stays_excluded(orgs_dir):

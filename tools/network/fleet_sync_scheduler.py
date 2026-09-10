@@ -350,9 +350,6 @@ class FleetSyncRuntimeConfig:
 _NON_SCOPE_STEMS: frozenset[str] = frozenset({"personal", "machine", "None", "none", ""})
 #: An organization slug: lowercase alphanumeric with dashes. Deliberately
 #: refuses a bare uuid, which is how the same org appeared twice.
-_SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
-
-
 def discover_org_sync_scopes() -> dict[str, Path]:
     """Organization databases present on this machine, by slug.
 
@@ -366,27 +363,18 @@ def discover_org_sync_scopes() -> dict[str, Path]:
     if not orgs_dir.is_dir():
         return {}
     scopes: dict[str, Path] = {}
-    from tools.graph.db import _UUID_SLUG
+    from tools.graph.db import is_org_slug
 
     for candidate in sorted(orgs_dir.glob("*.db")):
         slug = candidate.stem
-        # _SLUG_RE ALONE DID NOT EXCLUDE A UUID, though the comment below has
-        # claimed it did. It requires a leading LETTER, so it rejects a uuid
-        # beginning with a digit and admits one beginning with a-f: home's
-        # stray `2d4b90cb-...db` was excluded by luck (leading '2'), while
-        # anchore's own org_uuid `c8e5cd04-...` and autonomy's genesis
-        # `a0d22266-...` both MATCH and would have been surfaced as scopes —
-        # 6 of 16 possible first characters. Measured 2026-09-10.
-        #
-        # The shape is now refused explicitly, sharing the one regex with
-        # db._org_db_path so the two cannot drift: the same wrong value is
-        # refused whether it reaches a path or a scope list.
-        if (
-            slug in _NON_SCOPE_STEMS
-            or ":" in slug
-            or _UUID_SLUG.match(slug)
-            or not _SLUG_RE.match(slug)
-        ):
+        # ONE DEFINITION OF "IS THIS AN ORG", shared with db.is_org_slug.
+        # This site used to carry its own `_SLUG_RE`, which requires a leading
+        # LETTER and therefore rejected a uuid beginning with a digit while
+        # admitting one beginning with a-f: home's stray `2d4b90cb-….db` was
+        # excluded by luck of a leading '2', and anchore's own org_uuid
+        # `c8e5cd04-…` would have been surfaced as an organization to
+        # synchronize. 6 of 16 possible first characters. Measured 2026-09-10.
+        if slug in _NON_SCOPE_STEMS or ":" in slug or not is_org_slug(slug):
             # A file in this directory is only a scope if its name is a real
             # organization slug. Path resolution can MINT a database at a
             # computed path (GraphDB defaults to create=True), so a bad path
