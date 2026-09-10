@@ -480,6 +480,68 @@ def test_empty_allowset_accepts_then_nonempty_enforces(
         })["ok"] is True
 
 
+@contextlib.contextmanager
+def _audit_records():
+    """Collect the registry's audit logger. It sets propagate=False, so
+    caplog's root handler never sees it — the handler has to go on it."""
+    import logging
+
+    collected = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record):
+            collected.append(record.getMessage())
+
+    logger = logging.getLogger("autonomy.registry.audit")
+    handler = _Collect()
+    logger.addHandler(handler)
+    try:
+        yield collected
+    finally:
+        logger.removeHandler(handler)
+
+
+def test_the_allowset_refusal_is_audited_not_silent(app, client, clock, root):
+    """The moment this gate starts refusing must be visible ON THE REGISTRY.
+
+    A HelloError is sent to the client and the socket closed, and nothing was
+    logged here — so a stale allow-set presented as an identity fault in the
+    rejected connector's log and left no trace on the side that decided it.
+    Serving keys rotate (per-org derivation landing, certs re-minted), so this
+    is the signal that says an allow-set needs re-registering rather than that
+    a machine is an impostor.
+    """
+    register(client, clock, root, org_uuid=ORG)
+    store = app.state.store
+    registered = KeyPair.generate()
+    store.register_serving_machine_key(
+        ORG, registered.public_hex, now=clock.now)
+
+    stranger = KeyPair.generate()
+    serve_key = KeyPair.generate()
+    with _audit_records() as records:
+        with client.websocket_connect(f"/t/{ORG}") as ws:
+            ws.send_text(_hello_for(root, clock, serve_key, stranger))
+            assert ws.receive_json()["ok"] is False
+    refusals = [line for line in records if "serving-key REFUSED" in line]
+    assert len(refusals) == 1, records
+    # Enough to diagnose without a second query: which org, which key was
+    # presented, and how many ARE registered — so "wrong key" and "stale
+    # allow-set" are distinguishable on sight.
+    assert ORG[:8] in refusals[0]
+    assert stranger.public_hex[:16] in refusals[0]
+    assert "1 key(s) registered" in refusals[0]
+
+    # And the accepted case emits no refusal.
+    with _audit_records() as records:
+        with _tunnel(client, clock, root, machine_key=registered) as (ws, _):
+            assert _ctrl(ws, "host-register", {
+                "reservation": _reservation(PERSONA_A, "docs"),
+                "host": _host("docs", PERSONA_A),
+            })["ok"] is True
+    assert not [line for line in records if "REFUSED" in line]
+
+
 def test_registering_under_the_genesis_id_leaves_enforcement_OFF(
     app, client, clock, root,
 ):
@@ -574,6 +636,64 @@ def test_the_backfill_tool_refuses_a_genesis_id(tmp_path, monkeypatch):
     store = RegistryStore(str(db))
     assert store.registered_serving_keys(org_uuid) == {machine_pub}
     assert store.count_orgs_with_serving_keys() == 1
+
+
+def test_a_stale_manifest_is_refused(tmp_path, monkeypatch):
+    """Serving keys rotate, so a manifest has a shelf life.
+
+    76d61b5b moved home's three org connectors from its durable roster key to
+    per-org keys in the middle of this work; an allow-set registered from
+    values collected before it would have hard-gated all three at the hello.
+    So `register` refuses a manifest older than the bound, and refuses two
+    manifests whose commits disagree, rather than writing a gate from values
+    that may already be wrong.
+    """
+    import json
+    import time as _time
+
+    from tools.network.registry import backfill_serving_keys as backfill
+    from tools.network.registry.store import RegistryStore
+
+    db = tmp_path / "registry.db"
+    RegistryStore(str(db))
+    entry = {"scope": "anchore",
+             "org_uuid": "c8e5cd04-8f19-4bc2-8951-a6b6b80b2699",
+             "serving_pub": "ab" * 32}
+
+    def write(name, *, age_s, commit="c0c69985"):
+        path = tmp_path / name
+        path.write_text(json.dumps({
+            "collected_at": int(_time.time()) - age_s,
+            "boot_commit": commit,
+            "entries": [dict(entry)],
+        }))
+        return str(path)
+
+    def run(*paths):
+        monkeypatch.setattr("sys.argv", [
+            "backfill", "--db", str(db), *sum((["--manifest", p] for p in paths), []),
+        ])
+        backfill.main()
+
+    stale = write("stale.json", age_s=backfill.MANIFEST_MAX_AGE_S + 60)
+    with pytest.raises(SystemExit) as exc:
+        run(stale)
+    assert "older than" in str(exc.value)
+    assert RegistryStore(str(db)).count_orgs_with_serving_keys() == 0
+
+    # Two machines on different commits: one of them may predate a derivation
+    # change, and we cannot tell which from here.
+    fresh_a = write("a.json", age_s=5, commit="c0c69985")
+    fresh_b = write("b.json", age_s=5, commit="76d61b5b")
+    with pytest.raises(SystemExit) as exc:
+        run(fresh_a, fresh_b)
+    assert "different commits" in str(exc.value)
+    assert RegistryStore(str(db)).count_orgs_with_serving_keys() == 0
+
+    # Fresh and in agreement: registered, and read back.
+    run(fresh_a)
+    store = RegistryStore(str(db))
+    assert store.registered_serving_keys(entry["org_uuid"]) == {entry["serving_pub"]}
 
 
 def test_the_backfill_tool_reads_back_what_relay_will_look_up(

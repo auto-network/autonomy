@@ -826,6 +826,31 @@ def _verify_tunnel_hello(
         allowed = store.registered_serving_keys(org)
         if allowed:
             if data["machine"] not in allowed:
+                # AUDIT THE REFUSAL, not only the permissive branch. A
+                # HelloError is sent to the client and the socket closed; the
+                # registry logged NOTHING, so the moment this gate started
+                # refusing it was invisible here and read as an identity fault
+                # in the rejected connector's own log. The permissive side
+                # below has always been logged and counted; the side we
+                # actually turn on had no record at all.
+                #
+                # Serving keys demonstrably drift: home served its org tunnels
+                # under its durable roster key until 76d61b5b gave every org
+                # connector its own, and all four serve-cert delegates rotated
+                # again when the certs were re-minted persona-signed (both
+                # 2026-09-10, measured from this registry's own log by
+                # host-0906-222509). So an allow-set registered before a
+                # derivation change hard-gates every connector it covers, and
+                # this line is how that is noticed. Counts are included so
+                # "wrong key" and "stale allow-set" are distinguishable at a
+                # glance rather than by grepping for what is absent.
+                _AUDIT_LOGGER.warning(
+                    "serving-key REFUSED org=%s machine=%s "
+                    "(%d key(s) registered for this org; the presented key is "
+                    "not one of them — a rotated or re-derived serving key "
+                    "needs re-registering, see auto-wku6r)",
+                    org[:8], data["machine"][:16], len(allowed),
+                )
                 raise HelloError(
                     "serving machine key not registered for this org"
                 )
