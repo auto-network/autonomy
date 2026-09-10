@@ -3119,10 +3119,30 @@ class FleetSyncScheduler:
     async def _pull_scope(
         self, machine_pub: str, addresses: Sequence[str], scope: str,
         *, org_channel: "OrgFleetAuthenticator | None" = None,
+        relay_slot: "tuple[str, str] | None" = None,
+        relay_connector=None,
     ) -> None:
         """``org_channel``: pull *scope* from a co-member's machine through
         the org hello (auto-coea3) instead of the personal roster's; the
-        request, the stream and the apply are otherwise identical."""
+        request, the stream and the apply are otherwise identical.
+
+        ``relay_slot`` + ``relay_connector``: obtain the channel from the
+        relay carrier instead of dialling a direct address (auto-ew9wf). The
+        slot is the peer's exact ``(persona_pub, machine)`` — the carrier
+        decides WHERE and the fleet handshake still decides WHO, because
+        fleet_relay_connect verifies ``expected_machine_pub`` exactly as
+        fleet_direct_connect does.
+
+        ONLY the channel differs. Everything after it — the request, the
+        stream, the apply, the telemetry and the acknowledgement — is the same
+        code on both paths, which is the point: a relay pull that diverged
+        after the channel would be a second implementation of synchronisation
+        rather than a second way to reach a peer.
+
+        This runs in the CONNECTOR process, which is where the adapter lives;
+        the dashboard reaches it by delegating an operation, never by dialling
+        from its own process.
+        """
         store = await asyncio.to_thread(self._store_for, scope)
         epoch, state_epoch = self._scope_epochs(scope)
         authenticator = org_channel if org_channel is not None else self.authenticator
@@ -3184,7 +3204,15 @@ class FleetSyncScheduler:
                 from tools.network.fleet_direct_config import path_class as _pc
 
                 values["address"] = connected_address
-                values["path_class"] = _pc(connected_address)
+                if relay_slot is not None:
+                    # Not a dialable address and must not be classified as one:
+                    # path_class reads a host out of a URL, and "relay:<slot>"
+                    # is a slot name. Saying channel=relay here is what lets a
+                    # reader tell a relay pull from a direct one at all.
+                    values["channel"] = "relay"
+                    values["path_class"] = "relay"
+                else:
+                    values["path_class"] = _pc(connected_address)
             if _PULL_TRACE:
                 values["received"] = list(received_ids)
             if acknowledged_transaction_ref is not None:
@@ -3204,7 +3232,20 @@ class FleetSyncScheduler:
         try:
             last_error: Exception | None = None
             candidate_failures: list[tuple[str, str]] = []
-            for address in addresses:
+            if relay_slot is not None:
+                # The carrier's channel is the same ViewerChannel shape
+                # fleet_direct_connect returns, so nothing below this changes.
+                from tools.network.fleet_relay_carrier import fleet_relay_connect
+
+                persona_pub, slot_machine = relay_slot
+                channel = await fleet_relay_connect(
+                    relay_connector, persona_pub, slot_machine,
+                    authenticator=authenticator,
+                    expected_machine_pub=machine_pub,
+                    timeout=self.config.connect_timeout,
+                )
+                connected_address = f"relay:{slot_machine[:12]}"
+            for address in addresses if relay_slot is None else ():
                 try:
                     channel = await fleet_direct_connect(
                         address,
