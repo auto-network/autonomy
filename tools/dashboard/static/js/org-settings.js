@@ -36,6 +36,7 @@
     host = null;
     state = { slug: null, screenId: null, view: 'list', identity: null };
     root.document.removeEventListener('keydown', onKey);
+    root.removeEventListener('resize', fitTitle);
     root.document.body.style.overflow = '';
   }
 
@@ -83,12 +84,28 @@
       badge.appendChild(el('span', '', identity.initial || name.charAt(0).toUpperCase()));
     }
     title.appendChild(badge);
-    // The organization name gives way first; the screen name never
-    // truncates — it is what says where you are.
     title.appendChild(el('span', 'orgset-org-name', name));
     if (screen && screen.windowTitle) {
       title.appendChild(el('span', 'orgset-title-separator', '–'));
       title.appendChild(el('span', 'orgset-window-name', screen.windowTitle));
+    }
+    fitTitle();
+  }
+
+  // Nothing in the title is truncated: the whole "<org> – <screen>" line
+  // scales its type down until it fits the room the buttons leave, and back
+  // up when there is room again. Min 0.6875rem keeps it legible; below that
+  // the browser's own overflow (hidden) applies rather than an ellipsis.
+  var TITLE_MAX_PX = 15, TITLE_MIN_PX = 11;
+  function fitTitle() {
+    var title = host && host.querySelector('.orgset-title');
+    if (!title) return;
+    var size = TITLE_MAX_PX;
+    title.style.fontSize = size + 'px';
+    var guard = 0;
+    while (title.scrollWidth > title.clientWidth && size > TITLE_MIN_PX && guard++ < 24) {
+      size -= 0.5;
+      title.style.fontSize = size + 'px';
     }
   }
 
@@ -211,6 +228,7 @@
     root.document.body.appendChild(host);
     root.document.body.style.overflow = 'hidden';
     root.document.addEventListener('keydown', onKey);
+    root.addEventListener('resize', fitTitle);
 
     renderRail();
     if (typeof root.fetch === 'function') {
