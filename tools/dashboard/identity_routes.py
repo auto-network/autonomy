@@ -1755,13 +1755,26 @@ async def get_unlock_state(request: Request) -> JSONResponse:
                           "outside. Bringing the tunnel back needs your root "
                           "key.")
             else:
+                # State the observation, name no cause, prescribe no remedy.
+                # This probe knows one thing: the connector did not answer its
+                # control socket as serving. It does not know WHY, and the
+                # first version of this string guessed — it copied the phrase
+                # from link_serving's own exit message ("the vault is not warm
+                # yet") and told the operator to unlock with their root key.
+                # Live on sjc-2 2026-09-10 that was false twice over: the vault
+                # WAS warm, and the connectors' actual blocker is that nothing
+                # ever arms an org scope's runtime cache (auto-oj5pt), which no
+                # unlock can change. The operator did as instructed and nothing
+                # happened. A tile that invents a cause is worse than a tile
+                # that reports a fault, because it spends the reader's time on
+                # the wrong repair.
                 plural = "s" if len(down) != 1 else ""
                 detail = (
                     f"{len(down)} organisation connector{plural} "
-                    f"({', '.join(down)}) are not running, so this dashboard "
-                    "is not reachable for them. They cannot start while the "
-                    "vault is cold — unlock with your root key to restore "
-                    "them. Personal sync is unaffected."
+                    f"({', '.join(down)}) {'are' if len(down) != 1 else 'is'} "
+                    "not serving, so this dashboard is not reachable for "
+                    f"{'them' if len(down) != 1 else 'it'}. Personal sync is "
+                    "unaffected."
                 )
             flags["tunnel"] = {
                 "needs": bool(down),

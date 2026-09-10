@@ -1890,9 +1890,17 @@ def main() -> None:
         connector_runtime.serving_machine_key or connector_runtime.machine_key
     )
     if machine_key is None:
+        # Say what was looked for and where, not why it might be missing. The
+        # previous text blamed a cold vault; on sjc-2 2026-09-10 the vault was
+        # warm and the real reason was that nothing ever arms an ORG scope's
+        # runtime cache — activate_local_runtime publishes with org=None only
+        # (fleet_enrollment_routes.py, "publish_connector_runtime(payload,
+        # org=None)"). That guess propagated: the tunnel tile repeated it and
+        # sent the operator to unlock a vault that was already open.
         parser.error(
-            "no runtime machine key is available for this scope — the vault "
-            "is not warm yet. Not starting; the supervisor retries."
+            f"no runtime machine key has been published for scope "
+            f"{args.org or 'personal'} — the warm runtime cache for this "
+            "scope is empty. Not starting; the supervisor retries."
         )
 
     from tools.network.relaykit.connector import Publisher
