@@ -87,7 +87,8 @@ export async function submitSignon(prepared, fetchImpl = fetch) {
       }
     } catch (error) {
       reportStepOutcome('vault-wake', { ready: false, reason: error.message }, { fetchImpl });
-      throw error;
+      report.failed.push({ org: 'personal', step: 'vault-wake', error: error.message });
+      report.ready = [];
     }
     for (const post of prepared.posts) {
       try {
@@ -108,9 +109,9 @@ export async function submitSignon(prepared, fetchImpl = fetch) {
         report.failed.push({ org: post.org || 'personal', step: post.step, error: error.message });
         if (post.step === 'fleet') {
           report.fleet_arming = { attempted: true, outcome: 'mint-failed', error: error.message };
-          throw error;
         }
-        // Existing per-org maintenance is opportunistic; another org still runs.
+        // Authentication already succeeded. Report maintenance failures and
+        // keep processing independent work without blocking dashboard entry.
       }
     }
     return report;
