@@ -94,7 +94,12 @@ def test_lookup_hints_carries_the_peer_standing_relay_route(env):
 
     hints = fr.lookup_hints("http://testserver", ORG, a_key, a_cert,
                             [b_key.public_hex], ts=NOW, client=client)
-    assert hints[b_key.public_hex] == {"addrs": [], "relay_url": relay_route}
+    assert hints[b_key.public_hex] == {
+        "addrs": [], "relay_url": relay_route,
+        # B announced no signed descriptor, which is not the same as being
+        # unreachable: this rolls out one machine at a time.
+        "descriptor": None,
+    }
     assert fr.lookup("http://testserver", ORG, a_key, a_cert,
                      [b_key.public_hex], ts=NOW, client=client) == {}
 

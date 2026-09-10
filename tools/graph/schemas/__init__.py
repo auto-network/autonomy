@@ -133,6 +133,7 @@ from . import fleet_sync_telemetry  # noqa: F401 — autonomy.machine.fleet-sync
 from . import fleet_sync_traffic  # noqa: F401 — autonomy.machine.fleet-sync-traffic#1
 from . import fleet_sync_peer_scope  # noqa: F401 — autonomy.machine.fleet-sync-peer-scope#1
 from . import fleet_counter_baseline  # noqa: F401 — autonomy.machine.fleet-counter-baseline#1
+from . import fleet_descriptor_generation  # noqa: F401 — autonomy.machine.fleet-descriptor-generation#1
 from . import agent_test_capacity  # noqa: F401 — dashboard.agent-test.{capacity,lease}#1
 from . import dashboard_shell  # noqa: F401 — dashboard.shell.default-org#1
 from . import central_attention  # noqa: F401 — dashboard.{attention,approval}.*#1
