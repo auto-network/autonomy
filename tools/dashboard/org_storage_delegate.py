@@ -123,7 +123,13 @@ def accept(item: dict) -> None:
             or p.get("ttl") != TTL_MS):
         raise ValueError("organization storage grant has incorrect key or terms")
     with LedgerStore(org_ledger_db_path(org)) as store:
-        if tuple(event.parents) != tuple(store.heads()):
+        known = event.event_id in store.ledger
+        current = context["delegate_metadata"].get("grant_event_id")
+        if known and current in store.ledger and event.event_id in store.ledger.ancestry([current]):
+            # This handoff completed, or a later grant has replaced it.
+            # Replaying an acknowledged grant must not roll the pointer back.
+            return
+        if not known and tuple(event.parents) != tuple(store.heads()):
             raise ValueError("organization delegation must cite current heads")
         # Verify admission using the existing fold before persisting the secret.
         from tools.network.ledger import fold
@@ -134,16 +140,15 @@ def accept(item: dict) -> None:
         frontier = fold(candidate, now=int(time.time() * 1000))
         if resolve_member_key(frontier, key.public_hex) != event.author_key:
             raise ValueError("organization storage grant is not member-authorized")
-        reference = (context["delegate_metadata"].get("key_reference")
-                     or "storage-delegate." + context["genesis_id"])
+        # The signed grant is the existing content-addressed idempotency key.
+        # Keep the previously indexed secret intact until this grant's index
+        # is published, and reuse this same stored object on repeat delivery.
+        reference = "storage-delegate." + context["genesis_id"] + "." + event.event_id
         existing = settings_ops.read_set_key(VAULT_AUDITED_SET_ID, reference, org=None)
         if existing:
-            settings_ops.override_setting(existing["id"], {"value": key.private_hex}, org=None)
+            if (existing.get("payload") or {}).get("value") != key.private_hex:
+                raise ValueError("organization delegate grant key cannot be opened or does not match")
         else:
-            # A retired base can still occupy its Settings key. Store the new
-            # key under its own reference; never revive an excluded secret.
-            if context["delegate_metadata"].get("key_reference"):
-                reference = "storage-delegate." + context["genesis_id"] + "." + key.public_hex
             settings_ops.add_setting(VAULT_AUDITED_SET_ID, 1, reference,
                                     {"value": key.private_hex}, org=None)
         event_id = store.append(event)
