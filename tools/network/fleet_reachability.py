@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import threading
 import time as _time
+from urllib.parse import urlsplit
 from typing import Iterable, Mapping, Optional, Sequence
 
 from tools.network.idkit import KeyPair
@@ -40,6 +41,68 @@ def _send(client, registry_url, method, path, key, payload, cert, ts, timeout):
         return c.request(method, url, json=envelope)
 
 
+def drop_self_reachable(candidates, own_addrs) -> list:
+    """Remove peer candidates that would reach THIS machine.
+
+    A hint says where a PEER is. An address that resolves to this machine is
+    not that, whatever the peer believes, and dialing it is guaranteed to
+    reach the wrong host. This is the one exclusion reachability may make,
+    because it is a statement about ourselves rather than a judgement about
+    the peer: §1 keeps reachability out of authority, and refusing to dial
+    ourselves decides nothing about whether the peer is a member or is up.
+
+    Observed 2026-09-09: sjc-2 dialled toward home, reached itself, and the
+    fleet handshake refused it 24 times between 19:35:47Z and 20:00:21Z --
+    "expected 3996513b6b233afd, got 571d62ab69c59f83", the second being
+    sjc-2's own key. The refusal is correct and it is not free: a connect and
+    a full handshake round trip are spent per attempt, and the log reads as a
+    peer-identity problem when the cause is an address meaning different
+    things on two machines.
+
+    HOST, not host:port. An address on this machine's own host reaches this
+    machine whatever port it names, so a peer hint pointing at our host on a
+    different port is equally wrong.
+
+    Assumes NOTHING about subnets, which is what makes it safe. The compose
+    subnet is pinned per host by a deterministic preflight, so a collision
+    between two nodes is the expected case and not an invariant --
+    "a design that ASSUMES collision is wrong; a design that assumes
+    NON-collision is wrong more often". Comparing against our own addresses
+    is exact: it is true precisely when it is true.
+
+    An empty ``own_addrs`` filters nothing. A machine that does not know its
+    own addresses must not start discarding a peer's.
+    """
+    mine = set()
+    for addr in own_addrs or ():
+        if not isinstance(addr, str) or not addr:
+            continue
+        try:
+            host = urlsplit(addr).hostname
+        except ValueError:
+            continue
+        if host:
+            mine.add(host)
+    if not mine:
+        return list(candidates or ())
+    kept = []
+    for addr in candidates or ():
+        if not isinstance(addr, str) or not addr:
+            continue
+        try:
+            host = urlsplit(addr).hostname
+        except ValueError:
+            continue
+        if host and host in mine:
+            logger.info(
+                "fleet reachability: not dialing %s for a peer -- that address "
+                "reaches this machine", addr,
+            )
+            continue
+        kept.append(addr)
+    return kept
+
+
 def announce(
     registry_url: str,
     org_uuid: str,
@@ -49,17 +112,27 @@ def announce(
     *,
     ttl: Optional[int] = None,
     relay_url: Optional[str] = None,
+    descriptor: Optional[Mapping] = None,
     ts: Optional[int] = None,
     timeout: float = 10.0,
     client=None,
 ) -> dict:
-    """Publish this machine's reachability hint (node:announce). Returns JSON."""
+    """Publish this machine's reachability hint (node:announce). Returns JSON.
+
+    ``descriptor`` carries the machine-signed reachability descriptor
+    (``fleet_descriptor``). The registry stores and returns it verbatim and
+    **does not re-sign it** (contract §3), so the signature that arrives at a
+    peer is the one this machine made, and the registry is a cache rather than
+    an authority. Omitted, this is the pre-descriptor announce unchanged.
+    """
     path = f"/v1/orgs/{org_uuid}/reachability"
     payload: dict = {"addrs": list(addrs)}
     if ttl is not None:
         payload["ttl"] = ttl
     if relay_url is not None:
         payload["relay_url"] = relay_url
+    if descriptor is not None:
+        payload["descriptor"] = dict(descriptor)
     resp = _send(client, registry_url, "POST", path, machine_key, payload, cert, ts, timeout)
     resp.raise_for_status()
     return resp.json()
@@ -95,6 +168,7 @@ def lookup_hints(
             continue
         cands = []
         relay_url = None
+        descriptor = None
         for hint in hints:
             for addr in (hint.get("addrs") or []):
                 if isinstance(addr, str) and addr:
@@ -102,9 +176,53 @@ def lookup_hints(
             candidate = hint.get("relay_url")
             if isinstance(candidate, str) and candidate and relay_url is None:
                 relay_url = candidate
-        if cands or relay_url:
-            out[pub] = {"addrs": cands, "relay_url": relay_url}
+            if descriptor is None:
+                descriptor = _verified_descriptor(hint.get("descriptor"), pub)
+        if cands or relay_url or descriptor:
+            out[pub] = {
+                "addrs": cands, "relay_url": relay_url,
+                "descriptor": descriptor,
+            }
     return out
+
+
+def _verified_descriptor(raw: object, expected_machine_pub: str):
+    """Verify a cached descriptor, or return None.
+
+    The registry does not re-sign (contract §3), so the caller is the only
+    thing standing between a cache and a forged hint. Two checks, and neither
+    is authority: the signature must be the one the NAMED machine made, and
+    the name must be the peer we asked about -- otherwise a registry could
+    answer a lookup for A with a validly-signed descriptor for B.
+
+    Whether that machine is a fleet member is the ROSTER's answer and is
+    checked elsewhere. §1: reachability is never authority.
+
+    A descriptor that fails either check is dropped rather than raised on: one
+    bad cached entry must not deny discovery of a peer whose direct addresses
+    are fine, which is the same best-effort rule the rest of this function
+    already follows.
+    """
+    if raw is None:
+        return None
+    from tools.network import fleet_descriptor
+
+    try:
+        verified = fleet_descriptor.verify(raw)
+    except Exception:
+        logger.warning(
+            "fleet reachability: discarding an unverifiable descriptor "
+            "cached for %s", expected_machine_pub[:12],
+        )
+        return None
+    if verified["machine_pub"] != expected_machine_pub:
+        logger.warning(
+            "fleet reachability: descriptor cached for %s is signed by %s; "
+            "discarding", expected_machine_pub[:12],
+            verified["machine_pub"][:12],
+        )
+        return None
+    return verified
 
 
 def lookup(
@@ -203,12 +321,59 @@ class ReachabilityCache:
         self._min_lookup_spacing = min_lookup_spacing
         #: What was last announced successfully: (addrs, relay_url).
         self._announced: Optional[tuple[tuple, Optional[str]]] = None
+        #: The last descriptor published and the content it described, so a
+        #: keepalive re-announces it instead of minting a new generation for
+        #: reachability that has not moved.
+        self._descriptor: Optional[dict] = None
+        self._descriptor_for_content = None
+        #: Highest generation seen in any projection of THIS machine's own
+        #: descriptor; repairs a counter rebuilt behind a surviving identity.
+        self._observed_own_generation = 0
         self._last_lookup: Optional[float] = None
         #: Roster peers the scheduler reported a failed pull for since the
         #: last lookup: they are looked up again at the next opportunity.
         self._stale: set = set()
         self._lock = threading.Lock()
         self._worker: Optional[threading.Thread] = None
+
+
+    def _descriptor_for(self, key, advertise, wanted):
+        """This machine's signed descriptor, minting a generation only when the
+        CONTENT changes.
+
+        A keepalive re-announces the same descriptor rather than a new one. The
+        announce cadence is TTL/2, so minting per announce would burn a
+        generation every couple of minutes forever and make ordering churn on a
+        machine whose reachability had not moved at all -- readers would see a
+        stream of "newer" descriptors carrying identical addresses.
+
+        A build failure returns None and the announce proceeds without a
+        descriptor: the pre-descriptor announce still works, and a peer that
+        cannot publish one must not thereby become unannounced.
+        """
+        from tools.network import fleet_descriptor
+
+        if self._descriptor is not None and self._descriptor_for_content == wanted:
+            return self._descriptor
+        try:
+            generation = fleet_descriptor.next_generation(
+                observed=self._observed_own_generation,
+            )
+            built = fleet_descriptor.build(
+                key,
+                # The reachability cert binds this key to the roster machine
+                # identity (fleet_runtime.py:66-67), so the signer and the row
+                # key are the same durable identity by construction.
+                machine_pub=key.public_hex,
+                addresses=advertise,
+                generation=generation,
+            )
+        except Exception as exc:
+            self._error(f"descriptor build failed: {exc!r}")
+            return None
+        self._descriptor = built
+        self._descriptor_for_content = wanted
+        return built
 
     def advertised_addrs(self) -> list:
         """The URLs this machine currently advertises (fresh if a getter)."""
@@ -338,6 +503,7 @@ class ReachabilityCache:
         advertise = self.advertised_addrs()
         relay_url = self.announced_relay_url()
         wanted = (tuple(advertise), relay_url)
+        descriptor = self._descriptor_for(key, advertise, wanted)
         keepalive_due = (
             self.last_announce is None
             or (now - self.last_announce[0]) >= self._ttl / 2
@@ -345,7 +511,8 @@ class ReachabilityCache:
         if (advertise or relay_url) and (self._announced != wanted or keepalive_due):
             try:
                 announce(registry_url, org_uuid, key, cert, advertise,
-                         ttl=self._ttl, relay_url=relay_url, ts=self._ts,
+                         ttl=self._ttl, relay_url=relay_url,
+                         descriptor=descriptor, ts=self._ts,
                          timeout=self._timeout, client=self._client)
                 self.last_announce = (now, list(advertise))
                 self._announced = wanted
@@ -402,7 +569,16 @@ class ReachabilityCache:
                     merged_hints.pop(pub, None)
         hints = merged_hints
         self._hints = hints
-        self._peers = {pub: h["addrs"] for pub, h in hints.items() if h["addrs"]}
+        # A hint that points at THIS machine is not where the peer is. Dropped
+        # here, once, so every consumer of peers() is spared the wasted connect
+        # and handshake rather than each having to know.
+        own = self.advertised_addrs()
+        self._peers = {
+            pub: kept
+            for pub, h in hints.items()
+            for kept in (drop_self_reachable(h["addrs"], own),)
+            if kept
+        }
         summary = "; ".join(
             f"{pub[:12]} addrs={h['addrs']} relay_route={bool(h.get('relay_url'))}"
             for pub, h in sorted(hints.items())
