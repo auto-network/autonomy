@@ -56,6 +56,8 @@ class ProjectionInputs:
     traffic_rows: tuple = ()
     #: {scope: oldest origin position THIS machine holds}
     local_frontiers: Mapping[str, int] = field(default_factory=dict)
+    #: {scope: {phase, frontier}} for any scope mid-bootstrap
+    bootstrap_states: Mapping[str, dict] = field(default_factory=dict)
     local_verdict: Mapping | None = None
     serve_cert: Mapping | None = None
     tunnel_serving: bool | None = None
@@ -225,6 +227,7 @@ def _load_inputs(*, now_ms: int) -> ProjectionInputs:
         peer_scope_rows=fleet_sync_peer_scope.read_peer_scopes(org="machine"),
         traffic_rows=tuple(fleet_sync_traffic.read_traffic_rows(org="machine")),
         local_frontiers=_local_frontiers(),
+        bootstrap_states=_bootstrap_states(),
         local_verdict=local_verdict,
         serve_cert=serve_cert,
         tunnel_serving=tunnel_serving,
@@ -294,6 +297,92 @@ def _local_frontiers() -> dict[str, int]:
     return out
 
 
+def _bootstrap_states() -> dict[str, dict]:
+    """``{scope: {phase, frontier}}`` for any scope mid-bootstrap.
+
+    A machine filling a scope KNOWS how much is left: F is the serving store's
+    frontier captured at sweep start and persisted precisely because it is not
+    derivable from the receiving database. Until the bootstrap completes the
+    store deliberately advertises nothing, which is correct on the wire and
+    renders as silence on a screen -- a machine that is working hard and
+    knows exactly how far it has to go looks identical to an idle one.
+    """
+    from tools.network.fleet_sync.sweep_receive import read_bootstrap
+    from tools.network.fleet_sync_scheduler import discover_org_sync_scopes
+
+    paths = {"personal": _org_db_path("personal")}
+    try:
+        paths.update(discover_org_sync_scopes())
+    except Exception:
+        pass
+    out: dict[str, dict] = {}
+    for scope, path in paths.items():
+        if not Path(path).exists():
+            continue
+        try:
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        except Exception:
+            continue
+        try:
+            state = read_bootstrap(conn)
+            if state is not None and state.phase.value != "complete":
+                out[scope] = {
+                    "phase": state.phase.value,
+                    "frontier": dict(state.frontier or {}),
+                }
+        except Exception:
+            continue
+        finally:
+            conn.close()
+    return out
+
+
+def _local_scope_rows(
+    peer_scope_rows: Mapping[str, list],
+    local: Mapping[str, int],
+    bootstrap: Mapping[str, dict],
+) -> list[dict]:
+    """The local machine's own per-organization row.
+
+    It has no peer row about itself -- Record 2 is keyed by PEER -- so without
+    this the local card renders an empty table and "0 / 0", which reads as a
+    fault rather than as the category error it is: this machine has nothing to
+    be behind.
+
+    Bytes are summed across peers for the scope, which IS this machine's total
+    in and out for that organization, and is lifetime like the peer rows beside
+    it. Lag is zero because this machine is the reference every peer is
+    measured against -- unless it is mid-bootstrap, in which case it is behind
+    by a knowable amount and says so.
+    """
+    totals: dict[str, dict] = {}
+    for scopes in (peer_scope_rows or {}).values():
+        for row in scopes or []:
+            entry = totals.setdefault(
+                row["scope"], {"bytesIn": 0, "bytesOut": 0}
+            )
+            entry["bytesIn"] += int(row.get("bytes_in") or 0)
+            entry["bytesOut"] += int(row.get("bytes_out") or 0)
+    out: list[dict] = []
+    for scope in sorted(set(local) | set(totals) | set(bootstrap)):
+        entry = totals.get(scope) or {"bytesIn": 0, "bytesOut": 0}
+        filling = bootstrap.get(scope)
+        lag = 0
+        if filling:
+            # now - F is what remains: F is where the sweep is filling TO.
+            target = max(filling["frontier"].values(), default=0)
+            ours = int(local.get(scope) or 0)
+            lag = max(0, (target - ours) // 1_000_000) if target else None
+        out.append({
+            "scope": scope,
+            "lag": lag,
+            "bytesIn": entry["bytesIn"],
+            "bytesOut": entry["bytesOut"],
+            "filling": filling["phase"] if filling else None,
+        })
+    return out
+
+
 def _scope_rows(
     rows: list | None, *, server_time: int, local: dict | None = None,
 ) -> list[dict]:
@@ -328,6 +417,7 @@ def _scope_rows(
             "lag": lag,
             "bytesIn": int(row.get("bytes_in") or 0),
             "bytesOut": int(row.get("bytes_out") or 0),
+            "filling": None,
         })
     return out
 
@@ -578,10 +668,17 @@ def project(inputs: ProjectionInputs) -> dict:
             peer=inputs.peer_rows.get(machine_pub),
             telemetry=inputs.telemetry_rows.get(machine_pub),
             display_name=inputs.machine_names.get(entry.machine_id),
-            scopes=_scope_rows(
-                inputs.peer_scope_rows.get(machine_pub),
-                server_time=inputs.server_time,
-                local=inputs.local_frontiers,
+            scopes=(
+                _local_scope_rows(
+                    inputs.peer_scope_rows, inputs.local_frontiers,
+                    inputs.bootstrap_states,
+                )
+                if entry.machine_id == inputs.local_machine_id
+                else _scope_rows(
+                    inputs.peer_scope_rows.get(machine_pub),
+                    server_time=inputs.server_time,
+                    local=inputs.local_frontiers,
+                )
             ),
         )
         for machine_pub, entry in active.items()
