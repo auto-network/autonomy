@@ -56,6 +56,7 @@ ORG = "org-a"
 PERSONA = "ab" * 32
 MACHINE_A, MACHINE_B, MACHINE_C = "11" * 32, "22" * 32, "33" * 32
 OP = "0f" * 16
+FRAME = 65536          # one DATA frame: the smallest window the wire admits
 
 
 class FakeWS:
@@ -99,7 +100,7 @@ async def settle(n: int = 3):
         await asyncio.sleep(0)
 
 
-async def opened(broker, src, dst, *, op=OP, bytes_=1000, slots=4,
+async def opened(broker, src, dst, *, op=OP, bytes_=4 * FRAME, slots=4,
                  accept_src=True, accept_dst=True):
     """Open a pair and complete both open-oks. Returns the pair and the two
     legs. Windows are what each leg OFFERS to receive."""
@@ -206,18 +207,18 @@ async def test_ready_follows_both_open_oks_destination_first(hub, broker):
     a, b = tunnel(hub, MACHINE_A), tunnel(hub, MACHINE_B)
     reply = await broker.open(a, args())
     pair = broker.pair(reply["pair_id"])
-    pair.source.on_ctrl_raw(build_fleet_open_ok(nonce=pair.source.nonce, bytes_=500, slots=5))
+    pair.source.on_ctrl_raw(build_fleet_open_ok(nonce=pair.source.nonce, bytes_=500_000, slots=5))
     await settle()
     assert not a.ws.of(FRAME_STREAM_CTRL) and not b.ws.of(FRAME_STREAM_CTRL)
     pair.destination.on_ctrl_raw(build_fleet_open_ok(
-        nonce=pair.destination.nonce, bytes_=700, slots=7))
+        nonce=pair.destination.nonce, bytes_=700_000, slots=7))
     await settle()
     (ready_b,) = b.ws.ctrls(pair.destination.channel_id)
     (ready_a,) = a.ws.ctrls(pair.source.channel_id)
     assert ready_a["op"] == ready_b["op"] == "fleet-ready"
     # Each leg's send window is the PEER's offer.
-    assert ready_a["window"] == {"bytes": 700, "slots": 7}
-    assert ready_b["window"] == {"bytes": 500, "slots": 5}
+    assert ready_a["window"] == {"bytes": 700_000, "slots": 7}
+    assert ready_b["window"] == {"bytes": 500_000, "slots": 5}
     assert ready_a["source_nonce"] == ready_b["source_nonce"] == pair.source.nonce
     assert ready_a["destination_nonce"] == pair.destination.nonce
     assert pair.state.may_send(a) and pair.state.may_send(b)
@@ -227,7 +228,7 @@ async def test_ready_follows_both_open_oks_destination_first(hub, broker):
 async def test_a_stale_or_repeated_open_ok_is_a_protocol_reset(hub, broker):
     a, b = tunnel(hub, MACHINE_A), tunnel(hub, MACHINE_B)
     pair = broker.pair((await broker.open(a, args()))["pair_id"])
-    pair.source.on_ctrl_raw(build_fleet_open_ok(nonce="00" * 16, bytes_=1, slots=1))
+    pair.source.on_ctrl_raw(build_fleet_open_ok(nonce="00" * 16, bytes_=FRAME, slots=1))
     await settle()
     assert pair.done and pair.closed_reason == ds.CLOSED_PROTOCOL
     assert b.ws.ctrls(pair.destination.channel_id) == [{"op": "reset", "code": RESET_PROTOCOL}]
@@ -238,7 +239,7 @@ async def test_a_stale_or_repeated_open_ok_is_a_protocol_reset(hub, broker):
 async def test_open_timeout_resets_both_and_releases(hub, broker):
     a, b = tunnel(hub, MACHINE_A), tunnel(hub, MACHINE_B)
     pair = broker.pair((await broker.open(a, args()))["pair_id"])
-    pair.source.on_ctrl_raw(build_fleet_open_ok(nonce=pair.source.nonce, bytes_=1, slots=1))
+    pair.source.on_ctrl_raw(build_fleet_open_ok(nonce=pair.source.nonce, bytes_=FRAME, slots=1))
     await asyncio.sleep(0.5)
     assert pair.done and pair.closed_reason == ds.CLOSED_OPEN_TIMEOUT
     assert a.ws.ctrls(pair.source.channel_id) == [{"op": "reset", "code": RESET_TIMEOUT}]
@@ -255,8 +256,8 @@ async def test_activation_fails_when_the_destination_was_replaced(hub, broker):
     a, b = tunnel(hub, MACHINE_A), tunnel(hub, MACHINE_B)
     pair = broker.pair((await broker.open(a, args()))["pair_id"])
     b2 = tunnel(hub, MACHINE_B)                     # same slot, new tunnel
-    pair.destination.on_ctrl_raw(build_fleet_open_ok(nonce=pair.destination.nonce, bytes_=1, slots=1))
-    pair.source.on_ctrl_raw(build_fleet_open_ok(nonce=pair.source.nonce, bytes_=1, slots=1))
+    pair.destination.on_ctrl_raw(build_fleet_open_ok(nonce=pair.destination.nonce, bytes_=FRAME, slots=1))
+    pair.source.on_ctrl_raw(build_fleet_open_ok(nonce=pair.source.nonce, bytes_=FRAME, slots=1))
     await settle(6)
     assert pair.done and pair.closed_reason == PAIR_DESTINATION_REPLACED
     assert a.ws.ctrls(pair.source.channel_id) == [{"op": "reset", "code": RESET_ROUTE_RELEASED}]
@@ -279,26 +280,26 @@ async def test_data_before_ready_is_a_protocol_reset(hub, broker):
 @pytest.mark.asyncio
 async def test_data_forwards_one_to_one_within_the_window(hub, broker):
     a, b = tunnel(hub, MACHINE_A), tunnel(hub, MACHINE_B)
-    pair = await opened(broker, a, b, bytes_=100, slots=3)
-    for n in (1, 63, 36):
+    pair = await opened(broker, a, b, bytes_=FRAME, slots=3)
+    for n in (1, 63, FRAME - 64):
         pair.source.on_data(b"x" * n)
     await settle(8)
-    assert [len(f.payload) for f in b.ws.of(FRAME_DATA, pair.destination.channel_id)] == [1, 63, 36]
+    assert [len(f.payload) for f in b.ws.of(FRAME_DATA, pair.destination.channel_id)] == [1, 63, FRAME - 64]
     assert pair.source.send_window.bytes == 0 and pair.source.send_window.slots == 0
     snap = broker.snapshot()
-    assert snap["queued_bytes"] == 0 and snap["outstanding_bytes"] == 100
+    assert snap["queued_bytes"] == 0 and snap["outstanding_bytes"] == FRAME
     assert not pair.done
 
 
 @pytest.mark.parametrize("frames", [
-    [b"x" * 101],                           # one byte over the window
+    [b"x" * FRAME, b"x"],                   # one byte over the window
     [b"x" * 30, b"x" * 30, b"x" * 30, b"x"],  # a fourth slot
     [b""],                                  # empty DATA is never legal
 ])
 @pytest.mark.asyncio
 async def test_exceeding_the_window_resets_before_a_byte_is_retained(hub, broker, frames):
     a, b = tunnel(hub, MACHINE_A), tunnel(hub, MACHINE_B)
-    pair = await opened(broker, a, b, bytes_=100, slots=3)
+    pair = await opened(broker, a, b, bytes_=FRAME, slots=3)
     for frame in frames:
         pair.source.on_data(frame)
     await settle(8)
@@ -316,21 +317,21 @@ async def test_exceeding_the_window_resets_before_a_byte_is_retained(hub, broker
 @pytest.mark.asyncio
 async def test_credit_is_conserved_and_must_name_an_exact_prefix(hub, broker):
     a, b = tunnel(hub, MACHINE_A), tunnel(hub, MACHINE_B)
-    pair = await opened(broker, a, b, bytes_=100, slots=4)
+    pair = await opened(broker, a, b, bytes_=FRAME, slots=4)
     for n in (10, 20, 30):
         pair.source.on_data(b"x" * n)
     await settle(8)
-    assert pair.source.send_window.bytes == 40 and pair.source.send_window.slots == 1
+    assert pair.source.send_window.bytes == FRAME - 60 and pair.source.send_window.slots == 1
     assert pair.destination.receipts.outstanding_bytes == 60
 
     # The receiver consumed the first two frames: the sender gets exactly that.
     pair.destination.on_ctrl_raw(build_fleet_credit(bytes_=30, slots=2))
     await settle(8)
-    assert pair.source.send_window.bytes == 70 and pair.source.send_window.slots == 3
+    assert pair.source.send_window.bytes == FRAME - 30 and pair.source.send_window.slots == 3
     assert a.ws.ctrls(pair.source.channel_id)[-1] == {"op": "fleet-credit", "bytes": 30, "slots": 2}
     assert pair.destination.receipts.outstanding_bytes == 30
     # Invariant, per direction: sender outstanding == queued + receiver outstanding.
-    sender_outstanding = 100 - pair.source.send_window.bytes
+    sender_outstanding = FRAME - pair.source.send_window.bytes
     assert sender_outstanding == broker.snapshot()["queued_bytes"] + 30
 
     # A credit that does not match the remaining prefix resets the pair.
@@ -347,25 +348,25 @@ async def test_a_blocked_destination_socket_bounds_custody_and_stalls_the_sender
     relay custody, then has zero credit. Nothing is discarded, nothing is
     reset, and unblocking drains it in order."""
     a, b = tunnel(hub, MACHINE_A), tunnel(hub, MACHINE_B)
-    pair = await opened(broker, a, b, bytes_=100, slots=4)
+    pair = await opened(broker, a, b, bytes_=FRAME, slots=4)
     b.ws.gate.clear()
     for _ in range(4):
-        pair.source.on_data(b"y" * 25)
+        pair.source.on_data(b"y" * (FRAME // 4))
     await settle(8)
     snap = broker.snapshot()
     # One frame is inside send_frame (awaiting the gate), three queued.
-    assert snap["queued_bytes"] + snap["outstanding_bytes"] == 100
-    assert snap["queued_bytes"] <= 100 and snap["queued_slots"] <= 4
+    assert snap["queued_bytes"] + snap["outstanding_bytes"] == FRAME
+    assert snap["queued_bytes"] <= FRAME and snap["queued_slots"] <= 4
     assert pair.source.send_window.bytes == 0
     assert not pair.done
     assert not b.ws.of(FRAME_DATA)
     b.ws.gate.set()
     await settle(12)
-    assert [len(f.payload) for f in b.ws.of(FRAME_DATA, pair.destination.channel_id)] == [25] * 4
+    assert [len(f.payload) for f in b.ws.of(FRAME_DATA, pair.destination.channel_id)] == [FRAME // 4] * 4
     assert broker.snapshot()["queued_bytes"] == 0
-    pair.destination.on_ctrl_raw(build_fleet_credit(bytes_=100, slots=4))
+    pair.destination.on_ctrl_raw(build_fleet_credit(bytes_=FRAME, slots=4))
     await settle(8)
-    assert pair.source.send_window.bytes == 100 and pair.source.send_window.slots == 4
+    assert pair.source.send_window.bytes == FRAME and pair.source.send_window.slots == 4
 
 
 @pytest.mark.asyncio
@@ -439,8 +440,8 @@ async def test_a_replaced_tunnel_closes_only_its_own_pair(hub, broker):
 @pytest.mark.asyncio
 async def test_the_scheduler_alternates_between_peers_toward_one_tunnel(hub, broker):
     a, b, c = tunnel(hub, MACHINE_A), tunnel(hub, MACHINE_B), tunnel(hub, MACHINE_C)
-    from_b = await opened(broker, b, a, op="01" * 16, bytes_=1000, slots=8)
-    from_c = await opened(broker, c, a, op="02" * 16, bytes_=1000, slots=8)
+    from_b = await opened(broker, b, a, op="01" * 16, bytes_=4 * FRAME, slots=8)
+    from_c = await opened(broker, c, a, op="02" * 16, bytes_=4 * FRAME, slots=8)
     a.ws.gate.clear()
     for _ in range(4):
         from_b.source.on_data(b"B")

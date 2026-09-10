@@ -46,6 +46,7 @@ from .fleet_stream_wire import (
     ROLE_SOURCE,
     build_fleet_credit,
     build_fleet_open_ok,
+    check_offer,
     encode_message,
     parse_fleet_ctrl,
     parse_fleet_open,
@@ -281,6 +282,7 @@ class FleetStreamAdapter:
         self._send_frame = send_frame
         self._control = control
         self._on_offer = on_offer
+        check_offer(window_bytes, window_slots, source="FleetStreamAdapter")
         self._window_bytes = int(window_bytes)
         self._window_slots = int(window_slots)
         self._endpoints: Dict[bytes, FleetStreamEndpoint] = {}
