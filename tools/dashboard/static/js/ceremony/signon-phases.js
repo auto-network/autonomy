@@ -61,7 +61,7 @@ export async function prepareSignon(rootSeed, encrypted, signon) {
     posts.push({ step: 'fleet', url: '/api/fleet/runtime', body: await mintFleetRuntimeCredential({
       personalRootSeed: new Uint8Array(rootSeed), rootPub: rc.personal_root_pub,
       machineId: rc.machine_id, machinePub: rc.machine_pub,
-      orgUuid: rc.org_uuid || rc.personal_org_uuid || null,
+      orgUuid: rc.org_uuid || null,
       servingOrgs: rc.serving_orgs || [],
     }) });
   }
