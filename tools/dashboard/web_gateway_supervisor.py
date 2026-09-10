@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -213,16 +214,45 @@ class HostnameLeaseReconciler:
                 if reply.get("ok") is True:
                     next_applied.pop(reservation_id, None)
 
+            # auto-nh1po: declare THIS machine as the host's serving machine.
+            # The desired set already names only publications whose target
+            # is bound to this machine (_local_reservation_ids); the relay
+            # pins the host to the connector's authenticated machine and
+            # refuses every sibling machine's register until a release.
+            slot = status.get("serving_slot")
+            machine = slot.get("machine") if isinstance(slot, dict) else None
+            if not (isinstance(machine, str) and _MACHINE_HEX_RE.match(machine)):
+                machine = None
             for reservation_id, host in sorted(leases.items()):
                 if previous.get(reservation_id) == host:
                     continue
+                args = {"reservation": reservation_id, "host": host}
+                if machine is not None:
+                    args["machine"] = machine
                 try:
                     reply = await asyncio.to_thread(
-                        self._call,
-                        org,
-                        "serve-host",
-                        {"reservation": reservation_id, "host": host},
+                        self._call, org, "serve-host", args,
                     )
+                    if (
+                        reply.get("ok") is not True
+                        and reply.get("error") == "host-owned-elsewhere"
+                        and machine is not None
+                    ):
+                        # The host is pinned to another machine of this
+                        # persona and the publication now names THIS one
+                        # (the service moved, and the old machine did not
+                        # release — it may be dead). Release, then declare.
+                        # The relay refuses the release while the other
+                        # machine's lease is live, so a running service is
+                        # never displaced.
+                        released = await asyncio.to_thread(
+                            self._call, org, "release-host",
+                            {"reservation": reservation_id},
+                        )
+                        if released.get("ok") is True:
+                            reply = await asyncio.to_thread(
+                                self._call, org, "serve-host", args,
+                            )
                 except Exception:
                     continue
                 if reply.get("ok") is True:
@@ -232,6 +262,9 @@ class HostnameLeaseReconciler:
             # failure for one publication does not cause calls for every
             # healthy sibling to repeat on the next watchdog tick.
             self._applied[org] = (marker, next_applied)
+
+
+_MACHINE_HEX_RE = re.compile(r"^[0-9a-f]{64}\Z")
 
 
 def _route_fingerprint(value: dict) -> str:

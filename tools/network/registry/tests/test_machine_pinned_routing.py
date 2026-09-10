@@ -1,0 +1,410 @@
+"""auto-nh1po: machine-targeted serve routing (graph://96a4aa40-1c9).
+
+A serve link points at a live port on ONE machine; a ``design``/``present``
+/``mission`` share link points at a store that does not fleet-sync. The
+publisher declares the serving machine, the registry records it, and the
+relay routes only to the tunnel whose authenticated hello named that
+machine. Every check here is against ``tunnel.machine`` — the hello's
+co-signed serving machine key — never an op-body identity.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import hashlib
+import json
+import sqlite3
+import uuid
+
+import pytest
+
+from tools.network.idkit import KeyPair, Subject, issue_cert
+from tools.network.registry import relay as relay_mod
+from tools.network.registry.relay import CLOSE_UNKNOWN_LINK, Tunnel, viewer_endpoint
+from tools.network.registry.store import LinkGrant, RegistryStore
+from tools.network.relaykit import hello as hello_mod
+from tools.network.relaykit.frames import (
+    CTRL_CHANNEL_ID,
+    FRAME_CTRL,
+    FRAME_OPEN,
+    decode_frame,
+    encode_frame,
+)
+
+from .conftest import DAY, NOW, ORG, TARGET, register
+
+PERSONA_A = "ab" * 32
+RESERVATION_NS = uuid.UUID("6cf440db-c8b4-566c-99db-e7be17109bdc")
+
+
+def _label(persona_pub: str, slug: str = "worker") -> str:
+    suffix = hashlib.sha256(bytes.fromhex(persona_pub)).hexdigest()[:20]
+    return f"{slug}-{suffix}"
+
+
+def _host(app_label: str, persona_pub: str = PERSONA_A) -> str:
+    return f"{app_label}.{_label(persona_pub)}.serve.auto.network"
+
+
+def _reservation(app_label: str, persona_pub: str = PERSONA_A) -> str:
+    return str(uuid.uuid5(RESERVATION_NS, f"{persona_pub}\0{app_label}"))
+
+
+def _serve_cert(root, serve_key, persona=PERSONA_A):
+    return issue_cert(
+        root, serve_key.public_hex, scope=("tunnel:serve",), org=ORG,
+        subject=Subject("persona", persona),
+        not_before=NOW - 100, not_after=NOW + 30 * DAY,
+    )
+
+
+@contextlib.contextmanager
+def _tunnel(client, clock, root, *, machine_key=None, caps=("host-lease/1",)):
+    serve_key = KeyPair.generate()
+    machine_key = machine_key or KeyPair.generate()
+    raw = hello_mod.build_tunnel_hello_v2(
+        serve_key, _serve_cert(root, serve_key), machine_key=machine_key,
+        org=ORG, ts=clock.now, caps=caps,
+        machine_hello_domain=hello_mod.SERVING_MACHINE_HELLO_DOMAIN,
+    )
+    with client.websocket_connect(f"/t/{ORG}") as ws:
+        ws.send_text(raw)
+        ack = ws.receive_json()
+        assert ack["ok"] is True, ack
+        yield ws, machine_key.public_hex
+
+
+_SEQ = iter(range(100_000))
+
+
+def _ctrl(ws, op, args):
+    correlation = format(next(_SEQ), "032x")
+    ws.send_bytes(encode_frame(
+        FRAME_CTRL, CTRL_CHANNEL_ID,
+        json.dumps({"id": correlation, "op": op, "args": args}).encode(),
+    ))
+    frame = decode_frame(ws.receive_bytes())
+    assert frame.type == FRAME_CTRL
+    reply = json.loads(frame.payload.decode())
+    assert reply["id"] == correlation
+    return reply
+
+
+# ── store ────────────────────────────────────────────────────────────
+
+
+def test_store_round_trips_serving_machine_and_defaults_to_org_wide():
+    store = RegistryStore(":memory:")
+    pinned = LinkGrant(
+        token="a" * 32, org_uuid=ORG, target_uuid=TARGET, target_type="present",
+        meta={}, created_at=NOW, expires_at=None, revoked_at=None,
+        signer_pub=None, subject_kind="org-tunnel", subject_id=None,
+        serving_machine="ef" * 32,
+    )
+    wide = LinkGrant(
+        token="b" * 32, org_uuid=ORG, target_uuid=TARGET, target_type="note",
+        meta={}, created_at=NOW, expires_at=None, revoked_at=None,
+        signer_pub=None, subject_kind="org-tunnel", subject_id=None,
+    )
+    store.create_link(pinned)
+    store.create_link(wide)
+    assert store.get_link("a" * 32).serving_machine == "ef" * 32
+    assert store.get_link("b" * 32).serving_machine is None
+    store.close()
+
+
+def test_store_migrates_pre_pinning_tables(tmp_path):
+    """An existing registry (links without serving_machine, serve_hosts
+    without machine) gains both columns on open; rows survive."""
+    path = tmp_path / "registry.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE links (
+            token TEXT PRIMARY KEY, org_uuid TEXT NOT NULL,
+            target_uuid TEXT NOT NULL, target_type TEXT NOT NULL,
+            invite_ref TEXT, meta TEXT NOT NULL, created_at INTEGER NOT NULL,
+            expires_at INTEGER, expires_at_ms INTEGER, revoked_at INTEGER,
+            signer_pub TEXT, subject_kind TEXT NOT NULL, subject_id TEXT,
+            operation_id TEXT
+        );
+        CREATE TABLE serve_hosts (
+            reservation_id TEXT PRIMARY KEY, org_uuid TEXT NOT NULL,
+            persona_pub TEXT NOT NULL, host TEXT NOT NULL UNIQUE,
+            generation INTEGER NOT NULL, created_at INTEGER NOT NULL
+        );
+        INSERT INTO serve_hosts VALUES ('r1', 'o', 'p', 'h.example', 3, 1);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    store = RegistryStore(str(path))
+    link_cols = {r["name"] for r in store._conn.execute("PRAGMA table_info(links)")}
+    host_cols = {r["name"] for r in store._conn.execute("PRAGMA table_info(serve_hosts)")}
+    assert "serving_machine" in link_cols
+    assert "machine" in host_cols
+    owner = store.get_host_ownership("r1")
+    assert owner.generation == 3 and owner.machine is None
+    store.close()
+
+
+def test_upsert_host_ownership_keeps_a_declaration_across_undeclared_refresh():
+    store = RegistryStore(":memory:")
+    store.upsert_host_ownership(
+        reservation_id="r", org=ORG, persona_pub=PERSONA_A, host="h",
+        now=NOW, machine="ef" * 32,
+    )
+    store.upsert_host_ownership(
+        reservation_id="r", org=ORG, persona_pub=PERSONA_A, host="h", now=NOW,
+    )
+    assert store.get_host_ownership("r").machine == "ef" * 32
+    store.clear_host_ownership_machine("r")
+    assert store.get_host_ownership("r").machine is None
+    store.close()
+
+
+# ── host-register: the declared machine ──────────────────────────────
+
+
+def test_declared_machine_is_recorded_and_must_be_the_tunnels_own(
+    app, client, clock, root,
+):
+    register(client, clock, root, org_uuid=ORG)
+    host, res = _host("app"), _reservation("app")
+    with _tunnel(client, clock, root) as (ws, machine):
+        # A declaration naming a machine this tunnel did not authenticate is
+        # a wrong-machine connector (or a lie): refused before any write.
+        reply = _ctrl(ws, "host-register", {
+            "reservation": res, "host": host, "machine": "ef" * 32,
+        })
+        assert reply["ok"] is False and reply["error"] == "host-owned-elsewhere"
+        assert app.state.store.get_host_ownership(res) is None
+        # Malformed declarations are a bad request, not an ownership verdict.
+        reply = _ctrl(ws, "host-register", {
+            "reservation": res, "host": host, "machine": "not-hex",
+        })
+        assert reply["ok"] is False and reply["error"] == "bad-request"
+
+        reply = _ctrl(ws, "host-register", {
+            "reservation": res, "host": host, "machine": machine,
+        })
+        assert reply["ok"] is True, reply
+        assert app.state.store.get_host_ownership(res).machine == machine
+        assert app.state.host_routes.route(host) is not None
+
+
+def test_pinned_host_refuses_a_sibling_machine_even_after_the_lease_lapses(
+    app, client, clock, root,
+):
+    """The 2026-09-10 split: two same-persona connectors trading the lease
+    for a service only one of them runs. Once machine A declared the host,
+    machine B's (undeclared) register is refused while A is live AND after
+    A's lease is gone — a lapsed lease is not an invitation."""
+    register(client, clock, root, org_uuid=ORG)
+    host, res = _host("app"), _reservation("app")
+    key_a, key_b = KeyPair.generate(), KeyPair.generate()
+    with _tunnel(client, clock, root, machine_key=key_a) as (ws_a, machine_a):
+        assert _ctrl(ws_a, "host-register", {
+            "reservation": res, "host": host, "machine": machine_a,
+        })["ok"] is True
+        with _tunnel(client, clock, root, machine_key=key_b) as (ws_b, machine_b):
+            reply = _ctrl(ws_b, "host-register", {"reservation": res, "host": host})
+            assert reply["ok"] is False
+            assert reply["error"] == "host-owned-elsewhere"
+            # Declaring ITSELF does not help B: the pin is A's until released.
+            reply = _ctrl(ws_b, "host-register", {
+                "reservation": res, "host": host, "machine": machine_b,
+            })
+            assert reply["error"] == "host-owned-elsewhere"
+    # A is gone (tunnel closed -> lease dropped) but the pin stays.
+    assert app.state.host_routes.route(host) is None
+    with _tunnel(client, clock, root, machine_key=key_b) as (ws_b, machine_b):
+        reply = _ctrl(ws_b, "host-register", {
+            "reservation": res, "host": host, "machine": machine_b,
+        })
+        assert reply["ok"] is False and reply["error"] == "host-owned-elsewhere"
+        assert app.state.store.get_host_ownership(res).machine == machine_a
+    # A comes back and simply re-registers: same machine, still its host.
+    with _tunnel(client, clock, root, machine_key=key_a) as (ws_a, machine_a):
+        assert _ctrl(ws_a, "host-register", {
+            "reservation": res, "host": host, "machine": machine_a,
+        })["ok"] is True
+
+
+def test_explicit_release_moves_the_pin_but_never_displaces_a_live_lease(
+    app, client, clock, root,
+):
+    register(client, clock, root, org_uuid=ORG)
+    host, res = _host("app"), _reservation("app")
+    key_a, key_b = KeyPair.generate(), KeyPair.generate()
+    with _tunnel(client, clock, root, machine_key=key_a) as (ws_a, machine_a):
+        assert _ctrl(ws_a, "host-register", {
+            "reservation": res, "host": host, "machine": machine_a,
+        })["ok"] is True
+        with _tunnel(client, clock, root, machine_key=key_b) as (ws_b, machine_b):
+            # B cannot release out from under a live A.
+            reply = _ctrl(ws_b, "host-release", {"reservation": res})
+            assert reply["ok"] is False and reply["error"] == "lease-held"
+            assert app.state.store.get_host_ownership(res).machine == machine_a
+    # A is dead and the service moved to B: B releases (same persona, no
+    # live lease), which clears the pin, then declares itself.
+    with _tunnel(client, clock, root, machine_key=key_b) as (ws_b, machine_b):
+        assert _ctrl(ws_b, "host-release", {"reservation": res})["ok"] is True
+        assert app.state.store.get_host_ownership(res).machine is None
+        assert _ctrl(ws_b, "host-register", {
+            "reservation": res, "host": host, "machine": machine_b,
+        })["ok"] is True
+        assert app.state.store.get_host_ownership(res).machine == machine_b
+        # And now A is the stranger.
+        with _tunnel(client, clock, root, machine_key=key_a) as (ws_a, machine_a):
+            reply = _ctrl(ws_a, "host-register", {
+                "reservation": res, "host": host, "machine": machine_a,
+            })
+            assert reply["error"] == "host-owned-elsewhere"
+
+
+def test_undeclared_register_keeps_persona_only_semantics(app, client, clock, root):
+    """A connector that predates the declaration registers exactly as
+    before: persona ownership, no pin, a sibling may take a lapsed lease."""
+    register(client, clock, root, org_uuid=ORG)
+    host, res = _host("app"), _reservation("app")
+    with _tunnel(client, clock, root) as (ws_a, _):
+        assert _ctrl(ws_a, "host-register", {"reservation": res, "host": host})["ok"] is True
+        assert app.state.store.get_host_ownership(res).machine is None
+    with _tunnel(client, clock, root) as (ws_b, _):
+        assert _ctrl(ws_b, "host-register", {"reservation": res, "host": host})["ok"] is True
+
+
+# ── create-link: the declared serving machine ────────────────────────
+
+
+def test_create_link_pins_to_the_tunnels_machine_and_refuses_any_other(
+    app, client, clock, root,
+):
+    register(client, clock, root, org_uuid=ORG)
+    with _tunnel(client, clock, root, caps=()) as (ws, machine):
+        reply = _ctrl(ws, "create-link", {
+            "target_uuid": TARGET, "target_type": "present",
+            "serving_machine": "ef" * 32,
+        })
+        assert reply["ok"] is False
+        assert "not the machine this tunnel authenticated" in reply["error"]
+
+        reply = _ctrl(ws, "create-link", {
+            "target_uuid": TARGET, "target_type": "present",
+            "serving_machine": "nope",
+        })
+        assert reply["ok"] is False and "64 lowercase hex" in reply["error"]
+
+        pinned = _ctrl(ws, "create-link", {
+            "target_uuid": TARGET, "target_type": "present",
+            "serving_machine": machine,
+        })
+        assert pinned["ok"] is True, pinned
+        assert app.state.store.get_link(pinned["token"]).serving_machine == machine
+
+        wide = _ctrl(ws, "create-link", {
+            "target_uuid": TARGET, "target_type": "note",
+        })
+        assert wide["ok"] is True
+        assert app.state.store.get_link(wide["token"]).serving_machine is None
+
+
+# ── viewer routing ───────────────────────────────────────────────────
+
+
+class _TunnelSocket:
+    def __init__(self):
+        self.frames: list[bytes] = []
+
+    async def send_bytes(self, payload: bytes) -> None:
+        self.frames.append(bytes(payload))
+
+
+class _ViewerSocket:
+    def __init__(self):
+        self.accepted = False
+        self.close_codes: list[int] = []
+
+    async def accept(self):
+        self.accepted = True
+
+    async def receive(self):
+        return {"type": "websocket.disconnect"}
+
+    async def close(self, *, code: int):
+        self.close_codes.append(code)
+
+
+class _Hub:
+    def __init__(self, *tunnels):
+        self._tunnels = list(tunnels)
+        self.least_loaded_calls = 0
+
+    def get(self, org):
+        self.least_loaded_calls += 1
+        return min(self._tunnels, key=lambda t: len(t.channels)) if self._tunnels else None
+
+    def tunnels_for(self, org):
+        return list(self._tunnels)
+
+
+def _link(serving_machine):
+    class _Link:
+        org_uuid = ORG
+        target_type = "present"
+    _Link.serving_machine = serving_machine
+    return _Link()
+
+
+def _opened(sock: _TunnelSocket) -> bool:
+    return any(decode_frame(f).type == FRAME_OPEN for f in sock.frames)
+
+
+def test_pinned_link_routes_only_to_the_declared_machine(monkeypatch):
+    sock_x, sock_y = _TunnelSocket(), _TunnelSocket()
+    tunnel_x = Tunnel(sock_x, ORG, machine="11" * 32)
+    tunnel_y = Tunnel(sock_y, ORG, machine="22" * 32)
+    # X is the least-loaded tunnel; the pin must still choose Y.
+    tunnel_y.channels = {b"a" * 16: object(), b"b" * 16: object()}
+    hub = _Hub(tunnel_x, tunnel_y)
+    monkeypatch.setattr(relay_mod, "_resolve_live_link",
+                        lambda store, token, now: _link("22" * 32))
+
+    ws = _ViewerSocket()
+    asyncio.run(viewer_endpoint(ws, "0" * 32, hub, None, lambda: 0))
+
+    assert ws.accepted
+    assert _opened(sock_y) and not _opened(sock_x)
+    assert hub.least_loaded_calls == 0
+
+
+def test_pinned_link_with_its_machine_offline_is_a_uniform_4404(monkeypatch):
+    sock_x = _TunnelSocket()
+    hub = _Hub(Tunnel(sock_x, ORG, machine="11" * 32))
+    monkeypatch.setattr(relay_mod, "_resolve_live_link",
+                        lambda store, token, now: _link("22" * 32))
+
+    ws = _ViewerSocket()
+    asyncio.run(viewer_endpoint(ws, "0" * 32, hub, None, lambda: 0))
+
+    assert ws.close_codes == [CLOSE_UNKNOWN_LINK]
+    assert not _opened(sock_x)  # never handed to a machine without the content
+
+
+def test_org_wide_link_still_takes_the_least_loaded_tunnel(monkeypatch):
+    sock_x, sock_y = _TunnelSocket(), _TunnelSocket()
+    tunnel_x = Tunnel(sock_x, ORG, machine="11" * 32)
+    tunnel_y = Tunnel(sock_y, ORG, machine="22" * 32)
+    tunnel_y.channels = {b"a" * 16: object()}
+    hub = _Hub(tunnel_x, tunnel_y)
+    monkeypatch.setattr(relay_mod, "_resolve_live_link",
+                        lambda store, token, now: _link(None))
+
+    ws = _ViewerSocket()
+    asyncio.run(viewer_endpoint(ws, "0" * 32, hub, None, lambda: 0))
+
+    assert hub.least_loaded_calls == 1
+    assert _opened(sock_x) and not _opened(sock_y)

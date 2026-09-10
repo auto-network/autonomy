@@ -878,16 +878,44 @@ def _create_link_over_tunnel(org, args, *, timeout: float = 60.0, poll: float = 
     (see _TUNNEL_STARTUP_RETRY_KINDS), so a retry cannot double-create; any
     other failure raises immediately, and the last pre-write failure raises if
     the tunnel never comes up within *timeout*."""
+    return _control_over_tunnel(org, "create-link", args, timeout=timeout, poll=poll)
+
+
+def _control_over_tunnel(org, op, args, *, timeout: float = 60.0,
+                         poll: float = 0.5):
+    """One control op on the org's tunnel with the same fresh-start retry
+    window as a publish: the supervisor may still be launching."""
     from tools.dashboard.link_serving_supervisor import TunnelUnavailable, control
     deadline = time.monotonic() + timeout
     while True:
         try:
-            return control(org, "create-link", args)
+            return control(org, op, args)
         except TunnelUnavailable as exc:
             if getattr(exc, "kind", None) not in _TUNNEL_STARTUP_RETRY_KINDS \
                     or time.monotonic() >= deadline:
                 raise
             time.sleep(poll)
+
+
+def _local_serving_machine(org):
+    """The serving-machine identity THIS machine's connector authenticates
+    to the relay for *org* — ``serving_slot.machine`` of the live connector
+    (its hello machine key pub), or None when the connector cannot say.
+
+    This is the value a machine-pinned grant carries (auto-nh1po). It is
+    deliberately NOT ``autonomy.machine.identity``'s machine_id: the relay
+    enforces pinning against what the hello proved, and the hello proves
+    the serving machine KEY, not the fleet id. A tunnel that never comes up
+    raises TunnelUnavailable exactly as create-link would."""
+    status = _control_over_tunnel(org, "connector-status", {})
+    slot = status.get("serving_slot") if isinstance(status, dict) else None
+    machine = slot.get("machine") if isinstance(slot, dict) else None
+    if isinstance(machine, str) and _MACHINE_HEX_RE.match(machine):
+        return machine
+    return None
+
+
+_MACHINE_HEX_RE = re.compile(r"^[0-9a-f]{64}\Z")
 
 
 async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
@@ -957,6 +985,28 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
         return _fail(
             "could not start the serving tunnel for this publish "
             f"({started.get('reason')})")
+    # auto-nh1po: a link to a MACHINE-LOCAL store (design/present in
+    # experiments.db, mission in the mission_control store — none of them
+    # fleet-synced) can be served only by THIS machine, the one that holds
+    # the content. Declare it: the registry pins the grant and the relay
+    # routes the link to no other member connector. A ``note`` stays
+    # org-wide because the org graph syncs to every member machine.
+    from tools.dashboard.link_channel_key import MACHINE_LOCAL_TARGET_TYPES
+    serving_machine = None
+    if req["target_type"] in MACHINE_LOCAL_TARGET_TYPES:
+        try:
+            serving_machine = await asyncio.to_thread(_local_serving_machine, org)
+        except TunnelUnavailable as exc:
+            return _fail(f"the serving tunnel did not come up in time ({exc})")
+        if serving_machine is None:
+            # Publishing it org-wide would reproduce the split (2026-09-10):
+            # another machine's connector takes the viewer and cannot find
+            # the content. Fail closed and say why.
+            return _fail(
+                "this machine's serving identity is unknown, so a "
+                f"{req['target_type']} link cannot be pinned to it — the "
+                "serving connector did not report its machine")
+        args["serving_machine"] = serving_machine
     try:
         reply = await asyncio.to_thread(_create_link_over_tunnel, org, args)
     except TunnelUnavailable as exc:
@@ -1017,6 +1067,8 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
     }
     if channel_pub is not None:
         grant["channel_pub"] = channel_pub
+    if serving_machine is not None:
+        grant["serving_machine"] = serving_machine
     if req.get("target_type") == "org:join":
         grant["invite_ref"] = req["invite_ref"]
     settings_ops.upsert_by_key(

@@ -102,7 +102,13 @@ CREATE TABLE IF NOT EXISTS links (
     signer_pub   TEXT,
     subject_kind TEXT NOT NULL,
     subject_id   TEXT,
-    operation_id TEXT
+    operation_id TEXT,
+    -- Serving machine key pub (64 hex) of the ONE tunnel machine that may
+    -- serve this link; NULL = org-wide (auto-nh1po). Machine-local target
+    -- stores (design/present/mission) are not fleet-synced, so the relay
+    -- routes such a link only to the tunnel whose authenticated hello
+    -- named this machine.
+    serving_machine TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_links_org ON links (org_uuid);
 
@@ -274,7 +280,13 @@ CREATE TABLE IF NOT EXISTS serve_hosts (
     persona_pub    TEXT NOT NULL,
     host           TEXT NOT NULL UNIQUE,
     generation     INTEGER NOT NULL,
-    created_at     INTEGER NOT NULL
+    created_at     INTEGER NOT NULL,
+    -- The serving machine (hello-authenticated machine key pub) the
+    -- publisher declared for this host (auto-nh1po). Once set, a
+    -- host-register from any other machine — same persona included — is
+    -- refused; only an explicit host-release clears it. NULL: undeclared
+    -- (legacy connectors), persona-only ownership.
+    machine        TEXT
 );
 
 -- DNS-01 challenge TXT values served by the registry's own authoritative
@@ -487,6 +499,8 @@ class HostOwnership:
     host: str
     generation: int
     created_at: int
+    #: Declared serving machine (hello machine key pub) or None.
+    machine: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -505,6 +519,8 @@ class LinkGrant:
     invite_ref: Optional[str] = None
     expires_at_ms: Optional[int] = None
     operation_id: Optional[str] = None
+    #: Serving machine key pub the link is pinned to; None = org-wide.
+    serving_machine: Optional[str] = None
 
     def is_expired_at(self, now_seconds: int) -> bool:
         if self.expires_at_ms is not None:
@@ -684,6 +700,18 @@ class RegistryStore:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_links_org_operation "
             "ON links (org_uuid, operation_id) WHERE operation_id IS NOT NULL"
         )
+        # auto-nh1po: machine-pinned links and hosts. Re-read the columns —
+        # the D19 rebuild above may have just recreated the table.
+        link_cols = {
+            r["name"] for r in self._conn.execute("PRAGMA table_info(links)")
+        }
+        if "serving_machine" not in link_cols:
+            self._conn.execute("ALTER TABLE links ADD COLUMN serving_machine TEXT")
+        host_cols = {
+            r["name"] for r in self._conn.execute("PRAGMA table_info(serve_hosts)")
+        }
+        if host_cols and "machine" not in host_cols:
+            self._conn.execute("ALTER TABLE serve_hosts ADD COLUMN machine TEXT")
 
     @_locked
     def close(self) -> None:
@@ -880,6 +908,7 @@ class RegistryStore:
             invite_ref=row["invite_ref"],
             expires_at_ms=row["expires_at_ms"],
             operation_id=row["operation_id"],
+            serving_machine=row["serving_machine"],
         )
 
     @_locked
@@ -887,8 +916,8 @@ class RegistryStore:
         self._conn.execute(
             "INSERT INTO links (token, org_uuid, target_uuid, target_type, invite_ref, meta,"
             " created_at, expires_at, expires_at_ms, revoked_at,"
-            " signer_pub, subject_kind, subject_id, operation_id)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)",
+            " signer_pub, subject_kind, subject_id, operation_id, serving_machine)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)",
             (
                 grant.token,
                 grant.org_uuid,
@@ -903,6 +932,7 @@ class RegistryStore:
                 grant.subject_kind,
                 grant.subject_id,
                 grant.operation_id,
+                grant.serving_machine,
             ),
         )
         self._conn.commit()
@@ -1082,8 +1112,9 @@ class RegistryStore:
             self._conn.execute(
                 "INSERT INTO links (token, org_uuid, target_uuid, target_type,"
                 " invite_ref, meta, created_at, expires_at, expires_at_ms,"
-                " revoked_at, signer_pub, subject_kind, subject_id, operation_id)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)",
+                " revoked_at, signer_pub, subject_kind, subject_id, operation_id,"
+                " serving_machine)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)",
                 (
                     grant.token,
                     grant.org_uuid,
@@ -1098,6 +1129,7 @@ class RegistryStore:
                     grant.subject_kind,
                     grant.subject_id,
                     grant.operation_id,
+                    grant.serving_machine,
                 ),
             )
             self._conn.execute(
@@ -1344,6 +1376,7 @@ class RegistryStore:
             host=row["host"],
             generation=row["generation"],
             created_at=row["created_at"],
+            machine=row["machine"],
         )
 
     @_locked
@@ -1352,7 +1385,7 @@ class RegistryStore:
     ) -> Optional["HostOwnership"]:
         row = self._conn.execute(
             "SELECT reservation_id, org_uuid, persona_pub, host, generation,"
-            " created_at FROM serve_hosts WHERE reservation_id = ?",
+            " created_at, machine FROM serve_hosts WHERE reservation_id = ?",
             (reservation_id,),
         ).fetchone()
         return self._host_ownership_row(row)
@@ -1363,10 +1396,21 @@ class RegistryStore:
     ) -> Optional["HostOwnership"]:
         row = self._conn.execute(
             "SELECT reservation_id, org_uuid, persona_pub, host, generation,"
-            " created_at FROM serve_hosts WHERE host = ?",
+            " created_at, machine FROM serve_hosts WHERE host = ?",
             (host,),
         ).fetchone()
         return self._host_ownership_row(row)
+
+    @_locked
+    def clear_host_ownership_machine(self, reservation_id: str) -> None:
+        """Forget the declared serving machine on an explicit host-release
+        (auto-nh1po), so the persona can re-declare the host from another
+        machine. Ownership itself (persona, host) is untouched."""
+        self._conn.execute(
+            "UPDATE serve_hosts SET machine = NULL WHERE reservation_id = ?",
+            (reservation_id,),
+        )
+        self._conn.commit()
 
     @_locked
     def upsert_serve_challenge(
@@ -1561,18 +1605,24 @@ class RegistryStore:
         persona_pub: str,
         host: str,
         now: int,
+        machine: Optional[str] = None,
     ) -> int:
         """Record/refresh ownership and advance the lease generation.
 
         Callers validate persona binding and conflicts BEFORE this write;
         the method itself only enforces row identity. Returns the new
-        generation — monotonic across restarts by construction."""
+        generation — monotonic across restarts by construction.
+
+        ``machine`` (auto-nh1po) is the declared serving machine; a None
+        keeps whatever the row already holds — an undeclared registration
+        never erases a declaration."""
         self._conn.execute(
             "INSERT INTO serve_hosts (reservation_id, org_uuid, persona_pub,"
-            " host, generation, created_at) VALUES (?, ?, ?, ?, 1, ?)"
+            " host, generation, created_at, machine) VALUES (?, ?, ?, ?, 1, ?, ?)"
             " ON CONFLICT (reservation_id) DO UPDATE SET"
-            " generation = serve_hosts.generation + 1",
-            (reservation_id, org, persona_pub, host, now),
+            " generation = serve_hosts.generation + 1,"
+            " machine = COALESCE(excluded.machine, serve_hosts.machine)",
+            (reservation_id, org, persona_pub, host, now, machine),
         )
         self._conn.commit()
         row = self._conn.execute(

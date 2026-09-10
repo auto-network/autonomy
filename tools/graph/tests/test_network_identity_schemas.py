@@ -784,3 +784,35 @@ def _smuggled_org_key_armor() -> str:
     return "\n".join([ARMOR_BEGIN, body, ARMOR_END])
 
 
+
+
+# ── link-grant serving machine (auto-nh1po) ───────────────────────────
+
+
+def test_link_grant_accepts_a_serving_machine_and_org_wide_absence():
+    payload = link_grant_payload()
+    validate_payload(ni.NETWORK_LINK_GRANT_SET_ID, ni.NETWORK_LINK_GRANT_REVISION, payload)
+    payload["serving_machine"] = "ef" * 32
+    validate_payload(ni.NETWORK_LINK_GRANT_SET_ID, ni.NETWORK_LINK_GRANT_REVISION, payload)
+    payload["serving_machine"] = None  # explicit org-wide
+    validate_payload(ni.NETWORK_LINK_GRANT_SET_ID, ni.NETWORK_LINK_GRANT_REVISION, payload)
+
+
+@pytest.mark.parametrize("value", ["EF" * 32, "ef" * 31, "ef" * 33, "", 7])
+def test_link_grant_rejects_a_malformed_serving_machine(value):
+    payload = link_grant_payload()
+    payload["serving_machine"] = value
+    with pytest.raises(SchemaValidationError, match="serving_machine"):
+        validate_payload(
+            ni.NETWORK_LINK_GRANT_SET_ID, ni.NETWORK_LINK_GRANT_REVISION, payload,
+        )
+
+
+def test_link_grant_stored_before_pinning_reads_back_org_wide(graph_db_env):
+    payload = link_grant_payload()
+    ops.add_setting(ni.NETWORK_LINK_GRANT_SET_ID, 5, TOKEN, payload, org=ops.CALLER_ORG)
+    current = ops.read_set(
+        ni.NETWORK_LINK_GRANT_SET_ID, org=ops.CALLER_ORG,
+        target_revision=ni.NETWORK_LINK_GRANT_REVISION,
+    ).members[0]
+    assert current.payload.get("serving_machine") is None

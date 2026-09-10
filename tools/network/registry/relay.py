@@ -1226,8 +1226,19 @@ class HostRoutes:
             return ""
         return reservation
 
-    def register(self, tunnel: "Tunnel", reservation: str, host: str) -> dict:
-        """host-register: the authenticated desired-state advertisement."""
+    def register(self, tunnel: "Tunnel", reservation: str, host: str,
+                 machine: "str | None" = None) -> dict:
+        """host-register: the authenticated desired-state advertisement.
+
+        ``machine`` (auto-nh1po) is the publisher's DECLARED serving
+        machine for this host. It must be the machine this very tunnel
+        authenticated in its hello — a connector cannot declare a machine
+        it is not — and once recorded on the ownership row, a register from
+        any other machine of the same persona is refused until an explicit
+        host-release clears it. A serve link points at a live port on ONE
+        machine; the relay must never let a sibling connector that does not
+        run the service take the lease (two connectors split viewers on
+        2026-09-10, graph://96a4aa40-1c9)."""
         try:
             zoned = validate_zone_host_registration(
                 host, reservation, tunnel.org, self._store.active_serve_zones()
@@ -1240,8 +1251,23 @@ class HostRoutes:
                 )
         except HostValidationError as exc:
             raise _CtrlError("label-invalid") from exc
+        if machine is not None and machine != tunnel.machine:
+            # The declaration names a machine that is not the one this
+            # tunnel proved: a wrong-machine connector reading the
+            # replicated publication — or a lie. Either way, not this host.
+            raise _CtrlError("host-owned-elsewhere")
         owner = self._store.get_host_ownership(reservation)
         if owner is not None and owner.persona_pub != tunnel.persona_pub:
+            raise _CtrlError("host-owned-elsewhere")
+        if (
+            owner is not None
+            and owner.machine is not None
+            and owner.machine != tunnel.machine
+        ):
+            # Same persona, different machine: the host is pinned to the
+            # machine that declared it. Sticky regardless of lease liveness
+            # (a lapsed lease on the declared machine is not an invitation)
+            # — only host-release moves it.
             raise _CtrlError("host-owned-elsewhere")
         if owner is not None and owner.host != host:
             # One immutable serving label per persona: a different slug
@@ -1273,6 +1299,7 @@ class HostRoutes:
             persona_pub=tunnel.persona_pub,
             host=host,
             now=int(self._now_fn()),
+            machine=machine,
         )
         expires_at = int(self._now_fn()) + HOST_LEASE_TTL
         self._leases[reservation] = _HostLease(
@@ -1329,6 +1356,10 @@ class HostRoutes:
         if self._metrics is not None:
             self._metrics.lease_event(tunnel.org, "release")
         self._drop(reservation)
+        # An explicit release is the one act that un-pins the host from its
+        # declared machine (auto-nh1po): the persona may now declare it from
+        # another machine (the service moved). A dead lease never does this.
+        self._store.clear_host_ownership_machine(reservation)
         return {}
 
     def drop_connection(self, tunnel: "Tunnel") -> None:
@@ -1542,10 +1573,29 @@ def _ctrl_create_link(tunnel: "Tunnel", args: dict, store: RegistryStore,
         raise _CtrlError("meta.ttl must be a positive integer of seconds")
     if absolute_expires_at is not None and link_ttl is not None:
         raise _CtrlError("org:join expires_at and meta.ttl are mutually exclusive")
+    # auto-nh1po: a link to a MACHINE-LOCAL target store is pinned to the
+    # one machine that holds the content. The publisher declares it, and it
+    # must be the machine THIS tunnel authenticated — the publish frame rides
+    # the publisher's own connector, so any other value is a wrong-machine
+    # connector or a lie, and the relay refuses rather than mis-route.
+    serving_machine = args.get("serving_machine")
+    if serving_machine is not None:
+        if (
+            not isinstance(serving_machine, str)
+            or not _MACHINE_HEX_RE.match(serving_machine)
+        ):
+            raise _CtrlError("serving_machine must be 64 lowercase hex")
+        if serving_machine != tunnel.machine:
+            raise _CtrlError(
+                "serving_machine is not the machine this tunnel authenticated"
+            )
 
     central = _central_operation(tunnel, args, store, witness_key)
     if central is not None:
-        allowed = {"target_uuid", "target_type", "meta"} | _CENTRAL_LINK_FIELDS
+        allowed = (
+            {"target_uuid", "target_type", "meta", "serving_machine"}
+            | _CENTRAL_LINK_FIELDS
+        )
         if set(args) - allowed:
             raise _CtrlError("Central create-link carries unknown or local-only fields")
         if central.operation != "publish":
@@ -1587,6 +1637,7 @@ def _ctrl_create_link(tunnel: "Tunnel", args: dict, store: RegistryStore,
             subject_kind=central.subject_kind,
             subject_id=central.subject_id,
             operation_id=args["operation_id"],
+            serving_machine=serving_machine,
         )
         status, completed = store.execute_publish_operation(
             tunnel.org, args["operation_id"], grant, now=now
@@ -1616,6 +1667,7 @@ def _ctrl_create_link(tunnel: "Tunnel", args: dict, store: RegistryStore,
             signer_pub=None,
             subject_kind="org-tunnel",
             subject_id=None,
+            serving_machine=serving_machine,
         )
     )
     result = {"token": token, "url": f"{base_url}/l/{token}"}
@@ -1692,6 +1744,13 @@ _HOST_OP_ARGS = {
     "host-renew-all": frozenset(),
     "host-release": frozenset({"reservation"}),
 }
+#: Optional args per host op. ``machine`` on host-register is the declared
+#: serving machine (auto-nh1po); a connector that predates it sends the
+#: exact required set and registers undeclared.
+_HOST_OP_OPTIONAL_ARGS = {
+    "host-register": frozenset({"machine"}),
+}
+_MACHINE_HEX_RE = _re.compile(r"^[0-9a-f]{64}\Z")
 
 # -- auto-bhs3c: serve.dns01.* ops -----------------------------------------
 
@@ -1889,11 +1948,21 @@ def _ctrl_host_op(tunnel: "Tunnel", op: str, args: dict,
         raise _CtrlError("not-authorized")
     if CAP_HOST_LEASE not in tunnel.caps:
         raise _CtrlError("not-authorized")
-    if not isinstance(args, dict) or set(args) != _HOST_OP_ARGS[op]:
+    required = _HOST_OP_ARGS[op]
+    optional = _HOST_OP_OPTIONAL_ARGS.get(op, frozenset())
+    if (
+        not isinstance(args, dict)
+        or not required <= set(args) <= (required | optional)
+    ):
         raise _CtrlError("bad-request")
     if op == "host-register":
+        machine = args.get("machine")
+        if machine is not None and (
+            not isinstance(machine, str) or not _MACHINE_HEX_RE.match(machine)
+        ):
+            raise _CtrlError("bad-request")
         return host_routes.register(
-            tunnel, args["reservation"], args["host"]
+            tunnel, args["reservation"], args["host"], machine=machine
         )
     if op == "host-renew":
         return host_routes.renew(
@@ -2191,7 +2260,22 @@ async def viewer_endpoint(
     # accepted removal latency). Closing it here would interrupt an honest
     # member who has not yet answered the push. Enforcement is the deadline
     # in push_reprove_and_enforce, which closes only a still-behind tunnel.
-    tunnel = hub.get(link.org_uuid) if link is not None else None
+    tunnel = None
+    if link is not None:
+        serving_machine = getattr(link, "serving_machine", None)
+        if serving_machine is not None:
+            # auto-nh1po: a machine-pinned link (design/present/mission —
+            # stores that do not fleet-sync) routes ONLY to the tunnel whose
+            # authenticated hello named the declared machine. Any other
+            # member connector would accept the channel and then fail to
+            # find the content. Declared machine offline == no tunnel.
+            tunnel = next(
+                (t for t in hub.tunnels_for(link.org_uuid)
+                 if t.machine == serving_machine),
+                None,
+            )
+        else:
+            tunnel = hub.get(link.org_uuid)  # org-wide: least-loaded
     if link is None or tunnel is None:
         # The WebSocket uses one close code; the bootloader has already
         # resolved the envelope, so it can distinguish an invalid token from
@@ -2200,6 +2284,12 @@ async def viewer_endpoint(
             logger.warning(
                 "relay dial refused (4404): link not live (unknown/expired/"
                 "revoked/dead org binding), token=%s", token,
+            )
+        elif getattr(link, "serving_machine", None) is not None:
+            logger.warning(
+                "relay dial refused (4404): declared serving machine has no "
+                "tunnel parked, token=%s org=%s machine=%s",
+                token, link.org_uuid, link.serving_machine[:16],
             )
         else:
             logger.warning(
