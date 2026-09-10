@@ -60,6 +60,36 @@ from tools.network.relaykit.direct import new_session_id
 
 logger = logging.getLogger(__name__)
 
+#: (kind, scope) -> monotonic seconds of the last telemetry-failure log.
+_TELEMETRY_FAILURE_LOGGED: dict = {}
+_TELEMETRY_FAILURE_INTERVAL_S = 300.0
+
+
+def _log_telemetry_failure(kind: str, scope, exc: BaseException) -> None:
+    """Report a telemetry write that failed, at most once per five minutes.
+
+    Recording must never fail a transfer — that part of the old
+    ``contextlib.suppress`` was right. Failing INVISIBLY was not: a
+    subtractive schema change made every write on home invalid for five
+    hours (2026-09-09 18:40Z onward), and because both call sites swallowed
+    the exception the only symptom was a chart that stopped moving while
+    sync stayed healthy. There was not one line to grep for.
+
+    Rate-limited because the failure mode is total and persistent: an
+    unthrottled log would be the outage's second symptom.
+    """
+    key = (kind, str(scope))
+    now = time.monotonic()
+    last = _TELEMETRY_FAILURE_LOGGED.get(key)
+    if last is not None and (now - last) < _TELEMETRY_FAILURE_INTERVAL_S:
+        return
+    _TELEMETRY_FAILURE_LOGGED[key] = now
+    logger.warning(
+        "fleet sync telemetry (%s) scope %r is NOT being recorded: %s: %s. "
+        "Transfers are unaffected; the record is not.",
+        kind, scope, type(exc).__name__, exc,
+    )
+
 FLEET_SYNC_PROTOCOL_VERSION = 4
 #: The server answers in the requester's declared version, so a v3 puller
 #: against a v4 server syncs unchanged. v3 repeats the full transaction
@@ -2455,7 +2485,15 @@ class FleetSyncScheduler:
                         0,
                         (time.monotonic_ns() - started_monotonic_ns) // 1_000_000,
                     )
-                    with contextlib.suppress(Exception):
+                    # Telemetry must never fail a transfer, but it must not
+                    # fail SILENTLY either. A suppress here hid a total
+                    # recording outage for five hours on home (2026-09-09
+                    # 18:40Z onward, auto-0905-002201): every write was
+                    # rejected as undeclared-field and the operator's only
+                    # signal was a frozen chart, while sync itself was
+                    # healthy. Rate-limited so a persistent failure cannot
+                    # become the log.
+                    try:
                         await asyncio.to_thread(
                             recorder,
                             peer_pub,
@@ -2469,6 +2507,8 @@ class FleetSyncScheduler:
                             scope=scope,
                             **stats,
                         )
+                    except Exception as exc:
+                        _log_telemetry_failure("serve", scope, exc)
 
         return self._observed(response(), telemetry_channel)
 
@@ -2526,10 +2566,12 @@ class FleetSyncScheduler:
             duration_ms = max(
                 0, (time.monotonic_ns() - started_monotonic_ns) // 1_000_000,
             )
-            with contextlib.suppress(Exception):
+            try:
                 await asyncio.to_thread(
                     recorder, peer_pub, duration_ms=duration_ms, **telemetry,
                 )
+            except Exception as exc:
+                _log_telemetry_failure("after-serve", scope, exc)
         # Retire transaction rows every active peer has acknowledged.
         # Best-effort maintenance: a failure is logged, never raised. A
         # solo roster prunes nothing (acknowledged_journal_floor returns
