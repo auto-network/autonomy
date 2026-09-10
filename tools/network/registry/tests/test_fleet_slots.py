@@ -67,3 +67,15 @@ def test_fleet_open_requires_the_negotiated_capability(client, clock, root, boun
     finally:
         a.__exit__(None, None, None)
         b.__exit__(None, None, None)
+
+
+def test_fleet_pairs_reports_only_this_orgs_custody(client, clock, root, bound_org):
+    a, _ = _open(client, clock, root, ORG, KeyPair.generate(), caps=(CAP_FLEET_DIRECTED_STREAM,))
+    try:
+        reply = ctrl(a, "4" * 32, "fleet-pairs", {})
+        assert reply["ok"] is True, reply
+        assert {k: reply[k] for k in ("pairs", "queued_bytes", "queued_slots", "outstanding_bytes")} == {
+            "pairs": 0, "queued_bytes": 0, "queued_slots": 0, "outstanding_bytes": 0}
+        assert ctrl(a, "5" * 32, "fleet-pairs", {"org": ORG})["ok"] is False
+    finally:
+        a.__exit__(None, None, None)

@@ -347,20 +347,26 @@ class DirectedStreamBroker:
             if pair.source.tunnel is tunnel or pair.destination.tunnel is tunnel
         ]
 
-    def snapshot(self) -> dict:
-        """Operator/test readout: counts and retained custody, never payload."""
+    def snapshot(self, org: Optional[str] = None) -> dict:
+        """Operator/test readout: counts and retained custody, never payload.
+        With *org*, only pairs whose source tunnel is in that org — what an
+        authenticated member may ask about (the ``fleet-pairs`` control op)."""
+        pairs = [
+            pair for pair in self._pairs.values()
+            if org is None or pair.source.tunnel.org == org
+        ]
+        schedulers = (
+            len(self._schedulers) if org is None
+            else len({id(leg.tunnel) for pair in pairs for leg in pair.legs
+                      if id(leg.tunnel) in self._schedulers})
+        )
         return {
-            "pairs": len(self._pairs),
-            "schedulers": len(self._schedulers),
-            "queued_bytes": sum(
-                leg.queued_bytes for pair in self._pairs.values() for leg in pair.legs
-            ),
-            "queued_slots": sum(
-                leg.queued_slots for pair in self._pairs.values() for leg in pair.legs
-            ),
+            "pairs": len(pairs),
+            "schedulers": schedulers,
+            "queued_bytes": sum(leg.queued_bytes for pair in pairs for leg in pair.legs),
+            "queued_slots": sum(leg.queued_slots for pair in pairs for leg in pair.legs),
             "outstanding_bytes": sum(
-                leg.receipts.outstanding_bytes
-                for pair in self._pairs.values() for leg in pair.legs
+                leg.receipts.outstanding_bytes for pair in pairs for leg in pair.legs
             ),
         }
 
