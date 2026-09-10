@@ -89,6 +89,34 @@ def test_a_uuid_shaped_value_is_still_a_valid_filename(tmp_path):
     assert (tmp_path / "2d4b90cb-1e89-452b-82cb-68ca44fd8e52.db").exists()
 
 
+@pytest.mark.parametrize("stringified", ["None", "none", "NULL", "null",
+                                         "nil", "undefined"])
+def test_a_stringified_absence_is_refused(stringified, tmp_path):
+    """THE MECHANISM THAT ACTUALLY MINTED orgs/None.db.
+
+    The shape guard catches `None` the object. A missing value usually reaches
+    a filename already stringified — through an f-string or a str() on the way
+    to a path — and `_org_db_path("None")` happily returned `orgs/None.db`.
+    sjc-2 still carries that file's 4.1 MB WAL.
+
+    Found by verifying my own claim that `is_org_slug` had three consumers: it
+    had two, and `_org_db_path` was the third answer to the same question in the
+    same module. `is_org_slug` rejected these strings all along.
+    """
+    with pytest.raises(ValueError) as exc:
+        _org_db_path(stringified, tmp_path)
+    assert "stringified absence" in str(exc.value)
+    assert not list(tmp_path.rglob(f"{stringified}*"))
+
+
+@pytest.mark.parametrize("slug", ["nonexistent-org", "nullify", "nilsson",
+                                  "none-of-the-above"])
+def test_a_real_slug_that_merely_starts_like_one_is_fine(slug, tmp_path):
+    """The refusal is an exact-match list, not a prefix. An org legitimately
+    named `nullify` must not be collateral."""
+    assert _org_db_path(slug, tmp_path).name == f"{slug}.db"
+
+
 def test_the_refusal_names_the_caller_as_the_bug(tmp_path):
     """The message has to send a reader to the call site. A path-shaped value
     formatted from a None is invisible; the error is the only thing that makes
