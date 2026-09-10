@@ -29,6 +29,7 @@ state cannot be accidentally mutated. Pooled via ``GraphDB.for_org``.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 from pathlib import Path
@@ -271,8 +272,14 @@ def _filter_existing_peers(
 # ── Peer-DB opening ──────────────────────────────────────────
 
 
+#: Peer identifiers already reported as unusable, so a per-tick loop says it
+#: once rather than on every broadcast.
+_UNUSABLE_PEERS: set = set()
+_logger = logging.getLogger(__name__)
+
+
 def open_peer_db(slug: str) -> GraphDB | None:
-    """Open a peer DB read-only via the pool. ``None`` if file missing.
+    """Open a peer DB read-only via the pool. ``None`` if unopenable.
 
     Pool keyed on ``(slug, 'ro')``; the returned instance is shared
     across calls for this process lifetime. Callers MUST NOT close it —
@@ -284,6 +291,35 @@ def open_peer_db(slug: str) -> GraphDB | None:
         # No file, or a file another component created ahead of the graph
         # schema (fleet enrollment writes its join-state table into the
         # machine store before any GraphDB open): no settings to read yet.
+        return None
+    except ValueError as exc:
+        # AN UNUSABLE PEER IDENTIFIER IS NOT A MISSING FILE, and must not be
+        # fatal here. `_org_db_path` refuses a slug that cannot be a filename
+        # — None, empty, or uuid-shaped — and a peer list naming a UUID is a
+        # DATA defect that predates that guard: home's orgs/ still carries the
+        # `2d4b90cb-….db` this path had been opening read-only all along, with
+        # seventy replicated rows in it.
+        #
+        # Raising from here froze home's dashboard. This runs inside
+        # SessionMonitor._broadcast_registry, so every replacement worker died
+        # at startup ("Application startup failed. Exiting.") while the
+        # zero-downtime supervisor kept the incumbent serving hours-old code —
+        # which also meant no later commit, including the fix, could reach that
+        # machine. Found by host-0906-222509 within two minutes of the guard
+        # landing, 2026-09-10.
+        #
+        # Skipping is not hiding: the peer is reported once per process and the
+        # underlying subscription row stays broken and findable. Resolving a
+        # uuid to a slug here would be worse — it would make the malformed
+        # entry work and entrench it.
+        if slug not in _UNUSABLE_PEERS:
+            _UNUSABLE_PEERS.add(slug)
+            _logger.warning(
+                "cross-org: skipping peer %r — it is not a usable organization "
+                "slug (%s). The peer list carries an identifier no database can "
+                "be named by; fix the subscription row. Reads continue without "
+                "this peer.", slug, exc,
+            )
         return None
 
 
