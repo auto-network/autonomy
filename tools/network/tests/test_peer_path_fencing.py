@@ -186,6 +186,32 @@ def test_every_code_the_carrier_defines_has_a_decision():
         assert c.reset(MINE, code) in (RETRY, STOP)
 
 
+def test_a_code_we_have_never_heard_of_retries_and_is_recorded():
+    """Their wire module defines 3 (overflow) and 4 (byte budget) beside the
+    five the fleet contract lists, and may grow more. An allowlist of
+    retryable codes fails closed into permanent silence every time the other
+    side adds one; a stop-list fails into a bounded retry. Wrong for a truly
+    terminal condition, but the envelope saturates, so the cost is a slow poll
+    rather than a storm — against a permanent silent give-up."""
+    c = _controller()
+    c.opened(MINE)
+    assert c.reset(MINE, 3) == RETRY
+    c.opened(MINE)
+    assert c.reset(MINE, 4) == RETRY
+    c.opened(MINE)
+    assert c.reset(MINE, 99) == RETRY
+    assert c.unknown_resets() == [3, 4, 99], "and it is visible, not silent"
+
+
+def test_known_codes_are_not_recorded_as_unknown():
+    c = _controller()
+    for code in (RESET_ORDERLY, RESET_OPEN_TIMEOUT, RESET_ROUTE_RELEASED,
+                 RESET_TUNNEL_LOST, RESET_PROTOCOL):
+        c.opened(MINE)
+        c.reset(MINE, code)
+    assert c.unknown_resets() == []
+
+
 def test_a_transport_fault_retries_and_touches_no_pair():
     """auto-fh2nv raises a bare ConnectionError when the dial never reached
     admission. No pair was minted, so there is nothing to fence and nothing to
