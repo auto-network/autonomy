@@ -54,23 +54,29 @@ CAP_FLEET_DIRECTED_STREAM = "fleet-directed-stream/1"
 FLEET_STREAM_VERSION = 1
 FLEET_STREAM_KIND = "fleet-stream"
 
-#: The receive window an endpoint offers by default, per direction.
+#: The limits below are the contract's (graph://76721e75-73c, "Limits"),
+#: decided from the two-leg soak. Only the receive window is operator
+#: tuning: it is the per-pair throughput lever on a real RTT (about
+#: window/RTT), and the WAN figure that would fix it is not measured yet.
+#: Everything else is a constant of the contract, not a knob.
 #: Env: AUTONOMY_FLEET_STREAM_WINDOW_BYTES / _SLOTS.
 FLEET_STREAM_WINDOW_BYTES = _env_int("AUTONOMY_FLEET_STREAM_WINDOW_BYTES", 256 * 1024)
 FLEET_STREAM_WINDOW_SLOTS = _env_int("AUTONOMY_FLEET_STREAM_WINDOW_SLOTS", 32)
 #: The most a leg may offer; the relay refuses larger open-oks because the
 #: offer is what bounds relay custody for that direction.
-FLEET_STREAM_MAX_WINDOW_BYTES = _env_int("AUTONOMY_FLEET_STREAM_MAX_WINDOW_BYTES", 1024 * 1024)
-FLEET_STREAM_MAX_WINDOW_SLOTS = _env_int("AUTONOMY_FLEET_STREAM_MAX_WINDOW_SLOTS", 256)
+FLEET_STREAM_MAX_WINDOW_BYTES = 1024 * 1024
+FLEET_STREAM_MAX_WINDOW_SLOTS = 256
 #: Largest reassembled endpoint message. The record layer emits 128 KiB
-#: records; this leaves room for framing and the hellos, and bounds what a
-#: peer can make an endpoint retain before a message completes.
-FLEET_STREAM_MAX_MESSAGE = _env_int("AUTONOMY_FLEET_STREAM_MAX_MESSAGE", 256 * 1024)
-#: Admission caps, counted BEFORE any pair state is allocated.
-FLEET_PAIRS_PER_TUNNEL = _env_int("AUTONOMY_FLEET_PAIRS_PER_TUNNEL", 64)
-FLEET_PAIRS_PER_PROCESS = _env_int("AUTONOMY_FLEET_PAIRS_PER_PROCESS", 256)
+#: records; this leaves room for framing and the hellos, and with the
+#: credit-on-absorption rule bounds endpoint retention at window + one
+#: message.
+FLEET_STREAM_MAX_MESSAGE = 256 * 1024
+#: Admission caps, counted BEFORE any pair state is allocated: worst-case
+#: relay custody is pairs × 2 directions × offered window.
+FLEET_PAIRS_PER_TUNNEL = 64
+FLEET_PAIRS_PER_PROCESS = 256
 #: Seconds the relay waits for both open-oks before resetting the offer.
-FLEET_OPEN_DEADLINE_S = float(_env_int("AUTONOMY_FLEET_OPEN_DEADLINE_S", 10))
+FLEET_OPEN_DEADLINE_S = 10.0
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}\Z")
 _HEX32 = re.compile(r"^[0-9a-f]{32}\Z")
