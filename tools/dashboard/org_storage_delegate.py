@@ -45,6 +45,43 @@ def prepare(org: str) -> dict:
     }
 
 
+def status(*, warm: bool, now_ms: int) -> dict:
+    """Signed-in profile status from public metadata; never open signing keys."""
+    from tools.dashboard.signon_preparation import organization_plans
+
+    organizations = []
+    for entry, _ in organization_plans():
+        org = entry["slug"]
+        metadata = prepare(org)["delegate_metadata"]
+        remaining = metadata.get("expires_at", 0) - now_ms
+        if not metadata.get("key_exists"):
+            state = "missing"
+        elif remaining <= 0:
+            state = "expired"
+        elif remaining < REMINT_BELOW_MS:
+            state = "renew"
+        else:
+            state = "ready"
+        organizations.append({"org": org, "status": state,
+                              "expires_at": metadata.get("expires_at"),
+                              "days_remaining": max(0, remaining // 86400000)})
+    problems = [row for row in organizations if row["status"] != "ready"]
+    detail = "Personal vault is warm." if warm else "Personal vault is locked."
+    labels = {"missing": "key missing", "expired": "key expired", "renew": "renewal due"}
+    if organizations:
+        detail += " " + "; ".join(
+            f'{row["org"]}: {row["days_remaining"]} days remaining'
+            if row["status"] == "ready" else f'{row["org"]}: {labels[row["status"]]}'
+            for row in organizations) + "."
+    if problems or not warm:
+        detail += " Unlock with your root to recover or renew the keys."
+    states = {row["status"] for row in problems}
+    value = ("Locked" if not warm else "Missing" if "missing" in states else
+             "Expired" if "expired" in states else "Renew" if problems else "Running")
+    return {"needs": bool(problems) or not warm, "value": value,
+            "detail": detail, "organizations": organizations}
+
+
 def signing_key(org: str):
     """Open the target organization's existing audited key on demand."""
     path = org_ledger_db_path(org) if org else None
