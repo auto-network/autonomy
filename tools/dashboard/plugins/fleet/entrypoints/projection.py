@@ -56,6 +56,10 @@ class ProjectionInputs:
     local_verdict: Mapping | None = None
     serve_cert: Mapping | None = None
     tunnel_serving: bool | None = None
+    #: Labels of the provisioned scopes that are NOT serving. Empty when
+    #: tunnel_serving is True; naming them is what turns "something is wrong"
+    #: into "anchore is wrong".
+    tunnel_scopes_down: tuple = ()
 
 
 def _peer_rows(epoch: str | None) -> dict[str, dict]:
@@ -146,13 +150,22 @@ def _load_inputs(*, now_ms: int) -> ProjectionInputs:
     # The same live handshake probe the profile panel's Tunnel indicator uses
     # (unlock-state): True only when the connector child reports a completed
     # tunnel handshake. None when the probe is unavailable.
+    # ASK EVERY PROVISIONED SCOPE, not only personal. This card said
+    # "Tunnel: Serving" on sjc-2 while three org connectors were dead, because
+    # serving() with no argument means the personal scope — the identical
+    # defect the profile tray's Tunnel tile had, in the second of its two
+    # callers. Both now go through one helper so they cannot disagree.
     tunnel_serving = None
+    tunnel_scopes_down: tuple = ()
     try:
-        from tools.dashboard.link_serving_supervisor import get_supervisor
+        from tools.dashboard.link_serving_supervisor import scopes_not_serving
 
-        tunnel_serving = bool(get_supervisor().serving())
+        down = scopes_not_serving()
+        tunnel_scopes_down = tuple(down)
+        tunnel_serving = not down
     except Exception:
         tunnel_serving = None
+        tunnel_scopes_down = ()
     return ProjectionInputs(
         server_time=now_ms,
         root_pub=root_pub,
@@ -174,6 +187,7 @@ def _load_inputs(*, now_ms: int) -> ProjectionInputs:
         local_verdict=local_verdict,
         serve_cert=serve_cert,
         tunnel_serving=tunnel_serving,
+        tunnel_scopes_down=tunnel_scopes_down,
     )
 
 
@@ -604,6 +618,7 @@ def project(inputs: ProjectionInputs) -> dict:
             cert_not_after * 1000 if isinstance(cert_not_after, int) else None
         ),
         "tunnelServing": inputs.tunnel_serving,
+        "tunnelScopesDown": list(inputs.tunnel_scopes_down),
         "verdictTopLine": verdict.get("top_line"),
     }
     from tools.network import build_version

@@ -41,6 +41,7 @@ def _inputs(
     machine_names=None, invitation_publication=None,
     publishing_org="autonomy", telemetry_rows=None,
     local_verdict=None, serve_cert=None, tunnel_serving=None,
+    tunnel_scopes_down=(),
 ):
     root = ROOT
     return ProjectionInputs(
@@ -71,6 +72,7 @@ def _inputs(
         local_verdict=local_verdict,
         serve_cert=serve_cert,
         tunnel_serving=tunnel_serving,
+        tunnel_scopes_down=tunnel_scopes_down,
     )
 
 
@@ -363,6 +365,7 @@ def test_local_machine_block_reports_probe_facts_or_stays_null():
         "certStatus": None,
         "certValidUntil": None,
         "tunnelServing": None,
+        "tunnelScopesDown": [],
         "verdictTopLine": None,
     }
 
@@ -383,5 +386,20 @@ def test_local_machine_block_reports_probe_facts_or_stays_null():
         "certStatus": "ok",
         "certValidUntil": 1_777_086_400_000,
         "tunnelServing": False,
+        "tunnelScopesDown": [],
         "verdictTopLine": "LOCKED",
     }
+
+
+def test_the_card_names_the_scopes_that_are_not_serving():
+    """The defect this replaces: the card asked serving() with no argument,
+    which means personal, so three dead org connectors on sjc-2 rendered
+    "Tunnel: Serving". Naming them is what turns "something is wrong" into
+    "anchore is wrong"."""
+    view = project(_inputs(
+        entries=(LOCAL_ENTRY,),
+        tunnel_serving=False,
+        tunnel_scopes_down=("anchore", "dynbench"),
+    ))["localMachine"]
+    assert view["tunnelServing"] is False
+    assert view["tunnelScopesDown"] == ["anchore", "dynbench"]

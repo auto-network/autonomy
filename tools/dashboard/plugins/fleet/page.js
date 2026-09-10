@@ -25,9 +25,11 @@ function fleetPage() {
         paused: 'Paused', away: 'Disconnected', failing: 'Failing',
         first: 'Not synced yet', synced: 'Synced', idle: '',
         link_off: 'Invite link off',
+        degraded: 'Some tunnels down',
       },
       note: {
         tunnel: "Your other devices can't reach this dashboard from outside. Bringing the tunnel back needs your root key.",
+        degraded: 'This dashboard still serves your fleet, but not every organization it is set up to serve.',
         first: 'This machine has joined your fleet but has not synchronized with this dashboard yet. Syncing starts automatically once it comes online.',
         link_off: 'This machine was approved, but its invitation link is not active — reactivate the link on this dashboard to finish setup and start syncing.',
         paused: 'This machine is running a different version of Autonomy. Synchronization will resume once the versions match.',
@@ -97,6 +99,7 @@ function fleetPage() {
         const local = (this.view && this.view.localMachine) || {};
         adapted.connectorArmed = local.connectorArmed;
         adapted.tunnelServing = local.tunnelServing;
+        adapted.tunnelScopesDown = local.tunnelScopesDown || [];
         adapted.runningStale = local.runningStale === true;
         adapted.certStatus = local.certStatus || null;
         adapted.certValidUntil = local.certValidUntil;
@@ -504,25 +507,34 @@ function fleetPage() {
       }
     },
 
-    STRINGS: {
-      word: {
-        serving: 'Serving', locked: 'Needs unlock', tunnel: 'Tunnel down',
-        cert: 'Certificate expired', restart: 'Restart needed',
-        paused: 'Paused', away: 'Disconnected', failing: 'Failing',
-        first: 'Not synced yet', synced: 'Synced', idle: '',
-      },
-      note: {
-        first: 'This machine has joined your fleet but has not synchronized with this dashboard yet. Syncing starts automatically once it comes online.',
-        paused: 'This machine is running a different version of Autonomy. Synchronization will resume once the versions match.',
-        away: 'Not responding — it may be asleep or offline. Syncing resumes automatically when it comes back.',
-        failing: 'Sync attempts are failing and will keep retrying. If this keeps happening, make sure both machines are up to date.',
-      },
+    // Down for SOME provisioned scopes but not personal: this dashboard still
+    // serves the fleet and is unreachable for the named orgs. Warn, not
+    // failed — "Tunnel down" would overstate it exactly as the old
+    // personal-only "Serving" understated it.
+    tunnelDegraded(machine) {
+      const down = machine.tunnelScopesDown || [];
+      return down.length > 0 && down.indexOf('personal') === -1;
+    },
+    tunnelWord(machine) {
+      if (machine.tunnelServing == null) return 'Unknown';
+      if (machine.tunnelServing) return 'Serving';
+      return this.tunnelDegraded(machine) ? 'Degraded' : 'Down';
+    },
+    tunnelTone(machine) {
+      if (machine.tunnelServing == null) return 'muted';
+      if (machine.tunnelServing) return 'good';
+      return this.tunnelDegraded(machine) ? 'warn' : 'bad';
+    },
+    tunnelTitle(machine) {
+      const down = machine.tunnelScopesDown || [];
+      return down.length ? `Not serving: ${down.join(', ')}` : '';
     },
     machineState(machine) {
       let id, tone;
       if (machine.isLocalMachine) {
         const serving = this.servingMachineId === machine.entryId;
         if (serving && !machine.connectorArmed) { id = 'locked'; tone = 'failed'; }
+        else if (serving && this.tunnelDegraded(machine)) { id = 'degraded'; tone = 'warn'; }
         else if (serving && !machine.tunnelServing) { id = 'tunnel'; tone = 'failed'; }
         else if (serving && machine.certValidUntil != null && Date.now() > machine.certValidUntil) { id = 'cert'; tone = 'failed'; }
         else if (machine.runningBuild !== machine.installedBuild) { id = 'restart'; tone = 'warn'; }
@@ -531,7 +543,14 @@ function fleetPage() {
       } else if (!machine.lastSuccessfulSyncAt) {
         // A machine we have never synced with is bootstrapping or absent;
         // failed attempts toward it are expected, not a connection LOST.
-        id = 'first'; tone = 'warn';
+        // UNLESS the invitation link is not serving joins, in which case it is
+        // blocked and cannot proceed without the operator — the distinction
+        // inviteInactive was written for. That branch was lost with the
+        // duplicate STRINGS block above (its words were unreachable), so this
+        // read the false-reassuring 'Not synced yet' instead.
+        const blocked = this.inviteInactive;
+        id = blocked ? 'link_off' : 'first';
+        tone = 'warn';
       } else if (machine.lastErrorCode === 'schema_mismatch') {
         id = 'paused'; tone = 'warn';
       } else if (machine.lastOutcome === 'failed') {
