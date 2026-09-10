@@ -34,7 +34,7 @@ from tools.dashboard.attention_registry import (
     AttentionClassRegistration, AttentionProjectionPlan,
     AttentionPublicationRuntime, AttentionRegistry, AttentionSourceEvidence,
 )
-from tools.dashboard.event_bus import EventBus, _BufferEntry
+from tools.dashboard.event_bus import EventBus
 from tools.graph.schemas.central_attention import (
     APPROVAL_REQUEST_SET_ID, APPROVAL_RESOLUTION_SET_ID,
     ATTENTION_DELIVERY_SET_ID, ATTENTION_ITEM_SET_ID,
@@ -761,44 +761,6 @@ async def test_private_hub_scope_filter_and_slow_subscriber_close():
     assert await asyncio.wait_for(queue.get(), timeout=1) is attention_routes._SSE_CLOSE
     assert queue not in hub._subscribers
     await hub.stop()
-
-
-def test_event_bus_scrub_gap_unrelated_and_restart(tmp_path):
-    bus = EventBus()
-    bus.broadcast_sync("nav", {"count": 1}, dedup=False)
-    bus.broadcast_sync(
-        "setting.changed", {"set_id": ATTENTION_ITEM_SET_ID, "key": "private"},
-        dedup=False,
-    )
-    bus.broadcast_sync(
-        "setting.changed",
-        {"set_id": LINK_APPROVAL_RESULT_SET_ID, "key": "private-link"},
-        dedup=False,
-    )
-    bus.broadcast_sync("dispatch", {"active": []}, dedup=False)
-    bus.broadcast_sync(
-        "setting.changed", {"set_id": "dashboard.feature_flags", "key": "public"},
-        dedup=False,
-    )
-    malformed = _BufferEntry(6, "setting.changed", "{", 1.0, 1)
-    bus._buffer.append(malformed)
-    bus._buffer_bytes += malformed.size
-    bus._seq = 6
-    bus._last["setting.changed"] = "{"
-    bus._last_seq["setting.changed"] = 6
-    assert attention_routes.scrub_private_cached_events(bus) == 4
-    assert bus._seq == 6 and "setting.changed" not in bus._last
-    events, complete = bus.replay(1, 5)
-    assert [row["seq"] for row in events] == [1, 4, 5]
-    assert complete is False
-    assert [
-        row for row in events if row["topic"] == "setting.changed"
-    ][0]["data"]["set_id"] == "dashboard.feature_flags"
-    snapshot = tmp_path / "event-bus.json"
-    bus.snapshot(snapshot)
-    restored = EventBus()
-    assert restored.restore(snapshot) is True
-    assert attention_routes.scrub_private_cached_events(restored) == 0
 
 
 def test_server_hook_diverts_all_private_sets(monkeypatch):

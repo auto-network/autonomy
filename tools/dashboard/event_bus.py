@@ -97,12 +97,14 @@ class EventBus:
         # worker thread) can publish without hopping to the event loop. Its
         # ``self._buffer.append`` therefore races every reader that walks the
         # deque. CPython raises "deque mutated during iteration" for exactly
-        # that race, and the reader it hit was the startup privacy scrub:
-        # discard_cached died, _on_startup logged "private Central Attention
-        # EventBus scrub failed; refusing to serve", and the worker exited.
-        # Live on sjc-2 2026-09-09 that turned every hot reload into a silent
-        # no-op — uvicorn kept the incumbent worker on 41-minute-old code while
-        # the deployed fix sat unread on disk.
+        # that race, and the reader it hit was the startup privacy scrub
+        # (since deleted — it was a migration guard wired as a permanent
+        # fail-closed boot step). discard_cached died, _on_startup refused to
+        # serve, and the worker exited. Live on sjc-2 2026-09-09 that turned
+        # every hot reload into a silent no-op — uvicorn kept the incumbent
+        # worker on 41-minute-old code while the deployed fix sat unread on
+        # disk. The remaining readers (replay, snapshot, _discard_restart_
+        # event_cache) race exactly the same way, which is why the lock stays.
         #
         # Reentrant because the guarded paths nest (broadcast_sync holds it
         # across _trim_buffer).
