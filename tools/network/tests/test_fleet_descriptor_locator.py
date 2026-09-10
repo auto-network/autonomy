@@ -256,3 +256,142 @@ class TestPerPeerReadout:
 
         assert cache.relay_locators() == {}
         assert cache.snapshot()[peer.public_hex] == [TAILNET]
+
+
+class TestExpiry:
+    """The locator's ``expires_at_ns`` was validated on the wire, written as 0
+    by the publisher, and read by NOTHING -- a field promising a guarantee the
+    system did not make. Raised by auto-0831-221227 validating auto-e38g4.
+
+    The reader now enforces exactly what a publisher states and nothing more.
+    """
+
+    def test_zero_means_no_expiry(self):
+        """What every publisher writes today. Honoured as written rather than
+        reinterpreted as "expired at the epoch"."""
+        assert fr.locator_is_current(_locator("ab" * 32, "cd" * 32), 10**18)
+
+    def test_a_passed_expiry_drops_the_locator(self):
+        locator = dict(_locator("ab" * 32, "cd" * 32), expires_at_ns=500)
+
+        assert fr.locator_is_current(locator, 501) is False
+
+    def test_an_unreached_expiry_is_current(self):
+        locator = dict(_locator("ab" * 32, "cd" * 32), expires_at_ns=500)
+
+        assert fr.locator_is_current(locator, 499) is True
+
+    def test_the_expiry_instant_itself_is_expired(self):
+        locator = dict(_locator("ab" * 32, "cd" * 32), expires_at_ns=500)
+
+        assert fr.locator_is_current(locator, 500) is False
+
+    def test_an_absent_locator_is_not_current(self):
+        assert fr.locator_is_current(None, 1) is False
+
+    def test_an_expired_peer_keeps_its_direct_addresses(self, machine, store,
+                                                        monkeypatch):
+        """Contract §6 in the expiry case: the slot goes, the peer does not."""
+        key, cert = machine
+        peer = KeyPair.generate()
+        expired = fd.build(
+            peer, machine_pub=peer.public_hex, addresses=[TAILNET], generation=1,
+            relay=dict(_locator("ab" * 32, "cd" * 32), expires_at_ns=500),
+        )
+        client = _Client()
+        client.stored[peer.public_hex] = {
+            "addrs": [TAILNET], "descriptor": expired}
+        cache = _cache(key, cert, [], client=client, roster=[peer.public_hex])
+        monkeypatch.setattr(fr._time, "time_ns", lambda: 10**6)
+
+        cache._maybe_refresh()
+
+        assert cache.relay_locators() == {}
+        assert cache.snapshot()[peer.public_hex] == [TAILNET]
+
+    def test_a_live_expiry_is_served(self, machine, store, monkeypatch):
+        key, cert = machine
+        peer = KeyPair.generate()
+        live = fd.build(
+            peer, machine_pub=peer.public_hex, addresses=[], generation=1,
+            relay=dict(_locator("ab" * 32, "cd" * 32), expires_at_ns=10**9),
+        )
+        client = _Client()
+        client.stored[peer.public_hex] = {"addrs": [], "descriptor": live}
+        cache = _cache(key, cert, [], client=client, roster=[peer.public_hex])
+        monkeypatch.setattr(fr._time, "time_ns", lambda: 10**6)
+
+        cache._maybe_refresh()
+
+        assert cache.relay_locators()[peer.public_hex]["expires_at_ns"] == 10**9
+
+    def test_an_expired_locator_is_logged_once_not_every_round(
+        self, machine, store, monkeypatch, caplog
+    ):
+        """relay_locators() runs once per scheduler round (~10 s) plus once per
+        delegated pull, and an expiry is permanent until the peer republishes.
+        Per-call logging would make a peer that has not republished into the
+        log. Raised by auto-0831-221227 reviewing the expiry gate.
+        """
+        key, cert = machine
+        peer = KeyPair.generate()
+        client = _Client()
+        client.stored[peer.public_hex] = {
+            "addrs": [TAILNET],
+            "descriptor": fd.build(
+                peer, machine_pub=peer.public_hex, addresses=[TAILNET],
+                generation=1,
+                relay=dict(_locator("ab" * 32, "cd" * 32), expires_at_ns=500),
+            ),
+        }
+        cache = _cache(key, cert, [], client=client, roster=[peer.public_hex])
+        monkeypatch.setattr(fr._time, "time_ns", lambda: 10**6)
+        cache._maybe_refresh()
+
+        with caplog.at_level("INFO", logger=fr.logger.name):
+            for _ in range(5):
+                assert cache.relay_locators() == {}
+
+        expired = [r for r in caplog.records if "locator expired" in r.message]
+        assert len(expired) == 1, [r.message for r in caplog.records]
+
+    def test_a_republished_locator_lets_a_later_expiry_be_heard(
+        self, machine, store, monkeypatch, caplog
+    ):
+        """Suppression must not be permanent: once the peer republishes, a NEW
+        expiry is a new fact and has to be reportable again."""
+        key, cert = machine
+        peer = KeyPair.generate()
+        client = _Client()
+
+        def publish(expires):
+            client.stored[peer.public_hex] = {
+                "addrs": [],
+                "descriptor": fd.build(
+                    peer, machine_pub=peer.public_hex, addresses=[],
+                    generation=1,
+                    relay=dict(_locator("ab" * 32, "cd" * 32),
+                               expires_at_ns=expires),
+                ),
+            }
+
+        cache = _cache(key, cert, [], client=client, roster=[peer.public_hex])
+        monkeypatch.setattr(fr._time, "time_ns", lambda: 10**6)
+
+        with caplog.at_level("INFO", logger=fr.logger.name):
+            publish(500)                      # expired
+            cache._maybe_refresh()
+            assert cache.relay_locators() == {}
+
+            publish(0)                        # republished, no expiry
+            cache._last = None
+            cache._maybe_refresh()
+            assert peer.public_hex in cache.relay_locators()
+
+            publish(900)                      # expired again, a NEW fact
+            cache._last = None
+            cache._maybe_refresh()
+            assert cache.relay_locators() == {}
+
+        expired = [r for r in caplog.records if "locator expired" in r.message]
+        assert len(expired) == 2, [r.message for r in caplog.records]
