@@ -294,6 +294,115 @@ def _dashboard_runtime_cache() -> fleet_relay_sync.FleetRuntimeWarmCache:
     )
 
 
+def serving_org_targets() -> list:
+    """Every ORG scope this machine is provisioned to serve, with the two ids
+    the browser needs to derive that org's serving machine key (auto-e2ufw):
+    the registry ``org_uuid`` and the org's ledger ``genesis_id``.
+
+    Only orgs. The personal scope keeps the fleet machine key as its hello
+    identity: its org is the operator's own, so binding it to the operator's
+    own fleet key discloses nothing that the roster does not already say, and
+    re-keying the one connector that currently carries Fleet sync buys no
+    unlinkability for real risk. Collaborative orgs are the whole point —
+    without this, the same physical machine shows one correlatable key to
+    every org's relay.
+
+    Every failure mode is a skip, not a raise: this list decides what the
+    browser is ASKED to derive, and an org that cannot answer here simply
+    keeps the behaviour it has today.
+    """
+    from tools.dashboard import link_serving_supervisor as _sup
+    from tools.dashboard.link_approvals import _load_binding
+    from tools.network.ledger import LedgerStore, org_ledger_db_path
+
+    targets = []
+    try:
+        scopes = _sup._discover_startup_orgs()
+    except Exception:
+        return targets
+    for scope in scopes:
+        if scope is None or scope == "personal":
+            continue
+        try:
+            state = _sup.serve_cert_state(scope)
+            if state.get("status", "missing") == "missing":
+                continue          # never provisioned to serve — not a fault
+            binding, _err = _load_binding(scope)
+            org_uuid = binding.get("org_uuid") if binding else None
+            if not org_uuid:
+                continue
+            path = org_ledger_db_path(scope)
+            if not path.exists():
+                continue
+            with LedgerStore(path) as store:
+                genesis_id = store.ledger.genesis_id
+            if not genesis_id:
+                continue
+        except Exception:
+            continue
+        targets.append({
+            "scope": scope,
+            "org_uuid": org_uuid,
+            "genesis_id": genesis_id,
+        })
+    return targets
+
+
+def _arm_serving_orgs(base_payload: dict, seeds: object) -> None:
+    """Give every serving org connector its own runtime credential.
+
+    THE POINT OF THIS FUNCTION: an org connector cannot start without a
+    machine key, and the only way it ever received one was the control socket
+    it serves itself — which it cannot serve until it starts. Nothing broke
+    that circle, so activate_local_runtime published for org=None alone and
+    every org connector on sjc-2 died at launch for an hour, once ramfs
+    cleared, with "no runtime machine key is available for this scope".
+
+    Writing the connector's warm cache from HERE breaks it: the cache is the
+    file the connector already reads at launch (link_serving.py, attach_warm_
+    cache + rearm_from_cache), so the next watchdog respawn finds a key
+    without anyone having to be present. The control-socket publish stays as
+    a best-effort live rotation for a connector that is already up.
+
+    ramfs, 0600, and cleared by a reboot — so a reboot still fails closed to a
+    human unlock, which is the property the cache was built to keep.
+    """
+    if not isinstance(seeds, dict) or not seeds:
+        return
+    logger = logging.getLogger(__name__)
+    for target in serving_org_targets():
+        seed_hex = seeds.get(target["org_uuid"])
+        if not isinstance(seed_hex, str) or not seed_hex:
+            continue
+        org_payload = dict(base_payload)
+        org_payload["serving_machine_private_seed"] = seed_hex
+        try:
+            fleet_relay_sync.FleetRuntimeWarmCache(target["org_uuid"]).store(
+                org_payload
+            )
+        except Exception:
+            # No ramfs, or a cache this process cannot write: the org keeps the
+            # behaviour it has today. Never fails an activation that otherwise
+            # succeeded.
+            logger.warning(
+                "could not arm the warm cache for serving org %s",
+                target["scope"], exc_info=True,
+            )
+            continue
+        try:
+            fleet_relay_sync.publish_connector_runtime(
+                org_payload, org=target["scope"]
+            )
+        except Exception as exc:
+            # Expected whenever the connector is not up yet — which is the
+            # case this whole function exists to fix. The cache above is what
+            # arms it; this was only the fast path.
+            logger.info(
+                "serving org %s is not running yet; it will arm from the warm "
+                "cache on its next launch (%s)", target["scope"], exc,
+            )
+
+
 def rearm_local_runtime_from_cache() -> bool:
     """Replay the Dashboard's cached Fleet runtime credential at startup.
 
@@ -356,6 +465,16 @@ def _activate_runtime(
     publish_connector: bool | None = None,
 ) -> fleet_runtime.FleetRuntimeCredential:
     from tools.network import fleet_sync_telemetry
+
+    # The per-org serving seeds ride ALONGSIDE the credential, not inside it:
+    # FleetRuntimeCredential.from_browser_payload takes exactly one scope's
+    # material (it accepts the singular serving_machine_private_seed) and
+    # rejects unknown keys, so the map is peeled here and each org gets its
+    # own single-seed payload built from the same base.
+    serving_seeds = {}
+    if isinstance(payload, dict) and "serving_machine_private_seeds" in payload:
+        payload = dict(payload)
+        serving_seeds = payload.pop("serving_machine_private_seeds") or {}
 
     context = _runtime_context() if root_pub is None or expected_entry is None else None
     if context is None and (root_pub is None or expected_entry is None):
@@ -467,6 +586,12 @@ def _activate_runtime(
                 "serving connector (%s) -- credential is still configured",
                 exc,
             )
+    # Each serving ORG gets the same base credential plus ITS OWN machine key
+    # (auto-e2ufw). Runs regardless of publish_connector: an org connector's
+    # cache must be armed even on a machine whose personal connector is not
+    # the designated fleet tunnel server, because the org tunnels are a
+    # different question from who carries Fleet sync.
+    _arm_serving_orgs(payload, serving_seeds)
     return credential
 
 
@@ -702,6 +827,10 @@ async def local_runtime_context(request: Request) -> JSONResponse:
         # predicate itself, not by designation: a mid-join machine fails closed
         # (`fleet-member-provisioning`), as does one absent from the roster.
         "serves": fleet_tunnel_server.tunnel_serving_permitted()[0],
+        # The orgs this machine serves, each with the ids the browser needs to
+        # derive its per-org serving machine key. The root never leaves the
+        # browser, so this list is the only way those keys can exist at all.
+        "serving_orgs": serving_org_targets(),
     })
 
 
