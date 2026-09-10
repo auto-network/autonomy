@@ -193,3 +193,96 @@ async def relay_probe(connector, runtime, *, targets: Optional[list] = None,
     return {"ok": all(r["ok"] for r in results) and bool(results),
             "own_slot": own_slot, "own_durable": own_durable,
             "slots": len(slots), "results": results}
+
+#: Delegated relay pulls, by operation id (auto-ew9wf). In memory and
+#: process-local by design: the DASHBOARD owns the controller and mints the
+#: id, this process only executes what it was told. Nothing here decides which
+#: peer to pull, so this map is never a second peer selector.
+_RELAY_PULLS: dict = {}
+
+#: Finished jobs are kept this long so a poller that arrives late still learns
+#: the outcome rather than "unknown operation", which is indistinguishable
+#: from "never started".
+RELAY_PULL_RETENTION_S = 300.0
+
+
+def _reap_relay_pulls(now: float) -> None:
+    for operation_id, job in list(_RELAY_PULLS.items()):
+        done_at = job.get("done_at")
+        if done_at is not None and (now - done_at) > RELAY_PULL_RETENTION_S:
+            _RELAY_PULLS.pop(operation_id, None)
+
+
+async def start_relay_pull(connector, runtime, *, peer_machine_pub: str,
+                           persona_pub: str, machine: str, scope: str,
+                           operation_id: str, timeout: float = 10.0) -> dict:
+    """Begin one delegated scope pull over the relay; return immediately.
+
+    A pull runs for minutes and the control protocol is one request/reply, so
+    holding the loopback connection open for the duration would tie the
+    dashboard's control socket to the transfer. The op returns a job id and
+    the caller polls :func:`relay_pull_status`.
+
+    The operation id is the DASHBOARD's, minted by the peer path controller
+    that decided to fall back. Re-submitting a live id returns the existing
+    job rather than starting a second one: that is the one-open-per-operation
+    promise auto-ieh3l made auto-fh2nv, enforced here as well as at the relay,
+    so a retry storm cannot be created by a caller that lost its reply.
+    """
+    scheduler = getattr(runtime, "scheduler", None)
+    if scheduler is None:
+        return {"ok": False, "error_kind": "not-armed",
+                "error": "this process is not armed for fleet sync"}
+    now = time.monotonic()
+    _reap_relay_pulls(now)
+    existing = _RELAY_PULLS.get(operation_id)
+    if existing is not None:
+        return {"ok": True, "operation_id": operation_id,
+                "state": existing["state"], "duplicate": True}
+
+    job: dict = {"state": "running", "started_at": now, "done_at": None,
+                 "scope": scope, "peer": peer_machine_pub}
+    _RELAY_PULLS[operation_id] = job
+
+    async def _run() -> None:
+        try:
+            await scheduler._pull_scope(
+                peer_machine_pub, (), scope,
+                relay_slot=(persona_pub, machine),
+                relay_connector=connector,
+            )
+        except Exception as exc:
+            job["state"] = "failed"
+            job["error"] = f"{type(exc).__name__}: {exc}"[:400]
+            # Carry the carrier's own taxonomy through untouched when it is
+            # there: the dashboard's controller decides stand-down vs retry vs
+            # stop from these, and flattening them here would make that
+            # decision impossible on the far side of the socket.
+            for field in ("reason", "pair_id", "code"):
+                value = getattr(exc, field, None)
+                if value is not None:
+                    job[field] = value
+        else:
+            job["state"] = "done"
+        finally:
+            job["done_at"] = time.monotonic()
+
+    job["task"] = asyncio.create_task(_run())
+    return {"ok": True, "operation_id": operation_id, "state": "running"}
+
+
+def relay_pull_status(operation_id: str) -> dict:
+    """What became of a delegated pull. Unknown ids are reported as unknown
+    rather than as failure: they are different facts and the caller responds
+    to them differently."""
+    _reap_relay_pulls(time.monotonic())
+    job = _RELAY_PULLS.get(operation_id)
+    if job is None:
+        return {"ok": False, "error_kind": "unknown-operation",
+                "error": "no such relay pull on this connector"}
+    reply = {"ok": True, "operation_id": operation_id, "state": job["state"],
+             "scope": job["scope"]}
+    for field in ("error", "reason", "pair_id", "code"):
+        if field in job:
+            reply[field] = job[field]
+    return reply

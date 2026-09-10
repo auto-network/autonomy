@@ -1739,6 +1739,46 @@ async def _serve_control_listener(connector, ctl_path: str,
                         )
                     except Exception as exc:
                         reply = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+                elif request.get("op") == "fleet-relay-pull":
+                    # DELEGATED pull (auto-ew9wf). The dashboard decided this
+                    # peer's direct addresses are exhausted and minted the
+                    # operation id; this process only executes, because
+                    # fleet_relay_connect needs the adapter that lives here.
+                    # It never selects a peer — the connector's own
+                    # peer_addresses stays empty — so there is no second
+                    # selector and no second opener for one peer.
+                    from tools.network.fleet_relay_carrier import start_relay_pull
+                    from tools.network.fleet_relay_sync import connector_runtime
+
+                    args = request.get("args") or {}
+                    try:
+                        reply = await start_relay_pull(
+                            connector, connector_runtime,
+                            peer_machine_pub=str(args["peer_machine_pub"]),
+                            persona_pub=str(args["persona_pub"]),
+                            machine=str(args["machine"]),
+                            scope=str(args["scope"]),
+                            operation_id=str(args["operation_id"]),
+                            timeout=float(args.get("timeout") or 10.0),
+                        )
+                    except KeyError as exc:
+                        reply = {"ok": False, "error_kind": "invalid-args",
+                                 "error": f"missing {exc}"}
+                    except Exception as exc:
+                        reply = {"ok": False,
+                                 "error": f"{type(exc).__name__}: {exc}"}
+                elif request.get("op") == "fleet-relay-pull-status":
+                    # The poll half: a pull runs minutes and ctl is one
+                    # request/reply, so the op above returns immediately and
+                    # the outcome is read here.
+                    from tools.network.fleet_relay_carrier import relay_pull_status
+
+                    args = request.get("args") or {}
+                    try:
+                        reply = relay_pull_status(str(args["operation_id"]))
+                    except KeyError as exc:
+                        reply = {"ok": False, "error_kind": "invalid-args",
+                                 "error": f"missing {exc}"}
                 elif request.get("op") == "fleet-runtime":
                     from tools.network.fleet_relay_sync import connector_runtime
 
