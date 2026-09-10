@@ -619,7 +619,10 @@ function fleetPage() {
     },
     lagLabel(ms) {
       if (ms == null) return '—';
-      if (ms < 1000) return 'current';
+      // A tick, not the word: in a Lag column every other value is a
+      // duration, so the one row with nothing to report should read as a
+      // mark rather than as the longest string in the column.
+      if (ms < 1000) return '✓';
       if (ms < 60000) return Math.round(ms / 1000) + 's';
       if (ms < 3600000) return Math.round(ms / 60000) + 'm';
       return Math.round(ms / 3600000) + 'h';

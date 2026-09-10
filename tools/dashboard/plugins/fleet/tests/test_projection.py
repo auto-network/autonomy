@@ -496,3 +496,44 @@ def test_no_local_position_reports_unknown_rather_than_converged():
         [{"scope": "blindhash", "frontier_ns": 5}], server_time=NOW, local={},
     )
     assert row["lag"] is None
+
+
+def test_the_local_machine_gets_its_own_organization_rows():
+    """It has no peer row about ITSELF -- Record 2 is keyed by peer -- so the
+    local card rendered an empty table and "0 / 0", which reads as a fault
+    rather than as the category error it is: this machine has nothing to be
+    behind. Bytes are its real totals per organization, summed across the
+    peers it exchanged them with."""
+    from tools.dashboard.plugins.fleet.entrypoints import projection as proj
+
+    peers = {
+        "aa": [{"scope": "personal", "bytes_in": 100, "bytes_out": 10},
+               {"scope": "anchore", "bytes_in": 5, "bytes_out": 1}],
+        "bb": [{"scope": "personal", "bytes_in": 50, "bytes_out": 5}],
+    }
+    rows = {r["scope"]: r for r in proj._local_scope_rows(
+        peers, {"personal": 1, "anchore": 1}, {})}
+
+    assert rows["personal"]["bytesIn"] == 150
+    assert rows["personal"]["bytesOut"] == 15
+    assert rows["anchore"]["bytesIn"] == 5
+    assert all(r["lag"] == 0 for r in rows.values()), "the reference is not behind"
+    assert all(r["filling"] is None for r in rows.values())
+
+
+def test_a_scope_mid_bootstrap_reports_how_much_is_left():
+    """A machine filling a scope knows exactly how far it has to go: F is the
+    serving store's frontier captured at sweep start and persisted because it
+    is not derivable from the receiving database. Until the bootstrap
+    completes the store advertises nothing, so without this it looks idle."""
+    from tools.dashboard.plugins.fleet.entrypoints import projection as proj
+
+    ours = 1_000_000_000
+    target = ours + 60_000 * 1_000_000          # a minute of content to go
+    [row] = [r for r in proj._local_scope_rows(
+        {}, {"personal": ours},
+        {"personal": {"phase": "sweeping", "frontier": {"origin": target}}},
+    ) if r["scope"] == "personal"]
+
+    assert row["filling"] == "sweeping"
+    assert row["lag"] == 60_000, "must say how much remains, not zero"
