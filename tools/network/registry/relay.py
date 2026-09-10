@@ -64,6 +64,7 @@ from tools.network.relaykit.stream_wire import (
     CAP_TLS_STREAM,
     RESET_ROUTE_RELEASED,
 )
+from tools.network.relaykit.fleet_stream_wire import CAP_FLEET_DIRECTED_STREAM
 from tools.network.relaykit.hello import (
     HELLO_FIELDS_V2,
     HELLO_FIELDS_V3,
@@ -886,7 +887,9 @@ CAP_HOST_LEASE = "host-lease/1"
 CAP_DNS01 = "dns-01/1"
 #: What this registry supports; the hello ack advertises the
 #: intersection with what the connector offered.
-REGISTRY_CAPS = frozenset({CAP_HOST_LEASE, CAP_TLS_STREAM, CAP_DNS01})
+REGISTRY_CAPS = frozenset({
+    CAP_HOST_LEASE, CAP_TLS_STREAM, CAP_DNS01, CAP_FLEET_DIRECTED_STREAM,
+})
 
 #: serve:dns-01 op signature domain (auto-bhs3c).
 DNS01_DOMAIN = b"autonomy.network.serve.dns01.v1\n"
@@ -1879,7 +1882,8 @@ def _ctrl_host_op(tunnel: "Tunnel", op: str, args: dict,
 async def _handle_ctrl_frame(tunnel: "Tunnel", payload: bytes,
                              store: RegistryStore, base_url: str,
                              now: int, turn_issuer=None, witness_key=None,
-                             host_routes: "HostRoutes | None" = None) -> None:
+                             host_routes: "HostRoutes | None" = None,
+                             directed_streams=None) -> None:
     """Parse one control request and reply on the control channel. A
     malformed payload raises FrameError (drops the tunnel); a clean op
     failure replies {ok: false} and leaves the tunnel up."""
@@ -1915,6 +1919,20 @@ async def _handle_ctrl_frame(tunnel: "Tunnel", payload: bytes,
                 tunnel, op, args, store, now,
                 metrics=getattr(host_routes, "_metrics", None),
             )
+        elif op == "fleet-open":
+            # fleet-directed-stream/1 (auto-fh2nv): pair this tunnel with
+            # the exact destination slot it names. The broker answers with a
+            # typed refusal or the pair identity; readiness follows on the
+            # stream channel, never in this reply.
+            if directed_streams is None:
+                raise _CtrlError("directed streams are not enabled on this relay")
+            if CAP_FLEET_DIRECTED_STREAM not in tunnel.caps:
+                raise _CtrlError("fleet-directed-stream/1 was not negotiated")
+            from .directed_stream import DirectedStreamError
+            try:
+                result = await directed_streams.open(tunnel, args)
+            except DirectedStreamError as exc:
+                raise _CtrlError(str(exc)) from exc
         else:
             raise _CtrlError(f"unknown control op: {op!r}")
         reply = {"id": correlation, "ok": True, **result}
@@ -1943,7 +1961,8 @@ async def _handle_ctrl_frame(tunnel: "Tunnel", payload: bytes,
 async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
                           store: RegistryStore, now_fn,
                           base_url: str = "", turn_issuer=None, witness_key=None,
-                          host_routes: "HostRoutes | None" = None) -> None:
+                          host_routes: "HostRoutes | None" = None,
+                          directed_streams=None) -> None:
     """Handle one dashboard tunnel connection for its whole lifetime."""
     await websocket.accept()
     try:
@@ -2022,6 +2041,7 @@ async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
                         tunnel, frame.payload, store, base_url, int(now_fn()),
                         turn_issuer=turn_issuer, witness_key=witness_key,
                         host_routes=host_routes,
+                        directed_streams=directed_streams,
                     )
                 except FrameError:
                     break

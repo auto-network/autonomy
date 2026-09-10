@@ -762,6 +762,12 @@ def create_app(
     app.state.now_fn = now_fn
     app.state.now_ms_fn = now_ms_fn
     app.state.tunnel_hub = hub
+    # fleet-directed-stream/1 (auto-fh2nv): the single-POP switchboard that
+    # joins two of this process's authenticated outbound tunnels. Process-
+    # local by design, like the hub it consumes.
+    from .directed_stream import DirectedStreamBroker
+    directed_streams = DirectedStreamBroker(hub)
+    app.state.directed_streams = directed_streams
     app.state.host_routes = host_routes
     app.state.metrics = metrics
     app.state.witness_key = witness_key
@@ -2479,7 +2485,8 @@ def create_app(
         await tunnel_endpoint(websocket, org_uuid, hub, store, now_fn,
                               base_url=base_url, turn_issuer=turn_issuer,
                               witness_key=witness_key,
-                              host_routes=host_routes)
+                              host_routes=host_routes,
+                              directed_streams=directed_streams)
 
     @app.websocket("/v1/links/{token}/channel")
     async def relay_viewer(websocket: WebSocket, token: str):

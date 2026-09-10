@@ -21,13 +21,16 @@ from __future__ import annotations
 
 from typing import Optional, Tuple, TYPE_CHECKING
 
+from tools.network.relaykit.fleet_stream_wire import CAP_FLEET_DIRECTED_STREAM
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from tools.network.registry.relay import Tunnel, TunnelHub
 
 #: Negotiated capability a tunnel must carry on BOTH legs before it can
-#: take part in a directed fleet pair. Defining the name here does not
-#: negotiate it; wiring it into the hello is separate work.
-CAP_FLEET_DIRECTED_STREAM = "fleet-directed-stream/1"
+#: take part in a directed fleet pair. The name is owned by the relaykit
+#: wire module so the connector and the relay cannot drift; it is
+#: re-exported here for the resolver's callers and tests.
+__all__ = ["CAP_FLEET_DIRECTED_STREAM"]
 
 #: Every refusal this resolver can return. Callers report the reason
 #: they were given; they do not re-derive one.

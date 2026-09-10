@@ -67,6 +67,8 @@ from .frames import (
 )
 from .stream_adapter import StreamAdapter
 from .stream_wire import CAP_TLS_STREAM
+from .fleet_stream import FleetStreamAdapter
+from .fleet_stream_wire import CAP_FLEET_DIRECTED_STREAM
 from .hello import (
     HELLO_VERSION_2,
     HELLO_VERSION_3,
@@ -475,6 +477,7 @@ class TunnelConnector:
         on_reprove=None,
         link_key_for=None,
         membership_proof_for=None,
+        fleet_stream_offer=None,
     ):
         self._url = f"{relay_url.rstrip('/')}/t/{org}"
         self._org = org
@@ -519,6 +522,14 @@ class TunnelConnector:
         #: registry authenticates the acting PERSONA by committed membership
         #: (auto-tmers). None falls back to the v2/v1 hello unchanged.
         self._membership_proof_for = membership_proof_for
+        #: async (FleetStreamEndpoint) -> bool: whether to accept an inbound
+        #: fleet-directed-stream/1 offer as its DESTINATION (auto-fh2nv). The
+        #: fleet runtime supplies it; None refuses every offer while still
+        #: letting this connector OPEN pairs as a source.
+        self._fleet_stream_offer = fleet_stream_offer
+        #: The live tunnel's FleetStreamAdapter (open pairs through it), or
+        #: None between tunnels / when the capability was not negotiated.
+        self.fleet_streams: "FleetStreamAdapter | None" = None
         #: capability intersection the registry accepted on the live tunnel
         self.accepted_caps: tuple = ()
         #: reservation -> hostname this connector wants leased; re-registered
@@ -929,6 +940,14 @@ class TunnelConnector:
                 self._stream_handler, send_frame,
                 lease_lookup=self._desired_hosts.get,
             )
+        # Fleet directed streams (auto-fh2nv): live only when this tunnel's
+        # ack negotiated the capability, for the same reason as above.
+        fleet = None
+        if CAP_FLEET_DIRECTED_STREAM in self.accepted_caps:
+            fleet = FleetStreamAdapter(
+                send_frame, self.control, on_offer=self._fleet_stream_offer,
+            )
+        self.fleet_streams = fleet
         open_tasks: set = set()
 
         def drop(channel_id: bytes) -> None:
@@ -948,12 +967,25 @@ class TunnelConnector:
                     self._resolve_ctrl_reply(frame.payload)
                     continue
                 if frame.type == FRAME_STREAM_CTRL:
+                    if fleet is not None and fleet.dispatch_ctrl(
+                        frame.channel_id, frame.payload
+                    ):
+                        continue
                     if adapter is not None:
                         adapter.dispatch_ctrl(frame.channel_id, frame.payload)
                     continue  # never negotiated: stale/hostile frame, ignored
                 if frame.type == FRAME_OPEN:
                     try:
                         meta = json.loads(frame.payload)
+                        if (
+                            isinstance(meta, dict)
+                            and meta.get("kind") == "fleet-stream"
+                        ):
+                            if fleet is None or not fleet.dispatch_open(
+                                frame.channel_id, meta
+                            ):
+                                await send_frame(FRAME_CLOSE, frame.channel_id)
+                            continue
                         if (
                             isinstance(meta, dict)
                             and meta.get("kind") == "tls-stream"
@@ -1007,6 +1039,10 @@ class TunnelConnector:
                         self._serve_channel(frame.channel_id, token, queue, send_frame, drop)
                     )
                 elif frame.type == FRAME_DATA:
+                    if fleet is not None and fleet.dispatch_data(
+                        frame.channel_id, frame.payload
+                    ):
+                        continue
                     if adapter is not None and adapter.dispatch_data(
                         frame.channel_id, frame.payload
                     ):
@@ -1015,12 +1051,19 @@ class TunnelConnector:
                     if queue is not None:
                         queue.put_nowait(frame.payload)
                 elif frame.type == FRAME_CLOSE:
+                    if fleet is not None and fleet.dispatch_close(
+                        frame.channel_id
+                    ):
+                        continue
                     if adapter is not None and adapter.dispatch_close(
                         frame.channel_id
                     ):
                         continue
                     drop(frame.channel_id)
         finally:
+            self.fleet_streams = None
+            if fleet is not None:
+                await fleet.shutdown()
             if adapter is not None:
                 for task in list(open_tasks):
                     task.cancel()
