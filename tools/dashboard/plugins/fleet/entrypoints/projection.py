@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import sqlite3
+from pathlib import Path
 import time
 from typing import Mapping
 
@@ -53,6 +54,8 @@ class ProjectionInputs:
     peer_scope_rows: Mapping[str, list] = field(default_factory=dict)
     #: One row per transport/direction/scope, each carrying its two rings.
     traffic_rows: tuple = ()
+    #: {scope: oldest origin position THIS machine holds}
+    local_frontiers: Mapping[str, int] = field(default_factory=dict)
     local_verdict: Mapping | None = None
     serve_cert: Mapping | None = None
     tunnel_serving: bool | None = None
@@ -221,6 +224,7 @@ def _load_inputs(*, now_ms: int) -> ProjectionInputs:
         telemetry_rows=fleet_sync_telemetry.read_peer_totals(org="machine"),
         peer_scope_rows=fleet_sync_peer_scope.read_peer_scopes(org="machine"),
         traffic_rows=tuple(fleet_sync_traffic.read_traffic_rows(org="machine")),
+        local_frontiers=_local_frontiers(),
         local_verdict=local_verdict,
         serve_cert=serve_cert,
         tunnel_serving=tunnel_serving,
@@ -239,7 +243,60 @@ def _milliseconds(value) -> int | None:
     return number // 1_000_000 if number > 1_000_000_000_000_000 else number
 
 
-def _scope_rows(rows: list | None, *, server_time: int) -> list[dict]:
+def _local_frontiers() -> dict[str, int]:
+    """``{scope: oldest origin position this machine holds}``.
+
+    The reference a peer's frontier is judged against. Lag is how far a peer
+    trails US, not how old the content happens to be: on a scope nobody has
+    written to for two days, ``now - their_frontier`` is two days for a peer
+    that is perfectly converged. Both machines sitting on the identical
+    position is the definition of in sync, whatever the wall clock says.
+
+    Measured live on 2026-09-10: the card showed anchore 47h and blindhash 13h
+    while both machines held byte-identical positions on every scope and the
+    reverse direction had just drained its backlog to zero. Those were quiet
+    organizations, not stranded ones.
+    """
+    from tools.network.fleet_sync_scheduler import discover_org_sync_scopes
+
+    paths = {"personal": _org_db_path("personal")}
+    try:
+        paths.update(discover_org_sync_scopes())
+    except Exception:
+        pass
+    out: dict[str, int] = {}
+    for scope, path in paths.items():
+        try:
+            if not Path(path).exists():
+                continue
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        except Exception:
+            continue
+        try:
+            present = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='fleet_sync_transactions'"
+            ).fetchone()
+            if present is None:
+                continue
+            rows = conn.execute(
+                "SELECT MAX(t.timestamp_ns) FROM fleet_sync_transactions t "
+                "JOIN fleet_sync_origins o ON o.id=t.origin_id "
+                "GROUP BY o.incarnation"
+            ).fetchall()
+            values = [int(row[0]) for row in rows if row[0]]
+            if values:
+                out[scope] = min(values)
+        except Exception:
+            continue
+        finally:
+            conn.close()
+    return out
+
+
+def _scope_rows(
+    rows: list | None, *, server_time: int, local: dict | None = None,
+) -> list[dict]:
     """One row per organization for one peer, as the Fleet view reads them.
 
     Lag is ``now - frontier_ns``. A peer that has never advertised a frontier
@@ -252,10 +309,23 @@ def _scope_rows(rows: list | None, *, server_time: int) -> list[dict]:
         # Nanoseconds by schema contract, so convert outright. _milliseconds
         # guesses the unit from magnitude, which is right for columns that
         # have carried both and wrong for a field that never will.
-        frontier_ms = int(row.get("frontier_ns") or 0) // 1_000_000
+        scope = row.get("scope")
+        theirs = int(row.get("frontier_ns") or 0)
+        # Against OUR position for the same scope, not against the clock. A
+        # peer that holds what we hold is current even if neither of us has
+        # written to that organization in days.
+        ours = int((local or {}).get(scope) or 0)
+        if not theirs:
+            lag = None
+        elif ours:
+            lag = max(0, (ours - theirs) // 1_000_000)
+        else:
+            # We hold nothing for this scope, so we have no reference and
+            # cannot say. Null renders as unknown rather than as converged.
+            lag = None
         out.append({
-            "scope": row.get("scope"),
-            "lag": max(0, server_time - frontier_ms) if frontier_ms else None,
+            "scope": scope,
+            "lag": lag,
             "bytesIn": int(row.get("bytes_in") or 0),
             "bytesOut": int(row.get("bytes_out") or 0),
         })
@@ -511,6 +581,7 @@ def project(inputs: ProjectionInputs) -> dict:
             scopes=_scope_rows(
                 inputs.peer_scope_rows.get(machine_pub),
                 server_time=inputs.server_time,
+                local=inputs.local_frontiers,
             ),
         )
         for machine_pub, entry in active.items()

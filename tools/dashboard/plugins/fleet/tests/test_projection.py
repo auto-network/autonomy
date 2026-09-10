@@ -456,3 +456,43 @@ def test_peer_counters_survive_a_roster_epoch_change(tmp_path, monkeypatch):
     assert row["peer_watermark"] == 9_000
     # An error from a retired epoch is not this peer's current state.
     assert row["last_error_code"] is None
+
+
+def test_a_quiet_organization_is_not_reported_as_lag():
+    """The card said anchore 47h and blindhash 13h while both machines held
+    byte-identical positions on every scope and the reverse direction had just
+    drained to zero. `now - their_frontier` measures how OLD the content is;
+    on an organization nobody has written to in two days that is two days of
+    invented lag on a perfectly converged peer."""
+    from tools.dashboard.plugins.fleet.entrypoints import projection as proj
+
+    two_days_ago = (NOW - 2 * 24 * 3_600_000) * 1_000_000
+    [row] = proj._scope_rows(
+        [{"scope": "anchore", "frontier_ns": two_days_ago}],
+        server_time=NOW,
+        local={"anchore": two_days_ago},
+    )
+    assert row["lag"] == 0, "a converged peer must not read as behind"
+
+
+def test_a_peer_that_trails_us_reports_the_difference():
+    from tools.dashboard.plugins.fleet.entrypoints import projection as proj
+
+    theirs = (NOW - 90_000) * 1_000_000
+    [row] = proj._scope_rows(
+        [{"scope": "autonomy", "frontier_ns": theirs}],
+        server_time=NOW,
+        local={"autonomy": NOW * 1_000_000},
+    )
+    assert row["lag"] == 90_000
+
+
+def test_no_local_position_reports_unknown_rather_than_converged():
+    """We hold nothing for that scope, so we have no reference. Null renders as
+    unknown; zero would claim agreement we cannot see."""
+    from tools.dashboard.plugins.fleet.entrypoints import projection as proj
+
+    [row] = proj._scope_rows(
+        [{"scope": "blindhash", "frontier_ns": 5}], server_time=NOW, local={},
+    )
+    assert row["lag"] is None
