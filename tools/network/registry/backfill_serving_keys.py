@@ -40,10 +40,23 @@ already-derived PUBLIC key so the root never touches the host.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import time
 
 from tools.network.registry.store import RegistryStore
+
+#: How old a collected manifest may be before `register` refuses it.
+#: Serving keys are not stable over hours: on 2026-09-10 home's three org
+#: connectors moved from its durable roster key to per-org keys when 76d61b5b
+#: landed at 00:14Z, and the four serve-cert delegates rotated again at 01:50Z
+#: when the certs were re-minted persona-signed -- two independent rotations in
+#: one night, measured from the registry's own log by host-0906-222509. An
+#: allow-set registered from values collected before a derivation change
+#: hard-gates every connector it covers, and the refusal surfaces at the hello
+#: where it reads as an identity fault. So a stale manifest is refused rather
+#: than trusted; re-collect and re-run, it is two commands.
+MANIFEST_MAX_AGE_S = 15 * 60
 
 
 #: LOWERCASE only, both of these. The registry stores what it is given and
@@ -111,21 +124,88 @@ def _require_serving_pub(pub: str) -> None:
     )
 
 
-def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--db", required=True)
-    p.add_argument("--org", required=True, help="org genesis/uuid")
-    p.add_argument("--machine", required=True,
-                   help="machine id (for the audit line only)")
-    p.add_argument("--serving-pub", required=True,
-                   help="64-hex serving machine PUBLIC key, derived by the "
-                        "operator with derive_serving_machine_key")
-    a = p.parse_args()
-    _require_org_uuid(a.org)
-    _require_serving_pub(a.serving_pub)
-    store = RegistryStore(a.db)
-    store.register_serving_machine_key(
-        a.org, a.serving_pub, now=int(time.time()))
+def collect_manifest() -> dict:
+    """THIS machine's live serving keys, read from the processes serving them.
+
+    Run on a dashboard machine, not on the registry host. Reads each serving
+    org's connector-status through the control socket, so the key recorded is
+    the one that org is ACTUALLY presenting -- not a derivation done in a fresh
+    interpreter, which can differ from what is on the wire and which cannot see
+    whether the connector is even up.
+    """
+    from tools.dashboard import fleet_enrollment_routes as routes
+    from tools.dashboard import link_serving_supervisor as supervisor
+
+    targets = [{"scope": None, "org_uuid": None, "genesis_id": None}]
+    targets += routes.serving_org_targets()
+    entries = []
+    commits = set()
+    for target in targets:
+        scope = target["scope"]
+        reply = supervisor.control(scope, "connector-status", {}, timeout=12.0)
+        slot = reply.get("serving_slot") or {}
+        machine_pub = slot.get("machine")
+        org_uuid = target["org_uuid"] or reply.get("org_uuid")
+        if not machine_pub or not org_uuid:
+            raise SystemExit(
+                f"scope {scope or 'personal'} reported no serving slot; its "
+                "connector is not serving. Registering a partial set would "
+                "gate the orgs it covers and leave this one un-enforced -- "
+                "fix the connector and re-collect."
+            )
+        commits.add(reply.get("boot_commit") or "")
+        entries.append({
+            "scope": scope or "personal",
+            "org_uuid": org_uuid,
+            "serving_pub": machine_pub,
+            # Recorded for provenance only. The key is DERIVED from this and
+            # REGISTERED under org_uuid; it must never reach a register line.
+            "genesis_id_do_not_register": target["genesis_id"],
+        })
+    if len(commits) > 1:
+        raise SystemExit(
+            f"this machine's connectors are on different commits ({commits}); "
+            "they are mid-handoff. Wait for the recycle and re-collect."
+        )
+    return {
+        "collected_at": int(time.time()),
+        "boot_commit": commits.pop() if commits else "",
+        "entries": entries,
+    }
+
+
+def _manifest_entries(paths: list, now: int) -> list:
+    """Load manifests, refusing stale ones and disagreeing commits."""
+    out = []
+    commits = set()
+    for path in paths:
+        with open(path) as fh:
+            manifest = json.load(fh)
+        age = now - int(manifest.get("collected_at") or 0)
+        if age > MANIFEST_MAX_AGE_S:
+            raise SystemExit(
+                f"{path} was collected {age // 60} minutes ago, older than the "
+                f"{MANIFEST_MAX_AGE_S // 60}-minute bound. Serving keys rotate "
+                "-- registering a stale one hard-gates the connector it was "
+                "meant to admit. Re-collect on each machine and re-run."
+            )
+        commits.add(manifest.get("boot_commit") or "")
+        out.extend(manifest["entries"])
+    if len(commits) > 1:
+        raise SystemExit(
+            f"the manifests come from different commits ({sorted(commits)}). "
+            "Register only when every machine is on the same commit and "
+            "quiescent: a commit touching key derivation or serving identity "
+            "invalidates an allow-set, and 76d61b5b already did exactly that "
+            "once."
+        )
+    return out
+
+
+def _register_one(store, org: str, machine: str, serving_pub: str) -> None:
+    _require_org_uuid(org)
+    _require_serving_pub(serving_pub)
+    store.register_serving_machine_key(org, serving_pub, now=int(time.time()))
     # READ BACK THROUGH THE FUNCTION RELAY.PY CALLS, and report what was
     # ACHIEVED rather than what was attempted. A refusal above catches the
     # mistakes we know about; this catches the ones we do not -- suggested by
@@ -133,19 +213,59 @@ def main() -> None:
     # its own action instead of the resulting state) is what let deploy.sh
     # print success without restarting the service and let a docker rmtree
     # return zero having deleted nothing.
-    allowed = store.registered_serving_keys(a.org)
-    if a.serving_pub not in allowed:
+    allowed = store.registered_serving_keys(org)
+    if serving_pub not in allowed:
         raise SystemExit(
             "READ-BACK FAILED: wrote the row, then looked the allow-set up the "
-            f"way relay.py does (registered_serving_keys({a.org!r})) and the "
+            f"way relay.py does (registered_serving_keys({org!r})) and the "
             f"key is not in it. Found {len(allowed)} key(s). Enforcement would "
             "NOT be on for this org. Do not treat this run as a backfill."
         )
-    print(f"registered serving key for org_uuid={a.org} machine={a.machine[:8]}"
+    print(f"registered serving key for org_uuid={org} machine={machine[:8]}"
           f"\n  read back via registered_serving_keys(): {len(allowed)} key(s) "
-          f"for this org, including {a.serving_pub}"
+          f"for this org, including {serving_pub}"
           f"\n  relay.py will now ENFORCE the allow-set for this org "
           f"(transitional accept closed)")
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("--collect", action="store_true",
+                   help="ON A DASHBOARD MACHINE: print this machine's live "
+                        "serving keys as a manifest; registers nothing")
+    p.add_argument("--manifest", action="append", default=[],
+                   help="ON THE REGISTRY HOST: a manifest from --collect "
+                        "(repeatable, one per machine). Refused when stale")
+    p.add_argument("--db")
+    p.add_argument("--org", help="org_uuid, NOT the genesis id")
+    p.add_argument("--machine", default="",
+                   help="machine id (for the audit line only)")
+    p.add_argument("--serving-pub",
+                   help="64 lowercase hex serving machine PUBLIC key")
+    a = p.parse_args()
+
+    if a.collect:
+        print(json.dumps(collect_manifest(), indent=1))
+        return
+    if not a.db:
+        raise SystemExit("--db is required to register")
+    store = RegistryStore(a.db)
+    if a.manifest:
+        entries = _manifest_entries(a.manifest, int(time.time()))
+        for entry in entries:
+            _register_one(store, entry["org_uuid"], a.machine or entry["scope"],
+                          entry["serving_pub"])
+        print(f"\n{len(entries)} registration(s) complete. Watch the registry "
+              "audit log: 'serving-key transitional-accept' must STOP appearing "
+              "for these orgs (that is the positive signal enforcement is on), "
+              "and 'serving-key REFUSED' appearing means a serving key rotated "
+              "and needs re-registering.")
+        return
+    if not a.org or not a.serving_pub:
+        raise SystemExit(
+            "give --manifest (preferred: values read live from the serving "
+            "processes) or --org with --serving-pub")
+    _register_one(store, a.org, a.machine, a.serving_pub)
 
 
 if __name__ == "__main__":
