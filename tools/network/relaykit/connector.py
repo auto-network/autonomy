@@ -546,6 +546,15 @@ class TunnelConnector:
         self._failure_log_window_started = None
         self._failure_log_suppressed = 0
 
+    @property
+    def serving_slot(self) -> dict:
+        """The (persona, serving machine) slot the relay files this
+        connector under — what a peer names to reach it directly."""
+        return {
+            "persona_pub": getattr(self._cert.subject, "id", None),
+            "machine": self._machine_key.public_hex if self._machine_key else None,
+        }
+
     def stop(self) -> None:
         self._stop.set()
 
