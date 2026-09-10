@@ -2765,16 +2765,28 @@ class FleetSyncScheduler:
         finally:
             receiver.close()
 
-    def _peer_relay_locators(self) -> dict:
-        """Peers with a verified serving-slot locator. Never raises: a
-        discovery source that fails must not stop the round."""
+    def _peer_relay_locators(self) -> "dict | None":
+        """Peers with a verified serving-slot locator, or None.
+
+        ``None`` means NO LOCATOR SOURCE WAS CONSULTED -- there is no provider
+        configured, or the provider failed. An empty dict means a source was
+        consulted and no peer has a locator. Those are different facts and
+        collapsing them is what lets a record assert an absence nobody
+        observed; see :meth:`_record_discovery_unavailable`. Found by
+        auto-0831-221227 validating auto-e38g4, and it is the same defect
+        class they withheld ``relay_absent`` to avoid in the first place.
+
+        Never raises: a discovery source that fails must not stop the round.
+        It reports that it saw nothing, not that there was nothing to see.
+        """
         provider = self.config.peer_relay_locators
         if provider is None:
-            return {}
+            return None
         try:
-            return dict(provider() or {})
+            locators = provider()
         except Exception:
-            return {}
+            return None
+        return None if locators is None else dict(locators)
 
     def _resolve_peers(self, active, addresses, now: float, locators=None) -> list:
         """Which rostered peers to attempt this round, and record the rest.
@@ -2797,13 +2809,17 @@ class FleetSyncScheduler:
         no surface carried either fact — the deleted `route is None -> return`
         give-up in a newer, quieter shape.
         """
+        # None and {} mean different things here: nothing was consulted, versus
+        # a source answered and no peer has a locator. Only the second earns
+        # `relay_absent` on the record below.
+        consulted = locators is not None
         locators = locators or {}
         peers = [pub for pub in sorted(active)
                  if pub != self.authenticator.machine_pub]
         for machine_pub in peers:
             if not addresses.get(machine_pub) and not locators.get(machine_pub):
                 self._record_discovery_unavailable(
-                    machine_pub, now, relay_absent=True,
+                    machine_pub, now, relay_absent=consulted,
                 )
         for machine_pub in list(self._discovery_unavailable):
             if (addresses.get(machine_pub) or locators.get(machine_pub)
