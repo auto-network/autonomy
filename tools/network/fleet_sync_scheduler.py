@@ -1735,6 +1735,11 @@ class FleetSyncScheduler:
         self._stopping = asyncio.Event()
         self._failures: dict[str, int] = {}
         self._next_attempt: dict[str, float] = {}
+        #: peer -> why it could not be attempted at all, and when we will look
+        #: again (auto-ieh3l acceptance 2 and 5). In memory only: the contract
+        #: is explicit that a discovery miss "must not exit the service, mint a
+        #: link, or write a new durable retry database".
+        self._discovery_unavailable: dict[str, dict] = {}
         self._activated_scopes: set[Path] = set()
         #: Per-peer declared pull version. A peer whose server rejected a v4
         #: request before serving any frame is retried at v3 for the rest of
@@ -2729,19 +2734,109 @@ class FleetSyncScheduler:
         finally:
             receiver.close()
 
+    def _resolve_peers(self, active, addresses, now: float) -> list:
+        """Which rostered peers to attempt this round, and record the rest.
+
+        THE ONE PLACE peer selection happens, so the authority rules are
+        stated once (contract sections 1 and 10):
+
+        * The ROSTER decides who is a peer. ``active`` is already resolved
+          against the personal root, so a machine that authenticates but is
+          absent from it is never selected — reachability alone never admits.
+        * Reachability decides only WHERE. A rostered peer with no address is
+          a discovery miss, not a non-peer: it is recorded and retried, never
+          silently dropped and never permanently abandoned.
+        * Nothing invitation-derived participates. Addresses arrive from
+          verified reachability only, so an obsolete invitation cannot be
+          selected and cannot resurrect as a fallback.
+
+        Before this, an unaddressable peer simply fell out of a comprehension:
+        membership said to sync with it, nothing could say where it was, and
+        no surface carried either fact — the deleted `route is None -> return`
+        give-up in a newer, quieter shape.
+        """
+        peers = [pub for pub in sorted(active)
+                 if pub != self.authenticator.machine_pub]
+        for machine_pub in peers:
+            if not addresses.get(machine_pub):
+                self._record_discovery_unavailable(machine_pub, now)
+        for machine_pub in list(self._discovery_unavailable):
+            if addresses.get(machine_pub) or machine_pub not in active:
+                # Discovered, or no longer a peer. Either way it stops being a
+                # miss, and the next real failure starts from a clean envelope
+                # instead of inheriting this one.
+                self._discovery_unavailable.pop(machine_pub, None)
+                self._failures.pop(machine_pub, None)
+                self._next_attempt.pop(machine_pub, None)
+        return [
+            machine_pub for machine_pub in peers
+            if addresses.get(machine_pub)
+            and now >= self._next_attempt.get(machine_pub, 0.0)
+        ]
+
+    def _record_discovery_unavailable(self, machine_pub: str, now: float) -> None:
+        """Record that a rostered peer could not be addressed, and when we
+        will look again (auto-ieh3l, contract section 7).
+
+        The property the old permanent exit existed to preserve — that a dead
+        puller stays distinguishable from a quietly working one — is preserved
+        by THIS RECORD, not by giving up. So it carries what was missing
+        (direct addresses, a relay locator, or both), when we last looked, and
+        when we look next.
+
+        Backoff reuses the scheduler's own min/max envelope rather than a new
+        one: the contract's recommended 0.5-to-30s ladder is marked
+        [UNAPPROVED] pending the design checkpoint, and inventing numbers here
+        is exactly the unapproved policy it warns against. The existing
+        envelope is already operator-configured and already governs every
+        other peer failure.
+        """
+        state = self._discovery_unavailable.get(machine_pub)
+        misses = (state or {}).get("misses", 0) + 1
+        delay = min(
+            self.config.max_backoff,
+            self.config.min_backoff * (2 ** min(misses - 1, 16)),
+        )
+        next_attempt = now + delay
+        self._next_attempt[machine_pub] = next_attempt
+        self._discovery_unavailable[machine_pub] = {
+            "reason": "discovery_unavailable",
+            "misses": misses,
+            "last_attempt": now,
+            "next_attempt": next_attempt,
+            # Named separately because they fail for different reasons and
+            # have different remedies: no address is a publication problem,
+            # no locator is a serving-slot problem.
+            "direct_absent": True,
+            "relay_absent": True,
+        }
+        if misses == 1 or misses % 20 == 0:
+            # Once when it starts, then rarely. A peer that is simply not
+            # published yet must not become the log.
+            logger.warning(
+                "fleet sync peer %s: discovery_unavailable — rostered but no "
+                "direct address and no relay locator; retrying in %.1fs "
+                "(miss %d). Membership is unaffected; this is WHERE, not WHO.",
+                machine_pub[:12], delay, misses,
+            )
+
+    def discovery_unavailable(self) -> dict:
+        """Peers the roster names that nothing can currently address.
+
+        Read by status surfaces so "no peers to sync with" and "peers I cannot
+        find" stop looking the same. Empty is the healthy answer.
+        """
+        return {pub: dict(state)
+                for pub, state in self._discovery_unavailable.items()}
+
+
     async def _run(self) -> None:
         while not self._stopping.is_set():
             entries = self._roster_snapshot
             active = resolve(entries, anchor_root_pub=self.config.personal_root_pub)
             addresses = self.config.peer_addresses()
             now = asyncio.get_running_loop().time()
-            eligible = [
-                machine_pub
-                for machine_pub in sorted(active)
-                if machine_pub != self.authenticator.machine_pub
-                and addresses.get(machine_pub)
-                and now >= self._next_attempt.get(machine_pub, 0.0)
-            ]
+            eligible = self._resolve_peers(active, addresses, now)
             selected = eligible
             if eligible:
                 try:
