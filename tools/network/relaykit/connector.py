@@ -585,6 +585,27 @@ class TunnelConnector:
             "machine": self._machine_key.public_hex if self._machine_key else None,
         }
 
+    @property
+    def host_leases(self) -> dict:
+        """reservation -> {host, machine?, ...lease} for every desired serve
+        host, as this connection holds it: a desired host with no lease entry
+        is registered on the next tunnel, not leased now. Read-only; the
+        dashboard's per-link status reads it (auto-q5xni)."""
+        result = {}
+        for reservation, host in self._desired_hosts.items():
+            entry = {"host": host}
+            machine = self._desired_machines.get(reservation)
+            if machine is not None:
+                entry["machine"] = machine
+            lease = self._host_leases.get(reservation)
+            if isinstance(lease, dict):
+                entry.update(lease)
+                entry["leased"] = True
+            else:
+                entry["leased"] = False
+            result[reservation] = entry
+        return result
+
     def stop(self) -> None:
         self._stop.set()
 

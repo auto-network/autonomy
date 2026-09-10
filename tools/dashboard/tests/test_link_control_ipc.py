@@ -25,6 +25,11 @@ class _StubConnector:
         self.calls = []
         self.connected = asyncio.Event()
         self.accepted_caps = tuple(accepted_caps)
+        # What connector-status reports beside readiness (auto-fh2nv /
+        # auto-e38g4): the relay slot and where it is filed.
+        self.serving_slot = {"persona_pub": "00" * 32, "machine": "bb" * 32}
+        self.relay_base = "wss://registry.invalid"
+        self.org = "org-uuid"
 
     async def control(self, op, args, timeout=10.0):
         self.calls.append((op, args))
@@ -32,13 +37,22 @@ class _StubConnector:
             raise ConnectionError("no live tunnel to carry a control frame")
         return {**self._reply, "op": op}
 
-    async def serve_host(self, reservation, host):
-        self.calls.append(("serve-host", {"reservation": reservation, "host": host}))
+    async def serve_host(self, reservation, host, machine=None):
+        args = {"reservation": reservation, "host": host}
+        if machine is not None:
+            args["machine"] = machine  # the auto-nh1po pin, when declared
+        self.calls.append(("serve-host", args))
         return {"ok": True, "lease": {"generation": 1}}
 
     async def release_host(self, reservation):
         self.calls.append(("release-host", {"reservation": reservation}))
         return {"ok": True}
+
+    @property
+    def host_leases(self):
+        self.calls.append(("host-leases", {}))
+        return {"reservation-id": {"host": "app.example", "leased": True,
+                                   "expires_at": 4102444800}}
 
 
 async def _with_listener(connector, ctl_path, body):
@@ -138,6 +152,27 @@ def test_listener_enrolls_host_in_connector_lease_keeper(tmp_path):
         assert connector.calls == [("serve-host", {
             "reservation": "reservation-id", "host": "app.example",
         })]
+
+    asyncio.run(_with_listener(connector, ctl, body))
+
+
+def test_listener_reports_host_leases_read_only(tmp_path):
+    """auto-q5xni: per-link status asks the process that holds the leases
+    instead of inferring them; the op forwards nothing to the registry."""
+    ctl = str(tmp_path / "serve.ctl")
+    connector = _StubConnector()
+
+    async def body():
+        descriptor = json.loads(open(ctl).read())
+        reply = await asyncio.to_thread(
+            _roundtrip, descriptor["port"], {
+                "auth": descriptor["auth"], "op": "host-leases", "args": {},
+            })
+        assert reply == {"ok": True, "leases": {
+            "reservation-id": {"host": "app.example", "leased": True,
+                               "expires_at": 4102444800},
+        }}
+        assert connector.calls == [("host-leases", {})]
 
     asyncio.run(_with_listener(connector, ctl, body))
 

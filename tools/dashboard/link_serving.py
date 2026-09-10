@@ -1743,6 +1743,11 @@ async def _serve_control_listener(connector, ctl_path: str,
                         reply = {"ok": False, "error": "invalid release-host request"}
                     else:
                         reply = await connector.release_host(args["reservation"])
+                elif request.get("op") == "host-leases":
+                    # Read-only (auto-q5xni): the leases THIS connection
+                    # holds, so per-link status can say "lease held" from
+                    # the process that holds it instead of inferring it.
+                    reply = {"ok": True, "leases": connector.host_leases}
                 elif request.get("op") == "fleet-relay-probe":
                     # End-to-end proof of the relay carrier from THIS
                     # machine (auto-fh2nv): pair with every other slot of
