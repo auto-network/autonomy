@@ -1704,6 +1704,53 @@ def get_supervisor() -> ServingSupervisor:
     return _SINGLETON
 
 
+def provisioned_serving_scopes() -> list:
+    """Every scope this machine is PROVISIONED to serve, as (scope, label).
+
+    Provisioned means it holds a serve certificate row. A scope with no row was
+    never set up to serve, which is a quiet fact and never a fault (auto-sdrsa)
+    — reporting it as down raises an alarm on a machine behaving exactly as
+    intended.
+
+    Shared so the two surfaces that answer "is this dashboard reachable" cannot
+    drift: the profile tray's Tunnel tile and the fleet page's machine card.
+    They drifted once already — both asked ``serving()`` with no argument,
+    which means personal, and on sjc-2 2026-09-09 three dead org connectors
+    read as fully green on both for over an hour.
+    """
+    scopes = []
+    try:
+        discovered = _discover_startup_orgs()
+    except Exception:
+        return scopes
+    for scope in discovered:
+        try:
+            if serve_cert_state(scope).get("status", "missing") == "missing":
+                continue
+        except Exception:
+            continue
+        scopes.append((scope, scope or "personal"))
+    return scopes
+
+
+def scopes_not_serving(provisioned=None) -> list:
+    """The labels of every provisioned scope whose connector is not serving.
+
+    ``serving()`` is contractually non-raising, so it is called OUTSIDE any
+    blanket except: wrapping it is how a missing method once read as a green
+    tile for weeks. Falls back to the personal scope alone when nothing is
+    provisioned, so a machine with no cert rows still answers the question it
+    was asked rather than silently reporting health.
+    """
+    checked = list(provisioned if provisioned is not None
+                   else provisioned_serving_scopes())
+    if not checked:
+        checked = [(None, "personal")]
+    supervisor = get_supervisor()
+    return [label for scope, label in checked
+            if not bool(supervisor.serving(scope))]
+
+
 def _discover_startup_orgs() -> list[str | None]:
     """Return every local Settings scope that may own serving state.
 

@@ -1740,9 +1740,10 @@ async def get_unlock_state(request: Request) -> JSONResponse:
             # question -- org connectors report fleet_runtime_configured=False
             # BY DESIGN, and asking them that invented a fault that could not
             # exist. Liveness and armed-for-sync are different questions.
-            checked = provisioned or [(None, "personal")]
-            down = [label for scope_, label in checked
-                    if not bool(supervisor.serving(scope_))]
+            from tools.dashboard.link_serving_supervisor import (
+                scopes_not_serving,
+            )
+            down = scopes_not_serving(provisioned or None)
             personal_down = any(
                 label in ("personal",) for label in down
             )
