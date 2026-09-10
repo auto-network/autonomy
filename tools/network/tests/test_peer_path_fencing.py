@@ -184,3 +184,24 @@ def test_every_code_the_carrier_defines_has_a_decision():
                  RESET_TUNNEL_LOST, RESET_PROTOCOL):
         c.opened(MINE)
         assert c.reset(MINE, code) in (RETRY, STOP)
+
+
+def test_a_transport_fault_retries_and_touches_no_pair():
+    """auto-fh2nv raises a bare ConnectionError when the dial never reached
+    admission. No pair was minted, so there is nothing to fence and nothing to
+    clear — and it must not be folded in with a refusal, which would turn a
+    transient network fault into a permanent stand-down."""
+    c = _controller()
+    c.opened(MINE)
+    assert c.transport_failed() == RETRY
+    assert c.pair_id == MINE, "a transport fault did not touch our live pair"
+
+
+def test_the_three_carrier_failures_map_to_three_decisions():
+    """The mapping must be total: one entry point per exception type, so an
+    adapter author is never left inventing a policy."""
+    c = _controller()
+    assert c.open_refused("operation-already-open") == STAND_DOWN
+    c.opened(MINE)
+    assert c.reset(MINE, RESET_TUNNEL_LOST) == RETRY
+    assert c.transport_failed() == RETRY
