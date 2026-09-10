@@ -35,12 +35,34 @@ from typing import Optional
 #: a deliberate close hammers a peer that meant to hang up; not retrying a
 #: transport failure turns a recoverable outage into a permanent one. Both are
 #: silent, which is why the code is carried rather than collapsed to a bool.
-RESET_TUNNEL_LOST = 6
-RESET_PEER_CLOSED = 1
+RESET_ORDERLY = 1
 RESET_OPEN_TIMEOUT = 2
+RESET_ROUTE_RELEASED = 5
+RESET_TUNNEL_LOST = 6
 RESET_PROTOCOL = 7
 
-_RETRYABLE_RESETS = frozenset({RESET_TUNNEL_LOST, RESET_OPEN_TIMEOUT})
+#: Backwards-compatible name for code 1; the carrier calls it "orderly".
+RESET_PEER_CLOSED = RESET_ORDERLY
+
+#: The transport saying NOT NOW. Every one of these describes a condition that
+#: a fresh attempt can resolve, so not retrying converts a recoverable outage
+#: into a permanent one.
+#:
+#: Code 5 was ADDED after reviewing auto-fh2nv's contract record at the
+#: convergence review. Their earlier summary to me listed 1, 2, 6 and 7; the
+#: contract also defines 5, "route released / activation failed" — the
+#: destination slot went away, or DirectedPair.activate's recheck failed
+#: because the destination was replaced between admission and activation.
+#: Both are resolved by resolving again and opening a fresh pair. Without it,
+#: code 5 fell through to STOP and this controller would have stopped
+#: retrying a peer whose route was merely replaced: precisely the silent
+#: permanent give-up this bead exists to remove, reintroduced by me. Found by
+#: cross-validation, which is what the convene step is for.
+_RETRYABLE_RESETS = frozenset({
+    RESET_OPEN_TIMEOUT,
+    RESET_ROUTE_RELEASED,
+    RESET_TUNNEL_LOST,
+})
 
 #: What the controller decided to do about an event.
 IGNORE = "ignore"        # not ours, or from a dead attempt
