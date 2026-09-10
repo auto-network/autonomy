@@ -282,7 +282,10 @@ def serve_cert_state(org: str | None, *, now: float | None = None) -> dict:
     * ``expired`` — a row whose delegate has passed ``not_after``;
     * ``key-invalid`` — a relative key locator is not a safe basename or its
       manifest root cannot be resolved;
-    * ``key-missing`` — a row whose ``key_path`` file is gone.
+    * ``key-missing`` — a row whose ``key_path`` file is gone;
+    * ``legacy-root-signed`` — a collaborative org still holding a root-signed
+      revision-2 cert, which the relay cannot accept from a v3 hello. Repair
+      is a sign-in; see the branch below.
 
 This is the cheap pre-unlock check: every organization-root sign-on mints a
 fresh serving credential iff the status is anything but ``ok``.
@@ -343,6 +346,38 @@ fresh serving credential iff the status is anything but ``ok``.
             "viewer_cert": None,
             "key_path": key_path,
             "not_after": not_after,
+        }
+
+    # REVISION 2 — root-signed. For a COLLABORATIVE org this is now obsolete,
+    # and reporting it "ok" is what kept it alive: the relay anchors a v3 hello
+    # at the cert's subject PERSONA and a v2 hello at the org root, so a
+    # root-signed org cert can only ever be served by a v2 hello. Rather than
+    # branch the connector on which cert it happens to hold — a compatibility
+    # shim that would keep the legacy mint alive indefinitely — the cert itself
+    # is declared out of date. Consequences, all of them wanted:
+    #
+    #   * the Certificate flag lights and names the org;
+    #   * serve_cert_ok is False, so the supervisor stops launching a connector
+    #     that can only be refused (on home 2026-09-10 that was three
+    #     connectors dialling, being rejected, and being replaced every 60s);
+    #   * the next sign-on re-mints it PERSONA-signed through the repair path
+    #     that already exists (_serveCredentialRepairState -> the persona mint,
+    #     which needs no org root), and the connector serves for the first time.
+    #
+    # The PERSONAL scope is deliberately excluded: the personal org has no
+    # adopted membership checkpoint at the registry, so it cannot present a v3
+    # hello at all, and its root-signed cert is correct until auto-tmers seeds
+    # that checkpoint. Excluding it is not a shim — it is the one scope for
+    # which revision 2 is still the right answer.
+    if org is not None and org != "personal":
+        return {
+            "status": "legacy-root-signed",
+            "row": row,
+            "error": (
+                "this organization's serving certificate is root-signed "
+                "(the retired mint) and the relay cannot accept it; sign in "
+                "again to issue the persona-signed one"
+            ),
         }
 
     if not isinstance(row.get("viewer_cert"), str):

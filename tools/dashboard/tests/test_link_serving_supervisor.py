@@ -43,6 +43,14 @@ from tools.graph.schemas.network_identity import (
     NETWORK_SERVE_CERT_REVISION,
     NETWORK_SERVE_CERT_SET_ID,
 )
+
+#: These fixtures mint the CURRENT generation: persona-signed revision 3.
+#: A collaborative org's root-signed revision-2 row is no longer "ok" — the
+#: relay cannot accept it from a v3 hello — so pinning launch behaviour on one
+#: would pin a state the supervisor now deliberately refuses to launch.
+#: Revision 2 remains correct for the PERSONAL scope only, and its rules are
+#: exercised there.
+SERVE_CERT_REVISION_V3 = 3
 from tools.graph.schemas.namespace_reservation import (
     NAMESPACE_RESERVATION_REVISION,
     NAMESPACE_RESERVATION_SET_ID,
@@ -208,6 +216,7 @@ def test_launch_adopts_a_healthy_incumbent_instead_of_reaping(env, monkeypatch):
     assert handle.pid() == incumbent_pid
     assert supervisor._credentials[ORG] == (
         state["cert"], state["viewer_cert"], state["key_path"])
+    assert state["viewer_cert"] is None, "revision 3 has no viewer certificate"
 
 
 def _refusing_spawn(*args, **kwargs):
@@ -268,25 +277,21 @@ def env(tmp_path, monkeypatch):
 
 
 def _provision_serve_cert(tmp_path, *, ttl=30 * 24 * 3600) -> dict:
-    """Mint a real root-signed tunnel:serve delegate, write its key file
-    (0600), and store the serve-cert row + a matching binding."""
+    """Mint a real PERSONA-signed tunnel:serve delegate, write its key file
+    (0600), and store the revision-3 serve-cert row + a matching binding."""
     from tools.network.idkit import KeyPair, Subject, issue_cert
 
     root = KeyPair.generate()
+    persona = KeyPair.generate()
     delegate = KeyPair.generate()
     now = int(time.time())
     cert = issue_cert(
-        root, delegate.public_hex, scope=("tunnel:serve",), org=ORG_UUID,
-        subject=Subject("persona", "ab" * 32),
+        persona, delegate.public_hex, scope=("tunnel:serve",), org=ORG_UUID,
+        subject=Subject("persona", persona.public_hex),
         not_before=now - 300, not_after=now + ttl,
     )
-    viewer_cert = issue_cert(
-        root, delegate.public_hex, scope=("tunnel:serve",), org=ORG_UUID,
-        subject=Subject("operator", delegate.public_hex),
-        not_before=cert.not_before, not_after=cert.not_after,
-    )
     dns01_cert = issue_cert(
-        root, delegate.public_hex, scope=("serve:dns-01",), org=ORG_UUID,
+        persona, delegate.public_hex, scope=("serve:dns-01",), org=ORG_UUID,
         subject=cert.subject,
         not_before=cert.not_before, not_after=cert.not_after,
     )
@@ -297,13 +302,12 @@ def _provision_serve_cert(tmp_path, *, ttl=30 * 24 * 3600) -> dict:
     os.chmod(key_path, 0o600)
 
     settings_ops.add_setting(
-        NETWORK_SERVE_CERT_SET_ID, NETWORK_SERVE_CERT_REVISION, "default",
+        NETWORK_SERVE_CERT_SET_ID, SERVE_CERT_REVISION_V3, "default",
         {
             "cert": cert.to_json().decode("ascii"),
-            "viewer_cert": viewer_cert.to_json().decode("ascii"),
             "dns01_cert": dns01_cert.to_json().decode("ascii"),
             "key_path": str(key_path),
-            "root_pub": root.public_hex,
+            "persona_pub": persona.public_hex,
             "not_after": cert.not_after,
         },
         org=ORG,
@@ -319,8 +323,8 @@ def _provision_serve_cert(tmp_path, *, ttl=30 * 24 * 3600) -> dict:
         },
         org=ORG,
     )
-    return {"root": root, "delegate": delegate, "cert": cert,
-            "viewer_cert": viewer_cert, "dns01_cert": dns01_cert,
+    return {"root": root, "persona": persona, "delegate": delegate,
+            "cert": cert, "viewer_cert": None, "dns01_cert": dns01_cert,
             "key_path": key_path}
 
 
@@ -343,13 +347,12 @@ def _put_grant(token="a" * 32, *, meta=None, issued_at=None):
 def _replace_key_path(provisioned: dict, key_path: str) -> None:
     settings_ops.upsert_by_key(
         NETWORK_SERVE_CERT_SET_ID,
-        NETWORK_SERVE_CERT_REVISION,
+        SERVE_CERT_REVISION_V3,
         "default",
         {
             "cert": provisioned["cert"].to_json().decode("ascii"),
-            "viewer_cert": provisioned["viewer_cert"].to_json().decode("ascii"),
             "key_path": key_path,
-            "root_pub": provisioned["root"].public_hex,
+            "persona_pub": provisioned["persona"].public_hex,
             "not_after": provisioned["cert"].not_after,
         },
         org=ORG,
@@ -865,30 +868,23 @@ def test_reprovisioned_credential_restarts_existing_connector(env):
     replacement = KeyPair.generate()
     now = int(time.time())
     cert = issue_cert(
-        provisioned["root"],
+        provisioned["persona"],
         replacement.public_hex,
         scope=("tunnel:serve",),
         org=ORG_UUID,
-        subject=Subject("persona", "ab" * 32),
+        subject=Subject("persona", provisioned["persona"].public_hex),
         not_before=now - 10,
         not_after=now + 30 * 24 * 3600,
-    )
-    viewer_cert = issue_cert(
-        provisioned["root"], replacement.public_hex,
-        scope=("tunnel:serve",), org=ORG_UUID,
-        subject=Subject("operator", replacement.public_hex),
-        not_before=cert.not_before, not_after=cert.not_after,
     )
     provisioned["key_path"].write_text(replacement.private_hex)
     settings_ops.upsert_by_key(
         NETWORK_SERVE_CERT_SET_ID,
-        NETWORK_SERVE_CERT_REVISION,
+        SERVE_CERT_REVISION_V3,
         "default",
         {
             "cert": cert.to_json().decode("ascii"),
-            "viewer_cert": viewer_cert.to_json().decode("ascii"),
             "key_path": str(provisioned["key_path"]),
-            "root_pub": provisioned["root"].public_hex,
+            "persona_pub": provisioned["persona"].public_hex,
             "not_after": cert.not_after,
         },
         org=ORG,
@@ -932,9 +928,18 @@ def test_legacy_operator_serve_cert_requires_reprovision(
         ),
     )
 
-    state = sup.serve_cert_state(ORG)
+    # The PERSONAL scope, because that is where revision 2 still lives: an org
+    # no longer reaches these identity rules at all (see the org case below).
+    state = sup.serve_cert_state(None)
     assert state["status"] == "identity-invalid"
     assert "reprovision" in state["error"]
+
+    # The same row under an ORG is refused earlier and for a different reason:
+    # root-signed is the retired mint, and the relay anchors an org hello at
+    # the cert's persona. Not broken — superseded, and repaired by signing in.
+    org_state = sup.serve_cert_state(ORG)
+    assert org_state["status"] == "legacy-root-signed"
+    assert "sign in again" in org_state["error"]
 
 
 def test_serve_cert_ok_reflects_status(env):

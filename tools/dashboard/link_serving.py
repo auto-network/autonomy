@@ -1406,7 +1406,13 @@ def _make_ice_serving_connector(
     # hello is correct until auto-tmers migrates it. Any failure here returns
     # None, the same v2 fallback as before — a scope that cannot prove
     # membership is not made worse by being asked.
-    if machine_key is not None and graph_org:
+    # The scopes that must present v3 are exactly the scopes whose certs must
+    # be persona-signed — serve_cert_state enforces the same boundary, and the
+    # two must not disagree or a scope would be asked for a proof its cert
+    # cannot use. Personal is excluded on both sides: its org has no adopted
+    # membership checkpoint at the registry, so it cannot prove membership and
+    # its root-signed cert is correct until auto-tmers seeds one.
+    if machine_key is not None and graph_org and graph_org != "personal":
         stream_kwargs["membership_proof_for"] = _membership_rider
         stream_kwargs["on_reprove"] = _membership_rider_for_seq
 

@@ -51,7 +51,17 @@ from tools.network.relaykit.connector import TunnelConnector
 from tools.network.relaykit.viewer import ViewerChannel
 
 REPO = Path(__file__).resolve().parents[3]
-ORG = "netorg"
+# The PERSONAL scope, deliberately. What this suite proves is the genuine
+# subprocess path — supervisor launches a real connector, it dials a real
+# relay, and serving goes live — and that path is identical for every scope.
+# The cert generation is not what is under test here, and personal is the one
+# scope whose root-signed revision-2 credential is still correct: it has no
+# adopted membership checkpoint at the registry, so it presents a v2 hello
+# that anchors at the org root. An org scope now requires a persona-signed
+# cert AND a membership rider built from a founded ledger, which is its own
+# fixture and its own bead; the org path is covered by the rider wiring tests
+# and was verified live on sjc-2 (all four scopes serving, 2026-09-10).
+ORG = "personal"
 ORG_UUID = "77777777-7777-4777-8777-777777777777"
 ISO = "%Y-%m-%dT%H:%M:%SZ"
 
@@ -305,9 +315,11 @@ def test_probe_confirms_live_link_and_flags_dead_grant(stack):
 
 
 def _provision_serve_cert(tmp_path, root, port):
-    """Mint a real root-signed tunnel:serve delegate, write its 0600 key file,
-    and store the serve-cert row + binding — what the provision endpoint will
-    do once the browser dual-mint lands."""
+    """Mint the personal scope's root-signed tunnel:serve delegate, write its
+    0600 key file, and store the revision-2 serve-cert row + binding.
+
+    Revision 2 is correct HERE and only here: an org scope's root-signed row
+    now reports legacy-root-signed and will not launch a connector."""
     delegate = KeyPair.generate()
     now = int(time.time())
     cert = issue_cert(

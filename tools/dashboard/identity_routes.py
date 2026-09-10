@@ -1561,6 +1561,14 @@ async def get_unlock_state(request: Request) -> JSONResponse:
             elif cert_status == "expired":
                 cert_states.append({"scope": label, "state": "expired",
                                     "reason": "The serving delegation certificate has expired."})
+            elif cert_status == "legacy-root-signed":
+                # Not broken — superseded. Say what the operator must DO,
+                # since a sign-in is the entire repair.
+                cert_states.append({"scope": label, "state": "renewal_due",
+                                    "reason": ("This organization's serving "
+                                               "certificate is the retired "
+                                               "root-signed kind. Sign in "
+                                               "again to replace it.")})
             else:
                 cert_states.append({"scope": label, "state": "issuance_failed",
                                     "reason": "The serving delegation certificate is invalid or unavailable."})
