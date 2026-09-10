@@ -225,3 +225,82 @@ class TestPeerFrontier:
         row = fleet_sync_peer_scope.read_peer_scopes()[PEER][0]
         assert (row["bytes_in"], row["bytes_out"]) == (0, 0)
         assert (row["frontier_ns"], row["observed_at_ns"]) == (8_000, 99)
+
+
+def test_a_field_a_later_schema_dropped_does_not_block_the_next_write(local_stores):
+    """The 2026-09-09 outage, as a test.
+
+    Deleting the checkpoint subsystem removed two counters from
+    FleetSyncTelemetryV1 at revision 1. Every stored row still carried them,
+    record_iteration merges the row it reads into the row it writes, and
+    upsert_by_key's enforce_declared_fields then refused the write -- silently,
+    because both call sites suppress. Home recorded no serve telemetry for five
+    hours while sync itself was healthy.
+
+    Resolution drops undeclared fields, so a stale field cannot reach a writer.
+    """
+    import json
+    import sqlite3
+
+    from tools.graph import settings_ops
+    from tools.graph.schemas.fleet_sync_telemetry import (
+        FLEET_SYNC_TELEMETRY_REVISION,
+        FLEET_SYNC_TELEMETRY_SET_ID,
+    )
+    from tools.network import fleet_sync_telemetry
+
+    _personal, machine = local_stores
+    key = fleet_sync_telemetry.telemetry_key(PEER, "direct", "serve", "anchore")
+    first = fleet_sync_telemetry.record_iteration(
+        PEER, channel="direct", direction="serve", mode="delta",
+        outcome="success", started_at_ns=1, duration_ms=1, scope="anchore",
+        bytes_sent=10,
+    )
+    assert first["iterations"] == 1
+
+    # Age the row into what a pre-deletion writer left behind. Written
+    # directly because the store itself now refuses to accept the field.
+    with sqlite3.connect(machine) as conn:
+        row = conn.execute(
+            "SELECT id,payload FROM settings WHERE set_id=? AND key=?",
+            (FLEET_SYNC_TELEMETRY_SET_ID, key),
+        ).fetchone()
+        stored = json.loads(row[1])
+        stored["total_checkpoint_bytes"] = 4096
+        stored["last_checkpoint_bytes"] = 512
+        conn.execute("UPDATE settings SET payload=? WHERE id=?",
+                     (json.dumps(stored), row[0]))
+
+    second = fleet_sync_telemetry.record_iteration(
+        PEER, channel="direct", direction="serve", mode="delta",
+        outcome="success", started_at_ns=2, duration_ms=1, scope="anchore",
+        bytes_sent=10,
+    )
+    assert second["iterations"] == 2, "the dead field blocked the write"
+    assert "total_checkpoint_bytes" not in second
+
+    resolved = settings_ops.read_set_key(
+        FLEET_SYNC_TELEMETRY_SET_ID, key, org="machine", peers=[],
+    )["payload"]
+    assert not [name for name in resolved if "checkpoint" in name]
+
+
+def test_a_misspelled_field_is_still_refused(local_stores):
+    """Dropping on read must not make a typo a silent no-op -- that is the
+    failure enforce_declared_fields exists to catch."""
+    from tools.graph import settings_ops
+    from tools.graph.schemas.registry import SchemaValidationError
+    from tools.graph.schemas.fleet_sync_telemetry import (
+        FLEET_SYNC_TELEMETRY_REVISION,
+        FLEET_SYNC_TELEMETRY_SET_ID,
+    )
+    from tools.network import fleet_sync_telemetry
+
+    payload = fleet_sync_telemetry._zero_payload()
+    payload.update({"last_mode": "delta", "last_outcome": "success",
+                    "total_bytes_snet": 5})
+    with pytest.raises(SchemaValidationError):
+        settings_ops.upsert_by_key(
+            FLEET_SYNC_TELEMETRY_SET_ID, FLEET_SYNC_TELEMETRY_REVISION,
+            f"direct:serve:{PEER}", payload, org="machine", state="raw",
+        )
