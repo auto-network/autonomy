@@ -123,3 +123,39 @@ def test_reopening_after_a_reset_fences_on_the_new_pair():
 def test_a_pair_id_is_required():
     with pytest.raises(ValueError):
         _controller().opened("")
+
+
+def test_a_verified_older_descriptor_is_accepted_and_recorded():
+    """The residual window auto-0905-002201 cannot close from inside ekwbp: if
+    a peer's local counter store is rebuilt, it republishes at 1 while we hold
+    7. Rejecting forever is a permanent silent outage; accepting a validly
+    signed descriptor from a rostered machine costs only liveness."""
+    c = _controller()
+    assert c.descriptor(7) is True
+    assert c.descriptor(1, verified=True) is True
+    assert c.descriptor_generation == 1, "the high-water mark follows reality"
+    assert c.downgrades() == [1], "and it is visible, not silent"
+
+
+def test_an_unverified_older_descriptor_is_still_ignored():
+    """Ordering still does its ordinary job: a late arrival nobody vouched for
+    must not replace a newer descriptor."""
+    c = _controller()
+    c.descriptor(7)
+    assert c.descriptor(4) is False
+    assert c.descriptor_generation == 7
+    assert c.downgrades() == []
+
+
+def test_a_newer_descriptor_needs_no_verification_flag():
+    c = _controller()
+    c.descriptor(2)
+    assert c.descriptor(9) is True
+    assert c.downgrades() == [], "forward motion is not a downgrade"
+
+
+def test_downgrades_are_empty_on_the_healthy_path():
+    c = _controller()
+    for generation in (1, 2, 3, 10):
+        assert c.descriptor(generation) is True
+    assert c.downgrades() == []
