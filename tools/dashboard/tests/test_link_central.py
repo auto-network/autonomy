@@ -18,6 +18,7 @@ from tools.network.registry.signing import sign_link_operation_receipt
 
 
 APPROVAL_ID = "central-link-runtime-0123456789abcdef"
+SERVING_MACHINE = "ef" * 32
 ORG = "example-org"
 ORG_UUID = "d55f8f0d-2de8-4fde-8678-68774cd68c19"
 ROOT = "11" * 32
@@ -100,11 +101,11 @@ def _planner(monkeypatch, store, witness):
     )
 
 
-def _planned(monkeypatch, store, witness):
+def _planned(monkeypatch, store, witness, *, target_type="design"):
     planner = _planner(monkeypatch, store, witness)
     plan = planner(_context(), {
         "target_uuid": "b88e521a-8d21-4e16-8f7c-f9a60110c745",
-        "target_type": "design",
+        "target_type": target_type,
         "meta": {
             "ttl": 3600,
             "label": "Quarterly plan",
@@ -674,6 +675,7 @@ def test_origin_consumer_converges_on_one_public_result(monkeypatch):
     consumer = link_central.LinkResultConsumer(
         store=store,
         secret_resolver=lambda: SECRET,
+        serving_machine_resolver=lambda _org: SERVING_MACHINE,
         tunnel_transport=lambda org, operation, body: calls.append(
             (org, operation, body)
         ) or {
@@ -696,8 +698,9 @@ def test_origin_consumer_converges_on_one_public_result(monkeypatch):
     assert calls[0][0:2] == (ORG, "create-link")
     assert set(calls[0][2]) == {
         "operation_id", "receipt", "signature", "origin_proof",
-        "target_uuid", "target_type", "meta",
+        "target_uuid", "target_type", "meta", "serving_machine",
     }
+    assert calls[0][2]["serving_machine"] == SERVING_MACHINE
     assert "relay_only" not in json.dumps(calls[0][2], sort_keys=True)
     operator = link_central.build_operator_result_projector(consumer)(status)
     assert "token" not in operator
@@ -743,6 +746,7 @@ def test_org_join_publish_uses_http_and_never_tunnel_control(monkeypatch):
             "url": "https://registry.example/l/" + "55" * 16,
             "completed_at": 1020.0,
         },
+        serving_machine_resolver=lambda _org: SERVING_MACHINE,
         tunnel_transport=lambda *_args: tunnel_calls.append(True) or {},
         witness_resolver=lambda _url: witness.public_hex,
     )
@@ -795,6 +799,10 @@ def test_first_ordinary_publish_starts_tunnel_before_control(monkeypatch):
         }
 
     monkeypatch.setattr(link_central.link_approvals, "_create_link_over_tunnel", control)
+    monkeypatch.setattr(
+        link_central.link_approvals, "_local_serving_machine",
+        lambda org: SERVING_MACHINE,
+    )
     consumer = link_central.LinkResultConsumer(
         store=store,
         secret_resolver=lambda: SECRET,
@@ -838,6 +846,7 @@ def test_tunnel_reply_loss_replays_the_exact_stable_operation(monkeypatch):
     consumer = link_central.LinkResultConsumer(
         store=store,
         secret_resolver=lambda: SECRET,
+        serving_machine_resolver=lambda _org: SERVING_MACHINE,
         tunnel_transport=tunnel,
         clock=lambda: 1020.0,
         witness_resolver=lambda _url: witness.public_hex,
@@ -881,6 +890,7 @@ def test_origin_consumer_serializes_concurrent_local_materialization(monkeypatch
     consumer = link_central.LinkResultConsumer(
         store=store,
         secret_resolver=lambda: SECRET,
+        serving_machine_resolver=lambda _org: SERVING_MACHINE,
         tunnel_transport=lambda *_args: calls.append(True) or {
             "ok": True,
             "token": "55" * 16,
@@ -912,6 +922,7 @@ def test_origin_consumer_wrong_destination_is_inert(monkeypatch):
     consumer = link_central.LinkResultConsumer(
         store=store,
         secret_resolver=lambda: b"other-origin" * 4,
+        serving_machine_resolver=lambda _org: SERVING_MACHINE,
         tunnel_transport=lambda *_args: calls.append(True) or {},
         witness_resolver=lambda _url: witness.public_hex,
     )
@@ -989,6 +1000,7 @@ def test_copied_rows_on_another_machine_cannot_claim_or_disclose(monkeypatch):
         store=store,
         secret_resolver=other_secret,
         transport=lambda *_args: external.append("http") or {},
+        serving_machine_resolver=lambda _org: SERVING_MACHINE,
         tunnel_transport=lambda *_args: external.append("tunnel") or {},
         witness_resolver=lambda _url: witness.public_hex,
     )
@@ -1032,6 +1044,7 @@ def test_requester_result_projection_is_read_only_during_transient_execution(
         store=store,
         secret_resolver=lambda: SECRET,
         transport=lambda *_args: external.append("http") or {},
+        serving_machine_resolver=lambda _org: SERVING_MACHINE,
         tunnel_transport=lambda *_args: external.append("tunnel") or {},
         witness_resolver=lambda _url: witness.public_hex,
     )
@@ -1062,6 +1075,7 @@ def test_origin_consumer_non_grants_never_reach_registry(monkeypatch, outcome):
         secret_resolver=lambda: (_ for _ in ()).throw(
             AssertionError("origin proof must not be resolved")
         ),
+        serving_machine_resolver=lambda _org: SERVING_MACHINE,
         tunnel_transport=lambda *_args: calls.append(True) or {},
         witness_resolver=lambda _url: witness.public_hex,
     )
@@ -1088,6 +1102,7 @@ def test_origin_consumer_refuses_witness_drift_before_execution(monkeypatch):
     consumer = link_central.LinkResultConsumer(
         store=store,
         secret_resolver=lambda: SECRET,
+        serving_machine_resolver=lambda _org: SERVING_MACHINE,
         tunnel_transport=lambda *_args: calls.append(True) or {},
         witness_resolver=lambda _url: "99" * 32,
         clock=lambda: 1020.0,
@@ -1126,6 +1141,7 @@ def test_origin_consumer_records_stable_revoke_not_found(monkeypatch):
             "completed_at": 1020.0,
             "revoked_at": None,
         },
+        serving_machine_resolver=lambda _org: SERVING_MACHINE,
         tunnel_transport=lambda *_args: tunnel_calls.append(True) or {},
         witness_resolver=lambda _url: witness.public_hex,
     )
@@ -1170,6 +1186,7 @@ def test_origin_consumer_converges_known_revoke_once(monkeypatch):
     consumer = link_central.LinkResultConsumer(
         store=store,
         secret_resolver=lambda: SECRET,
+        serving_machine_resolver=lambda _org: SERVING_MACHINE,
         tunnel_transport=lambda org, operation, args: calls.append(
             (org, operation, args)
         ) or {
@@ -1221,6 +1238,7 @@ def test_malformed_publish_success_writes_no_cache_or_result(monkeypatch):
     consumer = link_central.LinkResultConsumer(
         store=store,
         secret_resolver=lambda: SECRET,
+        serving_machine_resolver=lambda _org: SERVING_MACHINE,
         tunnel_transport=lambda *_args: {
             "ok": True,
             "token": "55" * 16,
@@ -1588,3 +1606,92 @@ def test_principal_planning_context_carries_kind_and_org():
         {},
     )
     assert captured == {"kind": "org_session", "org": ORG}
+
+
+# ── auto-nh1po: Central publishes of machine-local targets are pinned ──
+
+
+def _resolved_status(monkeypatch, store, witness, **planned_kwargs):
+    _plan, payload = _planned(monkeypatch, store, witness.public_hex, **planned_kwargs)
+    decision = _decision(store, payload, witness)
+    return ApprovalStatus(
+        "resolved",
+        ApprovalRecord(APPROVAL_ID, payload),
+        ApprovalRecord(APPROVAL_ID, {
+            "outcome": "granted", "decision": decision, "resolved_at": 1010.0,
+        }),
+    )
+
+
+def _tunnel_ok(calls):
+    def transport(org, operation, args):
+        calls.append((org, operation, json.loads(json.dumps(args))))
+        return {"ok": True, "token": "55" * 16,
+                "url": "https://registry.example/l/" + "55" * 16}
+    return transport
+
+
+def test_design_publish_over_tunnel_declares_and_caches_the_serving_machine(monkeypatch):
+    witness = KeyPair.generate()
+    store = MemoryStore()
+    status = _resolved_status(monkeypatch, store, witness)  # design: experiments.db
+    writes = []
+    monkeypatch.setattr(
+        link_central.settings_ops, "upsert_by_key",
+        lambda *args, **kwargs: writes.append((args, kwargs)) or "setting-1",
+    )
+    calls = []
+    consumer = link_central.LinkResultConsumer(
+        store=store, secret_resolver=lambda: SECRET,
+        serving_machine_resolver=lambda org: SERVING_MACHINE,
+        tunnel_transport=_tunnel_ok(calls),
+        clock=lambda: 1020.0, witness_resolver=lambda _url: witness.public_hex,
+    )
+    assert consumer.materialize(status) is True
+    assert calls[0][1] == "create-link"
+    assert calls[0][2]["serving_machine"] == SERVING_MACHINE
+    grant = writes[0][0][3]
+    assert grant["target_type"] == "design"
+    assert grant["serving_machine"] == SERVING_MACHINE
+
+
+def test_note_publish_over_tunnel_stays_org_wide(monkeypatch):
+    witness = KeyPair.generate()
+    store = MemoryStore()
+    status = _resolved_status(monkeypatch, store, witness, target_type="note")
+    writes = []
+    monkeypatch.setattr(
+        link_central.settings_ops, "upsert_by_key",
+        lambda *args, **kwargs: writes.append((args, kwargs)) or "setting-1",
+    )
+    calls = []
+    consumer = link_central.LinkResultConsumer(
+        store=store, secret_resolver=lambda: SECRET,
+        serving_machine_resolver=lambda org: (_ for _ in ()).throw(
+            AssertionError("a note is never pinned")),
+        tunnel_transport=_tunnel_ok(calls),
+        clock=lambda: 1020.0, witness_resolver=lambda _url: witness.public_hex,
+    )
+    assert consumer.materialize(status) is True
+    assert "serving_machine" not in calls[0][2]
+    assert "serving_machine" not in writes[0][0][3]
+
+
+def test_machine_local_publish_without_a_serving_machine_sends_nothing_and_retries(monkeypatch):
+    """The connector could not say which machine it is: nothing is minted
+    (a link published org-wide would recreate the 2026-09-10 split) and the
+    operation stays retryable — no terminal local truth was written."""
+    witness = KeyPair.generate()
+    store = MemoryStore()
+    status = _resolved_status(monkeypatch, store, witness)
+    calls = []
+    consumer = link_central.LinkResultConsumer(
+        store=store, secret_resolver=lambda: SECRET,
+        serving_machine_resolver=lambda org: None,
+        tunnel_transport=_tunnel_ok(calls),
+        clock=lambda: 1020.0, witness_resolver=lambda _url: witness.public_hex,
+    )
+    with pytest.raises(link_central.LinkCentralError, match="registry unavailable"):
+        consumer.materialize(status)
+    assert calls == []
+    assert store.results == {}

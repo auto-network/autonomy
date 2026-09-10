@@ -1364,6 +1364,7 @@ class LinkResultConsumer:
         secret_resolver: Callable[[], bytes] = _session_secret,
         transport: Callable[[str, str, Mapping[str, Any]], Mapping[str, Any]] | None = None,
         tunnel_transport: Callable[[str, str, Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        serving_machine_resolver=None,
         clock: Callable[[], float] = time.time,
         witness_resolver: Callable[[str], str] = _registry_witness_public_key,
     ) -> None:
@@ -1371,6 +1372,10 @@ class LinkResultConsumer:
         self._secret_resolver = secret_resolver
         self._http_transport = transport
         self._tunnel_transport = tunnel_transport
+        #: org -> serving machine key pub of THIS machine's connector, or
+        #: None (auto-nh1po). Defaults to the live connector-status lookup;
+        #: injected by tests beside ``tunnel_transport``.
+        self._serving_machine_resolver = serving_machine_resolver
         self._clock = clock
         self._witness_resolver = witness_resolver
         self._materialize_lock = threading.RLock()
@@ -1447,6 +1452,8 @@ class LinkResultConsumer:
             args["token"] = intent["revoke_token"]
         try:
             if self._tunnel_transport is not None:
+                if operation == "publish":
+                    self._declare_serving_machine(org, args)
                 reply = self._tunnel_transport(org, control_op, args)
             elif operation == "publish":
                 from tools.dashboard.link_serving_supervisor import get_supervisor
@@ -1454,6 +1461,7 @@ class LinkResultConsumer:
                 started = get_supervisor().start(org)
                 if not isinstance(started, Mapping) or not started.get("running"):
                     raise LinkCentralError("registry_unavailable")
+                self._declare_serving_machine(org, args)
                 reply = link_approvals._create_link_over_tunnel(org, args)
             else:
                 from tools.dashboard.link_serving_supervisor import control
@@ -1470,17 +1478,44 @@ class LinkResultConsumer:
         if reply.get("ok") is not True:
             raise LinkCentralError("registry_unavailable")
         if operation == "publish":
-            return {
+            result = {
                 "state": "succeeded",
                 "token": reply.get("token"),
                 "url": reply.get("url"),
                 "serving": {"live": True, "via": "tunnel-control"},
             }
+            if "serving_machine" in args:
+                result["serving_machine"] = args["serving_machine"]
+            return result
         return {
             "state": reply.get("state"),
             "revoked_at": reply.get("revoked_at"),
             "via": "tunnel-control",
         }
+
+    def _declare_serving_machine(self, org: str, args: dict) -> None:
+        """auto-nh1po: a link to a MACHINE-LOCAL store (design/present/
+        mission) is served only by this machine; declare its serving
+        machine so the registry pins the grant and the relay routes the
+        link nowhere else. The value is what the tunnel hello proves — the
+        serving machine KEY pub — read from the live connector. Unknown
+        means the connector is not up: retryable, nothing was committed."""
+        from tools.dashboard.link_channel_key import MACHINE_LOCAL_TARGET_TYPES
+
+        if args.get("target_type") not in MACHINE_LOCAL_TARGET_TYPES:
+            return
+        resolver = self._serving_machine_resolver
+        if resolver is None:
+            resolver = link_approvals._local_serving_machine
+        try:
+            machine = resolver(org)
+        except LinkCentralError:
+            raise
+        except Exception as exc:
+            raise LinkCentralError("registry_unavailable") from exc
+        if not isinstance(machine, str) or _HEX64_RE.fullmatch(machine) is None:
+            raise LinkCentralError("registry_unavailable")
+        args["serving_machine"] = machine
 
     def _execute(
         self,
@@ -1695,6 +1730,9 @@ class LinkResultConsumer:
             }
             if target["target_type"] == "org:join":
                 grant["invite_ref"] = intent["invite_ref"]
+            serving_machine = remote.get("serving_machine")
+            if isinstance(serving_machine, str) and _HEX64_RE.fullmatch(serving_machine):
+                grant["serving_machine"] = serving_machine
             serving = remote.get("serving")
             if not isinstance(serving, Mapping):
                 try:
