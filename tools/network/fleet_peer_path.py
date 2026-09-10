@@ -102,6 +102,28 @@ class PeerPathController:
             return STAND_DOWN
         return RETRY
 
+    def transport_failed(self) -> str:
+        """The dial failed before any pair was admitted.
+
+        auto-fh2nv surfaces three distinct failures out of open(), and the
+        adapter must keep them apart because they produce different decisions
+        here:
+
+            FleetStreamRefused(reason)        -> open_refused(reason)
+            FleetStreamClosed(pair_id, code)  -> reset(pair_id, code)
+            ConnectionError                   -> transport_failed()
+
+        A bare transport fault never reached admission, so there is no pair_id
+        to fence on and nothing to clear: the relay minted nothing and this
+        controller holds nothing. Retry is immediately legal.
+
+        This method exists so the mapping is TOTAL. Without it an adapter
+        author has to decide what a ConnectionError means, and the plausible
+        wrong answer — folding it in with a refusal — turns a transient
+        network fault into a permanent stand-down.
+        """
+        return RETRY
+
     def reset(self, pair_id: str, code: int) -> str:
         """A leg was torn down. Decide whether it was OURS and what to do."""
         if self.pair_id is None or pair_id != self.pair_id:
