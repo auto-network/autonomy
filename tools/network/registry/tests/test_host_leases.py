@@ -638,6 +638,121 @@ def test_the_backfill_tool_refuses_a_genesis_id(tmp_path, monkeypatch):
     assert store.count_orgs_with_serving_keys() == 1
 
 
+def test_the_live_slot_check_refuses_a_key_that_rotated_after_collection(
+    tmp_path, monkeypatch,
+):
+    """The check a freshness bound cannot make.
+
+    76d61b5b merged and home's connectors recycled onto per-org keys in about
+    26 seconds, so a manifest collected seconds earlier passes any clock and is
+    already wrong. This compares the manifest against who is serving RIGHT NOW,
+    read from the registry's own live-hub readout, and refuses when a serving
+    machine is not covered -- naming the key that would be locked out.
+
+    Found by host-0906-222509, who measured the propagation and pointed out
+    that the registry already observes the invariant directly.
+    """
+    import json
+    import time as _time
+
+    from tools.network.registry import backfill_serving_keys as backfill
+    from tools.network.registry.store import RegistryStore
+
+    db = tmp_path / "registry.db"
+    RegistryStore(str(db))
+    org = "c8e5cd04-8f19-4bc2-8951-a6b6b80b2699"
+    collected = "ab" * 32           # what the manifest caught
+    rotated = "cd" * 32             # what the connector serves by now
+
+    path = tmp_path / "m.json"
+    path.write_text(json.dumps({
+        "collected_at": int(_time.time()),
+        "boot_commit": "c0c69985",
+        "entries": [{"scope": "anchore", "org_uuid": org,
+                     "serving_pub": collected}],
+    }))
+
+    def run(live_keys):
+        monkeypatch.setattr(
+            backfill, "live_slots", lambda url: {org: set(live_keys)})
+        monkeypatch.setattr("sys.argv", [
+            "backfill", "--db", str(db), "--manifest", str(path),
+            "--readout", "http://127.0.0.1:1/readout",
+        ])
+        backfill.main()
+
+    # A tunnel is serving under the ROTATED key, truncated as the readout does.
+    with pytest.raises(SystemExit) as exc:
+        run([rotated[:16]])
+    assert "serving RIGHT NOW" in str(exc.value)
+    assert rotated[:16] in str(exc.value)
+    assert RegistryStore(str(db)).count_orgs_with_serving_keys() == 0, (
+        "nothing may be written when the gate would lock a live connector out"
+    )
+
+    # The manifest matching the live slot registers, and the post-condition
+    # confirms the gate admits the fleet as it stands.
+    run([collected[:16]])
+    assert RegistryStore(str(db)).registered_serving_keys(org) == {collected}
+
+    # No readout and no explicit waiver: refuse rather than guess.
+    monkeypatch.setattr("sys.argv", [
+        "backfill", "--db", str(db), "--manifest", str(path),
+    ])
+    with pytest.raises(SystemExit) as exc:
+        backfill.main()
+    assert "--readout is required" in str(exc.value)
+
+
+def test_the_live_slot_readout_is_parsed_from_the_real_shape():
+    """Parse what metrics.render_readout actually emits, not a guess at it:
+    per-org tunnels with `machine` truncated to 16 hex."""
+    from tools.network.registry import backfill_serving_keys as backfill
+    from tools.network.registry.metrics import render_readout
+
+    class _T:
+        persona_pub = "ab" * 32
+        machine = "cd" * 32
+        version = 3
+        caps = ()
+        channels = ()
+        raw_streams = ()
+        last_control = None
+
+    class _Hub:
+        _tunnels = {ORG: {("slot",): _T()}}
+
+    payload = render_readout(_Hub(), build_info={"commit": "abc"})
+    captured = {}
+
+    def fake_urlopen(url, timeout=None):
+        import io
+        import json as _json
+
+        class _R(io.StringIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        captured["url"] = url
+        return _R(_json.dumps(payload))
+
+    import urllib.request
+    original = urllib.request.urlopen
+    urllib.request.urlopen = fake_urlopen
+    try:
+        slots = backfill.live_slots("http://127.0.0.1:1/readout")
+    finally:
+        urllib.request.urlopen = original
+
+    assert slots == {ORG: {_T.machine[:16]}}
+    # And a full key is matched by that truncated prefix, which is how the
+    # manifest comparison works.
+    assert backfill._covered(_T.machine[:16], {_T.machine})
+    assert not backfill._covered(_T.machine[:16], {"ef" * 32})
+
+
 def test_a_stale_manifest_is_refused(tmp_path, monkeypatch):
     """Serving keys rotate, so a manifest has a shelf life.
 
@@ -670,8 +785,12 @@ def test_a_stale_manifest_is_refused(tmp_path, monkeypatch):
         return str(path)
 
     def run(*paths):
+        # --no-live-check on purpose: this test is about the staleness
+        # BACKSTOP. The live-slot comparison is the primary check and has its
+        # own test above; mixing them would let one cover for the other.
         monkeypatch.setattr("sys.argv", [
-            "backfill", "--db", str(db), *sum((["--manifest", p] for p in paths), []),
+            "backfill", "--db", str(db), "--no-live-check",
+            *sum((["--manifest", p] for p in paths), []),
         ])
         backfill.main()
 

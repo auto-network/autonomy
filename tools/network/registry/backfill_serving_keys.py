@@ -202,6 +202,91 @@ def _manifest_entries(paths: list, now: int) -> list:
     return out
 
 
+def live_slots(readout_url: str) -> dict:
+    """``{org_uuid: {machine-key prefix, ...}}`` for tunnels serving RIGHT NOW.
+
+    Read from the registry's own loopback readout (``GET /readout`` on the
+    private metrics listener, metrics.render_readout), which walks the live
+    TunnelHub at call time "so it can never disagree with reality". This is the
+    invariant itself rather than a proxy for it: who is serving now, versus who
+    the set about to be written would admit.
+
+    WHY THIS REPLACED A FRESHNESS CLOCK as the primary check. The first version
+    refused manifests older than 15 minutes. host-0906-222509 measured the real
+    propagation: 76d61b5b merged and home's connectors recycled onto it in about
+    26 SECONDS, so a manifest collected at 00:13:50 and applied at 00:14:30
+    passes any bound you would pick and is already wrong. The hazard is CHANGE,
+    not age, and on this fleet a merge lands faster than two ssh round trips.
+    The clock survives below as a backstop against a stale terminal resumed
+    tomorrow — do not "improve" this tool by tuning that number and think the
+    risk is addressed.
+
+    Machine keys in the readout are truncated to 16 hex characters (64 bits) on
+    purpose; comparison is therefore by prefix, which is collision-free at this
+    scale. The registry's own ``build.commit`` is in the reply too and is
+    deliberately NOT compared with the manifests' ``boot_commit``: those are
+    different deploys of different codebases, and equating them would assert a
+    relationship that does not exist.
+    """
+    import json as _json
+    import urllib.request
+
+    with urllib.request.urlopen(readout_url, timeout=5) as resp:
+        data = _json.load(resp)
+    slots = {}
+    for org, info in (data.get("orgs") or {}).items():
+        keys = {
+            tunnel.get("machine") or ""
+            for tunnel in (info.get("tunnels") or ())
+        }
+        slots[org] = {key for key in keys if key}
+    return slots
+
+
+def _covered(prefix: str, full_keys) -> bool:
+    return any(full.startswith(prefix) for full in full_keys)
+
+
+def _require_live_slots_covered(slots: dict, entries: list) -> None:
+    """Every machine serving an org NOW must be in the set about to be written.
+
+    Catches what no clock can: one machine drifting between its own collect and
+    this register, and a derivation change landing in the seconds between them.
+    """
+    by_org: dict = {}
+    for entry in entries:
+        by_org.setdefault(entry["org_uuid"], set()).add(entry["serving_pub"])
+    for org, manifest_keys in sorted(by_org.items()):
+        for prefix in sorted(slots.get(org, ())):
+            if not _covered(prefix, manifest_keys):
+                raise SystemExit(
+                    f"REFUSING: org {org} has a tunnel serving RIGHT NOW under "
+                    f"machine key {prefix}..., which is not in the manifest "
+                    f"({len(manifest_keys)} key(s) collected). Registering now "
+                    "would gate that connector at its next hello. Its serving "
+                    "key changed after the manifest was collected — re-collect "
+                    "on every machine and re-run."
+                )
+
+
+def _require_live_slots_admitted(slots: dict, store, entries: list) -> None:
+    """POST-CONDITION, stronger than the read-back: the gate now admits the
+    fleet as it actually stands. Read-back proves the row landed; this proves
+    every live tunnel would pass the check relay.py is about to start making.
+    If the two ever disagree, that is worth waking someone for."""
+    for org in sorted({entry["org_uuid"] for entry in entries}):
+        allowed = store.registered_serving_keys(org)
+        for prefix in sorted(slots.get(org, ())):
+            if not _covered(prefix, allowed):
+                raise SystemExit(
+                    f"POST-CONDITION FAILED: org {org} is being served NOW by "
+                    f"machine key {prefix}..., and the allow-set just written "
+                    f"({len(allowed)} key(s)) does not admit it. Enforcement is "
+                    "live and that connector will be refused at its next "
+                    "hello. Investigate before anything reconnects."
+                )
+
+
 def _register_one(store, org: str, machine: str, serving_pub: str) -> None:
     _require_org_uuid(org)
     _require_serving_pub(serving_pub)
@@ -236,6 +321,17 @@ def main() -> None:
     p.add_argument("--manifest", action="append", default=[],
                    help="ON THE REGISTRY HOST: a manifest from --collect "
                         "(repeatable, one per machine). Refused when stale")
+    p.add_argument("--readout",
+                   help="the registry's own loopback readout URL "
+                        "(http://127.0.0.1:<metrics_port>/readout). THE "
+                        "PRIMARY SAFETY CHECK: every machine serving an org "
+                        "right now must be in the manifest, and must still be "
+                        "admitted afterwards")
+    p.add_argument("--no-live-check", action="store_true",
+                   help="skip the live-slot check. You are then registering a "
+                        "gate without knowing who it will refuse; the only "
+                        "remaining detection is the 'serving-key REFUSED' "
+                        "audit line, after a connector is already locked out")
     p.add_argument("--db")
     p.add_argument("--org", help="org_uuid, NOT the genesis id")
     p.add_argument("--machine", default="",
@@ -252,9 +348,28 @@ def main() -> None:
     store = RegistryStore(a.db)
     if a.manifest:
         entries = _manifest_entries(a.manifest, int(time.time()))
+        slots = {}
+        if a.no_live_check:
+            print("WARNING: --no-live-check. Registering a gate without "
+                  "reading who is serving now.")
+        elif not a.readout:
+            raise SystemExit(
+                "--readout is required (or --no-live-check to proceed without "
+                "it). The live-slot comparison is the primary check: a "
+                "freshness bound cannot catch a derivation change that lands "
+                "in the seconds between collect and register, and one did "
+                "exactly that on 2026-09-10 in about 26 seconds."
+            )
+        else:
+            slots = live_slots(a.readout)
+            _require_live_slots_covered(slots, entries)
         for entry in entries:
             _register_one(store, entry["org_uuid"], a.machine or entry["scope"],
                           entry["serving_pub"])
+        if slots:
+            _require_live_slots_admitted(slots, store, entries)
+            print("\npost-condition OK: every tunnel serving these orgs right "
+                  "now is admitted by the allow-set just written.")
         print(f"\n{len(entries)} registration(s) complete. Watch the registry "
               "audit log: 'serving-key transitional-accept' must STOP appearing "
               "for these orgs (that is the positive signal enforcement is on), "
