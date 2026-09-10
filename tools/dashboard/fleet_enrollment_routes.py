@@ -1028,6 +1028,11 @@ async def local_runtime_context(request: Request) -> JSONResponse:
     denied = _operator_required(request)
     if denied is not None:
         return denied
+    return runtime_preparation()
+
+
+def runtime_preparation() -> JSONResponse:
+    """Public derivation inputs, also consumed by encrypted sign-in preparation."""
     try:
         context = _runtime_context()
     except (ValueError, TypeError, fleet_roster.FleetRosterError) as exc:

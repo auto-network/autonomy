@@ -104,7 +104,7 @@ class VaultSealerNotReady(RuntimeError):
 
 def build_vault_sealer(
     cache,
-    author_provider: Callable[[], object],
+    author_provider: Callable[[str], object],
     ledger_provider: Callable[[str, "str | None"], object],
 ) -> Callable[..., str]:
     """Return the sealer callable ``settings_ops`` invokes on a vaulted write.
@@ -122,7 +122,7 @@ def build_vault_sealer(
     value sealed by this process is opened by the same material that sealed it
     and a divergence cannot hide in a second construction.
 
-    ``author_provider`` returns the attenuated agent delegate's SIGNING KEY,
+    ``author_provider(org)`` returns that organization's delegate SIGNING KEY,
     or ``None`` before an unlock has provisioned one — not the
     ``StorageDelegate`` wrapper, which carries the public facts around it.
     ``seal_revision`` signs with what it is given (``creator.sign_hex``), and
@@ -167,7 +167,7 @@ def build_vault_sealer(
         org: "str | None",
         policy_class_id: "str | None" = None,
     ) -> str:
-        author = author_provider()
+        author = author_provider(org)
         if author is None:
             raise VaultSealerNotReady(
                 f"{set_id} is a vault set, but this process holds no agent "
@@ -298,7 +298,7 @@ def _land_advance(advance, cache, key_control, fold_at, authority_ancestry) -> N
 
 def register_vault_sealer(
     cache,
-    author_provider: Callable[[], object],
+    author_provider: Callable[[str], object],
     ledger_provider: Callable[[str, "str | None"], object],
 ) -> Callable[..., str]:
     """Build the sealer and install it as the process's vault sealer.

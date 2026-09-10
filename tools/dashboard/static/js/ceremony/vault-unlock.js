@@ -11,6 +11,56 @@ const PERSONAL_ROOT_CLASS_NAME = 'Personal root vault';
 const DELEGATE_AUDITED_DERIVE_PURPOSE =
   'autonomy/vault/delegate-audited-recipient/v1';
 
+export function deriveAuditedRecipient(rootSeed) {
+  return deriveEncapsulationKeypair(rootSeed, DELEGATE_AUDITED_DERIVE_PURPOSE);
+}
+
+/** Phase 2: construct the existing handoff using only pre-fetched inputs. */
+export async function prepareVault(rootSeed, prepared, audited) {
+  const result = { keys: { generation_keys: {},
+    delegate_audited_private_key: audited.privateKeyHex,
+    delegate_audited_public_key: audited.publicKeyHex } };
+  if (prepared.recovery_genesis_id) {
+    const kemSeed = await deriveKemSeed(rootSeed);
+    try {
+      result.keys.persona_kem_private_key = (await deriveEncapsulationKeypair(
+        kemSeed, 'autonomy/persona-kem/v1/' + prepared.recovery_genesis_id,
+      )).privateKeyHex;
+    } finally { kemSeed.fill(0); }
+  }
+  const inventory = prepared.inventory;
+  if (!rootReachableClass(inventory)) {
+    let anchor = inventory.anchors.find(a => a.anchor_id === PERSONAL_ROOT_ANCHOR_ID)
+      || inventory.anchors[0];
+    if (!anchor) {
+      let signingKey = await importEd25519RootSigningKey(rootSeed);
+      try {
+        anchor = await createRootAnchorEnvelope({ seed: rootSeed, signingKey,
+          rootPub: prepared.root_pub }, { anchorId: PERSONAL_ROOT_ANCHOR_ID,
+          displayName: 'Personal root vault access', createdAt: new Date().toISOString() });
+        result.anchor = anchor;
+      } finally { signingKey = null; }
+    }
+    result.class_anchor_id = anchor.anchor_id;
+  }
+  return result;
+}
+
+/** Phase 3: no root key is needed by any of these writes. */
+export async function submitVault(prepared, fetchImpl = fetch) {
+  async function post(url, payload) {
+    const response = await fetchImpl(url, { method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const result = await body(response);
+    if (!response.ok || result.ok === false) throw new Error(result.error || 'vault handoff failed');
+  }
+  if (prepared.anchor) await post('/api/identity/vault-anchors', { anchor: prepared.anchor });
+  if (prepared.class_anchor_id) await post(
+    '/api/identity/vault-anchors/' + encodeURIComponent(prepared.class_anchor_id) + '/classes',
+    { display_name: PERSONAL_ROOT_CLASS_NAME });
+  await post('/api/identity/unlock/vault-keys', prepared.keys);
+}
+
 /** Scope personal vault bootstrap requests explicitly. */
 function personalHeaders() {
   return { 'Content-Type': 'application/json', 'X-Graph-Org': 'personal' };

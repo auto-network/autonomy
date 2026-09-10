@@ -719,9 +719,11 @@
   // not strand the others, and the re-read shows whatever actually cleared.
   async function runRestart() {
     if (restartBusy) return;
-    var openRootMod;
+    var openRootMod, phases, encrypted;
     try {
       openRootMod = await import('./ceremony/open-root.js');
+      phases = await import('./ceremony/signon-phases.js');
+      encrypted = await phases.fetchPreparation(function (u, o) { return root.fetch(u, o); });
     } catch (e) {
       loadError = 'Could not start the restore: ' + ((e && e.message) || e);
       render();
@@ -745,57 +747,22 @@
     var seed = opened.seed;
     opened.seed = null;
     try {
-      // 1. Restart the serving processes: a fresh subprocess drops the stale
-      //    code and the dead in-memory credential, and comes back ready to be
-      //    re-armed.
+      var prepared;
+      try {
+        prepared = await phases.prepareSignon(seed, encrypted, root.AutonomyNetworkSession);
+      } finally {
+        seed.fill(0);
+        opened.signingKey = null;
+      }
       try {
         await root.fetch('/api/fleet/restore', {
           method: 'POST', credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' }, body: '{}',
         });
-      } catch (e) { /* best-effort — the arm below still runs */ }
-      // 2. Re-warm the vault (mints a fresh delegate) with the open root.
-      try {
-        var signon = root.AutonomyNetworkSession;
-        if (signon && signon._internals
-            && typeof signon._internals.wakeVault === 'function') {
-          await signon._internals.wakeVault({
-            personalRootSeed: new Uint8Array(seed),
-          });
-        }
-      } catch (e) { /* best-effort */ }
-      // 3. Give the now-fresh sync processes a new credential (the shared,
-      //    non-diverging restore used by the unlock path too).
-      try {
-        var fr = await import('./ceremony/fleet-restore.js');
-        await fr.restoreFleetRuntime(new Uint8Array(seed), {
-          fetchImpl: function (u, o) { return root.fetch(u, o); },
-          signon: root.AutonomyNetworkSession,
-        });
-      } catch (e) { /* best-effort */ }
-      // 4. The SAME per-org maintenance every other root unlock runs —
-      //    serving certificates, bindings, checkpoints. unlock.js documents
-      //    this as the convergence point of every root ceremony ("the factor
-      //    that proved the policy is irrelevant"), but only three of the four
-      //    root-opening paths actually called it: passkey, password and
-      //    recovery. THIS one did not, and this one is the button the operator
-      //    presses BECAUSE a flag is lit.
-      //
-      //    Live consequence on home 2026-09-10: the Certificate flag said
-      //    "sign in again to replace it", the operator opened their root here
-      //    twice, and the ceremony did everything except the repair the flag
-      //    was asking for — one serve-cert POST for the personal scope, no
-      //    per-org pass at all, no unlock-report. The three organizations
-      //    stayed on their retired root-signed certificates, and no number of
-      //    repeats could ever have changed that.
-      try {
-        var unlock = root.AutonomyUnlock;
-        var repair = unlock && unlock._internals
-          && unlock._internals.repairServingAfterRootUnlock;
-        if (typeof repair === 'function') {
-          await repair(new Uint8Array(seed));
-        }
-      } catch (e) { /* best-effort: never cost the operator their session */ }
+      } catch (e) { /* existing best-effort restart: still attempt arming */ }
+      await phases.submitSignon(prepared, function (u, o) { return root.fetch(u, o); });
+    } catch (e) {
+      loadError = (e && e.message) || String(e);
     } finally {
       if (seed && seed.fill) seed.fill(0);
       restartBusy = false;

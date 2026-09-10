@@ -1,10 +1,6 @@
-/* Exercise the real password-unlock function without a browser UI.
- *
- * The cryptographic primitives and HTTP responses are narrow fakes; the code
- * under test is unlock.js itself.  The proof is about orchestration: access
- * authentication completes before serving maintenance, a maintenance failure
- * does not undo access, and the access-only passkey function contains no call
- * to the root-signing repair path.
+/* Exercise the real phased serving maintenance and access-only passkey path.
+ * Local signing uses real crypto. HTTP is a fixture which rejects any call
+ * before root cleanup. Maintenance failure must not undo completed access.
  */
 "use strict";
 
@@ -37,7 +33,9 @@ globalThis.location = { search: "", pathname: "/unlock" };
 const mode = process.env.AUTONOMY_REPAIR_MODE || "success";
 const events = [];
 let repairCalls = 0;
+let ceremonySeed = null;
 globalThis.fetch = async (requestUrl, options) => {
+  if (ceremonySeed && ceremonySeed.some(Boolean)) throw new Error('network before root cleanup');
   const method = (options && options.method) || "GET";
   events.push(method + " " + requestUrl);
   if (requestUrl === "/api/identity/personal") {
@@ -59,32 +57,23 @@ globalThis.fetch = async (requestUrl, options) => {
   if (requestUrl === "/api/identity/unlock/passkey") {
     return { ok: true, json: async () => ({ ok: true }) };
   }
+  if (requestUrl === '/api/network/serve-cert') {
+    repairCalls += 1;
+    repairCalledAfterAccess = events.includes('POST /api/identity/unlock/password');
+    return { ok: mode !== 'failure', json: async () => mode === 'failure'
+      ? { ok: false, error: 'simulated maintenance failure' } : { ok: true } };
+  }
+  if (['/api/identity/unlock/vault-keys', '/api/network/unlock-report',
+       '/api/identity/ceremony-error'].includes(requestUrl)) {
+    return { ok: true, json: async () => ({ ok: true }) };
+  }
   return { ok: false, status: 404, json: async () => ({}) };
 };
 window.fetch = globalThis.fetch;
 
 let repairCalledAfterAccess = false;
-window.AutonomyNetworkSession.repairAllServeCredentialsWithRootSeed = async (seed) => {
-  repairCalls += 1;
-  repairCalledAfterAccess = events.includes(
-    "POST /api/identity/unlock/password");
-  if (!(seed instanceof Uint8Array) || seed.length !== 32) {
-    throw new Error("opened root seed not forwarded");
-  }
-  if (mode === "failure") throw new Error("simulated maintenance failure");
-  return { checked: true, repaired: false, status: "ready" };
-};
-
 let allRepairCalls = 0;
 let allRepairOrgs = null;
-if (process.env.AUTONOMY_ALL_ORG_REPAIR === "1") {
-  window.AutonomyNetworkSession.repairAllServeCredentialsWithRootSeed = async (seed) => {
-    allRepairCalls += 1;
-    if (!(seed instanceof Uint8Array) || seed.length !== 32) throw new Error("root missing");
-    allRepairOrgs = ["autonomy", "dynbench", "anchore"];
-    return { repaired: allRepairOrgs, ready: [], failed: [] };
-  };
-}
 
 require("../static/js/unlock.js");
 
@@ -108,12 +97,40 @@ require("../static/js/unlock.js");
     } });
     await api.unlockWithPasskey();
   } else {
-    // The v3 root-factor ceremony has its own exhaustive browser harness.
-    // This proof isolates the post-access orchestration contract: once the
-    // password ceremony has succeeded, serving maintenance runs while the
-    // factor is still available and reports its bounded result.
+    const phases = await import('../static/js/ceremony/signon-phases.js');
+    const { deriveAuditedRecipient } = await import('../static/js/ceremony/vault-unlock.js');
+    const { sealToEncapsulationKey } = await import('../static/js/ceremony/sealing.js');
+    const { bytesToHex } = await import('../static/js/ceremony/primitives.js');
+    await import('../static/js/network-signon.mjs');
+    ceremonySeed = crypto.getRandomValues(new Uint8Array(32));
+    const audited = await deriveAuditedRecipient(ceremonySeed);
+    const orgs = process.env.AUTONOMY_ALL_ORG_REPAIR === '1'
+      ? ['autonomy', 'dynbench', 'anchore'] : ['autonomy'];
+    const inputs = {
+      vault: { root_pub: 'aa'.repeat(32), recovery_genesis_id: null,
+        inventory: { anchors: [], classes: [{ governance: { form: 'root-reachable' } }] } },
+      runtime: { enabled: false }, completion: null, personal_serve: {},
+      organizations: orgs.map((slug, i) => ({ slug,
+        genesis_id: String(i + 1).repeat(64),
+        org_uuid: '8a2d6c7a-498c-42ba-a4a6-b3b27a024bac',
+        serve_cert: { required: true }, checkpoint_work: null,
+        storage_delegate: { organization: slug, remint_below_ms: 30 * 86400000,
+          delegate_metadata: { key_exists: true, expires_at: Date.now() + 90 * 86400000,
+            key_reference: 'stored-' + slug } },
+      })),
+    };
+    const encrypted = { sealed: bytesToHex(await sealToEncapsulationKey(
+      new TextEncoder().encode(JSON.stringify(inputs)), audited.publicKeyHex,
+      'autonomy/identity/sign-in-preparation/v1')) };
+    let prepared;
+    try {
+      prepared = await phases.prepareSignon(ceremonySeed, encrypted, window.AutonomyNetworkSession);
+    } finally { ceremonySeed.fill(0); }
+    // Login proof and all maintenance are submitted only after cleanup.
     events.push("POST /api/identity/unlock/password");
-    await api.repairServingAfterRootUnlock(new Uint8Array(32));
+    await phases.submitSignon(prepared, globalThis.fetch);
+    allRepairOrgs = orgs;
+    allRepairCalls = 1;
   }
   process.stdout.write(JSON.stringify({
     events,
@@ -123,6 +140,7 @@ require("../static/js/unlock.js");
     all_repair_orgs: allRepairOrgs,
     serve_repair: window.__autonomyServeRepair || null,
   }));
+  process.exit(0);
 })().catch((error) => {
   console.error(error && error.stack || error);
   process.exit(1);

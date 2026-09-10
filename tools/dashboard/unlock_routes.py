@@ -1142,6 +1142,11 @@ async def get_personal_vault_recovery(request: Request) -> JSONResponse:
     """Old personal storage derivation context, from descriptors, not a ledger."""
     if session_from_request(request) is None:
         return JSONResponse({"ok": False, "error": "unlock required"}, status_code=401)
+    return personal_vault_recovery()
+
+
+def personal_vault_recovery() -> JSONResponse:
+    """Read-only descriptor context, shared with encrypted preparation."""
     try:
         from tools.network.storagekit.keycontrol import KeyControlStore
         from tools.vault.db_content_store import vault_db_path_for
@@ -1266,13 +1271,11 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
             "the failure — do not bring the vault up half-way"
         )}, status_code=400)
 
-    delegate_hex = body.get("delegate_signing_key")
-    if delegate_hex is not None and not isinstance(delegate_hex, str):
+    if "delegate_signing_key" in body:
         logger.warning(
             "vault bring-up refused (delegate-signing-key-shape)")
         return JSONResponse({"ok": False, "error": (
-            "delegate_signing_key must be the attenuated delegate's private "
-            "key as hex, or absent"
+            "delegate_signing_key is unscoped; submit organization_delegates instead"
         )}, status_code=400)
 
     audited_private = body.get("delegate_audited_private_key")
@@ -1293,9 +1296,14 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
         )}, status_code=400)
 
     try:
-        loaded = _bring_vault_up(decoded, delegate_hex)
+        loaded = _bring_vault_up(decoded)
         if audited_private is not None:
             _install_personal_audited_delegate(audited_private, audited_public)
+        if body.get("organization_delegates"):
+            from tools.dashboard.org_storage_delegate import accept
+            for item in body["organization_delegates"]:
+                accept(item)
+        if audited_private is not None:
             # Certificate issuance may have failed before this first recipient
             # existed. Wake it at the exact state transition that removes that
             # blocker; do not depend on a later UI maintenance-report request.
@@ -1431,21 +1439,13 @@ def _personal_store_has_generations() -> bool:
         return False
 
 
-def _bring_vault_up(generation_keys: dict, delegate_hex: "str | None" = None) -> int:
+def _bring_vault_up(generation_keys: dict) -> int:
     """Install the vault seams for this process. Returns how many keys landed.
 
     Split out so the route stays about the request and this stays about the
     wiring — and so a test can drive the wiring without a session cookie.
     """
     from tools.vault.bringup import register_vault_for_unlock
-
-    if delegate_hex:
-        from tools.network.idkit import KeyPair
-
-        # The dashboard MAY hold this one (crib §12) — it is the attenuated
-        # agent delegate, scope-bound to the two storage scopes and TTL-bounded,
-        # never a persona signing key.
-        _VAULT_CACHE["delegate"] = KeyPair.from_private_hex(delegate_hex)
 
     cache = register_vault_for_unlock(
         generation_keys=generation_keys,
@@ -1462,13 +1462,14 @@ def _bring_vault_up(generation_keys: dict, delegate_hex: "str | None" = None) ->
 _VAULT_CACHE: dict = {}
 
 
-def _agent_delegate():
+def _agent_delegate(org):
     """The attenuated delegate's signing key, or None before one is held.
 
     This is the organization storage-author seam, not the personal audited
     decryption recipient. Personal warm-up deliberately does not supply it.
     """
-    return _VAULT_CACHE.get("delegate")
+    from tools.dashboard.org_storage_delegate import signing_key
+    return signing_key(org)
 
 
 # ── Surviving a GRACEFUL hot reload (auto-a1pub) ─────────────────────────────
@@ -1661,7 +1662,10 @@ def _org_fold(org):
 
 
 
+from tools.dashboard.signon_preparation import get_preparation
+
 ROUTES = [
+    Route("/api/identity/unlock/preparation", get_preparation, methods=["GET"]),
     Route("/api/identity/unlock/passkey/options", post_unlock_passkey_options,
           methods=["POST"]),
     Route("/api/identity/unlock/passkey", post_unlock_passkey,

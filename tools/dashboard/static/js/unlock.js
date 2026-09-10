@@ -148,198 +148,14 @@
 
   // ── ceremonies ─────────────────────────────────────────────────────
 
-  // Complete a pending Fleet join, else mint the Fleet runtime (+reachability)
-  // credential. Shared by BOTH root-releasing unlock paths — password AND
-  // passkey — so they can never diverge; that divergence is exactly what left a
-  // passkey-only unlock unable to activate fleet sync. Best-effort; the caller
-  // owns the seed's outer lifecycle (the ceremonies zero the array passed here).
-  async function _fleetCompleteOrMint(seed) {
-    var completion = await _fetchJson('/api/fleet/enrollment/local-completion');
-    if (completion.pending) {
-      var fc = await import('./ceremony/fleet-enrollment.js');
-      var proof = await fc.completeFleetEnrollment({
-        personalRootSeed: seed,
-        requestId: completion.request_id,
-        request: completion.request,
-        channelBinding: completion.channel_binding,
-        approval: completion.approval,
-        rosterEntry: completion.roster_entry,
-      });
-      await _postJson('/api/fleet/enrollment/local-completion', proof);
-    } else {
-      // ARMING IS REPORTED WHETHER OR NOT IT HAPPENS.
-      //
-      // This block is the ONLY thing that arms the machine's fleet runtime,
-      // and it was gated behind `rc.enabled` with no else. A 401 before the
-      // session cookie settled, or any failure of this one GET, made
-      // `rc.enabled` falsy and the ceremony completed happily WITHOUT
-      // minting — no error, no log, nothing in the UI. The operator saw
-      // "unlocked" and the machine stayed anonymous to the relay.
-      //
-      // That is exactly what happened on 2026-09-09: a login at 14:21Z
-      // produced no POST at all, while the last real activation was 13:54Z,
-      // and it cost hours because "unlocked" and "armed" are different states
-      // that looked identical from outside. Every outcome now reaches the
-      // server through the existing unlock-report sink.
-      var arming = { attempted: false, outcome: 'unknown' };
-      var rc = null;
-      try {
-        rc = await _fetchJson('/api/fleet/runtime');
-      } catch (e) {
-        arming = { attempted: false, outcome: 'runtime-status-unreadable',
-                   error: (e && e.message) || String(e) };
-      }
-      if (rc && rc.enabled) {
-        // Bring the PERSONAL TUNNEL online before minting the runtime
-        // credential. When the personal org is not yet registered (org_uuid is
-        // null), register it — and, on the serving machine, provision its
-        // serving delegate — using the personal root that is already open. This
-        // is what gives a virgin system with zero collaborative orgs a tunnel
-        // to serve the fleet on: its own. Idempotent and best-effort — a
-        // failure here degrades to a sync-only credential, never a lockout.
-        // Run when the personal org isn't registered yet OR this machine is the
-        // tunnel server: provisionPersonalNetworkIdentity is idempotent (the
-        // registry returns the UUID for a same-root re-register, and the
-        // serve-cert is minted only when one isn't already provisioned), so a
-        // serving machine re-tries the serve-cert every unlock until it exists —
-        // gating on `!org_uuid` alone would permanently skip a serve-cert that
-        // failed on the registration unlock (registration lands, serving does
-        // not, and org_uuid is now set forever).
-        if (rc.personal_org_uuid && (!rc.org_uuid || rc.serves)) {
-          try {
-            await _signonI().provisionPersonalNetworkIdentity({
-              personalRootSeed: new Uint8Array(seed),   // ceremony zeroes its copy
-              orgUuid: rc.personal_org_uuid,
-              rootPub: rc.personal_root_pub,
-              serve: !!rc.serves,
-            });
-            // The binding now exists; re-read so the runtime credential carries
-            // the reachability material minted under the registered org_uuid.
-            rc = await _fetchJson('/api/fleet/runtime');
-          } catch (e) {
-            if (window.console && console.warn) {
-              console.warn('personal tunnel provisioning failed:',
-                           (e && e.message) || e);
-            }
-          }
-        }
-        var frc = await import('./ceremony/fleet-enrollment.js');
-        var cred;
-        try {
-        cred = await frc.mintFleetRuntimeCredential({
-          personalRootSeed: new Uint8Array(seed),   // fresh copy; mint zeroes it
-          rootPub: rc.personal_root_pub,
-          machineId: rc.machine_id,
-          machinePub: rc.machine_pub,
-          // When the personal org is registered, the credential also carries the
-          // machine key + a node-scoped reachability cert for discovery; a null
-          // org_uuid keeps it sync-only.
-          orgUuid: rc.org_uuid || null,
-          // One serving machine key per org this machine serves (auto-e2ufw).
-          // Derived HERE because the personal root only exists in this browser
-          // during the ceremony; an org connector cannot obtain one any other
-          // way, which is why they stayed dead through every restart until an
-          // unlock happened to run.
-          servingOrgs: Array.isArray(rc.serving_orgs) ? rc.serving_orgs : [],
-        });
-        await _postJson('/api/fleet/runtime', cred);
-        arming = { attempted: true, outcome: 'armed',
-                   machine_id: rc.machine_id || null };
-        } catch (e) {
-          // REPORT, THEN RETHROW. The visibility is new; the behaviour is
-          // not. A mint that throws here used to vanish into whatever caught
-          // it upstream, leaving the same "unlocked but not armed" state with
-          // no trace of an attempt.
-          arming = { attempted: true, outcome: 'mint-failed',
-                     error: (e && e.message) || String(e) };
-          try {
-            await _postJson('/api/network/unlock-report', { fleet_arming: arming });
-          } catch (ignored) { /* reporting must never mask the real failure */ }
-          seed.fill(0);
-          throw e;
-        }
-      } else if (rc) {
-        // A REAL answer that says this machine has no fleet runtime. Benign,
-        // and still reported: "fleet is not enabled here" and "we could not
-        // ask" are different facts and only one of them is a problem.
-        arming = { attempted: false, outcome: 'fleet-not-enabled' };
-      }
-      try { await _postJson('/api/network/unlock-report', { fleet_arming: arming }); }
-      catch (e) {
-        if (window.console && console.warn) {
-          console.warn('fleet arming report failed:', (e && e.message) || e);
-        }
-      }
-      seed.fill(0);   // original consumed only via fresh copies above; drop it
-    }
-  }
-
-  // THE CEREMONY'S TO-DO LIST, FETCHED WHILE THE OPERATOR IS STILL TYPING.
-  //
-  // Everything the root ceremony needs to decide which per-org steps apply is
-  // persona-independent and knowable before any factor is proven, so it is
-  // fetched on first page load — two GETs, concurrent with a human typing a
-  // password — and the unlock itself then makes no preparatory calls at all.
-  // Failure is free: a null plan means each step probes exactly as it used to.
-  var _planPrefetch = null;
-
-  //: How stale a prefetched plan may be and still be trusted. A page left open
-  //: for an hour must not gate a ceremony on what was true then; past this the
-  //: ceremony fetches its own, which costs one round-trip and is always right.
-  var PLAN_FRESH_FOR_MS = 10 * 60 * 1000;
-
-  function _prefetchUnlockPlan() {
-    var startedAt = Date.now();
-    _planPrefetch = (async function () {
-      var listing = await _fetchJson('/api/orgs');
-      var slugs = ((listing && listing.orgs) || []).map(function (row) {
-        return (row && row.org && row.org.slug) || (row && row.slug);
-      }).filter(function (s) { return typeof s === 'string' && s; });
-      if (!slugs.length) return null;
-      var body = await _fetchJson('/api/network/unlock-plan?orgs=' +
-                                  encodeURIComponent(slugs.join(',')));
-      return (body && body.ok === true && body.plan)
-        ? { plan: body.plan, at: startedAt } : null;
-    })().catch(function () { return null; });
-  }
-
-  async function _prefetchedPlan() {
-    if (!_planPrefetch) return null;
-    var got = await _planPrefetch;
-    if (!got || (Date.now() - got.at) > PLAN_FRESH_FOR_MS) return null;
-    return got.plan;
-  }
-
-  // Every successful ROOT unlock converges here. The factor that proved the
-  // policy is irrelevant: password, passkey, recovery, or a future factor all
-  // yield the same opened personal root and therefore the same maintenance.
-  async function _repairServingAfterRootUnlock(rootSeed) {
-    var report;
-    var plan = null;
-    try { plan = await _prefetchedPlan(); } catch (e) { plan = null; }
-    try {
-      report = await window.AutonomyNetworkSession
-        .repairAllServeCredentialsWithRootSeed(new Uint8Array(rootSeed),
-                                               { plan: plan });
-    } catch (e) {
-      report = { repaired: [], ready: [], bindings: [],
-                 failed: [{ org: 'all', error: (e && e.message) || String(e) }] };
-    }
-    window.__autonomyServeRepair = report;
-    try { await _postJson('/api/network/unlock-report', report); }
-    catch (e) {
-      if (window.console && console.warn) {
-        console.warn('unlock maintenance report failed:', (e && e.message) || e);
-      }
-    }
-    return report;
-  }
-
   async function _unlockWithPasskey() {
     if (!window.PublicKeyCredential || !navigator.credentials) {
       throw new Error('this browser does not support passkeys — use your password instead');
     }
     var minted = await _postJson('/api/identity/unlock/passkey/options', {});
+    var phases = await import('./ceremony/signon-phases.js');
+    var encrypted = U.passkeyOpensRoot ? await phases.fetchPreparation(window.fetch.bind(window)) : null;
+    var pending = U.passkeyOpensRoot ? await _preparePendingSlot().catch(_pendingSlotFailure) : null;
     var pk = minted.options;
     var challengeText = pk.challenge;
     pk.challenge = b64uToBytes(pk.challenge);
@@ -465,70 +281,20 @@
 
     var passkeyBody = { credential: credentialPayload };
     if (rootSignature) passkeyBody.root_signature = rootSignature;
-    try {
-      await _postJson('/api/identity/unlock/passkey', passkeyBody);
-    } catch (e) {
-      if (openedForWarm && openedForWarm.seed) openedForWarm.seed.fill(0);
-      throw e;
-    }
-
-    // Access is granted. If this passkey is a ROOT factor, use the PRF output
-    // from the same gesture to open the armor and warm the vault — this is what
-    // makes "Face ID opens your keys" true after a promotion. Strictly
-    // best-effort: a failure here never turns a successful access unlock into a
-    // lockout, and never runs for an access-only passkey or an MFA identity
-    // (where the passkey alone cannot reach the root).
-    if (U.passkeyOpensRoot && enroll && U.armorText) {
+    var prepared = null, pendingSubmission = null;
+    if (openedForWarm) {
       try {
-        var opened = openedForWarm;
-        if (U.factorPolicy && U.factorPolicy.armor_version === 3) {
-          if (!opened) {
-            throw new Error('this passkey grants access but does not open the root alone');
-          }
-        } else {
-          throw new Error('this identity\'s armor is in a retired format and '
-            + 'cannot be opened by this software');
-        }
-        var rootSeed = new Uint8Array(opened.seed);
-        opened.seed.fill(0);
-        // best-effort: a root-opening passkey login can also enroll a pending
-        // device slot stashed for ANOTHER of this browser's credentials
-        if (U.factorPolicy && U.factorPolicy.armor_version === 3) {
-          try { await _completePendingSlot(rootSeed); }
-          catch (e) {
-            if (window.console && console.warn) {
-              console.warn('pending device slot not enrolled:', (e && e.message) || e);
-            }
-          }
-        }
-        try {
-          // Warm the vault, then mint the Fleet runtime + reachability
-          // credential — the SAME root release the password path runs (shared
-          // via _fleetCompleteOrMint), so a passkey-only unlock activates fleet
-          // sync + discovery too. Fresh copies: each ceremony zeroes its own.
-          try {
-            await _signonI().wakeVault({ personalRootSeed: new Uint8Array(rootSeed) });
-          } catch (e) {
-            if (window.console && console.warn) console.warn('vault wake failed:', (e && e.message) || e);
-          }
-          try {
-            await _fleetCompleteOrMint(new Uint8Array(rootSeed));
-          } catch (e) {
-            if (window.console && console.warn) {
-              console.warn('fleet runtime after passkey unlock failed:', (e && e.message) || e);
-            }
-            if (U.fleetRootRequired) throw e;
-          }
-          await _repairServingAfterRootUnlock(rootSeed);
-        } finally {
-          rootSeed.fill(0);
-        }
-      } catch (e) {
-        if (window.console && console.warn) {
-          console.warn('passkey root release failed:', (e && e.message) || e);
-        }
+        prepared = await phases.prepareSignon(openedForWarm.seed, encrypted, window.AutonomyNetworkSession);
+        pendingSubmission = await _signPendingSlot(openedForWarm.seed, pending).catch(_pendingSlotFailure);
+      } finally {
+        openedForWarm.seed.fill(0);
+        openedForWarm.signingKey = null;
+        openedForWarm = null;
       }
     }
+    await _postJson('/api/identity/unlock/passkey', passkeyBody);
+    await _submitPendingSlot(pendingSubmission, pending).catch(_pendingSlotFailure);
+    if (prepared) await phases.submitSignon(prepared, window.fetch.bind(window));
   }
 
   // A WebAuthn PRF assertion on an enrolled passkey, for the passkey half of a
@@ -566,24 +332,17 @@
     var rawId = new Uint8Array(asrt.rawId || allow[0].id);
     return { prf: prf, credentialId: bytesToB64u(rawId) };
   }
+  // Prepare the existing public pending-recipient transition before root opening.
+  function _pendingSlotFailure(error) {
+    // Enrollment has always been best-effort; retain the pending descriptor
+    // for the signed-in completion flow when preview or commit is unavailable.
+    if (window.console && console.warn) {
+      console.warn('pending device slot not enrolled:', error.message || error);
+    }
+    return null;
+  }
 
-  // The plaintext seed exists only inside this function — zeroed the
-  // moment the signing key is imported (I1).
-  // ═══ ONE-SHOT v2→v3 ARMOR UPGRADE — DELETE THIS FUNCTION (and its two call
-  // sites) AFTER THE OPERATOR'S FIRST POST-DEPLOY LOGIN. ═══════════════════
-  //
-  // Runs only while the stored armor is still v2 (migration_required). It
-  // migrates ONLY the factor material live at this login: the typed password
-  // re-derives its v3 factor under its legacy factor id (so metadata labels
-  // survive); the passkey used to sign in (if any) gets THIS device's v3
-  // root-recipient, derived under FACTOR_RECIPIENT_PURPOSE — the legacy
-  // vault-purpose kem_pub must never be carried into a v3 recipient (different
-  // HKDF purpose ⇒ a key no device could ever re-derive ⇒ permanent lockout).
-  // Factors with no live material keep dashboard access but leave the root
-  // policy; they re-gain authority per device via "Enroll this device" in
-  // Manage credentials. Knowingly not a general migration (operator ruling
-  // 2026-08-27: sole pre-deployment identity, delete after use).
-  async function _completePendingSlot(rootSeed) {
+  async function _preparePendingSlot() {
     var raw = null;
     try { raw = sessionStorage.getItem('autonomy.factor.pending-slot'); } catch (e) { return; }
     if (!raw) return;
@@ -622,23 +381,38 @@
       var pv = await _postJson('/api/identity/factor-policy/preview', {
         base_generation: fp.generation, operations: operations,
       });
-      var armor = await R.buildFactorPolicyArmor({
-        rootSeed: rootSeed, rootPub: fp.root_pub, generation: pv.generation,
-        factors: pv.factors, access: pv.access, policy: pv.root_policy,
-      });
-      var seedCopy = new Uint8Array(rootSeed);
-      var signingKey;
-      try { signingKey = await _identityI().importSigningKey(seedCopy); }
-      finally { seedCopy.fill(0); }
+      return { R: R, fp: fp, pv: pv, operations: operations, pending: pending, factor: factor };
+    }
+    return null;
+  }
+
+  async function _signPendingSlot(rootSeed, prepared) {
+    if (!prepared) return null;
+    var { R, fp, pv, operations } = prepared;
+    var armor = await R.buildFactorPolicyArmor({
+      rootSeed: rootSeed, rootPub: fp.root_pub, generation: pv.generation,
+      factors: pv.factors, access: pv.access, policy: pv.root_policy, recovery: pv.recovery,
+    });
+    var seedCopy = new Uint8Array(rootSeed);
+    var signingKey;
+    try { signingKey = await _identityI().importSigningKey(seedCopy); }
+    finally { seedCopy.fill(0); }
+    try {
       var signature = await R.signFactorPolicyTransition({
         signingKey: signingKey, baseGeneration: fp.generation,
         operations: operations, candidateArmor: armor,
       });
-      await _postJson('/api/identity/factor-policy/commit', {
+      return {
         base_generation: fp.generation, operations: operations,
         candidate_armor: armor, root_signature: signature,
-      });
-    }
+      };
+    } finally { signingKey = null; }
+  }
+
+  async function _submitPendingSlot(payload, prepared) {
+    if (!payload) return;
+    await _postJson('/api/identity/factor-policy/commit', payload);
+    var { factor, pending } = prepared;
     sessionStorage.removeItem('autonomy.factor.pending-slot');
     sessionStorage.setItem('autonomy.factor.slot-enrolled', JSON.stringify({
       factor_id: factor.factor_id,
@@ -728,31 +502,34 @@
         if (!R.policySatisfied(envelope.policy, Object.keys(factorSeeds))) {
           throw new Error('more factors are required by this root policy');
         }
+        var phases = await import('./ceremony/signon-phases.js');
+        var encrypted = await phases.fetchPreparation(window.fetch.bind(window));
+        var pending = await _preparePendingSlot().catch(_pendingSlotFailure);
+        var mintedV3 = await _postJson('/api/identity/unlock/password/options', {});
         var v3Opened = await R.openFactorPolicyArmor(stored.armored_private_key, factorSeeds);
         var rootSeed = new Uint8Array(v3Opened.seed);
         v3Opened.seed.fill(0);
-        var mintedV3 = await _postJson('/api/identity/unlock/password/options', {});
-        var rootMessageV3 = new TextEncoder().encode(
-          UNLOCK_DOMAIN + _signonI().canonicalJson({
-            v: 1, challenge: mintedV3.challenge, origin: mintedV3.origin,
-          }));
-        var rootSignatureV3 = _signonI().bytesToHex(await crypto.subtle.sign(
-          'Ed25519', v3Opened.signingKey, rootMessageV3,
-        ));
+        var prepared, pendingSubmission;
+        try {
+          var rootMessageV3 = new TextEncoder().encode(
+            UNLOCK_DOMAIN + _signonI().canonicalJson({
+              v: 1, challenge: mintedV3.challenge, origin: mintedV3.origin,
+            }));
+          var rootSignatureV3 = _signonI().bytesToHex(await crypto.subtle.sign(
+            'Ed25519', v3Opened.signingKey, rootMessageV3,
+          ));
+          prepared = await phases.prepareSignon(rootSeed, encrypted, window.AutonomyNetworkSession);
+          pendingSubmission = await _signPendingSlot(rootSeed, pending).catch(_pendingSlotFailure);
+        } finally {
+          rootSeed.fill(0);
+          v3Opened.signingKey = null;
+          Object.values(factorSeeds).forEach(function (seed) { seed.fill(0); });
+        }
         await _postJson(v3Route, {
           challenge: mintedV3.challenge, signature: rootSignatureV3,
         });
-        try {
-          // best-effort: enroll a detected-but-pending device slot now that
-          // the root is open (never blocks the unlock)
-          try { await _completePendingSlot(rootSeed); }
-          catch (e) { if (window.console && console.warn) console.warn('pending device slot not enrolled:', (e && e.message) || e); }
-          try { await _signonI().wakeVault({ personalRootSeed: new Uint8Array(rootSeed) }); }
-          catch (e) { if (window.console && console.warn) console.warn('vault wake failed:', e); }
-          await _fleetCompleteOrMint(new Uint8Array(rootSeed));
-          await _repairServingAfterRootUnlock(rootSeed);
-          rootSeed = null;
-        } finally { if (rootSeed) rootSeed.fill(0); }
+        await _submitPendingSlot(pendingSubmission, pending).catch(_pendingSlotFailure);
+        await phases.submitSignon(prepared, window.fetch.bind(window));
         return;
       } finally {
         Object.values(factorSeeds).forEach(function (seed) { seed.fill(0); });
@@ -775,29 +552,25 @@
     catch (e) { throw new Error('That is not a valid recovery code — check the characters.'); }
     var stored = await _fetchJson('/api/identity/personal');
     var opened;
+    var phases = await import('./ceremony/signon-phases.js');
+    var encrypted = await phases.fetchPreparation(window.fetch.bind(window));
+    var minted = await _postJson('/api/identity/unlock/password/options', {});
     try { opened = await R.openRootWithRecovery(stored.armored_private_key, code); }
     catch (e) { throw new Error('That recovery code did not open your identity — check it and try again.'); }
     var rootSeed = new Uint8Array(opened.seed);
     opened.seed.fill(0);
     try {
-      var minted = await _postJson('/api/identity/unlock/password/options', {});
       var message = new TextEncoder().encode(
         UNLOCK_DOMAIN + _signonI().canonicalJson({
           v: 1, challenge: minted.challenge, origin: minted.origin,
         }));
       var sig = _signonI().bytesToHex(await crypto.subtle.sign('Ed25519', opened.signingKey, message));
-      await _postJson('/api/identity/unlock/password', { challenge: minted.challenge, signature: sig });
-      // land straight on the credentials screen to re-establish factors
-      try { sessionStorage.setItem('autonomy.factor.open-credentials', '1'); } catch (e) { /* best-effort */ }
-      try { await _signonI().wakeVault({ personalRootSeed: new Uint8Array(rootSeed) }); }
-      catch (e) { if (window.console && console.warn) console.warn('vault wake failed:', (e && e.message) || e); }
-      try {
-        await _fleetCompleteOrMint(new Uint8Array(rootSeed));
-        await _repairServingAfterRootUnlock(rootSeed);
-        rootSeed = null;
-      }
-      catch (e) { if (window.console && console.warn) console.warn('fleet after recovery unlock failed:', (e && e.message) || e); }
-    } finally { if (rootSeed) rootSeed.fill(0); }
+      var prepared = await phases.prepareSignon(rootSeed, encrypted, window.AutonomyNetworkSession);
+    } finally { rootSeed.fill(0); opened.signingKey = null; }
+    await _postJson('/api/identity/unlock/password', { challenge: minted.challenge, signature: sig });
+    // land straight on the credentials screen to re-establish factors
+    try { sessionStorage.setItem('autonomy.factor.open-credentials', '1'); } catch (e) { /* best-effort */ }
+    await phases.submitSignon(prepared, window.fetch.bind(window));
   }
 
   // ── rendering (markup mirrors the mockup's Unlock state) ───────────
@@ -1085,11 +858,7 @@
 
   async function _init() {
     U.webauthnOk = !!(window.PublicKeyCredential && navigator.credentials);
-    // Start the ceremony's to-do list now, in the background. It is never
-    // awaited here and never blocks a render — by the time a factor is
-    // proven it has long since resolved, and if it failed the unlock is
-    // unaffected.
-    _prefetchUnlockPlan();
+    // Organization/membership preparation is delivered encrypted at ceremony start.
     var status;
     try {
       status = await _fetchJson('/api/identity/status');
@@ -1164,7 +933,6 @@
       state: function () { return U; },
       unlockWithPasskey: _unlockWithPasskey,
       unlockWithPassword: _unlockWithPassword,
-      repairServingAfterRootUnlock: _repairServingAfterRootUnlock,
       nextPath: _nextPath,
       domain: UNLOCK_DOMAIN,
     },

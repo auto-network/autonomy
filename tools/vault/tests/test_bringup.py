@@ -30,7 +30,7 @@ def test_bringup_installs_both_seams(tmp_path):
 
     cache = register_vault_for_unlock(
         generation_keys={"state-1": b"k" * 32},
-        author_provider=lambda: object(),
+        author_provider=lambda org: object(),
         org_ledger_provider=lambda org: None,
     )
 
@@ -44,12 +44,12 @@ def test_a_second_unlock_adds_to_the_same_cache(tmp_path):
     write minting a generation the read side cannot see."""
     cache = register_vault_for_unlock(
         generation_keys={"state-1": b"k" * 32},
-        author_provider=lambda: object(),
+        author_provider=lambda org: object(),
         org_ledger_provider=lambda org: None,
     )
     again = register_vault_for_unlock(
         generation_keys={"state-2": b"j" * 32},
-        author_provider=lambda: object(),
+        author_provider=lambda org: object(),
         org_ledger_provider=lambda org: None,
         cache=cache,
     )

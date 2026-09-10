@@ -904,6 +904,27 @@ class NetworkLinkChannelKeyV1(SettingSchema):
         _require_hex(payload, "seed", cls.__name__, length=NETWORK_PUB_HEX_LEN)
 
 
+# ── Organization delegate metadata (personal, fleet-replicated) ──
+
+NETWORK_STORAGE_DELEGATE_SET_ID = "autonomy.network.storage-delegate"
+
+
+@home("personal")
+@publication_band(max="raw")
+@keyed_per_entity(key_strategy="genesis_id")
+class NetworkStorageDelegateV1(SettingSchema):
+    """Public index for an org signing key held in personal audited Settings."""
+
+    set_id = NETWORK_STORAGE_DELEGATE_SET_ID
+    schema_revision = 1
+    organization: str = field(required=True, description="Local organization scope.")
+    persona_pub: str = field(required=True, description="Issuing member public key.")
+    public_key: str = field(required=True, description="Delegate public key.")
+    key_reference: str = field(required=True, description="Personal audited Setting key.")
+    expires_at: int = field(required=True, description="Grant expiry, epoch milliseconds.")
+    grant_event_id: str = field(required=True, description="Organization delegation event.")
+
+
 # ── autonomy.network.membership-checkpoint (local adopted cache) ──
 
 

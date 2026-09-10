@@ -34,9 +34,8 @@ def test_password_unlock_runs_opportunistic_serving_repair_after_access(mode):
     proof = _proof(result.stdout)
     assert proof["repair_called_after_access"] is True
     assert proof["repair_calls"] == 1
-    # Access authentication completes BEFORE any maintenance -- the ordering
-    # is the property, not that the unlock is the final call (maintenance now
-    # reports its outcome to the server afterwards).
+    # Signing is local before access; submissions and reporting follow access
+    # and root cleanup. The harness rejects every fetch while root is live.
     events = proof["events"]
     assert "POST /api/identity/unlock/password" in events
     maintenance = [i for i, e in enumerate(events) if "unlock-report" in e]
@@ -90,6 +89,6 @@ def test_the_unlock_repairs_every_organization_not_just_the_default():
     proof = _proof(result.stdout)
     assert proof["all_repair_calls"] == 1
     assert proof["all_repair_orgs"] == ["autonomy", "dynbench", "anchore"]
-    assert proof["repair_calls"] == 0, "the single-org path is not used as well"
+    assert proof["repair_calls"] == 3, "each prepared organization is submitted once"
     assert proof["serve_repair"]["repaired"] == [
         "autonomy", "dynbench", "anchore"]
