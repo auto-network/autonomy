@@ -305,6 +305,15 @@ def is_org_slug(value: object) -> bool:
     Deliberately stricter than "is a legal filename": a uuid is a legal
     filename, and a uuid where a slug belonged is what minted a ghost database
     and made it a peer of every org on the machine (auto-kou68).
+
+    ONE DEFINITION, THREE CONSUMERS, and that is the point. Before this, path
+    resolution here, `cross_org.list_org_slugs` and
+    `fleet_sync_scheduler.discover_org_sync_scopes` each decided for
+    themselves, and the uuid slipped through two of the three. As
+    host-0906-222509 put it: coincidental agreement between three definitions
+    is indistinguishable from one definition until exactly the moment it is
+    not, and nothing fails when it starts to drift. Add a consumer here rather
+    than a fourth regex elsewhere.
     """
     return bool(
         isinstance(value, str)
