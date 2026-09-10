@@ -145,6 +145,25 @@ async function browserMode() {
     process.env.AUTONOMY_PASSPHRASE,
     { org: 'module-load-org', ttlSeconds: 3600 },
   );
+  const fetchCallsAfterSignOn = fetchCalls.slice();
+  // The seed path the approval sheet uses after the shared factor-aware
+  // unlock: the SAME persona and certificate chain must come out of an
+  // already-open root as out of a passphrase.
+  const opened = await session._internals.openPersonalRoot(
+    process.env.AUTONOMY_PASSPHRASE);
+  const seedCopy = new Uint8Array(opened.seed);
+  const seedSignOn = await session.signOnWithRootSeed(
+    opened.seed, opened.rootPub, { org: 'module-load-org', ttlSeconds: 3600 },
+  );
+  const seedSignOnResult = {
+    personaPub: seedSignOn.orgs[0].personaPub,
+    certWire: seedSignOn.orgs[0].certWire,
+    personalRootPub: seedSignOn.personalRootPub,
+    // The caller's buffer is the caller's: sign-on copies it and zeroes
+    // only its copy.
+    callerSeedIntact: opened.seed.every((b, i) => b === seedCopy[i]),
+  };
+  opened.seed.fill(0); seedCopy.fill(0);
   // The tunnel PoP bytes every link publish signs (D19/auto-qol1v).
   const envelope = await window.AutonomyNetworkSigner.signRegistryRequest(
     'TUNNEL',
@@ -158,11 +177,12 @@ async function browserMode() {
   );
   const output = {
     signOnResult,
+    seedSignOnResult,
     envelope,
     state: session.state(),
     storedSessions: records.size,
     subjectId: localValues.get('autonomy.network.browser-id') || null,
-    fetchCalls,
+    fetchCalls: fetchCallsAfterSignOn,
   };
   process.stdout.write(JSON.stringify(output), () => process.exit(0));
 }

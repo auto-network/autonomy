@@ -1228,10 +1228,11 @@ class TestWorktreePage:
         """The revoke approve path is not the publish path: its envelope
         payload must be EMPTY (the server refuses anything else), its
         retained-authority match reads the enrich's org_uuid (the empty
-        payload carries none), and the simple sheet can actually collect a
-        password and surface the execution error inline. Every one of
-        these was missing when revoke approval first became reachable
-        (2026-07-30) and each absence broke the approve."""
+        payload carries none), it unlocks through the ONE shared factor-aware
+        control rather than a password field of its own, and the simple
+        sheet surfaces the execution error inline. Every one of these was
+        missing when revoke approval first became reachable (2026-07-30)
+        and each absence broke the approve."""
         js = (JS_DIR / "pages" / "worktrees.js").read_text()
         template = (
             TEMPLATE_DIR / "partials" / "worktree-review-overlays.html"
@@ -1239,7 +1240,12 @@ class TestWorktreePage:
         assert "const isRevoke = req.op === 'revoke';" in js
         assert "req.orgUuid || (" in js
         assert "orgUuid: r.org_uuid || null," in js
-        assert "approval.needsPassword = !approval.allowSessionApprovals;" in js
+        # No factor field on the sheet: Approve opens ceremony/open-root.js
+        # and signs on from the seed it produced (password, passkey, or both).
+        assert "approval.needsPassword = !approval.allowSessionApprovals;" not in js
+        assert "needsPassword: false," in js
+        assert "await import('../ceremony/open-root.js')" in js
+        assert "session.signOnWithRootSeed(opened.seed, opened.rootPub, { org: req.orgSlug })" in js
         assert "(isOrgJoin || isRevoke) ? { envelope } : { envelope, ttl }" in js
         assert "req.gate2 || req.op === 'revoke'" in js
         assert 'data-testid="approval-revoke-password"' in template

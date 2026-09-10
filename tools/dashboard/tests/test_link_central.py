@@ -1695,3 +1695,29 @@ def test_machine_local_publish_without_a_serving_machine_sends_nothing_and_retri
         consumer.materialize(status)
     assert calls == []
     assert store.results == {}
+
+
+def test_attention_summary_names_the_requesting_session():
+    """The Central card must say WHICH session asked for a link — the
+    operator decides on who is asking as much as on what."""
+    def status(requester):
+        payload = {
+            "kind": link_central.PUBLISH_KIND,
+            "safe_review": {"target_title": "Quarterly plan"},
+            "created_at": 1000.0,
+            "expires_at": 2000.0,
+        }
+        if requester is not None:
+            payload["requester_ref"] = requester
+        return ApprovalStatus("open", ApprovalRecord(APPROVAL_ID, payload), None)
+
+    runtime = link_central.build_attention_runtime(link_central.PUBLISH_KIND, object())
+    named = runtime.projection_planner(status(
+        {"kind": "session", "id": "x", "label": "auto-0910-155648 · serve routing"},
+    ))
+    assert named.safe_summary == (
+        "Review Quarterly plan · requested by auto-0910-155648 · serve routing"
+    )
+    unlabeled = runtime.projection_planner(status({"kind": "session", "id": "x"}))
+    assert unlabeled.safe_summary == "Review Quarterly plan"
+    assert runtime.projection_planner(status(None)).safe_summary == "Review Quarterly plan"

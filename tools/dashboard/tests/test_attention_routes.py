@@ -793,3 +793,44 @@ def test_server_hook_diverts_all_private_sets(monkeypatch):
     replay, complete = bus.replay(1, 1)
     assert complete is True
     assert replay[0]["data"]["set_id"] == "dashboard.feature_flags"
+
+
+def test_session_requester_label_names_the_session_and_its_working_title(monkeypatch):
+    """An approval must say WHICH session is asking. The label is the tmux
+    name plus the working title the session set; a session with no title
+    is still named; an unreadable dashboard DB never hides the name."""
+    from tools.dashboard.dao import dashboard_db
+
+    rows = {
+        "auto-0910-155648": {"tmux_name": "auto-0910-155648",
+                             "label": "auto-nh1po: serve routing"},
+        "auto-0910-000001": {"tmux_name": "auto-0910-000001", "label": ""},
+    }
+    monkeypatch.setattr(dashboard_db, "get_session", lambda name: rows.get(name))
+    assert attention_routes.session_requester_label("auto-0910-155648") == (
+        "auto-0910-155648 · auto-nh1po: serve routing"
+    )
+    assert attention_routes.session_requester_label("auto-0910-000001") == "auto-0910-000001"
+    assert attention_routes.session_requester_label("auto-unknown") == "auto-unknown"
+    assert attention_routes.session_requester_label("") is None
+
+    def boom(_name):
+        raise RuntimeError("dashboard.db is locked")
+
+    monkeypatch.setattr(dashboard_db, "get_session", boom)
+    assert attention_routes.session_requester_label("auto-0910-155648") == "auto-0910-155648"
+
+
+def test_production_runtime_resolves_requester_labels_through_the_session_registry(monkeypatch):
+    from tools.dashboard.dao import dashboard_db
+
+    monkeypatch.setattr(
+        dashboard_db, "get_session",
+        lambda name: {"tmux_name": name, "label": "Voice capsule"},
+    )
+    monkeypatch.setattr(
+        attention_routes.unlock_routes, "gate_enforced", lambda: False,
+    )
+    production = attention_routes.build_production_runtime()
+    label = production.approvals._session_label("auto-0910-155648")
+    assert label == "auto-0910-155648 · Voice capsule"

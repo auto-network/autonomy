@@ -114,12 +114,13 @@
 
   // Inline first-publish registration (register-before-freeze). Reuses the
   // EXISTING root-signed registration ceremony via exposed internals — no new
-  // crypto: decrypt the org armor with the operator's password, sign a
-  // root-direct registration envelope, POST it to the server route (which
-  // verifies signer==root_pub, matches the stored key, and forwards to the
-  // registry that verifies the signature and returns the binding). The root
-  // plaintext is zeroed before this returns (I1).
-  async function _registerOrgInline(req) {
+  // crypto: open the sealed org root with the personal root the shared
+  // factor-aware unlock just produced, sign a root-direct registration
+  // envelope, POST it to the server route (which verifies signer==root_pub,
+  // matches the stored key, and forwards to the registry that verifies the
+  // signature and returns the binding). The org root plaintext is zeroed
+  // before this returns (I1); the personal seed belongs to the caller.
+  async function _registerOrgInline(req, personalRoot) {
     if (!INLINE_RECOVERY_POLICY) {
       throw new Error(
         'First-publish registration is not enabled yet — the organization ' +
@@ -142,10 +143,9 @@
     if (!orgKey.armored_private_key && !orgKey.sealed_root_key) {
       throw new Error('This organization has no signing key to register.');
     }
-    // Open the root the same way the signer does — handles both the
-    // password-armored key and the sealed_root_key scheme (unsealed via the
-    // personal root). Returns the same {seed, rootPub} shape either way.
-    const opened = await S.openOrgRoot(orgKey, req.password);
+    // Unseal the org root with the already-open personal root. A retired
+    // password-only org armor cannot be opened this way and says so.
+    const opened = await S.openOrgRootWithSeed(orgKey, personalRoot.seed);
     let rootKey = null;
     try {
       rootKey = await I.importSigningKey(opened.seed);
@@ -174,19 +174,52 @@
     let rr = req.registryRequest;
     const session = window.AutonomyNetworkSession;
     const signer = window.AutonomyNetworkSigner;
-    if (!session || typeof session.signOn !== 'function' ||
+    if (!session || typeof session.signOnWithRootSeed !== 'function' ||
         !signer || typeof signer.signRegistryRequest !== 'function') {
       throw new Error('Approval is unavailable in this browser. Reload the dashboard and try again.');
     }
     if (typeof session.ready === 'function') await session.ready();
 
+    // ONE common factor-aware unlock — password, passkey, or both, chosen by
+    // the personal armor's own factor policy — opened only when this action
+    // needs authority the browser does not already retain. The sheet owns no
+    // password field: a publish is authorized by the operator's PERSONA,
+    // which derives from the personal root, so the personal root's factors
+    // are the only credential that was ever really being asked for.
+    const needsRoot = (req.registrationRequired && !rr) || !_matchingApprovalAuthority(req);
+    let opened = null;
+    if (needsRoot) {
+      const { openRoot } = await import('../ceremony/open-root.js');
+      const actingName = (req.actingIdentity && req.actingIdentity.name) ||
+        req.orgSlug || 'this organization';
+      opened = await openRoot({
+        title: req.op === 'revoke' ? 'Revoke this share link?' : 'Publish this share link?',
+        detail: 'Unlock your personal identity to act as ' + actingName + '.',
+      });
+      if (!opened) throw new Error('Approval cancelled.');
+    }
+    try {
+      await _authorizeLinkDecision(req, session, opened);
+    } finally {
+      // I1: the personal root plaintext dies here whatever happened above.
+      if (opened && opened.seed) { opened.seed.fill(0); opened.seed = null; }
+    }
+    rr = req.registryRequest;
+    return _signAuthorizedLinkDecision(req, session, signer, rr);
+  }
+
+  // Establish authority for one link action from an opened personal root:
+  // register the organization inline when it has never been registered,
+  // then sign on as this organization's persona unless a retained session
+  // already carries it.
+  async function _authorizeLinkDecision(req, session, opened) {
+    let rr = req.registryRequest;
     // Register-before-freeze: a keyed-but-unregistered org registers its
-    // EXISTING key inline (the password just entered unlocks it), then a
+    // EXISTING key inline (the root just opened unseals it), then a
     // re-enrich freezes the publish against the now-live binding. Nothing is
     // frozen or executed before the binding exists, so the confused-deputy
     // execute path is untouched.
     if (req.registrationRequired && !rr) {
-      if (!req.password) throw new Error('Enter your organization password to continue.');
       // On-the-fly registration: register this org's EXISTING key inline in
       // the SAME Approve, invisibly. auto.network routes scope by the
       // X-Graph-Org header (a bare ?org= is refused cross-org without it), so
@@ -205,7 +238,7 @@
           alreadyBound = !!(bj && bj.org_uuid && bj.root_pub && bj.registry_url);
         }
       } catch (e) { /* unreachable -> treat as not bound, register */ }
-      if (!alreadyBound) await _registerOrgInline(req);
+      if (!alreadyBound) await _registerOrgInline(req, opened);
       // Wait for the publish request to freeze against the now-live binding
       // (covers read-after-write timing). Invisible -- it just completes; no
       // "try again" is ever surfaced to the operator.
@@ -227,9 +260,8 @@
 
     let retained = _matchingApprovalAuthority(req);
     if (!retained) {
-      if (!req.password) throw new Error('Enter your organization password to continue.');
       try {
-        await session.signOn(req.password, { org: req.orgSlug });
+        await session.signOnWithRootSeed(opened.seed, opened.rootPub, { org: req.orgSlug });
       } catch (error) {
         const message = String((error && error.message) || error || '');
         if (error && error.status === 404 && /org|identity|key/i.test(message)) {
@@ -238,19 +270,17 @@
           missing.code = 'ORG_KEY_NOT_CONFIGURED';
           throw missing;
         }
-        if (/passphrase|password|decrypt|authentication/i.test(message)) {
-          throw new Error('That password did not work. Try again.');
-        }
         throw error;
       }
       retained = _matchingApprovalAuthority(req);
       if (!retained) {
-        req.password = '';
         await session.signOut();
         throw new Error('The unlocked authority does not match this organization.');
       }
     }
+  }
 
+  async function _signAuthorizedLinkDecision(req, session, signer, rr) {
     const isRevoke = req.op === 'revoke';
     const isOrgJoin = !isRevoke && rr.payload && rr.payload.target_type === 'org:join';
     let ttl = null;
@@ -296,9 +326,8 @@
       return (isOrgJoin || isRevoke) ? { envelope } : { envelope, ttl };
     } finally {
       // Unchecked is deliberately one action only. Checked retains the
-      // non-extractable authority, never the password; Lock clears this same
-      // AutonomyNetworkSession store.
-      req.password = '';
+      // non-extractable authority (never any factor material); Lock clears
+      // this same AutonomyNetworkSession store.
       if (!req.allowSessionApprovals) await session.signOut();
     }
   }
@@ -2736,6 +2765,9 @@
             const fixedExpiry = req.target_type === 'org:join';
             const approval = {
               id: r.id, kind: r.kind, session: r.session,
+              // Which session is asking, by name and working title — the
+              // operator decides on WHO is asking as much as on what.
+              sessionLabel: r.session_label || r.session || '',
               gate2: true,
               title: 'Publish a share link', actionLabel: 'Approve & publish',
               action: 'Publish a share link',
@@ -2768,7 +2800,6 @@
                 : '',
               customDurationSeconds: customDuration ? r.ttl : null,
               customDurationLabel: customDuration ? _linkTtlText(r.ttl) : '',
-              password: '', showPassword: false,
               allowSessionApprovals: false,
               registrationRequired,
               previewOpen: false, targetPreview: r.target_preview || null,
@@ -2803,22 +2834,22 @@
             }
             const approval = {
               id: r.id, kind: r.kind, session: r.session,
+              sessionLabel: r.session_label || r.session || '',
               title: 'Revoke share-link', actionLabel: 'Approve & revoke',
               op: 'revoke', target: title,
               bodyMarkdown: lines.join('\n'),
               orgSlug: req.org || '',
               orgUuid: r.org_uuid || null,
               targetType: r.target_type || null,
-              password: '', showPassword: false,
               allowSessionApprovals: false,
+              // The shared factor-aware unlock opens on Approve when no
+              // retained session matches this org; the sheet collects no
+              // factor itself (same rule as publish).
               needsPassword: false,
               error: '',
               registryRequest: r.registry_request || null,
             };
-            // A retained session matching this org signs without a password;
-            // otherwise the sheet collects one (same rule as publish).
             approval.allowSessionApprovals = _matchingApprovalAuthority(approval);
-            approval.needsPassword = !approval.allowSessionApprovals;
             self.approvalRequest = approval;
           },
           decision: (self, req) => _signLinkDecision(self, req),

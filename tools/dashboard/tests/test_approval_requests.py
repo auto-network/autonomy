@@ -460,3 +460,22 @@ def test_sse_events_on_create_and_decision(tmp_path, monkeypatch):
             event_bus.unsubscribe(queue)
 
     asyncio.run(scenario())
+
+
+def test_get_names_the_requesting_session_with_its_working_title(client, monkeypatch):
+    """The review sheet shows "Requested by <session · title>": the legacy
+    GET carries the same resolved label Central attaches to its requester."""
+    from tools.dashboard.dao import dashboard_db
+
+    monkeypatch.setattr(
+        dashboard_db, "get_session",
+        lambda name: {"tmux_name": name, "label": "Release notes"} if name == "auto-2" else None,
+    )
+    r = client.post("/api/approvals", json={
+        "kind": "demo_ack", "session": "auto-2",
+        "request": {"summary": "Ship it", "description": "now"},
+    })
+    rid = r.json()["id"]
+    d = client.get(f"/api/approvals/{rid}").json()
+    assert d["session"] == "auto-2"
+    assert d["session_label"] == "auto-2 · Release notes"

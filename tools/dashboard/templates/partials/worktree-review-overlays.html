@@ -626,6 +626,10 @@
               <p class="mt-0.5 text-xs text-slate-400">Authorized by
                 <span x-text="approvalRequest.actorIdentity.display_name || 'your personal identity'"></span>
               </p>
+              <p x-show="approvalRequest.sessionLabel" class="mt-0.5 truncate text-xs text-slate-400"
+                 data-testid="approval-requester">Requested by
+                <span class="font-medium text-slate-200" x-text="approvalRequest.sessionLabel"></span>
+              </p>
             </div>
           </section>
 
@@ -692,20 +696,13 @@
 
           <template x-if="!approvalAuthorityAvailable()">
           <div class="mt-5">
-            <label for="approval-password" class="text-sm font-medium text-slate-200">Organization password</label>
-            <div class="mt-2 flex overflow-hidden rounded border bg-gray-950"
-                 :class="approvalRequest.error ? 'border-red-500' : 'border-slate-600 focus-within:border-indigo-400'">
-              <input id="approval-password" data-testid="approval-password"
-                     x-ref="approvalPassword" x-model="approvalRequest.password"
-                     :type="approvalRequest.showPassword ? 'text' : 'password'"
-                     :disabled="approvalAuthorityAvailable()"
-                     autocomplete="current-password" placeholder="Enter password"
-                     class="h-12 min-w-0 flex-1 bg-transparent px-3 text-base text-white outline-none placeholder:text-slate-600 disabled:cursor-not-allowed disabled:text-slate-500">
-              <button type="button" class="h-12 shrink-0 px-3 text-xs font-semibold text-slate-400 hover:text-white disabled:opacity-40"
-                      :disabled="approvalAuthorityAvailable()"
-                      @click="approvalRequest.showPassword = !approvalRequest.showPassword"
-                      x-text="approvalRequest.showPassword ? 'Hide' : 'Show'"></button>
-            </div>
+            <!-- No factor field lives on this sheet. Approve opens the ONE
+                 shared factor-aware unlock (ceremony/open-root.js), which
+                 asks for exactly what the personal identity's armor
+                 requires: password, passkey, or both. -->
+            <p class="text-xs leading-5 text-slate-400" data-testid="approval-unlock-hint">
+              Approving unlocks your personal identity first — with your password, your passkey, or both, as your identity requires.
+            </p>
             <p x-show="approvalRequest.error" x-cloak data-testid="approval-error"
                class="mt-2 text-xs leading-5 text-red-300" x-text="approvalRequest.error"></p>
             <p x-show="approvalRequest.blockingError" x-cloak data-testid="approval-blocking-error"
@@ -714,7 +711,7 @@
               <input type="checkbox" x-model="approvalRequest.allowSessionApprovals"
                      data-testid="approval-session-option"
                      class="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-500 bg-gray-950 text-indigo-500 focus:ring-indigo-400">
-              <span>Allow approvals this session without asking for my password again.</span>
+              <span>Allow approvals this session without unlocking again.</span>
             </label>
           </div>
           </template>

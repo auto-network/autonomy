@@ -87,6 +87,17 @@ def test_browser_module_load_configures_real_signon_path():
 
     entry = output["signOnResult"]["orgs"][0]
     assert entry["personaPub"] == persona.public_hex
+    # Signing on from an already-open root (the approval sheet's path after
+    # the shared factor-aware unlock) yields the SAME persona under the same
+    # personal root, and leaves the caller's seed buffer alone.
+    seeded = output["seedSignOnResult"]
+    assert seeded["personaPub"] == persona.public_hex
+    assert seeded["personalRootPub"] == output["signOnResult"]["personalRootPub"]
+    assert seeded["callerSeedIntact"] is True
+    seeded_cert = DelegationCert.from_json(seeded["certWire"])
+    verify_chain(
+        seeded_cert, persona.public_hex, org=org_uuid, required_scope="link:publish",
+    )
     certificate = DelegationCert.from_json(entry["certWire"])
     verify_chain(
         certificate,
