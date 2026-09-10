@@ -133,6 +133,30 @@ def stored_payload(db_path: Path, setting_id: str):
 # ── the secret comes back ─────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize("lifecycle", ["active", "deprecated", "excluded", "removed-base"])
+def test_vault_chain_presence_follows_lifecycle_without_opening(
+    graph_db_env, vault_schema, vault, monkeypatch, lifecycle
+):
+    base = settings_ops.add_setting(VAULT_SET, 1, "presence", {"v": SECRET}, org=None)
+    settings_ops.override_setting(base, {"v": "renewed-test-secret"}, org=None)
+    if lifecycle == "deprecated":
+        settings_ops.deprecate_setting(base, org=None)
+    elif lifecycle == "excluded":
+        settings_ops.exclude_setting(base, org=None)
+    elif lifecycle == "removed-base":
+        settings_ops.remove_setting(base, org=None)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("presence must not open a secret")
+
+    monkeypatch.setattr(settings_ops, "_unwrap_vault_locator", forbidden)
+    chain = settings_ops.chain_setting(VAULT_SET, "presence", org=None)
+    assert (chain is not None) == (lifecycle == "active")
+    if chain:
+        assert is_vault_locator(chain["final"])
+        assert len(chain["layers"]) == 2
+
+
 def test_a_vault_secret_resolves_to_plaintext_through_read_set(
     graph_db_env, vault_schema, vault
 ):

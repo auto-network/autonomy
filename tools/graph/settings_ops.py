@@ -4447,6 +4447,10 @@ def chain_setting(
         return None
     chosen_org, chosen_row = candidate_bases[0]
 
+    from copy import deepcopy
+
+    # Vaulted payloads are scalar locators. Preserve their JSON type while
+    # explaining the chain; this metadata read must never unwrap a secret.
     base_payload = json.loads(chosen_row["payload"])
     layers: list[dict] = [{
         "id": chosen_row["id"],
@@ -4457,10 +4461,10 @@ def chain_setting(
         "supersedes": chosen_row["supersedes"],
         "created_at": chosen_row["created_at"],
         "patch": base_payload,
-        "result": dict(base_payload),
+        "result": deepcopy(base_payload),
     }]
 
-    merged = dict(base_payload)
+    merged = deepcopy(base_payload)
     # Same ordering as read_set, so an explanation matches what actually
     # resolves rather than describing a different merge order.
     for ov_org, ov_row in sorted(
@@ -4479,7 +4483,7 @@ def chain_setting(
             "supersedes": ov_row["supersedes"],
             "created_at": ov_row["created_at"],
             "patch": ov_payload,
-            "result": dict(merged),
+            "result": deepcopy(merged),
         })
 
     return {
