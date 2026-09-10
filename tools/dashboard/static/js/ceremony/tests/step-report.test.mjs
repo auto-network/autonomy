@@ -67,7 +67,7 @@ test('per-org failures coexist and each clears on its own success', () => {
       { fetchImpl, org: 'autonomy' });
     reportStepOutcome('checkpoint', { status: 'failed', reason: 'heads-500' },
       { fetchImpl, org: 'anchore' });
-    reportStepOutcome('vault-wake', { ready: false, reason: 'not-founded' },
+    reportStepOutcome('vault-wake', { ready: false, reason: 'recovery-503' },
       { fetchImpl });
 
     assert.deepEqual(Object.keys(stored(storage)).sort(),

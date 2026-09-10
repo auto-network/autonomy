@@ -1138,24 +1138,36 @@ def sanitize_next(raw: str | None) -> str:
 # ── the vault's one warm moment ───────────────────────────────────────
 
 
+async def get_personal_vault_recovery(request: Request) -> JSONResponse:
+    """Old personal storage derivation context, from descriptors, not a ledger."""
+    if session_from_request(request) is None:
+        return JSONResponse({"ok": False, "error": "unlock required"}, status_code=401)
+    try:
+        from tools.network.storagekit.keycontrol import KeyControlStore
+        from tools.vault.db_content_store import vault_db_path_for
+
+        path = vault_db_path_for(None)
+        genesis_ids = set()
+        if Path(path).exists():
+            with KeyControlStore(path) as kc:
+                genesis_ids = {state.genesis_id for state in kc.states.values()}
+        if len(genesis_ids) > 1:
+            raise ValueError("personal storage has more than one recovery domain")
+        return JSONResponse({"recovery_genesis_id": next(iter(genesis_ids), None)})
+    except Exception:
+        logger.exception("personal storage recovery metadata unavailable")
+        return JSONResponse({"ok": False, "error": "recovery metadata unavailable"},
+                            status_code=503)
+
+
 async def post_unlock_vault_keys(request: Request) -> JSONResponse:
-    """Receive the generation keys the browser opened, and bring the vault up.
+    """Receive personal decryption keys after the authenticated root unlock.
 
-    The personal root never reaches this process. The browser opens the armor,
-    derives the per-organization persona encapsulation key, opens the
-    CapabilityGrants addressed to it, and sends only the recovered generation
-    keys — content keys, never identity keys (crib §12). This route loads them
-    into the in-memory cache and registers the read and write seams, which is
-    the entire difference between a vault that is built and a vault that works.
-
-    Nothing here is persisted. The cache dies with the process, so a restart
-    forces a fresh unlock rather than resurrecting keys from disk — the design
-    calls that the accepted cost of a reboot, not a defect (§10).
-
-    Requires a live session, because it is only reachable AFTER an unlock has
-    succeeded. That is not belt-and-braces: a caller without a session has not
-    proved possession of the root, and the keys it is offering could be
-    anything.
+    The personal root stays in the client. Its audited X25519 recipient opens
+    modern personal values. An optional KEM key recovers old storage-format
+    values from persisted grants; it does not create membership or credentials.
+    The existing organization signing-author handoff is separate from this
+    personal recipient and is not provisioned by personal warm-up.
     """
     if session_from_request(request) is None:
         return JSONResponse({"ok": False, "error": (
@@ -1198,28 +1210,6 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
                 f"generation key for {state_id} is {len(raw)} bytes, not 32"
             )}, status_code=400)
         decoded[state_id] = raw
-
-    # Publish the caller's PersonaKemCredential when offered. This is what a
-    # self-grant is addressed TO: without a stored credential the sealer mints
-    # a generation with no durable recovery copy, and the secret dies with the
-    # process cache. The record is persona-signed and fully re-verified by
-    # accept_credential before a row is written; posting it is idempotent
-    # (content-addressed by kem_key_id). The default founding path omits the
-    # credential (auto-5dh9a RESOLUTION-2), so first warm-up is where it lands.
-    kem_credential = body.get("kem_credential")
-    if kem_credential is not None:
-        try:
-            from tools.network.storagekit.keycontrol import KeyControlStore
-            from tools.vault.db_content_store import vault_db_path_for
-
-            with KeyControlStore(vault_db_path_for(None)) as kc:
-                kc.accept_credential(kem_credential)
-        except Exception as exc:
-            logger.warning(
-                "vault bring-up refused (kem-credential): %s", exc)
-            return JSONResponse({"ok": False, "error": (
-                f"kem_credential was refused: {exc}"
-            )}, status_code=400)
 
     # Server-side recovery (crib §1c/§12): the caller re-derived the persona's
     # decrypt-only KEM private key from the root and hands it here; this
@@ -1321,22 +1311,7 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
         # Strictly after _install_personal_audited_delegate: the audited
         # write is a cold delegate seal against the recipient just published.
         _ensure_sealed_settings_pepper()
-    # PERSIST THE CARRIER AT UNLOCK, not only at shutdown.
-    #
-    # MEASURED: the only production writer of the ramfs snapshot is the
-    # graceful-shutdown hook (server.py:22257), and it writes only when the
-    # process is already warm. So an unlock warms this process and persists
-    # nothing; a process killed before any graceful shutdown carries nothing
-    # forward.
-    #
-    # NOT ESTABLISHED: that this is what happened on 2026-09-09. Whether either
-    # of that day's two unlocks reached a shutdown that wrote is unrecoverable
-    # — save's bool is discarded at server.py:22257 and restore's missing-files
-    # branch is silent. This is a behaviour change that removes a dependency on
-    # a clean shutdown; it is not a proven incident root cause.
-    #
-    # Same ramfs carrier, same policy, no disk fallback: this adds no storage,
-    # only a second moment at which the existing carrier is written.
+    # Use the existing RAM-backed carrier at unlock as well as shutdown.
     snapshot = False
     try:
         snapshot = save_vault_across_hot_reload()
@@ -1438,10 +1413,11 @@ def _assert_audited_recipient_compatible(public_hex: str) -> None:
 
 
 def _personal_store_has_generations() -> bool:
-    """Whether anything has ever been sealed in the operator's own store.
+    """Whether old storage-format personal values have generation records.
 
-    Distinguishes "the browser opened no grants" (a failure) from "there are no
-    grants to open" (a first unlock). Fails to False on any error: an
+    Modern personal values do not use generations. Distinguishes missing
+    recovery keys for old content from a store with no old grants. Fails to
+    False on any error: an
     unreadable key-control store must not be the thing that blocks a fresh
     identity from ever bringing its vault up.
     """
@@ -1475,7 +1451,6 @@ def _bring_vault_up(generation_keys: dict, delegate_hex: "str | None" = None) ->
         generation_keys=generation_keys,
         author_provider=_agent_delegate,
         org_ledger_provider=_org_fold,
-        personal_ledger_provider=_personal_fold,
         cache=_VAULT_CACHE.get("cache"),
     )
     _VAULT_CACHE["cache"] = cache
@@ -1490,9 +1465,8 @@ _VAULT_CACHE: dict = {}
 def _agent_delegate():
     """The attenuated delegate's signing key, or None before one is held.
 
-    MEMORY-class: it arrives at unlock, lives in this dict, and dies with the
-    process. Nothing persists it, so a restart leaves no author and a write
-    refuses naming the unlock — which is the design, not a gap.
+    This is the organization storage-author seam, not the personal audited
+    decryption recipient. Personal warm-up deliberately does not supply it.
     """
     return _VAULT_CACHE.get("delegate")
 
@@ -1505,19 +1479,11 @@ def _agent_delegate():
 # can hand the warm keys to the next process through the ramfs key cache and
 # come back warm with nobody present.
 #
-# What crosses: the agent delegate's signing key and the persona KEM private
-# key — two fixed 32-byte values (§12 sanctions the dashboard holding both after
-# sign-in; ramfs is memory — it never swaps and dies at reboot, the same
-# exposure class as the heap). The KEM key is deliberately included: it is what
-# lets this process open grants it does not already hold — a secret minted or
-# rotated on ANOTHER machine and synced in — and serve it unattended after the
-# reload. The generation keys are NOT saved: they re-derive from the on-disk
-# grants with the KEM key, so there is nothing variable-sized to persist.
-#
-# Files live only in ramfs, and the startup hook CLEARS them once loaded — they
-# exist only for the reload window. A CRASH skips the shutdown hook, so no file
-# is written and the next process boots locked, the correct fail-closed posture
-# for a non-graceful restart.
+# What crosses: the personal audited decryption key and, for old storage-format
+# data only, the KEM recovery key. Neither grants membership or signs anything.
+# The snapshot uses the existing ramfs carrier: no disk fallback, no reboot
+# persistence. Successful restoration consumes it; failed application retains
+# it for a retry. It is written at unlock and at graceful shutdown.
 
 
 def _keycache_dir() -> "Path":
@@ -1567,159 +1533,93 @@ def _keycache_clear(name: str) -> None:
         pass
 
 
-_HOTRELOAD_DELEGATE = "vault.hotreload.delegate"
 _HOTRELOAD_KEM = "vault.hotreload.kem"
 _HOTRELOAD_AUDITED_DELEGATE = "vault.hotreload.audited-delegate"
 
 
-def save_vault_across_hot_reload() -> bool:
-    """Shutdown hook: hand the warm vault to the next process, or do nothing.
+def _clear_vault_snapshot() -> None:
+    _keycache_clear(_HOTRELOAD_KEM)
+    _keycache_clear(_HOTRELOAD_AUDITED_DELEGATE)
+    # Discard the obsolete signing-key file from a pre-cleanup process too.
+    _keycache_clear("vault.hotreload.delegate")
 
-    Writes the delegate signing key, persona KEM private key, and audited
-    recipient private key. Absent any of them (a locked or partially warmed
-    process) it writes nothing, so a non-warm process reloads to locked.
+
+def save_vault_across_hot_reload() -> bool:
+    """Retain personal decryption material in the existing RAM-backed carrier.
+
+    The audited recipient suffices for new personal values. Carry a KEM key
+    only when old storage-format values required it. No signing key is saved.
     """
-    delegate = _VAULT_CACHE.get("delegate")
-    kem_private = _VAULT_CACHE.get("kem_private")
     audited_delegate = _VAULT_CACHE.get("audited_delegate")
-    if delegate is None or not kem_private or not audited_delegate:
-        # OBSERVABILITY. This return value is discarded by the sole production
-        # caller (server.py:22257), so the documented "a locked or partially
-        # warmed process writes nothing" case has always been silent — one of
-        # the two links that made 2026-09-09 unrecoverable. Reports the
-        # MEASURED outcome only: which of the three parts was absent. Never
-        # any key bytes, and no claim about what a later process will do —
-        # another carrier may exist.
-        missing = [
-            name for name, present in (
-                ("delegate", delegate is not None),
-                ("kem_private", bool(kem_private)),
-                ("audited_delegate", bool(audited_delegate)),
-            ) if not present
-        ]
-        logger.warning(
-            "vault snapshot NOT written (pid=%s): missing %s",
-            os.getpid(), ",".join(missing),
-        )
+    if not audited_delegate:
+        logger.warning("vault snapshot NOT written: missing audited recipient")
         return False
-    # A True return was silent too, so "snapshot written" was as invisible as
-    # "snapshot declined". Logged at the same level for the same reason.
     try:
-        _keycache_write(_HOTRELOAD_DELEGATE, delegate.private_hex.encode("ascii"))
-        _keycache_write(_HOTRELOAD_KEM, kem_private.encode("ascii"))
-        _keycache_write(
-            _HOTRELOAD_AUDITED_DELEGATE, audited_delegate.encode("ascii")
-        )
-        logger.warning(
-            "vault snapshot written (pid=%s): delegate + kem + audited-delegate",
-            os.getpid(),
-        )
+        kem_private = _VAULT_CACHE.get("kem_private")
+        if kem_private:
+            _keycache_write(_HOTRELOAD_KEM, kem_private.encode("ascii"))
+        else:
+            _keycache_clear(_HOTRELOAD_KEM)
+        _keycache_write(_HOTRELOAD_AUDITED_DELEGATE, audited_delegate.encode("ascii"))
+        _keycache_clear("vault.hotreload.delegate")
+        logger.warning("vault snapshot written: personal decryption keys")
         return True
     except Exception:
-        logger.exception(
-            "vault snapshot write FAILED (pid=%s): nothing was carried forward "
-            "by this attempt", os.getpid()
-        )
-        _keycache_clear(_HOTRELOAD_DELEGATE)
-        _keycache_clear(_HOTRELOAD_KEM)
-        _keycache_clear(_HOTRELOAD_AUDITED_DELEGATE)
+        logger.exception("vault snapshot write FAILED")
+        _clear_vault_snapshot()
         return False
 
 
 def restore_vault_across_hot_reload() -> bool:
-    """Startup hook: re-warm the vault from a graceful-shutdown snapshot.
+    """Restore personal decryption keys without opening an authority ledger.
 
-    Reads the three keys, RE-DERIVES the generation keys from the on-disk grants
-    with the KEM key (the same server-side recovery an unlock runs), installs
-    the delegate, and re-retains the KEM key for the next reload. The files are
-    CLEARED once read. Missing files — a crash, or a cold boot — leave the
-    vault locked.
+    Consume after successful apply only; retain the snapshot on transient error.
     """
-    delegate_raw = _keycache_read(_HOTRELOAD_DELEGATE)
-    kem_raw = _keycache_read(_HOTRELOAD_KEM)
     audited_raw = _keycache_read(_HOTRELOAD_AUDITED_DELEGATE)
-    if not delegate_raw or not kem_raw or not audited_raw:
-        # OBSERVABILITY. This branch returned False with no log, so "no restore
-        # line" was ambiguous between never-called, files-absent and
-        # process-died-earlier. NONE present and a PARTIAL set are different
-        # diagnoses and are now distinguished.
-        present = [
-            name for name, raw in (
-                ("delegate", delegate_raw),
-                ("kem", kem_raw),
-                ("audited-delegate", audited_raw),
-            ) if raw
-        ]
-        logger.warning(
-            "vault snapshot NOT restored (pid=%s): %s",
-            os.getpid(),
-            ("no snapshot files present" if not present
-             else f"PARTIAL snapshot, only {','.join(present)} present"),
-        )
-        # Never leave a partial snapshot for a later process to mistake for a
-        # complete hand-off (including one written by the pre-recipient code).
-        _keycache_clear(_HOTRELOAD_DELEGATE)
-        _keycache_clear(_HOTRELOAD_KEM)
-        _keycache_clear(_HOTRELOAD_AUDITED_DELEGATE)
+    kem_raw = _keycache_read(_HOTRELOAD_KEM)
+    if not audited_raw:
+        logger.warning("vault snapshot NOT restored: missing audited recipient")
+        _clear_vault_snapshot()
         return False
     try:
-        from tools.network.storagekit.keycontrol import KeyControlStore
-        from tools.vault.db_content_store import vault_db_path_for
-        from tools.vault.unlock import open_generation_keys
+        generation_keys = {}
+        if kem_raw:
+            from tools.network.storagekit.keycontrol import KeyControlStore
+            from tools.vault.db_content_store import vault_db_path_for
+            from tools.vault.unlock import open_generation_keys
 
-        delegate_hex = delegate_raw.decode("ascii").strip()
-        kem_private_hex = kem_raw.decode("ascii").strip()
-        with KeyControlStore(vault_db_path_for(None)) as kc:
-            generation_keys = open_generation_keys(
-                kem_private_hex, kc.accepted_grants(), kc.states
-            )
-        _bring_vault_up(generation_keys, delegate_hex)
-        _VAULT_CACHE["kem_private"] = kem_private_hex  # retain for the next reload
-        audited_private_hex = audited_raw.decode("ascii").strip()
+            kem_private_hex = kem_raw.decode("ascii").strip()
+            with KeyControlStore(vault_db_path_for(None)) as kc:
+                generation_keys = open_generation_keys(
+                    kem_private_hex, kc.accepted_grants(), kc.states
+                )
+            if not generation_keys and _personal_store_has_generations():
+                raise ValueError("no generation keys recovered for old personal content")
+        elif _personal_store_has_generations():
+            raise ValueError("old personal content needs its KEM recovery key")
         from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+
+        audited_private_hex = audited_raw.decode("ascii").strip()
         audited_public_hex = (
             X25519PrivateKey.from_private_bytes(bytes.fromhex(audited_private_hex))
-            .public_key()
-            .public_bytes_raw()
-            .hex()
+            .public_key().public_bytes_raw().hex()
         )
         private_hex, public_hex = _validate_audited_delegate_pair(
             audited_private_hex, audited_public_hex
         )
+        _bring_vault_up(generation_keys)
+        if kem_raw:
+            _VAULT_CACHE["kem_private"] = kem_private_hex
         _install_personal_audited_delegate(private_hex, public_hex)
-        # Same step-3 ordering as post_unlock_vault_keys. The restore path is
-        # a real bring-up (every merge hot-reloads through here), and a warm
-        # process whose unlock predates the pepper's existence would otherwise
-        # never mint it — the browser only re-posts vault keys when the vault
-        # is actually cold.
         _ensure_sealed_settings_pepper()
         logger.info(
-            "vault keys successfully hot-reloaded: delegate + KEM + audited "
-            "delegate re-warmed from the ramfs snapshot and %d generation "
-            "key(s) re-derived from on-disk grants; vault is warm with no "
-            "key-holder present",
-            len(generation_keys),
+            "vault keys successfully hot-reloaded: personal recipient and %d "
+            "recovered generation key(s)", len(generation_keys),
         )
-        # CONSUME on success. These used to sit in a `finally`, which also ran
-        # on failure and destroyed a complete snapshot that had merely failed
-        # to APPLY. Moving them here keeps the consume and drops the destroy —
-        # but they must be INSIDE the success path, because this `return True`
-        # would otherwise skip them entirely (caught in review).
-        _keycache_clear(_HOTRELOAD_DELEGATE)
-        _keycache_clear(_HOTRELOAD_KEM)
-        _keycache_clear(_HOTRELOAD_AUDITED_DELEGATE)
+        _clear_vault_snapshot()
         return True
     except Exception:
-        logger.exception(
-            "vault hot-reload restore failed; leaving the vault locked"
-        )
-        # DO NOT CLEAR. The snapshot was COMPLETE; applying it failed, which
-        # can be transient (the grants store briefly unavailable, a partially
-        # started process). Clearing here destroyed the only carrier and made
-        # a transient failure permanent — the next process then had nothing to
-        # restore and only a human could recover it. A complete snapshot is
-        # kept so the next start can retry; it lives in ramfs and dies with
-        # the machine anyway.
+        logger.exception("vault hot-reload restore failed; retaining snapshot")
         return False
 
 
@@ -1758,14 +1658,7 @@ def _org_fold(org):
     return _fold_for(org) if org else None
 
 
-def _personal_fold(_org):
-    """The operator's own folded ledger.
 
-    Ignores the org argument deliberately: a personal-homed set seals against
-    the operator's own fold whatever organization a caller happens to be
-    acting as. The row's home and the acting org are different axes.
-    """
-    return _fold_for("personal")
 
 
 ROUTES = [
@@ -1781,6 +1674,8 @@ ROUTES = [
           methods=["POST"]),
     Route("/api/identity/unlock/approval", post_unlock_approval,
           methods=["POST"]),
+    Route("/api/identity/unlock/vault-keys", get_personal_vault_recovery,
+          methods=["GET"]),
     Route("/api/identity/unlock/vault-keys", post_unlock_vault_keys,
           methods=["POST"]),
     Route("/api/identity/session", get_session, methods=["GET"]),
