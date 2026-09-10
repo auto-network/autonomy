@@ -1,0 +1,122 @@
+/* submitSignon must not turn a post-cookie handoff failure into a failed
+ * sign-in.
+ *
+ * By the time submitSignon runs, the credential POST has already minted the
+ * session cookie: the operator IS signed in. What follows — the vault-keys
+ * handoff and the fleet runtime post — are maintenance that can fail for
+ * reasons unrelated to the operator's credential (a stale delegate, a
+ * connector that is down, a roster mismatch). Today submitSignon rethrows
+ * both, every ceremony awaits it bare, the failure handler renders an error,
+ * the redirect never runs, and `finally` nulls the prepared keys so nothing
+ * can be retried. Before fa760a61 the vault wake was wrapped and logged.
+ *
+ * Expected: submitSignon RESOLVES with the report naming the failed step;
+ * only the caller decides what a failed maintenance step means.
+ *
+ *   node --test tools/dashboard/tests/signon_phases_submit.test.mjs
+ */
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import { submitSignon } from '../static/js/ceremony/signon-phases.js';
+
+function reply(status, body) {
+  return { ok: status < 400, status, json: async () => body };
+}
+
+function fetchWhere(rules) {
+  const calls = [];
+  const impl = async (url, options = {}) => {
+    calls.push({ url: String(url), method: options.method || 'GET' });
+    for (const [prefix, answer] of rules) {
+      if (String(url).startsWith(prefix)) return typeof answer === 'function' ? answer() : answer;
+    }
+    return reply(200, { ok: true });
+  };
+  impl.calls = calls;
+  return impl;
+}
+
+function prepared(posts) {
+  return {
+    ready: ['netorg'],
+    fleetEnabled: posts.some((p) => p.step === 'fleet'),
+    vault: { keys: { generation_keys: {}, organization_delegates: [] } },
+    posts,
+  };
+}
+
+test('a vault-keys 500 after the cookie is minted resolves with the step reported, and the other posts still run', async () => {
+  const fetchImpl = fetchWhere([
+    ['/api/identity/unlock/vault-keys', reply(500, { ok: false, error: 'the vault could not be brought up: organization delegate must cite current heads' })],
+  ]);
+  const posts = [{ step: 'serve-cert', org: 'netorg', url: '/api/network/serve-cert', body: {} }];
+
+  const handoff = prepared(posts);
+  const report = await submitSignon(handoff, fetchImpl);
+
+  assert.ok(report, 'submitSignon resolved instead of throwing');
+  assert.ok(report.failed.some((f) => f.step === 'vault-wake' || f.step === 'vault'),
+    'the vault handoff failure is in the report: ' + JSON.stringify(report.failed));
+  assert.ok(fetchImpl.calls.some((c) => c.url === '/api/network/serve-cert' && c.method === 'POST'),
+    'per-org maintenance still ran after the vault handoff failed');
+  assert.ok(fetchImpl.calls.some((c) => c.url === '/api/network/unlock-report'),
+    'the diagnostics report was still posted');
+  assert.deepEqual(report.ready, [], 'failed vault handoff is not ready');
+  assert.equal(handoff.vault.keys, null, 'key material is still released');
+});
+
+test('a fleet runtime 400 resolves with fleet_arming=mint-failed instead of failing the sign-in', async () => {
+  const fetchImpl = fetchWhere([
+    ['/api/fleet/runtime', reply(400, { ok: false, error: 'reachability credential delivered without a registered org_uuid' })],
+  ]);
+  const posts = [
+    { step: 'serve-cert', org: 'netorg', url: '/api/network/serve-cert', body: {} },
+    { step: 'fleet', url: '/api/fleet/runtime', body: {} },
+    { step: 'binding', org: 'netorg', url: '/api/network/renew', body: {} },
+  ];
+
+  const report = await submitSignon(prepared(posts), fetchImpl);
+
+  assert.ok(report, 'submitSignon resolved instead of throwing');
+  assert.equal(report.fleet_arming.attempted, true);
+  assert.equal(report.fleet_arming.outcome, 'mint-failed');
+  assert.match(report.fleet_arming.error, /registered org_uuid/);
+  assert.deepEqual(report.repaired, ['netorg'], 'the serve-cert post before it still counted');
+  assert.deepEqual(report.bindings, [{ org: 'netorg', action: 'renewed' }],
+    'independent maintenance after the fleet failure still ran');
+});
+
+test('a clean handoff is unchanged: resolves with no failures', async () => {
+  const fetchImpl = fetchWhere([]);
+  const posts = [{ step: 'serve-cert', org: 'netorg', url: '/api/network/serve-cert', body: {} }];
+
+  const report = await submitSignon(prepared(posts), fetchImpl);
+
+  assert.deepEqual(report.failed, []);
+  assert.deepEqual(report.repaired, ['netorg']);
+});
+
+test('the vault failure remains visible after navigation through the existing session storage report', async () => {
+  const previous = globalThis.sessionStorage;
+  const values = new Map();
+  globalThis.sessionStorage = {
+    getItem: key => values.get(key) || null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: key => values.delete(key),
+  };
+  try {
+    const fetchImpl = fetchWhere([
+      ['/api/identity/unlock/vault-keys', reply(500, { error: 'vault handoff refused' })],
+    ]);
+    await submitSignon(prepared([]), fetchImpl);
+    const failures = JSON.parse(values.get('autonomy.unlock.step-failures'));
+    assert.match(failures['vault-wake'], /vault handoff refused/);
+    await submitSignon(prepared([]), fetchWhere([]));
+    assert.equal(values.has('autonomy.unlock.step-failures'), false,
+      'only a successful later handoff clears the failure');
+  } finally {
+    if (previous === undefined) delete globalThis.sessionStorage;
+    else globalThis.sessionStorage = previous;
+  }
+});

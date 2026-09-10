@@ -69,6 +69,7 @@ const SERVER = { armor: null, state: null, credId: null, posts: [], getRequests:
 async function buildFixture() {
   SERVER.posts.length = 0;
   SERVER.preparationFailure = null;
+  SERVER.submissionFailure = null;
   SERVER.getRequests.length = 0;
   const kp = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
   const rootSeed = new Uint8Array(await crypto.subtle.exportKey('pkcs8', kp.privateKey)).slice(-32);
@@ -175,6 +176,9 @@ async function router(url, opts) {
   if (u.includes('/unlock/passkey')) { SERVER.posts.push(body); return ok({ ok: true }); }
   if (u.includes('/fleet/enrollment/local-completion')) return ok({ pending: false });
   if (u.includes('/fleet/runtime')) return ok({ enabled: false });
+  if (u.includes('/unlock/vault-keys') && SERVER.submissionFailure === 'vault') {
+    return { ok: false, status: 500, json: async () => ({ error: 'vault handoff refused' }) };
+  }
   if (u.includes('/unlock/vault-keys') || u.includes('/api/session')) return ok({ ok: true });
   return ok({ ok: false, error: 'unrouted: ' + u });
 }
@@ -353,6 +357,27 @@ test('invalid preparation ciphertext still fails before authentication', async (
   dom.window.close();
 });
 
+test('password UI enters dashboard after a post-authentication vault failure', async () => {
+  await buildFixture();
+  SERVER.submissionFailure = 'vault';
+  const { win, nav, dom } = await bootUnlock(path.join(JS_DIR, 'unlock.js'), { traceRoot: true });
+  const card = win.document.getElementById('unlock-card');
+  await until(() => card.querySelector('#unlock-primary'), 'unlock button');
+  card.querySelector('#unlock-trouble-toggle').click();
+  card.querySelector('#unlock-use-password').click();
+  const input = await until(() => card.querySelector('#unlock-password'), 'password field');
+  input.value = 'unused-here';
+  card.querySelector('#unlock-primary').click();
+  await until(() => nav.target, 'dashboard navigation after authenticated maintenance failure');
+  assert.equal(nav.target, '/');
+  assert.ok(SERVER.posts.some(post => post.route === 'password' && post.signature));
+  const report = SERVER.posts.find(post => post.route === 'report');
+  assert.ok(report.failed.some(item => item.step === 'vault-wake'));
+  assert.deepEqual(report.ready, []);
+  assert.equal(win.AutonomyUnlock._internals.state().error, null);
+  dom.window.close();
+});
+
 test('passkey login on a slotless (post-migration) device: PRF requested, access granted, pending slot stashed', async () => {
   await buildFixture();
   // UNLOCK_JS overrides the target source — used to prove this harness turns
@@ -410,11 +435,12 @@ test('a login that detects a pending enrollment lands on the shell home, never t
 });
 
 
-for (const failure of [null, 'vault', 'runtime', 'organization']) {
+for (const failure of [null, 'vault', 'runtime', 'organization', 'vault-post']) {
 test(`unlock with a recovery code: opens root, posts unlock, lands on credentials (${failure || 'healthy'})`, async () => {
   SERVER.posts.length = 0;
   await buildFixture();
   SERVER.preparationFailure = failure;
+  if (failure === 'vault-post') SERVER.submissionFailure = 'vault';
   // add a recovery slot to the fixture armor
   const code = generateRecoveryCode();
   const recipient = await recoveryRecipientPublicKey(code);
@@ -423,7 +449,7 @@ test(`unlock with a recovery code: opens root, posts unlock, lands on credential
     rootSeed: SERVER.rootSeed, recoveryRecipientPub: recipient, recoveryPub,
     createdAt: '2026-08-01T00:00:00Z',
   });
-  const { win } = await bootUnlock(process.env.UNLOCK_JS || path.join(JS_DIR, 'unlock.js'));
+  const { win, nav } = await bootUnlock(process.env.UNLOCK_JS || path.join(JS_DIR, 'unlock.js'));
   const card = win.document.getElementById('unlock-card');
   await until(() => card.querySelector('#unlock-primary'), 'unlock button');
 
@@ -442,5 +468,7 @@ test(`unlock with a recovery code: opens root, posts unlock, lands on credential
   await until(() => win.sessionStorage.getItem('autonomy.factor.open-credentials') === '1', 'open-credentials flag set');
   const report = await until(() => SERVER.posts.find(post => post.route === 'report'), 'maintenance report');
   if (failure) assert.equal(report.failed.length, 1);
+  await until(() => nav.target, 'dashboard navigation');
+  assert.equal(nav.target, '/');
 });
 }
