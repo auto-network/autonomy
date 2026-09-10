@@ -25,21 +25,38 @@ export async function prepareSignon(rootSeed, encrypted, signon) {
   let inputs;
   try { inputs = JSON.parse(new TextDecoder().decode(raw)); }
   finally { raw.fill(0); }
-  const vault = await prepareVault(rootSeed, inputs.vault, audited);
-  vault.keys.organization_delegates = [];
-  for (const org of inputs.organizations) {
-    vault.keys.organization_delegates.push(await prepareStorageDelegate(rootSeed, org.storage_delegate));
+  // These failures describe unavailable maintenance inputs, not failed
+  // authentication. Keep them local until phase 3 can report them safely.
+  const failures = [];
+  const organizations = inputs.organizations.filter(org => {
+    if (!org.error) return true;
+    failures.push({ step: 'organization-preparation', org: org.slug, error: org.error });
+    return false;
+  });
+  let vault = null;
+  if (inputs.vault.error) {
+    failures.push({ step: 'vault-wake', error: inputs.vault.error });
+  } else {
+    vault = await prepareVault(rootSeed, inputs.vault, audited);
+    vault.keys.organization_delegates = [];
+    for (const org of organizations) {
+      vault.keys.organization_delegates.push(await prepareStorageDelegate(rootSeed, org.storage_delegate));
+    }
   }
+  const fleetError = inputs.completion?.error || inputs.runtime.error;
+  if (fleetError) failures.push({ step: 'fleet', error: fleetError });
+  const personalServeError = inputs.personal_serve?.error;
+  if (personalServeError) failures.push({ step: 'serve-cert', error: personalServeError });
   const posts = await signon._internals.prepareRootMaintenance(rootSeed,
-    inputs.organizations, inputs.runtime, inputs.personal_serve);
-  if (inputs.completion) {
+    organizations, fleetError || personalServeError ? null : inputs.runtime, inputs.personal_serve);
+  if (!fleetError && inputs.completion) {
     const c = inputs.completion;
     posts.push({ step: 'fleet', url: '/api/fleet/enrollment/local-completion', body: await completeFleetEnrollment({
       personalRootSeed: new Uint8Array(rootSeed), requestId: c.request_id,
       request: c.request, channelBinding: c.channel_binding, approval: c.approval,
       rosterEntry: c.roster_entry,
     }) });
-  } else if (inputs.runtime.enabled) {
+  } else if (!fleetError && inputs.runtime.enabled) {
     const rc = inputs.runtime;
     posts.push({ step: 'fleet', url: '/api/fleet/runtime', body: await mintFleetRuntimeCredential({
       personalRootSeed: new Uint8Array(rootSeed), rootPub: rc.personal_root_pub,
@@ -48,18 +65,26 @@ export async function prepareSignon(rootSeed, encrypted, signon) {
       servingOrgs: rc.serving_orgs || [],
     }) });
   }
-  return { vault, posts,
-    ready: inputs.organizations.filter(org => !org.serve_cert.required).map(org => org.slug),
-    fleetEnabled: Boolean(inputs.completion || inputs.runtime.enabled) };
+  return { vault, posts, failures,
+    ready: vault ? organizations.filter(org => !org.serve_cert.required).map(org => org.slug) : [],
+    fleetEnabled: !fleetError && Boolean(inputs.completion || inputs.runtime.enabled) };
 }
 
 export async function submitSignon(prepared, fetchImpl = fetch) {
-  const report = { repaired: [], ready: prepared.ready || [], bindings: [], failed: [] };
-  if (!prepared.fleetEnabled) report.fleet_arming = { attempted: false, outcome: 'fleet-not-enabled' };
+  const report = { repaired: [], ready: prepared.ready || [], bindings: [], failed: [...(prepared.failures || [])] };
+  const fleetFailure = report.failed.find(item => item.step === 'fleet');
+  if (fleetFailure) report.fleet_arming = { attempted: false, outcome: fleetFailure.error };
+  else if (!prepared.fleetEnabled) report.fleet_arming = { attempted: false, outcome: 'fleet-not-enabled' };
   try {
+    for (const failure of report.failed) {
+      reportStepOutcome(failure.step, { status: 'failed', reason: failure.error },
+        { fetchImpl, org: failure.org });
+    }
     try {
-      await submitVault(prepared.vault, fetchImpl);
-      reportStepOutcome('vault-wake', { ready: true }, { fetchImpl });
+      if (prepared.vault) {
+        await submitVault(prepared.vault, fetchImpl);
+        reportStepOutcome('vault-wake', { ready: true }, { fetchImpl });
+      }
     } catch (error) {
       reportStepOutcome('vault-wake', { ready: false, reason: error.message }, { fetchImpl });
       throw error;
@@ -90,7 +115,7 @@ export async function submitSignon(prepared, fetchImpl = fetch) {
     }
     return report;
   } finally {
-    prepared.vault.keys = null;
+    if (prepared.vault) prepared.vault.keys = null;
     prepared.posts = [];
     if (typeof window !== 'undefined') window.__autonomyServeRepair = report;
     try {

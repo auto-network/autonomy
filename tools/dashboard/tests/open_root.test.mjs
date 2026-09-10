@@ -80,19 +80,17 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
 async function until(fn, n = 60) { for (let i = 0; i < n && !fn(); i += 1) await tick(); return fn(); }
 function q(sel) { const o = document.querySelectorAll('.or-overlay'); const r = o[o.length - 1]; return r ? r.querySelector(sel) : null; }
 function qa(sel) { const o = document.querySelectorAll('.or-overlay'); const r = o[o.length - 1]; return r ? [...r.querySelectorAll(sel)] : []; }
-function btnByText(t) { return qa('.or-btn').find((b) => b.textContent.includes(t)); }
-function rowByText(t) { return qa('.or-row').find((b) => b.textContent.includes(t)); }
 
 test('v3 password policy → password field opens it', async () => {
   const root = await mintRoot();
   SERVER = { armor: await aV3Password(root, 'pw'), rootPub: root.rootPub,
     passkeys: [], factorPolicy: v3PolicyView() };
   const p = openRoot({ title: 'Approve X' });
-  await until(() => q('.or-in'));
-  assert.ok(q('.or-in'), 'password field shown');
-  q('.or-in').value = 'pw'; q('.or-in').dispatchEvent(new window.Event('input'));
-  await until(() => btnByText('Use this password'));
-  btnByText('Use this password').click();
+  await until(() => q('input[type="password"]'));
+  assert.ok(q('input[type="password"]'), 'password field shown');
+  q('input[type="password"]').value = 'pw';
+  q('input[type="password"]').dispatchEvent(new window.Event('input'));
+  q('.or-ok').click();
   const out = await p;
   assert.ok(out && out.rootPub === root.rootPub, 'resolved with the right root');
   assert.equal(bytesToHex(out.seed), bytesToHex(root.seed));
@@ -150,11 +148,12 @@ test('v3 grouped policy gathers one password AND one passkey', async () => {
     },
   };
   const promise = openRoot({ title: 'Approve X' });
-  await until(() => q('.or-in') && btnByText('Use this password'));
-  q('.or-in').value = 'pw'; q('.or-in').dispatchEvent(new window.Event('input'));
-  btnByText('Use this password').click();
-  await until(() => btnByText('Use a passkey'));
-  btnByText('Use a passkey').click();
+  await until(() => q('input[type="password"]') && q('.or-ok'));
+  q('input[type="password"]').value = 'pw';
+  q('input[type="password"]').dispatchEvent(new window.Event('input'));
+  q('.or-ok').click();
+  await until(() => q('.or-factor-btn') && !q('.or-ok'));
+  q('.or-factor-btn').click();
   const opened = await promise;
   assert.equal(bytesToHex(opened.seed), bytesToHex(root.seed));
 });

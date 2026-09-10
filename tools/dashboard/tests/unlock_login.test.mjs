@@ -68,6 +68,7 @@ const SERVER = { armor: null, state: null, credId: null, posts: [], getRequests:
 
 async function buildFixture() {
   SERVER.posts.length = 0;
+  SERVER.preparationFailure = null;
   SERVER.getRequests.length = 0;
   const kp = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
   const rootSeed = new Uint8Array(await crypto.subtle.exportKey('pkcs8', kp.privateKey)).slice(-32);
@@ -118,11 +119,16 @@ async function router(url, opts) {
   const u = String(url);
   const body = opts && opts.body ? JSON.parse(opts.body) : null;
   if (u.includes('/unlock/preparation')) {
+    if (SERVER.preparationFailure === 'ciphertext') return ok({ sealed: '00' });
     const pair = await deriveEncapsulationKeypair(SERVER.rootSeed,
       'autonomy/vault/delegate-audited-recipient/v1');
     const payload = { vault: { root_pub: SERVER.rootPub, recovery_genesis_id: null,
       inventory: { anchors: [], classes: [{ governance: { form: 'root-reachable' } }] } },
       organizations: [], runtime: { enabled: false }, completion: null, personal_serve: {} };
+    if (SERVER.preparationFailure === 'vault') payload.vault = { error: 'recovery-unavailable' };
+    if (SERVER.preparationFailure === 'runtime') payload.runtime = { error: 'runtime-status-unreadable' };
+    if (SERVER.preparationFailure === 'organization') payload.organizations = [
+      { slug: 'bad', error: 'organization-preparation-unavailable' }];
     return ok({ sealed: bytesToHex(await sealToEncapsulationKey(
       new TextEncoder().encode(JSON.stringify(payload)), pair.publicKeyHex,
       'autonomy/identity/sign-in-preparation/v1')) });
@@ -165,6 +171,7 @@ async function router(url, opts) {
     return ok({ ok: true, challenge: bytesToB64u(crypto.getRandomValues(new Uint8Array(16))), origin: ORIGIN });
   }
   if (u.includes('/unlock/password')) { SERVER.posts.push({ route: 'password', ...body }); return ok({ ok: true }); }
+  if (u.includes('/api/network/unlock-report')) { SERVER.posts.push({ route: 'report', ...body }); return ok({ ok: true }); }
   if (u.includes('/unlock/passkey')) { SERVER.posts.push(body); return ok({ ok: true }); }
   if (u.includes('/fleet/enrollment/local-completion')) return ok({ pending: false });
   if (u.includes('/fleet/runtime')) return ok({ enabled: false });
@@ -316,6 +323,36 @@ test('password sign-in previews pending enrollment upfront and submits only afte
   assert.ok(SERVER.posts.some((p) => p.route === 'commit' && p.root_signature));
 });
 
+for (const failure of ['vault', 'runtime', 'organization']) {
+  test(`password sign-in survives unavailable ${failure} inputs and reports failure after root cleanup`, async () => {
+    await buildFixture();
+    SERVER.preparationFailure = failure;
+    const { win, trace, dom } = await bootUnlock(path.join(JS_DIR, 'unlock.js'), { traceRoot: true });
+    await until(() => win.AutonomyUnlock._internals.state().factorPolicy, 'factor policy loaded');
+    await win.AutonomyUnlock._internals.unlockWithPassword('unused-here');
+    assert.ok(SERVER.posts.some(post => post.route === 'password' && post.signature));
+    const report = SERVER.posts.find(post => post.route === 'report');
+    const step = { vault: 'vault-wake', runtime: 'fleet', organization: 'organization-preparation' }[failure];
+    assert.ok(report.failed.some(item => item.step === step));
+    assert.deepEqual(report.ready, [], 'unprepared work is not ready');
+    const handedOff = trace.events.includes('POST /api/identity/unlock/vault-keys');
+    assert.equal(handedOff, failure !== 'vault', 'unreadable vault inputs never cause an empty handoff');
+    if (failure === 'runtime') assert.equal(report.fleet_arming.outcome, 'runtime-status-unreadable');
+    assert.equal(trace.roots.length, 1);
+    dom.window.close();
+  });
+}
+
+test('invalid preparation ciphertext still fails before authentication', async () => {
+  await buildFixture();
+  SERVER.preparationFailure = 'ciphertext';
+  const { win, dom } = await bootUnlock(path.join(JS_DIR, 'unlock.js'), { traceRoot: true });
+  await until(() => win.AutonomyUnlock._internals.state().factorPolicy, 'factor policy loaded');
+  await assert.rejects(win.AutonomyUnlock._internals.unlockWithPassword('unused-here'));
+  assert.equal(SERVER.posts.some(post => post.route === 'password'), false);
+  dom.window.close();
+});
+
 test('passkey login on a slotless (post-migration) device: PRF requested, access granted, pending slot stashed', async () => {
   await buildFixture();
   // UNLOCK_JS overrides the target source — used to prove this harness turns
@@ -373,9 +410,11 @@ test('a login that detects a pending enrollment lands on the shell home, never t
 });
 
 
-test('unlock with a recovery code: opens root, posts unlock, lands on credentials', async () => {
+for (const failure of [null, 'vault', 'runtime', 'organization']) {
+test(`unlock with a recovery code: opens root, posts unlock, lands on credentials (${failure || 'healthy'})`, async () => {
   SERVER.posts.length = 0;
   await buildFixture();
+  SERVER.preparationFailure = failure;
   // add a recovery slot to the fixture armor
   const code = generateRecoveryCode();
   const recipient = await recoveryRecipientPublicKey(code);
@@ -401,4 +440,7 @@ test('unlock with a recovery code: opens root, posts unlock, lands on credential
   const posted = SERVER.posts.find((p) => p.route === 'password');
   assert.ok(posted.signature && /^[0-9a-f]{128}$/.test(posted.signature), 'a root signature was posted');
   await until(() => win.sessionStorage.getItem('autonomy.factor.open-credentials') === '1', 'open-credentials flag set');
+  const report = await until(() => SERVER.posts.find(post => post.route === 'report'), 'maintenance report');
+  if (failure) assert.equal(report.failed.length, 1);
 });
+}
