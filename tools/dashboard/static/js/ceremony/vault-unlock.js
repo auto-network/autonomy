@@ -53,12 +53,13 @@ export async function submitVault(prepared, fetchImpl = fetch) {
       headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     const result = await body(response);
     if (!response.ok || result.ok === false) throw new Error(result.error || 'vault handoff failed');
+    return result;
   }
   if (prepared.anchor) await post('/api/identity/vault-anchors', { anchor: prepared.anchor });
   if (prepared.class_anchor_id) await post(
     '/api/identity/vault-anchors/' + encodeURIComponent(prepared.class_anchor_id) + '/classes',
     { display_name: PERSONAL_ROOT_CLASS_NAME });
-  await post('/api/identity/unlock/vault-keys', prepared.keys);
+  return await post('/api/identity/unlock/vault-keys', prepared.keys);
 }
 
 /** Scope personal vault bootstrap requests explicitly. */

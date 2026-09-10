@@ -82,8 +82,15 @@ export async function submitSignon(prepared, fetchImpl = fetch) {
     }
     try {
       if (prepared.vault) {
-        await submitVault(prepared.vault, fetchImpl);
+        const vault = await submitVault(prepared.vault, fetchImpl);
         reportStepOutcome('vault-wake', { ready: true }, { fetchImpl });
+        for (const [org, outcome] of Object.entries(vault.organization_delegates || {})) {
+          reportStepOutcome('organization-delegate', { ok: outcome.ok, reason: outcome.error }, { fetchImpl, org });
+          if (!outcome.ok) {
+            report.failed.push({ org, step: 'organization-delegate', error: outcome.error });
+            report.ready = report.ready.filter(ready => ready !== org);
+          }
+        }
       }
     } catch (error) {
       reportStepOutcome('vault-wake', { ready: false, reason: error.message }, { fetchImpl });
