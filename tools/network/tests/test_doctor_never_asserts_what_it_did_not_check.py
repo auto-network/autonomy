@@ -111,3 +111,46 @@ def test_a_machine_refused_for_safety_is_still_called_by_design(
     out = _serving_readiness_output(monkeypatch, capsys)
 
     assert "not serving by design" in out
+
+
+def test_the_readiness_verdict_never_rests_on_a_probe_that_failed():
+    """A connector-status query that RAISED must not print "eligible and
+    running".
+
+    The branch fetched connector-status, read one key, and swallowed every
+    exception with a bare `pass` -- after which the next statement printed
+    the green line unconditionally. A refused socket, a missing .ctl or a
+    timeout, each of which a connector with no live tunnel is likely to
+    produce, therefore rendered identically to a connector that answered.
+    This file's whole premise is that could-not-look and nothing-is-there
+    stay distinguishable; _running_connectors raises ProcessScanUnavailable
+    for exactly that reason 200 lines below, and this branch was the one
+    producing the operator-facing verdict.
+
+    Pinned at the source level on purpose: reaching the branch behaviourally
+    means stubbing the tunnel-serving gate, org_ops, serve_cert_state, the
+    running-connector map AND the supervisor, and a test that elaborate
+    tends to be deleted rather than repaired. The property here is narrow --
+    the handler must not fall through to the success line -- and reads
+    directly off the source, the same technique this file already uses for
+    the certificate message.
+    """
+    import inspect
+
+    from tools.network import fleet_doctor
+
+    source = inspect.getsource(fleet_doctor.check_serving_readiness)
+
+    # The swallow that caused it, in the exact shape it had.
+    assert "pass  # connector-status is itself best-effort here" not in source
+
+    # Could-not-look must say so, and must not be reported as a verdict.
+    assert "UNREADABLE" in source
+    assert "UNKNOWN, not confirmed" in source
+
+    # And the reply's own liveness field must actually be read: everything
+    # else in this section tests whether the PROCESS exists, so without this
+    # a connector looping on a refused hello is indistinguishable from one
+    # holding a live tunnel. Home spent 00:31-01:50 on 2026-09-10 in that
+    # state with three org connectors replaced every 60s.
+    assert 'status.get("serving")' in source
