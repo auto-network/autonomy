@@ -1,70 +1,55 @@
-"""Clear the cumulative Fleet counters the operator sees, and nothing else.
+"""Clear the cumulative Fleet counters the operator sees, without a race.
 
-The four numbers the Fleet screen calls resettable — received, sent, changes
-applied and failed attempts — do not share one home.  Bytes and failed
-attempts are in the machine-local telemetry Settings, per-organization bytes
-are in the peer/scope Settings, and changes applied is a column on
-``fleet_sync_peer_state`` in each scope's database.
+The first version of this mutated the counters in place. That cannot be correct
+here: the dashboard runs the reset while four connector processes are
+read-modify-writing the same telemetry rows on every serve, and both sides take
+a ``threading`` lock, which is process-local. Measured 2026-09-10, one reset
+cleared 3,348 failed attempts and 1.27 GB received, moved 52.7 GB sent only as
+far as 28.0 GB, and left transactions applied untouched -- a lost update, worst
+on the counters written most often.
 
-Which makes the hazard worth stating once, here: those rows are not display
-records.  A telemetry row also carries ``acknowledged_transaction_ref`` and
-the resume breadcrumb trail, which a restored source uses to recompute its
-position from content rather than from renumbered row ids; a peer-state row
-carries the watermarks, roster epoch and error the scheduler reads to decide
-what to request next.  Clearing a number an operator is looking at must never
-cost a peer its place in the stream.  Every write here is therefore
-field-level: no row is deleted and no payload is replaced wholesale.
+A cross-process lock is the wrong answer. It would put a settings-store lock in
+the path of every sync completion, so the bookkeeping would contend with the
+work it describes.
+
+So nothing is mutated. The reset writes ONE baseline row per peer and scope,
+holding what the counters read at that moment, and the view subtracts. The
+connectors keep writing monotonically, the subtraction is exact however much
+traffic is in flight, and the real lifetime totals survive on disk.
 """
 
 from __future__ import annotations
 
-import sqlite3
-from pathlib import Path
-
-from tools.network import fleet_sync_peer_scope, fleet_sync_telemetry
-
-
-def _peer_state_paths() -> list[Path]:
-    """The personal database plus every organization scope on this machine."""
-    from tools.graph.db import _org_db_path
-    from tools.network.fleet_sync_scheduler import discover_org_sync_scopes
-
-    paths = [Path(_org_db_path("personal"))]
-    paths.extend(discover_org_sync_scopes().values())
-    return [path for path in paths if path.exists()]
-
-
-def _reset_transactions_applied(path: Path) -> int:
-    """Zero ``transactions_applied`` in one scope's peer-state table.
-
-    ``fleet_sync_peer_state`` is a LOCAL-policy table, so writing it authors
-    no mutation and this cannot feed sync.  Only the one column moves: the
-    watermarks beside it are how the scheduler resumes.
-    """
-    with sqlite3.connect(path) as conn:
-        present = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' "
-            "AND name='fleet_sync_peer_state'"
-        ).fetchone()
-        if present is None:
-            return 0
-        cursor = conn.execute(
-            "UPDATE fleet_sync_peer_state SET transactions_applied=0 "
-            "WHERE transactions_applied>0"
-        )
-        return int(cursor.rowcount or 0)
+from tools.network import (
+    fleet_counter_baseline,
+    fleet_sync_peer_scope,
+    fleet_sync_telemetry,
+)
 
 
 def reset_counters(*, org: str = "machine") -> dict:
-    """Clear the cumulative totals the Fleet screen displays.
+    """Record what the displayed counters read now, so the view can subtract.
 
-    Machine-local by construction: every store touched is this machine's own,
-    so another dashboard's counters are unaffected.
+    Machine-local by construction: every store read is this machine's own, so
+    another dashboard's counters are unaffected.
     """
-    return {
-        "telemetryRows": fleet_sync_telemetry.reset_byte_totals(org=org),
-        "peerScopeRows": fleet_sync_peer_scope.reset_byte_totals(org=org),
-        "peerStateRows": sum(
-            _reset_transactions_applied(path) for path in _peer_state_paths()
-        ),
-    }
+    entries: dict[tuple[str, str], dict] = {}
+
+    # Machine-wide totals, keyed under the sentinel scope.
+    for peer, totals in fleet_sync_telemetry.read_peer_totals(org=org).items():
+        entries[(peer, fleet_counter_baseline.MACHINE_SCOPE)] = {
+            "bytes_sent": totals.get("bytes_sent"),
+            "bytes_received": totals.get("bytes_received"),
+            "attempts_failed": totals.get("failed_iterations"),
+        }
+
+    # Per-organization byte totals, at the grain they are displayed.
+    for peer, scopes in fleet_sync_peer_scope.read_peer_scopes(org=org).items():
+        for row in scopes:
+            entries[(peer, row["scope"])] = {
+                "bytes_sent": row.get("bytes_out"),
+                "bytes_received": row.get("bytes_in"),
+            }
+
+    written = fleet_counter_baseline.record(entries, org=org)
+    return {"baselineRows": written}

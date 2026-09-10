@@ -25,6 +25,7 @@ from tools.network import (
     fleet_machine_profile,
     fleet_roster,
     fleet_sync_scheduler,
+    fleet_counter_baseline,
     fleet_sync_peer_scope,
     fleet_sync_telemetry,
     fleet_sync_traffic,
@@ -58,6 +59,8 @@ class ProjectionInputs:
     local_frontiers: Mapping[str, int] = field(default_factory=dict)
     #: {scope: {phase, frontier}} for any scope mid-bootstrap
     bootstrap_states: Mapping[str, dict] = field(default_factory=dict)
+    #: {(peer, scope): counters at the operator's last reset}
+    counter_baselines: Mapping = field(default_factory=dict)
     local_verdict: Mapping | None = None
     serve_cert: Mapping | None = None
     tunnel_serving: bool | None = None
@@ -228,6 +231,7 @@ def _load_inputs(*, now_ms: int) -> ProjectionInputs:
         traffic_rows=tuple(fleet_sync_traffic.read_traffic_rows(org="machine")),
         local_frontiers=_local_frontiers(),
         bootstrap_states=_bootstrap_states(),
+        counter_baselines=fleet_counter_baseline.read(org="machine"),
         local_verdict=local_verdict,
         serve_cert=serve_cert,
         tunnel_serving=tunnel_serving,
@@ -385,6 +389,7 @@ def _local_scope_rows(
 
 def _scope_rows(
     rows: list | None, *, server_time: int, local: dict | None = None,
+    baselines: Mapping | None = None, peer: str | None = None,
 ) -> list[dict]:
     """One row per organization for one peer, as the Fleet view reads them.
 
@@ -415,8 +420,12 @@ def _scope_rows(
         out.append({
             "scope": scope,
             "lag": lag,
-            "bytesIn": int(row.get("bytes_in") or 0),
-            "bytesOut": int(row.get("bytes_out") or 0),
+            "bytesIn": fleet_counter_baseline.since(
+                row.get("bytes_in"),
+                (baselines or {}).get((peer, scope)), "bytes_received"),
+            "bytesOut": fleet_counter_baseline.since(
+                row.get("bytes_out"),
+                (baselines or {}).get((peer, scope)), "bytes_sent"),
             "filling": None,
         })
     return out
@@ -426,6 +435,7 @@ def _observation(
     peer: Mapping | None,
     telemetry: Mapping | None = None,
     scopes: list | None = None,
+    baseline: Mapping | None = None,
 ) -> dict:
     peer = peer or {}
     telemetry = telemetry or {}
@@ -441,15 +451,16 @@ def _observation(
             ),
             default=None,
         ),
-        "transactionsApplied": int(peer.get("transactions_applied") or 0),
-        "bytesSent": int(
+        "transactionsApplied": fleet_counter_baseline.since(
+            peer.get("transactions_applied"), baseline, "transactions_applied"),
+        # Minus whatever the operator's last reset cleared. The counters
+        # themselves are never mutated -- see fleet_sync_counters.
+        "bytesSent": fleet_counter_baseline.since(
             telemetry.get("bytes_sent") if has_telemetry
-            else peer.get("bytes_sent") or 0
-        ),
-        "bytesReceived": int(
+            else peer.get("bytes_sent"), baseline, "bytes_sent"),
+        "bytesReceived": fleet_counter_baseline.since(
             telemetry.get("bytes_received") if has_telemetry
-            else peer.get("bytes_received") or 0
-        ),
+            else peer.get("bytes_received"), baseline, "bytes_received"),
         # Per-transport bytes, so the fleet view can show how much of a
         # peer's traffic went over the direct listener versus the relay.
         # Empty when only the peer_state fallback is available: that table is
@@ -482,7 +493,8 @@ def _observation(
         # The names the Fleet view actually reads. "attempts" rather than
         # "iterations" because the screen is about what this peer tried, and
         # a failed attempt is the fact an operator is looking for.
-        "attemptsFailed": int(telemetry.get("failed_iterations") or 0),
+        "attemptsFailed": fleet_counter_baseline.since(
+            telemetry.get("failed_iterations"), baseline, "attempts_failed"),
         "lastOutcome": telemetry.get("last_outcome"),
         # How far this peer's own promise reaches, per scope, and the bytes
         # exchanged for it. Lag is derived against this response's serverTime
@@ -504,6 +516,7 @@ def _machine_row(
     telemetry: Mapping | None,
     display_name: str | None,
     scopes: list | None = None,
+    baseline: Mapping | None = None,
 ) -> dict:
     local = entry.machine_id == local_machine_id
     return {
@@ -529,6 +542,7 @@ def _machine_row(
             peer if standing == "authorized" else None,
             telemetry if standing == "authorized" else None,
             scopes if standing == "authorized" else None,
+            baseline if standing == "authorized" else None,
         ),
         # The browser-root removal command is deliberately not invented by
         # this read-only slice.
@@ -668,6 +682,8 @@ def project(inputs: ProjectionInputs) -> dict:
             peer=inputs.peer_rows.get(machine_pub),
             telemetry=inputs.telemetry_rows.get(machine_pub),
             display_name=inputs.machine_names.get(entry.machine_id),
+            baseline=inputs.counter_baselines.get(
+                (machine_pub, fleet_counter_baseline.MACHINE_SCOPE)),
             scopes=(
                 _local_scope_rows(
                     inputs.peer_scope_rows, inputs.local_frontiers,
@@ -678,6 +694,8 @@ def project(inputs: ProjectionInputs) -> dict:
                     inputs.peer_scope_rows.get(machine_pub),
                     server_time=inputs.server_time,
                     local=inputs.local_frontiers,
+                    baselines=inputs.counter_baselines,
+                    peer=machine_pub,
                 )
             ),
         )
