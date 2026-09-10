@@ -1781,6 +1781,11 @@ async def _serve_control_listener(connector, ctl_path: str,
                             # slot, because the relay connection is here.
                             persona_pub=args.get("persona_pub"),
                             machine=args.get("machine"),
+                            # This peer's own signed relay locator, as the
+                            # dashboard verified it (auto-e38g4). The only
+                            # source that can name an ORG-scope slot, where
+                            # the serving key is not the durable key.
+                            locator=args.get("locator"),
                             timeout=float(args.get("timeout") or 10.0),
                         )
                     except KeyError as exc:

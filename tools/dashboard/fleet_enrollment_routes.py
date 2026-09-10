@@ -408,10 +408,18 @@ def _relay_pull_delegate(poll_interval: float = 2.0, deadline: float = 900.0):
                 None, op, args, timeout=timeout,
             )
 
+        args = {"peer_machine_pub": peer_machine_pub, "scope": scope,
+                "operation_id": operation_id}
+        # The peer's verified relay locator, when this machine has one
+        # (auto-e38g4). Absent, the connector resolves the slot from the
+        # relay's live list exactly as before.
+        if _reachability_cache is not None:
+            with contextlib.suppress(Exception):
+                locator = _reachability_cache.relay_locators().get(peer_machine_pub)
+                if locator:
+                    args["locator"] = locator
         started = await asyncio.to_thread(
-            _control, "fleet-relay-pull",
-            {"peer_machine_pub": peer_machine_pub, "scope": scope,
-             "operation_id": operation_id},
+            _control, "fleet-relay-pull", args,
         )
         if not (isinstance(started, dict) and started.get("ok") is True):
             detail = (started or {}).get("error") if isinstance(started, dict) else started
@@ -720,6 +728,15 @@ def _activate_runtime(
             # lives (auto-ew9wf). Direct stays first; this never runs while a
             # direct address works.
             relay_pull=_relay_pull_delegate(),
+            # Peers with a verified serving-slot locator (auto-e38g4). Used
+            # for ONE decision: a rostered peer with no direct address at all
+            # -- behind NAT, publishing nothing -- is still worth attempting,
+            # because the relay is exactly what it is reachable through. It
+            # never reorders or displaces a direct address.
+            peer_relay_locators=lambda: (
+                _reachability_cache.relay_locators()
+                if _reachability_cache is not None else {}
+            ),
             # A failed pull re-looks that peer up before the next interval.
             on_peer_failure=lambda pub: (
                 _reachability_cache.note_failed(pub)
