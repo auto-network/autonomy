@@ -91,9 +91,12 @@ def list_org_slugs(*, root: Path | str | None = None) -> list[str]:
     # truth", and nothing checked the filename. On home that made a stray
     # `orgs/2d4b90cb-1e89-452b-82cb-68ca44fd8e52.db` — a uuid where a slug
     # belonged — a first-class PEER of every org on the box, sorting FIRST in
-    # every peer list because digits precede letters. That is how it acquired
-    # seventy settings and fleet_sync_catalog rows: it was enumerated, read,
-    # and written through on every cross-org resolution. Root cause traced by
+    # every peer list because digits precede letters, so it was OPENED on every
+    # cross-org resolution on the machine. It also holds seventy settings and
+    # fleet_sync_catalog rows — and WHAT WROTE THOSE IS UNRESOLVED
+    # (auto-kou68). Enumeration explains the opens; a read does not explain a
+    # write, and an earlier version of this very comment asserted "read, and
+    # written through" as though it did. Root cause traced by
     # host-0906-222509, 2026-09-10, who proved it in-process:
     #     resolve_peers('anchore', None) ->
     #         ['2d4b90cb-1e89-452b-82cb-68ca44fd8e52', 'autonomy', ...]
