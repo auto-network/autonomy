@@ -83,7 +83,9 @@
       badge.appendChild(el('span', '', identity.initial || name.charAt(0).toUpperCase()));
     }
     title.appendChild(badge);
-    title.appendChild(el('span', '', name));
+    // The organization name gives way first; the screen name never
+    // truncates — it is what says where you are.
+    title.appendChild(el('span', 'orgset-org-name', name));
     if (screen && screen.windowTitle) {
       title.appendChild(el('span', 'orgset-title-separator', '–'));
       title.appendChild(el('span', 'orgset-window-name', screen.windowTitle));
@@ -183,8 +185,12 @@
     dialog.setAttribute('data-view', 'list');
 
     var header = el('div', 'orgset-header');
-    var back = el('button', 'orgset-back', '‹ Screens');
+    // A bare chevron: the label ("Screens") was costing the title its room
+    // on a phone, where the screen name is what the operator needs to read.
+    var back = el('button', 'orgset-back', '‹');
     back.type = 'button';
+    back.setAttribute('aria-label', 'Back to screens');
+    back.setAttribute('title', 'Back to screens');
     back.setAttribute('data-testid', 'orgset-back');
     back.addEventListener('click', function () { show('list'); });
     header.appendChild(back);
