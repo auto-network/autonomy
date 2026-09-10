@@ -503,7 +503,19 @@ class ReachabilityCache:
         advertise = self.advertised_addrs()
         relay_url = self.announced_relay_url()
         wanted = (tuple(advertise), relay_url)
-        descriptor = self._descriptor_for(key, advertise, wanted)
+        # HELD: the descriptor is built but NOT SENT until registry-ash-1 is
+        # deployed with the widened allow-list (autonomy@2fa78bc). Its current
+        # allow-list is {addrs, relay_url, ttl} and _require_fields 400s the
+        # WHOLE announce on an unknown field, so sending it costs the announce
+        # itself -- and the announce is what supplies the candidate list.
+        #
+        # Not a compatibility shim and not a fallback: one line, removed the
+        # moment the registry is deployed. The landing order was mine to get
+        # right and I got it wrong -- the registry-side commit (926df5e3) and
+        # the node-side one (581a23d3) were split precisely so the accepting
+        # side could ship first, and then both were merged together.
+        descriptor = None
+        _built_but_held = self._descriptor_for(key, advertise, wanted)
         keepalive_due = (
             self.last_announce is None
             or (now - self.last_announce[0]) >= self._ttl / 2
