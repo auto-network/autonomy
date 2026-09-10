@@ -252,6 +252,7 @@ def _reap_relay_pulls(now: float) -> None:
 
 
 async def resolve_peer_slot(connector, runtime, peer_machine_pub: str, *,
+                            locator: Optional[Mapping] = None,
                             timeout: float = 10.0) -> tuple:
     """The peer's exact serving slot, and where the answer came from.
 
@@ -260,16 +261,25 @@ async def resolve_peer_slot(connector, runtime, peer_machine_pub: str, *,
     knows a peer by its durable roster key, not by which slot that peer
     happens to be serving under right now.
 
-    Interim source is the relay's own live slot list filtered to the roster.
-    The descriptor's relay locator replaces it when the descriptor-locator
-    bead lands, which is why the source is RETURNED rather than assumed — the
-    telemetry row records which one answered, so a later reader can tell a
-    locator-routed pull from a slot-list-routed one instead of inferring it
-    from dates.
+    Two sources, and the source is RETURNED rather than assumed so the
+    telemetry row records which one answered:
 
-    Filtering to the roster is not authority and does not pretend to be: it
-    only narrows which slot to dial. The fleet handshake still proves WHO,
-    exactly as on the direct path.
+    ``descriptor`` -- the peer's own signed relay locator (auto-e38g4), which
+    is the only source that can name an ORG-scope slot, where the serving key
+    is a distinct per-org key and the durable-key equality below is false.
+
+    ``org-slots`` -- the relay's live slot list matched by durable key.
+    Correct for personal scope, where the serving key IS the durable key.
+
+    A locator is a HINT and is checked against the live list rather than
+    trusted in place of it. The list is being fetched on this path anyway, so
+    the check costs nothing, and it means a locator left over from a connector
+    that has since moved slots falls back to the equality instead of sending a
+    pull at a slot the relay no longer has.
+
+    Neither source is authority and neither pretends to be: they only narrow
+    which slot to dial. The fleet handshake still proves WHO, exactly as on
+    the direct path.
     """
     scheduler = getattr(runtime, "scheduler", None)
     if scheduler is None:
@@ -284,6 +294,18 @@ async def resolve_peer_slot(connector, runtime, peer_machine_pub: str, *,
             f"peer {peer_machine_pub[:12]} is not in the active roster")
     slots = await list_org_slots(connector, timeout=timeout)
     own = (getattr(connector, "serving_slot", None) or {}).get("machine")
+    wanted = None
+    if isinstance(locator, Mapping):
+        persona, named = (
+            locator.get("persona_pub"), locator.get("serving_machine_pub"))
+        if persona and named and named != own:
+            wanted = (persona, named)
+    for slot in slots:
+        machine = slot.get("machine")
+        if not machine or machine == own:
+            continue
+        if wanted is not None and (slot.get("persona_pub"), machine) == wanted:
+            return wanted, "descriptor"
     for slot in slots:
         machine = slot.get("machine")
         if not machine or machine == own:
@@ -307,6 +329,7 @@ async def start_relay_pull(connector, runtime, *, peer_machine_pub: str,
                            scope: str, operation_id: str,
                            persona_pub: str | None = None,
                            machine: str | None = None,
+                           locator: Optional[Mapping] = None,
                            timeout: float = 10.0) -> dict:
     """Begin one delegated scope pull over the relay; return immediately.
 
@@ -336,7 +359,8 @@ async def start_relay_pull(connector, runtime, *, peer_machine_pub: str,
     if persona_pub is None or machine is None:
         try:
             (persona_pub, machine), slot_source = await resolve_peer_slot(
-                connector, runtime, peer_machine_pub, timeout=timeout,
+                connector, runtime, peer_machine_pub,
+                locator=locator, timeout=timeout,
             )
         except Exception as exc:
             return {"ok": False, "error_kind": "no-slot",

@@ -91,6 +91,10 @@ def _run_one_round(monkeypatch, rows, addresses=(TAILNET, BRIDGE),
             # no address at all; these are the scheduler's own defaults.
             min_backoff=0.25,
             max_backoff=5.0,
+            # No peer here publishes a relay locator: this suite is about the
+            # DIRECT dial order, and a locator would change which peers are
+            # eligible (auto-e38g4).
+            peer_relay_locators=None,
         ),
         _sync_peer=fake_sync_peer,
         _sync_org_peers=fake_sync_org_peers,
@@ -100,6 +104,9 @@ def _run_one_round(monkeypatch, rows, addresses=(TAILNET, BRIDGE),
     # against logic that is not the logic that ships — and _resolve_peers is
     # where peer authority is now decided.
     stub._resolve_peers = fss.FleetSyncScheduler._resolve_peers.__get__(stub)
+    stub._peer_relay_locators = (
+        fss.FleetSyncScheduler._peer_relay_locators.__get__(stub)
+    )
     stub._record_discovery_unavailable = (
         fss.FleetSyncScheduler._record_discovery_unavailable.__get__(stub)
     )

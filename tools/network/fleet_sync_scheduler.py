@@ -273,6 +273,13 @@ class FleetSyncRuntimeConfig:
     #: still decides which peer and mints the operation id, and the connector
     #: is told, never choosing. Its own `peer_addresses` stays empty.
     relay_pull: "Callable[..., Awaitable[Mapping]] | None" = None
+    #: ``{machine_pub: relay locator}`` for peers whose verified reachability
+    #: descriptor names a serving slot (auto-e38g4), or None. Consulted for one
+    #: decision only: whether a peer with NO direct address is still worth
+    #: attempting. Without it such a peer was recorded discovery_unavailable
+    #: and never tried -- which is precisely the peer a relay exists for.
+    #: It never reorders or displaces a direct address; direct stays first.
+    peer_relay_locators: "Callable[[], Mapping[str, Mapping]] | None" = None
     min_backoff: float = 0.25
     max_backoff: float = 5.0
     telemetry_recorder: Callable[..., object] | None = None
@@ -2758,7 +2765,18 @@ class FleetSyncScheduler:
         finally:
             receiver.close()
 
-    def _resolve_peers(self, active, addresses, now: float) -> list:
+    def _peer_relay_locators(self) -> dict:
+        """Peers with a verified serving-slot locator. Never raises: a
+        discovery source that fails must not stop the round."""
+        provider = self.config.peer_relay_locators
+        if provider is None:
+            return {}
+        try:
+            return dict(provider() or {})
+        except Exception:
+            return {}
+
+    def _resolve_peers(self, active, addresses, now: float, locators=None) -> list:
         """Which rostered peers to attempt this round, and record the rest.
 
         THE ONE PLACE peer selection happens, so the authority rules are
@@ -2779,13 +2797,17 @@ class FleetSyncScheduler:
         no surface carried either fact — the deleted `route is None -> return`
         give-up in a newer, quieter shape.
         """
+        locators = locators or {}
         peers = [pub for pub in sorted(active)
                  if pub != self.authenticator.machine_pub]
         for machine_pub in peers:
-            if not addresses.get(machine_pub):
-                self._record_discovery_unavailable(machine_pub, now)
+            if not addresses.get(machine_pub) and not locators.get(machine_pub):
+                self._record_discovery_unavailable(
+                    machine_pub, now, relay_absent=True,
+                )
         for machine_pub in list(self._discovery_unavailable):
-            if addresses.get(machine_pub) or machine_pub not in active:
+            if (addresses.get(machine_pub) or locators.get(machine_pub)
+                    or machine_pub not in active):
                 # Discovered, or no longer a peer. Either way it stops being a
                 # miss, and the next real failure starts from a clean envelope
                 # instead of inheriting this one.
@@ -2794,7 +2816,7 @@ class FleetSyncScheduler:
                 self._next_attempt.pop(machine_pub, None)
         return [
             machine_pub for machine_pub in peers
-            if addresses.get(machine_pub)
+            if (addresses.get(machine_pub) or locators.get(machine_pub))
             and now >= self._next_attempt.get(machine_pub, 0.0)
         ]
 
@@ -2921,7 +2943,8 @@ class FleetSyncScheduler:
             return controller.reset(str(pair_id), int(code))
         return controller.transport_failed()
 
-    def _record_discovery_unavailable(self, machine_pub: str, now: float) -> None:
+    def _record_discovery_unavailable(self, machine_pub: str, now: float, *,
+                                      relay_absent: bool = False) -> None:
         """Record that a rostered peer could not be addressed, and when we
         will look again (auto-ieh3l, contract section 7).
 
@@ -2951,18 +2974,17 @@ class FleetSyncScheduler:
             "misses": misses,
             "last_attempt": now,
             "next_attempt": next_attempt,
-            # Only what this code actually observed. It consulted the direct
-            # address map and nothing else, so that is the only absence it can
-            # report.
+            # Only what this code actually observed.
             #
-            # `relay_absent` is deliberately NOT asserted here. There is no
-            # relay locator to consult yet — the descriptor row that carries
-            # one is auto-iipt7, downstream of this bead — and writing True
-            # would read as an observation while being a placeholder. That is
-            # the precise defect class this bead keeps finding: a field that
-            # states a fact nothing established. It appears once a locator can
-            # actually be looked up and found missing.
+            # `relay_absent` was withheld until a locator could actually be
+            # looked up and found missing: writing True before that would have
+            # read as an observation while being a placeholder, which is the
+            # precise defect class this record exists to avoid. auto-e38g4
+            # fills the descriptor's relay locator, so the caller consults a
+            # real locator map and passes what it saw. A caller that consulted
+            # no locator source still asserts nothing.
             "direct_absent": True,
+            **({"relay_absent": True} if relay_absent else {}),
         }
         if misses == 1 or misses % 20 == 0:
             # Once when it starts, then rarely. A peer that is simply not
@@ -2990,7 +3012,9 @@ class FleetSyncScheduler:
             active = resolve(entries, anchor_root_pub=self.config.personal_root_pub)
             addresses = self.config.peer_addresses()
             now = asyncio.get_running_loop().time()
-            eligible = self._resolve_peers(active, addresses, now)
+            eligible = self._resolve_peers(
+                active, addresses, now, self._peer_relay_locators(),
+            )
             selected = eligible
             if eligible:
                 try:
@@ -3326,19 +3350,31 @@ class FleetSyncScheduler:
                         (address, f"{type(exc).__name__}: {exc}"[:160])
                     )
             if channel is None:
-                assert last_error is not None
-                # Every candidate failed. Name each one: the raised error is
-                # only the LAST candidate's (often the harmless container
-                # bridge address, refused in milliseconds), which hid what
-                # happened to the reachable one (SJC-2 -> home, 2026-09-07).
-                logger.warning(
-                    "fleet sync peer %s scope %r: no candidate connected: %s",
-                    machine_pub[:12], scope,
-                    "; ".join(f"{a} -> {e}" for a, e in candidate_failures),
-                )
+                if last_error is None:
+                    # NO DIRECT ADDRESS AT ALL (auto-e38g4). Until a peer could
+                    # publish a relay locator this was unreachable by
+                    # definition and _resolve_peers never selected it, so
+                    # arriving here meant a bug and the code asserted. A peer
+                    # behind NAT that publishes only a locator is the case a
+                    # relay exists for, and it reaches this line legitimately:
+                    # zero candidates, nothing tried, nothing failed.
+                    last_error = FleetSyncPeerUnreachable(
+                        "peer published no direct address")
+                else:
+                    # Every candidate failed. Name each one: the raised error
+                    # is only the LAST candidate's (often the harmless
+                    # container bridge address, refused in milliseconds),
+                    # which hid what happened to the reachable one
+                    # (SJC-2 -> home, 2026-09-07).
+                    logger.warning(
+                        "fleet sync peer %s scope %r: no candidate connected: %s",
+                        machine_pub[:12], scope,
+                        "; ".join(f"{a} -> {e}" for a, e in candidate_failures),
+                    )
                 # DIRECT IS EXHAUSTED, NOT THE PEER (auto-ew9wf). Direct stays
-                # first and this only runs when every address has failed, so a
-                # working direct path is never displaced by the relay.
+                # first and this only runs when every address has failed -- or
+                # when there was never one to try -- so a working direct path
+                # is never displaced by the relay.
                 delegated = await self._relay_fallback(
                     machine_pub, scope, last_error,
                 )
