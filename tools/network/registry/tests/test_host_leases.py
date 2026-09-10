@@ -704,9 +704,15 @@ def test_the_live_slot_check_refuses_a_key_that_rotated_after_collection(
     assert "--readout is required" in str(exc.value)
 
 
-def test_the_live_slot_readout_is_parsed_from_the_real_shape():
-    """Parse what metrics.render_readout actually emits, not a guess at it:
-    per-org tunnels with `machine` truncated to 16 hex."""
+def test_the_readout_truncates_so_the_comparison_must_stay_a_prefix_match():
+    """THIS TEST EXISTS TO FAIL if someone tidies `_covered` into an equality.
+
+    render_readout emits `machine` as 16 hex; a manifest carries the full 64.
+    The truncation is the readout's, so an equality check would make the
+    pre-condition an unconditional refusal — no live key could ever match and
+    no registration could proceed. Parsed from what render_readout actually
+    emits rather than from a guess at its shape.
+    """
     from tools.network.registry import backfill_serving_keys as backfill
     from tools.network.registry.metrics import render_readout
 

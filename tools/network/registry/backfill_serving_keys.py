@@ -226,7 +226,19 @@ def live_slots(readout_url: str) -> dict:
     scale. The registry's own ``build.commit`` is in the reply too and is
     deliberately NOT compared with the manifests' ``boot_commit``: those are
     different deploys of different codebases, and equating them would assert a
-    relationship that does not exist.
+    relationship that does not exist. Measured rather than assumed, 2026-09-10:
+    the live registry reported ``build.commit 96625246, dirty=true`` while both
+    dashboards were on ``c0c69985``, several commits later. An equality check
+    would have refused every registration that night, on two machines that were
+    perfectly consistent with each other.
+
+    The readout also carries ``version`` and ``last_control`` per tunnel, which
+    are genuinely useful -- personal serves v2 and the org scopes v3, so a v2 on
+    an org scope would mean a cert regressed to the retired mint, and a tunnel
+    whose ``last_control`` is a refusal is a live fault. Neither is checked
+    here: this tool registers an allow-set, and turning it into a general
+    fleet-health assertion would be inventing policy it does not own. Named so
+    the omission reads as a decision rather than an oversight.
     """
     import json as _json
     import urllib.request
@@ -244,6 +256,21 @@ def live_slots(readout_url: str) -> dict:
 
 
 def _covered(prefix: str, full_keys) -> bool:
+    """PREFIX MATCH, AND IT MUST STAY ONE.
+
+    The truncation is the READOUT'S, not the manifest's: render_readout emits
+    ``machine`` as 16 hex characters while a manifest carries the full 64 --
+    e.g. ``dcc7521afc76c4a7`` against
+    ``dcc7521afc76c4a7c27645f5002111c5eacb8dabf060eee1a849bada0eb26d07``.
+    Confirmed against the live registry's /readout on 2026-09-10 by
+    host-0906-222509, all eight keys matching the manifests exactly.
+
+    So this is not an accommodation for sloppy input. "Tidying" it into an
+    equality check turns the pre-condition into an UNCONDITIONAL REFUSAL: no
+    live key would ever match and no registration could ever proceed. If the
+    comparison ever needs to be exact, widen the readout, not this. 64 bits of
+    prefix is sufficient here and deliberately not widened.
+    """
     return any(full.startswith(prefix) for full in full_keys)
 
 
