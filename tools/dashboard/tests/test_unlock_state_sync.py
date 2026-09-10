@@ -76,8 +76,8 @@ def test_tunnel_degrades_when_only_an_org_connector_is_down(client, monkeypatch)
 
     Personal serves (its credential survives a restart via the ramfs warm
     cache and the "a personal fleet with members always serves" rule), while
-    every collaborative org connector exits on a cold vault and is relaunched
-    each watchdog interval. The tile asked serving() with no argument, which
+    every collaborative org connector exits at launch and is relaunched each
+    watchdog interval. The tile asked serving() with no argument, which
     means personal, so it reported Up while two thirds of serving was down.
     """
     _stub_serving(
@@ -94,6 +94,14 @@ def test_tunnel_degrades_when_only_an_org_connector_is_down(client, monkeypatch)
     assert tunnel["value"] == "Degraded"
     assert sorted(tunnel["scopes"]) == ["autonomy", "dynbench"]
     assert "autonomy" in tunnel["detail"] and "dynbench" in tunnel["detail"]
+    # This probe knows the connector did not answer as serving. It does not
+    # know why, and it must not guess: the first version blamed a cold vault
+    # and told the operator to unlock, which on sjc-2 2026-09-10 was false and
+    # wasted their time (the vault was warm; the org runtime cache is simply
+    # never armed). Asserting on the operator-visible string, not on source.
+    lowered = tunnel["detail"].lower()
+    assert "vault" not in lowered, "the tile is guessing at a cause again"
+    assert "unlock" not in lowered, "the tile is prescribing a remedy again"
 
 
 def test_tunnel_ignores_a_scope_never_provisioned_to_serve(client, monkeypatch):
