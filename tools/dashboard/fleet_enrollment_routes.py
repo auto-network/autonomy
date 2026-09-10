@@ -733,9 +733,13 @@ def _activate_runtime(
             # -- behind NAT, publishing nothing -- is still worth attempting,
             # because the relay is exactly what it is reachable through. It
             # never reorders or displaces a direct address.
+            # None, NOT {}, when there is no cache to ask: "I consulted
+            # nothing" and "I consulted a source and this peer has no locator"
+            # are different facts, and only the second lets the scheduler's
+            # discovery record assert relay_absent.
             peer_relay_locators=lambda: (
                 _reachability_cache.relay_locators()
-                if _reachability_cache is not None else {}
+                if _reachability_cache is not None else None
             ),
             # A failed pull re-looks that peer up before the next interval.
             on_peer_failure=lambda pub: (

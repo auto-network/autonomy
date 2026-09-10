@@ -108,14 +108,47 @@ def test_a_caller_that_consults_no_locator_source_asserts_nothing():
     assert "relay_absent" not in scheduler._discovery_unavailable[PEER]
 
 
-def test_a_failing_locator_source_does_not_stop_the_round():
-    def boom():
-        raise RuntimeError("reachability cache exploded")
+class TestConsultedIsNotTheSameAsEmpty:
+    """Three facts that all used to arrive as ``{}`` and all wrote
+    ``relay_absent: True`` -- an observation nothing had made. Found by
+    auto-0831-221227 validating this bead; the same defect class as the
+    placeholder they withheld the field to avoid.
+    """
 
-    scheduler = _Scheduler(boom)
+    def test_no_provider_configured_reads_none(self):
+        """The connector's own scheduler configures no locator source at all,
+        and neither does a bare test config."""
+        assert _Scheduler.read_locators(_Scheduler()) is None
 
-    assert _Scheduler.read_locators(scheduler) == {}
+    def test_a_failing_provider_reads_none_not_empty(self):
+        """It must not stop the round, and it must not pretend it looked."""
+        def boom():
+            raise RuntimeError("reachability cache exploded")
 
+        assert _Scheduler.read_locators(_Scheduler(boom)) is None
 
-def test_no_locator_source_configured_reads_empty():
-    assert _Scheduler.read_locators(_Scheduler()) == {}
+    def test_a_provider_returning_none_reads_none(self):
+        """The dashboard's provider returns None when it has no cache to ask,
+        and `dict(x or {})` would have flattened that back to empty."""
+        assert _Scheduler.read_locators(_Scheduler(lambda: None)) is None
+
+    def test_a_provider_that_answers_empty_reads_empty(self):
+        """The one case that DID observe: a source answered, no peer has a
+        locator. Only this earns the assertion."""
+        assert _Scheduler.read_locators(_Scheduler(lambda: {})) == {}
+
+    def test_nothing_consulted_asserts_no_relay_absence(self):
+        scheduler = _Scheduler()
+
+        assert _resolve(scheduler, {}, None) == []
+
+        state = scheduler._discovery_unavailable[PEER]
+        assert state["direct_absent"] is True
+        assert "relay_absent" not in state
+
+    def test_a_consulted_empty_source_does_assert_it(self):
+        scheduler = _Scheduler()
+
+        assert _resolve(scheduler, {}, {}) == []
+
+        assert scheduler._discovery_unavailable[PEER]["relay_absent"] is True
