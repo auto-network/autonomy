@@ -304,3 +304,86 @@ def test_a_misspelled_field_is_still_refused(local_stores):
             FLEET_SYNC_TELEMETRY_SET_ID, FLEET_SYNC_TELEMETRY_REVISION,
             f"direct:serve:{PEER}", payload, org="machine", state="raw",
         )
+
+
+class TestCounterReset:
+    """The reset must survive concurrent writers, because it has not.
+
+    On 2026-09-10 the operator reset counters while four connectors were
+    serving. 3,348 failed attempts cleared and 1.27 GB received cleared, but
+    52.7 GB sent only fell to 28.0 GB and transactions applied did not move --
+    a lost update, worst on the counters written most often. Both sides took a
+    threading lock, which is process-local and buys nothing across processes.
+    """
+
+    def test_reset_does_not_touch_the_counters_a_connector_is_writing(
+        self, local_stores
+    ):
+        from tools.graph import settings_ops
+        from tools.graph.schemas.fleet_sync_telemetry import (
+            FLEET_SYNC_TELEMETRY_SET_ID,
+        )
+        from tools.network import fleet_sync_counters, fleet_sync_telemetry
+
+        fleet_sync_telemetry.record_iteration(
+            PEER, channel="direct", direction="serve", mode="delta",
+            outcome="success", started_at_ns=1, duration_ms=1,
+            bytes_sent=1000, bytes_received=200, scope="personal",
+        )
+        key = fleet_sync_telemetry.telemetry_key(
+            PEER, "direct", "serve", "personal")
+        before = settings_ops.read_set_key(
+            FLEET_SYNC_TELEMETRY_SET_ID, key, org="machine", peers=[],
+        )["payload"]
+
+        fleet_sync_counters.reset_counters()
+
+        after = settings_ops.read_set_key(
+            FLEET_SYNC_TELEMETRY_SET_ID, key, org="machine", peers=[],
+        )["payload"]
+        assert after["total_bytes_sent"] == before["total_bytes_sent"], (
+            "the reset mutated a counter a connector owns"
+        )
+        # And the resume trail it shares a row with is untouched, which is the
+        # thing a mutating reset could cost a peer.
+        assert after["acknowledged_transaction_ref"] == \
+            before["acknowledged_transaction_ref"]
+
+    def test_the_view_reads_zero_after_a_reset_and_counts_from_there(
+        self, local_stores
+    ):
+        from tools.network import (
+            fleet_counter_baseline, fleet_sync_counters, fleet_sync_telemetry,
+        )
+
+        fleet_sync_telemetry.record_iteration(
+            PEER, channel="direct", direction="serve", mode="delta",
+            outcome="failed", started_at_ns=1, duration_ms=1,
+            bytes_sent=1000, bytes_received=200, scope="personal",
+            error_code="boom",
+        )
+        fleet_sync_counters.reset_counters()
+
+        totals = fleet_sync_telemetry.read_peer_totals()[PEER]
+        base = fleet_counter_baseline.read()[
+            (PEER, fleet_counter_baseline.MACHINE_SCOPE)]
+        assert fleet_counter_baseline.since(
+            totals["bytes_sent"], base, "bytes_sent") == 0
+        assert fleet_counter_baseline.since(
+            totals["failed_iterations"], base, "attempts_failed") == 0
+
+        # Traffic after the reset counts from zero, not from the lifetime total.
+        fleet_sync_telemetry.record_iteration(
+            PEER, channel="direct", direction="serve", mode="delta",
+            outcome="success", started_at_ns=2, duration_ms=1,
+            bytes_sent=64, scope="personal",
+        )
+        totals = fleet_sync_telemetry.read_peer_totals()[PEER]
+        assert fleet_counter_baseline.since(
+            totals["bytes_sent"], base, "bytes_sent") == 64
+
+    def test_a_rebuilt_counter_floors_at_zero_rather_than_going_negative(self):
+        from tools.network import fleet_counter_baseline
+
+        assert fleet_counter_baseline.since(
+            10, {"bytes_sent": 5_000}, "bytes_sent") == 0
