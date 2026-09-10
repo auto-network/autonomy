@@ -295,6 +295,20 @@ def test_root_unlock_enables_organization_channel_key_write(tmp_path, monkeypatc
                 NETWORK_STORAGE_DELEGATE_SET_ID, founded[ORG].genesis_id, org=None)["payload"]
             assert metadata["expires_at"] - int(time.time() * 1000) > 89 * 86400000
 
+            # Retiring a retained key must cause the next ceremony to mint,
+            # not attempt to reuse a lifecycle-hidden base/renewal chain.
+            from tools.graph.schemas.vault_credential import VAULT_AUDITED_SET_ID
+            retired_key = org_storage_delegate.signing_key(ORG).public_hex
+            retained = settings_ops.read_set_key(
+                VAULT_AUDITED_SET_ID, metadata["key_reference"], org=None)
+            settings_ops.exclude_setting(retained["id"], org=None)
+            assert not org_storage_delegate.prepare(ORG)["delegate_metadata"]["key_exists"]
+            settings_ops.set_personal_delegate_audited_key(None)
+            unlock_routes._VAULT_CACHE.clear()
+            _run_ceremony(client, terms)
+            assert org_storage_delegate.signing_key(ORG).public_hex != retired_key
+            assert len(checkpoints) == expected_checkpoints
+
         # End-to-end success: the existing Settings write selects the stored
         # organization delegate without a test-supplied signing author.
         token = "7c" * 16
