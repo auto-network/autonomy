@@ -151,7 +151,7 @@ async def test_messages_larger_than_a_frame_are_split_and_reassembled():
 
 
 @pytest.mark.asyncio
-async def test_credit_is_issued_only_after_delivery_and_a_stalled_reader_stops_the_sender():
+async def test_credit_is_issued_only_inside_recv_so_a_stalled_reader_stops_the_sender():
     relay = LoopbackRelay()
     a, b, src, dst = await connected(relay, b_bytes=200, b_slots=2)
     await src.send(b"x" * 90)                       # frame 1: 94 bytes
@@ -162,7 +162,7 @@ async def test_credit_is_issued_only_after_delivery_and_a_stalled_reader_stops_t
     assert not third.done()                         # zero slots: waits, no reset
     credits = [p for s, t, c, p in relay.sent if s == "B" and t == FRAME_STREAM_CTRL
                and parse_fleet_ctrl(p)["op"] == "fleet-credit"]
-    assert credits == []                            # nothing delivered yet
+    assert credits == []                            # nobody called recv: no credit
     assert await dst.recv() == b"x" * 90
     credits = [parse_fleet_ctrl(p) for s, t, c, p in relay.sent if s == "B"
                and t == FRAME_STREAM_CTRL and parse_fleet_ctrl(p)["op"] == "fleet-credit"]
@@ -171,6 +171,22 @@ async def test_credit_is_issued_only_after_delivery_and_a_stalled_reader_stops_t
     assert await dst.recv() == b"y" * 90
     assert await dst.recv() == b"z"
     assert not src.closed.is_set() and not dst.closed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_a_message_wider_than_the_slot_window_still_completes():
+    """Three 64 KiB frames against a two-slot window: crediting on delivery
+    deadlocked this (the third frame could never get a slot); crediting on
+    absorption lets each frame free the slot the next one needs, and the
+    endpoint never retains more than the window plus one message."""
+    relay = LoopbackRelay()
+    a, b, src, dst = await connected(relay, b_bytes=1 << 20, b_slots=2)
+    payload = bytes(range(256)) * 768               # 192 KiB = 3 frames + prefix
+    sender = asyncio.create_task(src.send(payload))
+    assert await asyncio.wait_for(dst.recv(), 2) == payload
+    await asyncio.wait_for(sender, 1)
+    assert (src.send_window.bytes, src.send_window.slots) == (1 << 20, 2)
+    assert dst._inflight_slots == 0 and dst._assembler.retained_bytes == 0
 
 
 @pytest.mark.asyncio
