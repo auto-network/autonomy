@@ -89,13 +89,57 @@ class PeerPathController:
         self.pair_id = None
         return RETRY if code in _RETRYABLE_RESETS else STOP
 
-    def descriptor(self, generation: int) -> bool:
-        """Accept a descriptor only if it is NEWER than what we hold.
+    def descriptor(self, generation: int, *, verified: bool = False) -> bool:
+        """Accept a descriptor. Ordering decides the ordinary case; the
+        SIGNATURE decides the hard one.
 
-        Ordering, not equality: a late descriptor for an older generation
-        cannot replace a newer one. Returns whether it was accepted.
+        Newer than what we hold: accept, always.
+
+        Older or equal: normally ignore, because a late arrival must not
+        replace a newer descriptor (contract section 9). But if the caller has
+        VERIFIED it — machine signature against the row key, and the machine
+        present in the current roster (section 1) — then accept it and reset
+        the high-water mark to it.
+
+        WHY THE VERIFIED CASE EXISTS, agreed with auto-0905-002201
+        2026-09-10. Their publisher guarantees strictly-increasing generations
+        across restarts, crashes, failed publishes and clock steps, with one
+        residual window it cannot close from inside: if the machine-local
+        counter store is rebuilt while the machine identity survives AND every
+        projection of that machine's own descriptor is unobservable at the
+        next publish, the counter restarts at 1. We would then hold a higher
+        number than the live descriptor and reject the CURRENT one forever,
+        routing on addresses that may be gone, with no error at either end.
+
+        The asymmetry decides it. Rejecting wrongly is a permanent silent
+        outage. Accepting a replayed old descriptor costs only liveness: its
+        addresses are hints, and a hint pointing at the wrong host is refused
+        at the hello, which checks the peer's machine_pub against the expected
+        one. So a validly signed descriptor from a rostered machine is treated
+        as current whatever number it carries, and ordering is demoted to what
+        it actually is — an optimisation against reprocessing, not the
+        authority.
+
+        A downgrade is returned as accepted but is NOT silent: callers record
+        it, because "we went backwards" is exactly the event that should be
+        visible if the residual window ever opens.
         """
-        if generation <= self.descriptor_generation:
-            return False
-        self.descriptor_generation = generation
-        return True
+        if generation > self.descriptor_generation:
+            self.descriptor_generation = generation
+            return True
+        if verified:
+            self.descriptor_generation = generation
+            self._history.append(("descriptor-downgrade", generation))
+            return True
+        return False
+
+    def downgrades(self) -> list:
+        """Generations accepted below the high-water mark, in order.
+
+        Empty is the expected answer. A non-empty list means a peer's
+        generation counter went backwards, which is the one failure mode the
+        publisher cannot rule out — so it is recorded rather than inferred
+        from an absence of symptoms.
+        """
+        return [gen for kind, gen in self._history
+                if kind == "descriptor-downgrade"]
