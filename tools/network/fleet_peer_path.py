@@ -44,24 +44,32 @@ RESET_PROTOCOL = 7
 #: Backwards-compatible name for code 1; the carrier calls it "orderly".
 RESET_PEER_CLOSED = RESET_ORDERLY
 
-#: The transport saying NOT NOW. Every one of these describes a condition that
-#: a fresh attempt can resolve, so not retrying converts a recoverable outage
-#: into a permanent one.
+#: The codes that mean STOP: the peer or the protocol saying do not come back.
+#: EVERYTHING ELSE RETRIES, including a code this table has never seen.
 #:
-#: Code 5 was ADDED after reviewing auto-fh2nv's contract record at the
-#: convergence review. Their earlier summary to me listed 1, 2, 6 and 7; the
-#: contract also defines 5, "route released / activation failed" — the
-#: destination slot went away, or DirectedPair.activate's recheck failed
-#: because the destination was replaced between admission and activation.
-#: Both are resolved by resolving again and opening a fresh pair. Without it,
-#: code 5 fell through to STOP and this controller would have stopped
-#: retrying a peer whose route was merely replaced: precisely the silent
-#: permanent give-up this bead exists to remove, reintroduced by me. Found by
-#: cross-validation, which is what the convene step is for.
-_RETRYABLE_RESETS = frozenset({
-    RESET_OPEN_TIMEOUT,
-    RESET_ROUTE_RELEASED,
-    RESET_TUNNEL_LOST,
+#: The default is inverted deliberately, and it took two findings to get here.
+#: First: auto-fh2nv's crosstalk summary listed four codes, their contract
+#: defines five, and the missing one — 5, "route released / activation
+#: failed" — is retryable. Under a retryable-allowlist it fell through to STOP
+#: and this controller would have abandoned a peer whose route was merely
+#: replaced. Second: reading their WIRE module rather than their contract
+#: shows seven codes, not five — 3 (overflow) and 4 (byte budget) exist too,
+#: and would have fallen through the same way.
+#:
+#: An allowlist of retryable codes fails closed into permanent silence every
+#: time the other side adds a code. A stop-list fails into a bounded retry
+#: instead: wrong for a genuinely terminal condition, but the backoff envelope
+#: saturates at max_backoff, so the cost is a slow poll rather than a storm —
+#: against a permanent silent give-up, which is the failure this whole bead
+#: exists to remove.
+_TERMINAL_RESETS = frozenset({RESET_ORDERLY, RESET_PROTOCOL})
+
+#: Codes this module was written knowing about. A code outside it still gets a
+#: decision (retry); it is recorded so "the carrier grew a code" is visible
+#: rather than inferred from behaviour.
+_KNOWN_RESETS = frozenset({
+    RESET_ORDERLY, RESET_OPEN_TIMEOUT, RESET_ROUTE_RELEASED,
+    RESET_TUNNEL_LOST, RESET_PROTOCOL,
 })
 
 #: What the controller decided to do about an event.
@@ -131,7 +139,9 @@ class PeerPathController:
             # peer's current work and it cannot clear our live pair.
             return IGNORE
         self.pair_id = None
-        return RETRY if code in _RETRYABLE_RESETS else STOP
+        if code not in _KNOWN_RESETS:
+            self._history.append(("unknown-reset", code))
+        return STOP if code in _TERMINAL_RESETS else RETRY
 
     def descriptor(self, generation: int, *, verified: bool = False) -> bool:
         """Accept a descriptor. Ordering decides the ordinary case; the
@@ -176,6 +186,16 @@ class PeerPathController:
             self._history.append(("descriptor-downgrade", generation))
             return True
         return False
+
+    def unknown_resets(self) -> list:
+        """Reset codes seen that this module was not written knowing about.
+
+        Empty is expected. A non-empty list means the carrier grew a code and
+        this table has not caught up — visible rather than inferred from a
+        peer that quietly stopped retrying.
+        """
+        return [code for kind, code in self._history
+                if kind == "unknown-reset"]
 
     def downgrades(self) -> list:
         """Generations accepted below the high-water mark, in order.
