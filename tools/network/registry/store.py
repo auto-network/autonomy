@@ -248,6 +248,10 @@ CREATE TABLE IF NOT EXISTS node_hints (
     node_pub     TEXT NOT NULL,
     addrs        TEXT NOT NULL,
     relay_url    TEXT,
+    -- The machine-signed reachability descriptor, stored VERBATIM. The
+    -- registry is a first-contact cache and never re-signs (contract
+    -- graph://7ed8a519-356 §3); the caller verifies the embedded signature.
+    descriptor   TEXT,
     announced_at INTEGER NOT NULL,
     expires_at   INTEGER NOT NULL,
     PRIMARY KEY (org_uuid, node_pub)
@@ -593,6 +597,11 @@ class RegistryStore:
         """Idempotent additive migrations for pre-existing registry DBs —
         ``CREATE TABLE IF NOT EXISTS`` never adds a column to an existing
         table. Runs once at construction, before any concurrent access."""
+        hint_cols = {
+            r["name"] for r in self._conn.execute("PRAGMA table_info(node_hints)")
+        }
+        if hint_cols and "descriptor" not in hint_cols:
+            self._conn.execute("ALTER TABLE node_hints ADD COLUMN descriptor TEXT")
         cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(orgs)")}
         if "policy_epoch" not in cols:
             self._conn.execute(
@@ -1269,6 +1278,7 @@ class RegistryStore:
         *,
         now: int,
         expires_at: int,
+        descriptor: Optional[dict] = None,
     ) -> None:
         """Announce/refresh one node's reachability. Last write wins —
         a refresh replaces the previous candidate set entirely, so an
@@ -1276,11 +1286,14 @@ class RegistryStore:
         than lingering until TTL."""
         self._conn.execute(
             "INSERT INTO node_hints (org_uuid, node_pub, addrs, relay_url,"
-            " announced_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)"
+            " descriptor, announced_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
             " ON CONFLICT (org_uuid, node_pub) DO UPDATE SET"
             " addrs = excluded.addrs, relay_url = excluded.relay_url,"
+            " descriptor = excluded.descriptor,"
             " announced_at = excluded.announced_at, expires_at = excluded.expires_at",
-            (org_uuid, node_pub, json.dumps(addrs), relay_url, now, expires_at),
+            (org_uuid, node_pub, json.dumps(addrs), relay_url,
+             json.dumps(descriptor) if descriptor is not None else None,
+             now, expires_at),
         )
         self._conn.commit()
 
@@ -1290,8 +1303,8 @@ class RegistryStore:
     ) -> list:
         """Live (non-expired) hints for an org, optionally one node's."""
         query = (
-            "SELECT node_pub, addrs, relay_url, announced_at, expires_at"
-            " FROM node_hints WHERE org_uuid = ? AND expires_at >= ?"
+            "SELECT node_pub, addrs, relay_url, descriptor, announced_at,"
+            " expires_at FROM node_hints WHERE org_uuid = ? AND expires_at >= ?"
         )
         params: tuple = (org_uuid, now)
         if node_pub is not None:
@@ -1303,6 +1316,10 @@ class RegistryStore:
                 "node": r["node_pub"],
                 "addrs": json.loads(r["addrs"]),
                 "relay_url": r["relay_url"],
+                # Verbatim, exactly as the machine signed it.
+                "descriptor": (
+                    json.loads(r["descriptor"]) if r["descriptor"] else None
+                ),
                 "announced_at": r["announced_at"],
                 "expires_at": r["expires_at"],
             }

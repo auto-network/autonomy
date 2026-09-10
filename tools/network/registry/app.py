@@ -271,6 +271,9 @@ from tools.network.clock import MAX_ATTESTATION_FUTURE_TS
 # Short TTLs are the point: a hint is a live-address claim, not a record.
 # Nodes refresh on a heartbeat; anything that stops refreshing goes dark.
 MAX_NODE_ADDRS = 8
+#: A signed descriptor is addresses plus an optional relay locator;
+#: 4 KiB is generous for both and still bounds a cache entry.
+MAX_DESCRIPTOR_BYTES = 4096
 MAX_NODE_URL_LEN = 256
 # Owned by tools.network.clock (validity intervals); re-exported here.
 from tools.network.clock import (
@@ -2167,7 +2170,8 @@ def create_app(
         """Announce/refresh the SIGNER's own reachability hints."""
         payload, auth, t = await _hint_gate(request, org_uuid, "node:announce")
         _require_fields(
-            payload, allowed=frozenset({"addrs", "relay_url", "ttl"}),
+            payload,
+            allowed=frozenset({"addrs", "relay_url", "ttl", "descriptor"}),
             required=frozenset({"addrs"}), what="reachability payload",
         )
         addrs = payload["addrs"]
@@ -2184,9 +2188,33 @@ def create_app(
         if type(ttl) is not int or ttl <= 0:
             raise _bad_request("ttl must be a positive integer of seconds")
         ttl = max(MIN_HINT_TTL, min(ttl, MAX_HINT_TTL))
+        descriptor = payload.get("descriptor")
+        if descriptor is not None:
+            # Stored VERBATIM and never re-signed: the registry is a
+            # first-contact cache, and the caller verifies the machine
+            # signature itself (contract graph://7ed8a519-356 §3). Two checks
+            # here, and neither is verification.
+            #
+            # The size bound is the same reason every other field has one — a
+            # cache entry must not grow without limit.
+            if not isinstance(descriptor, dict):
+                raise _bad_request("descriptor must be an object")
+            if len(json.dumps(descriptor)) > MAX_DESCRIPTOR_BYTES:
+                raise _bad_request(
+                    f"descriptor must encode to at most {MAX_DESCRIPTOR_BYTES} bytes"
+                )
+            # A node announces ITSELF. The endpoint already enforces that for
+            # addresses by keying on the envelope signer; a descriptor naming a
+            # different machine would let one node fill the cache with entries
+            # its peers must then fetch and discard.
+            if descriptor.get("machine_pub") != auth.signer_pub:
+                raise _bad_request(
+                    "descriptor machine_pub must be the announcing node"
+                )
         store.purge_expired_node_hints(now=t)
         store.upsert_node_hint(
-            org_uuid, auth.signer_pub, addrs, relay_url, now=t, expires_at=t + ttl
+            org_uuid, auth.signer_pub, addrs, relay_url, now=t,
+            expires_at=t + ttl, descriptor=descriptor,
         )
         return {"node": auth.signer_pub, "expires_at": t + ttl}
 
