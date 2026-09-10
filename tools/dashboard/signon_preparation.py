@@ -11,6 +11,7 @@ from tools.graph.schemas.vault_policy_class import VAULT_POLICY_CLASS_SET_ID
 from tools.network.idkit import sealing
 from tools.vault.key_holder import _scoped_db
 from tools.vault.store import VaultStore
+from tools.vault.errors import VaultError
 
 PURPOSE = "autonomy/identity/sign-in-preparation/v1"
 logger = logging.getLogger(__name__)
@@ -80,7 +81,13 @@ async def get_preparation(request):
     """Pre-authentication response contains ciphertext only, never org metadata."""
     try:
         with VaultStore(_scoped_db(VAULT_POLICY_CLASS_SET_ID, None)) as store:
-            public = store.get_delegate_audited_recipient()
+            try:
+                public = store.get_delegate_audited_recipient()
+            except VaultError as exc:
+                if "no audited delegate recipient is published" not in str(exc):
+                    raise
+                return JSONResponse({"error": "recipient_missing"}, status_code=409,
+                                    headers={"Cache-Control": "no-store"})
         payload = json.dumps(collect(), separators=(",", ":")).encode()
         return JSONResponse({"sealed": sealing.seal(payload, public, PURPOSE).hex()},
                             headers={"Cache-Control": "no-store"})

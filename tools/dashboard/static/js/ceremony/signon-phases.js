@@ -11,6 +11,9 @@ const PURPOSE = 'autonomy/identity/sign-in-preparation/v1';
 export async function fetchPreparation(fetchImpl = fetch) {
   const response = await fetchImpl('/api/identity/unlock/preparation', { cache: 'no-store' });
   const body = await response.json();
+  if (response.status === 409 && body.error === 'recipient_missing') {
+    throw new Error('Sign-in is blocked because this dashboard is missing part of your identity’s encryption setup.');
+  }
   if (!response.ok) throw new Error(body.error || 'sign-in preparation unavailable');
   return body;
 }

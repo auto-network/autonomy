@@ -196,8 +196,10 @@ def _identity_armor(root: KeyPair, access_passkeys=()):
 
 
 def _store_identity(client, root: KeyPair, name="Alex", access_passkeys=()):
+    from tools.vault.personal_object import derive_delegate_audited_recipient
     r = client.post("/api/identity/personal",
                     json={"display_name": name,
+                          "delegate_audited_public_key": derive_delegate_audited_recipient(bytes.fromhex(root.private_hex))[1],
                           "armored_private_key": _identity_armor(root, access_passkeys)})
     assert r.status_code == 200, r.text
     return r
@@ -1284,8 +1286,10 @@ def _store_v3_passkey_identity(client, root, *, access):
         access=[factor["factor_id"]] if access else [],
         policy={"op": "factor", "factor_id": factor["factor_id"]},
     )
+    from tools.vault.personal_object import derive_delegate_audited_recipient
     response = client.post("/api/identity/personal", json={
         "display_name": "Alex",
+        "delegate_audited_public_key": derive_delegate_audited_recipient(bytes.fromhex(root.private_hex))[1],
         "armored_private_key": emit_armored_envelope(envelope),
     })
     assert response.status_code == 200, response.text
@@ -1429,8 +1433,10 @@ def _store_v3_access_identity(client, root: KeyPair, *, access=True):
                 ],
             },
         )
+        from tools.vault.personal_object import derive_delegate_audited_recipient
         response = client.post("/api/identity/personal", json={
             "display_name": "Alex",
+            "delegate_audited_public_key": derive_delegate_audited_recipient(bytes.fromhex(root.private_hex))[1],
             "armored_private_key": emit_armored_envelope(envelope),
         })
         assert response.status_code == 200, response.text

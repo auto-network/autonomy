@@ -136,10 +136,12 @@ def test_virtual_authenticator_registers_unlocks_and_signals_clone(
         "node virtual authenticator password",
         iterations=10_000,
     )
+    from tools.vault.personal_object import derive_delegate_audited_recipient
     personal = route_client.post(
         "/api/identity/personal",
         json={
             "display_name": "Node Operator",
+            "delegate_audited_public_key": derive_delegate_audited_recipient(bytes.fromhex(root.private_hex))[1],
             "armored_private_key": armor,
         },
     )
@@ -163,11 +165,13 @@ def test_virtual_authenticator_registers_unlocks_and_signals_clone(
                 "prf": True,
             },
         )
+        from tools.dashboard.tests.test_identity_routes import _statement_for
         registered = route_client.post(
             "/api/identity/passkey/register",
             json={
                 "label": "Node virtual authenticator",
                 "credential": credential,
+                "statement": _statement_for(root, credential, minted),
             },
         )
         assert registered.status_code == 200, registered.text
@@ -180,6 +184,22 @@ def test_virtual_authenticator_registers_unlocks_and_signals_clone(
         assert len(rows) == 1
         assert rows[0].payload["credential_id"] == credential["rawId"]
         assert rows[0].payload["sign_count"] == 0
+
+        # Registration proves which root enrolled the credential; dashboard
+        # access is a separate, root-authorized factor-policy transition.
+        from tools.network.idkit import root_factor_policy as policy
+        from tools.dashboard.tests.test_identity_routes import _policy_commit_body
+        current = policy.parse_armored_envelope(armor)
+        factor = policy.passkey_factor("passkey.node", credential["rawId"], None)
+        operations = [{"op": "enroll_passkey", "factor": factor, "access": True}]
+        candidate = policy.emit_armored_envelope(policy.build_envelope(
+            root, generation=current["generation"] + 1,
+            factors=[*current["factors"], factor],
+            access=[*current["access"], factor["factor_id"]], policy=current["policy"],
+        ))
+        enabled = route_client.post("/api/identity/factor-policy/commit", json=
+            _policy_commit_body(root, current["generation"], operations, candidate))
+        assert enabled.status_code == 200, enabled.text
 
         route_client.cookies.clear()
         unlock_options = route_client.post(
@@ -202,7 +222,7 @@ def test_virtual_authenticator_registers_unlocks_and_signals_clone(
             json={"credential": assertion},
         )
         assert unlocked.status_code == 200, unlocked.text
-        assert unlocked.json() == {"ok": True, "method": "passkey"}
+        assert unlocked.json() == {"ok": True, "method": "passkey", "root_released": False}
         assert unlock_routes.SESSION_COOKIE in route_client.cookies
 
         advanced = settings_ops.read_set(
