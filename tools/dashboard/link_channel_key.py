@@ -36,6 +36,16 @@ logger = logging.getLogger("dashboard.link_channel_key")
 #: membership links keep their own fragment semantics.
 CHANNEL_KEY_TARGET_TYPES = frozenset({"design", "file", "mission", "note", "present"})
 
+#: Target types whose backing store is MACHINE-LOCAL, not the fleet-synced
+#: org graph (auto-nh1po, graph://96a4aa40-1c9): ``design``/``present`` read
+#: experiments.db, ``mission`` reads the mission_control store. Only the
+#: publishing machine can serve such a link, so its grant is pinned to that
+#: machine's serving identity and the relay routes it nowhere else. ``note``
+#: is served from the org graph, which every member machine syncs, so it
+#: stays org-wide. ``file`` is deliberately absent until its store is
+#: classified.
+MACHINE_LOCAL_TARGET_TYPES = frozenset({"design", "present", "mission"})
+
 
 class ChannelKeyUnavailable(Exception):
     """Minting or resolving a channel key failed; the message names why

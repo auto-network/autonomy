@@ -552,6 +552,9 @@ class TunnelConnector:
         #: reservation -> hostname this connector wants leased; re-registered
         #: after every reconnect (leases are connection-scoped by design).
         self._desired_hosts: dict = {}
+        #: reservation -> declared serving machine (auto-nh1po), sent with
+        #: every host-register for that reservation; absent = undeclared.
+        self._desired_machines: dict = {}
         self._host_leases: dict = {}
         self._stop = asyncio.Event()
         #: set while a tunnel is authenticated and serving (tests await it)
@@ -638,11 +641,20 @@ class TunnelConnector:
             bytes.fromhex(self._machine_key.public_hex)
         ).hexdigest()[:16]
 
-    async def serve_host(self, reservation: str, host: str) -> dict:
+    async def serve_host(self, reservation: str, host: str,
+                         machine: "str | None" = None) -> dict:
         """Advertise + lease one serving hostname (host-lease/1). The pair
         persists as desired state: leases are connection-scoped by design,
-        so every reconnect re-registers them under a fresh generation."""
+        so every reconnect re-registers them under a fresh generation.
+
+        ``machine`` is the publisher's declared serving machine
+        (auto-nh1po): the relay pins the host to it and refuses any other
+        machine's register until an explicit release."""
         self._desired_hosts[reservation] = host
+        if machine is not None:
+            self._desired_machines[reservation] = machine
+        else:
+            self._desired_machines.pop(reservation, None)
         try:
             return await self._register_host(reservation, host)
         except ConnectionError:
@@ -652,13 +664,16 @@ class TunnelConnector:
 
     async def release_host(self, reservation: str) -> dict:
         self._desired_hosts.pop(reservation, None)
+        self._desired_machines.pop(reservation, None)
         self._host_leases.pop(reservation, None)
         return await self.control("host-release", {"reservation": reservation})
 
     async def _register_host(self, reservation: str, host: str) -> dict:
-        reply = await self.control(
-            "host-register", {"reservation": reservation, "host": host}
-        )
+        args = {"reservation": reservation, "host": host}
+        machine = self._desired_machines.get(reservation)
+        if machine is not None:
+            args["machine"] = machine
+        reply = await self.control("host-register", args)
         if isinstance(reply, dict) and reply.get("ok") is True:
             self._host_leases[reservation] = dict(reply.get("lease") or {})
         return reply

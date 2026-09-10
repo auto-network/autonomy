@@ -135,20 +135,34 @@ def env(tmp_path, monkeypatch, root, founded_org):
     GraphDB.close_all_pooled()
 
 
-class _ControlRecorder:
-    """Stands in for the serving tunnel: records control ops and replies."""
+SERVING_MACHINE = "ef" * 32
 
-    def __init__(self, reply=None, raise_unavailable=False):
+
+class _ControlRecorder:
+    """Stands in for the serving tunnel: records control ops and replies.
+
+    ``connector-status`` (the machine-pinning lookup a machine-local publish
+    makes first, auto-nh1po) is answered with this connector's serving slot
+    and recorded under ``status_calls`` so ``calls`` stays the list of
+    link operations the registry saw."""
+
+    def __init__(self, reply=None, raise_unavailable=False, machine=SERVING_MACHINE):
         self.calls = []
+        self.status_calls = []
         self._reply = reply
         self._raise = raise_unavailable
+        self._machine = machine
 
     def __call__(self, org, op, args, **kwargs):
-        self.calls.append((org, op, args))
         if self._raise:
             # kind=None -> non-retryable, so the publish fails immediately
             # rather than retrying create-link for the full startup window.
             raise link_serving_supervisor.TunnelUnavailable("no tunnel")
+        if op == "connector-status":
+            self.status_calls.append((org, op, args))
+            slot = {"persona_pub": "ab" * 32, "machine": self._machine}
+            return {"ok": True, "serving": True, "serving_slot": slot}
+        self.calls.append((org, op, args))
         if self._reply is not None:
             return self._reply
         token = "c0ffee00" * 4  # 32 hex
@@ -237,12 +251,14 @@ def test_authorized_publish_emits_frame_and_caches_grant(
     execution = result["execution"]
     assert execution["ok"] is True, execution
     assert execution["serving"] == {"live": True, "via": "tunnel-control"}
-    # The registry saw one create-link, as the org, carrying only the target
-    # and meta — never a persona.
+    # The registry saw one create-link, as the org, carrying only the target,
+    # meta and (present is machine-local) this machine's serving identity —
+    # never a persona.
     assert recorder.calls == [
         (ORG, "create-link",
          {"target_uuid": TARGET, "target_type": "present",
-          "meta": {"ttl": 3600, "label": "binder"}}),
+          "meta": {"ttl": 3600, "label": "binder"},
+          "serving_machine": SERVING_MACHINE}),
     ]
     token = execution["token"]
     grants = _cached_grants()
@@ -757,3 +773,59 @@ def client_post_revoke(client, token):
         "kind": "link_revoke", "session": SESSION,
         "request": {"org": ORG, "token": token},
     })
+
+
+# ── auto-nh1po: machine-local targets are pinned to this machine ──────
+
+
+def test_present_publish_declares_this_machine_and_caches_the_pin(
+    env, root, session_key, session_cert, monkeypatch,
+):
+    recorder = _ControlRecorder()
+    _install_control(monkeypatch, recorder)
+
+    rid = _create_publish(env)  # target_type present: experiments.db, local
+    envelope = _tunnel_envelope(session_key, session_cert, "/control/create-link")
+    execution = _decide_and_wait(env, rid, envelope)["execution"]
+    assert execution["ok"] is True, execution
+
+    assert [c[1] for c in recorder.status_calls] == ["connector-status"]
+    assert recorder.calls[0][2]["serving_machine"] == SERVING_MACHINE
+    assert _cached_grants()[execution["token"]]["serving_machine"] == SERVING_MACHINE
+
+
+def test_note_publish_stays_org_wide(env, root, session_key, session_cert, monkeypatch):
+    recorder = _ControlRecorder()
+    _install_control(monkeypatch, recorder)
+
+    r = env.post("/api/approvals", json={
+        "kind": "link_publish", "session": SESSION,
+        "request": {"org": ORG, "target_uuid": TARGET,
+                    "target_type": "note", "meta": {}},
+    })
+    assert r.status_code == 200, r.text
+    envelope = _tunnel_envelope(session_key, session_cert, "/control/create-link")
+    execution = _decide_and_wait(env, r.json()["id"], envelope)["execution"]
+    assert execution["ok"] is True, execution
+
+    assert recorder.status_calls == []  # the org graph syncs: no pin needed
+    assert "serving_machine" not in recorder.calls[0][2]
+    assert "serving_machine" not in _cached_grants()[execution["token"]]
+
+
+def test_present_publish_fails_closed_when_the_machine_is_unknown(
+    env, root, session_key, session_cert, monkeypatch,
+):
+    """Publishing a machine-local target org-wide would recreate the
+    2026-09-10 split; without a serving identity the publish refuses."""
+    recorder = _ControlRecorder(machine=None)
+    _install_control(monkeypatch, recorder)
+
+    rid = _create_publish(env)
+    envelope = _tunnel_envelope(session_key, session_cert, "/control/create-link")
+    execution = _decide_and_wait(env, rid, envelope)["execution"]
+
+    assert execution["ok"] is False
+    assert "serving identity is unknown" in execution["error"]
+    assert recorder.calls == []  # no create-link was ever sent
+    assert _cached_grants() == {}

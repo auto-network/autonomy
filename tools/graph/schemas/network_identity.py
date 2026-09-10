@@ -80,7 +80,7 @@ GENESIS_ID_HEX_LEN = 64
 #: into existence either by founding an org or by claiming membership.
 PERSONA_SOURCES = ("found", "join")
 NETWORK_LINK_GRANT_SET_ID = "autonomy.network.link-grant"
-NETWORK_LINK_GRANT_REVISION = 5
+NETWORK_LINK_GRANT_REVISION = 6
 NETWORK_PUBLIC_LINK_BASE_URL = "https://relay.auto.network"
 NETWORK_SERVE_CERT_SET_ID = "autonomy.network.serve-cert"
 NETWORK_SERVE_CERT_REVISION = 2
@@ -749,7 +749,7 @@ class NetworkLinkGrantV4(NetworkLinkGrantV3):
 
 
 class NetworkLinkGrantV5(NetworkLinkGrantV4):
-    """Current share-link grant, retaining an invitation's bearer.
+    """Share-link grant retaining an invitation's bearer.
 
     Decision of record graph://e75ebdde-6df. An ``org:join`` link's bearer
     is the secret that lets its holder ASK to join: the fold accepts a
@@ -767,7 +767,7 @@ class NetworkLinkGrantV5(NetworkLinkGrantV4):
     """
 
     set_id = NETWORK_LINK_GRANT_SET_ID
-    schema_revision = NETWORK_LINK_GRANT_REVISION
+    schema_revision = 5
 
     bearer: str = field(
         required=False,
@@ -797,6 +797,54 @@ class NetworkLinkGrantV5(NetworkLinkGrantV4):
     @classmethod
     def upconvert_from_prev(cls, payload: dict) -> dict:
         return dict(payload)  # absent bearer == minted before this revision
+
+
+class NetworkLinkGrantV6(NetworkLinkGrantV5):
+    """Current share-link grant, naming the machine that serves it.
+
+    Design of record graph://96a4aa40-1c9 (bead auto-nh1po). A link whose
+    target lives in a MACHINE-LOCAL store (``design``/``present`` in
+    experiments.db, ``mission`` in the mission_control store — nothing
+    fleet-synced) can only be served by the machine that published it. The
+    publisher declares that machine here and on the registry's grant, and
+    the relay routes the link ONLY to the tunnel whose authenticated hello
+    named the same machine. Absent (or null) means org-wide: any member
+    machine's connector may serve it, which is right for ``note`` (the org
+    graph is fleet-synced) and for every grant minted before this revision.
+
+    The value is the SERVING MACHINE KEY public hex — the ``machine`` the
+    tunnel hello authenticates (``Tunnel.machine``, the
+    ``serve_machine_keys`` allow-set) — not the fleet ``machine_id`` from
+    ``autonomy.machine.identity``. The relay can enforce only what the hello
+    proves, and the hello proves this key.
+    """
+
+    set_id = NETWORK_LINK_GRANT_SET_ID
+    schema_revision = NETWORK_LINK_GRANT_REVISION
+
+    serving_machine: str = field(
+        required=False,
+        description=(
+            "Serving machine key public hex (64 lowercase hex) of the ONE "
+            "machine that can serve this link — the machine the tunnel hello "
+            "authenticates. Null or absent: org-wide, any member connector."
+        ),
+    )
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        super().validate(payload)
+        if not isinstance(payload, dict):
+            return
+        if payload.get("serving_machine") is not None:
+            _require_hex(
+                payload, "serving_machine", cls.__name__,
+                length=NETWORK_PUB_HEX_LEN,
+            )
+
+    @classmethod
+    def upconvert_from_prev(cls, payload: dict) -> dict:
+        return dict(payload)  # absent serving_machine == org-wide, by design
 
 
 # ── autonomy.network.link-channel-key ─────────────────────────

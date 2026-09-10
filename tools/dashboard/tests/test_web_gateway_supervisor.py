@@ -965,3 +965,124 @@ async def test_planner_discovers_orgs_off_the_event_loop(monkeypatch):
     state = await sup._build_desired_state()
     assert seen == [False], "org discovery must run in a worker thread"
     assert state is not None
+
+
+# ── auto-nh1po: the reconciler declares this machine as the serving machine
+
+
+SERVING_MACHINE = "ef" * 32
+
+
+@pytest.mark.asyncio
+async def test_hostname_lease_reconciler_declares_the_connectors_machine():
+    calls = []
+
+    def control(_org, op, args):
+        calls.append((op, args))
+        if op == "connector-status":
+            return {
+                "ok": True, "serving": True, "connector_instance": "c-1",
+                "serving_slot": {"persona_pub": "ab" * 32, "machine": SERVING_MACHINE},
+            }
+        return {"ok": True}
+
+    reconciler = sup.HostnameLeaseReconciler(
+        control_fn=control,
+        desired_fn=lambda: {"anchore": {"reservation-1": "app.example"}},
+    )
+    await reconciler.reconcile()
+
+    assert [c for c in calls if c[0] == "serve-host"] == [(
+        "serve-host",
+        {"reservation": "reservation-1", "host": "app.example",
+         "machine": SERVING_MACHINE},
+    )]
+
+
+@pytest.mark.asyncio
+async def test_hostname_lease_reconciler_ignores_a_malformed_slot_machine():
+    calls = []
+
+    def control(_org, op, args):
+        calls.append((op, args))
+        if op == "connector-status":
+            return {
+                "ok": True, "serving": True, "connector_instance": "c-1",
+                "serving_slot": {"persona_pub": "ab" * 32, "machine": None},
+            }
+        return {"ok": True}
+
+    reconciler = sup.HostnameLeaseReconciler(
+        control_fn=control,
+        desired_fn=lambda: {"anchore": {"reservation-1": "app.example"}},
+    )
+    await reconciler.reconcile()
+
+    assert [c for c in calls if c[0] == "serve-host"] == [(
+        "serve-host", {"reservation": "reservation-1", "host": "app.example"},
+    )]
+
+
+@pytest.mark.asyncio
+async def test_hostname_lease_reconciler_releases_a_stale_pin_then_declares():
+    """The service moved here and the previous machine did not release
+    (dead): host-owned-elsewhere -> release-host -> serve-host, once."""
+    calls = []
+    registers = []
+
+    def control(_org, op, args):
+        calls.append((op, args))
+        if op == "connector-status":
+            return {
+                "ok": True, "serving": True, "connector_instance": "c-1",
+                "serving_slot": {"persona_pub": "ab" * 32, "machine": SERVING_MACHINE},
+            }
+        if op == "serve-host":
+            registers.append(args)
+            if len(registers) == 1:
+                return {"ok": False, "error": "host-owned-elsewhere"}
+            return {"ok": True}
+        return {"ok": True}
+
+    reconciler = sup.HostnameLeaseReconciler(
+        control_fn=control,
+        desired_fn=lambda: {"anchore": {"reservation-1": "app.example"}},
+    )
+    await reconciler.reconcile()
+    await reconciler.reconcile()  # applied: no repeat
+
+    assert [c[0] for c in calls] == [
+        "connector-status", "serve-host", "release-host", "serve-host",
+        "connector-status",
+    ]
+    assert ("release-host", {"reservation": "reservation-1"}) in calls
+
+
+@pytest.mark.asyncio
+async def test_hostname_lease_reconciler_does_not_release_a_live_pin():
+    """release-host is refused (lease-held) while the other machine serves:
+    the reconciler stops there and retries next tick, never displacing."""
+    calls = []
+
+    def control(_org, op, args):
+        calls.append((op, args))
+        if op == "connector-status":
+            return {
+                "ok": True, "serving": True, "connector_instance": "c-1",
+                "serving_slot": {"persona_pub": "ab" * 32, "machine": SERVING_MACHINE},
+            }
+        if op == "serve-host":
+            return {"ok": False, "error": "host-owned-elsewhere"}
+        return {"ok": False, "error": "lease-held"}
+
+    reconciler = sup.HostnameLeaseReconciler(
+        control_fn=control,
+        desired_fn=lambda: {"anchore": {"reservation-1": "app.example"}},
+    )
+    await reconciler.reconcile()
+    await reconciler.reconcile()
+
+    assert [c[0] for c in calls] == [
+        "connector-status", "serve-host", "release-host",
+        "connector-status", "serve-host", "release-host",
+    ]

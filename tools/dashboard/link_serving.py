@@ -1716,14 +1716,24 @@ async def _serve_control_listener(connector, ctl_path: str,
                     # reservation in the connector and its half-life keeper
                     # renews it across the full tunnel lifetime/reconnects.
                     args = request.get("args") or {}
-                    if set(args) != {"reservation", "host"} or not all(
-                        isinstance(args.get(field), str) and args[field]
-                        for field in ("reservation", "host")
+                    machine = args.get("machine")
+                    if (
+                        not {"reservation", "host"} <= set(args)
+                        <= {"reservation", "host", "machine"}
+                        or not all(
+                            isinstance(args.get(field), str) and args[field]
+                            for field in ("reservation", "host")
+                        )
+                        or (machine is not None and not (
+                            isinstance(machine, str) and machine
+                        ))
                     ):
                         reply = {"ok": False, "error": "invalid serve-host request"}
                     else:
+                        # ``machine`` (auto-nh1po): the declared serving
+                        # machine the relay pins this host to.
                         reply = await connector.serve_host(
-                            args["reservation"], args["host"]
+                            args["reservation"], args["host"], machine=machine
                         )
                 elif request.get("op") == "release-host":
                     args = request.get("args") or {}
