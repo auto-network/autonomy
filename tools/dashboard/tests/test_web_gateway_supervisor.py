@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+#: Target rows freeze a machine (ServiceTargetV1); the supervisor serves
+#: only rows naming THIS one, so a stub needs both halves.
+LOCAL_MACHINE = "aa" * 32
+
 import asyncio
 import contextlib
 import json
@@ -175,12 +179,16 @@ def test_desired_hostname_leases_come_only_from_targeted_live_settings(monkeypat
         ],
     )
     monkeypatch.setattr(
+        sup.service_publication, "_read_local_machine_id",
+        lambda: LOCAL_MACHINE,
+    )
+    monkeypatch.setattr(
         sup.service_publication,
         "list_service_targets",
         lambda _org: [
-            {"reservation_id": "active"},
-            {"reservation_id": "paused"},
-            {"reservation_id": "released"},
+            {"reservation_id": "active", "machine_id": LOCAL_MACHINE},
+            {"reservation_id": "paused", "machine_id": LOCAL_MACHINE},
+            {"reservation_id": "released", "machine_id": LOCAL_MACHINE},
         ],
     )
     monkeypatch.setattr(
@@ -489,12 +497,16 @@ async def test_planner_builds_complete_active_and_paused_config(monkeypatch):
         ],
     )
     monkeypatch.setattr(
+        sup.service_publication, "_read_local_machine_id",
+        lambda: LOCAL_MACHINE,
+    )
+    monkeypatch.setattr(
         sup.service_publication,
         "list_service_targets",
         lambda org: [
-            {"reservation_id": active_id},
-            {"reservation_id": paused_id},
-            {"reservation_id": released_id},
+            {"reservation_id": active_id, "machine_id": LOCAL_MACHINE},
+            {"reservation_id": paused_id, "machine_id": LOCAL_MACHINE},
+            {"reservation_id": released_id, "machine_id": LOCAL_MACHINE},
         ],
     )
 
@@ -540,9 +552,13 @@ async def test_planner_stays_dormant_without_certificate(monkeypatch):
         ],
     )
     monkeypatch.setattr(
+        sup.service_publication, "_read_local_machine_id",
+        lambda: LOCAL_MACHINE,
+    )
+    monkeypatch.setattr(
         sup.service_publication,
         "list_service_targets",
-        lambda _org: [{"reservation_id": "r1"}],
+        lambda _org: [{"reservation_id": "r1", "machine_id": LOCAL_MACHINE}],
     )
     monkeypatch.setattr(
         sup.service_certificate, "active_gateway_pair", lambda _org, _persona: None
@@ -569,9 +585,13 @@ async def test_planner_stays_dormant_until_connector_is_serving(monkeypatch):
         lambda org: [{"reservation_id": "r1", "state": "active", "persona_label": "persona-test"}],
     )
     monkeypatch.setattr(
+        sup.service_publication, "_read_local_machine_id",
+        lambda: LOCAL_MACHINE,
+    )
+    monkeypatch.setattr(
         sup.service_publication,
         "list_service_targets",
-        lambda org: [{"reservation_id": "r1"}],
+        lambda org: [{"reservation_id": "r1", "machine_id": LOCAL_MACHINE}],
     )
 
     async def connector_not_ready(_org):
@@ -596,9 +616,13 @@ async def test_planner_replaces_stale_active_target_with_unavailable_route(monke
         lambda org: [{"reservation_id": "r1", "state": "active", "persona_label": "persona-test"}],
     )
     monkeypatch.setattr(
+        sup.service_publication, "_read_local_machine_id",
+        lambda: LOCAL_MACHINE,
+    )
+    monkeypatch.setattr(
         sup.service_publication,
         "list_service_targets",
-        lambda org: [{"reservation_id": "r1"}],
+        lambda org: [{"reservation_id": "r1", "machine_id": LOCAL_MACHINE}],
     )
 
     async def connector_ready(_org):
@@ -648,9 +672,13 @@ async def test_planner_keeps_healthy_sibling_when_another_target_is_unavailable(
         ],
     )
     monkeypatch.setattr(
+        sup.service_publication, "_read_local_machine_id",
+        lambda: LOCAL_MACHINE,
+    )
+    monkeypatch.setattr(
         sup.service_publication,
         "list_service_targets",
-        lambda _org: [{"reservation_id": healthy_id}, {"reservation_id": down_id}],
+        lambda _org: [{"reservation_id": healthy_id, "machine_id": LOCAL_MACHINE}, {"reservation_id": down_id, "machine_id": LOCAL_MACHINE}],
     )
 
     async def connector_ready(_org):
