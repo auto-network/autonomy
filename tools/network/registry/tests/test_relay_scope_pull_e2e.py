@@ -168,22 +168,23 @@ def test_a_scope_pull_crosses_the_relay_with_no_direct_address(tmp_path):
         assert pulls[-1]["address"].startswith("relay:")
         assert pulls[-1]["mutation_frames"] >= 1, "nothing was carried"
         assert pulls[-1]["outcome"] == "success"
-        # NOT asserted, and deliberately: `transactions` reads 0 on this pull
-        # while the row demonstrably arrived, mutation_frames is 1, and
-        # acknowledged_transaction_ref is 1 with a breadcrumb naming a real
-        # transaction. The counter increments per applied group inside the
-        # batch-flush loop (fleet_sync_scheduler ~3412), so either that loop
-        # did not run for a single-frame delta or the apply happened by
-        # another route.
+        # ANSWERED (auto-132dr, 2026-09-10): `transactions` reads 0 here
+        # because this pull is a BOOTSTRAP SWEEP, not a delta. The puller's
+        # store is freshly prepared, so has_state() is False, bootstrap is
+        # True, and the server serves a sweep; rows then arrive through
+        # apply_swept -> store.apply_swept_page, which counts nothing. The
+        # delta path does count — apply_pending appends the group and
+        # flush_batch increments once per group regardless of its size, and a
+        # real delta pull over this same carrier reported 12 transactions the
+        # same night.
         #
-        # Which of those is true decides whether this is a counting
-        # definition or an undercount, and an undercount would matter: a pull
-        # that applies rows while telemetry reports zero transactions is the
-        # same blindness that had home's counters frozen for five hours
-        # tonight while sync was healthy. Asserting either way here would
-        # bake in a guess, so the question is recorded instead — see the bead.
-        observed_transactions = pulls[-1]["transactions"]
-        assert observed_transactions >= 0  # placeholder for the recorded question
+        # So this is asserted as 0 deliberately: it pins WHICH path carried the
+        # rows. A non-zero here would mean this test stopped exercising the
+        # bootstrap sweep and quietly became a delta test.
+        assert pulls[-1]["transactions"] == 0, (
+            "expected a bootstrap sweep (uncounted); a non-zero transaction "
+            "count means this pull took the delta path instead"
+        )
 
     asyncio.run(scenario())
 
