@@ -92,12 +92,18 @@ def list_org_slugs(*, root: Path | str | None = None) -> list[str]:
     # `orgs/2d4b90cb-1e89-452b-82cb-68ca44fd8e52.db` — a uuid where a slug
     # belonged — a first-class PEER of every org on the box, sorting FIRST in
     # every peer list because digits precede letters, so it was OPENED on every
-    # cross-org resolution on the machine. It also holds seventy settings and
-    # fleet_sync_catalog rows — and WHAT WROTE THOSE IS UNRESOLVED
-    # (auto-kou68). Enumeration explains the opens; a read does not explain a
-    # write, and an earlier version of this very comment asserted "read, and
-    # written through" as though it did. Root cause traced by
-    # host-0906-222509, 2026-09-10, who proved it in-process:
+    # cross-org resolution on the machine — READ-ONLY, and that is all
+    # enumeration ever did to it. Its seventy settings and fleet_sync_catalog
+    # rows came from somewhere else entirely: 35 `autonomy.schema` plus 35
+    # `autonomy.schema.synopsis` registrations, every created_at identical at
+    # 2026-08-07T19:00:35Z, captured by the catalog as transaction 1. One
+    # read-write open five weeks ago ran schema init and wrote all of it; the
+    # file has been inert since (sources=0, thoughts=0). So the minting and the
+    # writes are ONE act, not two. Which caller passed the uuid that day is not
+    # reconstructible and is not claimed. Established by host-0906-222509,
+    # 2026-09-10; two earlier versions of this comment — mine, inheriting their
+    # first message — said enumeration had "written through" it, which the
+    # timestamps disprove. Root cause of the peering, proved in-process:
     #     resolve_peers('anchore', None) ->
     #         ['2d4b90cb-1e89-452b-82cb-68ca44fd8e52', 'autonomy', ...]
     #
