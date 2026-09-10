@@ -52,7 +52,7 @@ from tools.network.idkit import KeyPair, Subject, issue_cert
 from tools.network.registry.app import create_app
 from tools.network.registry.signing import sign_request
 from tools.network.relaykit.connector import TunnelConnector
-from tools.network.relaykit.fleet_stream import FleetStreamClosed
+from tools.network.relaykit.fleet_stream import FleetStreamClosed, FleetStreamRefused
 from tools.network.relaykit.fleet_stream_wire import (
     CAP_FLEET_DIRECTED_STREAM as CAP,
     FLEET_STREAM_WINDOW_BYTES,
@@ -201,8 +201,9 @@ async def _scenario(root, port, broker):
     servers = []
     try:
         # -- 1. exact routing: a slot nobody holds is a typed refusal ------
-        with pytest.raises(ConnectionError, match="destination-slot-absent"):
+        with pytest.raises(FleetStreamRefused) as refused:
             await a.connector.fleet_streams.open(PERSONA, "cc" * 32)
+        assert refused.value.reason == "destination-slot-absent"
         assert broker.snapshot()["pairs"] == 0
 
         # -- 2. the pair, then the fleet handshake end to end -------------
