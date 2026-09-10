@@ -27,7 +27,6 @@ from tools.network import (
     fleet_enroll,
     fleet_invite,
     fleet_machine_profile,
-    fleet_route,
     fleet_roster,
     fleet_runtime,
     fleet_sync_scheduler,
@@ -88,11 +87,12 @@ def operator_api(tmp_path, monkeypatch):
     monkeypatch.setattr(
         fleet_enrollment_service, "FleetEnrollmentStore", lambda: store
     )
-    monkeypatch.setattr(
-        fleet_enrollment_routes.fleet_relay_sync.dashboard_relay_sync_service,
-        "configure",
-        lambda _credential: None,
-    )
+    # No relay-sync service to neutralise any more: DashboardFleetRelaySyncService
+    # and its module singleton were deleted with the relay pull path (e71332e1),
+    # and fleet sync now runs on the direct tier. This fixture used to patch its
+    # `configure` so activation would not start real sync during the test; with
+    # the service gone there is nothing to patch, and the stale reference is what
+    # made this whole file fail COLLECTION — eleven tests silently not running.
     monkeypatch.setattr(
         fleet_enrollment_routes.fleet_relay_sync,
         "publish_connector_runtime",
