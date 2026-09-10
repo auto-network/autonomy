@@ -71,8 +71,19 @@ def fleet_session(pair_id: str, source_nonce: str, destination_nonce: str) -> st
     return f"{CAP_FLEET_DIRECTED_STREAM}:{pair_id}:{source_nonce}:{destination_nonce}"
 
 
+class FleetStreamRefused(ConnectionError):
+    """The relay refused admission in its reply: no pair was minted. The
+    controller's STAND_DOWN input — a typed reason, never a code, so it
+    cannot be mistaken for a post-admission teardown."""
+
+    def __init__(self, reason: str):
+        super().__init__(f"fleet-open refused: {reason}")
+        self.reason = reason
+
+
 class FleetStreamClosed(ConnectionError):
-    """The pair ended; ``code`` is the reset code (None for a local close)."""
+    """The pair ended AFTER admission; ``code`` is the reset code (None for
+    a local close). The controller's RETRY-or-STOP input, by code."""
 
     def __init__(self, pair_id: str, code: Optional[int]):
         super().__init__(f"fleet stream {pair_id[:8]} closed (code {code})")
@@ -379,8 +390,14 @@ class FleetStreamAdapter:
                    claimed_machine_pub: Optional[str] = None,
                    timeout: float = FLEET_OPEN_DEADLINE_S) -> FleetStreamEndpoint:
         """Open a directed stream to the exact destination slot and return
-        its endpoint once the relay's READY has arrived. Raises
-        ``ConnectionError`` with the relay's typed reason on refusal."""
+        its endpoint once the relay's READY has arrived.
+
+        Three distinct failures, for three distinct controller responses:
+        :class:`FleetStreamRefused` (admission refused, typed reason: stand
+        down), :class:`FleetStreamClosed` (the pair was minted and then
+        ended, reset code: retry or stop by code), and a bare
+        ``ConnectionError`` (this tunnel could not carry the request or no
+        READY arrived within *timeout*: a transport fault, retry)."""
         operation_id = operation_id or secrets.token_hex(16)
         if operation_id in self._pending_opens:
             raise ConnectionError("operation-already-pending")
@@ -397,7 +414,7 @@ class FleetStreamAdapter:
             reply = await self._control("fleet-open", args, timeout=timeout)
             if not (isinstance(reply, dict) and reply.get("ok") is True):
                 reason = reply.get("error") if isinstance(reply, dict) else "refused"
-                raise ConnectionError(f"fleet-open refused: {reason}")
+                raise FleetStreamRefused(str(reason))
             return await asyncio.wait_for(future, timeout)
         except asyncio.TimeoutError as exc:
             raise ConnectionError("fleet-open: no READY before the deadline") from exc

@@ -206,8 +206,10 @@ async def test_a_refused_open_reports_the_relay_reason():
     relay = LoopbackRelay()
     relay.refuse_open = "destination-slot-absent"
     a = relay.attach("A")
-    with pytest.raises(ConnectionError, match="destination-slot-absent"):
+    with pytest.raises(fs.FleetStreamRefused) as excinfo:
         await a.open(PERSONA, MACHINE_B)
+    assert excinfo.value.reason == "destination-slot-absent"
+    assert not isinstance(excinfo.value, fs.FleetStreamClosed)   # stand down, not retry
     assert not a._pending_opens
 
 
@@ -285,3 +287,74 @@ async def test_tunnel_loss_ends_every_endpoint_with_code_6_and_fails_pending_ope
     with pytest.raises(ConnectionError):
         await pending
     assert a.closed and not a._pending_opens and not a._endpoints
+
+
+# -- READY skew, pinned rather than reasoned -----------------------------------
+
+
+class ManualRelay:
+    """A relay driven by hand: the test decides when READY (or a reset)
+    reaches the source leg, so the window between open-ok and READY can be
+    observed directly."""
+
+    def __init__(self):
+        self.sent = []
+        self.channel = secrets.token_bytes(16)
+        self.pair_id = secrets.token_hex(16)
+        self.nonce = secrets.token_hex(16)
+        self.adapter = None
+
+    async def send_frame(self, frame_type, channel_id, payload=b""):
+        self.sent.append((frame_type, channel_id, payload))
+
+    async def control(self, op, args, timeout=10.0):
+        meta = json.loads(build_fleet_open(
+            pair_id=self.pair_id, leg_nonce=self.nonce, role="source",
+            operation_id=args["operation_id"], peer_persona_pub=PERSONA,
+            peer_machine=MACHINE_B, claimed_machine_pub=None))
+        assert self.adapter.dispatch_open(self.channel, meta)
+        return {"ok": True, "pair_id": self.pair_id}
+
+    def ready(self):
+        self.adapter.dispatch_ctrl(self.channel, build_fleet_ready(
+            pair_id=self.pair_id, source_nonce=self.nonce,
+            destination_nonce="00" * 16, bytes_=1000, slots=8))
+
+    def controls(self):
+        return [parse_fleet_ctrl(p) for t, c, p in self.sent if t == FRAME_STREAM_CTRL]
+
+
+@pytest.mark.asyncio
+async def test_data_before_ready_is_buffered_and_delivered_after_ready():
+    relay = ManualRelay()
+    relay.adapter = fs.FleetStreamAdapter(relay.send_frame, relay.control)
+    opening = asyncio.create_task(relay.adapter.open(PERSONA, MACHINE_B, timeout=2))
+    await asyncio.sleep(0.02)
+    assert [c["op"] for c in relay.controls()] == ["fleet-open-ok"]
+    # The destination was told READY first and sent: the source has only
+    # its open-ok out, and must accept within the window it offered.
+    early = fs.encode_message(b"first, before ready")
+    assert relay.adapter.dispatch_data(relay.channel, early)
+    await asyncio.sleep(0.02)
+    assert not opening.done()                       # nothing surfaced yet
+    assert all(c["op"] != "reset" for c in relay.controls())
+    assert all(c["op"] != "fleet-credit" for c in relay.controls())  # not consumed
+    relay.ready()
+    endpoint = await asyncio.wait_for(opening, 1)
+    assert await endpoint.recv() == b"first, before ready"
+    assert relay.controls()[-1] == {"op": "fleet-credit", "bytes": len(early), "slots": 1}
+
+
+@pytest.mark.asyncio
+async def test_data_before_a_failed_ready_dies_with_the_pair_and_is_never_surfaced():
+    relay = ManualRelay()
+    relay.adapter = fs.FleetStreamAdapter(relay.send_frame, relay.control)
+    opening = asyncio.create_task(relay.adapter.open(PERSONA, MACHINE_B, timeout=2))
+    await asyncio.sleep(0.02)
+    assert relay.adapter.dispatch_data(relay.channel, fs.encode_message(b"orphan"))
+    relay.adapter.dispatch_ctrl(relay.channel, build_ctrl_reset(RESET_TUNNEL_LOSS))
+    with pytest.raises(fs.FleetStreamClosed) as excinfo:
+        await asyncio.wait_for(opening, 1)
+    assert excinfo.value.code == RESET_TUNNEL_LOSS
+    assert excinfo.value.pair_id == relay.pair_id
+    assert not relay.adapter._endpoints and not relay.adapter._pending_opens
