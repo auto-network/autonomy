@@ -103,6 +103,24 @@ def drop_self_reachable(candidates, own_addrs) -> list:
     return kept
 
 
+def _locator_key(locator: Optional[Mapping]) -> Optional[tuple]:
+    """The comparison key for a relay locator, for change detection.
+
+    Only the SEMANTIC fields: the slot a peer would pair with. ``capabilities``
+    and ``expires_at_ns`` are excluded on purpose -- a capability set that
+    reorders, or an expiry that ticks, is not a route change, and letting
+    either into the key would mint a descriptor generation on a machine whose
+    reachability had not moved. Same rule, same reason, as
+    ``fleet_personal_reachability.semantic_tuple``.
+    """
+    if not locator:
+        return None
+    return (
+        locator.get("relay_base"), locator.get("org_uuid"),
+        locator.get("persona_pub"), locator.get("serving_machine_pub"),
+    )
+
+
 def announce(
     registry_url: str,
     org_uuid: str,
@@ -265,6 +283,7 @@ class ReachabilityCache:
         roster_getter,
         advertise_addrs,
         relay_url=None,
+        relay_locator=None,
         ttl: int = 300,
         interval: float = 45.0,
         timeout: float = 3.0,
@@ -299,6 +318,12 @@ class ReachabilityCache:
         #: This machine's standing relay route to announce beside its direct
         #: addresses: a string, a callable re-read each refresh, or None.
         self._relay_url = relay_url
+        #: This machine's serving-slot relay LOCATOR for the signed descriptor
+        #: (auto-e38g4): a mapping, a callable re-read each refresh, or None.
+        #: Distinct from ``relay_url`` -- that is a standing public route, this
+        #: names the exact ``(relay_base, org_uuid, persona_pub,
+        #: serving_machine_pub)`` slot the carrier pairs with.
+        self._relay_locator = relay_locator
         self._ttl = ttl
         self._interval = interval
         self._timeout = timeout
@@ -337,7 +362,7 @@ class ReachabilityCache:
         self._worker: Optional[threading.Thread] = None
 
 
-    def _descriptor_for(self, key, advertise, wanted):
+    def _descriptor_for(self, key, advertise, wanted, locator=None):
         """This machine's signed descriptor, minting a generation only when the
         CONTENT changes.
 
@@ -346,6 +371,10 @@ class ReachabilityCache:
         generation every couple of minutes forever and make ordering churn on a
         machine whose reachability had not moved at all -- readers would see a
         stream of "newer" descriptors carrying identical addresses.
+
+        ``locator`` is this machine's serving slot (auto-e38g4). It is part of
+        *wanted*, so a slot that moves mints a new generation exactly as a
+        changed address does, and a slot that has not moved does not.
 
         A build failure returns None and the announce proceeds without a
         descriptor: the pre-descriptor announce still works, and a peer that
@@ -367,6 +396,7 @@ class ReachabilityCache:
                 machine_pub=key.public_hex,
                 addresses=advertise,
                 generation=generation,
+                relay=locator,
             )
         except Exception as exc:
             self._error(f"descriptor build failed: {exc!r}")
@@ -374,6 +404,24 @@ class ReachabilityCache:
         self._descriptor = built
         self._descriptor_for_content = wanted
         return built
+
+    def current_relay_locator(self) -> Optional[dict]:
+        """This machine's serving-slot locator right now, or None.
+
+        A getter is re-read every refresh, so a connector that completes its
+        hello after the runtime was armed fills the locator on the next
+        announce without re-arming anything. Any failure -- no connector, no
+        live tunnel, a stale generation -- is None, which per contract §6
+        makes the relay paths unavailable and leaves direct addresses alone.
+        """
+        try:
+            value = (
+                self._relay_locator() if callable(self._relay_locator)
+                else self._relay_locator
+            )
+        except Exception:
+            return None
+        return dict(value) if isinstance(value, Mapping) and value else None
 
     def advertised_addrs(self) -> list:
         """The URLs this machine currently advertises (fresh if a getter)."""
@@ -414,6 +462,33 @@ class ReachabilityCache:
             pub: h["relay_url"] for pub, h in self._hints.items()
             if h.get("relay_url")
         }
+
+    def relay_locators(self) -> dict:
+        """``{durable machine_pub: relay locator}`` for peers whose VERIFIED
+        descriptor names a serving slot (refreshing on the same throttle as
+        :meth:`peers`).
+
+        Read from ``self._hints`` rather than ``self._peers`` deliberately.
+        ``_peers`` is the DIRECT-DIAL map: a peer whose only addresses resolve
+        to this machine is dropped from it (``drop_self_reachable``), and a
+        peer that publishes no addresses at all was never in it. Those are
+        exactly the peers the relay path exists for, so keying the locator on
+        direct reachability would withhold it from everyone who needs it. Same
+        seam :meth:`relay_routes` already reads.
+
+        Every locator here came out of ``_verified_descriptor``, so the machine
+        named as the row key signed it. It remains a HINT: the carrier still
+        proves the durable peer through ``FleetAuthenticator``, and a locator
+        that names the wrong slot can only make a probe fail, never admit.
+        """
+        self._maybe_refresh()
+        out = {}
+        for pub, hint in self._hints.items():
+            descriptor = hint.get("descriptor") or {}
+            locator = descriptor.get("relay")
+            if isinstance(locator, Mapping) and locator:
+                out[pub] = dict(locator)
+        return out
 
     def announced_relay_url(self) -> Optional[str]:
         try:
@@ -502,13 +577,20 @@ class ReachabilityCache:
 
         advertise = self.advertised_addrs()
         relay_url = self.announced_relay_url()
-        wanted = (tuple(advertise), relay_url)
-        descriptor = self._descriptor_for(key, advertise, wanted)
+        locator = self.current_relay_locator()
+        wanted = (tuple(advertise), relay_url, _locator_key(locator))
+        descriptor = self._descriptor_for(key, advertise, wanted, locator)
         keepalive_due = (
             self.last_announce is None
             or (now - self.last_announce[0]) >= self._ttl / 2
         )
-        if (advertise or relay_url) and (self._announced != wanted or keepalive_due):
+        # A machine with a serving slot and no direct addresses is reachable
+        # through the relay and MUST still announce: withholding the announce
+        # would make the locator -- the only thing a peer could use -- the one
+        # thing never published. The registry accepts an empty addrs list.
+        if (advertise or relay_url or locator) and (
+            self._announced != wanted or keepalive_due
+        ):
             try:
                 announce(registry_url, org_uuid, key, cert, advertise,
                          ttl=self._ttl, relay_url=relay_url,
@@ -519,14 +601,16 @@ class ReachabilityCache:
                 self._error(None)
                 self._state(
                     "announce",
-                    "announced:" + ",".join(advertise) + "|" + (relay_url or ""),
-                    "fleet reachability announced addrs=%s relay_route=%s",
+                    "announced:" + ",".join(advertise) + "|" + (relay_url or "")
+                    + "|" + str(_locator_key(locator)),
+                    "fleet reachability announced addrs=%s relay_route=%s slot=%s",
                     advertise, bool(relay_url),
+                    (locator or {}).get("serving_machine_pub", "")[:12] or None,
                 )
             except Exception as exc:
                 # keep serving the last map; retry next interval
                 self._error(f"announce failed: {exc!r}")
-        elif not (advertise or relay_url):
+        elif not (advertise or relay_url or locator):
             self._state("announce", "nothing",
                         "fleet reachability: nothing to announce (no advertised "
                         "addresses, no standing route) -- peers cannot dial this "

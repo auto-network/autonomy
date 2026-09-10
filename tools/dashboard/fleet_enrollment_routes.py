@@ -30,6 +30,7 @@ from tools.dashboard import (
 )
 from tools.graph.db import _org_db_path
 from tools.network import (
+    fleet_descriptor,
     fleet_invite,
     fleet_relay_sync,
     fleet_runtime,
@@ -212,6 +213,77 @@ def _fleet_advertise_addrs():
 #: registry round trip.
 _reachability_cache = None
 
+#: Monotonic count of runtime activations in THIS dashboard process
+#: (auto-e38g4). Contract graph://7ed8a519-356 §5 orders the startup: cache the
+#: latest desired generation, arm the connector, wait for its hello, then
+#: publish the descriptor built from the slot it reports -- and "a late
+#: acknowledgment for an older generation cannot publish its descriptor".
+#:
+#: The connector's own instance token cannot be that fence: it is 128 random
+#: bits per process, an identity with no order, so it can say "different" but
+#: never "older". This counter is the ordered thing, and it is the dashboard's
+#: because the dashboard is what decides a new runtime is desired.
+_runtime_generation = 0
+
+
+def _serving_slot_locator():
+    """This machine's relay locator from the LIVE connector, or None.
+
+    Called by the ReachabilityCache on each refresh, off the event loop. The
+    four semantic fields come from the connector process that is actually
+    connected -- not from this dashboard's registry binding, which may have
+    been re-pointed since that connector was launched.
+
+    Returns None, never raises, on every one of: no connector provisioned, a
+    connector whose tunnel hello has not completed, a reply missing a field,
+    and a stale generation. None means the descriptor carries no locator, which
+    per contract §6 makes the relay and pre-ICE paths unavailable and leaves
+    direct addresses untouched. A locator is never fabricated to fill the gap.
+    """
+    from tools.network import fleet_personal_reachability
+
+    desired = _runtime_generation
+    try:
+        reply = link_serving_supervisor.control(
+            None, "connector-status", {}, timeout=5.0
+        )
+    except Exception:
+        return None
+    if not (isinstance(reply, dict) and reply.get("ok") and reply.get("serving")):
+        # `serving` is the connector's own `connected` event: the tunnel hello
+        # has completed and the relay has filed this slot. Publishing before
+        # that would advertise a slot no peer can pair with.
+        return None
+    if _runtime_generation != desired:
+        # A newer activation started while this round trip was in flight, so
+        # this reply describes the connector of a superseded generation. Its
+        # slot may already be gone; publishing it would mint a NEWER descriptor
+        # generation carrying an OLDER slot, and peers fence by generation --
+        # they would take the dead slot and have no way to be corrected until
+        # the content changed again.
+        return None
+    slot = reply.get("serving_slot") or {}
+    persona_pub, serving_machine_pub = slot.get("persona_pub"), slot.get("machine")
+    relay_base, org_uuid = reply.get("relay_base"), reply.get("org_uuid")
+    if not (persona_pub and serving_machine_pub and relay_base and org_uuid):
+        return None
+    try:
+        # Canonicalize the origin HERE, at the build input, and never in the
+        # verifier: normalizing untrusted bytes before checking a signature
+        # verifies a body the signer never produced
+        # (fleet_personal_reachability's rule, stated in its module docstring).
+        relay_base = fleet_personal_reachability.canonical_relay_origin(relay_base)
+    except Exception:
+        return None
+    caps = [c for c in (reply.get("accepted_caps") or []) if isinstance(c, str) and c]
+    return {
+        "relay_base": relay_base,
+        "org_uuid": org_uuid,
+        "persona_pub": persona_pub,
+        "serving_machine_pub": serving_machine_pub,
+        "capabilities": caps[:fleet_descriptor.MAX_CAPABILITIES],
+    }
+
 
 def _fleet_env_peers():
     """Manual peer map from ``AUTONOMY_FLEET_PEERS`` (machine_pub -> ws urls).
@@ -262,6 +334,11 @@ def _reachability_peer_addresses(credential, root_pub, *, pull_direct=True):
             ).keys()
         ),
         advertise_addrs=_fleet_advertise_addrs,
+        # The serving slot this machine's connector actually holds, read
+        # fresh each refresh (auto-e38g4). A connector that completes its
+        # hello minutes after this activation fills the descriptor's relay
+        # locator on the next announce with no re-arm.
+        relay_locator=_serving_slot_locator,
         # Off the event loop: a due refresh runs on its own thread and the
         # scheduler gets the last map at once (auto-8dw0w).
         background=True,
@@ -573,6 +650,12 @@ def _activate_runtime(
     if isinstance(payload, dict) and "serving_machine_private_seeds" in payload:
         payload = dict(payload)
         serving_seeds = payload.pop("serving_machine_private_seeds") or {}
+
+    # §5.1: cache the latest desired generation BEFORE anything is armed, so a
+    # locator read that is already in flight for the previous one is fenced out
+    # rather than racing this activation's connector.
+    global _runtime_generation
+    _runtime_generation += 1
 
     context = _runtime_context() if root_pub is None or expected_entry is None else None
     if context is None and (root_pub is None or expected_entry is None):

@@ -1655,6 +1655,17 @@ async def _serve_control_listener(connector, ctl_path: str,
                         # fh2nv): what a peer's directed pair names. Routing
                         # facts, not a durable fleet key.
                         "serving_slot": connector.serving_slot,
+                        # The relay origin and org that slot is filed under
+                        # (auto-e38g4). serving_slot's shape is fixed by the
+                        # carrier contract (graph://76721e75-73c) at
+                        # {persona_pub, machine} and the probe compares it as
+                        # a tuple, so these ride BESIDE it rather than inside
+                        # it. Together the four fields are the descriptor's
+                        # relay locator, and they come from the process that
+                        # is actually connected rather than from a binding
+                        # the dashboard could have re-pointed since.
+                        "relay_base": connector.relay_base,
+                        "org_uuid": connector.org,
                         # Added live 2026-08-23 while diagnosing "locked for
                         # Fleet sync" persisting across an unlock that
                         # logged no error -- lets a caller ask this exact
