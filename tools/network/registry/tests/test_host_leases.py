@@ -480,6 +480,83 @@ def test_empty_allowset_accepts_then_nonempty_enforces(
         })["ok"] is True
 
 
+def test_registering_under_the_genesis_id_leaves_enforcement_OFF(
+    app, client, clock, root,
+):
+    """The allow-set is keyed by org_uuid. A backfill run against the GENESIS
+    ID writes a row nothing reads, and the silent consequence is that the
+    transitional accept stays open -- while the backfill tool's own success
+    line reports the org now has a registered key.
+
+    This drives the consequence rather than the identifier: an unregistered
+    serving machine is still ACCEPTED after the wrong-keyed registration, and
+    refused after the right-keyed one. Nothing here inspects the tool's help
+    text; the guard it grew is exercised through its own entry point below.
+    """
+    register(client, clock, root, org_uuid=ORG)
+    store = app.state.store
+    genesis_id = "b1" * 32          # what derive_serving_machine_key takes
+    assert genesis_id != ORG
+
+    registered = KeyPair.generate()
+    store.register_serving_machine_key(
+        genesis_id, registered.public_hex, now=clock.now)
+    # The row exists -- under a key the relay never looks up.
+    assert store.registered_serving_keys(genesis_id) == {registered.public_hex}
+    assert store.registered_serving_keys(ORG) == set()
+
+    # So an UNREGISTERED serving machine is still admitted: enforcement never
+    # turned on, and nothing said so.
+    stranger = KeyPair.generate()
+    with _tunnel(client, clock, root, machine_key=stranger) as (ws, _):
+        assert _ctrl(ws, "host-register", {
+            "reservation": _reservation(PERSONA_A, "docs"),
+            "host": _host("docs", PERSONA_A),
+        })["ok"] is True
+
+    # The same registration under the org_uuid turns it on.
+    store.register_serving_machine_key(ORG, registered.public_hex, now=clock.now)
+    serve_key = KeyPair.generate()
+    with client.websocket_connect(f"/t/{ORG}") as ws:
+        ws.send_text(_hello_for(root, clock, serve_key, stranger))
+        assert ws.receive_json()["ok"] is False
+
+
+def test_the_backfill_tool_refuses_a_genesis_id(tmp_path, monkeypatch):
+    """The guard, through the tool's real entry point: a 64-hex value is a
+    genesis id and must crash rather than write a row that confirms itself."""
+    from tools.network.registry import backfill_serving_keys as backfill
+    from tools.network.registry.store import RegistryStore
+
+    db = tmp_path / "registry.db"
+    RegistryStore(str(db))
+    machine_pub = "cd" * 32
+
+    def run(org):
+        monkeypatch.setattr("sys.argv", [
+            "backfill", "--db", str(db), "--org", org,
+            "--machine", "m1", "--serving-pub", machine_pub,
+        ])
+        backfill.main()
+
+    with pytest.raises(SystemExit) as exc:
+        run("b1" * 32)
+    assert "GENESIS ID" in str(exc.value)
+    with pytest.raises(SystemExit):
+        run("anchore")
+    # Nothing was written by either refusal.
+    store = RegistryStore(str(db))
+    assert store.count_orgs_with_serving_keys() == 0
+
+    # The org_uuid form writes exactly one row, and is idempotent.
+    org_uuid = "c8e5cd04-8f19-4bc2-8951-a6b6b80b2699"
+    run(org_uuid)
+    run(org_uuid)
+    store = RegistryStore(str(db))
+    assert store.registered_serving_keys(org_uuid) == {machine_pub}
+    assert store.count_orgs_with_serving_keys() == 1
+
+
 def _hello_for(root, clock, serve_key, machine_key, persona=PERSONA_A):
     return hello_mod.build_tunnel_hello_v2(
         serve_key, _serve_cert(root, serve_key, persona),
