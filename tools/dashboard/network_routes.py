@@ -2236,10 +2236,6 @@ def _org_unlock_plan(slug: str, org: str, local_store_keys) -> dict:
     bound = bool(binding.get("org_uuid") and binding.get("root_pub")
                  and binding.get("registry_url"))
     okey = _first_member(NETWORK_ORG_KEY_SET_ID, org)
-    has_org_key = bool(okey is not None and (
-        okey.payload.get("sealed_root_key")
-        or okey.payload.get("armored_private_key")))
-    committed = bool(bound and has_org_key and org not in local_store_keys)
 
     genesis_id = None
     try:
@@ -2249,6 +2245,11 @@ def _org_unlock_plan(slug: str, org: str, local_store_keys) -> dict:
                 genesis_id = store.ledger.genesis_id
     except Exception:
         genesis_id = None
+
+    # This is the organization's ledger model, not possession of its root.
+    # Joined members and other fleet machines need persona-signed maintenance
+    # and storage delegates without the founder's non-replicated org-key row.
+    committed = bool(bound and genesis_id and org not in local_store_keys)
 
     # The SAME verdict the pre-unlock status route serves, resolved from the
     # one definition — never a re-derivation here (a simpler copy would skip

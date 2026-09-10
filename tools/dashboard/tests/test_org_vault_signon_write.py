@@ -122,7 +122,8 @@ def _run_ceremony(client, terms):
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not on PATH")
 @pytest.mark.parametrize("unavailable_org", [False, True])
-def test_root_unlock_enables_organization_channel_key_write(tmp_path, monkeypatch, unavailable_org):
+@pytest.mark.parametrize("has_org_key", [False, True])
+def test_root_unlock_enables_organization_channel_key_write(tmp_path, monkeypatch, unavailable_org, has_org_key):
     GraphDB.close_all_pooled()
     monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
@@ -197,12 +198,27 @@ def test_root_unlock_enables_organization_channel_key_write(tmp_path, monkeypatc
         )
         from tools.network.idkit.sealing import derive_encapsulation_keypair, seal
         _, owner_pub = derive_encapsulation_keypair(seed, ORG_ROOT_ARMOR_PURPOSE)
-        settings_ops.add_setting(NETWORK_ORG_KEY_SET_ID, NETWORK_ORG_KEY_REVISION_2, "default", {
+        org_key_row = settings_ops.add_setting(NETWORK_ORG_KEY_SET_ID, NETWORK_ORG_KEY_REVISION_2, "default", {
             "root_pub": organization_root.public_hex,
             "sealed_root_key": seal(bytes.fromhex(organization_root.private_hex), owner_pub,
                                     ORG_ROOT_ARMOR_PURPOSE).hex(),
             "owner_kem_pub": owner_pub, "seal_purpose": ORG_ROOT_ARMOR_PURPOSE,
         }, org=ORG)
+        if not has_org_key:
+            # A second fleet machine has the org ledger and adopted checkpoint,
+            # but does not receive the founder's identity-armor Setting.
+            settings_ops.remove_setting(org_key_row, org=ORG)
+            from tools.network.ledger import membership_commitment as mc
+            with LedgerStore(org_ledger_db_path(ORG)) as ledger:
+                state = ledger.fold()
+                adopted = mc.build_root_checkpoint(
+                    org="8a2d6c7a-498c-42ba-a4a6-b3b27a024bac", seq=0,
+                    genesis_id=founded[ORG].genesis_id, ledger_head=ledger.heads()[0],
+                    members_root_hex=mc.members_root(state),
+                    checkpointers_root_hex=mc.checkpointers_root(state),
+                    ts=int(time.time()), root=organization_root,
+                )
+            cp.record_adopted(ORG, adopted)
         settings_ops.add_setting(NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "default", {
             "org_uuid": "8a2d6c7a-498c-42ba-a4a6-b3b27a024bac",
             "root_pub": organization_root.public_hex, "registry_url": "https://registry.invalid",
@@ -246,7 +262,8 @@ def test_root_unlock_enables_organization_channel_key_write(tmp_path, monkeypatc
         }
         with TestClient(app) as client:
             _run_ceremony(client, terms)
-            assert len(checkpoints) == 1
+            expected_checkpoints = int(has_org_key)
+            assert len(checkpoints) == expected_checkpoints
             initial = org_storage_delegate.signing_key(ORG).public_hex
             with LedgerStore(org_ledger_db_path(ORG)) as ledger:
                 count = len(ledger.events())
@@ -254,7 +271,7 @@ def test_root_unlock_enables_organization_channel_key_write(tmp_path, monkeypatc
             settings_ops.set_personal_delegate_audited_key(None)
             unlock_routes._VAULT_CACHE.clear()
             _run_ceremony(client, terms)
-            assert len(checkpoints) == 1, "adopted roots suppress another checkpoint"
+            assert len(checkpoints) == expected_checkpoints, "adopted roots suppress another checkpoint"
             assert org_storage_delegate.signing_key(ORG).public_hex == initial
             with LedgerStore(org_ledger_db_path(ORG)) as ledger:
                 assert len(ledger.events()) == count
@@ -270,7 +287,7 @@ def test_root_unlock_enables_organization_channel_key_write(tmp_path, monkeypatc
             settings_ops.set_personal_delegate_audited_key(None)
             unlock_routes._VAULT_CACHE.clear()
             _run_ceremony(client, terms)
-            assert len(checkpoints) == 1, "storage delegation does not change membership"
+            assert len(checkpoints) == expected_checkpoints, "storage delegation does not change membership"
             assert org_storage_delegate.signing_key(ORG).public_hex != initial
             with LedgerStore(org_ledger_db_path(ORG)) as ledger:
                 assert len(ledger.events()) == count + 1
