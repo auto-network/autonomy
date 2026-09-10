@@ -1328,6 +1328,55 @@ def _make_ice_serving_connector(
     # signing key from the vault so the handshake is authenticated by that key
     # instead of the org-root serve cert. A link with no channel key (legacy,
     # or a cold vault at publish) resolves to None and serves the old way.
+    def _registry_membership_state():
+        """The registry's adopted checkpoint for this org: {seq, members_root}.
+
+        Read live rather than cached: the rider must be built against the
+        checkpoint the registry has ACTUALLY adopted, and a stale seq is
+        rejected at the hello with nothing to distinguish it from a forged
+        one.
+        """
+        import json as _json
+        import urllib.request
+
+        from tools.dashboard.link_approvals import _load_binding
+
+        binding, err = _load_binding(graph_org)
+        if not binding:
+            raise ConnectionError(f"no registry binding for {graph_org}: {err}")
+        url = (
+            f"{binding['registry_url'].rstrip('/')}"
+            f"/v1/orgs/{org}/membership"
+        )
+        with urllib.request.urlopen(url, timeout=10) as response:
+            return _json.loads(response.read().decode("utf-8"))
+
+    def _build_rider():
+        from tools.dashboard import membership_plane
+
+        state = _registry_membership_state()
+        return membership_plane.rider_for_org(graph_org, cert.subject.id, state)
+
+    async def _membership_rider():
+        """The v3 hello's rider. None falls back to v2, unchanged."""
+        try:
+            return await asyncio.to_thread(_build_rider)
+        except Exception as exc:
+            # Includes the contested-root refusal, which membership_plane has
+            # already raised as an operator alarm. Never raise into the
+            # handshake: a connector that cannot prove membership must keep
+            # retrying, not crash.
+            logging.getLogger(__name__).warning(
+                "membership rider unavailable for %s: %s", graph_org, exc,
+            )
+            return None
+
+    async def _membership_rider_for_seq(_seq):
+        """The pushed reprove-required answer. Rebuilt from the registry's
+        CURRENT state rather than the pushed seq: the seq is the registry
+        telling us to look again, not an input we should trust into a proof."""
+        return await _membership_rider()
+
     def _link_key_for(token):
         from tools.dashboard.link_channel_key import (
             ChannelKeyUnavailable,
@@ -1337,6 +1386,29 @@ def _make_ice_serving_connector(
             return channel_key_for(token, graph_org)
         except ChannelKeyUnavailable:
             return None
+
+    # A collaborative org's serve cert is PERSONA-signed (network-signon.mjs
+    # mints it under the org persona), and the relay anchors a hello at that
+    # persona ONLY for v3 — a v2 hello is anchored at the org root and dies
+    # with "hop 1: signature does not verify against its parent key". Which is
+    # precisely what every org connector on sjc-2 hit the moment they could
+    # start at all (2026-09-10): the cert verifies under its persona and
+    # cannot verify under the root.
+    #
+    # So an org connector must carry a membership rider. Everything that
+    # builds one already existed with no caller: membership_plane (auto-3bhy3)
+    # proves this node's persona is in the committed member set of the
+    # checkpoint the REGISTRY has adopted, and refuses — with an operator
+    # alarm — when the registry's root contradicts the local fold.
+    #
+    # The personal connector is launched WITHOUT --graph-org, so it never
+    # takes this path: its cert is root-signed by the legacy mint and its v2
+    # hello is correct until auto-tmers migrates it. Any failure here returns
+    # None, the same v2 fallback as before — a scope that cannot prove
+    # membership is not made worse by being asked.
+    if machine_key is not None and graph_org:
+        stream_kwargs["membership_proof_for"] = _membership_rider
+        stream_kwargs["on_reprove"] = _membership_rider_for_seq
 
     connector = factory(
         relay,
