@@ -13,6 +13,7 @@
     });
   }
   function icon(kind) {
+    if (kind === 'refresh') return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg>';
     if (kind === 'share') return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V3M7 8l5-5 5 5"/><path d="M5 12v8h14v-8"/></svg>';
     return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 5h5v5M19 5l-9 9"/><path d="M19 13v6H5V5h6"/></svg>';
   }
@@ -45,14 +46,35 @@
     });
   }
 
+  // Per-row status probes (auto-q5xni). The list renders instantly from the
+  // read model, then each row is asked GET /service-targets/{id}/status with
+  // bounded concurrency and a per-probe timeout, and the answer is written
+  // into the row in place. No row says Live until its public HEAD passed.
+  var PROBE_CONCURRENCY = 3, PROBE_TIMEOUT_MS = 20000;
+  function fetchWithTimeout(url, options, ms) {
+    var controller = typeof AbortController === 'function' ? new AbortController() : null;
+    options = options || {};
+    if (controller) options.signal = controller.signal;
+    var timer = controller ? setTimeout(function () { controller.abort(); }, ms) : null;
+    return request(url, options).then(function (body) { if (timer) clearTimeout(timer); return body; }, function (e) {
+      if (timer) clearTimeout(timer);
+      if (e && e.name === 'AbortError') { var err = new Error('timeout'); err.detail = 'No answer within ' + Math.round(ms / 1000) + ' seconds.'; throw err; }
+      throw e;
+    });
+  }
+
   function Controller(slug, root, data) {
     this.slug = slug; this.root = root; this.open = null; this.error = ''; this.errorDetail = '';
     this.tab = 'services'; this.shareType = 'note';
     this.domainFilter = ''; this.zoneStatus = null; this.zoneDraft = '';
+    this.status = {}; this.probing = 0; this.probeQueue = [];
     this.absorb(data);
   }
   Controller.prototype.absorb = function (data) {
     this.services = data.services || [];
+    var known = {}, self = this;
+    this.services.forEach(function (s) { known[s.reservation_id] = true; });
+    Object.keys(this.status).forEach(function (id) { if (!known[id]) delete self.status[id]; });
     this.shares = (data.shares || []).filter(function (s) { return !s.expired; });
     this.serviceWarning = data.service_warning || '';
     this.zones = data.zones || [];
@@ -105,11 +127,11 @@
   Controller.prototype.render = function () {
     var self = this;
     lastCount = this.services.length + this.shares.length;
-    var live = this.services.filter(function (s) { return s.state === 'active'; }).length;
+    var count = this.services.length;
     var shareTypes = [['note','Notes'],['design','Designs'],['present','Presents'],['mission','Missions']];
     var body = '<p class="pl-intro">Services and shared artifacts published by this organization.</p>' +
       (this.error ? '<p class="pl-error">'+esc(this.error)+(this.errorDetail?' <span style="color:#9ca3af">— '+esc(this.errorDetail)+'</span>':'')+'</p>' : '') +
-      '<div class="pl-tabs" role="tablist"><button data-tab="services" class="'+(this.tab==='services'?'on':'')+'">Services <sup class="pl-tabcount">'+live+'</sup></button><button data-tab="shares" class="'+(this.tab==='shares'?'on':'')+'">Shares <sup class="pl-tabcount">'+this.shares.length+'</sup></button></div>';
+      '<div class="pl-tabs" role="tablist"><button data-tab="services" class="'+(this.tab==='services'?'on':'')+'">Services <sup class="pl-tabcount">'+count+'</sup></button><button data-tab="shares" class="'+(this.tab==='shares'?'on':'')+'">Shares <sup class="pl-tabcount">'+this.shares.length+'</sup></button></div>';
     if (this.tab === 'services') {
       body += '<div data-panel="services">';
       if (this.serviceWarning && this.services.length) body += '<div class="pl-notice"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5M12 16.5h.01"/></svg><span>'+esc(this.serviceWarning)+'</span></div>';
@@ -135,6 +157,72 @@
     }
     this.root.innerHTML = body;
     this.bind();
+    if (this.tab === 'services') this.probeAll();
+  };
+  // The four-word vocabulary: Live, Down, Checking, Paused. Remote is a
+  // location badge, not a state -- the public HEAD verifies a link served on
+  // another machine exactly as it verifies a local one.
+  Controller.prototype.statusFor = function (s) {
+    if (s.state === 'paused') return {state: 'Paused'};
+    return this.status[s.reservation_id] || {state: 'Checking'};
+  };
+  Controller.prototype.statusHtml = function (s) {
+    var st = this.statusFor(s), word = st.state || 'Checking', cls = word.toLowerCase();
+    var html = '<div class="pl-status-area" data-role="status">' + (s.remote ? '<span class="pl-remote" title="Served by another machine">Remote</span>' : '') +
+      '<span class="pl-state ' + esc(cls) + '"><i class="pl-dot"></i>' + esc(word) + '</span></div>';
+    return html;
+  };
+  Controller.prototype.healthHtml = function (s) {
+    var st = this.statusFor(s);
+    if (st.state !== 'Down') return '<div class="pl-health" data-role="health"></div>';
+    // A Down local link names the failed stage; a remote link carries only
+    // the public verdict, because its other stages live on another machine.
+    var text = 'Down';
+    if (!s.remote && st.failed_stage) text += ' at ' + st.failed_stage;
+    if (st.detail) text += ' — ' + st.detail;
+    return '<div class="pl-health down" data-role="health">' + esc(text) + '</div>';
+  };
+  Controller.prototype.applyStatus = function (s) {
+    var card = this.root.querySelector('[data-service="' + s.reservation_id + '"]');
+    if (!card) return;
+    var area = card.querySelector('[data-role="status"]'), health = card.querySelector('[data-role="health"]');
+    if (area) area.outerHTML = this.statusHtml(s);
+    if (health) health.outerHTML = this.healthHtml(s);
+    var button = card.querySelector('[data-action="refresh"]');
+    if (button) { var busy = !!(this.status[s.reservation_id] || {}).refreshing; button.disabled = busy; button.classList.toggle('busy', busy); }
+  };
+  Controller.prototype.probeAll = function () {
+    var self = this;
+    this.services.forEach(function (s) {
+      if (s.state === 'paused') return;
+      var st = self.status[s.reservation_id];
+      if (st && (st.fresh || st.refreshing)) return;
+      if (self.probeQueue.indexOf(s.reservation_id) < 0) self.probeQueue.push(s.reservation_id);
+    });
+    this.drainProbes();
+  };
+  Controller.prototype.drainProbes = function () {
+    var self = this;
+    while (this.probing < PROBE_CONCURRENCY && this.probeQueue.length) {
+      (function (id) {
+        var s = self.services.find(function (x) { return x.reservation_id === id; });
+        if (!s) return;
+        self.probing += 1;
+        fetchWithTimeout('/api/network/service-targets/' + encodeURIComponent(id) + '/status', {headers: {'X-Graph-Org': self.slug}}, PROBE_TIMEOUT_MS)
+          .then(function (r) { self.status[id] = Object.assign({fresh: true}, r && r.status || {state: 'Down', detail: 'no status returned'}); },
+                function (e) { self.status[id] = {state: 'Down', fresh: true, detail: e && e.detail ? e.detail : (e && e.message ? e.message : 'status unavailable')}; })
+          .then(function () { self.probing -= 1; self.applyStatus(s); self.drainProbes(); });
+      })(this.probeQueue.shift());
+    }
+  };
+  Controller.prototype.refreshService = function (s) {
+    var self = this, id = s.reservation_id;
+    this.status[id] = {state: 'Checking', refreshing: true};
+    this.applyStatus(s);
+    return fetchWithTimeout('/api/network/service-targets/' + encodeURIComponent(id) + '/refresh', {method: 'POST', headers: {'X-Graph-Org': this.slug}}, 60000)
+      .then(function (r) { self.status[id] = Object.assign({fresh: true}, r && r.status || {state: 'Down', detail: 'no status returned'}); },
+            function (e) { self.status[id] = {state: 'Down', fresh: true, detail: e && e.detail ? e.detail : (e && e.message ? e.message : 'refresh failed')}; })
+      .then(function () { self.applyStatus(s); });
   };
   Controller.prototype.zonesPanel = function () {
     var self = this, open = this.open === 'zone:add';
@@ -165,7 +253,12 @@
     var options = this.domainOptions(), current = s.zone || '';
     if (!options.some(function (o) { return o.value === current; })) options.unshift({value: current, label: domain + root});
     var select = options.map(function (o) { return '<option value="'+esc(o.value)+'" '+(o.value===current?'selected':'')+'>'+esc(o.label)+'</option>'; }).join('');
-    return '<article class="pl-card" data-service="'+esc(s.reservation_id)+'"><div class="pl-row"><span class="pl-state '+(s.state==='paused'?'paused':'')+'"><i class="pl-dot"></i>'+(s.state==='paused'?'Paused':'Live')+'</span><div class="pl-session"><div class="pl-eyebrow">Hosted by</div><div class="pl-session-title">'+esc(s.session_title)+'</div><div class="pl-terminal">'+esc(s.target && s.target.session_id || 'Target unavailable')+'</div>'+(s.publisher?'<div class="pl-publisher">Published by <b>'+esc(s.publisher.display_name)+'</b>'+(s.session_local===false?' · on another member\'s machine':'')+'</div>':'')+'</div><div class="pl-hosted"><div class="pl-eyebrow">Hosted at</div><div class="pl-hostline"><span class="pl-host-app">'+esc(app)+'</span><span class="pl-host-dot">.</span><span class="pl-host-domain">'+esc(domain)+'</span>'+(root?'<span class="pl-host-root '+(short?'inline':'')+'">'+root+'</span>':'')+'</div></div><div class="pl-footer"><button class="pl-secondary" data-action="rename">Rename</button><span></span><div class="pl-pair"><button class="pl-secondary" data-action="toggle">'+(s.state==='paused'?'Resume':'Pause')+'</button><button class="pl-danger" data-action="stop">Stop</button></div><span></span><div class="pl-icons"><button class="pl-icon" data-action="share" aria-label="Share service">'+icon('share')+'</button><button class="pl-icon" data-action="visit" aria-label="Open service">'+icon('open')+'</button></div></div></div>'+
+    var busy = !!(this.status[s.reservation_id] || {}).refreshing;
+    // Refresh re-establishes the path from the machine that serves the link,
+    // so it is offered only where that machine is this one and the link is
+    // not paused (resume first).
+    var refresh = (!s.remote && s.state !== 'paused') ? '<button class="pl-icon pl-refresh '+(busy?'busy':'')+'" data-action="refresh" '+(busy?'disabled':'')+' aria-label="Refresh service" title="Re-establish and verify the public link from this machine">'+icon('refresh')+'</button>' : '';
+    return '<article class="pl-card" data-service="'+esc(s.reservation_id)+'"><div class="pl-row">'+this.statusHtml(s)+'<div class="pl-session"><div class="pl-eyebrow">Hosted by</div><div class="pl-session-title">'+esc(s.session_title)+'</div><div class="pl-terminal">'+esc(s.target && s.target.session_id || 'Target unavailable')+'</div>'+(s.publisher?'<div class="pl-publisher">Published by <b>'+esc(s.publisher.display_name)+'</b>'+(s.session_local===false?' · on another member\'s machine':'')+'</div>':'')+'</div><div class="pl-hosted"><div class="pl-eyebrow">Hosted at</div><div class="pl-hostline"><span class="pl-host-app">'+esc(app)+'</span><span class="pl-host-dot">.</span><span class="pl-host-domain">'+esc(domain)+'</span>'+(root?'<span class="pl-host-root '+(short?'inline':'')+'">'+root+'</span>':'')+'</div>'+this.healthHtml(s)+'</div><div class="pl-footer"><button class="pl-secondary" data-action="rename">Rename</button><span></span><div class="pl-pair"><button class="pl-secondary" data-action="toggle">'+(s.state==='paused'?'Resume':'Pause')+'</button><button class="pl-danger" data-action="stop">Stop</button></div><span></span><div class="pl-icons">'+refresh+'<button class="pl-icon" data-action="share" aria-label="Share service">'+icon('share')+'</button><button class="pl-icon" data-action="visit" aria-label="Open service">'+icon('open')+'</button></div></div></div>'+
       '<div class="pl-detail '+(detail==='rename'?'open':'')+'"><div class="pl-field"><label>Service hostname</label><input data-field="app" value="'+esc(s.app_label)+'"></div><div class="pl-field" style="margin-top:10px"><label>Publish under</label><select data-field="domain">'+select+'</select></div><p style="margin:8px 0 0;color:#fbbf24;font-size:11px">Changing either field creates a new public address. The current address stops after the new one is live.</p><div class="pl-formactions"><button class="pl-secondary" data-action="cancel">Cancel</button><button class="pl-primary" data-action="save">Save address</button></div></div>'+
       '<div class="pl-detail '+(detail==='stop'?'open':'')+'"><div class="pl-share-title">Stop this Service?</div><p style="margin:5px 0 0;color:#9ca3af;font-size:12px">This closes the public connection. The current address will stop working.</p><div class="pl-formactions"><button class="pl-secondary" data-action="cancel">Cancel</button><button class="pl-danger" data-action="confirm-stop">Stop Service</button></div></div></article>';
   };
@@ -227,7 +320,7 @@
       }).catch(function(e){self.zoneStatus={kind:'error',text:self.zoneReason(e)};self.render();});
     }
   };
-  Controller.prototype.refresh = function () { var self=this; return request('/api/network/published-links',{headers:{'X-Graph-Org':this.slug}}).then(function(d){self.absorb(d);self.open=null;self.error='';self.errorDetail='';self.render();}); };
+  Controller.prototype.refresh = function () { var self=this; return request('/api/network/published-links',{headers:{'X-Graph-Org':this.slug}}).then(function(d){self.absorb(d);self.status={};self.open=null;self.error='';self.errorDetail='';self.render();}); };
   Controller.prototype.serviceAction = function (action,s,card,button) {
     var self=this, url=s.origin;
     if(action==='share') return shareUrl(s.app_label,url,button).catch(function(e){self.fail(e);});
@@ -235,6 +328,7 @@
     if(action==='cancel'){this.open=null;return this.render();}
     if(action==='rename'){this.open='rename:'+s.reservation_id;return this.render();}
     if(action==='stop'){this.open='stop:'+s.reservation_id;return this.render();}
+    if(action==='refresh') return this.refreshService(s);
     if(action==='toggle') return this.transition(s,s.state==='paused'?'active':'paused');
     if(action==='confirm-stop') return this.transition(s,'released');
     if(action==='save') {

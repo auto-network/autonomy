@@ -3070,12 +3070,14 @@ async def get_published_links(request: Request) -> JSONResponse:
         for row in service_publication.list_service_targets(org)
     }
     publishers = service_publication.reservation_publishers(org)
+    local_machine = service_publication._read_local_machine_id()
     services = []
     for reservation in service_publication.list_reservations(org):
         if reservation.get("state") == "released":
             continue
         target = targets.get(reservation["reservation_id"])
         session = dashboard_db.get_session(target["session_id"]) if target else None
+        serving_machine = (target or {}).get("machine_id")
         services.append({
             **reservation,
             "target": target,
@@ -3086,6 +3088,14 @@ async def get_published_links(request: Request) -> JSONResponse:
             # it here or say it lives on another member's machine.
             "publisher": publishers.get(reservation["reservation_id"]),
             "session_local": session is not None,
+            # Where it is served (auto-q5xni). This read model says nothing
+            # about health -- "active" is a Settings fact, not a reachable
+            # link -- so the screen renders these rows instantly and then
+            # asks GET /service-targets/{id}/status per row. A row whose
+            # target is bound to another machine is Remote: a location
+            # badge the status probe honours by using the public HEAD only.
+            "serving_machine": serving_machine,
+            "remote": bool(serving_machine) and serving_machine != local_machine,
         })
 
     shares = []
@@ -3243,6 +3253,44 @@ async def check_service_target(request: Request) -> JSONResponse:
     )
 
 
+async def get_service_target_status(request: Request) -> JSONResponse:
+    """Read-only per-link status (auto-q5xni): the four-word verdict plus
+    the seven serve-path stages for a local link, the public HEAD alone for
+    a remote one. Never mutates connector, relay, or Settings state."""
+    org, refused = _service_publication_org(request)
+    if refused is not None:
+        return refused
+    from tools.dashboard import service_publication, service_status
+
+    try:
+        result = await service_status.service_status(
+            org, request.path_params.get("reservation_id", "")
+        )
+    except service_publication.ServicePublicationError as exc:
+        return _service_publication_error(exc.code, exc.status_code, exc.detail)
+    return JSONResponse({"ok": True, "status": result})
+
+
+async def post_service_target_refresh(request: Request) -> JSONResponse:
+    """Mutating (auto-q5xni): re-establish and verify the whole serve path
+    for one local link and re-declare its machine pin, reporting each
+    stage. Takes no body."""
+    org, refused = _service_publication_org(request)
+    if refused is not None:
+        return refused
+    if await request.body():
+        return _service_publication_error("unknown_fields")
+    from tools.dashboard import service_publication, service_status
+
+    try:
+        result = await service_status.refresh_service(
+            org, request.path_params.get("reservation_id", "")
+        )
+    except service_publication.ServicePublicationError as exc:
+        return _service_publication_error(exc.code, exc.status_code, exc.detail)
+    return JSONResponse({"ok": True, "status": result})
+
+
 ROUTES = [
     Route("/api/network/service-reservations", get_service_reservations, methods=["GET"]),
     Route("/api/network/service-reservations", post_service_reservation, methods=["POST"]),
@@ -3270,6 +3318,16 @@ ROUTES = [
     Route(
         "/api/network/service-targets/{reservation_id}/check",
         check_service_target,
+        methods=["POST"],
+    ),
+    Route(
+        "/api/network/service-targets/{reservation_id}/status",
+        get_service_target_status,
+        methods=["GET"],
+    ),
+    Route(
+        "/api/network/service-targets/{reservation_id}/refresh",
+        post_service_target_refresh,
         methods=["POST"],
     ),
     Route("/api/network/org-key", get_org_key, methods=["GET"]),

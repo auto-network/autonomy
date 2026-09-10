@@ -559,10 +559,23 @@ def reserve_origin(
     else:
         key = reservation_key(persona_pub, app_label)
     existing = _member_by_key(org, key)
-    if existing is not None:
-        if existing.payload.get("state") == "released":
-            raise ServicePublicationError("reservation_released", 409)
+    if existing is not None and existing.payload.get("state") != "released":
         return reservation_projection(key, existing.payload), False
+    if existing is not None:
+        # RECLAIM (auto-q5xni). Released used to be terminal: the row stayed
+        # under its key and every later publish of the same name answered
+        # reservation_released, so a name once stopped could never be used
+        # again by the organization that owns it (live 2026-09-10:
+        # re-publishing oss-insights). A released reservation now falls
+        # through to a fresh upsert under the same key -- same key because
+        # the relay derives the host lease id from it -- so the normal
+        # publish overwrites it whole: new created_at, no released_at, and
+        # the connector mints a new lease when the target is bound. The old
+        # target row is dropped so the reclaimed name starts unbound instead
+        # of inheriting a container that was released with it.
+        stale_target = _target_member_by_key(org, key)
+        if stale_target is not None:
+            settings_ops.remove_setting(stale_target.id, org=org)
     now = _utc_now()
     payload = {
         "persona_pub": persona_pub,

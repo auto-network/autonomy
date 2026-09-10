@@ -152,3 +152,18 @@ def test_renewed_shortfall_triggers_full_reregistration(monkeypatch):
     registers = [c for c in calls if c[0] == "host-register"]
     # 2 at connect + 2 repair re-registrations after the shortfall reply.
     assert len(registers) == 4
+
+
+def test_host_leases_view_pairs_desired_hosts_with_held_leases():
+    """auto-q5xni: the read-only view per-link status consumes. A desired
+    host with no lease on this connection reads leased=False, never absent,
+    so "registered on the next tunnel" is distinguishable from "unknown"."""
+    conn = _connector()
+    conn._desired_hosts = {"r-1": "one.example", "r-2": "two.example"}
+    conn._desired_machines = {"r-1": "bb" * 32}
+    conn._host_leases = {"r-1": {"generation": 3, "expires_at": 1_000_600}}
+    assert conn.host_leases == {
+        "r-1": {"host": "one.example", "machine": "bb" * 32, "generation": 3,
+                "expires_at": 1_000_600, "leased": True},
+        "r-2": {"host": "two.example", "leased": False},
+    }

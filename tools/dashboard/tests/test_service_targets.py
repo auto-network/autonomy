@@ -295,6 +295,38 @@ class TestServiceTargetApiContract:
         assert active["session_title"] == "session-a"
         assert active["target"]["session_id"] == "session-a"
         assert "container_id" not in active["target"]
+        # auto-q5xni: where it is served, and whether that is here. The read
+        # model carries no health verdict at all -- that is the status route.
+        assert active["serving_machine"] == MACHINE_ID
+        assert active["remote"] is False
+        assert "status" not in active
+        paused = next(
+            row for row in payload["services"]
+            if row["reservation_id"] == PAUSED_ID
+        )
+        assert paused["serving_machine"] is None
+        assert paused["remote"] is False
+
+    def test_published_links_marks_a_target_bound_elsewhere_remote(self, target_api):
+        client, _events, *_ = target_api
+        settings_ops.upsert_by_key(
+            TARGET_SET_ID, REVISION, ACTIVE_ID,
+            {
+                "machine_id": "ff" * 32, "session_id": "elsewhere-session",
+                "container_id": "ee" * 32, "port": 9000,
+                "created_at": "2026-09-10T00:00:00.000Z",
+                "updated_at": "2026-09-10T00:00:00.000Z",
+            },
+            org="acme",
+        )
+        payload = client.get("/api/network/published-links", headers=_headers()).json()
+        active = next(
+            row for row in payload["services"]
+            if row["reservation_id"] == ACTIVE_ID
+        )
+        assert active["serving_machine"] == "ff" * 32
+        assert active["remote"] is True
+        assert active["session_local"] is False
 
     @pytest.mark.parametrize(
         ("headers", "cookies", "status"),
@@ -326,6 +358,9 @@ class TestServiceTargetApiContract:
         projection = created.json()["target"]
         assert projection == {
             "reservation_id": ACTIVE_ID,
+            # Carried since 04e56c0d: the binding to a machine IS the row's
+            # meaning (see target_projection).
+            "machine_id": MACHINE_ID,
             "session_id": "session-a",
             "port": 8000,
             "created_at": "2026-08-30T12:00:00.000Z",

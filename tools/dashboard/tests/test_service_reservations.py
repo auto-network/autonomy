@@ -273,8 +273,23 @@ def test_duplicate_and_complete_lifecycle_matrix_is_idempotent(reservation_api):
 
     _error(_state(client, reservation_id, "active"), 409, "reservation_released")
     _error(_state(client, reservation_id, "paused"), 409, "reservation_released")
-    _error(_reserve(client, "port-8000"), 409, "reservation_released")
     assert len(events) == 4
+
+    # RECLAIM (auto-q5xni): released is not terminal. The normal publish of
+    # the same name overwrites the released row whole under the SAME key
+    # (the relay derives the host lease id from it): a fresh created_at, an
+    # active state, and no released_at survive from the old row.
+    reclaimed = _reserve(client, "port-8000")
+    assert reclaimed.status_code == 201, reclaimed.text
+    row = reclaimed.json()["reservation"]
+    assert row["reservation_id"] == reservation_id
+    assert row["state"] == "active"
+    assert "released_at" not in row
+    assert row["created_at"] > created.json()["reservation"]["created_at"]
+    assert row["created_at"] == row["updated_at"]
+    assert len(events) == 5
+    assert _reserve(client, "port-8000").status_code == 200
+    assert len(events) == 5
 
     direct = _reserve(client, "direct-release")
     direct_id = direct.json()["reservation"]["reservation_id"]
@@ -285,7 +300,34 @@ def test_duplicate_and_complete_lifecycle_matrix_is_idempotent(reservation_api):
     assert direct_released.json()["reservation"]["released_at"] == (
         direct_released.json()["reservation"]["updated_at"]
     )
-    assert len(events) == 7
+    assert len(events) == 8
+
+
+def test_reclaiming_a_released_name_drops_its_stale_target(reservation_api):
+    """The reclaimed name starts unbound: the container released with it is
+    not inherited, so the gateway never leases a hostname to a dead target."""
+    importlib.import_module("tools.graph.schemas.service_target")
+    client, _events = reservation_api
+    reservation_id = _reserve(client, "oss-insights").json()["reservation"]["reservation_id"]
+    settings_ops.upsert_by_key(
+        "autonomy.network.service-target", 1, reservation_id,
+        {
+            "machine_id": "aa" * 32, "session_id": "session-a",
+            "container_id": "bb" * 32, "port": 8000,
+            "created_at": "2026-09-10T00:00:00.000Z",
+            "updated_at": "2026-09-10T00:00:00.000Z",
+        },
+        org="acme",
+    )
+    assert _state(client, reservation_id, "released").status_code == 200
+    targets = settings_ops.read_owned_set("autonomy.network.service-target", org="acme").members
+    assert [m.key for m in targets] == [reservation_id]
+
+    reclaimed = _reserve(client, "oss-insights")
+    assert reclaimed.status_code == 201, reclaimed.text
+    assert reclaimed.json()["reservation"]["state"] == "active"
+    targets = settings_ops.read_owned_set("autonomy.network.service-target", org="acme").members
+    assert [m.key for m in targets] == []
 
 
 def test_lifecycle_preserves_product_reference_and_sibling(reservation_api):
