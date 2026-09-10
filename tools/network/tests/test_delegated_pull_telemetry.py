@@ -4,10 +4,12 @@ Both processes write the same machine-homed telemetry store, and the key is
 (peer, channel, direction, scope) — an upsert. So a row from the DELEGATING
 side can only be wrong in one of two ways: under channel "relay" it would
 overwrite the connector's real measurements with zero bytes, and under
-"direct" it refreshes the direct key's ``last_outcome`` and
-``last_success_at_ns`` for a pull direct had just failed to carry — which is
-exactly what ``fleet_sync_telemetry.direct_is_carrying`` reads to decide that
-relay pulls are redundant.
+"direct" it credits that key with a success and refreshes its
+``last_outcome`` and ``last_success_at_ns`` for a pull direct had just failed to
+carry, so the direct channel's readout claims successes that never happened.
+``fleet_sync_telemetry.direct_pull_fresh`` is built on exactly those two fields
+to let a relay loop defer to a working direct path; it has no production caller
+today, so this corrupted the readout rather than misrouting anything live.
 
 Found by auto-0909-161758 reviewing auto-ew9wf.
 """
