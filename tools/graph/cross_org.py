@@ -37,7 +37,12 @@ from typing import Any, Iterable
 
 from tools.data_paths import resolve_orgs_root
 
-from .db import GraphDB, GraphDBNotReady, resolve_caller_db_path
+from .db import (
+    GraphDB,
+    GraphDBNotReady,
+    is_org_slug,
+    resolve_caller_db_path,
+)
 
 
 # Public so tests can import and assert against it.
@@ -80,9 +85,47 @@ def list_org_slugs(*, root: Path | str | None = None) -> list[str]:
     # beside this directory, not in it — and until the one-time relocation
     # has run on an older tree, a file still sitting here is STILL not an
     # organization, so enumeration never yields one either way.
-    return sorted(
-        p.stem for p in d.glob("*.db") if p.stem not in LOCAL_STORE_SLUGS
-    )
+    #
+    # AND A FILENAME THAT IS NOT A SLUG IS NOT AN ORGANIZATION EITHER. This
+    # function's own docstring says cross-org reads "treat filename as slug
+    # truth", and nothing checked the filename. On home that made a stray
+    # `orgs/2d4b90cb-1e89-452b-82cb-68ca44fd8e52.db` — a uuid where a slug
+    # belonged — a first-class PEER of every org on the box, sorting FIRST in
+    # every peer list because digits precede letters. That is how it acquired
+    # seventy settings and fleet_sync_catalog rows: it was enumerated, read,
+    # and written through on every cross-org resolution. Root cause traced by
+    # host-0906-222509, 2026-09-10, who proved it in-process:
+    #     resolve_peers('anchore', None) ->
+    #         ['2d4b90cb-1e89-452b-82cb-68ca44fd8e52', 'autonomy', ...]
+    #
+    # Filtered rather than raised, deliberately: this runs on the startup path
+    # through SessionMonitor._broadcast_registry, and a raise there stopped
+    # home from starting a new worker at all. A stray file in a data directory
+    # must not be able to do that. Dropping is also safe in the wrong
+    # direction — if this ever excluded a real org the symptom is a missing
+    # peer, not a dead process — so anything dropped is named once.
+    dropped = []
+    slugs = []
+    for path in sorted(d.glob("*.db")):
+        stem = path.stem
+        if stem in LOCAL_STORE_SLUGS:
+            continue
+        if not is_org_slug(stem):
+            dropped.append(stem)
+            continue
+        slugs.append(stem)
+    for stem in dropped:
+        if stem not in _UNUSABLE_PEERS:
+            _UNUSABLE_PEERS.add(stem)
+            _logger.warning(
+                "cross-org: %s.db is in the orgs directory but %r is not an "
+                "organization slug, so it is NOT a peer. THE CONTENTS OF THIS "
+                "DIRECTORY ARE THE REGISTRY — a database named by org_uuid "
+                "instead of slug was previously enumerated as a first-class "
+                "peer of every org here and replicated into. Remove or rename "
+                "the file (auto-kou68).", stem, stem,
+            )
+    return slugs
 
 
 def all_store_slugs(*, root: Path | str | None = None) -> list[str]:
@@ -314,11 +357,21 @@ def open_peer_db(slug: str) -> GraphDB | None:
         # entry work and entrench it.
         if slug not in _UNUSABLE_PEERS:
             _UNUSABLE_PEERS.add(slug)
+            # WORDING MATTERS HERE and the first version got it wrong. It
+            # said "fix the subscription row", and there is no subscription
+            # row: autonomy.org.peer-subscription has ZERO rows in every store
+            # on home — personal, machine and all nine org databases — so every
+            # read takes resolve_peers precedence 3, "every other org slug
+            # under data/orgs/*.db", and the peer list is built from FILENAMES.
+            # Measured by host-0906-222509, 2026-09-10. A message sending its
+            # reader to hunt a Setting that does not exist is the same defect as
+            # the comment that started this whole thread.
             _logger.warning(
                 "cross-org: skipping peer %r — it is not a usable organization "
-                "slug (%s). The peer list carries an identifier no database can "
-                "be named by; fix the subscription row. Reads continue without "
-                "this peer.", slug, exc,
+                "slug (%s). The peer list is built from the filenames in "
+                "data/orgs/; something minted a database named by org_uuid "
+                "instead of slug. Remove or rename that file (auto-kou68). "
+                "Reads continue without this peer.", slug, exc,
             )
         return None
 
