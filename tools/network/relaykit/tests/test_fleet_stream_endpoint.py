@@ -32,6 +32,7 @@ from tools.network.relaykit.stream_wire import (
 
 PERSONA = "ab" * 32
 MACHINE_A, MACHINE_B = "11" * 32, "22" * 32
+FRAME = 65536          # one DATA frame: the smallest window the wire admits
 
 
 class LoopbackRelay:
@@ -110,10 +111,10 @@ async def accept_all(endpoint):
 
 
 async def connected(relay, **kwargs):
-    a = relay.attach("A", window_bytes=kwargs.pop("a_bytes", 1000),
+    a = relay.attach("A", window_bytes=kwargs.pop("a_bytes", 4 * FRAME),
                      window_slots=kwargs.pop("a_slots", 8))
     b = relay.attach("B", on_offer=accept_all,
-                     window_bytes=kwargs.pop("b_bytes", 1000),
+                     window_bytes=kwargs.pop("b_bytes", 4 * FRAME),
                      window_slots=kwargs.pop("b_slots", 8))
     src = await a.open(PERSONA, MACHINE_B, claimed_machine_pub="33" * 32, **kwargs)
     dst = await asyncio.wait_for(b.accepted.get(), 1)
@@ -131,7 +132,7 @@ async def test_open_returns_at_ready_with_one_session_bound_on_both_ends():
     assert dst.claimed_machine_pub == "33" * 32 and src.claimed_machine_pub is None
     assert dst.peer_machine == MACHINE_A and src.peer_machine == MACHINE_B
     # Each end's send window is the PEER's offer.
-    assert (src.send_window.bytes, src.send_window.slots) == (1000, 8)
+    assert (src.send_window.bytes, src.send_window.slots) == (4 * FRAME, 8)
 
 
 @pytest.mark.asyncio
@@ -153,10 +154,10 @@ async def test_messages_larger_than_a_frame_are_split_and_reassembled():
 @pytest.mark.asyncio
 async def test_credit_is_issued_only_inside_recv_so_a_stalled_reader_stops_the_sender():
     relay = LoopbackRelay()
-    a, b, src, dst = await connected(relay, b_bytes=200, b_slots=2)
+    a, b, src, dst = await connected(relay, b_bytes=FRAME, b_slots=2)
     await src.send(b"x" * 90)                       # frame 1: 94 bytes
     await src.send(b"y" * 90)                       # frame 2: 94 bytes
-    assert (src.send_window.bytes, src.send_window.slots) == (12, 0)
+    assert (src.send_window.bytes, src.send_window.slots) == (FRAME - 188, 0)
     third = asyncio.create_task(src.send(b"z"))
     await asyncio.sleep(0.05)
     assert not third.done()                         # zero slots: waits, no reset
@@ -265,7 +266,7 @@ async def test_an_unsolicited_source_open_is_refused():
 @pytest.mark.asyncio
 async def test_data_beyond_the_offered_window_is_a_protocol_reset():
     relay = LoopbackRelay()
-    a, b, src, dst = await connected(relay, b_bytes=100, b_slots=1)
+    a, b, src, dst = await connected(relay, b_bytes=FRAME, b_slots=1)
     # Bypass the sender's own window: a relay that forwards more than the
     # receiver offered is misbehaving, and the receiver must not retain it.
     b.dispatch_data(dst.channel_id, b"q" * 60)
@@ -334,7 +335,7 @@ class ManualRelay:
     def ready(self):
         self.adapter.dispatch_ctrl(self.channel, build_fleet_ready(
             pair_id=self.pair_id, source_nonce=self.nonce,
-            destination_nonce="00" * 16, bytes_=1000, slots=8))
+            destination_nonce="00" * 16, bytes_=4 * FRAME, slots=8))
 
     def controls(self):
         return [parse_fleet_ctrl(p) for t, c, p in self.sent if t == FRAME_STREAM_CTRL]

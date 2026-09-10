@@ -62,6 +62,14 @@ FLEET_STREAM_KIND = "fleet-stream"
 #: Env: AUTONOMY_FLEET_STREAM_WINDOW_BYTES / _SLOTS.
 FLEET_STREAM_WINDOW_BYTES = _env_int("AUTONOMY_FLEET_STREAM_WINDOW_BYTES", 256 * 1024)
 FLEET_STREAM_WINDOW_SLOTS = _env_int("AUTONOMY_FLEET_STREAM_WINDOW_SLOTS", 32)
+#: The least a leg may offer: one full DATA frame and one slot. The sender
+#: chunks at STREAM_MAX_DATA and a frame must fit the grant whole, so an
+#: offer below one frame can never carry a message larger than itself — the
+#: sender waits for credit that cannot come and nothing resets (auto-mmxw0:
+#: a 4 KiB offer stalled a 256 KiB row silently for 60 s and surfaced as the
+#: PEER's silence). The wire refuses such an offer by name instead.
+FLEET_STREAM_MIN_WINDOW_BYTES = STREAM_MAX_DATA
+FLEET_STREAM_MIN_WINDOW_SLOTS = 1
 #: The most a leg may offer; the relay refuses larger open-oks because the
 #: offer is what bounds relay custody for that direction.
 FLEET_STREAM_MAX_WINDOW_BYTES = 1024 * 1024
@@ -97,11 +105,36 @@ def _window(value: object, what: str) -> tuple[int, int]:
         or set(value) != {"bytes", "slots"}
         or type(value["bytes"]) is not int
         or type(value["slots"]) is not int
-        or not 0 < value["bytes"] <= FLEET_STREAM_MAX_WINDOW_BYTES
-        or not 0 < value["slots"] <= FLEET_STREAM_MAX_WINDOW_SLOTS
     ):
         raise StreamProtocolError(f"malformed {what} window")
+    if not FLEET_STREAM_MIN_WINDOW_BYTES <= value["bytes"] <= FLEET_STREAM_MAX_WINDOW_BYTES:
+        raise StreamProtocolError(
+            f"{what} window of {value['bytes']} bytes is outside "
+            f"[{FLEET_STREAM_MIN_WINDOW_BYTES}, {FLEET_STREAM_MAX_WINDOW_BYTES}]: "
+            "an offer below one frame can never carry a frame"
+        )
+    if not FLEET_STREAM_MIN_WINDOW_SLOTS <= value["slots"] <= FLEET_STREAM_MAX_WINDOW_SLOTS:
+        raise StreamProtocolError(f"{what} window slots out of range")
     return value["bytes"], value["slots"]
+
+
+def check_offer(window_bytes: int, window_slots: int, *, source: str = "window") -> None:
+    """Refuse an unsatisfiable receive offer LOUDLY at construction, naming
+    where the value came from, rather than letting it reach the wire where
+    the peer's parser refuses it and the pair resets with a bare code."""
+    if not FLEET_STREAM_MIN_WINDOW_BYTES <= int(window_bytes) <= FLEET_STREAM_MAX_WINDOW_BYTES:
+        raise ValueError(
+            f"{source}: a fleet stream receive window must be between "
+            f"{FLEET_STREAM_MIN_WINDOW_BYTES} and {FLEET_STREAM_MAX_WINDOW_BYTES} "
+            f"bytes (one DATA frame to the maximum offer); got {window_bytes}. "
+            "AUTONOMY_FLEET_STREAM_WINDOW_BYTES below one frame stalls every "
+            "transfer on this machine."
+        )
+    if not FLEET_STREAM_MIN_WINDOW_SLOTS <= int(window_slots) <= FLEET_STREAM_MAX_WINDOW_SLOTS:
+        raise ValueError(
+            f"{source}: receive window slots must be between "
+            f"{FLEET_STREAM_MIN_WINDOW_SLOTS} and {FLEET_STREAM_MAX_WINDOW_SLOTS}; got {window_slots}"
+        )
 
 
 # -- the source's request: a control op, not a frame ------------------------

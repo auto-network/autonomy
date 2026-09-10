@@ -94,13 +94,13 @@ def test_fleet_open_rejects_unknown_roles_and_shapes():
 
 
 def test_fleet_controls_round_trip_with_byte_and_slot_windows():
-    ok = fw.parse_fleet_ctrl(fw.build_fleet_open_ok(nonce=NONCE, bytes_=4096, slots=8))
+    ok = fw.parse_fleet_ctrl(fw.build_fleet_open_ok(nonce=NONCE, bytes_=65536, slots=8))
     assert ok == {"op": "fleet-open-ok", "v": 1, "nonce": NONCE,
-                  "window": {"bytes": 4096, "slots": 8}}
+                  "window": {"bytes": 65536, "slots": 8}}
     ready = fw.parse_fleet_ctrl(fw.build_fleet_ready(
         pair_id=PAIR, source_nonce=NONCE, destination_nonce="00" * 16,
-        bytes_=1024, slots=2))
-    assert ready["window"] == {"bytes": 1024, "slots": 2}
+        bytes_=131072, slots=2))
+    assert ready["window"] == {"bytes": 131072, "slots": 2}
     credit = fw.parse_fleet_ctrl(fw.build_fleet_credit(bytes_=300, slots=3))
     assert credit == {"op": "fleet-credit", "bytes": 300, "slots": 3}
     assert fw.parse_fleet_ctrl(b'{"op": "eof"}') == {"op": "eof"}
@@ -116,15 +116,41 @@ def test_fleet_controls_round_trip_with_byte_and_slot_windows():
     b'{"op": "fleet-credit", "bytes": 2, "slots": 0}',
     b'{"op": "fleet-credit", "bytes": 2.0, "slots": 1}',
     b'{"op": "fleet-open-ok", "v": 1, "nonce": "%s", "window": {"bytes": 0, "slots": 1}}' % NONCE.encode(),
-    b'{"op": "fleet-open-ok", "v": 1, "nonce": "%s", "window": {"bytes": 10, "slots": 100000}}' % NONCE.encode(),
-    b'{"op": "fleet-open-ok", "v": 2, "nonce": "%s", "window": {"bytes": 10, "slots": 1}}' % NONCE.encode(),
-    b'{"op": "fleet-ready", "pair_id": "x", "source_nonce": "%s", "destination_nonce": "%s", "window": {"bytes": 1, "slots": 1}}' % (NONCE.encode(), NONCE.encode()),
+    b'{"op": "fleet-open-ok", "v": 1, "nonce": "%s", "window": {"bytes": 65536, "slots": 100000}}' % NONCE.encode(),
+    b'{"op": "fleet-open-ok", "v": 2, "nonce": "%s", "window": {"bytes": 65536, "slots": 1}}' % NONCE.encode(),
+    b'{"op": "fleet-ready", "pair_id": "x", "source_nonce": "%s", "destination_nonce": "%s", "window": {"bytes": 65536, "slots": 1}}' % (NONCE.encode(), NONCE.encode()),
     b'{"op": "reset", "code": 99}',
     b'{"op": "eof", "extra": 1}',
 ])
 def test_malformed_fleet_controls_are_refused(raw):
     with pytest.raises(StreamProtocolError):
         fw.parse_fleet_ctrl(raw)
+
+
+@pytest.mark.parametrize("bytes_", [1, 4096, fw.FLEET_STREAM_MIN_WINDOW_BYTES - 1])
+def test_an_offer_below_one_frame_is_refused_by_name_on_the_wire(bytes_):
+    """auto-mmxw0: a receive window smaller than one DATA frame cannot carry
+    a frame, so a sender chunking at the frame size waits forever. The wire
+    refuses the offer instead of letting the pair stall silently."""
+    raw = fw.build_fleet_open_ok(nonce=NONCE, bytes_=bytes_, slots=2)
+    with pytest.raises(StreamProtocolError, match="below one frame"):
+        fw.parse_fleet_ctrl(raw)
+    ready = fw.build_fleet_ready(pair_id=PAIR, source_nonce=NONCE,
+                                 destination_nonce="00" * 16, bytes_=bytes_, slots=2)
+    with pytest.raises(StreamProtocolError):
+        fw.parse_fleet_ctrl(ready)
+    # Exactly one frame is the floor and is satisfiable.
+    ok = fw.parse_fleet_ctrl(fw.build_fleet_open_ok(
+        nonce=NONCE, bytes_=fw.FLEET_STREAM_MIN_WINDOW_BYTES, slots=1))
+    assert ok["window"] == {"bytes": fw.FLEET_STREAM_MIN_WINDOW_BYTES, "slots": 1}
+
+
+def test_check_offer_names_the_knob_and_the_floor():
+    with pytest.raises(ValueError, match="AUTONOMY_FLEET_STREAM_WINDOW_BYTES"):
+        fw.check_offer(4096, 2, source="FleetStreamAdapter")
+    with pytest.raises(ValueError, match="slots"):
+        fw.check_offer(fw.FLEET_STREAM_MIN_WINDOW_BYTES, 0)
+    fw.check_offer(fw.FLEET_STREAM_MIN_WINDOW_BYTES, 1)
 
 
 def test_public_tls_stream_parser_still_refuses_fleet_ops():
