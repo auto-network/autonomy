@@ -32,12 +32,16 @@ def organization_plans():
     for ref in org_ops.list_orgs():
         if ref.slug in LOCAL_STORE_KEYS:
             continue
-        entry = network_routes._org_unlock_plan(ref.slug, ref.slug, LOCAL_STORE_KEYS)
-        if not entry.get("committed_membership_org") or not entry.get("genesis_id"):
-            continue
-        persona_pub = org_ops.persona_pub_for_org(entry["genesis_id"])
-        if persona_pub:
-            yield entry, persona_pub
+        try:
+            entry = network_routes._org_unlock_plan(ref.slug, ref.slug, LOCAL_STORE_KEYS)
+            if not entry.get("committed_membership_org") or not entry.get("genesis_id"):
+                continue
+            persona_pub = org_ops.persona_pub_for_org(entry["genesis_id"])
+            if persona_pub:
+                yield entry, persona_pub
+        except Exception:
+            logger.exception("sign-in organization preparation unavailable: %s", ref.slug)
+            yield {"slug": ref.slug, "error": "organization-preparation-unavailable"}, None
 
 
 def collect():
@@ -46,35 +50,59 @@ def collect():
                                  vault_routes, org_storage_delegate)
 
     personal = identity_routes._personal_member()
-    vault = _body(unlock_routes.personal_vault_recovery())
-    vault.update(root_pub=personal.payload["root_pub"],
-                 inventory=vault_routes.root_anchor_inventory())
-    runtime = _body(fleet.runtime_preparation())
-    _, recovery, delivery = fleet._local_completion_state()
+    try:
+        vault = _body(unlock_routes.personal_vault_recovery())
+        vault.update(root_pub=personal.payload["root_pub"],
+                     inventory=vault_routes.root_anchor_inventory())
+    except Exception:
+        logger.exception("sign-in vault preparation unavailable")
+        vault = {"error": "recovery-unavailable"}
+    try:
+        runtime = _body(fleet.runtime_preparation())
+    except Exception:
+        logger.exception("sign-in fleet runtime preparation unavailable")
+        runtime = {"error": "runtime-status-unreadable"}
     completion = None
-    if recovery is not None and delivery is not None:
-        completion = {"request_id": recovery.request_id,
-                      "request": recovery.request.to_dict(),
-                      "channel_binding": recovery.channel_binding,
-                      "approval": delivery.approval.to_dict(),
-                      "roster_entry": delivery.roster_entry.to_dict()}
+    try:
+        _, recovery, delivery = fleet._local_completion_state()
+        if recovery is not None and delivery is not None:
+            completion = {"request_id": recovery.request_id,
+                          "request": recovery.request.to_dict(),
+                          "channel_binding": recovery.channel_binding,
+                          "approval": delivery.approval.to_dict(),
+                          "roster_entry": delivery.roster_entry.to_dict()}
+    except Exception:
+        logger.exception("sign-in fleet completion preparation unavailable")
+        completion = {"error": "fleet-completion-unavailable"}
     organizations = []
     for entry, persona_pub in organization_plans():
         org = entry["slug"]
-        entry["storage_delegate"] = org_storage_delegate.prepare(org)
-        okey = network_routes._first_member(NETWORK_ORG_KEY_SET_ID, org)
-        entry["org_key"] = okey.payload if okey else None
-        entry["checkpoint_work"] = None
-        if entry["checkpoint"]["needed"]:
-            decision = membership_checkpoint.checkpoint_due(org, persona_pub,
-                ts=int(time.time()), genesis_id=entry["genesis_id"], org_uuid=entry["org_uuid"])
-            if decision.action == "assemble":
-                entry["checkpoint_work"] = {"record": decision.record, "sign_with": decision.sign_with}
+        if entry.get("error"):
+            organizations.append(entry)
+            continue
+        try:
+            entry["storage_delegate"] = org_storage_delegate.prepare(org)
+            okey = network_routes._first_member(NETWORK_ORG_KEY_SET_ID, org)
+            entry["org_key"] = okey.payload if okey else None
+            entry["checkpoint_work"] = None
+            if entry["checkpoint"]["needed"]:
+                decision = membership_checkpoint.checkpoint_due(org, persona_pub,
+                    ts=int(time.time()), genesis_id=entry["genesis_id"], org_uuid=entry["org_uuid"])
+                if decision.action == "assemble":
+                    entry["checkpoint_work"] = {"record": decision.record, "sign_with": decision.sign_with}
+        except Exception:
+            logger.exception("sign-in organization preparation unavailable: %s", org)
+            entry = {"slug": org, "error": "organization-preparation-unavailable"}
         organizations.append(entry)
     # A personal serving certificate status read is local and needs no signer.
     from tools.dashboard.link_serving_supervisor import serve_cert_state
+    try:
+        personal_serve = serve_cert_state(None)
+    except Exception:
+        logger.exception("sign-in personal serving preparation unavailable")
+        personal_serve = {"error": "serving-status-unreadable"}
     return {"vault": vault, "runtime": runtime, "completion": completion,
-            "personal_serve": serve_cert_state(None), "organizations": organizations}
+            "personal_serve": personal_serve, "organizations": organizations}
 
 
 async def get_preparation(request):

@@ -40,6 +40,8 @@ const STEP_LABELS = {
   'serve-cert': 'the serving certificate was not renewed',
   'binding': 'the registry binding was not renewed',
   'rekey': 'the organization key was not rotated',
+  'organization-preparation': 'the organization could not be prepared for unlock',
+  'fleet': 'fleet sign-in work did not complete',
 };
 
 //: What it costs the operator until the step succeeds.
@@ -49,11 +51,17 @@ const STEP_CONSEQUENCES = {
   'serve-cert': 'Serving keeps running on the existing certificate until it expires.',
   'binding': 'The registry binding keeps counting down to expiry.',
   'rekey': 'The organization key stays on its current generation.',
+  'organization-preparation': 'This organization’s storage key and sign-in maintenance were not prepared.',
+  'fleet': 'Fleet access was not renewed by this sign-in.',
 };
 
 //: Reason-slug prefix -> phrase. Longest-meaningful first: 'personal-root-public-key'
 //: must win over 'personal-root'.
 const REASON_PHRASES = [
+  ['organization-preparation', 'the organization’s sign-in inputs could not be read'],
+  ['runtime-status', 'the fleet runtime context could not be read'],
+  ['fleet-completion', 'the fleet enrollment context could not be read'],
+  ['serving-status', 'the serving credential status could not be read'],
   ['anchor-inventory', 'the vault anchor inventory could not be read'],
   ['personal-root-public-key', 'the personal identity record has no root public key'],
   ['personal-root', 'the personal identity record could not be read'],

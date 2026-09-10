@@ -43,13 +43,21 @@ import { createInterface } from 'node:readline';
 const input = createInterface({ input: process.stdin })[Symbol.asyncIterator]();
 const terms = JSON.parse((await input.next()).value);
 let rootOpen = false;
-async function fetchImpl(url, options = {}) {
+let transportQueue = Promise.resolve();
+function fetchImpl(url, options = {}) {
   if (rootOpen) throw new Error('network while root is open');
-  process.stdout.write(JSON.stringify({url, method: options.method || 'GET',
-    headers: options.headers || {}, body: options.body || null}) + '\n');
-  const response = JSON.parse((await input.next()).value);
-  return { status: response.status, ok: response.status < 300,
-    json: async () => response.body };
+  // The test's single JSON-lines pipe has one response reader. Serialize
+  // diagnostic and handoff requests so fire-and-forget reporting cannot
+  // consume the next request's reply or fill Python's text read buffer.
+  const pending = transportQueue.then(async () => {
+    process.stdout.write(JSON.stringify({url, method: options.method || 'GET',
+      headers: options.headers || {}, body: options.body || null}) + '\n');
+    const response = JSON.parse((await input.next()).value);
+    return { status: response.status, ok: response.status < 300,
+      json: async () => response.body };
+  });
+  transportQueue = pending.catch(() => {});
+  return pending;
 }
 globalThis.window = { fetch: fetchImpl };
 await import(terms.signonModule);
@@ -113,7 +121,8 @@ def _run_ceremony(client, terms):
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not on PATH")
-def test_root_unlock_enables_organization_channel_key_write(tmp_path, monkeypatch):
+@pytest.mark.parametrize("unavailable_org", [False, True])
+def test_root_unlock_enables_organization_channel_key_write(tmp_path, monkeypatch, unavailable_org):
     GraphDB.close_all_pooled()
     monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
@@ -155,6 +164,9 @@ def test_root_unlock_enables_organization_channel_key_write(tmp_path, monkeypatc
                 "governance": {"form": "root-reachable"},
             }]})
 
+        async def reported_failure(request):
+            return JSONResponse({"ok": True})
+
         from tools.dashboard import membership_checkpoint as cp
         from tools.network.ledger.membership_commitment import validate_checkpoint
         checkpoints = []
@@ -170,6 +182,7 @@ def test_root_unlock_enables_organization_channel_key_write(tmp_path, monkeypatc
 
         app = Starlette(routes=[
             Route("/api/identity/unlock/preparation", signon_preparation.get_preparation),
+            Route("/api/identity/ceremony-error", reported_failure, methods=["POST"]),
             Route("/api/identity/vault-anchors", existing_personal_class),
             Route("/api/network/ledger/heads", network_routes.get_ledger_heads),
             Route("/api/network/ledger/delegate", network_routes.post_ledger_delegate, methods=["POST"]),
@@ -220,6 +233,12 @@ def test_root_unlock_enables_organization_channel_key_write(tmp_path, monkeypatc
         monkeypatch.setattr(link_serving_supervisor, "serve_cert_state", lambda org: {})
         monkeypatch.setattr(link_serving_supervisor, "serve_cert_requirement",
                             lambda org: {"required": False})
+        if unavailable_org:
+            real_plans = signon_preparation.organization_plans
+            def plans_with_unavailable_org():
+                yield {"slug": "unavailable-org", "error": "organization-preparation-unavailable"}, None
+                yield from real_plans()
+            monkeypatch.setattr(signon_preparation, "organization_plans", plans_with_unavailable_org)
         terms = {
             "seed": seed.hex(), "org": ORG,
             "signonModule": (JS_ROOT / "network-signon.mjs").as_uri(),
