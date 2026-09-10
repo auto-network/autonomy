@@ -46,6 +46,23 @@ function prepared(posts) {
   };
 }
 
+test('organization delegate refusal stays visible without marking the personal vault or healthy org failed', async () => {
+  const fetchImpl = fetchWhere([
+    ['/api/identity/unlock/vault-keys', reply(200, { ok: true, organization_delegates: {
+      netorg: { ok: false, error: 'organization delegation must cite current heads' },
+      healthy: { ok: true },
+    } })],
+  ]);
+  const handoff = prepared([{ step: 'serve-cert', org: 'healthy', url: '/api/network/serve-cert', body: {} }]);
+  handoff.ready = ['netorg', 'healthy'];
+  const report = await submitSignon(handoff, fetchImpl);
+  assert.deepEqual(report.failed, [{ org: 'netorg', step: 'organization-delegate',
+    error: 'organization delegation must cite current heads' }]);
+  assert.deepEqual(report.ready, ['healthy']);
+  assert.deepEqual(report.repaired, ['healthy']);
+  assert.equal(handoff.vault.keys, null);
+});
+
 test('a vault-keys 500 after the cookie is minted resolves with the step reported, and the other posts still run', async () => {
   const fetchImpl = fetchWhere([
     ['/api/identity/unlock/vault-keys', reply(500, { ok: false, error: 'the vault could not be brought up: organization delegate must cite current heads' })],

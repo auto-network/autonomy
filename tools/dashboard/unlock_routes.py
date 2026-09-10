@@ -1295,6 +1295,7 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
             f"audited delegate recipient was refused: {exc}"
         )}, status_code=400)
 
+    organization_delegates = {}
     try:
         loaded = _bring_vault_up(decoded)
         if audited_private is not None:
@@ -1302,7 +1303,13 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
         if body.get("organization_delegates"):
             from tools.dashboard.org_storage_delegate import accept
             for item in body["organization_delegates"]:
-                accept(item)
+                org = item["organization"]
+                try:
+                    accept(item)
+                    organization_delegates[org] = {"ok": True}
+                except Exception as exc:
+                    logger.warning("organization delegate refused for %s: %s", org, exc)
+                    organization_delegates[org] = {"ok": False, "error": str(exc)}
         if audited_private is not None:
             # Certificate issuance may have failed before this first recipient
             # existed. Wake it at the exact state transition that removes that
@@ -1339,6 +1346,7 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
         # False means warm-but-not-durable: this process can serve, and a
         # restart returns to locked.
         "snapshot_persisted": snapshot,
+        **({"organization_delegates": organization_delegates} if organization_delegates else {}),
     })
 
 
