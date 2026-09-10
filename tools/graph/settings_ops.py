@@ -2514,6 +2514,51 @@ def json_merge_patch(target: Any, patch: Any) -> Any:
 # ── Row → ResolvedSetting ────────────────────────────────────
 
 
+def _drop_undeclared_fields(set_id: str, revision: int, payload: dict) -> dict:
+    """Remove keys the schema at *revision* does not declare.
+
+    The read half of the contract :func:`~tools.graph.schemas.registry.enforce_declared_fields`
+    states on write: the schema is the COMPLETE statement of the payload's
+    shape, and a key it does not declare is not part of the payload. Write
+    already refuses such a key; handing one back on read is the half that was
+    missing, and the disagreement between the two is a defect, not a leniency.
+
+    Paired with :func:`_apply_declared_defaults` and applied beside it, because
+    together they say one thing: shape the resolved payload to the schema.
+    Absent declared fields get their default; present undeclared ones go.
+
+    This matters most to a read-modify-write writer, which merges the row it
+    read into the row it writes. When a schema drops a field without bumping
+    its revision, that field stays on every stored row, the writer carries it
+    forward, and its own write is then refused. The field is dead, the row is
+    unwritable, and nothing says so.
+
+    Not hypothetical. Deleting the fleet-sync checkpoint subsystem removed
+    ``total_checkpoint_bytes`` and ``last_checkpoint_bytes`` at revision 1, and
+    every Fleet serve-telemetry write on home failed from 2026-09-09T18:40:39Z
+    onward -- silently, because both recorder call sites wrap the write in
+    ``contextlib.suppress``. Synchronization was healthy throughout; only the
+    record of it stopped, and the screen kept rendering confident totals.
+
+    Read rather than write is deliberate. Dropping on write would make a
+    MISSPELLED field a silent no-op, which is the failure the write-side check
+    exists to catch. Here a dead field cannot reach a writer at all, and a typo
+    in a freshly built payload still fails loudly where it should.
+
+    Resolution always happens at a revision this store declares -- a row
+    carrying a revision it does not know resolves no schema and is returned
+    untouched -- so this never guesses at a shape it cannot see. A schema
+    declaring no fields enforces nothing on write and is likewise untouched.
+    """
+    schema = schemas.get_schema(set_id, int(revision))
+    if schema is None or not isinstance(payload, dict):
+        return payload
+    meta = getattr(schema, "_field_metadata", None) or {}
+    if not meta or set(payload) <= set(meta):
+        return payload
+    return {name: value for name, value in payload.items() if name in meta}
+
+
 def _apply_declared_defaults(set_id: str, revision: int, payload: dict) -> dict:
     """Fill fields the schema declares a default for and the payload omits.
 
@@ -5496,8 +5541,16 @@ def read_set(
                 continue
             merged_payload = opened
 
-        resolved.payload = _apply_declared_defaults(
-            chosen_row["set_id"], chosen_row["schema_revision"], merged_payload,
+        # Shape the resolved payload to the schema, both directions: fill a
+        # declared field that is absent, drop a stored field it does not
+        # declare. Without the second half a read-modify-write writer carries
+        # a removed field forward and its own write is refused.
+        resolved.payload = _drop_undeclared_fields(
+            chosen_row["set_id"], chosen_row["schema_revision"],
+            _apply_declared_defaults(
+                chosen_row["set_id"], chosen_row["schema_revision"],
+                merged_payload,
+            ),
         )
 
         # Optional revision transform.
