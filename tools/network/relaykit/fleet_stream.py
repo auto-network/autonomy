@@ -193,7 +193,19 @@ class FleetStreamEndpoint:
     # -- the transport --------------------------------------------------------
 
     async def recv(self) -> Optional[bytes]:
-        """Next whole message, or None at the peer's half-close."""
+        """Next whole message, or None at the peer's half-close.
+
+        A frame is credited the moment ``recv`` absorbs it into the message
+        assembler — not when the message is delivered. Absorption happens
+        only inside ``recv``, so a reader that stops calling it issues no
+        credit and its sender stalls at zero (the isolation property), while
+        a message wider than the peer's slot window still completes: each
+        absorbed frame frees the slot the next one needs. Crediting on
+        delivery instead deadlocked a three-frame message against a two-slot
+        window (soak at-0910-040533-7577). Retained bytes are therefore
+        bounded by the offered window (frames not yet absorbed) plus one
+        maximum message (the assembler), never by the peer's message sizes.
+        """
         while True:
             try:
                 complete = self._assembler.next_message()
@@ -201,20 +213,18 @@ class FleetStreamEndpoint:
                 self._fail(RESET_PROTOCOL)
                 raise FleetStreamClosed(self.pair_id, RESET_PROTOCOL)
             if complete is not None:
-                message, frames, bytes_ = complete
-                if frames:
-                    self._inflight_bytes -= bytes_
-                    self._inflight_slots -= frames
-                    await self._adapter._send_ctrl(
-                        self.channel_id,
-                        build_fleet_credit(bytes_=bytes_, slots=frames),
-                    )
-                return message
+                return complete[0]
             if self._recv_eof:
                 return None
             kind, payload = await self._inbound.get()
             if kind == "data":
                 self._assembler.feed(payload)
+                self._inflight_bytes -= len(payload)
+                self._inflight_slots -= 1
+                await self._adapter._send_ctrl(
+                    self.channel_id,
+                    build_fleet_credit(bytes_=len(payload), slots=1),
+                )
             elif kind == "eof":
                 if self._assembler.retained_bytes:
                     self._fail(RESET_PROTOCOL)
