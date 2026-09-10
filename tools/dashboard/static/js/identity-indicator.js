@@ -773,6 +773,29 @@
           signon: root.AutonomyNetworkSession,
         });
       } catch (e) { /* best-effort */ }
+      // 4. The SAME per-org maintenance every other root unlock runs —
+      //    serving certificates, bindings, checkpoints. unlock.js documents
+      //    this as the convergence point of every root ceremony ("the factor
+      //    that proved the policy is irrelevant"), but only three of the four
+      //    root-opening paths actually called it: passkey, password and
+      //    recovery. THIS one did not, and this one is the button the operator
+      //    presses BECAUSE a flag is lit.
+      //
+      //    Live consequence on home 2026-09-10: the Certificate flag said
+      //    "sign in again to replace it", the operator opened their root here
+      //    twice, and the ceremony did everything except the repair the flag
+      //    was asking for — one serve-cert POST for the personal scope, no
+      //    per-org pass at all, no unlock-report. The three organizations
+      //    stayed on their retired root-signed certificates, and no number of
+      //    repeats could ever have changed that.
+      try {
+        var unlock = root.AutonomyUnlock;
+        var repair = unlock && unlock._internals
+          && unlock._internals.repairServingAfterRootUnlock;
+        if (typeof repair === 'function') {
+          await repair(new Uint8Array(seed));
+        }
+      } catch (e) { /* best-effort: never cost the operator their session */ }
     } finally {
       if (seed && seed.fill) seed.fill(0);
       restartBusy = false;
