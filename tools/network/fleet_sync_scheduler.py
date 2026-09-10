@@ -1758,6 +1758,12 @@ class FleetSyncScheduler:
         #: auto-ieh3l gave auto-fh2nv: this machine never has two concurrent
         #: opens for the same peer.
         self._peer_paths: dict = {}
+        #: peer -> (decision, loop time until which the RELAY path is held
+        #: off). Set only by a stand_down or a stop; a retry leaves the relay
+        #: immediately available again and the peer's own `_next_attempt`
+        #: governs when the round comes back. This is what makes the
+        #: controller's decision change behaviour rather than only the log.
+        self._relay_hold: dict[str, tuple[str, float]] = {}
         self._activated_scopes: set[Path] = set()
         #: Per-peer declared pull version. A peer whose server rejected a v4
         #: request before serving any frame is retried at v3 for the rest of
@@ -2792,6 +2798,15 @@ class FleetSyncScheduler:
             and now >= self._next_attempt.get(machine_pub, 0.0)
         ]
 
+    def _backoff_delay(self, failures: int) -> float:
+        """The one retry envelope this scheduler has: exponential from
+        ``min_backoff``, saturating at ``max_backoff``. Shared by the peer's
+        next attempt and by the relay hold so the two cannot drift apart."""
+        return min(
+            self.config.max_backoff,
+            self.config.min_backoff * (2 ** min(max(failures, 1) - 1, 16)),
+        )
+
     async def _relay_fallback(self, machine_pub: str, scope: str, direct_error):
         """Delegate one scope pull to the relay after direct is exhausted.
 
@@ -2822,6 +2837,25 @@ class FleetSyncScheduler:
             return None
         from tools.network import fleet_peer_path as fpp
 
+        now = asyncio.get_running_loop().time()
+        hold = self._relay_hold.get(machine_pub)
+        if hold is not None:
+            held_decision, until = hold
+            if now < until:
+                # THE DECISION IS ACTED ON, not merely logged. A stand_down
+                # means another attempt holds this peer: delegating now would
+                # create the second concurrent open this bead promised never to
+                # create. A stop means the peer or the protocol said do not
+                # come back. Either way the relay is not tried again until the
+                # envelope expires, while direct keeps being tried every round.
+                logger.info(
+                    "fleet sync peer %s scope %r: relay held off (%s) for "
+                    "another %.1fs; direct error was %r",
+                    machine_pub[:12], scope, held_decision, until - now,
+                    direct_error,
+                )
+                return None
+            self._relay_hold.pop(machine_pub, None)
         controller = self._peer_paths.get(machine_pub)
         if controller is None:
             controller = fpp.PeerPathController(
@@ -2837,6 +2871,17 @@ class FleetSyncScheduler:
             )
         except Exception as exc:
             decision = self._relay_decision(controller, exc)
+            if decision in (fpp.STAND_DOWN, fpp.STOP):
+                # Measured from NOW, not from the pre-delegation `now`: a
+                # delegated pull can poll for minutes, so an envelope anchored
+                # before it started would already have expired and the hold
+                # would silently do nothing.
+                self._relay_hold[machine_pub] = (
+                    decision,
+                    asyncio.get_running_loop().time() + self._backoff_delay(
+                        self._failures.get(machine_pub, 0) + 1
+                    ),
+                )
             logger.warning(
                 "fleet sync peer %s scope %r: relay fallback %s after direct "
                 "failed (%s: %s); direct error was %r",
@@ -2844,6 +2889,7 @@ class FleetSyncScheduler:
                 type(exc).__name__, exc, direct_error,
             )
             return None
+        self._relay_hold.pop(machine_pub, None)
         if not isinstance(outcome, Mapping):
             return None
         return dict(outcome)
@@ -2856,14 +2902,22 @@ class FleetSyncScheduler:
         relay: the three types auto-fh2nv raises are deliberately distinct and
         collapsing them turns losing a race into a retry storm.
         """
-        from tools.network import fleet_peer_path as fpp
-
         reason = getattr(exc, "reason", None)
         if reason is not None:
             return controller.open_refused(str(reason))
         pair_id = getattr(exc, "pair_id", None)
         code = getattr(exc, "code", None)
         if pair_id is not None and code is not None:
+            # ADOPT THE PAIR BEFORE FENCING ON IT. The pair is opened in the
+            # CONNECTOR process, so this controller never saw `opened()` and
+            # holds no pair id; `reset` would answer IGNORE for every code and
+            # the stop/retry distinction could never fire from here at all.
+            # Adoption is sound because the operation id is the fence: this
+            # failure was read back under the id this controller minted for
+            # this peer moments ago, so the pair the connector reports for it
+            # is ours by construction. Found by auto-0909-161758 reviewing
+            # auto-ew9wf.
+            controller.opened(str(pair_id))
             return controller.reset(str(pair_id), int(code))
         return controller.transport_failed()
 
@@ -3121,6 +3175,7 @@ class FleetSyncScheduler:
         *, org_channel: "OrgFleetAuthenticator | None" = None,
         relay_slot: "tuple[str, str] | None" = None,
         relay_connector=None,
+        relay_operation_id: "str | None" = None,
     ) -> None:
         """``org_channel``: pull *scope* from a co-member's machine through
         the org hello (auto-coea3) instead of the personal roster's; the
@@ -3137,11 +3192,15 @@ class FleetSyncScheduler:
         stream, the apply, the telemetry and the acknowledgement — is the same
         code on both paths, which is the point: a relay pull that diverged
         after the channel would be a second implementation of synchronisation
-        rather than a second way to reach a peer.
+        rather than a second way to reach a peer. What the request ASKS is the
+        same too: the reply is bounded by the per-origin watermark map read
+        from this machine's store, and the resume trail comes from the same
+        breadcrumb reader in both processes (fleet_relay_sync.configure).
 
-        This runs in the CONNECTOR process, which is where the adapter lives;
-        the dashboard reaches it by delegating an operation, never by dialling
-        from its own process.
+        A relay pull runs in the CONNECTOR process, which is where the adapter
+        lives; the dashboard reaches it by delegating an operation, never by
+        dialling from its own process. The delegating side therefore writes no
+        telemetry row of its own — see the delegation branch below.
         """
         store = await asyncio.to_thread(self._store_for, scope)
         epoch, state_epoch = self._scope_epochs(scope)
@@ -3242,6 +3301,11 @@ class FleetSyncScheduler:
                     relay_connector, persona_pub, slot_machine,
                     authenticator=authenticator,
                     expected_machine_pub=machine_pub,
+                    claimed_machine_pub=authenticator.machine_pub,
+                    # The controller's id, so the relay's one-pair-per-
+                    # operation arbitration guards the operation the
+                    # controller actually opened.
+                    operation_id=relay_operation_id,
                     timeout=self.config.connect_timeout,
                 )
                 connected_address = f"relay:{slot_machine[:12]}"
@@ -3279,10 +3343,21 @@ class FleetSyncScheduler:
                     machine_pub, scope, last_error,
                 )
                 if delegated is not None:
-                    await record(
-                        delegated.get("outcome", "ok"),
-                        error_code=str(delegated.get("error_code") or ""),
-                    )
+                    # NO TELEMETRY ROW IS WRITTEN HERE, deliberately. The
+                    # connector carried the bytes and recorded them under this
+                    # same (peer, channel, direction, scope) key with
+                    # channel="relay"; that row IS the pull's record and both
+                    # processes write the same machine-homed store. A row from
+                    # this process could only be wrong in one of two ways:
+                    # channel="relay" would overwrite the connector's real
+                    # measurements with zero bytes, and channel="direct" --
+                    # which is what it did -- refreshes the DIRECT key's
+                    # last_outcome=success and last_success_at_ns for a pull
+                    # direct had just failed to carry. fleet_sync_telemetry
+                    # .direct_is_carrying reads exactly those two fields to
+                    # decide that relay pulls are redundant, so the phantom row
+                    # taught the relay loop to defer to a dead direct path.
+                    # Found by auto-0909-161758 reviewing auto-ew9wf.
                     return delegated
                 raise FleetSyncPeerUnreachable(
                     f"no candidate address connected: {last_error!r}"
@@ -3804,10 +3879,7 @@ class FleetSyncScheduler:
             ):
                 with contextlib.suppress(Exception):
                     self.config.on_peer_failure(machine_pub)
-            delay = min(
-                self.config.max_backoff,
-                self.config.min_backoff * (2 ** min(failures - 1, 16)),
-            )
+            delay = self._backoff_delay(failures)
             transient = isinstance(exc, (
                 ConnectionError, OSError,
             )) or type(exc).__name__.startswith("ConnectionClosed")

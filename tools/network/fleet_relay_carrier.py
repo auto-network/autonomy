@@ -110,18 +110,27 @@ async def fleet_relay_connect(
     connector, persona_pub: str, machine: str, *,
     authenticator, expected_machine_pub: str,
     claimed_machine_pub: Optional[str] = None,
+    operation_id: Optional[str] = None,
     timeout: float = 10.0,
 ):
     """Open one mutually authenticated fleet channel through the relay to
     the exact serving slot ``(persona_pub, machine)``. The carrier decides
-    WHERE; the handshake decides WHO."""
+    WHERE; the handshake decides WHO.
+
+    ``operation_id`` is the CALLER'S. The relay arbitrates one pair per
+    (source tunnel, destination tunnel, operation_id) and refuses a duplicate
+    with `operation-already-open`; if the id is minted here instead, that
+    arbitration is keyed on a value the caller's controller never saw, and the
+    relay-level guarantee stops guarding the caller's actual operation. Found
+    by auto-0909-161758 reviewing auto-ew9wf.
+    """
     adapter = getattr(connector, "fleet_streams", None)
     if adapter is None:
         raise ConnectionError(
             "no live tunnel negotiated fleet-directed-stream/1 on this connector")
     endpoint = await adapter.open(
         persona_pub, machine, claimed_machine_pub=claimed_machine_pub,
-        timeout=timeout,
+        operation_id=operation_id, timeout=timeout,
     )
     return await asyncio.wait_for(authenticate_fleet_transport(
         endpoint, authenticator=authenticator,
@@ -251,6 +260,12 @@ async def resolve_peer_slot(connector, runtime, peer_machine_pub: str, *,
         if not machine or machine == own:
             continue
         if machine == peer_machine_pub:
+            # PERSONAL-SCOPE IDENTITY: the serving key equals the durable
+            # roster key here, so a slot can be matched by durable key. That
+            # stops being true for org scopes, which carry distinct per-org
+            # serving keys since 76d61b5 — there the slot must come from the
+            # peer's descriptor locator (auto-e38g4), not from this equality.
+            # Correct today, invisible tomorrow, so it is named.
             return (slot.get("persona_pub"), machine), "org-slots"
     # A peer whose slot the relay does not report is not reachable by relay
     # right now. Say which peer, rather than returning an empty slot that
@@ -309,6 +324,7 @@ async def start_relay_pull(connector, runtime, *, peer_machine_pub: str,
                 peer_machine_pub, (), scope,
                 relay_slot=(persona_pub, machine),
                 relay_connector=connector,
+                relay_operation_id=operation_id,
             )
         except Exception as exc:
             job["state"] = "failed"

@@ -309,6 +309,21 @@ class ConnectorFleetRuntime:
             listen_host=listen_host,
             listen_port=listen_port,
             telemetry_recorder=fleet_sync_telemetry.record_iteration,
+            # THE SAME RESUME TRAIL THE DASHBOARD ASKS WITH. A delegated pull
+            # must differ from a direct one in the channel and nothing else,
+            # and without this it also differed in what it asked for: the
+            # breadcrumb trail went out empty. Today's servers bound the reply
+            # by the watermark map (read from this machine's store, so identical
+            # in both processes) and ignore the trail, which is why this was
+            # invisible -- but a server that predates the watermark field falls
+            # back to the trail, and an empty trail asks it to replay its whole
+            # retained journal. Inert on apply, wasted on the wire.
+            resume_cursor=(
+                lambda peer, scope="personal":
+                    fleet_sync_telemetry.read_resume_breadcrumbs(
+                        peer, scope=scope
+                    )
+            ),
             # Materialise org DB stubs from the synced org roster before
             # discovery, so the direct/tunnel scheduler (like the relay pull)
             # bootstraps a fresh member's org scopes rather than only seeing
