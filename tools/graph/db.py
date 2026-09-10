@@ -286,6 +286,39 @@ _UUID_SLUG = re.compile(
 )
 
 
+#: The shape of an organization slug: a lowercase name, starting with a letter.
+#: Shared so "is this an org" has ONE definition — enumeration
+#: (cross_org.list_org_slugs), sync scope discovery
+#: (fleet_sync_scheduler.discover_org_sync_scopes) and this module agreed by
+#: coincidence before, and a uuid-named file slipped through two of the three.
+_ORG_SLUG = re.compile(r"^[a-z][a-z0-9-]{0,62}\Z")
+
+
+def is_org_slug(value: object) -> bool:
+    """Whether *value* can name an organization's database.
+
+    A PREDICATE, for callers that should SKIP a bad name rather than fail on
+    it — enumerating a data directory, for instance, where a stray file must
+    not be able to stop a process. `_org_db_path` raises instead, because a
+    caller asking for a path has already decided this is an org.
+
+    Deliberately stricter than "is a legal filename": a uuid is a legal
+    filename, and a uuid where a slug belonged is what minted a ghost database
+    and made it a peer of every org on the machine (auto-kou68).
+    """
+    return bool(
+        isinstance(value, str)
+        and _ORG_SLUG.match(value)
+        and not _UUID_SLUG.match(value)
+        # "none" follows the convention fleet_sync_scheduler's
+        # _NON_SCOPE_STEMS already set: str(None).lower() is the other way a
+        # missing value reaches a filename, and an organization genuinely named
+        # "none" is a cost worth paying to keep that door shut. Matching the
+        # existing answer rather than inventing a second one.
+        and value not in {"none", "null"}
+    )
+
+
 def _org_db_path(slug: str, root: Path | str | None = None) -> Path:
     """Return ``<orgs_dir>/<slug>.db`` — or the local store's own home for
     the two reserved local-store names, which are not organizations.
