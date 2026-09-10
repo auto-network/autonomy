@@ -20744,7 +20744,9 @@ async def api_plugins(request):
     requests still see the canonical state (substrate v1.1 fix). The
     ``org`` field is the runtime install scope: operator override
     (``payload.org``) when set, else ``manifest.org``. The browser
-    stamps it as ``X-Graph-Org`` on plugin-originated fetches.
+    stamps it as ``X-Graph-Org`` on plugin-originated fetches. For an
+    org-bound session, return its authenticated org instead: an install
+    scope cannot override the session's data scope.
     """
     try:
         force_settings = (
@@ -20776,6 +20778,9 @@ async def api_plugins(request):
         effective_org = (
             override if isinstance(override, str) and override else manifest_org
         )
+        principal = api_auth.principal_from_request(request)
+        if principal.org_bound:
+            effective_org = principal.org
         out.append({
             "id": p.id,
             "label": p.nav_label,

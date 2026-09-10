@@ -423,6 +423,32 @@ def test_plugin_asset_rev_changes_when_page_assets_change(tmp_path, monkeypatch)
     assert before != after
 
 
+@pytest.mark.parametrize("caller_org, expected_org", [("anchore", "anchore"), (None, "autonomy")])
+def test_api_plugins_browser_scope_respects_org_bearer(tmp_path, monkeypatch, caller_org, expected_org):
+    import asyncio
+    import json
+    from starlette.requests import Request
+    from tools.dashboard import api_auth, server
+
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+    _write_plugin(plugins_dir, "slides", _min_manifest_yaml("slides", org="autonomy"))
+    monkeypatch.setattr(loader, "_read_plugin_settings", lambda org=None: {})
+    monkeypatch.setattr(loader, "reconcile_declared_settings", lambda *a, **kw: None)
+    monkeypatch.setattr(server, "PLUGIN_REGISTRY", loader.load_enabled(plugins_dir=plugins_dir))
+    principal = api_auth.ApiPrincipal(
+        api_auth.ApiPrincipalKind.ORG_SESSION if caller_org else api_auth.ApiPrincipalKind.OPERATOR_COOKIE,
+        subject="viewer", org=caller_org,
+    )
+    request = Request({
+        "type": "http", "method": "GET", "path": "/api/plugins",
+        "query_string": b"", "headers": [], "state": {"api_principal": principal},
+    })
+    response = asyncio.run(server.api_plugins(request))
+    assert response.status_code == 200
+    assert json.loads(response.body)["plugins"][0]["org"] == expected_org
+
+
 def test_api_plugins_has_style_reflects_declared_style_asset(tmp_path, monkeypatch):
     """`/api/plugins`'s `has_style` field is what the SPA shell
     (`refreshPlugins()` in app.js) reads to decide whether to inject a

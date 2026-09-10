@@ -1027,11 +1027,14 @@ def _cookie_from_scope(scope) -> str | None:
 # org secret; the design DATA it fetches is org-scoped at the /api layer
 # (api_auth.caller_org_scope_hides). The ApiIdentityMiddleware does not
 # authenticate non-/api paths, so the human gate validates the bearer itself.
-_BEARER_ELIGIBLE_PAGE_PREFIXES = ("/design", "/present")
+_BEARER_ELIGIBLE_PAGE_PREFIXES = ("/design", "/present", "/presentations")
+# Present loads its actual viewer markup separately from the page shell.
+# This exact fragment contains no deck data; its API reads enforce org scope.
+_BEARER_ELIGIBLE_PAGE_PATHS = frozenset({"/pages/presentations"})
 
 
 def _path_admits_agent_bearer(path: str) -> bool:
-    return any(
+    return path in _BEARER_ELIGIBLE_PAGE_PATHS or any(
         path == p or path.startswith(p + "/")
         for p in _BEARER_ELIGIBLE_PAGE_PREFIXES
     )
