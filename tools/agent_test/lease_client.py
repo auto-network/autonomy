@@ -10,6 +10,37 @@ import urllib.request
 from typing import Any
 
 
+#: The dashboard this harness coordinates through, in precedence order.
+#: ``AGENT_TEST_DASHBOARD`` is the explicit override. ``GRAPH_API`` is what
+#: the session launcher exports for every session type, and it is the only
+#: name that is right on all of them: a compose session reaches the dashboard
+#: by service name, and nothing listens on its localhost:8080 -- three runs
+#: in a row recorded "machine capacity coordinator unavailable" there on
+#: 2026-09-10 before anyone exported the override. The localhost default is
+#: for a host terminal, where GRAPH_API is not set.
+DASHBOARD_ENV = ("AGENT_TEST_DASHBOARD", "GRAPH_API")
+DEFAULT_DASHBOARD = "https://localhost:8080"
+
+
+def dashboard_base() -> str:
+    """The dashboard base URL, without a trailing slash."""
+    for name in DASHBOARD_ENV:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value.rstrip("/")
+    return DEFAULT_DASHBOARD
+
+
+def coordinator_configured() -> bool:
+    """Whether this process has any way to reach a coordinator: a session
+    identity, or a dashboard address from either variable. A bare host
+    process with none of these skips the organization-history calls."""
+    return bool(
+        os.environ.get("AUTONOMY_SESSION")
+        or any(os.environ.get(name, "").strip() for name in DASHBOARD_ENV)
+    )
+
+
 def _headers() -> dict[str, str]:
     """JSON content type plus the session bearer, when this process holds one.
 
@@ -27,7 +58,7 @@ def _headers() -> dict[str, str]:
 
 
 def lease_request(action: str, **payload: Any) -> dict[str, Any]:
-    base = os.environ.get("AGENT_TEST_DASHBOARD", "https://localhost:8080").rstrip("/")
+    base = dashboard_base()
     data = json.dumps({"action": action, **payload}).encode()
     request = urllib.request.Request(
         f"{base}/api/agent-test/leases",
@@ -52,7 +83,7 @@ def telemetry_request(
     session = os.environ.get("AUTONOMY_SESSION", "").strip()
     if action in {"event", "error"} and not session:
         return {"ok": False, "unavailable": True, "error": "no session identity"}
-    base = os.environ.get("AGENT_TEST_DASHBOARD", "https://localhost:8080").rstrip("/")
+    base = dashboard_base()
     try:
         from . import __version__
     except ImportError:
@@ -123,9 +154,9 @@ def progress_request(
 
 def duration_request(action: str, **payload: Any) -> dict[str, Any]:
     """Reach the caller's organization-local capped duration history."""
-    if not os.environ.get("AUTONOMY_SESSION") and "AGENT_TEST_DASHBOARD" not in os.environ:
+    if not coordinator_configured():
         return {"ok": False, "unavailable": True, "error": "no machine coordinator"}
-    base = os.environ.get("AGENT_TEST_DASHBOARD", "https://localhost:8080").rstrip("/")
+    base = dashboard_base()
     data = json.dumps({"action": action, **payload}).encode()
     request = urllib.request.Request(
         f"{base}/api/plugins/testing/durations",
@@ -144,9 +175,9 @@ def duration_request(action: str, **payload: Any) -> dict[str, Any]:
 
 def run_result_request(run_id: str, run: dict[str, Any]) -> dict[str, Any]:
     """Record one terminal run in the authenticated caller's organization."""
-    if not os.environ.get("AUTONOMY_SESSION") and "AGENT_TEST_DASHBOARD" not in os.environ:
+    if not coordinator_configured():
         return {"ok": False, "unavailable": True, "error": "no organization coordinator"}
-    base = os.environ.get("AGENT_TEST_DASHBOARD", "https://localhost:8080").rstrip("/")
+    base = dashboard_base()
     data = json.dumps({"run_id": run_id, "run": run}).encode()
     request = urllib.request.Request(
         f"{base}/api/plugins/testing/runs",

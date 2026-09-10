@@ -17,6 +17,7 @@ from typing import Any
 
 from .environment import project_config
 from .lease_client import (
+    dashboard_base,
     duration_request,
     error_request,
     lease_request,
@@ -400,7 +401,7 @@ def _notification_text(run_id: str, status: str, summary: dict[str, int], durati
 
 
 def _dashboard_notify(session: str, run_id: str, status: str, text: str) -> tuple[bool, str]:
-    base = os.environ.get("AGENT_TEST_DASHBOARD", "https://localhost:8080").rstrip("/")
+    base = dashboard_base()
     payload = json.dumps(
         {
             "tmux_session": session,

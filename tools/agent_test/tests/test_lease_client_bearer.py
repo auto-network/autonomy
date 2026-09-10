@@ -47,7 +47,7 @@ def test_every_request_site_sends_the_bearer(monkeypatch, call, path):
 
     def _capture(request, timeout=None, context=None):
         seen["auth"] = request.headers.get("Authorization")
-        seen["path"] = request.full_url.removeprefix("https://localhost:8080")
+        seen["path"] = request.full_url.removeprefix(lease_client.dashboard_base())
         return _Resp()
 
     monkeypatch.setattr(lease_client.urllib.request, "urlopen", _capture)

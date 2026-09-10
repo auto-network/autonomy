@@ -79,10 +79,48 @@ def ensure_supervisor(root: Path, repo: Path) -> dict[str, Any]:
     raise RuntimeError("Agent Test supervisor did not become ready")
 
 
+#: Environment the worker must take from the CLI that asked for the run, not
+#: from the resident supervisor. The supervisor copies its environment once,
+#: at its own start, and lives for the session; a dashboard address or session
+#: credential exported after that never reached a worker, so every later run
+#: dialled whatever the first one had (2026-09-10: three runs refused
+#: admission at localhost after the fix was already in the shell).
+WORKER_ENV_PASSTHROUGH = (
+    "AGENT_TEST_DASHBOARD",
+    "GRAPH_API",
+    "AUTONOMY_SESSION",
+    "CROSSTALK_TOKEN",
+)
+
+
+def worker_env_overrides(environ: dict[str, str] | None = None) -> dict[str, str]:
+    """The passthrough subset of *environ* (default: this process's)."""
+    source = os.environ if environ is None else environ
+    return {name: source[name] for name in WORKER_ENV_PASSTHROUGH if name in source}
+
+
+def worker_env(overrides: object, base: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment for one worker: the supervisor's own, with the
+    passthrough names replaced by what the requesting CLI sent. Anything
+    else in *overrides* is ignored -- the socket is local, but the whitelist
+    is what keeps a start request from rewriting PATH or PYTHONPATH."""
+    env = (os.environ if base is None else base).copy()
+    if isinstance(overrides, dict):
+        for name in WORKER_ENV_PASSTHROUGH:
+            value = overrides.get(name)
+            if isinstance(value, str):
+                env[name] = value
+    return env
+
+
 def start_worker(root: Path, repo: Path, directory: Path) -> dict[str, Any]:
     ensure_supervisor(root, repo)
     socket_path, _metadata_path = _paths(root)
-    return _request(socket_path, {"op": "start", "run_dir": str(directory)}, timeout=3)
+    return _request(
+        socket_path,
+        {"op": "start", "run_dir": str(directory), "env": worker_env_overrides()},
+        timeout=3,
+    )
 
 
 def supervisor_status(root: Path) -> dict[str, Any] | None:
@@ -139,7 +177,7 @@ def serve(root: Path, repo: Path) -> int:
                             child = subprocess.Popen(
                                 [sys.executable, "-m", f"{__package__}.worker", "--run-dir", str(directory)],
                                 cwd=repo,
-                                env=os.environ.copy(),
+                                env=worker_env(request.get("env")),
                                 stdin=subprocess.DEVNULL,
                                 stdout=log,
                                 stderr=subprocess.STDOUT,

@@ -39,6 +39,16 @@ The resident supervisor launches isolated run process groups. Completion is
 delivered through the dashboard's typed task-notification endpoint for both
 Claude and Codex; self-CrossTalk remains a compatibility fallback.
 
+The machine capacity coordinator, duration history, and notifications all
+live on the dashboard. Its address resolves from `AGENT_TEST_DASHBOARD`,
+then `GRAPH_API` (what the session launcher exports, and the only name that is
+right in a compose session, where localhost has nothing listening), then
+`https://localhost:8080` for a host terminal. The CLI hands that address, the
+session identity, and the bearer to each worker at start, so a value exported
+after the supervisor came up still reaches the next run. A run that ended in
+`error` or `stopped` never judged the code, so it does not trip the
+unchanged-run guard; only a `passed`, `failed`, or `collected` run does.
+
 `agent-test doctor` finds a project virtualenv and invokes its interpreter
 directly. Agents do not source activation scripts, and Agent Test never
 installs dependencies. Named profiles can be declared in `pyproject.toml`:
