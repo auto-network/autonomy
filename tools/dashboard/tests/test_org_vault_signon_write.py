@@ -109,6 +109,23 @@ def _run_ceremony(client, terms):
                     assert response.status_code < 300, (
                         f'{message["method"]} {message["url"]}: {response.status_code}'
                     )
+                    if message["url"] == "/api/identity/unlock/vault-keys":
+                        # Replay the exact browser-signed grants, without
+                        # reopening the root or generating another key.
+                        for item in json.loads(message["body"]).get("organization_delegates", []):
+                            org = item["organization"]
+                            before = org_storage_delegate.prepare(org)["delegate_metadata"]
+                            from tools.graph.schemas.vault_credential import VAULT_AUDITED_SET_ID
+                            chain = settings_ops.chain_setting(
+                                VAULT_AUDITED_SET_ID, before["key_reference"], org=None)
+                            with LedgerStore(org_ledger_db_path(org)) as ledger:
+                                ids = ledger.ledger.all_ids()
+                            org_storage_delegate.accept(item)
+                            assert org_storage_delegate.prepare(org)["delegate_metadata"] == before
+                            assert settings_ops.chain_setting(
+                                VAULT_AUDITED_SET_ID, before["key_reference"], org=None) == chain
+                            with LedgerStore(org_ledger_db_path(org)) as ledger:
+                                assert ledger.ledger.all_ids() == ids
                     proc.stdin.write(json.dumps({
                         "status": response.status_code, "body": response.json(),
                     }) + "\n")
