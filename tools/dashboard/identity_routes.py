@@ -1484,12 +1484,6 @@ async def get_unlock_state(request: Request) -> JSONResponse:
         delegate = _VAULT_CACHE.get("audited_delegate")
     except Exception:
         delegate = None
-    flags["agent"] = {
-        "needs": delegate is None,
-        "detail": ("Running — it can fetch your secrets without asking again."
-                   if delegate is not None
-                   else "Not running. Unlock with your root to start it."),
-    }
 
     # ttl — how long this dashboard session stays open.
     try:
@@ -1509,14 +1503,19 @@ async def get_unlock_state(request: Request) -> JSONResponse:
                        if not low else "Running low — unlock again to extend it."),
         }
 
-    # agent (continued) — a lit delegate now says what stopped working, not
-    # only which button to press (the balloon-remedy-alone gap, bead auto-sdrsa).
-    if flags["agent"]["needs"]:
-        flags["agent"]["detail"] = (
-            "Your delegate key isn't loaded, so background work that needs "
-            "your secrets can't run. Unlock with your root to start it."
-        )
-    flags["agent"]["value"] = "Locked" if flags["agent"]["needs"] else "Running"
+    # The same tile covers personal warmth and organization signing-key health.
+    if session:
+        try:
+            from tools.dashboard import org_storage_delegate
+            flags["agent"] = org_storage_delegate.status(
+                warm=delegate is not None, now_ms=int(_now() * 1000))
+        except Exception:
+            flags["agent"] = {"needs": True, "value": "Unknown",
+                              "detail": "Organization delegate status could not be read. Try again."}
+    else:
+        # This endpoint is available before authentication: do not disclose orgs.
+        flags["agent"] = {"needs": True, "value": "Sign in",
+                          "detail": "Sign in to check your vault and organization delegate keys."}
 
     # certificates + sync are two questions about the SAME set of serving
     # connectors, so one pass over the serving scopes computes both. A scope

@@ -23,11 +23,26 @@ def _body(response):
     return result
 
 
+def organization_plans():
+    """The registered, locally held organizations serviced by root sign-in."""
+    from tools.dashboard import network_routes
+    from tools.data_paths import LOCAL_STORE_KEYS
+
+    for ref in org_ops.list_orgs():
+        if ref.slug in LOCAL_STORE_KEYS:
+            continue
+        entry = network_routes._org_unlock_plan(ref.slug, ref.slug, LOCAL_STORE_KEYS)
+        if not entry.get("committed_membership_org") or not entry.get("genesis_id"):
+            continue
+        persona_pub = org_ops.persona_pub_for_org(entry["genesis_id"])
+        if persona_pub:
+            yield entry, persona_pub
+
+
 def collect():
     from tools.dashboard import (fleet_enrollment_routes as fleet, identity_routes,
                                  membership_checkpoint, network_routes, unlock_routes,
                                  vault_routes, org_storage_delegate)
-    from tools.data_paths import LOCAL_STORE_KEYS
 
     personal = identity_routes._personal_member()
     vault = _body(unlock_routes.personal_vault_recovery())
@@ -43,21 +58,14 @@ def collect():
                       "approval": delivery.approval.to_dict(),
                       "roster_entry": delivery.roster_entry.to_dict()}
     organizations = []
-    for ref in org_ops.list_orgs():
-        if ref.slug in LOCAL_STORE_KEYS:
-            continue
-        entry = network_routes._org_unlock_plan(ref.slug, ref.slug, LOCAL_STORE_KEYS)
-        if not entry.get("committed_membership_org") or not entry.get("genesis_id"):
-            continue
-        persona_pub = org_ops.persona_pub_for_org(entry["genesis_id"])
-        if not persona_pub:
-            continue
-        entry["storage_delegate"] = org_storage_delegate.prepare(ref.slug)
-        okey = network_routes._first_member(NETWORK_ORG_KEY_SET_ID, ref.slug)
+    for entry, persona_pub in organization_plans():
+        org = entry["slug"]
+        entry["storage_delegate"] = org_storage_delegate.prepare(org)
+        okey = network_routes._first_member(NETWORK_ORG_KEY_SET_ID, org)
         entry["org_key"] = okey.payload if okey else None
         entry["checkpoint_work"] = None
         if entry["checkpoint"]["needed"]:
-            decision = membership_checkpoint.checkpoint_due(ref.slug, persona_pub,
+            decision = membership_checkpoint.checkpoint_due(org, persona_pub,
                 ts=int(time.time()), genesis_id=entry["genesis_id"], org_uuid=entry["org_uuid"])
             if decision.action == "assemble":
                 entry["checkpoint_work"] = {"record": decision.record, "sign_with": decision.sign_with}

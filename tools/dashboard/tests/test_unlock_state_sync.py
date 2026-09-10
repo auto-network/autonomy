@@ -17,6 +17,65 @@ def client():
         yield c
 
 
+@pytest.mark.parametrize("warm,exists,days,value,needs", [
+    (True, False, 90, "Missing", True),
+    (True, True, 0, "Expired", True),
+    (True, True, 29, "Renew", True),
+    (True, True, 30, "Running", False),
+    (True, True, 90, "Running", False),
+    (False, True, 90, "Locked", True),
+])
+def test_delegate_flag_uses_organization_key_metadata(client, monkeypatch, warm, exists, days, value, needs):
+    from tools.dashboard import org_storage_delegate as delegates, signon_preparation, unlock_routes
+
+    now = 1_800_000_000
+    monkeypatch.setattr(identity_routes, "_now", lambda: now)
+    monkeypatch.setattr(unlock_routes, "session_from_request", lambda _: {"exp": now + 7200})
+    monkeypatch.setattr(unlock_routes, "_VAULT_CACHE", {"audited_delegate": "warm"} if warm else {})
+    monkeypatch.setattr(signon_preparation, "organization_plans", lambda: [
+        ({"slug": "healthy"}, "persona"), ({"slug": "anchore"}, "persona"),
+    ])
+    monkeypatch.setattr(delegates, "prepare", lambda org: {"delegate_metadata": {
+        "key_exists": True if org == "healthy" else exists,
+        "expires_at": now * 1000 + (90 if org == "healthy" else days) * 86400000,
+    }})
+    monkeypatch.setattr(delegates, "signing_key", lambda _: pytest.fail("status must not open private keys"))
+    _stub_serving(monkeypatch, scopes=[], cert_status={}, replies={})
+    flag = client.get("/api/identity/unlock-state").json()["agent"]
+    assert flag["value"] == value
+    assert flag["needs"] is needs
+    assert len(flag["organizations"]) == 2
+    assert "healthy: 90 days remaining" in flag["detail"]
+    if value in ("Missing", "Expired", "Renew"):
+        assert "anchore" in flag["detail"]
+
+
+def test_delegate_flag_does_not_disclose_organizations_before_signin(client, monkeypatch):
+    from tools.dashboard import signon_preparation, unlock_routes
+
+    monkeypatch.setattr(unlock_routes, "session_from_request", lambda _: None)
+    monkeypatch.setattr(signon_preparation, "organization_plans",
+                        lambda: pytest.fail("pre-auth status must not enumerate organizations"))
+    _stub_serving(monkeypatch, scopes=[], cert_status={}, replies={})
+    flag = client.get("/api/identity/unlock-state").json()["agent"]
+    assert flag["value"] == "Sign in"
+    assert "organizations" not in flag
+
+
+def test_delegate_flag_is_not_green_when_metadata_cannot_be_read(client, monkeypatch):
+    from tools.dashboard import signon_preparation, unlock_routes
+
+    monkeypatch.setattr(unlock_routes, "session_from_request", lambda _: {"exp": 9_999_999_999})
+    monkeypatch.setattr(unlock_routes, "_VAULT_CACHE", {"audited_delegate": "warm"})
+    def unavailable():
+        raise ValueError("unreadable org data")
+    monkeypatch.setattr(signon_preparation, "organization_plans", unavailable)
+    _stub_serving(monkeypatch, scopes=[], cert_status={}, replies={})
+    flag = client.get("/api/identity/unlock-state").json()["agent"]
+    assert flag["needs"] is True
+    assert flag["value"] == "Unknown"
+
+
 def _stub_serving(monkeypatch, *, scopes, cert_status, replies, disk="c0ffee",
                   may_serve=True, tunnel_serving=True):
     """Stub the serving-scope reads get_unlock_state makes.

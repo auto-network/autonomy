@@ -50,7 +50,7 @@
   // Order = tray order. Icons are the design's outline glyphs (placeholders to refine).
   var FLAGS = [
     { id: 'key', key: 'agent', title: 'Delegate key',
-      body: 'The key that keeps your fleet running while you’re away. When it lapses, unlock again to renew it.',
+      body: 'Personal vault access and organization storage keys. Organization keys last 90 days; unlock to replace missing keys or renew those with fewer than 30 days remaining.',
       shapes: [['rect', { x: 7.5, y: 7.5, width: 9, height: 9, rx: 1.6 }],
         ['path', { d: 'M10 4v3.5M14 4v3.5M10 16.5V20M14 16.5V20M4 10h3.5M4 14h3.5M16.5 10H20M16.5 14H20' }]] },
     { id: 'session', key: 'ttl', title: 'Session',
