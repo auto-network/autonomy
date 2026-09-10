@@ -120,6 +120,29 @@ def update_manifest(directory: Path, changes: dict[str, Any]) -> dict[str, Any]:
     return current
 
 
+#: Statuses under which a run actually judged the code it fingerprinted
+#: (or, in collect mode, inventoried it). An errored run (no interpreter,
+#: coordinator unreachable, launch failure) and a stopped one recorded nothing
+#: about the tests, so they must not stand in the way of running them; the
+#: unchanged-run guard exists to stop a verdict from being re-derived, not to
+#: make a failed launch permanent.
+VERDICT_STATUSES = frozenset({"passed", "failed", "collected"})
+
+
+def previous_verdict(root: Path, fingerprint: str) -> dict[str, Any] | None:
+    """The newest terminal run that judged exactly this code and selection,
+    or None when no such verdict exists yet."""
+    return next(
+        (
+            item
+            for item in list_manifests(root)
+            if item.get("fingerprint") == fingerprint
+            and item.get("status") in VERDICT_STATUSES
+        ),
+        None,
+    )
+
+
 def list_manifests(root: Path) -> list[dict[str, Any]]:
     manifests: list[dict[str, Any]] = []
     runs = root / "runs"

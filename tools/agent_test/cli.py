@@ -25,6 +25,7 @@ from .store import (
     atomic_write_json,
     guidance_first,
     list_manifests,
+    previous_verdict,
     live_manifest,
     manifest_path,
     new_run_id,
@@ -241,15 +242,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(f"Inspect it with: agent-test status", file=sys.stderr)
             return 3
         if not getattr(args, "allow_repeat", False):
-            repeated = next(
-                (
-                    item
-                    for item in list_manifests(root)
-                    if item.get("fingerprint") == fingerprint
-                    and item.get("status") not in {"starting", "running", "stopping"}
-                ),
-                None,
-            )
+            repeated = previous_verdict(root, fingerprint)
             if repeated is not None:
                 print(
                     f"Agent Test: unchanged run refused; {repeated['run_id']} "
