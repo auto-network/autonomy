@@ -509,24 +509,6 @@ def emit_personal_sync_change(*, addresses=(), gap: bool = False) -> None:
             pass
 
 
-def scrub_private_cached_events(bus: Any) -> int:
-    discard = getattr(bus, "discard_cached", None)
-    if not callable(discard):
-        return 0
-
-    def predicate(topic: str, data: Any, decoded_ok: bool) -> bool:
-        if topic != "setting.changed":
-            return False
-        if not decoded_ok or not isinstance(data, Mapping):
-            return True
-        set_id = data.get("set_id")
-        if not isinstance(set_id, str):
-            return True
-        return set_id in PRIVATE_CENTRAL_SET_IDS
-
-    return int(discard(predicate))
-
-
 def _no_store(payload: Mapping[str, Any], *, status_code: int = 200) -> JSONResponse:
     return JSONResponse(
         dict(payload), status_code=status_code, headers={"Cache-Control": "no-store"},

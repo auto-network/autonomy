@@ -21714,24 +21714,8 @@ async def _on_startup():
     # notice left by an older process before any fresh browser can subscribe.
     _discard_restart_event_cache()
     _mark("event_bus.restore")
-    try:
-        scrubbed = attention_routes.scrub_private_cached_events(event_bus)
-        if scrubbed:
-            snapshot_fn = getattr(event_bus, "snapshot", None)
-            if callable(snapshot_fn):
-                snapshot_fn(EVENT_BUS_STATE_PATH)
-            logger.info(
-                "removed %d private Central Attention entries from EventBus replay",
-                scrubbed,
-            )
-    except Exception:
-        logger.critical(
-            "private Central Attention EventBus scrub failed; refusing to serve",
-            exc_info=True,
-        )
-        raise
     await attention_routes.start()
-    _mark("attention_routes.start+event_bus_scrub")
+    _mark("attention_routes.start")
     # Wire the terminal CrossTalk notifier before the monitor starts so
     # any initial-refresh cache write in ``start()`` can fire transitions
     # for already-armed rows.
