@@ -18,6 +18,11 @@ export const FLEET_ROSTER_DOMAIN = 'autonomy.fleet.roster-entry.v1\n';
 export const FLEET_APPROVAL_DOMAIN = 'autonomy.fleet.enrollment-approval.v1\n';
 export const FLEET_INVITE_DOMAIN = 'autonomy.network.fleet-invite.v1\n';
 export const FLEET_MACHINE_KEY_SALT = 'autonomy.identity.machine.v1';
+// Per-(org, machine) SERVING key salt (auto-e2ufw). MUST stay byte-identical to
+// idkit.persona.SERVING_MACHINE_KEY_SALT: the relay verifies the tunnel hello's
+// machine co-signature against the key this derives, so a drift here is an
+// org that cannot serve, not a test failure.
+export const SERVING_MACHINE_KEY_SALT = 'autonomy.identity.serving-machine.v1';
 export const FLEET_MEMBER_ASSIGNMENT = 'personal_root_holder';
 export const FLEET_COMPLETION_DOMAIN = 'autonomy.fleet.enrollment-completion.v1\n';
 export const IDKIT_CERT_DOMAIN = 'autonomy.idkit.cert.v1\n';
@@ -86,6 +91,22 @@ async function deriveMachineSeed(seed, machineId) {
     hash: 'SHA-256',
     salt: encoder.encode(FLEET_MACHINE_KEY_SALT),
     info: encoder.encode(machineId),
+  }, key, 256));
+}
+
+async function deriveServingMachineSeed(seed, genesisId, machineId) {
+  // idkit.persona.derive_serving_machine_key, byte for byte:
+  //   HKDF-SHA256(root, salt=SERVING_MACHINE_KEY_SALT,
+  //               info=genesis_id + "\0" + machine_id)
+  // Both ids are fixed-length lowercase hex and the NUL cannot occur in
+  // either, so the concatenation is unambiguous. TextEncoder emits U+0000 as
+  // a single 0x00 byte, matching Python's ascii encoding of the same string.
+  const key = await webCrypto.subtle.importKey('raw', seed, 'HKDF', false, ['deriveBits']);
+  return new Uint8Array(await webCrypto.subtle.deriveBits({
+    name: 'HKDF',
+    hash: 'SHA-256',
+    salt: encoder.encode(SERVING_MACHINE_KEY_SALT),
+    info: encoder.encode(`${genesisId}\0${machineId}`),
   }, key, 256));
 }
 
@@ -166,6 +187,7 @@ export async function mintFleetRuntimeCredential({
   machineId,
   machinePub,
   orgUuid = null,
+  servingOrgs = [],
 } = {}) {
   if (!(personalRootSeed instanceof Uint8Array) || personalRootSeed.length !== 32) {
     throw new Error('personalRootSeed must be a 32-byte Uint8Array');
@@ -201,6 +223,29 @@ export async function mintFleetRuntimeCredential({
       credential.machine_private_seed = bytesToHex(machineSeed);
       credential.reachability_cert = await mintReachabilityCert(
         seed, authorizedPub, mid, orgUuid);
+    }
+    // One SERVING key per organization this machine is provisioned to serve
+    // (auto-e2ufw). Keyed by the registry org_uuid, which is what names the
+    // connector's warm cache and its --org. The root is only ever open here,
+    // in this browser, at unlock: nothing server-side can derive these, which
+    // is why an org connector that has never been handed one cannot start at
+    // all after a restart clears ramfs.
+    if (Array.isArray(servingOrgs) && servingOrgs.length) {
+      const seeds = {};
+      for (const target of servingOrgs) {
+        const genesisId = requireHex64(target?.genesis_id, 'genesis_id');
+        const targetUuid = target?.org_uuid;
+        if (typeof targetUuid !== 'string' || !targetUuid) {
+          throw new Error('servingOrgs entries need an org_uuid');
+        }
+        const servingSeed = await deriveServingMachineSeed(seed, genesisId, mid);
+        try {
+          seeds[targetUuid] = bytesToHex(servingSeed);
+        } finally {
+          servingSeed.fill(0);
+        }
+      }
+      credential.serving_machine_private_seeds = seeds;
     }
     return credential;
   } finally {

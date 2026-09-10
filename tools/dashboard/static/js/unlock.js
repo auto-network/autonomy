@@ -235,6 +235,12 @@
           // machine key + a node-scoped reachability cert for discovery; a null
           // org_uuid keeps it sync-only.
           orgUuid: rc.org_uuid || null,
+          // One serving machine key per org this machine serves (auto-e2ufw).
+          // Derived HERE because the personal root only exists in this browser
+          // during the ceremony; an org connector cannot obtain one any other
+          // way, which is why they stayed dead through every restart until an
+          // unlock happened to run.
+          servingOrgs: Array.isArray(rc.serving_orgs) ? rc.serving_orgs : [],
         });
         await _postJson('/api/fleet/runtime', cred);
         arming = { attempted: true, outcome: 'armed',
