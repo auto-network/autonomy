@@ -57,6 +57,38 @@ def test_the_ghost_database_is_not_creatable_by_passing_none(tmp_path):
     )
 
 
+@pytest.mark.parametrize("uuid_slug", [
+    "2d4b90cb-1e89-452b-82cb-68ca44fd8e52",          # the autonomy org_uuid
+    "2D4B90CB-1E89-452B-82CB-68CA44FD8E52",          # and uppercased
+    "c8e5cd04-8f19-4bc2-8951-a6b6b80b2699",          # anchore's
+])
+def test_an_org_uuid_is_refused_even_though_it_is_a_valid_filename(
+    uuid_slug, tmp_path,
+):
+    """The second value that produced a ghost, and the filename-shape guard
+    cannot catch it.
+
+    Found on home 2026-09-10: data/orgs/2d4b90cb-1e89-452b-82cb-68ca44fd8e52.db
+    beside the real autonomy.db, carrying the full 65-table schema and SEVENTY
+    settings and fleet_sync_catalog rows — a live sync target for a while, not
+    an empty file. 2d4b90cb IS the autonomy org_uuid. An org has two opaque
+    identifiers and passing the wrong one here mints a parallel database
+    instead of failing.
+    """
+    with pytest.raises(ValueError) as exc:
+        _org_db_path(uuid_slug, tmp_path)
+    message = str(exc.value)
+    assert "not its UUID" in message
+    assert not list(tmp_path.rglob(f"{uuid_slug}*")), "nothing was created"
+
+
+def test_a_uuid_shaped_value_is_still_a_valid_filename(tmp_path):
+    """Why the UUID check had to be separate: the filename-shape guard would
+    have accepted it, so a reader does not later collapse the two checks."""
+    (tmp_path / "2d4b90cb-1e89-452b-82cb-68ca44fd8e52.db").write_text("")
+    assert (tmp_path / "2d4b90cb-1e89-452b-82cb-68ca44fd8e52.db").exists()
+
+
 def test_the_refusal_names_the_caller_as_the_bug(tmp_path):
     """The message has to send a reader to the call site. A path-shaped value
     formatted from a None is invisible; the error is the only thing that makes

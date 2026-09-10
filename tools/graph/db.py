@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import os
+import re
 import secrets
 import functools
 import sqlite3
@@ -277,6 +278,14 @@ def _local_store_db_path(name: str, root: Path | str | None = None) -> Path:
     return resolve_local_store_path(name, _orgs_dir(root))
 
 
+#: A slug that is really an org_uuid. Checked separately from the
+#: filename-shape guard because a UUID is a perfectly valid filename.
+_UUID_SLUG = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z"
+)
+
+
 def _org_db_path(slug: str, root: Path | str | None = None) -> Path:
     """Return ``<orgs_dir>/<slug>.db`` — or the local store's own home for
     the two reserved local-store names, which are not organizations.
@@ -303,6 +312,32 @@ def _org_db_path(slug: str, root: Path | str | None = None) -> Path:
             "or empty slug creates a ghost database (orgs/None.db) that no org "
             "owns, that sync will discover and fail on forever, and that sorts "
             "ahead of every real org. Fix the caller."
+        )
+    if _UUID_SLUG.match(slug):
+        # A UUID IS A VALID FILENAME, which is why the check above does not
+        # catch this and why it needed its own. An org has TWO opaque
+        # identifiers -- the slug it is named by on disk (anchore, autonomy)
+        # and the org_uuid the registry keys it by -- and passing the wrong one
+        # here mints a parallel database beside the real one instead of failing.
+        #
+        # Found on home 2026-09-10 by host-0906-222509:
+        #   data/orgs/2d4b90cb-1e89-452b-82cb-68ca44fd8e52.db   700 KB
+        #   ...-shm touched 2026-09-09, ...-wal 478 KB
+        # 2d4b90cb IS the autonomy org_uuid, sitting next to the real
+        # autonomy.db (2.7 GB). It carries the full 65-table schema, no sources
+        # or thoughts, and SEVENTY settings and fleet_sync_catalog rows -- so it
+        # was a live sync target for a while, not an empty file someone touched.
+        #
+        # This is the same mistake as passing a genesis id to the registry's
+        # serving-key backfill (auto-wku6r): two identifiers for one org, used
+        # at opposite ends, neither validated. Both now refuse by shape.
+        raise ValueError(
+            f"org slug must be the org's SLUG, not its UUID, got {slug!r}. "
+            "Slugs name the database on disk (orgs/anchore.db); the org_uuid is "
+            "what the registry keys an org by. Passing the uuid here mints a "
+            "parallel database beside the real one and replicates into it -- "
+            "live evidence in auto-kou68. Resolve the slug from the uuid at the "
+            "call site."
         )
     if slug in LOCAL_STORE_SLUGS:
         return _local_store_db_path(slug, root)
