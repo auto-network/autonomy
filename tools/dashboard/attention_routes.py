@@ -359,6 +359,31 @@ class AttentionRouteRuntime:
             raise ValueError("Central route runtime must share one exact composition")
 
 
+def session_requester_label(subject: str) -> str | None:
+    """The human-readable name of the SESSION asking for an approval:
+    its tmux name plus the working title it set with ``graph set-label``,
+    e.g. ``auto-0910-155648 · auto-nh1po: machine-targeted serve routing``.
+
+    This is what every approval renderer shows as "Requested by". Without
+    it the requester was ``{kind: session}`` and nothing else, and the
+    operator was asked to grant Dashboard access to "Authenticated
+    session" with no way to tell which of a dozen live sessions wanted it.
+    The label is frozen on the request at creation, so a later rename
+    does not rewrite history. Never raises: an unreadable dashboard DB
+    yields the bare tmux name."""
+    if not isinstance(subject, str) or not subject:
+        return None
+    try:
+        from tools.dashboard.dao import dashboard_db
+        row = dashboard_db.get_session(subject)
+    except Exception:
+        row = None
+    title = row.get("label") if isinstance(row, dict) else None
+    if isinstance(title, str) and title.strip():
+        return f"{subject} · {title.strip()}"
+    return subject
+
+
 def build_production_runtime() -> AttentionRouteRuntime:
     dashboard_approval_runtime = dashboard_access_central.build_approval_runtime()
     approval_registry = build_production_registry(runtimes={
@@ -376,6 +401,7 @@ def build_production_runtime() -> AttentionRouteRuntime:
     approvals = ApprovalService(
         registry=approval_registry,
         after_commit=approval_after_commit,
+        session_label_resolver=session_requester_label,
     )
     dashboard_attention_runtime = dashboard_access_central.build_attention_runtime(
         approvals,

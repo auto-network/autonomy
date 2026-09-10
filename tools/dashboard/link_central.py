@@ -1171,15 +1171,23 @@ def build_attention_runtime(kind: str, approvals: ApprovalService) -> AttentionP
         version = 2 if resolution is not None else 1
         review = request.get("safe_review")
         title = review.get("target_title") if isinstance(review, Mapping) else None
+        requester = request.get("requester_ref")
+        requester_label = (
+            requester.get("label")
+            if isinstance(requester, Mapping) and isinstance(requester.get("label"), str)
+            else None
+        )
+        summary = f"Review {title}" if isinstance(title, str) and title else "Review Link authority"
+        if requester_label:
+            # The card must say WHICH session is asking, not only what for.
+            summary = f"{summary} · requested by {requester_label}"
         return AttentionProjectionPlan(
             attention_id=link_attention_id(source.request.approval_id),
             object_ref=source.request.approval_id,
             participant_role="recipient",
             attention_state="resolved" if resolution is not None else "needs_attention",
             safe_title="Publish a share link" if operation == "publish" else "Revoke a share link",
-            safe_summary=(
-                f"Review {title}" if isinstance(title, str) and title else "Review Link authority"
-            ),
+            safe_summary=summary,
             counterparty_ref=None,
             occurred_at=float(
                 resolution.payload["resolved_at"] if resolution is not None else request["created_at"]

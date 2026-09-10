@@ -304,6 +304,19 @@ var signRegistryRequestCore;
     return resp.json();
   }
 
+  // Open a sealed (revision-2) org root with an ALREADY-OPEN personal seed —
+  // the seed the shared factor-aware unlock produced. Revision-1 armor is
+  // password-only by construction and cannot be opened this way.
+  async function _openOrgRootWithSeed(orgKey, personalSeed) {
+    if (orgKey && orgKey.sealed_root_key) {
+      var seed = await openSealedArmor(orgKey, personalSeed);
+      return { seed: seed, rootPub: orgKey.root_pub };
+    }
+    throw new Error('this organization\'s signing key uses the retired ' +
+      'password-only armor and cannot be opened with your personal ' +
+      'identity — register it from the getting-started flow first');
+  }
+
   // Open the org root from either armor generation, one password either
   // way. Revision-1 legacy armor decrypts directly with the entered
   // passphrase. Revision-2 (B4 Option B, what the founding ceremony
@@ -938,14 +951,43 @@ var signRegistryRequestCore;
   // decrypted (the removed `_openOrgRoot(orgKey, passphrase)` sign-on path).
   async function signOn(passphrase, opts) {
     opts = opts || {};
+    var ttl = _sessionTtl(opts);
+    var slugs = await _signOnOrgSlugs(opts);
+    var opened = await _openPersonalRoot(passphrase);
+    return _signOnWithOpenedRoot(opened, slugs, ttl);
+  }
+
+  // The SAME sign-on from a personal root the caller has already opened —
+  // by the shared factor-aware unlock (ceremony/open-root.js: password,
+  // passkey, or both, as the armor requires). This is what lets an approval
+  // sheet stop owning a password field: it opens the root with the common
+  // control and signs on with the seed. The caller's buffer is copied and
+  // the copy dies in the same finally as the password path's seed; the
+  // caller zeroes its own.
+  async function signOnWithRootSeed(personalRootSeed, rootPub, opts) {
+    opts = opts || {};
+    if (!(personalRootSeed instanceof Uint8Array) || personalRootSeed.length !== 32) {
+      throw new Error('personalRootSeed must be a 32-byte Uint8Array');
+    }
+    var ttl = _sessionTtl(opts);
+    var slugs = await _signOnOrgSlugs(opts);
+    var opened = {
+      seed: new Uint8Array(personalRootSeed),
+      rootPub: typeof rootPub === 'string' && rootPub ? rootPub : null,
+    };
+    return _signOnWithOpenedRoot(opened, slugs, ttl);
+  }
+
+  function _sessionTtl(opts) {
     var ttl = opts.ttlSeconds || DEFAULT_TTL_S;
     if (typeof ttl !== 'number' || !Number.isSafeInteger(ttl) ||
         ttl < MIN_TTL_S || ttl > MAX_TTL_S) {
       throw new Error('session TTL must be between 1 minute and 30 days');
     }
+    return ttl;
+  }
 
-    var slugs = await _signOnOrgSlugs(opts);
-    var opened = await _openPersonalRoot(passphrase);
+  async function _signOnWithOpenedRoot(opened, slugs, ttl) {
     var sessionKeys = await crypto.subtle.generateKey(
       { name: 'Ed25519' }, false, ['sign', 'verify']);
     var sessionPub = bytesToHex(
@@ -1766,6 +1808,7 @@ var signRegistryRequestCore;
       };
     },
     signOn: signOn,
+    signOnWithRootSeed: signOnWithRootSeed,
     signOut: signOut,
     provisionServeCert: provisionServeCert,
     provisionPersonalNetworkIdentity: provisionPersonalNetworkIdentity,
@@ -1784,6 +1827,7 @@ var signRegistryRequestCore;
       deriveEncapsulationKeypair: deriveEncapsulationKeypair,
       sealToEncapsulationKey: sealToEncapsulationKey,
       openOrgRoot: _openOrgRoot,
+      openOrgRootWithSeed: _openOrgRootWithSeed,
       derivePersona: derivePersona,
       resolveOrgEntry: function (ref) {
         return _resolveOrgEntry(_state.session, ref);

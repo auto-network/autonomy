@@ -512,10 +512,16 @@ async def _get_approval_legacy(request: Request) -> JSONResponse:
             extra = await asyncio.to_thread(enrich, r) or {}
         except Exception:
             extra = {}
+    # Which session is asking, by name AND working title — every review
+    # sheet shows it as "Requested by". Same resolver Central uses.
+    session_label = await asyncio.to_thread(
+        attention_routes.session_requester_label, r["session"]
+    )
     return JSONResponse({
         "id": r["id"],
         "kind": r["kind"],
         "session": r["session"],
+        "session_label": session_label,
         "request": r["request"],
         "result": r["result"],
         **extra,

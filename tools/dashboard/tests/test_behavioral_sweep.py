@@ -5862,8 +5862,50 @@ LINK_PUBLISH_APPROVAL_CHECKS = """(async () => {
     var data = window._worktreeReviewOverlay;
     if (!data) { r.error = 'no review-overlay component'; return JSON.stringify(r); }
 
+    // The sheet owns no password field any more: Approve opens the ONE
+    // shared factor-aware unlock (ceremony/open-root.js). Serve it a real v3
+    // password armor so the dialog under test is the production dialog.
+    var primitives = await import('/static/js/ceremony/primitives.js');
+    var factorPolicy = await import('/static/js/ceremony/root-factor-policy.js');
+    var rootKeys = await crypto.subtle.generateKey({name: 'Ed25519'}, true, ['sign', 'verify']);
+    var rootPkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', rootKeys.privateKey));
+    var rootSeed = rootPkcs8.slice(-32);
+    var rootPub = primitives.bytesToHex(new Uint8Array(
+        await crypto.subtle.exportKey('raw', rootKeys.publicKey)));
+    var rootArmor = await factorPolicy.mintPasswordArmor({
+        rootSeed: rootSeed, rootPub: rootPub, password: 'correct password',
+        factorId: 'pw.primary', iterations: 10000});
+    rootSeed.fill(0); rootPkcs8.fill(0);
+    var rootDialog = function() { return q('open-root'); };
+    // Drive Approve through the shared unlock. A null password cancels the
+    // dialog; a wrong one leaves its inline error and is then cancelled.
+    var approveWithRoot = async function(password) {
+        var pending = data.approveRequest();
+        var shown = await waitFor(function() { return !!rootDialog(); }, 4000);
+        var outcome = {dialog: shown, dialog_error: ''};
+        if (shown && password === null) {
+            rootDialog().querySelector('.or-cancel').click();
+        } else if (shown) {
+            var field = rootDialog().querySelector('.or-in-bare');
+            field.value = password;
+            field.dispatchEvent(new Event('input', {bubbles: true}));
+            rootDialog().querySelector('.or-ok').click();
+            await waitFor(function() {
+                return !rootDialog() || !!rootDialog().querySelector('.or-factor-err');
+            }, 8000);
+            if (rootDialog() && rootDialog().querySelector('.or-factor-err')) {
+                outcome.dialog_error = textOf(rootDialog().querySelector('.or-factor-err'));
+                rootDialog().querySelector('.or-cancel').click();
+            }
+        }
+        await pending;
+        await tick();
+        return outcome;
+    };
+
     var baseRow = {
         id: 'apr-link-1', kind: 'link_publish', session: 'auto-agent-1', result: null,
+        session_label: 'auto-agent-1 · Release notes',
         request: { org: 'netorg', target_uuid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
                    target_type: 'note', meta: { ttl: 604800, label: 'binder' } },
         target_title: 'Release checklist', type_label: 'Note', ttl: 604800,
@@ -5886,7 +5928,7 @@ LINK_PUBLISH_APPROVAL_CHECKS = """(async () => {
     var origSession = window.AutonomyNetworkSession;
     var origToast = window.showToast;
     var posted = [], signed = [], signOnCalls = [], signOutCount = 0;
-    var authority = false, responseMode = 'success';
+    var authority = false, responseMode = 'success', signOnMode = 'ok';
     try {
         window.showToast = function() {};
         window.AutonomyNetworkSession = {
@@ -5896,14 +5938,16 @@ LINK_PUBLISH_APPROVAL_CHECKS = """(async () => {
                         orgSlug: baseRow.org_slug || null, live: true,
                         subject: {kind: 'operator', id: 'aa'.repeat(32)}}]
             } : {signedIn: false, orgs: []}; },
-            signOn: async function(password, opts) {
-                signOnCalls.push({password: password, org: opts.org});
-                if (password === 'missing key') {
+            // The sheet hands over the seed the shared unlock produced; the
+            // password itself never reaches this seam any more.
+            signOnWithRootSeed: async function(seed, seedRootPub, opts) {
+                signOnCalls.push({seedLength: seed ? seed.length : 0,
+                                  rootPub: seedRootPub, org: opts.org});
+                if (signOnMode === 'missing-key') {
                     var missing = new Error('no identity key is stored for this org');
                     missing.status = 404;
                     throw missing;
                 }
-                if (password !== 'correct password') throw new Error('wrong passphrase');
                 authority = true;
             },
             signOut: async function() { authority = false; signOutCount += 1; },
@@ -5931,6 +5975,15 @@ LINK_PUBLISH_APPROVAL_CHECKS = """(async () => {
                 ok: true, json: async function() { return {
                     result: {approved: true, execution: {ok: true, token: 'token'}}}; }
             };
+            var identityReply = function(body) {
+                return {ok: true, status: 200, json: async function() { return body; }};
+            };
+            if (u.indexOf('/api/identity/status') !== -1) return identityReply(
+                {rp_id: location.hostname, passkeys: []});
+            if (u.indexOf('/api/identity/personal') !== -1) return identityReply(
+                {display_name: 'Alex Operator', armored_private_key: rootArmor, root_pub: rootPub});
+            if (u.indexOf('/api/identity/factor-policy') !== -1) return identityReply(
+                {armor_version: 3, factors: [{factor_id: 'pw.primary', label: 'Main password'}]});
             return origFetch.call(this, url, opts);
         };
 
@@ -5940,8 +5993,9 @@ LINK_PUBLISH_APPROVAL_CHECKS = """(async () => {
         r.sheet_open = !!q('approval-sheet');
         r.generic_overlay_absent = !q('approval-request-overlay');
         r.sheet_text = textOf(q('approval-sheet'));
-        r.password_inside_sheet = !!q('approval-sheet').querySelector('[data-testid=approval-password]');
+        r.unlock_hint_inside_sheet = !!q('approval-sheet').querySelector('[data-testid=approval-unlock-hint]');
         r.password_count = document.querySelectorAll('[data-testid=approval-password]').length;
+        r.requester_text = textOf(q('approval-requester'));
         r.option_unchecked = !q('approval-session-option').checked;
         r.duration_initial = q('approval-duration').value;
         r.desktop_attached_class = q('approval-sheet').className.indexOf('md:w-[28rem]') !== -1;
@@ -5953,7 +6007,7 @@ LINK_PUBLISH_APPROVAL_CHECKS = """(async () => {
         data.dismissApproval(); await tick();
         authority = true;
         data._approvalKinds.link_publish.open(data, row('no-password')); await tick();
-        r.no_password_field_hidden = !q('approval-password');
+        r.no_password_field_hidden = !q('approval-password') && !q('approval-unlock-hint');
         r.no_password_message_hidden = textOf(q('approval-sheet')).indexOf('Password not required') === -1;
         r.no_password_approve_enabled = !q('approval-confirm').disabled;
         data.dismissApproval(); await tick();
@@ -5977,7 +6031,6 @@ LINK_PUBLISH_APPROVAL_CHECKS = """(async () => {
         await tick();
 
         // Trusted preview replaces the sheet and preserves all form state.
-        input('approval-password', 'preserved password');
         q('approval-session-option').click();
         q('approval-duration').value = '2592000';
         q('approval-duration').dispatchEvent(new Event('change', {bubbles: true}));
@@ -5988,7 +6041,6 @@ LINK_PUBLISH_APPROVAL_CHECKS = """(async () => {
         r.preview_has_no_confirm = !q('approval-confirm');
         q('approval-preview-back').click();
         await tick();
-        r.preview_password_preserved = q('approval-password').value === 'preserved password';
         r.preview_option_preserved = q('approval-session-option').checked;
         r.preview_duration_preserved = q('approval-duration').value === '2592000';
         data.dismissApproval();
@@ -6024,29 +6076,47 @@ LINK_PUBLISH_APPROVAL_CHECKS = """(async () => {
         // A newly-created org without authority has a clean follow-up seam.
         data._approvalKinds.link_publish.open(data, row('no-key')); await tick();
         var attemptMark = posted.length;
-        input('approval-password', 'missing key');
-        await data.approveRequest(); await tick();
+        signOnMode = 'missing-key';
+        await approveWithRoot('correct password');
+        signOnMode = 'ok';
         r.no_key_error = textOf(q('approval-error'));
         r.no_key_stays_open = !!q('approval-sheet');
         r.no_key_posts = posted.length - attemptMark;
         data.dismissApproval(); await tick();
 
-        // Wrong password stays in the sheet and never posts a decision.
+        // Wrong password is the shared dialog's inline error; cancelling it
+        // leaves the sheet open and never posts a decision.
         data._approvalKinds.link_publish.open(data, row('wrong')); await tick();
         attemptMark = posted.length;
-        input('approval-password', 'wrong password');
-        await data.approveRequest(); await tick();
-        r.wrong_password_error = textOf(q('approval-error'));
+        var signOnMark = signOnCalls.length;
+        var wrong = await approveWithRoot('wrong password');
+        r.wrong_password_dialog_shown = wrong.dialog;
+        r.wrong_password_error = wrong.dialog_error;
+        r.wrong_password_sheet_error = textOf(q('approval-error'));
         r.wrong_password_stays_open = !!q('approval-sheet');
         r.wrong_password_posts = posted.length - attemptMark;
+        r.wrong_password_no_signon = signOnCalls.length === signOnMark;
+        data.dismissApproval(); await tick();
+
+        // Cancelling the unlock is a clean, recoverable non-decision.
+        data._approvalKinds.link_publish.open(data, row('cancel-unlock')); await tick();
+        attemptMark = posted.length;
+        await approveWithRoot(null);
+        r.cancel_unlock_error = textOf(q('approval-error'));
+        r.cancel_unlock_stays_open = !!q('approval-sheet');
+        r.cancel_unlock_posts = posted.length - attemptMark;
         data.dismissApproval(); await tick();
 
         // Unchecked: one explicit action, no password in POST, authority cleared.
         data._approvalKinds.link_publish.open(data, row('once')); await tick();
-        input('approval-password', 'correct password');
         q('approval-duration').value = 'none';
         q('approval-duration').dispatchEvent(new Event('change', {bubbles: true}));
-        await data.approveRequest(); await tick();
+        signOnMark = signOnCalls.length;
+        var onceUnlock = await approveWithRoot('correct password');
+        r.once_dialog_shown = onceUnlock.dialog;
+        var onceSignOn = signOnCalls[signOnCalls.length - 1];
+        r.once_signon_got_seed = signOnCalls.length === signOnMark + 1 &&
+            onceSignOn.seedLength === 32 && onceSignOn.rootPub === rootPub;
         var once = posted[posted.length - 1];
         r.once_closed = !q('approval-sheet');
         r.once_body = once.body;
@@ -6056,9 +6126,8 @@ LINK_PUBLISH_APPROVAL_CHECKS = """(async () => {
 
         // Checked: authority survives, next concrete action still needs Confirm.
         data._approvalKinds.link_publish.open(data, row('retain')); await tick();
-        input('approval-password', 'correct password');
         q('approval-session-option').click();
-        await data.approveRequest(); await tick();
+        await approveWithRoot('correct password');
         r.retained_after_first = authority;
         var callsBeforeNext = signOnCalls.length;
         data._approvalKinds.link_publish.open(data, row('next')); await tick();
@@ -6066,9 +6135,11 @@ LINK_PUBLISH_APPROVAL_CHECKS = """(async () => {
         // Retained authority renders the no-password variant (controls
         // absent entirely), not the old checked-and-disabled password row.
         r.next_password_controls_hidden =
-            !q('approval-session-option') && !q('approval-password');
+            !q('approval-session-option') && !q('approval-password') &&
+            !q('approval-unlock-hint');
         r.next_approve_enabled = !q('approval-confirm').disabled;
         await data.approveRequest(); await tick();
+        r.next_no_dialog = !rootDialog();
         r.next_skipped_password = signOnCalls.length === callsBeforeNext;
         r.retained_after_next = authority;
         await window.AutonomyNetworkSession.signOut();
@@ -6077,8 +6148,7 @@ LINK_PUBLISH_APPROVAL_CHECKS = """(async () => {
         // A consumed request remains dismissible and shows the server cause.
         responseMode = 'stale';
         data._approvalKinds.link_publish.open(data, row('stale')); await tick();
-        input('approval-password', 'correct password');
-        await data.approveRequest(); await tick();
+        await approveWithRoot('correct password');
         r.stale_stays_open = !!q('approval-sheet');
         r.stale_error = textOf(q('approval-error'));
         r.stale_can_cancel = !!q('approval-cancel');
@@ -6111,10 +6181,13 @@ class TestApprovalRequired:
         assert "Authorized by Alex Operator" in c["sheet_text"]
         assert "Service auto.network" in c["sheet_text"]
 
-    def test_initial_password_and_session_option(self):
+    def test_initial_unlock_hint_requester_and_session_option(self):
+        """No password field lives on the sheet: Approve opens the shared
+        factor-aware unlock. The sheet names the SESSION that asked."""
         c = self._checks
-        assert c["password_inside_sheet"] is True
-        assert c["password_count"] == 1
+        assert c["unlock_hint_inside_sheet"] is True
+        assert c["password_count"] == 0
+        assert c["requester_text"] == "Requested by auto-agent-1 · Release notes"
         assert c["option_unchecked"] is True
         assert c["duration_initial"] == "604800"
 
@@ -6138,7 +6211,6 @@ class TestApprovalRequired:
         assert c["preview_open"] is True
         assert "Trusted note body" in c["preview_trusted_content"]
         assert c["preview_has_no_confirm"] is True
-        assert c["preview_password_preserved"] is True
         assert c["preview_option_preserved"] is True
         assert c["preview_duration_preserved"] is True
 
@@ -6152,10 +6224,21 @@ class TestApprovalRequired:
         assert c["escape_declines"] is True
 
     def test_wrong_password_is_recoverable_without_post(self):
+        """The shared unlock owns the wrong-factor error inline; the sheet
+        survives a cancelled unlock and nothing was signed or posted."""
         c = self._checks
+        assert c["wrong_password_dialog_shown"] is True
+        assert c["wrong_password_error"], c
+        assert c["wrong_password_no_signon"] is True
         assert c["wrong_password_posts"] == 0
         assert c["wrong_password_stays_open"] is True
-        assert "did not work" in c["wrong_password_error"]
+        assert "cancelled" in c["wrong_password_sheet_error"].lower()
+
+    def test_cancelling_the_unlock_is_a_recoverable_non_decision(self):
+        c = self._checks
+        assert c["cancel_unlock_stays_open"] is True
+        assert c["cancel_unlock_posts"] == 0
+        assert "cancelled" in c["cancel_unlock_error"].lower()
 
     def test_missing_org_key_has_clean_followup_seam(self):
         c = self._checks
@@ -6171,6 +6254,8 @@ class TestApprovalRequired:
         assert "ttl" not in c["once_signed_payload"].get("meta", {})
         assert c["once_authority_cleared"] is True
         assert c["once_password_not_posted"] is True
+        assert c["once_dialog_shown"] is True
+        assert c["once_signon_got_seed"] is True
 
     def test_retention_still_requires_each_action_and_lock_clears(self):
         c = self._checks
@@ -6178,6 +6263,7 @@ class TestApprovalRequired:
         assert c["next_sheet_still_present"] is True
         assert c["next_password_controls_hidden"] is True
         assert c["next_approve_enabled"] is True
+        assert c["next_no_dialog"] is True
         assert c["next_skipped_password"] is True
         assert c["retained_after_next"] is True
         assert c["lock_store_clear"] is True
