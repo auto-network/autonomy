@@ -387,3 +387,36 @@ class TestCounterReset:
 
         assert fleet_counter_baseline.since(
             10, {"bytes_sent": 5_000}, "bytes_sent") == 0
+
+
+def test_reset_captures_changes_applied_which_is_not_in_telemetry(local_stores):
+    """The second partial reset. bytes and failed attempts cleared, "Changes
+    applied" did not -- transactions_applied is the one displayed counter that
+    lives on fleet_sync_peer_state rather than in telemetry, so a baseline
+    built only from telemetry never covered it."""
+    import sqlite3
+
+    from tools.graph.db import _org_db_path
+    from tools.network import fleet_counter_baseline, fleet_sync_counters
+
+    with sqlite3.connect(_org_db_path("personal")) as conn:
+        # The real table, created by the store the fixture activates. Columns
+        # are named rather than positional so this keeps testing the live
+        # schema instead of a hand-rolled stand-in.
+        # Two epochs, because a roster change starts a fresh row and reading
+        # one epoch would under-count what the reset must clear.
+        for epoch, applied in (("old", 40), ("new", 13)):
+            conn.execute(
+                "INSERT INTO fleet_sync_peer_state"
+                "(machine_public_key, roster_epoch, transactions_applied)"
+                " VALUES(?,?,?)",
+                (PEER, epoch, applied),
+            )
+
+    fleet_sync_counters.reset_counters()
+
+    base = fleet_counter_baseline.read()[
+        (PEER, fleet_counter_baseline.MACHINE_SCOPE)]
+    assert base["transactions_applied"] == 53
+    assert fleet_counter_baseline.since(53, base, "transactions_applied") == 0
+    assert fleet_counter_baseline.since(57, base, "transactions_applied") == 4
