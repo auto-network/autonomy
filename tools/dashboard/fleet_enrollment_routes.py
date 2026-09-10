@@ -249,7 +249,7 @@ def _reachability_peer_addresses(credential, root_pub, *, pull_direct=True):
     {}; AUTONOMY_FLEET_PEERS is unioned on top either way.
     """
     global _reachability_cache
-    from tools.network import fleet_reachability
+    from tools.network import fleet_direct_config, fleet_reachability
 
     cache = fleet_reachability.ReachabilityCache(
         binding_getter=_reachability_binding,
@@ -270,7 +270,28 @@ def _reachability_peer_addresses(credential, root_pub, *, pull_direct=True):
     def peers():
         merged = dict(cache.peers())
         merged.update(_fleet_env_peers())
-        if not pull_direct:
+        # RE-READ the row, do not close over the value. The scheduler calls
+        # this every iteration, so the only reason a pull_direct change needed
+        # a re-arm was that the answer was frozen at arm time.
+        #
+        # Live on home 2026-09-10: the operator authorized the flip to True,
+        # host-0906-222509 wrote the row at 02:00:25Z, and nothing dialled —
+        # every armed process had captured False seconds to minutes earlier
+        # (connectors 02:00:03, the dashboard puller 01:39:25). No failed dial,
+        # no candidate error: the scheduler simply held an empty address list
+        # and no amount of polling could change it. A durable Setting the
+        # operator changes and that silently does not apply is the same defect
+        # class as the rest of tonight, and it is worse here because the
+        # symptom is silence.
+        #
+        # The read is a local Settings lookup on a ~13s cycle. A failure to
+        # read must not strand the tier either way, so it falls back to the
+        # value captured at arm time.
+        try:
+            allow_direct = fleet_direct_config.load().pull_direct
+        except Exception:
+            allow_direct = pull_direct
+        if not allow_direct:
             return {}
         return merged
 
