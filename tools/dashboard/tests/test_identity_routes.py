@@ -29,6 +29,9 @@ import base64
 import hashlib
 import json
 import struct
+import shutil
+import subprocess
+from pathlib import Path
 
 import cbor2
 import pytest
@@ -44,6 +47,7 @@ from tools.graph.schemas.personal_identity import (
     PERSONAL_IDENTITY_SET_ID,
 )
 from tools.network.idkit import KeyPair
+from tools.vault.personal_object import derive_delegate_audited_recipient
 
 ORG = "idorg"
 PASSWORD = "week-glacier-thirty-nine"
@@ -94,9 +98,14 @@ def _armor(root: KeyPair) -> str:
     return mint_password_armor(root, PASSWORD, iterations=10_000)
 
 
+def _audited_public(root):
+    return derive_delegate_audited_recipient(bytes.fromhex(root.private_hex))[1]
+
+
 def _store_identity(client, root: KeyPair, name="Alex"):
     r = client.post("/api/identity/personal",
                     json={"display_name": name,
+                          "delegate_audited_public_key": _audited_public(root),
                           "armored_private_key": _armor(root)})
     assert r.status_code == 200, r.text
     return r.json()
@@ -311,6 +320,7 @@ def test_personal_scope_stays_consistent_when_graph_org_is_set(
         created = client.post(
             "/api/identity/personal",
             json={"org": ORG, "display_name": "Personal Alex",
+                  "delegate_audited_public_key": _audited_public(root),
                   "armored_private_key": _armor(root)},
             headers={"X-Graph-Org": ORG},
         )
@@ -376,6 +386,127 @@ def test_personal_roundtrip(env, root):
     assert opened.public_hex == root.public_hex
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not on PATH")
+def test_new_identity_can_fetch_encrypted_signin_preparation(env, monkeypatch):
+    """Initial enrollment must enable the preparation required before root login.
+
+    Run the real browser identity creation and real identity/recipient storage. Unlike
+    the organization-write regression, do not pre-seed the audited recipient
+    or call the authenticated vault-keys handoff before requesting preparation.
+    Only the unrelated contents of the encrypted preparation are a fixture.
+    """
+    from starlette.routing import Route
+    from tools.dashboard import signon_preparation
+    from tools.network.idkit import sealing
+    from tools.vault.personal_object import derive_delegate_audited_recipient
+
+    expected = {"vault": {}, "organizations": [], "runtime": {"enabled": False}}
+    monkeypatch.setattr(signon_preparation, "collect", lambda: expected)
+    env.app.router.routes.append(Route(
+        "/api/identity/unlock/preparation", signon_preparation.get_preparation,
+        methods=["GET"],
+    ))
+    browser = subprocess.run(["node", "--input-type=module", "-e", r"""
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { createRequire } from 'node:module';
+const { JSDOM } = createRequire(import.meta.url)('jsdom');
+const base = new URL('../static/js/', import.meta.url);
+const primitives = await import(new URL('ceremony/primitives.js', base));
+const dom = new JSDOM('', { url: 'https://localhost/', runScripts: 'outside-only' });
+const w = dom.window;
+Object.defineProperty(w, 'crypto', { value: globalThis.crypto });
+w.TextEncoder = TextEncoder;
+w.TextDecoder = TextDecoder;
+w.__AUTONOMY_WELCOME_SHELL__ = true;
+w.AutonomyNetworkSession = { _internals: primitives };
+w.__dynImport = spec => import(new URL(spec.replace(/^\/static\/js\//, ''), base));
+for (const name of ['network-identity.js', 'network-onboarding.js']) {
+  w.eval(fs.readFileSync(new URL(name, base), 'utf8').replace(/\bimport\(/g, '__dynImport('));
+}
+const identity = w.AutonomyNetworkIdentity._internals;
+identity.overrideIterations(10000);
+const generate = identity.generateEd25519;
+let seed;
+identity.generateEd25519 = async () => {
+  const pair = await generate(); seed = pair.seed; return pair;
+};
+let payload;
+w.fetch = async (url, options) => {
+  assert.equal(url, '/api/identity/personal');
+  assert.ok(seed.every(byte => byte === 0), 'root seed cleared before submission');
+  assert.equal(payload, undefined, 'only the existing creation request is made');
+  payload = JSON.parse(options.body);
+  assert.deepEqual(Object.keys(payload).sort(),
+    ['armored_private_key', 'delegate_audited_public_key', 'display_name', 'root_pub']);
+  return { ok: true, json: async () => ({ ok: true }) };
+};
+await w.AutonomyOnboarding._internals.createIdentity(
+  'Alex', 'week-glacier-thirty-nine', 'week-glacier-thirty-nine');
+process.stdout.write(JSON.stringify(payload));
+dom.window.close();
+"""], cwd=Path(__file__).parent, capture_output=True, text=True, timeout=30)
+    assert browser.returncode == 0, browser.stderr
+    payload = json.loads(browser.stdout)
+    root = open_armor_with_password(payload["armored_private_key"], PASSWORD)
+    assert payload["delegate_audited_public_key"] == _audited_public(root)
+    created = env.post("/api/identity/personal", json=payload)
+    assert created.status_code == 200, created.text
+    # Model the next sign-in, not the initial bootstrap session.
+    env.cookies.clear()
+    response = env.get("/api/identity/unlock/preparation")
+    assert response.status_code == 200, response.text
+    assert set(response.json()) == {"sealed"}
+    private, _ = derive_delegate_audited_recipient(bytes.fromhex(root.private_hex))
+    opened = sealing.open(bytes.fromhex(response.json()["sealed"]), private,
+                          signon_preparation.PURPOSE)
+    assert json.loads(opened) == expected
+
+
+def test_existing_identity_without_recipient_gets_metadata_free_refusal(env, root, monkeypatch):
+    from starlette.routing import Route
+    from tools.dashboard import signon_preparation
+    from tools.graph.schemas.personal_identity import PERSONAL_IDENTITY_REVISION
+
+    # Persist an existing identity exactly as before recipient publication was
+    # part of enrollment. Do not run the new enrollment endpoint to set it up.
+    with settings_ops.identity_write_context():
+        settings_ops.upsert_by_key(PERSONAL_IDENTITY_SET_ID, PERSONAL_IDENTITY_REVISION,
+            "default", {"root_pub": root.public_hex, "armored_private_key": _armor(root),
+                        "display_name": "Alex", "created_at": "2026-09-10T00:00:00Z"}, org=None)
+    def must_not_collect():
+        pytest.fail("missing recipient must not collect organization metadata")
+    monkeypatch.setattr(signon_preparation, "collect", must_not_collect)
+    env.app.router.routes.append(Route(
+        "/api/identity/unlock/preparation", signon_preparation.get_preparation))
+    response = env.get("/api/identity/unlock/preparation")
+    assert response.status_code == 409
+    assert response.json() == {"error": "recipient_missing"}
+    assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not on PATH")
+def test_missing_recipient_browser_message_does_not_offer_nonexistent_recovery():
+    result = subprocess.run(["node", "--input-type=module", "-e", """
+import assert from 'node:assert/strict';
+import { fetchPreparation } from '../static/js/ceremony/signon-phases.js';
+await assert.rejects(fetchPreparation(async () => ({
+  status: 409, ok: false, json: async () => ({ error: 'recipient_missing' }),
+})), { message: 'Sign-in is blocked because this dashboard is missing part of your identity’s encryption setup.' });
+"""], cwd=Path(__file__).parent, capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("public", [None, "", "not-hex", "ab" * 31])
+def test_personal_rejects_missing_or_malformed_recipient_before_identity_write(env, root, public):
+    response = env.post("/api/identity/personal", json={
+        "display_name": "Alex", "armored_private_key": _armor(root),
+        "delegate_audited_public_key": public,
+    })
+    assert response.status_code == 400
+    assert identity_routes._personal_member() is None
+
+
 def test_personal_refuses_plaintext_key(env, root):
     r = env.post("/api/identity/personal",
                  json={"display_name": "Alex",
@@ -429,6 +560,7 @@ def test_personal_seed_never_touches_disk(env, root, tmp_path):
 def test_personal_org_context_is_ignored(env, root):
     r = env.post("/api/identity/personal",
                  json={"org": "someone-else", "display_name": "Mallory",
+                       "delegate_audited_public_key": _audited_public(root),
                        "armored_private_key": _armor(root)},
                  headers={"X-Graph-Org": "someone-else"})
     assert r.status_code == 200
@@ -873,6 +1005,7 @@ def _store_policy_identity(env, root, factors, access, policy, generation=1):
     armor = _policy_armor(root, generation, factors, access, policy)
     r = env.post("/api/identity/personal", json={
         "display_name": "Alex", "armored_private_key": armor,
+        "delegate_audited_public_key": _audited_public(root),
     })
     assert r.status_code == 200, r.text
     return armor

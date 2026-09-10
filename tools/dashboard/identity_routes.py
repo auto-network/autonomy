@@ -398,7 +398,7 @@ async def get_personal(request: Request) -> JSONResponse:
 async def post_personal(request: Request) -> JSONResponse:
     """Store the personal root key's password-encrypted armor (step 1, 'You').
 
-    Body: ``{label?, display_name, armored_private_key, root_pub?}``.
+    Body: ``{label?, display_name, armored_private_key, root_pub?, delegate_audited_public_key}``.
     The canonical-armor check (I1) lives in the PersonalIdentityV1 schema
     — shared by every write path — but is ALSO applied here so the error
     surfaces as a 400 with a clear message rather than a schema string.
@@ -462,6 +462,11 @@ async def post_personal(request: Request) -> JSONResponse:
             "a personal identity already exists — the Get started flow "
             "never overwrites your root key"
         )}, status_code=409)
+    audited_public = body.get("delegate_audited_public_key")
+    if not isinstance(audited_public, str) or not re.fullmatch(r"[0-9a-f]{64}", audited_public):
+        return JSONResponse({"ok": False, "error": (
+            "delegate_audited_public_key must be the root-derived X25519 public key as 64 lowercase hex characters"
+        )}, status_code=400)
     payload = {
         "armored_private_key": canonical_armor,
         "root_pub": root_pub,
@@ -469,6 +474,15 @@ async def post_personal(request: Request) -> JSONResponse:
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     try:
+        from tools.graph.schemas.vault_policy_class import VAULT_POLICY_CLASS_SET_ID
+        from tools.vault.key_holder import _scoped_db
+        from tools.vault.store import VaultStore
+
+        # Initial enrollment already establishes this identity. Publish its
+        # public recipient before the next sign-in needs encrypted preparation.
+        # This does not install any private key or warm the vault.
+        with VaultStore(_scoped_db(VAULT_POLICY_CLASS_SET_ID, None)) as store:
+            store.put_delegate_audited_recipient(audited_public)
         # The identity sets are write-protected against the generic
         # settings API; the enrollment routes carry the capability.
         with settings_ops.identity_write_context():

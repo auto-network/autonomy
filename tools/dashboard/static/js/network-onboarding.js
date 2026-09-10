@@ -10,7 +10,7 @@
  *     in this page, armor it with the password (the SAME canonical
  *     armor as network-identity.js — its crypto internals are reused,
  *     so one implementation serves both ceremonies), and store ONLY the
- *     armor via POST /api/identity/personal (I1: the plaintext seed is
+ *     armor and public encryption recipient via POST /api/identity/personal (I1: the plaintext seed is
  *     zeroed the moment the armor exists; the password never leaves
  *     the browser).
  *   Step 2 (This device): navigator.credentials.create() against
@@ -123,9 +123,11 @@
     if (password !== confirm) throw new Error('the passwords do not match');
     var I = _idI();
     var pair = await I.generateEd25519();
-    var armor;
+    var armor, auditedPublic;
     try {
       armor = await I.armorSeed(pair.seed, pair.pubHex, password);
+      var vault = await import('./ceremony/vault-unlock.js');
+      auditedPublic = (await vault.deriveAuditedRecipient(pair.seed)).publicKeyHex;
       // Keep the root signing key for the passkey enrollment that follows in
       // this same ceremony; the seed itself is zeroed immediately below.
       _ceremonyRoot = {
@@ -140,6 +142,7 @@
       display_name: name,
       armored_private_key: armor,
       root_pub: pair.pubHex,
+      delegate_audited_public_key: auditedPublic,
     });
   }
 
