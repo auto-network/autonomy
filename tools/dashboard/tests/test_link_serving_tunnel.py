@@ -40,13 +40,25 @@ from tools.network.idkit import KeyPair, Subject, canonical_json, issue_cert
 from tools.network.registry.signing import sign_request
 from tools.dashboard import link_serving_supervisor as sup
 from tools.dashboard.link_probe import probe_link
+from tools.graph.schemas.machine_identity import (
+    MACHINE_IDENTITY_KEY,
+    MACHINE_IDENTITY_REVISION,
+    MACHINE_IDENTITY_SET_ID,
+)
 from tools.graph.schemas.network_identity import (
     NETWORK_BINDING_REVISION,
     NETWORK_BINDING_SET_ID,
     NETWORK_SERVE_CERT_REVISION,
     NETWORK_SERVE_CERT_SET_ID,
 )
+from tools.graph.schemas.personal_identity import (
+    PERSONAL_IDENTITY_REVISION,
+    PERSONAL_IDENTITY_SET_ID,
+)
+from tools.network import fleet_roster
+from tools.network.fleet_relay_sync import FleetRuntimeWarmCache
 from tools.network.idkit import Subject, issue_cert
+from tools.network.idkit.root_factor_policy import mint_password_armor
 from tools.network.relaykit.connector import TunnelConnector
 from tools.network.relaykit.viewer import ViewerChannel
 
@@ -195,10 +207,16 @@ def stack(tmp_path, monkeypatch):
             ))
             assert response.status_code == 201, response.text
 
+        # A machine identity is not optional: since bc79dc9a a connector
+        # constructed without one refuses to open a tunnel at all (the
+        # anonymous v1 hello is gone), and the relay files v2 tunnels by
+        # (persona, machine). This org has registered no serving keys, so
+        # the relay's transitional accept admits any well-signed machine key.
         connector = TunnelConnector(
             f"ws://127.0.0.1:{port}", ORG_UUID, session_key, session_cert,
             handler=link_serving.make_grant_handler(ORG),
             channel_cert=channel_cert,
+            machine_key=KeyPair.generate(),
             min_backoff=0.1, max_backoff=1.0,
         )
         yield {"port": port, "root": root, "root_pub": root.public_hex,
@@ -236,8 +254,9 @@ def test_tunnel_serves_only_against_local_grants(stack):
             assert json.loads(header) == {
                 "v": 1, "status": "ok", "kind": "present",
                 "viewer": {"offset": 0, "length": len(BINDER_BYTES)},
+                # The generated identity of the scope this suite serves as.
                 "branding": {
-                    "name": "netorg", "color": "#118AB2", "initial": "N",
+                    "name": "personal", "color": "#F4A261", "initial": "P",
                 },
             }
             assert len(body) == len(BINDER_BYTES)  # binder-sized, byte-exact
@@ -355,6 +374,96 @@ def _provision_serve_cert(tmp_path, root, port):
     )
 
 
+def _enroll_fleet_machine(tmp_path, monkeypatch, root) -> Path:
+    """Make this installation an enrolled, serving-permitted fleet machine
+    and warm the connector's runtime cache for ORG_UUID.
+
+    The spawned connector has ONE source of machine identity: the warm
+    runtime cache, keyed by its ``--org``, verified against the personal
+    root and the roster (bc79dc9a deleted the anonymous fallback). So the
+    subprocess needs, in the stores it inherits through AUTONOMY_ORGS_DIR:
+    the personal root, one active roster entry, this machine's own identity
+    row (the serving permit re-validates roster membership), and a cached
+    credential whose reachability half carries the machine key the v2 hello
+    co-signs with. Returns the connector's log path for diagnostics."""
+    machine = KeyPair.generate()
+    process = KeyPair.generate()
+    machine_id = "cc" * 32
+    now = int(time.time())
+
+    with settings_ops.identity_write_context():
+        settings_ops.add_setting(
+            PERSONAL_IDENTITY_SET_ID, PERSONAL_IDENTITY_REVISION, "default",
+            {
+                "armored_private_key": mint_password_armor(
+                    root, "test-passphrase", iterations=10_000),
+                "root_pub": root.public_hex,
+                "display_name": "Tunnel Suite",
+                "created_at": "2026-09-10T00:00:00Z",
+            },
+            org=None, state="raw",
+        )
+    fleet_roster.store_entry(
+        fleet_roster.enroll(
+            root, machine_id=machine_id, machine_pub=machine.public_hex),
+        org=None,
+    )
+    settings_ops.upsert_by_key(
+        MACHINE_IDENTITY_SET_ID, MACHINE_IDENTITY_REVISION, MACHINE_IDENTITY_KEY,
+        {"machine_id": machine_id}, org="machine", state="raw",
+    )
+
+    delegation = issue_cert(
+        machine, process.public_hex, scope=["fleet:sync"],
+        org=f"personal:{root.public_hex}",
+        subject=Subject("machine", machine_id),
+        not_before=now - 30, not_after=now + 3600,
+    )
+    reachability = issue_cert(
+        root, machine.public_hex, scope=("node:announce", "node:lookup"),
+        org=ORG_UUID, subject=Subject("machine", machine_id),
+        not_before=now - 30, not_after=now + 3600,
+    )
+    # A temp dir stands in for the ramfs key cache, as the warm-cache suite
+    # does; the guard itself is memory_cache's proof. The subprocess reads
+    # the same directory through the inherited env (see _ramfs_free_spawn).
+    keycache = tmp_path / "keycache"
+    keycache.mkdir()
+    monkeypatch.setenv("AUTONOMY_KEYCACHE_MOUNT", str(keycache))
+    monkeypatch.setattr(
+        "tools.network.storagekit.memory_cache.assert_memory_backed",
+        lambda *a, **k: None,
+    )
+    FleetRuntimeWarmCache(ORG_UUID).store({
+        "machine_id": machine_id,
+        "machine_pub": machine.public_hex,
+        "process_private_seed": process.private_hex,
+        "delegation_cert": delegation.to_dict(),
+        "machine_private_seed": machine.private_hex,
+        "reachability_cert": reachability.to_dict(),
+    })
+    return tmp_path / "network" / "serve.log"
+
+
+# The real connector, in a real subprocess, with exactly one thing
+# neutered: the ramfs guard on the warm cache it re-arms from, since the
+# cache above lives in a temp dir. `-c` cannot be `-m`, so the argv the
+# supervisor built is re-entered through runpy with the same arguments.
+_CONNECTOR_BOOTSTRAP = (
+    "import runpy; "
+    "from tools.network.storagekit import memory_cache; "
+    "memory_cache.assert_memory_backed = lambda *a, **k: None; "
+    "runpy.run_module('tools.dashboard.link_serving', "
+    "run_name='__main__', alter_sys=True)"
+)
+
+
+def _ramfs_free_spawn(argv, env, **kwargs):
+    assert argv[1:3] == ["-m", "tools.dashboard.link_serving"], argv
+    return sup._default_spawn(
+        [argv[0], "-c", _CONNECTOR_BOOTSTRAP, *argv[3:]], env, **kwargs)
+
+
 def test_supervisor_brings_serving_live_end_to_end(stack, tmp_path, monkeypatch):
     """The whole point: given a provisioned serve-cert, the supervisor spawns
     the REAL connector subprocess and the freshly published link goes live —
@@ -372,8 +481,9 @@ def test_supervisor_brings_serving_live_end_to_end(stack, tmp_path, monkeypatch)
     token = publish_link(stack["db"], binder_rev)
     cache_grant(token, binder_rev)
     _provision_serve_cert(tmp_path, stack["root"], stack["port"])
+    connector_log = _enroll_fleet_machine(tmp_path, monkeypatch, stack["root"])
 
-    supervisor = sup.ServingSupervisor()
+    supervisor = sup.ServingSupervisor(spawn=_ramfs_free_spawn)
     relay = f"ws://127.0.0.1:{stack['port']}"
     try:
         # The post-publish trigger: reconcile → launch the connector subprocess.
@@ -393,7 +503,11 @@ def test_supervisor_brings_serving_live_end_to_end(stack, tmp_path, monkeypatch)
                 if verdict["live"]:
                     break
                 await asyncio.sleep(0.5)
-            assert verdict and verdict["live"] is True, verdict
+            # The connector's own log says why it never came live; the probe
+            # can only report that the relay had no tunnel to hand it.
+            log_tail = (connector_log.read_text()[-3000:]
+                        if connector_log.exists() else "<no connector log>")
+            assert verdict and verdict["live"] is True, (verdict, log_tail)
             assert verdict["content_length"] == len(BINDER_BYTES)  # headers-only
 
         asyncio.run(run())
