@@ -245,6 +245,8 @@ DOMAIN_OWNED_EXCLUSIONS = (
     ("tools/network/relaykit/fleet_stream_wire.py", "FLEET_STREAM_WINDOW_SLOTS"),
     ("tools/network/relaykit/fleet_stream_wire.py", "FLEET_STREAM_MAX_WINDOW_BYTES"),
     ("tools/network/relaykit/fleet_stream_wire.py", "FLEET_STREAM_MAX_WINDOW_SLOTS"),
+    ("tools/network/relaykit/fleet_stream_wire.py", "FLEET_STREAM_MIN_WINDOW_BYTES"),
+    ("tools/network/relaykit/fleet_stream_wire.py", "FLEET_STREAM_MIN_WINDOW_SLOTS"),
 )
 
 # -- Deliberate delays --------------------------------------------------------
