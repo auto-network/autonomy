@@ -558,9 +558,34 @@ def check_serving_readiness(report: dict) -> None:
                 # above -- it needed a direct, live query against the exact
                 # running process (connector-status) to actually confirm.
                 configured_note = ""
+                unreadable: Exception | None = None
+                serving_now = None
                 try:
                     status = sup.control(org, "connector-status", {})
                     configured = status.get("fleet_runtime_configured")
+                    # The connector's own connected event: the relay accepted
+                    # its hello and the tunnel is live. Everything above this
+                    # point tests whether the PROCESS exists
+                    # (_running_connectors scans /proc), and a connector
+                    # looping on a refused hello is process-present and
+                    # tunnel-absent -- indistinguishable in the old output.
+                    # Home spent 00:31-01:50 on 2026-09-10 in exactly that
+                    # state, its three org connectors replaced every 60s while
+                    # the relay refused every hello with "SignatureError: hop
+                    # 1". This reply was already being fetched; only
+                    # fleet_runtime_configured was read out of it.
+                    serving_now = status.get("serving")
+                    if serving_now is False:
+                        _line(
+                            f"{label}: serving readiness",
+                            "connector process is up and eligible, but its tunnel "
+                            "is NOT established (connector-status serving=False) -- "
+                            "the relay is refusing or has not yet accepted its "
+                            "hello; check the connector's own log for the refusal, "
+                            "and expect this transiently for ~60s after a restart",
+                            fail=True,
+                        )
+                        continue
                     if configured is False and org not in personal_aliases:
                         # Only the PERSONAL tunnel is ever armed for Fleet
                         # sync. activate_local_runtime publishes the runtime
@@ -589,9 +614,33 @@ def check_serving_readiness(report: dict) -> None:
                         continue
                     elif configured is True:
                         configured_note = ", fleet_runtime_configured=True"
-                except Exception:
-                    pass  # connector-status is itself best-effort here
-                _line(f"{label}: serving readiness", f"eligible and running{configured_note}")
+                except Exception as exc:
+                    unreadable = exc
+                if unreadable is not None:
+                    # COULD NOT LOOK IS NOT A PASS. This branch used to
+                    # `pass` and fall straight into "eligible and running",
+                    # so a refused socket, a missing .ctl or a timeout --
+                    # every one of which a connector with no live tunnel is
+                    # likely to produce -- printed the same green line as a
+                    # connector that answered. That is the failure this file
+                    # already refuses to make 200 lines below, where
+                    # _running_connectors raises ProcessScanUnavailable so
+                    # "could not look" and "nothing is there" stay
+                    # distinguishable (auto-kqpfw). Same discipline here.
+                    _line(
+                        f"{label}: serving readiness",
+                        "eligible, process is up, but connector-status is "
+                        f"UNREADABLE ({unreadable!r}) -- this line rests on a "
+                        "/proc entry alone; whether the tunnel is actually "
+                        "serving is UNKNOWN, not confirmed",
+                        warn=True,
+                    )
+                    continue
+                serving_note = ", serving=True" if serving_now else ""
+                _line(
+                    f"{label}: serving readiness",
+                    f"eligible and running{configured_note}{serving_note}",
+                )
     except Exception as exc:
         _line("serving readiness check", f"FAILED to run: {exc!r}", fail=True)
 
