@@ -280,6 +280,11 @@ def _local_store_db_path(name: str, root: Path | str | None = None) -> Path:
 
 #: A slug that is really an org_uuid. Checked separately from the
 #: filename-shape guard because a UUID is a perfectly valid filename.
+#: How a missing value looks once something has stringified it on the way to
+#: a filename. `None` the object is caught by the shape guard; `"None"` the
+#: string is not, and the string is the likelier arrival.
+_STRINGIFIED_ABSENCE = frozenset({"none", "null", "nil", "undefined"})
+
 _UUID_SLUG = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z"
@@ -354,6 +359,41 @@ def _org_db_path(slug: str, root: Path | str | None = None) -> Path:
             "or empty slug creates a ghost database (orgs/None.db) that no org "
             "owns, that sync will discover and fail on forever, and that sorts "
             "ahead of every real org. Fix the caller."
+        )
+    if slug.lower() in _STRINGIFIED_ABSENCE:
+        # THE MECHANISM THAT ACTUALLY MINTED orgs/None.db. The guard above
+        # catches `_org_db_path(None)` — the object — but a missing value
+        # usually reaches a filename already stringified, through an f-string
+        # or a str() on the way to a path. `_org_db_path("None")` returned
+        # `orgs/None.db` and sjc-2 still carries that file's WAL. `is_org_slug`
+        # rejected these all along, and `_org_db_path` did not: two answers to
+        # one question in the same module, which is the drift this whole
+        # sequence is about, found by verifying my own claim that the predicate
+        # had three consumers. It had two.
+        #
+        # Listed explicitly rather than by adopting `is_org_slug` wholesale.
+        # That predicate requires `^[a-z][a-z0-9-]{0,62}$`, and tightening a
+        # RAISE on the startup path to a shape I have not checked every live
+        # caller against is how this module froze home's dashboard for three
+        # and a half minutes tonight. Narrow, demonstrated, no new class.
+        #
+        # THE SAFETY OF THIS REST ON A MEASUREMENT THAT CAN EXPIRE. Before
+        # landing, host-0906-222509 ran `SELECT slug FROM orgs` across every
+        # store on both nodes: home and sjc-2 carry personal, anchore,
+        # autonomy, blindhash, dynbench and nothing else, so none of these four
+        # words can reach here from a legitimate caller. That is a fact about
+        # two machines on 2026-09-10, NOT a property of the system — a third
+        # machine joining, or an org created later, invalidates it. Anyone
+        # widening this set must re-run that query first; an exact-match list
+        # is safe only while its members are provably unused.
+        #
+        # Exact match, never a prefix: `nullify`, `nilsson`, `nonexistent-org`
+        # and `none-of-the-above` are all legitimate slugs and are pinned as
+        # such by test.
+        raise ValueError(
+            f"org slug is a stringified absence, got {slug!r}. A missing org "
+            "reached a filename through str() or an f-string; this is what "
+            "minted orgs/None.db (auto-kou68). Fix the caller."
         )
     if _UUID_SLUG.match(slug):
         # A UUID IS A VALID FILENAME, which is why the check above does not
