@@ -86,7 +86,7 @@ def test_personal_signin_and_reload_without_a_ledger(tmp_path, monkeypatch, old_
             with KeyControlStore(db) as kc:
                 kc.accept_credential(founded.kem_credential)
             seal = build_vault_sealer(
-                VaultKeyCache(), lambda: founder,
+                VaultKeyCache(), lambda org: founder,
                 lambda *_: (ledger.fold(),
                             lambda heads: ledger.fold(heads=list(heads)),
                             ledger.ledger.ancestry),

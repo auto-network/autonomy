@@ -823,6 +823,86 @@ var signRegistryRequestCore;
     }
   }
 
+  // Phase 2: prepare the existing maintenance messages, with NO transport.
+  async function prepareRootMaintenance(seed, organizations, runtime, personalServe) {
+    var posts = [];
+    async function rootKeyFor(entry) {
+      var raw = await openSealedArmor(entry.org_key, seed);
+      try { return await _importRootKey(raw); }
+      finally { raw.fill(0); }
+    }
+    if (runtime && runtime.enabled && runtime.personal_org_uuid && (!runtime.org_uuid || runtime.serves)) {
+      var key = await _importRootKey(seed);
+      try {
+        var registration = await _signRootRequest(key, runtime.personal_root_pub, 'POST', '/v1/orgs', {
+          org_uuid: runtime.personal_org_uuid, root_pub: runtime.personal_root_pub, recovery_policy: 'none',
+        });
+        posts.push({ step: 'binding', url: '/api/network/register', body: { org: null, envelope: registration } });
+        if (runtime.serves && (!personalServe || personalServe.status !== 'ok')) {
+          var credential = await _mintServeCredential(key, runtime.personal_org_uuid, runtime.personal_root_pub);
+          posts.push({ step: 'serve-cert', url: '/api/network/serve-cert', body: Object.assign({ org: null }, credential.body) });
+        }
+      } catch (error) {
+        posts.push({ step: 'binding', error: error.message || String(error) });
+      } finally { key = null; }
+    }
+    for (var entry of organizations) {
+      var slug = entry.slug;
+      var cp = entry.checkpoint_work;
+      if (cp) {
+        var record = Object.assign({}, cp.record);
+        var signer = null, persona = null;
+        try {
+          if (cp.sign_with === 'root') {
+            signer = await rootKeyFor(entry);
+            record.signer = entry.root_pub;
+          } else {
+            persona = await derivePersona(seed, entry.genesis_id);
+            signer = persona.signingKey;
+          }
+          record.sig = bytesToHex(await crypto.subtle.sign('Ed25519', signer,
+            _domainBytes(CHECKPOINT_DOMAIN, canonicalJson(record))));
+          posts.push({ step: 'checkpoint', url: '/api/network/membership-checkpoint', org: slug,
+            body: { org: slug, record: record } });
+        } catch (error) {
+          posts.push({ step: 'checkpoint', org: slug, error: error.message || String(error) });
+        } finally { signer = null; if (persona) persona.signingKey = null; }
+      }
+      if (entry.serve_cert.required) {
+        var servingPersona = null;
+        try {
+          servingPersona = await derivePersona(seed, entry.genesis_id);
+          var serving = await _mintServeCredentialPersona(servingPersona.signingKey,
+            entry.org_uuid, servingPersona.publicHex);
+          posts.push({ step: 'serve-cert', url: '/api/network/serve-cert', org: slug,
+            body: Object.assign({ org: slug }, serving.body) });
+        } catch (error) {
+          posts.push({ step: 'serve-cert', org: slug, error: error.message || String(error) });
+        } finally { if (servingPersona) servingPersona.signingKey = null; }
+      }
+      var expiry = _isoSeconds(entry.binding_expires_at);
+      if (expiry !== null && expiry - _nowS() < BINDING_RENEW_BELOW_DAYS * 86400
+          && entry.org_key && entry.org_key.sealed_root_key) {
+        var bindingKey = null;
+        try {
+          bindingKey = await rootKeyFor(entry);
+          var expired = expiry <= _nowS();
+          var policy = entry.recovery_policy || {};
+          var payload = expired ? { org_uuid: entry.org_uuid, root_pub: entry.root_pub,
+            recovery_policy: policy.mode || 'none' } : {};
+          if (expired && policy.recovery_pub) payload.recovery_pub = policy.recovery_pub;
+          var envelope = await _signRootRequest(bindingKey, entry.root_pub, 'POST',
+            expired ? '/v1/orgs' : '/v1/orgs/' + entry.org_uuid + '/renew', payload);
+          posts.push({ step: 'binding', url: expired ? '/api/network/register' : '/api/network/renew', org: slug,
+            body: { org: slug, envelope: envelope } });
+        } catch (error) {
+          posts.push({ step: 'binding', org: slug, error: error.message || String(error) });
+        } finally { bindingKey = null; }
+      }
+    }
+    return posts;
+  }
+
   async function _postCheckpoint(record, orgSlug) {
     var headers = { 'Content-Type': 'application/json' };
     if (orgSlug) headers['X-Graph-Org'] = orgSlug;
@@ -1822,6 +1902,7 @@ var signRegistryRequestCore;
     _internals: {
       canonicalJson: canonicalJson,
       wakeVault: wakeVault,
+      prepareRootMaintenance: prepareRootMaintenance,
       enrollPasskey: enrollPasskey,
       openPersonalRoot: _openPersonalRoot,
       deriveEncapsulationKeypair: deriveEncapsulationKeypair,

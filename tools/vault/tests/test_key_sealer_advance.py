@@ -94,7 +94,7 @@ def test_a_first_write_is_readable_after_it_mints(world):
     cache = VaultKeyCache()
     seal = build_vault_sealer(
         cache,
-        lambda: world["agent"], world["ledger_provider"],
+        lambda org: world["agent"], world["ledger_provider"],
     )
     hold = build_key_holder(cache)
 
@@ -133,7 +133,7 @@ def test_secured_write_uses_named_class_public_key_without_an_opener(world):
 
     cache = VaultKeyCache()
     seal = build_vault_sealer(
-        cache, lambda: world["agent"], world["ledger_provider"],
+        cache, lambda org: world["agent"], world["ledger_provider"],
     )
     secret = {"value": "-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n-----END OPENSSH PRIVATE KEY-----\n"}
     locator = seal(
@@ -169,7 +169,7 @@ def test_secured_write_without_an_explicit_policy_class_fails_closed(world):
     from tools.vault.key_sealer import VaultSealerNotReady
 
     seal = build_vault_sealer(
-        VaultKeyCache(), lambda: world["agent"], world["ledger_provider"],
+        VaultKeyCache(), lambda org: world["agent"], world["ledger_provider"],
     )
     with pytest.raises(VaultSealerNotReady, match="must name the policy class"):
         seal(
@@ -189,7 +189,7 @@ def test_the_minted_descriptor_is_durable(world):
     cache = VaultKeyCache()
     seal = build_vault_sealer(
         cache,
-        lambda: world["agent"], world["ledger_provider"],
+        lambda org: world["agent"], world["ledger_provider"],
     )
 
     seal(set_id="autonomy.vault.audited", schema_revision=1, key="github.token",
@@ -208,7 +208,7 @@ def test_the_new_generation_key_reaches_the_cache(world):
     cache = VaultKeyCache()
     seal = build_vault_sealer(
         cache,
-        lambda: world["agent"], world["ledger_provider"],
+        lambda org: world["agent"], world["ledger_provider"],
     )
     assert not cache, "precondition: the cache starts empty"
 
@@ -234,7 +234,7 @@ def test_the_storage_ancestry_is_refused_on_this_path(world):
 
     seal = build_vault_sealer(
         cache,
-        lambda: world["agent"], wrong_ledger,
+        lambda org: world["agent"], wrong_ledger,
     )
 
     with pytest.raises(TypeError, match="authority"):
@@ -250,7 +250,7 @@ def test_no_delegate_means_no_write(world):
 
     seal = build_vault_sealer(
         VaultKeyCache(),
-        lambda: None, world["ledger_provider"],
+        lambda org: None, world["ledger_provider"],
     )
 
     with pytest.raises(VaultSealerNotReady, match="unlock"):
@@ -285,7 +285,7 @@ def test_a_mint_persists_a_grant_that_survives_the_process(world):
 
     cache = VaultKeyCache()
     seal = build_vault_sealer(
-        cache, lambda: world["agent"], world["ledger_provider"],
+        cache, lambda org: world["agent"], world["ledger_provider"],
     )
     secret = {"value": "survives-the-restart"}
     locator = seal(

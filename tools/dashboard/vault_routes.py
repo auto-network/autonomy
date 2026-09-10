@@ -75,6 +75,11 @@ async def root_anchors(request: Request):
     """Inventory the stable personal recipients and their bound classes."""
     if (denied := _guard(request)) is not None:
         return denied
+    return JSONResponse(root_anchor_inventory())
+
+
+def root_anchor_inventory():
+    """Existing public inventory, reusable inside encrypted preparation."""
     root_pub = _personal_root_pub()
     with _store() as store:
         anchors = [
@@ -90,7 +95,7 @@ async def root_anchors(request: Request):
             and record.governance.get("form") == "root-reachable"
             and record.governance.get("anchor_id") in anchor_ids
         ]
-    return JSONResponse({"anchors": anchors, "classes": classes})
+    return {"anchors": anchors, "classes": classes}
 
 
 async def enroll_root_anchor(request: Request):

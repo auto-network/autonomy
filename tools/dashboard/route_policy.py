@@ -66,6 +66,9 @@ PUBLIC_EXCEPTIONS: dict[tuple[str, str], str] = {
     ("POST", "/api/identity/unlock/password/options"):
         "Issues the one-use password-unlock challenge. The caller has no "
         "session yet — obtaining one is the point of the call.",
+    ("GET", "/api/identity/unlock/preparation"):
+        "Root-ceremony preparation sealed to the existing personal audited "
+        "recipient. Only ciphertext is exposed before authentication.",
     ("POST", "/api/identity/unlock/password"):
         "Proves the password unlock and mints the session cookie. Pre-session "
         "by construction.",

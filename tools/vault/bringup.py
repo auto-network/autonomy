@@ -15,7 +15,7 @@ from tools.vault.key_sealer import register_vault_sealer
 def register_vault_for_unlock(
     *,
     generation_keys: dict,
-    author_provider: Callable[[], object],
+    author_provider: Callable[[str], object],
     org_ledger_provider: Callable[["str | None"], object],
     cache: "VaultKeyCache | None" = None,
 ) -> VaultKeyCache:

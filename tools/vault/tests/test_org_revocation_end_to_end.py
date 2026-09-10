@@ -133,7 +133,7 @@ def test_a_remint_grants_two_surviving_members_in_one_mint(tmp_path, monkeypatch
         kc.accept_credential(world.principals[alice.public_hex]["credential"])
 
     cache = VaultKeyCache()
-    seal = build_vault_sealer(cache, lambda: alice, _ledger_provider(world))
+    seal = build_vault_sealer(cache, lambda org: alice, _ledger_provider(world))
 
     loc1 = seal(
         set_id=TEST_SET, schema_revision=1, key="github.token",
@@ -188,7 +188,7 @@ def test_a_kicked_out_member_cannot_read_a_rewritten_org_secret(tmp_path, monkey
         kc.accept_credential(world.principals[alice.public_hex]["credential"])
 
     cache = VaultKeyCache()
-    seal = build_vault_sealer(cache, lambda: alice, _ledger_provider(world))
+    seal = build_vault_sealer(cache, lambda org: alice, _ledger_provider(world))
 
     # 2. Vault a secret BEFORE the second member exists; 3. Alice reads it.
     loc1 = seal(

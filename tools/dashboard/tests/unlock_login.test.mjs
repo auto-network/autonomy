@@ -32,7 +32,8 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const { JSDOM } = createRequire(import.meta.url)('jsdom');
 
 import { VirtualAuthenticator } from '../static/js/ceremony/authenticator-node.js';
-import { deriveEncapsulationKeypair, bytesToHex } from '../static/js/ceremony/primitives.js';
+import { deriveEncapsulationKeypair, bytesToHex, importEd25519RootSigningKey } from '../static/js/ceremony/primitives.js';
+import { sealToEncapsulationKey } from '../static/js/ceremony/sealing.js';
 import { prfOutputFromResults, prfEvalExtension } from '../static/js/ceremony/enrollment.js';
 import { generateRecoveryCode, deriveRecoveryFactors, encodeRecoveryCode } from '../static/js/ceremony/recovery.js';
 import {
@@ -66,6 +67,8 @@ const authenticator = new VirtualAuthenticator();
 const SERVER = { armor: null, state: null, credId: null, posts: [], getRequests: [] };
 
 async function buildFixture() {
+  SERVER.posts.length = 0;
+  SERVER.getRequests.length = 0;
   const kp = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
   const rootSeed = new Uint8Array(await crypto.subtle.exportKey('pkcs8', kp.privateKey)).slice(-32);
   const rootPub = bytesToHex(new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey)));
@@ -114,6 +117,16 @@ const ok = (data) => ({ ok: true, status: 200, json: async () => data });
 async function router(url, opts) {
   const u = String(url);
   const body = opts && opts.body ? JSON.parse(opts.body) : null;
+  if (u.includes('/unlock/preparation')) {
+    const pair = await deriveEncapsulationKeypair(SERVER.rootSeed,
+      'autonomy/vault/delegate-audited-recipient/v1');
+    const payload = { vault: { root_pub: SERVER.rootPub, recovery_genesis_id: null,
+      inventory: { anchors: [], classes: [{ governance: { form: 'root-reachable' } }] } },
+      organizations: [], runtime: { enabled: false }, completion: null, personal_serve: {} };
+    return ok({ sealed: bytesToHex(await sealToEncapsulationKey(
+      new TextEncoder().encode(JSON.stringify(payload)), pair.publicKeyHex,
+      'autonomy/identity/sign-in-preparation/v1')) });
+  }
   if (u.includes('/api/identity/status')) {
     return ok({
       personal_identity: { display_name: 'Jeremy Spilman' },
@@ -123,6 +136,20 @@ async function router(url, opts) {
     });
   }
   if (u.includes('/api/identity/personal')) return ok({ armored_private_key: SERVER.armor });
+  if (u.includes('/api/identity/factor-policy/preview')) {
+    const factors = structuredClone(SERVER.state.factors);
+    let policy = SERVER.state.policy;
+    for (const op of body.operations) {
+      if (op.op === 'add_passkey_recipient') {
+        factors.find((f) => f.factor_id === op.factor_id).recipients.push(op.recipient);
+      } else if (op.op === 'set_root_policy') policy = op.policy;
+    }
+    return ok({ generation: 2, factors, access: SERVER.state.access, root_policy: policy });
+  }
+  if (u.includes('/api/identity/factor-policy/commit')) {
+    SERVER.posts.push({ route: 'commit', ...body });
+    return ok({ ok: true });
+  }
   if (u.includes('/api/identity/factor-policy')) return ok(view());
   if (u.includes('/unlock/passkey/options')) {
     return ok({
@@ -168,7 +195,7 @@ function browserCredential(sim) {
 }
 
 // ── the harness: run the REAL unlock.js against a jsdom window ─────────────
-async function bootUnlock(sourcePath, { search = '' } = {}) {
+async function bootUnlock(sourcePath, { search = '', traceRoot = false } = {}) {
   const dom = new JSDOM(
     '<!doctype html><html><body><div class="unlock-shell"><div id="unlock-card" class="unlock-card"></div></div></body></html>',
     { url: 'https://localhost/unlock' + search, pretendToBeVisual: true },
@@ -195,16 +222,46 @@ async function bootUnlock(sourcePath, { search = '' } = {}) {
     canonicalJson: (v) => JSON.stringify(v, Object.keys(v).sort()),
     bytesToHex,
     wakeVault: async () => ({}),
+    prepareRootMaintenance: async () => [],
     ready: async () => {},
   } };
-  win.AutonomyNetworkIdentity = { _internals: {} };
-  win.fetch = router;
+  win.AutonomyNetworkIdentity = { _internals: { importSigningKey: importEd25519RootSigningKey } };
+  const trace = { roots: [], seeds: [], events: [] };
+  const checkedFetch = async (url, opts) => {
+    if (traceRoot) {
+      for (const opened of trace.roots) {
+        assert.ok(opened.seed.every((v) => v === 0), 'opened root bytes cleared before fetch');
+        assert.equal(opened.signingKey, null, 'root signing key released before fetch');
+      }
+      for (const seed of trace.seeds) assert.ok(seed.every((v) => v === 0), 'working root cleared before fetch');
+      trace.events.push((opts?.method || 'GET') + ' ' + url);
+    }
+    return router(url, opts);
+  };
+  win.fetch = checkedFetch;
 
   let src = fs.readFileSync(sourcePath, 'utf8');
   // jsdom cannot evaluate dynamic import in classic scripts; route the same
   // specifiers to the same real modules through the test's ESM loader
   src = src.replace(/\bimport\(/g, '__dynImport(');
-  const dynImport = (spec) => import(pathToFileURL(path.join(JS_DIR, spec)).href);
+  const dynImport = async (spec) => {
+    const mod = await import(pathToFileURL(path.join(JS_DIR, spec)).href);
+    if (!traceRoot) return mod;
+    if (spec.endsWith('/root-factor-policy.js')) return { ...mod,
+      openFactorPolicyArmor: async (...args) => {
+        const opened = await mod.openFactorPolicyArmor(...args);
+        trace.roots.push(opened); trace.events.push('root-open');
+        return opened;
+      },
+    };
+    if (spec.endsWith('/signon-phases.js')) return { ...mod,
+      prepareSignon: async (seed, ...args) => {
+        trace.seeds.push(seed);
+        return mod.prepareSignon(seed, ...args);
+      },
+    };
+    return mod;
+  };
   const nav = { target: null };
   const location = {
     href: 'https://localhost/unlock' + search,
@@ -218,10 +275,10 @@ async function bootUnlock(sourcePath, { search = '' } = {}) {
     src,
   );
   run(
-    win, win.document, win.navigator, win.sessionStorage, router, crypto,
+    win, win.document, win.navigator, win.sessionStorage, checkedFetch, crypto,
     location, dynImport, win.PublicKeyCredential,
   );
-  return { dom, win, nav };
+  return { dom, win, nav, trace };
 }
 
 const flush = () => new Promise((r) => setImmediate(r));
@@ -233,6 +290,31 @@ async function until(fn, what = 'condition', ms = 15000) {
     await flush();
   }
 }
+
+test('password sign-in previews pending enrollment upfront and submits only after root cleanup', async () => {
+  SERVER.posts.length = 0;
+  await buildFixture();
+  const { win, trace } = await bootUnlock(path.join(JS_DIR, 'unlock.js'), { traceRoot: true });
+  await until(() => win.AutonomyUnlock._internals.state().factorPolicy, 'factor policy loaded');
+  const recipient = await deriveEncapsulationKeypair(crypto.getRandomValues(new Uint8Array(32)),
+    FACTOR_RECIPIENT_PURPOSE);
+  win.sessionStorage.setItem('autonomy.factor.pending-slot', JSON.stringify({
+    factor_id: 'pk.mac', credential_id: SERVER.credId,
+    recipient_public_key: recipient.publicKeyHex, label: 'New device',
+  }));
+  await win.AutonomyUnlock._internals.unlockWithPassword('unused-here');
+  const events = trace.events;
+  const opened = events.indexOf('root-open');
+  assert.ok(opened > events.indexOf('GET /api/identity/unlock/preparation'));
+  assert.ok(opened > events.indexOf('POST /api/identity/factor-policy/preview'));
+  assert.ok(opened > events.indexOf('POST /api/identity/unlock/password/options'));
+  assert.ok(events.indexOf('POST /api/identity/unlock/password') > opened);
+  assert.ok(events.indexOf('POST /api/identity/factor-policy/commit') > opened);
+  assert.ok(events.indexOf('POST /api/identity/unlock/vault-keys') > opened);
+  assert.equal(trace.roots.length, 1, 'one root opening');
+  assert.equal(win.sessionStorage.getItem('autonomy.factor.pending-slot'), null);
+  assert.ok(SERVER.posts.some((p) => p.route === 'commit' && p.root_signature));
+});
 
 test('passkey login on a slotless (post-migration) device: PRF requested, access granted, pending slot stashed', async () => {
   await buildFixture();
