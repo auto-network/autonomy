@@ -2804,11 +2804,18 @@ class FleetSyncScheduler:
             "misses": misses,
             "last_attempt": now,
             "next_attempt": next_attempt,
-            # Named separately because they fail for different reasons and
-            # have different remedies: no address is a publication problem,
-            # no locator is a serving-slot problem.
+            # Only what this code actually observed. It consulted the direct
+            # address map and nothing else, so that is the only absence it can
+            # report.
+            #
+            # `relay_absent` is deliberately NOT asserted here. There is no
+            # relay locator to consult yet — the descriptor row that carries
+            # one is auto-iipt7, downstream of this bead — and writing True
+            # would read as an observation while being a placeholder. That is
+            # the precise defect class this bead keeps finding: a field that
+            # states a fact nothing established. It appears once a locator can
+            # actually be looked up and found missing.
             "direct_absent": True,
-            "relay_absent": True,
         }
         if misses == 1 or misses % 20 == 0:
             # Once when it starts, then rarely. A peer that is simply not

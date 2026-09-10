@@ -51,7 +51,12 @@ def test_a_miss_is_recorded_with_what_was_absent():
     s.record(PEER, 100.0)
     [state] = s.read().values()
     assert state["reason"] == "discovery_unavailable"
-    assert state["direct_absent"] is True and state["relay_absent"] is True
+    assert state["direct_absent"] is True
+    # NOT reported: nothing consulted a relay locator, so nothing may claim
+    # one was absent. The descriptor that carries locators is auto-iipt7 and
+    # is downstream of this bead; asserting its absence here would be a
+    # placeholder wearing the costume of an observation.
+    assert "relay_absent" not in state
     assert state["last_attempt"] == 100.0
     assert state["next_attempt"] > 100.0
 
