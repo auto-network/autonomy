@@ -32,6 +32,8 @@ def client(monkeypatch, tmp_path):
     settings_ops.set_personal_delegate_audited_key(None)
     app = Starlette(routes=[
         Route("/api/identity/unlock/vault-keys",
+              unlock_routes.get_personal_vault_recovery, methods=["GET"]),
+        Route("/api/identity/unlock/vault-keys",
               unlock_routes.post_unlock_vault_keys, methods=["POST"]),
     ])
     with TestClient(app) as c:
@@ -150,7 +152,7 @@ def test_a_good_hand_off_installs_both_seams(client, unlocked):
     # `snapshot_persisted` is FALSE here, and truthfully so: this unlock sends
     # only generation_keys, so `_VAULT_CACHE["kem_private"]` is never set
     # (unlock_routes.py:1255 is inside `if kem_private_hex is not None`) and
-    # `save_vault_across_hot_reload` requires all three parts. The process is
+    # `save_vault_across_hot_reload` requires the personal audited recipient. The process is
     # warm and the hand-off is NOT durable — previously indistinguishable from
     # outside, which is how the operator was told "unlocked" while the next
     # process booted locked.
@@ -396,7 +398,7 @@ def test_a_partial_snapshot_is_still_cleared(monkeypatch, tmp_path):
     cleared = []
     monkeypatch.setattr(
         ur, "_keycache_read",
-        lambda name: b"aa" if name == ur._HOTRELOAD_DELEGATE else None)
+        lambda name: b"aa" if name == ur._HOTRELOAD_KEM else None)
     monkeypatch.setattr(ur, "_keycache_clear", lambda name: cleared.append(name))
 
     assert ur.restore_vault_across_hot_reload() is False

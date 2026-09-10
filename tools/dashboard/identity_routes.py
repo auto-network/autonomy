@@ -1461,7 +1461,7 @@ async def get_unlock_state(request: Request) -> JSONResponse:
     armed (holds its memory-only credential) and current (running the installed
     code); a scope never set up to serve is a quiet note, never a lit tile.
     """
-    from tools.dashboard.unlock_routes import _agent_delegate, session_from_request
+    from tools.dashboard.unlock_routes import _VAULT_CACHE, session_from_request
 
     flags: dict = {}
 
@@ -1478,10 +1478,10 @@ async def get_unlock_state(request: Request) -> JSONResponse:
                    if anchored else "No personal identity is set up yet."),
     }
 
-    # agent — the delegate signing key that keeps the fleet running. A cold
-    # vault holds none, so this lights until you unlock with your root.
+    # Personal unattended reads need the audited decryption recipient, not
+    # membership authority or a signing delegate.
     try:
-        delegate = _agent_delegate()
+        delegate = _VAULT_CACHE.get("audited_delegate")
     except Exception:
         delegate = None
     flags["agent"] = {

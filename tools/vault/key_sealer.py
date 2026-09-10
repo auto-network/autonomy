@@ -135,9 +135,9 @@ def build_vault_sealer(
 
     ``ledger_provider(set_id, org)`` returns ``(frontier, fold_at,
     authority_ancestry)`` or ``None``. It takes the SET as well as the org
-    because which fold to seal against is decided by the set's declared HOME,
-    not by the org a caller happens to be acting as: a personal-homed set seals
-    against the operator's own fold whatever org is in scope. Three seams rather than one, because they are not
+    for organization storage. Personal-homed Settings bypass this sealer and
+    encrypt directly through personal_object. Three seams rather than one,
+    because they are not
     interchangeable and conflating them is silently wrong:
 
     * ``frontier`` is a folded VALUE, for :func:`seal_revision`.
@@ -206,9 +206,8 @@ def build_vault_sealer(
                         created_at=datetime.now(timezone.utc).isoformat(),
                     )
                     class_store.put_class(policy_class)
-        # Routed by the set's declared HOME, exactly as the ledger is: a
-        # personal-homed set's ciphertext belongs in personal.db whatever org
-        # the caller is acting as.
+        # Resolve the content store through the same declared-home rule as
+        # Settings. Direct callers also use this to read historical formats.
         from tools.vault.db_content_store import DbContentStore
 
         scoped = _scoped_db(set_id, org)

@@ -60,11 +60,8 @@ const REASON_PHRASES = [
   ['anchor-race', 'the vault anchor inventory changed mid-ceremony'],
   ['anchor-enroll', 'the root anchor could not be enrolled'],
   ['root-class', 'the root policy class could not be created'],
-  ['ledger-no-genesis', 'the ledger database is present but holds no genesis —'
-    + ' the wrong store may be resolving, or the data is damaged; do NOT re-found'],
-  ['not-founded', 'this identity’s ledger is not founded, so nothing can be delegated'],
+  ['recovery', 'the personal vault recovery metadata could not be read'],
   ['heads', 'the ledger heads could not be read'],
-  ['delegate', 'the storage delegate grant was refused by the ledger'],
   ['vault-keys', 'the dashboard refused the vault key material'],
 ];
 
