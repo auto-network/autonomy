@@ -1919,6 +1919,22 @@ async def _handle_ctrl_frame(tunnel: "Tunnel", payload: bytes,
                 tunnel, op, args, store, now,
                 metrics=getattr(host_routes, "_metrics", None),
             )
+        elif op == "fleet-slots":
+            # The org's live serving slots, for an authenticated member of
+            # that org: what a directed pair can name. Routing facts only —
+            # the same tuple the hello registered — never a durable fleet
+            # key, never another org.
+            if args != {}:
+                raise _CtrlError("fleet-slots takes no arguments")
+            hub_for_slots = getattr(directed_streams, "hub", None)
+            if hub_for_slots is None:
+                raise _CtrlError("directed streams are not enabled on this relay")
+            result = {"slots": [
+                {"persona_pub": t.persona_pub, "machine": t.machine,
+                 "caps": list(t.caps), "version": t.version}
+                for t in hub_for_slots.tunnels_for(tunnel.org)
+                if t.persona_pub and t.machine
+            ]}
         elif op == "fleet-open":
             # fleet-directed-stream/1 (auto-fh2nv): pair this tunnel with
             # the exact destination slot it names. The broker answers with a

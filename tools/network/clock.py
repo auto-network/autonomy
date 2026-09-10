@@ -68,6 +68,9 @@ is the machine-readable copy the property test enforces):
 - ``fleet_relay_sync.DIRECT_FRESHNESS_WINDOW_S`` — channel-preference
   heuristic (skip a redundant relay pull while direct is fresh); no
   adversary, nothing refused, staleness merely resumes the relay.
+- ``relaykit/fleet_stream_wire.FLEET_STREAM_*WINDOW_*`` — fleet-directed-
+  stream credit windows, measured in BYTES and frame SLOTS; flow control,
+  not time, the same vocabulary as ``attachment_download.WINDOW``.
 
 Units
 -----
@@ -238,6 +241,10 @@ DOMAIN_OWNED_EXCLUSIONS = (
     ("tools/network/registry/dns_challenges.py", "DEFAULT_EXPIRY"),
     ("tools/network/registry/relay.py", "HOST_LEASE_TTL"),
     ("tools/network/fleet_relay_sync.py", "DIRECT_FRESHNESS_WINDOW_S"),
+    ("tools/network/relaykit/fleet_stream_wire.py", "FLEET_STREAM_WINDOW_BYTES"),
+    ("tools/network/relaykit/fleet_stream_wire.py", "FLEET_STREAM_WINDOW_SLOTS"),
+    ("tools/network/relaykit/fleet_stream_wire.py", "FLEET_STREAM_MAX_WINDOW_BYTES"),
+    ("tools/network/relaykit/fleet_stream_wire.py", "FLEET_STREAM_MAX_WINDOW_SLOTS"),
 )
 
 # -- Deliberate delays --------------------------------------------------------

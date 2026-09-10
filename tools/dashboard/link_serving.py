@@ -1319,10 +1319,19 @@ def _make_ice_serving_connector(
     )
     stream_kwargs = {}
     if machine_key is not None:
+        from tools.network.fleet_relay_carrier import fleet_stream_offer_handler
+        from tools.network.fleet_relay_sync import connector_runtime as _fleet_rt
+
         stream_kwargs = {
             "machine_key": machine_key,
-            "caps": ("host-lease/1", "tls-stream/1", "dns-01/1"),
+            # fleet-directed-stream/1 (auto-fh2nv): this tunnel can be one
+            # leg of a relay pair. Offers are served only while the process
+            # is armed for fleet sync; an unarmed process refuses them the
+            # way the direct listener refuses a pull.
+            "caps": ("host-lease/1", "tls-stream/1", "dns-01/1",
+                     "fleet-directed-stream/1"),
             "stream_handler": LocalCaddyStreamHandler(graph_org),
+            "fleet_stream_offer": fleet_stream_offer_handler(_fleet_rt),
         }
     # Per-link serving (graph://807b4e11-3e9): resolve the link's channel
     # signing key from the vault so the handshake is authenticated by that key
@@ -1642,6 +1651,10 @@ async def _serve_control_listener(connector, ctl_path: str,
                         # operations on negotiation instead of interpreting a
                         # uniform remote refusal as a capability signal.
                         "accepted_caps": list(connector.accepted_caps),
+                        # The relay slot this connector serves under (auto-
+                        # fh2nv): what a peer's directed pair names. Routing
+                        # facts, not a durable fleet key.
+                        "serving_slot": connector.serving_slot,
                         # Added live 2026-08-23 while diagnosing "locked for
                         # Fleet sync" persisting across an unlock that
                         # logged no error -- lets a caller ask this exact
@@ -1709,6 +1722,23 @@ async def _serve_control_listener(connector, ctl_path: str,
                         reply = {"ok": False, "error": "invalid release-host request"}
                     else:
                         reply = await connector.release_host(args["reservation"])
+                elif request.get("op") == "fleet-relay-probe":
+                    # End-to-end proof of the relay carrier from THIS
+                    # machine (auto-fh2nv): pair with every other slot of
+                    # the org the relay reports and run the real fleet
+                    # handshake. Local op, never a registry frame by itself.
+                    from tools.network.fleet_relay_carrier import relay_probe
+                    from tools.network.fleet_relay_sync import connector_runtime
+
+                    args = request.get("args") or {}
+                    try:
+                        reply = await relay_probe(
+                            connector, connector_runtime,
+                            targets=args.get("targets"),
+                            timeout=float(args.get("timeout") or 10.0),
+                        )
+                    except Exception as exc:
+                        reply = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
                 elif request.get("op") == "fleet-runtime":
                     from tools.network.fleet_relay_sync import connector_runtime
 

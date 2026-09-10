@@ -790,6 +790,31 @@ async def local_completion_context(request: Request) -> JSONResponse:
     })
 
 
+async def relay_probe(request: Request) -> JSONResponse:
+    """Prove the relay carrier end to end from this machine (auto-fh2nv):
+    the personal connector pairs with every other slot of the org the relay
+    reports and runs the real fleet handshake. Body: optional ``targets``
+    (list of {persona_pub, machine}) and ``timeout`` seconds."""
+    denied = _operator_required(request)
+    if denied is not None:
+        return denied
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    try:
+        reply = link_serving_supervisor.control(
+            None, "fleet-relay-probe",
+            {k: v for k, v in body.items() if k in ("targets", "timeout")},
+            timeout=float(body.get("timeout") or 10.0) + 5.0,
+        )
+    except link_serving_supervisor.TunnelUnavailable as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=503)
+    return JSONResponse(reply, status_code=200 if reply.get("ok") else 502)
+
+
 async def fleet_status(request: Request) -> JSONResponse:
     """One decisive verdict for "is fleet-sync working, and if not, why" --
     the HTTP face of fleet_doctor's top line (tools/network/fleet_verdict.py).
@@ -1127,5 +1152,6 @@ ROUTES = [
         methods=["POST"],
     ),
     Route("/api/fleet/status", fleet_status, methods=["GET"]),
+    Route("/api/fleet/relay-probe", relay_probe, methods=["POST"]),
     Route("/api/fleet/restore", restore_fleet_serving, methods=["POST"]),
 ]
