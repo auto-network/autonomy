@@ -481,6 +481,14 @@ class TunnelConnector:
         fleet_stream_offer=None,
     ):
         self._url = f"{relay_url.rstrip('/')}/t/{org}"
+        #: The relay ORIGIN and org this connector actually dialed. Kept
+        #: because the reachability descriptor's relay locator has to name the
+        #: relay a peer should pair through, and the honest source for that is
+        #: the process that is connected -- not the dashboard's binding, which
+        #: may have been re-pointed since this connector was launched
+        #: (contract graph://7ed8a519-356 §5.6: read the AUTHENTICATED
+        #: connector's actual org/persona/serving-machine slot).
+        self._relay_base = relay_url.rstrip('/')
         self._org = org
         self._key = key
         self._cert = cert
@@ -554,6 +562,16 @@ class TunnelConnector:
         self._ctrl_send = None
         self._failure_log_window_started = None
         self._failure_log_suppressed = 0
+
+    @property
+    def relay_base(self) -> str:
+        """The relay origin this connector dials (no ``/t/<org>`` suffix)."""
+        return self._relay_base
+
+    @property
+    def org(self) -> str:
+        """The org whose tunnel this connector serves."""
+        return self._org
 
     @property
     def serving_slot(self) -> dict:
