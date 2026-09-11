@@ -145,6 +145,12 @@ def _refresh(target: WorktreeTarget) -> dict:
 def _readiness(row: dict) -> str:
     if row.get("clone_stale"):
         return "needs base sync"
+    if "commits_behind" in row:
+        if row["commits_behind"]:
+            return "needs rebase" if row.get("commits_ahead") else "needs fast-forward (no rebase needed)"
+        if row.get("is_dirty"):
+            return "uncommitted changes; commit or stash before merging"
+        return "ready" if row.get("commits_ahead") else "nothing to merge"
     if row.get("rebase_required"):
         return "needs rebase"
     if row.get("ff_eligible"):
@@ -156,22 +162,56 @@ def _readiness(row: dict) -> str:
     return "not fast-forward eligible"
 
 
+def _checkout_state(target: WorktreeTarget, row: dict) -> dict:
+    """Measure the files this CLI operates on, not a cached dashboard verdict."""
+    branch = str(row.get("target_branch") or "").strip()
+    if not branch:
+        raise WorktreeCommandError("dashboard did not report a target branch")
+    head = _git(target.root, "rev-parse", "HEAD")
+    base = _git(target.root, "rev-parse", branch)
+    ahead, behind = map(int, _git(
+        target.root, "rev-list", "--left-right", "--count", f"HEAD...{branch}",
+    ).split())
+    dirty = _git(target.root, "status", "--porcelain")
+    return dict(row, checkout_commit=head, base_commit=base,
+                commits_ahead=ahead, commits_behind=behind,
+                is_dirty=bool(dirty),
+                dirty_count=len(dirty.splitlines()))
+
+
 def _print_status(target: WorktreeTarget, row: dict) -> None:
     dirty = f"dirty ({row.get('dirty_count', 0)} paths)" if row.get("is_dirty") else "clean"
     print(f"Worktree: {target.root}")
     print(f"Session:  {target.session_name}")
     print(f"Repo:     {target.repo_name}")
     print(f"Branch:   {row.get('branch') or '?'} -> {row.get('target_branch') or '?'}")
-    print(f"State:    {dirty}; {row.get('commits_ahead', 0)} commit(s) ahead")
-    print(f"Base:     {'stale' if row.get('clone_stale') else 'synchronized'}")
+    print(f"Files:    {dirty}")
+    print(f"Checkout: {row['checkout_commit']} (your checked-out code)")
+    print(f"Target:   {row['base_commit']} (local {row['target_branch']})")
+    print(f"Distance: {row['commits_ahead']} commit(s) ahead, {row['commits_behind']} behind local {row['target_branch']}")
+    stale = row.get("clone_stale")
+    if stale is True:
+        print("Host base: STALE — local target does not match the host; latest host commits are not all available here.")
+    elif stale is False:
+        print("Host base: synchronized with the host at this check.")
+    else:
+        print("Host base: UNKNOWN — host freshness was not reported.")
+    if row["commits_behind"]:
+        print(f"Current:  NO — your checkout is missing {row['commits_behind']} local target commit(s).")
+    elif stale is not False:
+        print("Current:  NOT CONFIRMED against the host; checkout contains all commits from the local target.")
+    else:
+        print("Current:  YES — checkout contains all target commits reported by the host.")
     print(f"Merge:    {_readiness(row)}")
 
 
 def _sync_and_rebase(target: WorktreeTarget) -> dict:
+    before = _git(target.root, "rev-parse", "HEAD")
     response = _api_request("POST", _target_path(target, "sync-base"))
     if not isinstance(response, dict) or not isinstance(response.get("state"), dict):
         raise WorktreeCommandError("dashboard returned an invalid sync result")
     row = response["state"]
+    rebased = False
     if row.get("rebase_required"):
         if _git(target.root, "status", "--porcelain"):
             raise WorktreeCommandError(
@@ -181,7 +221,10 @@ def _sync_and_rebase(target: WorktreeTarget) -> dict:
         if not target_branch:
             raise WorktreeCommandError("dashboard did not report a target branch")
         _git(target.root, "rebase", target_branch)
+        rebased = True
         row = _refresh(target)
+    row["sync_before"] = before
+    row["sync_rebased"] = rebased
     return row
 
 
@@ -195,14 +238,21 @@ def _run_session_command(args, action) -> None:
 
 def cmd_worktree_status(args) -> None:
     def _action(target: WorktreeTarget) -> None:
-        _print_status(target, _refresh(target))
+        _print_status(target, _checkout_state(target, _refresh(target)))
 
     _run_session_command(args, _action)
 
 
 def cmd_worktree_sync(args) -> None:
     def _action(target: WorktreeTarget) -> None:
-        row = _sync_and_rebase(target)
+        row = _checkout_state(target, _sync_and_rebase(target))
+        if row["commits_behind"] or row.get("clone_stale") is not False:
+            print("Sync INCOMPLETE — checkout is not confirmed current with the host.")
+        elif row["sync_before"] != row["checkout_commit"]:
+            print("Sync COMPLETE — your checked-out code was updated.")
+        else:
+            print("Sync COMPLETE — your checkout was already current; no commit update was needed.")
+        print(f"Rebase:   {'performed' if row['sync_rebased'] else 'not performed'}")
         _print_status(target, row)
 
     _run_session_command(args, _action)
