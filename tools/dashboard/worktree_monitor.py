@@ -66,6 +66,7 @@ from tools.graph.schemas.worktree_terminal_fire import (
     SCHEMA_REVISION as TERMINAL_FIRE_REVISION,
     SET_ID as TERMINAL_FIRE_SET_ID,
 )
+from tools.dashboard.dao import dashboard_db
 
 logger = logging.getLogger(__name__)
 
