@@ -40,6 +40,12 @@ from tools.dashboard import api_auth
 PUBLIC_EXCEPTIONS: dict[tuple[str, str], str] = {
     ("GET", "/api/health"):
         "Liveness probe. Returns no data and touches no state.",
+    ("GET", "/api/vault/status"):
+        "Reports whether THIS dashboard process holds the warm audited "
+        "delegate key: one boolean plus the pid, no secret and no org "
+        "disclosure. Lets `graph vault status` read warmth from the live "
+        "process instead of a cold side-process (the source of false 'vault "
+        "is locked' reports).",
     ("GET", "/api/ping"):
         "Liveness probe. Returns no data and touches no state.",
     ("GET", "/api/identity/personal"):

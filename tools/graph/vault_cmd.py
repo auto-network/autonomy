@@ -258,6 +258,27 @@ def cmd_vault_list(args) -> None:
         print(f"  {name:<{width}}  {tier}")
 
 
+def cmd_vault_status(args) -> None:
+    """Ask the LIVE dashboard process whether its vault is warm.
+
+    The warm audited-delegate key is a per-process global set at unlock, so it
+    can only be read from the running dashboard process — not a fresh CLI
+    process, which is always cold. This hits the dashboard's public
+    ``/api/vault/status`` so the answer is authoritative.
+    """
+    client = get_client()
+    try:
+        data = client._request("GET", "/api/vault/status")
+    except Exception as exc:  # noqa: BLE001 — the reach failure is the message
+        print(f"Error: could not reach the dashboard: {exc}", file=sys.stderr)
+        sys.exit(1)
+    warm = bool(data.get("audited_delegate_warm"))
+    pid = data.get("pid")
+    state = "WARM" if warm else "COLD"
+    print(f"vault (audited delegate): {state}  [dashboard pid {pid}]")
+    sys.exit(0 if warm else 2)
+
+
 def cmd_vault_share(args) -> None:
     """Share an audited secret into another organization's namespace."""
     if ":" in args.name:
@@ -363,3 +384,10 @@ def attach_vault_subparser(sub) -> None:
     )
     _add_scope(p_list)
     p_list.set_defaults(func=cmd_vault_list)
+
+    p_status = vault_sub.add_parser(
+        "status",
+        help="Is the LIVE dashboard vault warm? Reads the per-process warm "
+             "flag from the running dashboard, not a cold CLI process",
+    )
+    p_status.set_defaults(func=cmd_vault_status)
