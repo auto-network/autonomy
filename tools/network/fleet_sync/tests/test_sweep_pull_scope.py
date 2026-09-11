@@ -13,6 +13,8 @@ import asyncio
 import json
 import sqlite3
 import time
+from types import SimpleNamespace
+from unittest.mock import Mock
 from pathlib import Path
 
 import pytest
@@ -150,6 +152,53 @@ def _drive(monkeypatch, scheduler, channel, *, expect=None):
     with pytest.raises(expect) as caught:
         asyncio.run(coro)
     return caught.value
+
+
+@pytest.mark.parametrize("outcome", ["success", "error", "cancelled"])
+@pytest.mark.parametrize("pull", ["scope", "blob"])
+def test_pull_releases_channel(tmp_path, monkeypatch, outcome, pull):
+    """Every completed/interrupted pull releases its connected transport."""
+    from tools.network.fleet_sync import blob_transport
+
+    scheduler, _ = _scheduler(tmp_path, settled=True)
+    channel = _FakeChannel([])
+    channel.close = Mock(wraps=channel.close)
+    failure = {"error": OSError, "cancelled": asyncio.CancelledError}.get(outcome)
+    if failure:
+        async def fail_send(_payload):
+            raise failure("interrupted pull")
+        channel.send_message = fail_send
+
+    async def connect(*args, **kwargs):
+        return channel
+
+    monkeypatch.setattr(fss, "fleet_direct_connect", connect)
+    if pull == "blob":
+        digest = "ab" * 32
+        scope_store = SimpleNamespace(
+            attachment_backlog=lambda: [SimpleNamespace(digest=digest)],
+            blob_store_root=lambda: None,
+            drain_attachments=lambda entries: 0,
+        )
+        monkeypatch.setattr(scheduler, "_store_for", lambda scope: scope_store)
+        async def frames():
+            yield blob_transport.done_frame([], [digest]), True
+        channel.recv_message_stream = frames
+        receiver = blob_transport.BlobReceiver(None)
+        receiver.close = Mock(wraps=receiver.close)
+        monkeypatch.setattr(blob_transport, "BlobReceiver", lambda store: receiver)
+        operation = scheduler._drain_attachment_backlog(PEER, ["peer"])
+    else:
+        operation = scheduler._pull_scope(PEER, ["peer"], "personal")
+
+    if failure:
+        with pytest.raises(failure, match="interrupted pull"):
+            asyncio.run(operation)
+    else:
+        asyncio.run(operation)
+    if pull == "blob":
+        receiver.close.assert_called_once_with()
+    channel.close.assert_called_once_with()
 
 
 def test_a_bootstrapping_store_asks_v5_and_refuses_a_downgrade(
