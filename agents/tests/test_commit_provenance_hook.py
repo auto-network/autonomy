@@ -83,6 +83,38 @@ def test_install_refuses_foreign_hook(session_repo):
     assert hook.read_text() == foreign
 
 
+def test_invalidation_hooks_chain_foreign_hook_and_are_idempotent(session_repo):
+    hooks = session_repo / ".git" / "hooks"
+    hook = hooks / "post-commit"
+    foreign = b"#!/bin/sh\n# repository hook\nexit 7\n"
+    hook.write_bytes(foreign)
+    hook.chmod(0o755)
+
+    assert wm._install_invalidation_hooks(session_repo, "autonomy") is True
+    preserved = hooks / "post-commit.autonomy-preserved"
+    assert preserved.read_bytes() == foreign
+    first_wrapper = hook.read_bytes()
+    assert wm._INVALIDATION_HOOK_MARKER.encode() in first_wrapper
+
+    assert wm._install_invalidation_hooks(session_repo, "autonomy") is True
+    assert hook.read_bytes() == first_wrapper
+    assert preserved.read_bytes() == foreign
+    result = subprocess.run([str(hook)], cwd=session_repo, env={})
+    assert result.returncode == 7
+
+
+def test_invalidation_hook_has_bounded_fire_and_forget_client(session_repo):
+    assert wm._install_invalidation_hooks(session_repo, "autonomy") is True
+    for name in wm._INVALIDATION_HOOK_NAMES:
+        text = (session_repo / ".git" / "hooks" / name).read_text()
+        assert "--connect-timeout 0.1" in text
+        assert "--max-time 0.25" in text
+        assert "--retry 0" in text
+        assert f'{{"reason":"{name.replace("-", "_")}"}}' in text
+        assert "invalidate" in text
+        assert "&)" in text
+
+
 # ── stamping behavior ──────────────────────────────────────────────
 
 def test_offline_commit_gets_branch_derived_fallback_stamp(session_repo):

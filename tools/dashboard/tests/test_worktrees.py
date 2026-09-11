@@ -75,6 +75,10 @@ class _FakeMonitor:
         self.refresh_count += 1
         return list(self.rows)
 
+    async def refresh_local_one(self, session_name, repo_name):
+        self.refresh_count += 1
+        return list(self.rows)
+
     async def discover_prs(self, rows):
         self.discover_calls = getattr(self, "discover_calls", [])
         self.discover_calls.append([r.session_name for r in rows])
@@ -91,6 +95,56 @@ class _FakeMonitor:
 
     async def refresh_rendered_cache(self):
         return None
+
+    def invalidate(self, session_name, repo_name, *, reason="semantic"):
+        self.invalidations = getattr(self, "invalidations", [])
+        self.invalidations.append((session_name, repo_name, reason))
+        return True
+
+    def invalidate_repo(self, repo_name, *, reason):
+        self.repo_invalidations = getattr(self, "repo_invalidations", [])
+        self.repo_invalidations.append((repo_name, reason))
+        return sum(1 for row in self.rows if row.repo_name == repo_name)
+
+
+def test_authenticated_invalidation_is_state_free_and_session_bound(monkeypatch):
+    from tools.dashboard import server
+
+    monitor = _FakeMonitor([_row(session="auto-own", repo="autonomy")])
+    monkeypatch.setattr(server, "worktree_monitor", monitor)
+    monkeypatch.setattr(
+        server, "authenticate_session_request",
+        lambda request: (("auto-own", None), None),
+    )
+
+    class _Request:
+        headers = {}
+        path_params = {"session": "auto-own", "repo": "autonomy"}
+
+        async def json(self):
+            return {"reason": "post_commit", "ignored_state": {"dirty": False}}
+
+    response = asyncio.run(server.api_worktree_invalidate(_Request()))
+    assert response.status_code == 202
+    assert json.loads(response.body)["queued"] is True
+    assert monitor.invalidations == [("auto-own", "autonomy", "post_commit")]
+
+    _Request.path_params = {"session": "auto-other", "repo": "autonomy"}
+    response = asyncio.run(server.api_worktree_invalidate(_Request()))
+    assert response.status_code == 403
+
+    _Request.path_params = {"session": "auto-own", "repo": "missing"}
+    response = asyncio.run(server.api_worktree_invalidate(_Request()))
+    assert response.status_code == 404
+
+    _Request.path_params = {"session": "auto-own", "repo": "autonomy"}
+    monkeypatch.setattr(
+        server, "authenticate_session_request",
+        lambda request: (("auto-own", "other-org"), None),
+    )
+    monkeypatch.setattr(server, "org_for_session", lambda session: "autonomy")
+    response = asyncio.run(server.api_worktree_invalidate(_Request()))
+    assert response.status_code == 403
 
 
 def _row(
@@ -161,6 +215,13 @@ def _install_fake_monitor(monkeypatch, rows):
     # row; without patching it the real monitor's live git sweep runs and
     # returns nothing in tests, 404-ing what should be a 409.
     monkeypatch.setattr(server.worktree_monitor, "refresh_one", fake.refresh_one)
+    monkeypatch.setattr(
+        server.worktree_monitor, "refresh_local_one", fake.refresh_local_one,
+    )
+    monkeypatch.setattr(server.worktree_monitor, "invalidate", fake.invalidate)
+    monkeypatch.setattr(
+        server.worktree_monitor, "invalidate_repo", fake.invalidate_repo,
+    )
     monkeypatch.setattr(server.worktree_monitor, "discover_prs", fake.discover_prs)
     monkeypatch.setattr(server.worktree_monitor, "refresh_bound_rows", fake.refresh_bound_rows)
     # Force the /api/worktrees fallback render so the faked ``get_all`` rows
@@ -498,7 +559,7 @@ class TestWorktreeAPI:
         assert called["args"] == ("auto-test", "autonomy")
         assert fake.refresh_count == 1
 
-    def test_merge_endpoint_fast_forwards_and_schedules_deferred_refresh(self, test_client, monkeypatch):
+    def test_merge_endpoint_fast_forwards_and_invalidates_repo(self, test_client, monkeypatch):
         server, fake = _install_fake_monitor(monkeypatch, [_row()])
         called = {}
 
@@ -507,20 +568,12 @@ class TestWorktreeAPI:
             return {"commit": "abc1234", "message": "merged", "target_repo": "/repo"}
 
         monkeypatch.setattr(server, "merge_session_worktree", fake_merge)
-        scheduled = []
-        monkeypatch.setattr(
-            server, "_schedule_deferred_worktree_refresh",
-            lambda *a, **k: scheduled.append(True),
-        )
-
         resp = test_client.post("/api/worktrees/auto-test/autonomy/merge")
 
         assert resp.status_code == 200
         assert resp.json() == {"ok": True, "commit": "abc1234", "message": "merged"}
         assert called["args"] == ("auto-test", "autonomy")
-        # The cache rescan is deferred (it self-cancels if this merge hot-reloads
-        # the server), so the endpoint schedules it rather than refreshing inline.
-        assert scheduled == [True]
+        assert fake.repo_invalidations == [("autonomy", "merge")]
         assert fake.refresh_count == 0
 
     def test_merge_endpoint_writes_worktree_merge_timeline_row(
@@ -712,7 +765,7 @@ class TestWorktreeAPI:
         assert resp.status_code == 404
         assert "could not resolve base ref" in resp.json()["error"]
 
-    def test_commit_merge_endpoint_merges_selected_sha_and_schedules_deferred_refresh(self, test_client, monkeypatch):
+    def test_commit_merge_endpoint_merges_selected_sha_and_invalidates_repo(self, test_client, monkeypatch):
         server, fake = _install_fake_monitor(monkeypatch, [_row()])
         called = {}
 
@@ -721,12 +774,6 @@ class TestWorktreeAPI:
             return {"commit": "abcdef1234567890", "message": "Add worktree dashboard"}
 
         monkeypatch.setattr(server, "merge_session_worktree_commit", fake_merge)
-        scheduled = []
-        monkeypatch.setattr(
-            server, "_schedule_deferred_worktree_refresh",
-            lambda *a, **k: scheduled.append(True),
-        )
-
         resp = test_client.post("/api/worktrees/auto-test/autonomy/commits/abcdef1/merge")
 
         assert resp.status_code == 200
@@ -736,7 +783,7 @@ class TestWorktreeAPI:
             "message": "Add worktree dashboard",
         }
         assert called["args"] == ("auto-test", "autonomy", "abcdef1")
-        assert scheduled == [True]
+        assert fake.repo_invalidations == [("autonomy", "commit-merge")]
         assert fake.refresh_count == 0
 
     def test_commit_merge_endpoint_writes_worktree_merge_timeline_row(
@@ -846,7 +893,7 @@ class TestWorktreeAPI:
         assert captured["branch"] == "session/auto-test"
         assert captured["branch_base"] == "master"
 
-    def test_cherry_pick_endpoint_notifies_inline_and_defers_only_rescan(
+    def test_cherry_pick_endpoint_notifies_inline_and_invalidates_repo(
         self, monkeypatch,
     ):
         server, fake = _install_fake_monitor(
@@ -874,19 +921,12 @@ class TestWorktreeAPI:
             captured.update(kwargs)
             return f"wt-{kwargs['commit_hash'][:12]}"
 
-        scheduled = []
-
         class _Request:
             path_params = {"session": "auto-test", "repo": "autonomy"}
 
         monkeypatch.setattr(server, "cherry_pick_session_worktree", fake_cherry_pick)
         monkeypatch.setattr(server, "_signal_session_merge_celebration", fake_signal)
         monkeypatch.setattr(server, "record_worktree_merge_run", fake_record)
-        monkeypatch.setattr(
-            server, "_schedule_deferred_worktree_refresh",
-            lambda *a, **k: scheduled.append(True),
-        )
-
         resp = asyncio.run(server.api_worktree_cherry_pick(_Request()))
 
         assert resp.status_code == 200
@@ -897,45 +937,9 @@ class TestWorktreeAPI:
         assert signal_calls[0]["kind"] == "cherry-pick"
         assert captured["reason"] == "cherry-pick"
         assert captured["commit_hash"] == "fedcba9876543210"
-        # Only the slow cache rescan is deferred, and it is NOT a response
-        # BackgroundTask (uvicorn's graceful shutdown would wait on that) —
-        # it's scheduled detached so a reload cancels it instead.
         assert resp.background is None
-        assert scheduled == [True]
+        assert fake.repo_invalidations == [("autonomy", "cherry-pick")]
         assert fake.refresh_count == 0
-
-    def test_deferred_worktree_refresh_runs_after_delay_and_reload_cancels_it(
-        self, monkeypatch,
-    ):
-        """The deferred rescan runs after its delay when nothing interrupts it,
-        and if a merge-triggered hot-reload cancels it first, it never runs —
-        which is correct, because the fresh process re-scans on boot."""
-        from tools.dashboard import server
-
-        ran = {"n": 0}
-
-        async def fake_refresh():
-            ran["n"] += 1
-
-        monkeypatch.setattr(server.worktree_monitor, "refresh", fake_refresh)
-
-        async def scenario():
-            task = server._schedule_deferred_worktree_refresh(delay=0.05)
-            await asyncio.sleep(0.01)
-            assert ran["n"] == 0            # not run immediately
-            await task
-            assert ran["n"] == 1            # ran after the delay
-
-            # Hot-reload case: cancel before the delay elapses -> never runs.
-            task2 = server._schedule_deferred_worktree_refresh(delay=5.0)
-            task2.cancel()
-            try:
-                await task2
-            except asyncio.CancelledError:
-                pass
-            assert ran["n"] == 1            # still 1 — cancelled rescan did not run
-
-        asyncio.run(scenario())
 
     def test_dashboard_ui_crosstalk_await_delivery_uses_blocking_sender(
         self, monkeypatch,
@@ -1045,7 +1049,7 @@ class TestWorktreeAPI:
         }
         assert fake.refresh_count == 0
 
-    def test_cleanup_endpoint_calls_workspace_cleanup_and_refreshes(self, test_client, monkeypatch):
+    def test_cleanup_endpoint_calls_workspace_cleanup_and_invalidates(self, test_client, monkeypatch):
         server, fake = _install_fake_monitor(monkeypatch, [_row()])
         called = {}
 
@@ -1075,9 +1079,10 @@ class TestWorktreeAPI:
             "errors": [],
         }
         assert called["args"] == ("auto-test", True)
-        assert fake.refresh_count == 1
+        assert fake.refresh_count == 0
+        assert fake.invalidations == [("auto-test", "autonomy", "cleanup")]
 
-    def test_discard_endpoint_calls_repo_cleanup_and_refreshes(self, test_client, monkeypatch):
+    def test_discard_endpoint_calls_repo_cleanup_and_invalidates(self, test_client, monkeypatch):
         server, fake = _install_fake_monitor(monkeypatch, [_row(dirty=True)])
         called = {}
 
@@ -1102,7 +1107,8 @@ class TestWorktreeAPI:
             "errors": [],
         }
         assert called["args"] == ("auto-test", "autonomy", True)
-        assert fake.refresh_count == 1
+        assert fake.refresh_count == 0
+        assert fake.invalidations == [("auto-test", "autonomy", "discard")]
 
     def test_discard_endpoint_surfaces_live_worktree_rejection(self, test_client, monkeypatch):
         server, _fake = _install_fake_monitor(monkeypatch, [_row(dirty=True, live=True)])
@@ -3411,6 +3417,75 @@ class TestWorktreeMonitorRefreshOne:
 
         # Clean response → backoff cleared.
         assert monitor._capability_backoff_until == 0.0
+
+
+class TestWorktreeSemanticInvalidation:
+    def test_pending_map_is_bounded_and_overflow_collapses_to_known_rows(
+        self, monkeypatch,
+    ):
+        from tools.dashboard import worktree_monitor as module
+
+        monkeypatch.setattr(module, "MAX_PENDING_INVALIDATIONS", 2)
+        monitor = module.WorktreeMonitor()
+        monitor._cache = [
+            _row(session="auto-a", repo="one"),
+            _row(session="auto-b", repo="two"),
+        ]
+        assert monitor.invalidate("new-a", "one") is True
+        assert monitor.invalidate("new-b", "two") is True
+        assert monitor.invalidate("new-c", "three") is False
+        assert monitor._pending_invalidations == {}
+        assert monitor._full_reconciliation_required is True
+
+    def test_burst_coalesces_and_skips_capability_fetch(self, monkeypatch):
+        from tools.dashboard import worktree_monitor as module
+
+        async def scenario():
+            monitor = module.WorktreeMonitor(interval_seconds=999)
+            old = _row(session="auto-x", repo="autonomy", dirty=False)
+            changed = _row(session="auto-x", repo="autonomy", dirty=True)
+            monitor._cache = [old]
+            monitor._lock = asyncio.Lock()
+            monitor._invalidation_event = asyncio.Event()
+            scans = []
+
+            def fake_scan(*, session_filter=None, repo_filter=None):
+                scans.append(
+                    session_filter("auto-x") and repo_filter("autonomy")
+                )
+                return [changed]
+
+            monkeypatch.setattr(module, "scan_all_worktrees", fake_scan)
+            capability_calls = []
+
+            async def forbidden(*args, **kwargs):
+                capability_calls.append(True)
+
+            monkeypatch.setattr(monitor, "_refresh_source_control", forbidden)
+            published = []
+            monitor.set_snapshot_callback(
+                lambda sequence, rows: _capture(published, sequence, rows)
+            )
+            task = asyncio.create_task(monitor._invalidation_loop())
+            try:
+                for _ in range(100):
+                    assert monitor.invalidate(
+                        "auto-x", "autonomy", reason="post-commit",
+                    )
+                await asyncio.sleep(0.8)
+            finally:
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            assert scans == [True]
+            assert capability_calls == []
+            assert monitor.get_all()[0].is_dirty is True
+            assert len(published) == 1
+
+        async def _capture(target, sequence, rows):
+            target.append((sequence, rows))
+
+        asyncio.run(scenario())
 
 
 class TestWorktreeMonitorRateLimitBackoff:

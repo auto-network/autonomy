@@ -109,7 +109,8 @@ Important current behavior:
 
 `tools/dashboard/worktree_monitor.py` mirrors the session monitor pattern:
 
-- 30s async background polling
+- event-driven semantic invalidation with a bounded per-row queue
+- 30s async background polling retained as reconciliation fallback
 - cached `list[WorktreeState]`
 - `get_all()`
 - `refresh()`
@@ -123,6 +124,7 @@ Important current behavior:
 - `GET /api/worktrees/{session}/{repo}/commits/{sha}`
 - `GET /api/worktrees/{session}/{repo}/changes`
 - `POST /api/worktrees/{session}/{repo}/commits/{sha}/merge`
+- `POST /api/worktrees/{session}/{repo}/invalidate` (session bearer; advisory)
 - `POST /api/worktrees/{session}/{repo}/sync-base`
 - `POST /api/worktrees/{session}/{repo}/request-rebase`
 - `POST /api/worktrees/{session}/{repo}/merge`
