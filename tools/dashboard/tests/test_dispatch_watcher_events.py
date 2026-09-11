@@ -210,8 +210,6 @@ async def test_recompute_gating_skips_ungated_reads(monkeypatch):
                         lambda: called.add("terminals") or 0)
     monkeypatch.setattr(srv, "_count_worktrees",
                         lambda: called.add("worktree_counts") or {"with_commits": 0, "with_changes": 0})
-    monkeypatch.setattr(srv, "_collect_worktree_state_rows",
-                        lambda: called.add("wt_rows") or [])
     monkeypatch.setattr(srv, "_count_streams",
                         lambda: called.add("streams") or 0)
     monkeypatch.setattr(srv, "_collect_harness_usage",
@@ -257,7 +255,6 @@ async def test_recompute_broadcasts_dispatch_and_nav_on_change(monkeypatch):
     monkeypatch.setattr(srv, "_count_terminals", lambda: 0)
     monkeypatch.setattr(srv, "_count_worktrees",
                         lambda: {"with_commits": 0, "with_changes": 0})
-    monkeypatch.setattr(srv, "_collect_worktree_state_rows", lambda: [])
     monkeypatch.setattr(srv, "_count_streams", lambda: 0)
     monkeypatch.setattr(srv, "_collect_harness_usage", lambda: {"harnesses": []})
     monkeypatch.setattr(srv, "_collect_plugin_badges", lambda: {})
