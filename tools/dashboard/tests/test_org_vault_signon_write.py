@@ -328,6 +328,10 @@ def test_root_unlock_enables_organization_channel_key_write(tmp_path, monkeypatc
 
         # End-to-end success: the existing Settings write selects the stored
         # organization delegate without a test-supplied signing author.
+        # Replicated metadata may retain the minting machine's local slug.
+        metadata = settings_ops.read_set_key(
+            NETWORK_STORAGE_DELEGATE_SET_ID, founded[ORG].genesis_id, org=None)
+        settings_ops.override_setting(metadata["id"], {"organization": "minting-machine-slug"}, org=None)
         token = "7c" * 16
         public = link_channel_key.mint_channel_key(token, ORG)
         assert link_channel_key.channel_key_for(token, ORG).public_hex == public
