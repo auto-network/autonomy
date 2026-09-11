@@ -777,6 +777,23 @@ async def api_health(request):
     """
     return JSONResponse(session_monitor.get_health())
 
+async def api_vault_status(request):
+    """Live vault warmth for THIS dashboard process.
+
+    The audited-delegate private key is a PER-PROCESS global, set at unlock and
+    cleared at lock (``settings_ops._personal_delegate_audited_key``). A tool
+    that imports ``settings_ops`` in a fresh process always sees it cold — the
+    source of repeated false "the vault is locked" reports. This reports the
+    flag from the running dashboard process itself, so ``graph vault status`` is
+    authoritative. A single boolean plus the pid: no secret, no org disclosure,
+    hence a public route.
+    """
+    from tools.graph import settings_ops
+    return JSONResponse({
+        "pid": os.getpid(),
+        "audited_delegate_warm": settings_ops.personal_delegate_audited_is_warm(),
+    })
+
 async def api_beads_ready(request):
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse(dao_beads.get_open_beads())
@@ -20948,6 +20965,7 @@ def _plugin_asset_rev(plugin) -> str:
 routes = [
     Route("/api/ping", api_ping),
     Route("/api/health", api_health),
+    Route("/api/vault/status", api_vault_status),
     Route("/api/operator/active", api_operator_active, methods=["POST"]),
     Route("/api/voice/diag", api_voice_diag, methods=["POST"]),
     Route("/api/voice/trace", api_voice_trace, methods=["POST"]),
