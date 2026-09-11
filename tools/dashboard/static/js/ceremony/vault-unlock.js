@@ -16,7 +16,7 @@ export function deriveAuditedRecipient(rootSeed) {
 }
 
 /** Phase 2: construct the existing handoff using only pre-fetched inputs. */
-export async function prepareVault(rootSeed, prepared, audited) {
+export async function prepareVault(rootSeed, prepared, audited, organizations = []) {
   const result = { keys: { generation_keys: {},
     delegate_audited_private_key: audited.privateKeyHex,
     delegate_audited_public_key: audited.publicKeyHex } };
@@ -26,6 +26,31 @@ export async function prepareVault(rootSeed, prepared, audited) {
       result.keys.persona_kem_private_key = (await deriveEncapsulationKeypair(
         kemSeed, 'autonomy/persona-kem/v1/' + prepared.recovery_genesis_id,
       )).privateKeyHex;
+    } finally { kemSeed.fill(0); }
+  }
+  result.keys.organization_kem_keys = [];
+  result.failures = [];
+  if (organizations.length) {
+    const kemSeed = await deriveKemSeed(rootSeed, 0);
+    try {
+      for (const org of organizations) {
+        try {
+          const recovery = org.encryption_recovery;
+          if (!recovery || recovery.error) throw new Error('organization-encryption-unavailable');
+          if (recovery.counter !== 0 || recovery.genesis_id !== org.genesis_id) {
+            throw new Error('organization-encryption-context-mismatch');
+          }
+          const pair = await deriveEncapsulationKeypair(kemSeed,
+            'autonomy/persona-kem/v1/' + recovery.genesis_id);
+          const credential = recovery.credentials.find(c => c.kem_public_key === pair.publicKeyHex);
+          if (!credential) throw new Error('organization-encryption-key-mismatch');
+          result.keys.organization_kem_keys.push({ organization: org.slug,
+            genesis_id: recovery.genesis_id, kem_key_id: credential.kem_key_id,
+            persona_kem_private_key: pair.privateKeyHex });
+        } catch (error) {
+          result.failures.push({ org: org.slug, step: 'organization-recovery', error: error.message });
+        }
+      }
     } finally { kemSeed.fill(0); }
   }
   const inventory = prepared.inventory;

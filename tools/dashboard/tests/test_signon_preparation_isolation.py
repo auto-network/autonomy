@@ -61,6 +61,8 @@ def healthy(monkeypatch):
                         lambda org: {"key_exists": False, "parents": []})
     monkeypatch.setattr(signon_preparation, "organization_plans",
                         lambda: iter([(_entry("good"), "ef" * 32), (_entry("bad"), "ef" * 32)]))
+    monkeypatch.setattr(signon_preparation, "organization_encryption_recovery",
+                        lambda org: {"genesis_id": "ab" * 32, "counter": 0, "credentials": []})
 
 
 def _prepared_slugs(result: dict) -> list[str]:
@@ -84,6 +86,19 @@ def test_one_organizations_failure_does_not_block_sign_in(healthy, monkeypatch):
     bad = [o for o in result["organizations"] if o["slug"] == "bad"]
     # Reported as unavailable, or omitted — never raised.
     assert not bad or bad[0].get("error")
+
+
+def test_encryption_preparation_failure_preserves_signing_and_other_org_inputs(healthy, monkeypatch):
+    def prepare(org):
+        if org == "bad":
+            raise ValueError("cannot read credential records")
+        return {"genesis_id": "ab" * 32, "counter": 0, "credentials": []}
+    monkeypatch.setattr(signon_preparation, "organization_encryption_recovery", prepare)
+    result = signon_preparation.collect()
+    assert _prepared_slugs(result) == ["good", "bad"]
+    assert result["organizations"][0]["encryption_recovery"]["counter"] == 0
+    assert result["organizations"][1]["encryption_recovery"]["error"]
+    assert "storage_delegate" in result["organizations"][1]
 
 
 def test_fleet_runtime_failure_does_not_block_sign_in(healthy, monkeypatch):

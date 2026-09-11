@@ -140,7 +140,7 @@ def _run_ceremony(client, terms):
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not on PATH")
 @pytest.mark.parametrize("unavailable_org", [False, True])
 @pytest.mark.parametrize("has_org_key", [False, True])
-def test_root_unlock_enables_organization_channel_key_write(tmp_path, monkeypatch, unavailable_org, has_org_key):
+def test_root_unlock_enables_organization_channel_key_write(tmp_path, monkeypatch, unavailable_org, has_org_key, *, receiver_check=None):
     GraphDB.close_all_pooled()
     monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
@@ -335,6 +335,8 @@ def test_root_unlock_enables_organization_channel_key_write(tmp_path, monkeypatc
         token = "7c" * 16
         public = link_channel_key.mint_channel_key(token, ORG)
         assert link_channel_key.channel_key_for(token, ORG).public_hex == public
+        if receiver_check is not None:
+            receiver_check(tmp_path, terms, root.public_hex, token, public)
         # Admission already supplied the public credential in member.claim.
         # The production write must register it and persist a recovery grant;
         # the test must NOT pre-populate KeyControlStore on the writer's behalf.

@@ -42,6 +42,7 @@ const STEP_LABELS = {
   'rekey': 'the organization key was not rotated',
   'organization-preparation': 'the organization could not be prepared for unlock',
   'organization-delegate': 'the organization’s storage key could not be activated',
+  'organization-recovery': 'the organization’s decryption key could not be activated',
   'fleet': 'fleet sign-in work did not complete',
 };
 
@@ -54,6 +55,7 @@ const STEP_CONSEQUENCES = {
   'rekey': 'The organization key stays on its current generation.',
   'organization-preparation': 'This organization’s storage key and sign-in maintenance were not prepared.',
   'organization-delegate': 'This organization’s vaulted secrets may remain unavailable; other organizations and the personal vault are unaffected.',
+  'organization-recovery': 'This organization’s received secrets may remain locked; personal and other organization keys are unaffected.',
   'fleet': 'Fleet access was not renewed by this sign-in.',
 };
 

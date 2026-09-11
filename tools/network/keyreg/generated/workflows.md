@@ -137,7 +137,7 @@ Built at the armor layer; exposed by no route or UI yet.
 <a id="workflow-ceremony-organization_grant_recovery"></a>
 ## ceremony.organization_grant_recovery
 
-**Status:** designed
+**Status:** built
 
 **Authority:** persona_kem_private
 
@@ -145,11 +145,11 @@ Built at the armor layer; exposed by no route or UI yet.
 
 - memory-held generation secrets only; no grants or storage states
 
-**Source:** `tools/vault/unlock.py:open_generation_keys` (ceremony)
+**Source:** `tools/dashboard/unlock_routes.py:_accept_organization_kem_key` (ceremony)
 
 **Crib:** §1c, §12, §14
 
-graph://35308bf7-584. Primitive built; organization handoff, RAM retention and read-time recovery integration pending. Root stays in browser; networking resumes only after cleanup.
+graph://35308bf7-584. Organization sign-in validates scoped KEM keys against current credentials and consumes the existing grant opener. Reload retention and read-time recovery remain auto-a1pub. Root stays in browser; networking resumes only after cleanup.
 
 <a id="workflow-ceremony-organization_storage_delegate"></a>
 ## ceremony.organization_storage_delegate

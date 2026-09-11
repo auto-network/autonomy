@@ -364,9 +364,9 @@ Custody describes intended storage; read each snapshot's stated conditions separ
 - **revoke** Publish a superseding PersonaKemCredential. Stops future grants only; undoes nothing already opened.
 - **bound** None — damage is complete at the instant of theft.
 - **sealed to** per_machine_key — KEM-distribution record (designed; bead auto-pw9bs.6)
-- **code** `tools/network/storagekit/credentials.py:derive_kem_seed` · `tools/dashboard/static/js/ceremony/founding.js:deriveKemSeed` · `tools/dashboard/static/js/join/ceremony.js` · `tools/vault/unlock.py:open_generation_keys`
+- **code** `tools/network/storagekit/credentials.py:derive_kem_seed` · `tools/dashboard/static/js/ceremony/founding.js:deriveKemSeed` · `tools/dashboard/static/js/join/ceremony.js` · `tools/vault/unlock.py:open_generation_keys` · `tools/dashboard/static/js/ceremony/vault-unlock.js:prepareVault` · `tools/dashboard/unlock_routes.py:_accept_organization_kem_key`
 - **crib** §9, §13, §14
-- **notes** Initial founding and admission derive counter zero, then bind the pair with kem_purpose(genesis_id). PersonaKemCredential has no counter field. The grant opener and personal legacy handoff are built; organization sign-in, read-time recovery and RAM handoff integration remain pending under graph://35308bf7-584. This key is not stored in audited Settings.
+- **notes** Initial founding and admission derive counter zero, then bind the pair with kem_purpose(genesis_id). PersonaKemCredential has no counter field. Personal and organization sign-in handoffs open existing grants and keep KEM keys in process memory. Organization read-time recovery and RAM handoff integration remain pending under graph://35308bf7-584, auto-a1pub. This key is not stored in audited Settings.
 
 <a id="key-serving_machine_signing_key"></a>
 ### serving_machine_signing_key — signing, memory (Derived at root unlock for unattended serving; not stored separately.)

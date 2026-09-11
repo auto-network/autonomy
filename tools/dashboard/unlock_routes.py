@@ -1166,13 +1166,15 @@ def personal_vault_recovery() -> JSONResponse:
 
 
 async def post_unlock_vault_keys(request: Request) -> JSONResponse:
-    """Receive personal decryption keys after the authenticated root unlock.
+    """Receive scoped decryption keys after the authenticated root unlock.
 
     The personal root stays in the client. Its audited X25519 recipient opens
     modern personal values. An optional KEM key recovers old storage-format
     values from persisted grants; it does not create membership or credentials.
     The existing organization signing-author handoff is separate from this
     personal recipient and is not provisioned by personal warm-up.
+    Organization KEM keys are matched to current credentials, held in memory,
+    and used to open persisted grants without publishing recovery records.
     """
     if session_from_request(request) is None:
         return JSONResponse({"ok": False, "error": (
@@ -1190,6 +1192,10 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": (
             "body must carry 'generation_keys' as {state_id: hex}"
         )}, status_code=400)
+    organization_kem_keys = body.get("organization_kem_keys", [])
+    if not isinstance(organization_kem_keys, list):
+        return JSONResponse({"ok": False, "error": "organization_kem_keys must be a list"},
+                            status_code=400)
     decoded: dict[str, bytes] = {}
     for state_id, hexed in keys.items():
         if not isinstance(state_id, str) or not isinstance(hexed, str):
@@ -1326,6 +1332,17 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
         # Strictly after _install_personal_audited_delegate: the audited
         # write is a cold delegate seal against the recipient just published.
         _ensure_sealed_settings_pepper()
+    organization_recovery = {}
+    for item in organization_kem_keys:
+        org = item.get("organization") if isinstance(item, dict) else None
+        label = org if isinstance(org, str) else "unknown"
+        try:
+            recovered = _accept_organization_kem_key(item)
+            organization_recovery[label] = {"ok": True, "recovered": recovered}
+        except Exception:
+            # Never echo request data or exception text containing private input.
+            logger.warning("organization encryption handoff refused for %s", label)
+            organization_recovery[label] = {"ok": False, "error": "organization-encryption-refused"}
     # Use the existing RAM-backed carrier at unlock as well as shutdown.
     snapshot = False
     try:
@@ -1347,7 +1364,36 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
         # restart returns to locked.
         "snapshot_persisted": snapshot,
         **({"organization_delegates": organization_delegates} if organization_delegates else {}),
+        **({"organization_recovery": organization_recovery} if organization_recovery else {}),
     })
+
+
+def _accept_organization_kem_key(item: dict) -> int:
+    """Validate current public membership before retaining a decrypt-only key."""
+    from tools.dashboard.signon_preparation import organization_encryption_recovery
+    from tools.network.storagekit.keycontrol import KeyControlStore
+    from tools.vault.db_content_store import vault_db_path_for
+    from tools.vault.unlock import recover_organization_generations
+
+    org = item["organization"]
+    if not isinstance(org, str) or not org:
+        raise ValueError("organization required")
+    context = organization_encryption_recovery(org)
+    if item["genesis_id"] != context["genesis_id"]:
+        raise ValueError("organization genesis mismatch")
+    credential = next((c for c in context["credentials"]
+                       if c["kem_key_id"] == item["kem_key_id"]), None)
+    if credential is None:
+        raise ValueError("no current organization credential")
+    private, _ = _validate_audited_delegate_pair(
+        item["persona_kem_private_key"], credential["kem_public_key"])
+    # Same process-lifetime custody as the personal KEM, not a vaulted Setting.
+    # The following bead extends the RAM carrier/read path to consume this map.
+    held = _VAULT_CACHE.setdefault("organization_kem_keys", {})
+    held.setdefault(context["genesis_id"], {})[credential["kem_key_id"]] = private
+    with KeyControlStore(vault_db_path_for(org)) as key_control:
+        return recover_organization_generations(context["genesis_id"], (private,),
+                                               key_control, _VAULT_CACHE["cache"])
 
 
 def _validate_audited_delegate_pair(private_hex: object,

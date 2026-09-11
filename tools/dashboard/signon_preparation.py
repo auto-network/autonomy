@@ -44,6 +44,28 @@ def organization_plans():
             yield {"slug": ref.slug, "error": "organization-preparation-unavailable"}, None
 
 
+def organization_encryption_recovery(org):
+    """Public recovery inputs for an existing org; never provision credentials."""
+    from tools.data_paths import LOCAL_STORE_KEYS
+    from tools.network.ledger import LedgerStore, org_ledger_db_path
+    from tools.network.storagekit.keycontrol import KeyControlStore
+    from tools.vault.db_content_store import vault_db_path_for
+    from tools.vault.unlock import current_recovery_credentials
+
+    path = org_ledger_db_path(org)
+    if org in LOCAL_STORE_KEYS or not path.exists():
+        raise ValueError("organization recovery needs a founded organization")
+    with LedgerStore(path) as ledger:
+        frontier = ledger.fold(now=int(time.time() * 1000))
+        if not frontier.genesis_id:
+            raise ValueError("organization recovery needs a founded organization")
+        with KeyControlStore(vault_db_path_for(org)) as key_control:
+            credentials = current_recovery_credentials(frontier, key_control, ledger.ledger.ancestry)
+    return {"genesis_id": frontier.genesis_id, "counter": 0,
+            "credentials": [{"kem_key_id": c.kem_key_id, "kem_public_key": c.kem_public_key}
+                            for c in credentials]}
+
+
 def collect():
     from tools.dashboard import (fleet_enrollment_routes as fleet, identity_routes,
                                  membership_checkpoint, network_routes, unlock_routes,
@@ -80,6 +102,11 @@ def collect():
         if entry.get("error"):
             organizations.append(entry)
             continue
+        try:
+            entry["encryption_recovery"] = organization_encryption_recovery(org)
+        except Exception:
+            logger.exception("sign-in organization encryption preparation unavailable: %s", org)
+            entry["encryption_recovery"] = {"error": "organization-encryption-unavailable"}
         try:
             entry["storage_delegate"] = org_storage_delegate.prepare(org)
             okey = network_routes._first_member(NETWORK_ORG_KEY_SET_ID, org)
