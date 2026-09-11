@@ -88,7 +88,9 @@ def signing_key(org: str):
         genesis = store.ledger.genesis_id
     row = settings_ops.read_set_key(NETWORK_STORAGE_DELEGATE_SET_ID, genesis, org=None)
     metadata = (row or {}).get("payload") or {}
-    if not metadata or metadata["organization"] != org:
+    # The index is keyed by this ledger's genesis. Its recorded slug is local
+    # display context and may differ after rename or fleet replication.
+    if not metadata:
         return None
     if metadata["expires_at"] <= int(time.time() * 1000):
         return None
