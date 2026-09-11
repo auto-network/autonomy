@@ -651,7 +651,9 @@
         "tools/dashboard/static/js/join/ceremony.js",
         "tools/vault/unlock.py:open_generation_keys",
         "tools/dashboard/static/js/ceremony/vault-unlock.js:prepareVault",
-        "tools/dashboard/unlock_routes.py:_accept_organization_kem_key"
+        "tools/dashboard/unlock_routes.py:_accept_organization_kem_key",
+        "tools/dashboard/unlock_routes.py:restore_vault_across_hot_reload",
+        "tools/vault/key_holder.py:build_key_holder"
       ],
       "crib": [
         "\u00a79",
@@ -678,7 +680,7 @@
       },
       "group": "domain-storage",
       "kind": "kem",
-      "notes": "Initial founding and admission derive counter zero, then bind the pair with kem_purpose(genesis_id). PersonaKemCredential has no counter field. Personal and organization sign-in handoffs open existing grants and keep KEM keys in process memory. Organization read-time recovery and RAM handoff integration remain pending under graph://35308bf7-584, auto-a1pub. This key is not stored in audited Settings.",
+      "notes": "Initial founding and admission derive counter zero, then bind the pair with kem_purpose(genesis_id). PersonaKemCredential has no counter field. Personal and organization sign-in handoffs open existing grants and keep KEM keys in process memory. Organization reads open late grants, and graceful reload uses the existing RAM-backed carrier to retain KEM keys, not generation secrets (graph://35308bf7-584, auto-a1pub). This key is not stored in audited Settings; cold restart needs sign-in.",
       "proofs": [
         {
           "framework": "tamarin",
@@ -1136,7 +1138,7 @@
           "memory-held generation secrets only; no grants or storage states"
         ]
       },
-      "notes": "graph://35308bf7-584. Organization sign-in validates scoped KEM keys against current credentials and consumes the existing grant opener. Reload retention and read-time recovery remain auto-a1pub. Root stays in browser; networking resumes only after cleanup.",
+      "notes": "graph://35308bf7-584. Organization sign-in validates scoped KEM keys against current credentials and consumes the existing grant opener. The same opener recovers addressed, unheld states at read time and after RAM-only reload retention (auto-a1pub). Root stays in browser; networking resumes only after cleanup. Live receiver proof is tracked by auto-hwlcy.",
       "source": {
         "file": "tools/dashboard/unlock_routes.py",
         "kind": "ceremony",

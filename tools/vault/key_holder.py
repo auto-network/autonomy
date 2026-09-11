@@ -86,18 +86,28 @@ def _scoped_db(set_id: str, org: "str | None"):
     return vault_db_path_for(None if home == "personal" else org)
 
 
-def build_key_holder(cache) -> Callable[..., settings_ops.VaultKeyControl]:
+def build_key_holder(cache, *, organization_kem_provider=None) -> Callable[..., settings_ops.VaultKeyControl]:
     """Return the holder callable ``settings_ops`` invokes on an audited read.
 
     No store paths. The content and key-control records are read from the SAME
     database file the settings row was written to, resolved per call. A single
     path put every scope in one sidecar — a store the design does not have, and
     a leak between organizations.
+
+    The optional provider reads memory-held KEM keys by genesis on each call.
+    Organization reads open newly available grants before constructing Holdings;
+    declared personal-home Settings never consume organization keys.
     """
 
     def holder(*, set_id: str, org: "str | None") -> settings_ops.VaultKeyControl:
         db = _scoped_db(set_id, org)
         with KeyControlStore(db) as key_control:
+            from tools.graph import schemas
+            if org and schemas.declared_home(set_id) != "personal" and organization_kem_provider:
+                from tools.vault.unlock import recover_organization_generations
+                for genesis in {state.genesis_id for state in key_control.states.values()}:
+                    recover_organization_generations(genesis, organization_kem_provider(genesis),
+                                                     key_control, cache)
             holdings = Holdings(
                 secrets=cache.secrets,
                 descriptors=key_control.states,
@@ -110,13 +120,13 @@ def build_key_holder(cache) -> Callable[..., settings_ops.VaultKeyControl]:
     return holder
 
 
-def register_key_holder(cache) -> Callable[..., settings_ops.VaultKeyControl]:
+def register_key_holder(cache, *, organization_kem_provider=None) -> Callable[..., settings_ops.VaultKeyControl]:
     """Build the holder and install it as the process's vault key holder.
 
     Call once per process. The cache may be empty at registration and filled at
     unlock — the holder reads it live, so a read before the first unlock fails
     closed with empty holdings rather than a missing-holder error.
     """
-    holder = build_key_holder(cache)
+    holder = build_key_holder(cache, organization_kem_provider=organization_kem_provider)
     settings_ops.set_vault_key_holder(holder)
     return holder

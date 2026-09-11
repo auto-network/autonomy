@@ -18,6 +18,24 @@ import sys
 import pytest
 
 
+def _reload_receiver():
+    """Fresh worker: only the production carrier files, no root or key pipe."""
+    from tools.dashboard import unlock_routes
+    from tools.graph import settings_ops
+    from tools.network.idkit import KeyPair
+    data = json.loads(sys.stdin.readline())
+    assert not unlock_routes._VAULT_CACHE
+    with pytest.MonkeyPatch.context() as mp:
+        # Same filesystem fixture as test_vault_hot_reload. Production's RAM
+        # guard is tested separately; serialization and restoration are real.
+        mp.setattr('tools.network.storagekit.memory_cache.assert_memory_backed', lambda *_: None)
+        assert unlock_routes.restore_vault_across_hot_reload()
+        row = settings_ops.read_set_key('autonomy.network.link-channel-key', data['token'], org=data['org'])
+        seed = (row or {}).get('payload', {}) or {}
+        print(json.dumps({'opened': bool(seed.get('seed')) and
+              KeyPair.from_private_hex(seed['seed']).public_hex == data['public']}), flush=True)
+
+
 def _receiver():
     from types import SimpleNamespace
     from starlette.applications import Starlette
@@ -31,6 +49,7 @@ def _receiver():
     from tools.vault.db_content_store import vault_db_path_for
 
     inputs = json.loads(sys.stdin.readline())
+    mode = inputs.get('mode', 'signin')
     org = inputs['terms']['org']
     assert not scenario.unlock_routes._VAULT_CACHE
     assert scenario.settings_ops._personal_delegate_audited_key is None
@@ -46,7 +65,13 @@ def _receiver():
         raise AssertionError('receiver should reuse the adopted checkpoint')
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(scenario.unlock_routes, 'session_from_request', lambda r: {'sid': 'receiver'})
-        mp.setattr(scenario.unlock_routes, 'save_vault_across_hot_reload', lambda: False)
+        if mode == 'reload':
+            carrier = Path(os.environ['AUTONOMY_DATA_ROOT']) / 'keycache'
+            carrier.mkdir()
+            mp.setenv('AUTONOMY_KEYCACHE_MOUNT', str(carrier))
+            mp.setattr('tools.network.storagekit.memory_cache.assert_memory_backed', lambda *_: None)
+        else:
+            mp.setattr(scenario.unlock_routes, 'save_vault_across_hot_reload', lambda: False)
         mp.setattr(service_certificate_manager, 'request_reconcile', lambda: None)
         mp.setattr(identity_routes, '_personal_member',
             lambda: SimpleNamespace(payload={'root_pub': inputs['root_pub']}))
@@ -63,8 +88,18 @@ def _receiver():
             Route('/api/identity/ceremony-error', report, methods=['POST']),
             Route('/api/network/membership-checkpoint', unexpected_checkpoint, methods=['POST']),
         ])
-        with TestClient(app) as client:
-            scenario._run_ceremony(client, inputs['terms'])
+        with pytest.MonkeyPatch.context() as delivery:
+            if mode == 'late':
+                # Simulate grant availability arriving later than the other
+                # replicated records; the next read uses the real store again.
+                delivery.setattr(KeyControlStore, 'accepted_grants', lambda self: ())
+            with TestClient(app) as client:
+                scenario._run_ceremony(client, inputs['terms'])
+            if mode == 'late':
+                unavailable = scenario.settings_ops.read_set_key(
+                    'autonomy.network.link-channel-key', inputs['token'], org=org)
+                assert not (unavailable.get('payload') or {}).get('seed')
+                assert scenario.unlock_routes._VAULT_CACHE['organization_kem_keys']
         signing = scenario.org_storage_delegate.signing_key(org)
         row = scenario.settings_ops.read_set_key(
             'autonomy.network.link-channel-key', inputs['token'], org=org)
@@ -72,6 +107,13 @@ def _receiver():
         opened = False
         if payload.get('seed'):
             opened = scenario.KeyPair.from_private_hex(payload['seed']).public_hex == inputs['public']
+        if mode == 'reload':
+            proc = subprocess.run([sys.executable, '-c',
+                'from tools.dashboard.tests.test_org_vault_receive_signon import _reload_receiver; _reload_receiver()'],
+                input=json.dumps({'org': org, 'token': inputs['token'], 'public': inputs['public']}) + '\n',
+                text=True, capture_output=True, timeout=30)
+            assert proc.returncode == 0, proc.stderr
+            opened = opened and json.loads(proc.stdout.strip().splitlines()[-1])['opened']
         with KeyControlStore(vault_db_path_for(org)) as kc:
             after = (len(kc.states), len(kc.accepted_grants()),
                      kc.db.execute('SELECT COUNT(*) FROM keycontrol_credential').fetchone()[0])
@@ -84,7 +126,8 @@ def _receiver():
 
 
 @pytest.mark.skipif(shutil.which('node') is None, reason='node is not on PATH')
-def test_received_org_value_opens_after_real_signin(tmp_path, monkeypatch):
+@pytest.mark.parametrize('mode', ['signin', 'late', 'reload'])
+def test_received_org_value_opens_after_real_signin(tmp_path, monkeypatch, mode):
     from tools.dashboard.tests import test_org_vault_signon_write as scenario
     def receive(sender, terms, root_pub, token, public):
         receiver = tmp_path / 'receiver'
@@ -101,7 +144,7 @@ def test_received_org_value_opens_after_real_signin(tmp_path, monkeypatch):
                    AUTONOMY_ORGS_DIR=str(receiver / 'orgs'))
         proc = subprocess.run([sys.executable, '-c',
             'from tools.dashboard.tests.test_org_vault_receive_signon import _receiver; _receiver()'],
-            input=json.dumps({'terms': terms, 'root_pub': root_pub,
+            input=json.dumps({'terms': terms, 'root_pub': root_pub, 'mode': mode,
                               'token': token, 'public': public}) + '\n',
             text=True, capture_output=True, env=env, timeout=60)
         assert proc.returncode == 0, proc.stderr

@@ -365,7 +365,7 @@ def test_a_successful_restore_consumes_the_snapshot(monkeypatch, tmp_path):
                         types.SimpleNamespace(open_generation_keys=lambda *a: {}))
 
     assert ur.restore_vault_across_hot_reload() is True
-    assert len(cleared) == 3, "a consumed snapshot must be cleared"
+    assert len(cleared) == 4, "a consumed snapshot must be cleared, including org keys"
 
 
 def test_a_failed_apply_retains_a_complete_snapshot(monkeypatch, tmp_path):
@@ -402,7 +402,7 @@ def test_a_partial_snapshot_is_still_cleared(monkeypatch, tmp_path):
     monkeypatch.setattr(ur, "_keycache_clear", lambda name: cleared.append(name))
 
     assert ur.restore_vault_across_hot_reload() is False
-    assert len(cleared) == 3, "a partial snapshot must be cleared"
+    assert len(cleared) == 4, "a partial snapshot must be cleared, including org keys"
 
 
 def test_the_unlock_call_writes_the_snapshot_and_reports_it(
