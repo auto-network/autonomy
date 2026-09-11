@@ -1162,13 +1162,13 @@ class TunnelConnector:
     async def _serve_channel(self, channel_id: bytes, token: str,
                              queue: asyncio.Queue, send_frame, drop) -> None:
         """One viewer channel: handshake, then request/response messages."""
-        link_key = None
-        if self._link_key_for is not None:
-            try:
-                link_key = self._link_key_for(token)
-            except Exception:
-                link_key = None  # a resolver fault falls back to legacy serving
         try:
+            import inspect
+            link_key = None
+            if self._link_key_for is not None:
+                link_key = self._link_key_for(token)
+                if inspect.isawaitable(link_key):
+                    link_key = await link_key
             await serve_channel(
                 self._key, self._channel_cert, org=self._org, token=token,
                 recv=queue.get,

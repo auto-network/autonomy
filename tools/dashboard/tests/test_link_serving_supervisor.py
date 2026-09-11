@@ -196,6 +196,7 @@ def test_launch_adopts_a_healthy_incumbent_instead_of_reaping(env, monkeypatch):
     assert state["status"] == "ok", state
     supervisor = sup.ServingSupervisor(spawn=_refusing_spawn)
     incumbent_pid = os.getpid() + 100000  # sentinel; alive() not exercised
+    monkeypatch.setattr(sup, "_adopt_connector_credential", lambda *args: True)
     from tools.network import build_version
     monkeypatch.setattr(
         sup, "_probe_ctl_status",
@@ -1152,6 +1153,8 @@ def _lame_duck_fixture(env, monkeypatch, *, now=None):
     supervisor = sup.ServingSupervisor(spawn=spawn, now=now)
     # A real process so _AdoptedProc.alive() holds during later reconciles.
     sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    from tools.dashboard.connector_key_resolution import register
+    register(sleeper.pid, ORG_UUID, ORG, "0" * 40)
     probe = {"ok": True, "serving": True, "boot_commit": "0" * 40,
              "active_streams": 1, "stream_activity_age_s": 1.0}
     # A killed duck's control socket goes silent — mirror that, or the

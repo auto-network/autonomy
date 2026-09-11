@@ -925,6 +925,24 @@ class NetworkStorageDelegateV1(SettingSchema):
     grant_event_id: str = field(required=True, description="Organization delegation event.")
 
 
+@home("machine")
+@publication_band(max="raw")
+@keyed_per_entity(key_strategy="org_uuid")
+class MachineServingConnectorV1(SettingSchema):
+    """Supervisor-owned process credential index; never contains the bearer."""
+
+    set_id = "autonomy.machine.serving-connector"
+    schema_revision = 1
+    token_hash: str = field(required=True, description="SHA256 of process bearer.")
+    organization: str = field(required=True, description="Local owning graph scope.")
+    org_uuid: str = field(required=True, description="Registry organization binding.")
+    pid: int = field(required=True, description="Recorded connector process ID.")
+    process_start: str = field(required=True, description="Kernel boot/start identity.")
+    boot_commit: str = field(required=True, description="Loaded connector code generation.")
+    protocol_version: int = field(required=True, description="Resolver wire version.")
+    resolver_port: int = field(required=True, description="Warm dashboard loopback port.")
+
+
 # ── autonomy.network.membership-checkpoint (local adopted cache) ──
 
 

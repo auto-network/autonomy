@@ -121,7 +121,7 @@ def publish_link(db, target_uuid: str) -> str:
 
 
 def cache_grant(token: str, target_uuid: str, *, meta: dict | None = None,
-                issued_at: str | None = None) -> None:
+                issued_at: str | None = None, channel_pub: str | None = None) -> None:
     settings_ops.add_setting(
         NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION, token,
         {
@@ -132,6 +132,7 @@ def cache_grant(token: str, target_uuid: str, *, meta: dict | None = None,
             "meta": meta or {},
             "subject": {"kind": "operator", "id": "op-1"},
             "issued_at": issued_at or time.strftime(ISO, time.gmtime()),
+            **({"channel_pub": channel_pub} if channel_pub else {}),
         },
         org=ORG,
     )
@@ -479,7 +480,11 @@ def test_supervisor_brings_serving_live_end_to_end(stack, tmp_path, monkeypatch)
         variants=[{"id": "v1", "html": BINDER_HTML}],
     )
     token = publish_link(stack["db"], binder_rev)
-    cache_grant(token, binder_rev)
+    link_key = KeyPair.generate()
+    cache_grant(token, binder_rev, channel_pub=link_key.public_hex)
+    # Only the dashboard holds the key; the REAL child must ask its resolver.
+    from tools.dashboard import link_channel_key
+    monkeypatch.setattr(link_channel_key, "channel_key_for", lambda *args: link_key)
     _provision_serve_cert(tmp_path, stack["root"], stack["port"])
     connector_log = _enroll_fleet_machine(tmp_path, monkeypatch, stack["root"])
 
@@ -495,13 +500,23 @@ def test_supervisor_brings_serving_live_end_to_end(stack, tmp_path, monkeypatch)
             deadline = loop.time() + 30
             verdict = None
             while loop.time() < deadline:
-                verdict = await probe_link(
-                    relay_url=relay, token=token, root_pub=stack["root_pub"],
-                    org_uuid=ORG_UUID, total_timeout=4.0, connect_timeout=2.0,
-                    attempts=1,
-                )
-                if verdict["live"]:
+                try:
+                    channel = await ViewerChannel.connect(
+                        relay, token, root_pub=None, link_pub=link_key.public_hex,
+                        org=ORG_UUID,
+                    )
+                    try:
+                        await channel.send_message(json.dumps({"v": 1, "op": "fetch"}).encode())
+                        response = await channel.recv_message()
+                        header, _, body = response.partition(b"\n")
+                        assert json.loads(header)["status"] == "ok"
+                        assert body == BINDER_BYTES
+                    finally:
+                        await channel.close()
+                    verdict = {"live": True, "content_length": len(body)}
                     break
+                except Exception as exc:
+                    verdict = {"live": False, "error": str(exc)}
                 await asyncio.sleep(0.5)
             # The connector's own log says why it never came live; the probe
             # can only report that the relay had no tunnel to hand it.

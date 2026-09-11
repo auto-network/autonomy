@@ -1988,6 +1988,8 @@ def main() -> None:
     )
     parser.add_argument("--graph-org", default=None,
                         help="dashboard org slug scoping the grant cache")
+    parser.add_argument("--link-key-fd", type=int, required=True,
+                        help="inherited pipe containing the resolver credential")
     parser.add_argument("--control-file", default=None,
                         help="path to write the loopback control descriptor "
                              "(enables D19 publish/revoke over this tunnel)")
@@ -2114,6 +2116,8 @@ def main() -> None:
         min_backoff=args.min_backoff, max_backoff=args.max_backoff,
         machine_key=machine_key,
     )
+    from tools.dashboard.connector_key_resolution import client, read_bootstrap
+    connector._link_key_for = client(read_bootstrap(args.link_key_fd))
     # Live push is ON by default and needs no configuration: the dashboard
     # delivers each event over the control listener below, so there is no
     # address to resolve, no stream to subscribe to and no credential to

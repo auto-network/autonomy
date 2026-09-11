@@ -816,6 +816,7 @@ class _AdoptedProc:
     def stop(self) -> None:
         with contextlib.suppress(Exception):
             _terminate_pid(self._pid)
+        _retire_connector_credential(self._pid)
         if self._ctl_path:
             with contextlib.suppress(OSError):
                 os.remove(self._ctl_path)
@@ -855,6 +856,7 @@ class _Proc:
                 except Exception:
                     self._p.kill()
         finally:
+            _retire_connector_credential(self.pid())
             # The connector removes its own .ctl on a clean exit; on a kill
             # it cannot, so the supervisor sweeps it — a stale descriptor
             # would otherwise point control() at a dead listener.
@@ -890,6 +892,17 @@ def _make_pdeathsig_preexec(expected_ppid: int):
     return _preexec
 
 
+def _retire_connector_credential(pid):
+    from tools.dashboard.connector_key_resolution import retire
+    with contextlib.suppress(Exception):
+        retire(pid)
+
+
+def _adopt_connector_credential(org_uuid, org, pid):
+    from tools.dashboard.connector_key_resolution import adopt
+    return adopt(org_uuid, org, pid)
+
+
 def _default_spawn(argv: list, env: dict, *, log_path: str | None = None,
                    ctl_path: str | None = None):
     out = open(log_path, "ab") if log_path else subprocess.DEVNULL
@@ -897,6 +910,12 @@ def _default_spawn(argv: list, env: dict, *, log_path: str | None = None,
     # A supervised connector's diagnostics must reach its file immediately;
     # otherwise a crash/reconnect loop looks like a frozen healthy process.
     child_env["PYTHONUNBUFFERED"] = "1"
+    argv = list(argv)
+    key_pipe = None
+    popen = None
+    if "--org" in argv and "--cert-file" in argv:
+        key_pipe = os.pipe()
+        argv.extend(["--link-key-fd", str(key_pipe[0])])
     try:
         popen = subprocess.Popen(
             argv, env=child_env, stdout=out, stderr=out,
@@ -911,8 +930,23 @@ def _default_spawn(argv: list, env: dict, *, log_path: str | None = None,
             # where it already exists: the per-org ownership lock + adoption of
             # a healthy incumbent in _launch, with _reap_strays for the sick.
             start_new_session=True,
+            pass_fds=(key_pipe[0],) if key_pipe else (),
         )
+        if key_pipe:
+            from tools.dashboard.connector_key_resolution import register
+            from tools.network import build_version
+            org_uuid = argv[argv.index("--org") + 1]
+            org = argv[argv.index("--graph-org") + 1] if "--graph-org" in argv else None
+            bootstrap = register(popen.pid, org_uuid, org, build_version.disk_head())
+            os.write(key_pipe[1], json.dumps(bootstrap).encode() + b"\n")
+    except Exception:
+        if popen is not None:
+            _Proc(popen, ctl_path=ctl_path).stop()
+        raise
     finally:
+        if key_pipe:
+            os.close(key_pipe[0])
+            os.close(key_pipe[1])
         if out is not subprocess.DEVNULL:
             out.close()  # the child retains its duplicated descriptor
     return _Proc(popen, ctl_path=ctl_path)
@@ -1405,7 +1439,7 @@ class ServingSupervisor:
                     if candidate != os.getpid() and _pid_alive(candidate):
                         pid = candidate
                         break
-                if pid is None:
+                if pid is None or not _adopt_connector_credential(org_uuid, org, pid):
                     return None
                 self._procs[org] = _AdoptedProc(pid, ctl_path=ctl_path)
                 self._boot_commit[org] = None
@@ -1449,7 +1483,7 @@ class ServingSupervisor:
                 if candidate != os.getpid():
                     pid = candidate
                     break
-            if pid is None:
+            if pid is None or not _adopt_connector_credential(org_uuid, org, pid):
                 return None
             self._procs[org] = _AdoptedProc(pid, ctl_path=ctl_path)
             self._boot_commit[org] = boot
@@ -1600,6 +1634,7 @@ class ServingSupervisor:
                     pid, org_uuid,
                 )
                 _terminate_pid(pid)
+                _retire_connector_credential(pid)
         except Exception:
             _log.warning("stray-connector reap failed for org=%s",
                          org, exc_info=True)
