@@ -149,7 +149,7 @@ Built at the armor layer; exposed by no route or UI yet.
 
 **Crib:** §1c, §12, §14
 
-graph://35308bf7-584. Organization sign-in validates scoped KEM keys against current credentials and consumes the existing grant opener. Reload retention and read-time recovery remain auto-a1pub. Root stays in browser; networking resumes only after cleanup.
+graph://35308bf7-584. Organization sign-in validates scoped KEM keys against current credentials and consumes the existing grant opener. The same opener recovers addressed, unheld states at read time and after RAM-only reload retention (auto-a1pub). Root stays in browser; networking resumes only after cleanup. Live receiver proof is tracked by auto-hwlcy.
 
 <a id="workflow-ceremony-organization_storage_delegate"></a>
 ## ceremony.organization_storage_delegate

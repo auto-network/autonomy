@@ -1388,11 +1388,10 @@ def _accept_organization_kem_key(item: dict) -> int:
     private, _ = _validate_audited_delegate_pair(
         item["persona_kem_private_key"], credential["kem_public_key"])
     # Same process-lifetime custody as the personal KEM, not a vaulted Setting.
-    # The following bead extends the RAM carrier/read path to consume this map.
     held = _VAULT_CACHE.setdefault("organization_kem_keys", {})
     held.setdefault(context["genesis_id"], {})[credential["kem_key_id"]] = private
     with KeyControlStore(vault_db_path_for(org)) as key_control:
-        return recover_organization_generations(context["genesis_id"], (private,),
+        return recover_organization_generations(context["genesis_id"], {credential["kem_key_id"]: private},
                                                key_control, _VAULT_CACHE["cache"])
 
 
@@ -1506,6 +1505,7 @@ def _bring_vault_up(generation_keys: dict) -> int:
         author_provider=_agent_delegate,
         org_ledger_provider=_org_fold,
         cache=_VAULT_CACHE.get("cache"),
+        organization_kem_provider=lambda genesis: _VAULT_CACHE.get("organization_kem_keys", {}).get(genesis, {}),
     )
     _VAULT_CACHE["cache"] = cache
     return len(cache.secrets)
@@ -1534,8 +1534,8 @@ def _agent_delegate(org):
 # can hand the warm keys to the next process through the ramfs key cache and
 # come back warm with nobody present.
 #
-# What crosses: the personal audited decryption key and, for old storage-format
-# data only, the KEM recovery key. Neither grants membership or signs anything.
+# What crosses: the personal audited decryption key, optional old-personal KEM,
+# and organization KEM keys. None grants membership or signs anything.
 # The snapshot uses the existing ramfs carrier: no disk fallback, no reboot
 # persistence. Successful restoration consumes it; failed application retains
 # it for a retry. It is written at unlock and at graceful shutdown.
@@ -1590,17 +1590,19 @@ def _keycache_clear(name: str) -> None:
 
 _HOTRELOAD_KEM = "vault.hotreload.kem"
 _HOTRELOAD_AUDITED_DELEGATE = "vault.hotreload.audited-delegate"
+_HOTRELOAD_ORGANIZATION_KEM = "vault.hotreload.organization-kem"
 
 
 def _clear_vault_snapshot() -> None:
     _keycache_clear(_HOTRELOAD_KEM)
     _keycache_clear(_HOTRELOAD_AUDITED_DELEGATE)
+    _keycache_clear(_HOTRELOAD_ORGANIZATION_KEM)
     # Discard the obsolete signing-key file from a pre-cleanup process too.
     _keycache_clear("vault.hotreload.delegate")
 
 
 def save_vault_across_hot_reload() -> bool:
-    """Retain personal decryption material in the existing RAM-backed carrier.
+    """Retain personal and organization decryption keys in the existing RAM carrier.
 
     The audited recipient suffices for new personal values. Carry a KEM key
     only when old storage-format values required it. No signing key is saved.
@@ -1616,8 +1618,15 @@ def save_vault_across_hot_reload() -> bool:
         else:
             _keycache_clear(_HOTRELOAD_KEM)
         _keycache_write(_HOTRELOAD_AUDITED_DELEGATE, audited_delegate.encode("ascii"))
+        organization_keys = _VAULT_CACHE.get("organization_kem_keys", {})
+        if organization_keys:
+            _keycache_write(_HOTRELOAD_ORGANIZATION_KEM,
+                            json.dumps(organization_keys, separators=(",", ":")).encode("ascii"))
+        else:
+            _keycache_clear(_HOTRELOAD_ORGANIZATION_KEM)
         _keycache_clear("vault.hotreload.delegate")
-        logger.warning("vault snapshot written: personal decryption keys")
+        logger.warning("vault snapshot written: personal decryption keys and %d org KEM scopes",
+                       len(organization_keys))
         return True
     except Exception:
         logger.exception("vault snapshot write FAILED")
@@ -1626,7 +1635,7 @@ def save_vault_across_hot_reload() -> bool:
 
 
 def restore_vault_across_hot_reload() -> bool:
-    """Restore personal decryption keys without opening an authority ledger.
+    """Restore personal keys first, then organization keys independently.
 
     Consume after successful apply only; retain the snapshot on transient error.
     """
@@ -1671,11 +1680,68 @@ def restore_vault_across_hot_reload() -> bool:
             "vault keys successfully hot-reloaded: personal recipient and %d "
             "recovered generation key(s)", len(generation_keys),
         )
-        _clear_vault_snapshot()
-        return True
     except Exception:
         logger.exception("vault hot-reload restore failed; retaining snapshot")
         return False
+    # Personal restoration succeeded. An org failure must not undo it, nor
+    # discard valid held keys just because no synchronized grant opens yet.
+    try:
+        _restore_organization_kem_keys(_keycache_read(_HOTRELOAD_ORGANIZATION_KEM))
+    except Exception:
+        logger.warning("organization KEM restore unavailable; personal vault restored")
+    _clear_vault_snapshot()
+    return True
+
+
+def _restore_organization_kem_keys(raw):
+    """Restore validated memory-carrier entries, then open each existing org.
+
+    Stable genesis identifies keys. Local slugs only locate already-existing
+    stores; recovery never creates an org or persists a key-control record.
+    """
+    if not raw:
+        return
+    from tools.graph import org_ops
+    from tools.data_paths import LOCAL_STORE_KEYS
+    from tools.network.ledger import LedgerStore, org_ledger_db_path
+    from tools.network.storagekit.keycontrol import KeyControlStore
+    from tools.vault.db_content_store import vault_db_path_for
+    from tools.vault.unlock import recover_organization_generations
+
+    def valid_hex(value):
+        return isinstance(value, str) and len(value) == 64 and bytes.fromhex(value).hex() == value
+
+    restored = json.loads(raw)
+    held = _VAULT_CACHE.setdefault("organization_kem_keys", {})
+    for genesis, keys in restored.items():
+        try:
+            if not valid_hex(genesis) or not isinstance(keys, dict):
+                raise ValueError("invalid scope")
+            for key_id, private in keys.items():
+                try:
+                    if not valid_hex(key_id) or not valid_hex(private):
+                        raise ValueError("invalid key")
+                    held.setdefault(genesis, {})[key_id] = private
+                except (TypeError, ValueError):
+                    logger.warning("invalid organization KEM carrier entry skipped")
+        except (TypeError, ValueError):
+            logger.warning("invalid organization KEM carrier scope skipped")
+    for ref in org_ops.list_orgs():
+        if ref.slug in LOCAL_STORE_KEYS:
+            continue
+        try:
+            path = org_ledger_db_path(ref.slug)
+            if not path.exists():
+                continue
+            with LedgerStore(path) as ledger:
+                genesis = ledger.ledger.genesis_id
+            if genesis not in held:
+                continue
+            with KeyControlStore(vault_db_path_for(ref.slug)) as key_control:
+                recover_organization_generations(genesis, held[genesis], key_control,
+                                                _VAULT_CACHE["cache"])
+        except Exception:
+            logger.warning("organization grant restore unavailable for %s", ref.slug)
 
 
 def _fold_for(slug):

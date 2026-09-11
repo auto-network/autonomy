@@ -132,7 +132,9 @@ def test_shared_recovery_skips_held_states_and_does_not_cache_failed_opens(monke
     cache.add("held", b"h" * 32)
     states = {s: SimpleNamespace(genesis_id="org", state_id=s) for s in ("held", "new")}
     states["foreign"] = SimpleNamespace(genesis_id="another-org", state_id="foreign")
-    grants = [SimpleNamespace(storage_state_id=s) for s in ("held", "new", "new", "foreign")]
+    grants = [SimpleNamespace(storage_state_id=s, recipient_kem_key_id="ours")
+              for s in ("held", "new", "new", "foreign")]
+    grants.append(SimpleNamespace(storage_state_id="new", recipient_kem_key_id="someone-else"))
     store = SimpleNamespace(states=states, accepted_grants=lambda: grants)
     calls = []
     def opens(private, candidates, descriptors):
@@ -140,8 +142,8 @@ def test_shared_recovery_skips_held_states_and_does_not_cache_failed_opens(monke
         calls.append((private, sid))
         return {sid: b"n" * 32} if private == "good" else {}
     monkeypatch.setattr(unlock, "open_generation_keys", opens)
-    assert recover_organization_generations("org", ("bad",), store, cache) == 0
-    assert recover_organization_generations("org", ("good",), store, cache) == 1
-    assert recover_organization_generations("org", ("good",), store, cache) == 0
+    assert recover_organization_generations("org", {"ours": "bad"}, store, cache) == 0
+    assert recover_organization_generations("org", {"ours": "good"}, store, cache) == 1
+    assert recover_organization_generations("org", {"ours": "good"}, store, cache) == 0
     assert calls == [("bad", "new"), ("bad", "new"), ("good", "new")]
     assert cache.secrets == {"held": b"h" * 32, "new": b"n" * 32}

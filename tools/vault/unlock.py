@@ -53,16 +53,18 @@ def recover_organization_generations(genesis_id, kem_keys, key_control, cache) -
 
     Shared by sign-in and subsequent holder/restore integration. Failed opens
     are not cached, so another key or a later synchronized grant may succeed.
+    ``kem_keys`` maps credential IDs to private keys; try only addressed grants.
     """
     descriptors = {sid: state for sid, state in key_control.states.items()
                    if state.genesis_id == genesis_id}
     grants = key_control.accepted_grants()
     held = set(cache.secrets)
     recovered = 0
-    for private in kem_keys:
+    for key_id, private in kem_keys.items():
         for grant in grants:
             sid = grant.storage_state_id
-            if sid in held or sid not in descriptors:
+            if (sid in held or sid not in descriptors
+                    or grant.recipient_kem_key_id != key_id):
                 continue
             for state_id, secret in open_generation_keys(private, (grant,), descriptors).items():
                 cache.add(state_id, secret)

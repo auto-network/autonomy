@@ -11,6 +11,7 @@ import pytest
 from tools.dashboard import unlock_routes as u
 from tools.graph import settings_ops
 from tools.network.idkit import KeyPair
+from tools.network.storagekit.memory_cache import assert_memory_backed as real_memory_guard
 
 
 @pytest.fixture(autouse=True)
@@ -117,3 +118,81 @@ def test_personal_recipient_alone_survives_reload(tmp_path, monkeypatch):
     assert settings_ops._personal_delegate_audited_key == "d" * 64
     assert "delegate" not in u._VAULT_CACHE
     assert "kem_private" not in u._VAULT_CACHE
+
+
+def test_org_map_survives_when_one_org_cannot_be_resolved(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from tools.graph import org_ops
+    import json
+    u._VAULT_CACHE['audited_delegate'] = 'd' * 64
+    keys = {'a' * 64: {'b' * 64: 'c' * 64}, 'e' * 64: {'f' * 64: '1' * 64}}
+    u._VAULT_CACHE['organization_kem_keys'] = keys
+    monkeypatch.setattr(org_ops, 'list_orgs', lambda: [SimpleNamespace(slug='unavailable')])
+    monkeypatch.setattr(u, '_personal_store_has_generations', lambda: False)
+    assert u.save_vault_across_hot_reload()
+    assert json.loads(u._keycache_read(u._HOTRELOAD_ORGANIZATION_KEM)) == keys
+    u._VAULT_CACHE.clear()
+    assert u.restore_vault_across_hot_reload()
+    assert settings_ops._personal_delegate_audited_key == 'd' * 64
+    assert u._VAULT_CACHE['organization_kem_keys'] == keys
+    assert u._VAULT_CACHE['cache'].secrets == {}  # No grants yet is normal.
+    assert not (tmp_path / 'orgs/unavailable.db').exists()
+    assert u._keycache_read(u._HOTRELOAD_ORGANIZATION_KEM) is None
+
+
+def test_malformed_org_entry_does_not_erase_personal_or_healthy_key(monkeypatch):
+    import json
+    from tools.graph import org_ops
+    monkeypatch.setattr(org_ops, 'list_orgs', lambda: [])
+    u._VAULT_CACHE['audited_delegate'] = 'd' * 64
+    u._VAULT_CACHE['organization_kem_keys'] = {'a' * 64: {'b' * 64: 'c' * 64}}
+    assert u.save_vault_across_hot_reload()
+    u._keycache_write(u._HOTRELOAD_ORGANIZATION_KEM, json.dumps({
+        'bad-scope': {}, 'a' * 64: {'b' * 64: 'c' * 64, 'f' * 64: 'bad-private'},
+    }).encode())
+    u._VAULT_CACHE.clear()
+    assert u.restore_vault_across_hot_reload()
+    assert settings_ops._personal_delegate_audited_key == 'd' * 64
+    assert u._VAULT_CACHE['organization_kem_keys'] == {'a' * 64: {'b' * 64: 'c' * 64}}
+
+
+def test_org_key_snapshot_refuses_disk_with_real_memory_guard(tmp_path, monkeypatch):
+    monkeypatch.setattr('tools.network.storagekit.memory_cache.assert_memory_backed', real_memory_guard)
+    u._VAULT_CACHE['audited_delegate'] = 'd' * 64
+    u._VAULT_CACHE['organization_kem_keys'] = {'a' * 64: {'b' * 64: 'c' * 64}}
+    assert not u.save_vault_across_hot_reload()
+    assert not list(tmp_path.glob('vault.hotreload.*'))
+
+
+def test_one_org_store_failure_does_not_block_another_org_restore(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from tools.graph import org_ops
+    from tools.vault.tests.test_unlock import _one_grant
+    grant, private, descriptor, secret = _one_grant()
+    u._VAULT_CACHE['audited_delegate'] = 'd' * 64
+    u._VAULT_CACHE['organization_kem_keys'] = {
+        descriptor.genesis_id: {grant.recipient_kem_key_id: private}}
+    assert u.save_vault_across_hot_reload()
+    u._VAULT_CACHE.clear()
+    monkeypatch.setattr(u, '_personal_store_has_generations', lambda: False)
+    monkeypatch.setattr(u, '_ensure_sealed_settings_pepper', lambda: None)
+    monkeypatch.setattr(org_ops, 'list_orgs', lambda: [
+        SimpleNamespace(slug='broken'), SimpleNamespace(slug='healthy')])
+    for slug in ('broken', 'healthy'):
+        (tmp_path / 'orgs' / f'{slug}.db').touch()
+    class Ledger:
+        def __init__(self, path): self.ledger = SimpleNamespace(genesis_id=descriptor.genesis_id)
+        def __enter__(self): return self
+        def __exit__(self, *_): pass
+    class Store:
+        def __init__(self, path):
+            if 'broken' in str(path): raise ValueError('unavailable org store')
+        def __enter__(self): return self
+        def __exit__(self, *_): pass
+        states = {descriptor.state_id: descriptor}
+        def accepted_grants(self): return (grant,)
+    monkeypatch.setattr('tools.network.ledger.LedgerStore', Ledger)
+    monkeypatch.setattr('tools.network.storagekit.keycontrol.KeyControlStore', Store)
+    assert u.restore_vault_across_hot_reload()
+    assert settings_ops._personal_delegate_audited_key == 'd' * 64
+    assert u._VAULT_CACHE['cache'].secrets == {descriptor.state_id: secret}

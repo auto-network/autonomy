@@ -18,6 +18,7 @@ def register_vault_for_unlock(
     author_provider: Callable[[str], object],
     org_ledger_provider: Callable[["str | None"], object],
     cache: "VaultKeyCache | None" = None,
+    organization_kem_provider=None,
 ) -> VaultKeyCache:
     """Make the vault usable in this process. Call once per unlock.
 
@@ -50,7 +51,7 @@ def register_vault_for_unlock(
         for state_id, secret in dict(generation_keys).items():
             cache.add(state_id, secret)
 
-    register_key_holder(cache)
+    register_key_holder(cache, organization_kem_provider=organization_kem_provider)
     register_vault_sealer(
         cache,
         author_provider,
