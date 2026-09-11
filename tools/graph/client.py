@@ -933,13 +933,23 @@ class HttpClient:
         self.last_write_report = result
         return result.get("id")
 
-    def seal_personal_setting(self, key, value, *, policy_class_id):
+    def seal_personal_setting(self, key, value, *, policy_class_id, org=None):
         """Use the narrow personal-write seam, never generic cross-org scope.
 
         The caller's bearer is attached by ``_request`` for attribution. It
         does not authorize the seal; the endpoint fixes the destination and
         public-key seals immediately.
+
+        ``org`` carries a caller-NAMED organization slug (``graph vault seal
+        --org SLUG``) so the endpoint can refuse a named org the caller's
+        bearer cannot prove, rather than silently sealing into the operator's
+        personal namespace (auto-ha7se). It is sent as ``X-Graph-Org`` — for a
+        matching org session it is redundant with the bearer, and for an
+        unscoped/host caller it is the only thing that makes the mis-scope
+        visible server-side. The default/own-session paths pass ``None`` and
+        send no header, preserving the bearer-derived routing unchanged.
         """
+        org = _resolve_client_org_arg(org)
         result = self._request(
             "POST",
             "/api/identity/vault-settings",
@@ -948,6 +958,7 @@ class HttpClient:
                 "value": value,
                 "policy_class_id": policy_class_id,
             },
+            headers=_settings_headers(org),
         )
         self.last_write_report = result
         return result.get("id")

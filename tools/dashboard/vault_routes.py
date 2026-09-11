@@ -175,6 +175,29 @@ async def seal_personal_setting(request: Request):
         if not isinstance(class_id, str) or not class_id:
             raise VaultError("policy_class_id must be a non-empty string")
         principal = api_auth.principal_from_request(request)
+        # A NAMED org that the caller cannot prove with its bearer is refused,
+        # not silently routed to the bare personal key (auto-ha7se). Without
+        # this, `graph vault seal --org anchore --tier secured` from a host or
+        # unscoped session answered "✓ sealed" while landing the secret in the
+        # operator's own namespace — a confidentiality mis-landing. An org
+        # session naming its OWN org is a MATCHING header (the middleware has
+        # already refused a conflicting one), so it is org_bound here and never
+        # reaches this refusal; the operator's own writes name no org at all.
+        requested_org = api_auth.organization_scope_from_request(request)
+        if (
+            isinstance(requested_org, str)
+            and requested_org not in ("personal", "machine")
+            and not principal.org_bound
+        ):
+            return JSONResponse(
+                {"error": (
+                    f"cannot seal into organization {requested_org!r} from an "
+                    "unscoped or host session; run this from a session scoped to "
+                    "that organization, or move an existing secret with "
+                    "'graph vault share --to-org'"
+                )},
+                status_code=403,
+            )
         if principal.kind in {
             api_auth.ApiPrincipalKind.OPERATOR_COOKIE,
             api_auth.ApiPrincipalKind.LOCAL_SESSION,

@@ -17871,7 +17871,44 @@ async def api_graph_setting_create(request):
     if _pinned == "machine":
         org = write_org = "machine"
     elif _pinned == "personal":
-        org = write_org = None
+        # A personal-homed set that declares an @org_writeback_namespace (the
+        # vault credential sets, sealed-settings rows) is org-partitioned by a
+        # ``<org>:`` key PREFIX inside the operator's own store, derived from the
+        # caller's AUTHENTICATED org (write_by_key -> _apply_org_writeback).
+        #
+        # Forcing org=None unconditionally here discarded that org and wrote the
+        # bare, UNPREFIXED key — the operator's own namespace — while reporting
+        # success. For a secret that is a confidentiality mis-landing
+        # (auto-ha7se): `graph vault seal --org anchore` answered "✓ sealed" but
+        # the row never reached anchore, would not sync to org members, and org
+        # readers never found it. Two rules replace the blanket None:
+        #   * a positively org-scoped caller (its bearer IS the org, so the
+        #     middleware has already refused any conflicting X-Graph-Org) keeps
+        #     its org, and the write lands under ``<org>:`` as intended; while
+        #   * a caller that NAMES an org via X-Graph-Org without a bearer proving
+        #     it — an unscoped/host/operator session — is refused LOUDLY rather
+        #     than silently demoted to the bare personal namespace.
+        _named_org = isinstance(org, str) and org not in ("personal", "machine")
+        if _named_org and _schemas.declared_org_writeback_key_strategy(
+            body["set_id"]
+        ):
+            if not api_auth.principal_from_request(request).org_bound:
+                return JSONResponse(
+                    {"error": (
+                        f"cannot seal into organization {org!r} from an unscoped "
+                        "or host session; run this from a session scoped to that "
+                        "organization, or move an existing secret with "
+                        "'graph vault share --to-org'"
+                    )},
+                    status_code=403,
+                )
+            # ``org`` is a non-empty slug here (checked above), so the
+            # ``or CALLER_ORG`` fallback is a no-op — it is written this way to
+            # keep the org-taint invariant the request-scope linter enforces
+            # (never pass a bare request-derived org to a Settings call).
+            write_org = org or graph_ops.CALLER_ORG
+        else:
+            org = write_org = None
     if os.environ.get("DASHBOARD_MOCK"):
         from tools.dashboard.dao import mock as dao_mock
         sid = dao_mock.add_setting_member(

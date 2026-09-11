@@ -33,8 +33,8 @@ class FakeClient:
     def read_set(self, set_id, *, org=None, peers=None):
         return FakeMembers(self.sets.get(set_id, []))
 
-    def seal_personal_setting(self, key, value, *, policy_class_id):
-        self.sealed.append((key, value, policy_class_id))
+    def seal_personal_setting(self, key, value, *, policy_class_id, org=None):
+        self.sealed.append((key, value, policy_class_id, org))
         return "sid-secured-0"
 
     def add_setting(self, set_id, rev, key, payload, *, org=None, **kw):
@@ -63,8 +63,51 @@ def test_seal_secured_uses_the_personal_seal_seam(monkeypatch):
     c = FakeClient()
     _use(monkeypatch, c, b"ghp_x")
     vault_cmd.cmd_vault_seal(_args(name="gh.token", tier="secured"))
-    assert c.sealed == [("gh.token", "ghp_x", "personal-root")]
+    assert c.sealed == [("gh.token", "ghp_x", "personal-root", None)]
     assert not c.added
+
+
+def test_seal_secured_forwards_a_named_org_to_the_seal_endpoint(monkeypatch):
+    # `--org SLUG` must reach the server so it can refuse a named org the
+    # caller cannot prove, instead of the CLI dropping it and the endpoint
+    # silently sealing personal (auto-ha7se).
+    c = FakeClient()
+    _use(monkeypatch, c, b"ghp_x")
+    vault_cmd.cmd_vault_seal(_args(name="gh.token", tier="secured", org="anchore"))
+    assert c.sealed == [("gh.token", "ghp_x", "personal-root", "anchore")]
+
+
+def test_seal_secured_default_and_bare_org_forward_no_named_org(monkeypatch):
+    # The default (--personal) and bare --org (this session's own org) send no
+    # named slug, preserving the bearer-derived routing exactly as before.
+    c = FakeClient()
+    _use(monkeypatch, c, b"ghp_x")
+    vault_cmd.cmd_vault_seal(_args(name="a", tier="secured"))  # default --personal
+    vault_cmd.cmd_vault_seal(
+        _args(name="b", tier="secured", org=vault_cmd._ORG_SENTINEL)
+    )
+    assert [row[3] for row in c.sealed] == [None, None]
+
+
+def test_seal_surfaces_a_server_refusal_as_a_clean_error(monkeypatch, capsys):
+    # A server that refuses a mis-scoped seal (non-2xx) must fail LOUDLY at the
+    # CLI: a clean stderr message and a non-zero exit, never an uncaught
+    # traceback nor a reported success.
+    class Refusing(FakeClient):
+        def seal_personal_setting(self, key, value, *, policy_class_id, org=None):
+            raise RuntimeError(
+                "cannot seal into organization 'anchore' from an unscoped or "
+                "host session"
+            )
+
+    c = Refusing()
+    _use(monkeypatch, c, b"S")
+    with pytest.raises(SystemExit) as exc:
+        vault_cmd.cmd_vault_seal(_args(name="k", tier="secured", org="anchore"))
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "cannot seal into organization 'anchore'" in err
+    assert "✓" not in err
 
 
 def test_seal_audited_uses_add_setting_to_the_audited_set(monkeypatch):
