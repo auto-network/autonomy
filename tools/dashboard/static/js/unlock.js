@@ -637,6 +637,7 @@
   function _render() {
     var card = document.getElementById('unlock-card');
     if (!card) return;
+    card.setAttribute('aria-busy', String(U.busy));
 
     if (U.mode === 'loading') return;
 
@@ -672,7 +673,6 @@
         '<button id="unlock-recovery-back" class="text-indigo-400 hover:underline">Back</button></div>' +
         '<div id="unlock-error" data-testid="unlock-error" class="' + (U.error ? '' : 'hidden ') +
         'text-sm text-red-400 mt-4">' + _esc(U.error || '') + '</div>' +
-        '<div id="unlock-busy" class="' + (U.busy ? '' : 'hidden ') + 'text-xs text-gray-500 mt-3">working&hellip;</div>' +
         '</div>';
       var recInput = card.querySelector('#unlock-recovery-input');
       var recSubmit = card.querySelector('#unlock-recovery-submit');
@@ -685,9 +685,10 @@
       if (recSubmit) recSubmit.addEventListener('click', runRecovery);
       if (recInput) {
         recInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') runRecovery(); });
-        recInput.focus();
+        if (!U.busy) recInput.focus();
       }
       if (recBack) recBack.addEventListener('click', function () { _switchMode('password'); });
+      if (U.busy) _showBusy(card);
       return;
     }
 
@@ -754,16 +755,37 @@
       '<div id="unlock-error" data-testid="unlock-error" class="' +
       (U.error ? '' : 'hidden ') + 'text-sm text-red-400 mt-4">' +
       _esc(U.error || '') + '</div>' +
-      '<div id="unlock-busy" class="' + (U.busy ? '' : 'hidden ') +
-      'text-xs text-gray-500 mt-3">working&hellip;</div>' +
       '</div>';
     _wire(card);
     if (!passkey) {
       var input = card.querySelector('#unlock-password');
       if (input) {
         if (priorPw) input.value = priorPw;
-        input.focus();
+        if (!U.busy) input.focus();
       }
+    }
+    if (U.busy) _showBusy(card);
+  }
+
+  // Keep autofilled inputs mounted during submission. Rebuilding the form
+  // and focusing its replacement reopens the software keyboard on iOS.
+  function _showBusy(card) {
+    if (!card) return;
+    card.setAttribute('aria-busy', 'true');
+    var input = card.querySelector('#unlock-password, #unlock-recovery-input');
+    if (input) {
+      input.blur();
+      input.disabled = true;
+    }
+    var error = card.querySelector('#unlock-error');
+    if (error) error.classList.add('hidden');
+    var button = card.querySelector('#unlock-primary, #unlock-recovery-submit');
+    if (button) {
+      button.disabled = true;
+      button.classList.add('unlock-submitting');
+      button.innerHTML = '<span class="unlock-progress" role="status" aria-live="polite">' +
+        '<span class="unlock-spinner" aria-hidden="true"></span>' +
+        '<span>Logging In&hellip;</span></span>';
     }
   }
 
@@ -778,7 +800,7 @@
     var myOp = ++U.op;
     U.busy = true;
     U.error = null;
-    _render();
+    _showBusy(document.getElementById('unlock-card'));
     ceremony().then(function () {
       if (myOp !== U.op) return;   // superseded by a mode switch — discard
       _done();

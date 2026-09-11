@@ -13,6 +13,22 @@
     html, body { margin: 0; height: 100%;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       background: #111827; color: #e5e7eb; }
+    .unlock-submitting {
+      cursor: wait;
+      background: linear-gradient(115deg, #4f46e5, #6366f1);
+      color: #fff;
+      box-shadow: 0 4px 24px rgba(99, 102, 241, .22);
+    }
+    .unlock-progress { display: inline-flex; align-items: center; gap: .65em; }
+    .unlock-spinner {
+      width: 1em; height: 1em; flex: none; border-radius: 50%;
+      border: 2px solid rgba(255, 255, 255, .3); border-top-color: #fff;
+      animation: unlock-spin .8s linear infinite;
+    }
+    @keyframes unlock-spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) {
+      .unlock-spinner { animation: none; }
+    }
   </style>
   <!-- Crypto internals only: the armor decrypt + canonical JSON live in
        network-signon.js, the Ed25519 key import in network-identity.js —
