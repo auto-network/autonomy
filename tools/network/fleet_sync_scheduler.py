@@ -2769,7 +2769,12 @@ class FleetSyncScheduler:
                 len(receiver.adopted), cleared, len(receiver.missing),
             )
         finally:
-            receiver.close()
+            try:
+                receiver.close()
+            finally:
+                if channel is not None:
+                    with contextlib.suppress(Exception):
+                        await channel.close()
 
     def _peer_relay_locators(self) -> "dict | None":
         """Peers with a verified serving-slot locator, or None.
