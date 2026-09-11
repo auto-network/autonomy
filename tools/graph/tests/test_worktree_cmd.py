@@ -55,6 +55,10 @@ def test_merge_is_one_sync_rebase_merge_workflow(monkeypatch, tmp_path: Path) ->
 
     def fake_git(_path: Path, *args: str) -> str:
         git_calls.append(args)
+        if args[:1] == ("rev-parse",):
+            return "abc123"
+        if args[:1] == ("rev-list",):
+            return "1\t0"
         return ""
 
     api_calls: list[tuple[str, str]] = []
@@ -80,6 +84,76 @@ def test_merge_is_one_sync_rebase_merge_workflow(monkeypatch, tmp_path: Path) ->
         ("POST", "/api/worktrees/auto-test/autonomy/refresh"),
         ("POST", "/api/worktrees/auto-test/autonomy/merge"),
     ]
+
+
+@pytest.fixture
+def checkout(tmp_path):
+    import subprocess
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(tmp_path), *args], check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+
+    git("init", "-b", "master")
+    git("config", "user.name", "Test")
+    git("config", "user.email", "test@example.invalid")
+    git("commit", "--allow-empty", "-m", "base")
+    git("checkout", "-b", "session/test")
+    return command.WorktreeTarget(tmp_path, "auto-test", "autonomy", _row()), git
+
+
+def test_sync_reports_fast_forward_distance_without_requesting_rebase(checkout, monkeypatch, capsys):
+    target, git = checkout
+    git("checkout", "master")
+    for i in range(3):
+        git("commit", "--allow-empty", "-m", f"update {i}")
+    git("checkout", "session/test")
+    before = git("rev-parse", "HEAD")
+    monkeypatch.setattr(command, "_resolve_target", lambda _: target)
+    monkeypatch.setattr(command, "_api_request", lambda *_: {
+        "state": _row(commits_ahead=0, rebase_required=False),
+    })
+    command.cmd_worktree_sync(SimpleNamespace(path="."))
+    out = capsys.readouterr().out
+    assert "Sync INCOMPLETE" in out
+    assert "0 commit(s) ahead, 3 behind local master" in out
+    assert "needs fast-forward (no rebase needed)" in out
+    assert "Rebase:   not performed" in out
+    assert "Current:  NO" in out
+    assert git("rev-parse", "HEAD") == before
+
+
+@pytest.mark.parametrize("ahead,behind,stale,expected", [
+    (0, 0, False, "Current:  YES"),
+    (2, 0, False, "Current:  YES"),
+    (2, 3, False, "Merge:    needs rebase"),
+    (0, 0, True, "Current:  NOT CONFIRMED"),
+    (0, 0, None, "Host base: UNKNOWN"),
+])
+def test_status_distinguishes_checkout_distance_and_host_freshness(
+    tmp_path, capsys, ahead, behind, stale, expected,
+):
+    target = command.WorktreeTarget(tmp_path, "auto-test", "autonomy", _row())
+    row = _row(commits_ahead=ahead, commits_behind=behind, clone_stale=stale,
+               checkout_commit="abc", base_commit="def")
+    command._print_status(target, row)
+    out = capsys.readouterr().out
+    assert f"{ahead} commit(s) ahead, {behind} behind local master" in out
+    assert expected in out
+
+
+def test_checkout_measures_dirty_files_without_calling_them_behind(checkout, capsys):
+    target, _ = checkout
+    (target.root / "uncommitted.txt").write_text("work")
+    row = command._checkout_state(target, _row())
+    command._print_status(target, row)
+    out = capsys.readouterr().out
+    assert "Files:    dirty (1 paths)" in out
+    assert "0 commit(s) ahead, 0 behind" in out
+    assert "Current:  YES" in out
+    assert "Merge:    uncommitted changes; commit or stash before merging" in out
 
 
 def test_host_prune_refuses_to_run_inside_session(monkeypatch, capsys) -> None:
