@@ -780,6 +780,75 @@ def _install_commit_msg_hook(worktree: Path) -> bool:
         return False
 
 
+_INVALIDATION_HOOK_MARKER = "# autonomy-worktree-invalidation-hook"
+_INVALIDATION_HOOK_NAMES = (
+    "post-commit", "post-rewrite", "post-checkout", "post-merge",
+)
+
+
+def _invalidation_hook_script(name: str) -> str:
+    """Return a chained, failure-isolated semantic invalidation hook."""
+    reason = name.replace("-", "_")
+    return f"""#!/usr/bin/env bash
+{_INVALIDATION_HOOK_MARKER} {name}
+set +e
+preserved="$0.autonomy-preserved"
+preserved_status=0
+if [ -x "$preserved" ]; then
+  "$preserved" "$@"
+  preserved_status=$?
+fi
+session="${{AUTONOMY_SESSION:-}}"
+if [ -z "$session" ]; then
+  branch="$(git branch --show-current 2>/dev/null || true)"
+  case "$branch" in session/*) session="${{branch#session/}}" ;; esac
+fi
+repo="$(git config --get autonomy.worktree.repo 2>/dev/null || true)"
+if [ -n "$session" ] && [ -n "$repo" ] && [ -n "${{CROSSTALK_TOKEN:-}}" ]; then
+  (curl -ks --connect-timeout 0.1 --max-time 0.25 --retry 0 \
+    -X POST -H "Authorization: Bearer ${{CROSSTALK_TOKEN}}" \
+    -H "Content-Type: application/json" \
+    --data '{{"reason":"{reason}"}}' \
+    "${{GRAPH_API:-https://localhost:8080}}/api/worktrees/${{session}}/${{repo}}/invalidate" \
+    >/dev/null 2>&1 &) >/dev/null 2>&1
+fi
+exit "$preserved_status"
+"""
+
+
+def _install_invalidation_hooks(worktree: Path, repo_name: str) -> bool:
+    """Install idempotent wrappers while preserving repository hooks exactly."""
+    try:
+        rc, out, _ = _git_output(["rev-parse", "--git-path", "hooks"], cwd=worktree)
+        if rc != 0 or not out.strip():
+            return False
+        raw = out.strip()
+        hooks_dir = Path(raw) if os.path.isabs(raw) else (Path(worktree) / raw)
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+        _run_git(["config", "autonomy.worktree.repo", repo_name], cwd=worktree)
+        for name in _INVALIDATION_HOOK_NAMES:
+            hook = hooks_dir / name
+            preserved = hooks_dir / f"{name}.autonomy-preserved"
+            if hook.exists():
+                existing = hook.read_text(errors="ignore")
+                if _INVALIDATION_HOOK_MARKER not in existing:
+                    if preserved.exists():
+                        logger.warning(
+                            "refusing invalidation hook install: %s and %s exist",
+                            hook, preserved,
+                        )
+                        return False
+                    os.replace(hook, preserved)
+            tmp = hooks_dir / f".{name}.autonomy-tmp"
+            tmp.write_text(_invalidation_hook_script(name))
+            tmp.chmod(0o755)
+            os.replace(tmp, hook)
+        return True
+    except Exception:
+        logger.exception("worktree invalidation hook install failed for %s", worktree)
+        return False
+
+
 def _ensure_declared_local_repo(repo) -> None:
     """Create a declared-but-missing local repository at first launch.
 
@@ -891,6 +960,9 @@ def prepare_session_mounts(
             # Every session commit gets an Autonomy-Provenance trailer so the
             # fast-forward merge carries persona/session/turn to master.
             _install_commit_msg_hook(worktree)
+            _install_invalidation_hooks(
+                worktree, _worktree_basename(repo.url),
+            )
             mounts[str(worktree)] = repo.mount
             # Worktree's .git file points at an absolute host path inside the
             # managed clone — mount the clone at that same path (rw) so the
@@ -3107,11 +3179,12 @@ def scan_all_worktrees(
     worktrees_dir: Path = WORKTREES_DIR,
     live_session_names: Iterable[str] | None = None,
     session_filter: Callable[[str], bool] | None = None,
+    repo_filter: Callable[[str], bool] | None = None,
     use_cache: bool = True,
 ) -> list[WorktreeState]:
     """Scan ``data/worktrees`` and return one state row per session/repo worktree.
 
-    ``session_filter`` limits the sweep to matching session names — the
+    ``session_filter`` and ``repo_filter`` limit the sweep to matching names — the
     worktree monitor uses it to rescan one org or one session without
     paying for every other worktree's git calls. A skipped session does
     no git work at all.
@@ -3173,6 +3246,8 @@ def scan_all_worktrees(
             continue
         for repo_dir in repo_dirs:
             if not repo_dir.is_dir():
+                continue
+            if repo_filter is not None and not repo_filter(repo_dir.name):
                 continue
             # Only scan real git worktrees. A half-provisioned workspace dir
             # (e.g. clones not yet landed) has no `.git`; running git there

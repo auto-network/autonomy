@@ -19,6 +19,7 @@ import logging
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 
 from agents.capabilities.github import probe as github_probe
 from agents.capabilities.github.service import (
@@ -40,6 +41,7 @@ from agents.capabilities.github.service import (
 from agents.workspace_manager import (
     WorktreeState,
     _git_output,
+    _install_invalidation_hooks,
     _worktree_dashboard_base_ref,
     git_call_count,
     scan_all_worktrees,
@@ -104,6 +106,14 @@ RATE_LIMIT_BACKOFF_SECONDS = 600.0
 # cap and stop polling instead of draining quota indefinitely.
 MAX_POLLS_PER_HOUR_PER_ROW = 60
 _POLL_WINDOW_SECONDS = 3600.0
+
+# Semantic invalidations are advisory, bounded, and deliberately cheaper than
+# operator refreshes: they rescan local Git only and never call a source-control
+# provider. A row receives at most one evaluation per debounce window even when
+# several Git operations finish together.
+INVALIDATION_QUIET_SECONDS = 0.250
+INVALIDATION_MAX_SECONDS = 0.500
+MAX_PENDING_INVALIDATIONS = 1024
 
 
 # Nag modes for the source_control.watch block. The UI maps these onto
@@ -941,8 +951,15 @@ async def _refresh_bindings_via_rest(
 class WorktreeMonitor:
     """Polling cache for session worktree state + per-row capability data."""
 
-    def __init__(self, *, interval_seconds: float = 30.0) -> None:
+    def __init__(
+        self, *, interval_seconds: float = 30.0,
+        evaluator_concurrency: int = 1,
+    ) -> None:
+        if evaluator_concurrency < 1 or evaluator_concurrency > 2:
+            raise ValueError("evaluator_concurrency must be 1 or 2")
         self._interval_seconds = interval_seconds
+        self._evaluator_concurrency = evaluator_concurrency
+        self._invalidation_executor: ThreadPoolExecutor | None = None
         self._cache: list[WorktreeState] = []
         self._source_control_cache: dict[tuple[str, str], dict] = {}
         # Per-row last-fetch monotonic timestamp (used for the
@@ -977,6 +994,12 @@ class WorktreeMonitor:
             Callable[[str, str], Awaitable[None]] | None
         ) = None
         self._task: asyncio.Task | None = None
+        self._invalidation_task: asyncio.Task | None = None
+        self._invalidation_event: asyncio.Event | None = None
+        self._pending_invalidations: dict[
+            tuple[str, str], tuple[float, float, set[str]]
+        ] = {}
+        self._full_reconciliation_required = False
         self._lock: asyncio.Lock | None = None
         self._started = False
         # Row → JSON dict renderer, registered by the server at startup
@@ -1084,6 +1107,182 @@ class WorktreeMonitor:
     def get_all(self) -> list[WorktreeState]:
         """Return a snapshot of cached worktree state."""
         return list(self._cache)
+
+    def invalidate(
+        self, session_name: str, repo_name: str, *, reason: str = "semantic",
+    ) -> bool:
+        """Coalesce a trusted hint for one row without doing inline Git work.
+
+        Returns false only when the bounded pending map is full. In that case
+        pending detail collapses to one reconciliation-required flag; the
+        evaluator later walks known row keys (never an inline full sweep).
+        """
+        key = (session_name, repo_name)
+        now = time.monotonic()
+        pending = self._pending_invalidations.get(key)
+        if pending is not None:
+            first, _last, reasons = pending
+            if len(reasons) < 8:
+                reasons.add(reason)
+            else:
+                reasons.add("multiple")
+            self._pending_invalidations[key] = (first, now, reasons)
+        elif len(self._pending_invalidations) < MAX_PENDING_INVALIDATIONS:
+            self._pending_invalidations[key] = (now, now, {reason})
+        else:
+            self._pending_invalidations.clear()
+            self._full_reconciliation_required = True
+            logger.warning(
+                "worktree_monitor: invalidation queue overflow; reconciliation required",
+            )
+            accepted = False
+            if self._invalidation_event is not None:
+                self._invalidation_event.set()
+            return accepted
+        if self._invalidation_event is not None:
+            self._invalidation_event.set()
+        return True
+
+    def invalidate_repo(self, repo_name: str, *, reason: str) -> int:
+        """Enqueue every cached row whose target repository may have moved."""
+        keys = {
+            (row.session_name, row.repo_name)
+            for row in self._cache if row.repo_name == repo_name
+        }
+        for session_name, name in keys:
+            self.invalidate(session_name, name, reason=reason)
+        return len(keys)
+
+    async def refresh_local_one(
+        self, session_name: str, repo_name: str,
+    ) -> list[WorktreeState]:
+        """Re-evaluate one row locally and publish, without capability I/O.
+
+        The executor accepts a configured ceiling of two for future scheduling,
+        but the monitor lock intentionally serializes evaluations today. This
+        keeps cache replacement ordered and makes effective concurrency one.
+        """
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        async with self._lock:
+            previous = next(
+                (
+                    row for row in self._cache
+                    if (row.session_name, row.repo_name)
+                    == (session_name, repo_name)
+                ),
+                None,
+            )
+            if self._invalidation_executor is None:
+                self._invalidation_executor = ThreadPoolExecutor(
+                    max_workers=self._evaluator_concurrency,
+                    thread_name_prefix="worktree-evaluator",
+                )
+            def _scan_target():
+                rows = scan_all_worktrees(
+                    session_filter=lambda name: name == session_name,
+                    repo_filter=lambda name: name == repo_name,
+                )
+                still_exists = bool(
+                    previous is not None and previous.worktree_path.exists()
+                )
+                return rows, still_exists
+
+            rows, previous_still_exists = await (
+                asyncio.get_running_loop().run_in_executor(
+                    self._invalidation_executor,
+                    _scan_target,
+                )
+            )
+            replacement = next(
+                (row for row in rows if row.repo_name == repo_name), None,
+            )
+            kept = [
+                row for row in self._cache
+                if (row.session_name, row.repo_name) != (session_name, repo_name)
+            ]
+            if replacement is not None:
+                kept.append(replacement)
+            elif previous is not None and previous_still_exists:
+                # An unreadable/partial scan is not evidence of deletion.
+                # Retain the last authoritative row until reconciliation can
+                # either read it or observe that its directory is truly gone.
+                kept.append(previous)
+            self._cache = kept
+            await self.refresh_rendered_cache()
+            snapshot = list(self._cache)
+            self._snapshot_sequence += 1
+            sequence = self._snapshot_sequence
+        await self._notify_snapshot(sequence, snapshot)
+        return snapshot
+
+    async def _invalidation_loop(self) -> None:
+        """Drain coalesced row hints through one local-Git evaluator."""
+        assert self._invalidation_event is not None
+        while True:
+            if self._full_reconciliation_required:
+                self._full_reconciliation_required = False
+                keys = list(dict.fromkeys(
+                    (row.session_name, row.repo_name) for row in self._cache
+                ))
+                for key in keys:
+                    try:
+                        await self.refresh_local_one(*key)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.exception(
+                            "worktree_monitor: overflow reconciliation failed row=%s",
+                            key,
+                        )
+                    await asyncio.sleep(0)
+                continue
+            if not self._pending_invalidations:
+                self._invalidation_event.clear()
+                await self._invalidation_event.wait()
+            now = time.monotonic()
+            due_key = None
+            next_due = None
+            for key, (first, last, _reasons) in self._pending_invalidations.items():
+                due = min(
+                    last + INVALIDATION_QUIET_SECONDS,
+                    first + INVALIDATION_MAX_SECONDS,
+                )
+                if due <= now:
+                    due_key = key
+                    break
+                next_due = due if next_due is None else min(next_due, due)
+            if due_key is None:
+                delay = max(0.0, (next_due or now) - now)
+                self._invalidation_event.clear()
+                try:
+                    await asyncio.wait_for(
+                        self._invalidation_event.wait(), timeout=delay,
+                    )
+                    continue
+                except asyncio.TimeoutError:
+                    continue
+            _first, _last, reasons = self._pending_invalidations.pop(due_key)
+            evaluation_started = time.monotonic()
+            calls_before = git_call_count()
+            try:
+                await self.refresh_local_one(*due_key)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "worktree_monitor: invalidation failed row=%s reasons=%s",
+                    due_key, sorted(reasons),
+                )
+            else:
+                logger.info(
+                    "worktree_monitor: targeted row=%s reasons=%s "
+                    "queue_delay=%.3fs duration=%.3fs git_calls=%d",
+                    due_key, sorted(reasons), evaluation_started - _first,
+                    time.monotonic() - evaluation_started,
+                    git_call_count() - calls_before,
+                )
+            await asyncio.sleep(0)
 
     def get_source_control(self, session_name: str, repo_name: str) -> dict | None:
         """Return the cached source_control snapshot for a row, if any."""
@@ -2067,20 +2266,37 @@ class WorktreeMonitor:
             return
         self._started = True
         self._lock = asyncio.Lock()
+        self._invalidation_event = asyncio.Event()
         try:
             await self.refresh()
         except Exception:
             logger.exception("worktree_monitor: initial refresh failed")
             self._cache = []
+        # Existing live worktrees predate this process version; install the
+        # same idempotent chained wrappers that mount preparation installs for
+        # newly-created sessions. This is off-loop and best-effort.
+        hook_rows_by_clone = {
+            (row.managed_clone, row.repo_name): row
+            for row in self._cache if row.session_live and not row.orphaned
+        }
+        await asyncio.to_thread(
+            lambda: [
+                _install_invalidation_hooks(row.worktree_path, row.repo_name)
+                for row in hook_rows_by_clone.values()
+            ]
+        )
         self._task = asyncio.create_task(self._loop())
+        self._invalidation_task = asyncio.create_task(self._invalidation_loop())
         logger.info("worktree_monitor: background task started")
 
     async def stop(self) -> None:
         """Cancel the polling loop and allow later restart."""
         if not self._started:
             return
-        task = self._task
-        if task and not task.done():
+        tasks = [self._task, self._invalidation_task]
+        for task in tasks:
+            if task is None or task.done():
+                continue
             try:
                 task.cancel()
             except RuntimeError:
@@ -2092,6 +2308,16 @@ class WorktreeMonitor:
             except RuntimeError:
                 pass
         self._task = None
+        self._invalidation_task = None
+        self._invalidation_event = None
+        self._pending_invalidations.clear()
+        self._full_reconciliation_required = False
+        executor = self._invalidation_executor
+        self._invalidation_executor = None
+        if executor is not None:
+            await asyncio.to_thread(
+                executor.shutdown, wait=True, cancel_futures=True,
+            )
         self._lock = None
         self._started = False
         logger.info("worktree_monitor: background task stopped")

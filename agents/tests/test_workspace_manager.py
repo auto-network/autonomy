@@ -1184,6 +1184,13 @@ def test_scan_all_worktrees_session_filter_skips_sessions(tmp_path, monkeypatch)
 
     assert [row.session_name for row in rows] == [session_a]
 
+    assert wm.scan_all_worktrees(
+        worktrees_dir=worktrees_dir,
+        live_session_names=set(),
+        session_filter=lambda name: name == session_a,
+        repo_filter=lambda name: name == "not-upstream",
+    ) == []
+
 
 def test_scan_all_worktrees_suppresses_rebased_copy_duplicates(tmp_path, monkeypatch):
     """A commit copied to another session branch under a different SHA

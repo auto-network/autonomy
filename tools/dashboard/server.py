@@ -95,6 +95,7 @@ from agents.workspace_manager import (
     prepare_session_mounts,
     save_row_cache,
     sync_session_worktree_base,
+    _worktree_basename,
 )
 from agents.design_db import DuplicateDesignTitleError
 if os.environ.get("DASHBOARD_MOCK"):
@@ -136,7 +137,7 @@ from tools.dashboard.session_lifecycle_worker import (
     SessionLifecycleStateWriter,
     SessionLifecycleWorker,
 )
-from tools.dashboard.worktree_monitor import worktree_monitor
+from tools.dashboard.worktree_monitor import org_for_session, worktree_monitor
 from tools.dashboard import session_trace
 from tools.dashboard import turn_corrections as turn_corrections_mod
 from tools.dashboard.dao import auth_db, dashboard_db, mcp_relay_db
@@ -12679,6 +12680,48 @@ async def api_worktree_refresh(request):
         return JSONResponse({"error": "worktree not found"}, status_code=404)
     return JSONResponse(_worktree_state_json(row))
 
+
+async def api_worktree_invalidate(request):
+    """Accept an authenticated, state-free advisory refresh hint.
+
+    The bearer identity, never the request body, selects the session. The
+    endpoint performs no Git work and therefore remains safe for synchronous
+    Git hooks with a very small client timeout.
+    """
+    identity, error = await asyncio.to_thread(authenticate_session_request, request)
+    if error is not None:
+        return error
+    assert identity is not None
+    caller_session, caller_org = identity
+    session_name = request.path_params["session"]
+    repo_name = request.path_params["repo"]
+    if caller_session != session_name:
+        return JSONResponse(
+            {"error": "token cannot invalidate another session"},
+            status_code=403,
+        )
+    row = _find_worktree_row(worktree_monitor.get_all(), session_name, repo_name)
+    if row is None:
+        return JSONResponse({"error": "worktree not found"}, status_code=404)
+    actual_org = await asyncio.to_thread(org_for_session, session_name)
+    if caller_org is not None and actual_org != caller_org:
+        return JSONResponse({"error": "organization mismatch"}, status_code=403)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    reason = "hook"
+    hook_reasons = {"post_commit", "post_rewrite", "post_checkout", "post_merge"}
+    if isinstance(body, dict) and body.get("reason") in hook_reasons:
+        reason = body["reason"]
+    worktree_monitor.invalidate(
+        session_name, repo_name, reason=reason,
+    )
+    return JSONResponse(
+        {"queued": True, "session": session_name, "repo": repo_name},
+        status_code=202,
+    )
+
 async def api_worktree_commit(request):
     session_name = request.path_params["session"]
     repo_name = request.path_params["repo"]
@@ -12873,40 +12916,6 @@ async def _deliver_merge_notification_and_timeline(
     )
 
 
-# Hold references to detached deferred-refresh tasks so the event loop does not
-# garbage-collect them mid-sleep (asyncio only keeps weak refs to tasks).
-_DEFERRED_MERGE_REFRESH_TASKS: set[asyncio.Task] = set()
-
-
-def _schedule_deferred_worktree_refresh(delay: float = 5.0) -> asyncio.Task:
-    """Queue a worktree rescan ``delay`` seconds out, detached from the request.
-
-    The rescan only refreshes the cached worktree list the UI reads. It is
-    deliberately NOT a response BackgroundTask (uvicorn's graceful shutdown
-    would wait on that, delaying the reload) but a detached task, so:
-
-    - If the merge landed dashboard code, ``uvicorn --reload`` restarts this
-      process within the window and this task is cancelled before it runs —
-      which is correct, because the fresh process re-scans in
-      ``worktree_monitor.start()`` on boot (and the periodic poll follows).
-    - If there is no reload, the rescan runs normally after ``delay`` so the
-      worktree list reflects the just-merged branch.
-    """
-    async def _run() -> None:
-        try:
-            await asyncio.sleep(delay)
-            await worktree_monitor.refresh()
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 — merge already succeeded
-            logger.exception("deferred post-merge worktree refresh failed")
-
-    task = asyncio.create_task(_run())
-    _DEFERRED_MERGE_REFRESH_TASKS.add(task)
-    task.add_done_callback(_DEFERRED_MERGE_REFRESH_TASKS.discard)
-    return task
-
-
 async def api_worktree_commit_merge(request):
     session_name = request.path_params["session"]
     repo_name = request.path_params["repo"]
@@ -12942,7 +12951,7 @@ async def api_worktree_commit_merge(request):
         celebration_kind="commit",
         timeline_reason="commit-merge",
     )
-    _schedule_deferred_worktree_refresh()
+    worktree_monitor.invalidate_repo(repo_name, reason="commit-merge")
     return JSONResponse({
         "ok": True,
         "commit": result.get("commit", ""),
@@ -13010,7 +13019,7 @@ async def api_worktree_merge(request):
         celebration_kind="ff",
         timeline_reason="ff",
     )
-    _schedule_deferred_worktree_refresh()
+    worktree_monitor.invalidate_repo(repo_name, reason="merge")
     return JSONResponse({
         "ok": True,
         "commit": result.get("commit", ""),
@@ -13055,7 +13064,7 @@ async def api_worktree_cherry_pick(request):
         celebration_kind="cherry-pick",
         timeline_reason="cherry-pick",
     )
-    _schedule_deferred_worktree_refresh()
+    worktree_monitor.invalidate_repo(repo_name, reason="cherry-pick")
     return JSONResponse({
         "ok": True,
         "commit": result.get("commit", ""),
@@ -13130,7 +13139,15 @@ async def api_worktree_sync_base(request):
     except WorkspaceError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
 
-    rows = await worktree_monitor.refresh()
+    rows = await worktree_monitor.refresh_local_one(session_name, repo_name)
+    for affected in rows:
+        if (
+            affected.repo_name == repo_name
+            and affected.session_name != session_name
+        ):
+            worktree_monitor.invalidate(
+                affected.session_name, repo_name, reason="sync-base",
+            )
     row = _find_worktree_row(rows, session_name, repo_name)
     if row is None:
         return JSONResponse({"error": "worktree not found"}, status_code=404)
@@ -13187,7 +13204,11 @@ async def api_worktree_cleanup(request):
     except WorkspaceError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
-    await worktree_monitor.refresh()
+    for row in worktree_monitor.get_all():
+        if row.session_name == session_name:
+            worktree_monitor.invalidate(
+                row.session_name, row.repo_name, reason="cleanup",
+            )
     return JSONResponse({"ok": True, **_cleanup_result_json(result)})
 
 
@@ -13206,7 +13227,7 @@ async def api_worktree_discard(request):
     except WorkspaceError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
 
-    await worktree_monitor.refresh()
+    worktree_monitor.invalidate(session_name, repo_name, reason="discard")
     return JSONResponse({"ok": True, **_cleanup_result_json(result)})
 
 async def api_dao_active_sessions(request):
@@ -19247,6 +19268,12 @@ async def _agentic_launch_task(
                 harness=workspace.harness,
                 model=model,
             )
+            for repo in workspace.repos:
+                if repo.writable:
+                    worktree_monitor.invalidate(
+                        run_id, _worktree_basename(repo.url),
+                        reason="session-active",
+                    )
     except Exception as exc:
         logger.exception("agent-actions: launch task failed run_id=%s", run_id)
         try:
@@ -21153,6 +21180,7 @@ routes = [
     Route("/api/worktrees/{session}/{repo}/pr-diff", api_worktree_integrated_diff, methods=["GET"]),
     Route("/api/worktrees/{session}/{repo}/commits/{sha}/merge", api_worktree_commit_merge, methods=["POST"]),
     Route("/api/worktrees/{session}/{repo}/refresh", api_worktree_refresh, methods=["POST"]),
+    Route("/api/worktrees/{session}/{repo}/invalidate", api_worktree_invalidate, methods=["POST"]),
     Route("/api/worktrees/{session}/{repo}/sync-base", api_worktree_sync_base, methods=["POST"]),
     Route("/api/worktrees/{session}/{repo}/watch", api_worktree_watch_set, methods=["PUT"]),
     Route("/api/worktrees/{session}/{repo}/merge", api_worktree_merge, methods=["POST"]),
@@ -21958,6 +21986,33 @@ async def _on_startup():
             if transition.state in ("ENDED", "FAILED"):
                 await session_monitor.broadcast_terminal_session(transition.tmux_name)
             await session_monitor._broadcast_registry()
+            if transition.state in ("ACTIVE", "ENDED", "FAILED"):
+                # Lifecycle changes alter session_live and may create/remove
+                # rows. Resolve the declared writable repos off-loop, then
+                # feed the same bounded row evaluator as Git-operation hints.
+                def _repo_names() -> list[str]:
+                    row = dashboard_db.get_session(transition.tmux_name) or {}
+                    project = row.get("project")
+                    if not project:
+                        return []
+                    workspace = workspace_settings.get_workspace(str(project))
+                    return [
+                        _worktree_basename(repo.url)
+                        for repo in workspace.repos if repo.writable
+                    ]
+
+                try:
+                    repo_names = await asyncio.to_thread(_repo_names)
+                    for repo_name in repo_names:
+                        worktree_monitor.invalidate(
+                            transition.tmux_name, repo_name,
+                            reason=f"session-{transition.state.lower()}",
+                        )
+                except Exception:
+                    logger.debug(
+                        "session_lifecycle: worktree invalidation failed",
+                        exc_info=True,
+                    )
 
         try:
             asyncio.run_coroutine_threadsafe(
