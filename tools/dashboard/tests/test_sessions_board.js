@@ -152,12 +152,14 @@ test('focusCard keeps the focused session in its slot and spills the others to i
   // From Ungrouped: the new column takes Ungrouped's slot, Ungrouped shifts right with the rest.
   board.focusCard('s1');
   assert.equal(board.columns[0].focus, 's1');
+  assert.equal(board.columns.find(c => c.id === 'g').focus, 's3', 'another column stays full height');
   assert.equal(board.columns[0].title, 'Label s1');
   assert.equal(board.columns[1].id, 'solo');
   assert.deepEqual(plain(board.columns[1].members), ['s5']);
   // ⤡ restores height only; the split stays.
   board.focusCard('s1');
   assert.equal(board.columns[0].focus, null);
+  assert.equal(board.columns.find(c => c.id === 'g').focus, 's3', 'restoring one column leaves the other expanded');
   assert.deepEqual(plain(board.columns[0].members), ['s1']);
 });
 
@@ -180,7 +182,7 @@ test('the layout payload carries everything a refresh must restore, and nothing 
   const payload = plain(board.layoutPayload());
   assert.deepEqual(payload, {
     presentation: 'stats', presentations: { s1: 'stats' }, column_order: ['solo', 'g'],
-    widths: { g: 600 }, heights: { s1: 500 }, focus_session: 's2',
+    widths: { g: 600 }, heights: { s1: 500 }, focus_sessions: ['s2'],
     boards: [], active_board: '', board_of: {},
   });
   // Membership is never part of the layout — it is the group record's.
@@ -194,17 +196,40 @@ test('a refresh restores the card face and the full-height card', () => {
   const { board } = makeBoard({ rows: ['s1', 's2'], sessions });
   // As init() does after reading the layout member.
   board.cardPresentations = { s1: 'stats' };
-  board._focusSession = 's2';
+  board._focusSessions = ['s2'];
   board.refresh({ columns: [{ id: 'g', members: [] }], widths: {} });
   assert.equal(board.cardPresentation('s1'), 'stats', 'the flipped card comes back on its stats face');
   assert.equal(board.cardPresentation('s2'), 'transcript');
   const g = board.columns.filter((c) => c.id === 'g')[0];
   assert.equal(g.focus, 's2', 'the full-height card comes back full height');
   // A focus whose session has gone is dropped rather than stranding the column.
-  board._focusSession = 'ghost';
+  board._focusSessions = ['ghost'];
   board.refresh({ columns: [{ id: 'g', members: [] }], widths: {} });
   assert.ok(!board.columns.some((c) => c.focus));
-  assert.equal(board._focusSession, '');
+  assert.deepEqual(plain(board._focusSessions), []);
+});
+
+test('two full-height columns survive saved layout restoration and registry refresh', () => {
+  const sessions = {
+    s1: { isLive: true, groupId: 'a', group: { slug: 'a', name: 'A' }, entries: [{}] },
+    s2: { isLive: true, groupId: 'b', group: { slug: 'b', name: 'B' }, entries: [{}] },
+  };
+  const { board } = makeBoard({ sessions });
+  board.refresh();
+  board.focusCard('s1');
+  board.focusCard('s2');
+  const saved = plain(board.layoutPayload());
+  assert.deepEqual(saved.focus_sessions, ['s1', 's2']);
+  const restored = makeBoard({ sessions }).board;
+  restored._focusSessions = saved.focus_sessions;
+  restored.refresh();
+  restored.refresh();
+  assert.equal(restored.columnOf('s1').focus, 's1');
+  assert.equal(restored.columnOf('s2').focus, 's2');
+  restored.focusCard('s1');
+  restored.refresh();
+  assert.equal(restored.columnOf('s1').focus, null);
+  assert.equal(restored.columnOf('s2').focus, 's2');
 });
 
 test('columnSlotFor orders a dragged column from the resting midpoints and the pointer only', () => {

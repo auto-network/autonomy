@@ -90,7 +90,7 @@ class TestGroupRecord:
     def test_layout_round_trip(self, board_settings):
         s = board_settings
         assert s.read_layout() == {"presentation": "transcript", "presentations": {}, "column_order": [],
-                                   "widths": {}, "heights": {}, "focus_session": "",
+                                   "widths": {}, "heights": {}, "focus_session": "", "focus_sessions": [],
                                    "boards": [], "active_board": "", "board_of": {}, "updated_at": 0}
         s.write_layout({"column_order": ["deploy", "solo"], "widths": {"deploy": 700}})
         s.write_layout({"presentation": "stats", "heights": {"auto-a": 540}})
@@ -101,6 +101,10 @@ class TestGroupRecord:
         # The card face and the full-height card are part of the member: a
         # refresh must put the screen back exactly as the operator left it.
         assert got["presentations"] == {"auto-a": "stats"} and got["focus_session"] == "auto-b"
+        s.write_layout({"focus_sessions": ["auto-a", "auto-b"]})
+        assert s.read_layout()["focus_sessions"] == ["auto-a", "auto-b"]
+        s.write_layout({"focus_sessions": []})
+        assert s.read_layout()["focus_sessions"] == []
         # Boards are layout too: the screens, which one is showing, and where
         # each column lives all follow the operator between machines.
         s.write_layout({"boards": [{"id": "b1", "name": "Board 1"}, {"id": "b2", "name": "Ops"}],

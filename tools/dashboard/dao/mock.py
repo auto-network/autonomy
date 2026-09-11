@@ -504,7 +504,7 @@ def session_group_index() -> dict[str, dict]:
 
 
 _LAYOUT: dict = {"presentation": "transcript", "presentations": {}, "column_order": [], "widths": {}, "heights": {},
-                 "focus_session": "", "boards": [], "active_board": "", "board_of": {}, "updated_at": 0}
+                 "focus_session": "", "focus_sessions": [], "boards": [], "active_board": "", "board_of": {}, "updated_at": 0}
 
 
 def read_layout(key: str = "default") -> dict:
@@ -513,7 +513,7 @@ def read_layout(key: str = "default") -> dict:
 
 def write_layout(fields: dict, key: str = "default") -> dict:
     import time as _t
-    for k in ("presentation", "presentations", "column_order", "widths", "heights", "focus_session",
+    for k in ("presentation", "presentations", "column_order", "widths", "heights", "focus_session", "focus_sessions",
               "boards", "active_board", "board_of"):
         if k in fields and fields[k] is not None:
             _LAYOUT[k] = fields[k]

@@ -131,6 +131,7 @@ class SessionBoardLayoutV1(SettingSchema):
     widths: dict = field(default_factory=dict, description="Column width in CSS px by slug, only for columns the operator resized.")
     heights: dict = field(default_factory=dict, description="Card height in CSS px by session name, only for cards the operator resized.")
     focus_session: str = field(default="", description="The session shown full height in its column, or empty. Its column is wherever that session sits.")
+    focus_sessions: list = field(default_factory=list, element=str, description="Full-height session names, at most one per column.")
     boards: list = field(
         default_factory=list, element=dict,
         description="Named boards the columns are spread across, like macOS Spaces: [{id, name}]. Empty means one implicit board holding every column.",
@@ -311,7 +312,7 @@ def session_group_index() -> dict[str, dict]:
 
 # ── Layout ──────────────────────────────────────────────────────────────
 
-_LAYOUT_FIELDS = ("presentation", "presentations", "column_order", "widths", "heights", "focus_session",
+_LAYOUT_FIELDS = ("presentation", "presentations", "column_order", "widths", "heights", "focus_session", "focus_sessions",
                   "boards", "active_board", "board_of")
 
 
@@ -325,6 +326,7 @@ def read_layout(key: str = LAYOUT_KEY) -> dict:
         "widths": dict(payload.get("widths") or {}),
         "heights": dict(payload.get("heights") or {}),
         "focus_session": payload.get("focus_session") or "",
+        "focus_sessions": list(payload.get("focus_sessions", [payload["focus_session"]] if payload.get("focus_session") else [])),
         "boards": list(payload.get("boards") or []),
         "active_board": payload.get("active_board") or "",
         "board_of": dict(payload.get("board_of") or {}),
