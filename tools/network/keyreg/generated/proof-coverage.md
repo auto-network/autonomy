@@ -14,10 +14,14 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | browser_session_key | key | **GAP** |
 | class_key | key | VaultPolicyClass: revoked_factor_excluded_forward<br>VaultPolicyClass: revoked_factor_keeps_old |
 | delegate_audited_recipient | key | **GAP** |
+| factor_access_signing_key | key | **GAP** |
 | factor_recipient | key | **GAP** |
 | factor_seed | key | VaultFactorPolicy: password_alone_no_root<br>VaultFactorPolicy: passkeys_both_no_root<br>VaultFactorPolicy: unlock_only_no_root |
+| fleet_operating_signing_key | key | **GAP** |
+| fleet_process_signing_key | key | **GAP** |
 | generation_secret | key | VaultRekeyMarker: exclusion_forward<br>VaultConcurrentRekey: concurrent_grant_secret |
 | k_index_k_meta | key | **GAP** |
+| link_channel_signing_key | key | **GAP** |
 | member_recovery_key | key | VaultRecoveryRace: recovery_key_secret<br>VaultRecoveryRace: recovery_beats_thief<br>RecoveryUnlink: Observational_equivalence |
 | object_cek | key | **GAP** |
 | object_wrap_key | key | **GAP** |
@@ -40,6 +44,9 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | armor.replace_recovery_slot | mutation | **GAP** |
 | armor.revoke_factor | mutation | **GAP** |
 | armor.set_recovery | mutation | **GAP** |
+| ceremony.organization_grant_recovery | mutation | **GAP** |
+| ceremony.organization_storage_delegate | mutation | **GAP** |
+| ceremony.personal_serve_cert_mint | mutation | **GAP** |
 | ceremony.recovery_policy_change | mutation | **GAP** |
 | ceremony.registration | mutation | **GAP** |
 | ceremony.serve_cert_mint | mutation | **GAP** |
@@ -59,6 +66,7 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | fold.role_define | mutation | **GAP** |
 | fold.role_grant | mutation | **GAP** |
 | fold.role_revoke | mutation | **GAP** |
+| link.mint_channel_key | mutation | **GAP** |
 | passkey.enroll | mutation | VaultOpenStore: no_key_to_forged_pk |
 | passkey.revoke | mutation | **GAP** |
 | recovery.succession | mutation | VaultRecoverySuccession: window_cannot_be_fast_forwarded<br>VaultRecoverySuccession: cancellation_blocks_completion<br>VaultRecoverySuccession: veto_blocks_completion<br>VaultWitnessAccountability: poll_yields_alert_or_fraud_proof |
@@ -72,4 +80,4 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | vault.create_class | mutation | VaultPolicyClass: root_reaches_every_generation |
 | vault.revoke_class_factor | mutation | VaultPolicyClass: revoked_factor_excluded_forward<br>VaultPolicyClass: revoked_factor_keeps_old |
 
-26 of 61 entries carry at least one model reference; 35 gaps.
+26 of 69 entries carry at least one model reference; 43 gaps.

@@ -322,6 +322,28 @@ keys:
       again during the certificate's validity. Distinct from the
       per-operation vault authorize ceremony, which costs one user-verified
       assertion per class open and involves no session key.
+
+  factor_access_signing_key:
+    group: identity-armor
+    kind: signing
+    custody:
+      class: cold
+      forced_by: Derived from an opened factor seed during access-only authentication; not retained for unattended operation.
+    derivation:
+      parent: factor_seed
+      fn: importFactorAccessSigningKey
+      purpose: autonomy.identity.factor-access.v1
+    descriptor:
+      reaches: Proves an enrolled factor's dashboard access authority without opening the root.
+      snapshot: Access proof authority for that factor, not the root or organization content keys.
+      live: "Yes — a fresh server challenge and enrolled access policy are required."
+      revoke: Removing the factor's access authority prevents further accepted proofs.
+      bound: Factor identity, single-use challenge and origin.
+    code:
+      - tools/dashboard/static/js/ceremony/root-factor-policy.js:importFactorAccessSigningKey
+      - tools/dashboard/unlock_routes.py:_complete_challenge_unlock
+    crib: ["§2"]
+    notes: Ed25519; HKDF purpose includes a terminal newline. Proof domain is autonomy.identity.factor-access-unlock.v1 followed by a newline and canonical challenge fields. Distinct from the X25519 factor recipient.
   persona_signing_key:
     group: org-authority
     kind: signing
@@ -370,6 +392,15 @@ keys:
       bound: None — damage is complete at the instant of theft.
     code:
       - tools/network/storagekit/credentials.py:derive_kem_seed
+      - tools/dashboard/static/js/ceremony/founding.js:deriveKemSeed
+      - tools/dashboard/static/js/join/ceremony.js
+      - tools/vault/unlock.py:open_generation_keys
+    notes: >-
+      Initial founding and admission derive counter zero, then bind the pair
+      with kem_purpose(genesis_id). PersonaKemCredential has no counter field.
+      The grant opener and personal legacy handoff are built; organization
+      sign-in, read-time recovery and RAM handoff integration remain pending
+      under graph://35308bf7-584. This key is not stored in audited Settings.
     crib: ["§9", "§13", "§14"]
     seals_to:
       - recipient: per_machine_key
@@ -453,10 +484,12 @@ keys:
     group: org-authority
     kind: signing
     custody:
-      class: memory
+      class: disk
       forced_by: >-
-        Passes the crib's Q2: scope-attenuated, TTL-bounded, fold-enforced
-        at acceptance, revocable, and required for unattended operation.
+        Operator-approved encrypted retention in personal-homed audited
+        Settings, replicated across the member's fleet. Opened on demand,
+        with no separate signing-key cache. Authority stays scope-attenuated,
+        TTL-bounded and fold-enforced.
     derivation: null
     descriptor:
       reaches: >-
@@ -468,10 +501,24 @@ keys:
         scopes.
       snapshot: Nothing.
       live: "Yes — records must reach honest nodes, which verify them against the fold."
-      revoke: RevocationRecord plus TTL. Not a ceremony.
+      revoke: >-
+        Delegation revocation and ninety-day expiry. Sign-in reuses with at
+        least thirty days remaining; otherwise mints a new keypair and grant.
       bound: The delegating persona's own membership; the fold rejects any overreach.
     code:
       - tools/network/storagekit/acceptance.py
+      - tools/dashboard/org_storage_delegate.py:prepare
+      - tools/dashboard/org_storage_delegate.py:accept
+      - tools/dashboard/org_storage_delegate.py:signing_key
+      - tools/dashboard/static/js/ceremony/org-storage-delegate.js:prepareStorageDelegate
+    seals_to:
+      - recipient: delegate_audited_recipient
+        record: personal autonomy.vault.audited storage-delegate.<genesis>.<grant-event-id>
+    notes: >-
+      graph://b437ecfb-e23 governs retention. Public metadata is keyed by
+      genesis in autonomy.network.storage-delegate. A reuse sign-in writes
+      no delegation event; no scheduled renewal runs. This is storage-ledger
+      authority, not generic Settings row-signing authority.
     crib: ["§7", "§9", "§11"]
     proofs:
       - {framework: tamarin, theory: VaultDelegateChain, lemma: write_resolves_to_current_member}
@@ -480,6 +527,7 @@ keys:
 
   per_machine_key:
     group: fleet
+    status: designed
     kind: kem
     custody:
       class: memory
@@ -497,40 +545,110 @@ keys:
       live: "Yes — the thief must still be in the fleet and reachable."
       revoke: Remove the machine from the fleet. Root-signed, not a ceremony.
       bound: The removal.
-    code:
-      - tools/network/idkit/persona.py:derive_machine_key
-      - tools/network/machine_boot.py:operating_key
-      - tools/network/fleet_roster.py:RosterEntry
+    code: []
     crib: ["§9", "§10"]
     proofs:
       - {framework: tamarin, theory: VaultFleetDist, lemma: machine_key_yields_nothing_undistributed}
       - {framework: tamarin, theory: VaultFleetDist, lemma: kicked_machine_excluded}
 
     notes: >-
-      Reconciliation pending: this entry describes the designed fleet KEM
-      recipient, but derive_machine_key currently returns an Ed25519
-      signing KeyPair used for fleet authentication. The distribution
-      mutation is explicitly designed, not implemented. Do not infer an
-      implemented decryption recipient from the signing-key code anchors;
-      recipient identity and derivation need reconciliation before this
-      entry can describe both consistently.
+      Designed KEM recipient only; concrete recipient derivation remains
+      part of fleet.distribute_kem. The implemented Ed25519 key is
+      fleet_operating_signing_key. Authentication and roster replication
+      do not implement KEM distribution.
+
+  fleet_operating_signing_key:
+    group: fleet
+    kind: signing
+    custody:
+      class: memory
+      forced_by: Root-derived at sign-in; private runtime retention uses RAM-backed carriers, not durable Settings.
+    derivation:
+      parent: personal_root_seed
+      fn: derive_machine_key
+      inputs: [machine_id]
+    descriptor:
+      reaches: Signs fleet process delegations and registered personal-org reachability requests.
+      snapshot: No content decryption; possession supplies machine signing authority.
+      live: "Yes — roster and certificate acceptance are authority boundaries."
+      revoke: Accepted roster removal and reachability certificate expiry.
+      bound: Machine identity; reachability scopes node:announce and node:lookup.
+    code:
+      - tools/network/idkit/persona.py:derive_machine_key
+      - tools/dashboard/static/js/ceremony/fleet-enrollment.js:mintFleetRuntimeCredential
+      - tools/network/fleet_runtime.py:FleetRuntimeCredential
+    crib: ["§10"]
+    notes: >-
+      Sync-only handoff omits this private seed. Registered personal-org
+      handoff includes machine_private_seed and a root-direct reachability
+      certificate (seven-day default). The browser checks the derived public
+      half against roster machine_pub. This is not a KEM recipient.
+
+  fleet_process_signing_key:
+    group: fleet
+    kind: signing
+    custody:
+      class: memory
+      forced_by: Fresh runtime seed retained in process and RAM-backed warm carriers.
+    derivation: null
+    descriptor:
+      reaches: Fleet synchronization under a machine-signed fleet:sync delegation.
+      snapshot: No content decryption; permits synchronization within accepted scope.
+      live: "Yes — runtime validates the live roster and delegation."
+      revoke: Roster removal or delegation expiry; maximum thirty-day lifetime.
+      bound: personal:<root-public-key> scope and named machine subject.
+    code:
+      - tools/dashboard/static/js/ceremony/fleet-enrollment.js:mintRuntimeCredential
+      - tools/network/fleet_runtime.py:FleetRuntimeCredential
+    crib: ["§10"]
+    notes: Random Ed25519 process_private_seed, distinct from the operating key that signs its delegation.
 
   serving_delegate_key:
     group: org-authority
     kind: signing
     custody:
       class: disk
-      forced_by: Snapshot is none — it reaches no plaintext and authorizes nothing.
+      forced_by: No content decryption; retained serving child has bounded certificate scopes enforced by its relying parties.
     derivation: null
     descriptor:
-      reaches: Authentication of one outbound serving tunnel (tunnel:serve only).
-      snapshot: None.
+      reaches: Authentication through tunnel:serve and serve:dns-01 certificates over the same serving child.
+      snapshot: No content decryption; possession permits use of accepted certificate scopes.
       live: "Yes."
       revoke: Re-mint; thirty-day TTL, renewal below twenty days remaining.
       bound: The TTL.
     code:
       - tools/network/idkit/certs.py
+      - tools/dashboard/static/js/network-signon.mjs:_mintServeCredentialPersona
+    notes: >-
+      Organization registry and DNS01 certificates are persona-signed, not
+      org-root-signed. No content viewer certificate is minted. Personal-org
+      bootstrap remains a separate root-signed branch.
     crib: ["§8", "§9"]
+
+  link_channel_signing_key:
+    group: share-links
+    kind: signing
+    custody:
+      class: disk
+      forced_by: Encrypted organization-homed audited Setting replicated with organization content.
+    derivation: null
+    descriptor:
+      reaches: Signs the serving handshake for one content share link.
+      snapshot: Proves possession for that link; cannot decrypt the organization vault or confer membership.
+      live: "Yes — viewer verifies against the public key in its URL fragment."
+      revoke: Active-grant checks stop future release; vaulted seed deletion does not erase delivered copies.
+      bound: One link keypair and fragment trust anchor.
+    code:
+      - tools/dashboard/link_channel_key.py:mint_channel_key
+      - tools/dashboard/link_channel_key.py:channel_key_for
+      - tools/dashboard/connector_key_resolution.py
+    crib: ["§8"]
+    notes: >-
+      graph://807b4e11-3e9. Random Ed25519 minted at publication, not sign-in.
+      Seed lives in autonomy.network.link-channel-key; channel_pub is on the
+      grant and projected into copied URL fragments. Dashboard opens it per
+      viewer OPEN and gives only this key to the connector, never the org KEM.
+      Content failures close the channel; invitations use separate semantics.
 
   serving_machine_signing_key:
     group: fleet
@@ -919,11 +1037,50 @@ mutations:
     crib: ["§2", "§8"]
 
   ceremony.serve_cert_mint:
-    source: {kind: ceremony, file: tools/network/idkit/certs.py}
-    authority: [org_root_signing_key]
+    source: {kind: ceremony, file: tools/dashboard/static/js/network-signon.mjs, symbol: _mintServeCredentialPersona}
+    authority: [persona_signing_key]
     effects:
       mints: [serving_delegate_key]
-      writes: [registry certificate and identity-neutral viewer certificate over the same child]
+      writes: [registry tunnel certificate and DNS01 certificate over the same child]
+    crib: ["§8"]
+    notes: Organization branch; no content viewer certificate.
+
+  ceremony.personal_serve_cert_mint:
+    source: {kind: ceremony, file: tools/dashboard/static/js/network-signon.mjs, symbol: _mintServeCredential}
+    authority: [personal_root_seed]
+    effects:
+      mints: [serving_delegate_key]
+      writes: [personal-org bootstrap cert, legacy viewer_cert, dns01_cert over one child]
+    crib: ["§8"]
+    notes: Existing personal branch still emits viewer_cert; do not infer organization content-viewer certificate use from this bootstrap field.
+
+  ceremony.organization_storage_delegate:
+    source: {kind: ceremony, file: tools/dashboard/static/js/ceremony/org-storage-delegate.js, symbol: prepareStorageDelegate}
+    authority: [persona_signing_key]
+    effects:
+      mints: [agent_delegate_signing_key when absent or below thirty days remaining]
+      writes: [ninety-day signed delegate event and personal audited seed on re-mint only]
+    crib: ["§7", "§11"]
+    notes: A reuse sign-in adds no ledger event. Workflow graph://b437ecfb-e23.
+
+  ceremony.organization_grant_recovery:
+    status: designed
+    source: {kind: ceremony, file: tools/vault/unlock.py, symbol: open_generation_keys}
+    authority: [persona_kem_private]
+    effects:
+      writes: [memory-held generation secrets only; no grants or storage states]
+    crib: ["§1c", "§12", "§14"]
+    notes: >-
+      graph://35308bf7-584. Primitive built; organization handoff, RAM retention
+      and read-time recovery integration pending. Root stays in browser;
+      networking resumes only after cleanup.
+
+  link.mint_channel_key:
+    source: {kind: module-op, file: tools/dashboard/link_channel_key.py, symbol: mint_channel_key}
+    authority: [agent_delegate_signing_key]
+    effects:
+      mints: [link_channel_signing_key]
+      writes: [org audited channel-key Setting; public half returned for grant and fragment]
     crib: ["§8"]
 
   ceremony.registration:
@@ -935,10 +1092,11 @@ mutations:
 
   ceremony.vault_master_read:
     source: {kind: ceremony, file: tools/vault/unlock.py, symbol: open_generation_keys}
-    authority: [factor_seed]
+    authority: [persona_kem_private]
     effects:
-      writes: [audited release log entry]
+      writes: [memory-held generation secrets recovered from CapabilityGrants]
     crib: ["§8", "§18"]
+    notes: Grant opening primitive, not a human-factor authorization or an audited-object release. Org integration remains pending.
 
   ceremony.recovery_policy_change:
     status: designed

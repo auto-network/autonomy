@@ -12,6 +12,7 @@ graph LR
     classDef public fill:#eda100,color:#0b0b0b,stroke:#7a5300,stroke-width:1px
     subgraph identity_armor["Personal identity & armor"]
         direction TB
+        factor_access_signing_key["factor access signing key"]:::cold
         factor_recipient["factor recipient"]:::cold
         factor_seed["factor seed"]:::cold
         per_credential_wrapping_key["per credential wrapping key"]:::cold
@@ -30,7 +31,7 @@ graph LR
     end
     subgraph org_authority["Org authority"]
         direction TB
-        agent_delegate_signing_key["agent delegate signing key"]:::memory
+        agent_delegate_signing_key["agent delegate signing key"]:::disk
         org_root_signing_key["org root signing key"]:::cold
         persona_signing_key["persona signing key"]:::cold
         serving_delegate_key["serving delegate key"]:::disk
@@ -57,11 +58,19 @@ graph LR
     end
     subgraph fleet["Fleet"]
         direction TB
-        per_machine_key["per machine key"]:::memory
+        fleet_operating_signing_key["fleet operating signing key"]:::memory
+        fleet_process_signing_key["fleet process signing key"]:::memory
+        per_machine_key["per machine key ⋄"]:::memory
         serving_machine_signing_key["serving machine signing key"]:::memory
     end
+    subgraph share_links["share-links"]
+        direction TB
+        link_channel_signing_key["link channel signing key"]:::disk
+    end
     personal_root_seed -->|derive_encapsulation_keypair| delegate_audited_recipient
+    factor_seed -->|importFactorAccessSigningKey| factor_access_signing_key
     factor_seed -->|derive_encapsulation_keypair| factor_recipient
+    personal_root_seed -->|derive_machine_key| fleet_operating_signing_key
     sealed_index -->|HKDF| k_index_k_meta
     recovery_code -->|HKDF| member_recovery_key
     generation_secret -->|HKDF| object_wrap_key
@@ -73,6 +82,7 @@ graph LR
     recovery_code -->|HKDF| recovery_slot_recipient
     personal_root_seed -->|derive_serving_machine_key| serving_machine_signing_key
     factor_seed -->|derive_encapsulation_keypair| vault_factor_recipient
+    agent_delegate_signing_key -.-> delegate_audited_recipient
     class_key -.-> vault_factor_recipient
     class_key -.-> root_anchor_seed
     generation_secret -.-> persona_kem_private

@@ -13,6 +13,9 @@ See the [reading guide](../GUIDE.md) and [key register](key-register.md).
 - [armor.replace_recovery_slot](#workflow-armor-replace_recovery_slot)
 - [armor.revoke_factor](#workflow-armor-revoke_factor)
 - [armor.set_recovery](#workflow-armor-set_recovery)
+- [ceremony.organization_grant_recovery](#workflow-ceremony-organization_grant_recovery)
+- [ceremony.organization_storage_delegate](#workflow-ceremony-organization_storage_delegate)
+- [ceremony.personal_serve_cert_mint](#workflow-ceremony-personal_serve_cert_mint)
 - [ceremony.recovery_policy_change](#workflow-ceremony-recovery_policy_change)
 - [ceremony.registration](#workflow-ceremony-registration)
 - [ceremony.serve_cert_mint](#workflow-ceremony-serve_cert_mint)
@@ -32,6 +35,7 @@ See the [reading guide](../GUIDE.md) and [key register](key-register.md).
 - [fold.role_define](#workflow-fold-role_define)
 - [fold.role_grant](#workflow-fold-role_grant)
 - [fold.role_revoke](#workflow-fold-role_revoke)
+- [link.mint_channel_key](#workflow-link-mint_channel_key)
 - [passkey.enroll](#workflow-passkey-enroll)
 - [passkey.revoke](#workflow-passkey-revoke)
 - [recovery.succession](#workflow-recovery-succession)
@@ -130,6 +134,67 @@ Built at the armor layer; exposed by no route or UI yet.
 
 **Crib:** §9
 
+<a id="workflow-ceremony-organization_grant_recovery"></a>
+## ceremony.organization_grant_recovery
+
+**Status:** designed
+
+**Authority:** persona_kem_private
+
+**Writes**
+
+- memory-held generation secrets only; no grants or storage states
+
+**Source:** `tools/vault/unlock.py:open_generation_keys` (ceremony)
+
+**Crib:** §1c, §12, §14
+
+graph://35308bf7-584. Primitive built; organization handoff, RAM retention and read-time recovery integration pending. Root stays in browser; networking resumes only after cleanup.
+
+<a id="workflow-ceremony-organization_storage_delegate"></a>
+## ceremony.organization_storage_delegate
+
+**Status:** built
+
+**Authority:** persona_signing_key
+
+**Mints**
+
+- agent_delegate_signing_key when absent or below thirty days remaining
+
+**Writes**
+
+- ninety-day signed delegate event and personal audited seed on re-mint only
+
+**Source:** `tools/dashboard/static/js/ceremony/org-storage-delegate.js:prepareStorageDelegate` (ceremony)
+
+**Crib:** §7, §11
+
+A reuse sign-in adds no ledger event. Workflow graph://b437ecfb-e23.
+
+<a id="workflow-ceremony-personal_serve_cert_mint"></a>
+## ceremony.personal_serve_cert_mint
+
+**Status:** built
+
+**Authority:** personal_root_seed
+
+**Mints**
+
+- serving_delegate_key
+
+**Writes**
+
+- personal-org bootstrap cert
+- legacy viewer_cert
+- dns01_cert over one child
+
+**Source:** `tools/dashboard/static/js/network-signon.mjs:_mintServeCredential` (ceremony)
+
+**Crib:** §8
+
+Existing personal branch still emits viewer_cert; do not infer organization content-viewer certificate use from this bootstrap field.
+
 <a id="workflow-ceremony-recovery_policy_change"></a>
 ## ceremony.recovery_policy_change
 
@@ -166,7 +231,7 @@ Built at the armor layer; exposed by no route or UI yet.
 
 **Status:** built
 
-**Authority:** org_root_signing_key
+**Authority:** persona_signing_key
 
 **Mints**
 
@@ -174,26 +239,30 @@ Built at the armor layer; exposed by no route or UI yet.
 
 **Writes**
 
-- registry certificate and identity-neutral viewer certificate over the same child
+- registry tunnel certificate and DNS01 certificate over the same child
 
-**Source:** `tools/network/idkit/certs.py` (ceremony)
+**Source:** `tools/dashboard/static/js/network-signon.mjs:_mintServeCredentialPersona` (ceremony)
 
 **Crib:** §8
+
+Organization branch; no content viewer certificate.
 
 <a id="workflow-ceremony-vault_master_read"></a>
 ## ceremony.vault_master_read
 
 **Status:** built
 
-**Authority:** factor_seed
+**Authority:** persona_kem_private
 
 **Writes**
 
-- audited release log entry
+- memory-held generation secrets recovered from CapabilityGrants
 
 **Source:** `tools/vault/unlock.py:open_generation_keys` (ceremony)
 
 **Crib:** §8, §18
+
+Grant opening primitive, not a human-factor authorization or an audited-object release. Org integration remains pending.
 
 <a id="workflow-fleet-distribute_kem"></a>
 ## fleet.distribute_kem
@@ -557,6 +626,25 @@ Checkpoint is decided-removed from the design vocabulary; the handler remains in
 - role-revoke-unauthorized
 
 **Source:** `tools/network/ledger/fold.py:_h_role_revoke` (fold)
+
+**Crib:** §8
+
+<a id="workflow-link-mint_channel_key"></a>
+## link.mint_channel_key
+
+**Status:** built
+
+**Authority:** agent_delegate_signing_key
+
+**Mints**
+
+- link_channel_signing_key
+
+**Writes**
+
+- org audited channel-key Setting; public half returned for grant and fragment
+
+**Source:** `tools/dashboard/link_channel_key.py:mint_channel_key` (module-op)
 
 **Crib:** §8
 

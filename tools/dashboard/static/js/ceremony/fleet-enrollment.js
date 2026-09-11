@@ -179,7 +179,10 @@ async function mintRuntimeCredential({
 /** Mint a process-only Fleet sync credential during any later root unlock.
  *
  * The durable machine key is re-derived in the browser and signs a short-lived
- * delegation. Python receives only the fresh process seed plus public proof.
+ * delegation. Sync-only handoff sends the fresh process seed and public proof;
+ * registered personal-org reachability also sends the operating seed, and
+ * serving targets receive org-specific serving-machine seeds. The personal
+ * root is never sent. Runtime private material is memory-held.
  */
 export async function mintFleetRuntimeCredential({
   personalRootSeed,
