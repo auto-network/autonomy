@@ -3445,6 +3445,20 @@ class TestWorktreeMonitorRefreshOne:
 
 
 class TestWorktreeSemanticInvalidation:
+    def test_session_org_resolver_reads_dashboard_row(self, monkeypatch):
+        from tools.dashboard import org_identity
+        from tools.dashboard import worktree_monitor as module
+
+        monkeypatch.setattr(
+            module.dashboard_db, "get_session",
+            lambda session: {"project": "autonomy-codex"},
+        )
+        monkeypatch.setattr(
+            org_identity, "session_org_slug",
+            lambda row: "autonomy" if row["project"] == "autonomy-codex" else "",
+        )
+        assert module.org_for_session("auto-own") == "autonomy"
+
     def test_pending_map_is_bounded_and_overflow_collapses_to_known_rows(
         self, monkeypatch,
     ):
