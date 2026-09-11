@@ -17,6 +17,7 @@
  */
 import { openArmorWithPassword as realOpenArmor } from '../ceremony/root-factor-policy.js';
 import { mintMemberClaim as realMint } from '../ceremony/claim.js';
+import { deriveKemSeed as realDeriveKemSeed } from '../ceremony/founding.js';
 
 async function defaultFetchPersonal() {
   const resp = await fetch('/api/identity/personal', {
@@ -28,15 +29,11 @@ async function defaultFetchPersonal() {
   return resp.json();
 }
 
-function defaultRandomSeed() {
-  return crypto.getRandomValues(new Uint8Array(32));
-}
-
 export function makeCeremony({
   fetchPersonal = defaultFetchPersonal,
   decryptArmor = realOpenArmor,
   mintMemberClaim = realMint,
-  randomSeed = defaultRandomSeed,
+  deriveKemSeed = realDeriveKemSeed,
 } = {}) {
   // ``approvals`` and ``position`` are supplied only by finalize(): the
   // second submit must re-mint at the staged claim's pinned causal position
@@ -54,12 +51,14 @@ export function makeCeremony({
     }
     // Acquire the seeds INSIDE the try so the finally covers them the instant
     // they exist: a throw between opening the armor and minting (e.g. a
-    // faulting randomSeed) still zeroes the root seed rather than leaking it.
+    // faulting derivation) still zeroes the root seed rather than leaking it.
     let opened = null;
     let kemSeed = null;
     try {
       opened = await decryptArmor(personal.armored_private_key, passphrase);
-      kemSeed = randomSeed();
+      // Initial admission uses the same root/counter derivation as founding
+      // and later sign-in (crib §§1c,14,15). This is not a transport key.
+      kemSeed = await deriveKemSeed(opened.seed, 0);
       const minted = await mintMemberClaim({
         context,
         personalRootSeed: opened.seed,
@@ -74,8 +73,8 @@ export function makeCeremony({
         personaPub: minted.personaPub,
         claimKey: minted.claimKey,
         // The invitee's own per-org persona KEM private key — kept by them to
-        // read org-sealed data. It is never sent; the controller persists it
-        // locally only once the claim is admitted.
+        // read org-sealed data. The controller holds it in memory; subsequent
+        // root ceremonies can re-derive it. Never send it to the inviter.
         kemPrivateKey: minted.kemPrivateKey,
         kemCredential: minted.kemCredential,
       };
@@ -103,7 +102,7 @@ export function makeCeremony({
 export function makeRootCeremony({
   openRoot,
   mintMemberClaim = realMint,
-  randomSeed = defaultRandomSeed,
+  deriveKemSeed = realDeriveKemSeed,
 }) {
   if (typeof openRoot !== 'function') {
     throw new Error('makeRootCeremony needs the openRoot control');
@@ -120,7 +119,7 @@ export function makeRootCeremony({
     if (!opened) return null;
     let kemSeed = null;
     try {
-      kemSeed = randomSeed();
+      kemSeed = await deriveKemSeed(opened.seed, 0);
       const minted = await mintMemberClaim({
         context,
         personalRootSeed: opened.seed,

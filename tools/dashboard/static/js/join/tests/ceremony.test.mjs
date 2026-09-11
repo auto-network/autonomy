@@ -7,7 +7,7 @@
  */
 import assert from 'node:assert/strict';
 
-import { makeCeremony } from '../ceremony.js';
+import { makeCeremony, makeRootCeremony } from '../ceremony.js';
 
 const INVITE = 'e'.repeat(64);
 const BEARER = 'bearer-token-xyz';
@@ -30,7 +30,11 @@ function fakes(over = {}) {
       seen.passphrase = passphrase;
       return { seed: openedSeed };
     },
-    randomSeed: () => kemSeed,
+    deriveKemSeed: async (seed, counter) => {
+      assert.equal(seed, openedSeed);
+      assert.equal(counter, 0);
+      return kemSeed;
+    },
     mintMemberClaim: async (args) => {
       seen.mintArgs = args;
       return {
@@ -118,20 +122,36 @@ function fakes(over = {}) {
   assert.equal(kemSeed.every((b) => b === 0), true, 'kem seed zeroed on error');
 }
 
-// 6. A faulting randomSeed (acquired after the armor is opened) still zeroes
+// 6. A faulting derivation (after the armor is opened) still zeroes
 //    the root seed — the acquisitions live inside the try (review finding a).
 {
   const { deps, openedSeed } = fakes({
-    randomSeed: () => {
-      throw new Error('rng failed');
+    deriveKemSeed: async () => {
+      throw new Error('derivation failed');
     },
   });
   const runCeremony = makeCeremony(deps);
   await assert.rejects(
     runCeremony({ context: CONTEXT, inputs: INPUTS, passphrase: 'p' }),
-    /rng failed/,
+    /derivation failed/,
   );
-  assert.equal(openedSeed.every((b) => b === 0), true, 'root seed zeroed when rng faults');
+  assert.equal(openedSeed.every((b) => b === 0), true, 'root seed zeroed when derivation faults');
+}
+
+// The shared root control preserves cleanup on derivation and mint failures.
+for (const step of ['deriveKemSeed', 'mintMemberClaim']) {
+  const { deps, openedSeed, kemSeed } = fakes({
+    [step]: async () => { throw new Error('step failed'); },
+  });
+  const run = makeRootCeremony({ ...deps, openRoot: async () => ({ seed: openedSeed }) });
+  await assert.rejects(run({ context: CONTEXT, inputs: INPUTS }), /step failed/);
+  assert.ok(openedSeed.every(b => b === 0));
+  if (step === 'mintMemberClaim') assert.ok(kemSeed.every(b => b === 0));
+}
+{
+  const run = makeRootCeremony({ openRoot: async () => null,
+    deriveKemSeed: () => { throw new Error('must not derive after cancellation'); } });
+  assert.equal(await run({ context: CONTEXT, inputs: INPUTS }), null);
 }
 
 console.log('ceremony: all assertions passed');
