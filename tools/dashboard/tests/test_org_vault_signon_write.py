@@ -335,5 +335,27 @@ def test_root_unlock_enables_organization_channel_key_write(tmp_path, monkeypatc
         token = "7c" * 16
         public = link_channel_key.mint_channel_key(token, ORG)
         assert link_channel_key.channel_key_for(token, ORG).public_hex == public
+        # Admission already supplied the public credential in member.claim.
+        # The production write must register it and persist a recovery grant;
+        # the test must NOT pre-populate KeyControlStore on the writer's behalf.
+        from tools.network.storagekit.keycontrol import KeyControlStore
+        from tools.vault.db_content_store import vault_db_path_for
+        from tools.vault.unlock import open_generation_keys
+        with KeyControlStore(vault_db_path_for(ORG)) as kc:
+            grants = kc.accepted_grants()
+            assert grants, "organization write persisted no recovery grant"
+            recovered = open_generation_keys(
+                founded[ORG].kem_private_key, grants, kc.states,
+            )
+            assert recovered, "member could not open the persisted grant"
+            credential_count = len(kc.credentials_for_persona(founded[ORG].founder_persona_pub))
+        unlock_routes._VAULT_CACHE["cache"].load(recovered)
+        assert link_channel_key.channel_key_for(token, ORG).public_hex == public
+        # Registration uses the existing content-addressed deduplication.
+        second = "7d" * 16
+        link_channel_key.mint_channel_key(second, ORG)
+        with KeyControlStore(vault_db_path_for(ORG)) as kc:
+            assert len(kc.credentials_for_persona(founded[ORG].founder_persona_pub)) == credential_count == 1
+            assert len(kc.accepted_grants()) == len(grants)
     finally:
         GraphDB.close_all_pooled()
