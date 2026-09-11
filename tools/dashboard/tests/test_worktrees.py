@@ -3434,6 +3434,30 @@ class TestWorktreeSemanticInvalidation:
         )
         assert module.org_for_session("auto-own") == "autonomy"
 
+    def test_session_org_resolver_warns_on_db_failure(self, monkeypatch, caplog):
+        import sqlite3
+        from tools.dashboard import worktree_monitor as module
+
+        def fail(_session):
+            raise sqlite3.OperationalError("database unavailable")
+
+        monkeypatch.setattr(module.dashboard_db, "get_session", fail)
+        with caplog.at_level(logging.WARNING):
+            assert module.org_for_session("auto-own") is None
+        assert "failed to resolve org for session=auto-own" in caplog.text
+
+    def test_session_org_resolver_does_not_hide_programming_errors(
+        self, monkeypatch,
+    ):
+        from tools.dashboard import worktree_monitor as module
+
+        def fail(_session):
+            raise AttributeError("broken resolver wiring")
+
+        monkeypatch.setattr(module.dashboard_db, "get_session", fail)
+        with pytest.raises(AttributeError, match="broken resolver wiring"):
+            module.org_for_session("auto-own")
+
     def test_pending_map_is_bounded_and_overflow_collapses_to_known_rows(
         self, monkeypatch,
     ):

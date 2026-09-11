@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sqlite3
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -168,8 +169,8 @@ def org_for_session(session_name: str) -> str | None:
 
     try:
         row = dashboard_db.get_session(session_name) or {}
-    except Exception:
-        logger.debug(
+    except (OSError, sqlite3.Error):
+        logger.warning(
             "worktree_monitor: failed to resolve org for session=%s",
             session_name,
             exc_info=True,
