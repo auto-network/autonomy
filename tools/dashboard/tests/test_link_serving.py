@@ -93,6 +93,7 @@ def _launch_argv(monkeypatch):
             "--key-file", "/does/not/matter",
             "--cert-file", "/does/not/matter",
             "--channel-cert-file", "/does/not/matter",
+            "--link-key-fd", "0",  # these gate tests stop before reading the pipe
         ],
     )
 

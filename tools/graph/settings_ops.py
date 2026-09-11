@@ -336,6 +336,7 @@ def _rank_candidates(
 import contextvars as _contextvars
 
 PROTECTED_IDENTITY_SET_IDS = frozenset({
+    "autonomy.machine.serving-connector",
     "autonomy.identity.personal",
     "autonomy.identity.passkey",
     "autonomy.identity.factor-metadata",
