@@ -302,6 +302,66 @@ async function until(fn, what = 'condition', ms = 15000) {
   }
 }
 
+for (const trigger of ['click', 'Enter']) {
+  test(`password ${trigger} keeps autofill mounted and keyboard dismissed until navigation`, async () => {
+    await buildFixture();
+    const { dom, win, nav } = await bootUnlock(path.join(JS_DIR, 'unlock.js'));
+    try {
+      const card = win.document.querySelector('#unlock-card');
+      await until(() => card.querySelector('#unlock-primary'), 'unlock ready');
+      card.querySelector('#unlock-trouble-toggle').click();
+      card.querySelector('#unlock-use-password').click();
+      const input = card.querySelector('#unlock-password');
+      input.value = 'unused-here'; // password manager autofill need not emit input events
+      if (trigger === 'click') input.blur(); // keyboard already dismissed after autofill
+      let focusedInputs = 0;
+      card.addEventListener('focusin', (event) => {
+        if (event.target.tagName === 'INPUT') focusedInputs += 1;
+      });
+      const button = card.querySelector('#unlock-primary');
+      if (trigger === 'click') button.click();
+      else input.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      assert.equal(card.querySelector('#unlock-password'), input, 'autofilled field is not replaced');
+      assert.equal(input.value, 'unused-here');
+      assert.notEqual(win.document.activeElement, input, 'software keyboard has no focused input');
+      assert.equal(input.disabled, true);
+      assert.equal(button.disabled, true);
+      assert.equal(card.getAttribute('aria-busy'), 'true');
+      assert.equal(button.querySelector('[role="status"]').textContent, 'Logging In…');
+      assert.equal(card.querySelector('#unlock-busy'), null, 'old working text removed');
+      button.click(); // duplicate taps must not start another ceremony
+      await until(() => nav.target, 'dashboard navigation');
+      assert.equal(focusedInputs, 0, 'login never refocuses a password field');
+      assert.equal(SERVER.posts.filter((post) => post.route === 'password').length, 1);
+      assert.equal(button.disabled, true, 'progress persists through navigation');
+    } finally { dom.window.close(); }
+  });
+}
+
+test('failed password login restores an editable field and retry button', async () => {
+  await buildFixture();
+  const { dom, win, nav } = await bootUnlock(path.join(JS_DIR, 'unlock.js'));
+  try {
+    const card = win.document.querySelector('#unlock-card');
+    await until(() => card.querySelector('#unlock-primary'), 'unlock ready');
+    card.querySelector('#unlock-trouble-toggle').click();
+    card.querySelector('#unlock-use-password').click();
+    card.querySelector('#unlock-password').value = 'incorrect';
+    card.querySelector('#unlock-primary').click();
+    await until(() => !win.AutonomyUnlock._internals.state().busy, 'password failure');
+    assert.equal(card.getAttribute('aria-busy'), 'false');
+    assert.equal(card.querySelector('#unlock-password').disabled, false);
+    assert.equal(card.querySelector('#unlock-password').value, 'incorrect');
+    assert.equal(card.querySelector('#unlock-primary').disabled, false);
+    assert.equal(card.querySelector('#unlock-primary').textContent, 'Unlock');
+    assert.match(card.querySelector('#unlock-error').textContent, /password/);
+    assert.equal(nav.target, null);
+    card.querySelector('#unlock-password').value = 'unused-here';
+    card.querySelector('#unlock-primary').click();
+    await until(() => nav.target, 'successful retry');
+  } finally { dom.window.close(); }
+});
+
 test('password sign-in previews pending enrollment upfront and submits only after root cleanup', async () => {
   SERVER.posts.length = 0;
   await buildFixture();
