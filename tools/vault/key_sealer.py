@@ -82,6 +82,11 @@ def _current_member_credentials(frontier, key_control, authority_ancestry) -> tu
     instead re-grants the new generation to removed and rotated-out keys — the
     crib's F-001 warns that "the re-key achieves NOTHING."
     """
+    # Claims may arrive through admission or replicated ledger Settings.
+    # Register their verified public credentials before selecting recipients.
+    for member in frontier.members.values():
+        if member.roles and member.kem_credential:
+            key_control.accept_credential(member.kem_credential)
     recipients = []
     for persona in sorted(domain_member_keys(frontier)):
         candidates = key_control.credentials_for_persona(persona)
