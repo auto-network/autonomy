@@ -139,6 +139,7 @@ from tools.dashboard.session_lifecycle_worker import (
 )
 from tools.dashboard.worktree_monitor import org_for_session, worktree_monitor
 from tools.dashboard import session_trace
+from tools.dashboard.org_identity import session_org_slug
 from tools.dashboard import turn_corrections as turn_corrections_mod
 from tools.dashboard.dao import auth_db, dashboard_db, mcp_relay_db
 from tools.dashboard import approvals_routes
@@ -12704,8 +12705,18 @@ async def api_worktree_invalidate(request):
     if row is None:
         return JSONResponse({"error": "worktree not found"}, status_code=404)
     actual_org = await asyncio.to_thread(org_for_session, session_name)
-    if caller_org is not None and actual_org != caller_org:
-        return JSONResponse({"error": "organization mismatch"}, status_code=403)
+    normalized_caller_org = await asyncio.to_thread(
+        session_org_slug, {"project": caller_org},
+    ) if caller_org is not None else None
+    if caller_org is not None and actual_org != normalized_caller_org:
+        return JSONResponse(
+            {
+                "error": "organization mismatch",
+                "caller_org": normalized_caller_org,
+                "session_org": actual_org,
+            },
+            status_code=403,
+        )
     try:
         body = await request.json()
     except Exception:

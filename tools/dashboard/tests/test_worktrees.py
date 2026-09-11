@@ -147,6 +147,31 @@ def test_authenticated_invalidation_is_state_free_and_session_bound(monkeypatch)
     assert response.status_code == 403
 
 
+def test_invalidation_normalizes_workspace_scoped_token_org(monkeypatch):
+    from tools.dashboard import server
+
+    monitor = _FakeMonitor([_row(session="auto-own", repo="autonomy")])
+    monkeypatch.setattr(server, "worktree_monitor", monitor)
+    monkeypatch.setattr(
+        server, "authenticate_session_request",
+        lambda request: (("auto-own", "autonomy-codex"), None),
+    )
+    monkeypatch.setattr(server, "org_for_session", lambda session: "autonomy")
+    monkeypatch.setattr(
+        server, "session_org_slug", lambda row: "autonomy",
+    )
+
+    class _Request:
+        headers = {}
+        path_params = {"session": "auto-own", "repo": "autonomy"}
+
+        async def json(self):
+            return {"reason": "post_commit"}
+
+    response = asyncio.run(server.api_worktree_invalidate(_Request()))
+    assert response.status_code == 202
+
+
 def _row(
     session="auto-test",
     repo="autonomy",
