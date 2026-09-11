@@ -42,6 +42,7 @@ def active_grants(org: str | None, target_types: Iterable[str] = SHARE_TARGET_TY
                   *, now: datetime | None = None) -> list[dict]:
     """Every unexpired grant of the given types the org holds, newest first."""
     wanted = set(target_types)
+    from tools.dashboard.link_channel_key import fragment_url
     from tools.graph import settings_ops
     from tools.graph.schemas.network_identity import (
         NETWORK_LINK_GRANT_REVISION,
@@ -75,7 +76,8 @@ def active_grants(org: str | None, target_types: Iterable[str] = SHARE_TARGET_TY
             "token": payload.get("token"),
             "target_uuid": str(payload.get("target_uuid") or ""),
             "target_type": payload.get("target_type"),
-            "url": payload.get("url"),
+            "url": (fragment_url(payload["url"], payload["channel_pub"])
+                    if payload.get("channel_pub") else payload.get("url")),
             "label": meta.get("label") or "",
             "issued_at": payload.get("issued_at"),
             "expires_at": expires_at,

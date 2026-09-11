@@ -237,6 +237,33 @@ def _target_members():
     return settings_ops.read_owned_set(TARGET_SET_ID, org="acme").members
 
 
+@pytest.mark.parametrize("surface", ["panel", "asset"])
+def test_keyed_share_copy_url_keeps_its_fragment(target_api, monkeypatch, surface):
+    from tools.dashboard import design_shares, link_approvals
+    from tools.dashboard.link_channel_key import fragment_url
+    from tools.network.idkit import KeyPair
+    from tools.graph.schemas.network_identity import NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION
+
+    client, *_ = target_api
+    token = "a1" * 16
+    url = "https://relay.auto.network/l/" + token
+    pub = KeyPair.generate().public_hex
+    settings_ops.add_setting(NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION, token, {
+        "token": token, "url": url, "channel_pub": pub,
+        "target_type": "present", "target_uuid": "00000000-0000-4000-8000-000000000001",
+        "meta": {}, "subject": {"kind": "operator", "id": "op-1"},
+        "issued_at": "2026-09-11T01:05:10Z",
+    }, org="acme")
+    monkeypatch.setattr(link_approvals, "_resolve_target", lambda *args: {"title": "Deck"})
+    if surface == "panel":
+        response = client.get("/api/network/published-links", headers=_headers())
+        assert response.status_code == 200
+        grants = response.json()["shares"]
+    else:
+        grants = design_shares.active_grants("acme")
+    assert next(row for row in grants if row["token"] == token)["url"] == fragment_url(url, pub)
+
+
 def test_service_gateway_status_requires_operator_and_reports_runtime(
     target_api, monkeypatch
 ):
