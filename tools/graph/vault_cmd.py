@@ -46,6 +46,22 @@ def _vault_org(args):
     return scope_org
 
 
+def _named_seal_org(args) -> "str | None":
+    """The explicit ``--org SLUG`` slug, or ``None`` for ``--personal`` / bare
+    ``--org``.
+
+    Only a NAMED slug is forwarded to the secured seal endpoint, so the server
+    can refuse a named org the caller cannot prove (auto-ha7se) without
+    disturbing the bearer-derived routing of the default and own-session
+    (``--org`` with no slug) paths — those send no ``X-Graph-Org`` and are
+    scoped exactly as before.
+    """
+    scope_org = getattr(args, "org", None)
+    if isinstance(scope_org, str) and scope_org not in ("personal", "machine"):
+        return scope_org
+    return None
+
+
 #: ``--org`` given with no slug resolves to the caller's bearer org.
 _ORG_SENTINEL = object()
 
@@ -141,16 +157,26 @@ def cmd_vault_seal(args) -> None:
 
     value = _read_secret_text(args)
 
-    if args.tier == "secured":
-        policy_class = args.audience or "personal-root"
-        sid = client.seal_personal_setting(
-            args.name, value, policy_class_id=policy_class,
-        )
-    else:
-        sid = client.add_setting(
-            VAULT_AUDITED_SET_ID, VAULT_CREDENTIAL_REVISION,
-            args.name, {"value": value}, org=org,
-        )
+    # The server is the authority on whether the caller may seal into a named
+    # org: it refuses (non-2xx) rather than silently sealing personal when the
+    # bearer cannot prove the org (auto-ha7se). Surface that refusal as a clean
+    # error + non-zero exit instead of an uncaught traceback, so a mis-scoped
+    # `--org` fails LOUDLY at the CLI too.
+    try:
+        if args.tier == "secured":
+            policy_class = args.audience or "personal-root"
+            sid = client.seal_personal_setting(
+                args.name, value, policy_class_id=policy_class,
+                org=_named_seal_org(args),
+            )
+        else:
+            sid = client.add_setting(
+                VAULT_AUDITED_SET_ID, VAULT_CREDENTIAL_REVISION,
+                args.name, {"value": value}, org=org,
+            )
+    except Exception as exc:  # the server's message is the useful part
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
     ident = sid[:11] if isinstance(sid, str) else str(sid)
     print(f"  ✓ {args.tier} secret sealed: {args.name}  ({ident})")
 
