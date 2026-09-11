@@ -3734,6 +3734,108 @@ class TestWorktreeSerializerOffLoop:
         assert by_org["anchore"] == JSONResponse([full[1]]).body
         assert json.loads(by_org[""]) == full
 
+    def test_refresh_calls_snapshot_callback_after_releasing_lock(
+        self, monkeypatch,
+    ):
+        from tools.dashboard import worktree_monitor as wm_module
+
+        row = _row(session="auto-live", live=True)
+        monkeypatch.setattr(
+            wm_module, "scan_all_worktrees", lambda **kwargs: [row],
+        )
+        monitor = wm_module.WorktreeMonitor()
+        observations = []
+
+        async def callback(sequence, rows):
+            observations.append((sequence, list(rows), monitor._lock.locked()))
+
+        monitor.set_snapshot_callback(callback)
+        result = asyncio.run(monitor.refresh())
+
+        assert result == [row]
+        assert observations == [(1, [row], False)]
+
+    def test_refresh_callback_failure_preserves_authoritative_cache(
+        self, monkeypatch, caplog,
+    ):
+        from tools.dashboard import worktree_monitor as wm_module
+
+        row = _row(session="auto-live", live=True)
+        monkeypatch.setattr(
+            wm_module, "scan_all_worktrees", lambda **kwargs: [row],
+        )
+        monitor = wm_module.WorktreeMonitor()
+
+        async def callback(_sequence, _rows):
+            raise RuntimeError("event bus unavailable")
+
+        monitor.set_snapshot_callback(callback)
+        result = asyncio.run(monitor.refresh())
+
+        assert result == [row]
+        assert monitor.get_all() == [row]
+        assert "snapshot callback failed" in caplog.text
+
+    def test_refresh_one_calls_snapshot_callback_after_releasing_lock(
+        self, monkeypatch,
+    ):
+        from tools.dashboard import worktree_monitor as wm_module
+
+        row = _row(session="auto-dead", live=False)
+        monkeypatch.setattr(
+            wm_module, "scan_all_worktrees", lambda **kwargs: [row],
+        )
+        monkeypatch.setattr(wm_module, "_read_bindings", lambda _row: [])
+        monitor = wm_module.WorktreeMonitor()
+        observations = []
+
+        async def callback(sequence, rows):
+            observations.append((sequence, list(rows), monitor._lock.locked()))
+
+        monitor.set_snapshot_callback(callback)
+        result = asyncio.run(monitor.refresh_one("auto-dead", "autonomy"))
+
+        assert result == [row]
+        assert observations == [(1, [row], False)]
+
+
+@pytest.mark.asyncio
+async def test_worktree_snapshot_publisher_broadcasts_changed_rows_once(
+    monkeypatch,
+):
+    from tools.dashboard import server
+
+    broadcasts = []
+
+    async def broadcast(topic, payload, dedup=True):
+        broadcasts.append((topic, payload, dedup))
+
+    monkeypatch.setattr(server.event_bus, "broadcast", broadcast)
+    monkeypatch.setattr(
+        server, "_worktree_state_json",
+        lambda row: {
+            "session_name": row.session_name,
+            "repo_name": row.repo_name,
+            "commits_ahead": row.commits_ahead,
+            "is_dirty": row.is_dirty,
+            "dirty_files": row.dirty_files,
+        },
+    )
+    monkeypatch.setattr(server, "_published_worktree_rows_signature", None)
+    monkeypatch.setattr(server, "_published_worktree_snapshot_sequence", 0)
+    clean = _row(session="auto-live", live=True)
+    dirty = replace(clean, is_dirty=True)
+
+    await server._publish_worktree_snapshot(1, [clean])
+    await server._publish_worktree_snapshot(2, [clean])
+    await server._publish_worktree_snapshot(3, [dirty])
+    await server._publish_worktree_snapshot(2, [clean])
+
+    assert [topic for topic, _payload, _dedup in broadcasts] == [
+        "worktrees", "worktrees",
+    ]
+    assert broadcasts[-1][1][0]["is_dirty"] is True
+
 
 # ── Watch / nag mode persistence (P4) ─────────────────────────────────
 

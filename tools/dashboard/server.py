@@ -14534,11 +14534,8 @@ _DISPATCH_WATCHER_HEARTBEAT = 60.0
 # The git status --porcelain merge-health probe is the one subprocess in
 # the recompute; never run it more often than this.
 _DISPATCH_WATCHER_GIT_FLOOR = 60.0
-# EventBus topics the watcher treats as change signals. ``worktrees`` is
-# (today) self-produced by this watcher, so it mainly closes the loop on a
-# real worktree-signature change the heartbeat would otherwise carry.
 _DISPATCH_WATCHER_TOPICS = frozenset({
-    "session:registry", "session:ended", "worktrees", "setting.changed",
+    "session:registry", "session:ended", "setting.changed",
 })
 # 15 min: no point polling the provider /usage APIs faster than the cache
 # lives (HARNESS_USAGE_CACHE_TTL = 15 min), and the slower cadence keeps us
@@ -14832,11 +14829,6 @@ def _count_worktrees() -> dict[str, int]:
     }
 
 
-def _collect_worktree_state_rows() -> list[dict]:
-    """Serialize per-row worktree state for the ``worktrees`` SSE topic."""
-    return [_worktree_state_json(row) for row in worktree_monitor.get_all()]
-
-
 def _worktree_rows_signature(rows: list[dict]) -> str:
     """Change signature for worktree rows — drives on-change ``worktrees`` emit."""
     return json.dumps(
@@ -14850,6 +14842,32 @@ def _worktree_rows_signature(rows: list[dict]) -> str:
         ],
         sort_keys=True,
     )
+
+
+_published_worktree_rows_signature: str | None = None
+_published_worktree_snapshot_sequence = 0
+_worktree_snapshot_publish_lock = asyncio.Lock()
+
+
+async def _publish_worktree_snapshot(
+    sequence: int, rows: list[WorktreeState],
+) -> None:
+    """Publish a changed monitor snapshot immediately after its refresh."""
+    async with _worktree_snapshot_publish_lock:
+        global _published_worktree_snapshot_sequence
+        if sequence <= _published_worktree_snapshot_sequence:
+            return
+        # Serialization resolves session/org metadata and must stay off the
+        # event loop just like the monitor's pre-rendered HTTP payload.
+        payload = await asyncio.to_thread(
+            lambda: [_worktree_state_json(row) for row in rows],
+        )
+        signature = _worktree_rows_signature(payload)
+        global _published_worktree_rows_signature
+        if signature != _published_worktree_rows_signature:
+            await event_bus.broadcast("worktrees", payload)
+            _published_worktree_rows_signature = signature
+        _published_worktree_snapshot_sequence = sequence
 
 
 def _sample_dispatch_data_version(conn: sqlite3.Connection) -> int | None:
@@ -15838,7 +15856,6 @@ class _WatcherSignals:
     beads: bool = False        # Dolt head hash moved
     timeline: bool = False     # dispatch-DB PRAGMA data_version moved
     sessions: bool = False     # session:registry / session:ended topic
-    worktrees: bool = False    # worktrees topic
     settings: bool = False     # setting.changed topic
     heartbeat: bool = False    # 60 s unconditional recompute
 
@@ -15892,7 +15909,6 @@ class _DispatchWatcher:
         self._cache: dict = {}
         self._last_dispatch = None
         self._last_nav = None
-        self._wt_sig: str | None = None
 
     def _drain(self) -> set[str]:
         """Collect the set of topics queued since the last tick (non-blocking)."""
@@ -15946,7 +15962,6 @@ class _DispatchWatcher:
             beads=head_changed,
             timeline=dv_changed,
             sessions=bool(topics & {"session:registry", "session:ended"}),
-            worktrees="worktrees" in topics,
             settings="setting.changed" in topics,
             heartbeat=(now - self._last_recompute) >= self._heartbeat,
         )
@@ -15958,7 +15973,7 @@ class _DispatchWatcher:
 
         any_signal = (
             signals.beads or signals.timeline or signals.sessions
-            or signals.worktrees or signals.settings
+            or signals.settings
         )
         if any_signal or signals.heartbeat:
             self._last_recompute = now
@@ -15982,7 +15997,7 @@ class _DispatchWatcher:
         """Run only the reads whose gate fired (or all, on the heartbeat),
         reuse cached results for the rest, and broadcast on change/heartbeat."""
         hb = signals.heartbeat
-        run_git = hb or (signals.worktrees and (now - self._last_git) >= self._git_floor)
+        run_git = hb
 
         # (cache-key, awaitable-factory, default) — only gated reads run, and
         # the awaitable is built lazily so an ungated read never creates (and
@@ -16005,7 +16020,7 @@ class _DispatchWatcher:
             lambda: asyncio.to_thread(dao_beads.get_beads_by_label, "pinned"), [])
         add("today_done", hb or signals.timeline,
             lambda: asyncio.to_thread(_count_today_done), 0)
-        add("pause", hb or signals.timeline or signals.beads or signals.worktrees,
+        add("pause", hb or signals.timeline or signals.beads,
             lambda: asyncio.to_thread(_get_pause_dict),
             {"paused": False, "reason": None})
         add("merge_health", run_git,
@@ -16014,11 +16029,9 @@ class _DispatchWatcher:
             lambda: asyncio.to_thread(_count_active_sessions), 0)
         add("terminals", hb or signals.sessions,
             lambda: asyncio.to_thread(_count_terminals), 0)
-        add("worktree_counts", hb or signals.worktrees,
+        add("worktree_counts", hb,
             lambda: asyncio.to_thread(_count_worktrees),
             {"with_commits": 0, "with_changes": 0})
-        add("wt_rows", hb or signals.worktrees,
-            lambda: asyncio.to_thread(_collect_worktree_state_rows), [])
         add("streams", hb or signals.sessions,
             lambda: asyncio.to_thread(_count_streams), 0)
         add("harness_usage", hb,
@@ -16075,15 +16088,6 @@ class _DispatchWatcher:
             self._last_nav = nav_data
         # dispatcher_state stays deduped — a quiet dashboard never re-sends it.
         await self._bus.broadcast("dispatcher_state", dispatcher_state)
-
-        # Per-row worktree state (⌥ workspace-changes indicator) — emit only
-        # on signature change so identical payloads never flood clients.
-        wt_rows = self._cache["wt_rows"]
-        wt_sig = _worktree_rows_signature(wt_rows)
-        if wt_sig != self._wt_sig:
-            self._wt_sig = wt_sig
-            await self._bus.broadcast("worktrees", wt_rows)
-
 
 async def _dispatch_watcher():
     """Background task: event-driven dispatch/header broadcasts.
@@ -21748,6 +21752,7 @@ async def _on_startup():
     # thread (auto-yq27f) — the request path then serves bytes, never git
     # or json.dumps on the event loop.
     worktree_monitor.set_row_renderer(_worktree_state_json)
+    worktree_monitor.set_snapshot_callback(_publish_worktree_snapshot)
     if os.environ.get("DASHBOARD_MOCK"):
         await worktree_monitor.start()
         # Mock mode: skip real database init and session monitor.

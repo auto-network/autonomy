@@ -985,6 +985,13 @@ class WorktreeMonitor:
         # the whole payload on the worker thread so the request path serves
         # pre-encoded bytes with neither git nor json.dumps (auto-yq27f).
         self._row_renderer: Callable[[WorktreeState], dict] | None = None
+        # Optional async hook invoked after a successful cache replacement and
+        # after the refresh lock is released.  The dashboard uses it to publish
+        # per-row state immediately; the monitor stays independent of EventBus.
+        self._snapshot_callback: (
+            Callable[[int, list[WorktreeState]], Awaitable[None]] | None
+        ) = None
+        self._snapshot_sequence = 0
         # Pre-encoded payload bytes keyed by org slug ("" = all orgs). ``None``
         # until the first sweep renders; callers fall back to per-request
         # rendering while it's None so a cold cache still serves correct data.
@@ -1000,6 +1007,25 @@ class WorktreeMonitor:
         falls back to rendering per call). Idempotent.
         """
         self._row_renderer = renderer
+
+    def set_snapshot_callback(
+        self,
+        callback: Callable[[int, list[WorktreeState]], Awaitable[None]] | None,
+    ) -> None:
+        """Register the best-effort post-refresh snapshot publisher."""
+        self._snapshot_callback = callback
+
+    async def _notify_snapshot(
+        self, sequence: int, snapshot: list[WorktreeState],
+    ) -> None:
+        """Best-effort publication shared by every cache-replacement path."""
+        callback = self._snapshot_callback
+        if callback is None:
+            return
+        try:
+            await callback(sequence, snapshot)
+        except Exception:
+            logger.exception("worktree_monitor: snapshot callback failed")
 
     def get_rendered_json(self, org: str = "") -> bytes | None:
         """Return pre-encoded ``/api/worktrees`` bytes for ``org``.
@@ -1338,7 +1364,14 @@ class WorktreeMonitor:
             # source-control snapshots are settled, so /api/worktrees serves
             # pre-encoded bytes without git or json.dumps (auto-yq27f).
             await self.refresh_rendered_cache()
-            return list(self._cache)
+            snapshot = list(self._cache)
+            self._snapshot_sequence += 1
+            sequence = self._snapshot_sequence
+
+        # Publishing is deliberately outside ``_lock``: a slow or failed SSE
+        # delivery must never hold up another authoritative Git refresh.
+        await self._notify_snapshot(sequence, snapshot)
+        return snapshot
 
     async def refresh_one(
         self, session_name: str, repo_name: str,
@@ -1399,7 +1432,12 @@ class WorktreeMonitor:
             if target is not None:
                 await self._refresh_one_source_control(target, rows)
             await self.refresh_rendered_cache()
-            return list(self._cache)
+            snapshot = list(self._cache)
+            self._snapshot_sequence += 1
+            sequence = self._snapshot_sequence
+
+        await self._notify_snapshot(sequence, snapshot)
+        return snapshot
 
     async def discover_prs(self, rows: list[WorktreeState]) -> None:
         """Repo-level PR discovery for the operator-initiated Refresh.
