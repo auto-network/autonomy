@@ -1369,11 +1369,11 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
 
 
 def _accept_organization_kem_key(item: dict) -> int:
-    """Validate current public membership before retaining a decrypt-only key."""
+    """Validate membership, optionally publish initial public KEM, retain private in RAM."""
     from tools.dashboard.signon_preparation import organization_encryption_recovery
     from tools.network.storagekit.keycontrol import KeyControlStore
     from tools.vault.db_content_store import vault_db_path_for
-    from tools.vault.unlock import recover_organization_generations
+    from tools.vault.unlock import recover_organization_generations, current_recovery_credentials
 
     org = item["organization"]
     if not isinstance(org, str) or not org:
@@ -1381,6 +1381,26 @@ def _accept_organization_kem_key(item: dict) -> int:
     context = organization_encryption_recovery(org)
     if item["genesis_id"] != context["genesis_id"]:
         raise ValueError("organization genesis mismatch")
+    publication = item.get("kem_credential")
+    if publication is not None:
+        from tools.network.ledger import LedgerStore, org_ledger_db_path
+        from tools.network.storagekit.credentials import verify_against_fold
+
+        with LedgerStore(org_ledger_db_path(org)) as ledger:
+            frontier = ledger.fold(now=int(time.time() * 1000))
+            proposed = verify_against_fold(publication, frontier)
+            if proposed.kem_key_id != item["kem_key_id"]:
+                raise ValueError("organization credential key id mismatch")
+            if not proposed.authority_heads or not set(proposed.authority_heads).issubset(ledger.ledger.all_ids()):
+                raise ValueError("organization credential cites unknown authority")
+            _validate_audited_delegate_pair(item["persona_kem_private_key"], proposed.kem_public_key)
+            with KeyControlStore(vault_db_path_for(org)) as key_control:
+                current = current_recovery_credentials(frontier, key_control, ledger.ledger.ancestry)
+                if any(c.persona == proposed.persona and c.kem_key_id != proposed.kem_key_id
+                       for c in current):
+                    raise ValueError("initial setup cannot replace an organization credential")
+                key_control.accept_credential(proposed)
+        context = organization_encryption_recovery(org)
     credential = next((c for c in context["credentials"]
                        if c["kem_key_id"] == item["kem_key_id"]), None)
     if credential is None:

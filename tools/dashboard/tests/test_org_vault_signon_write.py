@@ -140,7 +140,7 @@ def _run_ceremony(client, terms):
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not on PATH")
 @pytest.mark.parametrize("unavailable_org", [False, True])
 @pytest.mark.parametrize("has_org_key", [False, True])
-def test_root_unlock_enables_organization_channel_key_write(tmp_path, monkeypatch, unavailable_org, has_org_key, *, receiver_check=None):
+def test_root_unlock_enables_organization_channel_key_write(tmp_path, monkeypatch, unavailable_org, has_org_key, *, receiver_check=None, has_kem_credential=True):
     GraphDB.close_all_pooled()
     monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
@@ -174,7 +174,7 @@ def test_root_unlock_enables_organization_channel_key_write(tmp_path, monkeypatc
                 founded[org] = found_org_ledger(
                     ledger, org_id=org, org_root=organization_root,
                     personal_root_seed=seed, now=now,
-                    kem_seed=derive_kem_seed(seed),
+                    kem_seed=derive_kem_seed(seed) if has_kem_credential else None,
                 )
 
         async def existing_personal_class(request):
@@ -346,9 +346,9 @@ def test_root_unlock_enables_organization_channel_key_write(tmp_path, monkeypatc
         with KeyControlStore(vault_db_path_for(ORG)) as kc:
             grants = kc.accepted_grants()
             assert grants, "organization write persisted no recovery grant"
-            recovered = open_generation_keys(
-                founded[ORG].kem_private_key, grants, kc.states,
-            )
+            private, _ = derive_encapsulation_keypair(derive_kem_seed(seed),
+                "autonomy/persona-kem/v1/" + founded[ORG].genesis_id)
+            recovered = open_generation_keys(private, grants, kc.states)
             assert recovered, "member could not open the persisted grant"
             credential_count = len(kc.credentials_for_persona(founded[ORG].founder_persona_pub))
         unlock_routes._VAULT_CACHE["cache"].load(recovered)

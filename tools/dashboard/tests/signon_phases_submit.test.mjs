@@ -22,6 +22,7 @@ import { submitSignon } from '../static/js/ceremony/signon-phases.js';
 import { prepareVault, deriveAuditedRecipient } from '../static/js/ceremony/vault-unlock.js';
 import { deriveKemSeed } from '../static/js/ceremony/founding.js';
 import { deriveEncapsulationKeypair } from '../static/js/ceremony/primitives.js';
+import { derivePersona } from '../static/js/ceremony/ledger-event.js';
 
 function reply(status, body) {
   return { ok: status < 400, status, json: async () => body };
@@ -48,6 +49,33 @@ function prepared(posts) {
     posts,
   };
 }
+
+test('missing member credential is signed locally for the existing handoff', async () => {
+  const root = new Uint8Array(32).fill(37);
+  const genesis = 'ab'.repeat(32);
+  const persona = await derivePersona(root, genesis);
+  const org = { slug: 'initial', genesis_id: genesis, encryption_recovery: {
+    genesis_id: genesis, counter: 0, credentials: [], provisioning: {
+      personas: [persona.publicHex], authority_heads: [genesis], created_hlc: [1000, 0],
+    },
+  } };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () => { throw new Error('network while root is open'); };
+  try {
+    const result = await prepareVault(root, { inventory: {
+      classes: [{ governance: { form: 'root-reachable' } }], anchors: [],
+    } }, await deriveAuditedRecipient(root), [org]);
+    assert.deepEqual(result.failures, []);
+    const item = result.keys.organization_kem_keys[0];
+    assert.equal(item.kem_credential.persona, persona.publicHex);
+    assert.equal(item.kem_key_id, item.kem_credential.kem_key_id);
+    const kemSeed = await deriveKemSeed(root, 0);
+    const pair = await deriveEncapsulationKeypair(kemSeed, 'autonomy/persona-kem/v1/' + genesis);
+    kemSeed.fill(0);
+    assert.equal(item.kem_credential.kem_public_key, pair.publicKeyHex);
+    assert.equal(item.persona_kem_private_key, pair.privateKeyHex);
+  } finally { root.fill(0); globalThis.fetch = originalFetch; }
+});
 
 test('organization derivation matches counter-zero credential and isolates mismatches with no network', async () => {
   const root = new Uint8Array(32).fill(37);

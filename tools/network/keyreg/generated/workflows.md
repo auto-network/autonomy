@@ -139,17 +139,17 @@ Built at the armor layer; exposed by no route or UI yet.
 
 **Status:** built
 
-**Authority:** persona_kem_private
+**Authority:** persona_kem_private, persona_signing_key
 
 **Writes**
 
-- memory-held generation secrets only; no grants or storage states
+- memory-held generation secrets; optional initial signed public KEM credential; no grants or storage states
 
 **Source:** `tools/dashboard/unlock_routes.py:_accept_organization_kem_key` (ceremony)
 
 **Crib:** §1c, §12, §14
 
-graph://35308bf7-584. Organization sign-in validates scoped KEM keys against current credentials and consumes the existing grant opener. The same opener recovers addressed, unheld states at read time and after RAM-only reload retention (auto-a1pub). Root stays in browser; networking resumes only after cleanup. Live receiver proof is tracked by auto-hwlcy.
+graph://35308bf7-584. Organization sign-in validates scoped KEM keys against current credentials and consumes the existing grant opener. The same opener recovers addressed, unheld states at read time and after RAM-only reload retention (auto-a1pub). Root stays in browser; networking resumes only after cleanup. Live receiver proof is tracked by auto-hwlcy. Initial setup (graph://dc405ba4-eef) may publish a missing current member credential using the founding signer and existing KeyControlStore. It never replaces an existing credential or persists a KEM private key.
 
 <a id="workflow-ceremony-organization_storage_delegate"></a>
 ## ceremony.organization_storage_delegate

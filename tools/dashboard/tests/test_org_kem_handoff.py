@@ -1,4 +1,4 @@
-"""Organization KEM handoff: current credentials, memory custody, no publication."""
+"""Organization KEM handoff: initial public setup, reuse, and memory-only custody."""
 import copy
 import time
 from dataclasses import replace
@@ -15,13 +15,14 @@ from tools.network.idkit import KeyPair, derive_persona
 from tools.network.ledger import LedgerStore, org_ledger_db_path
 from tools.network.ledger.found import found_org_ledger
 from tools.network.storagekit import credentials
+from tools.network.storagekit.errors import StorageError
 from tools.network.storagekit.keycontrol import KeyControlStore
 from tools.vault.key_holder import VaultKeyCache
 from tools.vault.unlock import current_recovery_credentials, recover_organization_generations
 
 
 @pytest.fixture
-def org(tmp_path, monkeypatch):
+def org(tmp_path, monkeypatch, request):
     GraphDB.close_all_pooled()
     monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
@@ -34,7 +35,8 @@ def org(tmp_path, monkeypatch):
     with LedgerStore(org_ledger_db_path(slug)) as ledger:
         founded = found_org_ledger(ledger, org_id=slug, org_root=KeyPair.generate(),
             personal_root_seed=bytes.fromhex(root.private_hex), now=int(time.time() * 1000) - 1000,
-            kem_seed=credentials.derive_kem_seed(bytes.fromhex(root.private_hex)))
+            kem_seed=(credentials.derive_kem_seed(bytes.fromhex(root.private_hex))
+                      if getattr(request, "param", True) else None))
     monkeypatch.setattr(unlock_routes, "_VAULT_CACHE", {"cache": VaultKeyCache()})
     yield slug, founded, root
     GraphDB.close_all_pooled()
@@ -53,6 +55,78 @@ def counts(slug):
     with KeyControlStore(org_ledger_db_path(slug)) as store:
         return (events, len(store.states), len(store.accepted_grants()),
                 store.db.execute("SELECT COUNT(*) FROM keycontrol_credential").fetchone()[0])
+
+
+@pytest.mark.parametrize("org", [False], indirect=True)
+def test_missing_member_credential_is_published_once_by_existing_handoff(org):
+    slug, founded, root = org
+    persona = derive_persona(bytes.fromhex(root.private_hex), founded.genesis_id)
+    before = counts(slug)
+    context = signon_preparation.organization_encryption_recovery(slug)
+    assert context["provisioning"]["personas"] == [persona.public_hex]
+    credential, private = credentials.build(persona, founded.genesis_id,
+        credentials.derive_kem_seed(bytes.fromhex(root.private_hex)),
+        context["provisioning"]["authority_heads"], context["provisioning"]["created_hlc"])
+    item = {"organization": slug, "genesis_id": founded.genesis_id,
+            "kem_key_id": credential.kem_key_id, "kem_credential": credential.to_dict(),
+            "persona_kem_private_key": private}
+    assert unlock_routes._accept_organization_kem_key(item) == 0
+    assert unlock_routes._accept_organization_kem_key(item) == 0
+    after = counts(slug)
+    assert after[:-1] == before[:-1]  # no new membership, generation, or grant
+    assert after[-1] == 1
+    assert "provisioning" not in signon_preparation.organization_encryption_recovery(slug)
+
+
+@pytest.mark.parametrize("org", [False], indirect=True)
+def test_initial_credential_context_is_reproducible_from_synced_genesis(org, monkeypatch):
+    slug, founded, _ = org
+    first = signon_preparation.organization_encryption_recovery(slug)["provisioning"]
+    later = time.time() + 60
+    monkeypatch.setattr(signon_preparation.time, "time", lambda: later)
+    second = signon_preparation.organization_encryption_recovery(slug)["provisioning"]
+    assert second == first
+    with LedgerStore(org_ledger_db_path(slug)) as ledger:
+        assert first["authority_heads"] == [founded.genesis_id]
+        assert first["created_hlc"] == ledger.get(founded.genesis_id).hlc.to_list()
+
+
+@pytest.mark.parametrize("org", [False], indirect=True)
+@pytest.mark.parametrize("invalid", ["private", "member", "heads", "signature", "key-id"])
+def test_invalid_initial_publication_writes_nothing(org, invalid):
+    slug, founded, root = org
+    persona = (KeyPair.generate() if invalid == "member" else
+               derive_persona(bytes.fromhex(root.private_hex), founded.genesis_id))
+    context = signon_preparation.organization_encryption_recovery(slug)["provisioning"]
+    credential, private = credentials.build(persona, founded.genesis_id,
+        credentials.derive_kem_seed(bytes.fromhex(root.private_hex)),
+        ["00" * 32] if invalid == "heads" else context["authority_heads"], context["created_hlc"])
+    wire = credential.to_dict()
+    if invalid == "signature":
+        wire["signature"] = "00" * 64
+    item = {"organization": slug, "genesis_id": founded.genesis_id,
+            "kem_key_id": "00" * 32 if invalid == "key-id" else credential.kem_key_id,
+            "kem_credential": wire,
+            "persona_kem_private_key": "00" * 32 if invalid == "private" else private}
+    before = counts(slug)
+    with pytest.raises((ValueError, StorageError)):
+        unlock_routes._accept_organization_kem_key(item)
+    assert counts(slug) == before
+    assert not unlock_routes._VAULT_CACHE.get("organization_kem_keys")
+
+
+def test_initial_publication_cannot_replace_existing_member_credential(org):
+    slug, founded, root = org
+    with LedgerStore(org_ledger_db_path(slug)) as ledger:
+        credential, private = credentials.build(
+            derive_persona(bytes.fromhex(root.private_hex), founded.genesis_id),
+            founded.genesis_id, b"n" * 32, ledger.heads(), (int(time.time() * 1000), 0))
+    before = counts(slug)
+    with pytest.raises(ValueError, match="cannot replace"):
+        unlock_routes._accept_organization_kem_key({"organization": slug,
+            "genesis_id": founded.genesis_id, "kem_key_id": credential.kem_key_id,
+            "kem_credential": credential.to_dict(), "persona_kem_private_key": private})
+    assert counts(slug) == before
 
 
 def test_fold_only_credential_preparation_acceptance_and_replay_write_nothing(org):

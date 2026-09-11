@@ -1071,9 +1071,9 @@ mutations:
 
   ceremony.organization_grant_recovery:
     source: {kind: ceremony, file: tools/dashboard/unlock_routes.py, symbol: _accept_organization_kem_key}
-    authority: [persona_kem_private]
+    authority: [persona_kem_private, persona_signing_key]
     effects:
-      writes: [memory-held generation secrets only; no grants or storage states]
+      writes: [memory-held generation secrets; optional initial signed public KEM credential; no grants or storage states]
     crib: ["§1c", "§12", "§14"]
     notes: >-
       graph://35308bf7-584. Organization sign-in validates scoped KEM keys
@@ -1081,6 +1081,9 @@ mutations:
       The same opener recovers addressed, unheld states at read time and after
       RAM-only reload retention (auto-a1pub). Root stays in browser; networking
       resumes only after cleanup. Live receiver proof is tracked by auto-hwlcy.
+      Initial setup (graph://dc405ba4-eef) may publish a missing current member
+      credential using the founding signer and existing KeyControlStore. It
+      never replaces an existing credential or persists a KEM private key.
 
   link.mint_channel_key:
     source: {kind: module-op, file: tools/dashboard/link_channel_key.py, symbol: mint_channel_key}
