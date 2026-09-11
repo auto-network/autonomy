@@ -51,6 +51,7 @@ def organization_encryption_recovery(org):
     from tools.network.storagekit.keycontrol import KeyControlStore
     from tools.vault.db_content_store import vault_db_path_for
     from tools.vault.unlock import current_recovery_credentials
+    from tools.network.storagekit.credentials import domain_member_keys
 
     path = org_ledger_db_path(org)
     if org in LOCAL_STORE_KEYS or not path.exists():
@@ -61,9 +62,16 @@ def organization_encryption_recovery(org):
             raise ValueError("organization recovery needs a founded organization")
         with KeyControlStore(vault_db_path_for(org)) as key_control:
             credentials = current_recovery_credentials(frontier, key_control, ledger.ledger.ancestry)
-    return {"genesis_id": frontier.genesis_id, "counter": 0,
-            "credentials": [{"kem_key_id": c.kem_key_id, "kem_public_key": c.kem_public_key}
-                            for c in credentials]}
+        missing = sorted(set(domain_member_keys(frontier)) - {c.persona for c in credentials})
+        result = {"genesis_id": frontier.genesis_id, "counter": 0,
+                  "credentials": [{"kem_key_id": c.kem_key_id, "kem_public_key": c.kem_public_key}
+                                  for c in credentials]}
+        if missing:
+            # Same initial binding as founding: identical on every fleet node.
+            genesis = ledger.get(frontier.genesis_id)
+            result["provisioning"] = {"personas": missing, "authority_heads": [frontier.genesis_id],
+                                      "created_hlc": genesis.hlc.to_list()}
+    return result
 
 
 def collect():

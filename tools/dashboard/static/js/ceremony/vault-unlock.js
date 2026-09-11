@@ -1,7 +1,8 @@
-/** Personal vault warm-up: retain decryption keys, never mint ledger authority. */
+/** Vault warm-up and missing public KEM setup; never mint ledger authority. */
 
 import { deriveEncapsulationKeypair, importEd25519RootSigningKey } from './primitives.js';
-import { deriveKemSeed } from './founding.js';
+import { deriveKemSeed, buildPersonaKemCredential } from './founding.js';
+import { derivePersona } from './ledger-event.js';
 import { createRootAnchorEnvelope } from './root-anchor.js';
 import { reportStepOutcome } from './step-report.js';
 
@@ -42,11 +43,24 @@ export async function prepareVault(rootSeed, prepared, audited, organizations = 
           }
           const pair = await deriveEncapsulationKeypair(kemSeed,
             'autonomy/persona-kem/v1/' + recovery.genesis_id);
-          const credential = recovery.credentials.find(c => c.kem_public_key === pair.publicKeyHex);
+          let credential = recovery.credentials.find(c => c.kem_public_key === pair.publicKeyHex);
+          let publication = null;
+          if (!credential && recovery.provisioning) {
+            const persona = await derivePersona(rootSeed, recovery.genesis_id);
+            if (recovery.provisioning.personas.includes(persona.publicHex)) {
+              ({ credential: publication } = await buildPersonaKemCredential({
+                persona, genesisId: recovery.genesis_id, kemSeed,
+                authorityHeads: recovery.provisioning.authority_heads,
+                createdHlc: recovery.provisioning.created_hlc,
+              }));
+              credential = publication;
+            }
+          }
           if (!credential) throw new Error('organization-encryption-key-mismatch');
           result.keys.organization_kem_keys.push({ organization: org.slug,
             genesis_id: recovery.genesis_id, kem_key_id: credential.kem_key_id,
-            persona_kem_private_key: pair.privateKeyHex });
+            persona_kem_private_key: pair.privateKeyHex,
+            ...(publication ? { kem_credential: publication } : {}) });
         } catch (error) {
           result.failures.push({ org: org.slug, step: 'organization-recovery', error: error.message });
         }

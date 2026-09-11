@@ -126,7 +126,7 @@ def _receiver():
 
 
 @pytest.mark.skipif(shutil.which('node') is None, reason='node is not on PATH')
-@pytest.mark.parametrize('mode', ['signin', 'late', 'reload'])
+@pytest.mark.parametrize('mode', ['signin', 'late', 'reload', 'initial-setup'])
 def test_received_org_value_opens_after_real_signin(tmp_path, monkeypatch, mode):
     from tools.dashboard.tests import test_org_vault_signon_write as scenario
     def receive(sender, terms, root_pub, token, public):
@@ -155,4 +155,4 @@ def test_received_org_value_opens_after_real_signin(tmp_path, monkeypatch, mode)
         assert result['opened'], result
     scenario.test_root_unlock_enables_organization_channel_key_write(
         tmp_path, monkeypatch, unavailable_org=False, has_org_key=False,
-        receiver_check=receive)
+        receiver_check=receive, has_kem_credential=(mode != 'initial-setup'))
