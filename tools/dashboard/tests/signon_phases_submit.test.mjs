@@ -19,6 +19,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { submitSignon } from '../static/js/ceremony/signon-phases.js';
+import { prepareVault, deriveAuditedRecipient } from '../static/js/ceremony/vault-unlock.js';
+import { deriveKemSeed } from '../static/js/ceremony/founding.js';
+import { deriveEncapsulationKeypair } from '../static/js/ceremony/primitives.js';
 
 function reply(status, body) {
   return { ok: status < 400, status, json: async () => body };
@@ -46,6 +49,38 @@ function prepared(posts) {
   };
 }
 
+test('organization derivation matches counter-zero credential and isolates mismatches with no network', async () => {
+  const root = new Uint8Array(32).fill(37);
+  const genesis = 'ab'.repeat(32);
+  const kemSeed = await deriveKemSeed(root, 0);
+  const pair = await deriveEncapsulationKeypair(kemSeed, 'autonomy/persona-kem/v1/' + genesis);
+  kemSeed.fill(0);
+  const good = { slug: 'good', genesis_id: genesis, encryption_recovery: {
+    genesis_id: genesis, counter: 0, credentials: [{ kem_key_id: 'cd'.repeat(32), kem_public_key: pair.publicKeyHex }],
+  } };
+  const badKey = { ...good, slug: 'bad-key', encryption_recovery: {
+    ...good.encryption_recovery, credentials: [{ kem_key_id: 'ef'.repeat(32), kem_public_key: '00'.repeat(32) }],
+  } };
+  const wrongCounter = { ...good, slug: 'wrong-counter', encryption_recovery: { ...good.encryption_recovery, counter: 1 } };
+  const wrongGenesis = { ...good, slug: 'wrong-genesis', genesis_id: 'ff'.repeat(32) };
+  const unavailable = { ...good, slug: 'unavailable', encryption_recovery: { error: 'organization-encryption-unavailable' } };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () => { throw new Error('network while root is open'); };
+  try {
+    const result = await prepareVault(root, { inventory: {
+      classes: [{ governance: { form: 'root-reachable' } }], anchors: [],
+    } }, await deriveAuditedRecipient(root), [badKey, wrongCounter, wrongGenesis, unavailable, good]);
+    assert.equal(result.keys.organization_kem_keys.length, 1);
+    const item = result.keys.organization_kem_keys[0];
+    assert.equal(item.organization, 'good');
+    assert.equal(item.genesis_id, genesis);
+    assert.equal(item.kem_key_id, good.encryption_recovery.credentials[0].kem_key_id);
+    assert.ok(item.persona_kem_private_key === pair.privateKeyHex, 'independent derivation matches');
+    assert.deepEqual(result.failures.map(f => f.org), ['bad-key', 'wrong-counter', 'wrong-genesis', 'unavailable']);
+    assert.ok(result.failures.every(f => f.step === 'organization-recovery'));
+  } finally { root.fill(0); globalThis.fetch = originalFetch; }
+});
+
 test('organization delegate refusal stays visible without marking the personal vault or healthy org failed', async () => {
   const fetchImpl = fetchWhere([
     ['/api/identity/unlock/vault-keys', reply(200, { ok: true, organization_delegates: {
@@ -61,6 +96,23 @@ test('organization delegate refusal stays visible without marking the personal v
   assert.deepEqual(report.ready, ['healthy']);
   assert.deepEqual(report.repaired, ['healthy']);
   assert.equal(handoff.vault.keys, null);
+});
+
+test('organization recovery counts and isolated refusal survive submission without private material', async () => {
+  const outcomes = { netorg: { ok: false, error: 'organization-encryption-refused' },
+    healthy: { ok: true, recovered: 2 } };
+  const fetchImpl = fetchWhere([
+    ['/api/identity/unlock/vault-keys', reply(200, { ok: true, organization_recovery: outcomes })],
+  ]);
+  const handoff = prepared([]);
+  handoff.ready = ['netorg', 'healthy'];
+  handoff.vault.keys.organization_kem_keys = [{ persona_kem_private_key: 'test-private-material' }];
+  const report = await submitSignon(handoff, fetchImpl);
+  assert.deepEqual(report.organization_recovery, outcomes);
+  assert.deepEqual(report.failed, [{ org: 'netorg', step: 'organization-recovery', error: 'organization-encryption-refused' }]);
+  assert.deepEqual(report.ready, ['healthy']);
+  assert.equal(handoff.vault.keys, null);
+  assert.equal(JSON.stringify(report).includes('test-private-material'), false);
 });
 
 test('a vault-keys 500 after the cookie is minted resolves with the step reported, and the other posts still run', async () => {

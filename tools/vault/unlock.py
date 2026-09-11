@@ -1,14 +1,12 @@
 """Sign-on handoff: turn a persona's material into the generation keys the
 vault key holder reads (``auto-pw9bs.1``).
 
-At unlock the browser (or its headless client-driver, crib ``1e005d5c-c11`` §21)
-holds the personal root seed just long enough to derive one thing per
-organization — the persona storage **encapsulation** private key — and to open
-the ``CapabilityGrant``s addressed to it, recovering each current generation's
-key. It transmits the opened generation keys to the dashboard, which loads them
+At unlock the browser derives each organization's persona storage
+**encapsulation** private key, clears the root, then submits the scoped keys.
+The dashboard opens persisted ``CapabilityGrant``s and merges recovered keys
 into :class:`tools.vault.key_holder.VaultKeyCache`. The personal root seed never
-leaves; the encapsulation key is decrypt-only and cannot sign, author, or act
-(crib §12).
+leaves; the encapsulation key is memory-only and cannot sign, author, or act
+(crib §12; sign-in wire graph://b437ecfb-e23).
 
 This module is the key-opening core of that handoff — the part that is pure
 cryptography over already-held inputs, with no transport and no browser. It
@@ -22,7 +20,55 @@ from typing import Dict, Iterable, Mapping
 
 from tools.network.idkit.sealing import derive_encapsulation_keypair
 from tools.network.storagekit.capability import accept
-from tools.network.storagekit.credentials import kem_purpose
+from tools.network.storagekit.credentials import (
+    kem_purpose, domain_member_keys, verify_against_fold, select_current_credential,
+)
+from tools.network.storagekit.errors import StorageError
+
+
+def current_recovery_credentials(frontier, key_control, ancestry) -> tuple:
+    """Read current recipients, including admitted claims not projected by a write.
+
+    Unlike sealing's recipient collection, recovery registers nothing. The
+    same validation/selection applies to both fold and persisted credentials.
+    """
+    result = []
+    for persona in sorted(domain_member_keys(frontier)):
+        candidates = list(key_control.credentials_for_persona(persona))
+        candidates.extend(member.kem_credential for member in frontier.members.values()
+                          if member.current_key == persona and member.kem_credential)
+        valid = []
+        for candidate in candidates:
+            try:
+                valid.append(verify_against_fold(candidate, frontier))
+            except StorageError:
+                continue
+        if valid:
+            result.append(select_current_credential(valid, ancestry))
+    return tuple(result)
+
+
+def recover_organization_generations(genesis_id, kem_keys, key_control, cache) -> int:
+    """Merge openable, unheld states into the existing cache; no record writes.
+
+    Shared by sign-in and subsequent holder/restore integration. Failed opens
+    are not cached, so another key or a later synchronized grant may succeed.
+    """
+    descriptors = {sid: state for sid, state in key_control.states.items()
+                   if state.genesis_id == genesis_id}
+    grants = key_control.accepted_grants()
+    held = set(cache.secrets)
+    recovered = 0
+    for private in kem_keys:
+        for grant in grants:
+            sid = grant.storage_state_id
+            if sid in held or sid not in descriptors:
+                continue
+            for state_id, secret in open_generation_keys(private, (grant,), descriptors).items():
+                cache.add(state_id, secret)
+                held.add(state_id)
+                recovered += 1
+    return recovered
 
 
 def open_generation_keys(

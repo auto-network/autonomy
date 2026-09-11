@@ -395,12 +395,15 @@ keys:
       - tools/dashboard/static/js/ceremony/founding.js:deriveKemSeed
       - tools/dashboard/static/js/join/ceremony.js
       - tools/vault/unlock.py:open_generation_keys
+      - tools/dashboard/static/js/ceremony/vault-unlock.js:prepareVault
+      - tools/dashboard/unlock_routes.py:_accept_organization_kem_key
     notes: >-
       Initial founding and admission derive counter zero, then bind the pair
       with kem_purpose(genesis_id). PersonaKemCredential has no counter field.
-      The grant opener and personal legacy handoff are built; organization
-      sign-in, read-time recovery and RAM handoff integration remain pending
-      under graph://35308bf7-584. This key is not stored in audited Settings.
+      Personal and organization sign-in handoffs open existing grants and keep
+      KEM keys in process memory. Organization read-time recovery and RAM
+      handoff integration remain pending under graph://35308bf7-584,
+      auto-a1pub. This key is not stored in audited Settings.
     crib: ["§9", "§13", "§14"]
     seals_to:
       - recipient: per_machine_key
@@ -1064,16 +1067,16 @@ mutations:
     notes: A reuse sign-in adds no ledger event. Workflow graph://b437ecfb-e23.
 
   ceremony.organization_grant_recovery:
-    status: designed
-    source: {kind: ceremony, file: tools/vault/unlock.py, symbol: open_generation_keys}
+    source: {kind: ceremony, file: tools/dashboard/unlock_routes.py, symbol: _accept_organization_kem_key}
     authority: [persona_kem_private]
     effects:
       writes: [memory-held generation secrets only; no grants or storage states]
     crib: ["§1c", "§12", "§14"]
     notes: >-
-      graph://35308bf7-584. Primitive built; organization handoff, RAM retention
-      and read-time recovery integration pending. Root stays in browser;
-      networking resumes only after cleanup.
+      graph://35308bf7-584. Organization sign-in validates scoped KEM keys
+      against current credentials and consumes the existing grant opener.
+      Reload retention and read-time recovery remain auto-a1pub. Root stays
+      in browser; networking resumes only after cleanup.
 
   link.mint_channel_key:
     source: {kind: module-op, file: tools/dashboard/link_channel_key.py, symbol: mint_channel_key}

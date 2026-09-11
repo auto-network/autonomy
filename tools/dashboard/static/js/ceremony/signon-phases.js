@@ -37,7 +37,8 @@ export async function prepareSignon(rootSeed, encrypted, signon) {
   if (inputs.vault.error) {
     failures.push({ step: 'vault-wake', error: inputs.vault.error });
   } else {
-    vault = await prepareVault(rootSeed, inputs.vault, audited);
+    vault = await prepareVault(rootSeed, inputs.vault, audited, organizations);
+    failures.push(...vault.failures);
     vault.keys.organization_delegates = [];
     for (const org of organizations) {
       vault.keys.organization_delegates.push(await prepareStorageDelegate(rootSeed, org.storage_delegate));
@@ -66,7 +67,8 @@ export async function prepareSignon(rootSeed, encrypted, signon) {
     }) });
   }
   return { vault, posts, failures,
-    ready: vault ? organizations.filter(org => !org.serve_cert.required).map(org => org.slug) : [],
+    ready: vault ? organizations.filter(org => !org.serve_cert.required
+      && !failures.some(f => f.org === org.slug)).map(org => org.slug) : [],
     fleetEnabled: !fleetError && Boolean(inputs.completion || inputs.runtime.enabled) };
 }
 
@@ -84,6 +86,14 @@ export async function submitSignon(prepared, fetchImpl = fetch) {
       if (prepared.vault) {
         const vault = await submitVault(prepared.vault, fetchImpl);
         reportStepOutcome('vault-wake', { ready: true }, { fetchImpl });
+        report.organization_recovery = vault.organization_recovery || {};
+        for (const [org, outcome] of Object.entries(report.organization_recovery)) {
+          reportStepOutcome('organization-recovery', { ok: outcome.ok, reason: outcome.error }, { fetchImpl, org });
+          if (!outcome.ok) {
+            report.failed.push({ org, step: 'organization-recovery', error: outcome.error });
+            report.ready = report.ready.filter(ready => ready !== org);
+          }
+        }
         for (const [org, outcome] of Object.entries(vault.organization_delegates || {})) {
           reportStepOutcome('organization-delegate', { ok: outcome.ok, reason: outcome.error }, { fetchImpl, org });
           if (!outcome.ok) {
