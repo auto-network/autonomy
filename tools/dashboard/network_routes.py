@@ -3059,6 +3059,7 @@ async def get_published_links(request: Request) -> JSONResponse:
 
     from datetime import datetime, timezone
     from tools.dashboard import link_approvals, service_publication
+    from tools.dashboard.link_channel_key import fragment_url
     from tools.dashboard.dao import dashboard_db
     from tools.graph.schemas.network_identity import (
         NETWORK_LINK_GRANT_REVISION,
@@ -3128,7 +3129,8 @@ async def get_published_links(request: Request) -> JSONResponse:
             "type": payload.get("target_type"),
             "title": resolved.get("title") or payload.get("target_uuid"),
             "description": meta.get("label") or "",
-            "url": payload.get("url"),
+            "url": (fragment_url(payload["url"], payload["channel_pub"])
+                    if payload.get("channel_pub") else payload.get("url")),
             "platform_url": _share_platform_url(
                 payload.get("target_type"), payload.get("target_uuid")
             ),
