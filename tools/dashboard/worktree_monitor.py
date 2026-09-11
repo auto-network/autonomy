@@ -169,6 +169,11 @@ def org_for_session(session_name: str) -> str | None:
     try:
         row = dashboard_db.get_session(session_name) or {}
     except Exception:
+        logger.debug(
+            "worktree_monitor: failed to resolve org for session=%s",
+            session_name,
+            exc_info=True,
+        )
         return None
     return session_org_slug(row) or None
 
