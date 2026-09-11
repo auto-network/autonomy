@@ -33,6 +33,18 @@ from urllib import error as urllib_error, request as urllib_request
 from urllib.parse import quote as url_quote
 
 logger = logging.getLogger(__name__)
+
+# On-demand full-thread stack dump: `kill -USR1 <worker-pid>` prints a Python
+# traceback for EVERY thread to stderr (-> docker logs). This is the only way
+# to see what the thread pool is blocked on during a stall where session-data
+# reads (asyncio.to_thread) hang while /api/ping stays fast. Registered at
+# import so every hot-reloaded worker has it. Mirrors link_serving.py's pattern.
+import faulthandler as _faulthandler
+try:
+    _faulthandler.register(signal.SIGUSR1, all_threads=True, chain=False)
+except (ValueError, OSError):
+    pass  # e.g. no stderr / non-main thread import; dumping is best-effort
+
 # Child loggers so the noisiest streams can be routed to their own files by
 # name (see the logging setup below): one line per HTTP request, event-loop
 # stall diagnostics, and the voice websocket's per-connection diagnostics.
