@@ -4395,6 +4395,11 @@ async def api_session_board_layout_put(request):
         if not isinstance(v, dict) or not all(x in ("transcript", "stats") for x in v.values()):
             return JSONResponse({"error": "presentations must map session names to transcript or stats"}, status_code=400)
         fields["presentations"] = {str(k): x for k, x in list(v.items())[:500]}
+    if "focus_sessions" in body:
+        v = body["focus_sessions"]
+        if not isinstance(v, list) or not all(isinstance(s, str) and 0 < len(s) <= 128 for s in v):
+            return JSONResponse({"error": "focus_sessions must be a list of session names"}, status_code=400)
+        fields["focus_sessions"] = list(dict.fromkeys(v))[:500]
     if "focus_session" in body:
         if not isinstance(body["focus_session"], str):
             return JSONResponse({"error": "focus_session must be a session name or empty"}, status_code=400)

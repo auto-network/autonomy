@@ -134,7 +134,7 @@
   document.addEventListener('alpine:init', function () {
     Alpine.data('sessionsBoard', function () { return {
       rows: [], columns: [], presentation: 'transcript',
-      cardPresentations: {}, cardHeights: {}, resources: {}, _focusSession: '',
+      cardPresentations: {}, cardHeights: {}, resources: {}, _focusSessions: [],
       boundId: '', dragId: '', dragging: false, movingCol: '', viewportTick: 0,
       organize: { state: 'idle', status: '', runId: '' }, commitTick: 0,
       menuFor: '', menuActions: [],
@@ -237,7 +237,7 @@
           if (layout.presentation === 'stats' || layout.presentation === 'transcript') self.presentation = layout.presentation;
           self.cardHeights = layout.heights || {};
           self.cardPresentations = layout.presentations || {};
-          self._focusSession = layout.focus_session || '';
+          self._focusSessions = layout.focus_sessions || (layout.focus_session ? [layout.focus_session] : []);
           self.boards = (layout.boards || []).slice();
           self.boardOf = Object.assign({}, layout.board_of || {});
           self.activeBoard = layout.active_board || '';
@@ -272,11 +272,11 @@
         this.columns = this.normalise(this.columnsFromStore(saved));
         // A full-height card survives a refresh: re-seat the saved focus on
         // whichever column now holds that session.
-        if (this._focusSession) {
-          var want = this._focusSession;
-          this.columns.forEach(function (c) { c.focus = c.members.indexOf(want) !== -1 ? want : null; });
-          if (!this.columns.some(function (c) { return c.focus; })) this._focusSession = '';
-        }
+        var wanted = this._focusSessions;
+        this.columns.forEach(function (c) {
+          c.focus = wanted.find(function (id) { return c.members.indexOf(id) !== -1; }) || null;
+        });
+        this._focusSessions = this.columns.filter(function (c) { return c.focus; }).map(function (c) { return c.focus; });
         var voice = Alpine.store('voice');
         if (voice) this.boundId = voice.boundSessionId || '';
       },
@@ -480,7 +480,7 @@
         if (!col || col.id === 'solo' || !boardId) return false;
         if (this.boardIdFor(col) === boardId) return false;
         this.assignColumnBoard(col.id, boardId);
-        if (col.focus) { col.focus = null; this._focusSession = ''; }
+        if (col.focus) { this._focusSessions = this._focusSessions.filter(function (id) { return id !== col.focus; }); col.focus = null; }
         this.persist();
         return true;
       },
@@ -508,7 +508,7 @@
       // members move to a new column on its right that keeps the group's title.
       focusCard(id) {
         var col = this.columnOf(id); if (!col) return;
-        if (col.focus === id) { col.focus = null; this._focusSession = ''; this.persist(); return; }
+        if (col.focus === id) { col.focus = null; this._focusSessions = this._focusSessions.filter(function (s) { return s !== id; }); this.persist(); return; }
         var self = this, idx = this.columns.indexOf(col), target = col;
         var others = col.members.filter(function (m) { return m !== id; });
         if (col.id === 'solo') {
@@ -533,9 +533,8 @@
           target.width = Math.max(target.width, 640); target._sized = true;
         }
         if (!target) return;
-        this.columns.forEach(function (c) { if (c !== target) c.focus = null; });
         target.focus = id;
-        this._focusSession = id;
+        this._focusSessions = this.columns.filter(function (c) { return c.focus; }).map(function (c) { return c.focus; });
         this.cardPresentations[id] = 'transcript';
         this.persist();
       },
@@ -882,15 +881,19 @@
           cols.forEach(function (c) { if (layout.widths && layout.widths[c.id]) { c.width = layout.widths[c.id]; c._sized = true; } });
           self._suppressPersist = true;
           self.columns = self.normalise(cols);
+          self._focusSessions = layout.focus_sessions || (layout.focus_session ? [layout.focus_session] : []);
+          self.columns.forEach(function (c) {
+            c.focus = self._focusSessions.find(function (id) { return c.members.indexOf(id) !== -1; }) || null;
+          });
           self._suppressPersist = false;
         });
       },
       layoutPayload() {
-        var widths = {}, focus = '';
-        this.columns.forEach(function (c) { if (c._sized) widths[c.id] = c.width; if (c.focus) focus = c.focus; });
+        var widths = {}, focus = [];
+        this.columns.forEach(function (c) { if (c._sized) widths[c.id] = c.width; if (c.focus) focus.push(c.focus); });
         return { presentation: this.presentation, presentations: this.cardPresentations,
                  column_order: this.columns.map(function (c) { return c.id; }), widths: widths,
-                 heights: this.cardHeights, focus_session: focus,
+                 heights: this.cardHeights, focus_sessions: focus,
                  boards: this.boards, active_board: this.activeBoard, board_of: this.boardOf };
       },
       persist() {
