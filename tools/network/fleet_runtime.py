@@ -3,8 +3,11 @@
 The browser opens the armored personal root, derives the durable machine key,
 and uses that key only long enough to sign a short-lived idkit delegation to a
 fresh process key. Python receives the process seed and public certificate,
-never the personal root or durable machine seed. Nothing in this module is
-persisted; a restart or expiry requires another unlock ceremony.
+never the personal root. Registered personal-org handoff additionally carries
+the machine seed and reachability certificate; serving targets add org-specific
+serving-machine seeds. Runtime carriers retain this material in RAM across
+graceful reloads, not durable disk. Cold start without the carrier or credential
+expiry requires another unlock ceremony.
 """
 
 from __future__ import annotations

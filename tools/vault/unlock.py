@@ -64,8 +64,9 @@ def open_generation_keys_for_persona(
     """Derive the persona's org-bound encapsulation key from its seed and open
     every grant with it.
 
-    ``persona_kem_seed`` is the per-organization persona seed (``HKDF(personal
-    root, genesis_id)``), never the personal root itself. The derived key is
+    ``persona_kem_seed`` comes from ``credentials.derive_kem_seed(personal_root,
+    counter)``, never the personal root itself. The seed is org-independent;
+    the encapsulation derivation supplies the organization binding. The key is
     bound to ``kem_purpose(genesis_id)`` — the one fixed label a
     ``PersonaKemCredential`` is published under — so it opens grants sealed to
     this persona in this org and nothing else.

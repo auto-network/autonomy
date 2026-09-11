@@ -7,6 +7,13 @@ authorization policy or a claim of whole-system proof.
 
 ## Choose your route
 
+The canonical dashboard sign-in ordering and wire reference is
+`graph://b437ecfb-e23`. It distinguishes implemented steps from approved,
+pending organization grant recovery (`graph://35308bf7-584`). Use it for
+upfront payloads, local derivations/checks and post-cleanup submissions; use
+this registry for key identity, custody and reach. The Key Ceremony Atlas is
+an illustration of those records, not a competing specification.
+
 | Your question | Start here |
 |---|---|
 | What does this key do, and where is it held? | [Key register](generated/key-register.md) |
