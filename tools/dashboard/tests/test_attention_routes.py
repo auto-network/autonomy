@@ -49,6 +49,27 @@ ROOT = "a" * 64
 APPROVAL_ID = "approval-1234567890"
 
 
+def test_production_dashboard_access_review_projects_the_existing_application_result(monkeypatch):
+    seen = []
+    expected = {"approved": True, "execution": {"ok": True}}
+
+    def project(_consumer, status):
+        seen.append(status)
+        return expected
+
+    monkeypatch.setattr(
+        attention_routes.dashboard_access_central.DashboardAccessResultConsumer,
+        "project", project,
+    )
+    runtime = attention_routes.build_production_runtime()
+    status = object()
+    result = runtime.operator_result_projectors[
+        attention_routes.dashboard_access_central.KIND
+    ](status)
+    assert seen == [status]
+    assert result == expected
+
+
 class _PresentationStore:
     def __init__(self, index_store):
         self.index_store = index_store

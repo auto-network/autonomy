@@ -464,6 +464,7 @@ def build_production_runtime() -> AttentionRouteRuntime:
         hub=PrivateAttentionHub(item_resolver=index.get_query_item),
         approval_http=approval_http,
         approval_reconciler=coordinator,
+        operator_result_projectors={dashboard_access_central.KIND: consumer.project},
     )
 
 

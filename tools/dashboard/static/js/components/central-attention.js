@@ -243,6 +243,7 @@
 
       destroy() {
         this._destroyed = true;
+        this._sharedApprovalDialog?.dispose();
         clearTimeout(this._refreshTimer);
         if (this._events) this._events.close();
       },
@@ -269,6 +270,10 @@
             this.items = collected.map(normalizeItem);
             this.counts = (first && first.counts) || emptyCounts();
             this.badgeCount = Number(this.counts.total_needs_attention || 0);
+            if (this._sharedApprovalItem && !sameItem(this._sharedApprovalItem,
+              this.items.find(item => item.id === this._sharedApprovalItem.id))) {
+              this._sharedApprovalDialog?.close();
+            }
             if (this.selectedItem) {
               const current = this.items.find(item => item.id === this.selectedItem.id);
               if (!sameItem(this.selectedItem, current)) {
@@ -416,7 +421,9 @@
       async openItem(item) {
         if (!item) return;
         item.decisionError = '';
-        this.selectedItem = item;
+        // Migrated reviews never flash the legacy right-hand detail panel.
+        const shared = item.rendererId === 'approval.dashboard_access.review';
+        this.selectedItem = shared ? null : item;
         try {
           const payload = await jsonRequest('/api/attention/items/' + encodeURIComponent(item.id));
           if (!sameItem(item, normalizeItem(payload.item))) {
@@ -436,6 +443,7 @@
           item.comparisonCode = item.safeReview.verification_code ||
             item.safeReview.comparison_code || '';
           item.unavailable = false;
+          if (shared) await this.openDashboardApproval(item);
         } catch (error) {
           if (error && error.status === 409 && error.payload && error.payload.item) {
             item.unavailable = true;
@@ -446,6 +454,46 @@
         jsonRequest('/api/attention/items/' + encodeURIComponent(item.id) + '/opened', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
         }).catch(() => {});
+      },
+
+      async openDashboardApproval(item) {
+        const { openApprovalDialog, requestingSession } = await import('./approval-dialog.js');
+        const { signDashboardAccessGrant } = await import('../ceremony/dashboard-access.js');
+        const grant = item.safeReview.grant;
+        const requester = await requestingSession(grant?.grantee, item.safeReview.requester_label);
+        const decide = async (outcome, decision) => {
+          const response = await jsonRequest('/api/attention/items/' + encodeURIComponent(item.id) + '/approval-decision', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ outcome, decision }),
+          });
+          if (response.resolution?.outcome !== outcome) throw new Error('This request was not completed.');
+          if (outcome === 'granted') {
+            const applied = await jsonRequest('/api/attention/items/' + encodeURIComponent(item.id));
+            if (applied.review?.application_result?.execution?.ok !== true) {
+              throw new Error('Your approval was recorded, but dashboard access has not been confirmed.');
+            }
+          }
+          // Our own resolution keeps its receipt open; only external changes
+          // should dismiss a still-pending review during refresh.
+          this._sharedApprovalItem = null;
+          this.refresh().catch(() => {});
+        };
+        this._sharedApprovalDialog = openApprovalDialog({
+          review: {
+            title: 'Allow dashboard access',
+            intro: 'This lets the session use your signed-in dashboard through a browser.',
+            requester,
+            facts: [['Expires', new Date(item.safeReview.expires_at * 1000).toLocaleString()]],
+            unavailable: !grant || !item.actions.includes('granted') ? 'This request is no longer available.' : '',
+          },
+          authorize: options => signDashboardAccessGrant(grant, options),
+          execute: decision => decide('granted', decision),
+          decline: item.actions.includes('declined') ? () => decide('declined', {}) : null,
+          result: { working: 'Allowing access', success: 'Access allowed',
+            copy: '', fact: { ...requester, byline: 'Dashboard access for this session.', linkLabel: 'View requesting session' } },
+          onClose: () => { this._sharedApprovalDialog = null; this._sharedApprovalItem = null; },
+        });
+        this._sharedApprovalItem = item;
       },
 
       async buildGrantDecision(item) {

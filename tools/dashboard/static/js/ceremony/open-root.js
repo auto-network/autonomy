@@ -123,7 +123,7 @@ function b64u(s) {
 }
 
 // A WebAuthn PRF assertion over the identity's passkeys (rp-scoped).
-async function getPrf(model, credentialIds = null) {
+async function getPrf(model, credentialIds = null, signal) {
   if (!window.PublicKeyCredential || !navigator.credentials) {
     throw new Error('this browser cannot use a passkey');
   }
@@ -136,6 +136,7 @@ async function getPrf(model, credentialIds = null) {
   let asrt;
   try {
     const operation = () => navigator.credentials.get({
+      ...(signal ? { signal } : {}),
       publicKey: {
         challenge: crypto.getRandomValues(new Uint8Array(32)),
         rpId, allowCredentials: allow, userVerification: 'required',
@@ -159,7 +160,7 @@ async function getPrf(model, credentialIds = null) {
 }
 
 
-async function openRootPolicy(model, { title, detail }) {
+async function openRootPolicy(model, { title, detail, mount, signal }) {
   const policy = model.policyModule;
   const memberIds = new Set(policy.policyFactorIds(model.envelope.policy));
   // Password grouping renders first regardless of armor order (stable sort
@@ -174,20 +175,33 @@ async function openRootPolicy(model, { title, detail }) {
   const S = { passwords: {}, errors: {}, busy: null, warn: null };
 
   return new Promise((resolve) => {
+    let closed = false;
+    let finishTimer;
+    const credentialsAbort = new AbortController();
     const host = document.createElement('div');
-    host.className = 'or-overlay'; host.setAttribute('data-testid', 'open-root');
+    host.className = mount ? 'approval-factors' : 'or-overlay'; host.setAttribute('data-testid', 'open-root');
     const card = document.createElement('div'); card.className = 'or-card';
-    host.appendChild(card); document.body.appendChild(host);
+    host.appendChild(card);
+    (mount ? mount() : document.body).appendChild(host);
 
     function cleanFactorSeeds() {
       Object.values(seeds).forEach((seed) => seed?.fill?.(0));
       Object.keys(seeds).forEach((factorId) => { delete seeds[factorId]; });
     }
     function close(result) {
+      if (closed) { result?.seed?.fill?.(0); return; }
+      closed = true;
+      clearTimeout(finishTimer);
+      credentialsAbort.abort();
+      signal?.removeEventListener('abort', abort);
+      S.passwords = {};
       cleanFactorSeeds();
       if (host.parentNode) host.parentNode.removeChild(host);
       resolve(result);
     }
+    function abort() { close(null); }
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) { close(null); return; }
     function el(tag, cls, html) {
       const node = document.createElement(tag);
       if (cls) node.className = cls;
@@ -247,7 +261,8 @@ async function openRootPolicy(model, { title, detail }) {
     // as the global warning with all seeds discarded.
     function finishCollected() {
       S.busy = 'closing'; render();
-      setTimeout(async () => {
+      finishTimer = setTimeout(async () => {
+        if (closed) return;
         try {
           const opened = await policy.openFactorPolicyArmor(model.armor, seeds);
           close(opened);
@@ -256,7 +271,7 @@ async function openRootPolicy(model, { title, detail }) {
           S.warn = error?.message || 'Those factors did not open your root.';
           render();
         }
-      }, 650);
+      }, mount ? 0 : 650);
     }
     function noteCollected() {
       if (policy.policySatisfied(model.envelope.policy, Object.keys(seeds))) {
@@ -267,12 +282,16 @@ async function openRootPolicy(model, { title, detail }) {
     }
     async function addPassword(factor) {
       const value = S.passwords[factor.factor_id] || '';
-      if (S.busy || !value) return;
+      if (closed || S.busy || !value) return;
+      if (mount) document.activeElement?.blur?.();
+      S.passwords[factor.factor_id] = '';
       S.busy = factor.factor_id; S.errors = {}; S.warn = null; render();
       try {
-        seeds[factor.factor_id] = await policy.openPasswordFactor(
+        const seed = await policy.openPasswordFactor(
           model.rootPub, factor, value,
         );
+        if (closed) { seed?.fill?.(0); return; }
+        seeds[factor.factor_id] = seed;
         S.passwords[factor.factor_id] = '';
         noteCollected();
       } catch (error) {
@@ -284,11 +303,12 @@ async function openRootPolicy(model, { title, detail }) {
       }
     }
     async function addPasskey(factor) {
-      if (S.busy) return;
+      if (closed || S.busy) return;
       S.busy = factor.factor_id; S.errors = {}; S.warn = null; render();
       let result;
       try {
-        result = await getPrf(model, [factor.credential_id]);
+        result = await getPrf(model, [factor.credential_id], credentialsAbort.signal);
+        if (closed) { result.prf.fill(0); return; }
         const recipient = await primitives.deriveEncapsulationKeypair(
           result.prf, policy.FACTOR_RECIPIENT_PURPOSE,
         );
@@ -296,6 +316,7 @@ async function openRootPolicy(model, { title, detail }) {
           && factor.recipients.some(
             (slot) => slot.recipient_public_key === recipient.publicKeyHex,
           );
+        if (closed) { result.prf.fill(0); return; }
         if (!enrolled) {
           result.prf.fill(0);
           throw new Error(NO_ROOT_AUTHORITY);
@@ -312,16 +333,25 @@ async function openRootPolicy(model, { title, detail }) {
     }
 
     function render() {
+      if (closed) return;
       card.innerHTML = '';
-      card.appendChild(el('div', 'or-ttl', title));
-      if (detail) card.appendChild(el('div', 'or-sub', detail));
-      card.appendChild(el('div', 'or-req', requirementLine()));
+      if (!mount) {
+        card.appendChild(el('div', 'or-ttl', title));
+        if (detail) card.appendChild(el('div', 'or-sub', detail));
+        card.appendChild(el('div', 'or-req', requirementLine()));
+      }
+      const expression = model.envelope.policy;
+      const flat = ['and', 'or'].includes(expression.op)
+        && (expression.children || []).every(child => child.op === 'factor');
+      if (mount && factors.length > 1 && !flat) {
+        card.appendChild(el('div', 'or-req', requirementLine()));
+      }
 
       const satisfied = policy.policySatisfied(
         model.envelope.policy, Object.keys(seeds),
       );
       let focusTarget = null;
-      factors.forEach((factor) => {
+      factors.forEach((factor, index) => {
         const slot = el('div', 'or-factor-slot');
         if (seeds[factor.factor_id]) {
           const done = el('div', 'or-factor done');
@@ -336,17 +366,25 @@ async function openRootPolicy(model, { title, detail }) {
           // dialog closes itself.
           return;
         } else if (factor.type === 'password') {
+          if (mount) {
+            const text = el('div', 'approval-password-label');
+            text.textContent = passwordCount > 1 ? label(factor) : 'Password';
+            slot.appendChild(text);
+          }
           const grouping = el('div', 'or-factor');
           const row = el('div', 'or-factor-row');
           row.appendChild(factorIcon(ICONS.password, factor));
           const input = el('input', 'or-in-bare');
           input.type = 'password'; input.autocomplete = 'current-password';
+          input.setAttribute('aria-label', passwordCount > 1 ? label(factor) : 'Password');
+          input.disabled = !!S.busy;
           input.placeholder = passwordCount > 1 ? label(factor) : 'Enter your password';
           input.value = S.passwords[factor.factor_id] || '';
           input.oninput = () => { S.passwords[factor.factor_id] = input.value; };
           input.onkeydown = (event) => { if (event.key === 'Enter') addPassword(factor); };
           row.appendChild(input);
-          const ok = el('div', 'or-ok', S.busy === factor.factor_id ? '…' : 'OK');
+          const ok = el(mount ? 'button' : 'div', 'or-ok', S.busy === factor.factor_id ? 'Verifying…' : mount ? 'Verify' : 'OK');
+          if (mount) { ok.type = 'button'; ok.disabled = !!S.busy; }
           if (S.busy) ok.setAttribute('aria-disabled', 'true');
           else ok.onclick = () => addPassword(factor);
           row.appendChild(ok);
@@ -359,7 +397,8 @@ async function openRootPolicy(model, { title, detail }) {
           button.appendChild(factorIcon(ICONS.passkey, factor));
           button.appendChild(el('span', 'or-factor-name',
             S.busy === factor.factor_id ? 'Waiting for your passkey…'
-              : passkeyCount > 1 ? label(factor) : 'Select your passkey'));
+              : passkeyCount > 1 ? label(factor) : mount ? 'Use a passkey' : 'Select your passkey'));
+          if (mount) button.disabled = !!S.busy;
           if (S.busy) button.setAttribute('aria-disabled', 'true');
           else button.onclick = () => addPasskey(factor);
           slot.appendChild(button);
@@ -367,14 +406,16 @@ async function openRootPolicy(model, { title, detail }) {
         if (S.errors[factor.factor_id]) {
           slot.appendChild(el('div', 'or-factor-err', S.errors[factor.factor_id]));
         }
+        if (mount && index && flat) card.appendChild(el('div', 'approval-separator', expression.op.toUpperCase()));
         card.appendChild(slot);
       });
 
       if (S.warn) card.appendChild(el('div', 'or-warn', S.warn));
-      const cancel = el('div', 'or-cancel', 'Cancel');
+      const cancel = el(mount ? 'button' : 'div', 'or-cancel', mount ? 'Back' : 'Cancel');
+      if (mount) cancel.type = 'button';
       cancel.onclick = () => close(null);
       card.appendChild(cancel);
-      if (focusTarget) setTimeout(() => focusTarget.focus(), 0);
+      if (focusTarget && !mount) setTimeout(() => { if (!closed) focusTarget.focus(); }, 0);
     }
     render();
   });
@@ -388,10 +429,11 @@ async function openRootPolicy(model, { title, detail }) {
  *   null when the operator cancels. The caller uses `signingKey` to sign (or
  *   `seed` for a ceremony that needs it) and MUST zero `seed` when done.
  */
-export async function openRoot({ title = 'Approve', detail = '' } = {}) {
+export async function openRoot({ title = 'Approve', detail = '', mount, signal } = {}) {
   injectStyles();
   const model = await loadModel();
-  if (model.v3) return openRootPolicy(model, { title, detail });
+  if (signal?.aborted) return null;
+  if (model.v3) return openRootPolicy(model, { title, detail, mount, signal });
   // loadModel refuses every non-v3 armor, so this line is unreachable; it
   // exists so a future model shape fails loudly instead of silently.
   throw new Error('unsupported root model');
