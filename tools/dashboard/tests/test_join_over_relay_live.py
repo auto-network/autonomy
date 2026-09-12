@@ -168,6 +168,15 @@ def _found_with_member_invite(root: KeyPair) -> tuple[str, str, KeyPair]:
             "token_hash": hashlib.sha256(BEARER.encode()).hexdigest(),
             "max_uses": 25,
         }, list(store.heads()), HLC(base + 1000, 0)))
+    # r7kk4: op:context requires the org's OWN autonomy.org identity row, or it
+    # serves the bounded unavailable envelope. The Membership screen writes it;
+    # write the minimal valid presentation here too.
+    from tools.graph.schemas.org import ORG_REVISION, ORG_SET_ID
+    settings_ops.add_setting(
+        ORG_SET_ID, ORG_REVISION, ORG,
+        {"name": "Join Relay Live", "color": "#123456"},
+        org=ORG, state="raw",
+    )
     return founded.genesis_id, invite_id, derive_persona(JOINER_SEED, founded.genesis_id)
 
 
