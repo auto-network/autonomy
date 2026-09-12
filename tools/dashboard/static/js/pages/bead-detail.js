@@ -182,6 +182,7 @@
             return;
           }
 
+          bead.children = window.beadImplementationOrder(bead.children || []);
           this.bead = bead;
           this.isApproved = (bead.labels || []).includes('readiness:approved');
           this.isRunning = (bead.labels || []).some(l =>

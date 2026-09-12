@@ -173,3 +173,62 @@ def test_approval_refuses_cross_org_before_bd(monkeypatch):
 
     assert response.status_code == 403
     assert called is False
+
+
+def test_list_hydrates_edges_in_one_org_scoped_batch(monkeypatch):
+    calls = []
+    edges = [{"issue_id": "anc-b", "depends_on_id": "anc-a", "type": "blocks"}]
+
+    async def fake_run(cmd, timeout=30, *, empty=None, beads_dir=None):
+        calls.append((cmd, beads_dir))
+        return edges if cmd[1] == "dep" else [{"id": "anc-b"}, {"id": "anc-a"}]
+
+    monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
+    monkeypatch.setattr(server, "run_cli_json", fake_run)
+    monkeypatch.setattr(data_paths, "org_beads_dir", lambda org: f"tracker:{org}")
+    response = asyncio.run(server.api_beads_list(_request("/api/beads/list", ANCHORE)))
+    assert json.loads(response.body) == [
+        {"id": "anc-b", "dependencies": edges}, {"id": "anc-a", "dependencies": []}]
+    assert calls[1] == (["bd", "dep", "list", "anc-b", "anc-a", "--json"], "tracker:anchore")
+    assert len(calls) == 2
+
+
+def test_dependency_hydration_normalizes_single_id_cli_shape(monkeypatch):
+    async def fake_run(*args, **kwargs):
+        return [{"id": "anc-epic", "dependency_type": "parent-child"}]
+
+    monkeypatch.setattr(server, "run_cli_json", fake_run)
+    rows = [{"id": "anc-a"}]
+    asyncio.run(server._hydrate_bead_dependencies(rows, beads_dir="tracker:anchore"))
+    assert rows[0]["dependencies"] == [
+        {"issue_id": "anc-a", "depends_on_id": "anc-epic", "type": "parent-child"}]
+
+
+def test_detail_cli_fallback_hydrates_child_blockers_in_same_org(monkeypatch):
+    calls = []
+
+    async def fake_run(cmd, timeout=30, *, empty=None, beads_dir=None):
+        calls.append((cmd, beads_dir))
+        if cmd[1] == "show":
+            return [{"id": "anc-epic"}]
+        if "--direction=up" in cmd:
+            return [{"id": "anc-b", "dependency_type": "parent-child"},
+                    {"id": "anc-a", "dependency_type": "parent-child"},
+                    {"id": "anc-related", "dependency_type": "relates-to"}]
+        if "anc-b" in cmd:
+            return [{"issue_id": "anc-b", "depends_on_id": "anc-a", "type": "blocks"}]
+        return []
+
+    monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
+    monkeypatch.setattr(server.dao_beads, "get_bead", lambda *args: None)
+    monkeypatch.setattr(server, "run_cli_json", fake_run)
+    monkeypatch.setattr(data_paths, "org_beads_dir", lambda org: f"tracker:{org}")
+    request = _request("/api/dao/bead/anc-epic", ANCHORE)
+    request.scope["path_params"] = {"id": "anc-epic"}
+    response = asyncio.run(server.api_dao_bead(request))
+    children = json.loads(response.body)["children"]
+    assert [c["id"] for c in children] == ["anc-b", "anc-a"]
+    assert children[0]["dependencies"][0]["depends_on_id"] == "anc-a"
+    assert children[1]["dependencies"] == []
+    assert len(calls) == 4
+    assert all(org == "tracker:anchore" for _, org in calls)
