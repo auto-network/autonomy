@@ -251,7 +251,7 @@
         </div>
       </div>
 
-      <div class="grid grid-cols-1 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)] gap-4">
+      <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
         <section class="rounded-2xl border border-gray-700 bg-gray-900/60 p-4">
           <div class="flex items-center justify-between gap-3 mb-4">
             <div>
@@ -284,35 +284,67 @@
         </section>
 
         <section class="rounded-2xl border border-gray-700 bg-gray-900/60 p-4">
-          <div class="mb-4">
-            <h2 class="text-sm font-mono text-gray-100">Mediator + Last Call</h2>
-            <div class="text-[11px] text-gray-500">Loop heartbeat and the latest observed Settings call</div>
+          <div class="flex items-center justify-between gap-3 mb-4">
+            <div>
+              <h2 class="text-sm font-mono text-amber-200">Top Lagging Sets</h2>
+              <div class="text-[11px] text-gray-500">Cumulative read time in the selected window</div>
+            </div>
+            <div class="text-[10px] uppercase tracking-wider text-gray-500" x-text="diagWindow"></div>
           </div>
-          <div class="space-y-3 text-xs font-mono">
-            <div class="flex items-center justify-between gap-3 border-b border-gray-800 pb-2">
-              <span class="text-gray-500">tick age</span>
-              <span class="text-gray-200" x-text="diagMediator && diagMediator.last_tick_age_s !== null && diagMediator.last_tick_age_s !== undefined ? formatFloat(diagMediator.last_tick_age_s, 1) + 's' : 'n/a'"></span>
+          <template x-if="diagLaggingSets.length === 0">
+            <div class="text-xs italic text-gray-500" data-testid="settings-diag-no-lagging-sets">
+              No Settings read activity captured for this window yet
             </div>
-            <div class="flex items-center justify-between gap-3 border-b border-gray-800 pb-2">
-              <span class="text-gray-500">events received</span>
-              <span class="text-gray-200" x-text="formatCount(diagMediator ? diagMediator.events_received_count : 0)"></span>
-            </div>
-            <div class="flex items-center justify-between gap-3 border-b border-gray-800 pb-2">
-              <span class="text-gray-500">handlers fired</span>
-              <span class="text-gray-200" x-text="formatCount(diagMediator ? Object.keys(diagMediator.handlers_fired_count || {}).length : 0)"></span>
-            </div>
-            <div class="flex items-center justify-between gap-3 border-b border-gray-800 pb-2">
-              <span class="text-gray-500">last call</span>
-              <span class="text-gray-200 truncate text-right" x-text="diagSummary && diagSummary.last_call ? (diagSummary.last_call.operation + ' · ' + (diagSummary.last_call.set_id || 'n/a')) : 'n/a'"></span>
-            </div>
-            <div class="space-y-1.5 pt-1">
-              <div class="text-gray-500">last error</div>
-              <div class="rounded-xl bg-gray-950/60 px-3 py-2 text-[11px] text-gray-300"
-                   x-text="diagSummary && diagSummary.last_error ? JSON.stringify(diagSummary.last_error) : 'none'"></div>
-            </div>
+          </template>
+          <div class="space-y-3" data-testid="settings-diag-lagging-chart">
+            <template x-for="row in diagLaggingSets" :key="row.set_id">
+              <div class="space-y-1.5" data-testid="settings-lagging-row" :data-set-id="row.set_id">
+                <div class="flex items-center justify-between gap-3">
+                  <div class="font-mono text-xs text-gray-200 truncate" x-text="row.set_id"></div>
+                  <div class="font-mono text-[10px] text-gray-500 shrink-0 text-right">
+                    <span class="text-amber-200" x-text="formatCount(diagActivityFor(row).read_duration_ms) + ' ms'"></span> ·
+                    <span x-text="formatCount(diagActivityFor(row).reads) + ' reads'"></span> ·
+                    <span x-text="formatCount(diagActivityFor(row).avg_read_duration_ms) + ' ms avg'"></span>
+                  </div>
+                </div>
+                <div class="h-2 rounded-full bg-gray-800 overflow-hidden">
+                  <div class="h-full rounded-full bg-amber-500/80" data-settings-lagging-bar :style="'width: ' + diagLaggingBarWidth(row)"></div>
+                </div>
+              </div>
+            </template>
           </div>
         </section>
       </div>
+
+      <section class="rounded-2xl border border-gray-700 bg-gray-900/60 p-4">
+        <div class="mb-4">
+          <h2 class="text-sm font-mono text-gray-100">Mediator + Last Call</h2>
+          <div class="text-[11px] text-gray-500">Loop heartbeat and the latest observed Settings call</div>
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 text-xs font-mono">
+          <div class="flex items-center justify-between gap-3 border-b border-gray-800 pb-2">
+            <span class="text-gray-500">tick age</span>
+            <span class="text-gray-200" x-text="diagMediator && diagMediator.last_tick_age_s !== null && diagMediator.last_tick_age_s !== undefined ? formatFloat(diagMediator.last_tick_age_s, 1) + 's' : 'n/a'"></span>
+          </div>
+          <div class="flex items-center justify-between gap-3 border-b border-gray-800 pb-2">
+            <span class="text-gray-500">events received</span>
+            <span class="text-gray-200" x-text="formatCount(diagMediator ? diagMediator.events_received_count : 0)"></span>
+          </div>
+          <div class="flex items-center justify-between gap-3 border-b border-gray-800 pb-2">
+            <span class="text-gray-500">handlers fired</span>
+            <span class="text-gray-200" x-text="formatCount(diagMediator ? Object.keys(diagMediator.handlers_fired_count || {}).length : 0)"></span>
+          </div>
+          <div class="flex items-center justify-between gap-3 border-b border-gray-800 pb-2">
+            <span class="text-gray-500">last call</span>
+            <span class="text-gray-200 truncate text-right" x-text="diagSummary && diagSummary.last_call ? (diagSummary.last_call.operation + ' · ' + (diagSummary.last_call.set_id || 'n/a')) : 'n/a'"></span>
+          </div>
+          <div class="space-y-1.5 sm:col-span-2 xl:col-span-4">
+            <div class="text-gray-500">last error</div>
+            <div class="rounded-xl bg-gray-950/60 px-3 py-2 text-[11px] text-gray-300"
+                 x-text="diagSummary && diagSummary.last_error ? JSON.stringify(diagSummary.last_error) : 'none'"></div>
+          </div>
+        </div>
+      </section>
 
       <div class="grid grid-cols-1 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)] gap-4">
         <section class="rounded-2xl border border-gray-700 bg-gray-900/60 overflow-hidden">

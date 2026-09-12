@@ -820,10 +820,14 @@ class _SettingsStatsRollup:
     set_reads: Counter[str] = dataclass_field(default_factory=Counter)
     set_writes: Counter[str] = dataclass_field(default_factory=Counter)
     set_upserts: Counter[str] = dataclass_field(default_factory=Counter)
+    set_read_duration_ms: Counter[str] = dataclass_field(default_factory=Counter)
     set_org_calls: Counter[tuple[str, str]] = dataclass_field(default_factory=Counter)
     set_org_reads: Counter[tuple[str, str]] = dataclass_field(default_factory=Counter)
     set_org_writes: Counter[tuple[str, str]] = dataclass_field(default_factory=Counter)
     set_org_upserts: Counter[tuple[str, str]] = dataclass_field(default_factory=Counter)
+    set_org_read_duration_ms: Counter[tuple[str, str]] = dataclass_field(
+        default_factory=Counter,
+    )
     orgs: Counter[str] = dataclass_field(default_factory=Counter)
 
 
@@ -982,6 +986,8 @@ class SettingsApiStats:
             if kind == "read":
                 rollup.set_reads[set_id] += 1
                 rollup.set_org_reads[(org, set_id)] += 1
+                rollup.set_read_duration_ms[set_id] += duration_ms
+                rollup.set_org_read_duration_ms[(org, set_id)] += duration_ms
             elif kind == "write":
                 rollup.set_writes[set_id] += 1
                 rollup.set_org_writes[(org, set_id)] += 1
@@ -1014,10 +1020,14 @@ class SettingsApiStats:
             out.set_reads.update(bucket.set_reads)
             out.set_writes.update(bucket.set_writes)
             out.set_upserts.update(bucket.set_upserts)
+            out.set_read_duration_ms.update(bucket.set_read_duration_ms)
             out.set_org_calls.update(bucket.set_org_calls)
             out.set_org_reads.update(bucket.set_org_reads)
             out.set_org_writes.update(bucket.set_org_writes)
             out.set_org_upserts.update(bucket.set_org_upserts)
+            out.set_org_read_duration_ms.update(
+                bucket.set_org_read_duration_ms,
+            )
             out.orgs.update(bucket.orgs)
         return out
 
@@ -1090,7 +1100,7 @@ class SettingsApiStats:
         rollup: _SettingsStatsRollup,
         *,
         scope: str | None,
-    ) -> dict[str, dict[str, int]]:
+    ) -> dict[str, dict[str, int | float]]:
         if scope is None:
             set_ids = sorted(rollup.set_ids)
             return {
@@ -1099,6 +1109,14 @@ class SettingsApiStats:
                     "reads": rollup.set_reads.get(set_id, 0),
                     "writes": rollup.set_writes.get(set_id, 0),
                     "upserts": rollup.set_upserts.get(set_id, 0),
+                    "read_duration_ms": round(
+                        rollup.set_read_duration_ms.get(set_id, 0.0), 3,
+                    ),
+                    "avg_read_duration_ms": round(
+                        rollup.set_read_duration_ms.get(set_id, 0.0)
+                        / rollup.set_reads.get(set_id, 1),
+                        3,
+                    ) if rollup.set_reads.get(set_id, 0) else 0.0,
                 }
                 for set_id in set_ids
             }
@@ -1112,6 +1130,18 @@ class SettingsApiStats:
                 "reads": rollup.set_org_reads.get((scope, set_id), 0),
                 "writes": rollup.set_org_writes.get((scope, set_id), 0),
                 "upserts": rollup.set_org_upserts.get((scope, set_id), 0),
+                "read_duration_ms": round(
+                    rollup.set_org_read_duration_ms.get(
+                        (scope, set_id), 0.0,
+                    ),
+                    3,
+                ),
+                "avg_read_duration_ms": round(
+                    rollup.set_org_read_duration_ms.get(
+                        (scope, set_id), 0.0,
+                    ) / rollup.set_org_reads.get((scope, set_id), 1),
+                    3,
+                ) if rollup.set_org_reads.get((scope, set_id), 0) else 0.0,
             }
             for set_id in set_ids
         }

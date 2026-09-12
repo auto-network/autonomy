@@ -18203,20 +18203,22 @@ async def api_graph_setting_delete(request):
     return JSONResponse({"ok": True})
 
 
-def _settings_zero_activity_metrics() -> dict[str, int]:
+def _settings_zero_activity_metrics() -> dict[str, int | float]:
     return {
         "calls": 0,
         "reads": 0,
         "writes": 0,
         "upserts": 0,
+        "read_duration_ms": 0.0,
+        "avg_read_duration_ms": 0.0,
     }
 
 
 def _settings_activity_windows_for_set(
     activity_snapshot: dict[str, Any],
     set_id: str,
-) -> dict[str, dict[str, int]]:
-    out: dict[str, dict[str, int]] = {}
+) -> dict[str, dict[str, int | float]]:
+    out: dict[str, dict[str, int | float]] = {}
     for window_name, window_metrics in activity_snapshot.items():
         row = (
             window_metrics.get(set_id)
@@ -18229,6 +18231,10 @@ def _settings_activity_windows_for_set(
                 "reads": int(row.get("reads") or 0),
                 "writes": int(row.get("writes") or 0),
                 "upserts": int(row.get("upserts") or 0),
+                "read_duration_ms": float(row.get("read_duration_ms") or 0.0),
+                "avg_read_duration_ms": float(
+                    row.get("avg_read_duration_ms") or 0.0,
+                ),
             })
         out[window_name] = merged
     return out

@@ -99,14 +99,14 @@ window.__settingsStubData = window.__settingsStubData || {
     },
     diagSetActivity: {
         'dashboard.plugin': {
-            totals: {calls: 12, reads: 7, writes: 5, upserts: 4},
-            last_10s: {calls: 4, reads: 2, writes: 2, upserts: 2},
-            last_60s: {calls: 9, reads: 5, writes: 4, upserts: 3},
+            totals: {calls: 12, reads: 7, writes: 5, upserts: 4, read_duration_ms: 70, avg_read_duration_ms: 10},
+            last_10s: {calls: 4, reads: 2, writes: 2, upserts: 2, read_duration_ms: 2000, avg_read_duration_ms: 1000},
+            last_60s: {calls: 9, reads: 5, writes: 4, upserts: 3, read_duration_ms: 50, avg_read_duration_ms: 10},
         },
         'autonomy.workspace': {
-            totals: {calls: 6, reads: 4, writes: 2, upserts: 1},
-            last_10s: {calls: 1, reads: 1, writes: 0, upserts: 0},
-            last_60s: {calls: 3, reads: 2, writes: 1, upserts: 1},
+            totals: {calls: 6, reads: 4, writes: 2, upserts: 1, read_duration_ms: 4800, avg_read_duration_ms: 1200},
+            last_10s: {calls: 1, reads: 1, writes: 0, upserts: 0, read_duration_ms: 1400, avg_read_duration_ms: 1400},
+            last_60s: {calls: 3, reads: 2, writes: 1, upserts: 1, read_duration_ms: 2600, avg_read_duration_ms: 1300},
         },
         'anchore.policy': {
             totals: {calls: 3, reads: 2, writes: 1, upserts: 1},
@@ -172,7 +172,8 @@ if (!window.__settingsFetchInstalled) {
         }
 
         function zeroActivity() {
-            return {calls: 0, reads: 0, writes: 0, upserts: 0};
+            return {calls: 0, reads: 0, writes: 0, upserts: 0,
+                    read_duration_ms: 0, avg_read_duration_ms: 0};
         }
 
         function diagActivity(setId) {
@@ -856,6 +857,93 @@ class TestSettingsPlugin:
         assert "/api/diag/settings/sets/dashboard.plugin" in (
             result.get("diag_fetches") or []
         ), result
+
+    def test_diagnostics_ranks_lagging_sets_by_cumulative_read_time(self):
+        _navigate_to_settings_and_check("", pre_settings_path="/sessions")
+        time.sleep(0.6)
+        result = _ab_eval_batch(
+            """
+            var button = document.querySelector(
+                '[data-testid="settings-tab-diagnostics"]');
+            if (button) button.click();
+            return new Promise(function (resolve) {
+                setTimeout(async function () {
+                    var root = document.querySelector(
+                        '[data-testid="settings-fragment-root"]');
+                    var data = Alpine.$data(root);
+                    var rows = Array.from(document.querySelectorAll(
+                        '[data-testid="settings-lagging-row"]'));
+                    var r = {
+                        noisy_count: document.querySelectorAll(
+                            '[data-testid="settings-noisy-row"]').length,
+                        lagging_count: rows.length,
+                        first_lagging_id: rows.length ? rows[0].dataset.setId : null,
+                        first_lagging_text: rows.length ? rows[0].textContent.trim() : '',
+                    };
+                    data.setDiagWindow('last_10s');
+                    await Alpine.nextTick();
+                    rows = Array.from(document.querySelectorAll(
+                        '[data-testid="settings-lagging-row"]'));
+                    r.ten_second_text = rows.length ? rows[0].textContent.trim() : '';
+                    r.ten_second_first_id = rows.length ? rows[0].dataset.setId : null;
+                    data.diagSets = Array.from({length: 12}, function (_, i) {
+                        var setId = i === 10 ? 'tie-b' : (i === 11 ? 'tie-a' : 'set-' + i);
+                        var duration = i < 8 ? 200 - i : (i >= 10 ? 100 : 50 - i);
+                        return {
+                            set_id: setId,
+                            activity: {
+                                last_10s: {
+                                    calls: 1, reads: 1, writes: 0, upserts: 0,
+                                    read_duration_ms: duration,
+                                    avg_read_duration_ms: duration,
+                                },
+                            },
+                        };
+                    });
+                    await Alpine.nextTick();
+                    rows = Array.from(document.querySelectorAll(
+                        '[data-testid="settings-lagging-row"]'));
+                    r.bounded_count = rows.length;
+                    r.tie_order = rows.slice(-2).map(function (row) {
+                        return row.dataset.setId;
+                    });
+                    data.diagSets.forEach(function (row) {
+                        Object.keys(row.activity || {}).forEach(function (name) {
+                            row.activity[name].read_duration_ms = 0;
+                            row.activity[name].avg_read_duration_ms = 0;
+                        });
+                    });
+                    await Alpine.nextTick();
+                    var empty = document.querySelector(
+                        '[data-testid="settings-diag-no-lagging-sets"]');
+                    r.empty_visible = !!empty && empty.offsetParent !== null;
+                    data.diagSets.forEach(function (row) {
+                        Object.keys(row.activity || {}).forEach(function (name) {
+                            delete row.activity[name].read_duration_ms;
+                            delete row.activity[name].avg_read_duration_ms;
+                        });
+                    });
+                    await Alpine.nextTick();
+                    empty = document.querySelector(
+                        '[data-testid="settings-diag-no-lagging-sets"]');
+                    r.absent_visible = !!empty && empty.offsetParent !== null;
+                    resolve(r);
+                }, 700);
+            });
+            """
+        )
+        assert result.get("noisy_count", 0) >= 1, result
+        assert result.get("lagging_count") == 2, result
+        assert result.get("first_lagging_id") == "autonomy.workspace", result
+        assert "2,600 ms" in result.get("first_lagging_text", ""), result
+        assert "2 reads" in result.get("first_lagging_text", ""), result
+        assert "1,300 ms avg" in result.get("first_lagging_text", ""), result
+        assert result.get("ten_second_first_id") == "dashboard.plugin", result
+        assert "2,000 ms" in result.get("ten_second_text", ""), result
+        assert result.get("bounded_count") == 10, result
+        assert result.get("tie_order") == ["tie-a", "tie-b"], result
+        assert result.get("empty_visible") is True, result
+        assert result.get("absent_visible") is True, result
 
     def test_state_persists_across_navigation(self):
         """Selecting org/set/member, navigating away, and returning
