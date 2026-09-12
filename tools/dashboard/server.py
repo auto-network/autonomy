@@ -1446,7 +1446,7 @@ async def api_dispatch_approved(request):
         for dep in dep_data:
             if not isinstance(dep, dict):
                 continue
-            if dep.get("dependency_type") == "parent-child":
+            if (dep.get("dependency_type") or dep.get("type")) != "blocks":
                 continue
             if dep.get("status") != "closed":
                 open_blockers.append({
