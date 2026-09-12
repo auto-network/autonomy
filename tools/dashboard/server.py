@@ -855,6 +855,26 @@ def _beads_request_org(request):
     return requested_org, None
 
 
+async def _hydrate_bead_dependencies(rows, *, beads_dir=None):
+    """Attach edges in one CLI batch, including bd's single-ID response shape."""
+    if not isinstance(rows, list) or not rows:
+        return
+    ids = [row["id"] for row in rows]
+    edges = await run_cli_json(
+        ["bd", "dep", "list", *ids, "--json"], empty=[], beads_dir=beads_dir,
+    )
+    if not isinstance(edges, list):
+        return
+    grouped = {}
+    for edge in edges:
+        if len(ids) == 1:
+            edge = {"issue_id": ids[0], "depends_on_id": edge["id"],
+                    "type": edge.get("dependency_type", edge.get("type"))}
+        grouped.setdefault(edge["issue_id"], []).append(edge)
+    for row in rows:
+        row["dependencies"] = grouped.get(row["id"], [])
+
+
 async def api_beads_list(request):
     org, refused = _beads_request_org(request)
     if refused is not None:
@@ -866,10 +886,12 @@ async def api_beads_list(request):
     if org is not None and bd_dir is None:
         return JSONResponse([])
     kwargs = {"beads_dir": bd_dir} if bd_dir is not None else {}
-    return JSONResponse(await run_cli_json(
+    rows = await run_cli_json(
         ["bd", "list", "--json", "-n", "100", "--sort", "updated"],
         empty=[], **kwargs,
-    ))
+    )
+    await _hydrate_bead_dependencies(rows, beads_dir=bd_dir)
+    return JSONResponse(rows)
 
 async def api_bead_show(request):
     bead_id = request.path_params["id"]
@@ -13732,6 +13754,7 @@ async def api_dao_bead(request):
     up = up if isinstance(up, list) else []
     down = down if isinstance(down, list) else []
     cli_bead["children"] = [c for c in up if c.get("dependency_type") == "parent-child"]
+    await _hydrate_bead_dependencies(cli_bead["children"], beads_dir=bd_dir)
     cli_bead["deps"] = down
     cli_bead.setdefault("comments", [])
     return JSONResponse(cli_bead)

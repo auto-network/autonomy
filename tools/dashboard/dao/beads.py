@@ -516,6 +516,19 @@ def get_bead(bead_id: str, org: str | None = None) -> dict | None:
             (bead_id, "parent-child"),
         )
         bead["children"] = [_coerce(r) for r in _rows(cur)]
+        if bead["children"]:
+            child_ids = [child["id"] for child in bead["children"]]
+            placeholders = ",".join(["%s"] * len(child_ids))
+            cur.execute(
+                "SELECT issue_id, depends_on_issue_id AS depends_on_id, type "
+                f"FROM dependencies WHERE issue_id IN ({placeholders})",
+                tuple(child_ids),
+            )
+            edges: dict[str, list[dict]] = {}
+            for edge in _rows(cur):
+                edges.setdefault(edge["issue_id"], []).append(edge)
+            for child in bead["children"]:
+                child["dependencies"] = edges.get(child["id"], [])
 
     return bead
 

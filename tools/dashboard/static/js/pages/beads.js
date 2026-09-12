@@ -684,14 +684,17 @@
 
         const groups = Object.entries(epicMap).map(([epicId, g]) => {
           const epic = g.epic || this.allBeads.find(b => b.id === epicId);
-          const allChildren = allChildrenByEpic[epicId] || g.children;
+          const allChildren = window.beadImplementationOrder(allChildrenByEpic[epicId] || g.children);
+          // Sort before filtering so hidden intermediate prerequisites retain
+          // the same relative implementation order for visible siblings.
+          const children = allChildren.filter(c => filteredIds.has(c.id));
           const closed = allChildren.filter(c => c.status === 'closed').length;
           const total = allChildren.length;
           const pct = total ? Math.round((closed / total) * 100) : 0;
           const barColor = pct === 100 ? 'bg-green-500' : pct > 50 ? 'bg-indigo-500' : 'bg-amber-500';
           const childCount = g.children.length;
           const countLabel = (hasFilters && childCount !== total) ? `${childCount}/${total}` : `${total}`;
-          return { epicId, epic, children: g.children, allChildren, closed, total, pct, barColor, countLabel };
+          return { epicId, epic, children, allChildren, closed, total, pct, barColor, countLabel };
         });
 
         return { groups, orphans };

@@ -288,7 +288,7 @@ def get_open_beads(limit: int = 200) -> list[dict]:
     return [b for b in _beads() if b["status"] != "closed"][:limit]
 
 
-def get_bead(bead_id: str) -> dict | None:
+def get_bead(bead_id: str, org: str | None = None) -> dict | None:
     beads = _beads()
     bead = next((b for b in beads if b["id"] == bead_id), None)
     if bead is None:
