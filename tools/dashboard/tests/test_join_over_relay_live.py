@@ -134,7 +134,9 @@ def stack(tmp_path, monkeypatch):
         connector = TunnelConnector(
             f"ws://127.0.0.1:{port}", ORG_UUID, session_key, session_cert,
             handler=link_serving.make_grant_handler(ORG),
-            link_key_for=lambda _token: link_key,
+            channel_authorization_for=lambda _token: {
+                "protocol": "public-link", "key": link_key,
+            },
             min_backoff=0.1, max_backoff=1.0,
         )
         yield {"port": port, "root": root, "root_pub": root.public_hex,

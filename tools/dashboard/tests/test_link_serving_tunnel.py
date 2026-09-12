@@ -8,16 +8,16 @@ LOCAL grant cache:
 
 * cached + valid   → the binder-sized Present fixture streams through
   the E2E channel and matches byte length exactly;
-* absent from the cache → REFUSED, even though the relay dutifully
-  requested it — a registry compromise alone opens nothing (I9 pinned);
-* cached but expired (``meta.ttl``) → REFUSED, byte-identical to the
-  absent case.
+* absent from the cache → channel closes before authentication, even though
+  the relay requested it — a registry compromise alone opens nothing;
+* cached but expired (``meta.ttl``) → the same pre-authentication closure.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import socket
@@ -40,11 +40,6 @@ from tools.network.idkit import KeyPair, Subject, canonical_json, issue_cert
 from tools.network.registry.signing import sign_request
 from tools.dashboard import link_serving_supervisor as sup
 from tools.dashboard.link_probe import probe_link
-from tools.graph.schemas.machine_identity import (
-    MACHINE_IDENTITY_KEY,
-    MACHINE_IDENTITY_REVISION,
-    MACHINE_IDENTITY_SET_ID,
-)
 from tools.graph.schemas.network_identity import (
     NETWORK_BINDING_REVISION,
     NETWORK_BINDING_SET_ID,
@@ -55,8 +50,6 @@ from tools.graph.schemas.personal_identity import (
     PERSONAL_IDENTITY_REVISION,
     PERSONAL_IDENTITY_SET_ID,
 )
-from tools.network import fleet_roster
-from tools.network.fleet_relay_sync import FleetRuntimeWarmCache
 from tools.network.idkit import Subject, issue_cert
 from tools.network.idkit.root_factor_policy import mint_password_armor
 from tools.network.relaykit.connector import TunnelConnector
@@ -120,8 +113,14 @@ def publish_link(db, target_uuid: str) -> str:
     return mint_link_at(db, ORG_UUID, target_uuid)
 
 
+def test_link_key(token: str) -> KeyPair:
+    """Stable per-token keypair for this hermetic serving stack."""
+    return KeyPair.from_private_hex(hashlib.sha256(token.encode()).hexdigest())
+
+
 def cache_grant(token: str, target_uuid: str, *, meta: dict | None = None,
                 issued_at: str | None = None, channel_pub: str | None = None) -> None:
+    channel_pub = channel_pub or test_link_key(token).public_hex
     settings_ops.add_setting(
         NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION, token,
         {
@@ -138,7 +137,7 @@ def cache_grant(token: str, target_uuid: str, *, meta: dict | None = None,
     )
 
 
-async def fetch_over_tunnel(port: int, token: str, root_pub: str,
+async def fetch_over_tunnel(port: int, token: str, link_pub: str,
                             timeout: float = 20.0) -> bytes:
     """Connect a viewer, run the E2E handshake, fetch once."""
     deadline = time.time() + timeout
@@ -146,7 +145,7 @@ async def fetch_over_tunnel(port: int, token: str, root_pub: str,
     while time.time() < deadline:
         try:
             channel = await ViewerChannel.connect(
-                f"ws://127.0.0.1:{port}", token, root_pub=root_pub, org=ORG_UUID,
+                f"ws://127.0.0.1:{port}", token, link_pub=link_pub, org=ORG_UUID,
             )
             break
         except Exception as exc:  # tunnel may still be dialing; retry
@@ -157,6 +156,18 @@ async def fetch_over_tunnel(port: int, token: str, root_pub: str,
     async with channel:
         await channel.send_message(canonical_json({"op": "fetch", "v": 1}))
         return await channel.recv_message()
+
+
+async def assert_authentication_refused(port: int, token: str, link_pub: str) -> None:
+    """A missing usable grant/key emits no hello or application response."""
+    with pytest.raises(Exception):
+        await asyncio.wait_for(
+            ViewerChannel.connect(
+                f"ws://127.0.0.1:{port}", token,
+                link_pub=link_pub, org=ORG_UUID,
+            ),
+            timeout=5.0,
+        )
 
 
 @pytest.fixture
@@ -217,6 +228,11 @@ def stack(tmp_path, monkeypatch):
             f"ws://127.0.0.1:{port}", ORG_UUID, session_key, session_cert,
             handler=link_serving.make_grant_handler(ORG),
             channel_cert=channel_cert,
+            channel_authorization_for=lambda token: {
+                "protocol": "public-link",
+                "key": test_link_key(token),
+            } if link_serving.check_grant(token, org=ORG) else (_ for _ in ()).throw(
+                PermissionError("link unavailable")),
             machine_key=KeyPair.generate(),
             min_backoff=0.1, max_backoff=1.0,
         )
@@ -250,7 +266,7 @@ def test_tunnel_serves_only_against_local_grants(stack):
             await asyncio.wait_for(connector.connected.wait(), timeout=15)
 
             served = await fetch_over_tunnel(
-                stack["port"], granted, stack["root_pub"])
+                stack["port"], granted, test_link_key(granted).public_hex)
             header, _, body = served.partition(b"\n")
             assert json.loads(header) == {
                 "v": 1, "status": "ok", "kind": "present",
@@ -263,17 +279,15 @@ def test_tunnel_serves_only_against_local_grants(stack):
             assert len(body) == len(BINDER_BYTES)  # binder-sized, byte-exact
             assert body == BINDER_BYTES
 
-            # I9 pinned: the REGISTRY vouches for this token and the relay
-            # opens the channel — but with no local grant, nothing serves.
-            refused = await fetch_over_tunnel(
-                stack["port"], registry_only, stack["root_pub"])
-            assert refused == link_serving.REFUSED
-
-            # Expired local grant → same refusal, byte-identical.
-            stale = await fetch_over_tunnel(
-                stack["port"], expired, stack["root_pub"])
-            assert stale == link_serving.REFUSED
-            assert stale == refused
+            # The registry knows these tokens, but neither has a usable local
+            # grant/key. Both close before authentication or application data.
+            await assert_authentication_refused(
+                stack["port"], registry_only,
+                test_link_key(registry_only).public_hex,
+            )
+            await assert_authentication_refused(
+                stack["port"], expired, test_link_key(expired).public_hex,
+            )
         finally:
             connector.stop()
             task.cancel()
@@ -310,21 +324,24 @@ def test_probe_confirms_live_link_and_flags_dead_grant(stack):
 
             live = await probe_link(
                 relay_url=relay, token=granted,
-                root_pub=stack["root_pub"], org_uuid=ORG_UUID,
+                link_pub=test_link_key(granted).public_hex, org_uuid=ORG_UUID,
+                operation="head",
                 total_timeout=15.0,
             )
             assert live["live"] is True, live
             assert live["status"] == 200
             assert live["content_length"] == len(BINDER_BYTES)  # headers-only
 
-            # Tunnel up (handshake succeeds), grant absent → not live, 404.
+            # Tunnel up, grant absent: authentication never completes, so
+            # there is deliberately no application status.
             dead = await probe_link(
                 relay_url=relay, token=registry_only,
-                root_pub=stack["root_pub"], org_uuid=ORG_UUID,
+                link_pub=test_link_key(registry_only).public_hex, org_uuid=ORG_UUID,
+                operation="head",
                 total_timeout=15.0,
             )
             assert dead["live"] is False, dead
-            assert dead["status"] == 404
+            assert dead["status"] is None
         finally:
             connector.stop()
             task.cancel()
@@ -375,7 +392,9 @@ def _provision_serve_cert(tmp_path, root, port):
     )
 
 
-def _enroll_fleet_machine(tmp_path, monkeypatch, root) -> Path:
+def _enroll_fleet_machine(
+    tmp_path, monkeypatch, root, *, org_uuid=ORG_UUID,
+) -> Path:
     """Make this installation an enrolled, serving-permitted fleet machine
     and warm the connector's runtime cache for ORG_UUID.
 
@@ -387,11 +406,6 @@ def _enroll_fleet_machine(tmp_path, monkeypatch, root) -> Path:
     row (the serving permit re-validates roster membership), and a cached
     credential whose reachability half carries the machine key the v2 hello
     co-signs with. Returns the connector's log path for diagnostics."""
-    machine = KeyPair.generate()
-    process = KeyPair.generate()
-    machine_id = "cc" * 32
-    now = int(time.time())
-
     with settings_ops.identity_write_context():
         settings_ops.add_setting(
             PERSONAL_IDENTITY_SET_ID, PERSONAL_IDENTITY_REVISION, "default",
@@ -404,27 +418,6 @@ def _enroll_fleet_machine(tmp_path, monkeypatch, root) -> Path:
             },
             org=None, state="raw",
         )
-    fleet_roster.store_entry(
-        fleet_roster.enroll(
-            root, machine_id=machine_id, machine_pub=machine.public_hex),
-        org=None,
-    )
-    settings_ops.upsert_by_key(
-        MACHINE_IDENTITY_SET_ID, MACHINE_IDENTITY_REVISION, MACHINE_IDENTITY_KEY,
-        {"machine_id": machine_id}, org="machine", state="raw",
-    )
-
-    delegation = issue_cert(
-        machine, process.public_hex, scope=["fleet:sync"],
-        org=f"personal:{root.public_hex}",
-        subject=Subject("machine", machine_id),
-        not_before=now - 30, not_after=now + 3600,
-    )
-    reachability = issue_cert(
-        root, machine.public_hex, scope=("node:announce", "node:lookup"),
-        org=ORG_UUID, subject=Subject("machine", machine_id),
-        not_before=now - 30, not_after=now + 3600,
-    )
     # A temp dir stands in for the ramfs key cache, as the warm-cache suite
     # does; the guard itself is memory_cache's proof. The subprocess reads
     # the same directory through the inherited env (see _ramfs_free_spawn).
@@ -435,14 +428,8 @@ def _enroll_fleet_machine(tmp_path, monkeypatch, root) -> Path:
         "tools.network.storagekit.memory_cache.assert_memory_backed",
         lambda *a, **k: None,
     )
-    FleetRuntimeWarmCache(ORG_UUID).store({
-        "machine_id": machine_id,
-        "machine_pub": machine.public_hex,
-        "process_private_seed": process.private_hex,
-        "delegation_cert": delegation.to_dict(),
-        "machine_private_seed": machine.private_hex,
-        "reachability_cert": reachability.to_dict(),
-    })
+    from deploy.harness.fixture_ops import provision_fleet_runtime
+    provision_fleet_runtime(personal_root=root, org_uuid=org_uuid)
     return tmp_path / "network" / "serve.log"
 
 
@@ -502,7 +489,7 @@ def test_supervisor_brings_serving_live_end_to_end(stack, tmp_path, monkeypatch)
             while loop.time() < deadline:
                 try:
                     channel = await ViewerChannel.connect(
-                        relay, token, root_pub=None, link_pub=link_key.public_hex,
+                        relay, token, link_pub=link_key.public_hex,
                         org=ORG_UUID,
                     )
                     try:
@@ -546,7 +533,8 @@ def test_probe_reports_unreachable_when_no_connector(stack):
         # connector deliberately NOT started.
         verdict = await probe_link(
             relay_url=relay, token=token,
-            root_pub=stack["root_pub"], org_uuid=ORG_UUID,
+            link_pub=test_link_key(token).public_hex, org_uuid=ORG_UUID,
+            operation="head",
             total_timeout=4.0, connect_timeout=1.5,
         )
         assert verdict["live"] is False, verdict
@@ -558,10 +546,8 @@ def test_probe_reports_unreachable_when_no_connector(stack):
 def test_per_link_key_serves_end_to_end(stack, monkeypatch):
     """The keystone loop for graph://807b4e11-3e9, on the REAL stack: a link
     whose grant carries a channel key serves over the per-link handshake (the
-    viewer verifies the fragment key, no root pin), a legacy keyless link
-    keeps serving over the certificate path ON THE SAME CONNECTOR at the same
-    time, a fragment-less open of the keyed link fails closed, and revoking
-    the keyed link ends its serving."""
+    viewer verifies the fragment key, no root pin), and revoking either the
+    grant or private key prevents a channel from authenticating."""
     from tools.dashboard import link_channel_key as lck
     from tools.network.idkit import KeyPair as _KP
 
@@ -570,14 +556,12 @@ def test_per_link_key_serves_end_to_end(stack, monkeypatch):
         variants=[{"id": "v1", "html": BINDER_HTML}],
     )
     keyed = publish_link(stack["db"], binder_rev)
-    legacy = publish_link(stack["db"], binder_rev)
 
     # The keyed link: grant row carries channel_pub; the private seed lives
     # behind the link_channel_key settings seam (in-memory here — the vault
     # sealing itself is the vault suite's proof; this test proves the loop).
     link_key = _KP.generate()
-    cache_grant(keyed, binder_rev)
-    cache_grant(legacy, binder_rev)
+    cache_grant(keyed, binder_rev, channel_pub=link_key.public_hex)
     seeds = {keyed: link_key.private_hex}
     monkeypatch.setattr(
         lck.settings_ops, "read_set_key",
@@ -585,12 +569,9 @@ def test_per_link_key_serves_end_to_end(stack, monkeypatch):
             ({"payload": {"seed": seeds[key]}} if key in seeds else None))
 
     # Wire the resolver exactly as link_serving wires it in production.
-    def resolver(token):
-        try:
-            return lck.channel_key_for(token, ORG)
-        except lck.ChannelKeyUnavailable:
-            return None
-    stack["connector"]._link_key_for = resolver
+    stack["connector"]._channel_authorization_for = lambda token: {
+        "protocol": "public-link", "key": lck.channel_key_for(token, ORG),
+    }
 
     async def run():
         connector = stack["connector"]
@@ -611,23 +592,7 @@ def test_per_link_key_serves_end_to_end(stack, monkeypatch):
             assert body == BINDER_BYTES
             await channel.close()
 
-            # 2. The legacy link still serves via the certificate path, on
-            #    the same connector, in the same breath — dual-mode proof.
-            legacy_served = await fetch_over_tunnel(
-                stack["port"], legacy, stack["root_pub"])
-            assert legacy_served.partition(b"\n")[2] == BINDER_BYTES
-
-            # 3. Opening the keyed link WITHOUT its fragment fails closed:
-            #    the server answers with link_sig, the root-pin viewer can't
-            #    verify it.
-            with pytest.raises(Exception) as excinfo:
-                await ViewerChannel.connect(
-                    f"ws://127.0.0.1:{stack['port']}", keyed,
-                    root_pub=stack["root_pub"], org=ORG_UUID,
-                )
-            assert "fragment" in str(excinfo.value)
-
-            # 4. Revoke: grant row and seed die; the keyed link stops serving
+            # Revoke: grant row and seed die; the keyed link stops serving
             #    even for a viewer still holding the fragment.
             for member in settings_ops.read_owned_set(
                     NETWORK_LINK_GRANT_SET_ID, org=ORG,
@@ -635,9 +600,9 @@ def test_per_link_key_serves_end_to_end(stack, monkeypatch):
                 if member.key == keyed:
                     settings_ops.remove_setting(member.id, org=ORG)
             del seeds[keyed]
-            revoked = await fetch_over_tunnel(
-                stack["port"], keyed, stack["root_pub"])
-            assert revoked == link_serving.REFUSED
+            with pytest.raises(AssertionError, match="viewer could not connect"):
+                await fetch_over_tunnel(
+                    stack["port"], keyed, link_key.public_hex, timeout=2.0)
         finally:
             connector.stop()
             task.cancel()

@@ -50,7 +50,12 @@ import websockets
 
 from tools.network.idkit import DelegationCert, KeyPair
 
-from .channel import ChannelCrypto, build_server_hello, parse_client_hello
+from .channel import (
+    ChannelCrypto,
+    build_certificate_server_hello,
+    build_link_server_hello,
+    parse_client_hello,
+)
 from .frames import (
     CHANNEL_ID_LEN,
     CTRL_CHANNEL_ID,
@@ -269,20 +274,13 @@ async def _serve_channel_records(
                 await result
 
 
-async def serve_channel(key: KeyPair, cert: DelegationCert = None, *, org: str,
-                        token: str, recv, send, handler,
-                        link_key: "KeyPair | None" = None) -> None:
-    """Authenticate to a viewer, then serve its record exchanges.
-
-    With *link_key* the server authenticates by the per-link keypair
-    (graph://807b4e11-3e9); otherwise by the org-delegated *cert* (legacy)."""
+async def _serve_authenticated_channel(*, org: str, token: str, recv, send,
+                                       handler, hello_builder) -> None:
     first = await recv()
     if first is None:
         return
     client_eph = parse_client_hello(first)
-    eph_priv, server_hello, transcript_hash = build_server_hello(
-        key, cert, org=org, token=token, client_eph=client_eph, link_key=link_key
-    )
+    eph_priv, server_hello, transcript_hash = hello_builder(client_eph)
     await send(tag_viewer_message(VIEWER_KIND_RECORD, server_hello))
     crypto = ChannelCrypto.server(eph_priv, client_eph, transcript_hash)
     await _serve_channel_records(
@@ -291,6 +289,27 @@ async def serve_channel(key: KeyPair, cert: DelegationCert = None, *, org: str,
         recv=recv,
         send=lambda payload: send(tag_viewer_message(VIEWER_KIND_RECORD, payload)),
         handler=handler,
+    )
+
+
+async def serve_link_channel(link_key: KeyPair, *, org: str, token: str,
+                             recv, send, handler) -> None:
+    """Serve a public link authenticated only by its fragment key."""
+    await _serve_authenticated_channel(
+        org=org, token=token, recv=recv, send=send, handler=handler,
+        hello_builder=lambda client_eph: build_link_server_hello(
+            link_key, org=org, token=token, client_eph=client_eph),
+    )
+
+
+async def serve_certificate_channel(key: KeyPair, cert: DelegationCert, *,
+                                    org: str, token: str, recv, send,
+                                    handler) -> None:
+    """Serve an explicitly typed non-link channel with a delegated cert."""
+    await _serve_authenticated_channel(
+        org=org, token=token, recv=recv, send=send, handler=handler,
+        hello_builder=lambda client_eph: build_certificate_server_hello(
+            key, cert, org=org, token=token, client_eph=client_eph),
     )
 
 
@@ -475,7 +494,7 @@ class TunnelConnector:
         caps: tuple = (),
         stream_handler=None,
         on_reprove=None,
-        link_key_for=None,
+        channel_authorization_for=None,
         membership_proof_for=None,
         fleet_stream_window=None,
         fleet_stream_offer=None,
@@ -513,11 +532,9 @@ class TunnelConnector:
         #: async (host, reservation) -> (reader, writer) | None — the
         #: dashboard's dial-only raw-stream seam (stream_adapter.py).
         self._stream_handler = stream_handler
-        #: (token) -> KeyPair | None: the per-link channel signing key for a
-        #: served link (graph://807b4e11-3e9). Supplied by the dashboard, which
-        #: resolves it from the vault; None (or an unset callback) means legacy
-        #: certificate serving for that link.
-        self._link_key_for = link_key_for
+        #: (token) -> an explicit public-link or Fleet-enrollment authorization.
+        #: Protocol selection never derives from an absent key.
+        self._channel_authorization_for = channel_authorization_for
         #: async (seq) -> membership_proof rider | None. Called when the
         #: registry PUSHES a reprove-required control frame after adopting a
         #: newer membership checkpoint (auto-3bhy3). The dashboard supplies a
@@ -927,12 +944,18 @@ class TunnelConnector:
         (``peer.PeerParkConnector``) overrides this to first demand the
         relay's own ``relay:serve`` proof before presenting a hello."""
         proof = None
-        if self._machine_key is not None and self._membership_proof_for is not None:
+        if self._membership_proof_for is not None:
             try:
                 proof = await self._membership_proof_for()
-            except Exception:
-                proof = None  # fall back to v2 if the proof can't be built
-        if proof is not None and self._machine_key is not None:
+            except Exception as exc:
+                raise ConnectionError(
+                    "refusing organization tunnel without membership proof"
+                ) from exc
+            if proof is None:
+                raise ConnectionError(
+                    "refusing organization tunnel without membership proof"
+                )
+        if self._membership_proof_for is not None:
             await ws.send(build_tunnel_hello_v3(
                 self._key, self._cert, machine_key=self._machine_key,
                 org=self._org, ts=int(time.time()), caps=self._caps,
@@ -1164,18 +1187,26 @@ class TunnelConnector:
         """One viewer channel: handshake, then request/response messages."""
         try:
             import inspect
-            link_key = None
-            if self._link_key_for is not None:
-                link_key = self._link_key_for(token)
-                if inspect.isawaitable(link_key):
-                    link_key = await link_key
-            await serve_channel(
-                self._key, self._channel_cert, org=self._org, token=token,
-                recv=queue.get,
-                send=lambda data: send_frame(FRAME_DATA, channel_id, data),
-                handler=self._handler,
-                link_key=link_key,
-            )
+            if self._channel_authorization_for is None:
+                raise PermissionError("channel authorization unavailable")
+            authorization = self._channel_authorization_for(token)
+            if inspect.isawaitable(authorization):
+                authorization = await authorization
+            protocol = authorization.get("protocol")
+            common = {
+                "org": self._org,
+                "token": token,
+                "recv": queue.get,
+                "send": lambda data: send_frame(FRAME_DATA, channel_id, data),
+                "handler": self._handler,
+            }
+            if protocol == "public-link":
+                await serve_link_channel(authorization["key"], **common)
+            elif protocol == "fleet-enrollment":
+                await serve_certificate_channel(
+                    self._key, self._channel_cert, **common)
+            else:
+                raise PermissionError("channel authorization refused")
         except Exception:  # HandshakeError, RecordError, transport failures
             with contextlib.suppress(Exception):
                 await send_frame(FRAME_CLOSE, channel_id)
@@ -1203,6 +1234,12 @@ def main() -> None:
         "--channel-cert-file",
         help=("identity-neutral certificate for viewer SERVER_HELLO; defaults "
               "to --cert-file for generic/test connectors"),
+    )
+    parser.add_argument(
+        "--channel-protocol",
+        choices=["fleet-enrollment"],
+        required=True,
+        help="explicit non-public viewer protocol for this standalone connector",
     )
     parser.add_argument("--mode", choices=["echo", "serve-file"], default="echo")
     parser.add_argument("--file", help="file to serve (serve-file mode)")
@@ -1237,6 +1274,9 @@ def main() -> None:
     connector = TunnelConnector(
         args.relay, args.org, key, cert, handler, channel_cert=channel_cert,
         machine_key=KeyPair.generate(),
+        channel_authorization_for=lambda _token: {
+            "protocol": args.channel_protocol,
+        },
         min_backoff=args.min_backoff, max_backoff=args.max_backoff,
     )
     asyncio.run(connector.run())

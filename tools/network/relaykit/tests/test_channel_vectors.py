@@ -131,7 +131,7 @@ def _keys(hs):
 
 def test_handshakes_verify_and_keys_rederive(vectors):
     for hs in vectors["handshakes"]:
-        sp, tr = ch.verify_server_hello(
+        sp, tr = ch.verify_certificate_server_hello(
             bytes.fromhex(hs["server_hello_utf8_hex"]), root_pub=hs["root"]["public_hex"],
             org=hs["org"], token=hs["token"], client_eph=hs["client_public_hex"], now=hs["now"])
         assert sp == hs["server_public_hex"]
@@ -190,7 +190,7 @@ def test_every_negative_is_refused(vectors):
         inp = nc["input"]
         with pytest.raises((HandshakeError, RecordError)):
             if nc["stage"] == "hello":
-                ch.verify_server_hello(
+                ch.verify_certificate_server_hello(
                     bytes.fromhex(inp["wire_utf8_hex"]), root_pub=inp["root_public_hex"],
                     org=inp["org"], token=inp["token"], client_eph=inp["client_public_hex"],
                     now=inp["now"])

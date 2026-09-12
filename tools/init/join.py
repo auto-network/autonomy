@@ -7,9 +7,9 @@ carries only ciphertext frames between the joining node and the org's.
 
 The order matters and is enforced:
 
-1. **Pin from the invitation, not the transport.** ``root_pub`` arrives
-   in the user-carried code; the channel is opened against it, and the
-   context the org returns is checked against the invitation's anchor.
+1. **Pin from the invitation, not the transport.** ``channel_pub`` arrives
+   in the user-carried code; the channel is opened against that per-link key,
+   and the context's organization identifier is checked against the invitation.
    A relay that answers for the wrong org fails the check rather than
    silently joining the invitee somewhere else.
 2. **Mint locally, or not at all.** The personal root is the asset that
@@ -74,8 +74,8 @@ class JoinOutcome:
 class JoinTransport(Protocol):
     """One request/response over the org:join channel.
 
-    Production is relaykit's ``ViewerChannel`` (E2E, pinned to the org
-    root). Tests supply an in-process transport so the orchestration
+    Production is relaykit's ``ViewerChannel`` (E2E, pinned to the fragment
+    key). Tests supply an in-process transport so the orchestration
     under test is the real one.
     """
 
@@ -172,8 +172,8 @@ def _context(transport: JoinTransport, invitation: Invitation) -> dict:
 def verify_anchor(context: dict, invitation: Invitation) -> None:
     """The org that answered must be the org the invitation names.
 
-    The channel is already pinned to ``invitation.root_pub`` by the
-    handshake; this re-checks the identity the org states about itself,
+    The channel is already pinned to ``invitation.channel_pub`` by the
+    handshake; this re-checks the organization identifier stated in context,
     so a transport that somehow reached a different node cannot pass a
     context off as the invited org's.
     """
@@ -182,9 +182,6 @@ def verify_anchor(context: dict, invitation: Invitation) -> None:
         raise AnchorMismatch(
             f"channel answered for org {stated}, invitation names {invitation.org}"
         )
-    stated_root = context.get("root_pub")
-    if stated_root is not None and stated_root != invitation.root_pub:
-        raise AnchorMismatch("channel presented a different org root than the invitation")
 
 
 def _mint_personal_identity(password: str, *, display_name: str) -> bytes:
@@ -608,7 +605,7 @@ class ViewerJoinTransport:
         channel = await ViewerChannel.connect(
             self._relay_url,
             self._invitation.channel_token,
-            root_pub=self._invitation.root_pub,
+            link_pub=self._invitation.channel_pub,
             org=self._invitation.org,
             open_timeout=self._timeout,
         )

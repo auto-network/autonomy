@@ -1,8 +1,8 @@
 """Viewer-side channel client — the bootloader's reference implementation.
 
-This is what the `/l/{token}` static JS will reimplement in WebCrypto:
-fetch the envelope (org + root_pub), open the channel WebSocket, run the
-X25519 handshake with the org root as the pin (I5), then exchange
+This is what the `/l/{token}` static JS reimplements in WebCrypto:
+decode the fragment key, open the channel WebSocket, run the X25519 handshake
+with that per-link key as the pin (I5), then exchange
 AES-256-GCM messages. Kept dependency-light and WebCrypto-shaped on
 purpose — every primitive used here (X25519, HKDF-SHA256, AES-GCM,
 Ed25519 verify) exists in ``crypto.subtle``.
@@ -21,7 +21,8 @@ from .channel import (
     ChannelCrypto,
     HandshakeError,
     build_client_hello,
-    verify_server_hello,
+    verify_certificate_server_hello,
+    verify_link_server_hello,
 )
 from .frames import (
     VIEWER_KIND_FEED,
@@ -56,9 +57,8 @@ def read_viewer_record(raw: bytes) -> bytes:
 class ViewerChannel:
     """An established E2E channel from the viewer end.
 
-    ``root_pub`` and ``org`` come from the registry envelope
-    (``GET /v1/links/{token}/envelope``) — fetched over HTTPS *before*
-    any channel bytes flow; that ordering is what makes the pin sound.
+    ``link_pub`` comes from the URL fragment and ``org`` identifies the
+    handshake domain. The relay never receives the fragment key.
     """
 
     def __init__(self, ws, crypto: ChannelCrypto):
@@ -128,8 +128,7 @@ class ViewerChannel:
         transport,
         token: str,
         *,
-        root_pub: Optional[str] = None,
-        link_pub: Optional[str] = None,
+        link_pub: str,
         org: str,
         now: Optional[int] = None,
     ) -> "ViewerChannel":
@@ -147,14 +146,12 @@ class ViewerChannel:
             if isinstance(server_hello, str):
                 raise HandshakeError("expected binary SERVER_HELLO")
             server_hello = read_viewer_record(server_hello)
-            server_eph, transcript_hash = verify_server_hello(
+            server_eph, transcript_hash = verify_link_server_hello(
                 server_hello,
-                root_pub=root_pub,
                 link_pub=link_pub,
                 org=org,
                 token=token,
                 client_eph=client_eph,
-                now=now,
             )
             crypto = ChannelCrypto.client(eph_priv, server_eph, transcript_hash)
         except BaseException:
@@ -171,8 +168,7 @@ class ViewerChannel:
         relay_url: str,
         token: str,
         *,
-        root_pub: Optional[str] = None,
-        link_pub: Optional[str] = None,
+        link_pub: str,
         org: str,
         now: Optional[int] = None,
         open_timeout: float = 10.0,
@@ -194,7 +190,7 @@ class ViewerChannel:
             ping_timeout=ping_timeout,
         )
         return await cls.authenticate(
-            ws, token, root_pub=root_pub, link_pub=link_pub, org=org, now=now
+            ws, token, link_pub=link_pub, org=org, now=now
         )
 
     async def send_message(self, data: bytes) -> None:
@@ -237,3 +233,71 @@ class ViewerChannel:
 
     async def __aexit__(self, *exc) -> None:
         await self.close()
+
+
+class CertificateViewerChannel(ViewerChannel):
+    """Explicit client for typed non-public certificate channels.
+
+    Fleet enrollment and direct/ICE transports use this API. Public links
+    must use :class:`ViewerChannel` and their fragment-carried link key.
+    """
+
+    @classmethod
+    async def authenticate(
+        cls,
+        transport,
+        token: str,
+        *,
+        root_pub: str,
+        org: str,
+        now: Optional[int] = None,
+    ) -> "CertificateViewerChannel":
+        try:
+            eph_priv, client_hello = build_client_hello()
+            client_eph = eph_priv.public_key().public_bytes_raw().hex()
+            await transport.send(client_hello)
+            server_hello = await transport.recv()
+            if isinstance(server_hello, str):
+                raise HandshakeError("expected binary SERVER_HELLO")
+            server_hello = read_viewer_record(server_hello)
+            server_eph, transcript_hash = verify_certificate_server_hello(
+                server_hello,
+                root_pub=root_pub,
+                org=org,
+                token=token,
+                client_eph=client_eph,
+                now=now,
+            )
+            crypto = ChannelCrypto.client(eph_priv, server_eph, transcript_hash)
+        except BaseException:
+            with contextlib.suppress(Exception):
+                result = transport.close()
+                if inspect.isawaitable(result):
+                    await result
+            raise
+        return cls(transport, crypto)
+
+    @classmethod
+    async def connect(
+        cls,
+        relay_url: str,
+        token: str,
+        *,
+        root_pub: str,
+        org: str,
+        now: Optional[int] = None,
+        open_timeout: float = 10.0,
+        ping_interval: Optional[float] = 20.0,
+        ping_timeout: Optional[float] = 20.0,
+    ) -> "CertificateViewerChannel":
+        ws = await websockets.connect(
+            f"{relay_url.rstrip('/')}/v1/links/{token}/channel",
+            max_size=2**22,
+            open_timeout=open_timeout,
+            compression=None,
+            ping_interval=ping_interval,
+            ping_timeout=ping_timeout,
+        )
+        return await cls.authenticate(
+            ws, token, root_pub=root_pub, org=org, now=now
+        )

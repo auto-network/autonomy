@@ -16,9 +16,11 @@ from tools.network.relaykit.channel import (
     HandshakeError,
     RecordError,
     build_client_hello,
-    build_server_hello,
+    build_certificate_server_hello,
+    build_link_server_hello,
     parse_client_hello,
-    verify_server_hello,
+    verify_certificate_server_hello,
+    verify_link_server_hello,
 )
 from tools.network.relaykit.frames import (
     VIEWER_KIND_FEED,
@@ -27,8 +29,11 @@ from tools.network.relaykit.frames import (
     split_viewer_message,
     tag_viewer_message,
 )
-from tools.network.relaykit.connector import serve_channel
-from tools.network.relaykit.viewer import ViewerChannel
+from tools.network.relaykit.connector import (
+    serve_certificate_channel,
+    serve_link_channel,
+)
+from tools.network.relaykit.viewer import CertificateViewerChannel, ViewerChannel
 from tools.network.relaykit.ice_signaling import (
     IceAnswer,
     IceCapacity,
@@ -45,10 +50,10 @@ def handshake(root, session_key, session_cert, now):
     """Run a full happy-path handshake; returns (client_crypto, server_crypto)."""
     client_priv, client_hello = build_client_hello()
     client_eph = parse_client_hello(client_hello)
-    server_priv, server_hello, server_th = build_server_hello(
+    server_priv, server_hello, server_th = build_certificate_server_hello(
         session_key, session_cert, org=ORG, token=TOKEN, client_eph=client_eph
     )
-    server_eph, client_th = verify_server_hello(
+    server_eph, client_th = verify_certificate_server_hello(
         server_hello, root_pub=root.public_hex, org=ORG, token=TOKEN,
         client_eph=client_eph, now=now,
     )
@@ -70,7 +75,7 @@ class TestHandshake:
         assert message == b"hello from the dashboard"
 
     def _server_hello(self, session_key, session_cert, client_eph):
-        _, server_hello, _ = build_server_hello(
+        _, server_hello, _ = build_certificate_server_hello(
             session_key, session_cert, org=ORG, token=TOKEN, client_eph=client_eph
         )
         return server_hello
@@ -86,7 +91,7 @@ class TestHandshake:
         tampered = json.loads(server_hello)
         tampered["eph_pub"] = mitm_eph
         with pytest.raises(HandshakeError):
-            verify_server_hello(
+            verify_certificate_server_hello(
                 canonical_json(tampered), root_pub=root.public_hex, org=ORG,
                 token=TOKEN, client_eph=client_eph, now=now,
             )
@@ -101,7 +106,7 @@ class TestHandshake:
         # Dashboard saw (and signed) the relay's key, not the viewer's.
         server_hello = self._server_hello(session_key, session_cert, swapped_eph)
         with pytest.raises(HandshakeError):
-            verify_server_hello(
+            verify_certificate_server_hello(
                 server_hello, root_pub=root.public_hex, org=ORG, token=TOKEN,
                 client_eph=real_client_eph, now=now,
             )
@@ -117,11 +122,11 @@ class TestHandshake:
         )
         _, client_hello = build_client_hello()
         client_eph = parse_client_hello(client_hello)
-        _, server_hello, _ = build_server_hello(
+        _, server_hello, _ = build_certificate_server_hello(
             fake_session, fake_cert, org=ORG, token=TOKEN, client_eph=client_eph
         )
         with pytest.raises(HandshakeError):
-            verify_server_hello(
+            verify_certificate_server_hello(
                 server_hello, root_pub=root.public_hex, org=ORG, token=TOKEN,
                 client_eph=client_eph, now=now,
             )
@@ -135,11 +140,11 @@ class TestHandshake:
         )
         _, client_hello = build_client_hello()
         client_eph = parse_client_hello(client_hello)
-        _, server_hello, _ = build_server_hello(
+        _, server_hello, _ = build_certificate_server_hello(
             publisher, publisher_cert, org=ORG, token=TOKEN, client_eph=client_eph
         )
         with pytest.raises(HandshakeError):
-            verify_server_hello(
+            verify_certificate_server_hello(
                 server_hello, root_pub=root.public_hex, org=ORG, token=TOKEN,
                 client_eph=client_eph, now=now,
             )
@@ -151,7 +156,7 @@ class TestHandshake:
         client_eph = parse_client_hello(client_hello)
         server_hello = self._server_hello(session_key, session_cert, client_eph)
         with pytest.raises(HandshakeError):
-            verify_server_hello(
+            verify_certificate_server_hello(
                 server_hello, root_pub=root.public_hex, org=ORG,
                 token="f" * 32, client_eph=client_eph, now=now,
             )
@@ -160,6 +165,7 @@ class TestHandshake:
     async def test_viewer_authenticates_an_already_open_transport(
         self, root, session_key, session_cert, now
     ):
+        link = KeyPair.generate()
         class Transport:
             def __init__(self):
                 self.sent = []
@@ -171,9 +177,8 @@ class TestHandshake:
                 self.sent.append(payload)
                 if self.server_crypto is None:
                     client_eph = parse_client_hello(payload)
-                    server_priv, server_hello, transcript = build_server_hello(
-                        session_key,
-                        session_cert,
+                    server_priv, server_hello, transcript = build_link_server_hello(
+                        link,
                         org=ORG,
                         token=TOKEN,
                         client_eph=client_eph,
@@ -201,7 +206,7 @@ class TestHandshake:
         channel = await ViewerChannel.authenticate(
             transport,
             TOKEN,
-            root_pub=root.public_hex,
+            link_pub=link.public_hex,
             org=ORG,
             now=now,
         )
@@ -214,6 +219,7 @@ class TestHandshake:
     async def test_viewer_bounds_demultiplexed_feed_while_waiting_for_a_record(
         self, root, session_key, session_cert, now
     ):
+        link = KeyPair.generate()
         class Transport:
             closed = False
 
@@ -222,9 +228,8 @@ class TestHandshake:
 
             async def send(self, payload):
                 client_eph = parse_client_hello(payload)
-                _, server_hello, _ = build_server_hello(
-                    session_key,
-                    session_cert,
+                _, server_hello, _ = build_link_server_hello(
+                    link,
                     org=ORG,
                     token=TOKEN,
                     client_eph=client_eph,
@@ -246,7 +251,7 @@ class TestHandshake:
         channel = await ViewerChannel.authenticate(
             transport,
             TOKEN,
-            root_pub=root.public_hex,
+            link_pub=link.public_hex,
             org=ORG,
             now=now,
         )
@@ -258,6 +263,7 @@ class TestHandshake:
     async def test_viewer_closes_an_open_transport_when_authentication_fails(
         self, root, now
     ):
+        link = KeyPair.generate()
         class Transport:
             closed = False
 
@@ -275,7 +281,7 @@ class TestHandshake:
             await ViewerChannel.authenticate(
                 transport,
                 TOKEN,
-                root_pub=root.public_hex,
+                link_pub=link.public_hex,
                 org=ORG,
                 now=now,
             )
@@ -496,7 +502,7 @@ async def test_serve_channel_streams_async_iterator_with_bounded_lookahead(
     client_eph = parse_client_hello(client_hello)
     await to_server.put(client_hello)
     task = asyncio.create_task(
-        serve_channel(
+        serve_certificate_channel(
             session_key,
             session_cert,
             org=ORG,
@@ -508,7 +514,7 @@ async def test_serve_channel_streams_async_iterator_with_bounded_lookahead(
     )
 
     server_hello = await from_server.get()
-    server_eph, transcript_hash = verify_server_hello(
+    server_eph, transcript_hash = verify_certificate_server_hello(
         server_hello,
         root_pub=root.public_hex,
         org=ORG,
@@ -592,7 +598,7 @@ async def test_serve_channel_isolates_and_closes_per_connection_handler_state(
     client_priv, client_hello = build_client_hello()
     client_eph = parse_client_hello(client_hello)
     await to_server.put(client_hello)
-    task = asyncio.create_task(serve_channel(
+    task = asyncio.create_task(serve_certificate_channel(
         session_key,
         session_cert,
         org=ORG,
@@ -603,7 +609,7 @@ async def test_serve_channel_isolates_and_closes_per_connection_handler_state(
     ))
 
     server_hello = await from_server.get()
-    server_eph, transcript_hash = verify_server_hello(
+    server_eph, transcript_hash = verify_certificate_server_hello(
         server_hello,
         root_pub=root.public_hex,
         org=ORG,
@@ -697,12 +703,12 @@ async def test_serve_channel_transfers_ice_only_after_terminal_wire_send(
     client_priv, client_hello = build_client_hello()
     client_eph = parse_client_hello(client_hello)
     await to_server.put(client_hello)
-    task = asyncio.create_task(serve_channel(
+    task = asyncio.create_task(serve_certificate_channel(
         session_key, session_cert, org=ORG, token=TOKEN,
         recv=recv, send=send, handler=Factory(),
     ))
     server_hello = await from_server.get()
-    server_eph, transcript_hash = verify_server_hello(
+    server_eph, transcript_hash = verify_certificate_server_hello(
         server_hello, root_pub=root.public_hex, org=ORG, token=TOKEN,
         client_eph=client_eph, now=now,
     )
@@ -773,12 +779,12 @@ async def test_serve_channel_deadline_closes_silent_signaling_peer(
     client_priv, client_hello = build_client_hello()
     client_eph = parse_client_hello(client_hello)
     await to_server.put(client_hello)
-    task = asyncio.create_task(serve_channel(
+    task = asyncio.create_task(serve_certificate_channel(
         session_key, session_cert, org=ORG, token=TOKEN,
         recv=recv, send=send, handler=Factory(),
     ))
     server_hello = await from_server.get()
-    server_eph, transcript_hash = verify_server_hello(
+    server_eph, transcript_hash = verify_certificate_server_hello(
         server_hello, root_pub=root.public_hex, org=ORG, token=TOKEN,
         client_eph=client_eph, now=now,
     )
@@ -810,9 +816,9 @@ class TestPerLinkHandshake:
     def test_round_trip_encrypts_both_directions(self):
         link = KeyPair.generate()
         _, client_eph = self._client()
-        eph_priv, hello, th = build_server_hello(
-            None, org=ORG, token=TOKEN, client_eph=client_eph, link_key=link)
-        server_eph, thv = verify_server_hello(
+        eph_priv, hello, th = build_link_server_hello(
+            link, org=ORG, token=TOKEN, client_eph=client_eph)
+        server_eph, thv = verify_link_server_hello(
             hello, link_pub=link.public_hex, org=ORG, token=TOKEN,
             client_eph=client_eph)
         assert thv == th  # both ends derived the same transcript
@@ -820,27 +826,18 @@ class TestPerLinkHandshake:
     def test_wrong_fragment_key_fails(self):
         link = KeyPair.generate()
         _, client_eph = self._client()
-        _, hello, _ = build_server_hello(
-            None, org=ORG, token=TOKEN, client_eph=client_eph, link_key=link)
+        _, hello, _ = build_link_server_hello(
+            link, org=ORG, token=TOKEN, client_eph=client_eph)
         with pytest.raises(HandshakeError):
-            verify_server_hello(
+            verify_link_server_hello(
                 hello, link_pub=KeyPair.generate().public_hex, org=ORG,
                 token=TOKEN, client_eph=client_eph)
 
-    def test_missing_fragment_fails_closed(self):
-        link = KeyPair.generate()
+    def test_typed_certificate_hello_verifies(self, root, session_key, session_cert):
         _, client_eph = self._client()
-        _, hello, _ = build_server_hello(
-            None, org=ORG, token=TOKEN, client_eph=client_eph, link_key=link)
-        with pytest.raises(HandshakeError, match="fragment"):
-            verify_server_hello(
-                hello, org=ORG, token=TOKEN, client_eph=client_eph)
-
-    def test_legacy_cert_hello_still_verifies(self, root, session_key, session_cert):
-        _, client_eph = self._client()
-        _, hello, _ = build_server_hello(
+        _, hello, _ = build_certificate_server_hello(
             session_key, session_cert, org=ORG, token=TOKEN, client_eph=client_eph)
-        server_eph, _ = verify_server_hello(
+        server_eph, _ = verify_certificate_server_hello(
             hello, root_pub=root.public_hex, org=ORG, token=TOKEN,
             client_eph=client_eph)
         assert server_eph
@@ -849,19 +846,17 @@ class TestPerLinkHandshake:
             self, root, session_key, session_cert):
         _, client_eph = self._client()
         link = KeyPair.generate()
-        _, link_hello, _ = build_server_hello(
-            None, org=ORG, token=TOKEN, client_eph=client_eph, link_key=link)
-        # A link hello handed only a root pin: it has no cert to chain, and the
-        # link path refuses without a fragment key.
+        _, link_hello, _ = build_link_server_hello(
+            link, org=ORG, token=TOKEN, client_eph=client_eph)
+        # Each verifier accepts only its exact, statically selected shape.
         with pytest.raises(HandshakeError):
-            verify_server_hello(
+            verify_certificate_server_hello(
                 link_hello, root_pub=root.public_hex, org=ORG, token=TOKEN,
                 client_eph=client_eph)
-        # A cert hello handed only a link pin: cert-shape needs the root.
-        _, cert_hello, _ = build_server_hello(
+        _, cert_hello, _ = build_certificate_server_hello(
             session_key, session_cert, org=ORG, token=TOKEN, client_eph=client_eph)
-        with pytest.raises(HandshakeError, match="root"):
-            verify_server_hello(
+        with pytest.raises(HandshakeError):
+            verify_link_server_hello(
                 cert_hello, link_pub=link.public_hex, org=ORG, token=TOKEN,
                 client_eph=client_eph)
 
@@ -876,14 +871,39 @@ class TestPerLinkHandshake:
         c2s, s2c = asyncio.Queue(), asyncio.Queue()
 
         async def server():
-            await serve_channel(
-                server_key, None, org=ORG, token=TOKEN,
-                recv=c2s.get, send=s2c.put, handler=handler, link_key=link)
+            await serve_link_channel(
+                link, org=ORG, token=TOKEN,
+                recv=c2s.get, send=s2c.put, handler=handler)
 
         srv = asyncio.create_task(server())
         channel = await ViewerChannel.authenticate(
             _QueueTransport(s2c, c2s), TOKEN,
             link_pub=link.public_hex, org=ORG)
+        await channel.send_message(b"hi")
+        assert await channel.recv_message() == b"echo:hi"
+        await c2s.put(None)
+        await srv
+
+    @pytest.mark.asyncio
+    async def test_certificate_channel_uses_explicit_certificate_client(
+        self, root, session_key, session_cert,
+    ):
+        async def handler(token, message):
+            return b"echo:" + message
+
+        c2s, s2c = asyncio.Queue(), asyncio.Queue()
+
+        async def server():
+            await serve_certificate_channel(
+                session_key, session_cert, org=ORG, token=TOKEN,
+                recv=c2s.get, send=s2c.put, handler=handler,
+            )
+
+        srv = asyncio.create_task(server())
+        channel = await CertificateViewerChannel.authenticate(
+            _QueueTransport(s2c, c2s), TOKEN,
+            root_pub=root.public_hex, org=ORG,
+        )
         await channel.send_message(b"hi")
         assert await channel.recv_message() == b"echo:hi"
         await c2s.put(None)

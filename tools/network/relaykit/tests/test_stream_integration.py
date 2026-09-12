@@ -28,7 +28,7 @@ from tools.network.idkit import KeyPair, Subject, issue_cert
 from tools.network.relaykit import stream_wire as sw
 from tools.network.relaykit.connector import TunnelConnector
 from tools.network.relaykit.stream_adapter import tcp_dial_handler
-from tools.network.relaykit.viewer import ViewerChannel
+from tools.network.relaykit.viewer import CertificateViewerChannel
 
 from .conftest import ORG
 from .test_relay_integration import free_port, start_registry
@@ -117,6 +117,9 @@ async def _serving_connector(stack, app_labels, echo_port):
         f"ws://127.0.0.1:{stack['port']}", ORG, serve_key, cert,
         min_backoff=0.1, max_backoff=0.5,
         machine_key=machine_key, caps=CAPS,
+        channel_authorization_for=lambda _token: {
+            "protocol": "fleet-enrollment",
+        },
         stream_handler=tcp_dial_handler("127.0.0.1", echo_port),
     )
     task = asyncio.create_task(connector.run())
@@ -270,7 +273,7 @@ def test_connector_loss_closes_streams_and_viewers_stay_responsive(stack):
             while len(got) < len(hello) + 1:
                 got += await asyncio.wait_for(reader.read(65536), timeout=10)
             # Encrypted viewer channel works concurrently on the same org.
-            viewer = await ViewerChannel.connect(
+            viewer = await CertificateViewerChannel.connect(
                 f"ws://127.0.0.1:{stack['port']}", stack["token"],
                 root_pub=stack["root"].public_hex, org=ORG,
             )

@@ -96,6 +96,7 @@ def cache_note_grant(token: str, note_id: str) -> None:
             "meta": {},
             "subject": {"kind": "operator", "id": "op-1"},
             "issued_at": time.strftime(ISO, time.gmtime()),
+            "channel_pub": _link_key(token).public_hex,
         },
         org=ORG,
     )
@@ -144,6 +145,10 @@ def stack(tmp_path, monkeypatch):
             f"ws://127.0.0.1:{port}", ORG_UUID, session_key, session_cert,
             handler=link_serving.make_grant_handler(ORG),
             channel_cert=viewer_cert,
+            machine_key=KeyPair.generate(),
+            channel_authorization_for=lambda token: {
+                "protocol": "public-link", "key": _link_key(token),
+            },
             min_backoff=0.1, max_backoff=1.0,
         )
         yield {"port": port, "root": root, "root_pub": root.public_hex,
@@ -162,9 +167,16 @@ def _note_with_attachment(tmp_path, data: bytes):
     return note["id"], note["attachments"][0]["id"]
 
 
-async def _fetch_manifest(port: int, token: str, root_pub: str) -> list:
+def _link_key(token: str) -> KeyPair:
+    return KeyPair.from_private_hex(
+        hashlib.sha256(("attachment-link-key\0" + token).encode()).hexdigest()
+    )
+
+
+async def _fetch_manifest(port: int, token: str, _root_pub: str) -> list:
     channel = await ViewerChannel.connect(
-        f"ws://127.0.0.1:{port}", token, root_pub=root_pub, org=ORG_UUID)
+        f"ws://127.0.0.1:{port}", token,
+        link_pub=_link_key(token).public_hex, org=ORG_UUID)
     async with channel:
         await channel.send_message(canonical_json({"op": "fetch", "v": 1}))
         served = await channel.recv_message()
@@ -174,12 +186,13 @@ async def _fetch_manifest(port: int, token: str, root_pub: str) -> list:
     return parsed["attachments"]
 
 
-def _make_fetch_window(port: int, token: str, root_pub: str, *, drop=None, requests=None):
+def _make_fetch_window(port: int, token: str, _root_pub: str, *, drop=None, requests=None):
     async def fetch_window(request):
         if requests is not None:
             requests.append(dict(request))
         channel = await ViewerChannel.connect(
-            f"ws://127.0.0.1:{port}", token, root_pub=root_pub, org=ORG_UUID)
+            f"ws://127.0.0.1:{port}", token,
+            link_pub=_link_key(token).public_hex, org=ORG_UUID)
 
         async def gen():
             try:
@@ -312,7 +325,7 @@ def test_end_to_end_unauthorized_ref_serves_zero_bytes(stack, tmp_path):
         try:
             channel = await ViewerChannel.connect(
                 f"ws://127.0.0.1:{stack['port']}", token,
-                root_pub=stack["root_pub"], org=ORG_UUID)
+                link_pub=_link_key(token).public_hex, org=ORG_UUID)
             body_frames = 0
             error = None
             async with channel:
