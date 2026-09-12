@@ -28,6 +28,7 @@ from tools.network.ledger import (
     make_event,
     org_ledger_db_path,
     sign_approval,
+    StoreError,
 )
 from tools.network.ledger.claims import mint_member_claim
 from tools.network.ledger.found import found_org_ledger
@@ -735,3 +736,109 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
     assert claim_service.submit(slug, pinned.to_json())["status"] == "admitted"
     with LedgerStore(path) as store:
         assert delayed_persona.public_hex in store.fold().members
+
+
+def test_destructive_restage_is_refused_at_the_service_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """auto-ixd9m: once a staged claim has a countersignature, an approval-free
+    re-submit for the same claim key must fail closed AT THE SERVICE BOUNDARY
+    and leave the approved staged row intact — never a fresh approval-free
+    'pending' that silently discards the gathered approval. No node needed."""
+    orgs_dir = tmp_path / "orgs"
+    slug = "restage-guard"
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    monkeypatch.setenv("GRAPH_ORG", slug)
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    GraphDB.create_org_db(slug, root=orgs_dir, org_id=ORG_ID).close()
+
+    wall_now = int(time.time() * 1000)
+    founded_at = wall_now - 60_000
+    root = KeyPair.from_private_hex(ROOT_SEED.hex())
+    path = org_ledger_db_path(slug)
+    invite_seed = INVITEE_PERSONAL_SEED
+    with LedgerStore(path) as store:
+        founded = found_org_ledger(
+            store,
+            org_id=ORG_ID,
+            org_root=root,
+            personal_root_seed=FOUNDER_PERSONAL_SEED,
+            now=founded_at,
+        )
+        founder = derive_persona(FOUNDER_PERSONAL_SEED, founded.genesis_id)
+        next_ts = founded_at
+
+        def emit(author: KeyPair, payload: dict) -> str:
+            nonlocal next_ts
+            next_ts += 1_000
+            return store.append(
+                make_event(author, payload, store.heads(), HLC(next_ts))
+            )
+
+        emit(
+            root,
+            {
+                "type": "role.define",
+                "name": "member",
+                "scope_set": ["link:publish"],
+                "claim_requires": "admin-ack",
+                "approver_threshold": {"kind": "static", "count": 1},
+                "version": 1,
+            },
+        )
+        invite_ref = emit(
+            founder,
+            {
+                "type": "invite",
+                "granted_role": "member",
+                "expiry": wall_now + 120_000,
+                "sponsor": founder.public_hex,
+                "token_hash": hashlib.sha256(TOKEN.encode("utf-8")).hexdigest(),
+            },
+        )
+        heads = list(store.heads())
+
+    invitee = derive_persona(invite_seed, founded.genesis_id)
+    claim, _ = mint_member_claim(
+        invite_seed,
+        founded.genesis_id,
+        invite_ref=invite_ref,
+        heads=heads,
+        hlc=HLC(wall_now),
+        token=TOKEN,
+    )
+    assert claim_service.submit(slug, claim.to_json()) == {
+        "status": "pending",
+        "have": 0,
+        "need": 1,
+    }
+
+    # An authorized countersignature lands on the staged row.
+    approval = sign_approval(root, "member.claim", claim.payload)
+    countersigned = claim_service.countersign(
+        slug, invite_ref, invitee.public_hex, approval
+    )
+    assert countersigned["status"] == "ready"
+    assert countersigned["have"] == 1
+
+    preserved = claim_service.status(slug, invite_ref, invitee.public_hex)
+    assert preserved["approvals"] == [approval]
+
+    # A freshly re-minted, approval-free claim for the SAME claim key. Under
+    # the old INSERT OR REPLACE this would overwrite the row and erase the
+    # approval; the store guard now refuses it, and the refusal crosses the
+    # service boundary as a raised fault rather than a success envelope.
+    remint, _ = mint_member_claim(
+        invite_seed,
+        founded.genesis_id,
+        invite_ref=invite_ref,
+        heads=heads,
+        hlc=HLC(wall_now + 5_000),
+        token=TOKEN,
+    )
+    with pytest.raises(StoreError):
+        claim_service.submit(slug, remint.to_json())
+
+    # The approval and the full staged record survive the refusal.
+    assert claim_service.status(slug, invite_ref, invitee.public_hex) == preserved

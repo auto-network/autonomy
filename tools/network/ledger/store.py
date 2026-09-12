@@ -334,13 +334,47 @@ class LedgerStore:
 
         A staging row only — the event tables, content-address hydrate,
         and L8 CHECK are untouched. Idempotent per (invite, persona).
+
+        **Destructive-replacement guard (auto-ixd9m).** Once a staged row
+        has gathered one or more countersignatures, a same-key re-mint that
+        carries NO approvals would, under a bare ``INSERT OR REPLACE``,
+        silently overwrite the row and discard every approval already on it —
+        the mechanism behind the approval loss this fix closes. Those stored
+        approvals stay valid across a re-mint (``approval_core`` signs only
+        ``kind`` / ``invite_ref`` / ``persona_pub``, identical across the
+        re-mint), so erasing them is always wrong. We fail closed instead:
+        read the existing row and refuse the replacement. :meth:`add_pending_approval`
+        is the only seam that merges approvals; this write path must never
+        conceal a conflicting replacement by silently unioning them into a
+        different incoming body. The read and the write share one IMMEDIATE
+        transaction so a concurrent submission on another connection cannot
+        slip between the check and the write (read-then-replace race).
         """
         if not isinstance(event, Event) or event.type != "member.claim":
             raise SchemaError("stage_pending_claim takes a member.claim event")
         p = event.payload
         key = self.claim_key(p["invite_ref"], p["persona_pub"])
+        incoming_approvals = list(p["approvals"])
         staged_at = clock.now_ms(now)
         with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            existing = self.db.execute(
+                "SELECT approvals FROM ledger_pending_claims WHERE claim_key = ?",
+                (key,),
+            ).fetchone()
+            if (
+                existing is not None
+                and not incoming_approvals
+                and json.loads(bytes(existing[0]))
+            ):
+                # Leaves every stored column byte-for-byte unchanged: the
+                # with-block rollback on this raise releases the write lock
+                # without having written anything.
+                raise StoreError(
+                    f"refusing to replace staged claim {key[:12]}: it holds "
+                    "countersignatures and the incoming event carries none "
+                    "(would erase gathered approvals)"
+                )
             self.db.execute(
                 "INSERT OR REPLACE INTO ledger_pending_claims VALUES "
                 "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -349,7 +383,7 @@ class LedgerStore:
                     p["invite_ref"],
                     p["persona_pub"],
                     canonical_json(p),
-                    canonical_json(list(p["approvals"])),
+                    canonical_json(incoming_approvals),
                     event.author_key,
                     event.hlc.ts,
                     # The fixed causal position finalization re-mints at.
