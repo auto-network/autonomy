@@ -17,7 +17,7 @@ from email.message import EmailMessage
 from email.utils import getaddresses, make_msgid
 from pathlib import Path
 from typing import Callable
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
 
 
 class InviteEmailError(Exception):
@@ -187,24 +187,37 @@ def validate_delivery(to_addr: object, join_link: object, expiry: object) -> Non
         raise InviteEmailError("invitation recipient must be a single address")
     if not isinstance(join_link, str) or not join_link.strip():
         raise InviteEmailError("invitation join link must be non-empty")
+    from tools.network.invitation import InvitationError, parse_invitation_fragment
+
     try:
         parsed = urlsplit(join_link)
-        fragment = parse_qs(parsed.fragment, strict_parsing=True)
     except ValueError:
         parsed = None
-        fragment = {}
     if (
         parsed is None
         or parsed.scheme not in {"http", "https"}
         or not parsed.netloc
         or parsed.username is not None
         or parsed.password is not None
-        or set(fragment) != {"t"}
-        or len(fragment["t"]) != 1
-        or not fragment["t"][0]
     ):
         raise InviteEmailError(
-            "invitation join link must be an HTTP(S) URL with one #t= secret"
+            "invitation join link must be an HTTP(S) URL with a complete "
+            "#k=…&t=… secret"
+        )
+    # An email must deliver the COMPLETE invitation: both the channel key and
+    # the bearer (graph://4f9e881c-a9 §3). A bearer-only (legacy) link is not
+    # deliverable — sending it would strand the recipient on an endpoint they
+    # cannot authenticate.
+    try:
+        channel_pub_hex, _bearer = parse_invitation_fragment(parsed.fragment)
+    except InvitationError as exc:
+        raise InviteEmailError(
+            f"invitation join link must carry a complete #k=…&t=… secret: {exc}"
+        ) from exc
+    if channel_pub_hex is None:
+        raise InviteEmailError(
+            "invitation join link must carry a complete #k=…&t=… secret; a "
+            "bearer-only link is not deliverable"
         )
     if (
         type(expiry) is not int

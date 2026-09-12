@@ -272,25 +272,27 @@ def _invite_token(args, expected_hash: str | None) -> str:
     return token
 
 
-def _join_url(grant_url: str, invite_token: str) -> str:
+def _join_url(grant_url: str, channel_pub: str | None, invite_token: str) -> str:
+    """The complete two-value invitation URL: canonical grant URL plus the
+    ``#k=<channel_pub>&t=<bearer>`` fragment (graph://4f9e881c-a9 §3), built by
+    the one shared serializer every surface uses. A publish that came back
+    without a channel key is an incomplete/legacy result: fail loudly rather
+    than hand out a bearer-only URL (which would silently downgrade viewer
+    endpoint authentication)."""
+    from tools.network.invitation import InvitationError, build_invitation_join_url
+
     if not isinstance(grant_url, str):
         _fail("the registry returned no invitation grant URL")
-    parsed = urllib.parse.urlsplit(grant_url)
-    if (
-        parsed.scheme != "https"
-        or not parsed.netloc
-        or parsed.query
-        or parsed.fragment
-        or parsed.username is not None
-        or parsed.password is not None
-    ):
-        _fail("the registry returned a malformed invitation grant URL")
-    return urllib.parse.urlunsplit(
-        (parsed.scheme, parsed.netloc, parsed.path, "", "t=" + urllib.parse.quote(
-            invite_token,
-            safe="",
-        ))
-    )
+    try:
+        built = build_invitation_join_url(grant_url, channel_pub, invite_token)
+    except InvitationError as exc:
+        _fail(f"the registry returned a malformed invitation grant URL: {exc}")
+    if not built.complete:
+        _fail(
+            "this invitation cannot be handed out as a usable link: "
+            f"{built.reason}. Re-mint the invitation to get a keyed link."
+        )
+    return built.url
 
 
 def _await_decision(approval_id: str, verb: str) -> dict:
@@ -405,7 +407,10 @@ def cmd_link_publish(args) -> None:
     execution = _await_decision(approval_id, "share-link publish")
     url = execution.get("url")
     if target_type == "org:join":
-        url = _join_url(url, invite_token)
+        # The executor returns the CANONICAL url and the minted channel public
+        # key separately; the complete viewer URL carries BOTH the channel key
+        # and the local bearer in its fragment.
+        url = _join_url(url, execution.get("channel_pub"), invite_token)
     print(f"✓ share-link published: {url}")
     # The token is the last path segment of the URL above, so printing it on
     # its own line just repeated it — and gave an agent one more thing to

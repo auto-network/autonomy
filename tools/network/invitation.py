@@ -47,6 +47,16 @@ _CHECKSUM_CHARS = 8
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _CHANNEL_TOKEN = re.compile(r"^[0-9a-f]{32}$")
 
+#: The two independent fragment keys of a viewer invitation URL
+#: (graph://4f9e881c-a9 §3). ``k`` carries the per-link channel-verification
+#: PUBLIC key (authenticates the serving endpoint); ``t`` carries the
+#: invitation bearer (buys only the right to ASK to join). The two are
+#: separate authorities and are never conflated: a link missing either value
+#: is not an apparently usable invitation, and ``root_pub`` is NEVER a
+#: substitute for ``k``.
+INVITE_FRAGMENT_CHANNEL_KEY = "k"
+INVITE_FRAGMENT_BEARER = "t"
+
 
 class InvitationError(ValueError):
     """The invitation code is malformed, truncated, or not an invitation."""
@@ -124,6 +134,149 @@ def _require_tokens(channel_token, claim_token) -> tuple[str, str]:
     return channel_token, claim_token
 
 
+def encode_channel_pub(channel_pub_hex: str) -> str:
+    """64-hex Ed25519 public key → the fragment ``k`` value.
+
+    Unpadded base64url of the 32 raw bytes (43 chars), the SAME encoding the
+    per-link channel key already uses on content-share fragments
+    (``link_channel_key.fragment_url`` / ``pub_from_fragment``). Keeping one
+    encoding means the viewer decodes ``k`` exactly as it decodes a content
+    link's channel key.
+    """
+    if not isinstance(channel_pub_hex, str) or not _HEX64.match(channel_pub_hex):
+        raise InvitationError("channel public key must be 64 lowercase hex chars")
+    raw = bytes.fromhex(channel_pub_hex)
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def decode_channel_pub(fragment_value: str) -> str:
+    """Inverse of :func:`encode_channel_pub`; raises on anything that is not
+    exactly a 32-byte base64url value."""
+    pad = "=" * (-len(fragment_value) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(fragment_value + pad)
+    except (binascii.Error, ValueError) as exc:
+        raise InvitationError("fragment channel key does not decode") from exc
+    if len(raw) != 32:
+        raise InvitationError("fragment channel key is not a 32-byte value")
+    return raw.hex()
+
+
+def parse_invitation_fragment(fragment: str) -> tuple[str | None, str]:
+    """Parse a viewer invitation URL fragment → ``(channel_pub_hex, bearer)``.
+
+    Accepts the two-value grammar ``k=<channel_pub>&t=<bearer>`` (complete) and
+    the legacy bearer-only ``t=<bearer>`` (returns ``channel_pub_hex is None``).
+    A legacy fragment is reported honestly rather than treated as complete; the
+    caller decides whether a keyless link is acceptable. Any other shape —
+    extra keys, duplicates, a missing bearer — is malformed and raises.
+    """
+    try:
+        parsed = urllib.parse.parse_qs(
+            fragment, keep_blank_values=True, strict_parsing=True,
+        )
+    except ValueError as exc:
+        raise InvitationError("invitation fragment is malformed") from exc
+    keys = set(parsed)
+    if keys not in ({INVITE_FRAGMENT_BEARER},
+                    {INVITE_FRAGMENT_CHANNEL_KEY, INVITE_FRAGMENT_BEARER}):
+        raise InvitationError(
+            "invitation fragment must carry a bearer 't' and optionally a "
+            "channel key 'k' — nothing else"
+        )
+    if len(parsed[INVITE_FRAGMENT_BEARER]) != 1:
+        raise InvitationError("invitation fragment carries a duplicate bearer")
+    bearer = parsed[INVITE_FRAGMENT_BEARER][0]
+    if not bearer:
+        raise InvitationError("invitation fragment bearer is empty")
+    channel_pub_hex = None
+    if INVITE_FRAGMENT_CHANNEL_KEY in parsed:
+        values = parsed[INVITE_FRAGMENT_CHANNEL_KEY]
+        if len(values) != 1:
+            raise InvitationError(
+                "invitation fragment carries a duplicate channel key")
+        channel_pub_hex = decode_channel_pub(values[0])
+    return channel_pub_hex, bearer
+
+
+@dataclass(frozen=True)
+class InvitationJoinUrl:
+    """The result of assembling a complete viewer invitation URL.
+
+    ``complete`` links carry BOTH fragment values (``k`` and ``t``) and expose
+    the full URL in ``url``. When either value is absent the result is an
+    explicit incomplete/legacy marker: ``url`` is ``None`` and ``reason`` names
+    the missing value. No surface ever emits a bearer-only URL from an
+    incomplete result.
+    """
+
+    complete: bool
+    url: str | None
+    reason: str | None = None
+
+
+def _require_canonical_join_url(canonical_url: object) -> str:
+    """The registry-minted canonical URL an invitation fragment attaches to.
+
+    It must be a bare ``https`` link with NO query, NO fragment, and no
+    credentials — the fragment values live only in the URL we build here and
+    never in the stored/canonical URL. A structurally invalid URL is a registry
+    or caller bug and raises loudly rather than yielding a plausible link.
+    """
+    if not isinstance(canonical_url, str) or not canonical_url:
+        raise InvitationError("invitation canonical URL is missing")
+    parsed = urllib.parse.urlsplit(canonical_url)
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise InvitationError("invitation canonical URL is malformed")
+    return canonical_url
+
+
+def build_invitation_join_url(
+    canonical_url: str,
+    channel_pub_hex: object,
+    bearer: object,
+) -> InvitationJoinUrl:
+    """The one shared serializer for a viewer invitation URL (graph://4f9e881c-a9 §3).
+
+    Attaches the two independent fragment values to the canonical URL as
+    ``#k=<channel_pub>&t=<bearer>``. Both are read from the organization-homed
+    grant — ``channel_pub`` from ``NetworkLinkGrantV6``, the separately retained
+    ``bearer`` — so no private channel seed is ever opened to build a viewer URL.
+
+    Returns an explicit incomplete/legacy result when either value is absent;
+    never a bearer-only URL, never ``root_pub`` in place of ``k``. Every
+    invitation-producing surface (publication result, Membership Copy/Share,
+    CLI, email, QR, API projections) consumes this so they all emit the SAME
+    complete URL.
+    """
+    url = _require_canonical_join_url(canonical_url)
+    if not isinstance(channel_pub_hex, str) or not channel_pub_hex:
+        return InvitationJoinUrl(
+            complete=False, url=None,
+            reason="channel-verification key is absent (legacy or keyless link)",
+        )
+    if not isinstance(bearer, str) or not bearer:
+        return InvitationJoinUrl(
+            complete=False, url=None,
+            reason="invitation bearer is absent (minted before bearers were retained)",
+        )
+    if len(bearer) > 128:
+        raise InvitationError("invitation bearer is malformed")
+    fragment = (
+        f"{INVITE_FRAGMENT_CHANNEL_KEY}={encode_channel_pub(channel_pub_hex)}"
+        f"&{INVITE_FRAGMENT_BEARER}="
+        f"{urllib.parse.quote(bearer, safe='')}"
+    )
+    return InvitationJoinUrl(complete=True, url=f"{url}#{fragment}", reason=None)
+
+
 def invitation_from_join_url(
     *,
     org: str,
@@ -134,9 +287,13 @@ def invitation_from_join_url(
     """Assemble an invitation v2 from a minted ``org:join`` URL.
 
     The registry grant comes from ``/l/<grant>`` in the request path. The
-    ledger bearer comes from the client-only ``#t=<bearer>`` fragment. Parsing
-    those positions here keeps the domain split identical in the CLI minter
-    and the B6 harness driver.
+    ledger bearer comes from the client-only fragment — the two-value
+    ``#k=<channel_pub>&t=<bearer>`` grammar (graph://4f9e881c-a9 §3) or the
+    legacy bearer-only ``#t=<bearer>``. Parsing those positions here keeps the
+    domain split identical in the CLI minter and the B6 harness driver. The
+    channel PUBLIC key, when present, authenticates the browser viewer's
+    serving handshake and is not part of the container-side ``AUTONOMY_INVITE``
+    credential set, so it is validated and dropped here.
     """
     if not isinstance(join_url, str):
         raise InvitationError("invitation join URL must be a string")
@@ -152,19 +309,8 @@ def invitation_from_join_url(
     parts = parsed.path.rstrip("/").split("/")
     if len(parts) < 3 or parts[-2] != "l":
         raise InvitationError("invitation join URL has no registry grant path")
-    try:
-        fragment = urllib.parse.parse_qs(
-            parsed.fragment,
-            keep_blank_values=True,
-            strict_parsing=True,
-        )
-    except ValueError as exc:
-        raise InvitationError("invitation join URL fragment is malformed") from exc
-    if set(fragment) != {"t"} or len(fragment["t"]) != 1:
-        raise InvitationError(
-            "invitation join URL must carry exactly one fragment bearer"
-        )
-    channel_token, claim_token = _require_tokens(parts[-1], fragment["t"][0])
+    _channel_pub_hex, bearer = parse_invitation_fragment(parsed.fragment)
+    channel_token, claim_token = _require_tokens(parts[-1], bearer)
     invitation = Invitation(
         org=org,
         root_pub=root_pub,
