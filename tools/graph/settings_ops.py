@@ -4318,7 +4318,13 @@ def read_set_key(
     ``org`` is **required** — see :func:`add_setting` for the contract.
     """
     org = _resolve_org_arg(org)
-    members = read_set(set_id, org=org, peers=peers)
+    # Narrow the fetch to this one key in SQL (indexed on idx_settings_set)
+    # rather than materializing the whole set and scanning members. read_set
+    # resolves per key, so key_equals yields the identical resolved member —
+    # same precedence, cross-org visibility, exclude rules, defaults, and
+    # vault refusal — while returning at most one member. See
+    # graph://7d588dfa-429 §4.
+    members = read_set(set_id, org=org, peers=peers, key_equals=key)
     for m in members.members:
         if m.key == key:
             # m.id is the chosen base id; fetch the row in its origin DB.
@@ -5274,6 +5280,7 @@ def read_set(
     prefix: str | None = None,
     model: type[Any] | None = None,
     now: int | None = None,
+    key_equals: str | None = None,
 ) -> SetMembers[Any]:
     """Resolve members of *set_id* visible to org's session.
 
@@ -5308,6 +5315,20 @@ def read_set(
     counted in ``dropped.schema_invalid``. Returns a ``SetMembers`` with
     drop accounting populated.
 
+    ``key_equals`` is a **private substrate selector** for single-key reads
+    (``read_set_key`` / ``api_graph_settings_get_by_key``). When set it
+    appends ``AND key = ?`` to BOTH the owned and peer row fetches (and to
+    their deprecated-count twins), so the covering index
+    ``idx_settings_set (set_id, key)`` narrows the fetch to one key's rows
+    instead of materializing the whole set. It changes only candidate
+    cardinality: every base, override, and exclusion row for that logical
+    member carries the same key, so the resolver still receives every layer
+    it would from a full read and produces the byte-identical member for
+    that key. It does NOT bypass organization isolation, peer publication
+    visibility, revision shaping, ranking, defaults, or vault opening. Keep
+    it out of the public collection API — it is an internal narrowing, not a
+    query filter callers compose.
+
     ``org`` is **required** — see :func:`add_setting` for the contract.
     """
     from .cross_org import (
@@ -5325,6 +5346,18 @@ def read_set(
     if prefix is not None:
         prefix_clause = " AND key LIKE ? ESCAPE '\\'"
         prefix_params = (_prefix_like_pattern(prefix),)
+
+    # Exact-key narrowing (private substrate selector). Additive equality on
+    # the indexed ``key`` column — resolution is per key, so restricting the
+    # fetch to one key yields byte-identical resolution for that key while
+    # turning the O(n) whole-set scan into an O(log n) index seek on
+    # idx_settings_set (set_id, key). Appended to BOTH query builders below,
+    # or peer composition would silently diverge from the owned read.
+    key_clause = ""
+    key_params: tuple[Any, ...] = ()
+    if key_equals is not None:
+        key_clause = " AND key = ?"
+        key_params = (key_equals,)
 
     # ORG-NAMESPACE ISOLATION. A set whose KEY is organizationally namespaced
     # — its key strategy's first segment is the org (``org:...`` /
@@ -5360,8 +5393,9 @@ def read_set(
         rows = db.conn.execute(
             f"SELECT rowid AS _rowid, * FROM settings WHERE set_id = ? "
             f"  AND deprecated = 0"
+            f"{key_clause}"
             f"{prefix_clause}",
-            (set_id, *prefix_params),
+            (set_id, *key_params, *prefix_params),
         ).fetchall()
         for r in rows:
             raw_rows.append((resolved_org, r))
@@ -5370,8 +5404,9 @@ def read_set(
         dep_row = db.conn.execute(
             f"SELECT COUNT(*) AS n FROM settings WHERE set_id = ? "
             f"  AND deprecated = 1"
+            f"{key_clause}"
             f"{prefix_clause}",
-            (set_id, *prefix_params),
+            (set_id, *key_params, *prefix_params),
         ).fetchone()
         if dep_row is not None:
             deprecated_filtered += int(dep_row["n"])
@@ -5398,8 +5433,9 @@ def read_set(
                 f"SELECT rowid AS _rowid, * FROM settings WHERE set_id = ? "
                 f"  AND deprecated = 0 "
                 f"  AND publication_state IN ({placeholders})"
+                f"{key_clause}"
                 f"{prefix_clause}",
-                (set_id, *PEER_VISIBLE_STATES, *prefix_params),
+                (set_id, *PEER_VISIBLE_STATES, *key_params, *prefix_params),
             ).fetchall()
         except sqlite3.OperationalError as exc:
             if "no such table: settings" in str(exc).lower():
@@ -5412,8 +5448,9 @@ def read_set(
                 f"SELECT COUNT(*) AS n FROM settings WHERE set_id = ? "
                 f"  AND deprecated = 1 "
                 f"  AND publication_state IN ({placeholders})"
+                f"{key_clause}"
                 f"{prefix_clause}",
-                (set_id, *PEER_VISIBLE_STATES, *prefix_params),
+                (set_id, *PEER_VISIBLE_STATES, *key_params, *prefix_params),
             ).fetchone()
         except sqlite3.OperationalError as exc:
             if "no such table: settings" in str(exc).lower():
