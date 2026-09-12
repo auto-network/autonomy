@@ -208,7 +208,7 @@ from .duration import parse_duration as _shared_parse_duration
 from .playbooks import get_catalog, get_playbook_status, save_playbook
 from .agent_runs import ingest_all_agent_runs, discover_subagent_traces, parse_agent_trace
 from .primer import generate_primer, collect_primer_data, format_for_agent, format_for_dashboard
-from .dispatch_cmd import cmd_dispatch_default, cmd_dispatch_runs, cmd_dispatch_status, cmd_dispatch_stats, cmd_dispatch_approve, cmd_dispatch_watch, cmd_dispatch_nag, cmd_dispatch_reset
+from .dispatch_cmd import cmd_dispatch_default, cmd_dispatch_runs, cmd_dispatch_status, cmd_dispatch_stats, cmd_dispatch_approve, cmd_dispatch_watch, cmd_dispatch_nag, cmd_dispatch_reset, cmd_dispatch_cancel
 from .worktree_cmd import (
     cmd_worktree_default,
     cmd_worktree_host_prune,
@@ -6362,6 +6362,13 @@ def main():
     p_reset = dispatch_sub.add_parser("reset", help="Reset circuit breaker for a bead")
     p_reset.add_argument("bead_id", help="Bead ID to reset")
     p_reset.set_defaults(func=cmd_dispatch_reset)
+
+    p_cancel = dispatch_sub.add_parser(
+        "cancel",
+        help="Cancel a running dispatch — kill its container, record CANCELLED (no reopen)",
+    )
+    p_cancel.add_argument("bead_or_run", help="Bead ID or run ID to cancel")
+    p_cancel.set_defaults(func=cmd_dispatch_cancel)
 
     p_stats = dispatch_sub.add_parser("stats", help="Aggregate statistics and trends")
     p_stats.add_argument("--trend", action="store_true", help="Show weekly trend")

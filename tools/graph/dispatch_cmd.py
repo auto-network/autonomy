@@ -7,6 +7,7 @@ import ssl
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
@@ -459,6 +460,47 @@ def cmd_dispatch_approve(args):
             failures += 1
     if failures:
         sys.exit(1)
+
+
+def cmd_dispatch_cancel(args):
+    """Cancel a running dispatch: kill its container, record CANCELLED (no reopen).
+
+    Accepts a bead id or a run id. The cancel endpoint is bead-keyed, so a run
+    id is first resolved to its bead via the runs list. Removes the need to
+    escalate a runaway dispatch to a host ``docker kill``.
+    """
+    ident = args.bead_or_run
+    base = _get_dashboard_url()
+    ctx = _make_ssl_ctx()
+
+    # Resolve a run id → bead id via the runs list (a bare bead id passes
+    # through unchanged; best-effort — fall back to treating ident as a bead).
+    bead_id = ident
+    try:
+        runs = _api_call(base, "/api/dispatch/runs", ctx)
+        if isinstance(runs, dict):
+            runs = runs.get("runs", [])
+        for r in (runs or []):
+            if r.get("id") == ident or r.get("dir_name") == ident:
+                bead_id = r.get("bead_id") or ident
+                break
+    except (urllib.error.URLError, OSError):
+        pass
+
+    path = f"/api/dispatch/cancel/{urllib.parse.quote(bead_id)}"
+    org = os.environ.get("GRAPH_ORG")
+    if org:
+        path += f"?org={urllib.parse.quote(org)}"
+    try:
+        result = _api_post(base, path, ctx)
+    except (urllib.error.URLError, OSError) as exc:
+        _exit_unreachable(base, exc)
+
+    print(
+        f"  ✓ Cancelled {result.get('bead_id')} "
+        f"(run {result.get('run_id')}, container {result.get('container')})"
+    )
+    print("    run recorded CANCELLED (no reopen); readiness:approved stripped")
 
 
 def cmd_dispatch_reset(args):
