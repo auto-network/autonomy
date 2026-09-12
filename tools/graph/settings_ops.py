@@ -5418,8 +5418,14 @@ def _build_payload_predicate(
                 f"where_payload: value for {field_name!r} must be a string or "
                 "a sequence of strings"
             )
+        # The JSON path is built by the one canonical helper the index DDL
+        # also uses, so SQLite sees textually identical expressions and a
+        # declared expression index is usable for this predicate. The helper
+        # re-validates the field-name shape (belt-and-braces over the schema
+        # allow-list check above); every VALUE stays a bound parameter.
+        json_expr = schemas.payload_json_extract_sql(field_name)
         if isinstance(value, str):
-            clauses.append(f" AND json_extract(payload, '$.{field_name}') = ?")
+            clauses.append(f" AND {json_expr} = ?")
             params.append(value)
             terms.append((field_name, None, value))
         elif isinstance(value, _Sequence):
@@ -5440,8 +5446,7 @@ def _build_payload_predicate(
                 continue
             placeholders = ",".join("?" for _ in items)
             clauses.append(
-                f" AND json_extract(payload, '$.{field_name}') "
-                f"IN ({placeholders})"
+                f" AND {json_expr} IN ({placeholders})"
             )
             params.extend(items)
             terms.append((field_name, frozenset(items), None))

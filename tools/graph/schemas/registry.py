@@ -62,6 +62,7 @@ hand-typed dotted strings; substrate-level prefix matching covers
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -623,6 +624,109 @@ def org_writeback_namespace(
     if cls is None:
         return _wrap
     return _wrap(cls)
+
+
+# ── Payload JSON expression: one builder for WHERE and for index DDL ──
+#
+# SQLite uses an expression index for a query only when the query expression
+# matches the indexed expression TEXTUALLY (https://www.sqlite.org/expridx.html).
+# The index DDL in :func:`reconcile_payload_indexes` and the ``where_payload``
+# clause builder in ``settings_ops._build_payload_predicate`` must therefore emit
+# byte-identical JSON paths. They both route through this one helper so the two
+# can never drift — a space or quote difference would silently disable the index.
+
+#: A payload field safe to interpolate into a ``$.<field>`` JSON path: the
+#: Python/JSON identifier shape, and nothing that could alter the SQL text (a
+#: dot, a quote, a bracket). Values compared against the path are always bound
+#: parameters; only a field name validated here is ever interpolated.
+_PAYLOAD_INDEX_FIELD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def payload_json_extract_sql(field_name: str) -> str:
+    """Return the canonical ``json_extract(payload, '$.<field>')`` expression.
+
+    Raises :class:`SchemaValidationError` for a field name that cannot be
+    represented safely in a JSON path — anything that is not the identifier
+    shape ``[A-Za-z_][A-Za-z0-9_]*``. This is the single point both the index
+    DDL and the predicate WHERE clause consume, so SQLite sees identical text
+    and the declared expression index is usable for the predicate.
+    """
+    if not isinstance(field_name, str) or not _PAYLOAD_INDEX_FIELD_RE.fullmatch(
+        field_name
+    ):
+        raise SchemaValidationError(
+            f"payload index field must match [A-Za-z_][A-Za-z0-9_]*, "
+            f"got {field_name!r}"
+        )
+    return f"json_extract(payload, '$.{field_name}')"
+
+
+def indexed_payload(*fields: str) -> Callable[[type], type]:
+    """Schema decorator: declare selective payload fields worth an index.
+
+    Each named field gets a SQLite expression index on
+    ``(set_id, json_extract(payload,'$.<field>'))`` installed idempotently by
+    :func:`reconcile_payload_indexes`, so an equality / finite-IN
+    ``where_payload`` predicate on that field seeks instead of scanning the
+    set partition. Declare only genuinely selective fields; a low-cardinality
+    field buys index bloat and write amplification for no seek.
+
+    Validation (all raise :class:`SchemaValidationError`):
+
+    * an empty call declares nothing and is a mistake, not a no-op;
+    * every field must match the identifier shape the JSON-path helper accepts
+      (:func:`payload_json_extract_sql`) so it can be represented safely;
+    * every field must be a declared field of the class (present in the merged
+      ``_field_metadata`` the subclass carries) — an index on a field the
+      schema does not know is a typo that would never match.
+
+    Declarations compose: a subclass inherits its parents' declarations, and a
+    class may stack ``@indexed_payload`` decorators. All are appended and then
+    deduplicated in first-declaration order, and stored as an immutable tuple
+    on ``_indexed_payload_fields``. :meth:`SettingSchema.export_json_schema`
+    surfaces the result as ``indexed_payload``.
+    """
+    if not fields:
+        raise SchemaValidationError(
+            "indexed_payload() requires at least one field"
+        )
+    for field_name in fields:
+        # Shape check — raises SchemaValidationError on anything unsafe to
+        # interpolate into a JSON path. Runs before the class is inspected so
+        # an unsafe declaration fails at decoration time regardless of fields.
+        payload_json_extract_sql(field_name)
+
+    def _wrap(target: type) -> type:
+        meta = getattr(target, "_field_metadata", None) or {}
+        unknown = [f for f in fields if f not in meta]
+        if unknown:
+            raise SchemaValidationError(
+                f"{target.__name__}: indexed_payload field(s) {unknown} are "
+                f"not declared in the schema's field metadata"
+            )
+        # Inherited declarations come from the nearest ancestor that carries
+        # its own (walk the MRO past this class). A subclass sees every field
+        # its parents declared.
+        inherited: tuple[str, ...] = ()
+        for base_cls in target.__mro__[1:]:
+            base_decl = base_cls.__dict__.get("_indexed_payload_fields")
+            if base_decl:
+                inherited = tuple(base_decl)
+                break
+        # Stacked declarations on THIS class already wrote the attribute into
+        # the class dict; append onto them so order is first-declared-first.
+        own = tuple(target.__dict__.get("_indexed_payload_fields", ()))
+        combined = inherited + own + tuple(fields)
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for f in combined:
+            if f not in seen:
+                seen.add(f)
+                ordered.append(f)
+        target._indexed_payload_fields = tuple(ordered)
+        return target
+
+    return _wrap
 
 
 VALID_HOMES = ("machine", "personal", "organization")
@@ -1432,6 +1536,13 @@ class SettingSchema:
     _strict_append_only: bool = False
     _org_writeback_key_strategy: str | None = None
 
+    # ``@indexed_payload(*fields)``-only: the payload fields this set declares
+    # as worth a SQLite expression index. An empty tuple means none declared —
+    # the default for every schema. ``reconcile_payload_indexes`` installs one
+    # physical ``(set_id, json_extract(payload,'$.<field>'))`` index per
+    # ``(set_id, field)`` across all registered revisions.
+    _indexed_payload_fields: tuple[str, ...] = ()
+
     # ``@cache(ttl=...)``-only: TTL in whole seconds, stamped onto the
     # ``expires_at`` column on every write to a row of this schema.
     # ``None`` for non-cache schemas (they never expire and have no
@@ -1603,6 +1714,9 @@ class SettingSchema:
         }
         if cls._cache_ttl_seconds is not None:
             payload["cache_ttl_seconds"] = int(cls._cache_ttl_seconds)
+        indexed = getattr(cls, "_indexed_payload_fields", ()) or ()
+        if indexed:
+            payload["indexed_payload"] = list(indexed)
         return payload
 
     @classmethod
@@ -1747,6 +1861,78 @@ def registered_schemas(set_id: str) -> list[type["SettingSchema"]]:
             continue
         out.append(cls)
     return out
+
+
+# ── Payload expression indexes ───────────────────────────────
+
+
+def _payload_index_name(set_id: str, field_name: str) -> str:
+    """Deterministic index name for a ``(set_id, field)`` payload index.
+
+    ``idx_settings_payload_<digest>`` where ``<digest>`` is the first 16
+    lowercase hex characters of SHA-256 over the UTF-8 bytes of
+    ``set_id:field``. A hash keeps the name within SQLite identifier limits
+    and free of the dots and dashes a set_id carries, while staying stable so
+    ``CREATE INDEX IF NOT EXISTS`` is idempotent across runs.
+    """
+    digest = hashlib.sha256(
+        f"{set_id}:{field_name}".encode("utf-8")
+    ).hexdigest()[:16]
+    return f"idx_settings_payload_{digest}"
+
+
+def indexed_payload_declarations() -> list[tuple[str, str]]:
+    """Every declared ``(set_id, field)`` payload index, collapsed and sorted.
+
+    Declarations on different schema revisions of the same set collapse to one
+    physical ``(set_id, field)`` because ``schema_revision`` is not part of the
+    table-wide index expression. Returns a deterministic, deduplicated list so
+    reconciliation is stable regardless of registry insertion order.
+    """
+    pairs: set[tuple[str, str]] = set()
+    for model_cls in SCHEMAS.values():
+        fields = getattr(model_cls, "_indexed_payload_fields", ()) or ()
+        if not fields:
+            continue
+        set_id = getattr(model_cls, "set_id", "") or ""
+        if not set_id:
+            continue
+        for field_name in fields:
+            pairs.add((set_id, field_name))
+    return sorted(pairs)
+
+
+def reconcile_payload_indexes(db) -> list[str]:
+    """Install every schema-declared Settings payload expression index on *db*.
+
+    Idempotent. For each declared ``(set_id, field)`` (collapsed across
+    revisions by :func:`indexed_payload_declarations`), executes
+    ``CREATE INDEX IF NOT EXISTS "<name>" ON settings(set_id, <json_expr>)``
+    where ``<name>`` is :func:`_payload_index_name` and ``<json_expr>`` is the
+    canonical :func:`payload_json_extract_sql` expression — the same text the
+    ``where_payload`` WHERE clause emits, so the index is usable for the
+    predicate. The index leads with ``set_id`` so one physical index serves
+    every set's partition.
+
+    This is the one place declaration DDL runs: dashboard startup calls it for
+    every existing writable organization store, and ``GraphDB.create_org_db``
+    calls it for every newly created organization store. Ordinary opens and
+    reads never call it. Returns the index names installed (sorted); a
+    read-only handle returns ``[]`` without touching the database.
+    """
+    if getattr(db, "read_only", False):
+        return []
+    names: list[str] = []
+    for set_id, field_name in indexed_payload_declarations():
+        name = _payload_index_name(set_id, field_name)
+        expr = payload_json_extract_sql(field_name)
+        db.conn.execute(
+            f'CREATE INDEX IF NOT EXISTS "{name}" '
+            f"ON settings(set_id, {expr})"
+        )
+        names.append(name)
+    db.conn.commit()
+    return names
 
 
 def upconvert_chain(

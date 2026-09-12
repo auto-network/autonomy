@@ -11,6 +11,7 @@ from tools.graph.schemas.registry import (
     append_only_log,
     field,
     home,
+    indexed_payload,
     keyed_per_entity,
     publication_band,
 )
@@ -157,8 +158,16 @@ class AgentTestRunV1(SettingSchema):
 @home("organization")
 @publication_band(max="raw")
 @append_only_log(strict=True)
+@indexed_payload("run_id")
 class AgentTestObservationV1(SettingSchema):
-    """One immutable test-node outcome and timing observation."""
+    """One immutable test-node outcome and timing observation.
+
+    ``run_id`` is declared indexed: the Tier 2 ``where_payload`` stale-run
+    prune selects observations by a finite set of run ids, and ``run_id`` is
+    the selective predicate over this append-only set (``repository`` is
+    low-cardinality and deliberately not indexed). ``reconcile_payload_indexes``
+    installs the matching ``(set_id, json_extract(payload,'$.run_id'))`` index.
+    """
 
     set_id = OBSERVATION_SET_ID
     schema_revision = SCHEMA_REVISION
