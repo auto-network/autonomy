@@ -633,12 +633,12 @@ def get_open_dependencies(bead_id: str) -> list[dict]:
     for dep in deps:
         if not isinstance(dep, dict):
             continue
-        # Only 'blocks' type dependencies gate dispatch.
-        # Parent-child deps are structural, not blocking.
-        dep_type = dep.get("dependency_type", "")
-        if dep_type == "parent-child":
+        # Only directed ``blocks`` edges gate dispatch. ``parent-child`` is
+        # structural and ``relates-to`` is symmetric context; treating either
+        # as a prerequisite leaves an otherwise-ready bead queued forever.
+        dep_type = dep.get("dependency_type") or dep.get("type")
+        if dep_type != "blocks":
             continue
-        # Any non-closed dependency blocks dispatch
         if dep.get("status") != "closed":
             open_blockers.append(dep)
 

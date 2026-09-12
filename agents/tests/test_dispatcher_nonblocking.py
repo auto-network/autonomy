@@ -548,12 +548,22 @@ class TestGetOpenDependencies:
         assert result == []
 
     @patch("agents.dispatcher.run_bd")
+    def test_relates_to_dep_ignored(self, mock_bd):
+        """A symmetric related-work edge never gates dispatch."""
+        mock_bd.return_value = json.dumps([
+            {"id": "auto-related", "status": "open", "dependency_type": "relates-to"},
+        ])
+        result = get_open_dependencies("auto-abc")
+        assert result == []
+
+    @patch("agents.dispatcher.run_bd")
     def test_mixed_deps(self, mock_bd):
         """Only open blocking deps are returned; closed and parent-child are excluded."""
         mock_bd.return_value = json.dumps([
             {"id": "auto-dep1", "status": "closed", "dependency_type": "blocks"},
             {"id": "auto-dep2", "status": "open", "dependency_type": "blocks"},
             {"id": "auto-epic", "status": "open", "dependency_type": "parent-child"},
+            {"id": "auto-related", "status": "open", "dependency_type": "relates-to"},
         ])
         result = get_open_dependencies("auto-abc")
         assert len(result) == 1
