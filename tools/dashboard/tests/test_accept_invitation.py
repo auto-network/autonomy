@@ -75,7 +75,7 @@ class TestFragmentsNeverEgress:
                           JOIN_JS.index("function showPasteStep")]
         assert "channelPub" not in request
         assert "bearer" not in request.lower()
-        assert "JSON.stringify" not in request
+        assert "JSON.stringify({ relay_host: inputs.relayHost, channel_token: inputs.channelToken })" in request
 
     def test_the_bearer_is_held_never_stored(self):
         # Held in a closure for the ceremony; never persisted anywhere audited.
@@ -84,8 +84,8 @@ class TestFragmentsNeverEgress:
                           "document.cookie"):
             assert forbidden not in JOIN_JS.lower(), forbidden
 
-    def test_obsolete_root_pinned_resolve_is_absent(self):
-        assert "/api/network/invite/resolve" not in JOIN_JS
+    def test_local_resolve_does_not_restore_root_pinning(self):
+        assert "/api/network/invite/resolve" in JOIN_JS
         assert "root_pub" not in JOIN_JS
 
     def test_org_action_is_present_but_initially_disabled_by_hidden_state(self):

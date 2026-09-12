@@ -326,6 +326,10 @@ export class JoinSession {
       return { state: 'admitted' };
     }
     if (status === 'pending') {
+      if (reply.need > 0 && reply.have >= reply.need && reply.position
+          && Array.isArray(reply.admitting) && reply.admitting.length) {
+        return { state: 'already-approved', have: reply.have, need: reply.need };
+      }
       return {
         state: 'pending',
         approvals: reply.approvals || null,
