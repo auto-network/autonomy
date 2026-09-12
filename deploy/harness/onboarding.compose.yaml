@@ -1,0 +1,54 @@
+name: autonomy-onboarding
+
+x-dashboard: &dashboard
+  image: autonomy-node:onboarding
+  init: true
+  environment:
+    AUTONOMY_DATA_ROOT: /app/data
+    AUTONOMY_NETWORK_REGISTRY_URL: http://relay:8477
+    DASHBOARD_HOST: 0.0.0.0
+    DASHBOARD_PORT: '8080'
+    DASHBOARD_TLS: 'off'
+  depends_on:
+    relay:
+      condition: service_healthy
+  healthcheck:
+    test: [CMD, curl, -fs, 'http://localhost:8080/api/ping']
+    interval: 2s
+    timeout: 2s
+    retries: 60
+
+services:
+  relay:
+    image: autonomy-node:onboarding
+    entrypoint: [python, -m, tools.network.registry]
+    command: [--db, /registry/registry.db, --host, 0.0.0.0, --port, '8477', --base-url, 'http://relay:8477']
+    volumes:
+      - registry:/registry
+    ports: ['127.0.0.1:${SIM_RELAY_PORT:-19477}:8477']
+    healthcheck:
+      test: [CMD, curl, -fs, 'http://localhost:8477/healthz']
+      interval: 2s
+      timeout: 2s
+      retries: 60
+  alice:
+    <<: *dashboard
+    ports: ['127.0.0.1:${SIM_ALICE_PORT:-19880}:8080']
+    volumes:
+      - alice:/app/data
+      - alice-keys:/run/autonomy-keycache
+  bob:
+    <<: *dashboard
+    ports: ['127.0.0.1:${SIM_BOB_PORT:-19881}:8080']
+    volumes:
+      - bob:/app/data
+      - bob-keys:/run/autonomy-keycache
+
+volumes:
+  registry: {}
+  alice: {}
+  bob: {}
+  alice-keys:
+    driver_opts: {type: ramfs, device: ramfs, o: 'mode=0700'}
+  bob-keys:
+    driver_opts: {type: ramfs, device: ramfs, o: 'mode=0700'}
