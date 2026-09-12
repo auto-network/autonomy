@@ -452,6 +452,19 @@ async function openRootPolicy(model, { title, detail, mount, signal, view }) {
  *   null when the operator cancels. The caller uses `signingKey` to sign (or
  *   `seed` for a ceremony that needs it) and MUST zero `seed` when done.
  */
+export async function openFrozenRoot(root, {signal, view} = {}) {
+  if(root?.armor_version !== 3 || typeof view !== 'function') throw new Error('This approval has no supported root ceremony.');
+  const policyModule = await import('./root-factor-policy.js');
+  const envelope = await policyModule.parseFactorPolicyArmor(root.armor);
+  if(envelope.root_pub !== root.root_pub) throw new Error('The root does not match this approval.');
+  const hostname = window.location.hostname;
+  const passkeys = (root.passkeys || []).filter(p => !p.rp_id || p.rp_id === hostname || hostname.endsWith('.' + p.rp_id));
+  const rpIds = [...new Set(passkeys.map(p => p.rp_id).filter(Boolean))];
+  if(rpIds.length > 1) throw new Error('Your root passkeys span incompatible sites.');
+  return openRootPolicy({armor:root.armor, rootPub:root.root_pub, envelope, policyModule,
+    passkeys, rpId:rpIds[0]}, {signal, view});
+}
+
 export async function openRoot({ title = 'Approve', detail = '', mount, signal, view } = {}) {
   injectStyles();
   const model = await loadModel();

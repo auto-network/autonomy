@@ -275,4 +275,51 @@ export function clearVaultOpeners(gathered) {
   }
 }
 
+// Bind the existing vault mechanisms to the shared factor view. No vault DOM.
+export async function collectVaultOpeners(ceremony, {view, signal, ...dependencies} = {}) {
+  if(ceremony?.v === 2) {
+    const {root, anchor, governance} = ceremony;
+    if(!root || !anchor || governance?.form !== 'root-reachable'
+      || governance.anchor_id !== anchor.anchor_id || root.root_pub !== anchor.root_pub) {
+      throw new Error('This approval has no valid personal-root ceremony.');
+    }
+    const {openFrozenRoot} = await import('./open-root.js');
+    const opened = await openFrozenRoot(root, {view, signal});
+    if(!opened) throw new Error('Approval cancelled.');
+    let seed;
+    try {
+      seed = await (dependencies.openAnchor || openRootAnchorEnvelope)(anchor, opened.seed);
+      if(signal?.aborted) {seed.fill(0);throw new Error('Approval cancelled.');}
+      return {openers:{[anchor.anchor_id]:bytesToHex(seed)},seeds:[seed]};
+    } finally {opened.seed.fill(0);}
+  }
+  if(ceremony?.v !== 1 || !['password','prf','both'].includes(ceremony.policy)) {
+    throw new Error('This vault policy is not supported in this browser.');
+  }
+  const types = ceremony.policy === 'both' ? ['password','passkey'] : [ceremony.policy === 'prf' ? 'passkey' : 'password'];
+  const policy = types.length === 1 ? {op:'factor',factor_id:types[0]} : {op:'and',children:types.map(type=>({op:'factor',factor_id:type}))};
+  return new Promise((resolve,reject) => {
+    let closed=false,busy=false;
+    const done=new Set(), gathered={openers:{},seeds:[]};
+    function finish(error,result) {if(closed){clearVaultOpeners(result);return;}closed=true;signal?.removeEventListener('abort',abort);error?reject(error):resolve(result);}
+    function abort(){clearVaultOpeners(gathered);finish(new Error('Approval cancelled.'));}
+    signal?.addEventListener('abort',abort,{once:true});
+    if(signal?.aborted){abort();return;}
+    function render(error='') {if(!closed)view({policy,done:[...done],busy,error,
+      password:value=>void collect('password',value),passkey:()=>void collect('passkey','')});}
+    async function collect(type,password) {
+      if(closed||busy||!types.includes(type)||done.has(type))return;busy=true;render();
+      try {
+        const credentials=dependencies.credentials || globalThis.navigator?.credentials;
+        const result=await gatherVaultOpeners({...ceremony,policy:type==='password'?'password':'prf'},password,{...dependencies,
+          credentials:credentials&&{get:options=>credentials.get({...options,signal})}});
+        if(closed){clearVaultOpeners(result);return;}
+        Object.assign(gathered.openers,result.openers);gathered.seeds.push(...result.seeds);done.add(type);
+        if(types.every(t=>done.has(t)))finish(null,gathered);else {busy=false;render();}
+      } catch(error){busy=false;render(error.message);}
+    }
+    render();
+  });
+}
+
 export default gatherVaultOpeners;
