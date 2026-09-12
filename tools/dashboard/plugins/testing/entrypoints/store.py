@@ -62,8 +62,17 @@ def _selector_matches(nodeid: str, selector: str) -> bool:
     )
 
 
-def _members(set_id: str, org: str) -> list[Any]:
-    return list(settings_ops.read_owned_set(set_id, org=org).members)
+def _members(
+    set_id: str,
+    org: str,
+    *,
+    where_payload: "dict[str, str | list[str]] | None" = None,
+) -> list[Any]:
+    return list(
+        settings_ops.read_owned_set(
+            set_id, org=org, where_payload=where_payload
+        ).members
+    )
 
 
 def record_event(
@@ -353,10 +362,9 @@ def record_run(org: str, run_id: str, payload: dict[str, Any]) -> dict[str, Any]
             state="raw",
         )
         repository = payload["repository"]
-        history = [
-            member for member in _members(RUN_SET_ID, org)
-            if member.payload.get("repository") == repository
-        ]
+        history = _members(
+            RUN_SET_ID, org, where_payload={"repository": repository}
+        )
         history.sort(
             key=lambda member: (
                 str(member.payload.get("finished_at") or ""),
@@ -370,8 +378,10 @@ def record_run(org: str, run_id: str, payload: dict[str, Any]) -> dict[str, Any]
         stale = [member.id for member in stale_runs]
         if stale_run_ids:
             stale.extend(
-                member.id for member in _members(OBSERVATION_SET_ID, org)
-                if member.payload.get("run_id") in stale_run_ids
+                member.id for member in _members(
+                    OBSERVATION_SET_ID, org,
+                    where_payload={"run_id": list(stale_run_ids)},
+                )
             )
         pruned = settings_ops.remove_raw_settings(stale, org=org)
     return {
@@ -384,10 +394,9 @@ def record_run(org: str, run_id: str, payload: dict[str, Any]) -> dict[str, Any]
 
 
 def _observation_members(org: str, repository: str) -> list[Any]:
-    return [
-        member for member in _members(OBSERVATION_SET_ID, org)
-        if member.payload.get("repository") == repository
-    ]
+    return _members(
+        OBSERVATION_SET_ID, org, where_payload={"repository": repository}
+    )
 
 
 def record_observations(
@@ -737,12 +746,10 @@ def dashboard_summary(
         "overestimated": sum(ratio < 1 for ratio in estimate_ratios),
     }
 
-    observations = _members(OBSERVATION_SET_ID, org)
-    if repository:
-        observations = [
-            member for member in observations
-            if member.payload.get("repository") == repository
-        ]
+    observations = _members(
+        OBSERVATION_SET_ID, org,
+        where_payload={"repository": repository} if repository else None,
+    )
     by_node: dict[tuple[str, str], list[Any]] = {}
     for member in observations:
         identity = (
