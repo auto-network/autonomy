@@ -612,6 +612,105 @@ def test_diag_settings_latency_percentiles(graph_db_env, client):
     }
 
 
+def test_diag_settings_sets_attributes_read_duration_by_org(graph_db_env, client):
+    settings_ops.reset_settings_api_stats()
+    stats = settings_ops._SETTINGS_API_STATS
+    stats.record(
+        operation="synthetic_read", set_id="autonomy.test.lagging",
+        org="autonomy", kind="read", ok=True,
+        duration_ms=100.125, result_count=1,
+    )
+    stats.record(
+        operation="synthetic_failed_read", set_id="autonomy.test.lagging",
+        org="autonomy", kind="read", ok=False,
+        duration_ms=25.25, result_count=0,
+    )
+    stats.record(
+        operation="synthetic_write", set_id="autonomy.test.lagging",
+        org="autonomy", kind="write", ok=True,
+        duration_ms=999.0, result_count=1,
+    )
+    stats.record(
+        operation="other_org_read", set_id="autonomy.test.lagging",
+        org="other-org", kind="read", ok=True,
+        duration_ms=500.0, result_count=1,
+    )
+    stats.record(
+        operation="anonymous_set_read", set_id=None,
+        org="autonomy", kind="read", ok=True,
+        duration_ms=300.0, result_count=1,
+    )
+
+    response = client.get("/api/diag/settings/sets")
+    assert response.status_code == 200
+    row = next(
+        item for item in response.json()["sets"]
+        if item["set_id"] == "autonomy.test.lagging"
+    )
+    assert row["activity"]["totals"] == {
+        "calls": 3,
+        "reads": 2,
+        "writes": 1,
+        "upserts": 0,
+        "read_duration_ms": 125.375,
+        "avg_read_duration_ms": 62.688,
+    }
+    assert row["activity"]["last_60s"]["read_duration_ms"] == 125.375
+    assert row["activity"]["last_10s"]["avg_read_duration_ms"] == 62.688
+
+
+def test_settings_activity_adapter_defaults_duration_metrics():
+    from tools.dashboard import server
+
+    windows = server._settings_activity_windows_for_set(
+        {"totals": {}}, "missing.set",
+    )
+    assert windows["totals"] == {
+        "calls": 0,
+        "reads": 0,
+        "writes": 0,
+        "upserts": 0,
+        "read_duration_ms": 0.0,
+        "avg_read_duration_ms": 0.0,
+    }
+
+
+def test_settings_read_duration_rolls_up_across_time_windows(monkeypatch):
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(settings_ops.time, "time", lambda: clock["now"])
+    stats = settings_ops.SettingsApiStats()
+
+    for recorded_at, duration_ms in (
+        (930.0, 100.0),
+        (950.0, 50.0),
+        (995.0, 10.0),
+    ):
+        clock["now"] = recorded_at
+        stats.record(
+            operation="synthetic_read", set_id="autonomy.test.windows",
+            org="autonomy", kind="read", ok=True,
+            duration_ms=duration_ms, result_count=1,
+        )
+
+    clock["now"] = 1_000.0
+    snapshot = stats.set_metrics_snapshot(org="autonomy")
+    assert snapshot["totals"]["autonomy.test.windows"] == {
+        "calls": 3, "reads": 3, "writes": 0, "upserts": 0,
+        "read_duration_ms": 160.0,
+        "avg_read_duration_ms": 53.333,
+    }
+    assert snapshot["last_60s"]["autonomy.test.windows"] == {
+        "calls": 2, "reads": 2, "writes": 0, "upserts": 0,
+        "read_duration_ms": 60.0,
+        "avg_read_duration_ms": 30.0,
+    }
+    assert snapshot["last_10s"]["autonomy.test.windows"] == {
+        "calls": 1, "reads": 1, "writes": 0, "upserts": 0,
+        "read_duration_ms": 10.0,
+        "avg_read_duration_ms": 10.0,
+    }
+
+
 def test_diag_settings_sets_summary_and_detail(
     graph_db_env, example_schema, client,
 ):
@@ -633,12 +732,18 @@ def test_diag_settings_sets_summary_and_detail(
     assert row["stored_row_count"] == 2
     assert row["stored_key_count"] == 1
     assert row["payload_bytes"] > 0
-    assert row["activity"]["totals"] == {
+    activity = row["activity"]["totals"]
+    assert {
+        key: activity[key]
+        for key in ("calls", "reads", "writes", "upserts")
+    } == {
         "calls": 3,
         "reads": 1,
         "writes": 2,
         "upserts": 0,
     }
+    assert activity["read_duration_ms"] > 0
+    assert activity["avg_read_duration_ms"] == activity["read_duration_ms"]
 
     detail = client.get("/api/diag/settings/sets/autonomy.test.api")
     assert detail.status_code == 200

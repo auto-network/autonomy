@@ -100,6 +100,17 @@ function settingsPage() {
       return this.diagSortedSets.slice(0, 8);
     },
 
+    get diagLaggingSets() {
+      return [...(this.diagSets || [])]
+        .filter(row => this.diagActivityFor(row).read_duration_ms > 0)
+        .sort((left, right) => (
+          this.diagActivityFor(right).read_duration_ms
+          - this.diagActivityFor(left).read_duration_ms
+          || String(left.set_id || '').localeCompare(String(right.set_id || ''))
+        ))
+        .slice(0, 10);
+    },
+
     get currentDiagSet() {
       return this.diagSetDetail && this.diagSetDetail.set
         ? this.diagSetDetail.set
@@ -216,6 +227,8 @@ function settingsPage() {
         reads: Number(block.reads || 0),
         writes: Number(block.writes || 0),
         upserts: Number(block.upserts || 0),
+        read_duration_ms: Number(block.read_duration_ms || 0),
+        avg_read_duration_ms: Number(block.avg_read_duration_ms || 0),
       };
     },
 
@@ -231,6 +244,18 @@ function settingsPage() {
       const maxCalls = Math.max(...rows.map(item => this.diagActivityFor(item).calls), 1);
       const pct = (this.diagActivityFor(row).calls / maxCalls) * 100;
       return Math.max(Math.round(pct), 6) + '%';
+    },
+
+    diagLaggingBarWidth(row) {
+      const rows = this.diagLaggingSets;
+      if (!rows.length) return '0%';
+      const maxDuration = Math.max(
+        ...rows.map(item => this.diagActivityFor(item).read_duration_ms), 1,
+      );
+      const pct = (
+        this.diagActivityFor(row).read_duration_ms / maxDuration
+      ) * 100;
+      return Math.max(Math.round(pct), 2) + '%';
     },
 
     // ── Save (edited payload) ─────────────────────────────────
@@ -500,7 +525,10 @@ function settingsPage() {
     },
 
     _zeroActivity() {
-      return { calls: 0, reads: 0, writes: 0, upserts: 0 };
+      return {
+        calls: 0, reads: 0, writes: 0, upserts: 0,
+        read_duration_ms: 0, avg_read_duration_ms: 0,
+      };
     },
 
     _sortDiagRows(rows) {
