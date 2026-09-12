@@ -85,10 +85,16 @@ def _link_grants(slug: str) -> dict:
         if payload.get("target_type") == "org:join" and invite_ref and url:
             label = (payload.get("meta") or {}).get("label")
             bearer = payload.get("bearer")
+            channel_pub = payload.get("channel_pub")
             grants[str(invite_ref)] = {
                 "url": str(url),
                 "label": str(label) if label else None,
                 "bearer": str(bearer) if bearer else None,
+                # The per-link channel PUBLIC key (NetworkLinkGrantV6). The
+                # screen combines it with the bearer, via the shared
+                # serializer, into the complete #k=..&t=.. viewer URL; absent
+                # on legacy keyless links.
+                "channel_pub": str(channel_pub) if channel_pub else None,
             }
     return grants
 
@@ -213,6 +219,10 @@ def _membership_view(slug: str) -> dict:
                 # redeemable link (graph://e75ebdde-6df). Absent on
                 # invitations minted before bearers were retained.
                 "bearer": (grants.get(invite_id) or {}).get("bearer"),
+                # The per-link channel public key; the screen needs BOTH it and
+                # the bearer to build a complete invitation URL
+                # (graph://4f9e881c-a9 §3). Absent on legacy keyless links.
+                "channel_pub": (grants.get(invite_id) or {}).get("channel_pub"),
                 "label": (grants.get(invite_id) or {}).get("label"),
             })
         pending = []

@@ -409,6 +409,32 @@ def test_revoke_wants_a_real_token(operator_env, capsys):
     assert "not a grant token" in capsys.readouterr().err
 
 
+def test_join_url_builds_complete_two_value_fragment():
+    # The CLI's org:join URL carries BOTH the channel key and the bearer
+    # (graph://4f9e881c-a9 §3), built by the shared serializer.
+    from tools.network.invitation import encode_channel_pub
+
+    channel_pub = "9a" * 32
+    bearer = "ef" * 32
+    url = link_cmd._join_url(
+        "https://relay.example/l/" + "cd" * 16, channel_pub, bearer,
+    )
+    assert url == (
+        "https://relay.example/l/" + "cd" * 16
+        + "#k=" + encode_channel_pub(channel_pub) + "&t=" + bearer
+    )
+
+
+def test_join_url_refuses_bearer_only_when_channel_key_absent(capsys):
+    # A keyless (legacy) publish result must NOT be handed out as a bearer-only
+    # URL; the CLI fails loudly and says to re-mint.
+    with pytest.raises(SystemExit) as exc:
+        link_cmd._join_url("https://relay.example/l/" + "cd" * 16, None, "ef" * 32)
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "channel" in err and "Re-mint" in err
+
+
 def test_link_list_hides_peer_published_grant(tmp_path, monkeypatch, capsys):
     """`graph link list` shows only THIS org's own grants — another org's
     grant row must never appear (owning-scope read, P2). The grant set's

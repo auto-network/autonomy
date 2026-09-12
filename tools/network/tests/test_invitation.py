@@ -12,9 +12,12 @@ from tools.network.invitation import (
     INVITE_VERSION,
     Invitation,
     InvitationError,
+    build_invitation_join_url,
     decode_invitation,
+    encode_channel_pub,
     encode_invitation,
     invitation_from_join_url,
+    parse_invitation_fragment,
 )
 
 ORG = "018f6b2a-7c4d-7e11-8a3b-9d5c1e2f4a6b"
@@ -22,6 +25,7 @@ ROOT_PUB = "ab" * 32
 INVITE_REF = "cd" * 32
 GRANT_TOKEN = "12" * 16
 CLAIM_TOKEN = "ef" * 32
+CHANNEL_PUB = "9a" * 32  # a per-link channel PUBLIC key, 64-hex
 
 
 def sample() -> Invitation:
@@ -83,6 +87,95 @@ def test_join_url_assembles_the_two_domains_from_path_and_fragment():
         join_url=f"https://relay.example/l/{GRANT_TOKEN}#t={CLAIM_TOKEN}",
     )
     assert inv == sample()
+
+
+def test_join_url_accepts_the_two_value_fragment():
+    # The complete viewer URL carries #k=<channel_pub>&t=<bearer>; the bearer is
+    # extracted for the AUTONOMY_INVITE code and the channel key is dropped
+    # (it authenticates the browser viewer, not the container credential set).
+    complete = build_invitation_join_url(
+        f"https://relay.example/l/{GRANT_TOKEN}", CHANNEL_PUB, CLAIM_TOKEN,
+    )
+    assert complete.complete
+    inv = invitation_from_join_url(
+        org=ORG, root_pub=ROOT_PUB, invite_ref=INVITE_REF, join_url=complete.url,
+    )
+    assert inv == sample()
+
+
+# ── the shared two-value invitation-URL serializer (graph://4f9e881c-a9 §3) ──
+
+
+def test_build_invitation_join_url_carries_both_independent_values():
+    built = build_invitation_join_url(
+        "https://relay.example/l/grant", CHANNEL_PUB, CLAIM_TOKEN,
+    )
+    assert built.complete and built.reason is None
+    assert built.url == (
+        "https://relay.example/l/grant#k="
+        + encode_channel_pub(CHANNEL_PUB) + "&t=" + CLAIM_TOKEN
+    )
+    # Round-trips back to the same two values, and never carries root_pub.
+    channel_pub_hex, bearer = parse_invitation_fragment(built.url.split("#", 1)[1])
+    assert channel_pub_hex == CHANNEL_PUB
+    assert bearer == CLAIM_TOKEN
+    assert ROOT_PUB not in built.url
+
+
+def test_build_invitation_join_url_missing_channel_key_is_incomplete_legacy():
+    for absent in (None, ""):
+        built = build_invitation_join_url(
+            "https://relay.example/l/grant", absent, CLAIM_TOKEN,
+        )
+        assert not built.complete
+        assert built.url is None
+        assert "channel" in built.reason
+
+
+def test_build_invitation_join_url_missing_bearer_is_incomplete():
+    for absent in (None, ""):
+        built = build_invitation_join_url(
+            "https://relay.example/l/grant", CHANNEL_PUB, absent,
+        )
+        assert not built.complete
+        assert built.url is None
+        assert "bearer" in built.reason
+
+
+@pytest.mark.parametrize(
+    "canonical",
+    [
+        "http://relay.example/l/grant",  # not https
+        "https://relay.example/l/grant?x=1",  # has query
+        "https://relay.example/l/grant#t=x",  # already has a fragment
+        "https://user:pass@relay.example/l/grant",  # credentials
+        "",
+    ],
+)
+def test_build_invitation_join_url_rejects_malformed_canonical(canonical):
+    with pytest.raises(InvitationError):
+        build_invitation_join_url(canonical, CHANNEL_PUB, CLAIM_TOKEN)
+
+
+def test_parse_invitation_fragment_reports_legacy_bearer_only():
+    channel_pub_hex, bearer = parse_invitation_fragment(f"t={CLAIM_TOKEN}")
+    assert channel_pub_hex is None
+    assert bearer == CLAIM_TOKEN
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    [
+        "",  # no bearer
+        "k=" + encode_channel_pub(CHANNEL_PUB),  # channel key but no bearer
+        f"t={CLAIM_TOKEN}&t={CLAIM_TOKEN}",  # duplicate bearer
+        f"k=notbase64!!&t={CLAIM_TOKEN}",  # undecodable channel key
+        f"root_pub={ROOT_PUB}&t={CLAIM_TOKEN}",  # root_pub is never a fragment value
+    ],
+)
+def test_parse_invitation_fragment_fail_closed(fragment):
+    with pytest.raises(InvitationError):
+        parse_invitation_fragment(fragment)
 
 
 @pytest.mark.parametrize(

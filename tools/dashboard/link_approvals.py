@@ -1050,11 +1050,20 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
     if req["target_type"] in CHANNEL_KEY_TARGET_TYPES:
         try:
             channel_pub = mint_channel_key(token, org)
-            share_url = fragment_url(url, channel_pub)
         except ChannelKeyUnavailable as exc:
             logger.warning(
                 "link %s published without a channel key (legacy link): %s",
                 token[:8], exc)
+        # A content share link carries only the channel key in its fragment, so
+        # the executor can assemble the complete URL here. An org:join link's
+        # complete URL needs BOTH the channel key and the invitation bearer
+        # (graph://4f9e881c-a9 §3), and the bearer is not held server-side at
+        # publish (it is minted client-side / retained separately). So the
+        # canonical url and channel_pub are returned independently and the
+        # caller (CLI, Membership browser) builds the two-value fragment with
+        # the one shared serializer — never a bearer-only or key-only URL.
+        if channel_pub is not None and req["target_type"] != "org:join":
+            share_url = fragment_url(url, channel_pub)
 
     grant = {
         "token": token,
@@ -1080,6 +1089,11 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
     return {
         "ok": True,
         "url": share_url,
+        # The minted channel PUBLIC key, so a caller that also holds the
+        # invitation bearer (the CLI, or the Membership browser that just
+        # minted it) can assemble the complete two-value invitation URL with
+        # the shared serializer. Absent when the link is keyless (legacy).
+        "channel_pub": channel_pub,
         "token": token,
         "serving": {"live": True, "via": "tunnel-control"},
         "actor": _approval_identities(org)["actor_identity"],
