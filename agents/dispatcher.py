@@ -1401,22 +1401,6 @@ def _bead_is_closed(bead_id: str) -> bool:
         return False
 
 
-def _reap_blocked_bead_worktree(bead_id: str) -> None:
-    """Remove a bead's PRESERVED worktree once the circuit breaker blocks it.
-
-    A blocked bead is no longer dispatch-eligible, so a worktree preserved
-    from an earlier interrupted run would linger indefinitely. Best-effort.
-    """
-    try:
-        wt = find_worktree_for_bead(bead_id)
-        if wt and Path(wt).exists():
-            print(f"  reaping preserved worktree for blocked bead {bead_id}: {wt}")
-            cleanup_worktree(wt)
-    except Exception as e:
-        print(f"  WARNING: reap worktree failed for {bead_id}: {e}",
-              file=sys.stderr)
-
-
 def find_worktree_for_bead(bead_id: str) -> str:
     """Find the most recent worktree path for a bead, if one exists."""
     worktrees_dir = REPO_ROOT / ".worktrees"
@@ -3452,9 +3436,11 @@ def dispatch_cycle(
             run_bd(["set-state", bead_id, "readiness=blocked",
                     "--reason", "Circuit breaker: 3 consecutive failures "
                     "— needs human review"])
-            # Blocked beads won't be re-dispatched — reap any PRESERVED
-            # worktree so it doesn't linger (auto-cpxdp).
-            _reap_blocked_bead_worktree(bead_id)
+            # Blocked beads won't be re-dispatched, but KEEP the preserved
+            # worktree — a block is exactly when its (often uncommitted) work
+            # must stay recoverable. Reaping it here deleted uncommitted work
+            # (auto-r7kk4, 2026-09-12); age-based reconcile removes genuinely
+            # abandoned ones later.
             continue
         if merge_fails >= 5:
             print(f"  Circuit breaker: {bead_id} has {merge_fails} consecutive "
@@ -3462,7 +3448,8 @@ def dispatch_cycle(
             run_bd(["set-state", bead_id, "readiness=blocked",
                     "--reason", "Circuit breaker: 5 consecutive merge failures "
                     "— needs human review"])
-            _reap_blocked_bead_worktree(bead_id)
+            # Keep the preserved worktree for recovery (see the failure-path
+            # circuit breaker above); do not reap a blocked bead's work.
             continue
 
         if config.dry_run:
