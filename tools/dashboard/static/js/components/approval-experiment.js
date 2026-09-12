@@ -7,20 +7,8 @@ export function mountApprovalExperiment(host,input,services=null){
  root.innerHTML='<style>'+approvedStyles.replace(/body\{/g,':host{').replace(/:root\{/g,':host{')+'</style>'+approvedMarkup;
  const document={getElementById:id=>root.getElementById(id),querySelector:s=>root.querySelector(s),querySelectorAll:s=>root.querySelectorAll(s),createElement:t=>realDocument.createElement(t),createTextNode:t=>realDocument.createTextNode(t),createComment:t=>realDocument.createComment(t),addEventListener:(...args)=>root.addEventListener(...args),body:root,get activeElement(){return root.activeElement}};
  const window=realDocument.defaultView;
- const viewport=window.visualViewport;
- const viewportStyle=realDocument.createElement('style');
- viewportStyle.textContent=`@media(max-width:767px){
- :host{top:var(--approval-top,0px)!important;bottom:auto!important;height:var(--approval-height,100dvh);overflow:hidden!important}
- .surface{height:var(--approval-height,100dvh);min-height:0;padding-top:max(24px,env(safe-area-inset-top,0px))}
- .sheet{max-height:100%;padding-bottom:calc(20px + env(safe-area-inset-bottom,0px))}
- .auth-overlay{top:var(--approval-top,0px);bottom:auto;height:var(--approval-height,100dvh);padding-bottom:calc(16px + env(safe-area-inset-bottom,0px))}
- .auth-panel{max-height:100%;padding-bottom:16px}
- }`;
- root.append(viewportStyle);
- function fitViewport(){host.style.setProperty('--approval-height',(viewport?.height||window.innerHeight)+'px');host.style.setProperty('--approval-top',(viewport?.offsetTop||0)+'px')}
- fitViewport();viewport?.addEventListener('resize',fitViewport);viewport?.addEventListener('scroll',fitViewport);window.addEventListener('resize',fitViewport);
  let controller=null,factorState=null,disposed=false;
- function dispose(){if(disposed)return;disposed=true;viewport?.removeEventListener('resize',fitViewport);viewport?.removeEventListener('scroll',fitViewport);window.removeEventListener('resize',fitViewport);controller?.abort();token++;host.remove();services?.onClose?.()}
+ function dispose(){if(disposed)return;disposed=true;controller?.abort();token++;host.remove();services?.onClose?.()}
  function expandAuthorization(){if(services){void authorizeRequest();return;}displayAuthorization()}
  async function authorizeRequest(){
    $('retain-authority').disabled=true;
