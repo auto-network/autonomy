@@ -102,8 +102,10 @@ def resolve_org_identity(slug: str | None) -> dict[str, Any]:
         name      — display name
         byline    — short tagline (may be empty string)
         color     — hex CSS colour for the org indicator background
-        favicon   — URL/path to a square icon, or ``None`` (renderer
-                    paints ``initial`` on a circle of ``color`` instead)
+        favicon   — the compact square icon: the portable ``icon_data_uri``
+                    when present, else the legacy path/URL, else ``None``
+                    (renderer paints ``initial`` on a circle of ``color``)
+        icon_data_uri — the org's own bounded ``data:`` URI icon, or ``None``
         initial   — single uppercase character for the no-favicon case
         resolved  — ``True`` when the slug is a real org (anything other
                     than ``UNKNOWN_SLUG``); ``False`` for legacy / unknown
@@ -145,6 +147,7 @@ def _identity_cached(slug: str, _generation: int) -> dict[str, Any]:
             "byline": "",
             "color": UNRESOLVED_COLOR,
             "favicon": None,
+            "icon_data_uri": None,
             "initial": "?",
             "resolved": False,
         }
@@ -166,8 +169,16 @@ def _identity_cached(slug: str, _generation: int) -> dict[str, Any]:
 
     name = pick("name", generated["name"])
     color = pick("color", generated["color"])
-    favicon = pick("favicon", None)
     byline = pick("byline", "")
+
+    # Portable compact icon (auto-j1y0z): the org's own bounded ``data:`` URI
+    # is the preferred compact presentation. Legacy ``favicon`` (a path/URL)
+    # remains a read-compatible fallback during migration. The resolved
+    # ``favicon`` slot every downstream consumer already reads prefers the
+    # portable URI so it flows through unchanged; ``icon_data_uri`` is also
+    # surfaced explicitly for callers that want the portable value directly.
+    icon_data_uri = pick("icon_data_uri", None)
+    favicon = icon_data_uri or pick("favicon", None)
 
     return {
         "slug": slug,
@@ -175,6 +186,7 @@ def _identity_cached(slug: str, _generation: int) -> dict[str, Any]:
         "byline": byline,
         "color": color,
         "favicon": favicon,
+        "icon_data_uri": icon_data_uri,
         "initial": _initial(name),
         "resolved": True,
     }

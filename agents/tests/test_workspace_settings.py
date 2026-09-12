@@ -715,3 +715,33 @@ def test_workspace_from_setting_rejects_reasonless_host_root_mount(bad):
             artifacts=(),
             mounts={},
         )
+
+
+# ── OrgOverride icon projection (auto-j1y0z) ─────────────────────────
+
+from agents.workspace_settings import OrgOverride, _org_override_from_payload
+
+
+def test_org_override_projects_icon_data_uri():
+    ov = _org_override_from_payload(
+        "acme",
+        {
+            "name": "Acme",
+            "favicon": "/static/legacy.png",
+            "icon_data_uri": "data:image/webp;base64,AAAA",
+        },
+    )
+    assert isinstance(ov, OrgOverride)
+    assert ov.icon_data_uri == "data:image/webp;base64,AAAA"
+    assert ov.favicon == "/static/legacy.png"
+
+
+def test_org_override_icon_data_uri_absent_is_none():
+    ov = _org_override_from_payload("acme", {"name": "Acme"})
+    assert ov.icon_data_uri is None
+
+
+def test_org_override_empty_icon_data_uri_is_none():
+    # An empty string "unset" falls through like the other fields.
+    ov = _org_override_from_payload("acme", {"name": "Acme", "icon_data_uri": ""})
+    assert ov.icon_data_uri is None

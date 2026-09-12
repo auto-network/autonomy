@@ -369,6 +369,11 @@ class OrgOverride:
     byline: str | None = None
     color: str | None = None
     favicon: str | None = None
+    # Portable compact icon (auto-j1y0z): a bounded 64x64 WebP ``data:`` URI
+    # stored on the org's own ``autonomy.org#3`` row. Preferred over the
+    # legacy ``favicon`` path/URL as the compact presentation, which remains a
+    # read-compatible fallback during migration.
+    icon_data_uri: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1296,6 +1301,7 @@ def _org_override_from_payload(slug: str, payload: dict) -> OrgOverride:
         byline=_opt("byline"),
         color=_opt("color"),
         favicon=_opt("favicon"),
+        icon_data_uri=_opt("icon_data_uri"),
     )
 
 

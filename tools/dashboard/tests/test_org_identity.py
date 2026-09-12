@@ -424,3 +424,85 @@ class TestResolvedFlag:
         org = resolve_session_org({"project": "-some-unknown-legacy-junk"})
         assert org["resolved"] is False
         assert org["initial"] == "?"
+
+
+# ── portable icon projection + precedence (auto-j1y0z) ───────────────
+
+
+def _write_org_rev3(slug: str, payload: dict) -> None:
+    """Write the org's identity at revision 3 (the icon-bearing revision).
+
+    Icon fields survive a read only when the row is stored at the revision
+    that declares them, so these tests write through the real upsert rather
+    than the fixture's raw rev-1 insert.
+    """
+    from tools.graph import settings_ops
+    import agents.workspace_settings as ws
+
+    settings_ops.upsert_by_key(
+        "autonomy.org", 3, slug, payload, org=slug, state="canonical",
+    )
+    ws.invalidate_caches()
+
+
+class TestPortableIcon:
+    def test_icon_data_uri_is_surfaced_and_preferred(self, isolated_orgs):
+        isolated_orgs({})
+        _write_org_rev3("anchore", {
+            "name": "Anchore",
+            "favicon": "/static/legacy.png",
+            "icon_attachment_id": "abc-123",
+            "icon_data_uri": "data:image/webp;base64,AAAA",
+        })
+        from tools.dashboard.org_identity import resolve_org_identity
+
+        identity = resolve_org_identity("anchore")
+        assert identity["icon_data_uri"] == "data:image/webp;base64,AAAA"
+        # The compact `favicon` slot every consumer reads prefers the portable
+        # data URI over the legacy path.
+        assert identity["favicon"] == "data:image/webp;base64,AAAA"
+
+    def test_legacy_favicon_is_the_fallback(self, isolated_orgs):
+        isolated_orgs({})
+        _write_org_rev3("anchore", {
+            "name": "Anchore",
+            "favicon": "/static/legacy.png",
+        })
+        from tools.dashboard.org_identity import resolve_org_identity
+
+        identity = resolve_org_identity("anchore")
+        assert identity["icon_data_uri"] is None
+        assert identity["favicon"] == "/static/legacy.png"
+
+    def test_no_icon_leaves_both_empty(self, isolated_orgs):
+        isolated_orgs({})
+        _write_org_rev3("anchore", {"name": "Anchore"})
+        from tools.dashboard.org_identity import resolve_org_identity
+
+        identity = resolve_org_identity("anchore")
+        assert identity["favicon"] is None
+        assert identity["icon_data_uri"] is None
+
+    def test_cache_invalidates_on_icon_change(self, isolated_orgs):
+        isolated_orgs({})
+        _write_org_rev3("anchore", {
+            "name": "Anchore",
+            "icon_data_uri": "data:image/webp;base64,AAAA",
+        })
+        from tools.dashboard.org_identity import resolve_org_identity
+
+        assert resolve_org_identity("anchore")["icon_data_uri"] == \
+            "data:image/webp;base64,AAAA"
+        _write_org_rev3("anchore", {
+            "name": "Anchore",
+            "icon_data_uri": "data:image/webp;base64,BBBB",
+        })
+        assert resolve_org_identity("anchore")["icon_data_uri"] == \
+            "data:image/webp;base64,BBBB"
+
+    def test_unknown_slug_has_icon_key(self, isolated_orgs):
+        isolated_orgs({})
+        from tools.dashboard.org_identity import resolve_org_identity
+
+        identity = resolve_org_identity(None)
+        assert identity["icon_data_uri"] is None

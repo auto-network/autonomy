@@ -29,6 +29,10 @@ cryptography==49.0.0
 python-gnupg==0.5.6
 # WebAuthn passkey ceremonies (tools/dashboard/identity_routes.py) —
 # py_webauthn; imported lazily, endpoints 500 without it.
+# Profile/organization image normalization (tools/dashboard/profile_image.py):
+# decode, EXIF-orient, crop, sRGB-convert, strip metadata, re-encode WebP.
+# Imported lazily by the icon routes; those endpoints 500 without it.
+Pillow==12.3.0
 webauthn==3.0.0
 # Imported directly by the WebAuthn contract tests as well as transitively by
 # webauthn. Pin it explicitly so test collection never depends on resolver luck.
