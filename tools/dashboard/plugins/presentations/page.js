@@ -11,6 +11,21 @@
   }
 
   var _presenceRuntime = resolvePresenceRuntime();
+  var PRESENTATIONS_ORG_KEY = 'autonomy.plugin.presentations.organization';
+
+  function readPersistedOrganization() {
+    try {
+      return (window.localStorage && window.localStorage.getItem(PRESENTATIONS_ORG_KEY)) || '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function persistOrganization(org) {
+    try {
+      if (window.localStorage) window.localStorage.setItem(PRESENTATIONS_ORG_KEY, String(org || ''));
+    } catch (_) { /* Browser storage may be disabled; keep the in-memory choice. */ }
+  }
 
   function parsePresentPath(pathname) {
     var parts = String(pathname || '').split('/').filter(Boolean);
@@ -279,7 +294,7 @@
         loading: false,
         error: '',
         decks: [],
-        org: '',
+        org: readPersistedOrganization(),
         organizations: [],
         failedThumbnails: {},
         _destroyed: false,
@@ -605,6 +620,7 @@
           var host = root.querySelector('.present-library-org-host');
           var opts = {orgs: organizations, value: this.org, compactOnMobile:true, testId: 'present-org', onChange: function (slug) {
             self.org = slug;
+            persistOrganization(slug);
             self.decks = [];
             self._clearLibrarySubscriptions();
             self.loadLibrary();
