@@ -26,18 +26,29 @@ from .registry import home
 
 
 ORG_SET_ID = "autonomy.org"
-ORG_REVISION = 1
+#: Current schema revision. Revision 3 adds portable organization icons
+#: (``icon_attachment_id`` + ``icon_data_uri``). This constant names the
+#: CURRENT revision only; it must never be assigned as the ``schema_revision``
+#: of an older class, which would relabel a landed revision (auto-j1y0z).
+ORG_REVISION = 3
 
 VALID_ORG_TYPES = ("shared", "personal")
+
+#: The bounded compact icon derivative is a 64x64 WebP encoded as a
+#: ``data:image/webp;base64,...`` URI. The processor holds the byte bound
+#: (16 KiB encoded); the schema bounds the whole URI string so a single
+#: org-list row a consumer loads cannot grow without limit. 24,000 chars is
+#: comfortably above a 16-KiB base64 payload (~21,848 chars) plus prefix.
+ORG_ICON_DATA_URI_MAX_CHARS = 24_000
 
 
 SYNOPSIS = {
     "summary": (
-        "Org identity: display name, byline, brand color, favicon, type"
+        "Org identity: display name, byline, brand color, favicon, icon, type"
     ),
     "nouns": [
         "org", "organization", "identity", "branding",
-        "rename org", "byline", "favicon",
+        "rename org", "byline", "favicon", "icon", "avatar",
     ],
     "related_set_ids": [
         "autonomy.org.peer-subscription#1",
@@ -66,7 +77,10 @@ class OrgV1(SettingSchema):
     """
 
     set_id = ORG_SET_ID
-    schema_revision = ORG_REVISION
+    # Frozen literal, NOT ``ORG_REVISION``: this class is revision 1 forever.
+    # Binding it to the current-revision constant would silently relabel a
+    # landed revision the day ORG_REVISION advances (auto-j1y0z).
+    schema_revision = 1
 
     _required = ("name",)
     _optional_types: dict[str, type | tuple[type, ...]] = {
@@ -183,4 +197,61 @@ class OrgV2(OrgV1):
     @classmethod
     def upconvert_from_prev(cls, payload: dict) -> dict:
         # description is optional; a rev-1 payload is a valid rev-2 payload.
+        return dict(payload)
+
+
+class OrgV3(OrgV2):
+    """Revision 3 adds a portable organization icon.
+
+    Two server-owned fields, both optional:
+
+    * ``icon_attachment_id`` — the UUID of the canonical 512x512 sRGB WebP
+      stored in this organization's own attachment store (durable, immutable
+      bytes). This is what a machine serves through the same-origin
+      ``/api/attachment`` route.
+    * ``icon_data_uri`` — an exact 64x64 WebP derivative encoded as a
+      ``data:image/webp;base64,...`` URI, bounded so it can travel inline in
+      the org identity row and be shown before any attachment fetch (the
+      portable compact presentation, e.g. the pre-consent invitation tile).
+
+    Both are written and cleared as a pair by the authority-checked icon
+    routes; the Charter writer never accepts them from a client body. A
+    revision-1 or revision-2 row (which carry neither, and may carry the
+    legacy ``favicon`` path/URL) is a valid revision-3 row as-is — upconversion
+    preserves ``favicon`` untouched.
+    """
+
+    set_id = ORG_SET_ID
+    schema_revision = ORG_REVISION
+
+    _optional_types = {
+        **OrgV2._optional_types,
+        "icon_attachment_id": str,
+        "icon_data_uri": str,
+    }
+
+    _field_metadata = {
+        **OrgV2._field_metadata,
+        "icon_attachment_id": {
+            "type": "string",
+            "description": (
+                "UUID of the canonical 512x512 WebP in the org's attachment "
+                "store; server-owned, set only by the org icon routes"
+            ),
+        },
+        "icon_data_uri": {
+            "type": "string",
+            "max_length": ORG_ICON_DATA_URI_MAX_CHARS,
+            "description": (
+                "Bounded 64x64 WebP data: URI — the portable compact icon "
+                "shown inline; server-owned, set only by the org icon routes"
+            ),
+        },
+    }
+
+    @classmethod
+    def upconvert_from_prev(cls, payload: dict) -> dict:
+        # The icon fields are optional and server-owned; a rev-2 payload
+        # (with or without the legacy `favicon`) is a valid rev-3 payload,
+        # and `favicon` is preserved untouched.
         return dict(payload)
