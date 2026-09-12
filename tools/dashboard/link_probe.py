@@ -89,7 +89,8 @@ def _unreachable(detail: str) -> dict:
     return {"live": False, "status": None, "content_length": None, "detail": detail}
 
 
-async def _attempt_once(relay_url, token, root_pub, org_uuid, connect_timeout):
+async def _attempt_once(relay_url, token, root_pub, org_uuid, connect_timeout,
+                        link_pub=None):
     """One probe attempt with NO internal wall — the caller wraps it in a
     single ``asyncio.wait_for`` so the whole thing is bounded.
 
@@ -104,8 +105,8 @@ async def _attempt_once(relay_url, token, root_pub, org_uuid, connect_timeout):
 
     try:
         channel = await ViewerChannel.connect(
-            relay_url, token, root_pub=root_pub, org=org_uuid,
-            open_timeout=connect_timeout,
+            relay_url, token, root_pub=root_pub, link_pub=link_pub,
+            org=org_uuid, open_timeout=connect_timeout,
         )
     except Exception as exc:  # relay refused, connector offline, DNS, TLS…
         return _unreachable(
@@ -127,6 +128,7 @@ async def probe_link(
     token: str,
     root_pub: str,
     org_uuid: str,
+    link_pub: str | None = None,
     attempts: int = 2,
     total_timeout: float = 6.0,
     connect_timeout: float = 3.0,
@@ -158,7 +160,8 @@ async def probe_link(
         try:
             result = await asyncio.wait_for(
                 _attempt_once(relay_url, token, root_pub, org_uuid,
-                              min(connect_timeout, remaining)),
+                              min(connect_timeout, remaining),
+                              link_pub=link_pub),
                 timeout=remaining,
             )
         except asyncio.TimeoutError:
