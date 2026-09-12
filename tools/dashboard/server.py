@@ -7491,6 +7491,18 @@ async def api_session_get(request):
         pending_approval = _approvals.pending_for_session(tmux_name)
     except Exception:
         pending_approval = None
+    # Central kinds no longer live in the legacy rendezvous table. Only the
+    # operator receives this pointer; the existing session visibility guard
+    # above runs before either lookup.
+    try:
+        from tools.dashboard import attention_routes
+        if attention_routes._operator_guard(request) is None:
+            from tools.dashboard.approval_service import resolve_human_approval_actor
+            actor = resolve_human_approval_actor(request)
+            central_pending = await asyncio.to_thread(attention_routes.pending_session_approval, session, actor)
+            pending_approval = central_pending or pending_approval
+    except Exception:
+        logger.debug("Central pending approval lookup unavailable", exc_info=True)
     return JSONResponse({
         "session_id": session["tmux_name"],
         "pending_approval": pending_approval,

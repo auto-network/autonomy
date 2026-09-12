@@ -228,6 +228,8 @@
       _destroyed: false,
 
       async init() {
+        this._openFromSession = (id, options) => this.openApprovalById(id, options);
+        window.openCentralApproval = this._openFromSession;
         await this.refresh();
         this.connectEvents();
         await this.refreshPush();
@@ -242,6 +244,7 @@
       },
 
       destroy() {
+        if(window.openCentralApproval === this._openFromSession) delete window.openCentralApproval;
         this._destroyed = true;
         this._sharedApprovalDialog?.dispose();
         clearTimeout(this._refreshTimer);
@@ -268,6 +271,7 @@
               if (page === MAX_PAGES - 1) throw new Error('Attention list is too large to render safely.');
             }
             this.items = collected.map(normalizeItem);
+            window.dispatchEvent(new window.CustomEvent('central:refreshed'));
             this.counts = (first && first.counts) || emptyCounts();
             this.badgeCount = Number(this.counts.total_needs_attention || 0);
             if (this._sharedApprovalItem && !sameItem(this._sharedApprovalItem,
@@ -418,7 +422,16 @@
         });
       },
 
-      async openItem(item) {
+      async openApprovalById(id, {isCurrent = () => true} = {}) {
+        const payload = await jsonRequest('/api/attention/items/' + encodeURIComponent(id));
+        if(this._destroyed || !isCurrent()) return false;
+        const item = normalizeItem(payload.item);
+        if(payload.item.attention_state !== 'needs_attention') return false;
+        this.inboxOpen = false;
+        return await this.openItem(item, isCurrent);
+      },
+
+      async openItem(item, isCurrent = () => true) {
         if (!item) return;
         item.decisionError = '';
         // Migrated reviews never flash the legacy right-hand detail panel.
@@ -426,6 +439,7 @@
         this.selectedItem = shared ? null : item;
         try {
           const payload = await jsonRequest('/api/attention/items/' + encodeURIComponent(item.id));
+          if(this._destroyed || !isCurrent()) {this.selectedItem = null;return false;}
           if (!sameItem(item, normalizeItem(payload.item))) {
             await this.refresh();
             this.selectedItem = null;
@@ -444,12 +458,14 @@
             item.safeReview.comparison_code || '';
           item.unavailable = false;
           if (shared) await this.openDashboardApproval(item);
+          return true;
         } catch (error) {
           if (error && error.status === 409 && error.payload && error.payload.item) {
             item.unavailable = true;
           } else {
             item.unavailable = true;
           }
+          return false;
         }
         jsonRequest('/api/attention/items/' + encodeURIComponent(item.id) + '/opened', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',

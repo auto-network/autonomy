@@ -168,6 +168,7 @@
                       data-testid="session-worktree-review-button"
                       aria-label="Open worktree review"
                       style="display:none;"><span class="sv-term-glyph">⌥</span></button>
+              {% include "partials/session-approval-button.html" %}
               <template x-for="item in sessionContributionActions" :key="item.id">
                 <button type="button"
                         class="sv-term-toggle sv-session-contribution-action"
