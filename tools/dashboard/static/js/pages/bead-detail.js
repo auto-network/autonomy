@@ -197,8 +197,9 @@
           try {
             const depRes = await fetch(`/api/bead/${this.id}/deps${this.orgQuery()}`);
             const depData = await depRes.json();
-            this.depBlockers = (depData.blockers || []).filter(d => d.dependency_type !== 'parent-child');
-            this.depDependents = (depData.dependents || []).filter(d => d.dependency_type !== 'parent-child');
+            const isBlockingEdge = d => (d.dependency_type || d.type) === 'blocks';
+            this.depBlockers = (depData.blockers || []).filter(isBlockingEdge);
+            this.depDependents = (depData.dependents || []).filter(isBlockingEdge);
           } catch (_) {}
 
           // Fetch runDir for all dispatched beads (trace link for completed, live panel for running)
