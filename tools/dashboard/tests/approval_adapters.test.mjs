@@ -138,3 +138,23 @@ for (const applied of [false, true]) {
     assert.equal(await crypto.subtle.verify('Ed25519', publicKey, Buffer.from(decision.decision.signature, 'hex'), input), true);
   });
 }
+
+test('Central exact-ID opener ignores a session switch during either review read', async () => {
+  await import('../static/js/components/central-attention.js?test=' + Math.random());
+  for(const deferredRead of [1,2]) {
+    instance = (centralFactory || window.centralAttentionSurface)();
+    let current = true, reads = 0, finish, opened = 0;
+    instance.openDashboardApproval = async () => {opened++};
+    const payload={item:{attention_id:'recipient-1',category:'approvals',application:{scope:'dashboard'},
+      source_version:1,attention_state:'needs_attention',open:{renderer_id:'approval.dashboard_access.review'}},
+      review:{safe_review:{},actions:['granted']}};
+    global.fetch=async url=>{
+      assert.equal(url,'/api/attention/items/recipient-1');
+      if(++reads===deferredRead) await new Promise(resolve=>finish=resolve);
+      return reply(payload);
+    };
+    const opening=instance.openApprovalById('recipient-1',{isCurrent:()=>current});
+    await until(()=>!!finish); current=false;finish();
+    assert.equal(await opening,false);assert.equal(opened,0);
+  }
+});

@@ -58,6 +58,11 @@
 
       // ── Session identity ────────────────────────────────────────
       sessionKey: '',       // store key (tmux_name)
+      pendingApproval: null,
+      approvalOpening: false,
+      approvalOpenError: '',
+      _approvalGeneration: 0,
+      _approvalDestroyed: false,
       project: '',
       sessionId: '',
       projectLabel: '',
@@ -1507,19 +1512,17 @@
 
       init() {
         this.refreshViewportWidth();
-        // Open the approval overlay when a request from this session awaits the
-        // operator (e.g. a commit signature). Push-driven: the ``approval:pending``
-        // SSE event opens it, ``approval:decided`` clears the dedup. The one-shot
-        // durable-field read below covers a viewer that mounts after the event
-        // fired (openApprovalRequest ignores already-decided rows, so a stale
-        // cached replay is harmless). The shared overlay's openApprovalOverlay
-        // dispatches on the request's kind.
-        this._lastApprovalPendingId = null;
+        // Discovery updates the envelope only. Entering the session must not
+        // immediately reopen the approval the operator just navigated away from.
+        this._approvalDestroyed = false;
         // sessionKey is empty at init (configure() populates it later), so
         // the durable-field read must also fire when the key lands.
         this._checkPendingApproval();
         this.$watch('sessionKey', (key) => {
-          this._lastApprovalPendingId = null;
+          this._approvalGeneration++;
+          this.pendingApproval = null;
+          this.approvalOpening = false;
+          this.approvalOpenError = '';
           if (key) this._checkPendingApproval();
           var service = window.Autonomy && window.Autonomy.sessionContributions;
           if (key && service) service.load([key]);
@@ -1527,17 +1530,13 @@
         var approvalSelf = this;
         this._approvalPendingHandler = function (d) {
           if (!d || d.session !== approvalSelf.sessionKey || !d.id) return;
-          if (d.id !== approvalSelf._lastApprovalPendingId && window.openApprovalOverlay) {
-            approvalSelf._lastApprovalPendingId = d.id;
-            window.openApprovalOverlay(d.id);
-          }
+          approvalSelf._checkPendingApproval();
         };
         this._approvalDecidedHandler = function (d) {
-          if (d && d.session === approvalSelf.sessionKey &&
-              d.id === approvalSelf._lastApprovalPendingId) {
-            approvalSelf._lastApprovalPendingId = null;
-          }
+          if (d && d.session === approvalSelf.sessionKey) approvalSelf._checkPendingApproval();
         };
+        this._centralApprovalHandler = () => this._checkPendingApproval();
+        window.addEventListener('central:refreshed', this._centralApprovalHandler);
         if (typeof window.registerHandler === 'function') {
           window.registerHandler('approval:pending', this._approvalPendingHandler);
           window.registerHandler('approval:decided', this._approvalDecidedHandler);
@@ -1716,19 +1715,45 @@
       // wasn't connected to see.
       async _checkPendingApproval() {
         const key = this.sessionKey;
-        if (!key || !window.openApprovalOverlay) return;
+        if (!key || this._approvalDestroyed) return false;
+        const generation = ++this._approvalGeneration;
         try {
           const r = await fetch('/api/session/' + encodeURIComponent(key));
-          if (!r.ok) return;
+          if (!r.ok) return false;
           const p = (await r.json()).pending_approval || null;
-          if (p && p.id && p.id !== this._lastApprovalPendingId) {
-            this._lastApprovalPendingId = p.id;
-            window.openApprovalOverlay(p.id);
+          if(this._approvalDestroyed || key !== this.sessionKey || generation !== this._approvalGeneration) return false;
+          this.pendingApproval = p && p.id ? p : null;
+          return true;
+        } catch (e) { return false; }
+      },
+
+      async openPendingApproval() {
+        if(this.approvalOpening) return;
+        const key = this.sessionKey;
+        this.approvalOpening = true;
+        this.approvalOpenError = '';
+        try {
+          if(!await this._checkPendingApproval()) throw Error('Could not load the approval. Tap to try again.');
+          if(this._approvalDestroyed || key !== this.sessionKey) return;
+          const pending = this.pendingApproval;
+          if(!pending) return;
+          const open = pending.attention_id ? window.openCentralApproval : window.openApprovalOverlay;
+          if(!open || await open(pending.attention_id || pending.id, {
+            isCurrent: () => !this._approvalDestroyed && key === this.sessionKey,
+          }) === false) {
+            throw Error('This approval is no longer available.');
           }
-        } catch (e) { /* best-effort */ }
+        } catch(error) {
+          if(key === this.sessionKey && !this._approvalDestroyed) this.approvalOpenError = error.message;
+        } finally {
+          if(key === this.sessionKey) this.approvalOpening = false;
+        }
       },
 
       destroy() {
+        this._approvalDestroyed = true;
+        this._approvalGeneration++;
+        window.removeEventListener('central:refreshed', this._centralApprovalHandler);
         // Do NOT unregister SSE — store keeps accumulating outside component lifecycle
         for (var i = 0; i < this._storeCleanups.length; i++) {
           if (typeof this._storeCleanups[i] === 'function') this._storeCleanups[i]();

@@ -26,6 +26,7 @@ from tools.dashboard.approval_service import (
     ApprovalService,
     ApprovalServiceError,
     ApprovalStatus,
+    HumanApprovalActor,
     resolve_human_approval_actor,
 )
 from tools.dashboard.approval_http_bridge import (
@@ -415,6 +416,40 @@ def session_requester_view(requester: Mapping[str, Any]) -> dict[str, str]:
         "href": f"/session/{quote(row['project'], safe='')}/{quote(subject, safe='')}",
         "byline": row["project"],
     }
+
+
+def pending_session_approval(session: Mapping[str, Any], actor: HumanApprovalActor) -> dict | None:
+    """Project an existing Central request into the session viewer's opener."""
+    from tools.dashboard.approval_service import canonical_session_requester_id
+    from tools.dashboard.org_identity import resolve_session_org
+
+    subject = session["tmux_name"]
+    org = resolve_session_org(session).get("slug")
+    principals = [api_auth.ApiPrincipal(api_auth.ApiPrincipalKind.LOCAL_SESSION, subject=subject)]
+    if org:
+        principals.append(api_auth.ApiPrincipal(api_auth.ApiPrincipalKind.ORG_SESSION, subject=subject, org=org))
+    identities = {canonical_session_requester_id(p) for p in principals}
+    cursor = None
+    found = []
+    while True:
+        page = _runtime.index.query(surface_category="approvals", attention_state="needs_attention",
+                                    participant_role="recipient", limit=100, cursor=cursor)
+        for item in page.items:
+            context = _approval_context(item)
+            if context is None:
+                continue
+            status = context[2]
+            payload = status.request.payload
+            requester = payload.get("requester_ref", {})
+            if (status.resolution is None and requester.get("kind") == "session"
+                    and requester.get("id") in identities
+                    and payload.get("decider") == {"kind": "person", "id": actor.decider_ref}):
+                found.append((item.payload["occurred_at"], item.attention_id,
+                              {"id": status.request.approval_id, "kind": payload["kind"],
+                               "attention_id": item.attention_id}))
+        cursor = page.next_cursor
+        if cursor is None:
+            return min(found, key=lambda row: row[:2])[2] if found else None
 
 
 def build_production_runtime() -> AttentionRouteRuntime:

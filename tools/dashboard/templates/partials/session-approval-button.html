@@ -1,0 +1,12 @@
+<button type="button" class="sv-term-toggle text-amber-300"
+        x-show="pendingApproval" style="display:none;"
+        @click.stop="openPendingApproval()" :disabled="approvalOpening"
+        :title="approvalOpenError || 'Open pending approval in Central'"
+        aria-label="Open pending approval in Central"
+        data-testid="session-central-approval-button">
+  <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none"
+       stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3" y="5" width="18" height="14" rx="3"></rect>
+    <path d="m4 7 8 6 8-6"></path>
+  </svg>
+</button>

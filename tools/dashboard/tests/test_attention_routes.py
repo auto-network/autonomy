@@ -211,6 +211,25 @@ def _route_runtime():
     ), producer
 
 
+def test_session_pending_central_matches_requester_decider_and_unresolved_state(monkeypatch):
+    from tools.dashboard import org_identity
+    runtime, _ = _route_runtime()
+    previous = attention_routes.configure_runtime(runtime)
+    monkeypatch.setattr(org_identity, "resolve_session_org", lambda row: {"slug": "autonomy"})
+    try:
+        session = {"tmux_name": "session-1", "project": "workspace"}
+        actor = HumanApprovalActor._verified(ROOT)
+        assert attention_routes.pending_session_approval(session, actor) == {
+            "id": APPROVAL_ID, "kind": "test_kind", "attention_id": "recipient-item",
+        }
+        assert attention_routes.pending_session_approval({**session, "tmux_name": "other"}, actor) is None
+        assert attention_routes.pending_session_approval(session, HumanApprovalActor._verified("b" * 64)) is None
+        runtime.approvals.decide(APPROVAL_ID, actor, outcome="declined", decision={})
+        assert attention_routes.pending_session_approval(session, actor) is None
+    finally:
+        attention_routes.configure_runtime(previous)
+
+
 @pytest.fixture
 def route_client(monkeypatch):
     runtime, producer = _route_runtime()
