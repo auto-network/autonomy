@@ -17843,9 +17843,20 @@ async def api_graph_settings_get_by_key(request):
     if err:
         return JSONResponse({"error": err}, status_code=400)
     org = api_auth.organization_scope_from_request(request)
+    # Route this single-key HTTP read through the resolver's indexed
+    # key_equals narrowing (idx_settings_set) instead of materializing the
+    # whole set and filtering in Python. key_equals changes only candidate
+    # cardinality — the resolver still receives every base/override/exclude
+    # layer for this key — so members[0].to_dict() is byte-identical to the
+    # prior full-read-then-filter for the local base, override, exclusion,
+    # peer-visible winner, target/minimum revision, defaults, and vault
+    # refusal cases. The row-dict-returning read_set_key is deliberately NOT
+    # used here: this endpoint's contract is ResolvedSetting.to_dict(), which
+    # carries revision-shaping fields (target_revision, upconverted) that the
+    # base-row shape does not. See graph://7d588dfa-429 §4.
     members = graph_ops.read_set(
         set_id, target_revision=target, min_revision=minrev,
-        org=org or graph_ops.CALLER_ORG,
+        org=org or graph_ops.CALLER_ORG, key_equals=key,
     )
     for m in members.members:
         if m.key == key:
