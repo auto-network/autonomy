@@ -5283,6 +5283,152 @@ def contested_keys(
     return contested
 
 
+@dataclass
+class _PayloadPredicate:
+    """A validated, schema-authorized payload predicate for an owned read.
+
+    Built once by :func:`_build_payload_predicate` and consumed by
+    :func:`read_set`. It carries three things the read path needs:
+
+    * ``clause`` / ``params`` — the additive SQL fragment (``AND
+      json_extract(payload,'$.<field>') = ?`` / ``... IN (?,…)``) and its
+      bound parameters, appended to the owned row SELECT only on the
+      layer-free fast path. Field names have already been checked against
+      the schema allow-list, so interpolating them into the JSON path is
+      safe; every VALUE is a bound parameter.
+    * ``is_empty`` — set when any field maps to an empty sequence. An empty
+      ``IN`` matches nothing, so the caller returns an empty ``SetMembers``
+      before touching the database rather than emitting invalid ``IN ()``.
+    * :meth:`matches` — the equivalent predicate over a RESOLVED payload,
+      applied to members after the six-step resolution so both the fast
+      (SQL-narrowed) and the fallback (full-fetch) paths are exact.
+    """
+
+    clause: str
+    params: tuple[Any, ...]
+    is_empty: bool
+    #: [(field, frozenset|None, scalar|None)] — one entry per field. A
+    #: frozenset means IN membership; a scalar means equality.
+    _terms: list[tuple[str, "frozenset[str] | None", "str | None"]]
+
+    def matches(self, payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            # A vaulted/failed resolution has no payload dict; it cannot
+            # satisfy a payload predicate. Vaulted sets are refused up
+            # front, so this is belt-and-braces.
+            return False
+        for field_name, allowed, scalar in self._terms:
+            value = payload.get(field_name)
+            if allowed is not None:
+                if value not in allowed:
+                    return False
+            elif value != scalar:
+                return False
+        return True
+
+
+def _build_payload_predicate(
+    set_id: str,
+    where_payload: "Mapping[str, str | Sequence[str]]",
+) -> _PayloadPredicate:
+    """Validate and compile a ``where_payload`` mapping into SQL + a Python
+    predicate for an OWNED, non-vaulted read.
+
+    Raises a bounded ``ValueError`` — before any predicate SQL is executed —
+    on every unsafe input: an unregistered set, a vaulted set, a value that
+    is a mapping / bytes / nested / non-string scalar, or a field that is not
+    declared in EVERY applicable registered schema revision (unknown field or
+    a revision mix in which the field is not uniformly present). Safety is a
+    static schema fact plus the caller's owned/non-vaulted boundary; access
+    pattern and publication state are deliberately NOT consulted.
+    """
+    from collections.abc import Mapping as _Mapping, Sequence as _Sequence
+
+    # Every registered revision of this set. Absence means the set is not
+    # schema-authorized for pushdown at all.
+    revisions = schemas.registered_schemas(set_id)
+    if not revisions:
+        raise ValueError(
+            f"where_payload: {set_id} has no registered schema revision; "
+            "predicate pushdown is only available for registered sets"
+        )
+
+    # A vaulted set stores locators, not the values a predicate would filter
+    # on; pushdown must never operate on one. ``declared_vault_tier`` also
+    # refuses a revision mix that disagrees on the tier.
+    if schemas.declared_vault_tier(set_id) is not None:
+        raise ValueError(
+            f"where_payload: {set_id} is vaulted; predicate pushdown is not "
+            "available on vaulted sets"
+        )
+
+    clauses: list[str] = []
+    params: list[Any] = []
+    terms: list[tuple[str, "frozenset[str] | None", "str | None"]] = []
+    is_empty = False
+
+    for field_name, value in where_payload.items():
+        # The field must be declared in EVERY applicable revision. A revision
+        # that does not declare it (including one with empty field metadata)
+        # makes the field unsafe: a stored row of that revision could carry a
+        # value the JSON path cannot see, so raw-row narrowing would diverge
+        # from resolution.
+        for cls in revisions:
+            meta = getattr(cls, "_field_metadata", None) or {}
+            if field_name not in meta:
+                raise ValueError(
+                    f"where_payload: field {field_name!r} is not declared in "
+                    f"every registered revision of {set_id}"
+                )
+
+        # Value shape. Reject mappings, bytes, non-string scalars, and any
+        # sequence carrying a non-string (nested) element.
+        if isinstance(value, _Mapping) or isinstance(value, (bytes, bytearray)):
+            raise ValueError(
+                f"where_payload: value for {field_name!r} must be a string or "
+                "a sequence of strings"
+            )
+        if isinstance(value, str):
+            clauses.append(f" AND json_extract(payload, '$.{field_name}') = ?")
+            params.append(value)
+            terms.append((field_name, None, value))
+        elif isinstance(value, _Sequence):
+            items = list(value)
+            for element in items:
+                if not isinstance(element, str) or isinstance(
+                    element, (bytes, bytearray)
+                ):
+                    raise ValueError(
+                        f"where_payload: sequence for {field_name!r} must "
+                        "contain only strings"
+                    )
+            if not items:
+                # An empty IN matches nothing; signal it and skip emitting
+                # invalid ``IN ()`` SQL.
+                is_empty = True
+                terms.append((field_name, frozenset(), None))
+                continue
+            placeholders = ",".join("?" for _ in items)
+            clauses.append(
+                f" AND json_extract(payload, '$.{field_name}') "
+                f"IN ({placeholders})"
+            )
+            params.extend(items)
+            terms.append((field_name, frozenset(items), None))
+        else:
+            raise ValueError(
+                f"where_payload: value for {field_name!r} must be a string or "
+                "a sequence of strings"
+            )
+
+    return _PayloadPredicate(
+        clause="".join(clauses),
+        params=tuple(params),
+        is_empty=is_empty,
+        _terms=terms,
+    )
+
+
 def read_set(
     set_id: str,
     *,
@@ -5294,6 +5440,7 @@ def read_set(
     model: type[Any] | None = None,
     now: int | None = None,
     key_equals: str | None = None,
+    where_payload: "Mapping[str, str | Sequence[str]] | None" = None,
 ) -> SetMembers[Any]:
     """Resolve members of *set_id* visible to org's session.
 
@@ -5342,6 +5489,26 @@ def read_set(
     it out of the public collection API — it is an internal narrowing, not a
     query filter callers compose.
 
+    ``where_payload`` is a schema-authorized equality / finite-IN predicate on
+    the stored JSON ``payload``, available ONLY on an owned, non-vaulted read
+    (``peers=[]``; see :func:`read_owned_set`). A scalar string becomes
+    ``json_extract(payload,'$.<field>') = ?``; a non-string sequence becomes a
+    parameterized ``IN``; an empty sequence returns an empty ``SetMembers``
+    without emitting ``IN ()``. Each requested field is validated against every
+    applicable registered schema revision, and the value shape is validated,
+    before any predicate SQL runs (:func:`_build_payload_predicate`).
+
+    Safety is a same-statement live-layer guard, not an access-pattern proxy:
+    in one read transaction this checks whether any live row in the set carries
+    ``supersedes`` or ``excludes``. If so it fetches the full set (an override
+    could give a row whose stored value misses but whose resolved value
+    matches); otherwise it narrows in SQL. Either way the equivalent predicate
+    is applied to the RESOLVED members before returning, so both paths are
+    exact. A ``target_revision`` read also skips SQL narrowing — an upconvert
+    can rewrite the queried field and the post-resolution re-apply cannot
+    recover a row SQL wrongly dropped; ``min_revision`` is a metadata floor that
+    composes safely. ``where_payload=None`` reproduces today's behavior.
+
     ``org`` is **required** — see :func:`add_setting` for the contract.
     """
     from .cross_org import (
@@ -5352,6 +5519,25 @@ def read_set(
 
     org = _resolve_org_arg(org)
     resolved_org = org
+
+    # Payload predicate: owned, non-vaulted, schema-authorized only.
+    payload_predicate: "_PayloadPredicate | None" = None
+    if where_payload is not None:
+        # The live-layer guard and the same-snapshot narrowing are defined for
+        # a single owned database; peer composition has no such snapshot. Only
+        # the explicit isolated marker ``peers=[]`` (what read_owned_set passes)
+        # is accepted — a subscription-resolved (None) or pinned peer list is a
+        # federated read and is refused.
+        if peers != []:
+            raise ValueError(
+                "where_payload is only available on owned reads (peers=[]); "
+                "it is not exposed on federated reads"
+            )
+        payload_predicate = _build_payload_predicate(set_id, where_payload)
+        if payload_predicate.is_empty:
+            # An empty IN matches nothing; return before any database query so
+            # no invalid ``IN ()`` SQL is emitted.
+            return SetMembers(members=[], dropped=DropAccounting())
     raw_rows: list[tuple[str | None, Any]] = []
     deprecated_filtered = 0
     prefix_clause = ""
@@ -5403,17 +5589,57 @@ def read_set(
         prefix_params = (*prefix_params, _prefix_like_pattern(resolved_org))
     db = _open_read(org, set_id)
     try:
+        payload_clause = ""
+        payload_params: tuple[Any, ...] = ()
+        in_read_tx = False
+        # SQL narrowing is exact only when the value SQL filters on (the
+        # STORED field) equals the value the predicate ultimately sees (the
+        # RESOLVED field), because the post-resolution re-apply can only drop
+        # false positives — it can never recover a row SQL wrongly excluded.
+        # An upconvert can rewrite the queried field, so a target_revision read
+        # must NOT narrow in SQL (it fetches fully and relies on the
+        # post-resolution predicate). ``min_revision`` is a metadata-only floor
+        # that never mutates a field value, so it composes safely and is not
+        # gated here. ``db`` is read_set's own per-call ``_open_read`` (a fresh
+        # ``mode="ro"`` connection closed in the finally below), never a pooled
+        # ro connection — the BEGIN/COMMIT read transaction relies on that.
+        if payload_predicate is not None and target_revision is None:
+            # One read transaction so the live-layer check and the row fetch
+            # observe a single snapshot. Under WAL with sqlite3's default
+            # isolation the snapshot is fixed at the first SELECT after BEGIN
+            # and held until COMMIT, so an override written between the two
+            # statements cannot make the guard and the fetch disagree.
+            db.conn.execute("BEGIN")
+            in_read_tx = True
+            layered = db.conn.execute(
+                f"SELECT 1 FROM settings WHERE set_id = ? "
+                f"  AND deprecated = 0"
+                f"{key_clause}"
+                f"{prefix_clause}"
+                f"  AND (supersedes IS NOT NULL OR excludes IS NOT NULL) "
+                f"LIMIT 1",
+                (set_id, *key_params, *prefix_params),
+            ).fetchone() is not None
+            if not layered:
+                # Layer-free fast path: narrow stored rows in SQL. A layered
+                # set falls through with no payload clause and fetches fully;
+                # the post-resolution predicate keeps both exact.
+                payload_clause = payload_predicate.clause
+                payload_params = payload_predicate.params
         rows = db.conn.execute(
             f"SELECT rowid AS _rowid, * FROM settings WHERE set_id = ? "
             f"  AND deprecated = 0"
             f"{key_clause}"
-            f"{prefix_clause}",
-            (set_id, *key_params, *prefix_params),
+            f"{prefix_clause}"
+            f"{payload_clause}",
+            (set_id, *key_params, *prefix_params, *payload_params),
         ).fetchall()
         for r in rows:
             raw_rows.append((resolved_org, r))
         # Count what we just filtered out so operators can spot drift
         # (e.g. a deprecated row still surfacing through some other path).
+        # Deliberately set-wide (no payload clause): drop accounting must
+        # equal a full read's, so a predicate narrows members, not counts.
         dep_row = db.conn.execute(
             f"SELECT COUNT(*) AS n FROM settings WHERE set_id = ? "
             f"  AND deprecated = 1"
@@ -5423,6 +5649,8 @@ def read_set(
         ).fetchone()
         if dep_row is not None:
             deprecated_filtered += int(dep_row["n"])
+        if in_read_tx:
+            db.conn.commit()
     finally:
         db.close()
 
@@ -5628,6 +5856,12 @@ def read_set(
 
         members.append(resolved)
 
+    # Re-apply the payload predicate to the RESOLVED members. On the layer-free
+    # path this only confirms the SQL narrowing; on the full-fetch fallback it
+    # is what makes the result exact when an override changed a filtered field.
+    if payload_predicate is not None:
+        members = [m for m in members if payload_predicate.matches(m.payload)]
+
     return SetMembers(members=members, dropped=dropped)
 
 
@@ -5639,6 +5873,7 @@ def read_owned_set(
     min_revision: int | None = None,
     prefix: str | None = None,
     model: type[Any] | None = None,
+    where_payload: "Mapping[str, str | Sequence[str]] | None" = None,
 ) -> SetMembers[Any]:
     """Resolve *set_id* from its owning database only.
 
@@ -5649,6 +5884,10 @@ def read_owned_set(
     by itself disable peer composition.  This named reader makes the security
     boundary explicit and prevents those call sites from silently forgetting
     the otherwise easy-to-miss ``peers=[]`` argument.
+
+    ``where_payload`` (see :func:`read_set`) is forwarded here because this is
+    the only sanctioned entry point for the owned-read payload predicate; the
+    federated ``read_set`` path refuses it.
     """
     return read_set(
         set_id,
@@ -5658,6 +5897,7 @@ def read_owned_set(
         min_revision=min_revision,
         prefix=prefix,
         model=model,
+        where_payload=where_payload,
     )
 
 
