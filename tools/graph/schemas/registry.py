@@ -1728,6 +1728,27 @@ def list_registered_set_ids() -> list[str]:
     return sorted({key.split("#", 1)[0] for key in SCHEMAS})
 
 
+def registered_schemas(set_id: str) -> list[type["SettingSchema"]]:
+    """Every registered revision class for ``set_id`` (unordered).
+
+    Empty when nothing is registered — the caller treats that as "not
+    schema-authorized" rather than a silent pass.
+    """
+    prefix = f"{set_id}#"
+    out: list[type["SettingSchema"]] = []
+    for key, cls in SCHEMAS.items():
+        if not key.startswith(prefix):
+            continue
+        # Guard against a set_id that is itself a prefix of another
+        # (``foo`` vs ``foo.bar``): the suffix after ``#`` must be an int.
+        try:
+            int(key[len(prefix):])
+        except ValueError:
+            continue
+        out.append(cls)
+    return out
+
+
 def upconvert_chain(
     set_id: str,
     from_rev: int,
