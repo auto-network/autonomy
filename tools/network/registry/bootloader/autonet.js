@@ -1832,6 +1832,7 @@ const autonet = (() => {
     return {
       org: envelope.org,
       inviteRef: envelope.invite_ref,
+      relayHost: location.origin,
       token: fragmentToken,
       linkKey,
     };
@@ -1841,6 +1842,7 @@ const autonet = (() => {
     const query = new URLSearchParams({
       org: context.org,
       invite_ref: context.inviteRef,
+      relay_host: context.relayHost,
     });
     // BOTH credentials ride the fragment — never the query. The channel
     // token is itself a bearer-class credential (possession opens the

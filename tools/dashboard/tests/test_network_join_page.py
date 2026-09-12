@@ -22,6 +22,9 @@ PAGE_JS = (DASHBOARD / "static" / "js" / "network-join.js").read_text(
     encoding="utf-8"
 )
 RELAYKIT_CORE = DASHBOARD / "static" / "js" / "lib" / "relaykit-core.js"
+CONTROLLER_JS = (
+    DASHBOARD / "static" / "js" / "join" / "accept-controller.js"
+).read_text(encoding="utf-8")
 
 
 def _client():
@@ -36,7 +39,7 @@ class TestRoute:
         bare = client.get("/network/join")
         full = client.get(
             "/network/join?org=11111111-1111-4111-8111-111111111111"
-            "&root_pub=" + "a" * 64 + "&invite_ref=" + "e" * 64
+            "&invite_ref=" + "e" * 64
         )
         assert bare.status_code == full.status_code == 200
         assert bare.text == full.text  # neutrality: query never interpolated
@@ -61,6 +64,9 @@ class TestRoute:
         assert response.status_code == 200
         assert response.content == RELAYKIT_CORE.read_bytes()
 
+    def test_obsolete_invite_resolve_route_is_retired(self):
+        assert _client().post("/api/network/invite/resolve", json={}).status_code == 404
+
 
 class TestI1Constraints:
     """The properties the three-pillar convergence demands."""
@@ -76,32 +82,15 @@ class TestI1Constraints:
         for forbidden in ("<form", 'type="password"', "password"):
             assert forbidden not in body, forbidden
 
-    def test_page_network_is_exactly_the_one_ruled_resolve_call(self):
-        # DELIBERATE CHANGE (2026-08-14): the operator ruled the
-        # paste-into-own-dashboard design — the page resolves invitations on
-        # its OWN origin (auto-yw5gz). The former no-network pin therefore
-        # narrows, consciously, to: exactly one fetch, to exactly the resolve
-        # endpoint, whose body carries transport credentials only. The bearer
-        # still never leaves the browser.
+    def test_page_fetches_only_public_envelope_in_browser(self):
         lowered = PAGE_JS.lower()
         assert lowered.count("fetch(") == 1
-        assert 'fetch("/api/network/invite/resolve"' in PAGE_JS
-        assert lowered.count("/api/") == 1
+        assert '"/v1/links/" + inputs.channeltoken + "/envelope"' in lowered
+        assert "/api/network/invite/resolve" not in lowered
+        assert "root_pub" not in lowered
         for forbidden in ("xmlhttprequest", "websocket",
                           "navigator.sendbeacon"):
             assert forbidden not in lowered, forbidden
-        # The SENT body shape is an allowlist, not just the declaration
-        # (adversarial review 2026-08-14: pinning the declaration alone let a
-        # later `body.t = heldBearer` mutation ship green). Every write to the
-        # body object, anywhere in the script, must stay inside the allowed
-        # public-field set.
-        import re
-
-        assert ("var body = { relay_host: relayHost, "
-                "channel_token: channelToken };") in PAGE_JS
-        mutations = set(re.findall(r"body\.(\w+)\s*=", PAGE_JS))
-        assert mutations <= {"org", "root_pub", "invite_ref"}, mutations
-        assert not re.search(r"body\s*\[", PAGE_JS)  # no dynamic-key writes
 
     def test_the_bearer_never_reaches_any_request(self):
         # heldBearer exists to be HELD for the future accept ceremony. It may
@@ -116,11 +105,10 @@ class TestI1Constraints:
             line = PAGE_JS[line_start:PAGE_JS.index("\n", idx)]
             ok = re.match(r"\s*(var\s+)?heldBearer\s*=", line)
             assert ok, f"heldBearer used outside plain assignment: {line.strip()}"
-        resolve_fn = PAGE_JS[PAGE_JS.index("function resolveOnOrigin"):
+        resolve_fn = PAGE_JS[PAGE_JS.index("function fetchEnvelope"):
                              PAGE_JS.index("function showPasteStep")]
         assert "heldBearer" not in resolve_fn
-        assert "bearer" not in resolve_fn.lower().replace(
-            "// the bearer is deliberately absent.", "")
+        assert "bearer" not in resolve_fn.lower()
 
     def test_no_ceremony_code(self):
         # TO THE IMPLEMENTER OF ACCEPTANCE MECHANICS (auto-9rw91): when the
@@ -138,9 +126,33 @@ class TestI1Constraints:
 
     def test_credentials_read_from_fragment_only(self):
         assert 'fragment.get("channel_token")' in PAGE_JS
+        assert 'fragment.get("k")' in PAGE_JS
         assert 'fragment.get("t")' in PAGE_JS
         assert 'query.get("channel_token")' not in PAGE_JS
         assert 'query.get("t")' not in PAGE_JS
+
+    def test_failure_classes_all_keep_the_action_disabled(self):
+        # Incomplete links never enter the org step. Envelope/transport and
+        # authenticated ledger closure flow through reportTerminal, which
+        # hides the action; transcript failure remains a distinct controller
+        # state so the page cannot dress it up as ledger truth.
+        assert '$("step-broken").classList.remove("hidden")' in PAGE_JS
+        terminal = PAGE_JS[PAGE_JS.index("function reportTerminal"):
+                           PAGE_JS.index("function wireAccept")]
+        assert 'show("accept-block", false)' in terminal
+        assert 'button.classList.add("hidden")' in terminal
+        assert "state: 'security'" in CONTROLLER_JS
+        assert "state: 'link-lost'" in CONTROLLER_JS
+        assert "state: 'closed'" in CONTROLLER_JS
+
+    def test_envelope_never_supplies_human_presentation(self):
+        envelope = PAGE_JS[PAGE_JS.index("function fetchEnvelope"):
+                           PAGE_JS.index("function showPasteStep")]
+        for field in ("org_name", "org_description", "org_icon", "org_color",
+                      "sponsor_name", "sponsor_avatar"):
+            assert field not in envelope
+        # Rendering is fed only by the authenticated JoinSession result.
+        assert "session.brand.orgName" in PAGE_JS
 
     def test_nothing_is_promised_that_does_not_work(self):
         # Operator product rule: UI shows what works. auto-9rw91 added the

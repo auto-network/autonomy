@@ -9,6 +9,7 @@ so these absences are file-pinnable (the b91a8770 pattern, third use).
 from __future__ import annotations
 
 import json
+import base64
 import shutil
 import subprocess
 from pathlib import Path
@@ -31,11 +32,15 @@ JOIN_HTML = (DASHBOARD / "templates" / "network-join.html").read_text(
 BASE_HTML = (DASHBOARD / "templates" / "base.html").read_text(encoding="utf-8")
 
 TOKEN = "7f" * 16
-SHARE = f"https://auto.network/l/{TOKEN}#t=bearer%20secret"
+CHANNEL_HEX = "cd" * 32
+CHANNEL_KEY = base64.urlsafe_b64encode(bytes.fromhex(CHANNEL_HEX)).decode().rstrip("=")
+BEARER = "be" * 32
+SHARE = f"https://auto.network/l/{TOKEN}#k={CHANNEL_KEY}&t={BEARER}"
 HANDOFF = (
     "https://registry.auto.network/network/join"
-    "?org=11111111-1111-4111-8111-111111111111&root_pub=" + "a" * 64
-    + "&invite_ref=" + "e" * 64 + "#channel_token=" + TOKEN + "&t=bearer"
+    "?org=11111111-1111-4111-8111-111111111111&invite_ref=" + "e" * 64
+    + "&relay_host=https%3A%2F%2Fregistry.auto.network#channel_token=" + TOKEN
+    + "&k=" + CHANNEL_KEY + "&t=" + BEARER
 )
 
 
@@ -60,20 +65,17 @@ class TestStructuralAbsences:
         assert "input.type" not in INDICATOR_JS
 
 
-class TestBearerNeverEgresses:
+class TestFragmentsNeverEgress:
     """auto-yw5gz: the page holds the bearer and resolves on its own origin
     with transport credentials only. These grep-level checks pin that the
     bearer is never placed in the one request the page makes."""
 
-    def test_resolve_body_is_transport_credentials_only(self):
-        # The single fetch body carries relay_host + channel_token (and, for a
-        # handoff, the public org/root_pub/invite_ref). It must never carry the
-        # bearer under any name.
-        i = JOIN_JS.index("JSON.stringify(body)")
-        # The request body object is assembled just above the fetch.
-        assembly = JOIN_JS[JOIN_JS.index("var body = {"):i]
-        for forbidden in ("bearer", "heldBearer", "parsed.bearer", '"t"', "'t'"):
-            assert forbidden not in assembly, forbidden
+    def test_registry_request_contains_no_fragment_values(self):
+        request = JOIN_JS[JOIN_JS.index("function fetchEnvelope"):
+                          JOIN_JS.index("function showPasteStep")]
+        assert "channelPub" not in request
+        assert "bearer" not in request.lower()
+        assert "JSON.stringify" not in request
 
     def test_the_bearer_is_held_never_stored(self):
         # Held in a closure for the ceremony; never persisted anywhere audited.
@@ -82,16 +84,16 @@ class TestBearerNeverEgresses:
                           "document.cookie"):
             assert forbidden not in JOIN_JS.lower(), forbidden
 
-    def test_the_one_endpoint_is_the_local_resolve(self):
-        # Same-origin path; no relay/registry origin is ever fetched by the page.
-        assert "/api/network/invite/resolve" in JOIN_JS
-        assert "auto.network" not in JOIN_JS  # never a cross-origin fetch
+    def test_obsolete_root_pinned_resolve_is_absent(self):
+        assert "/api/network/invite/resolve" not in JOIN_JS
+        assert "root_pub" not in JOIN_JS
 
-    def test_org_step_stays_button_free(self):
-        # No Accept until the ceremony lands (auto-9rw91).
+    def test_org_action_is_present_but_initially_disabled_by_hidden_state(self):
         org = JOIN_HTML[JOIN_HTML.index('id="step-org"'):
                         JOIN_HTML.index('id="step-broken"')]
-        assert "<button" not in org.lower()
+        assert 'id="accept-block"' in org
+        assert 'class="hidden' in org[org.index('id="accept-block"') - 80:
+                                      org.index('id="accept-block"') + 80]
 
 
 class TestMount:
@@ -139,7 +141,8 @@ class TestParseBehavior:
             "kind": "bridge",
             "relayHost": "https://auto.network",
             "channelToken": TOKEN,
-            "bearer": "bearer secret",
+            "channelPub": CHANNEL_HEX,
+            "bearer": BEARER,
         }
         assert "destination" not in out  # the relay bounce is gone
 
@@ -151,14 +154,14 @@ class TestParseBehavior:
         assert out["kind"] == "local"
         assert out["destination"].startswith("/network/join?org=")
         assert "#channel_token=" + TOKEN in out["destination"]
-        assert "registry.auto.network" not in out["destination"]
+        assert not out["destination"].startswith("https://registry.auto.network")
 
     def test_shape_errors_are_honest_and_navigation_free(self):
         cases = {
             "": "Paste an invitation link.",
             "not a url": "does not look like a link",
             "javascript:alert(1)": "does not look like a link",
-            f"https://auto.network/l/{TOKEN}": "missing its secret part",
+            f"https://auto.network/l/{TOKEN}": "incomplete secret part",
             "https://auto.network/network/join?org=x#t=y":
                 "missing its invitation details",
             "https://example.com/other": "not an Autonomy invitation",
@@ -192,7 +195,8 @@ class TestParseBehavior:
             "kind": "bridge",
             "relayHost": "https://auto.network",
             "channelToken": TOKEN,
-            "bearer": "bearer secret",
+            "channelPub": CHANNEL_HEX,
+            "bearer": BEARER,
         }]
 
     def test_a_share_link_without_a_resolve_handler_stays_put(self):

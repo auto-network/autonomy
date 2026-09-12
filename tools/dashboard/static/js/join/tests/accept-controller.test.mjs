@@ -12,7 +12,6 @@ const te = new TextEncoder();
 const td = new TextDecoder();
 
 const ORG = '11111111-1111-4111-8111-111111111111';
-const ROOT = 'a'.repeat(64);
 const GENESIS = 'b'.repeat(64);
 const HEADS = ['1'.repeat(64), '2'.repeat(64)];
 const MAXHLC = [12345, 0];
@@ -21,7 +20,8 @@ const PERSONA = 'f'.repeat(64);
 const CLAIMKEY = 'c'.repeat(64);
 
 const INPUTS = {
-  org: ORG, rootPub: ROOT, inviteRef: INVITE, channelToken: 'd'.repeat(32), bearer: 'tok',
+  org: ORG, channelPub: 'a'.repeat(64), inviteRef: INVITE,
+  channelToken: 'd'.repeat(32), bearer: 'b'.repeat(64),
 };
 
 // A SecureChannel-shaped stub whose replies are scripted per op and per Nth
@@ -80,6 +80,34 @@ const stubCeremony = async ({ context, inputs, passphrase }) => {
   assert.equal(r.grantedRole, 'member');
   assert.equal(s.ready(), true);
   assert.deepEqual(ch.sent[0], { v: 1, op: 'context' });
+  assert.equal(ch.sent.length, 1);
+  assert.deepEqual(s.context, {
+    transport: s.transport, orgSlug: ORG, genesisId: GENESIS,
+    heads: HEADS, maxHlc: MAXHLC, grantedRole: 'member',
+    inviteExpiry: [99999, 0], binding: null, approvalPolicy: null,
+    presentation: {
+      orgName: 'Anchore', orgDescription: 'container security',
+      orgColor: null, orgIcon: 'data:image/png;base64,AAAA',
+      sponsorName: null, sponsorAvatar: null, sponsorPub: null,
+    },
+  });
+}
+
+// Authentication failure is security truth and sends no encrypted operation.
+{
+  let channelUsed = false;
+  const error = new Error('bad transcript signature');
+  error.autonetKind = 'security';
+  const s = new JoinSession({
+    inputs: INPUTS,
+    openChannel: async () => { channelUsed = true; throw error; },
+    runCeremony: async () => { throw new Error('must not run'); },
+  });
+  const r = await s.connect();
+  assert.equal(channelUsed, true);
+  assert.deepEqual(r, { state: 'security', reason: 'link-authentication-failed' });
+  assert.equal(s.ready(), false);
+  await assert.rejects(s.accept(), /before a successful connect/);
 }
 
 // 2. connect -> 'closed' (LEDGER truth) on a gone invite.
