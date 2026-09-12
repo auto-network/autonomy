@@ -20,6 +20,7 @@ from tools.graph.schemas.registry import (
     SchemaValidationError,
     SettingSchema,
     append_only_log,
+    declared_strict_append_only,
     declared_org_writeback_key_strategy,
     derive_org_writeback_key,
     field,
@@ -73,6 +74,36 @@ def test_append_only_log_explicit_key_strategy():
 
     assert V1._access_pattern == "append_only_log"
     assert V1._key_strategy == "snowflake_id"
+
+
+def test_append_only_log_strict_mode_is_declared_and_exported():
+    @append_only_log(strict=True)
+    class V1(SettingSchema):
+        set_id = "x.strict"
+        schema_revision = 1
+
+    assert V1._strict_append_only is True
+    assert declared_strict_append_only("x.strict", 1) is True
+    assert V1.export_json_schema()["strict_append_only"] is True
+
+
+def test_append_only_log_is_non_strict_by_default():
+    @append_only_log
+    class V1(SettingSchema):
+        set_id = "x.ordinary"
+        schema_revision = 1
+
+    assert V1._strict_append_only is False
+    assert declared_strict_append_only("x.ordinary", 1) is False
+    assert "strict_append_only" not in V1.export_json_schema()
+
+
+def test_append_only_log_strict_mode_must_be_boolean():
+    with pytest.raises(SchemaValidationError, match="strict must be a boolean"):
+        @append_only_log(strict="yes")
+        class V1(SettingSchema):
+            set_id = "x.invalid-strict"
+            schema_revision = 1
 
 
 def test_append_only_log_callable_key_normalizes_to_name():
@@ -224,6 +255,23 @@ def test_decorator_metadata_inherits_to_subclass():
     assert Child._key_strategy == "uuid_v4"
     # Inheritance fix from auto-vumin: child also sees base's typed fields.
     assert set(Child._field_metadata) == {"tile_id", "extra"}
+
+
+def test_strict_append_only_inherits_and_can_be_explicitly_disabled():
+    @append_only_log(strict=True)
+    class Base(SettingSchema):
+        set_id = "x.strict-inherited"
+        schema_revision = 1
+
+    class Child(Base):
+        schema_revision = 2
+
+    @append_only_log(strict=False)
+    class Relaxed(Base):
+        schema_revision = 3
+
+    assert Child._strict_append_only is True
+    assert Relaxed._strict_append_only is False
 
 
 def test_subclass_redecorates_to_override_pattern():

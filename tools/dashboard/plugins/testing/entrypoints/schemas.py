@@ -61,7 +61,7 @@ def _non_negative_number(payload: dict, name: str, maximum: float) -> None:
 
 @home("organization")
 @publication_band(max="raw")
-@keyed_per_entity(key_strategy="run_id")
+@append_only_log(key="run_id", strict=True)
 class AgentTestRunV1(SettingSchema):
     """One immutable completed Agent Test run, keyed by run id."""
 
@@ -156,7 +156,7 @@ class AgentTestRunV1(SettingSchema):
 
 @home("organization")
 @publication_band(max="raw")
-@append_only_log
+@append_only_log(strict=True)
 class AgentTestObservationV1(SettingSchema):
     """One immutable test-node outcome and timing observation."""
 
@@ -221,7 +221,7 @@ class AgentTestTelemetryV1(SettingSchema):
 
 @home("organization")
 @publication_band(max="raw")
-@append_only_log
+@append_only_log(strict=True)
 class AgentTestUsageEventV1(SettingSchema):
     """One immutable, argument-free Agent Test product-usage event."""
 
@@ -249,7 +249,7 @@ class AgentTestUsageEventV1(SettingSchema):
 
 @home("organization")
 @publication_band(max="raw")
-@append_only_log
+@append_only_log(strict=True)
 class AgentTestErrorEventV1(SettingSchema):
     """One bounded operational error; test assertion failures remain run evidence."""
 

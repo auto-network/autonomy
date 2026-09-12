@@ -166,15 +166,21 @@ def test_history_is_raw_org_owned_append_only_capped_and_isolated(tmp_path, monk
     error_schema = get_schema(ERROR_SET_ID, SCHEMA_REVISION)
     assert run_schema._home == "organization"
     assert run_schema._publication_band == ("raw", "raw")
+    assert run_schema._access_pattern == "append_only_log"
+    assert run_schema._key_strategy == "run_id"
+    assert run_schema._strict_append_only is True
     assert observation_schema._home == "organization"
     assert observation_schema._publication_band == ("raw", "raw")
     assert observation_schema._access_pattern == "append_only_log"
+    assert observation_schema._strict_append_only is True
     assert usage_schema._home == "organization"
     assert usage_schema._publication_band == ("raw", "raw")
     assert usage_schema._access_pattern == "append_only_log"
+    assert usage_schema._strict_append_only is True
     assert error_schema._home == "organization"
     assert error_schema._publication_band == ("raw", "raw")
     assert error_schema._access_pattern == "append_only_log"
+    assert error_schema._strict_append_only is True
 
     nodeid = "tests/test_widget.py::test_widget"
     clock = [1_800_000_000.0]
