@@ -170,7 +170,7 @@
     }
   }
 
-  async function _signLinkDecision(self, req) {
+  async function _signLinkDecision(self, req, { mount, signal, onAuthenticated } = {}) {
     let rr = req.registryRequest;
     const session = window.AutonomyNetworkSession;
     const signer = window.AutonomyNetworkSigner;
@@ -195,10 +195,13 @@
       opened = await openRoot({
         title: req.op === 'revoke' ? 'Revoke this share link?' : 'Publish this share link?',
         detail: 'Unlock your personal identity to act as ' + actingName + '.',
+        mount, signal,
       });
       if (!opened) throw new Error('Approval cancelled.');
     }
     try {
+      if (signal?.aborted) throw new DOMException('Approval cancelled.', 'AbortError');
+      onAuthenticated?.();
       await _authorizeLinkDecision(req, session, opened);
     } finally {
       // I1: the personal root plaintext dies here whatever happened above.
@@ -2812,7 +2815,68 @@
               registryRequest: r.registry_request || null,
             };
             approval.allowSessionApprovals = _matchingApprovalAuthority(approval);
-            self.approvalRequest = approval;
+            const { openApprovalDialog, requestingSession } = await import('../components/approval-dialog.js');
+            const requester = await requestingSession(r.session, approval.sessionLabel);
+            const controls = document.createElement('div');
+            const durationRow = document.createElement('label');
+            durationRow.className = 'approval-fact';
+            const durationLabel = document.createElement('span'); durationLabel.textContent = 'Expires';
+            durationRow.append(durationLabel);
+            if (approval.fixedExpiry) {
+              const fixed = document.createElement('span'); fixed.textContent = approval.fixedExpiryLabel;
+              durationRow.append(fixed);
+            } else {
+              const select = document.createElement('select'); select.setAttribute('aria-label', 'Link expiration');
+              const options = [['604800', 'In 1 week'], ['2592000', 'In 1 month'], ['31536000', 'In 1 year'], ['none', 'No expiration']];
+              if (customDuration) options.unshift(['custom', approval.customDurationLabel]);
+              for (const [value, label] of options) {
+                const option = document.createElement('option'); option.value = value; option.textContent = label; select.append(option);
+              }
+              select.value = approval.duration;
+              select.onchange = () => { approval.duration = select.value; };
+              durationRow.append(select);
+            }
+            controls.append(durationRow);
+            if (!approval.allowSessionApprovals) {
+              const label = document.createElement('label'); label.className = 'approval-choice';
+              const checkbox = document.createElement('input'); checkbox.type = 'checkbox';
+              checkbox.onchange = () => { approval.allowSessionApprovals = checkbox.checked; };
+              label.append(checkbox, document.createTextNode('Allow approvals this session without unlocking again.'));
+              controls.append(label);
+            }
+            // Only routes that exist in the product; never a synthetic preview.
+            const targetPath = { note: '/graph/', design: '/design/', present: '/present/' }[req.target_type];
+            const target = { name: approval.target, type: approval.targetType, byline: 'On auto.network',
+              href: targetPath && req.target_uuid ? targetPath + encodeURIComponent(req.target_uuid) : null };
+            const postDecision = async body => {
+              const response = await fetch('/api/approvals/' + encodeURIComponent(approval.id) + '/decision', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+              });
+              const data = await response.json();
+              if (!response.ok || !data.ok) throw new Error(data.error || 'This approval is no longer available.');
+            };
+            self._sharedApprovalDialog = openApprovalDialog({
+              review: { title: 'Publish a share link', intro: '',
+                organization: { name: acting.name || approval.orgSlug, image: acting.favicon },
+                target, requester, controls,
+                facts: approval.recipient ? [['Prepared for', approval.recipient.displayName]] : [],
+                unavailable: approval.blockingError },
+              retained: !registrationRequired && _matchingApprovalAuthority(approval),
+              authorize: options => _signLinkDecision(self, approval, options),
+              execute: async decision => {
+                await postDecision({ approved: true, ...decision });
+                const response = await fetch('/api/approvals/' + encodeURIComponent(approval.id) + '?wait=20');
+                const outcome = await response.json();
+                const execution = outcome.result && outcome.result.execution;
+                if (!response.ok || execution?.ok !== true) throw new Error(execution?.error || outcome.error || 'The approval did not finish executing.');
+                self._markApprovalDecided(approval.id);
+              },
+              decline: async () => { await postDecision({ approved: false }); self._markApprovalDecided(approval.id); },
+              result: { working: 'Publishing link', success: 'Link published', copy: '',
+                fact: { ...target, byline: 'On auto.network', linkLabel: 'Open ' + approval.targetType.toLowerCase() } },
+              onClose: () => { self._sharedApprovalId = null; self._sharedApprovalDialog = null; },
+            });
+            self._sharedApprovalId = approval.id;
           },
           decision: (self, req) => _signLinkDecision(self, req),
         },
@@ -3022,6 +3086,7 @@
         if (!id) return;
         if (!this._decidedApprovals) this._decidedApprovals = new Set();
         this._decidedApprovals.add(id);
+        if (this._sharedApprovalId === id) this._sharedApprovalDialog?.close();
         // Dismiss if this overlay is the one showing it — the decision may have
         // been made on another device, so this is not necessarily our own click.
         if (this.approvalRequest && this.approvalRequest.id === id) {
@@ -3034,7 +3099,7 @@
 
       async openApprovalRequest(id) {
         if (this._decidedApprovals && this._decidedApprovals.has(id)) return;
-        if ((this.approvalRequest && this.approvalRequest.id === id) ||
+        if (this._sharedApprovalId === id || (this.approvalRequest && this.approvalRequest.id === id) ||
             (this.selectedCommit && this.selectedCommit.approvalId === id)) return;
         if (!this._openingApprovals) this._openingApprovals = new Set();
         if (this._openingApprovals.has(id)) return;
@@ -3893,6 +3958,7 @@
       },
 
       destroy() {
+        this._sharedApprovalDialog?.dispose();
         if (window._worktreeReviewOverlay === this) {
           window._worktreeReviewOverlay = null;
         }

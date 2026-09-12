@@ -106,6 +106,69 @@ test('cancel resolves null', async () => {
   assert.equal(await p, null);
 });
 
+test('embedded password verification clears and blurs input without reopening keyboard', async () => {
+  const root = await mintRoot();
+  SERVER = { armor: await aV3Password(root, 'pw'), rootPub: root.rootPub, passkeys: [], factorPolicy: v3PolicyView() };
+  const mount = document.createElement('div'); document.body.append(mount);
+  const promise = openRoot({ mount: () => mount });
+  await until(() => mount.querySelector('input'));
+  const input = mount.querySelector('input');
+  assert.notEqual(document.activeElement, input);
+  input.focus(); input.value = 'pw'; input.dispatchEvent(new window.Event('input'));
+  mount.querySelector('.or-ok').click();
+  assert.equal(mount.querySelector('input').value, '');
+  assert.notEqual(document.activeElement.type, 'password');
+  const opened = await promise;
+  assert.equal(bytesToHex(opened.seed), bytesToHex(root.seed)); opened.seed.fill(0);
+  assert.equal(mount.childElementCount, 0); assert.equal(mount.isConnected, true); mount.remove();
+});
+
+test('embedded Back during password verification settles once and leaves caller mount intact', async () => {
+  const root = await mintRoot();
+  SERVER = { armor: await aV3Password(root, 'pw'), rootPub: root.rootPub, passkeys: [], factorPolicy: v3PolicyView() };
+  const mount = document.createElement('div'); document.body.append(mount);
+  const abort = new AbortController();
+  const promise = openRoot({ mount: () => mount, signal: abort.signal });
+  await until(() => mount.querySelector('input'));
+  const input = mount.querySelector('input'); input.value = 'pw'; input.dispatchEvent(new window.Event('input'));
+  mount.querySelector('.or-ok').click(); abort.abort();
+  assert.equal(await promise, null);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(mount.childElementCount, 0); assert.equal(mount.isConnected, true); mount.remove();
+});
+
+for (const mode of ['passkey', 'or', 'and']) {
+  test('embedded ' + mode + ' policy uses the existing root policy evaluator', async () => {
+    const root = await mintRoot(), credential = 'embedded-' + mode;
+    const made = await createPasswordFactor(root.rootPub, 'pw', 'pw', IT); made.seed.fill(0);
+    const passkey = { factor_id: 'pk', type: 'passkey', credential_id: enc(credential),
+      recipients: [{ recipient_public_key: await rootRecipientPub(credential), label: 'Test passkey', created_at: '2026-09-12T00:00:00Z' }] };
+    const factors = mode === 'passkey' ? [passkey] : [made.factor, passkey];
+    const policy = mode === 'passkey' ? { op: 'factor', factor_id: 'pk' }
+      : { op: mode, children: [{ op: 'factor', factor_id: 'pw' }, { op: 'factor', factor_id: 'pk' }] };
+    SERVER = { rootPub: root.rootPub, passkeys: [{ credential_id: enc(credential), rp_id: 'localhost' }],
+      factorPolicy: { armor_version: 3, factors: [] },
+      armor: await buildFactorPolicyArmor({ rootSeed: root.seed, rootPub: root.rootPub,
+        generation: 1, factors, access: factors.map(f => f.factor_id), policy }) };
+    const mount = document.createElement('div'); document.body.append(mount);
+    let resolved = false;
+    const promise = openRoot({ mount: () => mount }).then(value => { resolved = true; return value; });
+    await until(() => mount.querySelector('.or-factor-btn'));
+    if (mode !== 'passkey') {
+      assert.equal(mount.querySelector('.approval-separator').textContent, mode.toUpperCase());
+      const input = mount.querySelector('input'); input.value = 'pw'; input.dispatchEvent(new window.Event('input'));
+      mount.querySelector('.or-ok').click();
+      if (mode === 'and') {
+        await until(() => mount.querySelector('.done'));
+        assert.equal(resolved, false, 'one factor does not satisfy AND');
+        mount.querySelector('.or-factor-btn').click();
+      }
+    } else mount.querySelector('.or-factor-btn').click();
+    const opened = await promise;
+    assert.equal(bytesToHex(opened.seed), bytesToHex(root.seed)); opened.seed.fill(0); mount.remove();
+  });
+}
+
 test('a retired-format armor is refused outright', async () => {
   const fake = ['-----BEGIN AUTONOMY NETWORK ROOT KEY-----',
     btoa('{"v": 2}'), '-----END AUTONOMY NETWORK ROOT KEY-----'].join('\n');

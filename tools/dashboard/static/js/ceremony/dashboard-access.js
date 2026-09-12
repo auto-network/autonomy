@@ -8,7 +8,7 @@ import { openRoot } from './open-root.js';
 
 const GRANT_DOMAIN = 'autonomy.identity.dashboard-access-grant.v1\n';
 
-export async function signDashboardAccessGrant(grant) {
+export async function signDashboardAccessGrant(grant, { mount, signal, onAuthenticated } = {}) {
   if (!grant || typeof grant !== 'object' || Array.isArray(grant)) {
     throw new Error('This access request has no server-frozen grant. Decline it and request a new one.');
   }
@@ -21,9 +21,12 @@ export async function signDashboardAccessGrant(grant) {
   const opened = await openRoot({
     title: 'Approve dashboard access',
     detail: 'Unlock your personal root to sign this access grant.',
+    mount, signal,
   });
   if (!opened) throw new Error('Approval cancelled.');
   try {
+    if (signal?.aborted) throw new DOMException('Approval cancelled.', 'AbortError');
+    onAuthenticated?.();
     const input = new TextEncoder().encode(
       GRANT_DOMAIN + session._internals.canonicalJson(grant));
     const signature = await crypto.subtle.sign('Ed25519', opened.signingKey, input);
