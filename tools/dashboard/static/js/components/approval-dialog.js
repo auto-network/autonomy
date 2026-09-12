@@ -37,7 +37,7 @@ export function openApprovalDialog({review, authorize, execute, decline, result,
     organization:{name:review.organization?.name||'Personal approval',image:review.organization?.image||''},
     requester:{kind:'Requesting session',...review.requester,href:localHref(review.requester?.href)},
     resourceLabel:review.target?.type,resource:review.target?.name,resourceDetail:review.target?.byline,
-    facts:[...(review.facts||[]),...(originalDuration?[['Link expires','duration']]:[])],
+    facts:[...(review.facts||[]),...(originalDuration?[[review.durationLabel||'Link expires','duration']]:[])],
     duration:originalDuration?.value,durationOptions,
     showRetention:!!originalRetention,allowSessionApprovals:!!originalRetention?.checked,
     consequence:kind==='link'?'Anyone who has the link can open the shared content until it expires.':review.consequence||'',
@@ -54,6 +54,10 @@ export function openApprovalDialog({review, authorize, execute, decline, result,
       if(kind==='link'&&snapshot){
         const chosen=durationOptions?.find(([value])=>value===snapshot.duration);
         input.receipt.byline='Anyone with the link · '+(chosen?.[1]||expiry||'No expiration');
+      }
+      if(kind==='service'&&snapshot){
+        const chosen=durationOptions?.find(([value])=>value===snapshot.duration);
+        input.receipt.byline=review.target.name+' · '+(chosen?.[1]||'');
       }
       return authorize(options);
     },

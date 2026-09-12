@@ -2373,30 +2373,9 @@
           },
         },
         external_service_access: {
-          open(self, r) {
-            const access = r.staged || r.request || {};
-            const requester = access.requester || {};
-            const requested = access.requested_ttl_seconds;
-            const allowed = new Set(['86400', '604800', '2592000', '31536000', '315360000', '']);
-            const suggested = requested == null ? '' : String(requested);
-            self.approvalBusy = false;
-            self.approvalRequest = {
-              id: r.id, kind: r.kind, session: requester.label || r.session,
-              title: 'Allow external service access', actionLabel: 'Allow access',
-              target: access.application || 'External service', op: 'enroll',
-              bodyMarkdown: [
-                access.summary || 'Allow this device to call the listed Autonomy capability.',
-                '',
-                'The credential is limited to the exact method and path shown below. It receives no session or organization authority.',
-              ].join('\n'),
-              ttl: allowed.has(suggested) ? suggested : '31536000',
-              externalAccess: access,
-              awaitExecution: true,
-              error: '',
-            };
-          },
-          decision(self, req) {
-            return { ttl_seconds: req.ttl === '' ? null : Number(req.ttl) };
+          async open(self, r) {
+            const {openServiceApproval}=await import('../components/service-approval.js');
+            openServiceApproval(self,r);
           },
         },
         mcp_peer_link: {
