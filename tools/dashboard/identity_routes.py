@@ -62,7 +62,9 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from tools.graph import settings_ops
-from tools.dashboard.network_routes import _first_member, _mock_mode
+from tools.dashboard.network_routes import _mock_mode
+from tools.dashboard import personal_profile
+from tools.dashboard.personal_profile import personal_identity_member
 # Importing registers the autonomy.identity.* Setting schemas.
 from tools.graph.schemas.personal_identity import (  # noqa: F401
     FACTOR_METADATA_REVISION,
@@ -213,26 +215,13 @@ def resolve_stable_personal_root_public_key() -> str:
 FACTOR_POLICY_TRANSITION_DOMAIN = b"autonomy.identity.factor-policy-transition.v1\n"
 
 
-def _personal_member():
-    """The canonical personal identity row.
-
-    Defense-in-depth against a shadowing row: ``_first_member`` picks the
-    lexically-FIRST key, so a stray ``autonomy.identity.personal`` row
-    with a low-sorting key (e.g. ``000-…``) would shadow the operator's
-    ``default`` and be verified against on password unlock. The write
-    guard (settings_ops.PROTECTED_IDENTITY_SET_IDS) blocks such a row from
-    ever being injected via the generic API, but the selection is pinned
-    to the canonical ``default`` label anyway so the gate can never be
-    fooled by key ordering. Only when no ``default`` exists (legacy rows
-    predating this label) does it fall back to the first member.
-    """
-    members = [m for m in settings_ops.read_owned_set(PERSONAL_IDENTITY_SET_ID,
-                                                      org=None).members
-               if isinstance(m.payload, dict)]
-    for m in members:
-        if m.key == PERSONAL_CANONICAL_LABEL:
-            return m
-    return _first_member(PERSONAL_IDENTITY_SET_ID, None)
+# The canonical personal-identity row selection now lives in
+# :mod:`tools.dashboard.personal_profile` (``personal_identity_member``) so the
+# profile service and the identity routes share one implementation. The old
+# name stays as a module-level alias: every ``from identity_routes import
+# _personal_member`` snapshot and every ``monkeypatch.setattr(identity_routes,
+# "_personal_member", ...)`` keeps working unchanged.
+_personal_member = personal_identity_member
 
 
 def _passkey_rows():
@@ -298,6 +287,7 @@ async def get_status(request: Request) -> JSONResponse:
         # The mock dashboard has no settings DB; land deterministically
         # enrolled-enough that no onboarding overlay covers the fixtures.
         return JSONResponse({"personal_identity": None, "passkeys": [],
+                             "profile": None,
                              "onboarding_needed": False,
                              "rp_id": None, "passkeys_for_host": 0,
                              "signed_in": False, "method": None,
@@ -345,8 +335,17 @@ async def get_status(request: Request) -> JSONResponse:
         "provisioning_public_key":
             (m.payload.get("statement") or {}).get("provisioning_public_key"),
     } for m in passkeys]
+    # The mutable Personal profile (autonomy.user#1) — the SAME serialized
+    # shape GET /api/identity/profile returns. Additive: personal_identity
+    # (above) keeps its display-name-only legacy shape unchanged.
+    try:
+        profile = personal_profile.serialize_profile(
+            personal_profile.get_effective_profile())
+    except Exception:
+        profile = None
     return JSONResponse({
         "personal_identity": identity,
+        "profile": profile,
         "passkeys": rows,
         # The activation condition (this bead's §4): no personal identity
         # or no passkey anywhere → the Get-started flow applies, including
@@ -519,6 +518,64 @@ async def post_personal(request: Request) -> JSONResponse:
     except Exception:
         pass
     return response
+
+
+# ── mutable Personal profile (autonomy.user#1) ────────────────────────
+#
+# GET/PATCH the person's ONE Personal presentation record — the source Profile
+# Settings edits and the invitation "Joining as" preview reads. The service
+# lives in :mod:`tools.dashboard.personal_profile`; both routes pin the read
+# and write to the personal store (``org=None``, ``peers=[]``) regardless of
+# the request organization, so a caller-org header can never move Personal
+# presentation into an organization database.
+
+
+async def get_profile(request: Request) -> JSONResponse:
+    """The mutable Personal profile, or ``{"profile": null}``.
+
+    With a personal root but no profile row, returns an UNPERSISTED baseline
+    (root display name, blank biography, derived initials, no avatar,
+    ``persisted: false``) without writing anything.
+    """
+    if _mock_mode():
+        return JSONResponse({"profile": None})
+    try:
+        effective = personal_profile.get_effective_profile()
+    except Exception as e:
+        return JSONResponse(
+            {"error": f"could not read the personal profile: {e}"},
+            status_code=500)
+    return JSONResponse({"profile": personal_profile.serialize_profile(effective)})
+
+
+async def patch_profile(request: Request) -> JSONResponse:
+    """Merge a PATCH of the Personal profile's text fields.
+
+    Accepts exactly ``display_name``, ``biography``, and ``initials`` (at least
+    one); omitted values and every avatar reference are preserved. Refuses
+    (409) until a canonical personal identity exists.
+    """
+    if _mock_mode():
+        return JSONResponse({"ok": False,
+                             "error": "mock dashboard stores no profiles"},
+                            status_code=502)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "body must be JSON"},
+                            status_code=400)
+    from tools.graph.schemas.registry import SchemaValidationError
+    try:
+        profile = personal_profile.update_profile(body)
+    except personal_profile.NoPersonalIdentity as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=409)
+    except (personal_profile.ProfileValidationError, SchemaValidationError) as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse(
+            {"ok": False, "error": f"could not store the personal profile: {e}"},
+            status_code=500)
+    return JSONResponse({"ok": True, "profile": profile})
 
 
 # The root signs the re-factored armor so the server knows the submitter opened
@@ -1881,6 +1938,8 @@ ROUTES = [
     Route("/api/identity/unlock-state", get_unlock_state, methods=["GET"]),
     Route("/api/identity/personal", get_personal, methods=["GET"]),
     Route("/api/identity/personal", post_personal, methods=["POST"]),
+    Route("/api/identity/profile", get_profile, methods=["GET"]),
+    Route("/api/identity/profile", patch_profile, methods=["PATCH"]),
     Route("/api/identity/factor-policy", get_factor_policy, methods=["GET"]),
     Route("/api/identity/factor-policy/preview", post_factor_policy_preview,
           methods=["POST"]),

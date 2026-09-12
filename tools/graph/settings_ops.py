@@ -341,6 +341,12 @@ PROTECTED_IDENTITY_SET_IDS = frozenset({
     "autonomy.identity.passkey",
     "autonomy.identity.factor-metadata",
     "autonomy.identity.factor-recipient-metadata",
+    # The mutable Personal profile (autonomy.user#1). Text fields are written
+    # by the identity/profile routes and the avatar fields by the follow-on
+    # avatar routes, both through identity_write_context(); a generic Settings
+    # write stays refused so nothing but those routes owns Personal
+    # presentation. See tools/graph/schemas/user.py.
+    "autonomy.user",
 })
 
 
