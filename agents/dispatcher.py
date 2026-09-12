@@ -1750,6 +1750,21 @@ def process_decision(dispatch_result: DispatchResult) -> str:
 # ── Dispatch completion nag ───────────────────────────────────────
 
 
+# Run ids (session/output-dir names) whose completion has already been
+# announced to dispatch-nag subscribers. A completion is nagged EXACTLY ONCE
+# (auto-0yxpm) even if the collection path is re-entered within this process
+# — a re-observed finished container, or the same agent reaching notify twice.
+# The dispatcher is a singleton (pid-file guard in ``main``) and the
+# reconcile-rescue path deliberately does not nag, so a fresh set on restart
+# never re-announces an already-collected run.
+_nagged_run_ids: set[str] = set()
+
+
+def _dispatch_run_id(agent: "RunningAgent") -> str:
+    """The unique id for a dispatch — the session/output-dir name, else bead."""
+    return Path(agent.output_dir).name if agent.output_dir else agent.bead_id
+
+
 def _notify_dispatch_nag(
     agent: RunningAgent,
     effective_status: str,
@@ -1757,6 +1772,13 @@ def _notify_dispatch_nag(
 ) -> None:
     """Send CrossTalk dispatch-nag to all opted-in sessions. Best-effort."""
     try:
+        # One nag per completion (auto-0yxpm). Mark before any work so a
+        # re-entered collection path for the same run is a no-op.
+        run_id = _dispatch_run_id(agent)
+        if run_id in _nagged_run_ids:
+            return
+        _nagged_run_ids.add(run_id)
+
         sys.path.insert(0, str(REPO_ROOT))
         from tools.dashboard.dao import dashboard_db
         dashboard_db.init_db()
@@ -1814,60 +1836,87 @@ def _notify_dispatch_nag(
         print(f"  WARN: dispatch nag failed: {e}", file=sys.stderr)
 
 
-def _send_dispatch_nag_crosstalk(targets: list[str], message: str) -> None:
-    """Send a dispatch nag message to multiple sessions via tmux paste-buffer."""
-    import secrets as _secrets
+def _post_dispatch_nag(targets: list[str], message: str) -> dict | None:
+    """POST the nag to the dashboard, which delivers it. Returns the parsed
+    response body, or None if the POST itself could not be made.
 
-    # Hard guard: never paste into real tmux sessions from a pytest process.
-    # The dispatcher mocks in test_dispatcher_nonblocking don't cover the
-    # nag path, so without this guard a unit-test run sprays MagicMock
-    # repr strings into every opted-in operator session.
+    The dispatcher runs in ``autonomy-dispatcher-1``, which has NO host tmux
+    socket — raw ``tmux paste-buffer`` from here always fails with rc=1
+    ``error connecting to /tmp/tmux-0/default`` (auto-0yxpm). Delivery is
+    therefore routed through the dashboard's ``/api/monitor/dispatch-nag``
+    endpoint: the dashboard process reaches the host tmux server (proven
+    graph://af8ae647) and AWAITS each paste, so a nonzero tmux rc comes back
+    as a ``failed`` entry rather than a phantom success. This is the same
+    locality-independent seam the dispatcher already uses for monitor
+    register/deregister (``_monitor_post``)."""
+    import json as _json
+    import ssl
+    import urllib.request
+
+    url = _dashboard_base_url().rstrip("/") + "/api/monitor/dispatch-nag"
+    payload = _json.dumps({"targets": targets, "message": message}).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    token = _monitor_service_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, data=payload, method="POST", headers=headers)
+    ctx = ssl.create_default_context()
+    if url.startswith(("https://localhost", "https://127.0.0.1",
+                       "https://dashboard:", "https://dashboard/")):
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    try:
+        with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:
+            return _json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        print(
+            f"  WARN: dispatch nag delivery POST failed for {targets}: {exc}",
+            file=sys.stderr,
+        )
+        return None
+
+
+def _log_dispatch_nag_result(result: dict) -> None:
+    """Render a nag delivery response. A success line is printed ONLY for a
+    target the dashboard actually delivered to; a nonzero-rc / offline target
+    logs a WARN so a failed nag is never indistinguishable from a delivered
+    one (auto-0yxpm — the old raw-tmux path ignored rc and always claimed
+    success)."""
+    for target in result.get("delivered", []) or []:
+        print(f"  dispatch nag -> {target}", file=sys.stderr)
+    for entry in result.get("failed", []) or []:
+        target = entry.get("target") if isinstance(entry, dict) else entry
+        err = entry.get("error") if isinstance(entry, dict) else ""
+        print(
+            f"  WARN: dispatch nag delivery failed for {target}: {err}",
+            file=sys.stderr,
+        )
+    for target in result.get("offline", []) or []:
+        print(
+            f"  WARN: dispatch nag target not live (not delivered): {target}",
+            file=sys.stderr,
+        )
+
+
+def _send_dispatch_nag_crosstalk(targets: list[str], message: str) -> None:
+    """Deliver a dispatch nag to sessions via the dashboard's CrossTalk path.
+
+    Locality-independent: the dispatcher POSTs to the dashboard rather than
+    touching tmux itself (which it cannot reach — auto-0yxpm). Delivery
+    outcomes are logged truthfully by :func:`_log_dispatch_nag_result`."""
+    # Hard guard: never emit HTTP from a pytest process into a possibly-live
+    # dashboard at localhost:8080. The dispatcher mocks in
+    # test_dispatcher_nonblocking don't cover the nag path; without this a
+    # unit-test run would POST MagicMock repr strings. Delivery-path tests
+    # exercise _post_dispatch_nag / _log_dispatch_nag_result directly.
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return
-
-    iso_now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    envelope = (
-        f'<crosstalk from="dispatcher"\n'
-        f'           label="Dispatch Notification"\n'
-        f'           source="" turn="0"\n'
-        f'           timestamp="{iso_now}">\n'
-        f'{message}\n'
-        f'</crosstalk>'
-    )
-
-    for tmux_name in targets:
-        try:
-            buf = f"nag_{_secrets.token_hex(4)}"
-            path = f"/tmp/dispatch_nag_{_secrets.token_hex(4)}.txt"
-            Path(path).write_text(envelope, encoding="utf-8")
-            subprocess.run(
-                ["tmux", "load-buffer", "-b", buf, path],
-                capture_output=True, timeout=5,
-            )
-            subprocess.run(
-                ["tmux", "paste-buffer", "-p", "-b", buf, "-t", tmux_name],
-                capture_output=True, timeout=5,
-            )
-            subprocess.run(
-                ["tmux", "delete-buffer", "-b", buf],
-                capture_output=True, timeout=5,
-            )
-            time.sleep(0.3)
-            subprocess.run(
-                ["tmux", "send-keys", "-t", tmux_name, "", "Enter"],
-                capture_output=True, timeout=5,
-            )
-            Path(path).unlink(missing_ok=True)
-            print(f"  dispatch nag -> {tmux_name}", file=sys.stderr)
-        except Exception as exc:
-            # Best-effort delivery, but NOT silent: this swallowed every
-            # failure, so a nag that never arrived looked identical to one
-            # that was never attempted. That ambiguity cost a debugging
-            # session — the notify functions logged, the send did not.
-            print(
-                f"  WARN: dispatch nag send failed for {tmux_name}: {exc}",
-                file=sys.stderr,
-            )
+    if not targets:
+        return
+    result = _post_dispatch_nag(targets, message)
+    if result is None:
+        return  # transport failure already logged; never a false success
+    _log_dispatch_nag_result(result)
 
 
 def _notify_agentic_dispatch_nag(
@@ -1891,6 +1940,11 @@ def _notify_agentic_dispatch_nag(
     behind it.
     """
     try:
+        # One nag per completion (auto-0yxpm), shared with the bead-agent path.
+        if run_id in _nagged_run_ids:
+            return
+        _nagged_run_ids.add(run_id)
+
         sys.path.insert(0, str(REPO_ROOT))
         from tools.dashboard.dao import dashboard_db
         from tools.dashboard.server import _resolve_agentic_identity

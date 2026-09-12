@@ -182,6 +182,7 @@ else:
 from tools.graph.schemas.agent_actions import AGENT_ACTION_TEMPLATE_ROOTS
 
 from tools.dashboard.tmux_send import (
+    TmuxSendError,
     tmux_enter_checked_sync,
     tmux_paste_checked_sync,
     tmux_send,
@@ -4235,6 +4236,10 @@ def _ensure_dispatcher_service_token() -> None:
         capabilities=[
             {"method": "POST", "path": "/api/monitor/register"},
             {"method": "POST", "path": "/api/monitor/deregister"},
+            # Dispatch-completion nag delivery (auto-0yxpm). The dispatcher
+            # cannot reach the host tmux server from its own container, so it
+            # POSTs the nag here and the dashboard delivers it.
+            {"method": "POST", "path": "/api/monitor/dispatch-nag"},
         ],
         application_scope="dispatcher-monitor",
         resource_audience="dashboard-local",
@@ -4458,6 +4463,78 @@ async def api_monitor_deregister(request):
         return JSONResponse({"error": str(exc)}, status_code=500)
 
     return JSONResponse({"ok": True})
+
+
+async def api_monitor_dispatch_nag(request):
+    """POST /api/monitor/dispatch-nag — deliver dispatch-completion nags.
+
+    Body: {targets: [tmux_name, ...], message: str}
+
+    The dispatcher runs in ``autonomy-dispatcher-1``, which has NO access to
+    the host tmux server where sessions live. Raw ``tmux paste-buffer`` from
+    there fails with rc=1 ``error connecting to /tmp/tmux-0/default`` and the
+    old code ignored that rc, printing a phantom ``dispatch nag -> X`` success
+    (auto-0yxpm). This endpoint moves delivery into the dashboard process,
+    which DOES reach the host tmux server (proven graph://af8ae647), and
+    AWAITS each paste via :func:`tmux_send_awaited` so a nonzero tmux rc
+    surfaces as a ``failed`` entry rather than a false success.
+
+    Returns {delivered: [...], failed: [{target, error}], offline: [...]} so
+    the dispatcher logs a real WARN for anything that did not land. Scoped to
+    the dispatcher-monitor service token (register/deregister/dispatch-nag)."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    targets = body.get("targets")
+    message = body.get("message")
+    if not isinstance(targets, list) or not all(isinstance(t, str) for t in targets):
+        return JSONResponse(
+            {"error": "targets must be a list of strings"}, status_code=400,
+        )
+    if not isinstance(message, str) or not message:
+        return JSONResponse({"error": "message is required"}, status_code=400)
+
+    iso_now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    envelope = (
+        f'<crosstalk from="dispatcher"\n'
+        f'           label="Dispatch Notification"\n'
+        f'           source="" turn="0"\n'
+        f'           harness="dispatcher" model=""\n'
+        f'           timestamp="{iso_now}">\n'
+        f'{message}\n'
+        f'</crosstalk>'
+    )
+
+    delivered: list[str] = []
+    failed: list[dict] = []
+    offline: list[str] = []
+    seen: set[str] = set()
+    for target in targets:
+        if target in seen:
+            continue
+        seen.add(target)
+        if not _tmux_session_exists(target):
+            offline.append(target)
+            continue
+        try:
+            await tmux_send_awaited(target, envelope)
+            delivered.append(target)
+        except TmuxSendError as exc:
+            failed.append({
+                "target": target,
+                "error": f"tmux {exc.op} rc={exc.returncode}: "
+                         f"{exc.stderr or '<no stderr>'}",
+            })
+        except Exception as exc:  # noqa: BLE001 — report, never 500 a best-effort nag
+            failed.append({"target": target, "error": str(exc)})
+
+    return JSONResponse({
+        "delivered": delivered,
+        "failed": failed,
+        "offline": offline,
+    })
 
 
 # ── Session groups — the Session Board's columns (auto-q9y6e.2) ──────────
@@ -21537,6 +21614,7 @@ routes = [
     Route("/api/resources/{tmux_name}/refresh", api_resources_refresh, methods=["POST"]),
     Route("/api/monitor/register", api_monitor_register, methods=["POST"]),
     Route("/api/monitor/deregister", api_monitor_deregister, methods=["POST"]),
+    Route("/api/monitor/dispatch-nag", api_monitor_dispatch_nag, methods=["POST"]),
 
     # Embed resolution + attachment serving
     Route("/api/resolve/{id}", api_resolve_embed),
