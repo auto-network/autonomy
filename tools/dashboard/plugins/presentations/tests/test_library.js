@@ -6,18 +6,20 @@ const vm = require('node:vm');
 const path = require('node:path');
 const { JSDOM } = require('jsdom');
 
-function harness() {
+function harness(persistedOrg) {
   let factory;
   const bars = [];
   const subscriptions = new Map();
   const dom = new JSDOM('<div id="topbar"></div>', {url:'https://example.test',runScripts:'outside-only'});
   dom.window.eval(fs.readFileSync(path.join(__dirname,'../../../static/js/org-picker.js'),'utf8'));
   dom.window.eval(fs.readFileSync(path.join(__dirname,'../../../static/js/asset-presence.js'),'utf8'));
+  if (persistedOrg) dom.window.localStorage.setItem('autonomy.plugin.presentations.organization',persistedOrg);
   const sandbox = {
     console, setTimeout, clearTimeout,
     document: dom.window.document,
     OrgPicker: dom.window.OrgPicker,
     AssetPresence: dom.window.AssetPresence,
+    localStorage: dom.window.localStorage,
     location: { pathname: '/presentations' },
     addEventListener() {}, removeEventListener() {},
     Alpine: { data(name, fn) { factory = fn; }, store() { return { live: { isLive: true, label: 'Editor' } }; } },
@@ -113,8 +115,19 @@ test('library org picker keeps resolved icons and delegates changes once', async
   const menu=sandbox.document.getElementById(trigger.getAttribute('aria-controls'));
   menu.querySelector('[data-slug=beta]').click();
   assert.equal(page.org,'beta');assert.equal(loads,1);
+  assert.equal(sandbox.localStorage.getItem('autonomy.plugin.presentations.organization'),'beta');
   page.updateTopbar();menu.querySelector('[data-slug=beta]').click();assert.equal(loads,1);
   page.destroy();assert.equal(menu.isConnected,false);
+});
+
+test('library restores the selected organization when the plugin remounts', () => {
+  const first=harness();
+  first.page.org='autonomy';first.page.organizations=[{slug:'autonomy',name:'Autonomy'},{slug:'beta',name:'Beta'}];first.page.updateTopbar();
+  const trigger=first.sandbox.document.querySelector('[data-testid=present-org]');
+  first.sandbox.document.getElementById(trigger.getAttribute('aria-controls')).querySelector('[data-slug=beta]').click();
+  const second=harness(first.sandbox.localStorage.getItem('autonomy.plugin.presentations.organization'));
+  assert.equal(second.page.org,'beta');
+  first.page.destroy();second.page.destroy();
 });
 
 test('Slides preserves human participant kinds for the shared presence renderer', () => {
