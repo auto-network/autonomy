@@ -154,6 +154,30 @@ def test_join_url_joins_by_invite_ref_and_carries_no_bearer(founded, monkeypatch
     assert BEARER not in _json.dumps(body["invites"])
 
 
+def test_invite_row_carries_channel_pub_for_complete_url(founded, monkeypatch):
+    # The screen needs BOTH the channel key and the retained bearer to build a
+    # complete #k=..&t=.. viewer URL (graph://4f9e881c-a9 §3); the projection
+    # surfaces channel_pub from the grant row alongside them.
+    store, _record, founder = founded
+    live_id = _bearer_invite(
+        store, founder, expiry=int(time.time() * 1000) + 86_400_000,
+        hlc=(NOW_MS + 1_000, 0),
+    )
+    monkeypatch.setattr(
+        org_membership_routes, "_link_grants",
+        lambda slug: {live_id: {
+            "url": "https://relay.example/l/" + "cd" * 16,
+            "label": "Dean's invite",
+            "bearer": BEARER,
+            "channel_pub": "9a" * 32,
+        }},
+    )
+    body = _client().get("/api/orgs/testorg/membership").json()
+    invites = {row["invite_id"]: row for row in body["invites"]}
+    assert invites[live_id]["channel_pub"] == "9a" * 32
+    assert invites[live_id]["bearer"] == BEARER
+
+
 def test_staged_bearer_claim_surfaces_progress_and_signed_profile(founded):
     store, record, founder = founded
     live_id = _bearer_invite(

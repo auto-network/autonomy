@@ -49,6 +49,7 @@ FOUNDER_SEED = bytes(range(32, 64))
 OUTSIDER_SEED = bytes(range(64, 96))
 INVITE_TOKEN = "ef" * 32
 GRANT_TOKEN = "f00dfeed" * 4  # 32 lowercase hex, matches _TOKEN_RE
+CHANNEL_PUB = "9a" * 32  # the per-link channel PUBLIC key the mint returns
 
 
 def _args(invite_ref):
@@ -144,6 +145,13 @@ def test_authorized_client_mints_exact_expiry_join_link_without_bearer_leak(
     monkeypatch.setattr(_sup_mod, "control", _control_stub)
     monkeypatch.setattr(_sup_mod, "serve_cert_state",
                         lambda org, **k: {"status": "ok"})
+
+    # The per-link channel key is minted into the org-vaulted set; the vault
+    # sealing itself is proven by its own suite, so stub the mint to return a
+    # known public key. This lets the CLI assemble the complete two-value
+    # #k=..&t=.. invitation URL deterministically (graph://4f9e881c-a9 §3).
+    import tools.dashboard.link_channel_key as _lck_mod
+    monkeypatch.setattr(_lck_mod, "mint_channel_key", lambda token, org: CHANNEL_PUB)
 
     session_key = KeyPair.generate()
 
@@ -278,8 +286,12 @@ def test_authorized_client_mints_exact_expiry_join_link_without_bearer_leak(
         join_url = published_line.split(": ", 1)[1]
         parsed = urllib.parse.urlsplit(join_url)
         assert parsed.scheme == "https"
+        # The complete invitation URL carries BOTH independent fragment values:
+        # the channel key k and the bearer t (graph://4f9e881c-a9 §3).
+        from tools.network.invitation import encode_channel_pub
         assert urllib.parse.parse_qs(parsed.fragment) == {
-            "t": [INVITE_TOKEN]
+            "k": [encode_channel_pub(CHANNEL_PUB)],
+            "t": [INVITE_TOKEN],
         }
         grant_token = parsed.path.rsplit("/", 1)[-1]
         assert grant_token == GRANT_TOKEN

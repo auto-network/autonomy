@@ -31,7 +31,17 @@ ROOT_SEED = bytes(range(32))
 PERSONAL_SEED = bytes(range(32, 64))
 INVITEE_SEED = bytes(range(64, 96))
 TOKEN = "ab" * 32
+CHANNEL_PUB = "cd" * 32  # 64-hex per-link channel public key for a complete link
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _complete_link(bearer: str = TOKEN, canonical: str = "https://relay.example/l/grant") -> str:
+    """A complete two-value invitation URL (#k=…&t=…) via the shared serializer."""
+    from tools.network.invitation import build_invitation_join_url
+
+    built = build_invitation_join_url(canonical, CHANNEL_PUB, bearer)
+    assert built.complete
+    return built.url
 
 
 class CapturingSMTP:
@@ -89,7 +99,7 @@ def test_send_produces_one_message_with_secret_link_and_reentry_copy(
 ) -> None:
     smtp = CapturingSMTP()
     monkeypatch.setattr(invite_email, "_smtp_client", lambda _config: smtp)
-    link = "https://relay.example/l/grant#t=" + TOKEN
+    link = _complete_link()
     expiry = 1_900_000_000_000
     receipt = send_invite_email(
         "invitee@example",
@@ -111,6 +121,25 @@ def test_send_produces_one_message_with_secret_link_and_reentry_copy(
         "recipient": "invitee@example",
         "message_id": message["Message-ID"],
     }
+
+
+def test_bearer_only_link_is_not_deliverable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A complete invitation email must carry BOTH the channel key and the
+    # bearer (graph://4f9e881c-a9 §3). A legacy bearer-only link is rejected
+    # before SMTP is ever opened, so no apparently usable invitation is sent.
+    smtp = CapturingSMTP()
+    monkeypatch.setattr(invite_email, "_smtp_client", lambda _config: smtp)
+    with pytest.raises(InviteEmailError, match="complete #k"):
+        send_invite_email(
+            "invitee@example",
+            "https://relay.example/l/grant#t=" + TOKEN,
+            1_900_000_000_000,
+            org="acme",
+            config_resolver=lambda _org: _cfg(),
+        )
+    assert smtp.calls == []
 
 
 def test_smtp_auth_is_optional_but_both_or_neither_and_always_closes(
@@ -145,7 +174,7 @@ def test_smtp_auth_is_optional_but_both_or_neither_and_always_closes(
     with pytest.raises(InviteEmailError, match="^SMTP delivery failed$") as error:
         send_invite_email(
             "invitee@example",
-            "https://relay.example/l/grant#t=secret",
+            _complete_link(bearer="secret"),
             1_900_000_000_000,
             org="acme",
             config_resolver=lambda _org: config,
@@ -195,7 +224,7 @@ def test_post_invite_email_scopes_org_and_never_returns_secret(
 ) -> None:
     monkeypatch.setenv("GRAPH_ORG", "acme")
     calls = []
-    link = "https://relay.example/l/grant#t=" + TOKEN
+    link = _complete_link()
 
     def fake_send(to_addr, join_link, expiry, org):
         calls.append((to_addr, join_link, expiry, org))
