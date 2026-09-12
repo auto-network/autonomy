@@ -862,6 +862,24 @@ async def api_bead_tree(request):
     return JSONResponse(await run_cli_json(["bd", "dep", "tree", bead_id, "--json"], empty=[]))
 
 
+def _blocking_bead_edges(value) -> list[dict]:
+    """Keep only directed blocker edges from ``bd dep list`` output.
+
+    ``relates-to`` is symmetric.  Treating every non-parent edge as a
+    dependency makes the same related bead appear under both "Blocked by"
+    and "Blocks", even though the tracker correctly considers the bead ready.
+    ``bd`` has emitted both ``dependency_type`` and ``type`` across versions,
+    so accept either spelling but only the exact ``blocks`` value.
+    """
+    if not isinstance(value, list):
+        return []
+    return [
+        edge for edge in value
+        if isinstance(edge, dict)
+        and (edge.get("dependency_type") or edge.get("type")) == "blocks"
+    ]
+
+
 async def api_bead_deps(request):
     """Return both blockers (down) and dependents (up) for a bead."""
     bead_id = request.path_params["id"]
@@ -878,8 +896,8 @@ async def api_bead_deps(request):
         run_cli_json(["bd", "dep", "list", bead_id, "--json"], empty=[], beads_dir=bd_dir),
         run_cli_json(["bd", "dep", "list", bead_id, "--direction=up", "--json"], empty=[], beads_dir=bd_dir),
     )
-    blockers = down if isinstance(down, list) else []
-    dependents = up if isinstance(up, list) else []
+    blockers = _blocking_bead_edges(down)
+    dependents = _blocking_bead_edges(up)
     return JSONResponse({"blockers": blockers, "dependents": dependents})
 
 

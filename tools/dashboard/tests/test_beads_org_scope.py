@@ -35,6 +35,42 @@ ANCHORE = api_auth.ApiPrincipal(
 )
 
 
+def test_bead_deps_excludes_symmetric_relations_from_blocker_sections(monkeypatch):
+    calls = []
+
+    async def fake_run(cmd, timeout=30, *, empty=None, beads_dir=None):
+        calls.append(cmd)
+        if "--direction=up" in cmd:
+            return [
+                {"id": "auto-next", "dependency_type": "blocks"},
+                {"id": "auto-related", "dependency_type": "relates-to"},
+            ]
+        return [
+            {"id": "auto-prior", "dependency_type": "blocks"},
+            {"id": "auto-related", "dependency_type": "relates-to"},
+            {"id": "auto-epic", "dependency_type": "parent-child"},
+        ]
+
+    monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
+    monkeypatch.setattr(server, "run_cli_json", fake_run)
+
+    response = asyncio.run(server.api_bead_deps(_request("/api/bead/auto-x/deps", LOCAL)))
+
+    assert response.status_code == 200
+    assert json.loads(response.body) == {
+        "blockers": [{"id": "auto-prior", "dependency_type": "blocks"}],
+        "dependents": [{"id": "auto-next", "dependency_type": "blocks"}],
+    }
+    assert len(calls) == 2
+
+
+def test_blocking_bead_edges_accepts_legacy_type_field():
+    assert server._blocking_bead_edges([
+        {"id": "auto-block", "type": "blocks"},
+        {"id": "auto-related", "type": "relates-to"},
+    ]) == [{"id": "auto-block", "type": "blocks"}]
+
+
 def test_list_routes_global_selection_to_organization_tracker(monkeypatch):
     calls = []
 
