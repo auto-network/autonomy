@@ -128,6 +128,12 @@ async function main() {
   assert.equal(
     w.AutonomyInvitationUrl.build('https://auto.network/l/x', CHANNEL_PUB, null).url,
     null, 'a bearer-less link is incomplete');
+  assert.equal(
+    w.AutonomyInvitationUrl.build('https://auto.network/l/x', CHANNEL_PUB, 'secret').url,
+    null, 'a non-hex bearer is malformed, never usable');
+  assert.equal(
+    w.AutonomyInvitationUrl.build('https://auto.network/l/x', CHANNEL_PUB, 'AB'.repeat(32)).url,
+    null, 'an uppercase bearer is malformed, never usable');
 
   // Deactivate needs a confirm step before any ceremony.
   pane().querySelector('[data-action="deactivate"]').click();

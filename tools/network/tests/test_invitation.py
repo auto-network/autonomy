@@ -142,6 +142,14 @@ def test_build_invitation_join_url_missing_bearer_is_incomplete():
         assert "bearer" in built.reason
 
 
+@pytest.mark.parametrize("bearer", ["secret", "AB" * 32, "ab" * 31, "ab" * 33])
+def test_build_invitation_join_url_rejects_noncanonical_bearer(bearer):
+    with pytest.raises(InvitationError, match="64 lowercase hex"):
+        build_invitation_join_url(
+            "https://relay.example/l/grant", CHANNEL_PUB, bearer,
+        )
+
+
 @pytest.mark.parametrize(
     "canonical",
     [
@@ -170,6 +178,10 @@ def test_parse_invitation_fragment_reports_legacy_bearer_only():
         "k=" + encode_channel_pub(CHANNEL_PUB),  # channel key but no bearer
         f"t={CLAIM_TOKEN}&t={CLAIM_TOKEN}",  # duplicate bearer
         f"k=notbase64!!&t={CLAIM_TOKEN}",  # undecodable channel key
+        f"k={encode_channel_pub(CHANNEL_PUB)}=&t={CLAIM_TOKEN}",  # padded key
+        f"k={encode_channel_pub(CHANNEL_PUB)[:-1]}&t={CLAIM_TOKEN}",  # short key
+        "k=" + encode_channel_pub(CHANNEL_PUB) + "&t=secret",  # malformed bearer
+        "k=" + encode_channel_pub(CHANNEL_PUB) + "&t=" + "AB" * 32,  # uppercase bearer
         f"root_pub={ROOT_PUB}&t={CLAIM_TOKEN}",  # root_pub is never a fragment value
     ],
 )
