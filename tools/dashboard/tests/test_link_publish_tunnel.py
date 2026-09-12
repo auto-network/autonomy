@@ -647,6 +647,12 @@ def _serving_ok(monkeypatch, status="ok"):
         lambda org, **k: {"status": status})
 
 
+def _channel_key_ok(monkeypatch):
+    from tools.dashboard import link_channel_key
+    monkeypatch.setattr(
+        link_channel_key, "mint_channel_key", lambda token, org: "ce" * 32)
+
+
 def test_org_join_publish_over_tunnel_caches_invite_grant(
     env, founder_persona, session_key, session_cert, monkeypatch,
 ):
@@ -654,6 +660,7 @@ def test_org_join_publish_over_tunnel_caches_invite_grant(
     invitation-aligned expiry, target_uuid reconciled to the binding, and the
     cached grant keeps invite_ref."""
     _serving_ok(monkeypatch)
+    _channel_key_ok(monkeypatch)
     expiry = int(time.time() * 1000) + 30 * 86400 * 1000
     invite_ref, _token = _mint_bearer_invite(founder_persona, expiry)
     token = "d0d0face" * 4
@@ -683,6 +690,7 @@ def test_org_join_publish_over_tunnel_caches_invite_grant(
     grants = _cached_grants()
     assert grants[token]["invite_ref"] == invite_ref
     assert grants[token]["target_type"] == "org:join"
+    assert grants[token]["channel_pub"] == "ce" * 32
 
 
 def test_org_join_publish_refused_on_expiry_mismatch(
@@ -707,7 +715,8 @@ def test_org_join_publish_refused_on_expiry_mismatch(
     execution = _decide_and_wait(env, r.json()["id"], envelope)["execution"]
 
     assert execution["ok"] is False
-    assert "invitation-aligned expiry" in execution["error"]
+    assert execution["failed_stage"] == "invitation-expiry"
+    assert execution["remote_revoked"] is True
     assert _cached_grants() == {}
 
 
@@ -731,6 +740,7 @@ def test_org_join_publish_refused_meta_ttl(
     """org:join's lifetime is the invitation's; a duration/ttl is refused at
     create (_org_join_request forbids meta.ttl)."""
     _serving_ok(monkeypatch)
+    _channel_key_ok(monkeypatch)
     expiry = int(time.time() * 1000) + 30 * 86400 * 1000
     invite_ref, _token = _mint_bearer_invite(founder_persona, expiry)
 
@@ -743,6 +753,7 @@ def test_org_join_revoke_over_tunnel(
     env, founder_persona, session_key, session_cert, monkeypatch,
 ):
     _serving_ok(monkeypatch)
+    _channel_key_ok(monkeypatch)
     expiry = int(time.time() * 1000) + 30 * 86400 * 1000
     invite_ref, _token = _mint_bearer_invite(founder_persona, expiry)
     token = "0ddba11c" * 4

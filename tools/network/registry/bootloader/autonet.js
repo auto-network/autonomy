@@ -1818,29 +1818,28 @@ const autonet = (() => {
     setStatus(state.artifactTitle || "");
   }
 
-  function assembleJoinContext(envelope, fragmentToken) {
+  function assembleJoinContext(envelope, fragmentToken, linkKey) {
     if (!envelope || typeof envelope !== "object" ||
         typeof envelope.org !== "string" || !envelope.org ||
-        typeof envelope.root_pub !== "string" ||
-        !/^[0-9a-f]{64}$/.test(envelope.root_pub) ||
         typeof envelope.invite_ref !== "string" ||
         !/^[0-9a-f]{64}$/.test(envelope.invite_ref) ||
         typeof fragmentToken !== "string" || fragmentToken.length === 0 ||
-        fragmentToken.length > 128) {
+        fragmentToken.length > 128 ||
+        typeof linkKey !== "string") {
       throw new Error("invalid organization invitation context");
     }
+    decodeFragmentKey(linkKey);
     return {
       org: envelope.org,
-      rootPub: envelope.root_pub,
       inviteRef: envelope.invite_ref,
       token: fragmentToken,
+      linkKey,
     };
   }
 
   function deliverJoinContext(context) {
     const query = new URLSearchParams({
       org: context.org,
-      root_pub: context.rootPub,
       invite_ref: context.inviteRef,
     });
     // BOTH credentials ride the fragment — never the query. The channel
@@ -1852,6 +1851,7 @@ const autonet = (() => {
     // access-log settings happen to be deployed.
     const fragment = new URLSearchParams({
       channel_token: (location.pathname || "").split("/").pop(),
+      k: context.linkKey,
       t: context.token,
     });
     const destination = "/network/join?" + query.toString() +
@@ -1866,6 +1866,10 @@ const autonet = (() => {
   // it. Returns the 64-hex key, or throws on anything that is not exactly a
   // 32-byte value.
   function decodeFragmentKey(fragment) {
+    if (typeof fragment !== "string" ||
+        !/^[A-Za-z0-9_-]{43}$/.test(fragment)) {
+      throw new Error("fragment is not an unpadded base64url key");
+    }
     const b64 = fragment.replace(/-/g, "+").replace(/_/g, "/");
     const pad = "=".repeat((4 - (b64.length % 4)) % 4);
     const raw = atob(b64 + pad);
@@ -1896,10 +1900,9 @@ const autonet = (() => {
 
       if (envelope.target_type === "org:join") {
         try {
-          const fragmentToken = decodeURIComponent(
-            location.hash.replace(/^#/, "")
-          );
-          const context = assembleJoinContext(envelope, fragmentToken);
+          const fragment = new URLSearchParams(location.hash.replace(/^#/, ""));
+          const context = assembleJoinContext(
+            envelope, fragment.get("t") || "", fragment.get("k") || "");
           state.phase = "join";
           deliverJoinContext(context);
           return;

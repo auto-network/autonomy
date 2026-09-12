@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import base64
 import shutil
 import subprocess
 from pathlib import Path
@@ -18,6 +19,7 @@ AUTONET_TEST_SOURCE = (
 )
 ORG = "11111111-1111-4111-8111-111111111111"
 ROOT_PUB = "ab" * 32
+LINK_KEY = base64.urlsafe_b64encode(bytes.fromhex("cd" * 32)).decode().rstrip("=")
 INVITE_REF = "bc" * 32
 BEARER = "01" * 32
 CHANNEL_TOKEN = "7f" * 16  # the /l/<token> path segment (registry-visible)
@@ -39,13 +41,13 @@ def test_join_context_and_fragment_only_delivery() -> None:
         "'TextEncoder','crypto','location','URLSearchParams',src);"
         "const A=factory(TextEncoder,{subtle:{}},location,URLSearchParams);"
         f"const envelope={envelope_json};"
-        f"const context=A.assembleJoinContext(envelope,{json.dumps(BEARER)});"
+        f"const context=A.assembleJoinContext(envelope,{json.dumps(BEARER)},{json.dumps(LINK_KEY)});"
         "const destination=A.deliverJoinContext(context);"
         "let blankRejected=false, longRejected=false, badRefRejected=false;"
-        "try{A.assembleJoinContext(envelope,'');}catch(e){blankRejected=true;}"
-        "try{A.assembleJoinContext(envelope,'x'.repeat(129));}"
+        f"try{{A.assembleJoinContext(envelope,'',{json.dumps(LINK_KEY)});}}catch(e){{blankRejected=true;}}"
+        f"try{{A.assembleJoinContext(envelope,'x'.repeat(129),{json.dumps(LINK_KEY)});}}"
         "catch(e){longRejected=true;}"
-        "try{A.assembleJoinContext({...envelope,invite_ref:'BC'.repeat(32)},'x');}"
+        f"try{{A.assembleJoinContext({{...envelope,invite_ref:'BC'.repeat(32)}},'x',{json.dumps(LINK_KEY)});}}"
         "catch(e){badRefRejected=true;}"
         "process.stdout.write(JSON.stringify({context,destination,navigations,"
         "blankRejected,longRejected,badRefRejected}));"
@@ -61,16 +63,15 @@ def test_join_context_and_fragment_only_delivery() -> None:
 
     assert output["context"] == {
         "org": ORG,
-        "rootPub": ROOT_PUB,
         "inviteRef": INVITE_REF,
         "token": BEARER,
+        "linkKey": LINK_KEY,
     }
     assert output["navigations"] == [output["destination"]]
     destination = urlsplit(output["destination"])
     assert destination.path == "/network/join"
     assert parse_qs(destination.query) == {
         "org": [ORG],
-        "root_pub": [ROOT_PUB],
         "invite_ref": [INVITE_REF],
     }
     # BOTH credentials ride the fragment (auto-y7nap, relay review): the
@@ -78,6 +79,7 @@ def test_join_context_and_fragment_only_delivery() -> None:
     # channel — so it must not create a second server-visible URL surface.
     assert parse_qs(destination.fragment) == {
         "channel_token": [CHANNEL_TOKEN],
+        "k": [LINK_KEY],
         "t": [BEARER],
     }
     # Neither credential ever rides the query, under any name.
