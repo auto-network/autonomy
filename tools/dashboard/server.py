@@ -501,6 +501,10 @@ def _current_headline_context() -> dict[str, str]:
 # signal — working-tree drift from HEAD — needs the file list).
 _RESTART_MERGE_RECENCY_SECONDS = 120
 
+# Cap the commit subject shown in the reload toast — agent/merge commits often
+# have one paragraph-length subject line, which would otherwise render in full.
+_RESTART_HEADLINE_MAX_CHARS = 100
+
 
 def _restart_attribution(changed_files: list[str] | None) -> dict[str, Any]:
     """Explain what triggered this restart, for the UI toast.
@@ -572,6 +576,13 @@ def _restart_attribution(changed_files: list[str] | None) -> dict[str, Any]:
         ctime = int(ctime_raw)
     except ValueError:
         return {}
+
+    # Agent/merge commits here often have one enormous single-line subject (no
+    # short-title/body split), so git's %s is a whole paragraph. Cap it so the
+    # reload toast shows a headline, not a wall of text.
+    subject = subject.strip()
+    if len(subject) > _RESTART_HEADLINE_MAX_CHARS:
+        subject = subject[: _RESTART_HEADLINE_MAX_CHARS - 1].rstrip() + "…"
 
     # With no changed-file list to prove working-tree drift, fall back to a
     # recency window: an old HEAD with unexplained changes is more likely a
