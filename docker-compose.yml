@@ -344,6 +344,12 @@ services:
       # containers), so localhost is itself: reach the dashboard by service name for
       # /api/monitor/register and dispatch status posts.
       GRAPH_API: https://dashboard:8080
+      # The dispatcher shells out to `graph` (sessions ingest, search) against the
+      # dashboard API, whose /api/graph/* now requires an authenticated caller.
+      # graph/client.py sends CROSSTALK_TOKEN as the bearer, so the dispatcher
+      # needs it in-env or every graph call 401s and trips the auth pause.
+      # Passed through from the host env at `up` time (not stored in the file).
+      CROSSTALK_TOKEN: ${CROSSTALK_TOKEN:-}
       AUTONOMY_DATA_ROOT: /app/data   # real mount, never repo-relative (see dashboard note)
       # The dispatcher has no keycache/ramfs mount (see deploy/dispatch.sh) — it
       # never decrypts a secret. Skip the shared entrypoint's ramfs provisioning
