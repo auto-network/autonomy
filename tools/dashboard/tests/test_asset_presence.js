@@ -271,4 +271,59 @@ describe('AssetPresence', () => {
     assert.equal(AssetPresence.expiryText({ expires_at: 1 }), 'expired');
     assert.match(AssetPresence.formatAgo(new Date(Date.now() - 5 * 60000).toISOString()), /5m ago/);
   });
+
+  it('maps the four publication states as reversible published pairs', () => {
+    assert.equal(AssetPresence.publicationTarget('raw'), 'published');
+    assert.equal(AssetPresence.publicationTarget('published'), 'raw');
+    assert.equal(AssetPresence.publicationTarget('curated'), 'canonical');
+    assert.equal(AssetPresence.publicationTarget('canonical'), 'curated');
+    assert.equal(AssetPresence.publicationTarget('unknown'), '');
+  });
+
+  it('shows publication only when state is supplied and commits successful changes', async () => {
+    makeWindow();
+    const absent = new FakeEl();
+    const absentCtl = AssetPresence.mount(absent, {sessions: [], sharing: false});
+    assert.doesNotMatch(absent.html, /asset-publication-toggle|Publication/);
+    absentCtl.destroy();
+
+    const calls = [];
+    const el = new FakeEl();
+    const ctl = AssetPresence.mount(el, {
+      sessions: [], sharing: false, publicationState: 'curated',
+      onPublicationChange: async (target, current) => { calls.push([target, current]); return target; },
+    });
+    assert.match(el.html, /asset-publication-toggle/);
+    assert.match(el.html, /aria-checked="false"/);
+    await ctl.togglePublication();
+    assert.deepEqual(calls, [['canonical', 'curated']]);
+    assert.equal(ctl.opts.publicationState, 'canonical');
+    assert.match(el.html, /aria-checked="true"/);
+    ctl.destroy();
+  });
+
+  it('suppresses duplicate publication changes and retains state on failure', async () => {
+    makeWindow();
+    let resolveChange;
+    let calls = 0;
+    const el = new FakeEl();
+    const ctl = AssetPresence.mount(el, {
+      sessions: [], sharing: false, publicationState: 'raw',
+      onPublicationChange: () => { calls += 1; return new Promise((resolve) => { resolveChange = resolve; }); },
+    });
+    const first = ctl.togglePublication();
+    const duplicate = ctl.togglePublication();
+    assert.equal(calls, 1);
+    assert.match(el.html, /disabled aria-busy="true"/);
+    resolveChange('published');
+    await Promise.all([first, duplicate]);
+    assert.equal(ctl.opts.publicationState, 'published');
+
+    ctl.opts.onPublicationChange = async () => { throw new Error('denied'); };
+    await ctl.togglePublication();
+    assert.equal(ctl.opts.publicationState, 'published');
+    assert.match(el.html, /Could not update publication: denied/);
+    assert.doesNotMatch(el.html, /disabled aria-busy="true"/);
+    ctl.destroy();
+  });
 });

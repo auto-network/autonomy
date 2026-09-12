@@ -74,6 +74,10 @@
     return 'expires in ' + hours + (hours === 1 ? ' hour' : ' hours');
   }
 
+  function publicationTarget(state) {
+    return ({ raw: 'published', published: 'raw', curated: 'canonical', canonical: 'curated' })[state] || '';
+  }
+
   // Sessions with live state resolved, live first, newest push first.
   function resolveSessions(input, org) {
     var out = (input || []).filter(function (s) { return s && s.id; }).map(function (s) {
@@ -131,6 +135,8 @@
     this.share = { shared: false, grants: [] };
     this.shareState = 'idle'; // idle | requesting | awaiting | error
     this.shareError = '';
+    this.publicationBusy = false;
+    this.publicationError = '';
     this.approvalId = '';
     this._pollTimer = null;
     this._destroyed = false;
@@ -309,12 +315,27 @@
           : '');
     }
     var error = this.shareError ? '<div class="design-presence-note is-error">' + esc(this.shareError) + '</div>' : '';
+    var publication = '';
+    var publicationState = this.opts.publicationState;
+    if (publicationTarget(publicationState)) {
+      var isPublished = publicationState === 'published' || publicationState === 'canonical';
+      publication = '<div class="design-presence-section">Publication</div>'
+        + '<div class="asset-publication-row">'
+        + '<span class="design-presence-copy"><strong>Published to other organizations</strong>'
+        + '<span>' + (isPublished ? 'Visible to subscribed organizations' : 'Only visible inside this organization') + '</span></span>'
+        + '<button type="button" class="asset-publication-switch' + (isPublished ? ' is-on' : '') + '"'
+        + ' role="switch" aria-label="Published to other organizations" aria-checked="' + (isPublished ? 'true' : 'false') + '"'
+        + ' data-action="toggle-publication" data-testid="asset-publication-toggle"'
+        + (this.publicationBusy ? ' disabled aria-busy="true"' : '') + '><span></span></button></div>'
+        + (this.publicationError ? '<div class="design-presence-note is-error">' + esc(this.publicationError) + '</div>' : '');
+    }
     var title = this.summaryTitle();
     var summaryHtml = '<span class="design-presence-stack">' + avatars + '</span>'
       + (sessions.length > 3 ? '<span class="design-presence-count">+' + (sessions.length - 3) + '</span>' : '')
       + (this.opts.sharing !== false && this.share.shared ? '<span class="design-presence-sharemark" title="Shared by link">↗</span>' : '');
     var menuHtml = '<div class="design-presence-section">' + (this.opts.people ? 'People' : 'Sessions') + ' on this ' + esc(this.opts.noun || 'item') + '</div>'
       + rows + chatRow
+      + publication
       + (this.opts.sharing === false ? '' : '<div class="design-presence-section">Sharing</div>' + sharing + error);
     this._fill(summaryHtml, menuHtml, title, sessions.some(function (s) { return s.live; }));
   };
@@ -384,6 +405,28 @@
       this.openLink();
     } else if (action === 'manage') {
       this.manage();
+    } else if (action === 'toggle-publication') {
+      this.togglePublication();
+    }
+  };
+
+  Control.prototype.togglePublication = async function () {
+    if (this.publicationBusy || typeof this.opts.onPublicationChange !== 'function') return;
+    var current = this.opts.publicationState;
+    var target = publicationTarget(current);
+    if (!target) return;
+    this.publicationBusy = true;
+    this.publicationError = '';
+    this.render();
+    try {
+      var next = await this.opts.onPublicationChange(target, current);
+      if (!publicationTarget(next)) throw new Error('Publication update returned an invalid state');
+      this.opts.publicationState = next;
+    } catch (e) {
+      this.publicationError = 'Could not update publication: ' + (e && e.message ? e.message : e);
+    } finally {
+      this.publicationBusy = false;
+      this.render();
     }
   };
 
@@ -528,6 +571,7 @@
     resolveSessions: resolveSessions,
     expiryText: expiryText,
     formatAgo: formatAgo,
+    publicationTarget: publicationTarget,
     Control: Control,
   };
 
