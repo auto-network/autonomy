@@ -242,12 +242,15 @@ def _require_startable_serving(org: str | None) -> None:
     serving credential must exist for the frame to authenticate. Without one the
     publish is doomed at execute — after the operator has already signed — so we
     refuse it here at planning time (the auto-hzs4f pre-sign-guard precedent). A
-    ``missing`` serve-cert is the unstartable case; an existing-but-stale cert
+    A keyed organization awaiting first registration is startable: the existing
+    approval registers it and prepares membership and serving before signing
+    the publish. Otherwise a ``missing`` serve-cert is unstartable; a stale cert
     (expired/key-missing) is re-minted at the next org-root unlock and start.
     """
     from tools.dashboard.link_serving_supervisor import serve_cert_state
 
-    if (serve_cert_state(org) or {}).get("status") == "missing":
+    if ((serve_cert_state(org) or {}).get("status") == "missing"
+            and not _is_registerable_on_first_publish(org)):
         raise ValueError(
             "this organization has no serving credential yet — unlock the "
             "organization root once to provision serving, then publish the "

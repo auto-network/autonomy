@@ -121,6 +121,13 @@ def test_a_planned_unlock_makes_ZERO_round_trips(proof):
     assert proof["with_plan"]["fetched"] == []
 
 
+def test_registry_membership_is_prepared_before_serving(proof):
+    fetched = proof["no_plan"]["fetched"]
+    assert fetched.index("GET /api/network/membership-checkpoint/decision") < fetched.index(
+        "GET /api/network/serve-cert"
+    ), "a fresh persona serving certificate requires registry membership first"
+
+
 def test_without_a_plan_the_ceremony_still_fetches_what_it_needs(proof):
     """The fallback is not theoretical: with no plan the loop fetches the
     binding and the ledger heads per org exactly as it did before, so an older
