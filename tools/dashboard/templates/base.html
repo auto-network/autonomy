@@ -1428,6 +1428,16 @@
       background: transparent;
       scroll-behavior: smooth;
     }
+    /* The ordinary app shell (including the session list) must use the same
+       established standalone height as the full-screen viewer. Otherwise
+       route changes alternate between the shorter dvh and screen height. */
+    html.ios-standalone body {
+      height: var(--app-height, 100dvh);
+      overflow: hidden;
+    }
+    html.ios-standalone main#content {
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+    }
     /* iOS PWA: propagate --app-height up the wrapper chain so body / main
        don't clamp to the stale WebKit 100dvh value (787 vs screen 844),
        which pushed .sv-input below the visible viewport. */

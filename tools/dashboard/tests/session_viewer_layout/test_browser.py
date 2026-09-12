@@ -170,6 +170,47 @@ def h(tmp_path_factory):
 # Grid shell + layout assertions
 # ══════════════════════════════════════════════════════════════════════
 
+class TestStandaloneShell:
+    def test_list_shell_and_approval_share_standalone_height(self, h):
+        """Exercise production shell CSS with the recorded iOS height mismatch."""
+        from tools.dashboard.mock_server import _ensure_tailwind_css
+        _ensure_tailwind_css()
+        ab_raw("open", f"http://localhost:{TEST_PORT}/sessions")
+        ab_raw("set", "viewport", "390", "787")
+        result = ab_eval("""
+            document.documentElement.classList.add('ios-standalone');
+            document.documentElement.style.setProperty('--app-height', '844px');
+            // Ordinary list mode must retain the same height as viewer mode.
+            document.body.classList.remove('fullscreen-page', 'session-overlay-active');
+            return {body:document.body.getBoundingClientRect().height,
+                    bodyDisplay:getComputedStyle(document.body).display,
+                    header:document.querySelector('header[data-app-chrome]').getBoundingClientRect().height,
+                    stack:document.querySelector('#page-stack').getBoundingClientRect().bottom};
+        """)
+        assert result["body"] == 844
+        assert result["bodyDisplay"] == "flex", result
+        assert abs(result["stack"] - 844) <= 1, result
+        result = ab_eval("""
+            return import('/static/js/components/approval-dialog.js').then(({openApprovalDialog}) => {
+              window.testApproval = openApprovalDialog({
+                review:{title:'Allow dashboard access',intro:'Browser access',requester:{name:'Test session'}},
+                authorize:async()=>({}),execute:async()=>({execution:{ok:true}}),
+                result:{working:'Allowing access',success:'Access allowed',fact:{name:'Test session'}}
+              });
+              const host=document.querySelector('[data-testid=approval-dialog]');
+              const root=host.shadowRoot;
+              return {hostBottom:host.getBoundingClientRect().bottom,
+                sheetBottom:root.querySelector('.sheet').getBoundingClientRect().bottom,
+                buttonBottom:root.querySelector('#primary').getBoundingClientRect().bottom,
+                position:getComputedStyle(host).position};
+            });
+        """)
+        assert result["position"] == "absolute"
+        assert result["hostBottom"] == 844
+        assert result["sheetBottom"] == 844
+        assert result["buttonBottom"] <= 824
+        ab_eval("window.testApproval.dispose(); return true;")
+
 class TestGridShell:
     def test_sv_ready_is_grid(self, h):
         """`.sv-ready` must render as a CSS grid in page mode."""
