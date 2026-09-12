@@ -80,6 +80,31 @@ if ! docker image inspect "$IMAGE" > /dev/null 2>&1; then
     exit 1
 fi
 
+# Return 0 (wedged) if a worktree is mid-git-op or holds a stale lock.
+# A worktree PRESERVED from an interrupted run (auto-cpxdp) is reused verbatim
+# on the next dispatch; if that tree is halfway through a rebase/merge/
+# cherry-pick or carries a stale index.lock, reusing it would re-wedge the
+# retry. Callers abandon reuse and start fresh when this returns 0. A worktree
+# whose git dir can't be resolved is treated as wedged (start fresh, safe).
+worktree_git_wedged() {
+    local wt="$1"
+    local gitdir
+    gitdir=$(git -C "$wt" rev-parse --git-dir 2>/dev/null) || return 0
+    case "$gitdir" in
+        /*) ;;
+        *) gitdir="$wt/$gitdir" ;;
+    esac
+    local marker
+    for marker in rebase-merge rebase-apply MERGE_HEAD CHERRY_PICK_HEAD \
+                  REVERT_HEAD BISECT_LOG index.lock; do
+        if [ -e "$gitdir/$marker" ]; then
+            echo "    Broken-git state in $wt: found $marker"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # ── Generate prompt ───────────────────────────────────
 echo "==> Generating prompt for $BEAD_ID..."
 PROMPT=$("$PYTHON" -m agents.compose "$BEAD_ID")
@@ -119,6 +144,14 @@ git -C "$REPO_ROOT" worktree prune -v
 existing_wt=$(git -C "$REPO_ROOT" worktree list --porcelain \
     | awk -v br="refs/heads/$BRANCH" '/^worktree / {wt=$2} $0=="branch "br {print wt}')
 WORKTREE_REUSED=false
+# Broken-git guard (auto-cpxdp): if the preserved worktree is mid-git-op or
+# holds a stale index.lock, abandon reuse and start fresh — reusing a wedged
+# tree would re-wedge the retry.
+if [ -n "$existing_wt" ] && worktree_git_wedged "$existing_wt"; then
+    echo "    Preserved worktree $existing_wt is wedged — abandoning reuse, starting fresh"
+    git -C "$REPO_ROOT" worktree remove "$existing_wt" --force 2>/dev/null || true
+    existing_wt=""
+fi
 if [ -n "$existing_wt" ]; then
     echo "    Reusing existing worktree: $existing_wt"
     WORKTREE_DIR="$existing_wt"
@@ -131,6 +164,42 @@ else
     git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" "$BRANCH"
 fi
 echo "    Worktree: $WORKTREE_DIR"
+
+# ── Preserved-worktree handoff block (auto-cpxdp) ─────────────────────
+# When we REUSE an existing worktree it may be a tree PRESERVED from a
+# previous interrupted dispatch of this bead (timed out / exited without a
+# decision). If it carries uncommitted changes, inject a block into the
+# composed prompt telling the retry agent to BUILD ON the preserved work
+# instead of restarting. $PROMPT was composed at :85 (before worktree
+# resolution); the prompt FILE is written below (:166+), so appending here
+# lands the block in the file the agent actually reads.
+if $WORKTREE_REUSED; then
+    HANDOFF_CHANGES=$(git -C "$WORKTREE_DIR" status --porcelain 2>/dev/null || true)
+    if [ -n "$HANDOFF_CHANGES" ]; then
+        HANDOFF_COUNT=$(printf '%s\n' "$HANDOFF_CHANGES" | grep -c .)
+        PROMPT="$PROMPT
+
+---
+
+# ⚠️ PRESERVED WORKTREE — build on the work already here
+
+This worktree was **PRESERVED from a previous interrupted run of this bead**
+(it timed out or exited without writing a decision). It was deliberately NOT
+discarded: it contains **uncommitted changes** from that run. Build on them —
+do **not** restart from scratch, and do not \`git reset\`/\`git checkout\` them
+away.
+
+Uncommitted changes present now (\`git status --porcelain\`):
+
+\`\`\`
+$HANDOFF_CHANGES
+\`\`\`
+
+Run \`git status\` and \`git diff\` first to review what the previous run left,
+then continue that work and commit it."
+        echo "    Preserved-worktree handoff: injected $HANDOFF_COUNT changed path(s) into prompt"
+    fi
+fi
 
 # Save branch base BEFORE agent runs — used to detect new commits after
 BRANCH_BASE=$(git -C "$WORKTREE_DIR" rev-parse HEAD)

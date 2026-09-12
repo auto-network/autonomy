@@ -8,6 +8,12 @@ Your working directory is `/workspace/repo` — a git worktree on branch `agent/
 You can read, edit, create files, and commit normally. The dispatcher will collect your
 commits after you exit.
 
+If a previous dispatch of this bead was interrupted (timed out or exited without a
+decision), its worktree is **preserved and reused** — this one may already contain
+uncommitted changes from that run. Run `git status` / `git diff` first; build on any
+work you find rather than restarting, and commit it. When there is preserved work, a
+"PRESERVED WORKTREE" block below lists the exact changed files.
+
 ## Knowledge Graph (`graph`)
 
 ```
