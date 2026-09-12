@@ -46,6 +46,7 @@ INVITE_VERSION = 2
 _CHECKSUM_CHARS = 8
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _CHANNEL_TOKEN = re.compile(r"^[0-9a-f]{32}$")
+_CHANNEL_FRAGMENT = re.compile(r"^[A-Za-z0-9_-]{43}$")
 
 #: The two independent fragment keys of a viewer invitation URL
 #: (graph://4f9e881c-a9 §3). ``k`` carries the per-link channel-verification
@@ -151,7 +152,15 @@ def encode_channel_pub(channel_pub_hex: str) -> str:
 
 def decode_channel_pub(fragment_value: str) -> str:
     """Inverse of :func:`encode_channel_pub`; raises on anything that is not
-    exactly a 32-byte base64url value."""
+    exactly the canonical 43-character unpadded base64url spelling of a
+    32-byte value."""
+    if (
+        not isinstance(fragment_value, str)
+        or not _CHANNEL_FRAGMENT.fullmatch(fragment_value)
+    ):
+        raise InvitationError(
+            "fragment channel key must be 43 unpadded base64url characters"
+        )
     pad = "=" * (-len(fragment_value) % 4)
     try:
         raw = base64.urlsafe_b64decode(fragment_value + pad)
@@ -159,7 +168,10 @@ def decode_channel_pub(fragment_value: str) -> str:
         raise InvitationError("fragment channel key does not decode") from exc
     if len(raw) != 32:
         raise InvitationError("fragment channel key is not a 32-byte value")
-    return raw.hex()
+    public_hex = raw.hex()
+    if encode_channel_pub(public_hex) != fragment_value:
+        raise InvitationError("fragment channel key is not canonically encoded")
+    return public_hex
 
 
 def parse_invitation_fragment(fragment: str) -> tuple[str | None, str]:
@@ -187,8 +199,10 @@ def parse_invitation_fragment(fragment: str) -> tuple[str | None, str]:
     if len(parsed[INVITE_FRAGMENT_BEARER]) != 1:
         raise InvitationError("invitation fragment carries a duplicate bearer")
     bearer = parsed[INVITE_FRAGMENT_BEARER][0]
-    if not bearer:
-        raise InvitationError("invitation fragment bearer is empty")
+    if not _HEX64.fullmatch(bearer):
+        raise InvitationError(
+            "invitation fragment bearer must be 64 lowercase hex characters"
+        )
     channel_pub_hex = None
     if INVITE_FRAGMENT_CHANNEL_KEY in parsed:
         values = parsed[INVITE_FRAGMENT_CHANNEL_KEY]
@@ -262,13 +276,15 @@ def build_invitation_join_url(
             complete=False, url=None,
             reason="channel-verification key is absent (legacy or keyless link)",
         )
-    if not isinstance(bearer, str) or not bearer:
+    if bearer is None or bearer == "":
         return InvitationJoinUrl(
             complete=False, url=None,
             reason="invitation bearer is absent (minted before bearers were retained)",
         )
-    if len(bearer) > 128:
-        raise InvitationError("invitation bearer is malformed")
+    if not isinstance(bearer, str) or not _HEX64.fullmatch(bearer):
+        raise InvitationError(
+            "invitation bearer must be 64 lowercase hex characters"
+        )
     fragment = (
         f"{INVITE_FRAGMENT_CHANNEL_KEY}={encode_channel_pub(channel_pub_hex)}"
         f"&{INVITE_FRAGMENT_BEARER}="

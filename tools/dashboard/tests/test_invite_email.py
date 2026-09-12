@@ -174,7 +174,7 @@ def test_smtp_auth_is_optional_but_both_or_neither_and_always_closes(
     with pytest.raises(InviteEmailError, match="^SMTP delivery failed$") as error:
         send_invite_email(
             "invitee@example",
-            _complete_link(bearer="secret"),
+            _complete_link(),
             1_900_000_000_000,
             org="acme",
             config_resolver=lambda _org: config,

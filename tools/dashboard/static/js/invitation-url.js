@@ -52,10 +52,16 @@
         reason: 'channel-verification key is absent (legacy or keyless link)',
       };
     }
-    if (typeof bearer !== 'string' || !bearer || bearer.length > 128) {
+    if (bearer === null || bearer === undefined || bearer === '') {
       return {
         complete: false, url: null,
         reason: 'invitation bearer is absent (minted before bearers were retained)',
+      };
+    }
+    if (typeof bearer !== 'string' || !HEX64.test(bearer)) {
+      return {
+        complete: false, url: null,
+        reason: 'invitation bearer must be 64 lowercase hex characters',
       };
     }
     var fragment = 'k=' + hexToBase64Url(channelPub)
