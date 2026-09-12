@@ -66,6 +66,8 @@ def operator_api(tmp_path, monkeypatch):
     store = fleet_enrollment_service.FleetEnrollmentStore(
         tmp_path / "machine.db"
     )
+    from tools.dashboard.tests.fleet_central_fixtures import configure_central
+    configure_central(monkeypatch, store, root, NOW_MS / 1000)
     grant = {
         "token": TOKEN,
         "target_type": "fleet:join",
@@ -106,6 +108,7 @@ def operator_api(tmp_path, monkeypatch):
     client = TestClient(Starlette(routes=[
         *fleet_enrollment_routes.ROUTES,
         *approvals_routes.ROUTES,
+        *__import__('tools.dashboard.attention_routes', fromlist=['routes']).routes,
     ]))
     yield client, root, invite, store
     client.close()
@@ -129,6 +132,10 @@ def test_operator_can_decline_and_agent_bearer_cannot_act(
     operator_api, monkeypatch
 ):
     client, _root, invite, store = operator_api
+    refused = client.post('/api/approvals', json={
+        'kind': 'fleet_machine_admission', 'session': 'forged', 'request': {'request_id': 'aa' * 32},
+    })
+    assert refused.status_code == 400
     _register(client, invite)
     request = fleet_enroll.build_request(
         invite=invite, machine_id="9a" * 32
@@ -143,11 +150,11 @@ def test_operator_can_decline_and_agent_bearer_cannot_act(
     pending = store.get_request(opened["request_id"])
     assert pending is not None
     declined = client.post(
-        f"/api/approvals/{pending.source_approval_id}/decision",
-        json={"approved": False},
+        f"/api/attention/items/{pending.source_approval_id}/approval-decision",
+        json={"outcome": "declined", "decision": {}},
     )
     assert declined.status_code == 200
-    assert declined.json() == {"ok": True}
+    assert declined.json()["resolution"]["outcome"] == "declined"
     # Fleet does not copy the human verdict into its transport table.
     assert store.get_request(pending.request_id).status == "pending"
     resumed = fleet_enrollment_service.handle_request(
@@ -307,7 +314,7 @@ def test_invalid_remote_evidence_cannot_bootstrap_legacy_origin(
     )
     pending = store.get_request(opened["request_id"])
     assert pending is not None
-    row = ar.get(pending.source_approval_id)
+    row = fleet_enrollment_approvals._runtime().approvals.get_request(pending.source_approval_id).payload
     bootstrap_id = row["staged"]["local_bootstrap_machine_id"]
     machine_id = fleet_enroll.assigned_machine_id(pending.request)
     machine_key = fleet_enroll.derive_machine_key(
@@ -333,40 +340,17 @@ def test_invalid_remote_evidence_cannot_bootstrap_legacy_origin(
         machine_id=bootstrap_id,
         machine_pub=local_key.public_hex,
     )
-    local_process = KeyPair.from_private_hex("83" * 32)
-    local_cert = issue_cert(
-        local_key,
-        local_process.public_hex,
-        scope=["fleet:sync"],
-        org=f"personal:{root.public_hex}",
-        subject=Subject(kind="machine", id=bootstrap_id),
-        not_before=int(time.time()) - 30,
-        not_after=int(time.time()) + 300,
-    )
-
     response = client.post(
-        f"/api/approvals/{pending.source_approval_id}/decision",
-        json={
-            "approved": True,
+        f"/api/attention/items/{pending.source_approval_id}/approval-decision",
+        json={"outcome": "granted", "decision": {
             "machine_name": "SJC dashboard",
             "approval": invalid_approval.to_dict(),
             "roster_entry": remote_entry.to_dict(),
             "local_roster_entry": local_entry.to_dict(),
-            "local_runtime": {
-                "machine_id": bootstrap_id,
-                "machine_pub": local_key.public_hex,
-                "process_private_seed": local_process.private_hex,
-                "delegation_cert": local_cert.to_dict(),
-            },
-        },
+        }},
     )
-
-    assert response.status_code == 200
-    assert response.json() == {"ok": True}
-    result = client.get(
-        f"/api/approvals/{pending.source_approval_id}", params={"wait": 5}
-    ).json()["result"]
-    assert result["execution"]["ok"] is False
+    assert response.status_code == 422
+    assert fleet_enrollment_approvals._runtime().approvals.status(pending.source_approval_id).resolution is None
     assert machine_boot.machine_id(org="machine") is None
     assert fleet_roster.load_entries(org=None) == []
 
@@ -395,22 +379,6 @@ def test_preapproval_table_is_forward_migrated(tmp_path):
     } <= columns
 
 
-def test_current_generic_dialogue_owns_pin_and_browser_root_ceremony():
-    js = (REPO_ROOT / "tools/dashboard/static/js/pages/worktrees.js").read_text()
-    template = (
-        REPO_ROOT
-        / "tools/dashboard/templates/partials/worktree-review-overlays.html"
-    ).read_text()
-    assert "fleet_machine_admission:" in js
-    assert "mintFleetEnrollmentEvidence" in js
-    assert "roster_entry: evidence.rosterEntry" in js
-    assert "decision.local_roster_entry = evidence.localRosterEntry" in js
-    assert "decision.local_runtime = evidence.localRuntime" in js
-    assert "machine_name: machineName" in js
-    assert "approval-fleet-machine-name" in template
-    assert "approval-fleet-pin" in template
-    assert "Machine comparison code" in template
-    assert "/api/fleet/enrollment/requests/" not in js
 
 
 def _runtime_serves(client, monkeypatch, *, allowed, reason):

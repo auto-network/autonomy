@@ -256,7 +256,7 @@ def test_production_composition_shares_one_service_and_activates_dashboard_acces
     assert set(runtime.approval_http.registry.adapters) == {"dashboard_access"}
     assert set(PRODUCTION_KIND_INVENTORY) == set(PRODUCTION_APPROVAL_REGISTRY.kinds)
     for kind, registration in PRODUCTION_APPROVAL_REGISTRY.kinds.items():
-        assert runtime.approval_http.claims_kind(kind) is (kind == "dashboard_access")
+        assert runtime.approval_http.claims_kind(kind) is (kind in {"dashboard_access", "fleet_machine_admission"})
         assert runtime.approval_http.migrated_kind(kind) is (kind == "dashboard_access")
         assert registration.runtime is None
 

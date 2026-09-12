@@ -281,7 +281,7 @@ class FleetEnrollmentStore:
             from tools.dashboard import fleet_enrollment_approvals
 
             known = {row["source_approval_id"] for row in rows}
-            return known & fleet_enrollment_approvals.terminal_approval_ids()
+            return fleet_enrollment_approvals.terminal_approval_ids(known)
         except Exception:
             # Approval storage unavailable means fail closed: every unresolved
             # transport row continues to consume a slot.
@@ -761,19 +761,21 @@ def handle_request(
                 "status": "unavailable",
                 "reason": unavailable.reason,
             }
+        from tools.dashboard import fleet_enrollment_approvals
+        if pending.source_approval_id:
+            fleet_enrollment_approvals.reconcile(pending.source_approval_id)
+            pending = state.get_request(pending.request_id)
         reply = {
             "v": 1,
             "status": pending.status,
             "request_id": pending.request_id,
             "verification_code": pending.verification_code,
         }
-        from tools.dashboard import fleet_enrollment_approvals
-
         if (
             pending.status == "pending"
             and fleet_enrollment_approvals.decision_status(
                 pending.source_approval_id
-            ) == "declined"
+            ) in {"declined", "canceled", "expired"}
         ):
             reply["status"] = "declined"
         if pending.status == "approved":

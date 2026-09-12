@@ -108,8 +108,6 @@
       presentation: source.presentation || {},
       rendererId: source.open && source.open.renderer_id,
       unavailable: false,
-      machine_name: '',
-      machineNameTouched: false,
       decisionBusy: false,
       decisionError: '',
       safeReview: {},
@@ -132,67 +130,7 @@
     return 'apps';
   }
 
-  function machineNameError(item) {
-    if (!item || item.applicationScope !== 'fleet') return '';
-    const raw = String(item.machine_name || '');
-    const normalized = raw.trim();
-    if (!normalized) return 'Enter a machine name.';
-    if (Array.from(normalized).length > 80) {
-      return 'Machine name must be 80 characters or fewer.';
-    }
-    if (/[\u0000-\u001f\u007f]/.test(raw)) {
-      return 'Machine name cannot contain control characters.';
-    }
-    return '';
-  }
 
-  async function fleetDecision(item) {
-    const error = machineNameError(item);
-    if (error) throw new Error(error);
-    const review = item.safeReview || {};
-    const fleet = review.fleet || review;
-    if (!fleet.request || !fleet.channel_binding ||
-        !Number.isSafeInteger(fleet.issued_at) || !fleet.personal_root_pub) {
-      throw new Error('This machine request has no server-frozen enrollment context.');
-    }
-    const { openRoot } = await import('../ceremony/open-root.js');
-    const opened = await openRoot({
-      title: 'Add this machine?',
-      detail: 'Unlock your personal root to approve this machine.',
-    });
-    if (!opened) throw new Error('Approval cancelled.');
-    try {
-      if (opened.rootPub !== fleet.personal_root_pub) {
-        throw new Error('This request belongs to a different personal fleet.');
-      }
-      const ceremony = await import('../ceremony/fleet-enrollment.js');
-      const evidence = await ceremony.mintFleetEnrollmentEvidence({
-        personalRootSeed: opened.seed,
-        rootPub: opened.rootPub,
-        request: fleet.request,
-        channelBinding: fleet.channel_binding,
-        localBootstrapMachineId: fleet.local_bootstrap_machine_id || null,
-        issuedAt: fleet.issued_at,
-        seq: 0,
-      });
-      opened.seed = null;
-      const decision = {
-        machine_name: String(item.machine_name).trim(),
-        approval: evidence.approval,
-        roster_entry: evidence.rosterEntry,
-      };
-      if (evidence.localRosterEntry) {
-        decision.local_roster_entry = evidence.localRosterEntry;
-        decision.local_runtime = evidence.localRuntime;
-      }
-      return decision;
-    } finally {
-      if (opened && opened.seed) {
-        opened.seed.fill(0);
-        opened.seed = null;
-      }
-    }
-  }
 
   function categoryGlyphs() {
     return [
@@ -394,7 +332,6 @@
 
       categoryFor: canonicalCategory,
       toneClasses,
-      machineNameError,
 
       categoryCount(key) {
         return Number((this.counts.categories || {})[key] || 0);
@@ -436,7 +373,7 @@
         if (!item) return;
         item.decisionError = '';
         // Migrated reviews never flash the legacy right-hand detail panel.
-        const shared = item.rendererId === 'approval.dashboard_access.review';
+        const shared = ['approval.dashboard_access.review', 'approval.fleet_machine_admission.review'].includes(item.rendererId);
         this.selectedItem = shared ? null : item;
         try {
           const payload = await jsonRequest('/api/attention/items/' + encodeURIComponent(item.id));
@@ -455,10 +392,17 @@
           item.requester = review.requester || null;
           item.detail = item.safeReview.detail || item.safeReview.summary || item.summary;
           item.sourceLabel = [item.applicationScope, review.kind].filter(Boolean).join(' · ');
-          item.comparisonCode = item.safeReview.verification_code ||
-            item.safeReview.comparison_code || '';
           item.unavailable = false;
-          if (shared) await this.openDashboardApproval(item);
+          if (shared) {
+            if (item.rendererId === 'approval.fleet_machine_admission.review') {
+              const { openFleetApproval } = await import('./fleet-approval.js');
+              this._sharedApprovalItem = item;
+              this._sharedApprovalDialog = openFleetApproval(item, {
+                onResolved: () => { this._sharedApprovalItem = null; this.refresh().catch(() => {}); },
+                onClose: () => { this._sharedApprovalItem = null; this._sharedApprovalDialog = null; },
+              });
+            } else await this.openDashboardApproval(item);
+          }
           return true;
         } catch (error) {
           if (error && error.status === 409 && error.payload && error.payload.item) {
@@ -526,21 +470,12 @@
           );
           return signDashboardAccessGrant(item.safeReview.grant);
         }
-        if (item.rendererId === 'approval.fleet_machine_admission.review') {
-          return fleetDecision(item);
-        }
         if (item.authorityRequirement === 'operator_session') return {};
         throw new Error('This approval renderer is not active yet.');
       },
 
       async grant(item) {
         if (!item || item.decisionBusy || !item.actions.includes('granted')) return;
-        const validationError = machineNameError(item);
-        if (validationError) {
-          item.machineNameTouched = true;
-          item.decisionError = validationError;
-          return;
-        }
         item.decisionBusy = true;
         item.decisionError = '';
         try {

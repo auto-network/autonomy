@@ -347,68 +347,6 @@
     return signDashboardAccessGrant(req.grant);
   }
 
-  // Fleet admission is personal-root authority. The browser opens the
-  // encrypted personal armor, mints the durable roster statement and the
-  // transient channel approval, and hands only those signed public records to
-  // the generic rendezvous. fleet-enrollment.js zeroes the root seed on every
-  // exit, including validation and signing failures.
-  async function _signFleetAdmissionDecision(self, req) {
-    const machineName = typeof req.machineName === 'string'
-      ? req.machineName.trim() : '';
-    if (!machineName) {
-      throw new Error('Enter a name for this machine.');
-    }
-    if (Array.from(machineName).length > 80 || /[\x00-\x1f\x7f]/.test(machineName)) {
-      throw new Error('Machine name must be 1–80 characters without ASCII controls.');
-    }
-    const staged = req.fleet;
-    if (!staged || !staged.request || !staged.channelBinding ||
-        !Number.isSafeInteger(staged.issuedAt)) {
-      throw new Error('This machine request has no server-frozen enrollment context.');
-    }
-    // ONE common factor-aware unlock — password, passkey, or both, chosen per
-    // the armor's own factors. No password field on this approval card anymore.
-    const { openRoot } = await import('../ceremony/open-root.js');
-    const opened = await openRoot({
-      title: 'Add this machine?',
-      detail: 'Unlock your personal root to approve this machine.',
-    });
-    if (!opened) throw new Error('Approval cancelled.');
-    try {
-      if (opened.rootPub !== staged.personalRootPub) {
-        throw new Error('This request belongs to a different personal fleet.');
-      }
-      const ceremony = await import('../ceremony/fleet-enrollment.js');
-      const evidence = await ceremony.mintFleetEnrollmentEvidence({
-        personalRootSeed: opened.seed,
-        rootPub: opened.rootPub,
-        request: staged.request,
-        channelBinding: staged.channelBinding,
-        localBootstrapMachineId: staged.localBootstrapMachineId || null,
-        issuedAt: staged.issuedAt,
-        seq: 0,
-      });
-      // The ceremony zeroed the same Uint8Array. Drop our reference so the
-      // finally block cannot imply that a second live copy exists.
-      opened.seed = null;
-      req.password = '';
-      const decision = {
-        machine_name: machineName,
-        approval: evidence.approval,
-        roster_entry: evidence.rosterEntry,
-      };
-      if (evidence.localRosterEntry) {
-        decision.local_roster_entry = evidence.localRosterEntry;
-        decision.local_runtime = evidence.localRuntime;
-      }
-      return decision;
-    } finally {
-      if (opened && opened.seed) {
-        opened.seed.fill(0);
-        opened.seed = null;
-      }
-    }
-  }
 
   async function _jsonOrError(resp) {
     const data = await resp.json().catch(() => ({}));
@@ -2810,40 +2748,6 @@
             };
           },
           decision: (self, req) => _signDashboardAccessDecision(self, req),
-        },
-        fleet_machine_admission: {
-          open(self, r) {
-            const staged = r.staged;
-            if (!staged || staged.v !== 1 || !staged.request ||
-                !staged.channel_binding || !staged.verification_code ||
-                !Number.isSafeInteger(staged.issued_at)) {
-              throw new Error('fleet admission has no server-frozen request');
-            }
-            self.approvalBusy = false;
-            self.approvalRequest = {
-              id: r.id, kind: r.kind, session: 'Fleet invitation',
-              title: 'Add this machine?', actionLabel: 'Approve machine',
-              op: 'admit', target: 'New Dashboard',
-              bodyMarkdown: [
-                'Compare the code below with the code on the joining machine.',
-                'Approve only when every group matches.',
-              ].join('\n'),
-              fleet: {
-                verificationCode: staged.verification_code,
-                requestId: staged.source_request_id,
-                request: staged.request,
-                channelBinding: staged.channel_binding,
-                personalRootPub: staged.personal_root_pub,
-                localBootstrapMachineId: staged.local_bootstrap_machine_id || null,
-                issuedAt: staged.issued_at,
-              },
-              machineName: '',
-              needsPassword: false,
-              awaitExecution: true,
-              error: '',
-            };
-          },
-          decision: (self, req) => _signFleetAdmissionDecision(self, req),
         },
         // Secure-setting provisioning: the agent described a small form
         // (staged.fields); the operator fills it and the values are HPKE-

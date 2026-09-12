@@ -453,15 +453,21 @@ def pending_session_approval(session: Mapping[str, Any], actor: HumanApprovalAct
 
 
 def build_production_runtime() -> AttentionRouteRuntime:
+    from tools.dashboard import fleet_enrollment_approvals as fleet
     dashboard_approval_runtime = dashboard_access_central.build_approval_runtime()
     approval_registry = build_production_registry(runtimes={
         dashboard_access_central.KIND: dashboard_approval_runtime,
+        fleet.KIND: fleet.build_approval_runtime(),
     })
     approval_waiters = ApprovalWaitHub()
     coordinator_holder: dict[str, Any] = {}
 
     def approval_after_commit(record_type: str, approval_id: str) -> None:
         approval_waiters.notify(record_type, approval_id)
+        record = approvals.store.get_request(approval_id)
+        if record is not None and record.payload.get("kind") == fleet.KIND:
+            fleet.reconcile(approval_id)
+            return
         coordinator = coordinator_holder.get("coordinator")
         if coordinator is not None:
             coordinator.offer(approval_id)
@@ -475,6 +481,7 @@ def build_production_runtime() -> AttentionRouteRuntime:
         approvals,
     )
     runtimes = {
+        (fleet.KIND, fleet.APPLICATION_SCOPE): fleet.build_attention_runtime(approvals),
         (
             dashboard_access_central.KIND,
             dashboard_access_central.APPLICATION_SCOPE,
@@ -532,7 +539,8 @@ def build_production_runtime() -> AttentionRouteRuntime:
         hub=PrivateAttentionHub(item_resolver=index.get_query_item),
         approval_http=approval_http,
         approval_reconciler=coordinator,
-        operator_result_projectors={dashboard_access_central.KIND: consumer.project},
+        operator_result_projectors={dashboard_access_central.KIND: consumer.project,
+                                    fleet.KIND: fleet.project_result},
     )
 
 
