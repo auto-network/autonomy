@@ -2,17 +2,13 @@
  *
  * Stepped, as a user walks it: opened bare, the page IS the paste step —
  * a full screen with a visible field and a Next button (parsing via the
- * network-free accept-invitation.js module; the pasted value never leaves
- * this page). Paste a relay share link (/l/<token>) and this dashboard
- * resolves it on its OWN origin instead of bouncing to the relay bridge:
- * it hands the resolve endpoint the transport credentials only
- * ({relay_host, channel_token}) and the endpoint opens the org tunnel and
- * returns the verified org context. Opened with a handoff link's context
- * in the URL, the page is the organization step directly.
+ * network-free accept-invitation.js module). Public relay metadata is used
+ * only for routing. The browser then authenticates the selected connector
+ * with fragment k and obtains all human and ledger context over that channel.
  *
- * The bearer (#t=) is HELD in this page and never sent to any server,
- * including our own dashboard — it is the ceremony's secret and stays in
- * the browser (I1-adjacent). Controls appear only when their function
+ * The bearer (#t=) is HELD in this page and reaches the organization only
+ * inside the encrypted claim — it never enters an HTTP request, URL query,
+ * or local dashboard endpoint. Controls appear only when their function
  * exists: the accept action appears once the organization has answered
  * over its own tunnel and said what you would be joining as. Accepting
  * opens the SHARED root control, which presents whichever factors this
@@ -23,20 +19,24 @@
 
   function $(id) { return document.getElementById(id); }
 
-  // The ledger bearer, held ONLY in this closure for the future ceremony.
-  // It is never written to storage and never placed in a request body —
-  // the resolve call below carries transport credentials and nothing else.
+  // The ledger bearer, held ONLY in this closure for the claim ceremony.
+  // It is never written to storage or placed in an unencrypted request.
   var heldBearer = "";
+
+  function decodeChannelPub(value) {
+    var api = window.AutonomyAcceptInvitation;
+    return api && api.decodeChannelPub ? api.decodeChannelPub(value) : null;
+  }
 
   function readInputs() {
     var query = new URLSearchParams(location.search);
     var fragment = new URLSearchParams(location.hash.replace(/^#/, ""));
     return {
       org: query.get("org") || "",
-      rootPub: query.get("root_pub") || "",
       inviteRef: query.get("invite_ref") || "",
       relayHost: query.get("relay_host") || "",
       channelToken: fragment.get("channel_token") || "",
+      channelPub: decodeChannelPub(fragment.get("k")),
       bearer: fragment.get("t") || "",
     };
   }
@@ -49,7 +49,10 @@
     return (
       /^[0-9a-f-]{32,36}$/.test(inputs.org) &&
       /^[0-9a-f]{64}$/.test(inputs.inviteRef) &&
-      inputs.bearer.length > 0
+      /^[0-9a-f]{32}$/.test(inputs.channelToken) &&
+      /^[0-9a-f]{64}$/.test(inputs.channelPub || "") &&
+      /^[0-9a-f]{64}$/.test(inputs.bearer) &&
+      /^https?:\/\/[^/]+$/.test(inputs.relayHost)
     );
   }
 
@@ -88,8 +91,8 @@
     if (accent) $("org-header").style.borderColor = accent;
   }
 
-  // Fill the minimal verified-org step from whatever public context we hold —
-  // org id + invite ref. This stands on its own when the org is unreachable.
+  // Routing identifiers are shown only as secondary technical details. No
+  // organization identity is inferred from the untrusted public envelope.
   function fillOrgStep(context) {
     $("step-org").classList.remove("hidden");
     if (context.org) {
@@ -101,22 +104,24 @@
     if (ref) $("invite-ref").textContent = ref.slice(0, 16) + "…";
   }
 
-  // The one network hop, to THIS dashboard's own origin. The body is the
-  // transport credentials only; when the handoff link already carried the
-  // public org/root_pub/invite_ref, those ride along so the endpoint can pin
-  // without a second registry hop. The bearer is deliberately absent.
-  function resolveOnOrigin(relayHost, channelToken, known) {
-    var body = { relay_host: relayHost, channel_token: channelToken };
-    if (known && known.org) {
-      body.org = known.org;
-      body.root_pub = known.rootPub;
-      body.invite_ref = known.inviteRef;
-    }
-    return fetch("/api/network/invite/resolve", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }).then(function (r) { return r.json(); });
+  // Public metadata supplies routing only. k and t are closure-held values and
+  // are absent from this URL, request body, and the returned registry envelope.
+  function fetchEnvelope(inputs) {
+    var base = new URL(inputs.relayHost);
+    var url = base.origin + "/v1/links/" + inputs.channelToken + "/envelope";
+    return fetch(url, { referrerPolicy: "no-referrer" }).then(function (r) {
+      if (!r.ok) throw new Error("organization unreachable");
+      return r.json();
+    }).then(function (envelope) {
+      if (!envelope || envelope.target_type !== "org:join" ||
+          !/^[0-9a-f-]{32,36}$/.test(envelope.org || "") ||
+          !/^[0-9a-f]{64}$/.test(envelope.invite_ref || "")) {
+        throw new Error("organization unreachable");
+      }
+      inputs.org = envelope.org;
+      inputs.inviteRef = envelope.invite_ref;
+      return inputs;
+    });
   }
 
   function showPasteStep() {
@@ -135,22 +140,15 @@
         // A handoff link still navigates locally (its fragment survives the
         // hop); the org step then renders from the URL on reload.
         navigate: function (dest) { location.assign(dest); },
-        // A relay share link resolves in place on this origin — no bounce to
-        // the relay bridge. The bearer is held here and never sent.
+        // A relay share link resolves routing metadata in this browser. The
+        // fragment values are held here and never sent with that request.
         resolve: function (parsed) {
           heldBearer = parsed.bearer;
           $("step-paste").classList.add("hidden");
-          fillOrgStep({});
-          resolveOnOrigin(parsed.relayHost, parsed.channelToken)
-            .then(function (reply) {
-              if (reply && reply.ok) {
-                fillOrgStep(reply);
-                renderVerifiedHeader(reply);
-              }
-            })
-            .catch(function () {
-              // Resolve unreachable: the minimal step stands. Never an error.
-            });
+          fetchEnvelope(parsed).then(showOrgStep)
+            .catch(function () { reportTerminal({
+              state: "link-lost", reason: "org-unreachable",
+            }); });
         },
       });
       if (result.kind === "error") hint.textContent = result.reason;
@@ -164,16 +162,9 @@
   // The org step reached with a handoff link's context already in the URL.
   // The minimal id + invite ref render immediately; if the link also named
   // its relay host, the verified header lights up over this origin too.
-  function showOrgStepFromUrl(inputs) {
+  function showOrgStep(inputs) {
     heldBearer = inputs.bearer;
     fillOrgStep({ org: inputs.org, inviteRef: inputs.inviteRef });
-    if (inputs.relayHost && /^[0-9a-f]{32}$/.test(inputs.channelToken)) {
-      resolveOnOrigin(inputs.relayHost, inputs.channelToken, inputs)
-        .then(function (reply) {
-          if (reply && reply.ok) renderVerifiedHeader(reply);
-        })
-        .catch(function () {});
-    }
     // Open the org's own channel to learn what this invitation grants. The
     // accept control appears only if that answer arrives; an organization we
     // cannot reach offers no action, which is the honest state.
@@ -185,6 +176,7 @@
             renderVerifiedHeader({
               org_name: session.brand.orgName,
               org_description: session.brand.orgDescription,
+              org_color: session.brand.orgColor,
               org_icon: session.brand.orgIcon,
             });
           }
@@ -195,7 +187,9 @@
         }
         reportTerminal(state);
       })
-      .catch(function () { /* unreachable org: the minimal step stands */ });
+      .catch(function () { reportTerminal({
+        state: "link-lost", reason: "org-unreachable",
+      }); });
   }
 
   // ---- accepting --------------------------------------------------------
@@ -332,11 +326,13 @@
       $("step-broken").classList.remove("hidden");
       return;
     }
-    showOrgStepFromUrl(inputs);
+    showOrgStep(inputs);
   }
 
   if (typeof module === "object" && module.exports) {
-    module.exports = { safeIcon: safeIcon, safeColor: safeColor };
+    module.exports = {
+      safeIcon: safeIcon, safeColor: safeColor, looksComplete: looksComplete,
+    };
   }
 
   if (typeof document !== "undefined") {

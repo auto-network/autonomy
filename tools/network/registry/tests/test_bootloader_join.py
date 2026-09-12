@@ -36,7 +36,7 @@ def test_join_context_and_fragment_only_delivery() -> None:
         "src=src.replace(/^const autonet = \\(\\(\\) => \\{/,'');"
         "const navigations=[];"
         "const location={assign:(url)=>navigations.push(url),"
-        f"pathname:'/l/'+{json.dumps(CHANNEL_TOKEN)}}};"
+        f"origin:'https://relay.auto.network',pathname:'/l/'+{json.dumps(CHANNEL_TOKEN)}}};"
         "const factory=new Function("
         "'TextEncoder','crypto','location','URLSearchParams',src);"
         "const A=factory(TextEncoder,{subtle:{}},location,URLSearchParams);"
@@ -64,6 +64,7 @@ def test_join_context_and_fragment_only_delivery() -> None:
     assert output["context"] == {
         "org": ORG,
         "inviteRef": INVITE_REF,
+        "relayHost": "https://relay.auto.network",
         "token": BEARER,
         "linkKey": LINK_KEY,
     }
@@ -73,6 +74,7 @@ def test_join_context_and_fragment_only_delivery() -> None:
     assert parse_qs(destination.query) == {
         "org": [ORG],
         "invite_ref": [INVITE_REF],
+        "relay_host": ["https://relay.auto.network"],
     }
     # BOTH credentials ride the fragment (auto-y7nap, relay review): the
     # channel token is bearer-class — possession opens the registry
@@ -84,7 +86,10 @@ def test_join_context_and_fragment_only_delivery() -> None:
     }
     # Neither credential ever rides the query, under any name.
     assert BEARER not in destination.query
+    assert LINK_KEY not in destination.query
     assert CHANNEL_TOKEN not in destination.query
+    assert BEARER not in envelope_json
+    assert LINK_KEY not in envelope_json
     assert output["blankRejected"] is True
     assert output["longRejected"] is True
     assert output["badRefRejected"] is True

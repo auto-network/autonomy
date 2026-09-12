@@ -68,13 +68,16 @@ export class JoinSession {
     return this.context !== null;
   }
 
-  // Rung 1 — open the org-pinned channel and read the join context. Returns
+  // Rung 1 — open the per-link-authenticated channel and read join context. Returns
   // {state:'org', brand, grantedRole, inviteExpiry} on success, or a terminal
   // ('closed' = ledger truth, 'link-lost' = link truth).
   async connect() {
     try {
       this.channel = await this.openChannel(this.inputs);
-    } catch (_) {
+    } catch (error) {
+      if (error && error.autonetKind === 'security') {
+        return { state: 'security', reason: 'link-authentication-failed' };
+      }
       return { state: 'link-lost', reason: 'org-unreachable' };
     }
     let reply;
@@ -97,10 +100,15 @@ export class JoinSession {
       genesisId: reply.genesis_id,
       heads: reply.heads,
       maxHlc: reply.max_hlc,
+      grantedRole: reply.granted_role || null,
+      inviteExpiry: reply.invite_expiry || null,
+      binding: reply.binding || null,
+      approvalPolicy: reply.approval_policy || null,
     };
     this.brand = {
       orgName: reply.org_name || null,
       orgDescription: reply.org_description || null,
+      orgColor: reply.org_color || null,
       // Defence in depth: the icon is org-delivered and must be a bounded
       // data: URI (r7kk4). A remote URL here would be a registry-blind
       // IP/UA leak, so anything else is dropped rather than rendered.
@@ -110,11 +118,18 @@ export class JoinSession {
           ? reply.org_icon
           : null,
     };
+    this.context.presentation = {
+      ...this.brand,
+      sponsorName: reply.sponsor_name || null,
+      sponsorAvatar: reply.sponsor_avatar || null,
+      sponsorPub: reply.sponsor_pub || null,
+    };
     return {
       state: 'org',
       brand: this.brand,
       grantedRole: reply.granted_role || null,
       inviteExpiry: reply.invite_expiry || null,
+      context: this.context,
     };
   }
 

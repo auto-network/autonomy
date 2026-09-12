@@ -6,7 +6,7 @@
  * reachability checks are the leak; "validate this link" must not become a
  * POST). Two accepted forms:
  *
- *   1. a share link  …/l/<32hex>#t=<bearer>       → RESOLVE LOCALLY. A user
+ *   1. a share link  …/l/<32hex>#k=<key>&t=<bearer> → CONNECT LOCALLY. A user
  *      with a dashboard resolves the link on their OWN origin instead of
  *      navigating to the relay bridge: the parse hands back the relay host
  *      and channel token (transport credentials) plus the bearer, and the
@@ -18,8 +18,9 @@
  *      handoff copied from anywhere lands on THIS node's shell.
  *
  * This file deliberately contains no network primitives and no storage —
- * the structural-absence tests pin both; the local resolve (the one network
- * hop) is the caller's job, keeping this module a pure parser. The
+ * the structural-absence tests pin both; fetching public routing metadata and
+ * opening the authenticated channel are the caller's job, keeping this module
+ * a pure parser. The
  * identity-panel mount that calls into it is crypto's chrome (their
  * file-level ack).
  */
@@ -33,6 +34,23 @@
   'use strict';
 
   var SHARE_PATH = /^\/l\/[0-9a-f]{32}$/;
+  var KEY43 = /^[A-Za-z0-9_-]{43}$/;
+  var HEX64 = /^[0-9a-f]{64}$/;
+
+  function decodeChannelPub(value) {
+    if (typeof value !== 'string' || !KEY43.test(value)) return null;
+    try {
+      var raw = atob(value.replace(/-/g, '+').replace(/_/g, '/') + '=');
+      if (raw.length !== 32) return null;
+      var hex = '';
+      for (var i = 0; i < raw.length; i++) {
+        hex += raw.charCodeAt(i).toString(16).padStart(2, '0');
+      }
+      return hex;
+    } catch (_) {
+      return null;
+    }
+  }
 
   /** Shape-parse a pasted invitation link.
    *
@@ -57,11 +75,12 @@
     var fragment = new URLSearchParams(url.hash.replace(/^#/, ''));
 
     if (SHARE_PATH.test(url.pathname)) {
+      var channelPub = decodeChannelPub(fragment.get('k'));
       var bearer = fragment.get('t');
-      if (!bearer) {
+      if (!channelPub || !HEX64.test(bearer || '')) {
         return {
           kind: 'error',
-          reason: 'This link is missing its secret part (after #) — ' +
+          reason: 'This link is missing or has an incomplete secret part (after #) — ' +
             'some apps strip it when forwarding. Ask for a fresh link.',
         };
       }
@@ -72,6 +91,7 @@
         kind: 'bridge',
         relayHost: url.origin,
         channelToken: url.pathname.slice(3),
+        channelPub: channelPub,
         bearer: bearer,
       };
     }
@@ -85,7 +105,8 @@
             'Ask for a fresh link.',
         };
       }
-      if (!fragment.get('t')) {
+      if (!decodeChannelPub(fragment.get('k')) ||
+          !HEX64.test(fragment.get('t') || '')) {
         return {
           kind: 'error',
           reason: 'This link is missing its secret part (after #) — ' +
@@ -129,6 +150,7 @@
   }
 
   return {
+    decodeChannelPub: decodeChannelPub,
     parseInvitationLink: parseInvitationLink,
     acceptPastedLink: acceptPastedLink,
   };
