@@ -29,7 +29,7 @@ if [ "${VOICE_SIDECAR_ENABLED:-false}" = true ]; then
 fi
 
 # Rebuild CSS on template edits (best-effort, backgrounded, never fatal).
-if [ -x /usr/local/bin/tailwindcss ]; then
+if [ -x /usr/local/bin/tailwindcss ] && [ "${DASHBOARD_CSS_WATCH:-on}" != off ]; then
     /usr/local/bin/tailwindcss --cwd /app/tools/dashboard \
         -i tailwind.input.css -o static/tailwind.css --watch=always \
         >/app/data/tailwind.log 2>&1 &
