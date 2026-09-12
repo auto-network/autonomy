@@ -630,3 +630,71 @@ def test_reset_circuit_breaker_no_prior_runs():
     run_id = db.reset_circuit_breaker("auto-new")
     assert run_id.startswith("reset-auto-new-")
     assert db.get_consecutive_failures("auto-new") == (0, 0)
+
+
+# ── Cancellation (auto-je5rv item 3) ─────────────────────────────
+
+
+def _launch(run_id, bead_id, started_at=1710000000.0,
+            container_name="agent-x-1"):
+    db.insert_launch_run(
+        run_id=run_id,
+        bead_id=bead_id,
+        started_at=started_at,
+        branch=f"agent/{bead_id}",
+        branch_base="",
+        image="autonomy-session",
+        container_name=container_name,
+        output_dir="",
+    )
+
+
+def test_mark_run_cancelling_flips_running_row():
+    """mark_run_cancelling flips the live row to CANCELLING and returns it."""
+    _use_temp_db()
+    _launch("auto-can-1", "auto-can", container_name="agent-can-1")
+
+    row = db.mark_run_cancelling("auto-can")
+    assert row is not None
+    assert row["id"] == "auto-can-1"
+    assert row["container_name"] == "agent-can-1"
+    # The persisted row is now CANCELLING (state before the kill).
+    assert db.get_run("auto-can-1")["status"] == "CANCELLING"
+
+
+def test_mark_run_cancelling_no_running_row():
+    """No RUNNING row -> None (nothing to cancel), nothing written."""
+    _use_temp_db()
+    _launch("auto-done-1", "auto-done")
+    db.record_run_cancelled("auto-done-1")  # now terminal, not RUNNING
+    assert db.mark_run_cancelling("auto-done") is None
+
+
+def test_record_run_cancelled_is_terminal():
+    """record_run_cancelled writes CANCELLED with a completed_at timestamp."""
+    _use_temp_db()
+    _launch("auto-can-2", "auto-can2")
+    db.mark_run_cancelling("auto-can2")
+    db.record_run_cancelled("auto-can-2", "Cancelled via dashboard/API")
+
+    row = db.get_run("auto-can-2")
+    assert row["status"] == "CANCELLED"
+    assert row["completed_at"] is not None
+    assert row["reason"] == "Cancelled via dashboard/API"
+
+
+def test_record_run_cancelled_default_reason():
+    """A missing reason falls back to a default sentence."""
+    _use_temp_db()
+    _launch("auto-can-3", "auto-can3")
+    db.record_run_cancelled("auto-can-3")
+    assert db.get_run("auto-can-3")["reason"] == "Cancelled by operator"
+
+
+def test_cancelled_row_not_counted_as_failure():
+    """CANCELLED is neither an agent nor a merge failure for the breaker."""
+    _use_temp_db()
+    _launch("auto-can-4", "auto-can4")
+    db.mark_run_cancelling("auto-can4")
+    db.record_run_cancelled("auto-can-4")
+    assert db.get_consecutive_failures("auto-can4") == (0, 0)

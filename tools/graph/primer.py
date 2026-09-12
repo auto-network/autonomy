@@ -341,18 +341,25 @@ def format_for_agent(data: dict) -> str:
             commit = merge_retry.get("commit", "?")
             merge_error = merge_retry.get("merge_error", "(no details)")
             sections.append(
-                f"\n## MERGE RETRY — Previous Work Available\n"
-                f"\nThis bead was previously completed but the merge to master failed due to conflicts.\n"
-                f"\n**Previous branch:** {branch}"
-                f"\n**Previous commit:** {commit}"
+                f"\n## ⚠️ MERGE RETRY — THE IMPLEMENTATION IS ALREADY DONE. DO NOT RE-IMPLEMENT.\n"
+                f"\n**STOP. Read this before touching any code.** This bead was already"
+                f" implemented and committed — the merge to master is the ONLY thing that"
+                f" failed (a conflict, because master moved). Your ONE task is:"
+                f" **rebase the existing work onto current master, re-verify, and re-submit.**"
+                f" You are NOT writing this feature again.\n"
+                f"\n**Previous branch:** `{branch}` (the implementation lives here, committed)"
+                f"\n**Previous commit:** `{commit}`"
                 f"\n**Merge error:**\n```\n{merge_error}\n```\n"
-                f"\n### Recovery Strategy\n"
-                f"\n1. `git cherry-pick {commit}` — apply previous work onto current master"
-                f"\n2. Resolve any conflicts (usually trivial — adjacent edits, import lines)"
-                f"\n3. Verify the result compiles/works"
-                f"\n4. Commit and write decision.json as normal\n"
-                f"\nDo NOT re-implement from scratch. The previous work is complete and correct"
-                f" — it just needs conflict resolution."
+                f"\n### Do exactly this\n"
+                f"\n1. `git cherry-pick {commit}` — replay the committed work onto current master."
+                f"\n2. **If the cherry-pick reports nothing to commit, or the diff vs master is"
+                f" empty after it** (`git diff master --stat` shows nothing), the work is ALREADY"
+                f" ON MASTER — a prior retry merged it. **Record DONE (reason: already merged /"
+                f" redundant) and STOP.** Do not re-create the change; a second copy is the bug."
+                f"\n3. Otherwise resolve any conflicts (usually trivial — adjacent edits, imports)."
+                f"\n4. Verify the result compiles / tests pass, then commit and write"
+                f" decision.json as normal.\n"
+                f"\nThe previous work is complete and correct — it needs a rebase, not a rewrite."
             )
         if bead["description"]:
             sections.append(f"\n## Description\n{bead['description']}")
