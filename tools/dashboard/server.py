@@ -529,21 +529,34 @@ def _restart_attribution(changed_files: list[str] | None) -> dict[str, Any]:
 
     files = [f for f in (changed_files or []) if f]
 
-    # Direct host edit: a changed file whose working-tree content diverges from
-    # HEAD. This is the precise signal and does not depend on wall-clock timing.
+    # A merge/ref-update rewrites tracked files to match the NEW HEAD: they show
+    # up in the watch event but are NOT dirty (content == HEAD). A direct host
+    # edit leaves its file dirty (diverged from HEAD). This content split is the
+    # precise trigger signal and does not depend on wall-clock timing.
+    #
+    # The subtlety that was the bug: a git merge/checkout also bumps the mtime of
+    # an already-dirty, UNRELATED file (e.g. an uncommitted debug edit) without
+    # changing its content, so that file rides along in the same watch event and
+    # is itself dirty. The merged (clean) files in the event prove a commit
+    # landed and IS the trigger. So we only call it a direct host edit when
+    # EVERY changed file is dirty; if any changed file is clean-but-touched, a
+    # ref-update happened and the reload is attributed to the commit. (Returning
+    # "direct edit of <coincidental dirty file>" on every dispatcher merge —
+    # because the check fired on *any* dirty file — was the defect.)
     dirty = _git("diff", "--name-only", "HEAD")
     if files and dirty is not None:
         dirty_set = {line.strip() for line in dirty.splitlines() if line.strip()}
-        edited = []
+        rels = []
         for f in files:
             # changed_files are absolute host paths; git reports repo-relative.
             try:
                 rel = str(Path(f).resolve().relative_to(_REPO_ROOT))
             except ValueError:
                 rel = f
-            if rel in dirty_set:
-                edited.append(rel)
-        if edited:
+            rels.append(rel)
+        edited = [r for r in rels if r in dirty_set]
+        clean_changed = [r for r in rels if r not in dirty_set]
+        if edited and not clean_changed:
             return {
                 "trigger": "direct-edit",
                 "files": edited,

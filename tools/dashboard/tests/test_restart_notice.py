@@ -130,6 +130,28 @@ def test_attribution_direct_edit_detects_uncommitted_change(tmp_path, monkeypatc
     assert attr["summary"] == "host terminal · direct file edit · app.py"
 
 
+def test_attribution_merge_wins_over_coincidental_dirty_file(tmp_path, monkeypatch):
+    # Regression: a git merge/checkout bumps the mtime of an unrelated,
+    # persistently-dirty file (an uncommitted debug edit) without changing its
+    # content, so it rides along in the SAME watch event as the merged (clean)
+    # file. The reload must be attributed to the landed commit, NOT to a "direct
+    # edit" of the coincidental dirty file. (This misattribution — firing on any
+    # dirty file — hijacked every dispatcher merge.)
+    repo = _init_git_repo(tmp_path)
+    _commit(repo, "feat: landed by merge\n\nAutonomy-Provenance: autonomy://PK/auto-xyz/3")
+    monkeypatch.setattr(server, "_REPO_ROOT", repo)
+    # app.py is part of the commit -> clean (content == HEAD) but changed on disk;
+    # debug.py is a coincidental uncommitted edit -> dirty.
+    (repo / "debug.py").write_text("print('temp')\n")
+
+    attr = server._restart_attribution([
+        str(repo / "app.py"), str(repo / "debug.py"),
+    ])
+    assert attr["trigger"] == "merge"
+    assert "files" not in attr  # not classified as a direct edit
+    assert "debug.py" not in attr.get("summary", "")
+
+
 def test_attribution_old_head_without_changed_files_is_empty(tmp_path, monkeypatch):
     import subprocess
     repo = _init_git_repo(tmp_path)
