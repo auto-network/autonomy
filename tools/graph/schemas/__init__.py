@@ -25,6 +25,14 @@ from .registry import (
     registered_schemas,
     flush_schema_meta,
     flush_schema_meta_machine_store,
+    # Schema-declared payload expression indexes (Tier 3). The decorator
+    # declares selective fields; one shared reconciler installs the physical
+    # index; the JSON-path helper is the single expression both the index DDL
+    # and the ``where_payload`` predicate consume so SQLite sees identical text.
+    indexed_payload,
+    indexed_payload_declarations,
+    reconcile_payload_indexes,
+    payload_json_extract_sql,
     cache_expires_at,
     SCHEMA_META_SET_ID,
     SCHEMA_META_REVISION,

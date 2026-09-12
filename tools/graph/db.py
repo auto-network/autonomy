@@ -1541,6 +1541,17 @@ class GraphDB:
             (oid, slug, type_, created),
         )
         db.conn.commit()
+        # Install schema-declared payload expression indexes on the freshly
+        # created store before returning — this is the common creation
+        # boundary for every organization store, including org_ops.create_org
+        # and fleet-roster materialize_org_scopes_from_roster, so covering it
+        # here covers every post-startup creation path. The machine store
+        # holds schema projections rather than organization-owned application
+        # Settings, so it gets no payload indexes. Deferred import avoids the
+        # db -> schemas -> settings_ops -> db import cycle.
+        if slug != "machine":
+            from .schemas.registry import reconcile_payload_indexes
+            reconcile_payload_indexes(db)
         return db
 
     @classmethod
