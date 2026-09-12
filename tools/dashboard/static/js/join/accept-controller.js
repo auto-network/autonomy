@@ -46,6 +46,26 @@ function countApprovals(event) {
   }
 }
 
+// r7kk4: the sponsor avatar is org-delivered and must be a bounded inline
+// image data: URI — one of the three raster types the server adapts owned
+// attachment bytes into. Anything else (a remote URL, a path, a non-image
+// data: URI, a non-string) is dropped rather than mapped: rendering a remote
+// URL here would be a registry-blind IP/UA leak on the exact page that
+// promises otherwise. Mirrors the org_icon allowlist, narrowed to the avatar's
+// accepted MIMEs.
+const SPONSOR_AVATAR_PREFIXES = [
+  'data:image/jpeg;base64,',
+  'data:image/png;base64,',
+  'data:image/webp;base64,',
+];
+
+function boundedSponsorAvatar(value) {
+  if (typeof value !== 'string') return null;
+  return SPONSOR_AVATAR_PREFIXES.some((prefix) => value.startsWith(prefix))
+    ? value
+    : null;
+}
+
 export class JoinSession {
   constructor({ inputs, openChannel, runCeremony = null }) {
     this.inputs = inputs;
@@ -121,7 +141,12 @@ export class JoinSession {
     this.context.presentation = {
       ...this.brand,
       sponsorName: reply.sponsor_name || null,
-      sponsorAvatar: reply.sponsor_avatar || null,
+      sponsorByline: reply.sponsor_byline || null,
+      // Bounded allowlist: only an inline JPEG/PNG/WebP data: URI is mapped
+      // (r7kk4). Anything else is dropped, never rendered.
+      sponsorAvatar: boundedSponsorAvatar(reply.sponsor_avatar),
+      // Secondary provenance: the raw persona key stays available behind the
+      // resolved human presentation, never as the headline identity.
       sponsorPub: reply.sponsor_pub || null,
     };
     return {

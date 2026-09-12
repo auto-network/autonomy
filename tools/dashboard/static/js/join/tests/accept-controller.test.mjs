@@ -88,9 +88,65 @@ const stubCeremony = async ({ context, inputs, passphrase }) => {
     presentation: {
       orgName: 'Anchore', orgDescription: 'container security',
       orgColor: null, orgIcon: 'data:image/png;base64,AAAA',
-      sponsorName: null, sponsorAvatar: null, sponsorPub: null,
+      sponsorName: null, sponsorByline: null, sponsorAvatar: null,
+      sponsorPub: null,
     },
   });
+}
+
+// 1b. Sponsor presentation maps through connect(): byline retained, avatar
+// accepted only on the bounded image allowlist, sponsorPub kept as secondary
+// provenance. (r7kk4)
+{
+  const ch = new ScriptedChannel((req) => (req.op === 'context'
+    ? okContext({
+        sponsor_pub: 'a'.repeat(64), sponsor_name: 'Ada',
+        sponsor_byline: 'founder',
+        sponsor_avatar: 'data:image/webp;base64,QQ==',
+      })
+    : {}));
+  const s = new JoinSession({ inputs: INPUTS, openChannel: async () => ch });
+  await s.connect();
+  assert.deepEqual(s.context.presentation, {
+    orgName: 'Anchore', orgDescription: 'container security',
+    orgColor: null, orgIcon: 'data:image/png;base64,AAAA',
+    sponsorName: 'Ada', sponsorByline: 'founder',
+    sponsorAvatar: 'data:image/webp;base64,QQ==',
+    sponsorPub: 'a'.repeat(64),
+  });
+}
+
+// 1c. A sponsor_avatar that is not a bounded jpeg/png/webp data: URI is
+// DROPPED (never rendered): remote URLs, non-image data: URIs, non-strings.
+for (const bad of [
+  'https://cdn.example/a.png',
+  '/uploads/a.png',
+  'data:image/gif;base64,QQ==',
+  'data:text/html;base64,QQ==',
+  12345,
+]) {
+  const ch = new ScriptedChannel((req) => (req.op === 'context'
+    ? okContext({ sponsor_pub: 'a'.repeat(64), sponsor_avatar: bad })
+    : {}));
+  const s = new JoinSession({ inputs: INPUTS, openChannel: async () => ch });
+  await s.connect();
+  assert.equal(s.context.presentation.sponsorAvatar, null);
+  // sponsorPub survives as secondary provenance even when the avatar is dropped.
+  assert.equal(s.context.presentation.sponsorPub, 'a'.repeat(64));
+}
+
+// 1d. Each allowed avatar MIME is accepted verbatim.
+for (const good of [
+  'data:image/jpeg;base64,QQ==',
+  'data:image/png;base64,QQ==',
+  'data:image/webp;base64,QQ==',
+]) {
+  const ch = new ScriptedChannel((req) => (req.op === 'context'
+    ? okContext({ sponsor_avatar: good })
+    : {}));
+  const s = new JoinSession({ inputs: INPUTS, openChannel: async () => ch });
+  await s.connect();
+  assert.equal(s.context.presentation.sponsorAvatar, good);
 }
 
 // Authentication failure is security truth and sends no encrypted operation.

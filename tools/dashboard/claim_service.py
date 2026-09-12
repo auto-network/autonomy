@@ -109,6 +109,13 @@ def context(org: str, invite_ref: str) -> dict:
             "granted_role": invite.payload["granted_role"],
             "binding": "key" if "invite_pub" in invite.payload else "token",
             "invite_expiry": invite.payload["expiry"],
+            # r7kk4: the sponsor persona public key, copied EXACTLY from the
+            # live invite event's own payload — the ledger is the sole source.
+            # Never accepted from the request or grant, and never used for
+            # authority beyond the fold checks already performed above. It lets
+            # the org resolve the inviter's presentation from its member
+            # directory, and remains a secondary provenance detail downstream.
+            "sponsor_pub": invite.payload["sponsor"],
         }
 
 

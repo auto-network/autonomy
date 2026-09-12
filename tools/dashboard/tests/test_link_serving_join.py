@@ -62,6 +62,15 @@ def service(monkeypatch):
     module.submit = stub.submit
     module.status = stub.status
     monkeypatch.setattr(link_serving, "_claim_service", lambda: module)
+    # This file pins the DISPATCH contract in isolation from the r7kk4 context
+    # enrichment (which reads real Settings and has its own coverage in
+    # test_link_serving.py / test_join_channel_integration.py). Stub the org
+    # brand so a successful context is not turned into the unavailable envelope
+    # for want of an autonomy.org row this stub environment never wrote.
+    monkeypatch.setattr(
+        link_serving, "_org_brand_for_invite",
+        lambda org: {"org_name": "Join Org", "org_color": "#123456"},
+    )
     return stub
 
 

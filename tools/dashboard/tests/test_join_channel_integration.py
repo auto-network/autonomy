@@ -17,6 +17,7 @@ service and dispatch, not only at the fold).
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import time
 import json
@@ -40,6 +41,12 @@ ORG_ID = "018f6b2a-7c4d-7e11-8a3b-9d5c1e2f4a6b"
 TOKEN = "ab" * 16  # relay link tokens are 32 hex chars
 T0 = 1_800_000_000_000
 FAR = T0 + 10**9
+
+# A bounded portable org icon: the shape the icon routes write into
+# autonomy.org.icon_data_uri (auto-j1y0z). Byte content is arbitrary here — the
+# serving edge re-checks only the prefix, the char bound, and the decoded byte
+# bound, not the WebP internals.
+ICON_WEBP = "data:image/webp;base64," + base64.b64encode(b"RIFFxxxxWEBP-bytes").decode()
 
 
 class World:
@@ -81,8 +88,60 @@ class World:
         })
         self.store.close()
         self._publish_grant()
+        # r7kk4: op:context now REQUIRES the org's own autonomy.org identity
+        # row (a valid name+color) — without it the org presentation is
+        # unavailable and no ledger/role/sponsor material is served. The invite
+        # sponsor is the org root persona; expose it for the member-directory
+        # tests below.
+        self.sponsor_pub = self.root.public_hex
+        self.publish_org_identity()
         self.invitee_seed = os.urandom(32)
         self.persona = derive_persona(self.invitee_seed, self.founded.genesis_id)
+
+    def publish_org_identity(self, **overrides):
+        """Write the org's OWN autonomy.org#3 identity row (name/color/byline/
+        icon). Overrides replace fields; a field set to ``None`` is omitted."""
+        from tools.graph.schemas.org import ORG_REVISION, ORG_SET_ID
+
+        payload = {
+            "name": "Claim Org", "color": "#123456",
+            "byline": "secure by default", "icon_data_uri": ICON_WEBP,
+        }
+        payload.update(overrides)
+        payload = {k: v for k, v in payload.items() if v is not None}
+        settings_ops.add_setting(
+            ORG_SET_ID, ORG_REVISION, ORG, payload, org=ORG, state="raw",
+        )
+
+    def publish_member_profile(self, persona_pub, **fields):
+        """Write one autonomy.org.member-profile#1 row keyed by *persona_pub*."""
+        from tools.graph.schemas.org_member_profile import (
+            MEMBER_PROFILE_REVISION,
+            MEMBER_PROFILE_SET_ID,
+        )
+
+        payload = {"display_name": "Ada Founder"}
+        payload.update(fields)
+        settings_ops.add_setting(
+            MEMBER_PROFILE_SET_ID, MEMBER_PROFILE_REVISION, persona_pub, payload,
+            org=ORG, state="raw",
+        )
+
+    def attach(self, path, *, mime, org=ORG):
+        """Insert a raw attachment row in *org*'s graph DB; return its id."""
+        from tools.graph.db import GraphDB
+        from tools.graph.models import Attachment
+
+        db = GraphDB.for_org(org)
+        try:
+            att = Attachment(
+                filename=os.path.basename(str(path)), mime_type=mime,
+                file_path=str(path),
+            )
+            db.insert_attachment(att)
+        finally:
+            db.close()
+        return att.id
 
     def _emit(self, author, payload):
         self._ts += 1_000
@@ -165,7 +224,14 @@ def world(tmp_path, monkeypatch):
     GraphDB.close_all_pooled()
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path))
     monkeypatch.delenv("GRAPH_DB", raising=False)  # real per-org settings stores
-    GraphDB.create_org_db("personal", type_="personal", root=tmp_path).close()
+    # personal is a LOCAL store: it resolves BESIDE the orgs dir (i.e. under the
+    # worker-shared tmp parent), not inside this test's tmp_path. Under a
+    # loadfile/loadscope xdist distribution every test in this module runs in
+    # one worker, so the row survives between tests — create it only when it is
+    # not already there, or the second test in the worker hits FileExistsError.
+    from tools.graph.db import _org_db_path
+    if not _org_db_path("personal", tmp_path).exists():
+        GraphDB.create_org_db("personal", type_="personal", root=tmp_path).close()
     yield World(tmp_path)
     GraphDB.close_all_pooled()
 
@@ -358,7 +424,12 @@ def test_finalize_after_the_invite_expires(tmp_path, monkeypatch):
     GraphDB.close_all_pooled()
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path))
     monkeypatch.delenv("GRAPH_DB", raising=False)
-    GraphDB.create_org_db("personal", type_="personal", root=tmp_path).close()
+    # personal is a worker-shared LOCAL store (beside the orgs dir); create it
+    # only when absent so a prior world-fixture test in this worker does not
+    # collide (FileExistsError).
+    from tools.graph.db import _org_db_path
+    if not _org_db_path("personal", tmp_path).exists():
+        GraphDB.create_org_db("personal", type_="personal", root=tmp_path).close()
 
     # Align the org's logical clock with real wall time so the invite can
     # expire for real between the initial submit and the finalize.
@@ -426,3 +497,158 @@ def test_finalize_after_the_invite_expires(tmp_path, monkeypatch):
     with LedgerStore(org_ledger_db_path(ORG)) as store:
         assert store.get_pending_claim(claim_key) is None  # staging cleared
     GraphDB.close_all_pooled()
+
+
+# -- r7kk4: authenticated organization + sponsor presentation over op:context --
+#
+# After the fragment-k handshake authenticates the org endpoint, a successful
+# ledger context is enriched with ONE bounded, provenance-clean org and sponsor
+# presentation assembled ONLY from the org's own identity Setting, the live
+# invite event, and the member-profile directory. These vectors drive the REAL
+# claim_service + Settings + attachment paths (graph://4f9e881c-a9 §§4,6,9).
+
+#: Fields a context reply must NEVER carry — no attachment id, path, URL,
+#: personal/org root, private key, bearer, or registry metadata.
+_FORBIDDEN_CONTEXT_KEYS = frozenset({
+    "avatar", "avatar_ref", "attachment", "attachment_id", "icon_attachment_id",
+    "file_path", "path", "url", "favicon", "favicon_url", "root_pub",
+    "personal_root", "org_root", "private_key", "seed", "bearer", "token",
+    "token_hash", "registry", "envelope",
+})
+
+
+def _assert_no_forbidden(reply):
+    leaked = _FORBIDDEN_CONTEXT_KEYS & set(reply)
+    assert not leaked, f"context leaked forbidden field(s): {sorted(leaked)}"
+
+
+def test_context_carries_org_and_complete_sponsor_presentation(world, tmp_path):
+    blob = tmp_path / "ada.webp"
+    blob.write_bytes(b"\x00webp-avatar-bytes")
+    world.publish_member_profile(
+        world.sponsor_pub, display_name="Ada", byline="founder",
+        avatar=world.attach(blob, mime="image/webp"),
+    )
+    ctx = world.channel({"v": 1, "op": "context"})
+    assert ctx["status"] == "ok"
+    # org presentation from the org's OWN autonomy.org row
+    assert ctx["org_name"] == "Claim Org"
+    assert ctx["org_color"] == "#123456"
+    assert ctx["org_description"] == "secure by default"
+    assert ctx["org_icon"] == ICON_WEBP
+    # sponsor_pub is copied EXACTLY from the live invite event
+    assert ctx["sponsor_pub"] == world.sponsor_pub
+    # sponsor presentation resolved through the member directory
+    assert ctx["sponsor_name"] == "Ada"
+    assert ctx["sponsor_byline"] == "founder"
+    assert ctx["sponsor_avatar"] == (
+        "data:image/webp;base64,"
+        + base64.b64encode(b"\x00webp-avatar-bytes").decode()
+    )
+    # the ledger fields still ride along, and nothing forbidden leaks
+    assert ctx["genesis_id"] == world.founded.genesis_id
+    assert ctx["granted_role"] == "member"
+    _assert_no_forbidden(ctx)
+
+
+def test_context_sponsor_pub_only_when_no_member_profile(world):
+    ctx = world.channel({"v": 1, "op": "context"})
+    assert ctx["status"] == "ok"
+    assert ctx["sponsor_pub"] == world.sponsor_pub
+    # No profile row: honest authorized-member fallback — a name is NEVER
+    # fabricated, and the optional human fields are simply absent.
+    assert "sponsor_name" not in ctx
+    assert "sponsor_byline" not in ctx
+    assert "sponsor_avatar" not in ctx
+    _assert_no_forbidden(ctx)
+
+
+def test_context_ignores_a_wrong_persona_profile_row(world):
+    # A directory row keyed by a DIFFERENT persona must not attach to this
+    # sponsor. The sponsor stays pub-only.
+    world.publish_member_profile("cd" * 32, display_name="Somebody Else")
+    ctx = world.channel({"v": 1, "op": "context"})
+    assert ctx["sponsor_pub"] == world.sponsor_pub
+    assert "sponsor_name" not in ctx
+
+
+def test_context_omits_remote_avatar_url(world):
+    world.publish_member_profile(
+        world.sponsor_pub, display_name="Ada",
+        avatar="https://cdn.example/ada.png",
+    )
+    ctx = world.channel({"v": 1, "op": "context"})
+    assert ctx["sponsor_name"] == "Ada"
+    assert "sponsor_avatar" not in ctx
+    _assert_no_forbidden(ctx)
+
+
+def test_context_omits_oversized_avatar(world, tmp_path):
+    big = tmp_path / "big.webp"
+    big.write_bytes(b"\x00" * (link_serving._SPONSOR_AVATAR_MAX_BYTES + 1))
+    world.publish_member_profile(
+        world.sponsor_pub, display_name="Ada",
+        avatar=world.attach(big, mime="image/webp"),
+    )
+    ctx = world.channel({"v": 1, "op": "context"})
+    assert ctx["sponsor_name"] == "Ada"
+    assert "sponsor_avatar" not in ctx
+
+
+def test_context_omits_wrong_org_avatar(world, tmp_path):
+    # An attachment that lives in a DIFFERENT org's store is not found by the
+    # owned (peers=[]) read, so it cannot become this org's sponsor avatar.
+    blob = tmp_path / "foreign.webp"
+    blob.write_bytes(b"\x00foreign-bytes")
+    foreign_ref = world.attach(blob, mime="image/webp", org="personal")
+    world.publish_member_profile(
+        world.sponsor_pub, display_name="Ada", avatar=foreign_ref,
+    )
+    ctx = world.channel({"v": 1, "op": "context"})
+    assert ctx["sponsor_name"] == "Ada"
+    assert "sponsor_avatar" not in ctx
+
+
+def _remove_org_identity():
+    from tools.graph.schemas.org import ORG_SET_ID
+
+    for m in settings_ops.read_owned_set(
+        ORG_SET_ID, org=ORG, target_revision=3,
+    ).members:
+        settings_ops.remove_setting(m.id, org=ORG)
+
+
+def test_context_unavailable_when_org_identity_missing(world):
+    # No autonomy.org row → required org presentation is unavailable → the
+    # bounded unavailable envelope, and NO ledger/role/sponsor/join material.
+    _remove_org_identity()
+    ctx = world.channel({"v": 1, "op": "context"})
+    assert ctx == {
+        "v": 1, "status": "unavailable",
+        "reason": "organization-profile-unavailable",
+    }
+    # None of the successful-context material rides along on the failure.
+    for forbidden in ("granted_role", "genesis_id", "sponsor_pub", "heads"):
+        assert forbidden not in ctx
+
+
+def test_context_unavailable_on_malformed_org_color(world):
+    # A row whose color is not #rrggbb is malformed presentation → unavailable,
+    # never a plausible-looking header built from a bad row.
+    _remove_org_identity()
+    world.publish_org_identity(color="not-a-hex")
+    ctx = world.channel({"v": 1, "op": "context"})
+    assert ctx == {
+        "v": 1, "status": "unavailable",
+        "reason": "organization-profile-unavailable",
+    }
+
+
+def test_context_never_falls_back_to_generated_uuid_label(world):
+    # The org header is the org's OWN name, never the org id/slug the identity
+    # cascade would synthesize. Even with the slug and org id in play, the
+    # served name is the row's, and the raw id never appears as a label.
+    ctx = world.channel({"v": 1, "op": "context"})
+    assert ctx["org_name"] == "Claim Org"
+    assert ctx["org_name"] not in (ORG, ORG_ID)
+    assert ORG_ID not in ctx.values()
