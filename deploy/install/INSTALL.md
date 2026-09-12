@@ -121,6 +121,15 @@ network colliding with the LAN, include that in your §3 briefing. §4 then runs
 `docker compose up` from this same directory, where the `.env` you just wrote
 supplies `AUTONOMY_SUBNET`.
 
+**Raise the inotify ceiling.** It is per-UID and shared by the node and all
+session containers; at the stock 128 the node silently stops tailing every
+session at once.
+
+```bash
+echo 'fs.inotify.max_user_instances = 256' | sudo tee /etc/sysctl.d/99-inotify.conf
+sudo sysctl --system
+```
+
 ## 3. The consent briefing
 
 Deliver a briefing in your own words with the observed specifics filled in.
