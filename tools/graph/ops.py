@@ -2412,7 +2412,8 @@ def promote_source(
         raise ValueError(
             f"invalid publication_state {to_state!r}; valid: {_SOURCE_VALID_STATES}"
         )
-    db = _open(org)
+    write_org = _write_org_for_source(source_id, org=org)
+    db = _open(write_org)
     try:
         row = db.conn.execute(
             "SELECT id, publication_state FROM sources WHERE id = ?", (source_id,)
@@ -2420,7 +2421,7 @@ def promote_source(
         if not row:
             # Distinguish peer-origin from not-found so operators get a
             # useful message ("act in origin org X") instead of bare 404.
-            resolved_org = _resolve_org(org)
+            resolved_org = _resolve_org(write_org)
             for peer in sorted(resolve_peers(resolved_org, None)):
                 peer_db = open_peer_db(peer)
                 if peer_db is None:

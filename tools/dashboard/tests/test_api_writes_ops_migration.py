@@ -247,6 +247,57 @@ def test_api_graph_note_scopeless_lands_in_personal(dashboard_client, orgs_root)
         pc.close()
 
 
+def test_api_graph_source_promote_scopeless_uses_personal_org(
+    dashboard_client, orgs_root,
+):
+    """A browser caller has no org header; None must reach graph ops as the
+    normal personal-org default, never the Settings-only CALLER_ORG sentinel."""
+    note_id = _make_peer_note(
+        orgs_root.parent / "personal.db", title="personal publication toggle",
+    )
+
+    resp = dashboard_client.post(
+        f"/api/graph/source/{note_id}/promote",
+        json={"to_state": "published"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["new_state"] == "published"
+    personal = sqlite3.connect(str(orgs_root.parent / "personal.db"))
+    try:
+        assert personal.execute(
+            "SELECT publication_state FROM sources WHERE id = ?", (note_id,),
+        ).fetchone()[0] == "published"
+    finally:
+        personal.close()
+    assert not (orgs_root / "<settings_ops.CALLER_ORG>.db").exists()
+
+
+def test_api_graph_source_promote_scopeless_derives_note_home(
+    dashboard_client, orgs_root,
+):
+    """A scopeless operator mutation targets the note's owning org, not a
+    hard-coded personal store or a client-selected filename."""
+    note_id = _make_peer_note(
+        orgs_root / "autonomy.db", title="organization publication toggle",
+    )
+
+    resp = dashboard_client.post(
+        f"/api/graph/source/{note_id}/promote",
+        json={"to_state": "published"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["new_state"] == "published"
+    autonomy = sqlite3.connect(str(orgs_root / "autonomy.db"))
+    try:
+        assert autonomy.execute(
+            "SELECT publication_state FROM sources WHERE id = ?", (note_id,),
+        ).fetchone()[0] == "published"
+    finally:
+        autonomy.close()
+
+
 def test_api_graph_note_multipart_html_creates_rich_content(
     dashboard_client, orgs_root, tmp_path,
 ):
