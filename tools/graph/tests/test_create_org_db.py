@@ -44,6 +44,13 @@ def _schema_shape(conn: sqlite3.Connection) -> dict:
         "SELECT name FROM sqlite_master WHERE type='index' "
         "AND name NOT LIKE 'sqlite_%'"
     ).fetchall():
+        # Schema-declared payload expression indexes (auto-9kfv5) are a
+        # registry-driven layer installed ONLY on organization-store creation
+        # (GraphDB.create_org_db reconciles; a plain GraphDB open does not), so
+        # they legitimately differ between the two and are not part of the
+        # canonical base schema this comparison pins.
+        if name.startswith("idx_settings_payload_"):
+            continue
         shape["indices"].add(name)
     for (name,) in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='trigger'"
