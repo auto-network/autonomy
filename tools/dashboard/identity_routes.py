@@ -45,14 +45,17 @@ options, which the browser flow does anyway.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
 import ipaddress
 import json
 import logging
+import os
 import re
 import secrets
+import tempfile
 import time
 
 _LOG = logging.getLogger("autonomy.dashboard.identity")
@@ -62,6 +65,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from tools.graph import settings_ops
+from tools.dashboard import api_auth
 from tools.dashboard.network_routes import _mock_mode
 from tools.dashboard import personal_profile
 from tools.dashboard.personal_profile import personal_identity_member
@@ -575,6 +579,277 @@ async def patch_profile(request: Request) -> JSONResponse:
         return JSONResponse(
             {"ok": False, "error": f"could not store the personal profile: {e}"},
             status_code=500)
+    return JSONResponse({"ok": True, "profile": profile})
+
+
+# ── Personal avatar (server-owned references) ─────────────────────────
+#
+# POST/DELETE the person's Personal profile PHOTO. These are thin persistence
+# adapters around the shared :mod:`tools.dashboard.profile_image` seam — the
+# same processor and error vocabulary the organization-icon route uses, applied
+# to Personal scope. The browser supplies an explicit normalized crop; the
+# processor emits a canonical 512x512 WebP plus a bounded 64x64 compact WebP;
+# ONLY the canonical bytes are stored (as a Personal attachment) and only its id
+# plus the compact ``data:`` URI enter ``autonomy.user#1``. Originals, EXIF,
+# filenames, paths, and the upload MIME are discarded. Decided by
+# ``graph://4f9e881c-a9`` §7 and comment ``8cc8b2ed-5ae``.
+#
+# The attachment is pinned to the ``"personal"`` store EXPLICITLY (not org=None):
+# the request contextvar carries whatever org the shell stamped via
+# ``X-Graph-Org``, and a scopeless ``attach_file`` would follow it into that
+# org's database. The Personal profile SETTING is home-pinned by its schema, but
+# an attachment has no such home — so we name the personal store to keep the
+# canonical bytes out of every organization store (design of record: Personal
+# presentation never lands in an org database).
+
+#: The personal (non-org) local store the Personal avatar attachment lives in —
+#: the same home the ``autonomy.user`` schema declares. Named explicitly so the
+#: attachment cannot follow the caller-org contextvar into an org database.
+_PERSONAL_ATTACHMENT_ORG = "personal"
+
+#: The multipart request body may exceed the 10 MiB image bound only by the
+#: framing overhead (boundaries, part headers, the small crop JSON field). This
+#: bound is enforced against a declared Content-Length BEFORE buffering and
+#: again while streaming, so neither a missing nor a dishonest header can cause
+#: unbounded memory use.
+_AVATAR_MULTIPART_OVERHEAD = 64 * 1024
+
+
+def _max_avatar_request_bytes() -> int:
+    from tools.dashboard import profile_image
+    return profile_image.MAX_INPUT_BYTES + _AVATAR_MULTIPART_OVERHEAD
+
+
+class _RequestTooLarge(Exception):
+    """The request body exceeds the bounded avatar-upload budget."""
+
+
+async def _read_bounded_body(request: Request, max_bytes: int) -> bytes:
+    """Buffer the request body, refusing to exceed ``max_bytes``.
+
+    A declared ``Content-Length`` over the bound is rejected before a single
+    chunk is read; the running total is checked as the body streams so a
+    missing or dishonest header cannot defeat the bound. Raises
+    :class:`_RequestTooLarge` in either case.
+    """
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > max_bytes:
+                raise _RequestTooLarge()
+        except ValueError:
+            # An unparseable header is treated as absent — the streaming bound
+            # below still holds.
+            pass
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > max_bytes:
+            raise _RequestTooLarge()
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _parse_avatar_multipart(content_type: str, body: bytes):
+    """Return ``(avatar_bytes, crop_text)`` from an already-buffered multipart
+    body.
+
+    Parses with the stdlib email machinery so the route depends on no optional
+    ``python-multipart`` package and operates on the bounded bytes we already
+    read (Starlette's own parser would re-consume the stream). Raises
+    :class:`ValueError` for a non-multipart or malformed body; a missing
+    ``avatar`` file or ``crop`` field comes back as ``None`` for the caller to
+    turn into a specific 400.
+    """
+    from email.parser import BytesParser
+    from email.policy import default as email_policy
+
+    if "multipart/form-data" not in content_type:
+        raise ValueError("invalid multipart form")
+    envelope = (
+        f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8")
+        + body
+    )
+    message = BytesParser(policy=email_policy).parsebytes(envelope)
+    if not message.is_multipart():
+        raise ValueError("invalid multipart form")
+    avatar_bytes: bytes | None = None
+    crop_text: str | None = None
+    for part in message.iter_parts():
+        if part.get_content_disposition() != "form-data":
+            continue
+        name = part.get_param("name", header="content-disposition")
+        if not name:
+            continue
+        content = part.get_payload(decode=True) or b""
+        if str(name) == "avatar" and part.get_filename() is not None:
+            avatar_bytes = content
+        elif str(name) == "crop":
+            charset = part.get_content_charset() or "utf-8"
+            try:
+                crop_text = content.decode(charset)
+            except UnicodeDecodeError:
+                crop_text = content.decode("utf-8", errors="replace")
+    return avatar_bytes, crop_text
+
+
+def _safe_unlink(path: str | None) -> None:
+    if not path:
+        return
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+async def post_avatar(request: Request) -> JSONResponse:
+    """POST /api/identity/profile/avatar — normalize + store the Personal photo.
+
+    Multipart with exactly one ``avatar`` file and one ``crop`` JSON part
+    (``{x, y, size}`` normalized coordinates in the EXIF-oriented image). The
+    bytes are read through a bounded request path, normalized through the shared
+    :mod:`profile_image` seam (all decoding, orientation, cropping, sRGB
+    conversion, metadata stripping, and derivative bounds live there), and the
+    canonical 512x512 WebP is stored as a Personal attachment; the attachment id
+    and the compact 64x64 ``data:`` URI are then activated on ``autonomy.user#1``
+    through :func:`personal_profile.set_avatar`.
+
+    Order matters: process → attach → activate. A processing or attachment
+    failure leaves the previous active profile unchanged; only a final
+    profile-write failure may leave an unreferenced (and harmless) immutable
+    blob. Returns ``{ok, avatar_attachment_id, avatar_icon_data_uri}`` — never a
+    filename, path, original bytes, EXIF, or the upload MIME.
+    """
+    refusal = api_auth.require_global_api_authority(request)
+    if refusal is not None:
+        return refusal
+    if _mock_mode():
+        return JSONResponse({"ok": False,
+                             "error": "mock dashboard stores no profiles"},
+                            status_code=502)
+
+    from tools.dashboard import profile_image
+
+    try:
+        body = await _read_bounded_body(request, _max_avatar_request_bytes())
+    except _RequestTooLarge:
+        return JSONResponse(
+            {"error": "the upload exceeds the accepted size bound",
+             "code": "request_too_large"},
+            status_code=413,
+        )
+    try:
+        avatar_bytes, crop_text = _parse_avatar_multipart(
+            request.headers.get("content-type", ""), body,
+        )
+    except Exception:
+        return JSONResponse(
+            {"error": "the request must be multipart/form-data",
+             "code": "bad_request"},
+            status_code=400,
+        )
+    if avatar_bytes is None:
+        # An ABSENT avatar part is a missing field; a present-but-empty file is
+        # a decode concern the processor reports as ``empty``.
+        return JSONResponse(
+            {"error": "an avatar file is required", "code": "missing_avatar"},
+            status_code=400,
+        )
+    if crop_text is None:
+        return JSONResponse(
+            {"error": "a crop is required", "code": "missing_crop"},
+            status_code=400,
+        )
+    try:
+        crop_obj = json.loads(crop_text)
+    except Exception:
+        return JSONResponse(
+            {"error": "crop must be a JSON object", "code": "invalid_crop"},
+            status_code=400,
+        )
+
+    def _process_and_store() -> tuple[str, str]:
+        from tools.graph import ops as graph_ops
+        # Refuse before any attachment is created when there is no person to
+        # profile — a no-identity upload leaves NO orphan blob behind.
+        if personal_profile._canonical_identity_member() is None:
+            raise personal_profile.NoPersonalIdentity(
+                "no canonical personal identity exists — create the personal "
+                "root before setting a Personal avatar"
+            )
+        # Normalize FIRST — a bad image or crop never creates an attachment.
+        processed = profile_image.process_profile_image(avatar_bytes, crop_obj)
+        tmp_path: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".webp") as tmp:
+                tmp.write(processed.canonical_webp)
+                tmp_path = tmp.name
+            att = graph_ops.attach_file(
+                tmp_path, org=_PERSONAL_ATTACHMENT_ORG,
+                alt_text="Personal profile avatar",
+                original_filename="profile-avatar.webp",
+            )
+        finally:
+            _safe_unlink(tmp_path)
+        attachment_id = att["id"]
+        # Activate the reference LAST. Only a failure here can strand the
+        # (immutable, content-addressed) blob just stored.
+        personal_profile.set_avatar(attachment_id, processed.compact_data_uri)
+        return attachment_id, processed.compact_data_uri
+
+    try:
+        attachment_id, data_uri = await asyncio.to_thread(_process_and_store)
+    except personal_profile.NoPersonalIdentity as exc:
+        return JSONResponse(
+            {"error": str(exc), "code": "no_personal_identity"},
+            status_code=409,
+        )
+    except profile_image.ProfileImageError as exc:
+        return JSONResponse(
+            {"error": str(exc), "code": exc.code}, status_code=400,
+        )
+    except Exception:
+        _LOG.exception("personal avatar upload failed")
+        return JSONResponse(
+            {"error": "the avatar could not be stored", "code": "store_failed"},
+            status_code=500,
+        )
+    return JSONResponse({
+        "ok": True,
+        "avatar_attachment_id": attachment_id,
+        "avatar_icon_data_uri": data_uri,
+    })
+
+
+async def delete_avatar(request: Request) -> JSONResponse:
+    """DELETE /api/identity/profile/avatar — clear the Personal avatar refs.
+
+    Idempotent: clears ``avatar_attachment_id`` and ``avatar_icon_data_uri``
+    from ``autonomy.user#1`` (preserving every text field), returning the person
+    to the initials/color fallback. The immutable attachment blob is NOT deleted.
+    Refuses (409) until a canonical personal identity exists.
+    """
+    refusal = api_auth.require_global_api_authority(request)
+    if refusal is not None:
+        return refusal
+    if _mock_mode():
+        return JSONResponse({"ok": False,
+                             "error": "mock dashboard stores no profiles"},
+                            status_code=502)
+    try:
+        profile = await asyncio.to_thread(personal_profile.clear_avatar)
+    except personal_profile.NoPersonalIdentity as exc:
+        return JSONResponse(
+            {"ok": False, "error": str(exc), "code": "no_personal_identity"},
+            status_code=409,
+        )
+    except Exception as exc:
+        return JSONResponse(
+            {"ok": False,
+             "error": f"could not clear the personal avatar: {exc}"},
+            status_code=500,
+        )
     return JSONResponse({"ok": True, "profile": profile})
 
 
@@ -1940,6 +2215,8 @@ ROUTES = [
     Route("/api/identity/personal", post_personal, methods=["POST"]),
     Route("/api/identity/profile", get_profile, methods=["GET"]),
     Route("/api/identity/profile", patch_profile, methods=["PATCH"]),
+    Route("/api/identity/profile/avatar", post_avatar, methods=["POST"]),
+    Route("/api/identity/profile/avatar", delete_avatar, methods=["DELETE"]),
     Route("/api/identity/factor-policy", get_factor_policy, methods=["GET"]),
     Route("/api/identity/factor-policy/preview", post_factor_policy_preview,
           methods=["POST"]),

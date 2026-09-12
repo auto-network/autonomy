@@ -311,3 +311,92 @@ def update_profile(fields: Any) -> dict | None:
             USER_PROFILE_CANONICAL_LABEL, base, org=None,
         )
     return serialize_profile(get_effective_profile())
+
+
+# ── avatar (server-owned references) ──────────────────────────
+#
+# The two avatar references (``avatar_attachment_id`` + ``avatar_icon_data_uri``)
+# are NOT part of :data:`PATCH_FIELDS`; a text PATCH can neither set nor erase
+# them. They are set only here, by the avatar routes, after the shared
+# :mod:`profile_image` processor has produced the canonical WebP (stored as a
+# Personal attachment) and the bounded compact data URI. Both operations
+# require the canonical personal root, preserve every text field, stamp
+# ``updated_at``, and write through the same protected
+# :func:`settings_ops.identity_write_context` seam pinned to ``org=None`` — so
+# a caller-org header can never move the Personal row into an org database.
+
+
+def set_avatar(attachment_id: str, icon_data_uri: str) -> dict | None:
+    """Activate the two server-owned avatar references on the Personal profile.
+
+    ``attachment_id`` is the canonical 512x512 WebP's Personal attachment id and
+    ``icon_data_uri`` the bounded compact 64x64 WebP ``data:`` URI. Every text
+    field already stored is preserved; only the two avatar fields (and
+    ``updated_at``) change. When no profile row exists yet the row is created
+    from the personal-root baseline, so a person can set a photo before entering
+    any text. The write is the LAST step of an upload — it activates a reference
+    only after the attachment has been stored.
+
+    Raises :class:`NoPersonalIdentity` when no canonical personal root exists.
+    """
+    identity = _canonical_identity_member()
+    if identity is None:
+        raise NoPersonalIdentity(
+            "no canonical personal identity exists — create the personal root "
+            "before setting a Personal avatar"
+        )
+    existing = profile_member()
+    if existing is not None:
+        base = dict(existing.payload)
+    else:
+        base = {"display_name": (identity.payload.get("display_name") or "").strip()}
+
+    base["avatar_attachment_id"] = attachment_id
+    base["avatar_icon_data_uri"] = icon_data_uri
+    base["updated_at"] = _now_iso()
+
+    with settings_ops.identity_write_context():
+        settings_ops.upsert_by_key(
+            USER_PROFILE_SET_ID, USER_PROFILE_REVISION,
+            USER_PROFILE_CANONICAL_LABEL, base, org=None,
+        )
+    return serialize_profile(get_effective_profile())
+
+
+def clear_avatar() -> dict | None:
+    """Drop both avatar references, returning to the initials/color fallback.
+
+    Idempotent: with a canonical root but no profile row, or a row that already
+    carries no avatar, nothing is written and the current effective profile is
+    returned unchanged. The immutable, content-addressed attachment blob is
+    NEVER deleted — only the active references are cleared, so a shared or
+    re-referenced blob survives. Every text field is preserved.
+
+    Raises :class:`NoPersonalIdentity` when no canonical personal root exists.
+    """
+    identity = _canonical_identity_member()
+    if identity is None:
+        raise NoPersonalIdentity(
+            "no canonical personal identity exists — create the personal root "
+            "before clearing a Personal avatar"
+        )
+    existing = profile_member()
+    if existing is None:
+        # No row to clear; removal is idempotent and never creates one.
+        return serialize_profile(get_effective_profile())
+    payload = existing.payload
+    if not (payload.get("avatar_attachment_id") or payload.get("avatar_icon_data_uri")):
+        # Already avatar-free — do not bump updated_at for a no-op removal.
+        return serialize_profile(get_effective_profile())
+
+    base = dict(payload)
+    base.pop("avatar_attachment_id", None)
+    base.pop("avatar_icon_data_uri", None)
+    base["updated_at"] = _now_iso()
+
+    with settings_ops.identity_write_context():
+        settings_ops.upsert_by_key(
+            USER_PROFILE_SET_ID, USER_PROFILE_REVISION,
+            USER_PROFILE_CANONICAL_LABEL, base, org=None,
+        )
+    return serialize_profile(get_effective_profile())
