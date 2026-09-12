@@ -57,6 +57,9 @@ def rendezvous(tmp_path, monkeypatch):
         invite=invite,
         machine_id="78" * 32,
     )
+    from tools.dashboard.tests.fleet_central_fixtures import configure_central
+    configure_central(monkeypatch, store, root, NOW_S)
+    monkeypatch.setattr(fleet_enrollment_approvals, '_needs_local_bootstrap', lambda: False)
     yield root, invite, store, grant, request
     GraphDB.close_all_pooled()
 
@@ -79,13 +82,11 @@ def test_new_request_gets_one_ephemeral_resume_token(rendezvous):
         "machine_id", "personal_root_pub", "invite_id"
     }
     approval_id = fleet_enrollment_approvals.approval_id_for(reply["request_id"])
-    approval = ar.get(approval_id)
+    approval = fleet_enrollment_approvals._runtime().approvals.get_request(approval_id).payload
     assert approval is not None
     assert approval["kind"] == fleet_enrollment_approvals.KIND
     assert approval["request"] == {
         "source_request_id": reply["request_id"],
-        "target_uuid": grant["target_uuid"],
-        "verification_code": reply["verification_code"],
     }
     pending = store.list_pending(grant["target_uuid"])
     assert len(pending) == 1
@@ -109,7 +110,8 @@ def test_same_channel_retries_but_another_channel_must_resume(rendezvous):
         grant, message, channel_state=first_channel, store=store, now_ms=NOW_MS
     )
     assert repeated == first
-    assert ar.get(fleet_enrollment_approvals.approval_id_for(first["request_id"]))
+    assert fleet_enrollment_approvals._runtime().approvals.get_request(
+        fleet_enrollment_approvals.approval_id_for(first["request_id"]))
 
     other_channel = {}
     duplicate = fleet_enrollment_service.handle_request(
@@ -210,7 +212,11 @@ def test_invitation_caps_unresolved_requests_at_one_hundred(rendezvous):
     # The generic verdict remains the only decline truth. Once it resolves,
     # that correlated transport row no longer consumes pending capacity.
     approval_id = fleet_enrollment_approvals.ensure_approval(rows[0], store=store)
-    assert ar.set_result(approval_id, {"approved": False}) is True
+    from tools.dashboard.approval_service import HumanApprovalActor
+    fleet_enrollment_approvals._runtime().approvals.decide(
+        approval_id, HumanApprovalActor._verified(fleet_enrollment_approvals._anchor()),
+        outcome="declined", decision={},
+    )
     accepted, token = store.open_request(
         grant["target_uuid"], overflow, now_ms=NOW_MS
     )

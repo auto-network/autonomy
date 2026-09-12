@@ -185,7 +185,6 @@ from tools.dashboard import dashboard_access_approvals as _dashboard_access
 from tools.dashboard import visitor_approvals as _visitor
 from tools.dashboard import mcp_peer_approvals as _mcp_peer
 from tools.dashboard import secure_setting_approvals as _secure_setting
-from tools.dashboard import fleet_enrollment_approvals as _fleet_enrollment
 from tools.dashboard import external_service_approvals as _external_service
 from tools.dashboard import vault_open_approvals as _vault_open
 
@@ -198,7 +197,6 @@ PREPARE_CREATE = {
     **_visitor.PREPARE_CREATE,
     **_mcp_peer.PREPARE_CREATE,
     **_secure_setting.PREPARE_CREATE,
-    **_fleet_enrollment.PREPARE_CREATE,
     **_external_service.PREPARE_CREATE,
 }
 # Kinds in this registry must derive their requester identity from the
@@ -212,7 +210,6 @@ AUTHORIZE_DECISION = {
     **_visitor.AUTHORIZE_DECISION,
     **_mcp_peer.AUTHORIZE_DECISION,
     **_secure_setting.AUTHORIZE_DECISION,
-    **_fleet_enrollment.AUTHORIZE_DECISION,
     **_external_service.AUTHORIZE_DECISION,
     **_vault_open.AUTHORIZE_DECISION,
 }
@@ -229,7 +226,6 @@ ENRICH = {
     **_visitor.ENRICH,
     **_mcp_peer.ENRICH,
     **_secure_setting.ENRICH,
-    **_fleet_enrollment.ENRICH,
     **_external_service.ENRICH,
 }
 ENRICH_FROM_REQUEST = {
@@ -258,7 +254,6 @@ EXECUTORS: dict = {
     **_visitor.EXECUTORS,
     **_mcp_peer.EXECUTORS,
     **_secure_setting.EXECUTORS,
-    **_fleet_enrollment.EXECUTORS,
     **_external_service.EXECUTORS,
     **_vault_open.EXECUTORS,
 }
@@ -360,6 +355,10 @@ async def open_approval(
     ordinary callers always pass through the kind's preparation hook.
     """
     staged = prepared_staged
+    registration = attention_routes.approval_runtime().approvals.registry.kinds.get(kind)
+    if (registration is not None and registration.runtime is not None
+            and registration.requester_policy.value == "internal_producer"):
+        raise ValueError("this approval kind uses Central, not the legacy rendezvous")
     if (
         isinstance(request_id, str)
         and request_id.startswith(CENTRAL_APPROVAL_ID_PREFIX)

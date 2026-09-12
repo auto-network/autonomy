@@ -43,8 +43,7 @@ class ProjectionInputs:
     selected_machine_id: str | None
     peer_rows: Mapping[str, Mapping]
     admissions: tuple[PendingEnrollment, ...]
-    approvals: Mapping[str, Mapping | None]
-    executing_approval_ids: frozenset[str]
+    approvals: Mapping[str, str | None]
     invitation: StoredFleetInvitation | None
     deactivated_invitation: StoredFleetInvitation | None = None
     machine_names: Mapping[str, str] = field(default_factory=dict)
@@ -156,17 +155,11 @@ def _load_inputs(*, now_ms: int) -> ProjectionInputs:
     selected_machine_id = fleet_tunnel_server.state().selected_machine_id
     store = FleetEnrollmentStore()
     admissions = store.list_admissions()
+    from tools.dashboard import fleet_enrollment_approvals
     approvals = {
-        row.source_approval_id: approval_requests.get(row.source_approval_id)
-        for row in admissions
-        if row.source_approval_id
+        row.source_approval_id: fleet_enrollment_approvals.decision_status(row.source_approval_id)
+        for row in admissions if row.source_approval_id
     }
-    from tools.dashboard import approvals_routes
-
-    executing = frozenset(
-        approval_id for approval_id in approvals
-        if approvals_routes.approval_is_executing(approval_id)
-    )
     invitation_publication = next(
         (
             row
@@ -220,7 +213,6 @@ def _load_inputs(*, now_ms: int) -> ProjectionInputs:
         peer_rows=_peer_rows(epoch),
         admissions=admissions,
         approvals=approvals,
-        executing_approval_ids=executing,
         invitation=store.current_invitation(now_ms=now_ms),
         deactivated_invitation=store.deactivated_invitation(now_ms=now_ms),
         machine_names=fleet_machine_profile.names(org=None),
@@ -589,28 +581,21 @@ def _revoked_entries(
 def _admission_standing(
     row: PendingEnrollment,
     *,
-    approval: Mapping | None,
-    executing: bool,
+    approval: str | None,
 ) -> tuple[str, str | None] | None:
     if row.status == "failed":
         return "admission_failed", row.last_error_code or "admission_failed"
     if not row.source_approval_id:
         return "admission_failed", "approval_registration_missing"
-    if row.status == "approving" or executing:
+    if row.status == "approving":
         return "admission_in_progress", None
     if approval is None:
         return "admission_failed", "approval_record_missing"
-    result = (approval or {}).get("result")
-    if result is None:
+    if approval == "open":
         return "pending_approval", None
-    if result.get("approved") is not True:
+    if approval != "granted":
         return None
-    execution = result.get("execution")
-    if isinstance(execution, Mapping) and execution.get("ok") is False:
-        return "admission_failed", "approval_execution_failed"
-    # A completed grant may only disappear in favour of committed roster
-    # truth. If that invariant breaks, keep a safe, visible failure row.
-    return "admission_failed", "roster_commit_missing"
+    return "admission_in_progress", None
 
 
 def _admission_row(
@@ -730,7 +715,6 @@ def project(inputs: ProjectionInputs) -> dict:
         lifecycle = _admission_standing(
             row,
             approval=inputs.approvals.get(approval_id) if approval_id else None,
-            executing=bool(approval_id and approval_id in inputs.executing_approval_ids),
         )
         if lifecycle is None:
             continue

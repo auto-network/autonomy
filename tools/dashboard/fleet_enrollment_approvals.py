@@ -1,169 +1,179 @@
-"""``fleet_machine_admission`` on the current generic approval rendezvous.
-
-Fleet owns transport, signed roster evidence, and delivery state.  The generic
-approval surface owns the human decision.  The stable kind and source approval
-id are deliberately independent of today's SQLite rendezvous so the same
-dialogue/executor can later move to Settings without changing Fleet state.
-"""
-
+"""Settings-native Fleet admission. Runtime private keys are not decision fields."""
 from __future__ import annotations
-
-import re
 import os
+import re
 import time
-
-from starlette.requests import Request
-
-from tools.dashboard import identity_routes, unlock_routes
-from tools.dashboard.dao import approval_requests as ar
-from tools.dashboard import web_push
-from tools.dashboard.event_bus import event_bus
-from tools.network import (
-    fleet_enroll,
-    fleet_machine_profile,
-    fleet_roster,
-    machine_boot,
-)
-
+from tools.dashboard import identity_routes
+from tools.dashboard.approval_http_bridge import central_stable_approval_id
+from tools.dashboard.approval_kind_registry import ApprovalKindRuntime, ApprovalRequestPlan, RegisteredApprovalProducer
+from tools.dashboard.approval_service import ApprovalServiceError, normalize_unix_milliseconds_deadline
+from tools.dashboard.attention_registry import AttentionProjectionPlan, AttentionPublicationRuntime, AttentionSourceEvidence
+from tools.network import fleet_enroll, fleet_machine_profile, fleet_roster, machine_boot
 
 KIND = "fleet_machine_admission"
-_APPROVAL_PREFIX = "fleet-"
+APPLICATION_SCOPE = "fleet"
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
+PRODUCER = RegisteredApprovalProducer("fleet.machine_admission", "Fleet enrollment", frozenset({KIND}), True)
 
 
-def _needs_local_bootstrap() -> bool:
-    """Whether this legacy Dashboard must become Fleet member one.
-
-    A missing machine database is the ordinary pre-Fleet state, not a reason
-    to refuse the first remote request.  Once either identity or roster state
-    exists, bootstrap is no longer permitted.
-    """
-    try:
-        local_machine_id = machine_boot.machine_id(org="machine")
-    except Exception:
-        local_machine_id = None
-    try:
-        entries = fleet_roster.load_entries(org=None)
-    except Exception:
-        entries = []
-    return local_machine_id is None and not entries
+def _runtime():
+    from tools.dashboard.attention_routes import approval_runtime
+    return approval_runtime()
 
 
-def approval_id_for(request_id: str) -> str:
+def _store():
+    from tools.dashboard.fleet_enrollment_service import FleetEnrollmentStore
+    return FleetEnrollmentStore()
+
+
+def _needs_local_bootstrap():
+    return machine_boot.machine_id(org="machine") is None and not fleet_roster.load_entries(org=None)
+
+
+def approval_id_for(request_id):
     if not isinstance(request_id, str) or not _HEX64.fullmatch(request_id):
-        raise ValueError("fleet source request id must be 64 lowercase hex chars")
-    return _APPROVAL_PREFIX + request_id
+        raise ValueError("invalid Fleet request ID")
+    return central_stable_approval_id(KIND, request_id)
 
 
-def prepare_create(_session: str, _request: dict) -> tuple[dict, dict]:
-    """External callers may not manufacture Fleet admission requests."""
-    raise ValueError("fleet admission approvals are created by the invitation channel")
+def build_approval_runtime():
+    def plan(context, body):
+        if set(body) != {"request_id"}:
+            raise ValueError("Fleet producer accepts only request_id")
+        store = _store()
+        pending = store.get_request(body["request_id"])
+        if pending is None or context.approval_id != approval_id_for(pending.request_id):
+            raise ValueError("Fleet approval correlation mismatch")
+        existing = _runtime().approvals.store.get_request(context.approval_id)
+        if existing is not None:
+            payload = existing.payload
+            return ApprovalRequestPlan(
+                subject_ref=payload["subject_ref"], request=payload["request"],
+                staged=payload["staged"], safe_review=payload["safe_review"],
+                trusted_source_expires_at=payload.get("expires_at"),
+            )
+        with store._connect() as conn:
+            invite = store._invite_row(conn, pending.target_uuid, int(context.planning_time * 1000))
+        fleet_enroll.verify_request(pending.request, invite=invite)
+        staged = {
+            "v": 1, "source_request_id": pending.request_id,
+            "target_uuid": pending.target_uuid, "request": pending.request.to_dict(),
+            "channel_binding": pending.channel_binding, "verification_code": pending.verification_code,
+            "personal_root_pub": pending.request.personal_root_pub, "issued_at": pending.created_at,
+            "local_bootstrap_machine_id": os.urandom(32).hex() if _needs_local_bootstrap() else None,
+        }
+        return ApprovalRequestPlan(
+            subject_ref="fleet-enrollment:" + pending.request_id,
+            request={"source_request_id": pending.request_id}, staged=staged,
+            safe_review={"title": "Add this machine?", "detail": "Compare the code with the one on the new machine.",
+                         "verification_code": pending.verification_code, "fleet": staged},
+            trusted_source_expires_at=normalize_unix_milliseconds_deadline(invite.expires_at),
+        )
+
+    def validate(context, payload, decision, is_grant):
+        if not is_grant:
+            if decision:
+                raise ValueError("Decline has no payload")
+            return {}
+        staged = payload["staged"]
+        expected = {"machine_name", "approval", "roster_entry"}
+        if staged["local_bootstrap_machine_id"]:
+            expected.add("local_roster_entry")
+        if set(decision) != expected:
+            raise ValueError("Fleet decisions contain only public admission evidence")
+        name = fleet_machine_profile.normalize_display_name(decision["machine_name"])
+        fleet_enroll.verify_admission_evidence(
+            fleet_enroll.EnrollmentApproval.from_dict(decision["approval"]),
+            fleet_enroll.EnrollmentRequest.from_dict(staged["request"]),
+            channel_binding=staged["channel_binding"],
+            roster_entry=fleet_roster.RosterEntry.from_dict(decision["roster_entry"]),
+            anchor_root_pub=_anchor(),
+        )
+        if staged["local_bootstrap_machine_id"]:
+            local = fleet_roster.RosterEntry.from_dict(decision["local_roster_entry"])
+            fleet_roster.verify(local, anchor_root_pub=_anchor())
+            if (local.machine_id != staged["local_bootstrap_machine_id"]
+                    or local.kind != fleet_roster.EntryKind.ENROLL
+                    or local.assignment != fleet_roster.FLEET_MEMBER_ASSIGNMENT):
+                raise ValueError("Local bootstrap evidence mismatch")
+        return {**decision, "machine_name": name}
+
+    return ApprovalKindRuntime(
+        request_planner=plan, decision_validator=validate, resolution_consumer_id="fleet.machine_admission",
+        result_ref_builder=lambda _id, payload, _decision: payload["subject_ref"],
+    )
 
 
-def ensure_approval(pending, *, store, db_path=None) -> str:
-    """Create/bind the one deterministic approval for a validated request."""
+def build_attention_runtime(approvals):
+    def plan(status):
+        payload, resolution = status.request.payload, status.resolution
+        return AttentionProjectionPlan(
+            attention_id=status.request.approval_id, object_ref=status.request.approval_id,
+            participant_role="recipient", attention_state="resolved" if resolution else "needs_attention",
+            safe_title="Add this machine?", safe_summary=payload["safe_review"]["detail"],
+            counterparty_ref=None, occurred_at=resolution.payload["resolved_at"] if resolution else payload["created_at"],
+            source_version=2 if resolution else 1,
+        )
+    def evidence(ref, version):
+        status = approvals.status(ref)
+        if status.request.payload["kind"] != KIND or version != (2 if status.resolution else 1):
+            raise ValueError("Fleet attention source mismatch")
+        return AttentionSourceEvidence(
+            source_guard={"kind": "approval", "ref": ref, "version": version},
+            source_expires_at=status.request.payload.get("expires_at"),
+        )
+    return AttentionPublicationRuntime(projection_planner=plan, source_evidence_builder=evidence)
+
+
+def ensure_approval(pending, *, store):
+    runtime = _runtime()
     approval_id = approval_id_for(pending.request_id)
-    existing = ar.get(approval_id, db_path=db_path)
-    existing_staged = (
-        existing.get("staged") if isinstance(existing, dict) else None
-    )
-    # The first call may need one random id for the legacy origin's own Fleet
-    # bootstrap. That random choice becomes part of the frozen approval bytes;
-    # every crash/channel retry must reuse it rather than manufacture a second
-    # identity under the same deterministic approval id.
-    existing_bootstrap_id = (
-        existing_staged.get("local_bootstrap_machine_id")
-        if isinstance(existing_staged, dict)
-        else None
-    )
-    safe_request = {
-        "source_request_id": pending.request_id,
-        "target_uuid": pending.target_uuid,
-        "verification_code": pending.verification_code,
-    }
-    staged = {
-        "v": 1,
-        "source_request_id": pending.request_id,
-        "target_uuid": pending.target_uuid,
-        "request": pending.request.to_dict(),
-        "channel_binding": pending.channel_binding,
-        "verification_code": pending.verification_code,
-        "personal_root_pub": pending.request.personal_root_pub,
-        "issued_at": pending.created_at,
-        "local_bootstrap_machine_id": (
-            existing_bootstrap_id
-            if existing is not None
-            else (os.urandom(32).hex() if _needs_local_bootstrap() else None)
-        ),
-    }
-    created = ar.create_idempotent(
-        request_id=approval_id,
-        kind=KIND,
-        session=f"fleet:{pending.target_uuid}",
-        request=safe_request,
-        staged=staged,
-        created_at=pending.created_at / 1000,
-        db_path=db_path,
+    runtime.approvals.create_from_producer(
+        KIND, PRODUCER, {"request_id": pending.request_id}, source_approval_id=approval_id,
     )
     store.bind_approval(pending.request_id, approval_id)
-    if created:
-        web_push.register_approval_pending_sync(approval_id, KIND)
-        event_bus.broadcast_sync(
-            "approval:pending",
-            {"id": approval_id, "kind": KIND, "session": f"fleet:{pending.target_uuid}"},
-            dedup=False,
-        )
+    reconcile(approval_id)
     return approval_id
 
 
-def enrich(row: dict) -> dict:
-    staged = row.get("staged")
-    if not isinstance(staged, dict):
-        return {"staged": None, "application": "fleet"}
-    return {"staged": staged, "application": "fleet"}
-
-
-def decision_status(approval_id: str | None, *, db_path=None) -> str | None:
-    """Project only the human verdict; never copy it into Fleet storage."""
+def decision_status(approval_id):
     if not approval_id:
         return None
-    row = ar.get(approval_id, db_path=db_path)
-    result = (row or {}).get("result")
-    if not isinstance(result, dict):
+    try:
+        status = _runtime().approvals.status(approval_id)
+    except ApprovalServiceError as exc:
+        if exc.code == "not_found":
+            return None
+        raise
+    return status.resolution.payload["outcome"] if status.resolution else "open"
+
+
+def terminal_approval_ids(approval_ids):
+    return {approval_id for approval_id in approval_ids
+            if decision_status(approval_id) in {"granted", "declined", "canceled", "expired"}}
+
+
+def reconcile(approval_id):
+    runtime = _runtime()
+    status = runtime.approvals.status(approval_id)
+    if status.request.payload["kind"] != KIND:
+        return
+    runtime.index.publish(runtime.index.registry.producer(KIND, APPLICATION_SCOPE), status)
+    if status.resolution and status.resolution.payload["outcome"] == "granted":
+        pending = _store().get_request(status.request.payload["staged"]["source_request_id"])
+        if pending and pending.source_approval_id == approval_id and pending.status in {"pending", "approving"}:
+            execute({"id": approval_id, "staged": status.request.payload["staged"]},
+                    status.resolution.payload["decision"])
+
+
+def project_result(status):
+    if not status.resolution or status.resolution.payload["outcome"] != "granted":
         return None
-    return "granted" if result.get("approved") is True else "declined"
-
-
-def terminal_approval_ids(*, db_path=None) -> set[str]:
-    return ar.decided_ids_for_kind(KIND, db_path=db_path)
-
-
-def authorize_decision(request: Request, row: dict, decision: dict) -> str | None:
-    session = unlock_routes.session_from_request(request)
-    if session is None:
-        return "unlock the dashboard before deciding this machine admission"
-    if decision.get("approved"):
-        expected = {"approved", "approval", "roster_entry", "machine_name"}
-        staged = row.get("staged")
-        if isinstance(staged, dict) and staged.get("local_bootstrap_machine_id"):
-            expected.update({"local_roster_entry", "local_runtime"})
-        if set(decision) != expected:
-            return (
-                "fleet approval must carry its machine name and exact signed "
-                "evidence handoff"
-            )
-        try:
-            fleet_machine_profile.normalize_display_name(
-                decision.get("machine_name")
-            )
-        except ValueError as exc:
-            return str(exc)
-    elif set(decision) != {"approved"}:
-        return "fleet decline must carry only the decision"
-    staged = row.get("staged")
-    if not isinstance(staged, dict) or staged.get("v") != 1:
-        return "fleet admission has no server-frozen request"
-    return None
+    pending = _store().get_request(status.request.payload["staged"]["source_request_id"])
+    if pending is None or pending.status in {"pending", "approving"}:
+        return None
+    return {"execution": {"ok": pending.status == "approved",
+                          "error": pending.last_error_code if pending.status != "approved" else None}}
 
 
 def _anchor() -> str:
@@ -174,13 +184,11 @@ def _anchor() -> str:
     return anchor
 
 
-async def execute(row: dict, decision: dict) -> dict:
-    from tools.dashboard import fleet_enrollment_service
-
+def execute(row: dict, decision: dict) -> dict:
     staged = row.get("staged") or {}
     target_uuid = staged.get("target_uuid")
     request_id = staged.get("source_request_id")
-    store = fleet_enrollment_service.FleetEnrollmentStore()
+    store = _store()
     try:
         pending = store.get_request(request_id)
         if pending is None:
@@ -198,7 +206,7 @@ async def execute(row: dict, decision: dict) -> dict:
             raise ValueError("fleet admission is not anchored to the stored personal root")
         approval = fleet_enroll.EnrollmentApproval.from_dict(decision.get("approval"))
         roster_entry = fleet_roster.RosterEntry.from_dict(decision.get("roster_entry"))
-        # On a legacy origin, validate the entire remote authorization before
+        # On a standalone dashboard, validate the remote authorization before
         # the first local Fleet row is allowed to exist. ``approve`` repeats
         # this check at commit time; the preflight prevents invalid joiner
         # evidence from partially bootstrapping the origin Dashboard.
@@ -229,19 +237,6 @@ async def execute(row: dict, decision: dict) -> dict:
             anchor_root_pub=anchor,
             org=None,
         )
-        if bootstrap_id:
-            # The root-holder Dashboard became member one in this ceremony,
-            # so it also needs a browser-minted process delegation now; there
-            # was no earlier Fleet identity from which an ordinary unlock
-            # could have minted one. The validator/configurator persists no
-            # key bytes and the next restart remints through /api/fleet/runtime.
-            from tools.dashboard import fleet_enrollment_routes
-
-            fleet_enrollment_routes._activate_runtime(
-                decision.get("local_runtime"),
-                root_pub=anchor,
-                expected_entry=local_entry,
-            )
         fleet_machine_profile.store(
             roster_entry.machine_id,
             decision.get("machine_name"),
@@ -262,9 +257,3 @@ async def execute(row: dict, decision: dict) -> dict:
         except Exception:
             pass
         return {"ok": False, "error": str(exc)}
-
-
-PREPARE_CREATE = {KIND: prepare_create}
-ENRICH = {KIND: enrich}
-EXECUTORS = {KIND: execute}
-AUTHORIZE_DECISION = {KIND: authorize_decision}

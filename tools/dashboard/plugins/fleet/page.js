@@ -212,12 +212,6 @@ function fleetPage() {
     reviewApproval(admission) {
       const id = admission && admission.sourceApprovalId;
       if (!id) return;
-      if (typeof window.openApprovalOverlay === 'function') {
-        window.openApprovalOverlay(id);
-        return;
-      }
-      // The shared activity screen opens the same central approval when the
-      // overlay bundle is not present yet (for example on a cold PWA).
       window.location.assign('/activity?focus=approval&id=' + encodeURIComponent(id));
     },
 

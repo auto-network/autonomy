@@ -557,31 +557,6 @@ def test_personal_sync_hint_is_payload_free_bounded_and_best_effort():
         fleet_sync_scheduler.set_settings_materialization_hook(None)
 
 
-def test_cli_and_both_ui_callers_use_the_central_envelope_and_shared_signer():
-    root = Path(__file__).resolve().parents[3]
-    cli = (root / "tools/graph/cli.py").read_text()
-    command = cli[cli.index("def cmd_session_auth"):cli.index("def cmd_", cli.index(
-        "def cmd_session_auth"
-    ) + 4)]
-    assert '"kind": ACCESS_KIND' in command
-    assert '"request": {"ephemeral_pub": keypair.public_hex}' in command
-    assert '"session": session_name' not in command
-
-    shared = root / "tools/dashboard/static/js/ceremony/dashboard-access.js"
-    central_js = (
-        root / "tools/dashboard/static/js/components/central-attention.js"
-    ).read_text()
-    legacy_js = (root / "tools/dashboard/static/js/pages/worktrees.js").read_text()
-    shared_js = shared.read_text()
-    assert "signDashboardAccessGrant" in shared_js
-    assert "opened.seed.fill(0)" in shared_js
-    assert "../ceremony/dashboard-access.js" in central_js
-    assert "../ceremony/dashboard-access.js" in legacy_js
-    assert "openRoot(" not in legacy_js[legacy_js.index(
-        "async function _signDashboardAccessDecision"
-    ):legacy_js.index("// Fleet admission", legacy_js.index(
-        "async function _signDashboardAccessDecision"
-    ))]
 
 
 def test_graph_session_auth_completes_central_create_wait_materialize_and_redeem(

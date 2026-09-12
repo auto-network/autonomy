@@ -281,6 +281,21 @@ def verify_approval(
 ) -> None:
     """Verify one browser-signed approval against server-owned context."""
     verify_request(request, invite=invite)
+    verify_admission_evidence(
+        approval, request, channel_binding=channel_binding,
+        roster_entry=roster_entry, anchor_root_pub=anchor_root_pub,
+    )
+
+
+def verify_admission_evidence(
+    approval: EnrollmentApproval,
+    request: EnrollmentRequest,
+    *,
+    channel_binding: str,
+    roster_entry: fleet_roster.RosterEntry,
+    anchor_root_pub: str,
+) -> None:
+    """Verify public evidence for an already-validated, frozen request."""
     if isinstance(approval.version, bool) or not isinstance(approval.version, int) \
             or approval.version != FLEET_APPROVAL_VERSION:
         raise FleetEnrollError(

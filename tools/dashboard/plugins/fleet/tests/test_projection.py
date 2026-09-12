@@ -36,7 +36,7 @@ def _admission(approval_id: str, *, status="pending", error=None, offset=0):
 
 
 def _inputs(
-    *, entries=(), admissions=(), approvals=None, executing=(),
+    *, entries=(), admissions=(), approvals=None,
     invitation=None, deactivated_invitation=None,
     machine_names=None, invitation_publication=None,
     publishing_org="autonomy", telemetry_rows=None,
@@ -62,7 +62,6 @@ def _inputs(
         },
         admissions=tuple(admissions),
         approvals=approvals or {},
-        executing_approval_ids=frozenset(executing),
         invitation=invitation,
         deactivated_invitation=deactivated_invitation,
         machine_names=machine_names or {},
@@ -163,12 +162,11 @@ def test_multiple_admissions_are_rows_not_a_fleet_approval_queue():
         entries=(LOCAL_ENTRY,),
         admissions=(pending, executing, failed, declined),
         approvals={
-            "fleet-pending": {"result": None},
-            "fleet-executing": {"result": None},
-            "fleet-failed": {"result": {"approved": True, "execution": {"ok": False}}},
-            "fleet-declined": {"result": {"approved": False}},
+            "fleet-pending": "open",
+            "fleet-executing": "granted",
+            "fleet-failed": "granted",
+            "fleet-declined": "declined",
         },
-        executing=("fleet-executing",),
     ))
 
     candidates = [r for r in view["machines"] if r["rowKind"] == "pending_admission"]
@@ -196,7 +194,7 @@ def test_roster_commit_replaces_candidate_with_only_signed_roster_truth():
     before = project(_inputs(
         entries=(LOCAL_ENTRY,),
         admissions=(_admission("fleet-remote"),),
-        approvals={"fleet-remote": {"result": None}},
+        approvals={"fleet-remote": "open"},
     ))
     after = project(_inputs(entries=(LOCAL_ENTRY, REMOTE_ENTRY)))
 
@@ -346,7 +344,7 @@ def test_projection_exposes_no_fleet_decision_surface():
     view = project(_inputs(
         entries=(LOCAL_ENTRY,),
         admissions=(_admission("fleet-pending"),),
-        approvals={"fleet-pending": {"result": None}},
+        approvals={"fleet-pending": "open"},
     ))
     wire = json.dumps(view)
     assert "verification_code" not in wire

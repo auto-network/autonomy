@@ -33,6 +33,7 @@ export function openApprovalDialog({review, authorize, execute, decline, result,
   const expiry = review.facts?.find(([label])=>/expir/i.test(label))?.[1];
   const input = {
     kind,title:review.title + (review.title.endsWith('?')?'':'?'),
+    code:review.code,machineName:review.machineName,
     intro:kind==='link'?`Create a link to this ${review.target.type.toLowerCase()} for someone outside your workspace.`:review.intro,
     organization:{name:review.organization?.name||'Personal approval',image:review.organization?.image||''},
     requester:{kind:'Requesting session',...review.requester,href:localHref(review.requester?.href)},
@@ -59,7 +60,8 @@ export function openApprovalDialog({review, authorize, execute, decline, result,
         const chosen=durationOptions?.find(([value])=>value===snapshot.duration);
         input.receipt.byline=review.target.name+' · '+(chosen?.[1]||'');
       }
-      return authorize(options);
+      if(kind==='fleet'&&snapshot) input.receipt.name=snapshot.machineName.trim();
+      return authorize(options,snapshot);
     },
     execute,
     decline:decline||(()=>Promise.reject(new Error('Declining is unavailable.'))),
