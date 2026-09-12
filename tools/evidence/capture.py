@@ -38,7 +38,11 @@ MANIFEST_VERSION = 1
 def run_ab(args: list[str], session: str) -> subprocess.CompletedProcess:
     """Run one agent-browser command in the capture's dedicated session."""
     cmd = ["agent-browser", *args, "--session", session]
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    # A capture may drive several named sessions at once ("device-a",
+    # "device-b") while the agent's own browser is open: opt out of the
+    # session shim's one-browser guard for these deliberate parallel runs.
+    env = {**os.environ, "AGENT_BROWSER_ALLOW_MANY": "1"}
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
 
 
 def load_spec(path: Path) -> dict:

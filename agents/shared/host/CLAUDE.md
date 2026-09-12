@@ -74,7 +74,14 @@ agent-browser open https://localhost:8080 --ignore-https-errors
 agent-browser snapshot -i             # interactive elements with refs
 agent-browser screenshot --annotate   # labeled visual screenshot
 agent-browser eval "document.title"   # run JS in page context
+agent-browser close                   # when you are done — each browser is ~1 GB
 ```
+One browser at a time: `open` refuses while another session name is alive.
+Reuse it (`--session <name>`), close the others first (`open --replace`), or
+run alongside on purpose (`open --new`). A browser idle for 15 minutes closes
+itself and you get a task notification saying so; `agent-browser ps` lists
+what is running (including orphaned Chrome no daemon owns) and
+`agent-browser reap` removes it.
 Run `agent-browser --help` for full reference.
 See `agents/shared/dashboard/agent-browser-primer.md` for dashboard-specific patterns.
 

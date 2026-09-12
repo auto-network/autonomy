@@ -42,6 +42,9 @@ def worker_port_base() -> int:
 def _isolate_browser_session():
     """Provide a stable fallback browser session for non-dashboard tests."""
     os.environ.setdefault("AGENT_BROWSER_SESSION", f"pytest-{worker_index()}")
+    # One browser per worker and per dashboard module is deliberate here, so
+    # opt out of the session shim's one-browser-at-a-time guard.
+    os.environ.setdefault("AGENT_BROWSER_ALLOW_MANY", "1")
     yield
 
 

@@ -355,6 +355,9 @@ def _isolate_agent_browser_session():
     # the "late-file load" failures' substrate. Two minutes covers any
     # legitimate between-command gap in a test.
     _os.environ.setdefault("AGENT_BROWSER_IDLE_TIMEOUT_MS", "120000")
+    # Parallel per-module browsers are the design; the session shim's guard
+    # would otherwise refuse the second module's `open`.
+    _os.environ.setdefault("AGENT_BROWSER_ALLOW_MANY", "1")
 
 
 _isolate_agent_browser_session()
