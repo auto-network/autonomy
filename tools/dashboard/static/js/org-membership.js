@@ -129,12 +129,25 @@
     this.mintRole = null;      // the picker's current choice
   }
 
+  // The one shared serializer builds the complete #k=..&t=.. viewer URL from
+  // the canonical URL, the per-link channel public key, and the bearer
+  // (graph://4f9e881c-a9 §3). Returns null when the result is incomplete —
+  // never a bearer-only or key-only URL — so a caller can only ever hand out a
+  // complete invitation.
+  function buildInviteUrl(canonicalUrl, channelPub, bearer) {
+    var util = window.AutonomyInvitationUrl;
+    if (!util) return null;
+    var built = util.build(canonicalUrl, channelPub, bearer);
+    return built.complete ? built.url : null;
+  }
+
   Controller.prototype.inviteLink = function (invite) {
-    // The redeemable link is the canonical URL plus the bearer in the
-    // fragment; the fragment never reaches a server. Null when the bearer
-    // was not retained, which is every invitation minted before it was.
-    if (!invite || !invite.join_url || !invite.bearer) return null;
-    return invite.join_url + '#t=' + invite.bearer;
+    // The redeemable link is the canonical URL plus BOTH fragment values (the
+    // channel key and the retained bearer); the fragment never reaches a
+    // server. Null when either value is absent — an invitation minted before
+    // the bearer was retained, or a legacy keyless link.
+    if (!invite || !invite.join_url) return null;
+    return buildInviteUrl(invite.join_url, invite.channel_pub, invite.bearer);
   };
   Controller.prototype.liveInvites = function () {
     return (this.view.invites || []).filter(function (invite) { return invite.status === 'live'; });
@@ -185,6 +198,11 @@
       // Say so, rather than offering a control that would hand out the URL
       // without it.
       parts.push('Link shown once when created — to send it again, deactivate and invite anew');
+    } else if (!invite.channel_pub) {
+      // Keyless legacy link: the bearer is retained but no per-link channel
+      // key was minted, so a complete secure invitation cannot be built
+      // (graph://4f9e881c-a9 §3). A bearer-only URL is never offered.
+      parts.push('Link predates secure invitations — deactivate and invite anew to send a new one');
     }
     return parts.filter(Boolean).join(' · ');
   };
@@ -445,7 +463,19 @@
   };
 
   Controller.prototype.showOnceHtml = function () {
-    var full = this.mintResult ? this.mintResult.url + '#t=' + this.mintResult.bearer : '';
+    var full = this.mintResult
+      ? buildInviteUrl(this.mintResult.url, this.mintResult.channel_pub, this.mintResult.bearer)
+      : null;
+    if (!full) {
+      // Publication returned no channel key, so no complete secure link can be
+      // built (graph://4f9e881c-a9 §3). Never fall back to a bearer-only URL.
+      return '<div class="mem-section"><div class="mem-panel">'
+        + '<h3>Invitation created</h3>'
+        + '<p class="mem-once">The invitation was signed and published, but a secure link could not be assembled for it. Deactivate it and invite anew to get a shareable link.</p>'
+        + '<div class="mem-panel-actions">'
+        + '<button type="button" class="mem-primary" data-action="finish-mint">Done</button>'
+        + '</div></div></div>';
+    }
     return '<div class="mem-section"><div class="mem-panel">'
       + '<h3>Invitation ready</h3>'
       + '<p>Send this link to the person you are inviting. It contains their secret entry code.</p>'
@@ -654,7 +684,10 @@
     this.root.querySelectorAll('[data-action="copy-once"]').forEach(function (button) {
       button.onclick = function () {
         if (!self.mintResult || !navigator.clipboard) return;
-        navigator.clipboard.writeText(self.mintResult.url + '#t=' + self.mintResult.bearer);
+        var full = buildInviteUrl(
+          self.mintResult.url, self.mintResult.channel_pub, self.mintResult.bearer);
+        if (!full) return;
+        navigator.clipboard.writeText(full);
         var label = self.root.querySelector('[data-once-copy]');
         if (label) label.textContent = 'Link copied';
       };
@@ -997,14 +1030,19 @@
           if (execution && execution.ok === false) {
             throw new Error(execution.error || 'Publishing the invitation link failed.');
           }
-          if (execution && execution.url) return execution.url;
+          if (execution && execution.url) return execution;
           return poll();
         });
       };
       return poll();
-    }).then(function (url) {
-      if (!url) return;
-      self.mintResult = { url: url, bearer: minted.bearer };
+    }).then(function (execution) {
+      if (!execution) return;
+      // The executor returns the CANONICAL url and the minted channel public
+      // key separately; the complete link is built (with the locally minted
+      // bearer) by the shared serializer, never here (graph://4f9e881c-a9 §3).
+      self.mintResult = {
+        url: execution.url, channel_pub: execution.channel_pub, bearer: minted.bearer,
+      };
       self.pendingMint = null;
       self.mintStep = 'show-once';
       self.render();

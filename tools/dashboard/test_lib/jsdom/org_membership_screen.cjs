@@ -6,6 +6,7 @@ const { resolve } = require('node:path');
 const assert = require('node:assert/strict');
 
 const orgSettings = readFileSync(resolve(__dirname, '../../static/js/org-settings.js'), 'utf8');
+const invitationUrl = readFileSync(resolve(__dirname, '../../static/js/invitation-url.js'), 'utf8');
 const membership = readFileSync(resolve(__dirname, '../../static/js/org-membership.js'), 'utf8');
 const settle = () => new Promise((r) => setTimeout(r, 0));
 
@@ -14,6 +15,8 @@ const PERSONA_ME = '7c'.repeat(32);
 const PERSONA_DEAN = '5a'.repeat(32);
 const INVITE_LIVE = 'c5'.repeat(32);
 const BEARER = 'ab'.repeat(32);
+const LIVE_BEARER = '7a'.repeat(32);
+const CHANNEL_PUB = '9a'.repeat(32);
 
 function baseView() {
   return {
@@ -27,7 +30,7 @@ function baseView() {
     ],
     role_defs: [{ name: 'owner', claim_requires: 'self', approver_threshold: 1, scope_set: ['*'] }],
     invites: [
-      { invite_id: INVITE_LIVE, status: 'live', granted_role: 'owner', expiry: Date.now() + 3 * 86400000, sponsor: PERSONA_ME, binding: 'bearer', uses: { max_uses: 5, used: 1, remaining: 4 }, join_url: 'https://auto.network/l/' + '9f'.repeat(16), bearer: '7a'.repeat(32), label: "Dean's invite" },
+      { invite_id: INVITE_LIVE, status: 'live', granted_role: 'owner', expiry: Date.now() + 3 * 86400000, sponsor: PERSONA_ME, binding: 'bearer', uses: { max_uses: 5, used: 1, remaining: 4 }, join_url: 'https://auto.network/l/' + '9f'.repeat(16), bearer: LIVE_BEARER, channel_pub: CHANNEL_PUB, label: "Dean's invite" },
       { invite_id: 'd6'.repeat(32), status: 'claimed', granted_role: 'owner', expiry: Date.now() - 86400000, sponsor: PERSONA_ME, binding: 'key', uses: { max_uses: 1, used: 1, remaining: 0 }, join_url: null, label: null },
       { invite_id: 'e7'.repeat(32), status: 'expired', granted_role: 'owner', expiry: Date.now() - 2 * 86400000, sponsor: PERSONA_ME, binding: 'bearer', uses: { max_uses: 1, used: 0, remaining: 1 }, join_url: null, label: null },
     ],
@@ -53,7 +56,7 @@ async function mount(view) {
     }
     throw new Error('unexpected fetch ' + url);
   };
-  for (const source of [orgSettings, membership]) {
+  for (const source of [orgSettings, invitationUrl, membership]) {
     const s = w.document.createElement('script');
     s.textContent = source;
     w.document.head.appendChild(s);
@@ -100,14 +103,31 @@ async function main() {
   assert.equal(pane().querySelectorAll('[data-invite]').length, 1);
   assert.match(text(), /Dean's invite/);
   assert.match(text(), /Owner · Expires in 3 days · 1 of 5 used/);
-  // Share and copy are offered ONLY when the bearer was retained, because
-  // the redeemable link is the stored URL plus that bearer
-  // (graph://e75ebdde-6df). This fixture's live invite carries one.
+  // Share and copy are offered ONLY when BOTH fragment values are present —
+  // the channel key and the retained bearer (graph://4f9e881c-a9 §3,
+  // graph://e75ebdde-6df). This fixture's live invite carries both.
   assert.ok(pane().querySelector('[data-action="share"]'));
   assert.ok(pane().querySelector('[data-action="copy"]'));
   assert.ok(!/Link shown once when created/.test(text()),
     'a retained bearer means the link is re-renderable, so do not say otherwise');
+  assert.ok(!/predates secure invitations/.test(text()),
+    'a channel key is present, so the link is not a legacy keyless one');
   assert.ok(pane().querySelector('[data-action="deactivate"]'));
+
+  // The complete redeemable link carries BOTH independent fragment values:
+  // #k=<channel key>&t=<bearer>, built by the one shared serializer.
+  const built = w.AutonomyInvitationUrl.build(
+    'https://auto.network/l/' + '9f'.repeat(16), CHANNEL_PUB, LIVE_BEARER);
+  assert.ok(built.complete, 'both values present builds a complete URL');
+  assert.match(built.url, /#k=[^&]+&t=/);
+  assert.ok(built.url.endsWith('&t=' + LIVE_BEARER));
+  // Missing either value is never handed out as a usable link.
+  assert.equal(
+    w.AutonomyInvitationUrl.build('https://auto.network/l/x', null, LIVE_BEARER).url,
+    null, 'a keyless link is incomplete, never bearer-only');
+  assert.equal(
+    w.AutonomyInvitationUrl.build('https://auto.network/l/x', CHANNEL_PUB, null).url,
+    null, 'a bearer-less link is incomplete');
 
   // Deactivate needs a confirm step before any ceremony.
   pane().querySelector('[data-action="deactivate"]').click();
@@ -162,6 +182,29 @@ async function main() {
   await settle();
   assert.equal(w.document.querySelector('.mem-tabs .on').textContent, 'Members2');
   assert.equal(pane().querySelectorAll('[data-member]').length, 2);
+
+  // ── a legacy keyless live invite: no usable link, honest explanation ──
+  {
+    const legacy = baseView();
+    legacy.pending_claims = [];
+    legacy.invites = [{
+      invite_id: INVITE_LIVE, status: 'live', granted_role: 'owner',
+      expiry: Date.now() + 3 * 86400000, sponsor: PERSONA_ME, binding: 'bearer',
+      uses: { max_uses: 1, used: 0, remaining: 1 },
+      join_url: 'https://auto.network/l/' + '9f'.repeat(16),
+      bearer: LIVE_BEARER, channel_pub: null, label: 'Old invite',
+    }];
+    const mounted = await mount(legacy);
+    const lp = mounted.w.document.querySelector('.org-membership');
+    mounted.w.document.querySelector('[data-tab="invites"]').click();
+    await settle();
+    assert.ok(!lp.querySelector('[data-action="copy"]'),
+      'a keyless link offers no copy control');
+    assert.ok(!lp.querySelector('[data-action="share"]'),
+      'a keyless link offers no share control');
+    assert.match(lp.textContent, /predates secure invitations/);
+    assert.ok(lp.querySelector('[data-action="deactivate"]'));
+  }
 
   // ── members-only org: no requests, opens on Members, badge silent ──
   {
