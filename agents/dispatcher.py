@@ -45,10 +45,12 @@ import re
 
 from agents.dispatch_db import (
     init_db, insert_run, insert_launch_run, update_live_stats,
-    get_currently_running, get_consecutive_failures,
+    get_currently_running, get_consecutive_failures, get_runs_for_bead,
     set_dispatcher_paused, is_paused as db_is_paused, get_pause_reason,
 )
-from agents.git_status import working_tree_clean_and_summary
+from agents.git_status import (
+    working_tree_clean_and_summary, has_working_tree_changes,
+)
 from agents.librarian_db import enqueue as enqueue_job, dequeue, complete_job, fail_job
 from agents.workspace_manager import WORKTREES_DIR, cleanup_session_worktrees
 from agents.workspace_settings import WorkspaceV1, load_workspaces
@@ -1247,6 +1249,112 @@ def cleanup_worktree(worktree_path: str) -> None:
             )
 
 
+# Cap on how many consecutive retries may PRESERVE a bead's dirty worktree
+# before it is torn down. A perpetually-failing/timing-out bead would
+# otherwise hold an ever-growing uncommitted tree forever (auto-cpxdp). Set
+# above the agent-failure circuit breaker (3) so it only backstops the loops
+# the circuit breaker misses — chiefly repeated TIMEOUTs, which
+# ``get_consecutive_failures`` does not count.
+MAX_PRESERVE_RETRIES = 6
+
+
+def _bead_preserve_retry_count(bead_id: str) -> int:
+    """Length of the bead's current non-DONE dispatch streak.
+
+    Counts completed dispatch runs since the most recent DONE (RUNNING rows
+    skipped). Used to cap how long a failing bead may keep a PRESERVED dirty
+    worktree. Best-effort: any error returns 0 (favor preservation).
+    """
+    if not bead_id:
+        return 0
+    try:
+        runs = get_runs_for_bead(bead_id)
+    except Exception:
+        return 0
+    count = 0
+    for run in runs:  # most recent first
+        status = run.get("status")
+        if status == "DONE":
+            break
+        if status == "RUNNING":
+            continue
+        count += 1
+    return count
+
+
+def resolve_bead_worktree(worktree_path: str, status: str,
+                          bead_id: str = "") -> None:
+    """Tear down or PRESERVE a bead-dispatch worktree based on the outcome.
+
+    Terminal DONE (a landed merge) tears the worktree down as before. Every
+    RETRYABLE outcome — no-decision FAILED, TIMEOUT, BLOCKED, MERGE_FAILED —
+    PRESERVES it (auto-cpxdp): the worktree lives on the persistent host
+    bind-mount, and ``launch.sh``'s reuse path re-enters the SAME worktree on
+    the next dispatch with any uncommitted work intact, instead of discarding
+    it into a fresh branch_base checkout. Preservation costs nothing until the
+    bead completes DONE (removed here) or is reaped — by age at startup
+    (``reconcile_state``), by the circuit breaker when a bead is blocked, or
+    by the retry cap below when a bead never lands.
+    """
+    if status == "DONE":
+        cleanup_worktree(worktree_path)
+        return
+    if not worktree_path or not Path(worktree_path).exists():
+        return
+    retries = _bead_preserve_retry_count(bead_id)
+    if retries >= MAX_PRESERVE_RETRIES:
+        logger.warning(
+            "workspace preserve: bead %s hit retry cap (%d preserved "
+            "retries) — removing worktree %s so it does not accumulate a "
+            "dirty tree forever",
+            bead_id, retries, worktree_path,
+        )
+        cleanup_worktree(worktree_path)
+        return
+    logger.info(
+        "workspace preserve: KEPT %s  status=%s bead=%s retries=%d "
+        "(uncommitted work survives for the next dispatch to reuse)",
+        worktree_path, status, bead_id, retries,
+    )
+
+
+def _bead_is_closed(bead_id: str) -> bool:
+    """Best-effort: True if the bead is terminal (closed/done).
+
+    A PRESERVED dirty worktree whose bead is terminal is genuinely abandoned
+    and may be reaped. Unknown state or any error returns False so the tree is
+    kept (favor preservation over accidental loss).
+    """
+    if not bead_id:
+        return False
+    try:
+        out = run_bd(["show", bead_id, "--json"])
+        if not out:
+            return False
+        row = json.loads(out)
+        if isinstance(row, list):
+            row = row[0] if row else {}
+        return (row or {}).get("status", "") in ("closed", "done")
+    except Exception:
+        return False
+
+
+def _reap_blocked_bead_worktree(bead_id: str) -> None:
+    """Remove a bead's PRESERVED worktree once the circuit breaker blocks it.
+
+    A blocked bead is no longer dispatch-eligible, so a worktree preserved
+    from an earlier interrupted run would linger indefinitely. Best-effort.
+    """
+    try:
+        wt = find_worktree_for_bead(bead_id)
+        if wt and Path(wt).exists():
+            print(f"  reaping preserved worktree for blocked bead {bead_id}: {wt}")
+            cleanup_worktree(wt)
+    except Exception as e:
+        print(f"  WARNING: reap worktree failed for {bead_id}: {e}",
+              file=sys.stderr)
+
+
 def find_worktree_for_bead(bead_id: str) -> str:
     """Find the most recent worktree path for a bead, if one exists."""
     worktrees_dir = REPO_ROOT / ".worktrees"
@@ -1367,7 +1475,9 @@ def process_decision(dispatch_result: DispatchResult) -> str:
     if decision is None:
         print(f"  No decision file from {bead_id} (exit code {dispatch_result.exit_code})")
         release_bead(bead_id, "FAILED", f"No decision file. Exit code: {dispatch_result.exit_code}")
-        cleanup_worktree(dispatch_result.worktree_path)
+        # Retryable: the bead is reopened. PRESERVE the worktree so the retry
+        # inherits any uncommitted work from this interrupted run (auto-cpxdp).
+        resolve_bead_worktree(dispatch_result.worktree_path, "FAILED", bead_id)
         return "FAILED"
 
     status = decision.get("status", "FAILED")
@@ -1558,8 +1668,11 @@ def process_decision(dispatch_result: DispatchResult) -> str:
         run_bd(["set-state", bead_id, "readiness=blocked",
                 "--reason", "Stash pop conflict — host working tree needs cleanup"])
 
-    # Clean up worktree (branch persists for review)
-    cleanup_worktree(dispatch_result.worktree_path)
+    # Resolve the worktree by outcome: DONE tears it down (branch persists for
+    # review, then is deleted below); every retryable outcome PRESERVES it so
+    # the next dispatch reuses the same tree with uncommitted work intact
+    # (auto-cpxdp).
+    resolve_bead_worktree(dispatch_result.worktree_path, status, bead_id)
 
     # Delete branch if it was merged successfully
     if status == "DONE" and dispatch_result.branch:
@@ -2598,7 +2711,8 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
             _record_run(agent, DispatchResult(
                 bead_id=agent.bead_id, exit_code=exit_code, error=error_msg),
                 effective_status="FAILED")
-            cleanup_worktree(agent.worktree_path)
+            # Retryable: PRESERVE the worktree for the reopened bead (auto-cpxdp).
+            resolve_bead_worktree(agent.worktree_path, "FAILED", agent.bead_id)
             continue
 
         # ── Phase 2: post-decision. ``process_decision`` has already
@@ -2657,7 +2771,9 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
                 result.reason = timeout_reason
                 _notify_dispatch_nag(agent, "TIMEOUT", result)
                 _record_run(agent, result, effective_status="TIMEOUT")
-                cleanup_worktree(agent.worktree_path)
+                # Retryable: PRESERVE the worktree so the retry inherits any
+                # uncommitted work from the timed-out run (auto-cpxdp).
+                resolve_bead_worktree(agent.worktree_path, "TIMEOUT", agent.bead_id)
         except Exception as e:
             error_msg = f"Timeout collection error: {type(e).__name__}: {e}"
             print(f"  ERROR collecting timed-out {agent.bead_id}: {error_msg}")
@@ -2669,7 +2785,8 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
                 bead_id=agent.bead_id, exit_code=-1, error=error_msg,
                 reason=timeout_reason),
                 effective_status="TIMEOUT")
-            cleanup_worktree(agent.worktree_path)
+            # Retryable: PRESERVE the worktree for the reopened bead (auto-cpxdp).
+            resolve_bead_worktree(agent.worktree_path, "TIMEOUT", agent.bead_id)
 
 
 def poll_and_collect_librarians(running_librarians: list[RunningLibrarian]) -> None:
@@ -3206,6 +3323,9 @@ def dispatch_cycle(
             run_bd(["set-state", bead_id, "readiness=blocked",
                     "--reason", "Circuit breaker: 3 consecutive failures "
                     "— needs human review"])
+            # Blocked beads won't be re-dispatched — reap any PRESERVED
+            # worktree so it doesn't linger (auto-cpxdp).
+            _reap_blocked_bead_worktree(bead_id)
             continue
         if merge_fails >= 5:
             print(f"  Circuit breaker: {bead_id} has {merge_fails} consecutive "
@@ -3213,6 +3333,7 @@ def dispatch_cycle(
             run_bd(["set-state", bead_id, "readiness=blocked",
                     "--reason", "Circuit breaker: 5 consecutive merge failures "
                     "— needs human review"])
+            _reap_blocked_bead_worktree(bead_id)
             continue
 
         if config.dry_run:
@@ -3751,6 +3872,27 @@ def reconcile_state(running: list[RunningAgent]) -> None:
             except (subprocess.TimeoutExpired, FileNotFoundError) as e:
                 print(f"  WARNING: reconcile: error checking worktree {name}: {e}, "
                       f"leaving it")
+                continue
+
+            # auto-cpxdp: a worktree with UNCOMMITTED changes for a still-open
+            # bead is a PRESERVED interrupted run — the dispatcher deliberately
+            # kept it so the next dispatch reuses the dirty tree. Do NOT reap it
+            # here (this path historically removed any worktree with no new
+            # commits, which would silently discard the preserved work). Only
+            # reap it once the bead is terminal (closed/done) — then it is
+            # genuinely abandoned.
+            try:
+                if has_working_tree_changes(Path(str(worktree))):
+                    if _bead_is_closed(bead_id):
+                        print(f"  reconcile: reaping dirty worktree {name} "
+                              f"(bead {bead_id} closed/abandoned)")
+                    else:
+                        print(f"  reconcile: preserving dirty worktree {name} "
+                              f"(uncommitted work for open bead {bead_id})")
+                        continue
+            except Exception as e:
+                print(f"  WARNING: reconcile: dirty-check failed for {name}: "
+                      f"{e}, leaving it")
                 continue
 
             # Get branch_base from the most recent output dir for this bead
