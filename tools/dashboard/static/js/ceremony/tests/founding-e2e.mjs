@@ -11,8 +11,7 @@
 import { readFile } from 'node:fs/promises';
 
 import {
-  buildFoundingBatch,
-  generateSealedOrgRoot,
+  foundExistingOrganizationShell,
 } from '../founding.js';
 import { hexToBytes } from '../primitives.js';
 
@@ -35,6 +34,12 @@ async function call(route, body) {
   return text ? JSON.parse(text) : null;
 }
 
+async function trackedFetch(route, options) {
+  const response = await fetch(new URL(route, base), options);
+  wire.push({ route, sent: options.body || '', status: response.status });
+  return response;
+}
+
 const personalRootSeed = hexToBytes(fixture.personal_root_seed_hex);
 
 // 1 — the shell. This is what mints the stable id genesis must bind.
@@ -44,32 +49,22 @@ const shell = await call('/api/orgs', {
   identity: { name: fixture.org, type: 'shared' },
 });
 
-// 2 — mint the organization root here, seal it to this owner, submit sealed.
-const { rootPub, rootSigningKey, sealedOrgKey } = await generateSealedOrgRoot({
-  personalRootSeed,
-});
-await call('/api/network/org-key/sealed', { org: fixture.org, ...sealedOrgKey });
-
-// 3 — sign the four constitutional events and fold them.
-const batch = await buildFoundingBatch({
-  orgId: shell.org.id,
-  rootPub,
-  rootSigningKey,
-  personalRootSeed,
-  now: fixture.now,
-});
-const folded = await call('/api/network/ledger/found', {
+// 2 + 3 — the shared production sequence: unlock, seal, store, and found.
+const founded = await foundExistingOrganizationShell({
   org: fixture.org,
-  events: batch.wires,
+  orgId: shell.org.id,
+  openRoot: async () => ({ seed: personalRootSeed }),
+  transport: { fetch: trackedFetch },
+  now: fixture.now,
 });
 
 process.stdout.write(JSON.stringify({
   org_id: shell.org.id,
   founded_flag: shell.founded,
-  root_pub: rootPub,
-  sealed_org_key: sealedOrgKey,
-  genesis_id: batch.genesisId,
-  founder_persona_pub: batch.founderPersonaPub,
-  event_ids: folded.event_ids,
+  root_pub: founded.rootPub,
+  sealed_org_key: founded.sealedOrgKey,
+  genesis_id: founded.genesisId,
+  founder_persona_pub: founded.founderPersonaPub,
+  event_ids: founded.server.event_ids,
   wire,
 }));

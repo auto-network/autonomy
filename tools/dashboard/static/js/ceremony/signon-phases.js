@@ -18,13 +18,18 @@ export async function fetchPreparation(fetchImpl = fetch) {
   return body;
 }
 
-export async function prepareSignon(rootSeed, encrypted, signon) {
+export async function openPreparation(rootSeed, encrypted) {
   const audited = await deriveAuditedRecipient(rootSeed);
   const raw = await openWithEncapsulationPrivateKey(hexToBytes(encrypted.sealed),
     audited.privateKeyHex, PURPOSE);
   let inputs;
   try { inputs = JSON.parse(new TextDecoder().decode(raw)); }
   finally { raw.fill(0); }
+  return { audited, inputs };
+}
+
+export async function prepareSignon(rootSeed, encrypted, signon) {
+  const { audited, inputs } = await openPreparation(rootSeed, encrypted);
   // These failures describe unavailable maintenance inputs, not failed
   // authentication. Keep them local until phase 3 can report them safely.
   const failures = [];
