@@ -676,6 +676,8 @@ def _parse_avatar_multipart(content_type: str, body: bytes):
         raise ValueError("invalid multipart form")
     avatar_bytes: bytes | None = None
     crop_text: str | None = None
+    avatar_parts = 0
+    crop_parts = 0
     for part in message.iter_parts():
         if part.get_content_disposition() != "form-data":
             continue
@@ -684,8 +686,14 @@ def _parse_avatar_multipart(content_type: str, body: bytes):
             continue
         content = part.get_payload(decode=True) or b""
         if str(name) == "avatar" and part.get_filename() is not None:
+            avatar_parts += 1
+            if avatar_parts > 1:
+                raise ValueError("duplicate avatar part")
             avatar_bytes = content
         elif str(name) == "crop":
+            crop_parts += 1
+            if crop_parts > 1:
+                raise ValueError("duplicate crop part")
             charset = part.get_content_charset() or "utf-8"
             try:
                 crop_text = content.decode(charset)
