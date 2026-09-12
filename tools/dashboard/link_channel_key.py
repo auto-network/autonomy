@@ -13,9 +13,10 @@ viewer verifies the serving handshake against the fragment key. Custody
 narrows to a chartered subgroup (graph://fe4499fa-0e9) by re-sealing the
 vault object — nothing here changes for that.
 
-org:join and fleet:* links are OUT of scope: their fragments already carry
-invitation bearer material and their viewers speak the join-bridge protocol,
-not the share-link handshake.
+``org:join`` links use the same channel keypair in addition to their independent
+invitation bearer: the channel key authenticates the serving endpoint, while
+the bearer only authorizes a request to join. ``fleet:*`` links remain out of
+scope because they use their own enrollment protocol.
 """
 
 from __future__ import annotations
@@ -32,9 +33,11 @@ from tools.network.idkit import KeyPair
 
 logger = logging.getLogger("dashboard.link_channel_key")
 
-#: Target types whose links carry a channel keypair. Everything content-like;
-#: membership links keep their own fragment semantics.
-CHANNEL_KEY_TARGET_TYPES = frozenset({"design", "file", "mission", "note", "present"})
+#: Target types whose links carry a channel keypair. ``org:join`` retains its
+#: separate bearer alongside this key; the two values serve different powers.
+CHANNEL_KEY_TARGET_TYPES = frozenset(
+    {"design", "file", "mission", "note", "org:join", "present"}
+)
 
 #: Target types whose backing store is MACHINE-LOCAL, not the fleet-synced
 #: org graph (auto-nh1po, graph://96a4aa40-1c9): ``design``/``present`` read

@@ -654,7 +654,8 @@ keys:
       Seed lives in autonomy.network.link-channel-key; channel_pub is on the
       grant and projected into copied URL fragments. Dashboard opens it per
       viewer OPEN and gives only this key to the connector, never the org KEM.
-      Content failures close the channel; invitations use separate semantics.
+      Content failures close the channel. Organization invitations use this
+      same endpoint-authentication key alongside a separate claim bearer.
 
   serving_machine_signing_key:
     group: fleet

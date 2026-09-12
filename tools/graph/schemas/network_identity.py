@@ -760,10 +760,11 @@ class NetworkLinkGrantV5(NetworkLinkGrantV4):
     here in the clear rather than vaulted: the organization can re-render a
     working link instead of losing it after one showing.
 
-    Only ``org:join`` grants carry it — those links have no channel keypair
-    (``CHANNEL_KEY_TARGET_TYPES`` excludes them), so the bearer is the only
-    secret in their fragment. A row without one is a link minted before this
-    revision: it keeps working and simply cannot be re-rendered.
+    Only ``org:join`` grants carry it. Invitations also carry the independent
+    per-link channel public key: the channel key authenticates the serving
+    endpoint, while this bearer buys only the right to ask to join. A row
+    without a retained bearer is a link minted before this revision: it keeps
+    working and simply cannot be re-rendered.
     """
 
     set_id = NETWORK_LINK_GRANT_SET_ID

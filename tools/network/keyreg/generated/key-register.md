@@ -423,7 +423,7 @@ Custody describes intended storage; read each snapshot's stated conditions separ
 - **bound** One link keypair and fragment trust anchor.
 - **code** `tools/dashboard/link_channel_key.py:mint_channel_key` · `tools/dashboard/link_channel_key.py:channel_key_for` · `tools/dashboard/connector_key_resolution.py`
 - **crib** §8
-- **notes** graph://807b4e11-3e9. Random Ed25519 minted at publication, not sign-in. Seed lives in autonomy.network.link-channel-key; channel_pub is on the grant and projected into copied URL fragments. Dashboard opens it per viewer OPEN and gives only this key to the connector, never the org KEM. Content failures close the channel; invitations use separate semantics.
+- **notes** graph://807b4e11-3e9. Random Ed25519 minted at publication, not sign-in. Seed lives in autonomy.network.link-channel-key; channel_pub is on the grant and projected into copied URL fragments. Dashboard opens it per viewer OPEN and gives only this key to the connector, never the org KEM. Content failures close the channel. Organization invitations use this same endpoint-authentication key alongside a separate claim bearer.
 
 <a id="key-serving_delegate_key"></a>
 ### serving_delegate_key — signing, disk (No content decryption; retained serving child has bounded certificate scopes enforced by its relying parties.)
