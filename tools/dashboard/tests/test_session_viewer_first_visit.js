@@ -423,6 +423,8 @@ describe('session viewer first-visit head/tail inversion (auto-cq7yd)', () => {
                 target_session: 'auto-test',
                 rel_path: '.uploads/a.png',
                 filename: 'a.png',
+                alt: 'Shared screenshot',
+                caption: 'Shared through the API',
                 mime: 'image/png',
                 size: 10,
                 timestamp: '2026-01-01T09:30:00Z',
@@ -457,6 +459,8 @@ describe('session viewer first-visit head/tail inversion (auto-cq7yd)', () => {
     assert.equal(store.entries.length, 2);
     assert.equal(store.localEntries.length, 2);
     assert.equal(store.localEntries[0].rel_path, '.uploads/a.png');
+    assert.equal(store.localEntries[0].alt, 'Shared screenshot');
+    assert.equal(store.localEntries[0].caption, 'Shared through the API');
     assert.equal(store.localEntries[1].rel_path, '.uploads/b.png');
     assert.equal(store._pendingAttachments.length, 0);
     assert.equal(store._structureRev, store._mergeRev,

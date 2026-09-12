@@ -2159,6 +2159,8 @@
           mime: p.mime,
           size: p.size,
           session: p.target_session,
+          alt: p.alt || '',
+          caption: p.caption || '',
         };
       },
 

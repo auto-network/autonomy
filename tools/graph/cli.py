@@ -5701,9 +5701,7 @@ def _resolve_share_output_root() -> Path | None:
 
 
 def cmd_share(args):
-    """Copy a file into ``<output_root>/.attachments/<ts>-<sha8>/`` and emit
-    a typed ``viewer_attachment`` event so the session viewer renders it as
-    a thumbnail tile bound to the current turn.
+    """Copy a file and register its existing attachment tile through the API.
 
     ``output_root`` is resolved by :func:`_resolve_share_output_root`:
     container sessions use the bind-mounted ``/workspace/output``; host
@@ -5712,12 +5710,8 @@ def cmd_share(args):
     ``/api/session/<tmux>/output/<rel_path>``; the JSON payload only carries
     the relative path so the viewer can resolve it through that route.
 
-    Security note: the payload **does not** include a session identifier.
-    The session that owns the entry is stamped by ``SessionMonitor`` after
-    parsing, sourced from the trusted JSONL stream the entry came from.
-    Letting agents claim a session in their own tool_result content would
-    create a cross-session read primitive (confused-deputy via the serve
-    route).
+    The API derives the session from the bearer, as turn corrections do.
+    stdout is only a receipt; discarding it does not affect delivery.
     """
     import hashlib
     import mimetypes
@@ -5764,23 +5758,41 @@ def cmd_share(args):
     if not mime:
         mime = "application/octet-stream"
 
-    # No "session" field — see docstring. The harness pins it from the
-    # trusted JSONL-stream identity, not from anything we print here.
+    # Same authenticated delivery as turn-correction suggest. No transcript
+    # discriminator: the persisted upload subscription renders the tile.
     payload = {
-        "type": "viewer_attachment",
-        "version": 1,
         "rel_path": rel_path,
         "filename": src.name,
         "mime": mime,
         "size": size,
-        "sha8": sha8,
     }
     if args.alt:
         payload["alt"] = args.alt
     if args.caption:
         payload["caption"] = args.caption
 
-    print(json.dumps(payload))
+    import ssl
+    import urllib.error
+    import urllib.request
+
+    token = _resolve_crosstalk_token()
+    api_base = os.environ.get("GRAPH_API", "https://localhost:8080")
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    req = urllib.request.Request(
+        f"{api_base}/api/session/share",
+        data=json.dumps(payload).encode(), method="POST",
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {token}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+            resp.read()
+    except (urllib.error.URLError, OSError) as exc:
+        print(f"share: registration failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+    print(f"  ✓ Shared {src.name}")
 
 
 def main():
@@ -6665,7 +6677,7 @@ def main():
     p_sauth.set_defaults(func=cmd_session_auth)
 
     # share — copy a file to /workspace/output/.attachments/<ts>-<sha8>/ and
-    # emit a viewer_attachment tile bound to the current turn.
+    # register the tile through the authenticated API.
     p_share = sub.add_parser(
         "share",
         help="Share a file (image/etc) into the session viewer as a tile",
