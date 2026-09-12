@@ -104,25 +104,46 @@ def checkout(tmp_path):
     return command.WorktreeTarget(tmp_path, "auto-test", "autonomy", _row()), git
 
 
-def test_sync_reports_fast_forward_distance_without_requesting_rebase(checkout, monkeypatch, capsys):
+def test_sync_fast_forwards_checkout_without_requesting_rebase(checkout, monkeypatch, capsys):
     target, git = checkout
     git("checkout", "master")
     for i in range(3):
         git("commit", "--allow-empty", "-m", f"update {i}")
     git("checkout", "session/test")
-    before = git("rev-parse", "HEAD")
+    target_head = git("rev-parse", "master")
     monkeypatch.setattr(command, "_resolve_target", lambda _: target)
-    monkeypatch.setattr(command, "_api_request", lambda *_: {
+    monkeypatch.setattr(command, "_api_request", lambda method, path: {
         "state": _row(commits_ahead=0, rebase_required=False),
-    })
+    } if path.endswith("sync-base") else _row())
     command.cmd_worktree_sync(SimpleNamespace(path="."))
     out = capsys.readouterr().out
-    assert "Sync INCOMPLETE" in out
-    assert "0 commit(s) ahead, 3 behind local master" in out
-    assert "needs fast-forward (no rebase needed)" in out
+    assert "Sync COMPLETE — your checked-out code was updated." in out
+    assert "Fast-forward: performed" in out
+    assert "0 commit(s) ahead, 0 behind local master" in out
     assert "Rebase:   not performed" in out
-    assert "Current:  NO" in out
-    assert git("rev-parse", "HEAD") == before
+    assert "Current:  YES" in out
+    assert git("rev-parse", "HEAD") == target_head
+
+
+def test_sync_fast_forwards_locally_but_reports_stale_host_separately(
+    checkout, monkeypatch, capsys,
+):
+    target, git = checkout
+    git("checkout", "master")
+    git("commit", "--allow-empty", "-m", "known local update")
+    target_head = git("rev-parse", "master")
+    git("checkout", "session/test")
+    monkeypatch.setattr(command, "_resolve_target", lambda _: target)
+    monkeypatch.setattr(command, "_api_request", lambda method, path: {
+        "state": _row(commits_ahead=0, rebase_required=False, clone_stale=True),
+    } if path.endswith("sync-base") else _row(clone_stale=True))
+
+    command.cmd_worktree_sync(SimpleNamespace(path="."))
+    out = capsys.readouterr().out
+    assert "Sync COMPLETE — your checked-out code was updated." in out
+    assert "Host confirmation INCOMPLETE" in out
+    assert "Current:  NOT CONFIRMED against the host" in out
+    assert git("rev-parse", "HEAD") == target_head
 
 
 @pytest.mark.parametrize("ahead,behind,stale,expected", [

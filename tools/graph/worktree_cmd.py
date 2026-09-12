@@ -212,19 +212,38 @@ def _sync_and_rebase(target: WorktreeTarget) -> dict:
         raise WorktreeCommandError("dashboard returned an invalid sync result")
     row = response["state"]
     rebased = False
-    if row.get("rebase_required"):
+    fast_forwarded = False
+    target_branch = str(row.get("target_branch") or "").strip()
+    if not target_branch:
+        raise WorktreeCommandError("dashboard did not report a target branch")
+
+    # The dashboard's rebase_required flag correctly stays false when this
+    # branch has no commits of its own and is merely behind the local target.
+    # That is still actionable sync work: update the checkout with a true
+    # fast-forward instead of reporting the distance and leaving it behind.
+    ahead, behind = map(int, _git(
+        target.root, "rev-list", "--left-right", "--count",
+        f"HEAD...{target_branch}",
+    ).split())
+    if behind and not ahead:
+        if _git(target.root, "status", "--porcelain"):
+            raise WorktreeCommandError(
+                "base advanced, but this worktree is dirty; commit or stash before fast-forwarding"
+            )
+        _git(target.root, "merge", "--ff-only", target_branch)
+        fast_forwarded = True
+        row = _refresh(target)
+    elif row.get("rebase_required"):
         if _git(target.root, "status", "--porcelain"):
             raise WorktreeCommandError(
                 "base advanced, but this worktree is dirty; commit or stash before rebasing"
             )
-        target_branch = str(row.get("target_branch") or "").strip()
-        if not target_branch:
-            raise WorktreeCommandError("dashboard did not report a target branch")
         _git(target.root, "rebase", target_branch)
         rebased = True
         row = _refresh(target)
     row["sync_before"] = before
     row["sync_rebased"] = rebased
+    row["sync_fast_forwarded"] = fast_forwarded
     return row
 
 
@@ -246,12 +265,15 @@ def cmd_worktree_status(args) -> None:
 def cmd_worktree_sync(args) -> None:
     def _action(target: WorktreeTarget) -> None:
         row = _checkout_state(target, _sync_and_rebase(target))
-        if row["commits_behind"] or row.get("clone_stale") is not False:
-            print("Sync INCOMPLETE — checkout is not confirmed current with the host.")
+        if row["commits_behind"]:
+            print("Local sync INCOMPLETE — checkout was not updated to the local target.")
         elif row["sync_before"] != row["checkout_commit"]:
             print("Sync COMPLETE — your checked-out code was updated.")
         else:
             print("Sync COMPLETE — your checkout was already current; no commit update was needed.")
+        if row.get("clone_stale") is not False:
+            print("Host confirmation INCOMPLETE — local target is not confirmed current with the host.")
+        print(f"Fast-forward: {'performed' if row['sync_fast_forwarded'] else 'not needed'}")
         print(f"Rebase:   {'performed' if row['sync_rebased'] else 'not performed'}")
         _print_status(target, row)
 
