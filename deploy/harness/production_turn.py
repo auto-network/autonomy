@@ -32,7 +32,7 @@ from pathlib import Path
 from tools.network.idkit import canonical_json
 from tools.network.relaykit.aiortc_initiator import NativeIceChannel, upgrade_via_ice
 from tools.network.relaykit.channel import open_stream_frame
-from tools.network.relaykit.viewer import ViewerChannel
+from tools.network.relaykit.viewer import CertificateViewerChannel
 
 
 class ProductionTurnError(RuntimeError):
@@ -306,7 +306,7 @@ class ProductionTurnHarness:
 
     async def _upgrade(self, node: _Node) -> NativeIceChannel:
         state = node.state
-        signal = await ViewerChannel.connect(
+        signal = await CertificateViewerChannel.connect(
             self.config.relay_url,
             state["token"],
             root_pub=state["root_pub"],

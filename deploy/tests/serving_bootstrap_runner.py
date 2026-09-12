@@ -20,7 +20,6 @@ import socket
 import subprocess
 import sys
 import time
-import urllib.parse
 from pathlib import Path
 
 TMP = Path(sys.argv[1]).resolve()
@@ -85,7 +84,13 @@ try:
 
     from deploy.harness import fixture_ops
 
-    claim_token = secrets.token_hex(16)
+    keycache = TMP / "keycache"
+    keycache.mkdir(exist_ok=True)
+    os.environ["AUTONOMY_KEYCACHE_MOUNT"] = str(keycache)
+    from tools.network.storagekit import memory_cache
+    memory_cache.assert_memory_backed = lambda *_args, **_kwargs: None
+
+    claim_token = secrets.token_hex(32)
     join_channel_token = secrets.token_hex(16)
     found = fixture_ops.found_node({
         "org": "demo",
@@ -122,15 +127,25 @@ try:
 
     # The post-restart production path: dashboard-startup reconciliation.
     from tools.dashboard import link_serving_supervisor
-    link_serving_supervisor.bootstrap()
+    supervisor = link_serving_supervisor.bootstrap(orgs=[])
+    reconcile = supervisor.ensure("demo")
 
     from tools.init.join import ViewerJoinTransport
-    from tools.network.invitation import invitation_from_join_url
+    from tools.network.invitation import (
+        build_invitation_join_url,
+        invitation_from_join_url,
+    )
+    complete_join = build_invitation_join_url(
+        canonical_url=seeded["join_url"],
+        channel_pub_hex=found["join_channel_pub"],
+        bearer=claim_token,
+    )
+    if not complete_join.complete or complete_join.url is None:
+        sys.exit(f"fixture invitation incomplete: {complete_join.reason}")
     invitation = invitation_from_join_url(
-        org=found["org_uuid"], root_pub=found["root_pub"],
+        org=found["org_uuid"],
         invite_ref=found["invite_ref"],
-        join_url=seeded["join_url"] + "#t="
-        + urllib.parse.quote(claim_token, safe=""),
+        join_url=complete_join.url,
     )
     reply, last = None, None
     deadline = time.time() + 25
@@ -146,6 +161,7 @@ try:
 
     ok = isinstance(reply, dict) and reply.get("status") == "ok"
     if not ok:
+        print("── serving reconcile:", json.dumps(reconcile, sort_keys=True))
         for log in sorted((TMP / "data" / "network").glob("*.log")):
             print(f"── connector log {log.name}:\n{log.read_text()[-3000:]}")
         print(f"── last transport error: {last}")

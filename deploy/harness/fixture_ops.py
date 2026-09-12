@@ -14,11 +14,14 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.cookiejar
 import json
 import os
 import stat
 import sys
 import time
+import urllib.error
+import urllib.request
 import uuid
 from pathlib import Path
 
@@ -93,13 +96,15 @@ def _put_local_grant(
     target_type: str,
     subject_id: str,
     invite_ref: str | None = None,
-) -> None:
+) -> str:
+    from tools.dashboard.link_channel_key import mint_channel_key
     from tools.graph import settings_ops
     from tools.graph.schemas.network_identity import (
         NETWORK_LINK_GRANT_REVISION,
         NETWORK_LINK_GRANT_SET_ID,
     )
 
+    channel_pub = mint_channel_key(token, org)
     payload = {
         "token": token,
         "url": f"https://relay.harness.invalid/l/{token}",
@@ -108,6 +113,7 @@ def _put_local_grant(
         "meta": {},
         "subject": {"kind": "operator", "id": subject_id},
         "issued_at": time.strftime(ISO, time.gmtime()),
+        "channel_pub": channel_pub,
     }
     if invite_ref is not None:
         payload["invite_ref"] = invite_ref
@@ -118,6 +124,7 @@ def _put_local_grant(
         payload,
         org=org,
     )
+    return channel_pub
 
 
 def _write_mode_0600(path: Path, value: str) -> None:
@@ -141,6 +148,86 @@ def _write_mode_0600(path: Path, value: str) -> None:
             raise
 
 
+def provision_fleet_runtime(*, personal_root, org_uuid: str) -> None:
+    """Enroll one synthetic machine and arm its organization connector."""
+    from tools.graph import settings_ops
+    from tools.graph.schemas.machine_identity import (
+        MACHINE_IDENTITY_KEY,
+        MACHINE_IDENTITY_REVISION,
+        MACHINE_IDENTITY_SET_ID,
+    )
+    from tools.graph.schemas.network_identity import (
+        NETWORK_BINDING_REVISION,
+        NETWORK_BINDING_SET_ID,
+    )
+    from tools.network import fleet_roster
+    from tools.network.fleet_relay_sync import FleetRuntimeWarmCache
+    from tools.network.idkit import KeyPair, Subject, issue_cert
+
+    machine = KeyPair.generate()
+    process = KeyPair.generate()
+    machine_id = machine.public_hex
+    now = int(time.time())
+    fleet_roster.store_entry(
+        fleet_roster.enroll(
+            personal_root,
+            machine_id=machine_id,
+            machine_pub=machine.public_hex,
+        ),
+        org=None,
+    )
+    settings_ops.upsert_by_key(
+        MACHINE_IDENTITY_SET_ID,
+        MACHINE_IDENTITY_REVISION,
+        MACHINE_IDENTITY_KEY,
+        {"machine_id": machine_id},
+        org="machine",
+        state="raw",
+    )
+    settings_ops.upsert_by_key(
+        NETWORK_BINDING_SET_ID,
+        NETWORK_BINDING_REVISION,
+        "fixture-runtime",
+        {
+            "org_uuid": org_uuid,
+            "root_pub": personal_root.public_hex,
+            "registry_url": "http://relay:8477",
+            "recovery_policy": {"mode": "none"},
+            "binding_expires_at": time.strftime(
+                ISO, time.gmtime(now + 24 * 60 * 60)
+            ),
+        },
+        org="personal",
+        state="raw",
+    )
+    delegation = issue_cert(
+        machine,
+        process.public_hex,
+        scope=("fleet:sync",),
+        org=f"personal:{personal_root.public_hex}",
+        subject=Subject("machine", machine_id),
+        not_before=now - 30,
+        not_after=now + 3600,
+    )
+    reachability = issue_cert(
+        personal_root,
+        machine.public_hex,
+        scope=("node:announce", "node:lookup"),
+        org=org_uuid,
+        subject=Subject("machine", machine_id),
+        not_before=now - 30,
+        not_after=now + 3600,
+    )
+    FleetRuntimeWarmCache(org_uuid).store({
+        "machine_id": machine_id,
+        "machine_pub": machine.public_hex,
+        "process_private_seed": process.private_hex,
+        "delegation_cert": delegation.to_dict(),
+        "machine_private_seed": machine.private_hex,
+        "reachability_cert": reachability.to_dict(),
+    })
+
+
 def found_node(payload: dict) -> dict:
     """Found A and establish the local side of its two real relay grants."""
     from tools.data_paths import resolve_store
@@ -152,7 +239,6 @@ def found_node(payload: dict) -> dict:
         NETWORK_BINDING_SET_ID,
         NETWORK_ORG_KEY_REVISION_2,
         NETWORK_ORG_KEY_SET_ID,
-        NETWORK_SERVE_CERT_REVISION,
         NETWORK_SERVE_CERT_SET_ID,
         ORG_ROOT_ARMOR_PURPOSE,
     )
@@ -263,6 +349,76 @@ def found_node(payload: dict) -> dict:
             )
         )
 
+    # Establish the same audited storage authority an interactive sign-in
+    # establishes before publishing links.  The channel seed is an
+    # organization-vaulted Setting, so the fixture must not mint it until a
+    # current member persona has delegated the two bounded storage scopes and
+    # the Personal vault can retain that delegate across process restarts.
+    from tools.dashboard import org_storage_delegate
+    from tools.network.storagekit.delegate import provision as provision_delegate
+    from tools.vault.bringup import register_vault_for_unlock
+    from tools.vault.key_holder import _scoped_db
+    from tools.vault.personal_object import derive_delegate_audited_recipient
+    from tools.vault.store import VaultStore
+    from tools.graph.schemas.vault_policy_class import VAULT_POLICY_CLASS_SET_ID
+
+    audited_private, audited_public = derive_delegate_audited_recipient(personal_seed)
+    with VaultStore(_scoped_db(VAULT_POLICY_CLASS_SET_ID, None)) as vault:
+        vault.put_delegate_audited_recipient(audited_public)
+    settings_ops.set_personal_delegate_audited_key(audited_private)
+
+    with LedgerStore(org_ledger_db_path(org)) as store:
+        delegate = provision_delegate(
+            store.ledger,
+            founder,
+            founder,
+            founded.genesis_id,
+            hlc=HLC(now_ms, 6),
+            ttl_ms=org_storage_delegate.TTL_MS,
+        )
+        delegate_event = store.ledger.get(delegate.grant_event_id)
+    org_storage_delegate.accept({
+        "organization": org,
+        "action": "new",
+        "private_key": delegate.signing_key.private_hex,
+        "event": delegate_event.to_json().decode("utf-8"),
+    })
+
+    from tools.network.ledger import membership_commitment as membership
+    with LedgerStore(org_ledger_db_path(org)) as store:
+        state = store.fold()
+        heads = sorted(store.heads())
+    if len(heads) != 1:
+        raise FixtureError("founded organization must have one checkpoint head")
+    membership_checkpoint = membership.build_root_checkpoint(
+        org=org_uuid,
+        seq=0,
+        genesis_id=founded.genesis_id,
+        ledger_head=heads[0],
+        members_root_hex=membership.members_root(state),
+        checkpointers_root_hex=membership.checkpointers_root(state),
+        ts=int(time.time()),
+        root=org_root,
+    )
+
+    def fixture_ledger_provider(_set_id, selected_org):
+        if selected_org != org:
+            return None
+        ledger = LedgerStore(org_ledger_db_path(selected_org))
+        return (
+            ledger.fold(),
+            lambda heads: ledger.fold(heads=list(heads)),
+            ledger.ledger.ancestry,
+        )
+
+    register_vault_for_unlock(
+        generation_keys={},
+        author_provider=org_storage_delegate.signing_key,
+        org_ledger_provider=lambda selected_org: fixture_ledger_provider(
+            None, selected_org
+        ),
+    )
+
     content_id = str(uuid.uuid4())
     # Write the served note through the SAME resolution reads use:
     # GraphDB(org=...) -> resolve_caller_db_path, which honors a pinned
@@ -309,7 +465,8 @@ def found_node(payload: dict) -> dict:
         },
         org=org,
     )
-    _put_local_grant(
+    provision_fleet_runtime(personal_root=personal, org_uuid=org_uuid)
+    join_channel_pub = _put_local_grant(
         org=org,
         token=payload["join_channel_token"],
         target_uuid=org_uuid,
@@ -317,7 +474,7 @@ def found_node(payload: dict) -> dict:
         invite_ref=invite_ref,
         subject_id=founder.public_hex,
     )
-    _put_local_grant(
+    content_channel_pub = _put_local_grant(
         org=org,
         token=payload["content_channel_token"],
         target_uuid=content_id,
@@ -328,25 +485,13 @@ def found_node(payload: dict) -> dict:
     delegate = KeyPair.generate()
     now = int(time.time())
     cert = issue_cert(
-        org_root,
+        founder,
         delegate.public_hex,
         scope=("tunnel:serve",),
         org=org_uuid,
-        # TEST AUTOMATION ONLY: exercise the production persona-bound serving
-        # contract with the real founder persona derived above. The serving
-        # child remains an independent key and never reuses persona material.
         subject=Subject("persona", founder.public_hex),
         not_before=now - 30,
         not_after=now + 24 * 60 * 60,
-    )
-    viewer_cert = issue_cert(
-        org_root,
-        delegate.public_hex,
-        scope=("tunnel:serve",),
-        org=org_uuid,
-        subject=Subject("operator", delegate.public_hex),
-        not_before=cert.not_before,
-        not_after=cert.not_after,
     )
     key_name = f"serve-{org_uuid}-{delegate.public_hex}.key"
     key_dir = resolve_store("serving_keys")
@@ -354,13 +499,12 @@ def found_node(payload: dict) -> dict:
     _write_mode_0600(key_path, delegate.private_hex)
     settings_ops.upsert_by_key(
         NETWORK_SERVE_CERT_SET_ID,
-        NETWORK_SERVE_CERT_REVISION,
+        3,
         "default",
         {
             "cert": cert.to_json().decode("ascii"),
-            "viewer_cert": viewer_cert.to_json().decode("ascii"),
             "key_path": key_name,
-            "root_pub": org_root.public_hex,
+            "persona_pub": founder.public_hex,
             "not_after": cert.not_after,
         },
         org=org,
@@ -375,10 +519,13 @@ def found_node(payload: dict) -> dict:
         "invite_ref": invite_ref,
         "invite_expiry": invite_expiry,
         "content_id": content_id,
+        "join_channel_pub": join_channel_pub,
+        "content_channel_pub": content_channel_pub,
         "serve_delegate_pub": delegate.public_hex,
         "serve_delegate_sha256": hashlib.sha256(
             delegate.private_hex.encode("ascii")
         ).hexdigest(),
+        "membership_checkpoint": membership_checkpoint,
     }
 
 
@@ -389,6 +536,7 @@ def seed_registry(payload: dict) -> dict:
     required = {
         "org_uuid", "root_pub", "join_channel_token", "invite_ref",
         "invite_expiry", "content_channel_token", "content_id",
+        "membership_checkpoint",
     }
     if set(payload) != required:
         raise FixtureError(
@@ -408,6 +556,9 @@ def seed_registry(payload: dict) -> dict:
                 now=now,
                 expires_at=now + 24 * 60 * 60,
             )
+        store.advance_membership_state(
+            payload["org_uuid"], payload["membership_checkpoint"], now=now
+        )
         store.create_link(
             LinkGrant(
                 token=payload["join_channel_token"],
@@ -450,6 +601,78 @@ def seed_registry(payload: dict) -> dict:
             + payload["join_channel_token"]
         ),
     }
+
+
+def activate_serving(payload: dict) -> dict:
+    """Retry the live serve-cert operation so its dashboard owns reconcile."""
+    if set(payload) != {"org", "password"} \
+            or not all(isinstance(payload[key], str) and payload[key] for key in payload):
+        raise FixtureError("activate-serving requires exactly org and password")
+    from tools.data_paths import resolve_store
+    from tools.dashboard.link_serving_supervisor import local_serve_cert_member
+    from tools.dashboard.unlock_routes import UNLOCK_SIGNING_DOMAIN
+    from tools.network.idkit import KeyPair, canonical_json
+
+    member = local_serve_cert_member(payload["org"])
+    if member is None:
+        raise FixtureError("serving credential is absent")
+    stored = member.payload
+    key_path = resolve_store("serving_keys") / stored["key_path"]
+    body = {
+        "org": payload["org"],
+        "cert": stored["cert"],
+        "persona_pub": stored["persona_pub"],
+        "private_key": key_path.read_text(encoding="ascii").strip(),
+    }
+    cookies = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookies))
+    options_request = urllib.request.Request(
+        "http://127.0.0.1:8080/api/identity/unlock/password/options",
+        data=b"{}",
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with opener.open(options_request, timeout=20) as response:
+        options = json.loads(response.read())
+    personal = KeyPair.from_private_hex(_personal_seed(payload["password"]).hex())
+    signed = UNLOCK_SIGNING_DOMAIN + canonical_json({
+        "v": 1,
+        "challenge": options["challenge"],
+        "origin": options["origin"],
+    })
+    unlock_request = urllib.request.Request(
+        "http://127.0.0.1:8080/api/identity/unlock/password",
+        data=json.dumps({
+            "challenge": options["challenge"],
+            "signature": personal.sign_hex(signed),
+        }).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with opener.open(unlock_request, timeout=20) as response:
+        unlocked = json.loads(response.read())
+    if unlocked.get("ok") is not True:
+        raise FixtureError(f"dashboard unlock refused: {unlocked!r}")
+
+    request = urllib.request.Request(
+        "http://127.0.0.1:8080/api/network/serve-cert",
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "X-Graph-Org": payload["org"],
+        },
+        method="POST",
+    )
+    try:
+        with opener.open(request, timeout=20) as response:
+            result = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        raise FixtureError(
+            f"serve-cert retry failed ({exc.code}): {exc.read().decode('utf-8', 'replace')}"
+        ) from exc
+    if result.get("ok") is not True:
+        raise FixtureError(f"serve-cert retry refused: {result!r}")
+    return {"ok": True, "child_pub": result.get("child_pub")}
 
 
 def pending_join(_payload: dict) -> dict:
@@ -575,6 +798,7 @@ def relay_stats(payload: dict) -> dict:
 
 
 COMMANDS = {
+    "activate-serving": activate_serving,
     "found": found_node,
     "seed-registry": seed_registry,
     "pending": pending_join,
