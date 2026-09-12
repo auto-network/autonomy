@@ -97,6 +97,32 @@ _DASHBOARD_STATIC = Path(__file__).resolve().parent / "static"
 _TOKEN_RE = re.compile(r"^[0-9a-f]{%d}$" % NETWORK_TOKEN_HEX_LEN)
 _ISO_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
+# r7kk4: invitation-context enrichment bounds.
+#: The bounded portable org icon (auto-j1y0z) is a 64x64 WebP data: URI. We
+#: re-validate the two bounds it was written under: the whole URI string
+#: (``ORG_ICON_DATA_URI_MAX_CHARS``) and the decoded WebP bytes. The byte bound
+#: mirrors ``profile_image.COMPACT_MAX_BYTES`` (16 KiB) — copied as a plain int
+#: so the serving edge does not import the PIL-heavy processor just to bound a
+#: string it never decodes as an image.
+_ORG_ICON_PREFIX = "data:image/webp;base64,"
+_ORG_ICON_MAX_DECODED_BYTES = 16 * 1024
+#: A same-org member avatar attachment is adapted to a data: URI only when its
+#: bytes are non-empty and at most this size — the compatibility bound this
+#: bead accepts already-owned blobs under (member-profile avatar normalization
+#: is a separate concern). 64 KiB.
+_SPONSOR_AVATAR_MAX_BYTES = 64 * 1024
+#: Only these three raster image types are adaptable to an inline avatar.
+_SPONSOR_AVATAR_MIMES = frozenset({"image/jpeg", "image/png", "image/webp"})
+#: Bound on the sponsor's human text fields so one context row cannot grow
+#: without limit regardless of what the member directory row carries.
+_SPONSOR_TEXT_MAX = 200
+#: Canonical persona/sponsor public key: 64 lowercase hex chars.
+_SPONSOR_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+#: An attachment id is UUID-shaped (hex + dashes). Requiring this shape is what
+#: rejects an avatar field holding an absolute URL, a filesystem path, or a
+#: ``data:`` URI stored directly in the member row — none of which match.
+_ATTACHMENT_ID_RE = re.compile(r"^[0-9a-fA-F][0-9a-fA-F-]{5,}$")
+
 
 def _response(status, body: bytes = b"") -> bytes:
     header = canonical_json({"v": 1, "status": status})
@@ -395,43 +421,165 @@ def _resolve_org_brand(org: str | None) -> dict | None:
         return None
 
 
+def _valid_org_icon(icon: object) -> bool:
+    """Whether ``icon`` is a bounded portable org icon (auto-j1y0z).
+
+    A ``data:image/webp;base64,...`` URI, at most
+    :data:`ORG_ICON_DATA_URI_MAX_CHARS` characters, whose base64 payload
+    decodes to non-empty bytes within the compact-icon byte bound. This is the
+    exact shape the org icon routes write into ``icon_data_uri``; we re-check it
+    at the serving edge rather than trust the stored string blindly, and emit
+    nothing (degrade to name/initial) on any deviation.
+    """
+    from tools.graph.schemas.org import ORG_ICON_DATA_URI_MAX_CHARS
+
+    if not isinstance(icon, str) or not icon.startswith(_ORG_ICON_PREFIX):
+        return False
+    if len(icon) > ORG_ICON_DATA_URI_MAX_CHARS:
+        return False
+    try:
+        raw = base64.b64decode(icon[len(_ORG_ICON_PREFIX):], validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return 0 < len(raw) <= _ORG_ICON_MAX_DECODED_BYTES
+
+
 def _org_brand_for_invite(org: str | None) -> dict | None:
     """The org's OWN identity for the invite/join context (auto-r7kk4), served
     by the org over the E2E join channel — never registry-served, so the
     registry never learns org identity.
 
-    Returns ``{org_name, org_color, org_description?, org_icon?}`` for a viewer's
-    verified-org header. org_description (the byline) and org_icon are optional.
+    Read STRICTLY from the org's own ``autonomy.org`` identity Setting row
+    (owning-scope, ``peers=[]``) — never through the identity cascade, which
+    would substitute a generated slug/UUID name or an operator-local override
+    and defeat the provenance guarantee (§6 of graph://4f9e881c-a9). The
+    presentation is valid ONLY when that row supplies a non-empty name and a
+    valid ``#rrggbb`` color; otherwise this returns ``None`` and the caller
+    serves the bounded unavailable state rather than a plausible UUID header.
 
-    org_icon is ALWAYS a bounded ``data:image/*;base64`` URI or ABSENT — NEVER a
-    remote URL. A remote favicon fetched on the invite-view page would leak each
-    visitor's IP/UA to the favicon host (a tracking vector on the exact page
-    where we promise a registry-blind posture) and would fail the invite page's
-    ``img-src data:`` CSP. So :func:`_resolve_org_brand`'s remote ``favicon_url``
-    branch is deliberately dropped here (degrade to name/initial).
+    Returns ``{org_name, org_color, org_description?, org_icon?}``.
+    ``org_description`` (the byline) and ``org_icon`` are optional.
+
+    org_icon is ALWAYS the row's bounded ``data:image/webp;base64`` URI or
+    ABSENT — NEVER a remote URL, path, or the legacy ``favicon`` field. A remote
+    favicon fetched on the invite-view page would leak each visitor's IP/UA to
+    the favicon host (a tracking vector on the exact page where we promise a
+    registry-blind posture) and would fail the page's ``img-src data:`` CSP.
     """
-    brand = _resolve_org_brand(org)
-    if not brand or not isinstance(brand.get("name"), str):
+    if not isinstance(org, str) or not org:
         return None
-    fields: dict = {"org_name": brand["name"], "org_color": brand["color"]}
     try:
-        from tools.dashboard.org_identity import resolve_org_identity
+        from tools.graph.schemas.org import ORG_REVISION, ORG_SET_ID
 
-        byline = (resolve_org_identity(org) or {}).get("byline")
-        if isinstance(byline, str) and byline:
-            fields["org_description"] = byline
+        members = settings_ops.read_owned_set(
+            ORG_SET_ID, org=org, target_revision=ORG_REVISION,
+        ).members
     except Exception:
-        pass
-    icon = brand.get("favicon")
-    # ONLY the bounded {mime, bytes} form becomes an icon; a remote favicon_url
-    # is intentionally never emitted here (registry-blind + data:-only CSP).
-    if (
-        isinstance(icon, dict)
-        and isinstance(icon.get("bytes"), bytes)
-        and isinstance(icon.get("mime"), str)
-    ):
-        b64 = base64.b64encode(icon["bytes"]).decode("ascii")
-        fields["org_icon"] = f"data:{icon['mime']};base64,{b64}"
+        return None
+    # keyed_per_entity(org_slug): the org's own row is keyed by its slug.
+    row = next((m for m in members if m.key == org), None)
+    payload = getattr(row, "payload", None)
+    if not isinstance(payload, dict):
+        return None
+    name = payload.get("name")
+    color = payload.get("color")
+    if not isinstance(name, str) or not name:
+        return None
+    if not isinstance(color, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+        return None
+    fields: dict = {"org_name": name[:200], "org_color": color}
+    byline = payload.get("byline")
+    if isinstance(byline, str) and byline:
+        fields["org_description"] = byline
+    icon = payload.get("icon_data_uri")
+    if _valid_org_icon(icon):
+        fields["org_icon"] = icon
+    return fields
+
+
+def _sponsor_avatar_data_uri(org: str | None, avatar_ref: object) -> str | None:
+    """Adapt a member row's ``avatar`` to an inline data: URI, or ``None``.
+
+    For this compatibility revision (auto-r7kk4) an avatar is produced ONLY
+    from an organization-OWNED graph attachment id (``peers=[]``, so a
+    wrong-org attachment is simply not found) whose MIME is JPEG/PNG/WebP and
+    whose bytes are non-empty and at most :data:`_SPONSOR_AVATAR_MAX_BYTES`.
+
+    Everything else the member row might carry — an absolute URL, a filesystem
+    path, a ``data:`` URI stored directly in the row, a missing blob, a
+    wrong-org or oversized attachment, a malformed MIME — is ignored (returns
+    ``None``). Avatar normalization/migration is a separate concern; this bead
+    only adapts already-owned bounded bytes.
+    """
+    if not isinstance(avatar_ref, str) or not _ATTACHMENT_ID_RE.match(avatar_ref):
+        return None
+    try:
+        from tools.graph import ops as graph_ops
+
+        att = graph_ops.get_attachment(avatar_ref, org=org, peers=[])
+    except Exception:
+        return None
+    if not isinstance(att, dict):
+        return None  # absent, or a prefix that matched more than one row
+    mime = att.get("mime_type")
+    if mime not in _SPONSOR_AVATAR_MIMES:
+        return None
+    file_path = att.get("file_path")
+    if not isinstance(file_path, str) or not file_path:
+        return None
+    try:
+        with Path(file_path).open("rb") as blob:
+            raw = blob.read(_SPONSOR_AVATAR_MAX_BYTES + 1)
+    except OSError:
+        return None
+    if not (0 < len(raw) <= _SPONSOR_AVATAR_MAX_BYTES):
+        return None
+    return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+
+
+def _sponsor_profile_for_invite(org: str | None, sponsor_pub: object) -> dict | None:
+    """The inviter's presentation for the invite/join context (auto-r7kk4).
+
+    Keyed ONLY by a canonical 64-lowercase-hex ``sponsor_pub`` (the persona
+    public key the ledger invite event named); reads only the matching row from
+    the org's OWN ``autonomy.org.member-profile`` set (``peers=[]``); and
+    returns ``sponsor_pub`` plus optional bounded ``sponsor_name``,
+    ``sponsor_byline`` and ``sponsor_avatar``.
+
+    A missing row or missing human fields is VALID and returns only
+    ``sponsor_pub`` — the downstream honest fallback ("an authorized member of
+    <org> invited you"). Profile lookup FAILURE likewise omits the optional
+    fields without failing the otherwise-valid invitation context. Authority is
+    never read here (the member directory grants none); the sponsor key stays a
+    secondary provenance detail.
+    """
+    if not isinstance(sponsor_pub, str) or not _SPONSOR_HEX_RE.match(sponsor_pub):
+        return None
+    fields: dict = {"sponsor_pub": sponsor_pub}
+    try:
+        from tools.graph.schemas.org_member_profile import (
+            MEMBER_PROFILE_REVISION,
+            MEMBER_PROFILE_SET_ID,
+        )
+
+        members = settings_ops.read_owned_set(
+            MEMBER_PROFILE_SET_ID, org=org, target_revision=MEMBER_PROFILE_REVISION,
+        ).members
+    except Exception:
+        return fields  # lookup failure → honest sponsor_pub-only fallback
+    row = next((m for m in members if m.key == sponsor_pub), None)
+    payload = getattr(row, "payload", None)
+    if not isinstance(payload, dict):
+        return fields
+    name = payload.get("display_name")
+    if isinstance(name, str) and name:
+        fields["sponsor_name"] = name[:_SPONSOR_TEXT_MAX]
+    byline = payload.get("byline")
+    if isinstance(byline, str) and byline:
+        fields["sponsor_byline"] = byline[:_SPONSOR_TEXT_MAX]
+    avatar = _sponsor_avatar_data_uri(org, payload.get("avatar"))
+    if avatar:
+        fields["sponsor_avatar"] = avatar
     return fields
 
 
@@ -780,13 +928,29 @@ def _serve_join(grant: dict, org: str | None, request: dict) -> bytes:
     try:
         if op == "context":
             result = service.context(org, invite_ref)
-            # r7kk4: enrich with the org's OWN identity (name/description/icon/
-            # color) so the invitee's verified-org header is delivered by the
-            # org over this E2E channel, never registry-served. Icon is a
-            # bounded data: URI or absent — never a remote URL.
-            brand = _org_brand_for_invite(org)
-            if brand:
-                result = {**result, **brand}
+            # r7kk4: enrich ONLY a successful ledger context, and only from the
+            # org's three owned sources — the autonomy.org identity row, the
+            # live invite event's sponsor_pub, and the member-profile directory.
+            # Resolve the org brand first: if the org's own presentation is
+            # unavailable or malformed, serve the bounded unavailable state and
+            # NO ledger/role/sponsor/join material — never a UUID-only header.
+            if result.get("status") == "ok":
+                brand = _org_brand_for_invite(org)
+                if not brand:
+                    result = {
+                        "status": "unavailable",
+                        "reason": "organization-profile-unavailable",
+                    }
+                else:
+                    result = {**result, **brand}
+                    # sponsor_pub is the ledger-supplied key already in result;
+                    # merge the inviter's optional presentation over it. A
+                    # missing/incomplete profile leaves sponsor_pub alone.
+                    profile = _sponsor_profile_for_invite(
+                        org, result.get("sponsor_pub"),
+                    )
+                    if profile:
+                        result = {**result, **profile}
         elif op == "submit":
             wire = request.get("event")
             if not isinstance(wire, str) or not wire:

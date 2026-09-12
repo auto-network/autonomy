@@ -453,6 +453,126 @@ class TestOrgBrandResolver:
         }
 
 
+# ── r7kk4: invite/join context enrichment against REAL Settings ───
+
+
+def _put_org_identity(org: str = ORG, **overrides) -> None:
+    """Write the org's OWN autonomy.org#3 identity row (name/color/byline/icon).
+    A field set to ``None`` in *overrides* is omitted from the payload."""
+    from tools.graph.schemas.org import ORG_REVISION, ORG_SET_ID
+
+    payload = {"name": "Net Org", "color": "#123456",
+               "byline": "sovereign by default", "icon_data_uri": _WEBP_ICON}
+    payload.update(overrides)
+    payload = {k: v for k, v in payload.items() if v is not None}
+    settings_ops.add_setting(ORG_SET_ID, ORG_REVISION, org, payload,
+                             org=org, state="raw")
+
+
+def _put_member_profile(persona_pub: str, org: str = ORG, **fields) -> None:
+    from tools.graph.schemas.org_member_profile import (
+        MEMBER_PROFILE_REVISION,
+        MEMBER_PROFILE_SET_ID,
+    )
+
+    payload = {"display_name": "Ada Founder"}
+    payload.update(fields)
+    settings_ops.add_setting(MEMBER_PROFILE_SET_ID, MEMBER_PROFILE_REVISION,
+                             persona_pub, payload, org=org, state="raw")
+
+
+import base64 as _base64  # noqa: E402
+
+_WEBP_ICON = "data:image/webp;base64," + _base64.b64encode(b"RIFFxxWEBP-bytes").decode()
+_SPONSOR = "a" * 64
+
+
+class TestInviteBrandFromOwnedRow:
+    """`_org_brand_for_invite` reads the org's OWN autonomy.org row directly
+    (never the identity cascade), valid only with a non-empty name + valid
+    color, icon strictly the bounded data:image/webp URI."""
+
+    def test_complete_brand(self, env):
+        _put_org_identity()
+        assert link_serving._org_brand_for_invite(ORG) == {
+            "org_name": "Net Org", "org_color": "#123456",
+            "org_description": "sovereign by default", "org_icon": _WEBP_ICON,
+        }
+
+    def test_absent_row_is_none_no_generated_fallback(self, env):
+        # No autonomy.org row: the owned read finds nothing and returns None —
+        # never a name synthesized from the slug/UUID.
+        assert link_serving._org_brand_for_invite(ORG) is None
+
+    def test_malformed_color_is_none(self, env):
+        _put_org_identity(color="purple")
+        assert link_serving._org_brand_for_invite(ORG) is None
+
+    def test_byline_and_icon_optional(self, env):
+        _put_org_identity(byline=None, icon_data_uri=None)
+        assert link_serving._org_brand_for_invite(ORG) == {
+            "org_name": "Net Org", "org_color": "#123456",
+        }
+
+    def test_remote_icon_string_is_rejected(self, env):
+        _put_org_identity(icon_data_uri=None,
+                          favicon="https://tracker.example/f.png")
+        out = link_serving._org_brand_for_invite(ORG)
+        # favicon is never consulted; only icon_data_uri, which is absent here.
+        assert "org_icon" not in out
+
+
+class TestSponsorProfileFromOwnedRow:
+    def test_complete_profile_with_owned_avatar(self, env, tmp_path):
+        blob = tmp_path / "ada.webp"
+        blob.write_bytes(b"\x00webp-avatar")
+        _put_member_profile(_SPONSOR, byline="founder",
+                            avatar=_attach(blob, mime="image/webp"))
+        out = link_serving._sponsor_profile_for_invite(ORG, _SPONSOR)
+        assert out["sponsor_pub"] == _SPONSOR
+        assert out["sponsor_name"] == "Ada Founder"
+        assert out["sponsor_byline"] == "founder"
+        assert out["sponsor_avatar"] == (
+            "data:image/webp;base64," + _base64.b64encode(b"\x00webp-avatar").decode()
+        )
+
+    def test_missing_row_is_pub_only(self, env):
+        assert link_serving._sponsor_profile_for_invite(ORG, _SPONSOR) == {
+            "sponsor_pub": _SPONSOR,
+        }
+
+    def test_wrong_persona_row_is_pub_only(self, env):
+        _put_member_profile("b" * 64, display_name="Someone Else")
+        assert link_serving._sponsor_profile_for_invite(ORG, _SPONSOR) == {
+            "sponsor_pub": _SPONSOR,
+        }
+
+    def test_noncanonical_pub_is_none(self, env):
+        assert link_serving._sponsor_profile_for_invite(ORG, "A" * 64) is None
+
+    def test_remote_avatar_url_is_omitted(self, env):
+        _put_member_profile(_SPONSOR, avatar="https://cdn.example/a.png")
+        out = link_serving._sponsor_profile_for_invite(ORG, _SPONSOR)
+        assert out["sponsor_name"] == "Ada Founder"
+        assert "sponsor_avatar" not in out
+
+    def test_stored_data_uri_avatar_is_omitted(self, env):
+        _put_member_profile(_SPONSOR, avatar="data:image/png;base64,QQ==")
+        assert "sponsor_avatar" not in link_serving._sponsor_profile_for_invite(ORG, _SPONSOR)
+
+    def test_wrong_mime_avatar_is_omitted(self, env, tmp_path):
+        blob = tmp_path / "a.gif"
+        blob.write_bytes(b"GIF89a")
+        _put_member_profile(_SPONSOR, avatar=_attach(blob, mime="image/gif"))
+        assert "sponsor_avatar" not in link_serving._sponsor_profile_for_invite(ORG, _SPONSOR)
+
+    def test_oversized_avatar_is_omitted(self, env, tmp_path):
+        blob = tmp_path / "big.webp"
+        blob.write_bytes(b"\x00" * (link_serving._SPONSOR_AVATAR_MAX_BYTES + 1))
+        _put_member_profile(_SPONSOR, avatar=_attach(blob, mime="image/webp"))
+        assert "sponsor_avatar" not in link_serving._sponsor_profile_for_invite(ORG, _SPONSOR)
+
+
 # ── file resolver: the path allowlist ─────────────────────────
 
 
