@@ -18115,7 +18115,7 @@ async def api_graph_source_promote(request):
             graph_ops.promote_source,
             source_id,
             str(to_state),
-            org=org or graph_ops.CALLER_ORG,
+            org=org,
         )
     except graph_ops.CrossOrgWriteError as e:
         return _cross_org_error_response(e)
