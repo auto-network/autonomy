@@ -160,7 +160,7 @@ async function getPrf(model, credentialIds = null, signal) {
 }
 
 
-async function openRootPolicy(model, { title, detail, mount, signal }) {
+async function openRootPolicy(model, { title, detail, mount, signal, view }) {
   const policy = model.policyModule;
   const memberIds = new Set(policy.policyFactorIds(model.envelope.policy));
   // Password grouping renders first regardless of armor order (stable sort
@@ -182,7 +182,7 @@ async function openRootPolicy(model, { title, detail, mount, signal }) {
     host.className = mount ? 'approval-factors' : 'or-overlay'; host.setAttribute('data-testid', 'open-root');
     const card = document.createElement('div'); card.className = 'or-card';
     host.appendChild(card);
-    (mount ? mount() : document.body).appendChild(host);
+    if (!view) (mount ? mount() : document.body).appendChild(host);
 
     function cleanFactorSeeds() {
       Object.values(seeds).forEach((seed) => seed?.fill?.(0));
@@ -271,7 +271,7 @@ async function openRootPolicy(model, { title, detail, mount, signal }) {
           S.warn = error?.message || 'Those factors did not open your root.';
           render();
         }
-      }, mount ? 0 : 650);
+      }, mount || view ? 0 : 650);
     }
     function noteCollected() {
       if (policy.policySatisfied(model.envelope.policy, Object.keys(seeds))) {
@@ -304,11 +304,15 @@ async function openRootPolicy(model, { title, detail, mount, signal }) {
     }
     async function addPasskey(factor) {
       if (closed || S.busy) return;
-      S.busy = factor.factor_id; S.errors = {}; S.warn = null; render();
+      const candidates = factor ? [factor] : factors.filter(f => f.type === 'passkey' && !seeds[f.factor_id]);
+      if (!candidates.length) return;
+      S.busy = factor?.factor_id || 'passkey'; S.errors = {}; S.warn = null; render();
       let result;
       try {
-        result = await getPrf(model, [factor.credential_id], credentialsAbort.signal);
+        result = await getPrf(model, candidates.map(f => f.credential_id), credentialsAbort.signal);
         if (closed) { result.prf.fill(0); return; }
+        factor = candidates.find(f => f.credential_id === result.credentialId);
+        if (!factor) throw new Error(NO_ROOT_AUTHORITY);
         const recipient = await primitives.deriveEncapsulationKeypair(
           result.prf, policy.FACTOR_RECIPIENT_PURPOSE,
         );
@@ -326,7 +330,7 @@ async function openRootPolicy(model, { title, detail, mount, signal }) {
       } catch (error) {
         result?.prf?.fill?.(0); S.busy = null;
         S.errors = {
-          [factor.factor_id]: error?.message || 'That passkey did not open a policy factor.',
+          [factor?.factor_id || 'passkey']: error?.message || 'That passkey did not open a policy factor.',
         };
         render();
       }
@@ -334,6 +338,25 @@ async function openRootPolicy(model, { title, detail, mount, signal }) {
 
     function render() {
       if (closed) return;
+      if (view) {
+        const types = Object.fromEntries(factors.map(f => [f.factor_id, f.type]));
+        const project = node => node.op === 'factor'
+          ? { op: 'factor', factor_id: types[node.factor_id] }
+          : { op: node.op, children: node.children.map(project) };
+        const collected = Object.keys(seeds);
+        const done = ['password', 'passkey'].filter(type => factors.some(f => f.type === type && seeds[f.factor_id])
+          && policy.policySatisfied(model.envelope.policy, [...collected, ...factors.filter(f => f.type !== type).map(f => f.factor_id)]));
+        view({ policy: project(model.envelope.policy), done, busy: !!S.busy,
+          error: S.warn || Object.values(S.errors)[0] || '',
+          password(value) {
+            const factor = factors.find(f => f.type === 'password' && !seeds[f.factor_id]);
+            if (!factor || closed || S.busy) return;
+            S.passwords[factor.factor_id] = value; void addPassword(factor);
+          },
+          passkey: () => addPasskey(),
+        });
+        return;
+      }
       card.innerHTML = '';
       if (!mount) {
         card.appendChild(el('div', 'or-ttl', title));
@@ -429,11 +452,11 @@ async function openRootPolicy(model, { title, detail, mount, signal }) {
  *   null when the operator cancels. The caller uses `signingKey` to sign (or
  *   `seed` for a ceremony that needs it) and MUST zero `seed` when done.
  */
-export async function openRoot({ title = 'Approve', detail = '', mount, signal } = {}) {
+export async function openRoot({ title = 'Approve', detail = '', mount, signal, view } = {}) {
   injectStyles();
   const model = await loadModel();
   if (signal?.aborted) return null;
-  if (model.v3) return openRootPolicy(model, { title, detail, mount, signal });
+  if (model.v3) return openRootPolicy(model, { title, detail, mount, signal, view });
   // loadModel refuses every non-v3 armor, so this line is unreachable; it
   // exists so a future model shape fails loudly instead of silently.
   throw new Error('unsupported root model');

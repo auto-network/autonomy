@@ -8,7 +8,7 @@ import { openRoot } from './open-root.js';
 
 const GRANT_DOMAIN = 'autonomy.identity.dashboard-access-grant.v1\n';
 
-export async function signDashboardAccessGrant(grant, { mount, signal, onAuthenticated } = {}) {
+export async function signDashboardAccessGrant(grant, { mount, signal, view, onAuthenticated } = {}) {
   if (!grant || typeof grant !== 'object' || Array.isArray(grant)) {
     throw new Error('This access request has no server-frozen grant. Decline it and request a new one.');
   }
@@ -21,7 +21,7 @@ export async function signDashboardAccessGrant(grant, { mount, signal, onAuthent
   const opened = await openRoot({
     title: 'Approve dashboard access',
     detail: 'Unlock your personal root to sign this access grant.',
-    mount, signal,
+    mount, signal, view,
   });
   if (!opened) throw new Error('Approval cancelled.');
   try {

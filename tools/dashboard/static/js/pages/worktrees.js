@@ -170,7 +170,7 @@
     }
   }
 
-  async function _signLinkDecision(self, req, { mount, signal, onAuthenticated } = {}) {
+  async function _signLinkDecision(self, req, { mount, signal, view, onAuthenticated } = {}) {
     let rr = req.registryRequest;
     const session = window.AutonomyNetworkSession;
     const signer = window.AutonomyNetworkSigner;
@@ -195,7 +195,7 @@
       opened = await openRoot({
         title: req.op === 'revoke' ? 'Revoke this share link?' : 'Publish this share link?',
         detail: 'Unlock your personal identity to act as ' + actingName + '.',
-        mount, signal,
+        mount, signal, view,
       });
       if (!opened) throw new Error('Approval cancelled.');
     }
@@ -2855,6 +2855,11 @@
               const data = await response.json();
               if (!response.ok || !data.ok) throw new Error(data.error || 'This approval is no longer available.');
             };
+            const readOutcome = async () => {
+              const response = await fetch('/api/approvals/' + encodeURIComponent(approval.id) + '?wait=20');
+              const outcome = await response.json();
+              return response.ok ? outcome.result : null;
+            };
             self._sharedApprovalDialog = openApprovalDialog({
               review: { title: 'Publish a share link', intro: '',
                 organization: { name: acting.name || approval.orgSlug, image: acting.favicon },
@@ -2865,11 +2870,10 @@
               authorize: options => _signLinkDecision(self, approval, options),
               execute: async decision => {
                 await postDecision({ approved: true, ...decision });
-                const response = await fetch('/api/approvals/' + encodeURIComponent(approval.id) + '?wait=20');
-                const outcome = await response.json();
-                const execution = outcome.result && outcome.result.execution;
-                if (!response.ok || execution?.ok !== true) throw new Error(execution?.error || outcome.error || 'The approval did not finish executing.');
-                self._markApprovalDecided(approval.id);
+                const outcome = await readOutcome();
+                if(outcome?.execution?.ok!==true) throw new Error(outcome?.execution?.error || 'The approval did not finish executing.');
+                if (outcome?.execution?.ok === true) self._markApprovalDecided(approval.id);
+                return outcome;
               },
               decline: async () => { await postDecision({ approved: false }); self._markApprovalDecided(approval.id); },
               result: { working: 'Publishing link', success: 'Link published', copy: '',
