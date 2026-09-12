@@ -5,12 +5,11 @@ run`` arguments, and never fetched from the relay. It names the org to
 join, carries the relay grant that reaches that org, and proves the
 bearer's right to claim membership:
 
-    {v, org, root_pub, invite_ref, channel_token, claim_token}
+    {v, org, invite_ref, channel_token, channel_pub, claim_token}
 
-``root_pub`` is the anchor that makes the relay a dumb transport: the
-joining node pins the org's root key from the INVITATION, so a relay
-that lies about which org is at the other end of the channel fails the
-pin. ``channel_token`` is the registry-minted transport credential from the
+``channel_pub`` is the anchor that keeps the relay a dumb transport: the
+joining node verifies the serving endpoint against the one-time public key
+carried in the URL fragment. ``channel_token`` is the registry-minted transport credential from the
 join URL's path; the relay is allowed to see it. ``claim_token`` is the
 separate bearer secret from the URL fragment whose SHA-256 is the invite
 event's ``token_hash``; it is proof of delivery and must reach only the org
@@ -68,15 +67,15 @@ class Invitation:
     """A decoded invitation. Both token fields are secret."""
 
     org: str  # the org's stable uuid
-    root_pub: str  # 64-hex org signing root — the channel pin
     invite_ref: str  # 64-hex invite event id
     channel_token: str = field(repr=False)  # relay-visible transport credential
+    channel_pub: str  # fragment public key authenticating the serving endpoint
     claim_token: str = field(repr=False)  # E2E-only ledger bearer
 
     def __repr__(self) -> str:  # pragma: no cover - trivial
         return (
-            f"Invitation(org={self.org!r}, root_pub={self.root_pub[:12]}…, "
-            f"invite_ref={self.invite_ref[:12]}…, "
+            f"Invitation(org={self.org!r}, invite_ref={self.invite_ref[:12]}…, "
+            f"channel_pub={self.channel_pub[:12]}…, "
             "channel_token=<redacted>, claim_token=<redacted>)"
         )
 
@@ -92,9 +91,9 @@ def _body(invitation: Invitation) -> dict:
     return {
         "v": INVITE_VERSION,
         "org": invitation.org,
-        "root_pub": invitation.root_pub,
         "invite_ref": invitation.invite_ref,
         "channel_token": invitation.channel_token,
+        "channel_pub": invitation.channel_pub,
         "claim_token": invitation.claim_token,
     }
 
@@ -174,15 +173,8 @@ def decode_channel_pub(fragment_value: str) -> str:
     return public_hex
 
 
-def parse_invitation_fragment(fragment: str) -> tuple[str | None, str]:
-    """Parse a viewer invitation URL fragment → ``(channel_pub_hex, bearer)``.
-
-    Accepts the two-value grammar ``k=<channel_pub>&t=<bearer>`` (complete) and
-    the legacy bearer-only ``t=<bearer>`` (returns ``channel_pub_hex is None``).
-    A legacy fragment is reported honestly rather than treated as complete; the
-    caller decides whether a keyless link is acceptable. Any other shape —
-    extra keys, duplicates, a missing bearer — is malformed and raises.
-    """
+def parse_invitation_fragment(fragment: str) -> tuple[str, str]:
+    """Parse the exact ``k=<channel_pub>&t=<bearer>`` invitation fragment."""
     try:
         parsed = urllib.parse.parse_qs(
             fragment, keep_blank_values=True, strict_parsing=True,
@@ -190,11 +182,10 @@ def parse_invitation_fragment(fragment: str) -> tuple[str | None, str]:
     except ValueError as exc:
         raise InvitationError("invitation fragment is malformed") from exc
     keys = set(parsed)
-    if keys not in ({INVITE_FRAGMENT_BEARER},
-                    {INVITE_FRAGMENT_CHANNEL_KEY, INVITE_FRAGMENT_BEARER}):
+    if keys != {INVITE_FRAGMENT_CHANNEL_KEY, INVITE_FRAGMENT_BEARER}:
         raise InvitationError(
-            "invitation fragment must carry a bearer 't' and optionally a "
-            "channel key 'k' — nothing else"
+            "invitation fragment must carry exactly channel key 'k' and "
+            "bearer 't'"
         )
     if len(parsed[INVITE_FRAGMENT_BEARER]) != 1:
         raise InvitationError("invitation fragment carries a duplicate bearer")
@@ -203,13 +194,10 @@ def parse_invitation_fragment(fragment: str) -> tuple[str | None, str]:
         raise InvitationError(
             "invitation fragment bearer must be 64 lowercase hex characters"
         )
-    channel_pub_hex = None
-    if INVITE_FRAGMENT_CHANNEL_KEY in parsed:
-        values = parsed[INVITE_FRAGMENT_CHANNEL_KEY]
-        if len(values) != 1:
-            raise InvitationError(
-                "invitation fragment carries a duplicate channel key")
-        channel_pub_hex = decode_channel_pub(values[0])
+    values = parsed[INVITE_FRAGMENT_CHANNEL_KEY]
+    if len(values) != 1:
+        raise InvitationError("invitation fragment carries a duplicate channel key")
+    channel_pub_hex = decode_channel_pub(values[0])
     return channel_pub_hex, bearer
 
 
@@ -296,7 +284,6 @@ def build_invitation_join_url(
 def invitation_from_join_url(
     *,
     org: str,
-    root_pub: str,
     invite_ref: str,
     join_url: str,
 ) -> Invitation:
@@ -304,12 +291,10 @@ def invitation_from_join_url(
 
     The registry grant comes from ``/l/<grant>`` in the request path. The
     ledger bearer comes from the client-only fragment — the two-value
-    ``#k=<channel_pub>&t=<bearer>`` grammar (graph://4f9e881c-a9 §3) or the
-    legacy bearer-only ``#t=<bearer>``. Parsing those positions here keeps the
-    domain split identical in the CLI minter and the B6 harness driver. The
-    channel PUBLIC key, when present, authenticates the browser viewer's
-    serving handshake and is not part of the container-side ``AUTONOMY_INVITE``
-    credential set, so it is validated and dropped here.
+    ``#k=<channel_pub>&t=<bearer>`` grammar (graph://4f9e881c-a9 §3). Parsing
+    those positions here keeps the domain split identical in the CLI minter
+    and the B6 harness driver. The channel public key is retained because it
+    is the invitation channel's sole serving-authentication anchor.
     """
     if not isinstance(join_url, str):
         raise InvitationError("invitation join URL must be a string")
@@ -325,13 +310,15 @@ def invitation_from_join_url(
     parts = parsed.path.rstrip("/").split("/")
     if len(parts) < 3 or parts[-2] != "l":
         raise InvitationError("invitation join URL has no registry grant path")
-    _channel_pub_hex, bearer = parse_invitation_fragment(parsed.fragment)
+    channel_pub_hex, bearer = parse_invitation_fragment(parsed.fragment)
+    if channel_pub_hex is None:
+        raise InvitationError("invitation fragment is missing channel key 'k'")
     channel_token, claim_token = _require_tokens(parts[-1], bearer)
     invitation = Invitation(
         org=org,
-        root_pub=root_pub,
         invite_ref=invite_ref,
         channel_token=channel_token,
+        channel_pub=channel_pub_hex,
         claim_token=claim_token,
     )
     # Reuse the full decoder's public-field validation.
@@ -371,11 +358,12 @@ def decode_invitation(code: str) -> Invitation:
             "regenerate the invitation"
         )
     if set(data) != {
-        "v", "org", "root_pub", "invite_ref", "channel_token", "claim_token",
+        "v", "org", "invite_ref", "channel_token", "channel_pub",
+        "claim_token",
     }:
         raise InvitationError(
             "invitation body must carry exactly "
-            "{v, org, root_pub, invite_ref, channel_token, claim_token}"
+            "{v, org, invite_ref, channel_token, channel_pub, claim_token}"
         )
     if data["v"] != INVITE_VERSION:
         raise InvitationError(f"unsupported invitation version: {data['v']!r}")
@@ -388,8 +376,8 @@ def decode_invitation(code: str) -> Invitation:
     )
     return Invitation(
         org=str(data["org"]),
-        root_pub=_require_hex64(data["root_pub"], "root_pub"),
         invite_ref=_require_hex64(data["invite_ref"], "invite_ref"),
         channel_token=channel_token,
+        channel_pub=_require_hex64(data["channel_pub"], "channel_pub"),
         claim_token=claim_token,
     )

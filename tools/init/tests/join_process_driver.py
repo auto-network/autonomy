@@ -72,7 +72,6 @@ class DirectClaimTransport:
                         reply = {
                             **reply,
                             "org": self.invitation.org,
-                            "root_pub": self.invitation.root_pub,
                         }
                 elif operation == "submit":
                     from tools.network.ledger import Event

@@ -10,7 +10,7 @@ same order, and fails loudly at whichever rung stops working.
 
 Without ``--link`` it runs the unauthenticated rungs only (health, shell,
 bootloader asset, CSP) and says so. With one, it also opens the channel,
-runs the X25519 handshake pinned to the envelope's org root key, and asks
+runs the X25519 handshake pinned to the URL's fragment key, and asks
 for the artifact header -- the full guest path, end to end.
 
 Exit status is the point: 0 means the rungs that ran all passed.
@@ -20,11 +20,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
 import sys
 import urllib.error
 import urllib.request
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 REPO_ROOT = __file__.rsplit("/tools/", 1)[0]
 if REPO_ROOT not in sys.path:
@@ -116,7 +117,7 @@ def http_rungs(base: str) -> None:
         _check(f"CSP carries {directive!r}", directive in csp)
 
 
-async def channel_rungs(base: str, token: str) -> None:
+async def channel_rungs(base: str, token: str, link_pub: str) -> None:
     # Lazily, so a bare interpreter still runs everything above this.
     try:
         from tools.network.relaykit.viewer import ViewerChannel
@@ -133,14 +134,11 @@ async def channel_rungs(base: str, token: str) -> None:
     scheme = "wss" if urlparse(base).scheme == "https" else "ws"
     relay = f"{scheme}://{urlparse(base).netloc}"
 
-    # The handshake is pinned to the org root key the envelope names, exactly
-    # as the browser pins it. A relay serving someone else's content would
-    # fail here rather than render.
     channel = await ViewerChannel.connect(
-        relay, token, root_pub=envelope["root_pub"], org=envelope["org"],
+        relay, token, link_pub=link_pub, org=envelope["org"],
     )
     async with channel:
-        _check("handshake verifies against the org root key", True)
+        _check("handshake verifies against the fragment key", True)
         await channel.send_message(json.dumps({"v": 1, "op": "head"}).encode())
         raw = await channel.recv_message()
         header = json.loads(raw.split(b"\n", 1)[0])
@@ -160,9 +158,17 @@ def main() -> int:
     try:
         http_rungs(args.base)
         if args.link:
-            token = args.link.rstrip("/").rsplit("/", 1)[-1].split("#")[0]
+            parsed = urlparse(args.link)
+            token = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+            fragment = parsed.fragment
+            if "=" in fragment:
+                values = parse_qs(fragment, strict_parsing=True).get("k", [])
+                fragment = values[0] if len(values) == 1 else ""
+            raw = base64.urlsafe_b64decode(fragment + "=" * (-len(fragment) % 4))
+            if len(raw) != 32:
+                raise SmokeFailure("link fragment is not a channel public key")
             print(f"  link: …{token[-8:]}")
-            asyncio.run(channel_rungs(args.base, token))
+            asyncio.run(channel_rungs(args.base, token, raw.hex()))
         else:
             print("  --   guest path SKIPPED (no --link given): this run did "
                   "NOT prove a link works")

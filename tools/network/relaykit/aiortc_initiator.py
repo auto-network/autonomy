@@ -47,7 +47,7 @@ from .ice_signaling import (
     validate_candidates,
     validate_ice_configuration,
 )
-from .viewer import ViewerChannel
+from .viewer import CertificateViewerChannel, ViewerChannel
 
 
 class NativeIceError(RuntimeError):
@@ -352,7 +352,7 @@ async def upgrade_via_ice(
             _assert_relay_selected(peer, modules)
         transport = _DataChannelTransport(data_channel, peer)
         application = await asyncio.wait_for(
-            ViewerChannel.authenticate(
+            CertificateViewerChannel.authenticate(
                 transport,
                 token,
                 root_pub=root_pub,

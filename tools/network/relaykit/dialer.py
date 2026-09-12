@@ -36,7 +36,7 @@ from .channel import (
     ChannelCrypto,
     HandshakeError,
     build_client_hello,
-    verify_server_hello,
+    verify_certificate_server_hello,
 )
 from .direct import direct_connect, new_session_id
 from .peer import NONCE_HEX_LEN, RELAY_HELLO_VERSION, verify_relay_hello
@@ -161,8 +161,8 @@ async def dial_via_peer_relay(
         # Direct and peer-relay dials get the same tagged bytes as the
         # relayed path: serve_channel is transport-agnostic.
         server_hello = read_viewer_record(server_hello)
-        server_eph, transcript_hash = verify_server_hello(
-            server_hello, root_pub=root_pub, link_pub=link_pub, org=org, token=session,
+        server_eph, transcript_hash = verify_certificate_server_hello(
+            server_hello, root_pub=root_pub, org=org, token=session,
             client_eph=client_eph, now=now,
         )
         return ViewerChannel(ws, ChannelCrypto.client(eph_priv, server_eph,
@@ -231,7 +231,7 @@ async def dial_peer(
         relay_url, token = floor
         try:
             channel = await ViewerChannel.connect(
-                relay_url, token, root_pub=root_pub, link_pub=link_pub, org=org, now=now,
+                relay_url, token, link_pub=link_pub, org=org, now=now,
                 open_timeout=attempt_timeout,
             )
             return DialResult(channel, PATH_FLOOR, relay_url, attempts)

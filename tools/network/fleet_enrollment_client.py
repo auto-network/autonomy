@@ -25,7 +25,7 @@ import httpx
 from tools.graph.db import _org_db_path
 from tools.network import fleet_enroll, fleet_invite, fleet_roster
 from tools.network.idkit import canonical_json
-from tools.network.relaykit.viewer import ViewerChannel
+from tools.network.relaykit.viewer import CertificateViewerChannel
 
 log = logging.getLogger(__name__)
 
@@ -331,7 +331,7 @@ class FleetEnrollmentClient:
         now_ms=None,
     ):
         self.envelope_fetcher = envelope_fetcher or _fetch_envelope
-        self.channel_connector = channel_connector or ViewerChannel.connect
+        self.channel_connector = channel_connector or CertificateViewerChannel.connect
         self.state_store = state_store or FleetJoinStateStore()
         self.now_ms = now_ms or (lambda: int(time.time() * 1000))
 

@@ -238,3 +238,21 @@ def test_connector_accepts_exact_registry_protocol_version():
     })
     asyncio.run(connector._handshake(socket))
     assert len(socket.sent) == 1
+
+
+@pytest.mark.parametrize("proof_result", [None, RuntimeError("unavailable")])
+def test_organization_connector_refuses_without_membership_proof(proof_result):
+    connector = _connector_for_handshake()
+
+    async def membership_proof_for():
+        if isinstance(proof_result, Exception):
+            raise proof_result
+        return proof_result
+
+    connector._membership_proof_for = membership_proof_for
+    socket = _HelloSocket({"ok": True, "v": HELLO_VERSION_2})
+
+    with pytest.raises(ConnectionError, match="without membership proof"):
+        asyncio.run(connector._handshake(socket))
+
+    assert socket.sent == []

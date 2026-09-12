@@ -332,7 +332,9 @@ def connect_identity(registry: Registry, org: Org, persona: KeyPair, *, seq: int
         registry.ws, registry.org, serve_key, _serve_cert(persona, serve_key, registry.org),
         handler=handler, machine_key=machine_key, caps=(),
         membership_proof_for=_proof_resolver(org.member_pubs(), persona, seq),
-        link_key_for=link_key_for, min_backoff=0.1, max_backoff=1.0,
+        channel_authorization_for=lambda token: {
+            "protocol": "public-link", "key": link_key_for(token),
+        }, min_backoff=0.1, max_backoff=1.0,
     )
 
 
