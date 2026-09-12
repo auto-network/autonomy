@@ -345,6 +345,10 @@ services:
       # /api/monitor/register and dispatch status posts.
       GRAPH_API: https://dashboard:8080
       AUTONOMY_DATA_ROOT: /app/data   # real mount, never repo-relative (see dashboard note)
+      # The dispatcher has no keycache/ramfs mount (see deploy/dispatch.sh) — it
+      # never decrypts a secret. Skip the shared entrypoint's ramfs provisioning
+      # so it does not FATAL "not ramfs" and burn its retry budget every start.
+      AUTONOMY_PROVISION_RAMFS: "0"
     logging:
       driver: json-file
       options: { max-size: "20m", max-file: "5" }
