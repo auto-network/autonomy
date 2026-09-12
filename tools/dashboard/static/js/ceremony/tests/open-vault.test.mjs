@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   clearVaultOpeners,
   gatherVaultOpeners,
+  collectVaultOpeners,
 } from '../open-vault.js';
 
 function b64u(bytes) {
@@ -18,6 +19,19 @@ const passkeyFactor = {
   factor_id: 'pk-1', type: 'passkey', credential_id: b64u(credentialId),
   rp_id: 'dashboard.example.test', transports: ['internal'],
 };
+
+test('shared vault passkey cancellation clears a late result and does not resolve authority',async()=>{
+  const abort=new AbortController();let state,finish;
+  const pending=collectVaultOpeners({v:1,policy:'prf',factors:[passkeyFactor]}, {
+    signal:abort.signal,view:value=>state=value,currentHostname:'dashboard.example.test',
+    credentials:{get:options=>{assert.equal(options.signal,abort.signal);return new Promise(resolve=>finish=resolve);}},
+  });
+  state.passkey();await Promise.resolve();abort.abort();
+  await assert.rejects(pending,/cancelled/);
+  const seed=new Uint8Array(32).fill(42);
+  finish({rawId:credentialId,getClientExtensionResults:()=>({prf:{results:{first:seed.buffer}}})});
+  await new Promise(resolve=>setTimeout(resolve,10));assert.ok(seed.every(value=>value===0));
+});
 
 test('both gathers both factor ids in one complete result', async () => {
   const passwordSeed = new Uint8Array(32).fill(0x11);

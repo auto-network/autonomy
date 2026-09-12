@@ -26,10 +26,12 @@ def test_vault_open_browser_ceremony():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_existing_approval_sheet_names_requester_and_full_setting():
+def test_vault_uses_shared_control_not_legacy_debug_readout():
     source = APPROVAL_RENDERER.read_text()
-    assert "'Setting: ' + setting.set_id + ' / ' + setting.key" in source
-    assert "'Requesting organization: ' + requester.organization" in source
-    assert "'Requesting session: ' + requester.session" in source
-    assert "'Workspace: ' + requester.workspace" in source
-    assert "'TTL: ' + req.ttl_seconds" in source
+    assert "await openVaultApproval(self, r)" in source
+    assert "'Setting: ' + setting.set_id" not in source
+    adapter = (APPROVAL_RENDERER.parent.parent / 'components/vault-approval.js').read_text()
+    assert "openApprovalDialog({" in adapter
+    assert "name:setting.key" in adapter
+    assert "requestingSession(requester.session" in adapter
+    assert "['Delivered file available for',duration]" in adapter

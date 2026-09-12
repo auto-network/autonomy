@@ -106,6 +106,29 @@ test('cancel resolves null', async () => {
   assert.equal(await p, null);
 });
 
+test('frozen vault root uses the supplied armor and no live identity reads', async () => {
+  const {collectVaultOpeners,clearVaultOpeners}=await import('../static/js/ceremony/open-vault.js');
+  const {createRootAnchorEnvelope}=await import('../static/js/ceremony/root-anchor.js');
+  const root=await mintRoot();
+  const signingKey=await primitivesSigningKey(root.seed);
+  const anchor=await createRootAnchorEnvelope({...root,signingKey});
+  const armor=await aV3Password(root,'frozen password');let state;
+  const previousFetch=global.fetch;global.fetch=()=>{throw Error('must not read live identity');};
+  try {
+    const pending=collectVaultOpeners({v:2,root:{armor,armor_version:3,root_pub:root.rootPub,methods:['password'],passkeys:[]},anchor,
+      governance:{form:'root-reachable',anchor_id:anchor.anchor_id}}, {view:value=>state=value});
+    assert.ok(await until(()=>!!state));state.password('wrong');assert.ok(await until(()=>state.error));
+    state.password('frozen password');const gathered=await pending;
+    assert.deepEqual(Object.keys(gathered.openers),[anchor.anchor_id]);assert.equal(gathered.seeds[0].length,32);
+    clearVaultOpeners(gathered);assert.ok(gathered.seeds[0].every(v=>v===0));
+  } finally {global.fetch=previousFetch;root.seed.fill(0);}
+});
+
+async function primitivesSigningKey(seed) {
+  const prefix=Buffer.from('302e020100300506032b657004220420','hex');
+  return crypto.subtle.importKey('pkcs8',Buffer.concat([prefix,seed]),{name:'Ed25519'},false,['sign']);
+}
+
 test('shared view offers one passkey action and accepts the browser-selected alternative', async () => {
   const root = await mintRoot();
   const ids = ['old-phone', 'pc', 'phone'];

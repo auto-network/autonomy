@@ -14,6 +14,7 @@ export async function requestingSession(session, label) {
     if (response.ok && info.project && info.session_id === session) {
       result.href = '/session/' + encodeURIComponent(info.project) + '/' + encodeURIComponent(info.session_id);
       result.byline = info.project;
+      result.organization = info.org && typeof info.org === 'object' ? info.org : null;
     }
   } catch (_) {}
   return result;
@@ -25,21 +26,21 @@ export function openApprovalDialog({review, authorize, execute, decline, result,
   host.setAttribute('data-testid','approval-dialog');
   host.style.cssText='position:fixed;inset:0;z-index:1300;overflow:auto;background:rgba(4,6,11,.72)';
   document.body.append(host);
-  const kind = review.target ? 'link' : 'central';
+  const kind = review.kind || (review.target ? 'link' : 'central');
   const originalDuration = review.controls?.querySelector('select');
   const originalRetention = review.controls?.querySelector('input[type=checkbox]');
   const durationOptions = originalDuration ? [...originalDuration.options].map(o=>[o.value,o.textContent]) : undefined;
   const expiry = review.facts?.find(([label])=>/expir/i.test(label))?.[1];
   const input = {
     kind,title:review.title + (review.title.endsWith('?')?'':'?'),
-    intro:kind==='central'?review.intro:`Create a link to this ${review.target.type.toLowerCase()} for someone outside your workspace.`,
+    intro:kind==='link'?`Create a link to this ${review.target.type.toLowerCase()} for someone outside your workspace.`:review.intro,
     organization:{name:review.organization?.name||'Personal approval',image:review.organization?.image||''},
     requester:{kind:'Requesting session',...review.requester,href:localHref(review.requester?.href)},
     resourceLabel:review.target?.type,resource:review.target?.name,resourceDetail:review.target?.byline,
     facts:[...(review.facts||[]),...(originalDuration?[['Link expires','duration']]:[])],
     duration:originalDuration?.value,durationOptions,
     showRetention:!!originalRetention,allowSessionApprovals:!!originalRetention?.checked,
-    consequence:kind==='link'?'Anyone who has the link can open the shared content until it expires.':'',
+    consequence:kind==='link'?'Anyone who has the link can open the shared content until it expires.':review.consequence||'',
     retained,canDecline:!!decline,reviewUnavailable:review.unavailable,
     working:result.working,success:result.success,result:result.copy,
     resultHref:localHref(result.fact.href),
