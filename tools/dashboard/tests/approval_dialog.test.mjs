@@ -24,6 +24,18 @@ test.beforeEach(() => {
 });
 test.afterEach(() => { handle?.dispose(); dom.window.close(); });
 
+test('visible viewport bounds update and listeners are removed on close', () => {
+  const viewport=new window.EventTarget();viewport.height=650;viewport.offsetTop=20;
+  Object.defineProperty(window,'visualViewport',{value:viewport,configurable:true});
+  open();const host=document.querySelector('[data-testid=approval-dialog]');
+  assert.equal(host.style.getPropertyValue('--approval-height'),'650px');
+  assert.equal(host.style.getPropertyValue('--approval-top'),'20px');
+  viewport.height=400;viewport.dispatchEvent(new window.Event('resize'));
+  assert.equal(host.style.getPropertyValue('--approval-height'),'400px');
+  handle.close();viewport.height=700;viewport.dispatchEvent(new window.Event('resize'));
+  assert.equal(host.style.getPropertyValue('--approval-height'),'400px');
+});
+
 test('review, close, Escape and session navigation never authorize or decline', () => {
   let calls = 0;
   const options = { authorize: async () => { calls++; }, decline: async () => { calls++; } };

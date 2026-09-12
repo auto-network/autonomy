@@ -7,8 +7,20 @@ export function mountApprovalExperiment(host,input,services=null){
  root.innerHTML='<style>'+approvedStyles.replace(/body\{/g,':host{').replace(/:root\{/g,':host{')+'</style>'+approvedMarkup;
  const document={getElementById:id=>root.getElementById(id),querySelector:s=>root.querySelector(s),querySelectorAll:s=>root.querySelectorAll(s),createElement:t=>realDocument.createElement(t),createTextNode:t=>realDocument.createTextNode(t),createComment:t=>realDocument.createComment(t),addEventListener:(...args)=>root.addEventListener(...args),body:root,get activeElement(){return root.activeElement}};
  const window=realDocument.defaultView;
+ const viewport=window.visualViewport;
+ const viewportStyle=realDocument.createElement('style');
+ viewportStyle.textContent=`@media(max-width:767px){
+ :host{top:var(--approval-top,0px)!important;bottom:auto!important;height:var(--approval-height,100dvh);overflow:hidden!important}
+ .surface{height:var(--approval-height,100dvh);min-height:0;padding-top:max(24px,env(safe-area-inset-top,0px))}
+ .sheet{max-height:100%;padding-bottom:calc(20px + env(safe-area-inset-bottom,0px))}
+ .auth-overlay{top:var(--approval-top,0px);bottom:auto;height:var(--approval-height,100dvh);padding-bottom:calc(16px + env(safe-area-inset-bottom,0px))}
+ .auth-panel{max-height:100%;padding-bottom:16px}
+ }`;
+ root.append(viewportStyle);
+ function fitViewport(){host.style.setProperty('--approval-height',(viewport?.height||window.innerHeight)+'px');host.style.setProperty('--approval-top',(viewport?.offsetTop||0)+'px')}
+ fitViewport();viewport?.addEventListener('resize',fitViewport);viewport?.addEventListener('scroll',fitViewport);window.addEventListener('resize',fitViewport);
  let controller=null,factorState=null,disposed=false;
- function dispose(){if(disposed)return;disposed=true;controller?.abort();token++;host.remove();services?.onClose?.()}
+ function dispose(){if(disposed)return;disposed=true;viewport?.removeEventListener('resize',fitViewport);viewport?.removeEventListener('scroll',fitViewport);window.removeEventListener('resize',fitViewport);controller?.abort();token++;host.remove();services?.onClose?.()}
  function expandAuthorization(){if(services){void authorizeRequest();return;}displayAuthorization()}
  async function authorizeRequest(){
    $('retain-authority').disabled=true;
@@ -31,7 +43,7 @@ const org={name:'Autonomy',image:'/static/icon-192.png'};
 const session={kind:'Requesting session',name:'Approval library — design contracts',byline:'Developer workspace',href:'/session/autonomy-codex/auto-0911-112429'};
 const recipes={
 operation:{kind:'operation',title:'Authorize this change?',intro:'Review the change before continuing.',facts:[],requester:{kind:'Requested by',name:'You',byline:'Autonomy'},working:'Applying change…',success:'Change saved',result:'The change has been saved.'},
-vault:{kind:'vault',title:'Share this saved value?',intro:'Allow this session to receive the saved value shown below.',resourceLabel:'Saved value',resource:'staging-deployment',facts:[['Delivered file available for','15 minutes'],['Request expires','In 5 minutes']],requester:session,consequence:'The session receives the saved value. Removing the delivered file later does not revoke copies it may have made.',action:'Share credential',working:'Sharing credential…',success:'Value shared',result:'The saved value was delivered to the requesting session.'},
+vault:{kind:'vault',title:'Release credential?',intro:'',resourceLabel:'Credential',resource:'staging-deployment',facts:[['Available','Until this session ends']],requester:session,consequence:'Copies made by the session are not revoked when access ends.',action:'Release credential',working:'Releasing credential…',success:'Credential released',result:''},
 service:{kind:'service',title:'Allow service access?',intro:'Let this device send screenshots to your dropbox.',resourceLabel:'Application',resource:'Autonomy Capture',resourceDetail:'Add screenshots to your dropbox',facts:[['Access lasts','duration']],requester:{kind:'Requesting device',name:'My iPhone',byline:'Autonomy Capture'},consequence:'This grants screenshot-upload access, not access to browse your dashboard.',action:'Allow access',working:'Allowing access…',success:'Access allowed',result:'My iPhone can send screenshots to your dropbox for one year.'},
 fleet:{kind:'fleet',title:'Add this machine?',intro:'Compare the code with the one on the new machine before adding it to your fleet.',resourceLabel:'New machine',resource:'Studio Mac',resourceDetail:'Only approve a machine you recognize.',facts:[],requester:{kind:'Joining machine',name:'Studio Mac',byline:'Your personal fleet'},code:'RIVER · MAPLE · SEVEN',consequence:'The machine will become a member of your personal fleet.',action:'Add machine',working:'Adding machine…',success:'Machine added',result:'The machine is now part of your fleet.'},
 member:{kind:'member',title:'Approve this membership?',intro:'Review who is joining and the invitation they received.',facts:[],requester:{kind:'Person joining',name:'Jordan',byline:'Product designer'},claim:{introduction:{display_name:'Jordan',byline:'Product designer'},granted_role:'Member',have:0,need:2},sponsor:{display_name:'Avery',byline:'Engineering lead'},consequence:'Your approval counts toward this request. Membership starts only after all required approvals and the joining steps are complete.',action:'Approve membership',working:'Recording approval…',success:'Approval recorded',result:'Your approval has been recorded.'},

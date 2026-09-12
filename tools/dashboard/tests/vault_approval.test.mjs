@@ -26,12 +26,17 @@ test.beforeEach(()=>{
   };
 });
 test.afterEach(()=>{self._sharedApprovalDialog?.dispose();dom.window.close();});
-async function open(){await openVaultApproval(self,fixture(),{
+async function open(ttl=900){const request=fixture();request.request.ttl_seconds=ttl;await openVaultApproval(self,request,{
   collect:(_ceremony,{view:render,signal})=>new Promise((resolve,reject)=>{
     view={policy:{op:'factor',factor_id:'password'},done:[],busy:false,password(){resolve({openers:{pw:'07'.repeat(32)},seeds:[seed]})},passkey(){}};
     signal.addEventListener('abort',()=>reject(Error('Approval cancelled.')),{once:true});render(view);
   }),openKey:async(_bundle,openers)=>{assert.equal(openers.pw,'07'.repeat(32));return 'ab'.repeat(32);},
 });}
+test('zero lifetime means session lifespan, not zero hours',async()=>{
+  await open(0);
+  assert.match(q('#facts').textContent,/Until this session ends/);
+  assert.doesNotMatch(q('#review').textContent,/0 hours|saved value/i);
+});
 test('review has actual saved value, session link and lifetime; close never decides',async()=>{
   await open();assert.equal(view,null);assert.equal(q('#auth').hidden,true);
   assert.equal(q('#resource').textContent,'deployment.env');
@@ -42,9 +47,9 @@ test('review has actual saved value, session link and lifetime; close never deci
 for(const ok of [true,false])test('POST acknowledgment stays working until actual delivery '+(ok?'success':'failure'),async()=>{
   execution=ok?{ok:true}:{ok:false,error:'Delivery destination is unavailable'};
   await open();q('#primary').click();q('#password').value='pw';q('#password-form').dispatchEvent(new window.Event('submit',{cancelable:true}));
-  await until(()=>reads===1);assert.equal(q('#result-title').textContent,'Sharing saved value…');
-  await until(()=>q('#result-title').textContent!=='Sharing saved value…');
-  assert.equal(q('#result-title').textContent,ok?'Value shared':'Could not complete the request');
+  await until(()=>reads===1);assert.equal(q('#result-title').textContent,'Releasing credential…');
+  await until(()=>q('#result-title').textContent!=='Releasing credential…');
+  assert.equal(q('#result-title').textContent,ok?'Credential released':'Could not complete the request');
   if(!ok)assert.match(q('#result-copy').textContent,/Delivery destination is unavailable/);
   assert.ok(seed.every(v=>v===0));
   const writes=calls.filter(([,o])=>o?.method==='POST');assert.equal(writes.length,1);
