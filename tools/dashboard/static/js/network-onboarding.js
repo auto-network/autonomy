@@ -123,11 +123,17 @@
     if (password !== confirm) throw new Error('the passwords do not match');
     var I = _idI();
     var pair = await I.generateEd25519();
-    var armor, auditedPublic;
+    var armor, auditedPublic, localRosterEntry;
     try {
       armor = await I.armorSeed(pair.seed, pair.pubHex, password);
       var vault = await import('./ceremony/vault-unlock.js');
       auditedPublic = (await vault.deriveAuditedRecipient(pair.seed)).publicKeyHex;
+      var fleet = await import('./ceremony/fleet-enrollment.js');
+      localRosterEntry = await fleet.mintLocalFleetRosterEntry({
+        personalRootSeed: new Uint8Array(pair.seed), rootPub: pair.pubHex,
+        machineId: _signI().bytesToHex(crypto.getRandomValues(new Uint8Array(32))),
+        issuedAt: Date.now(),
+      });
       // Keep the root signing key for the passkey enrollment that follows in
       // this same ceremony; the seed itself is zeroed immediately below.
       _ceremonyRoot = {
@@ -143,6 +149,7 @@
       armored_private_key: armor,
       root_pub: pair.pubHex,
       delegate_audited_public_key: auditedPublic,
+      local_roster_entry: localRosterEntry,
     });
   }
 

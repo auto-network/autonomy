@@ -393,6 +393,43 @@ export async function mintFleetInvite({
   }
 }
 
+/** The first machine's existing root-signed roster entry. No transport or UI.
+ * Shared by personal-identity creation and legacy-origin fleet approval.
+ * Consumes and clears the supplied seed; callers retain only their own copy.
+ */
+export async function mintLocalFleetRosterEntry({
+  personalRootSeed, rootPub, machineId, issuedAt = 0, seq = 0,
+}) {
+  const seed = personalRootSeed;
+  let machineSeed;
+  let signingKey;
+  try {
+    if (!(seed instanceof Uint8Array) || seed.length !== 32) {
+      throw new Error('personalRootSeed must be a 32-byte Uint8Array');
+    }
+    const anchor = requireHex64(rootPub, 'rootPub');
+    if (await ed25519PublicHex(seed) !== anchor) {
+      throw new Error('opened personal root does not match rootPub');
+    }
+    const mid = requireHex64(machineId, 'machineId');
+    machineSeed = await deriveMachineSeed(seed, mid);
+    const binding = {
+      v: 1, personal_root_pub: anchor, machine_id: mid,
+      machine_pub: await ed25519PublicHex(machineSeed),
+      assignment: FLEET_MEMBER_ASSIGNMENT, kind: 'enroll',
+      seq: requireSafeInt(seq, 'seq'), issued_at: requireSafeInt(issuedAt, 'issuedAt'),
+      supersedes: null,
+    };
+    signingKey = await importEd25519RootSigningKey(seed);
+    return { ...binding, signature: await signHex(signingKey,
+      domainBytes(FLEET_ROSTER_DOMAIN, canonicalJson(binding))) };
+  } finally {
+    if (seed instanceof Uint8Array) seed.fill(0);
+    if (machineSeed) machineSeed.fill(0);
+    signingKey = null;
+  }
+}
+
 export async function mintFleetEnrollmentEvidence({
   personalRootSeed,
   rootPub,
@@ -407,7 +444,6 @@ export async function mintFleetEnrollmentEvidence({
   }
   const seed = personalRootSeed;
   let machineSeed = null;
-  let localMachineSeed = null;
   let rootSigningKey = null;
   try {
     if (seed.length !== 32) {
@@ -458,35 +494,14 @@ export async function mintFleetEnrollmentEvidence({
     let localRosterEntry = null;
     let localRuntime = null;
     if (localBootstrapMachineId !== null) {
-      const localMachineId = requireHex64(
-        localBootstrapMachineId, 'localBootstrapMachineId',
-      );
-      localMachineSeed = await deriveMachineSeed(seed, localMachineId);
-      const localMachinePub = await ed25519PublicHex(localMachineSeed);
-      const localBinding = {
-        v: 1,
-        personal_root_pub: anchor,
-        machine_id: localMachineId,
-        machine_pub: localMachinePub,
-        assignment: FLEET_MEMBER_ASSIGNMENT,
-        kind: 'enroll',
-        seq: sequence,
-        issued_at: timestamp,
-        supersedes: null,
-      };
-      localRosterEntry = {
-        ...localBinding,
-        signature: await signHex(
-          rootSigningKey,
-          domainBytes(FLEET_ROSTER_DOMAIN, canonicalJson(localBinding)),
-        ),
-      };
-      const localSigningKey = await importEd25519RootSigningKey(localMachineSeed);
-      localRuntime = await mintRuntimeCredential({
-        machineSigningKey: localSigningKey,
-        machineId: localMachineId,
-        machinePub: localMachinePub,
-        personalRootPub: anchor,
+      localRosterEntry = await mintLocalFleetRosterEntry({
+        personalRootSeed: new Uint8Array(seed), rootPub: anchor,
+        machineId: localBootstrapMachineId, issuedAt: timestamp, seq: sequence,
+      });
+      localRuntime = await mintFleetRuntimeCredential({
+        personalRootSeed: new Uint8Array(seed), rootPub: anchor,
+        machineId: localRosterEntry.machine_id,
+        machinePub: localRosterEntry.machine_pub,
       });
     }
 
@@ -509,7 +524,6 @@ export async function mintFleetEnrollmentEvidence({
   } finally {
     seed.fill(0);
     if (machineSeed) machineSeed.fill(0);
-    if (localMachineSeed) localMachineSeed.fill(0);
     rootSigningKey = null;
   }
 }

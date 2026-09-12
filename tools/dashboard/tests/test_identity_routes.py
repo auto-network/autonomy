@@ -418,6 +418,9 @@ const w = dom.window;
 Object.defineProperty(w, 'crypto', { value: globalThis.crypto });
 w.TextEncoder = TextEncoder;
 w.TextDecoder = TextDecoder;
+// Imported ceremony modules run in Node's realm; use its byte-array type too,
+// as the browser uses one realm for both the page and its imported modules.
+w.Uint8Array = Uint8Array;
 w.__AUTONOMY_WELCOME_SHELL__ = true;
 w.AutonomyNetworkSession = { _internals: primitives };
 w.__dynImport = spec => import(new URL(spec.replace(/^\/static\/js\//, ''), base));
@@ -438,7 +441,7 @@ w.fetch = async (url, options) => {
   assert.equal(payload, undefined, 'only the existing creation request is made');
   payload = JSON.parse(options.body);
   assert.deepEqual(Object.keys(payload).sort(),
-    ['armored_private_key', 'delegate_audited_public_key', 'display_name', 'root_pub']);
+    ['armored_private_key', 'delegate_audited_public_key', 'display_name', 'local_roster_entry', 'root_pub']);
   return { ok: true, json: async () => ({ ok: true }) };
 };
 await w.AutonomyOnboarding._internals.createIdentity(
@@ -452,6 +455,21 @@ dom.window.close();
     assert payload["delegate_audited_public_key"] == _audited_public(root)
     created = env.post("/api/identity/personal", json=payload)
     assert created.status_code == 200, created.text
+    # The SAME browser creation now installs its first machine, without a
+    # later login or another machine's enrollment approval.
+    from tools.network import fleet_roster, machine_boot
+    from tools.dashboard import fleet_enrollment_routes
+    from tools.network.idkit import derive_machine_key
+    entry = fleet_roster.RosterEntry.from_dict(payload["local_roster_entry"])
+    fleet_roster.verify(entry, anchor_root_pub=root.public_hex)
+    assert machine_boot.machine_id() == entry.machine_id
+    assert entry.machine_pub == derive_machine_key(
+        bytes.fromhex(root.private_hex), entry.machine_id).public_hex
+    runtime = json.loads(fleet_enrollment_routes.runtime_preparation().body)
+    assert runtime["enabled"] is True
+    assert runtime["machine_id"] == entry.machine_id
+    assert runtime["machine_pub"] == entry.machine_pub
+    assert "machine_private_seed" not in json.dumps(payload)
     # Model the next sign-in, not the initial bootstrap session.
     env.cookies.clear()
     response = env.get("/api/identity/unlock/preparation")
@@ -461,6 +479,35 @@ dom.window.close();
     opened = sealing.open(bytes.fromhex(response.json()["sealed"]), private,
                           signon_preparation.PURPOSE)
     assert json.loads(opened) == expected
+
+
+@pytest.mark.parametrize("fault", ["wrong-root", "bad-signature", "conflicting-machine"])
+def test_first_machine_evidence_refused_before_identity_write(env, root, fault):
+    from dataclasses import replace
+    from tools.network import fleet_roster, machine_boot
+    from tools.network.idkit import derive_machine_key
+
+    signer = KeyPair.generate() if fault == "wrong-root" else root
+    mid = "cd" * 32
+    key = derive_machine_key(bytes.fromhex(signer.private_hex), mid)
+    entry = fleet_roster.enroll(signer, machine_id=mid, machine_pub=key.public_hex)
+    if fault == "bad-signature":
+        entry = replace(entry, signature="00" * 64)
+    if fault == "conflicting-machine":
+        other_id = "ef" * 32
+        other_key = derive_machine_key(bytes.fromhex(root.private_hex), other_id)
+        machine_boot.accept_local_bootstrap(fleet_roster.enroll(
+            root, machine_id=other_id, machine_pub=other_key.public_hex),
+            anchor_root_pub=root.public_hex)
+    response = env.post('/api/identity/personal', json={
+        'display_name': 'Alice', 'armored_private_key': _armor(root),
+        'delegate_audited_public_key': _audited_public(root),
+        'local_roster_entry': entry.to_dict(),
+    })
+    assert response.status_code == 400, response.text
+    assert identity_routes._personal_member() is None
+    if fault != "conflicting-machine":
+        assert machine_boot.machine_id() is None
 
 
 def test_existing_identity_without_recipient_gets_metadata_free_refusal(env, root, monkeypatch):
