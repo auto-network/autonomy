@@ -276,6 +276,92 @@ def test_pending_claims_survive_reopen(tmp_path):
     reopened.close()
 
 
+# -- auto-ixd9m: accepting twice must not erase gathered countersignatures ------------
+
+
+_PENDING_COLS = (
+    "claim_key, invite_ref, persona_pub, body, approvals, author_key, "
+    "hlc_ts, parents, hlc_count, staged_at"
+)
+
+
+def _pending_row(store, claim_key):
+    return store.db.execute(
+        f"SELECT {_PENDING_COLS} FROM ledger_pending_claims WHERE claim_key = ?",
+        (claim_key,),
+    ).fetchone()
+
+
+def test_restaging_without_approvals_after_countersign_is_refused():
+    """Once a staged claim holds a countersignature, a same-key approval-free
+    re-mint must NOT silently replace the row and discard the approvals — the
+    server-side hole behind this bead. The refusal fails closed and leaves the
+    stored record byte-for-byte intact."""
+    org = Org(requires="admin-ack", token=True)
+    claim_key = org.store.stage_pending_claim(org.mint_claim())
+    body = org.store.get_pending_claim(claim_key)["body"]
+    org.store.add_pending_approval(
+        claim_key, sign_approval(org.admin, "member.claim", body)
+    )
+
+    before_row = _pending_row(org.store, claim_key)
+    before_record = org.store.get_pending_claim(claim_key)
+    assert [e["key"] for e in before_record["approvals"]] == [org.admin.public_hex]
+
+    # A freshly minted claim for the same (invite, persona) shares the claim
+    # key but carries no approvals; replacing would erase the countersignature.
+    remint = org.mint_claim()
+    assert (
+        org.store.claim_key(remint.payload["invite_ref"], remint.payload["persona_pub"])
+        == claim_key
+    )
+    assert list(remint.payload["approvals"]) == []
+    with pytest.raises(StoreError):
+        org.store.stage_pending_claim(remint)
+
+    assert _pending_row(org.store, claim_key) == before_row  # byte-for-byte
+    assert org.store.get_pending_claim(claim_key) == before_record
+
+
+def test_first_stage_and_unsigned_restage_stay_idempotent():
+    """Control: the guard only fires once approvals exist. A first stage and
+    an approval-free re-stage BEFORE any countersignature both behave exactly
+    as before — one row per claim key, empty approvals preserved."""
+    org = Org(requires="admin-ack", token=True)
+    claim_key = org.store.stage_pending_claim(org.mint_claim())
+    assert org.store.get_pending_claim(claim_key)["approvals"] == []
+
+    # Re-mint and re-stage with no approvals yet: permitted, idempotent on key.
+    again = org.store.stage_pending_claim(org.mint_claim())
+    assert again == claim_key
+    assert org.store.get_pending_claim(claim_key)["approvals"] == []
+    assert (
+        org.store.db.execute(
+            "SELECT COUNT(*) FROM ledger_pending_claims"
+        ).fetchone()[0]
+        == 1
+    )
+
+
+def test_restaging_with_its_own_approvals_still_replaces():
+    """Control: the guard targets ONLY the approval-erasing case. An incoming
+    event that carries its own approvals is not an erasure, so the existing
+    replace behavior is unchanged (the store never unions across bodies)."""
+    org = Org(requires="admin-ack", token=True)
+    claim_key = org.store.stage_pending_claim(org.mint_claim())
+    org.store.add_pending_approval(
+        claim_key,
+        sign_approval(org.admin, "member.claim", org.store.get_pending_claim(claim_key)["body"]),
+    )
+    # A re-mint that itself carries an approval replaces the row (no raise).
+    signed = org.mint_claim(approvers=[org.root])
+    assert list(signed.payload["approvals"])  # non-empty
+    org.store.stage_pending_claim(signed)
+    assert [e["key"] for e in org.store.get_pending_claim(claim_key)["approvals"]] == [
+        org.root.public_hex
+    ]
+
+
 # -- credential integration (jkd6f consumption) ----------------------------------------
 
 
