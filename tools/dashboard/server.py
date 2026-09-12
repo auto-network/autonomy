@@ -7336,6 +7336,41 @@ async def api_session_get(request):
 _TMUX_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 
+async def api_session_share(request):
+    """Register a graph-share file using the existing persisted upload tile.
+
+    Like turn corrections, identity comes from the authenticated API call,
+    never command output. Settings persists before emitting its change event.
+    """
+    identity, err = authenticate_session_request(request)
+    if err is not None:
+        return err
+    tmux_name, _org = identity
+    try:
+        body = await request.json()
+        payload = {
+            field: body[field]
+            for field in ("rel_path", "filename", "mime", "size")
+        }
+        payload.update(
+            target_session=tmux_name,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            alt=body.get("alt", ""), caption=body.get("caption", ""),
+        )
+    except (ValueError, TypeError, KeyError):
+        return JSONResponse({"error": "invalid share payload"}, status_code=400)
+    from tools.graph.schemas import SchemaValidationError
+    try:
+        sid = graph_ops.add_setting(
+            _session_upload.SESSION_UPLOAD_SET_ID,
+            _session_upload.SCHEMA_REVISION,
+            str(uuid.uuid4()), payload, org="machine", state="raw",
+        )
+    except SchemaValidationError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse({"ok": True, "id": sid}, status_code=201)
+
+
 async def api_session_output(request):
     """GET /api/session/{tmux_name}/output/{path:path}
 
@@ -21298,6 +21333,7 @@ routes = [
     Route("/api/session/notify", api_session_notify, methods=["POST"]),
     Route("/api/agent-test/leases", api_agent_test_leases, methods=["POST"]),
     Route("/api/session/{tmux_name}", api_session_get, methods=["GET"]),
+    Route("/api/session/share", api_session_share, methods=["POST"]),
     Route("/api/session/{tmux_name}/output/{path:path}", api_session_output, methods=["GET"]),
     Route("/api/session/{tmux_name}/request-identity-refresh", api_session_request_identity_refresh, methods=["POST"]),
     Route("/api/session/{tmux_name}/interrupt", api_session_interrupt, methods=["POST"]),

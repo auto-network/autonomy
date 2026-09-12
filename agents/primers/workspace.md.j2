@@ -244,14 +244,10 @@ Use `graph share <file> [--alt ...] [--caption ...]` to drop an image (or
 any file) into the session viewer as an inline tile. One tool call →
 one tile, rendered at the current turn. The operator clicks for fullscreen.
 
-- **One share per Bash tool_result.** The harness up-converts a single JSON
-  object whose `type` is `viewer_attachment`; chaining shares (`graph
-  share a && graph share b`) in one Bash call concatenates two JSON
-  objects and *neither* renders. Use one Bash invocation per share.
-- **Don't print anything else in the same Bash call** — extra stdout
-  breaks the parse.
-- **No `--session` flag, no need.** The session is stamped from the
-  trusted JSONL stream, not anything the agent prints.
+- Delivery is an authenticated API call using the existing persisted
+  attachment records and viewer subscription, not command-output parsing.
+- stdout is only a receipt: `graph share image.png >/dev/null` still delivers.
+- **No `--session` flag, no need.** The API derives the session from its bearer.
 
 Canonical how-to with examples + security model: `graph read 3570406f-29a`.
 

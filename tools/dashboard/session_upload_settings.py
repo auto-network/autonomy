@@ -86,6 +86,8 @@ class SessionUploadV1(SettingSchema):
         default=0,
         description="File size in bytes.",
     )
+    alt: str = field(default="", description="Accessible description of a shared file.")
+    caption: str = field(default="", description="Operator-facing attachment caption.")
     timestamp: str = field(
         default="",
         description=(
