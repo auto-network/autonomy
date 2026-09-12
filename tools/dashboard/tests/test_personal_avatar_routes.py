@@ -345,6 +345,40 @@ def test_missing_avatar_and_missing_crop(env, root):
     assert missing_crop.json()["code"] == "missing_crop"
 
 
+@pytest.mark.parametrize("duplicate", ["avatar", "crop"])
+def test_duplicate_required_multipart_part_is_rejected(env, root, duplicate):
+    """The request has one unambiguous avatar and one crop."""
+    _store_identity(env, root, name="Jeremy Spilman")
+    boundary = "profile-duplicate-boundary"
+    parts = [
+        ("avatar", "first.png", "image/png", _png()),
+        ("crop", None, None, json.dumps(_full_crop()).encode()),
+    ]
+    if duplicate == "avatar":
+        parts.append(("avatar", "second.png", "image/png", _png()))
+    else:
+        parts.append(("crop", None, None, json.dumps(_full_crop()).encode()))
+    body = bytearray()
+    for name, filename, content_type, value in parts:
+        body.extend(f"--{boundary}\r\n".encode())
+        disposition = f'Content-Disposition: form-data; name="{name}"'
+        if filename is not None:
+            disposition += f'; filename="{filename}"'
+        body.extend((disposition + "\r\n").encode())
+        if content_type is not None:
+            body.extend(f"Content-Type: {content_type}\r\n".encode())
+        body.extend(b"\r\n" + value + b"\r\n")
+    body.extend(f"--{boundary}--\r\n".encode())
+
+    response = env.post(
+        "/api/identity/profile/avatar",
+        content=bytes(body),
+        headers={"content-type": f"multipart/form-data; boundary={boundary}"},
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "bad_request"
+
+
 def test_malformed_crop_json_is_invalid_crop(env, root):
     _store_identity(env, root, name="Jeremy Spilman")
     r = env.post(
