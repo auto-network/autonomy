@@ -11,7 +11,7 @@
 
 /**
  * dashboard.testing.run#1
- * Access pattern: keyed_per_entity (key strategy: run_id)
+ * Access pattern: append_only_log (key strategy: run_id)
  */
 export interface AgentTestRunV1 {
   /** Stable credential-free repository identity. */
