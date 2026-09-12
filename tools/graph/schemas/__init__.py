@@ -33,6 +33,7 @@ from .registry import (
     # using these helpers / decorators.
     field,
     append_only_log,
+    declared_strict_append_only,
     singleton,
     keyed_per_entity,
     org_writeback_namespace,
@@ -179,6 +180,7 @@ __all__ = [
     "SYNOPSIS_META_REVISION",
     "field",
     "append_only_log",
+    "declared_strict_append_only",
     "singleton",
     "keyed_per_entity",
     "org_writeback_namespace",

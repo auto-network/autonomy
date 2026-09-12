@@ -3160,6 +3160,17 @@ def _access_pattern_for(set_id: str, revision: int) -> str | None:
     return getattr(schema, "_access_pattern", None) if schema else None
 
 
+def _assert_allows_resolution_layers(target: dict) -> None:
+    """Reject amendment layers forbidden by the target revision's schema."""
+    if schemas.declared_strict_append_only(
+        target["set_id"], int(target["schema_revision"])
+    ):
+        raise ValueError(
+            f"{target['set_id']}#{target['schema_revision']} is strict "
+            "append-only: overrides and exclusions are forbidden"
+        )
+
+
 def layers_for(set_id: str, key: str, *, org: str | None) -> dict:
     """Every stored row behind one resolved value, and what each contributes.
 
@@ -3638,6 +3649,7 @@ def override_setting(
     target = _fetch_setting_any_org(target_id, org)
     if target is None:
         raise LookupError(f"override target not found: {target_id!r}")
+    _assert_allows_resolution_layers(target)
 
     # Resolution applies ONLY overrides whose ``supersedes`` points at the
     # chosen base row (see read_set / explain_setting). An override of an
@@ -3772,6 +3784,7 @@ def exclude_setting(
     target = _fetch_setting_any_org(target_id, org)
     if target is None:
         raise LookupError(f"exclude target not found: {target_id!r}")
+    _assert_allows_resolution_layers(target)
     db = _open(org)
     try:
         sid = str(uuid4())

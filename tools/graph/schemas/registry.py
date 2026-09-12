@@ -478,13 +478,19 @@ def append_only_log(
     cls: type | None = None,
     *,
     key: str | Callable[..., Any] = "uuid_v4",
+    strict: bool = False,
 ) -> Any:
     """Schema decorator: declare append-only event log semantics.
 
-    Rows are never overridden; each write generates a fresh key via the
+    Rows are never rewritten; each write generates a fresh key via the
     named key strategy (default ``uuid_v4``). Codegen-aware consumers
     expose ``.append(payload)`` instead of generic ``.write({key,
     payload})``.
+
+    ``strict=True`` additionally forbids override and exclusion layers. Raw
+    base deletion remains available for bounded retention; strictness is a
+    guarantee that every live member is a complete base, not an instruction
+    to retain every event forever.
 
     The design signpost shows ``@append_only_log(key=uuid_v4)`` (a
     callable reference) as the canonical authoring shape. We normalize
@@ -501,11 +507,26 @@ def append_only_log(
         key_name = str(key)
 
     def _wrap(target: type) -> type:
+        if not isinstance(strict, bool):
+            raise SchemaValidationError(
+                f"{target.__name__}: append_only_log strict must be a boolean"
+            )
+        target._strict_append_only = strict
         return _claim_access_pattern(target, "append_only_log", key_name)
 
     if cls is None:
         return _wrap
     return _wrap(cls)
+
+
+def declared_strict_append_only(set_id: str, revision: int) -> bool:
+    """Whether this registered schema revision forbids resolution layers."""
+    schema = get_schema(set_id, int(revision))
+    return bool(
+        schema is not None
+        and getattr(schema, "_access_pattern", None) == "append_only_log"
+        and getattr(schema, "_strict_append_only", False)
+    )
 
 
 def singleton(cls: type | None = None, *, key: str = "default") -> Any:
@@ -1408,6 +1429,7 @@ class SettingSchema:
     # substrate's generic ``.write({key, payload})`` is the escape hatch.
     _access_pattern: str | None = None
     _key_strategy: str | None = None
+    _strict_append_only: bool = False
     _org_writeback_key_strategy: str | None = None
 
     # ``@cache(ttl=...)``-only: TTL in whole seconds, stamped onto the
@@ -1565,6 +1587,8 @@ class SettingSchema:
         payload["schema_revision"] = cls.schema_revision
         payload["access_pattern"] = cls._access_pattern
         payload["key_strategy"] = cls._key_strategy
+        if cls._strict_append_only:
+            payload["strict_append_only"] = True
         org_writeback = getattr(cls, "_org_writeback_key_strategy", None)
         if org_writeback is not None:
             payload["org_writeback_key_strategy"] = org_writeback

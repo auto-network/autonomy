@@ -51,6 +51,12 @@ def schemas():
         schema_revision = 1
         v: str = field(required=True, description="value")
 
+    @append_only_log(key="uuid_v4", strict=True)
+    class StrictLog(SettingSchema):
+        set_id = "probe.pattern.strict-log"
+        schema_revision = 1
+        v: str = field(required=True, description="value")
+
     @singleton(key="default")
     class Undeclared(SettingSchema):
         # Declares a pattern but stands in for the general case below.
@@ -58,7 +64,7 @@ def schemas():
         schema_revision = 1
         v: str = field(required=True, description="value")
 
-    return Replaced, PerEntity, Log, Undeclared
+    return Replaced, PerEntity, Log, StrictLog, Undeclared
 
 
 @pytest.fixture
@@ -164,3 +170,71 @@ def test_bulk_append_and_raw_prune_preserve_log_contract(orgs):
             [("acme", {"v": "wrong cardinality"})],
             org="acme",
         )
+
+
+def test_strict_append_only_refuses_override_without_writing_a_layer(orgs):
+    key = str(uuid.uuid4())
+    base = settings_ops.add_setting(
+        "probe.pattern.strict-log", 1, key, {"v": "a"}, org="acme"
+    )
+
+    with pytest.raises(ValueError, match="strict append-only"):
+        settings_ops.override_setting(base, {"v": "b"}, org="acme")
+
+    layers = settings_ops.layers_for(
+        "probe.pattern.strict-log", key, org="acme"
+    )
+    assert layers["overrides"] == []
+
+
+def test_strict_append_only_refuses_exclusion_without_writing_a_layer(orgs):
+    key = str(uuid.uuid4())
+    base = settings_ops.add_setting(
+        "probe.pattern.strict-log", 1, key, {"v": "a"}, org="acme"
+    )
+
+    with pytest.raises(ValueError, match="strict append-only"):
+        settings_ops.exclude_setting(base, org="acme")
+
+    assert settings_ops.layers_for(
+        "probe.pattern.strict-log", key, org="acme"
+    )["base"] is not None
+
+
+@pytest.mark.parametrize("operation", ["override", "exclude"])
+def test_strict_append_only_refuses_layers_on_peer_owned_target(orgs, operation):
+    key = str(uuid.uuid4())
+    base = settings_ops.add_setting(
+        "probe.pattern.strict-log",
+        1,
+        key,
+        {"v": "a"},
+        org="acme",
+        state="canonical",
+    )
+
+    with pytest.raises(ValueError, match="strict append-only"):
+        if operation == "override":
+            settings_ops.override_setting(
+                base, {"v": "b"}, org="other", state="canonical"
+            )
+        else:
+            settings_ops.exclude_setting(base, org="other", state="canonical")
+
+    assert settings_ops.read_set(
+        "probe.pattern.strict-log", org="other"
+    ).members[0].payload == {"v": "a"}
+
+
+def test_strict_append_only_still_allows_append_and_raw_prune(orgs):
+    ids = settings_ops.append_log_entries(
+        "probe.pattern.strict-log",
+        1,
+        [(str(uuid.uuid4()), {"v": "a"}), (str(uuid.uuid4()), {"v": "b"})],
+        org="acme",
+    )
+
+    assert settings_ops.remove_raw_settings(ids[:1], org="acme") == 1
+    assert len(settings_ops.read_set(
+        "probe.pattern.strict-log", org="acme", peers=[]
+    ).members) == 1
