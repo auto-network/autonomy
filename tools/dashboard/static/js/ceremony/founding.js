@@ -419,6 +419,10 @@ async function foundOrganization({
     throw new Error('transport adapter is missing method fetch');
   }
   const batch = await buildFoundingBatch(foundingInputs);
+  return submitFoundingBatch({ org, transport, batch });
+}
+
+async function submitFoundingBatch({ org, transport, batch }) {
   const response = await transport.fetch(
     '/api/network/ledger/found',
     {
@@ -451,10 +455,116 @@ async function foundOrganization({
   };
 }
 
+/**
+ * Found an organization shell using the existing root-unlock and founding
+ * ceremonies.
+ *
+ * This is the shared browser orchestration for the already-existing sequence:
+ * unlock the personal root, mint and seal the organization root locally,
+ * store only the sealed key, then submit the signed founding batch.  Callers
+ * decide only whether their shell still needs founding.
+ */
+async function foundExistingOrganizationShell({
+  org,
+  orgId,
+  storageDelegatePolicy,
+  openRoot,
+  transport,
+  now,
+}) {
+  if (typeof openRoot !== 'function') {
+    throw new Error('openRoot must be the shared personal-root ceremony');
+  }
+  if (!transport || typeof transport.fetch !== 'function') {
+    throw new Error('transport adapter is missing method fetch');
+  }
+
+  const phases = await import('./signon-phases.js');
+  const vault = await import('./vault-unlock.js');
+  const { prepareStorageDelegate } = await import('./org-storage-delegate.js');
+  const fetchImpl = transport.fetch.bind(transport);
+  const encrypted = await phases.fetchPreparation(fetchImpl);
+  const opened = await openRoot({
+    title: 'Set up organization authority',
+    detail: 'Unlock your personal root to create this organization\'s signing authority.',
+  });
+  if (!opened) throw new Error('Organization setup was cancelled.');
+
+  let generated, batch, preparedVault;
+  let kemSeed;
+  try {
+    const { audited, inputs } = await phases.openPreparation(opened.seed, encrypted);
+    if (inputs.vault.error) throw new Error(inputs.vault.error);
+    generated = await generateSealedOrgRoot({
+      personalRootSeed: opened.seed,
+    });
+    const timestamp = now == null ? Date.now() : now;
+    kemSeed = await deriveKemSeed(opened.seed, 0);
+    batch = await buildFoundingBatch({ orgId, rootPub: generated.rootPub,
+      rootSigningKey: generated.rootSigningKey, personalRootSeed: opened.seed,
+      kemSeed, now: timestamp });
+    // The new ledger exists locally as this signed batch. Its genesis and
+    // final head are already known: no root-open server lookup is needed.
+    preparedVault = await vault.prepareVault(opened.seed, inputs.vault, audited);
+    preparedVault.keys.organization_kem_keys = [{ organization: org,
+      genesis_id: batch.genesisId, kem_key_id: batch.kemCredential.kem_key_id,
+      persona_kem_private_key: batch.kemPrivateKey }];
+    // Same v1 content domain and exact two scopes as ledger/projections.py
+    // and storagekit/delegate.py; policy durations come from the server.
+    const domain = await sha256Hex('autonomy/storage-domain/v1'
+      + batch.genesisId + 'organization-content');
+    preparedVault.keys.organization_delegates = [await prepareStorageDelegate(
+      opened.seed, { ...storageDelegatePolicy, organization: org,
+        genesis_id: batch.genesisId, parents: [batch.eventIds[3]],
+        scope: ['storage:capability:grant:' + domain, 'storage:state:advance:' + domain],
+        delegate_metadata: {} }, Math.max(Date.now(), batch.events.at(-1).hlc[0] + 1))];
+  } finally {
+    opened.seed?.fill?.(0);
+    opened.signingKey = null;
+    if (kemSeed) kemSeed.fill(0);
+    if (generated) generated.rootSigningKey = null;
+    if (batch) batch.kemPrivateKey = null;
+  }
+
+  try {
+    const sealedResponse = await transport.fetch(
+      '/api/network/org-key/sealed',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ org, ...generated.sealedOrgKey }),
+      },
+    );
+    const sealedResult = await responseBody(sealedResponse);
+    if (!sealedResponse.ok) {
+      throw new Error(
+        `sealed organization key endpoint failed with ${sealedResponse.status}: `
+        + `${typeof sealedResult === 'string' ? sealedResult : JSON.stringify(sealedResult)}`,
+      );
+    }
+
+    const founded = await submitFoundingBatch({ org, transport, batch });
+    const handoff = await vault.submitVault(preparedVault, fetchImpl);
+    for (const outcome of [handoff.organization_recovery?.[org],
+      handoff.organization_delegates?.[org]]) {
+      if (!outcome?.ok) throw new Error(outcome?.error || 'Organization vault setup did not complete.');
+    }
+    return {
+      ...founded,
+      rootPub: generated.rootPub,
+      sealedOrgKey: generated.sealedOrgKey,
+      sealedServer: sealedResult,
+    };
+  } finally {
+    preparedVault.keys = null;
+  }
+}
+
 export {
   buildFoundingBatch,
   buildPersonaKemCredential,
   deriveKemSeed,
+  foundExistingOrganizationShell,
   foundOrganization,
   generateSealedOrgRoot,
   ORG_ROOT_ARMOR_PURPOSE,

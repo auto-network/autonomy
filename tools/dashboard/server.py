@@ -20520,7 +20520,11 @@ async def api_orgs_create(request):
         return JSONResponse({"error": str(e)}, status_code=409)
     except org_ops.OrgError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
-    return JSONResponse({"org": ref.to_dict(), "founded": False}, status_code=201)
+    from tools.dashboard.org_storage_delegate import TTL_MS, REMINT_BELOW_MS
+    return JSONResponse({"org": ref.to_dict(), "founded": False,
+                         "storage_delegate_policy": {
+                             "ttl_ms": TTL_MS, "remint_below_ms": REMINT_BELOW_MS,
+                         }}, status_code=201)
 
 
 async def api_orgs_delete(request):
