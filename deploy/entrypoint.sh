@@ -101,20 +101,33 @@ fi
 # than only by starting a container. It retries while the Docker daemon comes
 # up; a single attempt once left this machine with no ramfs carrier for an
 # hour (2026-09-09).
-"$(dirname "$0")/provision-secret-ramfs.sh" || true
+#
+# ROLE GATE: this entrypoint is shared by the dashboard and the dispatcher, but
+# only the dashboard holds the keycache/ramfs mount. The dispatcher deliberately
+# has no keycache bind (deploy/dispatch.sh: "the dispatcher never decrypts a
+# secret itself") — so on it /run/autonomy-keycache is a plain dir, and the
+# provisioner FATALs "not ramfs" and burns its full retry budget on every start
+# for setup the dispatcher does not use. Set AUTONOMY_PROVISION_RAMFS=0 on any
+# role without a keycache mount to skip it. Default 1 preserves dashboard/node
+# behavior exactly.
+if [ "${AUTONOMY_PROVISION_RAMFS:-1}" = "1" ]; then
+    "$(dirname "$0")/provision-secret-ramfs.sh" || true
 
-# The key cache is a dashboard-owned memory-class store. The dashboard runs
-# as autonomy, so hand the mounted root to it after the ramfs provisioner
-# verifies it. Session secret delivery is per-container-private and needs no
-# host-side store at all.
-chown autonomy:autonomy /run/autonomy-keycache 2>/dev/null || true
+    # The key cache is a dashboard-owned memory-class store. The dashboard runs
+    # as autonomy, so hand the mounted root to it after the ramfs provisioner
+    # verifies it. Session secret delivery is per-container-private and needs no
+    # host-side store at all.
+    chown autonomy:autonomy /run/autonomy-keycache 2>/dev/null || true
 
-# Certificate material for the Service gateway is a child of the verified
-# ramfs key cache. Caddy receives only this child, read-only, and Compose is
-# told to refuse rather than create the bind source if this preparation failed.
-mkdir -p /run/autonomy-keycache/service-gateway 2>/dev/null || true
-chown autonomy:autonomy /run/autonomy-keycache/service-gateway 2>/dev/null || true
-chmod 0700 /run/autonomy-keycache/service-gateway 2>/dev/null || true
+    # Certificate material for the Service gateway is a child of the verified
+    # ramfs key cache. Caddy receives only this child, read-only, and Compose is
+    # told to refuse rather than create the bind source if this preparation failed.
+    mkdir -p /run/autonomy-keycache/service-gateway 2>/dev/null || true
+    chown autonomy:autonomy /run/autonomy-keycache/service-gateway 2>/dev/null || true
+    chmod 0700 /run/autonomy-keycache/service-gateway 2>/dev/null || true
+else
+    echo "entrypoint: ramfs keycache provisioning skipped (AUTONOMY_PROVISION_RAMFS=0; role has no keycache mount)" >&2
+fi
 
 # Host terminals: when the host's /tmp is mounted (docker-compose.yml,
 # dashboard service), every tmux invocation from this container must reach
