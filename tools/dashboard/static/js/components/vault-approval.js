@@ -4,6 +4,7 @@ import {collectVaultOpeners, clearVaultOpeners} from '../ceremony/open-vault.js'
 import {openContentKey} from '../ceremony/policy-class-open.js';
 
 function lifetime(seconds) {
+  if(seconds === 0) return 'Until this session ends';
   if(seconds % 3600 === 0) return `${seconds / 3600} hour${seconds === 3600 ? '' : 's'}`;
   if(seconds % 60 === 0) return `${seconds / 60} minute${seconds === 60 ? '' : 's'}`;
   return `${seconds} seconds`;
@@ -38,12 +39,12 @@ export async function openVaultApproval(self, r, {collect=collectVaultOpeners, o
     if(!result.ok) throw new Error(result.error||'This release is no longer available.');
   };
   self._sharedApprovalDialog=openApprovalDialog({
-    review:{kind:'vault',title:'Share this saved value',
-      intro:'Allow this session to receive the saved value shown below.',
+    review:{kind:'vault',title:'Release credential',
+      intro:'',
       organization:org?{name:org.name,image:org.favicon}:null,
-      target:{type:'Saved value',name:setting.key},requester:session,
-      facts:[['Delivered file available for',duration]],
-      consequence:'The session receives the saved value. Removing the delivered file later does not revoke copies it may have made.',
+      target:{type:'Credential',name:setting.key},requester:session,
+      facts:[['Available',duration]],
+      consequence:'Copies made by the session are not revoked when access ends.',
     },
     authorize:async options=>{
       let gathered;
@@ -71,8 +72,8 @@ export async function openVaultApproval(self, r, {collect=collectVaultOpeners, o
       throw new Error('Delivery has not been confirmed. Check the requesting session.');
     },
     decline:async()=>{await post({approved:false});self._markApprovalDecided(r.id);},
-    result:{working:'Sharing saved value…',success:'Value shared',copy:'',
-      fact:{name:setting.key,href:session.href,byline:`${session.name} · Delivery lifetime: ${duration}`,linkLabel:'View requesting session'}},
+    result:{working:'Releasing credential…',success:'Credential released',copy:'',
+      fact:{name:setting.key,href:session.href,byline:`${session.name} · ${duration}`,linkLabel:'View requesting session'}},
     onClose:()=>{self._sharedApprovalDialog=null;self._sharedApprovalId=null;},
   });
   self._sharedApprovalId=r.id;
