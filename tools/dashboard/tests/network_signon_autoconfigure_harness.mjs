@@ -1,6 +1,7 @@
 import { webcrypto } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
+import assert from 'node:assert/strict';
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 
@@ -86,6 +87,7 @@ async function browserMode() {
   const records = installIndexedDb();
   const localValues = new Map();
   const fetchCalls = [];
+  let requireRuntime = false;
   globalThis.localStorage = {
     getItem(key) {
       return localValues.has(key) ? localValues.get(key) : null;
@@ -102,6 +104,15 @@ async function browserMode() {
   globalThis.window = {
     async fetch(url) {
       fetchCalls.push(String(url));
+      if (requireRuntime && String(url).startsWith('/api/network/serve-cert')) {
+        return Response.json({ status: 'ok', required: false });
+      }
+      if (String(url) === '/api/fleet/enrollment/local-completion') {
+        return Response.json({ pending: false });
+      }
+      if (String(url) === '/api/fleet/runtime') {
+        return Response.json({ enabled: false });
+      }
       if (String(url).startsWith('/api/identity/personal')) {
         return {
           ok: true,
@@ -163,6 +174,15 @@ async function browserMode() {
     // only its copy.
     callerSeedIntact: opened.seed.every((b, i) => b === seedCopy[i]),
   };
+  requireRuntime = true;
+  const start = fetchCalls.length;
+  await assert.rejects(session.signOnWithRootSeed(opened.seed, opened.rootPub, {
+    org: 'module-load-org', requireServingRuntime: true,
+  }), /Machine runtime is not ready/);
+  const readinessCalls = fetchCalls.slice(start);
+  assert.ok(readinessCalls.findIndex(url => url.startsWith('/api/network/serve-cert'))
+    < readinessCalls.indexOf('/api/fleet/runtime'), 'serving preparation precedes runtime inputs');
+  assert.ok(opened.seed.every((byte, i) => byte === seedCopy[i]));
   opened.seed.fill(0); seedCopy.fill(0);
   // The tunnel PoP bytes every link publish signs (D19/auto-qol1v).
   const envelope = await window.AutonomyNetworkSigner.signRegistryRequest(

@@ -2093,6 +2093,11 @@ async def _post_serve_cert_v3(request: Request, body: dict) -> JSONResponse:
     previous_serve = local_serve_cert_member(org)
     if previous_serve is not None and \
             previous_serve.payload.get("cert") == body["cert"]:
+        try:
+            from tools.dashboard.link_serving_supervisor import get_supervisor
+            await asyncio.to_thread(get_supervisor().ensure, org)
+        except Exception:
+            pass  # reconcile is best-effort; the watchdog retries
         return JSONResponse({"ok": True, "child_pub": cert.child_pub,
                              "not_after": cert.not_after})
 

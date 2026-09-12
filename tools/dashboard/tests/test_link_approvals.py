@@ -492,6 +492,12 @@ def test_sealed_keyed_unregistered_org_is_registerable(tmp_path, monkeypatch, ro
     dialog dead-ended with 'not registered' + a disabled Approve button."""
     _isolated_orgs_with_peer_binding(tmp_path, monkeypatch, root, "sealedorg")
     _seed_org_key_sealed("sealedorg", root)
+    # First publish must reach the approval that registers this key and
+    # provisions serving; demanding its certificate here deadlocks startup.
+    from tools.dashboard import link_serving_supervisor
+    monkeypatch.setattr(link_serving_supervisor, "serve_cert_state",
+                        lambda org: {"status": "missing"})
+    link_approvals._require_startable_serving("sealedorg")
     enriched = link_approvals._enrich_link_publish({
         "id": "r-sealed",
         "request": {"org": "sealedorg", "target_uuid": TARGET,

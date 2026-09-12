@@ -65,24 +65,19 @@ def test_browser_module_load_configures_real_signon_path():
     # organization key itself is fetched only when a certificate is actually
     # due for renewal, which it is not here.
     #
-    # The trailing checkpoint probe is `signOn`'s — the worktrees-approval
-    # path, which still hand-wires its per-org maintenance instead of running
-    # the plan-gated step registry the dashboard unlock uses
-    # (repairAllServeCredentialsWithRootSeed). On that path the same probe is
-    # not made at all unless a checkpoint is genuinely due AND this persona may
-    # publish it. Converting signOn to the one runner is auto-77y5a's
-    # remaining piece; until then this call is real and asserted, not wished
-    # away.
+    # Sign-on uses the shared maintenance runner. The membership checkpoint
+    # precedes the serving certificate: the registry needs membership before
+    # it can accept a persona-issued serving credential.
     assert output["fetchCalls"] == [
         "/api/identity/personal",
         "/api/network/ledger/heads?org=module-load-org",
         "/api/network/binding?org=module-load-org",
         "/api/network/rekey-policy?org=module-load-org",
-        "/api/network/serve-cert?org=module-load-org",
         "/api/network/membership-checkpoint/decision"
         "?org=module-load-org"
         "&persona=" + persona.public_hex +
         "&genesis_id=" + genesis_id,
+        "/api/network/serve-cert?org=module-load-org",
     ]
 
     entry = output["signOnResult"]["orgs"][0]
