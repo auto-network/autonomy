@@ -89,8 +89,8 @@ def _unreachable(detail: str) -> dict:
     return {"live": False, "status": None, "content_length": None, "detail": detail}
 
 
-async def _attempt_once(relay_url, token, root_pub, org_uuid, connect_timeout,
-                        link_pub=None):
+async def _attempt_once(relay_url, token, link_pub, org_uuid, operation,
+                        connect_timeout):
     """One probe attempt with NO internal wall — the caller wraps it in a
     single ``asyncio.wait_for`` so the whole thing is bounded.
 
@@ -105,7 +105,7 @@ async def _attempt_once(relay_url, token, root_pub, org_uuid, connect_timeout,
 
     try:
         channel = await ViewerChannel.connect(
-            relay_url, token, root_pub=root_pub, link_pub=link_pub,
+            relay_url, token, link_pub=link_pub,
             org=org_uuid, open_timeout=connect_timeout,
         )
     except Exception as exc:  # relay refused, connector offline, DNS, TLS…
@@ -115,7 +115,7 @@ async def _attempt_once(relay_url, token, root_pub, org_uuid, connect_timeout,
         )
     try:
         async with channel:
-            await channel.send_message(canonical_json({"op": "head", "v": 1}))
+            await channel.send_message(canonical_json({"op": operation, "v": 1}))
             raw = await channel.recv_message()
         return _interpret(raw)
     except Exception as exc:
@@ -126,9 +126,9 @@ async def probe_link(
     *,
     relay_url: str,
     token: str,
-    root_pub: str,
+    link_pub: str,
     org_uuid: str,
-    link_pub: str | None = None,
+    operation: str,
     attempts: int = 2,
     total_timeout: float = 6.0,
     connect_timeout: float = 3.0,
@@ -136,9 +136,9 @@ async def probe_link(
 ) -> dict:
     """Prove — or disprove — that *token* actually serves over the tunnel.
 
-    Connects as a viewer pinned to *root_pub* / *org_uuid* (the values the
-    publisher already holds from its own binding, so no envelope round-trip
-    is needed), issues an object HEAD, and interprets the reply.
+    Connects as a viewer pinned to the per-link fragment public key, issues
+    the explicitly selected ``head`` or ``context`` operation, and interprets
+    the reply.
 
     This is a single honest snapshot of the tunnel, not a heal-wait: a down
     tunnel self-heals in the backend and the publish reports it rather than
@@ -149,6 +149,8 @@ async def probe_link(
     whole probe is bounded by *total_timeout*. Never raises: any transport,
     protocol, or timeout failure becomes an honest "not reachable" result.
     """
+    if operation not in {"head", "context"}:
+        raise ValueError("link probe operation must be 'head' or 'context'")
     loop = asyncio.get_running_loop()
     deadline = loop.time() + total_timeout
     result = _unreachable("the serving tunnel did not respond within the probe budget")
@@ -159,9 +161,8 @@ async def probe_link(
             break
         try:
             result = await asyncio.wait_for(
-                _attempt_once(relay_url, token, root_pub, org_uuid,
-                              min(connect_timeout, remaining),
-                              link_pub=link_pub),
+                _attempt_once(relay_url, token, link_pub, org_uuid, operation,
+                              min(connect_timeout, remaining)),
                 timeout=remaining,
             )
         except asyncio.TimeoutError:
