@@ -59,6 +59,7 @@ import copy
 import re
 import time
 import uuid
+from urllib.parse import urlsplit
 
 
 from tools.dashboard.dao import approval_requests as ar
@@ -1015,7 +1016,24 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
         return _fail(reply.get("error", "the registry refused the link"))
     token, url = reply.get("token"), reply.get("url")
     if not isinstance(token, str) or not _TOKEN_RE.match(token):
-        return _fail("registry returned a malformed grant token — not caching it")
+        return await asyncio.to_thread(
+            _compensate_failed_publish, org, token, "registry-response")
+    try:
+        parsed_url = urlsplit(url) if isinstance(url, str) else None
+    except ValueError:
+        parsed_url = None
+    if not (
+        parsed_url
+        and parsed_url.scheme == "https"
+        and parsed_url.netloc
+        and parsed_url.username is None
+        and parsed_url.password is None
+        and parsed_url.path == f"/l/{token}"
+        and not parsed_url.query
+        and not parsed_url.fragment
+    ):
+        return await asyncio.to_thread(
+            _compensate_failed_publish, org, token, "registry-response")
     # org:join's lifetime is the invitation's: the relay must echo the exact
     # expiry we sent, or the link would outlive/undercut the invite. Refuse to
     # cache on any mismatch (mirrors the retired HTTP path's guard).
@@ -1023,22 +1041,17 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
         req.get("target_type") == "org:join"
         and reply.get("expires_at") != req.get("expires_at")
     ):
-        return _fail(
-            "registry did not preserve the invitation-aligned expiry — "
-            "not caching the link"
-        )
+        return await asyncio.to_thread(
+            _compensate_failed_publish, org, token, "invitation-expiry")
 
     # Per-link channel key (graph://807b4e11-3e9): mint the keypair, vault the
     # private seed org-wide, and carry the public key on the grant row. The
     # shareable URL gains the key as a FRAGMENT — presentation-side only; the
     # registry minted and stores the canonical url and never sees the key.
     #
-    # BEST EFFORT during rollout: a mint that cannot run (the vault is cold)
-    # leaves the link keyless — a valid LEGACY link that serves under the old
-    # handshake. The fail-closed is on the VIEWER side (the handshake bead): a
-    # link opened without a fragment key fails closed. Making publish itself
-    # hard-depend on a warm vault before viewers consume the key would be a
-    # regression, so it does not.
+    # Existing content targets retain their rollout fallback. New org:join
+    # links do not: without this key there is no authenticated invitation
+    # endpoint, so the already-created registry grant is compensated below.
     from tools.dashboard.link_channel_key import (
         CHANNEL_KEY_TARGET_TYPES,
         ChannelKeyUnavailable,
@@ -1050,7 +1063,12 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
     if req["target_type"] in CHANNEL_KEY_TARGET_TYPES:
         try:
             channel_pub = mint_channel_key(token, org)
-        except ChannelKeyUnavailable as exc:
+        except Exception as exc:
+            if req["target_type"] == "org:join":
+                return await asyncio.to_thread(
+                    _compensate_failed_publish, org, token, "channel-key")
+            if not isinstance(exc, ChannelKeyUnavailable):
+                raise
             logger.warning(
                 "link %s published without a channel key (legacy link): %s",
                 token[:8], exc)
@@ -1080,10 +1098,21 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
         grant["serving_machine"] = serving_machine
     if req.get("target_type") == "org:join":
         grant["invite_ref"] = req["invite_ref"]
-    settings_ops.upsert_by_key(
-        NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION,
-        token, grant, org=org,
-    )
+    try:
+        from tools.graph import schemas
+        schemas.validate_payload(
+            NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION, grant)
+    except Exception:
+        return await asyncio.to_thread(
+            _compensate_failed_publish, org, token, "grant-schema")
+    try:
+        settings_ops.upsert_by_key(
+            NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION,
+            token, grant, org=org,
+        )
+    except Exception:
+        return await asyncio.to_thread(
+            _compensate_failed_publish, org, token, "grant-write")
     # The frame round-tripped on the live tunnel, so serving IS live by
     # construction — no separate probe needed on this path (register D19 B10).
     return {
@@ -1097,6 +1126,28 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
         "token": token,
         "serving": {"live": True, "via": "tunnel-control"},
         "actor": _approval_identities(org)["actor_identity"],
+    }
+
+
+def _compensate_failed_publish(org, token, stage):
+    """Undo a remotely-created link without disclosing its capabilities."""
+    remote_revoked = False
+    try:
+        from tools.dashboard.link_serving_supervisor import control
+        reply = control(org, "revoke-link", {"token": token})
+        remote_revoked = bool(reply.get("ok") or
+                              "unknown link" in (reply.get("error") or ""))
+    except Exception:
+        pass
+    cleanup = _drop_cached_grant(token, org)
+    prefix = token[:8] if isinstance(token, str) else "invalid"
+    return {
+        "ok": False,
+        "token_prefix": prefix,
+        "failed_stage": stage,
+        "remote_revoked": remote_revoked,
+        "grant_cleanup": cleanup["grant_cleanup"],
+        "key_cleanup": cleanup["key_cleanup"],
     }
 
 
@@ -1224,18 +1275,23 @@ async def _execute_share_link_revoke_tunnel(row: dict, decision: dict) -> dict:
     # the local cache row must still die so the dashboard stops serving it.
     if not reply.get("ok") and "unknown link" not in (reply.get("error") or ""):
         return _fail(reply.get("error", "the registry refused the revoke"))
-    removed = _drop_cached_grant(token, org)
+    cleanup = _drop_cached_grant(token, org)
+    if not cleanup["grant_cleanup"] or not cleanup["key_cleanup"]:
+        return {
+            "ok": False, "token_prefix": token[:8],
+            "failed_stage": "local-cleanup", "remote_revoked": True,
+            **cleanup,
+        }
     return {"ok": True, "token": token, "via": "tunnel-control",
-            "cache_removed": removed}
+            "cache_removed": True}
 
 
 
 
-def _drop_cached_grant(token: str, org: str | None) -> bool:
-    # Revocation's key half (graph://807b4e11-3e9): the vaulted channel seed
-    # dies with the grant row, so members stop holding the serving secret.
+def _drop_cached_grant(token: str, org: str | None) -> dict:
+    """Close the serving gate first, then clean up the now-powerless seed."""
     from tools.dashboard.link_channel_key import drop_channel_key
-    drop_channel_key(token, org)
+    grant_cleanup = False
     try:
         for m in settings_ops.read_owned_set(
             NETWORK_LINK_GRANT_SET_ID,
@@ -1244,10 +1300,28 @@ def _drop_cached_grant(token: str, org: str | None) -> bool:
         ).members:
             if m.key == token:
                 settings_ops.remove_setting(m.id, org=org)
-                return True
+                break
+        # A successful owning-set read plus a successful remove (or absence)
+        # establishes closure. Do not use _cached_grant here: that serving
+        # helper deliberately collapses read errors to None.
+        grant_cleanup = True
     except Exception:
-        pass
-    return False
+        grant_cleanup = False
+    # The seed is cleanup only after the serving gate is proven closed. If the
+    # grant removal failed, leave it intact for a repair retry.
+    key_cleanup = False
+    if grant_cleanup:
+        key_cleanup = bool(drop_channel_key(token, org))
+    if grant_cleanup and not key_cleanup:
+        try:
+            from tools.graph.schemas.network_identity import (
+                NETWORK_LINK_CHANNEL_KEY_SET_ID,
+            )
+            key_cleanup = settings_ops.read_set_key(
+                NETWORK_LINK_CHANNEL_KEY_SET_ID, token, org=org) is None
+        except Exception:
+            key_cleanup = False
+    return {"grant_cleanup": grant_cleanup, "key_cleanup": key_cleanup}
 
 
 # Consumed by approvals_routes when building its ENRICH / EXECUTORS registries.

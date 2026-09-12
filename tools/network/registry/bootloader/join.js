@@ -9,7 +9,7 @@
  * relay-served page must not run the join ceremony holds by construction.
  * Per the operator's ingress ruling there is NO auto-detection of local
  * nodes; both affordances always render and the user picks. The page's
- * ONE network interaction is the root-pinned E2E join channel, over
+ * ONE network interaction is the per-link authenticated E2E join channel, over
  * which the ORG self-describes (name/description/icon) — auto-r7kk4.
  *
  * Inputs, all read from the current URL:
@@ -27,6 +27,20 @@
 
   function $(id) { return document.getElementById(id); }
 
+  function decodeFragmentKey(fragment) {
+    if (typeof fragment !== "string" ||
+        !/^[A-Za-z0-9_-]{43}$/.test(fragment)) {
+      throw new Error("fragment is not an unpadded base64url key");
+    }
+    var raw = atob(fragment.replace(/-/g, "+").replace(/_/g, "/") + "=");
+    if (raw.length !== 32) throw new Error("fragment is not a 32-byte key");
+    var hex = "";
+    for (var i = 0; i < raw.length; i++) {
+      hex += raw.charCodeAt(i).toString(16).padStart(2, "0");
+    }
+    return hex;
+  }
+
   function readInputs() {
     var query = new URLSearchParams(location.search);
     var fragment = new URLSearchParams(
@@ -34,9 +48,9 @@
     );
     return {
       org: query.get("org") || "",
-      rootPub: query.get("root_pub") || "",
       inviteRef: query.get("invite_ref") || "",
       channelToken: fragment.get("channel_token") || "",
+      linkKey: fragment.get("k") || "",
       bearer: fragment.get("t") || "",
     };
   }
@@ -45,6 +59,7 @@
     return (
       /^[0-9a-f-]{32,36}$/.test(inputs.org) &&
       /^[0-9a-f]{32}$/.test(inputs.channelToken) &&
+      /^[A-Za-z0-9_-]{43}$/.test(inputs.linkKey) &&
       inputs.bearer.length > 0
     );
   }
@@ -67,13 +82,13 @@
   function localNodeUrl(inputs) {
     var query = new URLSearchParams({
       org: inputs.org,
-      root_pub: inputs.rootPub,
       invite_ref: inputs.inviteRef,
     });
     // Same shape the bootloader minted: both credentials in the fragment,
     // so the local hand-off adds no server-visible surface either.
     var fragment = new URLSearchParams({
       channel_token: inputs.channelToken,
+      k: inputs.linkKey,
       t: inputs.bearer,
     });
     return LOCAL_NODE + "/network/join?" + query.toString() +
@@ -111,11 +126,10 @@
 
   // ── Org self-description over the E2E join channel (auto-r7kk4) ────
   // The one network interaction this page performs, and it is the same
-  // authenticated read the join flow is built on: open the root-pinned
+  // authenticated read the join flow is built on: open the link-key-pinned
   // channel to the ORG'S OWN node and ask for the invitation context.
   // The reply's org_name/org_description/org_icon are trustworthy because the
-  // org said them over a channel pinned to the root key the invitation
-  // itself carries — a link can claim anything; this cannot. The BEARER
+  // org said them over a channel pinned to the key in the invitation URL.
   // is not involved anywhere in this read (channel token only).
 
   function safeIcon(value) {
@@ -161,7 +175,7 @@
       return a.performHandshake(ws, {
         org: inputs.org,
         token: inputs.channelToken,
-        rootPub: inputs.rootPub,
+        linkPub: decodeFragmentKey(inputs.linkKey),
       });
     }).then(function (channel) {
       return a.sendOp(channel, { v: 1, op: "context" });
@@ -181,7 +195,10 @@
   };
 
   if (typeof module === "object" && module.exports) {
-    module.exports = { safeIcon: safeIcon, safeColor: safeColor };
+    module.exports = {
+      safeIcon: safeIcon, safeColor: safeColor,
+      decodeFragmentKey: decodeFragmentKey,
+    };
   }
 
   if (typeof document !== "undefined") {

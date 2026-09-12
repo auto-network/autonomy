@@ -104,7 +104,7 @@ class World:
                 "issued_at": "2026-07-26T00:00:00Z",
                 "meta": {},
             },
-            org=ORG, state="canonical",
+            org=ORG, state="raw",
         )
 
     # -- the transport seam: exactly the bytes the connector hands over ----
