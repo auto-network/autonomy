@@ -12179,12 +12179,13 @@ def _has_collaborative_org() -> bool:
     """Whether any collaborative organization exists on this machine.
 
     ``list_orgs`` enumerates ``data/orgs/*.db``; the operator's own
-    ``personal`` store is not a collaborative org, so it is excluded. A
+    reserved local stores are not collaborative orgs, so they are excluded. A
     genuinely fresh invite-join machine (personal store only) reads False
     here until the operator creates or joins one.
     """
     from tools.graph import org_ops
-    return any(ref.slug != "personal" for ref in org_ops.list_orgs())
+    from tools.graph.db import LOCAL_STORE_SLUGS
+    return any(ref.slug not in LOCAL_STORE_SLUGS for ref in org_ops.list_orgs())
 
 
 def _fleet_enrollment_first_render() -> dict | None:
@@ -12219,10 +12220,12 @@ def _fleet_enrollment_first_render() -> dict | None:
 
 
 def _welcome_page(*, fleet_sync: bool = False) -> HTMLResponse:
+    from tools.graph.db import LOCAL_STORE_SLUGS
     return HTMLResponse(_load_template(
         "welcome.html",
         fleet_enrollment=_fleet_enrollment_first_render(),
         fleet_sync=fleet_sync,
+        local_store_slugs=sorted(LOCAL_STORE_SLUGS),
     ))
 
 
