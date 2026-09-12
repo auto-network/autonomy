@@ -691,3 +691,145 @@ def test_contested_route_reports_slots(graph_db_env, example_schema, client):
     # No founded ledger exists in this fixture, so eligibility fails closed
     # and neither slot resolves — the report is empty rather than wrong.
     assert contested == []
+
+
+# ── exact-key endpoint parity (indexed key_equals narrowing) — auto-x0xsu ──
+#
+# GET /api/graph/settings/<set_id>/<key> now routes through the resolver's
+# indexed key_equals seam instead of materializing the whole set. The
+# response must stay byte-identical to the prior full-read-then-filter
+# ResolvedSetting.to_dict() for every resolution shape. Spec:
+# graph://7d588dfa-429 §4.
+
+
+def _endpoint_reference(set_id, key, *, target=None, minrev=None):
+    """The prior behavior: full read (server org scope 'autonomy'), filter to
+    the key, serialize the member — the exact shape the endpoint returned."""
+    members = ops.read_set(
+        set_id, org="autonomy", target_revision=target, min_revision=minrev)
+    for m in members.members:
+        if m.key == key:
+            return json.loads(json.dumps(m.to_dict()))
+    return None
+
+
+def test_get_setting_by_key_matches_full_read_base(
+    graph_db_env, example_schema, client,
+):
+    ops.add_setting("autonomy.test.api", 1, "alpha", {"x": 1}, org=ops.CALLER_ORG)
+    ops.add_setting("autonomy.test.api", 1, "beta", {"x": 2}, org=ops.CALLER_ORG)
+    r = client.get("/api/graph/settings/autonomy.test.api/alpha")
+    assert r.status_code == 200
+    assert r.json() == _endpoint_reference("autonomy.test.api", "alpha")
+
+
+def test_get_setting_by_key_matches_full_read_override(
+    graph_db_env, example_schema, client,
+):
+    base = ops.add_setting(
+        "autonomy.test.api", 1, "alpha",
+        {"name": "A", "color": "blue"}, org=ops.CALLER_ORG)
+    ops.override_setting(base, {"color": "red"}, org=ops.CALLER_ORG)
+    r = client.get("/api/graph/settings/autonomy.test.api/alpha")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["payload"] == {"name": "A", "color": "red"}
+    assert body == _endpoint_reference("autonomy.test.api", "alpha")
+
+
+def test_get_setting_by_key_exclusion_is_404(
+    graph_db_env, example_schema, client,
+):
+    canonical = ops.add_setting(
+        "autonomy.test.api", 1, "alpha", {"x": 1},
+        state="canonical", org=ops.CALLER_ORG)
+    ops.exclude_setting(canonical, org=ops.CALLER_ORG)
+    r = client.get("/api/graph/settings/autonomy.test.api/alpha")
+    assert r.status_code == 404
+    assert _endpoint_reference("autonomy.test.api", "alpha") is None
+
+
+def test_get_setting_by_key_target_revision(graph_db_env, client):
+    class V1(schemas.SettingSchema):
+        set_id = "autonomy.test.api"
+        schema_revision = 1
+
+    class V2(schemas.SettingSchema):
+        set_id = "autonomy.test.api"
+        schema_revision = 2
+
+    schemas.register_schema("autonomy.test.api", 1, V1)
+    schemas.register_schema(
+        "autonomy.test.api", 2, V2,
+        upconvert_from_prev=lambda p: {**p, "v2": True})
+    ops.add_setting("autonomy.test.api", 1, "alpha", {"x": 1}, org=ops.CALLER_ORG)
+    r = client.get("/api/graph/settings/autonomy.test.api/alpha?target_revision=2")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["payload"] == {"x": 1, "v2": True}
+    assert body["target_revision"] == 2
+    assert body == _endpoint_reference("autonomy.test.api", "alpha", target=2)
+
+
+def test_get_setting_by_key_min_revision_drops_to_404(graph_db_env, client):
+    class V1(schemas.SettingSchema):
+        set_id = "autonomy.test.api"
+        schema_revision = 1
+
+    class V2(schemas.SettingSchema):
+        set_id = "autonomy.test.api"
+        schema_revision = 2
+
+    schemas.register_schema("autonomy.test.api", 1, V1)
+    schemas.register_schema("autonomy.test.api", 2, V2)
+    ops.add_setting("autonomy.test.api", 1, "alpha", {"x": 1}, org=ops.CALLER_ORG)
+    r = client.get("/api/graph/settings/autonomy.test.api/alpha?min_revision=2")
+    assert r.status_code == 404
+    assert _endpoint_reference("autonomy.test.api", "alpha", minrev=2) is None
+
+
+def test_get_setting_by_key_declared_defaults(graph_db_env, client):
+    from tools.graph.schemas.registry import field
+
+    class DefV1(schemas.SettingSchema):
+        set_id = "autonomy.test.api"
+        schema_revision = 1
+        color: str = field(default="blue")
+
+    schemas.register_schema("autonomy.test.api", 1, DefV1)
+    ops.add_setting("autonomy.test.api", 1, "alpha", {}, org=ops.CALLER_ORG)
+    r = client.get("/api/graph/settings/autonomy.test.api/alpha")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["payload"] == {"color": "blue"}
+    assert body == _endpoint_reference("autonomy.test.api", "alpha")
+
+
+def test_get_setting_by_key_invalid_revision_returns_400(
+    graph_db_env, example_schema, client,
+):
+    r = client.get("/api/graph/settings/autonomy.test.api/alpha?target_revision=abc")
+    assert r.status_code == 400
+    assert "target_revision" in r.json()["error"]
+
+
+def test_get_setting_by_key_forwards_key_equals_to_resolver(
+    graph_db_env, example_schema, client, monkeypatch,
+):
+    """The endpoint must ask the resolver to narrow by key (indexed seek),
+    not materialize the whole set and filter in Python."""
+    from tools.dashboard import server
+
+    key_equals_seen = []
+    real = server.graph_ops.read_set
+
+    def spy(set_id, **kwargs):
+        if "key_equals" in kwargs:
+            key_equals_seen.append(kwargs["key_equals"])
+        return real(set_id, **kwargs)
+
+    monkeypatch.setattr(server.graph_ops, "read_set", spy)
+    ops.add_setting("autonomy.test.api", 1, "alpha", {"x": 1}, org=ops.CALLER_ORG)
+    r = client.get("/api/graph/settings/autonomy.test.api/alpha")
+    assert r.status_code == 200
+    assert key_equals_seen == ["alpha"]

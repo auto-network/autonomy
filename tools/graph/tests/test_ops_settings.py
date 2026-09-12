@@ -11,8 +11,14 @@ import json
 
 import pytest
 
-from tools.graph import ops, schemas
-from tools.graph.schemas.registry import SCHEMAS, UPCONVERTERS, SchemaValidationError
+from tools.graph import ops, schemas, settings_ops
+from tools.graph.db import GraphDB
+from tools.graph.schemas.registry import (
+    SCHEMAS,
+    UPCONVERTERS,
+    SchemaValidationError,
+    field,
+)
 from tools.graph.settings_ops import json_merge_patch
 
 
@@ -388,3 +394,324 @@ def test_read_set_deprecated_filter_counts_zero_when_none(
      org=ops.CALLER_ORG)
     members = ops.read_set("autonomy.test.example", org=ops.CALLER_ORG)
     assert members.dropped.deprecated_filtered == 0
+
+
+# ── exact-key narrowing (read_set key_equals) — auto-x0xsu ──────────
+#
+# key_equals is the private substrate selector that lets a single-key read
+# seek idx_settings_set (set_id, key) instead of materializing the whole set.
+# It must change ONLY candidate cardinality: for the selected key it returns
+# the byte-identical resolved member the full read-then-filter would, because
+# every base/override/exclusion layer for that key shares the key and so still
+# reaches the unchanged resolver. Spec: graph://7d588dfa-429 §4.
+
+
+def _ser(members):
+    """Serialize a member list the way the wire and read_set_key would see
+    it — stable across the full-read-then-filter and the narrowed read."""
+    return json.dumps(
+        [m.to_dict() for m in members], sort_keys=True, default=str,
+    )
+
+
+def _full_then_filter(set_id, key, *, org, **kw):
+    """The reference: resolve the WHOLE set, then keep the one key."""
+    full = ops.read_set(set_id, org=org, **kw)
+    return [m for m in full.members if m.key == key]
+
+
+class _RecordingConn:
+    """Delegating proxy that records the RAW (pre-binding) SQL and params of
+    every ``execute``, so a test can assert what a query builder emitted.
+
+    ``set_trace_callback`` expands bound parameters into the statement text,
+    which would erase the ``?`` placeholders this test exists to see — so the
+    capture has to sit in front of ``execute`` instead.
+    """
+
+    def __init__(self, real, sink):
+        object.__setattr__(self, "_real", real)
+        object.__setattr__(self, "_sink", sink)
+
+    def execute(self, sql, params=()):
+        self._sink.append((sql, tuple(params)))
+        return self._real.execute(sql, params)
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_real"), name)
+
+
+def test_key_equals_matches_full_read_local_base(graph_db_env, example_schema):
+    ops.add_setting(
+        "autonomy.test.example", 1, "foo", {"x": 1, "name": "bar"},
+        org=ops.CALLER_ORG)
+    ops.add_setting(
+        "autonomy.test.example", 1, "other", {"x": 2}, org=ops.CALLER_ORG)
+
+    narrowed = ops.read_set(
+        "autonomy.test.example", org=ops.CALLER_ORG, key_equals="foo")
+    assert len(narrowed.members) == 1
+    assert narrowed.members[0].key == "foo"
+    assert _ser(narrowed.members) == _ser(
+        _full_then_filter("autonomy.test.example", "foo", org=ops.CALLER_ORG))
+
+
+def test_key_equals_matches_full_read_matching_override(
+    graph_db_env, example_schema,
+):
+    base = ops.add_setting(
+        "autonomy.test.example", 1, "foo",
+        {"name": "Alice", "color": "blue", "limit": 10}, org=ops.CALLER_ORG)
+    ops.override_setting(base, {"color": "red"}, org=ops.CALLER_ORG)
+    ops.add_setting(
+        "autonomy.test.example", 1, "other", {"name": "Z"}, org=ops.CALLER_ORG)
+
+    narrowed = ops.read_set(
+        "autonomy.test.example", org=ops.CALLER_ORG, key_equals="foo")
+    assert narrowed.members[0].payload == {
+        "name": "Alice", "color": "red", "limit": 10}
+    assert _ser(narrowed.members) == _ser(
+        _full_then_filter("autonomy.test.example", "foo", org=ops.CALLER_ORG))
+
+
+def test_key_equals_matches_full_read_exclusion(graph_db_env, example_schema):
+    canonical = ops.add_setting(
+        "autonomy.test.example", 1, "foo", {"name": "X"},
+        state="canonical", org=ops.CALLER_ORG)
+    ops.add_setting(
+        "autonomy.test.example", 1, "bar", {"name": "Y"},
+        state="canonical", org=ops.CALLER_ORG)
+    ops.exclude_setting(canonical, org=ops.CALLER_ORG)
+
+    narrowed = ops.read_set(
+        "autonomy.test.example", org=ops.CALLER_ORG, key_equals="foo")
+    # The excluded key resolves to nothing — same as the filtered full read.
+    assert narrowed.members == []
+    assert _ser(narrowed.members) == _ser(
+        _full_then_filter("autonomy.test.example", "foo", org=ops.CALLER_ORG))
+
+
+def test_key_equals_matches_full_read_target_revision(graph_db_env):
+    class V1(schemas.SettingSchema):
+        set_id = "autonomy.test.rev"
+        schema_revision = 1
+
+    class V2(schemas.SettingSchema):
+        set_id = "autonomy.test.rev"
+        schema_revision = 2
+
+    schemas.register_schema("autonomy.test.rev", 1, V1)
+    schemas.register_schema(
+        "autonomy.test.rev", 2, V2,
+        upconvert_from_prev=lambda p: {**p, "v2": True})
+    ops.add_setting("autonomy.test.rev", 1, "foo", {"x": 1}, org=ops.CALLER_ORG)
+    ops.add_setting("autonomy.test.rev", 1, "other", {"x": 9}, org=ops.CALLER_ORG)
+
+    narrowed = ops.read_set(
+        "autonomy.test.rev", org=ops.CALLER_ORG,
+        target_revision=2, key_equals="foo")
+    assert narrowed.members[0].payload == {"x": 1, "v2": True}
+    assert narrowed.members[0].target_revision == 2
+    assert _ser(narrowed.members) == _ser(_full_then_filter(
+        "autonomy.test.rev", "foo", org=ops.CALLER_ORG, target_revision=2))
+
+
+def test_key_equals_matches_full_read_min_revision(graph_db_env):
+    class V1(schemas.SettingSchema):
+        set_id = "autonomy.test.rev"
+        schema_revision = 1
+
+    class V2(schemas.SettingSchema):
+        set_id = "autonomy.test.rev"
+        schema_revision = 2
+
+    schemas.register_schema("autonomy.test.rev", 1, V1)
+    schemas.register_schema("autonomy.test.rev", 2, V2)
+    ops.add_setting("autonomy.test.rev", 1, "foo", {"x": 1}, org=ops.CALLER_ORG)
+    ops.add_setting("autonomy.test.rev", 2, "foo2", {"x": 2}, org=ops.CALLER_ORG)
+
+    # A key dropped by the floor resolves to nothing under both paths.
+    narrowed = ops.read_set(
+        "autonomy.test.rev", org=ops.CALLER_ORG,
+        min_revision=2, key_equals="foo")
+    assert narrowed.members == []
+    assert _ser(narrowed.members) == _ser(_full_then_filter(
+        "autonomy.test.rev", "foo", org=ops.CALLER_ORG, min_revision=2))
+
+
+def test_key_equals_matches_full_read_declared_defaults(graph_db_env):
+    class DefV1(schemas.SettingSchema):
+        set_id = "autonomy.test.defaults"
+        schema_revision = 1
+        color: str = field(default="blue")
+
+    schemas.register_schema("autonomy.test.defaults", 1, DefV1)
+    ops.add_setting("autonomy.test.defaults", 1, "foo", {}, org=ops.CALLER_ORG)
+
+    narrowed = ops.read_set(
+        "autonomy.test.defaults", org=ops.CALLER_ORG, key_equals="foo")
+    # The declared default is filled by the resolver, not the selector.
+    assert narrowed.members[0].payload == {"color": "blue"}
+    assert _ser(narrowed.members) == _ser(
+        _full_then_filter("autonomy.test.defaults", "foo", org=ops.CALLER_ORG))
+
+
+def test_key_equals_matches_full_read_vault_refusal(graph_db_env, tmp_path):
+    """A vault member that does not open resolves to a NAMED refusal, not to
+    absence — and the narrowed read must carry it exactly as the full read
+    does (payload None + vault_error), because step six runs unchanged."""
+    from tools.graph.tests.vault_read_harness import VaultWorld, clear_seams
+
+    vset = "autonomy.test.exactkey-vault"
+
+    @schemas.vaulted("audited")
+    class VaultedV1(schemas.SettingSchema):
+        set_id = vset
+        schema_revision = 1
+
+    schemas.register_schema(vset, 1, VaultedV1)
+    clear_seams()
+    world = VaultWorld(tmp_path / "vault").register()
+    try:
+        ops.add_setting(
+            vset, 1, "default", {"access_token": "sk-must-not-leak"},
+            org=ops.CALLER_ORG)
+        ops.add_setting(
+            vset, 1, "other", {"access_token": "sk-other"}, org=ops.CALLER_ORG)
+        settings_ops.set_vault_key_holder(None)
+
+        narrowed = ops.read_set(vset, org=None, key_equals="default")
+        assert len(narrowed.members) == 1
+        m = narrowed.members[0]
+        assert m.payload is None
+        assert m.vault_error.reason == settings_ops.VAULT_NO_KEY_HOLDER
+        assert "sk-must-not-leak" not in json.dumps(m.to_dict())
+        assert _ser(narrowed.members) == _ser(
+            _full_then_filter(vset, "default", org=None))
+    finally:
+        world.close()
+        clear_seams()
+
+
+def test_key_equals_no_selector_reproduces_full_query(graph_db_env, example_schema):
+    """No selector => the byte-identical prior result and shape."""
+    ops.add_setting("autonomy.test.example", 1, "a", {"x": 1}, org=ops.CALLER_ORG)
+    ops.add_setting("autonomy.test.example", 1, "b", {"x": 2}, org=ops.CALLER_ORG)
+    with_none = ops.read_set(
+        "autonomy.test.example", org=ops.CALLER_ORG, key_equals=None)
+    plain = ops.read_set("autonomy.test.example", org=ops.CALLER_ORG)
+    assert _ser(with_none.members) == _ser(plain.members)
+    assert with_none.dropped.to_dict() == plain.dropped.to_dict()
+
+
+def test_read_set_key_matches_full_read_then_filter(graph_db_env, example_schema):
+    """read_set_key (now narrowed) returns the byte-identical ROW contract a
+    full read-then-filter would build: base identity + resolved payload."""
+    base = ops.add_setting(
+        "autonomy.test.example", 1, "foo",
+        {"name": "Alice", "color": "blue"}, org=ops.CALLER_ORG)
+    ops.override_setting(base, {"color": "red"}, org=ops.CALLER_ORG)
+    ops.add_setting(
+        "autonomy.test.example", 1, "other", {"name": "Z"}, org=ops.CALLER_ORG)
+
+    row = settings_ops.read_set_key(
+        "autonomy.test.example", "foo", org=ops.CALLER_ORG)
+    assert row is not None
+    assert row["id"] == base  # base identity, not the override id
+    assert row["payload"] == {"name": "Alice", "color": "red"}  # resolved
+
+    # Reference: resolve the full set, filter, fetch the base row, splice the
+    # resolved payload — exactly what read_set_key did before it narrowed.
+    # _fetch_setting_any_org takes a RESOLVED org, not the CALLER_ORG sentinel,
+    # which read_set_key resolves via _resolve_org_arg before calling it.
+    resolved_org = settings_ops._resolve_org_arg(ops.CALLER_ORG)
+    m = next(
+        mm for mm in ops.read_set("autonomy.test.example", org=ops.CALLER_ORG).members
+        if mm.key == "foo")
+    ref = settings_ops._fetch_setting_any_org(
+        m.id, resolved_org, "autonomy.test.example")
+    ref["payload"] = m.payload
+    assert json.dumps(row, sort_keys=True) == json.dumps(ref, sort_keys=True)
+
+
+def test_read_set_key_missing_returns_none(graph_db_env, example_schema):
+    ops.add_setting("autonomy.test.example", 1, "foo", {"x": 1}, org=ops.CALLER_ORG)
+    assert settings_ops.read_set_key(
+        "autonomy.test.example", "nope", org=ops.CALLER_ORG) is None
+
+
+def test_key_equals_narrows_both_builders_and_uses_index(
+    tmp_path, monkeypatch, example_schema,
+):
+    """Both the owned and the peer SELECT must carry the parameterized
+    ``AND key = ?``, and the plan must be an index SEARCH on idx_settings_set
+    — a full scan on either builder is the regression this guards."""
+    import sqlite3
+
+    from tools.graph import cross_org
+
+    orgs = tmp_path / "orgs"
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    GraphDB.close_all_pooled()
+    for slug in ("autonomy", "anchore", "personal"):
+        GraphDB.create_org_db(slug).close()
+
+    # Peer (autonomy) canonical beats owned (anchore) raw under the same key.
+    ops.add_setting(
+        "autonomy.test.example", 1, "foo", {"k": "peer"},
+        org="autonomy", state="canonical")
+    ops.add_setting(
+        "autonomy.test.example", 1, "foo", {"k": "own"},
+        org="anchore", state="raw")
+
+    owned_sql: list = []
+    peer_sql: list = []
+    real_open_read = settings_ops._open_read
+    real_open_peer = cross_org.open_peer_db
+
+    def spy_open_read(*a, **k):
+        db = real_open_read(*a, **k)
+        db.conn = _RecordingConn(db.conn, owned_sql)
+        return db
+
+    def spy_open_peer(*a, **k):
+        db = real_open_peer(*a, **k)
+        if db is not None:
+            db.conn = _RecordingConn(db.conn, peer_sql)
+        return db
+
+    monkeypatch.setattr(settings_ops, "_open_read", spy_open_read)
+    monkeypatch.setattr(cross_org, "open_peer_db", spy_open_peer)
+
+    result = ops.read_set(
+        "autonomy.test.example", org="anchore", key_equals="foo")
+    assert len(result.members) == 1
+    assert result.members[0].payload == {"k": "peer"}
+
+    def _selects(sink):
+        return [
+            (s, p) for (s, p) in sink
+            if "FROM settings" in s and "rowid AS _rowid" in s
+        ]
+
+    owned_sel = _selects(owned_sql)
+    peer_sel = _selects(peer_sql)
+    assert owned_sel, "owned builder never ran"
+    assert peer_sel, "peer builder never ran"
+    assert all("AND key = ?" in s for (s, _) in owned_sel)
+    assert all("AND key = ?" in s for (s, _) in peer_sel)
+    # The key is a bound parameter, never interpolated into the SQL text.
+    assert all("foo" in p for (_, p) in owned_sel)
+    assert all("foo" in p for (_, p) in peer_sel)
+
+    sql, params = owned_sel[0]
+    conn = sqlite3.connect(orgs / "anchore.db")
+    try:
+        plan = "\n".join(
+            r[-1] for r in conn.execute("EXPLAIN QUERY PLAN " + sql, params))
+    finally:
+        conn.close()
+    assert "SEARCH settings USING INDEX idx_settings_set" in plan
+    GraphDB.close_all_pooled()
