@@ -1,0 +1,25 @@
+╭─────────────────────────────────────────────────╮
+│ ✨ Update available! 0.153.2 -> 0.154.0         │
+│ Run npm install -g @openai/codex to update.     │
+│                                                 │
+│ See full release notes:                         │
+│ https://github.com/openai/codex/releases/latest │
+╰─────────────────────────────────────────────────╯
+
+╭─────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.153.2)                  │
+│                                             │
+│ model:       gpt-5.6-sol   /model to change │
+│ directory:   /workspace/repo                │
+│ permissions: YOLO mode                      │
+╰─────────────────────────────────────────────╯
+
+  Tip: This is GPT-6, a new generation of intelligence. Astra is state-of-the-art in coding, computer use, science, and professional work. Give it a hard problem, a half-formed idea, or anything you've been meaning to build.
+  See where it takes you.
+
+• You have 3 usage limit resets available. Run /usage to use one.
+
+
+› Ask Codex to do anything
+
+  gpt-5.6-sol default · /workspace/repo

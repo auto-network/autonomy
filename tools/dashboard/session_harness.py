@@ -3098,7 +3098,20 @@ _CODEX_TRUST_CONFIRM_RE = re.compile(
     r"press\s+enter\s+to\s+continue",
     re.IGNORECASE,
 )
-_CODEX_COMPOSER_PROMPT_RE = re.compile(r"(?:^|\n)\s*›\s*(?:\n|$)")
+# The composer prompt line is `›` followed by either nothing (empty, after the
+# user clears input) OR the ghost placeholder the current TUI renders until the
+# first keystroke.  v0.150.1 rendered an EMPTY line; v0.153.2 renders
+# `› Ask Codex to do anything`, so an empty-only match never fired for a fresh
+# session and every Codex launch fell through to the 12s HARNESS_READY_GRACE_S
+# fallback in the screen poller (~13s wasted/launch).  Trust-menu option lines
+# (`› 1. Yes, continue`) are excluded separately via `not trust_visible` below,
+# so accepting the placeholder here cannot re-trigger the 2026-09-06 regression.
+# NOTE: keying on the exact placeholder string is itself vendor-UI drift-prone —
+# codex_composer_ready_v0_153.txt pins the current wording so a future change
+# fails a test instead of silently costing 13s/launch again.
+_CODEX_COMPOSER_PROMPT_RE = re.compile(
+    r"(?:^|\n)\s*›\s*(?:Ask Codex to do anything)?\s*(?:\n|$)"
+)
 _CODEX_AUTH_RE = re.compile(
     r"not logged in|sign in to continue|authentication required|run\s+codex\s+login",
     re.IGNORECASE,

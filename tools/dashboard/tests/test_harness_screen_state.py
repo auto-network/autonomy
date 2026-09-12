@@ -185,6 +185,13 @@ PANE_CODEX_COMPOSER_READY = """
 ›
 """
 
+# Real capture from Codex v0.153.2 — the composer renders a ghost placeholder
+# (`› Ask Codex to do anything`) on the prompt line until the first keystroke,
+# not an empty `›`. Pins the CURRENT UI so the detector can't silently rot
+# against a placeholder-wording change again (an empty-only regex left every
+# Codex launch stuck at harness_starting for the full 12s grace fallback).
+PANE_CODEX_COMPOSER_READY_V0_153 = _load("codex_composer_ready_v0_153.txt")
+
 
 def test_codex_trust_dialog_is_confirmed_but_never_called_composer_ready():
     state, keys = CODEX_HARNESS.read_screen_state(PANE_CODEX_TRUST_DIALOG, {})
@@ -211,6 +218,21 @@ def test_codex_empty_composer_clears_trust_and_reports_ready():
 
     assert state["confirming_trust_prompt"] is False
     assert state["composer_ready"] is True
+    assert keys == []
+
+
+def test_codex_placeholder_composer_v0_153_reports_ready():
+    """v0.153.2 renders `› Ask Codex to do anything` (ghost placeholder) on the
+    prompt line, not an empty `›`. This real-capture fixture must read
+    composer_ready=True — an empty-only regex missed it and forced every Codex
+    launch through the 12s grace fallback."""
+    state, keys = CODEX_HARNESS.read_screen_state(
+        PANE_CODEX_COMPOSER_READY_V0_153, {},
+    )
+    assert state["composer_ready"] is True, (
+        "v0.153.2 '› Ask Codex to do anything' placeholder must be composer_ready"
+    )
+    assert state["confirming_trust_prompt"] is False
     assert keys == []
 
 
