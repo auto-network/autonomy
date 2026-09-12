@@ -226,6 +226,32 @@ def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _persist_profile(base: dict) -> dict | None:
+    """Commit the Personal profile row, then invalidate its identity projection.
+
+    The single seam every Personal-profile mutation — text
+    (:func:`update_profile`), avatar activation (:func:`set_avatar`), and avatar
+    removal (:func:`clear_avatar`) — writes through. The write goes through the
+    protected :func:`settings_ops.identity_write_context` pinned to ``org=None``
+    (the generic Settings API cannot touch this set). After it commits, the
+    org-identity resolver's Personal generation is advanced so
+    ``resolve_org_identity("personal")`` rebuilds with the new name / initials /
+    avatar on the very next read — no other org's cached identity is disturbed
+    and no process restart is required (auto-vlt7j.3). Returns the freshly
+    serialized effective profile.
+    """
+    with settings_ops.identity_write_context():
+        settings_ops.upsert_by_key(
+            USER_PROFILE_SET_ID, USER_PROFILE_REVISION,
+            USER_PROFILE_CANONICAL_LABEL, base, org=None,
+        )
+    # Lazy import avoids an org_identity ↔ personal_profile import cycle: the
+    # resolver reads this module's effective profile during the overlay.
+    from tools.dashboard import org_identity
+    org_identity.invalidate_personal_identity()
+    return serialize_profile(get_effective_profile())
+
+
 def _merge_text_field(base: dict, key: str, value: Any) -> None:
     """Apply one validated PATCH text field onto ``base`` in place."""
     if not isinstance(value, str):
@@ -305,12 +331,7 @@ def update_profile(fields: Any) -> dict | None:
 
     base["updated_at"] = _now_iso()
 
-    with settings_ops.identity_write_context():
-        settings_ops.upsert_by_key(
-            USER_PROFILE_SET_ID, USER_PROFILE_REVISION,
-            USER_PROFILE_CANONICAL_LABEL, base, org=None,
-        )
-    return serialize_profile(get_effective_profile())
+    return _persist_profile(base)
 
 
 # ── avatar (server-owned references) ──────────────────────────
@@ -355,12 +376,7 @@ def set_avatar(attachment_id: str, icon_data_uri: str) -> dict | None:
     base["avatar_icon_data_uri"] = icon_data_uri
     base["updated_at"] = _now_iso()
 
-    with settings_ops.identity_write_context():
-        settings_ops.upsert_by_key(
-            USER_PROFILE_SET_ID, USER_PROFILE_REVISION,
-            USER_PROFILE_CANONICAL_LABEL, base, org=None,
-        )
-    return serialize_profile(get_effective_profile())
+    return _persist_profile(base)
 
 
 def clear_avatar() -> dict | None:
@@ -394,9 +410,4 @@ def clear_avatar() -> dict | None:
     base.pop("avatar_icon_data_uri", None)
     base["updated_at"] = _now_iso()
 
-    with settings_ops.identity_write_context():
-        settings_ops.upsert_by_key(
-            USER_PROFILE_SET_ID, USER_PROFILE_REVISION,
-            USER_PROFILE_CANONICAL_LABEL, base, org=None,
-        )
-    return serialize_profile(get_effective_profile())
+    return _persist_profile(base)

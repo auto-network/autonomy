@@ -38,6 +38,12 @@ _PALETTE: tuple[str, ...] = (
 
 UNKNOWN_SLUG = "unknown"
 
+#: The special organization slug reserved for the person themselves. Host
+#: sessions and the graph's own-repo mapping resolve here (see
+#: :func:`session_org_slug`). Its resolved identity is the ONLY one that
+#: overlays the mutable Personal profile (auto-vlt7j.3).
+PERSONAL_SLUG = "personal"
+
 # Neutral gray painted behind the "?" glyph when the org is unresolved
 # (legacy sessions with path-derived project junk, missing project field).
 UNRESOLVED_COLOR = "#4b5563"
@@ -50,6 +56,36 @@ UNRESOLVED_COLOR = "#4b5563"
 _AUTONOMY_PATH_PATTERNS: tuple[str, ...] = (
     "-workspace-repo",                  # dashboard container mount
 )
+
+
+# Personal-profile projection freshness (auto-vlt7j.3).
+#
+# ``resolve_org_identity(PERSONAL_SLUG)`` overlays the effective Personal
+# profile (display name, initials, compact avatar) onto the resolved identity.
+# That profile is a SECOND mutable input to the ``personal`` entry, independent
+# of the ``autonomy.org`` overrides the main cascade keys on. It gets its own
+# monotonic generation, mixed into the ``_identity_cached`` key for the
+# ``personal`` slug ONLY (non-personal slugs always pass ``0``), so a Personal
+# profile mutation moves the ``personal`` cache key without disturbing any other
+# org's cached identity. Personal-profile mutators call
+# :func:`invalidate_personal_identity` after a successful write; keying on the
+# counter (rather than a registered flush callback) means a new mutation site
+# cannot leave DB I/O stranded behind a permanently stale key.
+_personal_generation: int = 0
+
+
+def personal_identity_generation() -> int:
+    """Monotonic counter identifying the current Personal-profile snapshot."""
+    return _personal_generation
+
+
+def invalidate_personal_identity() -> None:
+    """Advance the Personal-profile generation so the next
+    ``resolve_org_identity(PERSONAL_SLUG)`` rebuilds with the just-written
+    profile. Only the ``personal`` cache key mixes this counter in, so no other
+    org identity is invalidated and no process restart is required."""
+    global _personal_generation
+    _personal_generation += 1
 
 
 def _hash_color(slug: str) -> str:
@@ -127,13 +163,23 @@ def resolve_org_identity(slug: str | None) -> dict[str, Any]:
     # this cache: the counter moves and the key moves with it.
     # A copy is returned so a caller that mutates the dict (rows stash it under
     # row["org"]) cannot poison the shared entry.
-    return dict(_identity_cached(slug, workspace_settings.overrides_generation()))
+    #
+    # The ``personal`` slug carries a SECOND mutable input — the Personal
+    # profile overlay — so its own generation joins the key for that slug only.
+    # Every other slug passes ``0``, leaving their cache entries untouched when
+    # the Personal profile changes.
+    personal_gen = _personal_generation if slug == PERSONAL_SLUG else 0
+    return dict(_identity_cached(
+        slug, workspace_settings.overrides_generation(), personal_gen))
 
 
 @lru_cache(maxsize=256)
-def _identity_cached(slug: str, _generation: int) -> dict[str, Any]:
+def _identity_cached(slug: str, _generation: int, _personal_gen: int = 0) -> dict[str, Any]:
     """Build one org's identity. ``_generation`` participates in the cache key
     only — see :func:`agents.workspace_settings.overrides_generation`.
+    ``_personal_gen`` is the Personal-profile generation (see
+    :func:`invalidate_personal_identity`); it is non-zero only for the
+    ``personal`` slug and, like ``_generation``, only ever keys the cache.
 
     NOTE: when ``_canonical_identity`` stops being a stub (auto-hoi4, federated
     identity fetched from the subscribed org's own graph.db), it becomes a
@@ -180,7 +226,7 @@ def _identity_cached(slug: str, _generation: int) -> dict[str, Any]:
     icon_data_uri = pick("icon_data_uri", None)
     favicon = icon_data_uri or pick("favicon", None)
 
-    return {
+    identity = {
         "slug": slug,
         "name": name,
         "byline": byline,
@@ -190,6 +236,64 @@ def _identity_cached(slug: str, _generation: int) -> dict[str, Any]:
         "initial": _initial(name),
         "resolved": True,
     }
+    if slug == PERSONAL_SLUG:
+        _overlay_personal_profile(identity)
+    return identity
+
+
+def _overlay_personal_profile(identity: dict[str, Any]) -> None:
+    """Overlay the effective Personal profile onto the resolved ``personal``
+    identity, in place (auto-vlt7j.3).
+
+    The person, not generic ``Personal`` / ``P`` branding, is what every
+    ``personal``-scoped consumer should show. This is the single shared seam
+    where that projection happens; ``resolve_session_org`` and every downstream
+    consumer receive it unchanged.
+
+    Cascade, per ``graph://4f9e881c-a9`` §7:
+
+      * No personal identity at all (no stored profile AND no personal root) →
+        leave ``identity`` as the seeded/generated ``personal`` result
+        (``name``/``P``/no-avatar).
+      * A personal identity — either the service's unpersisted root-name
+        baseline or a stored profile row — replaces ``name`` with the effective
+        display name (when present), ``initial`` with the explicit-or-derived
+        Personal initials (when present), and, when a valid compact avatar data
+        URI is present, BOTH ``favicon`` and ``icon_data_uri`` with it.
+
+    Slug, color, byline, ``resolved``, and every other field are preserved. When
+    the avatar is absent or removed, no unrelated branding is cleared and the
+    effective Personal initials render. A read never writes (the service's
+    baseline is unpersisted), and any failure degrades to the base identity so a
+    profile-store hiccup can never break host-session rendering.
+    """
+    try:
+        from tools.dashboard import personal_profile
+
+        effective = personal_profile.get_effective_profile()
+        if effective is None:
+            return
+        display_name = (effective.get("display_name") or "").strip()
+        if display_name:
+            identity["name"] = display_name
+        initials = personal_profile.effective_initials(
+            effective.get("display_name") or "", effective.get("initials"),
+        )
+        if initials:
+            identity["initial"] = initials
+        avatar = effective.get("avatar_icon_data_uri")
+        if isinstance(avatar, str) and avatar.strip():
+            identity["favicon"] = avatar
+            identity["icon_data_uri"] = avatar
+    except Exception:  # pragma: no cover - defensive
+        # A profile-store read failure must never break identity resolution for
+        # host sessions; fall back to the base ``personal`` identity.
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "personal profile overlay failed; using base identity",
+            exc_info=True,
+        )
 
 
 def session_org_slug(session: dict) -> str:
