@@ -411,7 +411,7 @@
       },
 
       filteredItems() {
-        return this.items.filter(item => {
+        const items = this.items.filter(item => {
           const categoryMatches = this.categoryFilter === 'all' ||
             canonicalCategory(item) === this.categoryFilter;
           const viewMatches = this.view === 'needs' ? item.attentionState === 'needs_attention' :
@@ -420,6 +420,7 @@
                 item.attentionState !== 'resolved';
           return categoryMatches && viewMatches;
         });
+        return this.view === 'recent' ? items.slice(0, 100) : items;
       },
 
       async openApprovalById(id, {isCurrent = () => true} = {}) {
