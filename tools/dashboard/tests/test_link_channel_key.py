@@ -24,6 +24,10 @@ TOKEN = "a" * 32
 ORG = "acme"
 
 
+def test_org_join_uses_the_shared_channel_key_mechanism():
+    assert "org:join" in lck.CHANNEL_KEY_TARGET_TYPES
+
+
 class _FakeSettings:
     """Minimal stand-in for the vaulted settings seam: an in-memory
     {(set_id, key): payload} plus the read/remove shapes the module uses."""
