@@ -108,6 +108,7 @@ from . import namespace_reservation  # noqa: F401 — autonomy.network.namespace
 from . import serve_zone  # noqa: F401 — autonomy.network.serve-zone#1
 from . import dashboard_auth  # noqa: F401 — autonomy.identity.dashboard-auth#1
 from . import personal_identity  # noqa: F401 — autonomy.identity.{personal,passkey}#1
+from . import user  # noqa: F401 — autonomy.user#1 (mutable Personal profile)
 from . import client_error  # noqa: F401 — autonomy.identity.client-error#1
 from . import network_ledger  # noqa: F401 — autonomy.network.{ledger-state,ledger-projection}#1
 from . import worktree_review_binding  # noqa: F401 — autonomy.worktree.review_binding#1
