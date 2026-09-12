@@ -21660,6 +21660,44 @@ def _warm_personal_settings_store() -> None:
     GraphDB(resolve_caller_db_path(None)).close()
 
 
+def _reconcile_payload_indexes_all_stores() -> None:
+    """Install declared Settings payload indexes on every existing org store.
+
+    The startup-side half of the Tier 3 reconciler (``GraphDB.create_org_db``
+    covers every store created later). Enumerates the operator's organization
+    stores, skips the machine metadata store (its rows are schema projections,
+    not organization-owned Settings), opens each writable, and runs the shared
+    registry reconciler. A single store's failure is logged with its slug and
+    never stops the sweep over the rest — idempotent DDL means a retry on the
+    next restart is harmless.
+    """
+    from tools.graph import org_ops
+    from tools.graph.db import GraphDB
+    from tools.graph.schemas.registry import reconcile_payload_indexes
+
+    for ref in org_ops.list_orgs():
+        slug = ref.slug
+        if slug == "machine":
+            continue
+        try:
+            db = GraphDB.open_org_db(slug, mode="rw")
+        except Exception:
+            logger.exception(
+                "payload-index reconciliation: could not open org store %r; "
+                "skipping", slug,
+            )
+            continue
+        try:
+            reconcile_payload_indexes(db)
+        except Exception:
+            logger.exception(
+                "payload-index reconciliation failed for org store %r; "
+                "continuing with remaining stores", slug,
+            )
+        finally:
+            db.close()
+
+
 async def _on_design_thumbnail_rendered(meta: dict) -> None:
     """A thumbnail landed on disk: drop the catalog caches and tell open
     gallery/viewer pages so the tile fills in without a reload."""
@@ -21960,6 +21998,21 @@ async def _on_startup():
     except Exception:
         logger.exception("flush_schema_meta_machine_store() failed; continuing startup")
     _mark("flush_schema_meta_machine_store")
+    # Install schema-declared Settings payload expression indexes on every
+    # existing writable organization store. Runs AFTER plugin registration
+    # (PLUGIN_REGISTRY is loaded at import) and ensure_bootstrap_orgs, so the
+    # full registry — including plugin schemas like AgentTestObservationV1 —
+    # and the bootstrap org/personal DBs are all present. The machine store is
+    # excluded: payload indexes apply to organization-owned Settings data, not
+    # the machine's schema projections. Off the event loop, and one store's
+    # failure is logged with its slug and never aborts the remaining stores.
+    try:
+        await asyncio.to_thread(_reconcile_payload_indexes_all_stores)
+    except Exception:
+        logger.exception(
+            "payload-index reconciliation sweep failed; continuing startup"
+        )
+    _mark("reconcile_payload_indexes")
     try:
         await asyncio.to_thread(_warm_personal_settings_store)
     except Exception:
