@@ -175,10 +175,14 @@ class TestReleaseBead:
             ["close", "auto-1", "--reason", "completed task"]
         )
 
+    @patch("agents.dispatcher._bead_preserve_retry_count", return_value=0)
     @patch("agents.dispatcher.run_bd")
     @patch("agents.dispatcher._retry_bd")
-    def test_failed_resets_and_flags(self, mock_retry, mock_run_bd):
-        """FAILED status resets to open and appends notes."""
+    def test_failed_resets_and_flags(self, mock_retry, mock_run_bd, mock_streak):
+        """FAILED status resets to open and appends notes.
+
+        Below the retry cap the readiness axis is untouched — normal auto-retry.
+        """
         mock_retry.return_value = "ok"
         mock_run_bd.return_value = ""
 
@@ -214,7 +218,12 @@ class TestReleaseBead:
     @patch("agents.dispatcher.run_bd")
     @patch("agents.dispatcher._retry_bd")
     def test_blocked_status_handling(self, mock_retry, mock_run_bd):
-        """BLOCKED status resets to open and appends notes."""
+        """BLOCKED resets to open, appends notes, and strips readiness:approved.
+
+        auto-je5rv item 1: BLOCKED needs human/other input a re-run cannot
+        supply, so the dispatcher must NOT keep re-dispatching it — dropping
+        readiness:approved takes it out of the dispatch query.
+        """
         mock_retry.return_value = "ok"
         mock_run_bd.return_value = ""
 
@@ -222,8 +231,88 @@ class TestReleaseBead:
 
         assert result is True
         mock_retry.assert_called_once_with(["update", "auto-1", "-s", "open"])
-        mock_run_bd.assert_called_once_with(
+        mock_run_bd.assert_any_call(
             ["update", "auto-1", "--append-notes", "Blocked: merge conflict"]
         )
+        mock_run_bd.assert_any_call(
+            ["update", "auto-1", "--remove-label", "readiness:approved"]
+        )
+
+
+# ── Per-bead reopen retry cap (auto-je5rv item 4) ────────────────
+
+
+class TestReopenRetryCap:
+    @patch("agents.dispatcher.run_bd")
+    @patch("agents.dispatcher._retry_bd")
+    def test_below_cap_leaves_readiness(self, mock_retry, mock_run_bd):
+        """A bead under the cap keeps readiness:approved (normal auto-retry)."""
+        from agents.dispatcher import MAX_REOPEN_RETRIES
+        with patch("agents.dispatcher._bead_preserve_retry_count",
+                   return_value=MAX_REOPEN_RETRIES - 3):
+            release_bead("auto-1", "TIMEOUT", "stalled")
+        removals = [c for c in mock_run_bd.call_args_list
+                    if "--remove-label" in c.args[0]]
+        assert removals == []
+
+    @patch("agents.dispatcher.run_bd")
+    @patch("agents.dispatcher._retry_bd")
+    def test_at_cap_strips_readiness(self, mock_retry, mock_run_bd):
+        """At the cap (this attempt is the Nth), readiness:approved is stripped
+        so the pipeline stops re-dispatching. Applies on the TIMEOUT path."""
+        from agents.dispatcher import MAX_REOPEN_RETRIES
+        # prior streak + 1 (this attempt) == cap
+        with patch("agents.dispatcher._bead_preserve_retry_count",
+                   return_value=MAX_REOPEN_RETRIES - 1):
+            release_bead("auto-1", "TIMEOUT", "stalled again")
+        removals = [c for c in mock_run_bd.call_args_list
+                    if "--remove-label" in c.args[0]
+                    and "readiness:approved" in c.args[0]]
+        assert len(removals) == 1
+
+    @patch("agents.dispatcher.run_bd")
+    @patch("agents.dispatcher._retry_bd")
+    def test_merge_failed_capped(self, mock_retry, mock_run_bd):
+        """MERGE_FAILED also honors the cap — no path loops forever."""
+        from agents.dispatcher import MAX_REOPEN_RETRIES
+        with patch("agents.dispatcher._bead_preserve_retry_count",
+                   return_value=MAX_REOPEN_RETRIES):
+            release_bead("auto-1", "MERGE_FAILED", "conflict again")
+        removals = [c for c in mock_run_bd.call_args_list
+                    if "--remove-label" in c.args[0]
+                    and "readiness:approved" in c.args[0]]
+        assert len(removals) == 1
+
+
+# ── Dashboard-cancel detection (auto-je5rv item 3) ───────────────
+
+
+class TestDispatchRunCancelled:
+    def test_running_row_not_cancelled(self):
+        from agents.dispatcher import _dispatch_run_cancelled
+        with patch("agents.dispatcher.get_run",
+                   return_value={"status": "RUNNING"}):
+            assert _dispatch_run_cancelled("run-1") is False
+
+    def test_cancelling_is_cancelled(self):
+        from agents.dispatcher import _dispatch_run_cancelled
+        with patch("agents.dispatcher.get_run",
+                   return_value={"status": "CANCELLING"}):
+            assert _dispatch_run_cancelled("run-1") is True
+
+    def test_cancelled_is_cancelled(self):
+        from agents.dispatcher import _dispatch_run_cancelled
+        with patch("agents.dispatcher.get_run",
+                   return_value={"status": "CANCELLED"}):
+            assert _dispatch_run_cancelled("run-1") is True
+
+    def test_missing_row_not_cancelled(self):
+        from agents.dispatcher import _dispatch_run_cancelled
+        with patch("agents.dispatcher.get_run", return_value=None):
+            assert _dispatch_run_cancelled("run-1") is False
+
+    def test_empty_run_id_not_cancelled(self):
+        from agents.dispatcher import _dispatch_run_cancelled
+        assert _dispatch_run_cancelled("") is False
 
 

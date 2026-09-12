@@ -78,7 +78,7 @@ from agents.dispatch_db import (
     list_runs, get_run, get_runs_for_bead, get_currently_running, DB_PATH,
     clear_paused, is_paused, get_pause_reason,
     get_consecutive_failures, reset_circuit_breaker,
-    record_worktree_merge_run,
+    record_worktree_merge_run, mark_run_cancelling, record_run_cancelled,
 )
 from agents.session_launcher import launch_session
 from agents import workspace_settings
@@ -1312,6 +1312,95 @@ async def api_dispatch_resume_bead(request):
         "session_uuid": new_uuid,
         "bead_id": bead_id,
     }, status_code=201)
+
+
+async def api_dispatch_cancel(request):
+    """POST /api/dispatch/cancel/{bead_id} — cancel a running dispatch.
+
+    The inverse of :func:`api_dispatch_resume_bead` (auto-je5rv). Kills the
+    bead's running container and records the run CANCELLED — a TERMINAL outcome
+    that the dispatcher poll loop must NOT reopen, unlike the retryable
+    FAILED/TIMEOUT paths. This removes the need to escalate a runaway dispatch
+    to a host ``docker kill``: the dashboard holds the docker socket.
+
+    Org-scoped: an org-bound session may cancel only its own org's beads;
+    the operator / local host may cancel any (by selecting the org). A bead in
+    another org is reported not-found, never confirmed to exist.
+
+    Ordering is state-before-side-effect: CANCELLING is written to dispatch.db
+    while the container still lives, THEN the container is killed, THEN
+    CANCELLED is recorded. A crash between steps leaves an unambiguous intent,
+    never a killed-but-RUNNING row.
+    """
+    auth_error = api_auth.require_authenticated_api_caller(request)
+    if auth_error is not None:
+        return auth_error
+
+    bead_id = request.path_params["bead_id"]
+
+    if os.environ.get("DASHBOARD_MOCK"):
+        return JSONResponse({"ok": True, "bead_id": bead_id, "status": "CANCELLED"})
+
+    org, refused = _beads_request_org(request)
+    if refused is not None:
+        return refused
+    from tools.data_paths import org_beads_dir
+    bd_dir = org_beads_dir(org)
+    if org is not None and bd_dir is None:
+        return JSONResponse(
+            {"error": "organization has no bead tracker", "bead_id": bead_id},
+            status_code=404,
+        )
+    kwargs = {"beads_dir": bd_dir} if bd_dir is not None else {}
+
+    # Resolve the bead in the caller's tracker and enforce org visibility.
+    # A cross-org bead is byte-indistinguishable from a nonexistent one — a
+    # 403 would confirm it exists in another org.
+    bead = _normalize_bead_show_payload(
+        await run_cli_json(["bd", "show", bead_id, "--json"], **kwargs))
+    if not bead or bead.get("error"):
+        return JSONResponse(
+            {"error": "bead not found", "bead_id": bead_id}, status_code=404)
+    bead_org = None
+    for label in (bead.get("labels") or []):
+        if isinstance(label, str) and label.startswith("org:"):
+            bead_org = label.split(":", 1)[1]
+            break
+    if api_auth.caller_org_scope_hides(request, bead_org):
+        return JSONResponse(
+            {"error": "bead not found", "bead_id": bead_id}, status_code=404)
+
+    # State-before-side-effect: mark CANCELLING (only if a RUNNING row exists).
+    row = await asyncio.to_thread(mark_run_cancelling, bead_id)
+    if row is None:
+        return JSONResponse(
+            {"error": "no running dispatch for bead", "bead_id": bead_id},
+            status_code=404)
+    run_id = row.get("id")
+    container_name = row.get("container_name")
+
+    # Kill the container (the dashboard owns the docker socket), then finalize.
+    if container_name:
+        from agents.dispatcher import kill_container
+        await asyncio.to_thread(kill_container, container_name)
+    await asyncio.to_thread(
+        record_run_cancelled, run_id, "Cancelled via dashboard/API")
+
+    # Strip readiness:approved so the pipeline does not re-dispatch the bead.
+    await run_cli(
+        ["bd", "update", bead_id, "--remove-label", "readiness:approved",
+         "--append-notes",
+         "dispatch cancelled by operator — container killed, run recorded "
+         "CANCELLED, readiness:approved stripped"], **kwargs,
+    )
+
+    return JSONResponse({
+        "ok": True,
+        "bead_id": bead_id,
+        "run_id": run_id,
+        "container": container_name,
+        "status": "CANCELLED",
+    })
 
 
 async def api_dispatch_pause_state(request):
@@ -21222,6 +21311,7 @@ routes = [
     Route("/api/dispatch/limits", api_dispatch_limits_post, methods=["POST"]),
     Route("/api/dispatch/resume", api_dispatch_resume, methods=["POST"]),
     Route("/api/dispatch/resume/{bead_id}", api_dispatch_resume_bead, methods=["POST"]),
+    Route("/api/dispatch/cancel/{bead_id}", api_dispatch_cancel, methods=["POST"]),
     Route("/api/dispatch/pause-state", api_dispatch_pause_state),
     Route("/api/dispatch/status", api_dispatch_status),
     Route("/api/dispatch/approved", api_dispatch_approved),

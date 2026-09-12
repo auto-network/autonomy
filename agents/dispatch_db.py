@@ -671,6 +671,66 @@ def get_currently_running() -> list[dict]:
         conn.close()
 
 
+# ── Cancellation (auto-je5rv) ─────────────────────────────────────
+# The dashboard's cancel endpoint owns the docker socket, so it — not the
+# dispatcher — kills a runaway container. The state must move BEFORE the
+# side effect: CANCELLING is written while the container still lives, so a
+# crash between write and kill leaves an unambiguous intent behind rather than
+# a killed-but-RUNNING row. CANCELLED is the terminal outcome, written after
+# the kill; it is terminal like DONE/FAILED, so the dispatcher poll loop must
+# recognize it and NOT reopen the bead as FAILED.
+
+
+def mark_run_cancelling(bead_id: str) -> dict | None:
+    """Flip the bead's live dispatch row to CANCELLING and return it.
+
+    State-before-side-effect: the caller writes intent here, THEN kills the
+    container, THEN calls :func:`record_run_cancelled`. The returned dict
+    carries ``id`` and ``container_name`` for the kill. Returns ``None`` when
+    the bead has no RUNNING row (nothing to cancel).
+    """
+    conn = _get_conn()
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT * FROM dispatch_runs WHERE bead_id = ? AND status = 'RUNNING' "
+            "ORDER BY started_at DESC LIMIT 1",
+            (bead_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        conn.execute(
+            "UPDATE dispatch_runs SET status = 'CANCELLING' WHERE id = ?",
+            (row["id"],),
+        )
+        conn.commit()
+        return _row_to_dict(row)
+    finally:
+        conn.close()
+
+
+def record_run_cancelled(run_id: str, reason: str = "") -> None:
+    """Finalize a cancelled dispatch row: CANCELLED terminal with completed_at.
+
+    Written after the container is killed. Terminal like DONE/FAILED — the
+    dispatcher poll loop reads this status and does not reopen the bead.
+    """
+    if not run_id:
+        return
+    conn = _get_conn()
+    try:
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute(
+            "UPDATE dispatch_runs SET status = 'CANCELLED', completed_at = ?, "
+            "duration_secs = CAST((julianday(?) - julianday(started_at)) * 86400 "
+            "AS INTEGER), reason = ? WHERE id = ?",
+            (now_str, now_str, reason or "Cancelled by operator", run_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def get_consecutive_failures(bead_id: str) -> tuple[int, int]:
     """Count consecutive failures for a bead, stopping at first DONE.
 

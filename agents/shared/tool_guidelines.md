@@ -268,12 +268,19 @@ Attention tab.
 
 ## Merge Retry
 
-If your primer includes a "MERGE RETRY" section, previous work exists on a branch. Do NOT re-implement from scratch.
+If your primer includes a "MERGE RETRY" section, **the implementation is already
+done and committed** on `agent/<bead>`. The only thing that failed was the merge
+to master (a conflict, because master moved). Your ONE task is: **rebase the
+existing work onto master, re-verify, and re-submit.** Do NOT re-implement from
+scratch — a second copy of the change is itself the bug.
 
-1. `git cherry-pick <commit>` to apply previous work
-2. Resolve conflicts if any
-3. Verify the result
-4. Commit normally
+1. `git cherry-pick <commit>` to replay the committed work onto current master.
+2. **If the diff vs master is empty after the rebase** (`git diff master --stat`
+   shows nothing, or the cherry-pick reports nothing to commit), the work is
+   ALREADY MERGED — a prior retry landed it. **Record DONE (reason: already
+   merged / redundant) and STOP.** Do not re-create the change.
+3. Otherwise resolve conflicts (usually trivial — adjacent edits, import lines).
+4. Verify the result, then commit normally.
 
 If cherry-pick has irreconcilable conflicts, read the diff (`git show <commit>`) and manually apply the changes.
 

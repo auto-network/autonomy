@@ -46,7 +46,7 @@ import re
 from agents.dispatch_db import (
     init_db, insert_run, insert_launch_run, update_live_stats,
     get_currently_running, get_consecutive_failures, get_runs_for_bead,
-    set_dispatcher_paused, is_paused as db_is_paused, get_pause_reason,
+    get_run, set_dispatcher_paused, is_paused as db_is_paused, get_pause_reason,
 )
 from agents.git_status import (
     working_tree_clean_and_summary, has_working_tree_changes,
@@ -650,6 +650,59 @@ def get_open_dependencies(bead_id: str) -> list[dict]:
 # ── Bead state mutations ────────────────────────────────────────
 
 
+# Per-bead reopen cap (auto-je5rv). No single reopen path — FAILED, TIMEOUT,
+# MERGE_FAILED (BLOCKED can no longer auto-retry at all) — may re-dispatch a
+# bead forever. Set above the agent-failure circuit breaker (3) so it only
+# backstops the loops the breaker misses: repeated TIMEOUTs and MERGE_FAILEDs,
+# which ``get_consecutive_failures`` does not fully drive a global pause on.
+# When a bead's consecutive non-DONE dispatch streak reaches this, release_bead
+# strips ``readiness:approved`` so the pipeline stops picking the bead up and
+# the operator sees a reopened, unapproved bead — instead of an invisible loop.
+MAX_REOPEN_RETRIES = 5
+
+
+def _enforce_reopen_retry_cap(bead_id: str, status: str) -> None:
+    """Strip ``readiness:approved`` once a bead's consecutive non-DONE dispatch
+    streak reaches ``MAX_REOPEN_RETRIES``, so no reopen path loops forever.
+
+    The current run is not yet recorded when ``release_bead`` runs, so the
+    streak from ``_bead_preserve_retry_count`` (prior non-DONE completed runs
+    since the last DONE) is ``N`` when this is the ``(N+1)``-th consecutive
+    attempt. Best-effort: any error leaves readiness untouched (favor retry
+    over silently stranding a bead).
+    """
+    try:
+        attempts = _bead_preserve_retry_count(bead_id) + 1
+    except Exception:
+        return
+    if attempts < MAX_REOPEN_RETRIES:
+        return
+    run_bd(["update", bead_id,
+            "--remove-label", "readiness:approved",
+            "--append-notes",
+            f"retry cap: {attempts} consecutive non-DONE dispatches "
+            f"(cap {MAX_REOPEN_RETRIES}, last {status}) — readiness:approved "
+            f"stripped so the pipeline stops re-dispatching. Operator: fix the "
+            f"cause and re-approve, or close the bead."])
+    print(f"  Retry cap: {bead_id} hit {attempts} reopens ({status}) — "
+          f"readiness:approved stripped")
+
+
+def _dispatch_run_cancelled(run_id: str) -> bool:
+    """True if the dispatch.db row for ``run_id`` is in a cancel state.
+
+    The dashboard's cancel endpoint writes CANCELLING before killing the
+    container and CANCELLED after (state-before-side-effect); either means the
+    operator terminated this run on purpose, so the poll loop must NOT reopen
+    the bead as FAILED when it later finds the container gone.
+    """
+    if not run_id:
+        return False
+    try:
+        row = get_run(run_id)
+    except Exception:
+        return False
+    return bool(row) and row.get("status") in ("CANCELLING", "CANCELLED")
 
 
 def release_bead(bead_id: str, status: str, reason: str) -> bool:
@@ -707,15 +760,24 @@ def release_bead(bead_id: str, status: str, reason: str) -> bool:
         elif status == "BLOCKED":
             _retry_bd(["update", bead_id, "-s", "open"])
             run_bd(["update", bead_id, "--append-notes", f"Blocked: {reason}"])
+            # auto-je5rv item 1: BLOCKED means the bead needs human/other input
+            # a re-run cannot supply, so it must NOT auto-retry. Strip
+            # readiness:approved (mirroring the DONE-path golden-rule gate at
+            # ~691) so the dispatcher stops picking it up; the operator sees the
+            # reopened, unapproved bead and re-approves once it is unblocked.
+            run_bd(["update", bead_id, "--remove-label", "readiness:approved"])
         elif status == "FAILED":
             _retry_bd(["update", bead_id, "-s", "open"])
             run_bd(["update", bead_id, "--append-notes", f"Failed: {reason}"])
+            _enforce_reopen_retry_cap(bead_id, status)
         elif status == "TIMEOUT":
             _retry_bd(["update", bead_id, "-s", "open"])
             run_bd(["update", bead_id, "--append-notes", f"Timeout: {reason}"])
+            _enforce_reopen_retry_cap(bead_id, status)
         elif status == "MERGE_FAILED":
             _retry_bd(["update", bead_id, "-s", "open"])
             run_bd(["update", bead_id, "--append-notes", f"Merge failed (will retry): {reason}"])
+            _enforce_reopen_retry_cap(bead_id, status)
         else:
             # Unknown status — log and release
             _retry_bd(["update", bead_id, "-s", "open"])
@@ -2695,6 +2757,19 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
         _deregister_session_with_monitor(
             Path(agent.output_dir).name if agent.output_dir else agent.bead_id
         )
+
+        # auto-je5rv: the dashboard's cancel endpoint terminates a run on
+        # purpose — it wrote CANCELLING/CANCELLED to dispatch.db before killing
+        # the container and already stripped readiness:approved. The container
+        # is now gone, so DO NOT reopen the bead as FAILED. Tear the worktree
+        # down (terminal — a cancelled run has no retry) and move on.
+        run_id = Path(agent.output_dir).name if agent.output_dir else agent.bead_id
+        if _dispatch_run_cancelled(run_id):
+            print(f"  Cancelled: {agent.bead_id} (run {run_id}) — "
+                  f"dashboard cancel, not reopening")
+            cleanup_worktree(agent.worktree_path)
+            continue
+
         print(f"  Collecting: {agent.bead_id} (container: {agent.container_name})")
 
         # ── Phase 1: pre-decision. A failure here means we never landed,
