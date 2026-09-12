@@ -129,6 +129,31 @@
             noun: 'note',
             sessions,
             chat: null,
+            publicationState: self.src?.publication_state,
+            onPublicationChange: async function (toState) {
+              const res = await fetch(
+                '/api/graph/source/' + encodeURIComponent(self.src?.id || self.id) + '/promote',
+                {
+                  ...self._scopedFetchOptions(),
+                  method: 'POST',
+                  headers: {
+                    ...(self._scopedFetchOptions().headers || {}),
+                    'Content-Type': 'application/json',
+                  },
+                  body: JSON.stringify({ to_state: toState }),
+                },
+              );
+              const data = await res.json().catch(() => ({}));
+              if (!res.ok || data.error) {
+                throw new Error(data.error || `Publication update failed (HTTP ${res.status})`);
+              }
+              const next = data.new_state;
+              if (!['raw', 'curated', 'published', 'canonical'].includes(next)) {
+                throw new Error('Publication update returned an invalid state');
+              }
+              self.src.publication_state = next;
+              return next;
+            },
           };
           if (self._presence && self._presence.el === host) { self._presence.update(opts); return; }
           if (self._presence) self._presence.destroy();
