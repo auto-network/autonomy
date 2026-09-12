@@ -161,6 +161,18 @@ RUN mkdir -p /home/agent/.agent-browser \
     && echo '{"colorScheme":"dark","screenshotFormat":"png","screenshotDir":"/tmp/screenshots","args":"--no-sandbox,--disable-dev-shm-usage"}' \
        > /home/agent/.agent-browser/config.json \
     && chown -R agent:agent /home/agent/.agent-browser
+# A browser nobody has talked to for 15 minutes closes itself: the upstream
+# daemon honours this and exits, taking Chrome (~1.2 GB RSS, 2 inotify
+# instances per browser) with it. Sessions that forgot `close` used to leave
+# Chrome running for days; 17 of them in one session pushed the host over
+# fs.inotify.max_user_instances and silenced session tailing dashboard-wide
+# (graph://cbcafe6f-e1b).
+ENV AGENT_BROWSER_IDLE_TIMEOUT_MS=900000
+# The shim sits ahead of /usr/bin/agent-browser on PATH: it refuses a second
+# browser unless asked (`open --new` / `open --replace`), watches each daemon
+# and tells the session when its browser was reaped, and adds `ps` / `reap`.
+COPY agent_browser_shim.sh /usr/local/bin/agent-browser
+RUN chmod 0755 /usr/local/bin/agent-browser
 
 RUN codex --version > /dev/null 2>&1 || echo "WARN: codex not functional" \
     && agent-browser --version > /dev/null 2>&1 || echo "WARN: agent-browser not functional"

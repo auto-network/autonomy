@@ -11,6 +11,8 @@ It's a headless Chrome CLI purpose-built for AI agents (~200-500 tokens per snap
 - Pass `--ignore-https-errors` on the `open` command only (not on subsequent commands, or you'll get warnings)
 - If `/unlock` appears, follow `_queue` → held wait → `_proof`/redeem in `tools/dashboard/tests/test_dashboard_access_approvals.py`: retain the non-waiting GET's `staged` grant and the same ephemeral key through redemption, then install its cookie. Never create a replacement request automatically.
 - Element refs (e.g. `[1]`, `[2]`) invalidate on navigation — re-snapshot after navigating
+- One browser at a time. `open` refuses while another session name is alive: reuse it with `--session <name>`, close the others with `open --replace` (also the fix when a running daemon ignores new flags), or run alongside deliberately with `open --new`
+- A browser idle for 15 minutes closes itself and posts a task notification to your session. `agent-browser ps` shows live sessions and orphaned Chrome; `agent-browser reap` removes orphans (`--idle <min>`, `--all` for sessions)
 
 ## Quick Validation Pattern
 
@@ -184,3 +186,6 @@ See the full Design Studio guide: graph://225a4af7-ee5
 | `wait --text "string"` | Wait for text to appear |
 | `eval "js expression"` | Execute JavaScript in page context |
 | `close` | Close browser session |
+| `ps` | Live sessions with Chrome RSS and idle time, plus orphaned Chrome trees |
+| `reap [--orphans\|--idle <min>\|--all]` | Kill orphaned Chrome; close idle or all sessions |
+| `open --new` / `open --replace` | Run a second browser on purpose / close the others first |

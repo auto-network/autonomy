@@ -216,7 +216,10 @@ def wrap_variant_html(design: dict, vendor_href: str | None = None) -> str:
 
 def _agent_browser(*args: str, timeout: int = AGENT_BROWSER_TIMEOUT) -> str:
     cmd = ["agent-browser", "--session", AGENT_BROWSER_SESSION, *args]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    # The thumbnail renderer owns a dedicated session beside whatever the
+    # operator has open; opt out of the session shim's one-browser guard.
+    env = {**os.environ, "AGENT_BROWSER_ALLOW_MANY": "1"}
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
     if proc.returncode != 0:
         raise RuntimeError(
             f"agent-browser {' '.join(args[:2])} failed: "
