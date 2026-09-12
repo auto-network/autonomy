@@ -457,10 +457,15 @@
       },
 
       async openDashboardApproval(item) {
-        const { openApprovalDialog, requestingSession } = await import('./approval-dialog.js');
+        const { openApprovalDialog, localHref } = await import('./approval-dialog.js');
         const { signDashboardAccessGrant } = await import('../ceremony/dashboard-access.js');
         const grant = item.safeReview.grant;
-        const requester = await requestingSession(grant?.grantee, item.safeReview.requester_label);
+        const requester = { name: item.safeReview.requester_label,
+          href: localHref(item.requester?.href), byline: item.requester?.byline || '' };
+        const readResult = async () => {
+          const detail = await jsonRequest('/api/attention/items/' + encodeURIComponent(item.id));
+          return detail.review?.application_result || null;
+        };
         const decide = async (outcome, decision) => {
           const response = await jsonRequest('/api/attention/items/' + encodeURIComponent(item.id) + '/approval-decision', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -468,10 +473,11 @@
           });
           if (response.resolution?.outcome !== outcome) throw new Error('This request was not completed.');
           if (outcome === 'granted') {
-            const applied = await jsonRequest('/api/attention/items/' + encodeURIComponent(item.id));
-            if (applied.review?.application_result?.execution?.ok !== true) {
-              throw new Error('Your approval was recorded, but dashboard access has not been confirmed.');
-            }
+            const applied = await readResult();
+            if(applied?.execution?.ok!==true) throw new Error('Your approval was recorded, but dashboard access has not been confirmed.');
+            this._sharedApprovalItem = null;
+            this.refresh().catch(() => {});
+            return applied;
           }
           // Our own resolution keeps its receipt open; only external changes
           // should dismiss a still-pending review during refresh.

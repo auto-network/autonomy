@@ -384,6 +384,39 @@ def session_requester_label(subject: str) -> str | None:
     return subject
 
 
+def session_requester_view(requester: Mapping[str, Any]) -> dict[str, str]:
+    """Resolve a viewer destination only after matching the canonical identity.
+
+    Existing frozen labels contain the session handle. It is a lookup hint,
+    never identity evidence: recompute the scope-bound ID before linking it.
+    No grant/signature field is changed and no raw subject is persisted.
+    """
+    if requester.get("kind") != "session":
+        return {}
+    from urllib.parse import quote
+    from tools.dashboard.approval_service import canonical_session_requester_id
+    from tools.dashboard.dao import dashboard_db
+    from tools.dashboard.org_identity import resolve_session_org
+
+    label = requester.get("label")
+    if not isinstance(label, str):
+        return {}
+    subject = label.split(" · ", 1)[0]
+    row = dashboard_db.get_session(subject)
+    if not row or not row.get("project") or row.get("tmux_name") != subject:
+        return {}
+    org = resolve_session_org(row).get("slug")
+    candidates = [api_auth.ApiPrincipal(api_auth.ApiPrincipalKind.LOCAL_SESSION, subject=subject)]
+    if org:
+        candidates.append(api_auth.ApiPrincipal(api_auth.ApiPrincipalKind.ORG_SESSION, subject=subject, org=org))
+    if not any(canonical_session_requester_id(principal) == requester.get("id") for principal in candidates):
+        return {}
+    return {
+        "href": f"/session/{quote(row['project'], safe='')}/{quote(subject, safe='')}",
+        "byline": row["project"],
+    }
+
+
 def build_production_runtime() -> AttentionRouteRuntime:
     dashboard_approval_runtime = dashboard_access_central.build_approval_runtime()
     approval_registry = build_production_registry(runtimes={
@@ -834,6 +867,10 @@ async def api_attention_item(request: Request):
     safe_requester = {"kind": requester["kind"]}
     if requester.get("label"):
         safe_requester["label"] = requester["label"]
+    try:
+        safe_requester.update(await asyncio.to_thread(session_requester_view, requester))
+    except Exception:
+        pass  # Unavailable metadata must never invent a destination.
     application_result = None
     has_application_result = False
     assert _runtime.operator_result_projectors is not None

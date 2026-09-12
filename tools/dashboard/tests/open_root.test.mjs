@@ -106,6 +106,36 @@ test('cancel resolves null', async () => {
   assert.equal(await p, null);
 });
 
+test('shared view offers one passkey action and accepts the browser-selected alternative', async () => {
+  const root = await mintRoot();
+  const ids = ['old-phone', 'pc', 'phone'];
+  const factors = [];
+  for (const id of ids) factors.push({ factor_id: id, type: 'passkey', credential_id: enc(id),
+    recipients: [{ recipient_public_key: await rootRecipientPub(id), label: id, created_at: '2026-09-12T00:00:00Z' }] });
+  const policy = { op: 'or', children: ids.map(id => ({ op: 'factor', factor_id: id })) };
+  SERVER = { rootPub: root.rootPub, passkeys: ids.map(id => ({ credential_id: enc(id), rp_id: 'localhost' })),
+    factorPolicy: { armor_version: 3, factors: [] },
+    armor: await buildFactorPolicyArmor({ rootSeed: root.seed, rootPub: root.rootPub, generation: 1, factors, access: ids, policy }) };
+  const previous = navigator.credentials.get;
+  let allowed;
+  navigator.credentials.get = async ({ publicKey }) => {
+    allowed = publicKey.allowCredentials.map(item => String.fromCharCode(...item.id));
+    const prf = prfFor('phone');
+    return { rawId: new TextEncoder().encode('phone').buffer,
+      getClientExtensionResults: () => ({ prf: { results: { first: prf.buffer } } }) };
+  };
+  try {
+    let state;
+    const promise = openRoot({ view: value => { state = value; } });
+    await until(() => state);
+    await state.passkey();
+    const opened = await promise;
+    assert.deepEqual(allowed, ids);
+    assert.equal(bytesToHex(opened.seed), bytesToHex(root.seed)); opened.seed.fill(0);
+    assert.equal(document.querySelector('.or-overlay'), null);
+  } finally { navigator.credentials.get = previous; }
+});
+
 test('embedded password verification clears and blurs input without reopening keyboard', async () => {
   const root = await mintRoot();
   SERVER = { armor: await aV3Password(root, 'pw'), rootPub: root.rootPub, passkeys: [], factorPolicy: v3PolicyView() };

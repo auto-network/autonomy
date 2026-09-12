@@ -49,6 +49,27 @@ ROOT = "a" * 64
 APPROVAL_ID = "approval-1234567890"
 
 
+def test_requesting_session_link_is_resolved_from_verified_identity_not_grant_id(monkeypatch):
+    from tools.dashboard.approval_service import canonical_session_requester_id
+    from tools.dashboard.dao import dashboard_db
+    from tools.dashboard import org_identity
+
+    session = "auto-0911-214710"
+    monkeypatch.setattr(dashboard_db, "get_session", lambda name: {
+        "tmux_name": session, "project": "autonomy-codex",
+    } if name == session else None)
+    monkeypatch.setattr(org_identity, "resolve_session_org", lambda row: {"slug": "autonomy"})
+    identity = canonical_session_requester_id(api_auth.ApiPrincipal(
+        api_auth.ApiPrincipalKind.ORG_SESSION, subject=session, org="autonomy",
+    ))
+    requester = {"kind": "session", "id": identity, "label": session + " · Review Settings"}
+    assert attention_routes.session_requester_view(requester) == {
+        "href": "/session/autonomy-codex/auto-0911-214710", "byline": "autonomy-codex",
+    }
+    assert identity not in attention_routes.session_requester_view(requester)["href"]
+    assert attention_routes.session_requester_view({**requester, "id": "unmatched"}) == {}
+
+
 def test_production_dashboard_access_review_projects_the_existing_application_result(monkeypatch):
     seen = []
     expected = {"approved": True, "execution": {"ok": True}}
