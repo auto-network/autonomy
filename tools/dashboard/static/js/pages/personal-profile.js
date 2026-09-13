@@ -67,7 +67,18 @@
         this._clamp();
       },
       endDrag() { this._drag = null; },
-      onZoom() { this._clamp(); },
+      onZoom() {
+        // Zoom around the centre of the viewport, not the image's top-left
+        // corner: keep the source point under the centre where it was.
+        const prev = this._zoomScale || this._scale;
+        const next = this._scale;
+        if (prev && next && prev !== next) {
+          this.offsetX = 128 - (128 - this.offsetX) * next / prev;
+          this.offsetY = 128 - (128 - this.offsetY) * next / prev;
+        }
+        this._zoomScale = next;
+        this._clamp();
+      },
       addPhoto() { this.photoError = ''; this.pickFile(); },
       pickFile() { this.$refs.file.value = ''; this.$refs.file.click(); },
       async onFile(e) {
@@ -92,7 +103,8 @@
           this.releasePending();
           this.pendingPhoto = url;
           this.pendW = img.naturalWidth; this.pendH = img.naturalHeight;
-          this.zoom = 1; this.offsetX = 0; this.offsetY = 0; this._clamp();
+          this.zoom = 1; this._zoomScale = this._scale;
+          this.offsetX = (256 - this.pendW * this._scale) / 2; this.offsetY = (256 - this.pendH * this._scale) / 2; this._clamp();
           this.photoStage = 'cropping';
         } catch (error) { this.photoError = error.message; this.photoStage = 'error'; }
       },

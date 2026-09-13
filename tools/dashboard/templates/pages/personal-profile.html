@@ -1,6 +1,6 @@
 <!-- Approved design 8492c7d3-2c99-4d82-9fc0-c4cb4b827d05, identity variant.
      Personal editor and photo overlays retained; fixture IO replaced by profile APIs. -->
-<style>.crop-vp{width:256px;height:256px}.crop-img{position:absolute;top:0;left:0;user-select:none;-webkit-user-drag:none;touch-action:none;will-change:transform}</style>
+<style>.crop-vp{width:256px;height:256px}.crop-img{position:absolute;top:0;left:0;max-width:none;max-height:none;user-select:none;-webkit-user-drag:none;touch-action:none;will-change:transform}</style>
 <div x-data="personalProfile()" data-testid="personal-profile" :aria-busy="photoStage==='uploading' ? 'true' : 'false'">
   <input x-ref="file" type="file" accept="image/jpeg,image/png,image/webp" class="hidden" @change="onFile($event)">
       <!-- ---------- SETTINGS ▸ PROFILES ---------- -->
