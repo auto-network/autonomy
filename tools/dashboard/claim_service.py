@@ -205,7 +205,14 @@ def submit(org: str, event_wire) -> dict:
         return {"status": "rejected", "reason": reason}
 
 
-def bootstrap(org: str, invite_ref: str, persona_pub: str) -> dict:
+#: Ledger events per bootstrap page (~600 B each: ~2.5 MB a page, well under
+#: the join channel's per-message backstop). The joiner asks again with
+#: ``after`` while ``more`` is set; events() is id-sorted, so index pages
+#: are deterministic, and the joiner's append_bundle orders by parents.
+BOOTSTRAP_EVENT_PAGE = 4096
+
+
+def bootstrap(org: str, invite_ref: str, persona_pub: str, after: int = 0) -> dict:
     """What an ADMITTED member needs to install the organization locally.
 
     Served over the org:join channel only once the fold shows *persona_pub*
@@ -222,7 +229,10 @@ def bootstrap(org: str, invite_ref: str, persona_pub: str) -> dict:
         member = state.members.get(persona_pub)
         if member is None or not state.valid.get(getattr(member, "claim_id", ""), True):
             return {"status": "pending"}
-        events = [event.to_json().decode("utf-8") for event in store.events()]
+        after = max(0, int(after))
+        page = store.events()[after:after + BOOTSTRAP_EVENT_PAGE]
+        events = [event.to_json().decode("utf-8") for event in page]
+        more = after + len(page) < len(store.ledger)
         genesis_id = store.ledger.genesis_id
     from tools.graph import settings_ops
     from tools.graph.schemas.network_identity import NETWORK_BINDING_SET_ID
@@ -235,7 +245,7 @@ def bootstrap(org: str, invite_ref: str, persona_pub: str) -> dict:
         binding = None  # served without a binding; the joiner refuses to install
     own_persona = _own_persona(genesis_id)
     reachability = _reachability_rows(org, own_persona)
-    return {"status": "ok", "events": events, "binding": binding,
+    return {"status": "ok", "events": events, "more": more, "binding": binding,
             "member_profiles": _member_profiles(org, reachability, own_persona),
             "reachability_rows": reachability}
 
