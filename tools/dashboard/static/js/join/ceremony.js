@@ -108,7 +108,7 @@ export function makeRootCeremony({
     throw new Error('makeRootCeremony needs the openRoot control');
   }
   return async function runCeremony({
-    context, inputs, approvals = [], position = null, title, detail,
+    context, inputs, profile = {}, approvals = [], position = null, title, detail,
   }) {
     const opened = await openRoot({
       title: title || 'Ask to join',
@@ -125,6 +125,7 @@ export function makeRootCeremony({
         personalRootSeed: opened.seed,
         inviteRef: inputs.inviteRef,
         token: inputs.bearer || null,
+        profile,
         kemSeed,
         approvals,
         position,
