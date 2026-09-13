@@ -33,6 +33,16 @@
           font-size:1.5rem; font-weight:700; background:#262b38; }
   .org-head h2 { margin:0; font-size:1.25rem; }
   .org-head p { margin:.15rem 0 0; color:var(--dim); font-size:.92rem; }
+  .profile-tile { display:flex; align-items:center; gap:.8rem; margin:1rem 0 0;
+          padding:.8rem; border:1px solid var(--line); border-radius:10px; }
+  .profile-avatar { width:44px; height:44px; flex:0 0 44px; border-radius:999px;
+          display:flex; align-items:center; justify-content:center; overflow:hidden;
+          background:#262b38; color:var(--ink); font-weight:700; }
+  .profile-avatar img { width:100%; height:100%; object-fit:cover; }
+  .profile-tile strong { display:block; }
+  .profile-tile p { margin:.1rem 0 0; color:var(--dim); font-size:.88rem; }
+  .profile-tile .profile-label { margin:0; color:var(--accent); font-size:.74rem;
+          text-transform:uppercase; letter-spacing:.06em; }
   .row { display:flex; justify-content:space-between; gap:1rem;
          padding:.3rem 0; font-size:.9rem; }
   .row .k { color:var(--dim); }
@@ -89,7 +99,6 @@
        of any kind (I1), and never asks for one. -->
   <section id="step-org" class="hidden">
     <h1>You're invited</h1>
-    <p class="sub">Here's who is inviting you.</p>
     <div class="card" id="org-header">
       <div class="org-head">
         <img id="org-icon" class="hidden" alt="">
@@ -99,10 +108,16 @@
           <p id="org-byline"></p>
         </div>
       </div>
-      <div class="row"><span class="k">Organization id</span>
-        <span class="v" id="org-id"></span></div>
-      <div class="row"><span class="k">Invitation</span>
-        <span class="v" id="invite-ref"></span></div>
+      <div class="profile-tile hidden" id="inviter-profile" data-testid="inviter-profile">
+        <div class="profile-avatar" id="inviter-avatar"></div>
+        <div><p class="profile-label">Invited by</p>
+          <strong id="inviter-name"></strong><p id="inviter-byline"></p></div>
+      </div>
+      <div class="profile-tile hidden" id="joining-profile" data-testid="joining-profile">
+        <div class="profile-avatar" id="joining-avatar"></div>
+        <div><p class="profile-label">Joining as</p>
+          <strong id="joining-name"></strong><p id="joining-byline"></p></div>
+      </div>
 
       <!-- The accept action. Hidden until the organization answers over its
            own tunnel, because until then we cannot say what you would be

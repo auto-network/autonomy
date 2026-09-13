@@ -1,0 +1,190 @@
+<!-- Approved design 8492c7d3-2c99-4d82-9fc0-c4cb4b827d05, identity variant.
+     Personal editor and photo overlays retained; fixture IO replaced by profile APIs. -->
+<style>.crop-vp{width:256px;height:256px}.crop-img{position:absolute;top:0;left:0;user-select:none;-webkit-user-drag:none;touch-action:none;will-change:transform}</style>
+<div x-data="personalProfile()" data-testid="personal-profile" :aria-busy="photoStage==='uploading' ? 'true' : 'false'">
+  <input x-ref="file" type="file" accept="image/jpeg,image/png,image/webp" class="hidden" @change="onFile($event)">
+      <!-- ---------- SETTINGS ▸ PROFILES ---------- -->
+      <div x-show="view==='settings'" x-cloak class="flex-1 border-t border-gray-800 overflow-y-auto">
+        <div class="max-w-5xl mx-auto px-4 md:px-6 py-5">
+          <!-- profile section sub-nav: Personal is first-class, alongside (not inside) org profiles -->
+          <div class="text-xs uppercase tracking-wide text-gray-500 mb-2">Profiles</div>
+          <div class="flex gap-2 overflow-x-auto pb-1 mb-5 border-b border-gray-800">
+            <button @click="pTab='personal'" class="flex items-center gap-2 px-3 py-2 -mb-px border-b-2 whitespace-nowrap text-sm"
+                    :class="pTab==='personal' ? 'border-indigo-500 text-indigo-300 font-semibold' : 'border-transparent text-gray-400 hover:text-gray-200'">
+              <span class="w-5 h-5 rounded-full bg-teal-600 flex items-center justify-center text-[10px] font-bold">You</span> Personal</button>
+            <template x-for="org in organizations" :key="org.slug">
+              <button @click="openOrganization(org.slug)" class="flex items-center gap-2 px-3 py-2 -mb-px border-b-2 whitespace-nowrap text-sm border-transparent text-gray-400 hover:text-gray-200">
+                <span class="w-5 h-5 rounded bg-indigo-600 flex items-center justify-center text-[10px] font-bold" x-text="org.initials"></span><span x-text="org.name"></span>
+              </button>
+            </template>
+          </div>
+
+          <!-- PERSONAL EDITOR -->
+          <template x-if="pTab==='personal'">
+            <div>
+              <div class="flex items-baseline gap-3 flex-wrap">
+                <h1 class="text-xl font-semibold" x-text="creating ? 'Create your Personal profile' : 'Personal profile'"></h1>
+                <span x-show="dirty" x-cloak class="text-xs text-amber-300 bg-amber-400/10 border border-amber-400/30 rounded-full px-2 py-0.5">Unsaved changes</span>
+                <span data-testid="profile-saved" x-show="saveState==='saved' && !dirty" x-cloak class="flex items-center gap-1 text-xs text-emerald-300"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>Saved</span>
+              </div>
+
+              <div class="max-w-lg mt-6">
+                <!-- ---- form column ---- -->
+                <div class="space-y-5">
+                  <!-- photo -->
+                  <div>
+                    <label class="block text-sm text-gray-400 mb-2">Photo</label>
+                    <div class="flex items-center gap-4">
+                      <div class="w-20 h-20 rounded-full overflow-hidden flex items-center justify-center bg-teal-600 flex-shrink-0 ring-1 ring-gray-700">
+                        <img data-testid="profile-photo" x-show="hasPhoto" x-cloak :src="photoSrc" :alt="altText" class="w-full h-full object-cover">
+                        <template x-if="!hasPhoto && profileInitials"><span class="text-2xl font-bold" x-text="profileInitials"></span></template>
+                        <template x-if="!hasPhoto && !profileInitials">
+                          <svg class="w-9 h-9 text-teal-200" fill="none" stroke="currentColor" stroke-width="1.6" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path stroke-linecap="round" d="M4 20a8 8 0 0 1 16 0"/></svg>
+                        </template>
+                      </div>
+                      <div class="flex flex-wrap gap-2">
+                        <button data-testid="profile-add-photo" x-show="!hasPhoto" x-cloak @click="addPhoto()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold rounded-lg px-3.5 py-2">Add photo</button>
+                        <button data-testid="profile-replace-photo" x-show="hasPhoto" x-cloak @click="addPhoto()" class="border border-gray-600 text-gray-200 text-sm font-semibold rounded-lg px-3.5 py-2 hover:bg-gray-800">Replace</button>
+                        <button data-testid="profile-remove-photo" x-show="hasPhoto" x-cloak @click="askRemove()" class="text-red-300 text-sm font-semibold rounded-lg px-3.5 py-2 hover:bg-red-500/10">Remove</button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- display name -->
+                  <div>
+                    <label class="block text-sm text-gray-400 mb-1.5">Display name</label>
+                    <input aria-label="Display name" data-testid="profile-name" maxlength="200" x-model="name" @input="onEdit()" placeholder="e.g. Alex Rivera"
+                           class="w-full bg-gray-800 md:bg-gray-900 border rounded-lg px-3 py-2.5 text-base focus:outline-none focus:ring-2"
+                           :class="nameError ? 'border-red-500 focus:ring-red-500' : 'border-gray-700 focus:ring-indigo-500'">
+                    <p x-show="nameError" x-cloak class="text-xs text-red-400 mt-1.5 flex items-center gap-1.5">
+                      <svg class="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path stroke-linecap="round" d="M12 8v4M12 16h.01"/></svg>
+                      <span data-testid="profile-error" x-text="nameError"></span></p>
+                  </div>
+
+                  <!-- biography -->
+                  <div>
+                    <label class="block text-sm text-gray-400 mb-1.5">Biography <span class="text-gray-600">(optional)</span></label>
+                    <textarea aria-label="Biography" data-testid="profile-bio" maxlength="500" x-model="bio" @input="onEdit()" rows="3" placeholder="A short line about you."
+                              class="w-full bg-gray-800 md:bg-gray-900 border border-gray-700 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"></textarea>
+                  </div>
+
+                  <!-- initials override -->
+                  <div>
+                    <label class="block text-sm text-gray-400 mb-1.5">Initials <span class="text-gray-600">(optional)</span></label>
+                    <input aria-label="Initials" data-testid="profile-initials" x-model="initialsOverride" @input="onEdit()" maxlength="4" :placeholder="derivedInitials || '—'"
+                           class="w-24 bg-gray-800 md:bg-gray-900 border border-gray-700 rounded-lg px-3 py-2.5 text-base uppercase focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                  </div>
+
+                  <!-- actions -->
+                  <div class="flex items-center gap-3 pt-1">
+                    <button data-testid="profile-save" @click="save()" :disabled="saveState==='saving'"
+                            class="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 text-white text-sm font-semibold rounded-lg px-5 py-2.5 flex items-center gap-2">
+                      <svg x-show="saveState==='saving'" x-cloak class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8V0C5.4 0 0 5.4 0 12h4z"/></svg>
+                      <span x-text="saveState==='saving' ? 'Saving…' : (creating ? 'Create profile' : 'Save changes')"></span>
+                    </button>
+                    <button x-show="dirty && saveState!=='saving'" x-cloak @click="discard()" class="text-sm text-gray-400 hover:text-gray-200">Discard</button>
+                  </div>
+                </div>
+
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+
+    <!-- ============================================================ PHOTO WORKFLOW OVERLAYS
+         Modal on desktop, full-screen sheet on phone. Driven by photoStage. -->
+    <template x-if="photoStage!=='none'">
+      <div class="fixed inset-0 z-[60] flex md:items-center md:justify-center">
+        <div class="absolute inset-0 bg-black/70" @click="photoStage==='cropping' || photoStage==='uploading' ? null : cancelPhoto()"></div>
+        <div class="relative w-full md:w-auto md:max-w-md md:rounded-2xl bg-gray-800 border-t md:border border-gray-700 md:shadow-2xl
+                    mt-auto md:mt-0 rounded-t-2xl p-5 pb-8 md:pb-5 max-h-[92vh] overflow-y-auto">
+
+          <!-- CROPPING: square crop with pan + zoom, live circular & rounded-tile masks -->
+          <template x-if="photoStage==='cropping'">
+            <div>
+              <div class="flex items-center justify-between mb-4">
+                <h2 class="text-base font-semibold">Position your photo</h2>
+                <button @click="cancelPhoto()" class="text-gray-400 hover:text-gray-200 p-1"><svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" d="M6 6l12 12M18 6L6 18"/></svg></button>
+              </div>
+              <div class="flex flex-col items-center">
+                <div class="crop-vp relative overflow-hidden rounded-lg bg-gray-900 border border-gray-700 mx-auto touch-none"
+                     @pointermove="onDrag($event)" @pointerup="endDrag()" @pointerleave="endDrag()">
+                  <img class="crop-img" :src="pendingSrc" :style="cropStyle" alt=""
+                       @pointerdown="startDrag($event)">
+                  <!-- circular guide over the square -->
+                  <div class="absolute inset-0 pointer-events-none">
+                    <div class="absolute inset-0 rounded-full ring-2 ring-white/80 shadow-[0_0_0_9999px_rgba(0,0,0,0.45)]"></div>
+                  </div>
+                </div>
+                <div class="flex items-center gap-3 w-full mt-4">
+                  <svg class="w-4 h-4 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path stroke-linecap="round" d="M11 8v6M8 11h6M20 20l-3-3"/></svg>
+                  <input type="range" min="1" max="3" step="0.01" x-model.number="zoom" @input="onZoom()" class="flex-1 accent-indigo-500">
+                </div>
+              </div>
+              <div class="flex gap-2.5 mt-5">
+                <button @click="cancelPhoto()" class="flex-1 border border-gray-600 text-gray-200 text-sm font-semibold rounded-lg py-2.5">Cancel</button>
+                <button data-testid="profile-use-photo" @click="applyCrop()" class="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold rounded-lg py-2.5">Use photo</button>
+              </div>
+            </div>
+          </template>
+
+          <!-- UPLOADING: normalize + upload progress -->
+          <template x-if="photoStage==='uploading'">
+            <div class="text-center py-2">
+              <h2 class="text-base font-semibold mb-1">Saving your photo</h2>
+              <div class="w-16 h-16 mx-auto rounded-full bg-teal-600/30 flex items-center justify-center mb-5">
+                <svg class="w-7 h-7 text-teal-300 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8V0C5.4 0 0 5.4 0 12h4z"/></svg>
+              </div>
+              <div class="h-2 rounded-full bg-gray-700 overflow-hidden">
+                <div class="h-full bg-indigo-500 transition-all duration-100" :style="'width:'+uploadPct+'%'"></div>
+              </div>
+              <div class="text-xs text-gray-400 mt-2" x-text="uploadPct+'%'"></div>
+            </div>
+          </template>
+
+          <!-- ERROR: actionable, recoverable -->
+          <template x-if="photoStage==='error'">
+            <div>
+              <div class="flex items-center gap-2.5 mb-3">
+                <span class="w-9 h-9 rounded-full bg-red-500/15 text-red-300 flex items-center justify-center flex-shrink-0">
+                  <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path stroke-linecap="round" d="M12 7v6M12 17h.01"/></svg></span>
+                <h2 class="text-base font-semibold">Couldn't use that photo</h2>
+              </div>
+              <p data-testid="profile-photo-error" class="text-sm text-gray-300 leading-relaxed" x-text="photoError"></p>
+              <div class="flex gap-2.5 mt-5">
+                <button @click="cancelPhoto()" class="flex-1 border border-gray-600 text-gray-200 text-sm font-semibold rounded-lg py-2.5">Cancel</button>
+                <button @click="pickFile()" class="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold rounded-lg py-2.5">Choose another</button>
+              </div>
+            </div>
+          </template>
+
+          <!-- REMOVE CONFIRM: show the resulting initials fallback before confirming -->
+          <template x-if="photoStage==='removeConfirm'">
+            <div>
+              <h2 class="text-base font-semibold mb-1">Remove photo?</h2>
+              <div class="flex items-center justify-center gap-4 mb-6">
+                <div class="w-20 h-20 rounded-full overflow-hidden bg-teal-600 flex items-center justify-center opacity-50">
+                  <img x-show="hasPhoto" x-cloak :src="photoSrc" :alt="altText" class="w-full h-full object-cover">
+                </div>
+                <svg class="w-6 h-6 text-gray-500" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14M13 6l6 6-6 6"/></svg>
+                <div class="w-20 h-20 rounded-full bg-teal-600 flex items-center justify-center text-2xl font-bold">
+                  <template x-if="profileInitials"><span x-text="profileInitials"></span></template>
+                  <template x-if="!profileInitials">
+                    <svg class="w-9 h-9 text-teal-200" fill="none" stroke="currentColor" stroke-width="1.6" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path stroke-linecap="round" d="M4 20a8 8 0 0 1 16 0"/></svg>
+                  </template>
+                </div>
+              </div>
+              <div class="flex gap-2.5">
+                <button @click="cancelPhoto()" class="flex-1 border border-gray-600 text-gray-200 text-sm font-semibold rounded-lg py-2.5">Keep photo</button>
+                <button data-testid="profile-confirm-remove" @click="confirmRemove()" class="flex-1 bg-red-600 hover:bg-red-500 text-white text-sm font-semibold rounded-lg py-2.5">Remove</button>
+              </div>
+            </div>
+          </template>
+
+        </div>
+      </div>
+    </template>
+
+
+</div>

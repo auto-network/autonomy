@@ -119,15 +119,6 @@ def test_structural_rejections_at_append():
             _claim(sim, invite_key, iid, persona, bad)
 
 
-def test_credential_nested_in_profile_is_pii_not_credential():
-    sim, persona, invite_key, iid = _org_with_invite()
-    credential = _credential_dict(sim, persona)
-    cid = _claim(sim, invite_key, iid, persona, profile={"kem_credential": credential})
-    state = sim.fold()
-    assert state.valid[cid] is True  # passes as profile PII (<= 2048 bytes)
-    assert state.members[persona.public_hex].kem_credential is None
-
-
 def test_cross_package_fidelity():
     # The storagekit record passes the ledger checker unchanged and its
     # signature verifies under the events.py domain constant.

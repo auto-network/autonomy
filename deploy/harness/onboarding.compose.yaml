@@ -11,6 +11,7 @@ x-dashboard: &dashboard
     DASHBOARD_TLS: 'off'
     SSL_CERT_FILE: /simulation-tls/server.crt
     DASHBOARD_CSS_WATCH: 'off'
+    DASHBOARD_RELOAD: 'off'
     PYTHONDONTWRITEBYTECODE: '1'
   depends_on:
     relay:
@@ -42,6 +43,7 @@ services:
     volumes:
       - ${SIM_SOURCE_DIR}:/app:ro
       - alice:/app/data
+      - alice-attachments:/app/attachments
       - alice-orgs:/app/orgs
       - alice-keys:/run/autonomy-keycache
       - ${SIM_TLS_DIR}/server.crt:/simulation-tls/server.crt:ro
@@ -51,6 +53,7 @@ services:
     volumes:
       - ${SIM_SOURCE_DIR}:/app:ro
       - bob:/app/data
+      - bob-attachments:/app/attachments
       - bob-orgs:/app/orgs
       - bob-keys:/run/autonomy-keycache
       - ${SIM_TLS_DIR}/server.crt:/simulation-tls/server.crt:ro
@@ -59,6 +62,8 @@ volumes:
   registry: {}
   alice: {}
   bob: {}
+  alice-attachments: {}
+  bob-attachments: {}
   alice-orgs: {}
   bob-orgs: {}
   alice-keys:

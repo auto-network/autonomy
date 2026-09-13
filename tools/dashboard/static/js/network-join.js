@@ -77,7 +77,10 @@
   function renderVerifiedHeader(reply) {
     var name = typeof reply.org_name === "string"
       ? reply.org_name.slice(0, 120) : "";
-    if (name) $("org-name").textContent = name;
+    if (name) {
+      $("org-name").textContent = name;
+      $("org-fallback").textContent = name.trim().charAt(0).toUpperCase();
+    }
     var byline = typeof reply.org_description === "string"
       ? reply.org_description.slice(0, 300) : "";
     if (byline) $("org-byline").textContent = byline;
@@ -88,20 +91,68 @@
       $("org-fallback").classList.add("hidden");
     }
     var accent = safeColor(reply.org_color);
-    if (accent) $("org-header").style.borderColor = accent;
+    if (accent) {
+      $("org-header").style.borderColor = accent;
+      $("org-fallback").style.backgroundColor = accent;
+    }
+  }
+
+  function renderProfile(prefix, profile) {
+    var name = profile && typeof profile.display_name === "string"
+      ? profile.display_name.trim().slice(0, 200) : "";
+    if (!name) throw new Error("profile presentation unavailable");
+    var tile = $(prefix + "-profile");
+    var avatar = $(prefix + "-avatar");
+    $(prefix + "-name").textContent = name;
+    $(prefix + "-byline").textContent = typeof profile.byline === "string"
+      ? profile.byline.slice(0, 300) : (profile.biography || "");
+    avatar.replaceChildren();
+    var image = typeof profile.avatar === "string" &&
+      /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(profile.avatar)
+      ? profile.avatar : null;
+    if (image) {
+      var img = document.createElement("img");
+      img.src = image;
+      img.alt = "Profile photo of " + name;
+      avatar.appendChild(img);
+    } else {
+      avatar.textContent = profile.initials || name.split(/\s+/).slice(0, 2)
+        .map(function (part) { return part.charAt(0); }).join("").toUpperCase();
+    }
+    tile.classList.remove("hidden");
+  }
+
+  function renderPresentation(presentation, joiningProfile) {
+    renderProfile("joining", {
+      display_name: joiningProfile.display_name,
+      byline: joiningProfile.biography,
+      avatar: joiningProfile.avatar_icon_data_uri,
+      initials: joiningProfile.initials,
+    });
+    if (!presentation || !presentation.sponsorName) {
+      throw new Error("inviter profile presentation unavailable");
+    }
+    renderProfile("inviter", {
+      display_name: presentation.sponsorName,
+      byline: presentation.sponsorByline,
+      avatar: presentation.sponsorAvatar,
+    });
+  }
+
+  function loadJoiningProfile() {
+    return fetch("/api/graph/settings/autonomy.user/default").then(function (response) {
+      if (!response.ok) throw new Error("joining profile unavailable");
+      return response.json();
+    }).then(function (body) {
+      if (!body || !body.payload) throw new Error("joining profile unavailable");
+      return body.payload;
+    });
   }
 
   // Routing identifiers are shown only as secondary technical details. No
   // organization identity is inferred from the untrusted public envelope.
   function fillOrgStep(context) {
     $("step-org").classList.remove("hidden");
-    if (context.org) {
-      $("org-id").textContent = context.org;
-      $("org-fallback").textContent =
-        context.org.slice(0, 1).toUpperCase() || "?";
-    }
-    var ref = context.invite_ref || context.inviteRef || "";
-    if (ref) $("invite-ref").textContent = ref.slice(0, 16) + "…";
   }
 
   // Public metadata supplies routing only. k and t are closure-held values and
@@ -183,8 +234,14 @@
             });
           }
           session.grantedRole = state.grantedRole;
-          offerAccept(state);
-          wireAccept(inputs);
+          loadJoiningProfile().then(function (profile) {
+            session.joiningProfile = profile;
+            renderPresentation(session.context.presentation, profile);
+            offerAccept(state);
+            wireAccept(inputs);
+          }).catch(function () { reportTerminal({
+            state: "closed", reason: "joining-profile-unavailable",
+          }); });
           return;
         }
         reportTerminal(state);

@@ -187,6 +187,7 @@ export class JoinSession {
     const minted = await this.runCeremony({
       context: this.context,
       inputs: this.inputs,
+      profile: this.joiningProfile || {},
       passphrase,
     });
     this.claimKey = minted.claimKey;
@@ -253,6 +254,7 @@ export class JoinSession {
     const minted = await this.runCeremony({
       context: this.context,
       inputs: this.inputs,
+      profile: this.joiningProfile || {},
       passphrase,
       approvals: staged.approvals,
       position: staged.position,

@@ -17,7 +17,7 @@ set -e
 cd /app
 
 # Org-mount root (the autonomy-orgs volume mounts here).
-mkdir -p /app/orgs
+mkdir -p /app/orgs /app/attachments
 # The dashboard and local Caddy share only this permissioned Unix-socket
 # directory. The dispatcher also runs this entrypoint but has no named volume
 # here; creating an empty private directory in that container is harmless.
@@ -27,7 +27,7 @@ mkdir -p /run/autonomy-service-gateway
 # server (running as autonomy) can read/write it. After that autonomy already
 # owns everything it writes, so the ownership check short-circuits and this is a
 # fast no-op on every reboot — no recursive chown of a large data volume.
-for d in /app/data /app/orgs /run/autonomy-service-gateway; do
+for d in /app/data /app/orgs /app/attachments /run/autonomy-service-gateway; do
     if [ "$(stat -c '%u' "$d" 2>/dev/null)" != "1000" ]; then
         chown -R autonomy:autonomy "$d" 2>/dev/null || true
     fi

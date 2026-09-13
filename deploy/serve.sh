@@ -37,10 +37,9 @@ fi
 
 # Hot-reload the code from the autonomy-code volume, same as the dev box.
 export DASHBOARD_RESTART_TOKEN="${DASHBOARD_RESTART_TOKEN:-$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')}"
-exec python3 -m tools.dashboard.reload_with_notice tools.dashboard.server:app \
-    --host "${DASHBOARD_HOST:-0.0.0.0}" \
-    --port "${DASHBOARD_PORT:-8080}" \
-    --reload \
+set --
+if [ "${DASHBOARD_RELOAD:-on}" != off ]; then
+    set -- --reload \
     --reload-dir tools/dashboard \
     --reload-dir tools/graph \
     --reload-dir tools/network \
@@ -48,7 +47,12 @@ exec python3 -m tools.dashboard.reload_with_notice tools.dashboard.server:app \
     --reload-exclude 'tools/dashboard/tests/*' \
     --reload-exclude 'tools/graph/tests/*' \
     --reload-exclude 'agents/tests/*' \
-    --reload-exclude '**/__pycache__/*' \
+    --reload-exclude '**/__pycache__/*'
+fi
+exec python3 -m tools.dashboard.reload_with_notice tools.dashboard.server:app \
+    --host "${DASHBOARD_HOST:-0.0.0.0}" \
+    --port "${DASHBOARD_PORT:-8080}" \
+    "$@" \
     --timeout-graceful-shutdown 5 \
     --no-access-log \
     $SSL_ARGS

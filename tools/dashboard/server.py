@@ -13629,6 +13629,10 @@ async def page_search_fragment(request):
     """Return the search results page as an HTML fragment for SPA injection."""
     return templates.TemplateResponse(request, "pages/search.html")
 
+async def page_personal_profile_fragment(request):
+    """Approved Personal editor within the existing dashboard shell."""
+    return templates.TemplateResponse(request, "pages/personal-profile.html")
+
 async def page_streams(request):
     """Serve the streams landing page (full HTML shell for direct navigation)."""
     return HTMLResponse(_load_template("base.html"))
@@ -21389,6 +21393,8 @@ routes = [
     Route("/pages/trace", page_trace_fragment),
     Route("/search", page_search),
     Route("/pages/search", page_search_fragment),
+    Route("/account/profile", page_search),
+    Route("/pages/personal-profile", page_personal_profile_fragment),
     Route("/streams", page_streams),
     Route("/pages/streams", page_streams_fragment),
     Route("/collab", page_collab),

@@ -90,11 +90,12 @@
 
   function identityName(value) {
     var identity = value && value.personal_identity;
-    var name = identity && identity.display_name;
+    var name = (value && value.profile && value.profile.display_name) || (identity && identity.display_name);
     return (typeof name === 'string' && name.trim()) ? name.trim() : 'Your identity';
   }
 
   function identityInitial(value) {
+    if (value && value.profile && value.profile.initials) return value.profile.initials;
     var name = identityName(value);
     return name === 'Your identity' ? '?' : name.charAt(0).toUpperCase();
   }
@@ -164,6 +165,15 @@
     var node = el('span', 'identity-avatar' + (panel ? ' identity-panel-avatar' : ''),
       identityInitial(value));
     node.setAttribute('aria-hidden', 'true');
+    var photo = value && value.profile && value.profile.avatar_icon_data_uri;
+    if (photo && photo.startsWith('data:image/')) {
+      var image = el('img', 'w-full h-full object-cover');
+      image.src = photo;
+      image.alt = '';
+      node.textContent = '';
+      node.style.overflow = 'hidden';
+      node.appendChild(image);
+    }
     return node;
   }
 
@@ -866,6 +876,11 @@
         'Finish setup', function () { openOnboarding(2); }));
     }
     if (status && status.signed_in === true && status.gate_disabled !== true) {
+      actions.appendChild(actionButton('profile', 'Account settings',
+        'Your Personal profile and photo', function () {
+          closePanel();
+          root.navigateTo('/account/profile');
+        }));
       actions.appendChild(actionButton('manage-factors', 'Manage credentials',
         'Your password and passkeys', function () { openCredentials(); }));
       actions.appendChild(actionButton('lock', lockBusy ? 'Locking...' : 'Lock dashboard',

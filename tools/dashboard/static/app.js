@@ -2277,6 +2277,10 @@ async function route() {
     renderTerminal(null, sessionId);
   } else if (path === '/search') {
     renderSearchFragment();
+  } else if (path === '/account/profile') {
+    pageTitle.textContent = 'Account settings';
+    const response = await fetch('/pages/personal-profile');
+    _replaceFragment(content, await response.text());
   } else if (path.startsWith('/missions/')) {
     renderMissionScreenFragment();
   } else {
