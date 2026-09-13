@@ -811,27 +811,6 @@ async def post_membership_checkpoint_adopt(request: Request) -> JSONResponse:
     return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
 
-def _import_reachability_rows(slug: str, genesis_id: str, rows: object) -> int:
-    from tools.network.fleet_org_reachability import REVISION, SET_ID, verify_row
-
-    if not isinstance(rows, list):
-        return 0
-    count = 0
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        payload = {k: v for k, v in row.items() if k != "key"}
-        key = row.get("key")
-        if not isinstance(key, str) or verify_row(key, payload, org=genesis_id) is None:
-            continue
-        try:
-            settings_ops.upsert_by_key(SET_ID, REVISION, key, payload, org=slug, state="published")
-            count += 1
-        except Exception:
-            continue
-    return count
-
-
 async def post_join_outcome(request: Request) -> JSONResponse:
     """Install an organization this node was just ADMITTED to (punch list 34).
 
@@ -965,15 +944,21 @@ async def post_join_outcome(request: Request) -> JSONResponse:
         org_ops._record_persona_setting(
             slug, genesis_id, persona_pub, source="join", invite_ref=invite_ref,
         )
-        # The member directory: the rows the founder served (their own row
-        # among them), then this person's own row from their Personal profile.
-        from tools.dashboard import member_directory
-        member_directory.import_rows(slug, body.get("member_profiles"), skip=persona_pub)
+        # This person's own directory row, from their Personal profile: the
+        # one row of the install that is THEIRS to author into the org set.
+        from tools.dashboard import member_directory, org_install_seed
         member_directory.write_self(slug, persona_pub)
-        # The org's reachability rows: each one re-verified here (its
-        # persona certificate, its machine signature) before it is stored in
-        # this node's copy of the org, exactly as replication would store it.
-        _import_reachability_rows(slug, genesis_id, body.get("reachability_rows"))
+        # Everything else the sponsor served (directory rows, reachability
+        # rows) is other members' facts. It is kept in the MACHINE store as
+        # an install seed, read only where no replicated row exists yet:
+        # written into the org sets it would replicate back to every member
+        # as this member's own writes (finding 2026-09-13).
+        org_install_seed.install(
+            slug, genesis_id,
+            member_profiles=body.get("member_profiles"),
+            reachability_rows=body.get("reachability_rows"),
+            skip_persona=persona_pub,
+        )
     except (LedgerError, OSError, ValueError) as exc:
         return JSONResponse({"ok": False, "error": f"installing the organization failed: {exc}"},
                             status_code=500)

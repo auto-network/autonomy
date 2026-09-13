@@ -44,7 +44,11 @@ _SERVER_OWNED_ICON_FIELDS = ("icon_attachment_id", "icon_data_uri", "favicon")
 
 def _member_profiles(slug: str) -> dict:
     """persona_pub -> chosen presentation from the self-authored directory set
-    (display_name, avatar — an attachment id or absolute URL — and color)."""
+    (display_name, avatar — an attachment id or absolute URL — and color).
+    A persona the replicated set does not name yet falls back to the
+    machine-local install seed the sponsor served at join; the replicated
+    row shadows it the moment it arrives."""
+    from tools.dashboard import org_install_seed
     from tools.graph import settings_ops
     from tools.graph.schemas.org_member_profile import MEMBER_PROFILE_SET_ID
 
@@ -54,7 +58,7 @@ def _member_profiles(slug: str) -> dict:
         ).members
     except Exception:
         return {}
-    profiles = {}
+    profiles = dict(org_install_seed.seed_profiles(slug))
     for member in members:
         payload = member.payload or {}
         name = payload.get("display_name")

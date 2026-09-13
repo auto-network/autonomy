@@ -2043,7 +2043,10 @@ class FleetSyncScheduler:
         verified reachability rows replicated into each org scope's own
         database, unioned with the org_peer_addresses hook (first contact;
         the harness). Hook addresses come first for a machine both name."""
-        from tools.network.fleet_org_reachability import co_member_addresses
+        from tools.network.fleet_org_reachability import (
+            co_member_addresses,
+            seeded_co_member_addresses,
+        )
 
         merged: dict[str, dict[str, list[str]]] = {}
         provider = self.config.org_peer_addresses
@@ -2078,6 +2081,24 @@ class FleetSyncScheduler:
                     scope, exc_info=True,
                 )
                 continue
+            # The machine-local install seed (what the sponsor served at
+            # join) fills in ONLY machines with no replicated row yet: the
+            # first pull brings the real rows, which shadow it from then on.
+            try:
+                seeded = seeded_co_member_addresses(
+                    scope, org=channel.org,
+                    own_machine_pub=channel.machine_pub,
+                    is_member=lambda persona, _ch=channel: (
+                        False if persona == _ch.persona_pub else _ch.is_member(persona)
+                    ),
+                )
+            except Exception:
+                logger.warning(
+                    "fleet sync scope %r: install seed unreadable", scope, exc_info=True,
+                )
+                seeded = {}
+            for machine_pub, addresses in seeded.items():
+                rows.setdefault(machine_pub, addresses)
             bucket = merged.setdefault(scope, {})
             for machine_pub, addresses in rows.items():
                 known = bucket.get(machine_pub, [])
