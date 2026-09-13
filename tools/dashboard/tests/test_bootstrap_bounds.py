@@ -58,3 +58,73 @@ def test_member_profiles_drop_photos_follow_reachability_order_and_cap(monkeypat
     assert [r["display_name"] for r in out[:4]] == ["Alice", "m7", "m3", "m9"]
     assert all("avatar" not in r for r in out)
     assert all(r["display_name"] for r in out)
+
+
+class _Member:
+    claim_id = "claim"
+
+
+class _State:
+    members = {"f" * 64: _Member()}
+    valid = {"claim": True}
+
+
+class _Event:
+    def __init__(self, i: int):
+        self.i = i
+
+    def to_json(self) -> bytes:
+        return f'{{"i":{self.i}}}'.encode()
+
+
+class _Ledger:
+    genesis_id = "b" * 64
+
+    def __init__(self, n: int):
+        self.n = n
+
+    def __len__(self) -> int:
+        return self.n
+
+
+class _Store:
+    def __init__(self, n: int):
+        self.ledger = _Ledger(n)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def fold(self, now):
+        return _State()
+
+    def events(self):
+        return [_Event(i) for i in range(self.ledger.n)]
+
+
+def _admitted_bootstrap(monkeypatch, n: int):
+    monkeypatch.setattr(claim_service, "_open", lambda org: _Store(n))
+    monkeypatch.setattr(claim_service, "_own_persona", lambda genesis: None)
+    monkeypatch.setattr(claim_service, "_reachability_rows", lambda org, own: [])
+    monkeypatch.setattr(claim_service, "_member_profiles", lambda org, rows, own: [])
+
+
+def test_bootstrap_pages_the_ledger(monkeypatch):
+    page = claim_service.BOOTSTRAP_EVENT_PAGE
+    _admitted_bootstrap(monkeypatch, page + 3)
+    first = claim_service.bootstrap("acme", "e" * 64, "f" * 64)
+    assert first["status"] == "ok" and first["more"] is True
+    assert len(first["events"]) == page
+    second = claim_service.bootstrap("acme", "e" * 64, "f" * 64, after=page)
+    assert second["more"] is False
+    assert [e for e in second["events"]] == [f'{{"i":{i}}}' for i in range(page, page + 3)]
+    past = claim_service.bootstrap("acme", "e" * 64, "f" * 64, after=page + 3)
+    assert past["events"] == [] and past["more"] is False
+
+
+def test_bootstrap_small_ledger_is_one_page(monkeypatch):
+    _admitted_bootstrap(monkeypatch, 4)
+    reply = claim_service.bootstrap("acme", "e" * 64, "f" * 64)
+    assert len(reply["events"]) == 4 and reply["more"] is False

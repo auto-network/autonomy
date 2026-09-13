@@ -415,6 +415,14 @@ try{
     });
     evidence.syncObservedMs=Date.now()-syncStarted;
     withStep('bob','save bob-charter-synced',()=>save('bob','bob-charter-synced',browser('bob','snapshot','-i')));
+    // The bootstrap seeds names only; Alice's photo must reach Bob's listing
+    // through the same organization sync the charter just proved (operator
+    // ruling 2026-09-13: no photos in the install material).
+    withStep('bob','reopen member directory after sync',()=>action('bob','[data-testid="orgset-rail-membership"]',{},'[data-testid="membership-members"]','.mem-error'));
+    withStep('bob','observe alice photo synced',()=>waitFor('bob','[data-member] .mem-avatar img[src^="data:image/"]','.mem-error'));
+    evidence.bobMembersAfterSync=memberRows('bob');
+    evidence.bobPhotosAfterSync=js('bob',`document.querySelectorAll('[data-member] .mem-avatar img[src^="data:image/"]').length`);
+    withStep('bob','save bob-member-directory-synced',()=>save('bob','bob-member-directory-synced',browser('bob','snapshot','-i')));
     evidence.status='passed';
   }
 }catch(error){

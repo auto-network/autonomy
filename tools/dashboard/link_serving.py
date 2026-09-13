@@ -1021,7 +1021,10 @@ def _serve_join(grant: dict, org: str | None, request: dict) -> bytes:
             persona_pub = request.get("persona_pub")
             if not isinstance(persona_pub, str) or not persona_pub:
                 return BAD_REQUEST
-            result = service.bootstrap(org, invite_ref, persona_pub)
+            after = request.get("after", 0)
+            if not isinstance(after, int) or isinstance(after, bool) or after < 0:
+                return BAD_REQUEST
+            result = service.bootstrap(org, invite_ref, persona_pub, after=after)
             if result.get("status") == "ok":
                 result = {**result, **(_org_brand_for_invite(org) or {})}
         else:  # status

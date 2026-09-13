@@ -177,13 +177,20 @@ export class JoinSession {
     if (!this.ready() || !this.personaPub) {
       throw new Error('bootstrap() needs a connected session and a minted persona');
     }
-    const reply = await sendOp(this.channel, {
-      v: 1, op: 'bootstrap', persona_pub: this.personaPub,
-    });
-    if (!reply || reply.status !== 'ok' || !Array.isArray(reply.events)) {
-      throw new Error('the organization did not release its install material');
-    }
-    return reply;
+    // The ledger comes in pages (BOOTSTRAP_EVENT_PAGE server-side); ask
+    // again with `after` while the reply says there is more.
+    let reply;
+    let events = [];
+    do {
+      reply = await sendOp(this.channel, {
+        v: 1, op: 'bootstrap', persona_pub: this.personaPub, after: events.length,
+      });
+      if (!reply || reply.status !== 'ok' || !Array.isArray(reply.events)) {
+        throw new Error('the organization did not release its install material');
+      }
+      events = events.concat(reply.events);
+    } while (reply.more === true && reply.events.length > 0);
+    return { ...reply, events };
   }
 
   // Rungs 2/3 — HELD. Mint the claim in the browser via the injected seam,

@@ -293,3 +293,23 @@ for (const good of [
 }
 
 console.log('accept-controller: all assertions passed');
+
+// bootstrap() pages the ledger: it asks again with `after` while the reply
+// says there is more, and returns the concatenated event list.
+{
+  const session = new JoinSession({ inputs: INPUTS });
+  session.context = {};
+  session.personaPub = PERSONA;
+  const channel = new ScriptedChannel((req) => {
+    assert.equal(req.op, 'bootstrap');
+    if (req.after === 0) return { v: 1, status: 'ok', events: ['e0', 'e1'], more: true, binding: { org_uuid: ORG } };
+    if (req.after === 2) return { v: 1, status: 'ok', events: ['e2'], more: false, binding: { org_uuid: ORG } };
+    throw new Error(`unexpected page after=${req.after}`);
+  });
+  channel.calls.bootstrap = 0;
+  session.channel = channel;
+  const material = await session.bootstrap();
+  assert.deepEqual(material.events, ['e0', 'e1', 'e2']);
+  assert.equal(material.binding.org_uuid, ORG);
+  assert.deepEqual(channel.sent.map((m) => m.after), [0, 2]);
+}
