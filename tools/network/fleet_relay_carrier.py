@@ -330,6 +330,7 @@ async def start_relay_pull(connector, runtime, *, peer_machine_pub: str,
                            persona_pub: str | None = None,
                            machine: str | None = None,
                            locator: Optional[Mapping] = None,
+                           org_scope: str | None = None,
                            timeout: float = 10.0) -> dict:
     """Begin one delegated scope pull over the relay; return immediately.
 
@@ -355,6 +356,17 @@ async def start_relay_pull(connector, runtime, *, peer_machine_pub: str,
         return {"ok": True, "operation_id": operation_id,
                 "state": existing["state"], "duplicate": True}
 
+    org_channel = None
+    if org_scope:
+        # An org co-member: the slot is the caller's (the relay listed it)
+        # and the hello is the org's. The personal roster has no say here.
+        org_channel = scheduler._org_channels().get(org_scope)
+        if org_channel is None:
+            return {"ok": False, "error_kind": "no-org-channel",
+                    "error": f"this process holds no org sync channel for {org_scope}"}
+        if persona_pub is None or machine is None:
+            return {"ok": False, "error_kind": "no-slot",
+                    "error": "an org pull names the slot the relay listed"}
     slot_source = "caller"
     if persona_pub is None or machine is None:
         try:
@@ -375,6 +387,7 @@ async def start_relay_pull(connector, runtime, *, peer_machine_pub: str,
         try:
             await scheduler._pull_scope(
                 peer_machine_pub, (), scope,
+                org_channel=org_channel,
                 relay_slot=(persona_pub, machine),
                 relay_connector=connector,
                 relay_operation_id=operation_id,

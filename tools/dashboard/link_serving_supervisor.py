@@ -552,6 +552,26 @@ def _has_live_service_publication(org: str | None) -> bool:
         return False
 
 
+def _is_member_scope(org: str | None) -> bool:
+    """True when this machine holds a persona in collaborative org *org*
+    (its ledger has a genesis and ``autonomy.network.persona`` names this
+    node's persona for it). Never raises."""
+    if not org or org == "personal":
+        return False
+    try:
+        from tools.graph import org_ops
+        from tools.network.ledger import LedgerStore, org_ledger_db_path
+
+        path = org_ledger_db_path(org)
+        if not path.exists():
+            return False
+        with LedgerStore(path) as store:
+            genesis_id = store.ledger.genesis_id
+        return bool(genesis_id) and bool(org_ops.persona_pub_for_org(genesis_id))
+    except Exception:
+        return False
+
+
 def _is_personal_fleet_scope(org: str | None) -> bool:
     """True when *org* is the personal fleet's own serving scope.
 
@@ -723,7 +743,8 @@ def _materialize_cert(key_path: str, cert_wire: str) -> str:
 
 def _connector_command(binding: dict, org: str | None, key_path: str,
                        cert_path: str,
-                       viewer_cert_path: "str | None") -> tuple[list, dict]:
+                       viewer_cert_path: "str | None",
+                       owns_inbound_listener: bool = False) -> tuple[list, dict]:
     """The argv + env to launch the serving connector against *binding*.
 
     *viewer_cert_path* is None for a revision-3 (persona-signed) credential:
@@ -741,6 +762,8 @@ def _connector_command(binding: dict, org: str | None, key_path: str,
         argv += ["--channel-cert-file", viewer_cert_path]
     if org:
         argv += ["--graph-org", org]
+    if owns_inbound_listener:
+        argv += ["--inbound-listener"]
     # Inherit the environment so the subprocess reads the SAME GRAPH_DB (its
     # grant cache) and PYTHONPATH as the dashboard.
     return argv, dict(os.environ)
@@ -1035,6 +1058,7 @@ class ServingSupervisor:
         self._now = now or time.time
         self._procs: dict = {}       # org -> handle
         self._credentials: dict = {} # org -> exact (both cert wires, key path) launched
+        self._listener_owner_launched: dict = {}  # org -> launched owning the inbound listener
         self._managed: set = set()   # orgs seen via ensure(), re-checked by the watchdog
         self._started_at: dict = {}  # org -> launch time; fresh-tunnel grace
         self._grace_s: float = CONNECTOR_STARTUP_TIMEOUT_S
@@ -1116,6 +1140,55 @@ class ServingSupervisor:
                 return {"running": False, "reason": state["status"]}
             return self._launch(org, state)
 
+    @staticmethod
+    def _scope_should_run(org: str | None, state: dict, now: float,
+                          fleet_has_members: bool) -> bool:
+        """THE rule for whether a scope's connector runs: a usable serving
+        credential, and a live grant, a live service publication, or the
+        personal fleet having members (operator directive 2026-08-23)."""
+        return state["status"] == "ok" and (
+            _has_live_grant(org, now)
+            or _has_live_service_publication(org)
+            or (fleet_has_members and _is_personal_fleet_scope(org))
+            # A member's machine serves every organization it belongs to:
+            # org-scope sync rides that tunnel (relay pulls between
+            # co-members, the org's live slot list), so membership keeps
+            # it online the way the personal directive keeps a fleet's.
+            or _is_member_scope(org)
+        )
+
+    def _inbound_listener_owner(self, now: float, fleet_has_members: bool,
+                                launching: str | None = "<none>"):
+        """Which scope's connector binds the machine-wide inbound direct
+        listener: the personal connector when it runs, otherwise the first
+        (lexically) organization connector that runs. One listener per
+        machine, owned by a connector that exists, rather than by a scope
+        that may never run here.
+
+        "Runs" means: its process is alive, it is the scope being launched
+        right now (*launching*), or the connector rule would start it. The
+        first two keep ownership stable across the moments a running
+        connector's own gate is transiently cold (a fresh tunnel whose grant
+        has not landed yet), so ownership never flaps a live connector."""
+        candidates: list = [None]
+        try:
+            candidates += sorted(
+                slug for slug in _discover_startup_orgs() if slug is not None
+            )
+        except Exception:
+            pass
+        for scope in candidates:
+            proc = self._procs.get(scope)
+            if scope == launching or (proc is not None and proc.alive()):
+                return scope
+            try:
+                state = serve_cert_state(scope, now=now)
+            except Exception:
+                continue
+            if self._scope_should_run(scope, state, now, fleet_has_members):
+                return scope
+        return None
+
     def _reconcile(self, org: str | None) -> dict:
         now = self._now()
         # `eligibility` is still needed below for active_machine_count, and it
@@ -1135,11 +1208,7 @@ class ServingSupervisor:
         # orgs are unaffected: _is_personal_fleet_scope excludes them, so they
         # still require a genuine live grant.
         fleet_has_members = (eligibility.active_machine_count or 0) >= 2
-        should_run = state["status"] == "ok" and (
-            _has_live_grant(org, now)
-            or _has_live_service_publication(org)
-            or (fleet_has_members and _is_personal_fleet_scope(org))
-        )
+        should_run = self._scope_should_run(org, state, now, fleet_has_members)
 
         if not should_run:
             # Fresh-tunnel grace: a connector just launched for a first publish
@@ -1174,6 +1243,21 @@ class ServingSupervisor:
             reason = state["status"] if state["status"] != "ok" else "no-live-grants"
             return {"running": False, "reason": reason}
 
+        if proc is not None and proc.alive():
+            wanted_owner = self._inbound_listener_owner(now, fleet_has_members) == org
+            launched_owner = self._listener_owner_launched.get(org)
+            # Only a connector THIS supervisor launched carries a recorded
+            # ownership; an adopted incumbent keeps running as it is and
+            # takes the current assignment at its natural replacement.
+            if launched_owner is not None and launched_owner != wanted_owner:
+                _log.warning(
+                    "replacing serving connector for org=%s: inbound listener "
+                    "ownership changed (%s -> %s)", org, launched_owner, wanted_owner,
+                )
+                proc.stop()
+                self._procs.pop(org, None)
+                self._credentials.pop(org, None)
+                proc = None
         if proc is not None and proc.alive():
             if self._credentials.get(org) == (
                 state["cert"], state["viewer_cert"], state["key_path"]
@@ -1572,8 +1656,16 @@ class ServingSupervisor:
             # failure must release ownership so another dashboard can serve.
             with contextlib.suppress(OSError):
                 os.remove(ctl_path)
+            launch_now = self._now()
+            launch_fleet_has_members = (
+                (self._fleet_eligibility().active_machine_count or 0) >= 2
+            )
+            owns_listener = self._inbound_listener_owner(
+                launch_now, launch_fleet_has_members, launching=org) == org
             argv, env = _connector_command(
-                binding, org, state["key_path"], cert_path, viewer_cert_path)
+                binding, org, state["key_path"], cert_path, viewer_cert_path,
+                owns_inbound_listener=owns_listener)
+            self._listener_owner_launched[org] = owns_listener
             self._procs[org] = self._spawn(
                 argv, env, log_path=_log_path_for(state["key_path"]),
                 ctl_path=ctl_path,

@@ -1,0 +1,16 @@
+# Overlay for the two-person workflow (SIM_ISOLATE_DASHBOARDS=1): the two
+# dashboards can reach the relay and nothing else. Alice and Bob share no
+# network, so neither can resolve nor dial the other's direct sync listener;
+# every organization pull must fall back to the relay pair through their
+# organization connectors. The relay sits on both networks.
+networks:
+  alice-net: {}
+  bob-net: {}
+
+services:
+  relay:
+    networks: [alice-net, bob-net]
+  alice:
+    networks: [alice-net]
+  bob:
+    networks: [bob-net]

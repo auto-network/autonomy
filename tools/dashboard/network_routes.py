@@ -746,6 +746,92 @@ def _slug_for_joined_org(name: str, org_uuid: str) -> str:
     raise ValueError("could not derive a free local slug for the organization")
 
 
+def _adopt_registry_checkpoint(slug: str) -> dict:
+    """Adopt the registry's current membership checkpoint for *slug* when it
+    agrees with this node's own ledger (design comment 30969266-a55, (b)):
+    the registry is the only source a node adopts from, and the members_root
+    it names must equal a re-fold of THIS node's ledger at that ledger_head,
+    so a registry cannot hand this node a roster its own ledger does not
+    produce. Pure local check plus one registry read; never signs."""
+    import httpx
+    from tools.dashboard import membership_checkpoint as cp
+    from tools.network.ledger import membership_commitment as mc
+
+    binding_member = _first_member(NETWORK_BINDING_SET_ID, slug)
+    binding = binding_member.payload if binding_member is not None else None
+    if not isinstance(binding, dict):
+        return {"ok": False, "error": "no registry binding"}
+    org_uuid, registry_url = binding.get("org_uuid"), binding.get("registry_url")
+    if not isinstance(org_uuid, str) or not isinstance(registry_url, str):
+        return {"ok": False, "error": "binding names no registry"}
+    try:
+        with httpx.Client(base_url=registry_url, verify=True, timeout=8.0) as client:
+            probe = client.get(f"/v1/orgs/{org_uuid}/membership")
+    except Exception as exc:
+        return {"ok": False, "error": f"registry unreachable: {exc}"}
+    if probe.status_code != 200:
+        return {"ok": False, "error": f"registry has no membership state ({probe.status_code})"}
+    state = probe.json()
+    try:
+        seq = int(state["seq"])
+        members_root, checkpointers_root = str(state["members_root"]), str(state["checkpointers_root"])
+        ledger_head = str(state["ledger_head"])
+    except (KeyError, TypeError, ValueError):
+        return {"ok": False, "error": "registry membership state is malformed"}
+    cached = cp._cached_adopted(slug)
+    if isinstance(cached, dict) and int(cached.get("seq", -1)) >= seq:
+        return {"ok": True, "action": "up-to-date", "seq": int(cached["seq"])}
+    try:
+        folded = cp._fold_at(slug, [ledger_head]) if cp._is_head(ledger_head) else None
+    except Exception as exc:
+        return {"ok": False, "error": f"this node's ledger has no head {ledger_head[:12]}: {exc}"}
+    if folded is None or mc.members_root(folded) != members_root:
+        return {"ok": False, "error": (
+            "the registry's members_root does not match this node's ledger at that head"
+        )}
+    record = {"org": org_uuid, "seq": seq, "members_root": members_root,
+              "checkpointers_root": checkpointers_root, "ledger_head": ledger_head}
+    cp.record_adopted(slug, record)
+    return {"ok": True, "action": "adopted", "seq": seq}
+
+
+async def post_membership_checkpoint_adopt(request: Request) -> JSONResponse:
+    """POST /api/network/membership-checkpoint/adopt {org}: adopt the
+    registry's current checkpoint when it matches this node's ledger."""
+    if _mock_mode():
+        return JSONResponse({"ok": False, "error": "mock dashboard adopts nothing"}, status_code=502)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    org, refused = resolve_scoped_org((body or {}).get("org"), request=request)
+    if refused is not None:
+        return refused
+    result = await asyncio.to_thread(_adopt_registry_checkpoint, org)
+    return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+
+
+def _import_reachability_rows(slug: str, genesis_id: str, rows: object) -> int:
+    from tools.network.fleet_org_reachability import REVISION, SET_ID, verify_row
+
+    if not isinstance(rows, list):
+        return 0
+    count = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        payload = {k: v for k, v in row.items() if k != "key"}
+        key = row.get("key")
+        if not isinstance(key, str) or verify_row(key, payload, org=genesis_id) is None:
+            continue
+        try:
+            settings_ops.upsert_by_key(SET_ID, REVISION, key, payload, org=slug, state="published")
+            count += 1
+        except Exception:
+            continue
+    return count
+
+
 async def post_join_outcome(request: Request) -> JSONResponse:
     """Install an organization this node was just ADMITTED to (punch list 34).
 
@@ -884,15 +970,22 @@ async def post_join_outcome(request: Request) -> JSONResponse:
         from tools.dashboard import member_directory
         member_directory.import_rows(slug, body.get("member_profiles"), skip=persona_pub)
         member_directory.write_self(slug, persona_pub)
+        # The org's reachability rows: each one re-verified here (its
+        # persona certificate, its machine signature) before it is stored in
+        # this node's copy of the org, exactly as replication would store it.
+        _import_reachability_rows(slug, genesis_id, body.get("reachability_rows"))
     except (LedgerError, OSError, ValueError) as exc:
         return JSONResponse({"ok": False, "error": f"installing the organization failed: {exc}"},
                             status_code=500)
     except Exception as exc:  # a store fault must not masquerade as success
         return JSONResponse({"ok": False, "error": f"installing the organization failed: {exc}"},
                             status_code=500)
+    # Adopt the registry's current membership checkpoint now (it may predate
+    # this admission; the next one is adopted at sign-on).
+    adoption = await asyncio.to_thread(_adopt_registry_checkpoint, slug)
     return JSONResponse({"ok": True, "org": slug, "org_id": stable_id,
                          "org_uuid": org_uuid, "genesis_id": genesis_id,
-                         "events": len(events)})
+                         "events": len(events), "checkpoint": adoption})
 
 
 async def post_ledger_claim(request: Request) -> JSONResponse:
@@ -3377,6 +3470,7 @@ ROUTES = [
     Route("/api/network/ledger/role-revoke", post_ledger_role_revoke, methods=["POST"]),
     Route("/api/network/ledger/claim", post_ledger_claim, methods=["POST"]),
     Route("/api/network/join/outcome", post_join_outcome, methods=["POST"]),
+    Route("/api/network/membership-checkpoint/adopt", post_membership_checkpoint_adopt, methods=["POST"]),
     Route(
         "/api/network/ledger/claim/context",
         get_ledger_claim_context,

@@ -69,6 +69,7 @@ export async function prepareSignon(rootSeed, encrypted, signon) {
       machineId: rc.machine_id, machinePub: rc.machine_pub,
       orgUuid: rc.org_uuid || null,
       servingOrgs: rc.serving_orgs || [],
+      syncOrgs: rc.sync_orgs || [],
     }) });
   }
   return { vault, posts, failures,

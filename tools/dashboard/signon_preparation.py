@@ -123,8 +123,18 @@ def collect():
             if entry["checkpoint"]["needed"]:
                 decision = membership_checkpoint.checkpoint_due(org, persona_pub,
                     ts=int(time.time()), genesis_id=entry["genesis_id"], org_uuid=entry["org_uuid"])
-                if decision.action == "assemble":
+                if decision.action == "assemble" and not (
+                    decision.sign_with == membership_checkpoint.SIGN_WITH_ROOT
+                    and entry["org_key"] is None
+                ):
                     entry["checkpoint_work"] = {"record": decision.record, "sign_with": decision.sign_with}
+                else:
+                    # Not this persona's to publish (a member who joined after
+                    # the last checkpoint, a non-checkpointer, or a joiner
+                    # with no org root to seed with): adopt what the registry
+                    # holds, checked against this node's own ledger, so org
+                    # sync can prove membership under it.
+                    entry["checkpoint_adoption"] = network_routes._adopt_registry_checkpoint(org)
         except Exception:
             logger.exception("sign-in organization preparation unavailable: %s", org)
             entry = {"slug": org, "error": "organization-preparation-unavailable"}

@@ -2027,11 +2027,24 @@ async def _serve_control_listener(connector, ctl_path: str,
                             # source that can name an ORG-scope slot, where
                             # the serving key is not the durable key.
                             locator=args.get("locator"),
+                            # An org scope: authenticate the pull with this
+                            # process's org channel for it (auto-coea3).
+                            org_scope=args.get("org_scope"),
                             timeout=float(args.get("timeout") or 10.0),
                         )
                     except KeyError as exc:
                         reply = {"ok": False, "error_kind": "invalid-args",
                                  "error": f"missing {exc}"}
+                elif request.get("op") == "fleet-org-slots":
+                    # The org's live serving slots at its relay: the
+                    # dashboard's discovery source for co-members it can
+                    # reach through the relay (the org counterpart of the
+                    # personal path's relay locators).
+                    from tools.network.fleet_relay_carrier import list_org_slots
+                    try:
+                        reply = {"ok": True, "slots": await list_org_slots(connector)}
+                    except Exception as exc:
+                        reply = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
                     except Exception as exc:
                         reply = {"ok": False,
                                  "error": f"{type(exc).__name__}: {exc}"}
@@ -2219,6 +2232,9 @@ def main() -> None:
     parser.add_argument("--control-file", default=None,
                         help="path to write the loopback control descriptor "
                              "(enables D19 publish/revoke over this tunnel)")
+    parser.add_argument("--inbound-listener", action="store_true",
+                        help="this connector binds the machine-wide inbound direct "
+                             "sync listener (assigned by the serving supervisor)")
     parser.add_argument("--min-backoff", type=float, default=0.2)
     parser.add_argument("--max-backoff", type=float, default=5.0)
     args = parser.parse_args()
@@ -2276,19 +2292,13 @@ def main() -> None:
         connector_runtime,
     )
 
-    # The PERSONAL connector owns the machine-wide inbound listener; org
-    # connectors must not bind it. Declared BEFORE re-arming, because
-    # rearm_from_cache() runs configure(), which is where the bind is decided
-    # — set it afterwards and the org connector has already taken the port.
-    _personal_org_uuid = None
-    with contextlib.suppress(Exception):
-        from tools.dashboard.link_approvals import _load_binding
-
-        _binding, _err = _load_binding(None)
-        _personal_org_uuid = _binding.get("org_uuid") if _binding else None
-    connector_runtime.set_owns_inbound_listener(
-        args.org is None or args.org == _personal_org_uuid
-    )
+    # Exactly one connector per machine binds the inbound direct listener.
+    # The serving supervisor assigns it by the same rule that starts
+    # connectors (the personal one when that runs, else the first org
+    # connector) and says so on the command line. Declared BEFORE re-arming,
+    # because rearm_from_cache() runs configure(), which is where the bind is
+    # decided — set it afterwards and the port is already taken or missed.
+    connector_runtime.set_owns_inbound_listener(bool(args.inbound_listener))
 
     with contextlib.suppress(Exception):
         connector_runtime.attach_warm_cache(FleetRuntimeWarmCache(args.org))

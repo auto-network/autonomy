@@ -785,7 +785,23 @@ var signRegistryRequestCore;
       return { checked: true, action: 'unavailable' };
     }
     if (decision.action !== 'assemble') {
+      // Not this persona's to publish (not a checkpointer, or one that
+      // joined after the last checkpoint): adopt what the registry holds,
+      // checked against this node's own ledger, so org sync can prove
+      // membership under it.
+      if (decision.action === 'not-checkpointer' || decision.action === 'not-eligible') {
+        await _adoptRegistryCheckpoint(slug);
+      }
       return { checked: true, action: decision.action };
+    }
+    if (decision.sign_with === 'root') {
+      var probeKey = await _fetchJsonOrNull('/api/network/org-key' + orgQ, slug);
+      if (!probeKey || !probeKey.sealed_root_key) {
+        // A seed is due but this node holds no org root: a joiner. Adopt
+        // the registry's checkpoint instead of trying to seed.
+        var adopted = await _adoptRegistryCheckpoint(slug);
+        return { checked: true, action: adopted ? 'adopted' : 'no-sealed-org-key' };
+      }
     }
     var record = decision.record;
     var signingKey = null;
@@ -902,6 +918,17 @@ var signRegistryRequestCore;
       }
     }
     return posts;
+  }
+
+  async function _adoptRegistryCheckpoint(orgSlug) {
+    try {
+      var resp = await _transport.fetch('/api/network/membership-checkpoint/adopt', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ org: orgSlug || null }),
+      });
+      var result = await resp.json().catch(function () { return {}; });
+      return resp.ok && result.ok === true;
+    } catch (e) { return false; }
   }
 
   async function _postCheckpoint(record, orgSlug) {
