@@ -537,7 +537,9 @@ def _sponsor_avatar_data_uri(org: str | None, avatar_ref: object) -> str | None:
     return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
 
 
-def _sponsor_profile_for_invite(org: str | None, sponsor_pub: object) -> dict | None:
+def _sponsor_profile_for_invite(
+    org: str | None, sponsor_pub: object, genesis_id: object = None,
+) -> dict | None:
     """The inviter's presentation for the invite/join context (auto-r7kk4).
 
     Keyed ONLY by a canonical 64-lowercase-hex ``sponsor_pub`` (the persona
@@ -552,6 +554,13 @@ def _sponsor_profile_for_invite(org: str | None, sponsor_pub: object) -> dict | 
     fields without failing the otherwise-valid invitation context. Authority is
     never read here (the member directory grants none); the sponsor key stays a
     secondary provenance detail.
+
+    When the directory has no presentation for the sponsor and the sponsor is
+    THIS machine's own persona in the org (``genesis_id`` names the org), the
+    serving dashboard reads its operator's Personal profile
+    (``autonomy.user#1/default``) on the side and attaches that instead. The
+    ledger already names the sponsor; nothing is written to it — the profile
+    rides only on this encrypted context reply (operator ruling 2026-09-13).
     """
     if not isinstance(sponsor_pub, str) or not _SPONSOR_HEX_RE.match(sponsor_pub):
         return None
@@ -569,16 +578,55 @@ def _sponsor_profile_for_invite(org: str | None, sponsor_pub: object) -> dict | 
         return fields  # lookup failure → honest sponsor_pub-only fallback
     row = next((m for m in members if m.key == sponsor_pub), None)
     payload = getattr(row, "payload", None)
-    if not isinstance(payload, dict):
-        return fields
-    name = payload.get("display_name")
-    if isinstance(name, str) and name:
-        fields["sponsor_name"] = name[:_SPONSOR_TEXT_MAX]
-    byline = payload.get("byline")
-    if isinstance(byline, str) and byline:
-        fields["sponsor_byline"] = byline[:_SPONSOR_TEXT_MAX]
-    avatar = _sponsor_avatar_data_uri(org, payload.get("avatar"))
-    if avatar:
+    if isinstance(payload, dict):
+        name = payload.get("display_name")
+        if isinstance(name, str) and name:
+            fields["sponsor_name"] = name[:_SPONSOR_TEXT_MAX]
+        byline = payload.get("byline")
+        if isinstance(byline, str) and byline:
+            fields["sponsor_byline"] = byline[:_SPONSOR_TEXT_MAX]
+        avatar = _sponsor_avatar_data_uri(org, payload.get("avatar"))
+        if avatar:
+            fields["sponsor_avatar"] = avatar
+    if "sponsor_name" not in fields:
+        fields.update(_local_sponsor_profile(sponsor_pub, genesis_id))
+    return fields
+
+
+def _local_sponsor_profile(sponsor_pub: str, genesis_id: object) -> dict:
+    """The serving operator's own Personal profile, when THEY are the sponsor.
+
+    Returns ``{}`` unless *genesis_id* is a string, this node's persona in
+    that org equals *sponsor_pub*, and a Personal profile with a display name
+    exists. Any lookup failure is ``{}`` — the honest sponsor_pub-only
+    fallback, never a guessed identity.
+    """
+    if not isinstance(genesis_id, str) or not genesis_id:
+        return {}
+    try:
+        from tools.dashboard import personal_profile
+        from tools.graph import org_ops
+
+        if org_ops.persona_pub_for_org(genesis_id) != sponsor_pub:
+            return {}
+        profile = personal_profile.get_effective_profile()
+    except Exception:
+        return {}
+    if not isinstance(profile, dict):
+        return {}
+    name = profile.get("display_name")
+    if not isinstance(name, str) or not name.strip():
+        return {}
+    fields: dict = {"sponsor_name": name.strip()[:_SPONSOR_TEXT_MAX]}
+    byline = profile.get("biography")
+    if isinstance(byline, str) and byline.strip():
+        fields["sponsor_byline"] = byline.strip()[:_SPONSOR_TEXT_MAX]
+    avatar = profile.get("avatar_icon_data_uri")
+    if (
+        isinstance(avatar, str)
+        and any(avatar.startswith(f"data:{m};base64,") for m in _SPONSOR_AVATAR_MIMES)
+        and len(avatar) <= _SPONSOR_AVATAR_MAX_BYTES * 4 // 3 + 64
+    ):
         fields["sponsor_avatar"] = avatar
     return fields
 
@@ -947,7 +995,7 @@ def _serve_join(grant: dict, org: str | None, request: dict) -> bytes:
                     # merge the inviter's optional presentation over it. A
                     # missing/incomplete profile leaves sponsor_pub alone.
                     profile = _sponsor_profile_for_invite(
-                        org, result.get("sponsor_pub"),
+                        org, result.get("sponsor_pub"), result.get("genesis_id"),
                     )
                     if profile:
                         result = {**result, **profile}
