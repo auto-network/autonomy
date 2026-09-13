@@ -66,6 +66,18 @@ function boundedSponsorAvatar(value) {
     : null;
 }
 
+// The profile a claim signs (design §7): the reviewed name, biography and
+// initials. Never the photo — the ledger is a permanent hash chain, not a
+// blob store; the photo rides the member directory row instead.
+function claimProfile(profile) {
+  const source = profile && typeof profile === 'object' ? profile : {};
+  const out = {};
+  for (const key of ['display_name', 'biography', 'initials']) {
+    if (typeof source[key] === 'string' && source[key].trim()) out[key] = source[key].trim();
+  }
+  return out;
+}
+
 export class JoinSession {
   constructor({ inputs, openChannel, runCeremony = null }) {
     this.inputs = inputs;
@@ -158,6 +170,22 @@ export class JoinSession {
     };
   }
 
+  // After admission: the organization's install material (ledger events,
+  // registry binding, presentation) over the same authenticated channel.
+  // The org's fold gates it — a persona it does not admit gets pending.
+  async bootstrap() {
+    if (!this.ready() || !this.personaPub) {
+      throw new Error('bootstrap() needs a connected session and a minted persona');
+    }
+    const reply = await sendOp(this.channel, {
+      v: 1, op: 'bootstrap', persona_pub: this.personaPub,
+    });
+    if (!reply || reply.status !== 'ok' || !Array.isArray(reply.events)) {
+      throw new Error('the organization did not release its install material');
+    }
+    return reply;
+  }
+
   // Rungs 2/3 — HELD. Mint the claim in the browser via the injected seam,
   // submit it, and report the first terminal or pending outcome.
   async accept(passphrase) {
@@ -187,7 +215,7 @@ export class JoinSession {
     const minted = await this.runCeremony({
       context: this.context,
       inputs: this.inputs,
-      profile: this.joiningProfile || {},
+      profile: claimProfile(this.joiningProfile),
       passphrase,
     });
     this.claimKey = minted.claimKey;
@@ -254,7 +282,7 @@ export class JoinSession {
     const minted = await this.runCeremony({
       context: this.context,
       inputs: this.inputs,
-      profile: this.joiningProfile || {},
+      profile: claimProfile(this.joiningProfile),
       passphrase,
       approvals: staged.approvals,
       position: staged.position,

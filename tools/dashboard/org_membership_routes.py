@@ -63,6 +63,7 @@ def _member_profiles(slug: str) -> dict:
                 "display_name": name,
                 "avatar": payload.get("avatar") or None,
                 "color": payload.get("color") or None,
+                "byline": payload.get("byline") or None,
             }
     return profiles
 
@@ -153,6 +154,7 @@ def _membership_view(slug: str) -> dict:
                 "display_name": (profiles.get(persona) or {}).get("display_name"),
                 "avatar": (profiles.get(persona) or {}).get("avatar"),
                 "color": (profiles.get(persona) or {}).get("color"),
+                "byline": (profiles.get(persona) or {}).get("byline"),
                 "roles": list(view.roles),
                 "sponsor": view.sponsor,
                 "current_key": view.current_key,

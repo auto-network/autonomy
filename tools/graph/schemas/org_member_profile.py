@@ -68,7 +68,9 @@ class OrgMemberProfileV1(SettingSchema):
                     "what screens show beside their acts")
     avatar: str = field(
         default="",
-        description="Optional icon: a graph attachment id (served at "
+        description="Optional icon: a bounded inline data:image/* URI (the "
+                    "64x64 profile icon, so the row replicates with its "
+                    "content), a graph attachment id (served at "
                     "/api/attachment/<id>) or an absolute URL")
     color: str = field(
         default="",

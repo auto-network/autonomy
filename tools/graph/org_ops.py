@@ -511,6 +511,7 @@ def create_org(
     identity_payload: dict | None = None,
     identity_state: str = "canonical",
     root: Path | str | None = None,
+    org_id: str | None = None,
 ) -> OrgRef:
     """Create ``data/orgs/<slug>.db`` with bootstrap row + optional seed.
 
@@ -536,7 +537,7 @@ def create_org(
         )
 
     try:
-        db = GraphDB.create_org_db(slug, type_=type_, path=path)
+        db = GraphDB.create_org_db(slug, type_=type_, path=path, org_id=org_id)
     except FileExistsError as e:
         raise OrgExistsError(str(e)) from e
     try:

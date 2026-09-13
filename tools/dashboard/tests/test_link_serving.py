@@ -556,9 +556,13 @@ class TestSponsorProfileFromOwnedRow:
         assert out["sponsor_name"] == "Ada Founder"
         assert "sponsor_avatar" not in out
 
-    def test_stored_data_uri_avatar_is_omitted(self, env):
+    def test_stored_bounded_data_uri_avatar_is_served(self, env):
+        # Directory rows carry their icon inline (member_directory), so a
+        # bounded raster data URI in the row IS the avatar. Deliberate change
+        # from the r7kk4 compatibility rule that ignored stored data URIs.
         _put_member_profile(_SPONSOR, avatar="data:image/png;base64,QQ==")
-        assert "sponsor_avatar" not in link_serving._sponsor_profile_for_invite(ORG, _SPONSOR)
+        out = link_serving._sponsor_profile_for_invite(ORG, _SPONSOR)
+        assert out["sponsor_avatar"] == "data:image/png;base64,QQ=="
 
     def test_wrong_mime_avatar_is_omitted(self, env, tmp_path):
         blob = tmp_path / "a.gif"

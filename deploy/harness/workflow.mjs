@@ -119,9 +119,22 @@ function waitFor(person,selector,errorSelector='.mem-error'){
       function probe(){try{for(const root of roots())if(!observers.has(root)){const observer=new MutationObserver(probe);observer.observe(root,{subtree:true,childList:true,attributes:true,characterData:true});observers.set(root,observer);}const error=one(${JSON.stringify(errorSelector)});if(error&&error.textContent.trim())throw new Error(error.textContent.trim());if(one(${JSON.stringify(selector)}))finish();}catch(error){finish(error);}}probe();});
   })()`);
 }
+function waitValue(person,selector,expected,prop='textContent',timeoutMs=8000){
+  return js(person,`(()=>{const sel=${JSON.stringify(selector)},expected=${JSON.stringify(expected)};
+    const read=e=>String(${prop==='value'?'e.value':'e.textContent'}).trim();
+    return new Promise((resolve,reject)=>{
+      const timer=setTimeout(()=>{observer.disconnect();const e=document.querySelector(sel);
+        reject(new Error('UI timeout: '+sel+' is '+(e?JSON.stringify(read(e)):'missing')+', expected '+JSON.stringify(expected)));},${timeoutMs});
+      const observer=new MutationObserver(probe);
+      function probe(){const e=document.querySelector(sel);if(e&&e.getClientRects().length&&read(e)===expected){observer.disconnect();clearTimeout(timer);resolve(true);}}
+      observer.observe(document,{subtree:true,childList:true,attributes:true,characterData:true});probe();});})()`);
+}
+function memberRows(person){
+  return js(person,`Array.from(document.querySelectorAll('[data-member]')).map(e=>e.textContent.trim().replace(/\s+/g,' ').slice(0,80))`);
+}
 function click(person,selector){return js(person,`(()=>{const e=Array.from(document.querySelectorAll(${JSON.stringify(selector)})).filter(e=>e.getClientRects().length);if(e.length!==1||e[0].disabled)throw new Error('Expected one enabled visible control: '+${JSON.stringify(selector)});e[0].click();return true})()`);}
 function textOf(person,selector){return js(person,`(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e||!e.getClientRects().length)throw new Error('Missing visible value: '+${JSON.stringify(selector)});return e.textContent.trim()})()`);}
-function setPersonalProfile(person,name,biography){
+function setPersonalProfile(person,name,biography,photo){
   const port=person==='alice'?alicePort:bobPort;
   browser(person,'open','http://localhost:'+port+'/account/profile');
   waitFor(person,'[data-testid="profile-name"]','#onboarding-error');
@@ -129,7 +142,17 @@ function setPersonalProfile(person,name,biography){
     '[data-testid="profile-name"]':name,
     '[data-testid="profile-bio"]':biography,
   },'[data-testid="profile-saved"]','[data-testid="profile-error"]');
-  save(person,person+'-personal-profile-saved',browser(person,'snapshot','-i'));
+  if(photo){
+    // The photo path: the file chooser (driven by the browser's file-upload
+    // primitive on the editor's own input), the crop editor, then the stored
+    // icon rendered back in the editor.
+    browser(person,'upload','input[type="file"]',photo);
+    waitFor(person,'[data-testid="profile-use-photo"]','[data-testid="profile-photo-error"]');
+    action(person,'[data-testid="profile-use-photo"]',{},'[data-testid="profile-photo"]','[data-testid="profile-photo-error"]');
+    save(person,person+'-personal-profile-photo',browser(person,'snapshot','-i'));
+  }else{
+    save(person,person+'-personal-profile-saved',browser(person,'snapshot','-i'));
+  }
   browser(person,'open','http://localhost:'+port+'/');
 }
 function failureContext(person){
@@ -253,7 +276,7 @@ try{
   withStep('alice','save alice-identity-created',()=>save('alice','alice-identity-created',browser('alice','snapshot','-i')));
   // The product offers Not now for optional device-passkey setup.
   withStep('alice','skip alice device setup',()=>action('alice','#onboarding-notnow',{},'[data-testid="welcome-create"]'));
-  withStep('alice','save alice personal profile',()=>setPersonalProfile('alice','Alice','Organization founder'));
+  withStep('alice','save alice personal profile',()=>setPersonalProfile('alice','Alice','Organization founder',directory+'fixtures/alice-photo.png'));
   withStep('alice','start org create',()=>action('alice','[data-testid="welcome-create"]',{},'#create-org-name'));
   withStep('alice','submit org name',()=>action('alice','#create-org-submit',{'#create-org-name':'Simulation Organization'},'.or-in-bare','#create-org-error'));
   withStep('alice','confirm org creation',()=>action('alice','.or-ok',{'.or-in-bare':alicePassword},'[data-testid="create-org-success"]','#create-org-error'));
@@ -307,6 +330,34 @@ try{
     withStep('alice','save join-request-approved',()=>save('alice','join-request-approved',browser('alice','snapshot','-i')));
     withStep('bob','done screen',()=>action('bob','.or-ok',{'.or-in-bare':bobPassword},'#done-block:not(.hidden)','#accept-hint'));
     withStep('bob','save invitation-complete',()=>save('bob','invitation-complete',browser('bob','snapshot','-i')));
+
+    // ---- After admission (punch list 34–35): Bob's organization must be usable
+    // on his own machine, both member directories must list both people, and
+    // one organization change made on Alice must be observed on Bob. Every
+    // step is a visible product control; a missing element is the finding.
+    withStep('bob','open dashboard from admitted screen',()=>browser('bob','click','[data-testid="invite-open-dashboard"]'));
+    withStep('bob','wait dashboard home',()=>waitFor('bob','[data-testid="identity-trigger"]','#accept-hint'));
+    evidence.bobHomeAfterAdmission=js('bob','location.pathname');
+    withStep('bob','open organization settings',()=>openOrganizationSettings('bob'));
+    withStep('bob','save bob-organization-opened',()=>save('bob','bob-organization-opened',browser('bob','snapshot','-i')));
+    withStep('bob','open membership rail',()=>action('bob','[data-testid="orgset-rail-membership"]',{},'[data-testid="membership-members"]'));
+    withStep('bob','wait member directory',()=>waitFor('bob','[data-member]','.mem-error'));
+    evidence.bobMembers=memberRows('bob');
+    withStep('bob','save bob-member-directory',()=>save('bob','bob-member-directory',browser('bob','snapshot','-i')));
+    withStep('alice','open members tab',()=>browser('alice','click','button[data-tab="members"]'));
+    withStep('alice','wait member directory',()=>waitFor('alice','[data-member]','.mem-error'));
+    evidence.aliceMembers=memberRows('alice');
+    withStep('alice','save alice-member-directory',()=>save('alice','alice-member-directory',browser('alice','snapshot','-i')));
+    // One organization change on Alice, observed on Bob through the same screen.
+    withStep('alice','open charter',()=>action('alice','[data-testid="orgset-rail-charter"]',{},'#ch-byline','.mem-error'));
+    withStep('alice','save charter byline',()=>action('alice','[data-action="save"]',{'#ch-byline':'Synced from Alice'},'#ch-byline','.mem-error'));
+    withStep('alice','wait charter saved',()=>waitValue('alice','[data-action="save"]','Saved'));
+    withStep('alice','save alice-charter-saved',()=>save('alice','alice-charter-saved',browser('alice','snapshot','-i')));
+    const syncStarted=Date.now();
+    withStep('bob','open charter',()=>action('bob','[data-testid="orgset-rail-charter"]',{},'#ch-byline','.mem-error'));
+    withStep('bob','observe synced byline',()=>waitValue('bob','#ch-byline','Synced from Alice','value',30000));
+    evidence.syncObservedMs=Date.now()-syncStarted;
+    withStep('bob','save bob-charter-synced',()=>save('bob','bob-charter-synced',browser('bob','snapshot','-i')));
     evidence.status='passed';
   }
 }catch(error){
