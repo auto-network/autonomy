@@ -401,7 +401,9 @@ async def get_personal(request: Request) -> JSONResponse:
 async def post_personal(request: Request) -> JSONResponse:
     """Store the personal root key's password-encrypted armor (step 1, 'You').
 
-    Body: ``{label?, display_name, armored_private_key, root_pub?, delegate_audited_public_key}``.
+    Body: ``{label?, display_name, armored_private_key, root_pub?,
+    delegate_audited_public_key, local_roster_entry?}``. The browser supplies
+    its root-signed first-machine entry in this same creation request.
     The canonical-armor check (I1) lives in the PersonalIdentityV1 schema
     — shared by every write path — but is ALSO applied here so the error
     surfaces as a 400 with a clear message rather than a schema string.
@@ -476,6 +478,19 @@ async def post_personal(request: Request) -> JSONResponse:
         "display_name": display_name,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    # First-machine enrollment rides the existing identity ceremony. Only a
+    # public, root-signed roster entry crosses this boundary; no machine seed.
+    # Keep older identity-only callers compatible, but the production create
+    # UI always supplies this evidence. Validate before identity persistence.
+    from tools.network import fleet_roster, machine_boot
+    local_entry = None
+    if "local_roster_entry" in body:
+        try:
+            local_entry = fleet_roster.RosterEntry.from_dict(body["local_roster_entry"])
+            machine_boot.validate_local_bootstrap(local_entry, anchor_root_pub=root_pub)
+        except (ValueError, TypeError, machine_boot.MachineBootError) as exc:
+            return JSONResponse({"ok": False, "error": f"invalid first-machine enrollment: {exc}"},
+                                status_code=400)
     try:
         from tools.graph.schemas.vault_policy_class import VAULT_POLICY_CLASS_SET_ID
         from tools.vault.key_holder import _scoped_db
@@ -493,6 +508,8 @@ async def post_personal(request: Request) -> JSONResponse:
                 PERSONAL_IDENTITY_SET_ID, PERSONAL_IDENTITY_REVISION, label,
                 payload, org=None,
             )
+        if local_entry is not None:
+            machine_boot.accept_local_bootstrap(local_entry, anchor_root_pub=root_pub)
     except Exception as e:
         return JSONResponse({"ok": False,
                              "error": f"could not store the personal identity: {e}"},

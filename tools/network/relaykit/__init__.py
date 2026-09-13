@@ -32,9 +32,11 @@ from .channel import (
     HandshakeError,
     OpenedRecord,
     build_client_hello,
-    build_server_hello,
+    build_certificate_server_hello,
+    build_link_server_hello,
     parse_client_hello,
-    verify_server_hello,
+    verify_certificate_server_hello,
+    verify_link_server_hello,
 )
 from .frames import (
     CTRL_CHANNEL_ID,
@@ -61,7 +63,9 @@ __all__ = [
     "HandshakeError",
     "HANDSHAKE_DOMAIN",
     "build_client_hello",
-    "build_server_hello",
+    "build_certificate_server_hello",
+    "build_link_server_hello",
     "parse_client_hello",
-    "verify_server_hello",
+    "verify_certificate_server_hello",
+    "verify_link_server_hello",
 ]

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tools.dashboard import api_auth, link_central
+from tools.dashboard import api_auth, link_central, link_channel_key
 from tools.dashboard.approval_kind_registry import build_production_registry
 from tools.dashboard.approval_service import (
     ApprovalRecord,
@@ -24,6 +24,30 @@ ORG_UUID = "d55f8f0d-2de8-4fde-8678-68774cd68c19"
 ROOT = "11" * 32
 GENERATION = "22" * 32
 SECRET = b"s" * 32
+
+
+@pytest.fixture(autouse=True)
+def keyed_publication(monkeypatch):
+    """Model the mandatory key custody and recipient-visible liveness contract."""
+    channel_key = KeyPair.from_private_hex("47" * 32)
+    monkeypatch.setattr(
+        link_channel_key,
+        "mint_channel_key",
+        lambda _token, _org: channel_key.public_hex,
+    )
+
+    async def live(_binding, _token, _org):
+        return {"live": True, "status": 200, "via": "registry-http"}
+
+    monkeypatch.setattr(link_central.link_approvals, "_probe_serving", live)
+    monkeypatch.setattr(
+        link_central.link_approvals,
+        "_cached_grant",
+        lambda token, _org: {
+            "token": token,
+            "channel_pub": channel_key.public_hex,
+        },
+    )
 
 
 class MemoryStore:
@@ -665,9 +689,9 @@ def test_origin_consumer_converges_on_one_public_result(monkeypatch):
 
     async def live(*_args, **_kwargs):
         return {
-            "live": False,
+            "live": True,
             "via": "registry-http",
-            "detail": "socket failed at private-registry.internal",
+            "status": 200,
         }
 
     monkeypatch.setattr(link_central.link_approvals, "_probe_serving", live)
@@ -694,7 +718,16 @@ def test_origin_consumer_converges_on_one_public_result(monkeypatch):
     assert projected["approved"] is True
     assert projected["execution"] == {"ok": True}
     assert projected["token"] == "55" * 16
-    assert projected["serving"] == {"live": True, "via": "tunnel-control"}
+    assert projected["serving"] == {
+        "live": True,
+        "status": 200,
+        "via": "registry-http",
+    }
+    assert projected["channel_pub"] == KeyPair.from_private_hex("47" * 32).public_hex
+    assert projected["url"] == link_channel_key.fragment_url(
+        "https://registry.example/l/" + "55" * 16,
+        projected["channel_pub"],
+    )
     assert calls[0][0:2] == (ORG, "create-link")
     assert set(calls[0][2]) == {
         "operation_id", "receipt", "signature", "origin_proof",
@@ -731,7 +764,7 @@ def test_org_join_publish_uses_http_and_never_tunnel_control(monkeypatch):
     )
 
     async def live(*_args, **_kwargs):
-        return {"live": False, "via": "registry-http"}
+        return {"live": True, "status": 200, "via": "registry-http"}
 
     monkeypatch.setattr(link_central.link_approvals, "_probe_serving", live)
     http_calls, tunnel_calls = [], []
@@ -758,6 +791,58 @@ def test_org_join_publish_uses_http_and_never_tunnel_control(monkeypatch):
         link_central.link_operation_id(APPROVAL_ID, "publish"),
     )
     assert http_calls[0][2]["registry_input"]["target_type"] == "org:join"
+    projected = consumer.project(status)
+    assert projected["url"] == "https://registry.example/l/" + "55" * 16
+    assert projected["channel_pub"] == KeyPair.from_private_hex("47" * 32).public_hex
+
+
+def test_publish_probe_failure_compensates_link_state(monkeypatch):
+    witness = KeyPair.generate()
+    store = MemoryStore()
+    _plan, payload = _planned(monkeypatch, store, witness.public_hex)
+    status = ApprovalStatus(
+        "resolved",
+        ApprovalRecord(APPROVAL_ID, payload),
+        ApprovalRecord(APPROVAL_ID, {
+            "outcome": "granted",
+            "decision": _decision(store, payload, witness),
+            "resolved_at": 1010.0,
+        }),
+    )
+    monkeypatch.setattr(
+        link_central.settings_ops,
+        "upsert_by_key",
+        lambda *_args, **_kwargs: "setting-1",
+    )
+
+    async def unavailable(_binding, _token, _org):
+        return {"live": False, "via": "registry-http"}
+
+    monkeypatch.setattr(link_central.link_approvals, "_probe_serving", unavailable)
+    compensation = []
+    monkeypatch.setattr(
+        link_central.link_approvals,
+        "_compensate_failed_publish",
+        lambda org, token, stage: compensation.append((org, token, stage)),
+    )
+    consumer = link_central.LinkResultConsumer(
+        store=store,
+        secret_resolver=lambda: SECRET,
+        serving_machine_resolver=lambda _org: SERVING_MACHINE,
+        tunnel_transport=lambda *_args: {
+            "ok": True,
+            "token": "55" * 16,
+            "url": "https://registry.example/l/" + "55" * 16,
+        },
+        clock=lambda: 1020.0,
+        witness_resolver=lambda _url: witness.public_hex,
+    )
+
+    with pytest.raises(link_central.LinkCentralError, match="registry unavailable"):
+        consumer.materialize(status)
+
+    assert compensation == [(ORG, "55" * 16, "recipient-probe")]
+    assert store.results == {}
 
 
 def test_first_ordinary_publish_starts_tunnel_before_control(monkeypatch):

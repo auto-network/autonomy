@@ -118,6 +118,9 @@ def stack(tmp_path_factory):
     """Registry + connector as real subprocesses, wired to real stores."""
     from tools.network.idkit import Subject, issue_cert
     from tools.network.idkit.persona import derive_persona
+    from tools.network.ledger import LedgerStore, org_ledger_db_path
+    from tools.network.ledger.found import found_org_ledger
+    from tools.network.ledger import membership_commitment as mc
 
     tmp = tmp_path_factory.mktemp("mission-relay")
     # Orgs-tree, no GRAPH_DB pin: the stack's grant/mission writes go at
@@ -195,7 +198,10 @@ def stack(tmp_path_factory):
     from tools.graph.db import GraphDB
 
     GraphDB.close_all_pooled()
-    GraphDB.create_org_db(GRAPH_ORG).close()
+    GraphDB.create_org_db(
+        GRAPH_ORG, type_="shared", org_id=ORG_UUID,
+        path=orgs_dir / f"{GRAPH_ORG}.db",
+    ).close()
     # Mission compose reads presence/state from the platform 'autonomy'
     # org (and the personal store), which always exist in production; the
     # connector serving the mission refuses ('unavailable') without them
@@ -203,9 +209,60 @@ def stack(tmp_path_factory):
     for _plat in ("autonomy", "personal"):
         if not (orgs_dir / f"{_plat}.db").exists():
             GraphDB.create_org_db(_plat).close()
+    GraphDB.create_org_db("machine").close()
+
+    personal_root = KeyPair.generate()
+    with LedgerStore(org_ledger_db_path(GRAPH_ORG)) as ledger:
+        founded = found_org_ledger(
+            ledger,
+            org_id=ORG_UUID,
+            org_root=root,
+            personal_root_seed=bytes.fromhex(personal_root.private_hex),
+            now=int(time.time() * 1000),
+        )
+        folded = ledger.fold()
+        checkpoint = mc.build_root_checkpoint(
+            org=ORG_UUID,
+            seq=0,
+            genesis_id=founded.genesis_id,
+            ledger_head=sorted(folded.heads)[0],
+            members_root_hex=mc.members_root(folded),
+            checkpointers_root_hex=mc.checkpointers_root(folded),
+            ts=int(time.time()),
+            root=root,
+        )
+    with httpx.Client(base_url=f"http://127.0.0.1:{registry_port}") as client:
+        response = client.post(
+            f"/v1/orgs/{ORG_UUID}/membership-checkpoints", json=checkpoint
+        )
+        assert response.status_code == 201, response.text
     from tools.graph.schemas.network_identity import (
+        NETWORK_BINDING_REVISION, NETWORK_BINDING_SET_ID,
         NETWORK_LINK_GRANT_REVISION, NETWORK_LINK_GRANT_SET_ID,
     )
+
+    settings_ops.add_setting(
+        NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "registry",
+        {
+            "org_uuid": ORG_UUID,
+            "root_pub": root.public_hex,
+            "registry_url": f"http://127.0.0.1:{registry_port}",
+            "recovery_policy": {"mode": "none"},
+            "binding_expires_at": _iso(time.time() + 7 * 86_400),
+        },
+        org=GRAPH_ORG,
+    )
+
+    fixture_patch = pytest.MonkeyPatch()
+    from tools.dashboard import link_channel_key
+    from tools.dashboard.tests.test_link_serving_tunnel import (
+        _CONNECTOR_BOOTSTRAP,
+        _enroll_fleet_machine,
+    )
+    _enroll_fleet_machine(
+        tmp, fixture_patch, personal_root, org_uuid=ORG_UUID,
+    )
+    env["AUTONOMY_KEYCACHE_MOUNT"] = os.environ["AUTONOMY_KEYCACHE_MOUNT"]
 
     mcdb.DB_PATH = mission_db
     mcdb.init_db(mission_db)
@@ -231,6 +288,10 @@ def stack(tmp_path_factory):
     from tools.network.registry.testkit import mint_link_at
     token = mint_link_at(registry_db, ORG_UUID, mission_id,
                          target_type="mission")
+    link_key = KeyPair.generate()
+    fixture_patch.setattr(
+        link_channel_key, "channel_key_for", lambda *_args: link_key
+    )
 
     settings_ops.add_setting(
         NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION, token,
@@ -246,6 +307,7 @@ def stack(tmp_path_factory):
             "meta": {"participant_id": guest["participant_id"], "label": "Briefing"},
             "subject": {"kind": "operator", "id": "op-1"},
             "issued_at": _iso(time.time()),
+            "channel_pub": link_key.public_hex,
         },
         org=GRAPH_ORG,
     )
@@ -265,10 +327,11 @@ def stack(tmp_path_factory):
     # genesis (derive_persona is pure HKDF; any well-formed 64-hex genesis
     # id yields a stable persona, and the relay checks the subject shape
     # and the chain to root, not the genesis).
-    org_genesis_id = ORG_UUID.replace("-", "") * 2  # 64 lowercase hex
-    persona = derive_persona(bytes.fromhex(root.private_hex), org_genesis_id)
+    persona = derive_persona(
+        bytes.fromhex(personal_root.private_hex), founded.genesis_id
+    )
     serve_cert = issue_cert(
-        root, session_key.public_hex,
+        persona, session_key.public_hex,
         scope=("tunnel:serve",),
         org=ORG_UUID, subject=Subject("persona", persona.public_hex),
         not_before=now - 300, not_after=now + 7 * 86_400,
@@ -290,21 +353,30 @@ def stack(tmp_path_factory):
     # and a test connector would then consume live production events.
     ctl_path = tmp / "connector.ctl"
     events = _ControlPipe(ctl_path)
+    key_pipe = os.pipe()
     connector = subprocess.Popen(
-        [sys.executable, "-m", "tools.dashboard.link_serving",
+        [sys.executable, "-c", _CONNECTOR_BOOTSTRAP,
          "--relay", f"ws://127.0.0.1:{registry_port}", "--org", ORG_UUID,
          "--key-file", str(key_file), "--cert-file", str(cert_file),
          "--channel-cert-file", str(channel_cert_file),
          "--graph-org", GRAPH_ORG,
+         "--link-key-fd", str(key_pipe[0]),
          "--control-file", str(ctl_path),
          "--min-backoff", "0.1", "--max-backoff", "1.0"],
         cwd=str(REPO), env=env,
+        pass_fds=(key_pipe[0],),
         stdout=open(tmp / "connector.log", "ab"), stderr=subprocess.STDOUT,
     )
+    from tools.dashboard.connector_key_resolution import register
+    bootstrap = register(connector.pid, ORG_UUID, GRAPH_ORG, "mission-test")
+    os.write(key_pipe[1], json.dumps(bootstrap).encode() + b"\n")
+    os.close(key_pipe[0])
+    os.close(key_pipe[1])
 
     state = {
         "tmp": tmp, "token": token, "registry_port": registry_port,
         "root_pub": root.public_hex, "mission_db": mission_db,
+        "link_pub": link_key.public_hex,
         "guest": guest, "pillar": pillar, "mission_id": mission_id,
         "events": events,
         "procs": {"registry": registry, "connector": connector},
@@ -318,6 +390,7 @@ def stack(tmp_path_factory):
         with contextlib.suppress(Exception):
             proc.wait(timeout=5)
     GraphDB.close_all_pooled()
+    fixture_patch.undo()
     for key, value in prior_env.items():
         if value is None:
             os.environ.pop(key, None)
@@ -332,7 +405,7 @@ async def open_channel(state, timeout=30.0) -> ViewerChannel:
         try:
             return await ViewerChannel.connect(
                 f"ws://127.0.0.1:{state['registry_port']}", state["token"],
-                root_pub=state["root_pub"], org=ORG_UUID,
+                link_pub=state["link_pub"], org=ORG_UUID,
             )
         except Exception as exc:
             last = exc

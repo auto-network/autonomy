@@ -31,17 +31,18 @@ CHANNEL_PUB = "9a" * 32  # a per-link channel PUBLIC key, 64-hex
 def sample() -> Invitation:
     return Invitation(
         org=ORG,
-        root_pub=ROOT_PUB,
         invite_ref=INVITE_REF,
         channel_token=GRANT_TOKEN,
+        channel_pub=CHANNEL_PUB,
         claim_token=CLAIM_TOKEN,
     )
 
 
 def _recode(**overrides) -> str:
     body = {
-        "v": INVITE_VERSION, "org": ORG, "root_pub": ROOT_PUB,
+        "v": INVITE_VERSION, "org": ORG,
         "invite_ref": INVITE_REF, "channel_token": GRANT_TOKEN,
+        "channel_pub": CHANNEL_PUB,
         "claim_token": CLAIM_TOKEN,
     }
     body.update(overrides)
@@ -71,34 +72,32 @@ def test_token_hash_matches_the_invite_commitment():
     token = generate_token()
     inv = Invitation(
         org=ORG,
-        root_pub=ROOT_PUB,
         invite_ref=INVITE_REF,
         channel_token=GRANT_TOKEN,
+        channel_pub=CHANNEL_PUB,
         claim_token=token,
     )
     assert inv.token_hash == hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def test_join_url_assembles_the_two_domains_from_path_and_fragment():
-    inv = invitation_from_join_url(
-        org=ORG,
-        root_pub=ROOT_PUB,
-        invite_ref=INVITE_REF,
-        join_url=f"https://relay.example/l/{GRANT_TOKEN}#t={CLAIM_TOKEN}",
-    )
-    assert inv == sample()
+def test_join_url_refuses_a_fragment_without_the_channel_key():
+    with pytest.raises(InvitationError):
+        invitation_from_join_url(
+            org=ORG,
+            invite_ref=INVITE_REF,
+            join_url=f"https://relay.example/l/{GRANT_TOKEN}#t={CLAIM_TOKEN}",
+        )
 
 
 def test_join_url_accepts_the_two_value_fragment():
     # The complete viewer URL carries #k=<channel_pub>&t=<bearer>; the bearer is
-    # extracted for the AUTONOMY_INVITE code and the channel key is dropped
-    # (it authenticates the browser viewer, not the container credential set).
+    # both are retained in their separate fields in the invitation code.
     complete = build_invitation_join_url(
         f"https://relay.example/l/{GRANT_TOKEN}", CHANNEL_PUB, CLAIM_TOKEN,
     )
     assert complete.complete
     inv = invitation_from_join_url(
-        org=ORG, root_pub=ROOT_PUB, invite_ref=INVITE_REF, join_url=complete.url,
+        org=ORG, invite_ref=INVITE_REF, join_url=complete.url,
     )
     assert inv == sample()
 
@@ -165,10 +164,9 @@ def test_build_invitation_join_url_rejects_malformed_canonical(canonical):
         build_invitation_join_url(canonical, CHANNEL_PUB, CLAIM_TOKEN)
 
 
-def test_parse_invitation_fragment_reports_legacy_bearer_only():
-    channel_pub_hex, bearer = parse_invitation_fragment(f"t={CLAIM_TOKEN}")
-    assert channel_pub_hex is None
-    assert bearer == CLAIM_TOKEN
+def test_parse_invitation_fragment_refuses_bearer_only():
+    with pytest.raises(InvitationError):
+        parse_invitation_fragment(f"t={CLAIM_TOKEN}")
 
 
 @pytest.mark.parametrize(
@@ -205,7 +203,6 @@ def test_join_url_split_is_fail_closed(url):
     with pytest.raises(InvitationError):
         invitation_from_join_url(
             org=ORG,
-            root_pub=ROOT_PUB,
             invite_ref=INVITE_REF,
             join_url=url,
         )
@@ -274,8 +271,8 @@ def test_edited_body_is_caught_by_the_checksum():
     [
         {"v": 3},                                  # unsupported version
         {"org": "not-a-uuid"},
-        {"root_pub": "zz" * 32},                   # not hex
-        {"root_pub": "AB" * 32},                   # uppercase
+        {"channel_pub": "zz" * 32},                # not hex
+        {"channel_pub": "AB" * 32},                # uppercase
         {"invite_ref": "ab" * 31},                 # wrong length
         {"channel_token": ""},
         {"channel_token": "AB" * 16},
@@ -295,7 +292,7 @@ def test_no_network_shape_escapes_a_bad_code():
     """Decode either returns a fully-validated invitation or raises; there
     is no partial object for a caller to act on."""
     with pytest.raises(InvitationError):
-        decode_invitation(_recode(root_pub="zz" * 32))
+        decode_invitation(_recode(channel_pub="zz" * 32))
 
 
 def test_version_one_is_rejected_with_regeneration_guidance():

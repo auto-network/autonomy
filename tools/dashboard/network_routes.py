@@ -2093,6 +2093,11 @@ async def _post_serve_cert_v3(request: Request, body: dict) -> JSONResponse:
     previous_serve = local_serve_cert_member(org)
     if previous_serve is not None and \
             previous_serve.payload.get("cert") == body["cert"]:
+        try:
+            from tools.dashboard.link_serving_supervisor import get_supervisor
+            await asyncio.to_thread(get_supervisor().ensure, org)
+        except Exception:
+            pass  # reconcile is best-effort; the watchdog retries
         return JSONResponse({"ok": True, "child_pub": cert.child_pub,
                              "not_after": cert.not_after})
 
@@ -2622,6 +2627,74 @@ async def post_serve_cert(request: Request) -> JSONResponse:
                          "not_after": cert.not_after})
 
 
+def _relay_bases(relay_host: str):
+    """Split a pasted relay origin into its ``(https base, wss base)``.
+
+    Accepts a full origin (``https://relay.host``) or a bare host; a bare
+    host defaults to https/wss. Returns ``(http_base, ws_base, None)`` or
+    ``(None, None, JSONResponse)`` on a malformed value.
+    """
+    raw = relay_host.strip()
+    parsed = urllib.parse.urlsplit(raw if "//" in raw else "https://" + raw)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return None, None, JSONResponse(
+            {"ok": False, "error": "relay_host must be an http(s) origin"},
+            status_code=400,
+        )
+    http_base = f"{parsed.scheme}://{parsed.netloc}"
+    ws_scheme = "wss" if parsed.scheme == "https" else "ws"
+    return http_base, f"{ws_scheme}://{parsed.netloc}", None
+
+
+def _relay_client(base_url: str) -> httpx.AsyncClient:
+    """Factory seam for the link-envelope GET (tests swap it for an
+    in-process registry app)."""
+    return httpx.AsyncClient(base_url=base_url, timeout=10.0)
+
+
+async def _fetch_link_envelope(http_base: str, token: str) -> dict | None:
+    """Fetch untrusted public routing metadata, never an authentication pin.
+
+    No fragment value is sent. Return None on transport/shape failure.
+    """
+    try:
+        async with _relay_client(http_base) as client:
+            resp = await client.get(f"/v1/links/{token}/envelope")
+    except httpx.HTTPError:
+        return None
+    if resp.status_code != 200:
+        return None
+    try:
+        body = resp.json()
+    except Exception:
+        return None
+    return body if isinstance(body, dict) else None
+
+
+async def post_invite_resolve(request: Request) -> JSONResponse:
+    """Resolve public routing locally; authentication stays in the browser."""
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "body must be JSON"}, status_code=400)
+    if not isinstance(body, dict) or set(body) != {"relay_host", "channel_token"}:
+        return JSONResponse({"ok": False, "error": "only relay_host and channel_token are accepted"}, status_code=400)
+    relay_host, token = body["relay_host"], body["channel_token"]
+    if not isinstance(relay_host, str) or not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{32}", token):
+        return JSONResponse({"ok": False, "error": "invalid relay_host or channel_token"}, status_code=400)
+    http_base, _, refused = _relay_bases(relay_host)
+    if refused is not None:
+        return refused
+    envelope = await _fetch_link_envelope(http_base, token)
+    if not envelope or envelope.get("target_type") != "org:join":
+        return JSONResponse({"ok": False, "reason": "unreachable"})
+    org, invite_ref = envelope.get("org"), envelope.get("invite_ref")
+    if not (isinstance(org, str) and re.fullmatch(r"[0-9a-f-]{32,36}", org)
+            and isinstance(invite_ref, str) and re.fullmatch(r"[0-9a-f]{64}", invite_ref)):
+        return JSONResponse({"ok": False, "reason": "unreachable"})
+    return JSONResponse({"ok": True, "org": org, "invite_ref": invite_ref})
+
+
 async def post_unlock_maintenance_report(request: Request) -> JSONResponse:
     """Record what the unlock's maintenance pass actually did, per org.
 
@@ -3138,6 +3211,7 @@ ROUTES = [
         methods=["POST"],
     ),
     Route("/api/network/invite/email", post_invite_email, methods=["POST"]),
+    Route("/api/network/invite/resolve", post_invite_resolve, methods=["POST"]),
     Route("/api/network/register", post_register, methods=["POST"]),
     Route("/api/network/renew", post_renew, methods=["POST"]),
     Route("/api/network/serve-cert", get_serve_cert_status, methods=["GET"]),

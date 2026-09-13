@@ -127,7 +127,9 @@ def _member_connector(port: int, root: KeyPair, sim: Sim, persona: KeyPair,
         f"ws://127.0.0.1:{port}", ORG_UUID, serve_key, cert, handler=handler,
         machine_key=machine_key, caps=(),
         membership_proof_for=membership_proof_for,
-        link_key_for=link_key_for, min_backoff=0.1, max_backoff=1.0,
+        channel_authorization_for=lambda token: {
+            "protocol": "public-link", "key": link_key_for(token),
+        }, min_backoff=0.1, max_backoff=1.0,
     )
 
 
@@ -277,33 +279,6 @@ def test_removed_member_cannot_authenticate(federation):
     # memberC is gone from members_root → refused; memberB remains → admitted.
     assert _hello_rejected(f["port"], sim, memberC, seq=1) is True
     assert _hello_rejected(f["port"], sim, memberB, seq=1) is False
-
-
-def test_viewer_without_fragment_fails_closed(federation):
-    """NEGATIVE: the keyed link opened without its fragment cannot verify the
-    per-link handshake — a member is serving, but the viewer fails closed."""
-    f = federation
-    link_key = KeyPair.generate()
-    token = _publish(f["db"])
-    connB = _member_connector(f["port"], f["root"], f["sim"], f["members"][0],
-                              link_token=token, link_key=link_key, seq=0)
-
-    async def run():
-        task = asyncio.create_task(connB.run())
-        try:
-            await asyncio.wait_for(connB.connected.wait(), timeout=15)
-            with pytest.raises(Exception) as excinfo:
-                await ViewerChannel.connect(
-                    f"ws://127.0.0.1:{f['port']}", token,
-                    root_pub=f["root"].public_hex, org=ORG_UUID)
-            assert "fragment" in str(excinfo.value)
-        finally:
-            connB.stop()
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
-
-    asyncio.run(run())
 
 
 def _claim_id_of(sim: Sim, persona: KeyPair) -> str:

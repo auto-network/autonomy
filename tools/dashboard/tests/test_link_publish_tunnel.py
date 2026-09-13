@@ -27,6 +27,7 @@ from starlette.testclient import TestClient
 
 from tools.dashboard import (
     approvals_routes,
+    link_channel_key,
     link_approvals,
     link_serving_supervisor,
 )
@@ -120,6 +121,14 @@ def env(tmp_path, monkeypatch, root, founded_org):
     GraphDB.close_all_pooled()
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_ORG", raising=False)
+    channel_key = KeyPair.from_private_hex("47" * 32)
+    monkeypatch.setattr(
+        link_channel_key, "mint_channel_key",
+        lambda token, org: channel_key.public_hex,
+    )
+    async def live_probe(binding, token, org):
+        return {"live": True, "status": 200, "content_length": 42}
+    monkeypatch.setattr(link_approvals, "_probe_serving", live_probe)
     settings_ops.add_setting(
         NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "registry.test",
         {
@@ -250,7 +259,9 @@ def test_authorized_publish_emits_frame_and_caches_grant(
 
     execution = result["execution"]
     assert execution["ok"] is True, execution
-    assert execution["serving"] == {"live": True, "via": "tunnel-control"}
+    assert execution["serving"] == {
+        "live": True, "status": 200, "content_length": 42,
+    }
     # The registry saw one create-link, as the org, carrying only the target,
     # meta and (present is machine-local) this machine's serving identity —
     # never a persona.
@@ -266,6 +277,34 @@ def test_authorized_publish_emits_frame_and_caches_grant(
     assert grants[token]["subject"] == {
         "kind": "operator", "id": session_cert.subject.id}
     assert grants[token]["meta"] == {"ttl": 3600, "label": "binder"}
+
+
+def test_recipient_probe_failure_compensates_grant_and_channel_key(
+    env, root, session_key, session_cert, monkeypatch,
+):
+    recorder = _ControlRecorder()
+    _install_control(monkeypatch, recorder)
+    async def failed_probe(binding, token, org):
+        return {"live": False, "status": None, "content_length": None}
+    monkeypatch.setattr(link_approvals, "_probe_serving", failed_probe)
+    dropped = []
+    monkeypatch.setattr(
+        link_channel_key, "drop_channel_key",
+        lambda token, org: dropped.append((token, org)) or True,
+    )
+
+    rid = _create_publish(env)
+    envelope = _tunnel_envelope(session_key, session_cert, "/control/create-link")
+    execution = _decide_and_wait(env, rid, envelope)["execution"]
+
+    assert execution["ok"] is False
+    assert execution["failed_stage"] == "recipient-probe"
+    assert execution["remote_revoked"] is True
+    assert execution["grant_cleanup"] is True
+    assert execution["key_cleanup"] is True
+    assert _cached_grants() == {}
+    assert dropped == [("c0ffee00" * 4, ORG)]
+    assert recorder.calls[-1] == (ORG, "revoke-link", {"token": "c0ffee00" * 4})
 
 
 def test_publish_refused_without_scope_emits_no_frame(

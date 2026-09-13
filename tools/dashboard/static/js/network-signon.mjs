@@ -13,6 +13,7 @@ import { createBrowserStorage } from './ceremony/storage.js';
 import { wakeVault } from './ceremony/vault-unlock.js';
 import { openArmorWithPassword } from './ceremony/root-factor-policy.js';
 import { enrollPasskey } from './ceremony/enrollment.js';
+import { restoreFleetRuntime } from './ceremony/fleet-restore.js';
 
 var CryptoKeyConstructor = globalThis.CryptoKey;
 if (
@@ -1034,7 +1035,7 @@ var signRegistryRequestCore;
     var ttl = _sessionTtl(opts);
     var slugs = await _signOnOrgSlugs(opts);
     var opened = await _openPersonalRoot(passphrase);
-    return _signOnWithOpenedRoot(opened, slugs, ttl);
+    return _signOnWithOpenedRoot(opened, slugs, ttl, opts);
   }
 
   // The SAME sign-on from a personal root the caller has already opened —
@@ -1055,7 +1056,7 @@ var signRegistryRequestCore;
       seed: new Uint8Array(personalRootSeed),
       rootPub: typeof rootPub === 'string' && rootPub ? rootPub : null,
     };
-    return _signOnWithOpenedRoot(opened, slugs, ttl);
+    return _signOnWithOpenedRoot(opened, slugs, ttl, opts);
   }
 
   function _sessionTtl(opts) {
@@ -1067,7 +1068,7 @@ var signRegistryRequestCore;
     return ttl;
   }
 
-  async function _signOnWithOpenedRoot(opened, slugs, ttl) {
+  async function _signOnWithOpenedRoot(opened, slugs, ttl, opts) {
     var sessionKeys = await crypto.subtle.generateKey(
       { name: 'Ed25519' }, false, ['sign', 'verify']);
     var sessionPub = bytesToHex(
@@ -1167,58 +1168,26 @@ var signRegistryRequestCore;
         orgs[genesisId] = entry;
         rekeys[genesisId] = rekey;
 
-        // Serving certificates expire on a 30-day clock of their own. This is
-        // the moment every one of them can be renewed at once: the personal
-        // seed is live, so each organization's root is reachable, and the
-        // persona that the credential names has just been derived.
-        //
-        // It must never disturb sign-on -- a registry that is down, or one
-        // organization whose key is legacy-armored, cannot cost the operator
-        // their session. The outcome is REPORTED per organization instead of
-        // warned to a console nobody reads, which is how these expired
-        // unnoticed.
+        // Sign-on consumes the same ordered maintenance as root unlock.
+        // Each step still reports failures without costing the session.
         var serve = { checked: false, renewed: false, status: 'skipped' };
-        if (bound) {
-          try {
-            serve = await _renewServeCredential(
-              slug, binding, persona.publicHex, opened.seed, genesisId);
-            if (serve.rootOpened) orgRootsOpened += 1;
-          } catch (e) {
-            serve = { checked: true, renewed: false, status: 'failed',
-                      error: (e && e.message) || String(e) };
-          }
-        }
-
-        // The registry binding lives on its own 30-day clock, and this is the
-        // same moment it can be kept alive: the org root is reachable and the
-        // binding coordinates are in hand. Like the serving cert, a registry
-        // that is down or an org whose binding cannot be signed must never cost
-        // the operator their session, so the outcome is reported per org.
         var bindingMaint = { checked: false, action: 'skipped' };
-        if (bound) {
-          try {
-            bindingMaint = await _maintainBinding(slug, binding, opened.seed);
-            if (bindingMaint.rootOpened) orgRootsOpened += 1;
-          } catch (e) {
-            bindingMaint = { checked: true, action: 'failed',
-                             error: (e && e.message) || String(e) };
-          }
-        }
-
-        // The registry's committed membership view lives on the same unlock:
-        // the org root the sealed key opens signs a seed, the persona just
-        // derived signs an advance, and a fold that already matches the
-        // adopted record is a cheap local no-op. Non-fatal per org, reported
-        // like the serving and binding maintenance beside it.
         var checkpoint = { checked: false, action: 'skipped' };
         if (bound) {
-          try {
-            checkpoint = await _publishMembershipCheckpoint(
-              slug, binding, persona.publicHex, opened.seed, genesisId);
-            if (checkpoint.rootOpened) orgRootsOpened += 1;
-          } catch (e) {
-            checkpoint = { checked: true, action: 'failed',
-                           error: (e && e.message) || String(e) };
+          var outcomes = await _reconcileOrgUnderRoot({
+            slug: slug, binding: binding, heads: heads, genesisId: genesisId,
+            persona: persona, seed: opened.seed, deriveSeed: deriveSeed,
+            rekeyResult: rekey,
+          });
+          for (var outcome of outcomes) {
+            var value = outcome.ok ? outcome.result : {
+              checked: true, renewed: false, status: 'failed',
+              action: 'failed', error: outcome.error,
+            };
+            if (value && value.rootOpened) orgRootsOpened += 1;
+            if (outcome.step === 'serve-cert') serve = value;
+            if (outcome.step === 'binding') bindingMaint = value;
+            if (outcome.step === 'checkpoint') checkpoint = value;
           }
         }
 
@@ -1227,6 +1196,24 @@ var signRegistryRequestCore;
           personaPub: persona.publicHex, notAfter: certPayload.not_after,
           certWire: certWire, registryUrl: entry.registryUrl, rekey: rekey,
           serveCert: serve, binding: bindingMaint, checkpoint: checkpoint,
+        });
+      }
+      // First publication needs runtime activation in this SAME root opening.
+      // Collect targets only after organization maintenance has provisioned
+      // serving; collecting earlier silently omits a newly registered org.
+      if (opts.requireServingRuntime) {
+        if (!opts.org || !reports.some(report => report.orgSlug === opts.org)) {
+          throw new Error('Serving runtime requires a signed-on organization.');
+        }
+        var servingState = await _fetchJson(
+          '/api/network/serve-cert?org=' + encodeURIComponent(opts.org), opts.org);
+        if (servingState.status !== 'ok') {
+          throw new Error('Organization serving setup did not complete. The link has not been published.');
+        }
+        await restoreFleetRuntime(new Uint8Array(opened.seed), {
+          fetchImpl: _transport.fetch.bind(_transport),
+          signon: { _internals: { provisionPersonalNetworkIdentity } },
+          requiredOrg: opts.org,
         });
       }
     } finally {
@@ -1485,26 +1472,11 @@ var signRegistryRequestCore;
         return r.due ? _run() : _skip(r.reason || 'not-due');
       },
       run: function (ctx) {
+        if (ctx.rekeyResult) return ctx.rekeyResult;
         return _evaluateRekey(
           { orgSlug: ctx.slug, genesisId: ctx.genesisId,
             org: ctx.binding.org_uuid, personaPub: ctx.persona.publicHex },
           ctx.deriveSeed);
-      } },
-    { name: 'serve-cert',
-      when: function (ctx) {
-        // The plan carries the serve-cert route's OWN verdict, so this gate
-        // and that route cannot disagree: a credential inside its renewal
-        // window is `required` even though its status is still 'ok'.
-        var s = ctx.plan && ctx.plan.serve_cert;
-        if (!s) return _run();
-        return s.required ? _run()
-                          : _skip('current' + (s.days_remaining !== null &&
-                                               s.days_remaining !== undefined
-                              ? ' (' + s.days_remaining + 'd)' : ''));
-      },
-      run: function (ctx) {
-        return _renewServeCredential(
-          ctx.slug, ctx.binding, ctx.persona.publicHex, ctx.seed, ctx.genesisId);
       } },
     { name: 'binding',
       // Cheap and self-gating: _maintainBinding compares the expiry it was
@@ -1529,6 +1501,18 @@ var signRegistryRequestCore;
       },
       run: function (ctx) {
         return _publishMembershipCheckpoint(
+          ctx.slug, ctx.binding, ctx.persona.publicHex, ctx.seed, ctx.genesisId);
+      } },
+    // A fresh persona credential is accepted only after the registry has
+    // adopted membership. All root-unlock callers use this ordering.
+    { name: 'serve-cert',
+      when: function (ctx) {
+        var s = ctx.plan && ctx.plan.serve_cert;
+        if (!s) return _run();
+        return s.required ? _run() : _skip('current');
+      },
+      run: function (ctx) {
+        return _renewServeCredential(
           ctx.slug, ctx.binding, ctx.persona.publicHex, ctx.seed, ctx.genesisId);
       } },
   ];

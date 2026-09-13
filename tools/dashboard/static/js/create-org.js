@@ -300,10 +300,23 @@
     try {
       var identity = { name: S.name.trim(), color: S.color, type: 'shared' };
       if (S.icon) identity.favicon = S.icon;
-      await _fetchJson('/api/orgs', {
+      var shell = await _fetchJson('/api/orgs', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ slug: slug, type: 'shared', identity: identity }),
       });
+      if (shell.founded === false) {
+        var ceremony = await Promise.all([
+          import('./ceremony/founding.js'),
+          import('./ceremony/open-root.js'),
+        ]);
+        await ceremony[0].foundExistingOrganizationShell({
+          org: slug,
+          orgId: shell.org.id,
+          storageDelegatePolicy: shell.storage_delegate_policy,
+          openRoot: ceremony[1].openRoot,
+          transport: { fetch: function (route, options) { return fetch(route, options); } },
+        });
+      }
       S.busy = false;
       S.phase = 'done';
       window.dispatchEvent(new Event('autonomy:orgs-changed'));

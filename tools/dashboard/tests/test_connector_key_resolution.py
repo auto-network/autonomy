@@ -45,12 +45,12 @@ def test_machine_hash_only_and_protected_write(setup):
 def test_socket_resolves_live_holder_and_adoption_preserves_bearer(setup):
     bootstrap = resolver.register(os.getpid(), ORG_ID, "autonomy", "commit")
     fetch = resolver.client(bootstrap)
-    assert asyncio.run(fetch(TOKEN)).public_hex == setup["key"].public_hex
+    assert asyncio.run(fetch(TOKEN))["key"].public_hex == setup["key"].public_hex
     original = resolver.record(ORG_ID)["payload"]["token_hash"]
     assert resolver.adopt(ORG_ID, "autonomy", os.getpid())
     assert resolver.record(ORG_ID)["payload"]["token_hash"] == original
     setup["key"] = KeyPair.generate()
-    assert asyncio.run(fetch(TOKEN)).public_hex == setup["key"].public_hex
+    assert asyncio.run(fetch(TOKEN))["key"].public_hex == setup["key"].public_hex
     setup["active"] = False
     with pytest.raises(PermissionError):
         asyncio.run(fetch(TOKEN))
@@ -83,14 +83,42 @@ def test_revoke_during_open_releases_nothing(setup, monkeypatch):
         resolver.resolve(request)
 
 
+def test_non_channel_key_target_is_not_a_successful_resolution(setup, monkeypatch):
+    request = {
+        **resolver.register(os.getpid(), ORG_ID, "autonomy", "commit"),
+        "token": TOKEN,
+    }
+    monkeypatch.setattr(
+        link_serving, "check_grant",
+        lambda *args, **kwargs: {"target_type": "fleet:join"},
+    )
+    with pytest.raises(PermissionError):
+        resolver.resolve(request)
+
+
+def test_fleet_enrollment_has_an_explicit_non_link_protocol(setup, monkeypatch):
+    request = {
+        **resolver.register(os.getpid(), ORG_ID, "autonomy", "commit"),
+        "token": TOKEN,
+    }
+    monkeypatch.setattr(
+        link_serving, "check_grant",
+        lambda *args, **kwargs: {"target_type": "fleet:join"},
+    )
+    assert resolver.resolve_channel(request) == {
+        "ok": True,
+        "protocol": "fleet-enrollment",
+    }
+
+
 def test_real_child_receives_only_pipe_bearer_and_link_key(setup):
     read_fd, write_fd = os.pipe()
     code = """
 import asyncio, sys
 from tools.dashboard.connector_key_resolution import read_bootstrap, client
 bootstrap = read_bootstrap(int(sys.argv[1]))
-key = asyncio.run(client(bootstrap)(sys.argv[2]))
-print(key.public_hex, flush=True)
+authorization = asyncio.run(client(bootstrap)(sys.argv[2]))
+print(authorization["key"].public_hex, flush=True)
 """
     child = subprocess.Popen([sys.executable, "-c", code, str(read_fd), TOKEN],
                              pass_fds=(read_fd,), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -123,8 +151,9 @@ def test_resolver_failure_closes_open_without_certificate_fallback(monkeypatch):
         pytest.fail("a failed resolver must not reach the certificate handshake")
     async def send(*args):
         sent.append(args)
-    monkeypatch.setattr(wire, "serve_channel", forbidden)
-    fake = SimpleNamespace(_link_key_for=unavailable, _publisher=None)
+    monkeypatch.setattr(wire, "serve_link_channel", forbidden)
+    monkeypatch.setattr(wire, "serve_certificate_channel", forbidden)
+    fake = SimpleNamespace(_channel_authorization_for=unavailable, _publisher=None)
     asyncio.run(wire.TunnelConnector._serve_channel(
         fake, b"channel", TOKEN, asyncio.Queue(), send, dropped.append))
     assert sent == [(FRAME_CLOSE, b"channel")]

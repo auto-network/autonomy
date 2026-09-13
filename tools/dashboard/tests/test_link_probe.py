@@ -39,6 +39,20 @@ def test_registry_to_relay_ws_scheme():
     assert registry_to_relay_ws("wss://already.ws") == "wss://already.ws"
 
 
+def test_publication_probe_executes_real_grant_gate():
+    """Exercise the publication wrapper itself, not a replacement probe.
+
+    A malformed token is refused by the real grant gate before any DB/network
+    access. A missing check_grant import must not masquerade as that refusal.
+    This checks wiring, not successful end-to-end publication.
+    """
+    from tools.dashboard.link_approvals import _probe_serving
+
+    verdict = asyncio.run(_probe_serving({}, "invalid-token", "probe-test"))
+    assert verdict["live"] is False
+    assert verdict["detail"] == "serving probe could not run: link has no channel key"
+
+
 def test_probe_does_not_hang_on_silent_relay():
     """The hang regression: reachable relay, handshake never completes → the
     probe returns not-live/None BOUNDED by total_timeout, not forever."""
@@ -50,7 +64,8 @@ def test_probe_does_not_hang_on_silent_relay():
             t0 = loop.time()
             verdict = await probe_link(
                 relay_url=f"ws://127.0.0.1:{port}",
-                token="a" * 32, root_pub="b" * 64, org_uuid="org-uuid",
+                token="a" * 32, link_pub="b" * 64, org_uuid="org-uuid",
+                operation="head",
                 total_timeout=1.5, connect_timeout=1.0, attempts=2,
             )
             elapsed = loop.time() - t0
@@ -71,7 +86,8 @@ def test_probe_reports_unreachable_on_dead_port():
         port = _free_port()  # allocated then released; nothing listens on it
         verdict = await probe_link(
             relay_url=f"ws://127.0.0.1:{port}",
-            token="a" * 32, root_pub="b" * 64, org_uuid="org-uuid",
+            token="a" * 32, link_pub="b" * 64, org_uuid="org-uuid",
+            operation="head",
             total_timeout=2.0, connect_timeout=1.0, attempts=1,
         )
         assert verdict["live"] is False and verdict["status"] is None, verdict

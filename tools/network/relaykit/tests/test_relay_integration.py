@@ -44,7 +44,7 @@ from tools.network.idkit import KeyPair, Subject, issue_cert
 from tools.network.registry.signing import sign_request
 from tools.network.relaykit.channel import HandshakeError
 from tools.network.relaykit.connector import TunnelConnector
-from tools.network.relaykit.viewer import ViewerChannel
+from tools.network.relaykit.viewer import CertificateViewerChannel
 
 from .conftest import ORG, TOKEN
 from .evil_relay import EvilRelay
@@ -129,6 +129,7 @@ def stack(tmp_path_factory, root, session_key, session_cert):
          "--relay", f"ws://127.0.0.1:{tap_port}", "--org", ORG,
          "--key-file", str(key_file), "--cert-file", str(cert_file),
          "--channel-cert-file", str(channel_cert_file),
+         "--channel-protocol", "fleet-enrollment",
          "--min-backoff", "0.1", "--max-backoff", "1.0"],
         cwd=str(REPO), env=env,
         stdout=open(tmp / "connector.log", "ab"), stderr=subprocess.STDOUT,
@@ -149,13 +150,13 @@ def stack(tmp_path_factory, root, session_key, session_cert):
             proc.wait(timeout=5)
 
 
-async def connect_viewer(state, token=None, timeout=20.0) -> ViewerChannel:
+async def connect_viewer(state, token=None, timeout=20.0) -> CertificateViewerChannel:
     """Retry until the connector's tunnel is up and the handshake lands."""
     deadline = time.time() + timeout
     last: Exception = None
     while time.time() < deadline:
         try:
-            return await ViewerChannel.connect(
+            return await CertificateViewerChannel.connect(
                 f"ws://127.0.0.1:{state['registry_port']}",
                 token or state["token"],
                 root_pub=state["root_pub"], org=ORG,
@@ -170,7 +171,7 @@ async def connect_viewer(state, token=None, timeout=20.0) -> ViewerChannel:
 
 async def close_code_for(state, token) -> int:
     try:
-        channel = await ViewerChannel.connect(
+        channel = await CertificateViewerChannel.connect(
             f"ws://127.0.0.1:{state['registry_port']}", token,
             root_pub=state["root_pub"], org=ORG,
         )
@@ -257,11 +258,14 @@ class TestMitmI5:
                 f"ws://127.0.0.1:{port}", ORG, session_key, session_cert,
                 min_backoff=0.1, max_backoff=0.5,
                 machine_key=KeyPair.generate(),
+                channel_authorization_for=lambda _token: {
+                    "protocol": "fleet-enrollment",
+                },
             )
             task = asyncio.create_task(connector.run())
             try:
                 await asyncio.wait_for(connector.connected.wait(), timeout=10)
-                channel = await ViewerChannel.connect(
+                channel = await CertificateViewerChannel.connect(
                     f"ws://127.0.0.1:{port}", TOKEN,
                     root_pub=root.public_hex, org=ORG,
                 )

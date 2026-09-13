@@ -503,7 +503,7 @@ def _init_join(data: Path, report: InitReport, *, invite: str) -> None:
         "join",
         PENDING,
         f"org {invitation.org} invite {invitation.invite_ref[:12]}… "
-        f"root {invitation.root_pub[:12]}…",
+        f"organization {invitation.org}",
     )
     return invitation
 

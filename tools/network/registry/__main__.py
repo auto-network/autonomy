@@ -63,6 +63,8 @@ def main() -> None:
     parser.add_argument("--db", default="registry.db", help="SQLite database path")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8477)
+    parser.add_argument("--ssl-certfile", help="PEM server certificate for direct TLS")
+    parser.add_argument("--ssl-keyfile", help="PEM private key for direct TLS")
     parser.add_argument(
         "--base-url",
         default="https://relay.auto.network",
@@ -112,6 +114,8 @@ def main() -> None:
              "Off by default; every other source stays fully limited.",
     )
     args = parser.parse_args()
+    if bool(args.ssl_certfile) != bool(args.ssl_keyfile):
+        parser.error('--ssl-certfile and --ssl-keyfile must be provided together')
     app = create_app(
         args.db,
         base_url=args.base_url,
@@ -132,6 +136,8 @@ def main() -> None:
         app,
         host=args.host,
         port=args.port,
+        ssl_certfile=args.ssl_certfile,
+        ssl_keyfile=args.ssl_keyfile,
         access_log=False,
         log_level="warning",
         # Caddy is the only public listener. Trust forwarded client

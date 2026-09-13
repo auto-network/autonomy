@@ -25,7 +25,7 @@ const fakeTransport = {
 };
 await assert.rejects(
   relaykit.performHandshake(fakeTransport, {
-    org: 'org', token: 'a'.repeat(64), rootPub: 'b'.repeat(64),
+    org: 'org', token: 'a'.repeat(64), linkPub: 'b'.repeat(64),
   }),
   /channel token/,
 );
@@ -33,62 +33,6 @@ await assert.rejects(
 const hex = (bytes) => Buffer.from(bytes).toString('hex');
 const unhex = (value) => new Uint8Array(Buffer.from(value, 'hex'));
 const encoder = new TextEncoder();
-
-// Exercise the real handshake against an identity-neutral, direct-root
-// tunnel:serve certificate. The fake is only the byte transport; all key
-// generation, signatures, verification, ECDH, HKDF, and parsing are real.
-{
-  const org = '00000000-0000-4000-8000-0000000000aa';
-  const token = 'a1'.repeat(16);
-  const now = Math.floor(Date.now() / 1000);
-  const root = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
-  const serving = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
-  const rootPub = hex(await crypto.subtle.exportKey('raw', root.publicKey));
-  const servingPub = hex(await crypto.subtle.exportKey('raw', serving.publicKey));
-  const payload = {
-    v: 1,
-    child_pub: servingPub,
-    scope: ['tunnel:serve'],
-    org,
-    subject: { kind: 'operator', id: servingPub },
-    not_before: now - 60,
-    not_after: now + 3600,
-  };
-  const certSig = hex(await crypto.subtle.sign(
-    'Ed25519', root.privateKey,
-    encoder.encode(`autonomy.idkit.cert.v1\n${relaykit.canonicalJson(payload)}`),
-  ));
-  const cert = relaykit.canonicalJson({ ...payload, sig: certSig });
-  let serverHello;
-  const transport = {
-    async send(bytes) {
-      const client = JSON.parse(new TextDecoder().decode(bytes));
-      const serverEph = await crypto.subtle.generateKey(
-        'X25519', true, ['deriveBits'],
-      );
-      const serverPub = hex(await crypto.subtle.exportKey('raw', serverEph.publicKey));
-      const signed = encoder.encode(
-        `autonomy.network.channel.handshake.v1\n${relaykit.canonicalJson({
-          v: 1,
-          org,
-          token,
-          client_eph: client.eph_pub,
-          server_eph: serverPub,
-        })}`,
-      );
-      const sig = hex(await crypto.subtle.sign('Ed25519', serving.privateKey, signed));
-      serverHello = encoder.encode(relaykit.canonicalJson({
-        v: 1, eph_pub: serverPub, cert, sig,
-      }));
-    },
-    async recvBinary() { return serverHello; },
-    close() {},
-  };
-  const channel = await relaykit.performHandshake(transport, {
-    org, token, rootPub,
-  });
-  assert.ok(channel instanceof relaykit.SecureChannel);
-}
 
 // Every failed handshake owns teardown. A caller must never lose the only
 // reference to a still-live unauthenticated transport.
@@ -100,7 +44,7 @@ const encoder = new TextEncoder();
     close() { closed = true; },
   };
   await assert.rejects(relaykit.performHandshake(transport, {
-    org: 'org', token: 'a1'.repeat(16), rootPub: 'b2'.repeat(32),
+    org: 'org', token: 'a1'.repeat(16), linkPub: 'b2'.repeat(32),
   }), /malformed SERVER_HELLO/);
   assert.equal(closed, true);
 }
@@ -118,81 +62,9 @@ const encoder = new TextEncoder();
     close() { closed = true; },
   };
   await assert.rejects(relaykit.performHandshake(transport, {
-    org: 'org', token: 'a1'.repeat(16), rootPub: 'b2'.repeat(32),
+    org: 'org', token: 'a1'.repeat(16), linkPub: 'b2'.repeat(32),
   }), /malformed SERVER_HELLO/);
   assert.equal(closed, true);
-}
-
-// The identity-neutral viewer credential is an exact wire shape, not merely
-// a few fields found inside a more revealing certificate.
-{
-  const org = '00000000-0000-4000-8000-0000000000bb';
-  const token = 'b1'.repeat(16);
-  const now = Math.floor(Date.now() / 1000);
-  const root = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
-  const parentKey = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
-  const serving = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
-  const rootPub = hex(await crypto.subtle.exportKey('raw', root.publicKey));
-  const parentPub = hex(await crypto.subtle.exportKey('raw', parentKey.publicKey));
-  const servingPub = hex(await crypto.subtle.exportKey('raw', serving.publicKey));
-
-  const signCert = async (payload, signer) => relaykit.canonicalJson({
-    ...payload,
-    sig: hex(await crypto.subtle.sign(
-      'Ed25519', signer,
-      encoder.encode(`autonomy.idkit.cert.v1\n${relaykit.canonicalJson(payload)}`),
-    )),
-  });
-  const base = {
-    v: 1, child_pub: servingPub, scope: ['tunnel:serve'], org,
-    subject: { kind: 'operator', id: servingPub },
-    not_before: now - 60, not_after: now + 3600,
-  };
-  const attempt = async (cert) => {
-    let hello;
-    let closed = false;
-    const transport = {
-      async send(bytes) {
-        const client = JSON.parse(new TextDecoder().decode(bytes));
-        const eph = await crypto.subtle.generateKey('X25519', true, ['deriveBits']);
-        const serverPub = hex(await crypto.subtle.exportKey('raw', eph.publicKey));
-        const signed = encoder.encode(
-          `autonomy.network.channel.handshake.v1\n${relaykit.canonicalJson({
-            v: 1, org, token, client_eph: client.eph_pub, server_eph: serverPub,
-          })}`,
-        );
-        hello = encoder.encode(relaykit.canonicalJson({
-          v: 1, eph_pub: serverPub, cert,
-          sig: hex(await crypto.subtle.sign('Ed25519', serving.privateKey, signed)),
-        }));
-      },
-      async recvBinary() { return hello; },
-      close() { closed = true; },
-    };
-    await assert.rejects(relaykit.performHandshake(transport, { org, token, rootPub }));
-    assert.equal(closed, true);
-  };
-
-  await attempt(await signCert({
-    ...base, subject: { kind: 'persona', id: servingPub },
-  }, root.privateKey));
-  await attempt(await signCert({
-    ...base, subject: { kind: 'operator', id: parentPub },
-  }, root.privateKey));
-  await attempt(await signCert({ ...base, scope: ['artifact:read', 'tunnel:serve'] }, root.privateKey));
-  await attempt(await signCert({ ...base, persona: parentPub }, root.privateKey));
-
-  const parentPayload = {
-    v: 1, child_pub: parentPub, scope: ['artifact:read', 'tunnel:serve'], org,
-    subject: { kind: 'operator', id: parentPub },
-    not_before: now - 120, not_after: now + 7200,
-  };
-  const parentCert = JSON.parse(await signCert(parentPayload, root.privateKey));
-  const childPayload = {
-    ...base, not_before: now - 60, not_after: now + 3600,
-    parent_cert: parentCert,
-  };
-  await attempt(await signCert(childPayload, parentKey.privateKey));
 }
 
 // Reassembly overflow closes the authenticated channel immediately.
@@ -375,12 +247,11 @@ console.log('relaykit-core: all assertions passed');
   );
   assert.equal(t2.closed, true);
 
-  // Missing fragment: a per-link hello with no linkPub fails closed with the
-  // operator-readable message, even when a root pin is present.
+  // Missing fragment authority is rejected before any server bytes are read.
   const t3 = makeTransport();
   await assert.rejects(
-    relaykit.performHandshake(t3, { org, token, rootPub: 'b2'.repeat(32) }),
-    /missing its '#' fragment/,
+    relaykit.performHandshake(t3, { org, token }),
+    /link public key/,
   );
   assert.equal(t3.closed, true);
 }

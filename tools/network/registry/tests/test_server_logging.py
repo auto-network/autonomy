@@ -5,13 +5,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import pytest
 
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from tools.network.registry import __main__ as registry_main
 
 
-def test_entrypoint_disables_http_and_websocket_route_logging(monkeypatch):
+@pytest.mark.parametrize('direct_tls', [False, True])
+def test_entrypoint_disables_http_and_websocket_route_logging(monkeypatch, direct_tls):
     app = object()
     app_calls: list[tuple[str, str, dict]] = []
     run_calls: list[tuple[object, dict[str, object]]] = []
@@ -42,6 +44,7 @@ def test_entrypoint_disables_http_and_websocket_route_logging(monkeypatch):
             "https://relay.test",
             "--version-file",
             "/missing/revision.json",
+            *(['--ssl-certfile', '/tmp/server.crt', '--ssl-keyfile', '/tmp/server.key'] if direct_tls else []),
         ],
     )
 
@@ -58,6 +61,8 @@ def test_entrypoint_disables_http_and_websocket_route_logging(monkeypatch):
             {
                 "host": "127.0.0.2",
                 "port": 18477,
+                "ssl_certfile": '/tmp/server.crt' if direct_tls else None,
+                "ssl_keyfile": '/tmp/server.key' if direct_tls else None,
                 # HTTP request paths are emitted by uvicorn.access.
                 "access_log": False,
                 # WebSocket paths are emitted by uvicorn.error at INFO even

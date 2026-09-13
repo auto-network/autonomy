@@ -30,6 +30,7 @@ ROOT_PUB = "ab" * 32
 INVITE_REF = "cd" * 32
 GRANT_TOKEN = "12" * 16
 CLAIM_TOKEN = "ef" * 32
+CHANNEL_PUB = "9a" * 32
 GENESIS = "9f" * 32
 PASSWORD = "mounted-secret-passphrase"
 
@@ -37,9 +38,9 @@ PASSWORD = "mounted-secret-passphrase"
 def invitation() -> Invitation:
     return Invitation(
         org=ORG,
-        root_pub=ROOT_PUB,
         invite_ref=INVITE_REF,
         channel_token=GRANT_TOKEN,
+        channel_pub=CHANNEL_PUB,
         claim_token=CLAIM_TOKEN,
     )
 
@@ -153,9 +154,7 @@ def test_anchor_mismatch_refuses_the_join():
     off as the invited org's."""
     with pytest.raises(AnchorMismatch):
         verify_anchor({"org": OTHER_ORG}, invitation())
-    with pytest.raises(AnchorMismatch):
-        verify_anchor({"root_pub": "99" * 32}, invitation())
-    verify_anchor({"org": ORG, "root_pub": ROOT_PUB}, invitation())  # matching: fine
+    verify_anchor({"org": ORG}, invitation())
 
 
 def test_join_refuses_a_wrong_org_context(volume):
@@ -276,7 +275,7 @@ def test_production_transport_pins_the_invitation_and_redacts_the_bearer(
         "relay_url": "wss://relay.example",
         "token": GRANT_TOKEN,
         "kwargs": {
-            "root_pub": ROOT_PUB,
+            "link_pub": CHANNEL_PUB,
             "org": ORG,
             "open_timeout": 1,
         },

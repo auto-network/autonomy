@@ -64,10 +64,6 @@ class TestRoute:
         assert response.status_code == 200
         assert response.content == RELAYKIT_CORE.read_bytes()
 
-    def test_obsolete_invite_resolve_route_is_retired(self):
-        assert _client().post("/api/network/invite/resolve", json={}).status_code == 404
-
-
 class TestI1Constraints:
     """The properties the three-pillar convergence demands."""
 
@@ -82,11 +78,11 @@ class TestI1Constraints:
         for forbidden in ("<form", 'type="password"', "password"):
             assert forbidden not in body, forbidden
 
-    def test_page_fetches_only_public_envelope_in_browser(self):
+    def test_page_resolves_public_routing_on_own_origin(self):
         lowered = PAGE_JS.lower()
         assert lowered.count("fetch(") == 1
-        assert '"/v1/links/" + inputs.channeltoken + "/envelope"' in lowered
-        assert "/api/network/invite/resolve" not in lowered
+        assert 'fetch("/api/network/invite/resolve"' in lowered
+        assert "/envelope" not in lowered
         assert "root_pub" not in lowered
         for forbidden in ("xmlhttprequest", "websocket",
                           "navigator.sendbeacon"):

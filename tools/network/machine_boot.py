@@ -182,14 +182,14 @@ def accept_browser_completion(
     clear_joining(org=org)
 
 
-def accept_local_bootstrap(
+def validate_local_bootstrap(
     entry,
     *,
     anchor_root_pub: str,
     org="machine",
-) -> None:
-    """Adopt the root-holder Dashboard as the first roster member."""
-    from tools.network import fleet_roster, fleet_tunnel_server
+) -> bool:
+    """Validate first-machine evidence without writing. True means already installed."""
+    from tools.network import fleet_roster
 
     fleet_roster.verify(entry, anchor_root_pub=anchor_root_pub)
     if entry.kind != fleet_roster.EntryKind.ENROLL:
@@ -204,11 +204,20 @@ def accept_local_bootstrap(
             raise MachineBootError(
                 "this Dashboard already has a different Fleet identity"
             )
-        return
+        return True
     if fleet_roster.load_entries(org=None):
         raise MachineBootError(
             "local Fleet bootstrap is only valid before the first roster entry"
         )
+    return False
+
+
+def accept_local_bootstrap(entry, *, anchor_root_pub: str, org="machine") -> None:
+    """Adopt the root-holder Dashboard as the first roster member."""
+    from tools.network import fleet_roster, fleet_tunnel_server
+
+    if validate_local_bootstrap(entry, anchor_root_pub=anchor_root_pub, org=org):
+        return
     fleet_roster.store_entry(entry, org=None)
     _write_row({"machine_id": entry.machine_id}, org=org)
     fleet_tunnel_server.select(

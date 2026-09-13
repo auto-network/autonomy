@@ -270,20 +270,6 @@ async function verifyChain(certWire, rootPublicHex, org, now) {
 // their own narrower subject/scope policy after this structural chain check.
 export { verifyChain as verifyDelegationCert };
 
-function requireNeutralViewerCertificate(leaf) {
-  if (
-    leaf.parent_cert !== undefined
-    || !Array.isArray(leaf.scope)
-    || leaf.scope.length !== 1
-    || leaf.scope[0] !== 'tunnel:serve'
-    || !leaf.subject
-    || leaf.subject.kind !== 'operator'
-    || leaf.subject.id !== leaf.child_pub
-  ) {
-    throw new Error('SERVER_HELLO certificate is not identity-neutral');
-  }
-}
-
 function requireTransport(transport) {
   if (
     !transport
@@ -295,17 +281,12 @@ function requireTransport(transport) {
   }
 }
 
-export async function performHandshake(transport, { org, token, rootPub, linkPub } = {}) {
+export async function performHandshake(transport, { org, token, linkPub } = {}) {
   requireTransport(transport);
   try {
     if (typeof org !== 'string' || !org) throw new Error('org is required');
     hexToBytes(token, 32, 'channel token');
-    // Two server-authentication modes (graph://807b4e11-3e9): a per-link
-    // hello carries link_sig and verifies against linkPub — the channel key
-    // decoded from the URL fragment; a legacy hello carries a certificate
-    // and verifies against rootPub. Each anchor is validated only when its
-    // mode is used, so a per-link open needs no root pin and vice versa.
-    if (linkPub !== undefined) hexToBytes(linkPub, 64, 'link public key');
+    hexToBytes(linkPub, 64, 'link public key');
 
     const ephemeral = await crypto.subtle.generateKey('X25519', false, ['deriveBits']);
     const clientEphemeral = bytesToHex(
@@ -328,11 +309,9 @@ export async function performHandshake(transport, { org, token, rootPub, linkPub
       || Array.isArray(hello)
       || hello.v !== HANDSHAKE_VERSION
       || typeof hello.eph_pub !== 'string'
+      || typeof hello.link_sig !== 'string'
+      || !hasExactFields(hello, ['v', 'eph_pub', 'link_sig'])
     ) {
-      throw new Error('malformed SERVER_HELLO');
-    }
-    const perLink = hasExactFields(hello, ['v', 'eph_pub', 'link_sig']);
-    if (!perLink && !hasExactFields(hello, ['v', 'eph_pub', 'cert', 'sig'])) {
       throw new Error('malformed SERVER_HELLO');
     }
 
@@ -344,33 +323,8 @@ export async function performHandshake(transport, { org, token, rootPub, linkPub
       server_eph: hello.eph_pub,
     }));
 
-    let transcriptAnchor;
-    if (perLink) {
-      if (typeof hello.link_sig !== 'string') {
-        throw new Error('malformed SERVER_HELLO');
-      }
-      if (linkPub === undefined) {
-        throw new Error(
-          "this link uses per-link serving but the URL is missing its '#' "
-          + 'fragment — re-share the full link');
-      }
-      if (!(await ed25519Verify(linkPub, hello.link_sig, signedPayload))) {
-        throw new Error('SERVER_HELLO signature does not verify');
-      }
-      transcriptAnchor = { link_pub: linkPub };
-    } else {
-      if (typeof hello.cert !== 'string' || typeof hello.sig !== 'string') {
-        throw new Error('malformed SERVER_HELLO');
-      }
-      hexToBytes(rootPub, 64, 'root public key');
-      const leaf = await verifyChain(
-        hello.cert, rootPub, org, Math.floor(Date.now() / 1000),
-      );
-      requireNeutralViewerCertificate(leaf);
-      if (!(await ed25519Verify(leaf.child_pub, hello.sig, signedPayload))) {
-        throw new Error('SERVER_HELLO signature does not verify');
-      }
-      transcriptAnchor = { cert: hello.cert };
+    if (!(await ed25519Verify(linkPub, hello.link_sig, signedPayload))) {
+      throw new Error('SERVER_HELLO signature does not verify');
     }
 
     const transcript = new Uint8Array(await crypto.subtle.digest(
@@ -381,7 +335,7 @@ export async function performHandshake(transport, { org, token, rootPub, linkPub
         token,
         client_eph: clientEphemeral,
         server_eph: hello.eph_pub,
-        ...transcriptAnchor,
+        link_pub: linkPub,
       })),
     ));
     const serverKey = await crypto.subtle.importKey(

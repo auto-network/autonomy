@@ -295,8 +295,12 @@ class WorkspaceV1(SettingSchema):
         "dind": {
             "type": "boolean",
             "description": (
-                "Deprecated alias for needs_nested_docker. Runs a nested "
-                "daemon; it never mounts the host Docker socket."
+                "Deprecated alias for needs_nested_docker. This selects the "
+                "nested-Docker launch mode but does not install or start "
+                "dockerd. The workspace image must include Docker, and an "
+                "autonomy.workspace.provision startup_script must start "
+                "dockerd and wait until it is ready. The host Docker socket "
+                "is never mounted."
             ),
             "default": False,
             "deprecated_alias_of": "needs_nested_docker",
@@ -304,8 +308,12 @@ class WorkspaceV1(SettingSchema):
         "needs_nested_docker": {
             "type": "boolean",
             "description": (
-                "Preserve the image entrypoint that starts its own nested "
-                "Docker daemon. Independent of session_runtime."
+                "Select nested-Docker isolation and preserve the workspace "
+                "image entrypoint. This flag does not install Docker, start "
+                "dockerd, or create /startup.sh: use a Docker-capable image "
+                "and define autonomy.workspace.provision startup_script to "
+                "start dockerd and wait for docker info to succeed. "
+                "Independent of session_runtime."
             ),
             "default": False,
         },

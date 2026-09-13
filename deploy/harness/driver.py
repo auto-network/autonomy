@@ -21,6 +21,7 @@ from typing import Callable, Protocol
 
 from tools.network.invitation import (
     Invitation,
+    build_invitation_join_url,
     encode_invitation,
     invitation_from_join_url,
 )
@@ -160,7 +161,7 @@ class Harness:
         self.compose_file = self.run_dir / "compose.json"
         self.log_file = self.run_dir / "compose.log"
         self._password = secrets.token_urlsafe(24)
-        self._claim_token = secrets.token_urlsafe(32)
+        self._claim_token = secrets.token_hex(32)
         self._join_channel_token = secrets.token_hex(16)
         self._content_channel_token = secrets.token_hex(16)
         self._found: dict = {}
@@ -188,8 +189,11 @@ class Harness:
     def relay_content_url(self) -> str:
         if not self._found:
             raise HarnessError("found phase has not published relay content")
-        return (
-            f"{self.config.relay_http}/l/{self._content_channel_token}"
+        from tools.dashboard.link_channel_key import fragment_url
+
+        return fragment_url(
+            f"{self.config.relay_http}/l/{self._content_channel_token}",
+            self._found["content_channel_pub"],
         )
 
     def _phase(self, index: int, phase: Phase) -> None:
@@ -379,7 +383,7 @@ class Harness:
             key: self._found[key]
             for key in (
                 "org_uuid", "root_pub", "invite_ref", "invite_expiry",
-                "content_id",
+                "content_id", "membership_checkpoint",
             )
         }
         registry_payload.update(
@@ -395,23 +399,24 @@ class Harness:
         # The driver assembles v2 from the same two URL domains as the real
         # minter: registry token in the path, ledger bearer in the fragment.
         # Only the path token was sent to the relay fixture above.
+        complete_join = build_invitation_join_url(
+            canonical_url=join_url,
+            channel_pub_hex=self._found["join_channel_pub"],
+            bearer=self._claim_token,
+        )
+        if not complete_join.complete or complete_join.url is None:
+            raise HarnessError(f"fixture invitation is incomplete: {complete_join.reason}")
         self._invitation = invitation_from_join_url(
             org=self._found["org_uuid"],
-            root_pub=self._found["root_pub"],
             invite_ref=self._found["invite_ref"],
-            join_url=(
-                join_url
-                + "#t="
-                + urllib.parse.quote(self._claim_token, safe="")
-            ),
+            join_url=complete_join.url,
         )
-        # Startup reconciliation is the production path by which a restored
-        # node reconnects. Restart A after fixture setup so the initial proof
-        # exercises that same path.
-        self._compose("restart", "node-a")
-        self._wait_http(
-            f"{self.config.node_http(0)}/api/ping",
-            description="node A after serving setup",
+        # Re-enter the live, idempotent serving operation after the registry
+        # prerequisites exist. The Dashboard process owns reconciliation and
+        # starts the connector; no synthetic restart stands in for publication.
+        self._fixture(
+            "node-a", "activate-serving",
+            {"org": "demo", "password": self._password},
         )
         context = self._wait_join_context()
         # Print the asserted values, don't just assert them: a passing run
@@ -578,7 +583,7 @@ class Harness:
         channel = await ViewerChannel.connect(
             self.config.relay_ws,
             self._content_channel_token,
-            root_pub=self._found["root_pub"],
+            link_pub=self._found["content_channel_pub"],
             org=self._found["org_uuid"],
             open_timeout=5,
         )

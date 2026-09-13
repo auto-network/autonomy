@@ -264,7 +264,9 @@
     let retained = _matchingApprovalAuthority(req);
     if (!retained) {
       try {
-        await session.signOnWithRootSeed(opened.seed, opened.rootPub, { org: req.orgSlug });
+        await session.signOnWithRootSeed(opened.seed, opened.rootPub, {
+          org: req.orgSlug, requireServingRuntime: true,
+        });
       } catch (error) {
         const message = String((error && error.message) || error || '');
         if (error && error.status === 404 && /org|identity|key/i.test(message)) {

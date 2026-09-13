@@ -242,12 +242,15 @@ def _require_startable_serving(org: str | None) -> None:
     serving credential must exist for the frame to authenticate. Without one the
     publish is doomed at execute — after the operator has already signed — so we
     refuse it here at planning time (the auto-hzs4f pre-sign-guard precedent). A
-    ``missing`` serve-cert is the unstartable case; an existing-but-stale cert
+    A keyed organization awaiting first registration is startable: the existing
+    approval registers it and prepares membership and serving before signing
+    the publish. Otherwise a ``missing`` serve-cert is unstartable; a stale cert
     (expired/key-missing) is re-minted at the next org-root unlock and start.
     """
     from tools.dashboard.link_serving_supervisor import serve_cert_state
 
-    if (serve_cert_state(org) or {}).get("status") == "missing":
+    if ((serve_cert_state(org) or {}).get("status") == "missing"
+            and not _is_registerable_on_first_publish(org)):
         raise ValueError(
             "this organization has no serving credential yet — unlock the "
             "organization root once to provision serving, then publish the "
@@ -1049,12 +1052,8 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
     # shareable URL gains the key as a FRAGMENT — presentation-side only; the
     # registry minted and stores the canonical url and never sees the key.
     #
-    # Existing content targets retain their rollout fallback. New org:join
-    # links do not: without this key there is no authenticated invitation
-    # endpoint, so the already-created registry grant is compensated below.
     from tools.dashboard.link_channel_key import (
         CHANNEL_KEY_TARGET_TYPES,
-        ChannelKeyUnavailable,
         fragment_url,
         mint_channel_key,
     )
@@ -1063,15 +1062,9 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
     if req["target_type"] in CHANNEL_KEY_TARGET_TYPES:
         try:
             channel_pub = mint_channel_key(token, org)
-        except Exception as exc:
-            if req["target_type"] == "org:join":
-                return await asyncio.to_thread(
-                    _compensate_failed_publish, org, token, "channel-key")
-            if not isinstance(exc, ChannelKeyUnavailable):
-                raise
-            logger.warning(
-                "link %s published without a channel key (legacy link): %s",
-                token[:8], exc)
+        except Exception:
+            return await asyncio.to_thread(
+                _compensate_failed_publish, org, token, "channel-key")
         # A content share link carries only the channel key in its fragment, so
         # the executor can assemble the complete URL here. An org:join link's
         # complete URL needs BOTH the channel key and the invitation bearer
@@ -1113,18 +1106,20 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
     except Exception:
         return await asyncio.to_thread(
             _compensate_failed_publish, org, token, "grant-write")
-    # The frame round-tripped on the live tunnel, so serving IS live by
-    # construction — no separate probe needed on this path (register D19 B10).
+    serving = await _probe_serving(binding, token, org)
+    if not serving.get("live"):
+        return await asyncio.to_thread(
+            _compensate_failed_publish, org, token, "recipient-probe")
     return {
         "ok": True,
         "url": share_url,
         # The minted channel PUBLIC key, so a caller that also holds the
         # invitation bearer (the CLI, or the Membership browser that just
         # minted it) can assemble the complete two-value invitation URL with
-        # the shared serializer. Absent when the link is keyless (legacy).
+        # the shared serializer.
         "channel_pub": channel_pub,
         "token": token,
-        "serving": {"live": True, "via": "tunnel-control"},
+        "serving": serving,
         "actor": _approval_identities(org)["actor_identity"],
     }
 
@@ -1213,18 +1208,23 @@ def _tunnel_link_meta(req: dict, decision: dict) -> tuple[dict, str | None]:
     return meta, None
 
 
-async def _probe_serving(binding: dict, token: str) -> dict:
+async def _probe_serving(binding: dict, token: str, org: str) -> dict:
     """End-to-end liveness probe of a freshly published link. Never raises —
     a probe that cannot run is reported as not-live, never an exception into
     the publish result (the grant is already cached). Shared with Link Central
     (link_central.py), which probes serving after a central publish."""
     from tools.dashboard.link_probe import probe_link, registry_to_relay_ws
+    from tools.dashboard.link_serving import check_grant
     try:
+        grant = check_grant(token, org=org)
+        if not grant or not grant.get("channel_pub"):
+            raise PermissionError("link has no channel key")
         return await probe_link(
             relay_url=registry_to_relay_ws(binding["registry_url"]),
             token=token,
-            root_pub=binding["root_pub"],
+            link_pub=grant["channel_pub"],
             org_uuid=binding["org_uuid"],
+            operation=("context" if grant["target_type"] == "org:join" else "head"),
         )
     except Exception as e:
         return {"live": False, "status": None, "content_length": None,

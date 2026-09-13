@@ -26,7 +26,7 @@ from typing import Any
 from tools.network.idkit import DelegationCert, KeyPair
 
 from .channel import MAX_RECORD_CHUNK_SIZE, SEND_CHUNK_SIZE
-from .connector import serve_channel
+from .connector import serve_certificate_channel
 from .ice_signaling import (
     IceAnswer,
     IceConfiguration,
@@ -575,7 +575,7 @@ class AiortcResponder:
             return result
 
         try:
-            await serve_channel(
+            await serve_certificate_channel(
                 self._key,
                 self._cert,
                 org=self._org,
