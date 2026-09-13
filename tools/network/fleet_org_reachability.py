@@ -164,6 +164,50 @@ def co_member_addresses(
     return peers
 
 
+def seeded_co_member_addresses(
+    slug: str,
+    *,
+    org: str,
+    own_machine_pub: str,
+    is_member: Callable[[str], bool | None] | None = None,
+    now: int | None = None,
+) -> dict[str, list[str]]:
+    """machine_pub -> addresses from the MACHINE-LOCAL install seed for org
+    *slug* (autonomy.machine.org-install-seed#1): the reachability rows the
+    sponsor served over org:join, each re-verified here exactly as a
+    replicated row is. A reader overlays these only for machines that have
+    no replicated row yet; nothing here is ever this machine's own write."""
+    from tools.graph import settings_ops
+    from tools.graph.schemas.org_install_seed import (
+        KIND_REACHABILITY,
+        ORG_INSTALL_SEED_REVISION,
+        ORG_INSTALL_SEED_SET_ID,
+        seed_prefix,
+    )
+
+    try:
+        members = settings_ops.read_owned_set(
+            ORG_INSTALL_SEED_SET_ID, org="machine",
+            target_revision=ORG_INSTALL_SEED_REVISION,
+            prefix=seed_prefix(slug, KIND_REACHABILITY),
+        ).members
+    except Exception:
+        return {}
+    peers: dict[str, list[str]] = {}
+    for member in members:
+        payload = member.payload or {}
+        if payload.get("organization") != slug or payload.get("kind") != KIND_REACHABILITY:
+            continue
+        key, row = payload.get("row_key"), payload.get("row")
+        if not isinstance(key, str) or not isinstance(row, dict) or key == own_machine_pub:
+            continue
+        verified = verify_row(key, row, org=org, now=now, is_member=is_member)
+        if verified is None or not verified[1]:
+            continue
+        peers[key] = verified[1]
+    return peers
+
+
 def _stored_addresses(slug: str, machine_pub: str) -> list[str] | None:
     from tools.graph import settings_ops
 

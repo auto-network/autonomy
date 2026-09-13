@@ -45,21 +45,6 @@ def test_claim_projection_never_carries_a_photo_and_never_overwrites(monkeypatch
     assert len(writes) == 1
 
 
-def test_import_rows_skips_self_and_malformed_and_bounds_avatar(monkeypatch):
-    writes = _capture(monkeypatch)
-    n = md.import_rows("org", [
-        {"persona_pub": "a" * 64, "display_name": "Alice", "avatar": ICON},
-        {"persona_pub": "b" * 64, "display_name": "Bob"},            # self, skipped
-        {"persona_pub": "c" * 64, "display_name": ""},               # nameless
-        {"persona_pub": "short", "display_name": "X"},               # bad key
-        {"persona_pub": "d" * 64, "display_name": "Dee", "avatar": "data:image/png;base64," + "A" * 30000},
-        "junk",
-    ], skip="b" * 64)
-    assert n == 2
-    assert writes[0][1] == "a" * 64 and writes[0][2]["avatar"] == ICON
-    assert writes[1][1] == "d" * 64 and writes[1][2]["avatar"] == ""
-
-
 def test_rows_lists_named_members_with_their_key(monkeypatch):
     monkeypatch.setattr(md.settings_ops, "read_owned_set", lambda *a, **k: SimpleNamespace(members=[
         SimpleNamespace(key="a" * 64, payload={"display_name": "Alice", "avatar": ICON, "byline": "", "color": ""}),

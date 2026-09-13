@@ -11,7 +11,10 @@ graph://4f9e881c-a9 §7 and §10, punch list item 31):
   the joiner signed into their claim (name, biography, initials; never a
   photo, the ledger is not a blob store) becomes their row.
 * :func:`write_self` — the joiner's own machine at install: their Personal
-  profile, photo included, becomes their row.
+  profile, photo included, becomes their row. The rows the sponsor served
+  for OTHER members are not written here: they are the machine-local
+  install seed (tools/dashboard/org_install_seed), never this member's
+  authored write.
 
 Rows are org-homed and replicate with the organization, so they carry
 CONTENT (the small icon as a data: URI), never a machine-local attachment
@@ -139,24 +142,3 @@ def rows(slug: str) -> list[dict]:
         if isinstance(member.payload, dict) and member.payload.get("display_name"):
             out.append({"persona_pub": str(member.key), **member.payload})
     return out
-
-
-def import_rows(slug: str, entries: Any, *, skip: str = "") -> int:
-    """Seed a freshly installed organization's directory from the rows its
-    founder served; the joiner's own row is written from their Personal
-    profile instead. Each row is bounded here again before it is stored."""
-    if not isinstance(entries, list):
-        return 0
-    count = 0
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        persona = entry.get("persona_pub")
-        if not isinstance(persona, str) or len(persona) != 64 or persona == skip:
-            continue
-        name = _clean(entry.get("display_name"), NAME_MAX)
-        if not name:
-            continue
-        write_row(slug, persona, entry)
-        count += 1
-    return count
