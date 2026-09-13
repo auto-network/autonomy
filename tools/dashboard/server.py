@@ -12242,13 +12242,32 @@ def _fleet_enrollment_first_render() -> dict | None:
 
 
 def _welcome_page(*, fleet_sync: bool = False) -> HTMLResponse:
+    """The Welcome rail lives inside the dashboard shell (SPA route
+    /welcome, fragment /pages/welcome). Callers that used to render it
+    directly send the browser to /welcome instead."""
+    url = "/welcome?fleet_sync=1" if fleet_sync else "/welcome"
+    return RedirectResponse(url=url)
+
+
+async def page_welcome_fragment(request):
+    """GET /pages/welcome — the onboarding rail as an SPA fragment.
+
+    The server's first-render facts (a live Fleet enrollment request, the
+    post-enrollment sync flag, the reserved store slugs the org step must
+    ignore) travel as data attributes on the fragment root; welcome.js reads
+    them in init(). Rendered fresh on every request so a Fleet request that
+    was approved since the last render shows its new state.
+    """
     from tools.graph.db import LOCAL_STORE_SLUGS
-    return HTMLResponse(_load_template(
-        "welcome.html",
-        fleet_enrollment=_fleet_enrollment_first_render(),
-        fleet_sync=fleet_sync,
-        local_store_slugs=sorted(LOCAL_STORE_SLUGS),
-    ))
+    return templates.TemplateResponse(
+        request, "pages/welcome.html",
+        {
+            "fleet_enrollment": _fleet_enrollment_first_render(),
+            "fleet_sync": request.query_params.get("fleet_sync") == "1",
+            "local_store_slugs": sorted(LOCAL_STORE_SLUGS),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 async def page_index(request):
@@ -12306,16 +12325,15 @@ async def page_index(request):
 
 
 async def page_welcome(request):
-    """GET /welcome — the onboarding empty-state shell.
+    """GET /welcome — the onboarding empty state, inside the dashboard shell.
 
-    Always serves the shell; the page reads identity + org state on load and
-    renders the matching step (fresh / mid / ready). Reachable directly so an
-    invited operator can land here org-attached, and so setup can be revisited
-    even after the gate has closed.
+    Always serves the shell; the SPA router injects /pages/welcome, which
+    reads identity + org state on load and renders the matching step (fresh /
+    mid / ready). Reachable directly so an invited operator can land here
+    org-attached, and so setup can be revisited even after the gate has
+    closed.
     """
-    return _welcome_page(
-        fleet_sync=request.query_params.get("fleet_sync") == "1"
-    )
+    return HTMLResponse(_load_template("base.html"))
 
 
 async def page_bootstrap(request):
@@ -12396,12 +12414,26 @@ async def api_bootstrap_install(request):
 
 async def page_network_join(request):
     """The invite bridge's local-origin half (auto-1ihgz): display/consent
-    shell for an org:join invitation. One static template, rendered
-    client-side from the URL's query + fragment — the server reads neither,
-    and the page contains no input fields (the passphrase must never gain
-    an HTTP ingress, I1). Acceptance mechanics await auto-9rw91's ruling."""
+    for an org:join invitation, inside the dashboard shell. The SPA router
+    injects /pages/network-join and renders it client-side from the URL's
+    query + fragment — the server reads neither, and the page contains no
+    input other than the paste field (the passphrase must never gain an
+    HTTP ingress, I1)."""
     return HTMLResponse(
-        _load_template("network-join.html"),
+        _load_template("base.html"),
+        headers={"Cache-Control": "no-store",
+                 "Referrer-Policy": "no-referrer",
+                 "X-Content-Type-Options": "nosniff"},
+    )
+
+
+async def page_network_join_fragment(request):
+    """GET /pages/network-join — the invitation flow as an SPA fragment.
+
+    One static fragment; the server reads neither query nor fragment, and
+    the markup contains no input other than the paste field (I1)."""
+    return templates.TemplateResponse(
+        request, "pages/network-join.html",
         headers={"Cache-Control": "no-store",
                  "Referrer-Policy": "no-referrer",
                  "X-Content-Type-Options": "nosniff"},
@@ -21376,6 +21408,7 @@ routes = [
     Route("/api/bootstrap/install", api_bootstrap_install, methods=["POST"]),
     # Layer-1 onboarding empty-state (bead auto-inpkd) — identity/org/workspace.
     Route("/welcome", page_welcome),
+    Route("/pages/welcome", page_welcome_fragment),
     Route("/beads", page_beads),
     Route("/pages/beads", page_beads_fragment),
     Route("/dispatch", page_dispatch),
@@ -21717,6 +21750,7 @@ routes = [
     # Acceptance mechanics are held for the ceremony-workflow ruling
     # (auto-9rw91); this page has no inputs and no API calls by design.
     Route("/network/join", page_network_join),
+    Route("/pages/network-join", page_network_join_fragment),
 
     # Human unlock gate: passkey assert + password fallback + session
     Route("/unlock", page_unlock),

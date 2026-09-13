@@ -15,7 +15,9 @@ from pathlib import Path
 from starlette.testclient import TestClient
 
 DASHBOARD = Path(__file__).resolve().parents[1]
-TEMPLATE = (DASHBOARD / "templates" / "network-join.html").read_text(
+# The page is an SPA fragment inside the dashboard shell: /network/join
+# serves the shell, /pages/network-join serves this markup.
+TEMPLATE = (DASHBOARD / "templates" / "pages" / "network-join.html").read_text(
     encoding="utf-8"
 )
 PAGE_JS = (DASHBOARD / "static" / "js" / "network-join.js").read_text(
@@ -43,21 +45,26 @@ class TestRoute:
         )
         assert bare.status_code == full.status_code == 200
         assert bare.text == full.text  # neutrality: query never interpolated
-        # The template is served whole, with one substitution: the build
-        # marker becomes the build the page was served from, so a browser can
-        # keep the two scripts it loads instead of rechecking them on every
-        # visit. Compare against the template with that marker filled in, so
-        # this still fails if anything else about the page changes.
-        served_version = re.search(r"network-join\.js\?v=([^\"]+)", bare.text)
-        assert served_version, "the page no longer names which build it is"
-        expected = TEMPLATE.replace("__STATIC_VERSION__", served_version.group(1))
-        assert bare.text.strip() == expected.strip()
+        # The dashboard shell is served; the SPA router injects the page.
+        assert 'id="content"' in bare.text
+        assert "network-join.js" in bare.text
         # The dashboard's global cache middleware rewrites Cache-Control;
         # the property that matters is that the shell is never cached.
         assert "no-store" in bare.headers["cache-control"] \
             or "no-cache" in bare.headers["cache-control"]
         assert bare.headers["referrer-policy"] == "no-referrer"
         assert bare.headers["x-content-type-options"] == "nosniff"
+
+    def test_fragment_is_the_static_page_markup(self):
+        client = _client()
+        bare = client.get("/pages/network-join")
+        full = client.get("/pages/network-join?org=x&invite_ref=y")
+        assert bare.status_code == full.status_code == 200
+        assert bare.text == full.text  # the server reads neither query nor fragment
+        assert bare.text.strip() == TEMPLATE.strip()
+        assert "no-store" in bare.headers["cache-control"] \
+            or "no-cache" in bare.headers["cache-control"]
+        assert bare.headers["referrer-policy"] == "no-referrer"
 
     def test_serves_the_shared_relaykit_core_own_origin(self):
         response = _client().get("/static/js/lib/relaykit-core.js")
@@ -74,14 +81,17 @@ class TestI1Constraints:
         lowered = TEMPLATE.lower()
         assert lowered.count("<input") == 1
         assert 'type="url"' in lowered
-        body = lowered[lowered.index("<body"):]
         for forbidden in ("<form", 'type="password"', "password"):
-            assert forbidden not in body, forbidden
+            assert forbidden not in lowered, forbidden
 
     def test_page_resolves_public_routing_on_own_origin(self):
+        # Exactly two same-origin reads: the routing envelope for a pasted
+        # link, and this person's own Personal profile for the Joining-as
+        # tile. Nothing else leaves the page over HTTP.
         lowered = PAGE_JS.lower()
-        assert lowered.count("fetch(") == 1
+        assert lowered.count("fetch(") == 2
         assert 'fetch("/api/network/invite/resolve"' in lowered
+        assert 'fetch("/api/identity/profile"' in lowered
         assert "/envelope" not in lowered
         assert "root_pub" not in lowered
         for forbidden in ("xmlhttprequest", "websocket",

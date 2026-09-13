@@ -25,9 +25,17 @@ import pytest
 from tools.dashboard import harness_bootstrap as hb
 
 
+# The rail is an SPA fragment inside the dashboard shell (/welcome serves the
+# shell, /pages/welcome serves the markup) and its Alpine component lives in
+# static/js/pages/welcome.js. SHELL is the two together, for guards that used
+# to read one standalone document.
 TEMPLATE = (
-    Path(__file__).resolve().parents[1] / "templates" / "welcome.html"
+    Path(__file__).resolve().parents[1] / "templates" / "pages" / "welcome.html"
 ).read_text(encoding="utf-8")
+SCRIPT = (
+    Path(__file__).resolve().parents[1] / "static" / "js" / "pages" / "welcome.js"
+).read_text(encoding="utf-8")
+SHELL = TEMPLATE + SCRIPT
 
 
 def _orgs(*slugs):
@@ -109,8 +117,9 @@ def test_empty_state_serves_welcome(test_client, monkeypatch):
     monkeypatch.setattr(server, "_has_personal_identity", lambda: False)
     monkeypatch.setattr(server, "_has_collaborative_org", lambda: True)
     r = test_client.get("/", follow_redirects=False)
-    assert r.status_code == 200
-    assert "Three steps and this machine is yours." in r.text
+    assert r.status_code in (302, 307)
+    assert r.headers["location"] == "/welcome"
+    assert "Three steps and this machine is yours." in test_client.get("/pages/welcome").text
 
 
 def test_identity_without_org_serves_welcome(test_client, monkeypatch):
@@ -119,8 +128,9 @@ def test_identity_without_org_serves_welcome(test_client, monkeypatch):
     monkeypatch.setattr(server, "_has_personal_identity", lambda: True)
     monkeypatch.setattr(server, "_has_collaborative_org", lambda: False)
     r = test_client.get("/", follow_redirects=False)
-    assert r.status_code == 200
-    assert "Welcome" in r.text
+    assert r.status_code in (302, 307)
+    assert r.headers["location"] == "/welcome"
+    assert "Welcome" in test_client.get("/pages/welcome").text
 
 
 def test_fleet_member_materialises_synced_orgs_and_skips_onboarding(test_client, monkeypatch):
@@ -159,8 +169,9 @@ def test_fresh_machine_with_empty_roster_still_onboards(test_client, monkeypatch
     monkeypatch.setattr(server, "_fleet_enrollment_first_render", lambda: None)
     monkeypatch.setattr(sched, "materialize_org_scopes_from_roster", lambda: [])
     r = test_client.get("/", follow_redirects=False)
-    assert r.status_code == 200
-    assert "Welcome" in r.text
+    assert r.status_code in (302, 307)
+    assert r.headers["location"] == "/welcome"
+    assert "Welcome" in test_client.get("/pages/welcome").text
 
 
 def test_complete_state_falls_through(test_client, monkeypatch):
@@ -189,11 +200,14 @@ def test_pending_fleet_enrollment_owns_first_render(test_client, monkeypatch):
         },
     )
     r = test_client.get("/", follow_redirects=False)
-    assert r.status_code == 200
-    assert "Confirm this machine" in r.text
-    assert "Waiting for approval" in r.text
-    assert "A1B2 C3D4 E5F6 0718 192A 3B4C" in r.text
-    assert "Set up your assistant" not in r.text
+    assert r.status_code in (302, 307)
+    assert r.headers["location"] == "/welcome"
+    rail = test_client.get("/pages/welcome")
+    assert rail.status_code == 200
+    assert "Confirm this machine" in rail.text
+    assert "Waiting for approval" in rail.text
+    assert "A1B2 C3D4 E5F6 0718 192A 3B4C" in rail.text
+    assert "Set up your assistant" not in rail.text
 
 
 def test_saved_fleet_delivery_renders_approved_after_restart(monkeypatch):
@@ -223,21 +237,31 @@ def test_saved_fleet_delivery_renders_approved_after_restart(monkeypatch):
     }
 
 
-def test_bootstrap_gate_precedes_welcome(test_client, monkeypatch):
-    """An unverified harness still wins — bootstrap is Layer 0."""
+def test_bootstrap_no_longer_intercepts_the_front_page(test_client, monkeypatch):
+    """An unverified harness does not gate `/` (72305dc4: the node never
+    runs a harness, so that probe could never be true here). The walkthrough
+    stays reachable at /bootstrap; the front page goes on to the Welcome
+    rail when the empty state holds."""
     from tools.dashboard import server
     monkeypatch.setattr(hb, "has_verified_harness", lambda: False)
-    # Even with the empty-state condition held, the harness gate is first.
     monkeypatch.setattr(server, "_has_personal_identity", lambda: False)
+    monkeypatch.setattr(server, "_fleet_enrollment_first_render", lambda: None)
     r = test_client.get("/", follow_redirects=False)
-    assert r.status_code == 200
-    assert "Set up your assistant" in r.text
+    assert r.status_code in (302, 307)
+    assert r.headers["location"] == "/welcome"
+    walkthrough = test_client.get("/bootstrap")
+    assert walkthrough.status_code == 200
+    assert "Set up your assistant" in walkthrough.text
 
 
 def test_welcome_route_always_served(test_client):
     r = test_client.get("/welcome")
     assert r.status_code == 200
-    assert "Three steps and this machine is yours." in r.text
+    assert 'id="content"' in r.text  # the dashboard shell, not a separate document
+    assert "welcome.js" in r.text
+    rail = test_client.get("/pages/welcome")
+    assert rail.status_code == 200
+    assert "Three steps and this machine is yours." in rail.text
 
 
 # ── Copy: interface, not engineering ──────────────────────────────────
@@ -248,7 +272,7 @@ def test_screens_speak_interface_not_engineering():
     Same guard the bootstrap and invitation pages carry, extended to the
     onboarding shell (UI copy rule, ruled repeatedly).
     """
-    visible = TEMPLATE[TEMPLATE.index("<body"):TEMPLATE.index("</main>")].lower()
+    visible = TEMPLATE[TEMPLATE.index('<div class="welcome"'):].lower()
     for leaked in ("this page", "own tool", "notices", "no-op", "oauth",
                    "run its command", "probe", "verif", "endpoint",
                    "record", "gate"):
@@ -264,7 +288,7 @@ def test_shell_carries_no_ceremony_code():
     WebAuthn, no org/session creation body — those live in the one delivered
     path for each action.
     """
-    lowered = TEMPLATE.lower()
+    lowered = SHELL.lower()
     for banned in ("generateed25519", "armorseed", "navigator.credentials",
                    "publickeycredential", "/api/identity/personal",
                    "/api/identity/passkey", "deriveorgslug"):
@@ -279,25 +303,26 @@ def test_shell_carries_no_ceremony_code():
 def test_shell_composes_the_delivered_flows():
     """Each step links into the single delivered path, never a duplicate."""
     # identity → the delivered ceremony
-    assert "AutonomyOnboarding" in TEMPLATE
+    assert "AutonomyOnboarding" in SHELL
     # create → the delivered create-org screen
-    assert "AutonomyCreateOrg" in TEMPLATE
+    assert "AutonomyCreateOrg" in SHELL
     # join → the delivered stepped accept flow (same target the profile menu uses)
-    assert "/network/join" in TEMPLATE
+    assert "/network/join" in SHELL
     # workspace → the session UI
-    assert "/beads" in TEMPLATE
+    assert "/beads" in SHELL
     # and it reads the same status the profile menu reads (one source of truth)
-    assert "/api/identity/status" in TEMPLATE
-    assert "/api/orgs" in TEMPLATE
-    assert "/unlock?fleet=1&amp;next=%2Fwelcome%3Ffleet_sync%3D1" in TEMPLATE
+    assert "/api/identity/status" in SHELL
+    assert "/api/orgs" in SHELL
+    assert "/unlock?fleet=1&amp;next=%2Fwelcome%3Ffleet_sync%3D1" in SHELL
 
 
 def test_post_enrollment_sync_state_is_one_compact_binary_row(test_client):
-    r = test_client.get("/welcome?fleet_sync=1")
+    r = test_client.get("/pages/welcome?fleet_sync=1")
     assert r.status_code == 200
+    assert "data-fleet-sync='true'" in r.text
     assert "Synchronizing with fleet" in r.text
     assert "Synchronization complete" in r.text
-    assert "/api/fleet/enrollment/local-sync-status" in r.text
+    assert "/api/fleet/enrollment/local-sync-status" in SCRIPT
     assert 'ready && !fleetEnrollment && !fleetSync && step === 1' in r.text
     assert 'ready && !fleetEnrollment && !fleetSync && step === 2' in r.text
     assert 'ready && !fleetEnrollment && !fleetSync && step === 3' in r.text
@@ -341,9 +366,9 @@ def test_unlock_redirects_when_nothing_is_enrolled(test_client, monkeypatch):
 def test_invitation_context_detected_and_carried():
     """Arrived-via-invitation: detect URL context, carry it to /network/join."""
     # detection mirrors network-join.js (search or hash present)
-    assert "location.search" in TEMPLATE and "location.hash" in TEMPLATE
+    assert "location.search" in SCRIPT and "location.hash" in SCRIPT
     # the bearer-bearing fragment rides along untouched to the accept flow
-    assert "'/network/join' + location.search + location.hash" in TEMPLATE
+    assert "'/network/join' + location.search + location.hash" in SCRIPT
 
 
 def test_design_variants_present():
