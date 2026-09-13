@@ -511,6 +511,10 @@ def _sponsor_avatar_data_uri(org: str | None, avatar_ref: object) -> str | None:
     ``None``). Avatar normalization/migration is a separate concern; this bead
     only adapts already-owned bounded bytes.
     """
+    if isinstance(avatar_ref, str) and any(
+        avatar_ref.startswith(f"data:{m};base64,") for m in _SPONSOR_AVATAR_MIMES
+    ) and len(avatar_ref) <= _SPONSOR_AVATAR_MAX_BYTES * 4 // 3 + 64:
+        return avatar_ref  # the row carries the bounded icon itself
     if not isinstance(avatar_ref, str) or not _ATTACHMENT_ID_RE.match(avatar_ref):
         return None
     try:
@@ -936,7 +940,7 @@ def resolve_target(grant: dict, *, org: str | None = None):
 #: protocol over the same E2E viewer channel every share link uses. The
 #: relay routes opaque frames; the claim (persona, profile, credential,
 #: and the BEARER TOKEN) is channel ciphertext end-to-end to this node.
-JOIN_OPS = ("context", "submit", "status")
+JOIN_OPS = ("context", "submit", "status", "bootstrap")
 
 # Fleet enrollment is a separate authority domain from organization claims.
 # It shares RelayKit's established channel but has its own grant type and
@@ -1011,6 +1015,15 @@ def _serve_join(grant: dict, org: str | None, request: dict) -> bytes:
             if payload_ref != invite_ref:
                 return REFUSED  # channel is scoped to its own invitation
             result = service.submit(org, raw)
+        elif op == "bootstrap":
+            # The admitted member's local install material (events, binding,
+            # brand). The fold gates it: a non-member persona gets pending.
+            persona_pub = request.get("persona_pub")
+            if not isinstance(persona_pub, str) or not persona_pub:
+                return BAD_REQUEST
+            result = service.bootstrap(org, invite_ref, persona_pub)
+            if result.get("status") == "ok":
+                result = {**result, **(_org_brand_for_invite(org) or {})}
         else:  # status
             persona_pub = request.get("persona_pub")
             if not isinstance(persona_pub, str) or not persona_pub:

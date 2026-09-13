@@ -56,7 +56,8 @@
   function initial(name) { return (name || '?').trim().charAt(0).toUpperCase(); }
   function avatarUrl(avatar) {
     if (!avatar) return '';
-    return /^https?:/.test(avatar) ? avatar : '/api/attachment/' + encodeURIComponent(avatar);
+    if (/^https?:/.test(avatar) || /^data:image\//.test(avatar)) return avatar;
+    return '/api/attachment/' + encodeURIComponent(avatar);
   }
   //: Display overrides for role names whose ledger form is not simply the
   //: capitalized word. A role NAME is a lowercase ledger fact

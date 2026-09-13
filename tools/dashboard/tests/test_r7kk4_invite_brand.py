@@ -220,13 +220,22 @@ def test_avatar_from_owned_png(monkeypatch, tmp_path):
 @pytest.mark.parametrize("ref", [
     "https://cdn.example/a.png",                 # absolute URL
     "/uploads/a.png",                            # path
-    "data:image/png;base64,AAAA",                # stored data URI
+    "data:image/gif;base64,AAAA",                # inline, but not a raster we serve
+    "data:image/png;base64," + "A" * (64 * 1024 * 4 // 3 + 65),  # inline, over the bound
     "", None, 42,
 ])
 def test_avatar_rejects_non_attachment_refs(monkeypatch, ref):
     # None of these are attachment-id shaped, so get_attachment is never reached.
     _avatar_attachment(monkeypatch, {"mime_type": "image/png", "file_path": "/dev/null"})
     assert link_serving._sponsor_avatar_data_uri("anchore", ref) is None
+
+
+def test_avatar_inline_bounded_data_uri_is_served_as_is():
+    # A directory row carries its icon inline (member_directory: rows
+    # replicate with content, never a machine-local attachment path), so a
+    # bounded JPEG/PNG/WebP data URI is the avatar itself. Deliberate change
+    # from the r7kk4 compatibility rule that ignored stored data URIs.
+    assert link_serving._sponsor_avatar_data_uri("anchore", WEBP_ICON) == WEBP_ICON
 
 
 def test_avatar_missing_blob_is_omitted(monkeypatch):

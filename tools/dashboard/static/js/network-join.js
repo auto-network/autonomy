@@ -298,6 +298,52 @@
       + (role ? " as " + article(role) + " " + role : "") + ".");
   }
 
+  // Admitted by the organization's ledger: now make it exist HERE. The
+  // install material comes over the same authenticated channel and is handed
+  // to this dashboard, which re-folds and verifies it before creating the
+  // organization locally. A failure is shown honestly: the admission stands
+  // on the organization's side, but this machine is not set up yet.
+  function installAdmitted(orgName, role) {
+    var inputs = session && session.inputs;
+    return session.bootstrap().then(function (material) {
+      return fetch("/api/network/join/outcome", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          org_uuid: inputs.org,
+          genesis_id: session.context.genesisId,
+          invite_ref: inputs.inviteRef,
+          persona_pub: session.personaPub,
+          org_name: material.org_name || orgName,
+          org_byline: material.org_description || "",
+          org_color: material.org_color || "",
+          events: material.events,
+          binding: material.binding,
+          member_profiles: material.member_profiles || [],
+        }),
+      }).then(function (response) {
+        return response.json().catch(function () { return {}; }).then(function (body) {
+          if (!response.ok || body.ok === false) {
+            throw new Error(body.error || ("install refused (" + response.status + ")"));
+          }
+          return body;
+        });
+      });
+    }).then(function (installed) {
+      showAdmitted(orgName, role);
+      if (installed && installed.org) {
+        window.dispatchEvent(new CustomEvent("autonomy:orgs-changed"));
+      }
+      return null;
+    }).catch(function (error) {
+      showAdmitted(orgName, role);
+      say("done-line", "You joined " + (orgName || "the organization")
+        + ", but this machine could not set it up: "
+        + ((error && error.message) || String(error)));
+      return null;
+    });
+  }
+
   // One live join session over the org's own channel. Every module is
   // imported here rather than at load: this page is a classic script, and
   // nothing below is needed until someone actually accepts.
@@ -345,7 +391,7 @@
           // Cancelled ceremony: nothing was signed and nothing was sent.
           if (result === null) { button.disabled = false; return null; }
           if (result.state === "pending") { showWaiting(brandName); return poll(brandName, role); }
-          if (result.state === "admitted") { showAdmitted(brandName, role); return null; }
+          if (result.state === "admitted") { return installAdmitted(brandName, role); }
           if (result.state === "already-approved") { return finalize(brandName, role); }
           reportTerminal(result);
           return null;
@@ -366,7 +412,7 @@
     }).then(function (result) {
       if (!result) return null;
       if (result.state === "already-approved") return finalize(brandName, role);
-      if (result.state === "admitted") { showAdmitted(brandName, role); return null; }
+      if (result.state === "admitted") { return installAdmitted(brandName, role); }
       if (result.state === "pending" || result.state === "pending-timeout") return null;
       reportTerminal(result);
       return null;
@@ -375,7 +421,7 @@
 
   function finalize(brandName, role) {
     return session.finalize().then(function (result) {
-      if (result && result.state === "admitted") { showAdmitted(brandName, role); return null; }
+      if (result && result.state === "admitted") { return installAdmitted(brandName, role); }
       showWaiting(brandName);
       return poll(brandName, role);
     });

@@ -175,6 +175,13 @@ def submit(org: str, event_wire) -> dict:
             store.append(event)
             store.drop_pending_claim(claim_key)
             store.refresh_projections()
+            try:
+                from tools.dashboard import member_directory
+                member_directory.project_claim(
+                    org, event.payload["persona_pub"], event.payload.get("profile"),
+                )
+            except Exception:
+                pass  # the admission stands; the directory row is presentation only
             return {
                 "status": "admitted",
                 "kem_credential": event.payload.get("kem_credential"),
@@ -196,6 +203,38 @@ def submit(org: str, event_wire) -> dict:
                 "need": readiness["need"],
             }
         return {"status": "rejected", "reason": reason}
+
+
+def bootstrap(org: str, invite_ref: str, persona_pub: str) -> dict:
+    """What an ADMITTED member needs to install the organization locally.
+
+    Served over the org:join channel only once the fold shows *persona_pub*
+    as a valid member: every ledger event as canonical wire (the joiner
+    re-folds from genesis and verifies for itself), the org's registry
+    binding (org uuid, root key, registry url — the joiner checks them
+    against the genesis event before storing), and the org's presentation.
+    A persona the fold does not admit gets ``pending``, never the ledger.
+    """
+    _require_hex(invite_ref, "invite_ref")
+    _require_hex(persona_pub, "persona_pub")
+    with _open(org) as store:
+        state = store.fold(now=int(time.time() * 1000))
+        member = state.members.get(persona_pub)
+        if member is None or not state.valid.get(getattr(member, "claim_id", ""), True):
+            return {"status": "pending"}
+        events = [event.to_json().decode("utf-8") for event in store.events()]
+    from tools.graph import settings_ops
+    from tools.graph.schemas.network_identity import NETWORK_BINDING_SET_ID
+    binding = None
+    try:
+        rows = settings_ops.read_owned_set(NETWORK_BINDING_SET_ID, org=org).members
+        if rows and isinstance(rows[0].payload, dict):
+            binding = dict(rows[0].payload)
+    except Exception:
+        binding = None  # served without a binding; the joiner refuses to install
+    from tools.dashboard import member_directory
+    return {"status": "ok", "events": events, "binding": binding,
+            "member_profiles": member_directory.rows(org)}
 
 
 def status(org: str, invite_ref: str, persona_pub: str) -> dict:

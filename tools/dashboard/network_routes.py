@@ -579,6 +579,14 @@ async def post_ledger_found(request: Request) -> JSONResponse:
             events[3].payload["persona_pub"],
             source="found",
         )
+        # The founder's presentation in the organization they just founded:
+        # their Personal profile, snapshotted into the member directory so the
+        # invitation's "Invited by" tile and the member list name them.
+        try:
+            from tools.dashboard import member_directory
+            member_directory.write_founder(requested_org, events[3].payload["persona_pub"])
+        except Exception:
+            logger.exception("founder member-profile row not written; continuing")
     except Exception as exc:
         # The ledger is already durable and correct; failing the whole
         # founding here would leave a founded org the client believes failed.
@@ -716,6 +724,175 @@ def _claim_key_matches(
     except UnicodeEncodeError:
         return False
     return hashlib.sha256(material).hexdigest() == claim_key
+
+
+def _slug_for_joined_org(name: str, org_uuid: str) -> str:
+    """A local slug for an organization this node joins: the organization's
+    display name lowercased and hyphenated (the founder's own convention),
+    disambiguated with the org uuid's prefix if a DIFFERENT org already holds
+    that slug here. A slug already holding THIS org (same stable id) is
+    reused so a repeated install is idempotent."""
+    from tools.graph import org_ops
+
+    base = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:48] or "organization"
+    for candidate in (base, f"{base}-{org_uuid[:8]}"):
+        try:
+            org_ops._validate_slug(candidate)
+        except Exception:
+            continue
+        existing = org_ops.get_org(candidate)
+        if existing is None or existing.id == org_uuid:
+            return candidate
+    raise ValueError("could not derive a free local slug for the organization")
+
+
+async def post_join_outcome(request: Request) -> JSONResponse:
+    """Install an organization this node was just ADMITTED to (punch list 34).
+
+    The browser join flow ends with the inviting organization's ledger saying
+    ``admitted``; until this route nothing on the joiner's machine knew the
+    organization existed. The page fetches the organization's bootstrap
+    material over the same authenticated org:join channel it joined through
+    and hands it here: every ledger event as canonical wire, the founder's
+    registry binding, and the organization's presentation. This route trusts
+    none of it on arrival. The events are re-folded from genesis in an
+    isolated store; the genesis must name the org uuid the invitation named
+    and the root key the binding names; and the fold must admit
+    ``persona_pub``. Only then is the org DB created with the SAME stable id
+    as the founder's, the ledger promoted into place, the binding stored so
+    this node knows the org's registry, and the persona recorded exactly as
+    the headless join records it. No key material passes through here: the
+    joiner's KEM custody and its sync credential are separate ceremonies.
+    """
+    if _mock_mode():
+        return JSONResponse({"ok": False, "error": "mock dashboard installs no organizations"},
+                            status_code=502)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "body must be JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"ok": False, "error": "body must be a JSON object"}, status_code=400)
+
+    def _text(key, limit=200):
+        value = body.get(key)
+        return value.strip()[:limit] if isinstance(value, str) else ""
+
+    org_uuid = _text("org_uuid", 36)
+    genesis_id = _text("genesis_id", 64)
+    invite_ref = _text("invite_ref", 64)
+    persona_pub = _text("persona_pub", 64)
+    org_name = _text("org_name", 120)
+    wires = body.get("events")
+    binding_in = body.get("binding")
+    if not re.fullmatch(r"[0-9a-f-]{32,36}", org_uuid) \
+            or not re.fullmatch(r"[0-9a-f]{64}", genesis_id) \
+            or not re.fullmatch(r"[0-9a-f]{64}", invite_ref) \
+            or not re.fullmatch(r"[0-9a-f]{64}", persona_pub) \
+            or not org_name \
+            or not isinstance(wires, list) or not wires \
+            or any(not isinstance(w, str) or not w for w in wires) \
+            or not isinstance(binding_in, dict):
+        return JSONResponse({"ok": False, "error": (
+            "org_uuid, genesis_id, invite_ref, persona_pub, org_name, events "
+            "and binding are required"
+        )}, status_code=400)
+
+    from tools.graph import org_ops
+    from tools.network.ledger import LedgerError
+    from tools.network.ledger.events import Event
+    from tools.network.ledger.store import LedgerStore, org_ledger_db_path
+
+    # Verify the material before touching disk: fold from genesis in isolation.
+    try:
+        events = [Event.from_json(wire.encode("utf-8")) for wire in wires]
+        # The org serves its events as a set; order them like a sync bundle
+        # (genesis first, then whatever's parents are present), never by
+        # trusting the wire order.
+        genesis_events = [e for e in events if e.type == "genesis" and not e.parents]
+        if len(genesis_events) != 1:
+            raise ValueError("the material must carry exactly one genesis")
+        events = genesis_events + [e for e in events if e is not genesis_events[0]]
+        # Two identifiers, deliberately distinct: the invitation and the
+        # registry binding name the org by its REGISTRY uuid; the genesis
+        # names it by its stable database id (the founder's org row). The
+        # binding is what links them — its uuid must be the invitation's and
+        # its root key must be the genesis root key.
+        stable_id = events[0].payload.get("org")
+        if not isinstance(stable_id, str) or not re.fullmatch(r"[0-9a-f-]{32,36}", stable_id):
+            raise ValueError("genesis carries no organization id")
+        root_pub = events[0].payload.get("root_pub")
+        if events[0].event_id != genesis_id:
+            raise ValueError("genesis does not match the invitation's genesis id")
+        if binding_in.get("org_uuid") != org_uuid:
+            raise ValueError("the registry binding names a different organization than the invitation")
+        if binding_in.get("root_pub") != root_pub:
+            raise ValueError("the registry binding's root key is not the genesis root key")
+        registry_url = binding_in.get("registry_url")
+        if not isinstance(registry_url, str) or not registry_url.startswith(("https://", "http://")):
+            raise ValueError("the registry binding carries no registry url")
+        with LedgerStore() as candidate:
+            candidate.append_bundle(events)
+            state = candidate.fold(now=int(time.time() * 1000))
+        member = state.members.get(persona_pub)
+        if member is None or state.valid.get(member.claim_id) is not True:
+            raise ValueError("the ledger does not admit this persona")
+        if state.genesis_id != genesis_id:
+            raise ValueError("fold genesis mismatch")
+    except (LedgerError, ValueError, TypeError, KeyError, IndexError) as exc:
+        return JSONResponse({"ok": False, "error": f"organization material rejected: {exc}"},
+                            status_code=400)
+
+    # Install: the org DB under the founder's stable id, the ledger, the
+    # binding, the persona. Idempotent on a repeat with the same org.
+    try:
+        slug = _slug_for_joined_org(org_name, stable_id)
+        identity = {"name": org_name}
+        for key, limit in (("byline", 300), ("description", 300), ("color", 16)):
+            value = body.get("org_" + key)
+            if isinstance(value, str) and value.strip():
+                identity[key] = value.strip()[:limit]
+        if org_ops.get_org(slug) is None:
+            org_ops.create_org(slug, type_="shared", identity_payload=identity,
+                               org_id=stable_id)
+        store_path = org_ledger_db_path(slug)
+        with LedgerStore(store_path) as durable:
+            known = {event.event_id for event in durable.events()}
+            if known and events[0].event_id not in known:
+                return JSONResponse({"ok": False, "error": (
+                    "a different ledger already lives under this organization"
+                )}, status_code=409)
+            durable.append_bundle([e for e in events if e.event_id not in known])
+            durable.refresh_projections(now=max(e.hlc.ts for e in events))
+        binding = {
+            key: binding_in[key] for key in (
+                "org_uuid", "root_pub", "registry_url", "recovery_policy",
+                "binding_generation", "binding_expires_at", "last_renewed_at",
+            ) if key in binding_in
+        }
+        if _first_member(NETWORK_BINDING_SET_ID, slug) is None:
+            binding_key = urllib.parse.urlsplit(registry_url).netloc or registry_url
+            settings_ops.upsert_by_key(
+                NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION_2, binding_key,
+                binding, org=slug,
+            )
+        org_ops._record_persona_setting(
+            slug, genesis_id, persona_pub, source="join", invite_ref=invite_ref,
+        )
+        # The member directory: the rows the founder served (their own row
+        # among them), then this person's own row from their Personal profile.
+        from tools.dashboard import member_directory
+        member_directory.import_rows(slug, body.get("member_profiles"), skip=persona_pub)
+        member_directory.write_self(slug, persona_pub)
+    except (LedgerError, OSError, ValueError) as exc:
+        return JSONResponse({"ok": False, "error": f"installing the organization failed: {exc}"},
+                            status_code=500)
+    except Exception as exc:  # a store fault must not masquerade as success
+        return JSONResponse({"ok": False, "error": f"installing the organization failed: {exc}"},
+                            status_code=500)
+    return JSONResponse({"ok": True, "org": slug, "org_id": stable_id,
+                         "org_uuid": org_uuid, "genesis_id": genesis_id,
+                         "events": len(events)})
 
 
 async def post_ledger_claim(request: Request) -> JSONResponse:
@@ -3199,6 +3376,7 @@ ROUTES = [
     Route("/api/network/ledger/role-grant", post_ledger_role_grant, methods=["POST"]),
     Route("/api/network/ledger/role-revoke", post_ledger_role_revoke, methods=["POST"]),
     Route("/api/network/ledger/claim", post_ledger_claim, methods=["POST"]),
+    Route("/api/network/join/outcome", post_join_outcome, methods=["POST"]),
     Route(
         "/api/network/ledger/claim/context",
         get_ledger_claim_context,
