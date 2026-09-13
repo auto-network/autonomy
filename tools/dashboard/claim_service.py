@@ -223,6 +223,7 @@ def bootstrap(org: str, invite_ref: str, persona_pub: str) -> dict:
         if member is None or not state.valid.get(getattr(member, "claim_id", ""), True):
             return {"status": "pending"}
         events = [event.to_json().decode("utf-8") for event in store.events()]
+        genesis_id = store.ledger.genesis_id
     from tools.graph import settings_ops
     from tools.graph.schemas.network_identity import NETWORK_BINDING_SET_ID
     binding = None
@@ -232,23 +233,98 @@ def bootstrap(org: str, invite_ref: str, persona_pub: str) -> dict:
             binding = dict(rows[0].payload)
     except Exception:
         binding = None  # served without a binding; the joiner refuses to install
-    from tools.dashboard import member_directory
+    own_persona = _own_persona(genesis_id)
+    reachability = _reachability_rows(org, own_persona)
     return {"status": "ok", "events": events, "binding": binding,
-            "member_profiles": member_directory.rows(org),
-            "reachability_rows": _reachability_rows(org)}
+            "member_profiles": _member_profiles(org, reachability, own_persona),
+            "reachability_rows": reachability}
 
 
-def _reachability_rows(org: str) -> list:
+#: Bound on the rows a bootstrap reply seeds a joiner with. The reply is one
+#: message over the org:join channel; a 5,000-member directory with photos
+#: would be ~60 MB of JSON, and the fleet engine replicates the same rows to
+#: the joiner on its first pull anyway. A joiner needs SOME peers to dial,
+#: not every peer: the sponsor's own row first, then the machines this node
+#: has most recently synced with (the scheduler's per-peer success stamps,
+#: keyed by the same serving machine key the reachability row is).
+BOOTSTRAP_ROW_CAP = 1024
+
+
+def _own_persona(genesis_id: object) -> str | None:
+    """The serving operator's persona in this org, so their own rows lead."""
+    try:
+        from tools.graph import org_ops
+
+        return org_ops.persona_pub_for_org(genesis_id)
+    except Exception:
+        return None
+
+
+def _peer_recency(path) -> dict[str, int]:
+    """Serving machine pub -> newest successful pull from it, from the org
+    scope's own fleet-sync peer state. Empty when nothing has synced."""
+    try:
+        from tools.network.fleet_sync_scheduler import SQLiteFleetSyncStore
+
+        return dict(SQLiteFleetSyncStore(path).peer_last_success())
+    except Exception:
+        return {}
+
+
+def _reachability_rows(org: str, own_persona: str | None = None,
+                       cap: int = BOOTSTRAP_ROW_CAP) -> list:
     """The org's replicated reachability rows (auto-mldvv), so a joiner's
-    first pull has somewhere to dial before its own rows have crossed."""
+    first pull has somewhere to dial before its own rows have crossed.
+    Bounded to *cap*: own rows first, then most recently synced with."""
     try:
         from tools.graph.db import _org_db_path
         from tools.network.fleet_org_reachability import read_rows
 
-        return [{"key": key, **payload} for key, payload in read_rows(_org_db_path(org)).items()
+        path = _org_db_path(org)
+        rows = [{"key": key, **payload} for key, payload in read_rows(path).items()
                 if isinstance(payload, dict)]
     except Exception:
         return []
+    if len(rows) <= cap:
+        recency = {}
+    else:
+        recency = _peer_recency(path)
+
+    def rank(row: dict) -> tuple:
+        own = 0 if own_persona and row.get("persona_pub") == own_persona else 1
+        synced = -int(recency.get(str(row.get("key")), 0) or 0)
+        published = -int(row.get("updated_at") or 0)
+        return (own, synced, published, str(row.get("key")))
+
+    rows.sort(key=rank)
+    return rows[:cap]
+
+
+def _member_profiles(org: str, reachability: list, own_persona: str | None,
+                     cap: int = BOOTSTRAP_ROW_CAP) -> list:
+    """Directory rows for the joiner's first render: name and byline only
+    (the photo replicates with the row on the first org pull; the listing
+    shows initials until then), for the personas the reachability rows name
+    plus the sponsor, then the rest of the directory up to *cap*."""
+    from tools.dashboard import member_directory
+
+    profiles = {row["persona_pub"]: row for row in member_directory.rows(org)}
+    order: list[str] = []
+    if own_persona and own_persona in profiles:
+        order.append(own_persona)
+    for row in reachability:
+        persona = row.get("persona_pub")
+        if isinstance(persona, str) and persona in profiles and persona not in order:
+            order.append(persona)
+    for persona in profiles:
+        if persona not in order:
+            order.append(persona)
+    out = []
+    for persona in order[:cap]:
+        row = dict(profiles[persona])
+        row.pop("avatar", None)
+        out.append(row)
+    return out
 
 
 def status(org: str, invite_ref: str, persona_pub: str) -> dict:
