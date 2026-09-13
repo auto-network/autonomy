@@ -142,7 +142,7 @@ def test_get_synthesizes_from_root_without_writing(env, root):
     assert prof["initials"] == "JS"          # derived
     assert prof["initials_override"] is None
     assert prof["avatar_attachment_id"] is None
-    assert prof["avatar_icon_data_uri"] is None
+    assert prof["avatar_url"] is None
     assert prof["persisted"] is False
     # A read must never create a row.
     assert personal_profile.profile_member() is None
@@ -237,13 +237,12 @@ def test_biography_clearing(env, root):
 # ── avatar preservation & rejection ────────────────────────────
 
 
-def _seed_avatar(uuid: str, data_uri: str) -> None:
-    """Simulate the follow-on avatar route: write the two server-owned avatar
-    fields through the same protected context, onto the existing row."""
+def _seed_avatar(uuid: str) -> None:
+    """Simulate the follow-on avatar route: write the server-owned avatar
+    field through the same protected context, onto the existing row."""
     existing = personal_profile.profile_member()
     payload = dict(existing.payload) if existing else {"display_name": "Jeremy Spilman"}
     payload["avatar_attachment_id"] = uuid
-    payload["avatar_icon_data_uri"] = data_uri
     payload["updated_at"] = "2026-09-12T00:00:00Z"
     with settings_ops.identity_write_context():
         settings_ops.upsert_by_key(
@@ -252,22 +251,51 @@ def _seed_avatar(uuid: str, data_uri: str) -> None:
 
 
 def test_text_patch_preserves_avatar_fields(env, root):
-    import base64
     _store_identity(env, root, name="Jeremy Spilman")
     env.patch("/api/identity/profile", json={"biography": "hi"})
     uuid = "0192a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
-    data_uri = "data:image/webp;base64," + base64.b64encode(b"R" * 40).decode()
-    _seed_avatar(uuid, data_uri)
-    # A subsequent text PATCH must not disturb the avatar references.
+    _seed_avatar(uuid)
+    # A subsequent text PATCH must not disturb the avatar reference.
     r = env.patch("/api/identity/profile", json={"display_name": "Jer"})
     assert r.status_code == 200
     prof = r.json()["profile"]
     assert prof["avatar_attachment_id"] == uuid
-    assert prof["avatar_icon_data_uri"] == data_uri
+    assert prof["avatar_url"] == f"/api/attachment/{uuid}?org=personal"
     assert prof["display_name"] == "Jer"
 
 
-@pytest.mark.parametrize("field", ["avatar_attachment_id", "avatar_icon_data_uri"])
+def test_revision_1_row_with_inline_icon_is_rewritten_on_next_write(env, root):
+    """A row stored at revision 1 (with the 64x64 inline icon) is migrated in
+    place by the first write: the icon is gone, the attachment stays, and
+    there is exactly one base row for the singleton key."""
+    import base64
+
+    from tools.graph.db import GraphDB
+
+    _store_identity(env, root, name="Jeremy Spilman")
+    uuid = "0192a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
+    legacy = {
+        "display_name": "Jeremy Spilman", "avatar_attachment_id": uuid,
+        "avatar_icon_data_uri": "data:image/webp;base64," + base64.b64encode(b"R" * 40).decode(),
+        "updated_at": "2026-09-12T00:00:00Z",
+    }
+    with settings_ops.identity_write_context():
+        settings_ops.upsert_by_key(
+            USER_PROFILE_SET_ID, 1, USER_PROFILE_CANONICAL_LABEL, legacy, org=None)
+    r = env.patch("/api/identity/profile", json={"biography": "hi"})
+    assert r.status_code == 200
+    prof = r.json()["profile"]
+    assert prof["avatar_attachment_id"] == uuid and "avatar_icon_data_uri" not in prof
+    db = GraphDB.for_org("personal")
+    rows = db.conn.execute(
+        "SELECT schema_revision, payload FROM settings WHERE set_id=? AND key=? "
+        "AND supersedes IS NULL AND excludes IS NULL",
+        (USER_PROFILE_SET_ID, USER_PROFILE_CANONICAL_LABEL)).fetchall()
+    assert [row[0] for row in rows] == [USER_PROFILE_REVISION]
+    assert "avatar_icon_data_uri" not in rows[0][1]
+
+
+@pytest.mark.parametrize("field", ["avatar_attachment_id", "avatar_url"])
 def test_patch_rejects_avatar_fields(env, root, field):
     _store_identity(env, root)
     r = env.patch("/api/identity/profile", json={field: "whatever"})

@@ -165,8 +165,8 @@
     var node = el('span', 'identity-avatar' + (panel ? ' identity-panel-avatar' : ''),
       identityInitial(value));
     node.setAttribute('aria-hidden', 'true');
-    var photo = value && value.profile && value.profile.avatar_icon_data_uri;
-    if (photo && photo.startsWith('data:image/')) {
+    var photo = value && value.profile && value.profile.avatar_url;
+    if (photo && photo.startsWith('/api/attachment/')) {
       var image = el('img', 'w-full h-full object-cover');
       image.src = photo;
       image.alt = '';

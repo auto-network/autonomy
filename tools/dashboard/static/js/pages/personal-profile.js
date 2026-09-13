@@ -34,7 +34,7 @@
         this.name = profile.display_name || '';
         this.bio = profile.biography || '';
         this.initialsOverride = profile.initials_override || '';
-        this.photo = profile.avatar_icon_data_uri || null;
+        this.photo = profile.avatar_url || null;
         this.hasProfile = !!profile.persisted;
         this.dirty = false;
       },
@@ -123,7 +123,7 @@
             xhr.onerror = () => reject(new Error('The photo could not be uploaded. Check your connection and try again.'));
             xhr.send(form);
           });
-          this.photo = result.avatar_icon_data_uri;
+          this.photo = result.avatar_url;
           this.hasProfile = true;
           if (this.saved) Object.assign(this.saved, result, {persisted: true});
           this.cancelPhoto(); this.changed();
@@ -138,7 +138,7 @@
         try {
           await request('/api/identity/profile/avatar', {method: 'DELETE'});
           this.photo = null;
-          if (this.saved) Object.assign(this.saved, {avatar_icon_data_uri: null, avatar_attachment_id: null});
+          if (this.saved) Object.assign(this.saved, {avatar_url: null, avatar_attachment_id: null});
           this.cancelPhoto(); this.changed();
         } catch (error) { this.photoError = error.message; this.photoStage = 'error'; }
       },

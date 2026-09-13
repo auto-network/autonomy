@@ -110,7 +110,10 @@ _ORG_ICON_MAX_DECODED_BYTES = 16 * 1024
 #: bytes are non-empty and at most this size — the compatibility bound this
 #: bead accepts already-owned blobs under (member-profile avatar normalization
 #: is a separate concern). 64 KiB.
-_SPONSOR_AVATAR_MAX_BYTES = 64 * 1024
+#: The canonical profile photo is a 512x512 WebP bounded at 512 KiB
+#: (profile_image.CANONICAL_MAX_BYTES); the join context carries it inline
+#: because the joiner is not yet a member and cannot fetch an org attachment.
+_SPONSOR_AVATAR_MAX_BYTES = 512 * 1024
 #: Only these three raster image types are adaptable to an inline avatar.
 _SPONSOR_AVATAR_MIMES = frozenset({"image/jpeg", "image/png", "image/webp"})
 #: Bound on the sponsor's human text fields so one context row cannot grow
@@ -500,10 +503,13 @@ def _org_brand_for_invite(org: str | None) -> dict | None:
 def _sponsor_avatar_data_uri(org: str | None, avatar_ref: object) -> str | None:
     """Adapt a member row's ``avatar`` to an inline data: URI, or ``None``.
 
-    For this compatibility revision (auto-r7kk4) an avatar is produced ONLY
-    from an organization-OWNED graph attachment id (``peers=[]``, so a
-    wrong-org attachment is simply not found) whose MIME is JPEG/PNG/WebP and
-    whose bytes are non-empty and at most :data:`_SPONSOR_AVATAR_MAX_BYTES`.
+    An avatar is produced from a graph attachment id OWNED by *org* — the
+    organization's store for a member row, ``"personal"`` for the serving
+    operator's own Personal photo (``peers=[]``, so a wrong-store attachment
+    is simply not found) — whose MIME is JPEG/PNG/WebP and whose bytes are
+    non-empty and at most :data:`_SPONSOR_AVATAR_MAX_BYTES` (the canonical
+    512x512 photo). The joiner is not yet a member and cannot fetch an org
+    attachment, so the bytes ride the context reply inline.
 
     Everything else the member row might carry — an absolute URL, a filesystem
     path, a ``data:`` URI stored directly in the row, a missing blob, a
@@ -625,12 +631,10 @@ def _local_sponsor_profile(sponsor_pub: str, genesis_id: object) -> dict:
     byline = profile.get("biography")
     if isinstance(byline, str) and byline.strip():
         fields["sponsor_byline"] = byline.strip()[:_SPONSOR_TEXT_MAX]
-    avatar = profile.get("avatar_icon_data_uri")
-    if (
-        isinstance(avatar, str)
-        and any(avatar.startswith(f"data:{m};base64,") for m in _SPONSOR_AVATAR_MIMES)
-        and len(avatar) <= _SPONSOR_AVATAR_MAX_BYTES * 4 // 3 + 64
-    ):
+    # The Personal photo is an attachment in the personal store; it rides the
+    # reply inline (bounded) because the joiner cannot fetch it yet.
+    avatar = _sponsor_avatar_data_uri("personal", profile.get("avatar_attachment_id"))
+    if avatar:
         fields["sponsor_avatar"] = avatar
     return fields
 

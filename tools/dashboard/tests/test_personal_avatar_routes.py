@@ -141,21 +141,21 @@ def _att_rows(orgs_dir, db_name="personal"):
 # ── happy path: store canonical, return compact ────────────────
 
 
-def test_upload_stores_canonical_and_returns_compact(env, root):
+def test_upload_stores_canonical_and_returns_its_url(env, root):
     _store_identity(env, root, name="Jeremy Spilman")
     r = _upload(env)
     assert r.status_code == 200, r.text
     body = r.json()
-    # The response leaks NOTHING but the two active references + ok.
-    assert set(body) == {"ok", "avatar_attachment_id", "avatar_icon_data_uri"}
+    # The response leaks NOTHING but the active reference, its URL, and ok.
+    assert set(body) == {"ok", "avatar_attachment_id", "avatar_url"}
     assert body["ok"] is True
-    assert body["avatar_icon_data_uri"].startswith("data:image/webp;base64,")
-    assert len(body["avatar_icon_data_uri"]) <= profile_image.COMPACT_MAX_URI_CHARS
+    assert body["avatar_url"] == f"/api/attachment/{body['avatar_attachment_id']}?org=personal"
 
     # The profile now references the avatar; text baseline preserved.
     prof = _profile(env)
     assert prof["avatar_attachment_id"] == body["avatar_attachment_id"]
-    assert prof["avatar_icon_data_uri"] == body["avatar_icon_data_uri"]
+    assert prof["avatar_url"] == body["avatar_url"]
+    assert "avatar_icon_data_uri" not in prof
     assert prof["display_name"] == "Jeremy Spilman"
     assert prof["persisted"] is True
 
@@ -423,7 +423,7 @@ def test_replacement_preserves_text_fields(env, root):
     assert prof["initials_override"] == "JX"
 
 
-def test_delete_clears_both_references_idempotently(env, root):
+def test_delete_clears_the_reference_idempotently(env, root):
     _store_identity(env, root, name="Jeremy Spilman")
     env.patch("/api/identity/profile", json={"biography": "Builder."})
     up = _upload(env).json()
@@ -433,7 +433,7 @@ def test_delete_clears_both_references_idempotently(env, root):
     assert r.status_code == 200
     prof = _profile(env)
     assert prof["avatar_attachment_id"] is None
-    assert prof["avatar_icon_data_uri"] is None
+    assert prof["avatar_url"] is None
     assert prof["biography"] == "Builder."  # text preserved
 
     # The immutable blob still exists — only the reference was dropped.

@@ -17703,8 +17703,35 @@ async def api_source_attachments(request):
     return JSONResponse({"attachments": atts})
 
 
+def _attachment_serve_org(request) -> "tuple[str | None, bool]":
+    """``(org, ok)`` for an explicit ``?org=`` on the attachment route.
+
+    Without the parameter the read is scopeless and finds the row wherever it
+    lives. With it, the read is pinned to that one store (``personal`` or an
+    organization present on this machine), which is what a screen names when
+    it knows the store an attachment belongs to — a member directory photo
+    that arrived over organization sync, the operator's own Personal photo
+    while the shell is scoped to some organization. A store this machine does
+    not have is a 404, never a database created on demand.
+    """
+    org = request.query_params.get("org")
+    if org is None or org == "":
+        return None, True
+    from tools.graph.cross_org import all_store_slugs
+
+    if org == "personal" or org in all_store_slugs():
+        return org, True
+    return None, False
+
+
 async def api_attachment_serve(request):
-    """Serve an attachment file by ID with correct Content-Type."""
+    """Serve an attachment file by ID with correct Content-Type.
+
+    ``?org=<store>`` pins the lookup to one store (see
+    :func:`_attachment_serve_org`). A row that reached this machine by fleet
+    sync resolves to the bytes the blob transport installed, exactly as a row
+    written here resolves to its upload.
+    """
     attachment_id = request.path_params["attachment_id"]
 
     if os.environ.get("DASHBOARD_MOCK"):
@@ -17728,8 +17755,17 @@ async def api_attachment_serve(request):
             return Response(b"<html><body>Mock HTML attachment</body></html>", media_type="text/html")
         return Response(b"mock content", media_type=mime or "application/octet-stream")
 
-    att = graph_ops.get_attachment(attachment_id)
-    if not att:
+    org, ok = _attachment_serve_org(request)
+    if not ok:
+        return JSONResponse({"error": "attachment not found"}, status_code=404)
+    try:
+        if org is None:
+            att = graph_ops.get_attachment(attachment_id)
+        else:
+            att = graph_ops.get_attachment(attachment_id, org=org, peers=[])
+    except Exception:
+        att = None
+    if not att or isinstance(att, list):
         return JSONResponse({"error": "attachment not found"}, status_code=404)
     file_path = Path(att["file_path"])
     if not file_path.is_absolute():

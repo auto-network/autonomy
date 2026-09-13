@@ -61,7 +61,7 @@ _AUTONOMY_PATH_PATTERNS: tuple[str, ...] = (
 # Personal-profile projection freshness (auto-vlt7j.3).
 #
 # ``resolve_org_identity(PERSONAL_SLUG)`` overlays the effective Personal
-# profile (display name, initials, compact avatar) onto the resolved identity.
+# profile (display name, initials, photo URL) onto the resolved identity.
 # That profile is a SECOND mutable input to the ``personal`` entry, independent
 # of the ``autonomy.org`` overrides the main cascade keys on. It gets its own
 # monotonic generation, mixed into the ``_identity_cached`` key for the
@@ -258,8 +258,9 @@ def _overlay_personal_profile(identity: dict[str, Any]) -> None:
       * A personal identity — either the service's unpersisted root-name
         baseline or a stored profile row — replaces ``name`` with the effective
         display name (when present), ``initial`` with the explicit-or-derived
-        Personal initials (when present), and, when a valid compact avatar data
-        URI is present, BOTH ``favicon`` and ``icon_data_uri`` with it.
+        Personal initials (when present), and, when a photo is set, ``favicon``
+        with the photo's same-origin attachment URL (``icon_data_uri`` stays
+        ``None``: the Personal photo is the attachment, never an inline icon).
 
     Slug, color, byline, ``resolved``, and every other field are preserved. When
     the avatar is absent or removed, no unrelated branding is cleared and the
@@ -281,10 +282,9 @@ def _overlay_personal_profile(identity: dict[str, Any]) -> None:
         )
         if initials:
             identity["initial"] = initials
-        avatar = effective.get("avatar_icon_data_uri")
-        if isinstance(avatar, str) and avatar.strip():
+        avatar = personal_profile.avatar_url(effective.get("avatar_attachment_id"))
+        if avatar:
             identity["favicon"] = avatar
-            identity["icon_data_uri"] = avatar
     except Exception:  # pragma: no cover - defensive
         # A profile-store read failure must never break identity resolution for
         # host sessions; fall back to the base ``personal`` identity.

@@ -23,7 +23,7 @@ from tools.network.fleet_sync.tests.test_org_channel_routing import ORG, Member
 from tools.network.idkit import KeyPair
 
 SLUG = "acme"
-ICON = "data:image/png;base64,AAAA"
+ICON = "0192a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"  # an org attachment id
 
 
 @pytest.fixture
@@ -90,7 +90,7 @@ def test_replicated_directory_row_shadows_the_seed(stores, monkeypatch):
     )
     monkeypatch.setattr(
         member_directory, "presentation_from_personal_profile",
-        lambda: {"display_name": "Bob", "byline": "", "avatar": ICON, "color": ""},
+        lambda slug: {"display_name": "Bob", "byline": "", "avatar": ICON, "color": ""},
     )
     assert member_directory.write_self(SLUG, bob) is True
     profiles = org_membership_routes._member_profiles(SLUG)
