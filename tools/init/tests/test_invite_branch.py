@@ -15,15 +15,16 @@ ROOT_PUB = "ab" * 32
 INVITE_REF = "cd" * 32
 GRANT_TOKEN = "12" * 16
 CLAIM_TOKEN = "ef" * 32
+CHANNEL_PUB = "9a" * 32
 
 
 def code() -> str:
     return encode_invitation(
         Invitation(
             org=ORG,
-            root_pub=ROOT_PUB,
             invite_ref=INVITE_REF,
             channel_token=GRANT_TOKEN,
+            channel_pub=CHANNEL_PUB,
             claim_token=CLAIM_TOKEN,
         )
     )

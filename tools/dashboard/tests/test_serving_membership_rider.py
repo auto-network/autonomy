@@ -87,9 +87,7 @@ def test_an_org_connector_is_given_a_rider(monkeypatch):
 
 
 def test_the_personal_connector_is_not(monkeypatch):
-    """Launched without --graph-org. Its cert is root-signed by the legacy
-    mint and its v2 hello is correct; handing it a rider would move its anchor
-    to a persona that never signed it."""
+    """Personal uses its own serving credential and has no member ledger."""
     captured = _build(monkeypatch, graph_org=None)
     assert "membership_proof_for" not in captured
     assert "on_reprove" not in captured
@@ -127,11 +125,11 @@ def test_the_rider_carries_the_certs_persona_and_the_registrys_seq(monkeypatch):
     assert rider["seq_seen"] == 7
 
 
-def test_a_proof_that_cannot_be_built_falls_back_instead_of_crashing(
+def test_an_unavailable_membership_proof_is_reported_as_unavailable(
     monkeypatch,
 ):
-    """Including the contested-root refusal. A connector that cannot prove
-    membership must keep retrying; raising into the handshake would kill it."""
+    """Including contested-root refusal. The provider returns no proof, so
+    the connector's strict organization handshake refuses and retries."""
     captured = _build(
         monkeypatch, graph_org="anchore",
         raises=RuntimeError("membership chain contested"),

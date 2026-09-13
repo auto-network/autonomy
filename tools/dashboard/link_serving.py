@@ -1574,17 +1574,16 @@ def _make_ice_serving_connector(
     # checkpoint the REGISTRY has adopted, and refuses — with an operator
     # alarm — when the registry's root contradicts the local fold.
     #
-    # The personal connector is launched WITHOUT --graph-org, so it never
-    # takes this path: its cert is root-signed by the legacy mint and its v2
-    # hello is correct until auto-tmers migrates it. Any failure here returns
-    # None, the same v2 fallback as before — a scope that cannot prove
-    # membership is not made worse by being asked.
+    # The Personal connector is launched WITHOUT --graph-org and therefore
+    # uses its separately typed Personal serving credential without a ledger.
+    # A collaborative organization is configured with this proof provider;
+    # if it cannot return a current proof, TunnelConnector refuses admission
+    # before sending a hello. It never downgrades to the Personal protocol.
     # The scopes that must present v3 are exactly the scopes whose certs must
     # be persona-signed — serve_cert_state enforces the same boundary, and the
     # two must not disagree or a scope would be asked for a proof its cert
     # cannot use. Personal is excluded on both sides: its org has no adopted
-    # membership checkpoint at the registry, so it cannot prove membership and
-    # its root-signed cert is correct until auto-tmers seeds one.
+    # membership checkpoint at the registry and does not use this protocol.
     if machine_key is not None and graph_org and graph_org != "personal":
         stream_kwargs["membership_proof_for"] = _membership_rider
         stream_kwargs["on_reprove"] = _membership_rider_for_seq
@@ -1599,7 +1598,9 @@ def _make_ice_serving_connector(
         min_backoff=min_backoff,
         max_backoff=max_backoff,
         publisher=publisher,
-        link_key_for=_link_key_for,
+        channel_authorization_for=(
+            lambda token: {"protocol": "public-link", "key": _link_key_for(token)}
+        ),
         **stream_kwargs,
     )
     return connector
@@ -2281,7 +2282,7 @@ def main() -> None:
         machine_key=machine_key,
     )
     from tools.dashboard.connector_key_resolution import client, read_bootstrap
-    connector._link_key_for = client(read_bootstrap(args.link_key_fd))
+    connector._channel_authorization_for = client(read_bootstrap(args.link_key_fd))
     # Live push is ON by default and needs no configuration: the dashboard
     # delivers each event over the control listener below, so there is no
     # address to resolve, no stream to subscribe to and no credential to

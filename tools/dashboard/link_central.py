@@ -1490,7 +1490,6 @@ class LinkResultConsumer:
                 "state": "succeeded",
                 "token": reply.get("token"),
                 "url": reply.get("url"),
-                "serving": {"live": True, "via": "tunnel-control"},
             }
             if "serving_machine" in args:
                 result["serving_machine"] = args["serving_machine"]
@@ -1718,6 +1717,13 @@ class LinkResultConsumer:
             target = intent["target"]
             local_meta = dict(intent["local_intent"].get("meta") or {})
             receipt = validated["receipt"]
+            from tools.dashboard.link_channel_key import mint_channel_key
+            try:
+                channel_pub = mint_channel_key(token, org)
+            except Exception as exc:
+                link_approvals._compensate_failed_publish(
+                    org, token, "channel-key")
+                raise LinkCentralError("registry_unavailable") from exc
             try:
                 issued_at = time.strftime(
                     "%Y-%m-%dT%H:%M:%SZ", time.gmtime(completed_at)
@@ -1735,30 +1741,25 @@ class LinkResultConsumer:
                     "id": receipt["accepting_subject_id"],
                 },
                 "issued_at": issued_at,
+                "channel_pub": channel_pub,
             }
             if target["target_type"] == "org:join":
                 grant["invite_ref"] = intent["invite_ref"]
             serving_machine = remote.get("serving_machine")
             if isinstance(serving_machine, str) and _HEX64_RE.fullmatch(serving_machine):
                 grant["serving_machine"] = serving_machine
-            serving = remote.get("serving")
-            if not isinstance(serving, Mapping):
-                try:
-                    serving = asyncio.run(
-                        link_approvals._probe_serving(binding, token)
-                    )
-                except Exception as exc:
-                    serving = {
-                        "live": False,
-                        "via": "registry-http",
-                        "detail": f"Serving verification is pending: {exc}",
-                    }
+            settings_ops.upsert_by_key(
+                NETWORK_LINK_GRANT_SET_ID,
+                NETWORK_LINK_GRANT_REVISION,
+                token,
+                grant,
+                org=org,
+            )
+            serving = asyncio.run(
+                link_approvals._probe_serving(binding, token, org)
+            )
             if not isinstance(serving, Mapping) or type(serving.get("live")) is not bool:
-                serving = {
-                    "live": False,
-                    "via": "registry-http",
-                    "detail": "Serving verification is pending.",
-                }
+                serving = {"live": False}
             serving = {
                 key: value
                 for key, value in dict(serving).items()
@@ -1766,7 +1767,9 @@ class LinkResultConsumer:
             }
             serving.setdefault("via", "registry-http")
             if not serving["live"]:
-                serving["detail"] = "Serving verification is pending."
+                link_approvals._compensate_failed_publish(
+                    org, token, "recipient-probe")
+                raise LinkCentralError("registry_unavailable")
             result = {
                 "operation": operation,
                 "state": "succeeded",
@@ -1780,13 +1783,6 @@ class LinkResultConsumer:
                 LinkApprovalResultV1.validate(result)
             except Exception as exc:
                 raise LinkCentralError("registry_unavailable") from exc
-            settings_ops.upsert_by_key(
-                NETWORK_LINK_GRANT_SET_ID,
-                NETWORK_LINK_GRANT_REVISION,
-                token,
-                grant,
-                org=org,
-            )
         else:
             revoked_at = remote.get("revoked_at")
             if isinstance(revoked_at, bool) or not isinstance(revoked_at, (int, float)):
@@ -1855,10 +1851,25 @@ class LinkResultConsumer:
                 "completed_at": result["completed_at"],
             }
         if result["operation"] == "publish":
+            grant = link_approvals._cached_grant(result["token"], org)
+            if (
+                not isinstance(grant, Mapping)
+                or grant.get("token") != result["token"]
+                or not isinstance(grant.get("channel_pub"), str)
+            ):
+                raise LinkCentralError("registry_unavailable")
+            channel_pub = grant["channel_pub"]
+            target_type = intent["target"]["target_type"]
+            if target_type == "org:join":
+                share_url = result["url"]
+            else:
+                from tools.dashboard.link_channel_key import fragment_url
+                share_url = fragment_url(result["url"], channel_pub)
             projected = {
                 "approved": True,
                 "execution": execution,
-                "url": result["url"],
+                "url": share_url,
+                "channel_pub": channel_pub,
                 "serving": dict(result["serving"]),
                 "completed_at": result["completed_at"],
             }

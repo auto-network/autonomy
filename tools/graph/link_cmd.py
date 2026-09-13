@@ -432,7 +432,6 @@ def cmd_link_publish(args) -> None:
 
         invitation = invitation_from_join_url(
             org=invite["org_uuid"],
-            root_pub=invite["root_pub"],
             invite_ref=invite["invite_ref"],
             join_url=url,
         )

@@ -122,6 +122,7 @@ def _node_service(
         "volumes": [
             f"{volume}:/app/data",
             f"{config.project}-artifacts:/artifacts",
+            f"{volume}-keycache:/run/autonomy-keycache",
         ],
         "ports": [f"127.0.0.1:{host_port}:8080"],
         "networks": ["harness"],
@@ -221,6 +222,23 @@ def compose_model(config: TopologyConfig) -> dict:
     volumes.update(
         {f"{config.project}-node-{index}": {} for index in range(3, config.nodes + 1)}
     )
+    node_volumes = [
+        f"{config.project}-node-a",
+        f"{config.project}-node-b",
+        f"{config.project}-node-c",
+        *(f"{config.project}-node-{index}" for index in range(3, config.nodes + 1)),
+    ]
+    volumes.update({
+        f"{volume}-keycache": {
+            "driver": "local",
+            "driver_opts": {
+                "type": "ramfs",
+                "device": "ramfs",
+                "o": "mode=0700",
+            },
+        }
+        for volume in node_volumes
+    })
     return {
         "name": config.project,
         "services": services,

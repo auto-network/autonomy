@@ -28,8 +28,8 @@
   .step.done .n { background:rgba(52,211,153,.15); color:var(--ok); }
   .step h2 { margin:0; font-size:1.05rem; } .step p { margin:.15rem 0 0; color:var(--dim); font-size:.88rem; }
   .step .body { flex:1; min-width:0; }
-  button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:.6rem 1.3rem; font-size:.95rem; font-weight:600; cursor:pointer; }
-  button.secondary { background:#262b38; }
+  #welcome-content button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:.6rem 1.3rem; font-size:.95rem; font-weight:600; cursor:pointer; }
+  #welcome-content button.secondary { background:#262b38; }
   .fleet-success { min-height:calc(100svh - 7.5rem); display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; }
   .fleet-success-mark { width:5rem; height:5rem; border-radius:50%; display:grid; place-items:center; margin-bottom:1.35rem; color:#07150f; background:var(--ok); box-shadow:0 0 0 .65rem rgba(52,211,153,.10); font-size:2.8rem; font-weight:800; }
   .fleet-success h1 { margin:0 0 1.6rem; font-size:clamp(1.9rem,7vw,2.6rem); }
@@ -259,8 +259,8 @@ function welcomeApp() {
           return { slug: id.slug || (e.org || {}).slug || '',
                    name: id.name || (e.org || {}).slug || '' };
         }).filter(function (x) {
-          // The operator's own personal store is not a collaborative org.
-          return x.slug && x.slug !== 'personal';
+          // Same reserved-store list used by the server's onboarding gate.
+          return x.slug && !{{ local_store_slugs | tojson }}.includes(x.slug);
         });
         this.hasOrg = orgs.length > 0;
         this.orgName = orgs.length ? (orgs[0].name || orgs[0].slug) : '';

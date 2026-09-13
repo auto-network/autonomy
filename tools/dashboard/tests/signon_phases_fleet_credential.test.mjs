@@ -24,6 +24,7 @@ import { deriveAuditedRecipient } from '../static/js/ceremony/vault-unlock.js';
 import { sealToEncapsulationKey } from '../static/js/ceremony/sealing.js';
 import { bytesToHex } from '../static/js/ceremony/primitives.js';
 import { FLEET_MACHINE_KEY_SALT } from '../static/js/ceremony/fleet-enrollment.js';
+import { restoreFleetRuntime } from '../static/js/ceremony/fleet-restore.js';
 
 const PURPOSE = 'autonomy/identity/sign-in-preparation/v1';
 const PKCS8_ED25519_PREFIX = Uint8Array.from([
@@ -68,7 +69,7 @@ async function fixture({ orgUuid }) {
   const sealed = await sealToEncapsulationKey(enc.encode(JSON.stringify(inputs)), audited.publicKeyHex, PURPOSE);
   const encrypted = { sealed: typeof sealed === 'string' ? sealed : bytesToHex(sealed) };
   const signon = { _internals: { prepareRootMaintenance: async () => [] } };
-  return { rootSeed, encrypted, signon };
+  return { rootSeed, encrypted, signon, runtime: inputs.runtime };
 }
 
 function fleetPost(prepared) {
@@ -93,3 +94,48 @@ test('registered personal org → reachability material is delivered (unchanged)
   assert.ok(body.reachability_cert, 'reachability cert delivered for a registered org');
   assert.ok(body.machine_private_seed);
 });
+
+test('runtime restore delivers the new organization serving key and clears its seed copy', async () => {
+  const { rootSeed, runtime } = await fixture({ orgUuid: null });
+  runtime.serving_orgs = [{ scope: 'fresh-org', org_uuid: 'fresh-registry-id', genesis_id: 'cd'.repeat(32) }];
+  const posts = [];
+  const copy = new Uint8Array(rootSeed);
+  const result = await restoreFleetRuntime(copy, {
+    requiredOrg: 'fresh-org', signon: null,
+    fetchImpl: async (url, options) => {
+      if (options.method === 'POST') {
+        posts.push(JSON.parse(options.body));
+        return Response.json({ ok: true });
+      }
+      return Response.json(url.endsWith('local-completion') ? { pending: false } : runtime);
+    },
+  });
+  assert.equal(result.armed, true);
+  assert.match(posts[0].serving_machine_private_seeds['fresh-registry-id'], /^[a-f0-9]{64}$/);
+  assert.equal(posts[0].machine_private_seed, undefined, 'personal reachability remains unregistered');
+  assert.ok(copy.every(byte => byte === 0));
+  assert.ok(rootSeed.some(byte => byte !== 0), 'outer caller retains its own seed');
+});
+
+for (const failure of ['missing-org', 'disabled', 'activation']) {
+  test(`required organization runtime fails closed: ${failure}`, async () => {
+    const { rootSeed, runtime } = await fixture({ orgUuid: null });
+    runtime.enabled = failure !== 'disabled';
+    runtime.serving_orgs = failure === 'missing-org' ? [] : [
+      { scope: 'fresh-org', org_uuid: 'fresh-registry-id', genesis_id: 'cd'.repeat(32) },
+    ];
+    let posts = 0;
+    await assert.rejects(restoreFleetRuntime(rootSeed, {
+      requiredOrg: 'fresh-org', signon: null,
+      fetchImpl: async (url, options) => {
+        if (options.method === 'POST') {
+          posts += 1;
+          return Response.json({ ok: false, error: 'activation refused' }, { status: 400 });
+        }
+        return Response.json(url.endsWith('local-completion') ? { pending: false } : runtime);
+      },
+    }), /runtime|activation refused/);
+    assert.equal(posts, failure === 'activation' ? 1 : 0);
+    assert.ok(rootSeed.every(byte => byte === 0));
+  });
+}

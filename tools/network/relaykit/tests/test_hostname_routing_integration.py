@@ -34,7 +34,7 @@ import websockets
 from tools.network.idkit import KeyPair, Subject, issue_cert
 from tools.network.registry.signing import sign_request
 from tools.network.relaykit.connector import TunnelConnector
-from tools.network.relaykit.viewer import ViewerChannel
+from tools.network.relaykit.viewer import CertificateViewerChannel
 
 from .conftest import ORG
 from .test_relay_integration import free_port, start_registry
@@ -104,6 +104,9 @@ class _Node:
             kwargs["caps"] = CAPS
         self.connector = TunnelConnector(
             relay_url, ORG, self.serve_key, cert,
+            channel_authorization_for=lambda _token: {
+                "protocol": "fleet-enrollment",
+            },
             min_backoff=0.1, max_backoff=0.5, **kwargs,
         )
         self.task: asyncio.Task | None = None
@@ -214,13 +217,14 @@ def test_l4_multi_connector_hostname_routing(stack):
             echo = await _probe(port, host_app2)
             assert echo["machine_digest"] == _machine_digest(machine_b)
 
-            # Legacy artifact viewer stays green mid-scenario.
-            viewer = await ViewerChannel.connect(
+            # The independently typed certificate channel stays responsive
+            # while hostname routes are released and rebound.
+            viewer = await CertificateViewerChannel.connect(
                 f"ws://127.0.0.1:{port}", stack["token"],
                 root_pub=root.public_hex, org=ORG,
             )
-            await viewer.send_message(b"legacy-compat-check")
-            assert await viewer.recv_message() == b"legacy-compat-check"
+            await viewer.send_message(b"channel-check")
+            assert await viewer.recv_message() == b"channel-check"
             await viewer.close()
 
             # Disconnect isolation + fail-closed teardown: kill machine A.

@@ -44,12 +44,15 @@ async function postJson(fetchImpl, url, body) {
  * @param {Uint8Array} seed the open personal root seed. This function makes its
  *   own fresh copies for the ceremonies (each zeroes its copy) and zeroes the
  *   passed array before returning.
- * @param {{fetchImpl?: function, signon?: object}} deps
+ * @param {{fetchImpl?: function, signon?: object, requiredOrg?: string}} deps
+ *   requiredOrg makes unavailable runtime/organization inputs fatal for an
+ *   operation that needs serving now, rather than an optional unlock repair.
  * @returns {Promise<{armed: boolean, reason: string|null}>}
  */
 export async function restoreFleetRuntime(seed, {
   fetchImpl = fetch,
   signon = (typeof window !== 'undefined' ? window.AutonomyNetworkSession : null),
+  requiredOrg = null,
 } = {}) {
   const internals = (signon && signon._internals) || {};
   try {
@@ -57,6 +60,7 @@ export async function restoreFleetRuntime(seed, {
       fetchImpl, '/api/fleet/enrollment/local-completion',
     );
     if (completion.pending) {
+      if (requiredOrg) throw new Error('Finish machine enrollment before serving an organization.');
       const fc = await import('./fleet-enrollment.js');
       const proof = await fc.completeFleetEnrollment({
         personalRootSeed: seed,
@@ -72,6 +76,7 @@ export async function restoreFleetRuntime(seed, {
 
     let rc = await fetchJson(fetchImpl, '/api/fleet/runtime');
     if (!rc.enabled) {
+      if (requiredOrg) throw new Error('Machine runtime is not ready.');
       seed.fill(0);
       return { armed: false, reason: 'fleet-not-enabled' };
     }
@@ -95,6 +100,9 @@ export async function restoreFleetRuntime(seed, {
         }
       }
     }
+    if (requiredOrg && !(rc.serving_orgs || []).some(target => target.scope === requiredOrg)) {
+      throw new Error('Organization is missing from runtime preparation.');
+    }
     const frc = await import('./fleet-enrollment.js');
     const cred = await frc.mintFleetRuntimeCredential({
       personalRootSeed: new Uint8Array(seed),  // fresh copy; mint zeroes it
@@ -102,6 +110,7 @@ export async function restoreFleetRuntime(seed, {
       machineId: rc.machine_id,
       machinePub: rc.machine_pub,
       orgUuid: rc.org_uuid || null,
+      servingOrgs: rc.serving_orgs || [],
     });
     await postJson(fetchImpl, '/api/fleet/runtime', cred);
     return { armed: true, reason: 'minted' };

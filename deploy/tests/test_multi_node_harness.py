@@ -48,7 +48,9 @@ def test_compose_topology_is_manifest_rooted_and_has_no_host_data_mounts(tmp_pat
     # internal:false since ee85b1c5 — an internal bridge blocked host port
     # publishing on the real-Docker run, timing out every node wait.
     assert model["networks"]["harness"]["internal"] is False
-    assert len(model["volumes"]) == 8  # registry + artifacts + A/B/C + 3 peers
+    # Registry + artifacts, plus one durable data volume and one isolated
+    # ramfs key-cache volume for every synthetic node.
+    assert len(model["volumes"]) == 14
 
     expected_envs = {
         store.env for store in STORE_MANIFEST if store.env and store.key != "graph"
@@ -78,7 +80,22 @@ def test_compose_topology_is_manifest_rooted_and_has_no_host_data_mounts(tmp_pat
             source, target = mount.split(":", 1)
             assert source.startswith(PROJECT + "-")
             assert not source.startswith(("/", ".", "~"))
-            assert target in {"/app/data", "/artifacts"}
+            assert target in {
+                "/app/data", "/artifacts", "/run/autonomy-keycache",
+            }
+        keycache = next(
+            mount.split(":", 1)[0]
+            for mount in service["volumes"]
+            if mount.endswith(":/run/autonomy-keycache")
+        )
+        assert model["volumes"][keycache] == {
+            "driver": "local",
+            "driver_opts": {
+                "type": "ramfs",
+                "device": "ramfs",
+                "o": "mode=0700",
+            },
+        }
 
     compose_path = write_compose(tmp_path / "compose.json", config)
     text = compose_path.read_text()
@@ -142,8 +159,11 @@ class FakeDocker:
                 "invite_ref": "e" * 64,
                 "invite_expiry": 4_000_000_000_000,
                 "content_id": "22222222-2222-4222-8222-222222222222",
+                "join_channel_pub": "3" * 64,
+                "content_channel_pub": "4" * 64,
                 "serve_delegate_pub": "f" * 64,
                 "serve_delegate_sha256": "1" * 64,
+                "membership_checkpoint": {"v": 1, "seq": 0},
             }
             return CommandResult(json.dumps(value) + "\n")
         if "fixture_ops seed-registry" in joined:
@@ -155,6 +175,8 @@ class FakeDocker:
                     + request["join_channel_token"]
                 ),
             }) + "\n")
+        if "fixture_ops activate-serving" in joined:
+            return CommandResult(json.dumps({"ok": True, "child_pub": "f" * 64}) + "\n")
         if "fixture_ops pending" in joined:
             if self.finalized:
                 return CommandResult('{"state":"not-single","count":0}\n')
@@ -371,6 +393,13 @@ def _root_all_stores(monkeypatch, root: Path) -> None:
     monkeypatch.setenv(REFUSE_REAL_DATA_FALLBACK_ENV, "1")
     monkeypatch.delenv("GRAPH_ORG", raising=False)
     monkeypatch.delenv("GRAPH_DB", raising=False)
+    keycache = root / "keycache"
+    keycache.mkdir(exist_ok=True)
+    monkeypatch.setenv("AUTONOMY_KEYCACHE_MOUNT", str(keycache))
+    monkeypatch.setattr(
+        "tools.network.storagekit.memory_cache.assert_memory_backed",
+        lambda *_args, **_kwargs: None,
+    )
 
 
 def test_fixture_founds_real_crypto_ledger_and_registry_rows(tmp_path, monkeypatch):
@@ -434,9 +463,10 @@ def test_fixture_founds_real_crypto_ledger_and_registry_rows(tmp_path, monkeypat
         "join_channel_token": "1" * 32,
         "invite_ref": founded["invite_ref"],
         "invite_expiry": founded["invite_expiry"],
-        "content_channel_token": "2" * 32,
-        "content_id": founded["content_id"],
-    })
+            "content_channel_token": "2" * 32,
+            "content_id": founded["content_id"],
+            "membership_checkpoint": founded["membership_checkpoint"],
+        })
     registry = RegistryStore(registry_db)
     try:
         assert registry.get_org(founded["org_uuid"]).root_pub == founded["root_pub"]

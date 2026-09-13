@@ -41,9 +41,9 @@ from .channel import (
     ChannelCrypto,
     HandshakeError,
     build_client_hello,
-    verify_server_hello,
+    verify_certificate_server_hello,
 )
-from .connector import echo_handler, serve_channel
+from .connector import echo_handler, serve_certificate_channel
 from .viewer import read_viewer_record
 from .peer import SESSION_HEX_LEN
 from .viewer import ViewerChannel
@@ -145,7 +145,7 @@ class DirectChannelServer:
 
         try:
             if self._channel_server is None:
-                await serve_channel(
+                await serve_certificate_channel(
                     self._key, self._cert, org=self._org,
                     token=data["session"], recv=recv, send=ws.send,
                     handler=self._handler,
@@ -190,8 +190,8 @@ async def direct_connect(
             if isinstance(server_hello, str):
                 raise HandshakeError("expected binary SERVER_HELLO")
             server_hello = read_viewer_record(server_hello)
-            server_eph, transcript_hash = verify_server_hello(
-                server_hello, root_pub=root_pub, link_pub=link_pub, org=org, token=session,
+            server_eph, transcript_hash = verify_certificate_server_hello(
+                server_hello, root_pub=root_pub, org=org, token=session,
                 client_eph=client_eph, now=now,
             )
             return ViewerChannel(ws, ChannelCrypto.client(eph_priv, server_eph,

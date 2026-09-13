@@ -1,0 +1,67 @@
+name: autonomy-onboarding
+
+x-dashboard: &dashboard
+  image: autonomy-node:onboarding
+  init: true
+  environment:
+    AUTONOMY_DATA_ROOT: /app/data
+    AUTONOMY_NETWORK_REGISTRY_URL: https://relay:8477
+    DASHBOARD_HOST: 0.0.0.0
+    DASHBOARD_PORT: '8080'
+    DASHBOARD_TLS: 'off'
+    SSL_CERT_FILE: /simulation-tls/server.crt
+    DASHBOARD_CSS_WATCH: 'off'
+    PYTHONDONTWRITEBYTECODE: '1'
+  depends_on:
+    relay:
+      condition: service_started
+  healthcheck:
+    test: [CMD, curl, -fs, 'http://localhost:8080/api/ping']
+    interval: 500ms
+    timeout: 2s
+    retries: 60
+
+services:
+  relay:
+    image: autonomy-node:onboarding
+    entrypoint: [python, -m, tools.network.registry]
+    command: [--db, /registry/registry.db, --host, 0.0.0.0, --port, '8477', --base-url, 'https://${SIM_RELAY_HOST:?Run workflow.mjs}:${SIM_RELAY_PORT:-19477}', --ssl-certfile, /simulation-tls/server.crt, --ssl-keyfile, /simulation-tls/server.key]
+    volumes:
+      - ${SIM_SOURCE_DIR:?Run workflow.mjs}:/app:ro
+      - registry:/registry
+      - ${SIM_TLS_DIR:?Run workflow.mjs to prepare TLS}:/simulation-tls:ro
+    ports: ['${SIM_RELAY_HOST}:${SIM_RELAY_PORT:-19477}:8477']
+    healthcheck:
+      test: [CMD, curl, -fs, --cacert, /simulation-tls/server.crt, 'https://localhost:8477/healthz']
+      interval: 500ms
+      timeout: 2s
+      retries: 60
+  alice:
+    <<: *dashboard
+    ports: ['127.0.0.1:${SIM_ALICE_PORT:-19880}:8080']
+    volumes:
+      - ${SIM_SOURCE_DIR}:/app:ro
+      - alice:/app/data
+      - alice-orgs:/app/orgs
+      - alice-keys:/run/autonomy-keycache
+      - ${SIM_TLS_DIR}/server.crt:/simulation-tls/server.crt:ro
+  bob:
+    <<: *dashboard
+    ports: ['127.0.0.1:${SIM_BOB_PORT:-19881}:8080']
+    volumes:
+      - ${SIM_SOURCE_DIR}:/app:ro
+      - bob:/app/data
+      - bob-orgs:/app/orgs
+      - bob-keys:/run/autonomy-keycache
+      - ${SIM_TLS_DIR}/server.crt:/simulation-tls/server.crt:ro
+
+volumes:
+  registry: {}
+  alice: {}
+  bob: {}
+  alice-orgs: {}
+  bob-orgs: {}
+  alice-keys:
+    driver_opts: {type: ramfs, device: ramfs, o: 'mode=0700'}
+  bob-keys:
+    driver_opts: {type: ramfs, device: ramfs, o: 'mode=0700'}

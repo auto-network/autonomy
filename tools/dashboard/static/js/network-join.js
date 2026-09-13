@@ -107,13 +107,15 @@
   // Public metadata supplies routing only. k and t are closure-held values and
   // are absent from this URL, request body, and the returned registry envelope.
   function fetchEnvelope(inputs) {
-    var base = new URL(inputs.relayHost);
-    var url = base.origin + "/v1/links/" + inputs.channelToken + "/envelope";
-    return fetch(url, { referrerPolicy: "no-referrer" }).then(function (r) {
+    return fetch("/api/network/invite/resolve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ relay_host: inputs.relayHost, channel_token: inputs.channelToken }),
+    }).then(function (r) {
       if (!r.ok) throw new Error("organization unreachable");
       return r.json();
     }).then(function (envelope) {
-      if (!envelope || envelope.target_type !== "org:join" ||
+      if (!envelope || !envelope.ok ||
           !/^[0-9a-f-]{32,36}$/.test(envelope.org || "") ||
           !/^[0-9a-f]{64}$/.test(envelope.invite_ref || "")) {
         throw new Error("organization unreachable");
@@ -140,7 +142,7 @@
         // A handoff link still navigates locally (its fragment survives the
         // hop); the org step then renders from the URL on reload.
         navigate: function (dest) { location.assign(dest); },
-        // A relay share link resolves routing metadata in this browser. The
+        // A relay share link resolves routing metadata through this dashboard. The
         // fragment values are held here and never sent with that request.
         resolve: function (parsed) {
           heldBearer = parsed.bearer;
@@ -301,6 +303,7 @@
       onProgress: function () {},
     }).then(function (result) {
       if (!result) return null;
+      if (result.state === "already-approved") return finalize(brandName, role);
       if (result.state === "admitted") { showAdmitted(brandName, role); return null; }
       if (result.state === "pending" || result.state === "pending-timeout") return null;
       reportTerminal(result);

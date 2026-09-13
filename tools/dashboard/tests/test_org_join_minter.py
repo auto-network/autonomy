@@ -301,7 +301,7 @@ def test_authorized_client_mints_exact_expiry_join_link_without_bearer_leak(
         )
         invitation = decode_invitation(invite_code_line.split(": ", 1)[1])
         assert invitation.org == ORG_UUID
-        assert invitation.root_pub == root.public_hex
+        assert invitation.channel_pub == CHANNEL_PUB
         assert invitation.invite_ref == invite.event_id
         assert invitation.channel_token == grant_token
         assert invitation.claim_token == INVITE_TOKEN

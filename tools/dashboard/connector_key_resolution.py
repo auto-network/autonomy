@@ -54,10 +54,9 @@ def _live(payload):
             and process_start(payload["pid"]) == payload["process_start"])
 
 
-def resolve(request):
-    """Authorize the active owning-org grant before opening its audited key."""
+def _authorized_grant(request):
+    """Authenticate the connector request and return its owned live grant."""
     from tools.dashboard.link_serving import check_grant
-    from tools.dashboard.link_channel_key import CHANNEL_KEY_TARGET_TYPES, channel_key_for
 
     credential_id = request.get("credential_id")
     auth = request.get("auth")
@@ -75,15 +74,32 @@ def resolve(request):
     grant = check_grant(token, org=org)
     if not grant:
         raise PermissionError("link unavailable")
+    return token, org, grant
+
+
+def resolve(request):
+    """Resolve one mandatory public-link key for an authenticated connector."""
+    from tools.dashboard.link_channel_key import CHANNEL_KEY_TARGET_TYPES, channel_key_for
+    from tools.dashboard.link_serving import check_grant
+
+    token, org, grant = _authorized_grant(request)
     if grant["target_type"] not in CHANNEL_KEY_TARGET_TYPES:
-        # Invitation protocols have their own fragment semantics.
-        return {"ok": True, "seed": None}
+        raise PermissionError("link unavailable")
     if not grant.get("channel_pub"):
         raise PermissionError("link has no channel key")
     key = channel_key_for(token, org)
     if key.public_hex != grant["channel_pub"] or check_grant(token, org=org) != grant:
         raise PermissionError("link unavailable")
     return {"ok": True, "seed": key.private_hex}
+
+
+def resolve_channel(request):
+    """Classify Fleet enrollment explicitly; all other channels require keys."""
+    token, org, grant = _authorized_grant(request)
+    if grant["target_type"] == "fleet:join":
+        return {"ok": True, "protocol": "fleet-enrollment"}
+    keyed = resolve(request)
+    return {**keyed, "protocol": "public-link"}
 
 
 def _read_message(stream):
@@ -100,7 +116,7 @@ class _Handler(socketserver.StreamRequestHandler):
     def handle(self):
         self.connection.settimeout(TIMEOUT)
         try:
-            response = resolve(_read_message(self.rfile))
+            response = resolve_channel(_read_message(self.rfile))
         except Exception:
             # Never echo requests, credentials or vault errors to the socket/log.
             response = {"ok": False, "error": "link key resolution refused"}
@@ -160,7 +176,7 @@ def read_bootstrap(fd):
 
 
 def client(bootstrap):
-    """Connector holds only its bearer; resolve fresh per OPEN, without a cache."""
+    """Resolve an explicit channel protocol fresh per OPEN, without a cache."""
     def fetch(token):
         from tools.network.idkit import KeyPair
         row = record(bootstrap["credential_id"])
@@ -174,7 +190,14 @@ def client(bootstrap):
                 response = _read_message(stream)
         if response.get("ok") is not True:
             raise PermissionError("link key resolution refused")
-        return KeyPair.from_private_hex(response["seed"]) if response.get("seed") else None
+        if response.get("protocol") == "fleet-enrollment":
+            return {"protocol": "fleet-enrollment"}
+        if response.get("protocol") != "public-link":
+            raise PermissionError("link key resolution refused")
+        return {
+            "protocol": "public-link",
+            "key": KeyPair.from_private_hex(response["seed"]),
+        }
 
     async def fetch_async(token):
         return await asyncio.to_thread(fetch, token)

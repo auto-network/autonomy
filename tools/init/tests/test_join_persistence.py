@@ -108,7 +108,6 @@ class DirectTransport:
                     reply = {
                         **reply,
                         "org": self.world.invitation.org,
-                        "root_pub": self.world.invitation.root_pub,
                     }
             elif payload["op"] == "submit":
                 reply = claim_service.submit(
@@ -200,9 +199,9 @@ class FoundedInvite:
 
         self.invitation = Invitation(
             org=self.org_id,
-            root_pub=self.root_key.public_hex,
             invite_ref=invite_ref,
             channel_token=channel_token,
+            channel_pub=KeyPair.generate().public_hex,
             claim_token=claim_token,
         )
         self.code = encode_invitation(self.invitation)

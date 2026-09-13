@@ -219,38 +219,27 @@ def _transcript_hash(org: str, token: str, client_eph: str, server_eph: str,
     ).digest()
 
 
-def build_server_hello(
-    signing_key: KeyPair,
-    cert: DelegationCert | None = None,
-    *,
-    org: str,
-    token: str,
-    client_eph: str,
-    link_key: KeyPair | None = None,
+def build_link_server_hello(
+    link_key: KeyPair, *, org: str, token: str, client_eph: str,
 ) -> Tuple[X25519PrivateKey, bytes, bytes]:
-    """Dashboard side: mint the server ephemeral key and the signed
-    SERVER_HELLO. Returns ``(eph_private, hello_bytes, transcript_hash)``.
-
-    Two mutually exclusive modes:
-
-    * PER-LINK (graph://807b4e11-3e9) — pass ``link_key``, the keypair whose
-      public half rides the link's URL fragment. The hello carries
-      ``link_sig`` and no certificate; the viewer verifies it against the
-      fragment key it already holds. This is the mechanism for member-served
-      content links: the org root is never involved.
-    * LEGACY — pass *signing_key* + *cert* (the ``tunnel:serve`` delegate and
-      its chain). Retained for the migration window; the viewer verifies the
-      chain to the org root.
-    """
+    """Build the only public-link hello: proof of the fragment key."""
     private_key = X25519PrivateKey.generate()
     server_eph = _eph_pub_hex(private_key)
-    if link_key is not None:
-        sig = link_key.sign_hex(_signed_payload(org, token, client_eph, server_eph))
-        hello = canonical_json(
-            {"v": HANDSHAKE_VERSION, "eph_pub": server_eph, "link_sig": sig}
-        )
-        return private_key, hello, _transcript_hash(
-            org, token, client_eph, server_eph, link_pub=link_key.public_hex)
+    sig = link_key.sign_hex(_signed_payload(org, token, client_eph, server_eph))
+    hello = canonical_json(
+        {"v": HANDSHAKE_VERSION, "eph_pub": server_eph, "link_sig": sig}
+    )
+    return private_key, hello, _transcript_hash(
+        org, token, client_eph, server_eph, link_pub=link_key.public_hex)
+
+
+def build_certificate_server_hello(
+    signing_key: KeyPair, cert: DelegationCert, *, org: str, token: str,
+    client_eph: str,
+) -> Tuple[X25519PrivateKey, bytes, bytes]:
+    """Build a certificate hello for explicitly typed non-link channels."""
+    private_key = X25519PrivateKey.generate()
+    server_eph = _eph_pub_hex(private_key)
     if cert is None or cert.child_pub != signing_key.public_hex:
         raise HandshakeError("cert does not delegate to the signing key")
     cert_wire = cert.to_json().decode("ascii")
@@ -267,62 +256,33 @@ def build_server_hello(
         org, token, client_eph, server_eph, cert_wire=cert_wire)
 
 
-def verify_server_hello(
-    raw,
-    *,
-    link_pub: str | None = None,
-    root_pub: str | None = None,
-    org: str,
-    token: str,
-    client_eph: str,
-    now: Optional[int] = None,
-) -> Tuple[str, bytes]:
-    """Viewer side: the I5 gate. The hello's shape selects the mode.
+def verify_link_server_hello(raw, *, link_pub: str, org: str, token: str,
+                             client_eph: str) -> Tuple[str, bytes]:
+    """Verify the exact public-link hello against its fragment key."""
+    data = _parse_hello(raw, frozenset({"v", "eph_pub", "link_sig"}),
+                        "SERVER_HELLO")
+    _decode_eph_pub(data.get("eph_pub"), "server eph_pub")
+    if not isinstance(data["link_sig"], str):
+        raise HandshakeError("SERVER_HELLO link_sig must be a string")
+    try:
+        verify_signature(
+            link_pub, data["link_sig"],
+            _signed_payload(org, token, client_eph, data["eph_pub"]))
+    except IdkitError as exc:
+        raise HandshakeError(f"{type(exc).__name__}: {exc}") from exc
+    return data["eph_pub"], _transcript_hash(
+        org, token, client_eph, data["eph_pub"], link_pub=link_pub)
 
-    PER-LINK (graph://807b4e11-3e9): a hello carrying ``link_sig`` is
-    verified against *link_pub* — the key the viewer decoded from its link's
-    URL fragment. No certificate, no org root, no registry trust: the server
-    authenticates by proving possession of the link's private key, which only
-    an authorized org member holds. *link_pub* is REQUIRED for this shape and
-    a hello of this shape is refused when it is absent (fail closed — a viewer
-    that got no fragment cannot verify).
 
-    LEGACY: a hello carrying ``cert`` is verified by chaining to *root_pub*
-    (the pin from the registry envelope) with scope ``tunnel:serve``, then the
-    signature against the chain leaf. Retained for the migration window.
-
-    Raises :class:`HandshakeError` on any failure. Returns
-    ``(server_eph_hex, transcript_hash)``.
-    """
-    if not isinstance(raw, (bytes, bytearray, str)):
-        raise HandshakeError("SERVER_HELLO must be bytes or str")
-    peek = _parse_hello(raw, None, "SERVER_HELLO")
-    _decode_eph_pub(peek.get("eph_pub"), "server eph_pub")
-
-    if "link_sig" in peek:
-        data = _parse_hello(raw, frozenset({"v", "eph_pub", "link_sig"}),
-                            "SERVER_HELLO")
-        if not isinstance(data["link_sig"], str):
-            raise HandshakeError("SERVER_HELLO link_sig must be a string")
-        if not link_pub:
-            raise HandshakeError(
-                "this link uses per-link serving but no fragment key was "
-                "supplied — the link is missing its '#' fragment; re-share it")
-        try:
-            verify_signature(
-                link_pub, data["link_sig"],
-                _signed_payload(org, token, client_eph, data["eph_pub"]))
-        except IdkitError as exc:
-            raise HandshakeError(f"{type(exc).__name__}: {exc}") from exc
-        return data["eph_pub"], _transcript_hash(
-            org, token, client_eph, data["eph_pub"], link_pub=link_pub)
-
+def verify_certificate_server_hello(raw, *, root_pub: str, org: str,
+                                    token: str, client_eph: str,
+                                    now: Optional[int] = None) -> Tuple[str, bytes]:
+    """Verify the exact certificate hello for a typed non-link channel."""
     data = _parse_hello(raw, frozenset({"v", "eph_pub", "cert", "sig"}),
                         "SERVER_HELLO")
+    _decode_eph_pub(data.get("eph_pub"), "server eph_pub")
     if not isinstance(data["cert"], str) or not isinstance(data["sig"], str):
         raise HandshakeError("SERVER_HELLO cert and sig must be strings")
-    if not root_pub:
-        raise HandshakeError("a legacy certificate hello needs the org root pin")
     try:
         cert = DelegationCert.from_json(data["cert"])
         result = verify_chain(
