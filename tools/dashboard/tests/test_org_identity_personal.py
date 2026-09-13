@@ -1,7 +1,7 @@
 """Personal-profile projection into ``resolve_org_identity("personal")``.
 
 auto-vlt7j.3: the shared org-identity resolver overlays the effective Personal
-profile (display name, explicit-or-derived initials, bounded compact avatar)
+profile (display name, explicit-or-derived initials, photo attachment URL)
 onto the ``personal`` slug ONLY, so every session/org consumer that already
 reads ``resolve_org_identity`` / ``resolve_session_org`` shows the person rather
 than generic ``Personal`` / ``P`` branding — with no consumer-specific code.
@@ -41,8 +41,10 @@ from tools.network.idkit import KeyPair
 
 ORG = "idorg"
 
-_AVATAR_A = "data:image/webp;base64," + base64.b64encode(b"A" * 40).decode()
-_AVATAR_B = "data:image/webp;base64," + base64.b64encode(b"B" * 40).decode()
+_ATT_A = "aaaaaaaa-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
+_ATT_B = "bbbbbbbb-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
+_AVATAR_A = f"/api/attachment/{_ATT_A}?org=personal"
+_AVATAR_B = f"/api/attachment/{_ATT_B}?org=personal"
 
 
 @pytest.fixture
@@ -147,12 +149,12 @@ def test_explicit_initials_override(env, root):
 def test_stored_profile_with_avatar(env, root):
     _store_identity(env, root, name="Jeremy Spilman")
     env.patch("/api/identity/profile", json={"display_name": "Jer"})
-    personal_profile.set_avatar("0192a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b", _AVATAR_A)
+    personal_profile.set_avatar(_ATT_A)
     identity = _personal()
     assert identity["name"] == "Jer"
-    # A valid compact avatar replaces BOTH favicon and icon_data_uri.
+    # The photo is the attachment: favicon carries its URL, no inline icon.
     assert identity["favicon"] == _AVATAR_A
-    assert identity["icon_data_uri"] == _AVATAR_A
+    assert identity["icon_data_uri"] is None
 
 
 # ── freshness on first read after mutation (no restart) ────────
@@ -181,11 +183,11 @@ def test_initials_change_is_fresh_on_next_read(env, root):
 
 def test_avatar_replace_and_removal_are_fresh(env, root):
     _store_identity(env, root, name="Jeremy Spilman")
-    personal_profile.set_avatar("aaaaaaaa-c3d4-7e5f-8a9b-0c1d2e3f4a5b", _AVATAR_A)
+    personal_profile.set_avatar(_ATT_A)
     assert _personal()["favicon"] == _AVATAR_A
     # Replace.
-    personal_profile.set_avatar("bbbbbbbb-c3d4-7e5f-8a9b-0c1d2e3f4a5b", _AVATAR_B)
-    assert _personal()["icon_data_uri"] == _AVATAR_B
+    personal_profile.set_avatar(_ATT_B)
+    assert _personal()["favicon"] == _AVATAR_B
     # Remove → back to initials, no branding left behind.
     personal_profile.clear_avatar()
     identity = _personal()

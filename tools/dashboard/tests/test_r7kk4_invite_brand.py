@@ -221,7 +221,7 @@ def test_avatar_from_owned_png(monkeypatch, tmp_path):
     "https://cdn.example/a.png",                 # absolute URL
     "/uploads/a.png",                            # path
     "data:image/gif;base64,AAAA",                # inline, but not a raster we serve
-    "data:image/png;base64," + "A" * (64 * 1024 * 4 // 3 + 65),  # inline, over the bound
+    "data:image/png;base64," + "A" * (link_serving._SPONSOR_AVATAR_MAX_BYTES * 4 // 3 + 65),  # inline, over the bound
     "", None, 42,
 ])
 def test_avatar_rejects_non_attachment_refs(monkeypatch, ref):
@@ -287,8 +287,15 @@ def test_sponsor_profile_falls_back_to_serving_operators_personal_profile(monkey
     _patch_owned(monkeypatch, {"autonomy.org.member-profile": _members()})
     _patch_local_profile(monkeypatch, SPONSOR, {
         "display_name": " Alice ", "biography": "Organization founder",
-        "avatar_icon_data_uri": WEBP_ICON,
+        "avatar_attachment_id": "a0dfac16-c45e-4b87-90c8-af6400991dbd",
     })
+    # The Personal photo is an attachment in the personal store; the reply
+    # carries its bytes inline for the not-yet-member joiner.
+    monkeypatch.setattr(
+        link_serving, "_sponsor_avatar_data_uri",
+        lambda org, ref: WEBP_ICON if (org, ref) == (
+            "personal", "a0dfac16-c45e-4b87-90c8-af6400991dbd") else None,
+    )
     out = link_serving._sponsor_profile_for_invite("anchore", SPONSOR, GENESIS)
     assert out == {
         "sponsor_pub": SPONSOR, "sponsor_name": "Alice",

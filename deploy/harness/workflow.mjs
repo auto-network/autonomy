@@ -417,11 +417,23 @@ try{
     withStep('bob','save bob-charter-synced',()=>save('bob','bob-charter-synced',browser('bob','snapshot','-i')));
     // The bootstrap seeds names only; Alice's photo must reach Bob's listing
     // through the same organization sync the charter just proved (operator
-    // ruling 2026-09-13: no photos in the install material).
+    // ruling 2026-09-13: no photos in the install material). The photo is an
+    // attachment in the org store: the row replicates, the bytes follow by
+    // content hash, and Bob's dashboard serves them at /api/attachment/<id>.
+    // The proof is the image LOADING (naturalWidth > 0), not the tag existing.
     withStep('bob','reopen member directory after sync',()=>action('bob','[data-testid="orgset-rail-membership"]',{},'[data-testid="membership-members"]','.mem-error'));
-    withStep('bob','observe alice photo synced',()=>waitFor('bob','[data-member] .mem-avatar img[src^="data:image/"]','.mem-error'));
+    withStep('bob','observe alice photo synced',()=>waitFor('bob','[data-member] .mem-avatar img[src^="/api/attachment/"]','.mem-error'));
+    withStep('bob','observe alice photo served',()=>{
+      const deadline=Date.now()+60000;
+      for(;;){
+        const loaded=js('bob',`Array.from(document.querySelectorAll('[data-member] .mem-avatar img[src^="/api/attachment/"]')).filter(i=>i.complete&&i.naturalWidth>0).length`);
+        if(Number(loaded)>0)return;
+        if(Date.now()>deadline)throw new Error('synced member photo never loaded from /api/attachment');
+        spawnSync('sleep',['1']);
+      }
+    });
     evidence.bobMembersAfterSync=memberRows('bob');
-    evidence.bobPhotosAfterSync=js('bob',`document.querySelectorAll('[data-member] .mem-avatar img[src^="data:image/"]').length`);
+    evidence.bobPhotosAfterSync=js('bob',`Array.from(document.querySelectorAll('[data-member] .mem-avatar img[src^="/api/attachment/"]')).filter(i=>i.complete&&i.naturalWidth>0).length`);
     withStep('bob','save bob-member-directory-synced',()=>save('bob','bob-member-directory-synced',browser('bob','snapshot','-i')));
     evidence.status='passed';
   }

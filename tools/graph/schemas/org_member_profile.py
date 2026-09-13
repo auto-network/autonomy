@@ -68,10 +68,12 @@ class OrgMemberProfileV1(SettingSchema):
                     "what screens show beside their acts")
     avatar: str = field(
         default="",
-        description="Optional icon: a bounded inline data:image/* URI (the "
-                    "64x64 profile icon, so the row replicates with its "
-                    "content), a graph attachment id (served at "
-                    "/api/attachment/<id>) or an absolute URL")
+        description="Optional photo: the id of the canonical 512x512 WebP as an "
+                    "attachment in THIS organization's store (served at "
+                    "/api/attachment/<id>?org=<slug>; org sync replicates the "
+                    "row and moves the bytes by content hash). Legacy rows may "
+                    "still carry an inline data: URI or an absolute URL, which "
+                    "readers tolerate and writers no longer produce.")
     color: str = field(
         default="",
         description="Optional CSS color hint for this member's accents")

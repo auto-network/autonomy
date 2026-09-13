@@ -179,7 +179,6 @@ def get_effective_profile() -> dict | None:
             "biography": p.get("biography", "") or "",
             "initials": p.get("initials"),
             "avatar_attachment_id": p.get("avatar_attachment_id"),
-            "avatar_icon_data_uri": p.get("avatar_icon_data_uri"),
             "updated_at": p.get("updated_at"),
             "persisted": True,
         }
@@ -190,10 +189,18 @@ def get_effective_profile() -> dict | None:
         "biography": "",
         "initials": None,
         "avatar_attachment_id": None,
-        "avatar_icon_data_uri": None,
         "updated_at": None,
         "persisted": False,
     }
+
+
+def avatar_url(attachment_id: Any) -> str | None:
+    """The same-origin URL every screen renders the Personal photo from: the
+    canonical 512x512 WebP attachment in the personal store, named
+    explicitly so the read never follows a request's organization scope."""
+    if not isinstance(attachment_id, str) or not attachment_id:
+        return None
+    return f"/api/attachment/{attachment_id}?org=personal"
 
 
 def serialize_profile(effective: dict | None) -> dict | None:
@@ -213,7 +220,7 @@ def serialize_profile(effective: dict | None) -> dict | None:
         "initials": effective_initials(display_name, explicit),
         "initials_override": override,
         "avatar_attachment_id": effective.get("avatar_attachment_id"),
-        "avatar_icon_data_uri": effective.get("avatar_icon_data_uri"),
+        "avatar_url": avatar_url(effective.get("avatar_attachment_id")),
         "updated_at": effective.get("updated_at"),
         "persisted": bool(effective.get("persisted")),
     }
@@ -240,7 +247,15 @@ def _persist_profile(base: dict) -> dict | None:
     and no process restart is required (auto-vlt7j.3). Returns the freshly
     serialized effective profile.
     """
+    base = dict(base)
+    base.pop("avatar_icon_data_uri", None)  # revision 1 only; never rewritten
     with settings_ops.identity_write_context():
+        # A row still stored at an older revision is rewritten in place first
+        # (upconverted), so the upsert below updates THAT row rather than
+        # inserting a second base under the same key.
+        settings_ops.migrate_setting_revisions(
+            USER_PROFILE_SET_ID, USER_PROFILE_REVISION, org=None,
+        )
         settings_ops.upsert_by_key(
             USER_PROFILE_SET_ID, USER_PROFILE_REVISION,
             USER_PROFILE_CANONICAL_LABEL, base, org=None,
@@ -336,23 +351,22 @@ def update_profile(fields: Any) -> dict | None:
 
 # ── avatar (server-owned references) ──────────────────────────
 #
-# The two avatar references (``avatar_attachment_id`` + ``avatar_icon_data_uri``)
-# are NOT part of :data:`PATCH_FIELDS`; a text PATCH can neither set nor erase
-# them. They are set only here, by the avatar routes, after the shared
-# :mod:`profile_image` processor has produced the canonical WebP (stored as a
-# Personal attachment) and the bounded compact data URI. Both operations
-# require the canonical personal root, preserve every text field, stamp
-# ``updated_at``, and write through the same protected
-# :func:`settings_ops.identity_write_context` seam pinned to ``org=None`` — so
-# a caller-org header can never move the Personal row into an org database.
+# The avatar reference (``avatar_attachment_id``) is NOT part of
+# :data:`PATCH_FIELDS`; a text PATCH can neither set nor erase it. It is set
+# only here, by the avatar routes, after the shared :mod:`profile_image`
+# processor has produced the canonical WebP and it has been stored as a
+# Personal attachment. Both operations require the canonical personal root,
+# preserve every text field, stamp ``updated_at``, and write through the same
+# protected :func:`settings_ops.identity_write_context` seam pinned to
+# ``org=None`` — so a caller-org header can never move the Personal row into
+# an org database.
 
 
-def set_avatar(attachment_id: str, icon_data_uri: str) -> dict | None:
-    """Activate the two server-owned avatar references on the Personal profile.
+def set_avatar(attachment_id: str) -> dict | None:
+    """Activate the server-owned avatar reference on the Personal profile.
 
-    ``attachment_id`` is the canonical 512x512 WebP's Personal attachment id and
-    ``icon_data_uri`` the bounded compact 64x64 WebP ``data:`` URI. Every text
-    field already stored is preserved; only the two avatar fields (and
+    ``attachment_id`` is the canonical 512x512 WebP's Personal attachment id.
+    Every text field already stored is preserved; only the avatar field (and
     ``updated_at``) change. When no profile row exists yet the row is created
     from the personal-root baseline, so a person can set a photo before entering
     any text. The write is the LAST step of an upload — it activates a reference
@@ -373,14 +387,13 @@ def set_avatar(attachment_id: str, icon_data_uri: str) -> dict | None:
         base = {"display_name": (identity.payload.get("display_name") or "").strip()}
 
     base["avatar_attachment_id"] = attachment_id
-    base["avatar_icon_data_uri"] = icon_data_uri
     base["updated_at"] = _now_iso()
 
     return _persist_profile(base)
 
 
 def clear_avatar() -> dict | None:
-    """Drop both avatar references, returning to the initials/color fallback.
+    """Drop the avatar reference, returning to the initials/color fallback.
 
     Idempotent: with a canonical root but no profile row, or a row that already
     carries no avatar, nothing is written and the current effective profile is
@@ -407,7 +420,6 @@ def clear_avatar() -> dict | None:
 
     base = dict(payload)
     base.pop("avatar_attachment_id", None)
-    base.pop("avatar_icon_data_uri", None)
     base["updated_at"] = _now_iso()
 
     return _persist_profile(base)

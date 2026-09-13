@@ -63,7 +63,7 @@ def install(slug: str, genesis_id: str, *, member_profiles: Any,
         row = {
             "display_name": name,
             "byline": member_directory._clean(entry.get("byline"), member_directory.BYLINE_MAX),
-            "avatar": member_directory.bounded_avatar(entry.get("avatar")),
+            "avatar": member_directory.avatar_ref(entry.get("avatar")),
             "color": member_directory._clean(entry.get("color"), 32),
         }
         try:

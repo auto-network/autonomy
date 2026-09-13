@@ -1,4 +1,4 @@
-"""``autonomy.user#1`` — the person's one mutable Personal profile.
+"""``autonomy.user#2`` — the person's one mutable Personal profile.
 
 The single Personal presentation record a person authors for themselves —
 the source the Profile Settings **Personal** screen edits and the source the
@@ -25,8 +25,15 @@ SCOPE — personal: always the operator's own store, home ``personal``, banded
 set is added to ``settings_ops.PROTECTED_IDENTITY_SET_IDS`` so a generic
 Settings write is refused; only the identity/profile routes carry the
 capability. Text fields (display name, biography, initials override) are
-mutated by the profile routes; the two avatar references are server-owned and
+mutated by the profile routes; the avatar reference is server-owned and
 written only by the follow-on avatar routes through the same protected seam.
+
+REVISION 2 (2026-09-13, operator ruling): the photo is the 512x512 WebP
+attachment and nothing else. Revision 1 also carried ``avatar_icon_data_uri``,
+a 64x64 WebP inlined on the row on the mistaken premise that attachments do
+not cross machines; they do (fleet sync replicates the attachment row and
+moves the bytes by content hash). Every consumer renders the attachment
+through ``/api/attachment/<id>``; the upconverter drops the inline icon.
 """
 
 from __future__ import annotations
@@ -49,7 +56,7 @@ from .registry import (
 
 
 USER_PROFILE_SET_ID = "autonomy.user"
-USER_PROFILE_REVISION = 1
+USER_PROFILE_REVISION = 2
 
 #: The one label the Personal profile is ever written under — the same
 #: canonical label the personal root uses (``identity_routes`` PERSONAL_
@@ -61,11 +68,8 @@ DISPLAY_NAME_MAX = 120
 BIOGRAPHY_MAX = 500
 INITIALS_MAX = 4
 
-#: The compact avatar derivative is a bounded 64x64 WebP encoded as a
-#: ``data:image/webp;base64,...`` URI — the exact shape the org icon path
-#: writes (see :data:`org.ORG_ICON_DATA_URI_MAX_CHARS`). Kept as its own
-#: constant so the Personal contract does not depend on the org module, but
-#: deliberately the same bound: both are the portable compact tile.
+#: Revision 1 only: the inline 64x64 icon's shape, kept so frozen rev-1 rows
+#: still validate and upconvert. Nothing at revision 2 writes or reads it.
 AVATAR_ICON_DATA_URI_PREFIX = "data:image/webp;base64,"
 AVATAR_ICON_DATA_URI_MAX_CHARS = 24_000
 
@@ -76,8 +80,8 @@ SYNOPSIS = {
     "summary": (
         "The person's one mutable Personal profile (autonomy.user): trimmed "
         "display name, optional biography, optional explicit initials "
-        "override, server-owned avatar references (attachment id + bounded "
-        "compact data: URI), and an update timestamp. Personal-scoped and "
+        "override, the server-owned avatar attachment id (the 512x512 WebP, "
+        "served through /api/attachment), and an update timestamp. Personal-scoped and "
         "singleton — distinct from the immutable personal root "
         "(autonomy.identity.personal), org branding (autonomy.org) and "
         "org-member presentation (autonomy.org.member-profile)."
@@ -121,20 +125,10 @@ def _require_trimmed_str(
     return value
 
 
-@home("personal")
-@publication_band(max="raw")
-@singleton(key="default")
-class UserProfileV1(SettingSchema):
-    """The person's one mutable Personal profile.
+class _UserProfileFields(SettingSchema):
+    """The fields every revision shares; concrete revisions register below."""
 
-    Key: the singleton ``default`` label. Payload: the mutable presentation
-    a person authors for themselves. ``display_name`` is required; the
-    remaining text fields are optional; the two avatar references are optional
-    and server-owned; ``updated_at`` is required and stamped on every write.
-    """
-
-    set_id = USER_PROFILE_SET_ID
-    schema_revision = USER_PROFILE_REVISION
+    internal = True
 
     display_name: str = field(
         required=True,
@@ -162,14 +156,8 @@ class UserProfileV1(SettingSchema):
         required=False,
         description=(
             "UUID of the canonical 512x512 WebP in the personal attachment "
-            "store; server-owned, written only by the avatar routes."
-        ),
-    )
-    avatar_icon_data_uri: str = field(
-        required=False,
-        description=(
-            "Bounded 64x64 WebP data: URI — the portable compact avatar shown "
-            "inline; server-owned, written only by the avatar routes."
+            "store, served at /api/attachment/<id>?org=personal; server-owned, "
+            "written only by the avatar routes."
         ),
     )
     updated_at: str = field(
@@ -177,17 +165,19 @@ class UserProfileV1(SettingSchema):
         description="ISO-8601 UTC timestamp of the last profile write.",
     )
 
+    #: The payload keys a revision accepts; a revision extends this.
+    _allowed_fields: frozenset[str] = frozenset({
+        "display_name", "biography", "initials",
+        "avatar_attachment_id", "updated_at",
+    })
+
     @classmethod
     def validate(cls, payload: Any) -> None:
         super().validate(payload)
         if not isinstance(payload, dict):
             return
 
-        allowed = {
-            "display_name", "biography", "initials",
-            "avatar_attachment_id", "avatar_icon_data_uri", "updated_at",
-        }
-        extra = set(payload) - allowed
+        extra = set(payload) - cls._allowed_fields
         if extra:
             raise SchemaValidationError(
                 f"{cls.__name__}: unknown field(s): {sorted(extra)}"
@@ -219,9 +209,6 @@ class UserProfileV1(SettingSchema):
 
         if "avatar_attachment_id" in payload:
             cls._validate_attachment_id(payload["avatar_attachment_id"])
-
-        if "avatar_icon_data_uri" in payload:
-            cls._validate_icon_data_uri(payload["avatar_icon_data_uri"])
 
         if "updated_at" not in payload:
             raise SchemaValidationError(
@@ -293,3 +280,54 @@ class UserProfileV1(SettingSchema):
                 f"{cls.__name__}: 'updated_at' must be an ISO-8601 UTC "
                 f"timestamp like 2026-07-17T00:00:00Z, got {value!r}"
             ) from exc
+
+
+@home("personal")
+@publication_band(max="raw")
+@singleton(key="default")
+class UserProfileV1(_UserProfileFields):
+    """Revision 1, frozen: the fields above plus the inline 64x64 icon."""
+
+    internal = False
+    set_id = USER_PROFILE_SET_ID
+    schema_revision = 1
+
+    avatar_icon_data_uri: str = field(
+        required=False,
+        description=(
+            "Revision 1 only: a bounded 64x64 WebP data: URI. Dropped at "
+            "revision 2; the attachment is the photo."
+        ),
+    )
+
+    _allowed_fields = _UserProfileFields._allowed_fields | {"avatar_icon_data_uri"}
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        super().validate(payload)
+        if isinstance(payload, dict) and "avatar_icon_data_uri" in payload:
+            cls._validate_icon_data_uri(payload["avatar_icon_data_uri"])
+
+
+@home("personal")
+@publication_band(max="raw")
+@singleton(key="default")
+class UserProfileV2(_UserProfileFields):
+    """The person's one mutable Personal profile.
+
+    Key: the singleton ``default`` label. Payload: the mutable presentation
+    a person authors for themselves. ``display_name`` is required; the
+    remaining text fields are optional; ``avatar_attachment_id`` is optional
+    and server-owned; ``updated_at`` is required and stamped on every write.
+    """
+
+    internal = False
+    set_id = USER_PROFILE_SET_ID
+    schema_revision = USER_PROFILE_REVISION
+
+    @classmethod
+    def upconvert_from_prev(cls, payload: dict) -> dict:
+        # The inline icon is gone; the attachment reference is the photo.
+        out = dict(payload)
+        out.pop("avatar_icon_data_uri", None)
+        return out

@@ -54,10 +54,15 @@
     return 'Expires in ' + hours + (hours === 1 ? ' hour' : ' hours');
   }
   function initial(name) { return (name || '?').trim().charAt(0).toUpperCase(); }
+  // The organization whose directory is on screen: member photos are
+  // attachments in ITS store (replicated to every member by org sync), so
+  // the URL names that store explicitly rather than relying on request scope.
+  var currentSlug = '';
   function avatarUrl(avatar) {
     if (!avatar) return '';
     if (/^https?:/.test(avatar) || /^data:image\//.test(avatar)) return avatar;
-    return '/api/attachment/' + encodeURIComponent(avatar);
+    return '/api/attachment/' + encodeURIComponent(avatar)
+      + (currentSlug ? '?org=' + encodeURIComponent(currentSlug) : '');
   }
   //: Display overrides for role names whose ledger form is not simply the
   //: capitalized word. A role NAME is a lowercase ledger fact
@@ -107,6 +112,7 @@
   }
 
   function Controller(slug, root, view) {
+    currentSlug = slug;
     this.slug = slug;
     this.root = root;
     this.view = view;

@@ -16,14 +16,21 @@ graph://4f9e881c-a9 §7 and §10, punch list item 31):
   install seed (tools/dashboard/org_install_seed), never this member's
   authored write.
 
-Rows are org-homed and replicate with the organization, so they carry
-CONTENT (the small icon as a data: URI), never a machine-local attachment
-path. The Personal profile is a snapshot here, not a live alias: renaming
-Personal later does not rewrite an organization's member row.
+Rows are org-homed and replicate with the organization. The photo is the
+``avatar`` field: the id of the canonical 512x512 WebP as an attachment IN
+THE ORGANIZATION'S OWN STORE (copied there from the Personal attachment by
+:func:`org_avatar_attachment`), never a machine-local path and never an
+inline icon. Organization sync replicates the attachment row and moves the
+bytes by content hash, so every member renders the same image through
+``/api/attachment/<id>?org=<slug>``. The Personal profile is a snapshot here,
+not a live alias: renaming Personal later does not rewrite an organization's
+member row.
 """
 
 from __future__ import annotations
 
+import os
+import uuid
 from typing import Any
 
 from tools.graph import settings_ops
@@ -34,27 +41,65 @@ from tools.graph.schemas.org_member_profile import (
 
 NAME_MAX = 200
 BYLINE_MAX = 300
-#: The 64x64 icon data URI the profile processor emits is at most 24,000
-#: characters; anything larger is not an icon and is dropped.
-AVATAR_DATA_URI_MAX = 24_000
-_DATA_URI_PREFIXES = ("data:image/webp;base64,", "data:image/png;base64,",
-                      "data:image/jpeg;base64,")
 
 
 def _clean(value: Any, limit: int) -> str:
     return value.strip()[:limit] if isinstance(value, str) else ""
 
 
-def bounded_avatar(value: Any) -> str:
-    """A row-safe avatar: a bounded inline image data URI, else ''."""
-    if not isinstance(value, str) or len(value) > AVATAR_DATA_URI_MAX:
+def avatar_ref(value: Any) -> str:
+    """A row-safe avatar: the canonical lowercase UUID of an attachment in the
+    organization's store, else ''. Nothing else is a photo here — not a data
+    URI, not a URL, not a path."""
+    if not isinstance(value, str) or not value:
         return ""
-    return value if value.startswith(_DATA_URI_PREFIXES) else ""
+    try:
+        return value if str(uuid.UUID(value)) == value else ""
+    except (ValueError, AttributeError, TypeError):
+        return ""
 
 
-def presentation_from_personal_profile() -> dict | None:
-    """This machine's operator as they present themselves: the Personal
-    profile's name, biography and icon. None with no personal identity."""
+def org_avatar_attachment(slug: str, personal_attachment_id: Any) -> str:
+    """Copy the operator's Personal photo into org *slug*'s attachment store
+    and return the org attachment id, or '' when there is no photo or the
+    copy fails. Content-addressed on both sides, so a repeat is a no-op that
+    returns the same id."""
+    import tempfile
+
+    from tools.graph import ops as graph_ops
+
+    if not isinstance(personal_attachment_id, str) or not personal_attachment_id:
+        return ""
+    try:
+        source = graph_ops.get_attachment(personal_attachment_id, org="personal", peers=[])
+        if not isinstance(source, dict):
+            return ""
+        data = graph_ops.download_attachment(personal_attachment_id, org="personal", peers=[])
+        suffix = os.path.splitext(str(source.get("filename") or ""))[1] or ".webp"
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(data)
+                tmp_path = tmp.name
+            att = graph_ops.attach_file(
+                tmp_path, org=slug, alt_text="Member profile photo",
+                original_filename=str(source.get("filename") or f"profile-avatar{suffix}"),
+            )
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+        return avatar_ref(att.get("id"))
+    except Exception:
+        return ""
+
+
+def presentation_from_personal_profile(slug: str) -> dict | None:
+    """This machine's operator as they present themselves in org *slug*: the
+    Personal profile's name and biography, and their photo copied into the
+    org's attachment store. None with no personal identity."""
     from tools.dashboard import personal_profile
 
     profile = personal_profile.get_effective_profile()
@@ -66,7 +111,7 @@ def presentation_from_personal_profile() -> dict | None:
     return {
         "display_name": name,
         "byline": _clean(profile.get("biography"), BYLINE_MAX),
-        "avatar": bounded_avatar(profile.get("avatar_icon_data_uri")),
+        "avatar": org_avatar_attachment(slug, profile.get("avatar_attachment_id")),
         "color": "",
     }
 
@@ -90,7 +135,7 @@ def write_row(slug: str, persona_pub: str, presentation: dict) -> None:
     payload = {
         "display_name": _clean(presentation.get("display_name"), NAME_MAX),
         "byline": _clean(presentation.get("byline"), BYLINE_MAX),
-        "avatar": bounded_avatar(presentation.get("avatar")),
+        "avatar": avatar_ref(presentation.get("avatar")),
         "color": _clean(presentation.get("color"), 32),
     }
     if not payload["display_name"]:
@@ -102,7 +147,7 @@ def write_row(slug: str, persona_pub: str, presentation: dict) -> None:
 
 
 def write_founder(slug: str, persona_pub: str) -> bool:
-    presentation = presentation_from_personal_profile()
+    presentation = presentation_from_personal_profile(slug)
     if presentation is None:
         return False
     write_row(slug, persona_pub, presentation)

@@ -107,8 +107,12 @@
     $(prefix + "-byline").textContent = typeof profile.byline === "string"
       ? profile.byline.slice(0, 300) : (profile.biography || "");
     avatar.replaceChildren();
+    // The joiner's own photo is their Personal attachment (same-origin URL);
+    // the inviter's rides the join context inline, because the joiner cannot
+    // fetch an organization attachment before they are a member.
     var image = typeof profile.avatar === "string" &&
-      /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(profile.avatar)
+      (/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(profile.avatar) ||
+        /^\/api\/attachment\/[0-9a-f-]+(\?org=[A-Za-z0-9_-]+)?$/.test(profile.avatar))
       ? profile.avatar : null;
     if (image) {
       var img = document.createElement("img");
@@ -126,7 +130,7 @@
     renderProfile("joining", {
       display_name: joiningProfile.display_name,
       byline: joiningProfile.biography,
-      avatar: joiningProfile.avatar_icon_data_uri,
+      avatar: joiningProfile.avatar_url,
       initials: joiningProfile.initials,
     });
     if (!presentation || !presentation.sponsorName) {

@@ -848,8 +848,7 @@ def _derive_attachment_disk_path(att: dict) -> str | None:
     h = att.get("hash")
     if not h:
         return att.get("file_path")
-    root = attachment_store_root(att.get("org") or None)
-    shard = root / h[:2]
+    org = att.get("org") or None
     # The extension is not in the hash; it lives in the frame-independent
     # basename. Prefer the stored path's suffix, then the original filename's,
     # so this keeps working if the file_path column is later dropped.
@@ -857,16 +856,27 @@ def _derive_attachment_disk_path(att: dict) -> str | None:
         Path(str(att.get("file_path") or "")).suffix
         or Path(str(att.get("filename") or "")).suffix
     )
-    candidate = shard / f"{h}{ext}"
-    if candidate.exists():
-        return str(candidate)
-    # Content-addressed fallback: find the blob by hash so an extension that
-    # does not match (or a dropped file_path column) never hides a present file.
-    try:
-        for match in sorted(shard.glob(f"{h}*")):
-            return str(match)
-    except OSError:
-        pass
+    # Two content-addressed roots hold bytes on this machine, both sharded
+    # ``<root>/<hash[:2]>/<hash><ext>``: the upload store this process writes
+    # (attach_file) and the fleet blob store where bytes that ARRIVED BY SYNC
+    # are installed (tools/network/fleet_sync/materialize.production_blob_store).
+    # An attachment row replicated from another member's machine has its file
+    # only in the second, so a read that knew only the first served 404s for
+    # every synced attachment.
+    roots = (attachment_store_root(org), fleet_blob_store_root(org))
+    candidate = roots[0] / h[:2] / f"{h}{ext}"
+    for root in roots:
+        shard = root / h[:2]
+        exact = shard / f"{h}{ext}"
+        if exact.exists():
+            return str(exact)
+        # Extension mismatch (or a dropped file_path column) never hides a
+        # present file: find the blob by hash.
+        try:
+            for match in sorted(shard.glob(f"{h}*")):
+                return str(match)
+        except OSError:
+            pass
     return str(candidate)
 
 
@@ -2791,6 +2801,14 @@ def _note_attachment_slots(
         if len(slots) == len(raw_slots):
             return slots
     return []
+
+
+def fleet_blob_store_root(org: str | None = None) -> "Path":
+    """Where fleet sync installs attachment bytes received from other machines
+    for *org*'s store: ``<db dir>/uploads/fleet/<hash[:2]>/`` (the layout
+    :func:`tools.network.fleet_sync.materialize.production_blob_store` writes).
+    """
+    return Path(_db_path(org)).parent / "uploads" / "fleet"
 
 
 def attachment_store_root(org: str | None = None) -> "Path":

@@ -605,11 +605,12 @@ async def patch_profile(request: Request) -> JSONResponse:
 # adapters around the shared :mod:`tools.dashboard.profile_image` seam — the
 # same processor and error vocabulary the organization-icon route uses, applied
 # to Personal scope. The browser supplies an explicit normalized crop; the
-# processor emits a canonical 512x512 WebP plus a bounded 64x64 compact WebP;
-# ONLY the canonical bytes are stored (as a Personal attachment) and only its id
-# plus the compact ``data:`` URI enter ``autonomy.user#1``. Originals, EXIF,
-# filenames, paths, and the upload MIME are discarded. Decided by
-# ``graph://4f9e881c-a9`` §7 and comment ``8cc8b2ed-5ae``.
+# processor emits a canonical 512x512 WebP; ONLY those bytes are stored (as a
+# Personal attachment) and only its id enters ``autonomy.user#2``. Every screen
+# renders the photo from ``/api/attachment/<id>?org=personal``; there is no
+# inline icon (operator ruling 2026-09-13: the photo is the attachment).
+# Originals, EXIF, filenames, paths, and the upload MIME are discarded. Decided
+# by ``graph://4f9e881c-a9`` §7 and comment ``8cc8b2ed-5ae``.
 #
 # The attachment is pinned to the ``"personal"`` store EXPLICITLY (not org=None):
 # the request contextvar carries whatever org the shell stamped via
@@ -736,15 +737,15 @@ async def post_avatar(request: Request) -> JSONResponse:
     bytes are read through a bounded request path, normalized through the shared
     :mod:`profile_image` seam (all decoding, orientation, cropping, sRGB
     conversion, metadata stripping, and derivative bounds live there), and the
-    canonical 512x512 WebP is stored as a Personal attachment; the attachment id
-    and the compact 64x64 ``data:`` URI are then activated on ``autonomy.user#1``
-    through :func:`personal_profile.set_avatar`.
+    canonical 512x512 WebP is stored as a Personal attachment; its id is then
+    activated on ``autonomy.user#2`` through :func:`personal_profile.set_avatar`.
 
     Order matters: process → attach → activate. A processing or attachment
     failure leaves the previous active profile unchanged; only a final
     profile-write failure may leave an unreferenced (and harmless) immutable
-    blob. Returns ``{ok, avatar_attachment_id, avatar_icon_data_uri}`` — never a
-    filename, path, original bytes, EXIF, or the upload MIME.
+    blob. Returns ``{ok, avatar_attachment_id, avatar_url}`` — the URL every
+    screen renders the photo from — never a filename, path, original bytes,
+    EXIF, or the upload MIME.
     """
     refusal = api_auth.require_global_api_authority(request)
     if refusal is not None:
@@ -794,7 +795,7 @@ async def post_avatar(request: Request) -> JSONResponse:
             status_code=400,
         )
 
-    def _process_and_store() -> tuple[str, str]:
+    def _process_and_store() -> str:
         from tools.graph import ops as graph_ops
         # Refuse before any attachment is created when there is no person to
         # profile — a no-identity upload leaves NO orphan blob behind.
@@ -820,11 +821,11 @@ async def post_avatar(request: Request) -> JSONResponse:
         attachment_id = att["id"]
         # Activate the reference LAST. Only a failure here can strand the
         # (immutable, content-addressed) blob just stored.
-        personal_profile.set_avatar(attachment_id, processed.compact_data_uri)
-        return attachment_id, processed.compact_data_uri
+        personal_profile.set_avatar(attachment_id)
+        return attachment_id
 
     try:
-        attachment_id, data_uri = await asyncio.to_thread(_process_and_store)
+        attachment_id = await asyncio.to_thread(_process_and_store)
     except personal_profile.NoPersonalIdentity as exc:
         return JSONResponse(
             {"error": str(exc), "code": "no_personal_identity"},
@@ -843,15 +844,15 @@ async def post_avatar(request: Request) -> JSONResponse:
     return JSONResponse({
         "ok": True,
         "avatar_attachment_id": attachment_id,
-        "avatar_icon_data_uri": data_uri,
+        "avatar_url": personal_profile.avatar_url(attachment_id),
     })
 
 
 async def delete_avatar(request: Request) -> JSONResponse:
     """DELETE /api/identity/profile/avatar — clear the Personal avatar refs.
 
-    Idempotent: clears ``avatar_attachment_id`` and ``avatar_icon_data_uri``
-    from ``autonomy.user#1`` (preserving every text field), returning the person
+    Idempotent: clears ``avatar_attachment_id`` from ``autonomy.user#2``
+    (preserving every text field), returning the person
     to the initials/color fallback. The immutable attachment blob is NOT deleted.
     Refuses (409) until a canonical personal identity exists.
     """
