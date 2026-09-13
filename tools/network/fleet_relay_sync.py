@@ -263,11 +263,24 @@ class ConnectorFleetRuntime:
         # here even though the org WAS registered -- found live 2026-08-23.
         binding, _err = _load_binding(None)
         org_uuid = binding.get("org_uuid") if binding else None
+        # Per-org fleet:sync persona certificates ride alongside the
+        # credential (see fleet_enrollment_routes._activate_runtime); this
+        # process keeps them so its inbound direct listener admits co-members.
+        from tools.dashboard import org_sync_channels
+        org_sync_certs = {}
+        if isinstance(payload, dict) and "org_sync_certs" in payload:
+            payload = dict(payload)
+            org_sync_certs = payload.pop("org_sync_certs") or {}
         credential = fleet_runtime.FleetRuntimeCredential.from_browser_payload(
             payload,
             personal_root_pub=root_pub,
             roster_entries=entries,
             org_uuid=org_uuid,
+        )
+        org_sync_channels.install(
+            org_sync_certs,
+            org_sync_channels.keys_for_connector(
+                org_sync_certs, credential.serving_machine_key),
         )
         # The direct listener lives HERE by default (fleet-direct row
         # serve_in=connector): this process already streams relay serves
@@ -329,6 +342,10 @@ class ConnectorFleetRuntime:
             # bootstraps a fresh member's org scopes rather than only seeing
             # whatever files already exist.
             sync_scopes=_materialize_then_discover_org_scopes,
+            # Inbound org hellos are admitted here (the listener lives in this
+            # process); outward org pulls and the reachability row are the
+            # dashboard scheduler's, so no peer or address providers here.
+            org_channels=org_sync_channels.provider(),
         )
         scheduler = FleetSyncScheduler(config)
         scheduler._roster_snapshot = entries

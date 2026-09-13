@@ -6,6 +6,7 @@
  * tools.network.fleet_enroll byte-for-byte.
  */
 
+import { derivePersona } from './ledger-event.js';
 import {
   bytesToHex,
   canonicalJson,
@@ -184,6 +185,51 @@ async function mintRuntimeCredential({
  * serving targets receive org-specific serving-machine seeds. The personal
  * root is never sent. Runtime private material is memory-held.
  */
+/** One ``fleet:sync`` persona certificate per organization, over this
+ *  machine's per-organization SERVING machine key (auto-e2ufw:
+ *  derive_serving_machine_key(root, genesis_id, machine_id)) -- the only
+ *  machine identity with an organization axis, unlinkable across
+ *  organizations and the same key the relay knows this machine by. The
+ *  credential a co-member's machine checks on the org hello
+ *  (graph://c2baad48-0a3 §1). Signed by the org persona, which only ever
+ *  exists here, at unlock. */
+async function mintOrgSyncCerts(seed, machineId, syncOrgs) {
+  const certs = {};
+  const now = Math.floor(Date.now() / 1000);
+  for (const target of syncOrgs) {
+    const genesisId = requireHex64(target?.genesis_id, 'genesis_id');
+    const scope = target?.scope;
+    if (typeof scope !== 'string' || !scope) throw new Error('syncOrgs entries need a scope');
+    const servingSeed = await deriveServingMachineSeed(seed, genesisId, machineId);
+    let servingPub;
+    try {
+      servingPub = await ed25519PublicHex(servingSeed);
+    } finally {
+      servingSeed.fill(0);
+    }
+    const persona = await derivePersona(seed, genesisId);
+    try {
+      const payload = {
+        v: 1,
+        child_pub: servingPub,
+        scope: [FLEET_SYNC_SCOPE],
+        org: genesisId,
+        subject: { kind: 'persona', id: persona.publicHex },
+        not_before: Math.max(0, now - 30),
+        not_after: now + FLEET_RUNTIME_TTL_SECONDS,
+      };
+      certs[scope] = {
+        ...payload,
+        sig: await signHex(persona.signingKey,
+          domainBytes(IDKIT_CERT_DOMAIN, canonicalJson(payload))),
+      };
+    } finally {
+      persona.signingKey = null;
+    }
+  }
+  return certs;
+}
+
 export async function mintFleetRuntimeCredential({
   personalRootSeed,
   rootPub,
@@ -191,6 +237,7 @@ export async function mintFleetRuntimeCredential({
   machinePub,
   orgUuid = null,
   servingOrgs = [],
+  syncOrgs = [],
 } = {}) {
   if (!(personalRootSeed instanceof Uint8Array) || personalRootSeed.length !== 32) {
     throw new Error('personalRootSeed must be a 32-byte Uint8Array');
@@ -249,6 +296,9 @@ export async function mintFleetRuntimeCredential({
         }
       }
       credential.serving_machine_private_seeds = seeds;
+    }
+    if (Array.isArray(syncOrgs) && syncOrgs.length) {
+      credential.org_sync_certs = await mintOrgSyncCerts(seed, mid, syncOrgs);
     }
     return credential;
   } finally {

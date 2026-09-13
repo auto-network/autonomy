@@ -44,8 +44,16 @@ function command(bin,args,input,options={}){
   if(result.status!==0)throw new Error(bin+' '+args[0]+' failed (exit '+result.status+')');
   return result.stdout;
 }
+// SIM_ISOLATE_DASHBOARDS=1: the dashboards share no network with each other,
+// only with the relay, so organization sync must use the relay fallback.
+const isolateDashboards=process.env.SIM_ISOLATE_DASHBOARDS==='1';
+function composeArgs(project){
+  const files=['-f',directory+'onboarding.compose.yaml'];
+  if(isolateDashboards)files.push('-f',directory+'onboarding.isolated.compose.yaml');
+  return ['compose','-p',project,...files];
+}
 function composeDown(composeFile,project,extraEnv){
-  command('docker',['compose','-p',project,'-f',composeFile,'down','--volumes','--remove-orphans','--timeout','10'],undefined,{env:extraEnv});
+  command('docker',[...composeArgs(project),'down','--volumes','--remove-orphans','--timeout','10'],undefined,{env:extraEnv});
 }
 function pruneComposeContainers(project){
   const ids=command('docker',['ps','-aq','--filter',`label=com.docker.compose.project=${project}`]).trim().split('\n').filter(Boolean);
@@ -128,6 +136,31 @@ function waitValue(person,selector,expected,prop='textContent',timeoutMs=8000){
       const observer=new MutationObserver(probe);
       function probe(){const e=document.querySelector(sel);if(e&&e.getClientRects().length&&read(e)===expected){observer.disconnect();clearTimeout(timer);resolve(true);}}
       observer.observe(document,{subtree:true,childList:true,attributes:true,characterData:true});probe();});})()`);
+}
+// Lock the dashboard from the identity panel and sign on again with the
+// password: the product's own root ceremony, which is where membership
+// checkpoints are published or adopted and org sync credentials are minted.
+function lockAndUnlock(person,password){
+  // The organization settings dialog is modal; close it before reaching the
+  // identity panel in the header.
+  if(js(person,`!!document.querySelector('[data-testid="orgset-close"]')`)){
+    browser(person,'click','[data-testid="orgset-close"]');
+  }
+  waitFor(person,'[data-testid="identity-trigger"]','#onboarding-error, .mem-error');
+  browser(person,'click','[data-testid="identity-trigger"]');
+  waitFor(person,'[data-testid="identity-action-lock"]','.mem-error');
+  browser(person,'click','[data-testid="identity-action-lock"]');
+  // Locking navigates to /unlock; wait for that navigation itself before
+  // observing the new document.
+  browser(person,'wait','--fn',"location.pathname.startsWith('/unlock')");
+  waitFor(person,'#unlock-password, #unlock-use-password','[data-testid="unlock-loaderror"]');
+  js(person,`(()=>{const b=document.getElementById('unlock-use-password');if(b&&b.getClientRects().length)b.click();return true})()`);
+  waitFor(person,'#unlock-password','[data-testid="unlock-loaderror"]');
+  js(person,`(()=>{const i=document.getElementById('unlock-password');i.value=${JSON.stringify(password)};i.dispatchEvent(new Event('input',{bubbles:true}));return true})()`);
+  browser(person,'click','#unlock-primary');
+  // A successful sign-on navigates back to the dashboard.
+  browser(person,'wait','--fn',"!location.pathname.startsWith('/unlock')");
+  waitFor(person,'[data-testid="identity-trigger"]','#unlock-error, [data-testid="unlock-error"]');
 }
 function memberRows(person){
   return js(person,`Array.from(document.querySelectorAll('[data-member]')).map(e=>e.textContent.trim().replace(/\s+/g,' ').slice(0,80))`);
@@ -239,7 +272,7 @@ try{
   let startupAttempts=0;
   while(true){
     startupAttempts+=1;
-    const startup=spawnSync('docker',['compose','-p',run,'-f',composeFile,'up','-d','--wait','--wait-timeout','150'],{env:composeEnv(),encoding:'utf8',timeout:180000});
+    const startup=spawnSync('docker',[...composeArgs(run),'up','-d','--wait','--wait-timeout','150'],{env:composeEnv(),encoding:'utf8',timeout:180000});
     startupLogLines.push(`--- compose up attempt ${startupAttempts} ---\n${startup.stdout+startup.stderr}`);
     writeFileSync(output+'/startup.log',startupLogLines.join('\n\n'));
     if(startup.status===0)break;
@@ -259,7 +292,8 @@ try{
   evidence.servicesReadyMs=Date.now()-preparationStarted;
   console.log('Fresh services healthy in '+evidence.servicesReadyMs+'ms total.');
   process.env.SIM_TLS_DIR=tlsDirectory;
-  evidence.services=command('docker',['compose','-p',run,'-f',composeFile,'ps','--format','json'])
+  evidence.isolatedDashboards=isolateDashboards;
+  evidence.services=command('docker',[...composeArgs(run),'ps','--format','json'])
     .trim().split('\n').map(line=>{const r=JSON.parse(line);return {service:r.Service,health:r.Health,state:r.State};});
   command('curl',['--fail','--silent','--show-error','--cacert',tlsDirectory+'/server.crt',relayOrigin+'/healthz']);
   browser('alice','open',relayOrigin+'/healthz');
@@ -348,14 +382,37 @@ try{
     withStep('alice','wait member directory',()=>waitFor('alice','[data-member]','.mem-error'));
     evidence.aliceMembers=memberRows('alice');
     withStep('alice','save alice-member-directory',()=>save('alice','alice-member-directory',browser('alice','snapshot','-i')));
+    // Both members sign on again: Alice's ceremony publishes the membership
+    // checkpoint that includes Bob and mints her org sync credential; Bob's
+    // adopts that checkpoint from the registry and mints his.
+    withStep('alice','lock and unlock',()=>lockAndUnlock('alice',alicePassword));
+    withStep('alice','save alice-signed-on-again',()=>save('alice','alice-signed-on-again',browser('alice','snapshot','-i')));
+    withStep('bob','lock and unlock',()=>lockAndUnlock('bob',bobPassword));
+    withStep('bob','save bob-signed-on-again',()=>save('bob','bob-signed-on-again',browser('bob','snapshot','-i')));
     // One organization change on Alice, observed on Bob through the same screen.
+    withStep('alice','reopen organization settings',()=>openOrganizationSettings('alice'));
     withStep('alice','open charter',()=>action('alice','[data-testid="orgset-rail-charter"]',{},'#ch-byline','.mem-error'));
     withStep('alice','save charter byline',()=>action('alice','[data-action="save"]',{'#ch-byline':'Synced from Alice'},'#ch-byline','.mem-error'));
     withStep('alice','wait charter saved',()=>waitValue('alice','[data-action="save"]','Saved'));
     withStep('alice','save alice-charter-saved',()=>save('alice','alice-charter-saved',browser('alice','snapshot','-i')));
     const syncStarted=Date.now();
-    withStep('bob','open charter',()=>action('bob','[data-testid="orgset-rail-charter"]',{},'#ch-byline','.mem-error'));
-    withStep('bob','observe synced byline',()=>waitValue('bob','#ch-byline','Synced from Alice','value',30000));
+    withStep('bob','reopen organization settings',()=>openOrganizationSettings('bob'));
+    // Convergence is observed by re-opening the charter screen (which reads
+    // the organization's current row) a bounded number of times; each look
+    // is a product action plus an observer, never a sleep.
+    withStep('bob','observe synced byline',()=>{
+      let lastError=null;
+      for(let attempt=0;attempt<8;attempt++){
+        try{
+          action('bob','[data-testid="orgset-rail-membership"]',{},'[data-testid="membership-members"]','.mem-error');
+          action('bob','[data-testid="orgset-rail-charter"]',{},'#ch-byline','.mem-error');
+          waitValue('bob','#ch-byline','Synced from Alice','value',10000);
+          evidence.syncAttempts=attempt+1;
+          return true;
+        }catch(error){lastError=error;}
+      }
+      throw lastError;
+    });
     evidence.syncObservedMs=Date.now()-syncStarted;
     withStep('bob','save bob-charter-synced',()=>save('bob','bob-charter-synced',browser('bob','snapshot','-i')));
     evidence.status='passed';
@@ -379,6 +436,45 @@ try{
   evidence.finished=new Date().toISOString();
   evidence.durationMs=Date.parse(evidence.finished)-Date.parse(evidence.started);
   evidence.cleanup={keptRunning:process.env.SIM_KEEP_RUNNING==='1',errors:[]};
+  // Service logs are evidence too: what each dashboard, connector and the
+  // relay said while the workflow ran, captured before anything is torn down.
+  try{
+    const composeFile=directory+'onboarding.compose.yaml';
+    const composeEnv={...process.env,SIM_SOURCE_DIR:repository,SIM_TLS_DIR:tlsDirectory,SIM_RELAY_HOST:process.env.SIM_RELAY_HOST||'127.0.0.1',SIM_RELAY_PORT:relayPort,SIM_ALICE_PORT:alicePort,SIM_BOB_PORT:bobPort};
+    const serviceLog=command('docker',[...composeArgs(run),'logs','--no-color','--timestamps'],undefined,{env:composeEnv,maxBuffer:64*1024*1024});
+    writeFileSync(output+'/services.log',serviceLog);
+    // Each dashboard's fleet channel log and its connectors' logs (a
+    // relay-delegated pull runs in the connector process, so that is where a
+    // relay pull is recorded), read from the containers before teardown.
+    let fleetLogs='';
+    for(const person of ['alice','bob']){
+      try{
+        const text=command('docker',['exec',run+'-'+person+'-1','sh','-c','cat /app/data/logs/fleet.log 2>/dev/null; for f in /app/data/network/*.log; do echo "--- $f"; cat "$f"; done 2>/dev/null'],undefined,{maxBuffer:64*1024*1024});
+        writeFileSync(output+'/'+person+'-fleet.log',text);fleetLogs+=text;
+      }catch(error){evidence.cleanup.errors.push(person+' fleet logs: '+error.message);}
+    }
+    // Which transport carried the organization pulls, in the services' own
+    // words. A pull that completes in a DASHBOARD process dialled the peer
+    // directly; one that completes in a CONNECTOR process was delegated
+    // there for the relay pair. The two are told apart by where the line
+    // was written (the connector logs follow their "--- /app/data/network"
+    // markers in each collected file).
+    const sections={dashboard:'',connector:''};
+    for(const person of ['alice','bob']){
+      let text='';try{text=readFileSync(output+'/'+person+'-fleet.log','utf8');}catch{continue;}
+      const marker=text.indexOf('--- /app/data/network/');
+      sections.dashboard+=marker<0?text:text.slice(0,marker);
+      sections.connector+=marker<0?'':text.slice(marker);
+    }
+    const count=(text,re)=>(text.match(re)||[]).length;
+    const completed=/fleet sync pull [0-9a-f]+ scope 'simulation-organization': got [1-9][0-9]* transaction/g;
+    evidence.transport={
+      directPullsCompleted:count(sections.dashboard,completed),
+      relayPullsCompleted:count(sections.connector,completed),
+      directCandidateFailures:count(sections.dashboard,/no candidate connected/g),
+      relayPullFailures:count(sections.dashboard,/relay fallback retry after direct failed/g),
+    };
+  }catch(error){evidence.cleanup.errors.push('service logs: '+error.message);}
   if(!evidence.cleanup.keptRunning){
     for(const person of openedBrowsers)try{browser(person,'close');}catch(error){evidence.cleanup.errors.push(error.message);}
     try{

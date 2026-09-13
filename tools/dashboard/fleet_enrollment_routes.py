@@ -402,14 +402,22 @@ def _relay_pull_delegate(poll_interval: float = 2.0, deadline: float = 900.0):
             self.code = code
 
     async def delegate(*, peer_machine_pub: str, scope: str,
-                       operation_id: str):
+                       operation_id: str, org: str | None = None,
+                       slot: "tuple[str, str] | None" = None):
+        # A personal peer is reached through the personal connector; an org
+        # co-member through THAT org's connector, whose tunnel is on the
+        # org's relay. Same op, same job, same engine on the far side.
         def _control(op, args, timeout=30.0):
             return link_serving_supervisor.control(
-                None, op, args, timeout=timeout,
+                org, op, args, timeout=timeout,
             )
 
         args = {"peer_machine_pub": peer_machine_pub, "scope": scope,
                 "operation_id": operation_id}
+        if org is not None:
+            args["org_scope"] = org
+            if slot is not None:
+                args["persona_pub"], args["machine"] = slot[0], slot[1]
         # The peer's verified relay locator, when this machine has one
         # (auto-e38g4). Absent, the connector resolves the slot from the
         # relay's live list exactly as before.
@@ -477,6 +485,17 @@ def _dashboard_runtime_cache() -> fleet_relay_sync.FleetRuntimeWarmCache:
     )
 
 
+def _sync_org_targets() -> list:
+    """The organizations the browser mints a ``fleet:sync`` persona
+    certificate for at sign-on (org sync's membership half)."""
+    from tools.dashboard import org_sync_channels
+
+    try:
+        return org_sync_channels.sync_org_targets()
+    except Exception:
+        return []
+
+
 def serving_org_targets() -> list:
     """Every ORG scope this machine is provisioned to serve, with the two ids
     the browser needs to derive that org's serving machine key (auto-e2ufw):
@@ -508,8 +527,12 @@ def serving_org_targets() -> list:
             continue
         try:
             state = _sup.serve_cert_state(scope)
-            if state.get("status", "missing") == "missing":
+            if state.get("status", "missing") == "missing" and not _sup._is_member_scope(scope):
                 continue          # never provisioned to serve — not a fault
+            # A member's machine serves every organization it belongs to
+            # (link_serving_supervisor._is_member_scope): this same sign-on
+            # mints its serving certificate, so its serving seed is minted
+            # alongside and the org connector can start armed.
             binding, _err = _load_binding(scope)
             org_uuid = binding.get("org_uuid") if binding else None
             if not org_uuid:
@@ -676,11 +699,24 @@ def _activate_runtime(
     entries = tuple(fleet_roster.load_entries(org=None))
     binding = _reachability_binding()
     org_uuid = binding.get("org_uuid") if binding else None
+    # Per-org ``fleet:sync`` persona certificates (org sync, auto-coea3's
+    # membership half) ride alongside the credential too: peeled here for
+    # from_browser_payload, kept in the cached copy so a restart re-arms them,
+    # and handed to the connector with its copy so its inbound listener can
+    # admit co-members.
+    from tools.dashboard import org_sync_channels
+    org_sync_certs = {}
+    if isinstance(payload, dict) and "org_sync_certs" in payload:
+        payload = dict(payload)
+        org_sync_certs = payload.pop("org_sync_certs") or {}
     credential = fleet_runtime.FleetRuntimeCredential.from_browser_payload(
         payload,
         personal_root_pub=root_pub,
         roster_entries=entries,
         org_uuid=org_uuid,
+    )
+    org_sync_channels.install(
+        org_sync_certs, org_sync_channels.keys_for_serving_seeds(serving_seeds),
     )
     if credential.machine_id != expected_entry.machine_id:
         raise fleet_runtime.FleetRuntimeError(
@@ -694,7 +730,9 @@ def _activate_runtime(
     # name, and replayed at startup by rearm_local_runtime_from_cache(). A cache
     # write failure must never fail an activation that otherwise succeeded.
     with contextlib.suppress(Exception):
-        _dashboard_runtime_cache().store(payload)
+        _dashboard_runtime_cache().store(
+            {**payload, "org_sync_certs": org_sync_certs} if org_sync_certs else payload
+        )
     _ensure_fleet_catalog(credential.machine_pub)
     from tools.network import fleet_direct_config
 
@@ -757,6 +795,14 @@ def _activate_runtime(
             # Every organization database on this machine synchronizes
             # across the personal fleet beside the personal one.
             sync_scopes=fleet_sync_scheduler.discover_org_sync_scopes,
+            # ... and across the organization's OTHER members' machines
+            # (auto-coea3): the org hello per org this machine holds a
+            # persona certificate for, this machine's advertised addresses
+            # for its reachability row, and first-contact peers learned over
+            # the join channel until their rows have replicated.
+            org_channels=org_sync_channels.provider(_fleet_advertise_addrs),
+            advertised_addresses=_fleet_advertise_addrs,
+            org_relay_slots=org_sync_channels.relay_slots_provider(),
         )
     )
     if publish_connector is None:
@@ -776,7 +822,10 @@ def _activate_runtime(
         # publish_connector_runtime would fall back to shell_default_org() (a
         # UI/attribution default) and notify whatever org is cosmetically first.
         try:
-            fleet_relay_sync.publish_connector_runtime(payload, org=None)
+            fleet_relay_sync.publish_connector_runtime(
+                {**payload, "org_sync_certs": org_sync_certs} if org_sync_certs else payload,
+                org=None,
+            )
         except (
             link_serving_supervisor.TunnelUnavailable,
             fleet_relay_sync.FleetRelaySyncError,
@@ -798,7 +847,10 @@ def _activate_runtime(
     # cache must be armed even on a machine whose personal connector is not
     # the designated fleet tunnel server, because the org tunnels are a
     # different question from who carries Fleet sync.
-    _arm_serving_orgs(payload, serving_seeds)
+    _arm_serving_orgs(
+        {**payload, "org_sync_certs": org_sync_certs} if org_sync_certs else payload,
+        serving_seeds,
+    )
     return credential
 
 
@@ -1077,6 +1129,9 @@ def runtime_preparation() -> JSONResponse:
         # derive its per-org serving machine key. The root never leaves the
         # browser, so this list is the only way those keys can exist at all.
         "serving_orgs": serving_org_targets(),
+        # The orgs this machine syncs with co-members, each with the ids the
+        # browser needs to mint that org's fleet:sync persona certificate.
+        "sync_orgs": _sync_org_targets(),
     })
 
 

@@ -42,6 +42,9 @@ from tools.graph.schemas.fleet_direct import (
 
 DEFAULT_LISTEN_HOST = "127.0.0.1"
 ADVERTISE_ENV = "AUTONOMY_FLEET_ADVERTISE_ADDRS"
+#: ``host:port`` for the direct listener when no fleet-direct row names one
+#: — the container form of the row, beside the advertise variable above.
+LISTEN_ENV = "AUTONOMY_FLEET_DIRECT_LISTEN"
 
 #: Tailscale's CGNAT range; a machine with an address here is on a tailnet.
 TAILNET = ipaddress.ip_network("100.64.0.0/10")
@@ -251,6 +254,11 @@ def load(*, org: str = "machine", detect=None) -> FleetDirectConfig:
         payload = {}
     listen_host = payload.get("listen_host") or DEFAULT_LISTEN_HOST
     listen_port = int(payload.get("listen_port") or 0)
+    if listen_port <= 0:
+        env_listen = os.environ.get(LISTEN_ENV, "").strip()
+        host, _, port = env_listen.rpartition(":")
+        if host and port.isdigit() and 0 < int(port) < 65536:
+            listen_host, listen_port = host, int(port)
     auto = payload.get("advertise_auto")
     advertise_auto = True if auto is None else bool(auto)
     serve_in = payload.get("serve_in") or "connector"

@@ -329,6 +329,16 @@ class FleetSyncRuntimeConfig:
     org_peer_addresses: Callable[
         [], Mapping[str, Mapping[str, Sequence[str]]]
     ] | None = None
+    #: The org's LIVE serving slots at its relay, as scope slug ->
+    #: [{persona_pub, machine}], read through this machine's own connector
+    #: for that org. The org-scope counterpart of the personal path's relay
+    #: locators: a co-member's machine that publishes no direct address is
+    #: still pulled, through the relay, exactly as a rostered peer is.
+    #: First contact needs nothing else -- the relay already knows who serves
+    #: the organization. None: no relay source consulted.
+    org_relay_slots: Callable[
+        [], Mapping[str, Sequence[Mapping[str, str]]]
+    ] | None = None
     #: This machine's dialable direct addresses (fleet_direct_config
     #: advertise_addrs). With org channels, the scheduler publishes them
     #: as this machine's row in autonomy.org.fleet-reachability#1 of every
@@ -1771,6 +1781,9 @@ class FleetSyncScheduler:
         #: auto-ieh3l gave auto-fh2nv: this machine never has two concurrent
         #: opens for the same peer.
         self._peer_paths: dict = {}
+        #: scope -> {peer key: (persona_pub, machine)} relay slots for org
+        #: co-members this round (see _org_peer_candidates).
+        self._org_relay_locators: dict[str, dict[str, tuple[str, str]]] = {}
         #: peer -> (decision, loop time until which the RELAY path is held
         #: off). Set only by a stand_down or a stop; a retry leaves the relay
         #: immediately available again and the peer's own `_next_attempt`
@@ -1921,6 +1934,17 @@ class FleetSyncScheduler:
             logger.warning("fleet sync: org channel provider failed", exc_info=True)
             return {}
 
+    def _org_relay_slots(self) -> dict[str, list]:
+        """scope slug -> the org's live serving slots at its relay, or {}."""
+        provider = self.config.org_relay_slots
+        if provider is None:
+            return {}
+        try:
+            return {str(k): list(v) for k, v in provider().items()}
+        except Exception:
+            logger.warning("fleet sync: org relay slot provider failed", exc_info=True)
+            return {}
+
     def _org_channel_for_genesis(self, org: str) -> "OrgFleetAuthenticator | None":
         """The org hello authenticator for an organization's genesis id (the
         listener's lookup for an incoming org hello), or None."""
@@ -1997,7 +2021,7 @@ class FleetSyncScheduler:
                     self._published_reachability[scope] = fingerprint
                     continue
                 written = publish_if_changed(
-                    scope, self.config.machine_key, channel.persona_cert, addresses,
+                    scope, channel.machine_key, channel.persona_cert, addresses,
                 )
             except Exception:
                 logger.warning(
@@ -2038,10 +2062,15 @@ class FleetSyncScheduler:
             if scope == "personal" or scope not in paths:
                 continue
             try:
+                # Rows under MY persona are my own fleet's machines (this
+                # process key's predecessors included): pulled on the
+                # personal path, never as org co-members.
                 rows = co_member_addresses(
                     paths[scope], org=channel.org,
-                    own_machine_pub=self.authenticator.machine_pub,
-                    is_member=channel.is_member,
+                    own_machine_pub=channel.machine_pub,
+                    is_member=lambda persona, _ch=channel: (
+                        False if persona == _ch.persona_pub else _ch.is_member(persona)
+                    ),
                 )
             except Exception:
                 logger.warning(
@@ -2053,16 +2082,40 @@ class FleetSyncScheduler:
             for machine_pub, addresses in rows.items():
                 known = bucket.get(machine_pub, [])
                 bucket[machine_pub] = known + [a for a in addresses if a not in known]
+            # The org's live serving slots at its relay: every co-member
+            # machine serving the organization right now, dialable through
+            # the relay carrier whether or not it published a direct address.
+            # Keyed by the slot's serving machine (stable per org and
+            # machine); the org hello still proves WHO on connect.
+            relay_slots = self._org_relay_slots().get(scope) or ()
+            locators = self._org_relay_locators.setdefault(scope, {})
+            locators.clear()
+            for slot in relay_slots:
+                persona = slot.get("persona_pub") if isinstance(slot, Mapping) else None
+                machine = slot.get("machine") if isinstance(slot, Mapping) else None
+                if not persona or not machine or persona == channel.persona_pub \
+                        or machine == channel.machine_pub:
+                    continue  # my own persona's machines are my fleet's
+                if channel.is_member(persona) is False:
+                    continue
+                locators[str(machine)] = (str(persona), str(machine))
+                bucket.setdefault(str(machine), [])
             # Machines that dialled us and introduced themselves in their
             # org hello: sync is pull-only, so this is how the first-dialled
             # side learns where to pull back until the peer's row crosses.
             for machine_pub, addresses in channel.admitted_addresses().items():
-                if machine_pub == self.authenticator.machine_pub:
+                if machine_pub in (self.authenticator.machine_pub, channel.machine_pub):
                     continue
                 known = bucket.get(machine_pub, [])
                 bucket[machine_pub] = known + [a for a in addresses if a not in known]
+        # A peer with no direct address but a relay slot stays a candidate:
+        # the pull tries nothing direct and falls back to the relay, as a
+        # rostered peer that publishes only a locator does.
         return {
-            scope: {pub: tuple(addrs) for pub, addrs in peers.items() if addrs}
+            scope: {
+                pub: tuple(addrs) for pub, addrs in peers.items()
+                if addrs or pub in self._org_relay_locators.get(scope, {})
+            }
             for scope, peers in merged.items()
         }
 
@@ -2856,7 +2909,8 @@ class FleetSyncScheduler:
             self.config.min_backoff * (2 ** min(max(failures, 1) - 1, 16)),
         )
 
-    async def _relay_fallback(self, machine_pub: str, scope: str, direct_error):
+    async def _relay_fallback(self, machine_pub: str, scope: str, direct_error,
+                              org_channel: "OrgFleetAuthenticator | None" = None):
         """Delegate one scope pull to the relay after direct is exhausted.
 
         Returns the connector's outcome mapping, or None when the relay is not
@@ -2908,15 +2962,26 @@ class FleetSyncScheduler:
         controller = self._peer_paths.get(machine_pub)
         if controller is None:
             controller = fpp.PeerPathController(
-                authority_domain="personal", peer_machine_pub=machine_pub,
+                authority_domain=org_channel.org if org_channel is not None else "personal",
+                peer_machine_pub=machine_pub,
             )
             self._peer_paths[machine_pub] = controller
         operation_id = new_session_id()
+        # An org co-member is reached through THAT org's connector (its
+        # tunnel is on the org's relay), at the slot the relay listed for
+        # it; a personal peer through the personal connector as before.
+        delegate_kwargs: dict = {}
+        if org_channel is not None:
+            delegate_kwargs["org"] = scope
+            slot = self._org_relay_locators.get(scope, {}).get(machine_pub)
+            if slot is not None:
+                delegate_kwargs["slot"] = slot
         try:
             outcome = await delegate(
                 peer_machine_pub=machine_pub,
                 scope=scope,
                 operation_id=operation_id,
+                **delegate_kwargs,
             )
         except Exception as exc:
             decision = self._relay_decision(controller, exc)
@@ -3115,11 +3180,12 @@ class FleetSyncScheduler:
             channel = channels.get(scope)
             if channel is None or scope not in paths or scope == "personal":
                 continue
+            relay_locators = self._org_relay_locators.get(scope, {})
             eligible = [
                 machine_pub for machine_pub in sorted(peers)
-                if machine_pub != self.authenticator.machine_pub
+                if machine_pub not in (self.authenticator.machine_pub, channel.machine_pub)
                 and machine_pub not in own_fleet
-                and peers.get(machine_pub)
+                and (peers.get(machine_pub) or machine_pub in relay_locators)
                 and now >= self._next_attempt.get(machine_pub, 0.0)
             ]
             if not eligible:
@@ -3403,7 +3469,7 @@ class FleetSyncScheduler:
                 # when there was never one to try -- so a working direct path
                 # is never displaced by the relay.
                 delegated = await self._relay_fallback(
-                    machine_pub, scope, last_error,
+                    machine_pub, scope, last_error, org_channel=org_channel,
                 )
                 if delegated is not None:
                     # NO TELEMETRY ROW IS WRITTEN HERE, deliberately. The

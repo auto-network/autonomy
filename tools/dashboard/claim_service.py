@@ -234,7 +234,21 @@ def bootstrap(org: str, invite_ref: str, persona_pub: str) -> dict:
         binding = None  # served without a binding; the joiner refuses to install
     from tools.dashboard import member_directory
     return {"status": "ok", "events": events, "binding": binding,
-            "member_profiles": member_directory.rows(org)}
+            "member_profiles": member_directory.rows(org),
+            "reachability_rows": _reachability_rows(org)}
+
+
+def _reachability_rows(org: str) -> list:
+    """The org's replicated reachability rows (auto-mldvv), so a joiner's
+    first pull has somewhere to dial before its own rows have crossed."""
+    try:
+        from tools.graph.db import _org_db_path
+        from tools.network.fleet_org_reachability import read_rows
+
+        return [{"key": key, **payload} for key, payload in read_rows(_org_db_path(org)).items()
+                if isinstance(payload, dict)]
+    except Exception:
+        return []
 
 
 def status(org: str, invite_ref: str, persona_pub: str) -> dict:
