@@ -243,7 +243,8 @@ try{
   const tlsPage=browser('alice','snapshot');
   if(JSON.stringify(tlsPage).includes('Your connection is not private'))throw new Error('Browser did not trust the relay certificate');
   evidence.tls={selfSigned:true,ca:false,verification:'curl and browser',publicCertificate:tlsDirectory+'/server.crt'};
-  withStep('alice','open alice home',()=>browser('alice','open','http://localhost:'+alicePort+'/'));
+  // Desktop-height viewport so each evidence screenshot holds a whole screen.
+  withStep('alice','open alice home',()=>{browser('alice','open','http://localhost:'+alicePort+'/');browser('alice','set','viewport','1280','900');});
   withStep('alice','save fresh start',()=>save('alice','fresh-start',browser('alice','snapshot','-i')));
   withStep('alice','begin alice onboarding',()=>action('alice','[data-testid="welcome-begin"]',{},'#onboarding-name'));
   const alicePassword=withStep('alice','create alice password',()=>randomBytes(24).toString('base64url'));
@@ -278,13 +279,16 @@ try{
     withStep('alice','finish mint',()=>action('alice','[data-action="finish-mint"]',{},'[data-invite]','.mem-error'));
     withStep('alice','save invitation-published',()=>save('alice','invitation-published',browser('alice','snapshot','-i')));
 
-    withStep('bob','open bob home',()=>browser('bob','open','http://localhost:'+bobPort+'/'));
+    withStep('bob','open bob home',()=>{browser('bob','open','http://localhost:'+bobPort+'/');browser('bob','set','viewport','1280','900');});
     withStep('bob','begin bob onboarding',()=>action('bob','[data-testid="welcome-begin"]',{},'#onboarding-name'));
     const bobPassword=withStep('bob','create bob password',()=>randomBytes(24).toString('base64url'));
     withStep('bob','submit bob identity',()=>action('bob','#onboarding-primary',{'#onboarding-name':'Bob','#onboarding-password':bobPassword,'#onboarding-password2':bobPassword},
       '[data-testid="onboarding-step-device"]'));
     withStep('bob','skip bob device setup',()=>action('bob','#onboarding-notnow',{},'[data-testid="welcome-join"]'));
     withStep('bob','save bob personal profile',()=>setPersonalProfile('bob','Bob','Joining member'));
+    // The welcome rail renders inside the dashboard shell after its fragment
+    // loads; observe the control before operating it.
+    withStep('bob','wait welcome join',()=>waitFor('bob','[data-testid="welcome-join"]','#onboarding-error, .mem-error'));
     withStep('bob','open invite input',()=>browser('bob','click','[data-testid="welcome-join"]'));
     withStep('bob','wait invite input',()=>waitFor('bob','[data-testid="invite-input"]','#paste-hint'));
     withStep('bob','submit invite code',()=>action('bob','[data-testid="invite-next"]',{'[data-testid="invite-input"]':invitation},'[data-testid="invite-accept"]','#paste-hint'));
@@ -294,7 +298,11 @@ try{
     withStep('bob','save join-request-sent',()=>save('bob','join-request-sent',browser('bob','snapshot','-i')));
 
     withStep('alice','wait for claim',()=>waitFor('alice','[data-claim]','.mem-error'));
+    withStep('alice','save join-request-received',()=>save('alice','join-request-received',browser('alice','snapshot','-i')));
     withStep('alice','approve invite claim',()=>action('alice','[data-claim] [data-action="approve"]',{},'.or-in-bare','.mem-error'));
+    // The approval prompt itself: the root-unlock dialog, captured before any
+    // factor is entered so no secret can appear in the evidence.
+    withStep('alice','save approval-prompt',()=>save('alice','approval-prompt',browser('alice','snapshot','-i')));
     withStep('alice','confirm claim with password',()=>action('alice','.or-ok',{'.or-in-bare':alicePassword},'.mem-word.good','.mem-error'));
     withStep('alice','save join-request-approved',()=>save('alice','join-request-approved',browser('alice','snapshot','-i')));
     withStep('bob','done screen',()=>action('bob','.or-ok',{'.or-in-bare':bobPassword},'#done-block:not(.hidden)','#accept-hint'));

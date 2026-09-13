@@ -26,7 +26,7 @@ INDICATOR_JS = (
 JOIN_JS = (DASHBOARD / "static" / "js" / "network-join.js").read_text(
     encoding="utf-8"
 )
-JOIN_HTML = (DASHBOARD / "templates" / "network-join.html").read_text(
+JOIN_HTML = (DASHBOARD / "templates" / "pages" / "network-join.html").read_text(
     encoding="utf-8"
 )
 BASE_HTML = (DASHBOARD / "templates" / "base.html").read_text(encoding="utf-8")
@@ -106,13 +106,14 @@ class TestMount:
         assert "identity-panel-invite" not in INDICATOR_JS
 
     def test_join_page_owns_the_parse_module(self):
-        template = (DASHBOARD / "templates" / "network-join.html").read_text(
-            encoding="utf-8"
-        )
-        accept = template.index("accept-invitation.js")
-        page = template.index("network-join.js")
+        # The join page is an SPA fragment inside the dashboard shell, so the
+        # shell loads the parse module before the page script; the fragment
+        # itself carries no script and the chrome still holds no paste UI.
+        accept = BASE_HTML.index("accept-invitation.js")
+        page = BASE_HTML.index("network-join.js")
         assert accept < page
-        assert "accept-invitation.js" not in BASE_HTML
+        assert "<script" not in JOIN_HTML
+        assert "acceptPastedLink" not in INDICATOR_JS
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")

@@ -2281,6 +2281,21 @@ async function route() {
     pageTitle.textContent = 'Account settings';
     const response = await fetch('/pages/personal-profile');
     _replaceFragment(content, await response.text());
+  } else if (path === '/welcome') {
+    // Onboarding rail inside the shell. The fragment carries the server's
+    // first-render facts (fleet enrollment, sync) as data attributes.
+    pageTitle.textContent = 'Welcome';
+    const response = await fetch('/pages/welcome' + window.location.search,
+      { cache: 'no-store' });
+    _replaceFragment(content, await response.text());
+  } else if (path === '/network/join') {
+    // Invitation flow inside the shell. The invitation context stays in
+    // the URL (query + fragment); network-join.js reads it at render time
+    // and never sends the fragment anywhere.
+    pageTitle.textContent = 'Accept an invitation';
+    const response = await fetch('/pages/network-join', { cache: 'no-store' });
+    _replaceFragment(content, await response.text());
+    if (window.AutonomyNetworkJoin) window.AutonomyNetworkJoin.render();
   } else if (path.startsWith('/missions/')) {
     renderMissionScreenFragment();
   } else {

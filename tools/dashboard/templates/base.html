@@ -21,6 +21,10 @@
        it, so a fragment writing ?v=__STATIC_VERSION__ literally would ship
        that text to the browser. Anything built or evaluated in the page uses
        this instead. Defined during parse, before anything reads it. */
+    /* The welcome rail owns onboarding sequencing: its step-1 "Begin" opens
+       the identity ceremony deliberately, so the ambient auto-open in
+       network-onboarding.js stays quiet on that page. */
+    window.__AUTONOMY_WELCOME_SHELL__ = (window.location.pathname === '/welcome');
     window.STATIC_V = (function () {
       var m = document.querySelector('meta[name="autonomy-static-version"]');
       var v = m && m.getAttribute('content');
@@ -83,6 +87,9 @@
   <script src="/static/js/org-membership.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/js/identity-indicator.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/js/pages/personal-profile.js?v=__STATIC_VERSION__" defer></script>
+  <script src="/static/js/pages/welcome.js?v=__STATIC_VERSION__" defer></script>
+  <script src="/static/js/accept-invitation.js?v=__STATIC_VERSION__" defer></script>
+  <script src="/static/js/network-join.js?v=__STATIC_VERSION__" defer></script>
   <!-- Installs a fetch wrapper BEFORE app.js so a locked session (401 from
        the unlock gate) navigates to /unlock instead of injecting the 401
        body into a fragment slot. Not deferred: must wrap window.fetch

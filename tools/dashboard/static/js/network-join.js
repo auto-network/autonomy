@@ -139,13 +139,16 @@
     });
   }
 
+  // This person's own Personal profile, read from this dashboard's own
+  // origin (the same API the Account settings editor saves through). It is
+  // what the Joining-as tile shows and what the claim carries.
   function loadJoiningProfile() {
-    return fetch("/api/graph/settings/autonomy.user/default").then(function (response) {
+    return fetch("/api/identity/profile", { cache: "no-store" }).then(function (response) {
       if (!response.ok) throw new Error("joining profile unavailable");
       return response.json();
     }).then(function (body) {
-      if (!body || !body.payload) throw new Error("joining profile unavailable");
-      return body.payload;
+      if (!body || !body.profile) throw new Error("joining profile unavailable");
+      return body.profile;
     });
   }
 
@@ -397,11 +400,17 @@
     };
   }
 
-  if (typeof document !== "undefined") {
-    if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", render);
-    } else {
-      render();
+  if (typeof window !== "undefined") {
+    // The dashboard shell injects the /pages/network-join fragment and then
+    // calls render(); a document that already carries the markup (tests,
+    // fixtures) renders itself.
+    window.AutonomyNetworkJoin = { render: render };
+    if (typeof document !== "undefined" && document.getElementById("step-paste")) {
+      if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", render);
+      } else {
+        render();
+      }
     }
   }
 })();
