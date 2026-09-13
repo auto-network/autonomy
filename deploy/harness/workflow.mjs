@@ -195,7 +195,8 @@ try{
   // the checkout. All product source remains read-only inside the simulation.
   command('tailwindcss',['--cwd',repository+'tools/dashboard','-i','tailwind.input.css',
     '-o','static/tailwind.css','--minify']);
-  mkdirSync(repository+'orgs',{recursive:true});
+  // Mountpoints for the per-person volumes; /app is bind-mounted read-only.
+  for(const mountpoint of ['orgs','attachments'])mkdirSync(repository+mountpoint,{recursive:true});
   process.env.SIM_SOURCE_DIR=repository;
   evidence.build={source:repository,mode:'bind-mounted-current-worktree',includesUncommittedChanges:true,
     image:command('docker',['image','inspect','autonomy-node:onboarding','--format','{{.Id}}']).trim()};

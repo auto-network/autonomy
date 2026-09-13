@@ -239,8 +239,10 @@
             renderPresentation(session.context.presentation, profile);
             offerAccept(state);
             wireAccept(inputs);
-          }).catch(function () { reportTerminal({
-            state: "closed", reason: "joining-profile-unavailable",
+          }).catch(function (error) { reportTerminal({
+            state: "closed",
+            reason: /inviter/.test(String(error && error.message))
+              ? "inviter-profile-unavailable" : "joining-profile-unavailable",
           }); });
           return;
         }

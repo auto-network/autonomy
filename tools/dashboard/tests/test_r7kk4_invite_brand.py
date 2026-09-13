@@ -261,3 +261,50 @@ def test_avatar_boundary_exactly_at_cap(monkeypatch, tmp_path):
     _avatar_attachment(monkeypatch, {"mime_type": "image/jpeg", "file_path": str(blob)})
     out = link_serving._sponsor_avatar_data_uri("anchore", "a0dfac16-c45e-4b87-90c8-af6400991dbd")
     assert out is not None and out.startswith("data:image/jpeg;base64,")
+
+
+# ── local Personal profile fallback (sponsor is the serving operator) ─
+
+
+GENESIS = "b" * 64
+
+
+def _patch_local_profile(monkeypatch, persona, profile):
+    monkeypatch.setattr("tools.graph.org_ops.persona_pub_for_org", lambda genesis_id: persona)
+    monkeypatch.setattr("tools.dashboard.personal_profile.get_effective_profile", lambda: profile)
+
+
+def test_sponsor_profile_falls_back_to_serving_operators_personal_profile(monkeypatch):
+    _patch_owned(monkeypatch, {"autonomy.org.member-profile": _members()})
+    _patch_local_profile(monkeypatch, SPONSOR, {
+        "display_name": " Alice ", "biography": "Organization founder",
+        "avatar_icon_data_uri": WEBP_ICON,
+    })
+    out = link_serving._sponsor_profile_for_invite("anchore", SPONSOR, GENESIS)
+    assert out == {
+        "sponsor_pub": SPONSOR, "sponsor_name": "Alice",
+        "sponsor_byline": "Organization founder", "sponsor_avatar": WEBP_ICON,
+    }
+
+
+def test_sponsor_profile_local_fallback_only_for_own_persona(monkeypatch):
+    _patch_owned(monkeypatch, {"autonomy.org.member-profile": _members()})
+    _patch_local_profile(monkeypatch, "c" * 64, {"display_name": "Someone Else"})
+    assert link_serving._sponsor_profile_for_invite("anchore", SPONSOR, GENESIS) == {"sponsor_pub": SPONSOR}
+
+
+def test_sponsor_profile_local_fallback_needs_genesis_and_name(monkeypatch):
+    _patch_owned(monkeypatch, {"autonomy.org.member-profile": _members()})
+    _patch_local_profile(monkeypatch, SPONSOR, {"display_name": "Alice"})
+    assert link_serving._sponsor_profile_for_invite("anchore", SPONSOR) == {"sponsor_pub": SPONSOR}
+    _patch_local_profile(monkeypatch, SPONSOR, {"display_name": "   "})
+    assert link_serving._sponsor_profile_for_invite("anchore", SPONSOR, GENESIS) == {"sponsor_pub": SPONSOR}
+
+
+def test_sponsor_profile_directory_row_wins_over_local_profile(monkeypatch):
+    _patch_owned(monkeypatch, {
+        "autonomy.org.member-profile": _members((SPONSOR, {"display_name": "Ada"})),
+    })
+    _patch_local_profile(monkeypatch, SPONSOR, {"display_name": "Alice"})
+    out = link_serving._sponsor_profile_for_invite("anchore", SPONSOR, GENESIS)
+    assert out["sponsor_name"] == "Ada"
