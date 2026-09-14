@@ -198,3 +198,13 @@ def test_exit_zero_without_pass_verdict_is_a_fail(store, tmp_path):
                      "#!/usr/bin/env bash\necho '@check restore ok x'\n")
     result = D.run_drill("manual", script=script)
     assert result["verdict"] == "fail"
+
+
+def test_drill_script_is_the_checked_in_restore_script():
+    """The scheduled drill runs DRILL_SCRIPT by default. A wrong parent
+    count sent it to tools/tools/graph/backup-restore.sh, so every drill
+    failed with "No such file or directory" before its first check and
+    the restore_drill_failed item could never resolve."""
+    assert D.DRILL_SCRIPT.is_file(), D.DRILL_SCRIPT
+    assert D.DRILL_SCRIPT.parts[-3:] == ("tools", "graph", "backup-restore.sh")
+    assert "tools/tools" not in str(D.DRILL_SCRIPT)
