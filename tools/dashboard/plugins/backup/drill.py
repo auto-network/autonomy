@@ -30,7 +30,11 @@ from tools.dashboard.plugins.backup.entrypoints.schemas import (
 
 logger = logging.getLogger(__name__)
 
-_REPO = Path(__file__).resolve().parents[3]
+# tools/dashboard/plugins/backup/drill.py -> four parents up is the repo
+# root. parents[3] was tools/, which sent every scheduled drill to
+# tools/tools/graph/backup-restore.sh and made it fail before its
+# first check (live 2026-09-13: "No such file or directory", 0 checks).
+_REPO = Path(__file__).resolve().parents[4]
 DRILL_SCRIPT = _REPO / "tools" / "graph" / "backup-restore.sh"
 
 #: Bounded tail of drill output stored as row evidence.

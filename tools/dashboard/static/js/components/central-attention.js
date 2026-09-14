@@ -65,6 +65,13 @@
     return days < 14 ? days + 'd' : new Date(Number(value) * 1000).toLocaleDateString();
   }
 
+  // Same-origin path or nothing: a destination is a dashboard page the
+  // server named from its closed route builder, never a free-form URL.
+  function localHref(value) {
+    return typeof value === 'string' && /^\/(?!\/)/.test(value)
+      && !/[\\\x00-\x20]/.test(value) ? value : null;
+  }
+
   function statusLabel(item) {
     if (item.attention_state === 'needs_attention') {
       return item.category === 'approvals' ? 'Approval requested' : 'Needs you';
@@ -107,6 +114,7 @@
       counterpartyRef: source.counterparty_ref || null,
       presentation: source.presentation || {},
       rendererId: source.open && source.open.renderer_id,
+      destinationHref: null,
       unavailable: false,
       decisionBusy: false,
       decisionError: '',
@@ -390,9 +398,16 @@
           item.actions = Array.isArray(review.actions) ? review.actions.slice() : [];
           item.resolution = review.resolution || null;
           item.requester = review.requester || null;
+          item.destinationHref = localHref(review.destination && review.destination.href);
           item.detail = item.safeReview.detail || item.safeReview.summary || item.summary;
           item.sourceLabel = [item.applicationScope, review.kind].filter(Boolean).join(' · ');
           item.unavailable = false;
+          // The opened receipt is presentation state (last_opened_at),
+          // posted once the review is in hand; a lost receipt never
+          // blocks the review.
+          jsonRequest('/api/attention/items/' + encodeURIComponent(item.id) + '/opened', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+          }).catch(() => {});
           if (shared) {
             if (item.rendererId === 'approval.fleet_machine_admission.review') {
               const { openFleetApproval } = await import('./fleet-approval.js');
@@ -412,9 +427,6 @@
           }
           return false;
         }
-        jsonRequest('/api/attention/items/' + encodeURIComponent(item.id) + '/opened', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
-        }).catch(() => {});
       },
 
       async openDashboardApproval(item) {
@@ -514,8 +526,12 @@
         }
       },
 
-      openDestination() {
+      openDestination(item) {
+        // The server named the page (backup items open /backup); an
+        // item without a reachable destination just closes the sheet.
+        const href = item && localHref(item.destinationHref);
         this.selectedItem = null;
+        if (href) window.location.assign(href);
       },
 
       async refreshPush() {

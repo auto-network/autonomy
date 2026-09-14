@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 import re
 from typing import Any, Callable, Iterable, Mapping
+from urllib.parse import urlencode
 
 from tools.dashboard.approval_kind_registry import (
     ApprovalKindRegistry,
@@ -169,6 +170,28 @@ class AttentionClassPolicy:
 
 
 _SCOPE_POLICY_FACTORY["backup"] = AttentionClassPolicy.backup_phase_one
+
+
+def destination_route(
+    route_builder_id: str, destination_id: str, source_guard_ref: str,
+) -> str:
+    """Closed route-builder dispatch: the dashboard path an attention
+    item opens, keyed by the registry's (route_builder_id,
+    destination_id) pair and never by data from the item body. One
+    builder serves both the Web Push payload and the Central item
+    review, so a phone alert and the inbox's open button land on the
+    same page."""
+    key = (route_builder_id, destination_id)
+    if key == ("activity.approval.v1", "activity.approval"):
+        return "/activity?" + urlencode({
+            "focus": "approval",
+            "id": source_guard_ref,
+        })
+    if key == ("backup.page.v1", "backup.page"):
+        # The backup page IS the review surface; every backup class
+        # coalesces there (auto-e4e66).
+        return "/backup"
+    raise ValueError("unregistered attention route builder")
 
 
 @dataclass(frozen=True, slots=True)

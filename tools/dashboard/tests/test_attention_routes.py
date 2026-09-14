@@ -896,3 +896,83 @@ def test_production_runtime_resolves_requester_labels_through_the_session_regist
     production = attention_routes.build_production_runtime()
     label = production.approvals._session_label("auto-0910-155648")
     assert label == "auto-0910-155648 · Voice capsule"
+
+
+def test_application_item_review_names_its_destination(monkeypatch):
+    """A non-approval item (the backup scope's restore_drill_failed) is
+    not an approval: its detail carries no decision, just the page its
+    class policy routes to. Before this, the detail route answered 409
+    review_unavailable for every backup item, the inbox rendered "The
+    destination application is temporarily unavailable", and Open
+    Backup went nowhere."""
+    from tools.dashboard.attention_registry import build_production_attention_registry
+    from tools.dashboard.plugins.backup.attention import publication_runtimes
+    base, _producer = _route_runtime()
+    registry = build_production_attention_registry(runtimes=publication_runtimes())
+    index_store = InMemoryAttentionIndexStore()
+    index = AttentionIndexService(registry=registry, store=index_store)
+    index.sync_registrations()
+    index.publish(registry.producer("backup.drill_failed", "backup"), {
+        "attention_id": "backup:drill", "object_ref": "backup:drill",
+        "attention_state": "needs_attention",
+        "safe_title": "Restore drill failed",
+        "safe_summary": "Drill 20260913-064414: verdict fail",
+        "occurred_at": 100.0, "source_version": 20260913064414,
+    })
+
+    def resolve_item(attention_id):
+        payload = index_store.items.get(attention_id)
+        return None if payload is None else PresentationItemRecord(
+            attention_id, dict(payload),
+        )
+
+    runtime = attention_routes.AttentionRouteRuntime(
+        index=index, approvals=base.approvals,
+        presentation=AttentionPresentationService(
+            reference_resolver=resolve_item,
+            store=_PresentationStore(index_store), clock=lambda: 110.0,
+        ),
+        hub=attention_routes.PrivateAttentionHub(item_resolver=index.get_query_item),
+    )
+    previous = attention_routes.configure_runtime(runtime)
+    monkeypatch.setattr(
+        api_auth, "principal_from_request",
+        lambda _request: api_auth.ApiPrincipal(
+            api_auth.ApiPrincipalKind.OPERATOR_COOKIE, "cookie-1",
+        ),
+    )
+    monkeypatch.setattr(attention_routes.unlock_routes, "gate_enforced", lambda: True)
+    monkeypatch.setattr(
+        attention_routes, "resolve_human_approval_actor",
+        lambda _request: HumanApprovalActor._verified(ROOT),
+    )
+    try:
+        with TestClient(
+            Starlette(routes=attention_routes.routes), base_url="https://dashboard.test",
+        ) as client:
+            detail = client.get("/api/attention/items/backup%3Adrill")
+            assert detail.status_code == 200, detail.text
+            assert detail.headers["cache-control"] == "no-store"
+            assert detail.json()["review"] == {
+                "type": "application",
+                "renderer_id": "backup.item.v1",
+                "kind": "backup.drill_failed",
+                "destination": {"href": "/backup"},
+                "actions": [],
+            }
+            assert detail.json()["item"]["title"] == "Restore drill failed"
+            assert '"object_ref"' not in detail.text
+            opened = client.post(
+                "/api/attention/items/backup%3Adrill/opened",
+                headers={"Origin": "https://dashboard.test"}, json={},
+            )
+            assert opened.status_code == 200
+            assert opened.json()["presentation"]["last_opened_at"] == 110.0
+            refused = client.post(
+                "/api/attention/items/backup%3Adrill/approval-decision",
+                headers={"Origin": "https://dashboard.test"},
+                json={"outcome": "granted", "decision": {}},
+            )
+            assert refused.status_code in {409, 503}
+    finally:
+        attention_routes.configure_runtime(previous)

@@ -10,8 +10,8 @@ import math
 import threading
 import time
 from typing import Callable, Protocol
-from urllib.parse import urlencode
 
+from tools.dashboard.attention_registry import destination_route
 from tools.dashboard.dao import web_push as web_push_dao
 from tools.dashboard import web_push_sender
 from tools.dashboard.web_push_delivery import (
@@ -44,18 +44,13 @@ class DeliveryCoordinator(Protocol):
 def _route(claim: ClaimedTarget) -> str:
     """Closed route-builder dispatch — builders are code keyed by the
     registry's (route_builder_id, destination_id) pair, never data from
-    the claim body."""
-    key = (claim.route_builder_id, claim.destination_id)
-    if key == ("activity.approval.v1", "activity.approval"):
-        return "/activity?" + urlencode({
-            "focus": "approval",
-            "id": claim.source_guard_ref,
-        })
-    if key == ("backup.page.v1", "backup.page"):
-        # The backup page IS the review surface; every backup class
-        # coalesces there (auto-e4e66).
-        return "/backup"
-    raise ValueError("unregistered Web Push route builder")
+    the claim body (shared with the Central item review)."""
+    try:
+        return destination_route(
+            claim.route_builder_id, claim.destination_id, claim.source_guard_ref,
+        )
+    except ValueError as exc:
+        raise ValueError("unregistered Web Push route builder") from exc
 
 
 def _payload(claim: ClaimedTarget) -> str:

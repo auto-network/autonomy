@@ -163,3 +163,27 @@ class TestPublication:
         record = service2.publish(producer2, {"source_version": 2})
         assert record.payload["attention_state"] == "resolved"
         assert record.payload["source_version"] == 2
+
+
+class TestDestinationRoute:
+    """One closed route builder serves Web Push and the Central item
+    review, so a phone alert and the inbox's open button agree."""
+
+    def test_backup_classes_open_the_backup_page(self):
+        from tools.dashboard.attention_registry import destination_route
+        policy = AttentionClassPolicy.backup_phase_one()
+        assert destination_route(
+            policy.route_builder_id, policy.destination_id, "backup:drill",
+        ) == "/backup"
+
+    def test_approval_classes_focus_the_activity_page(self):
+        from tools.dashboard.attention_registry import destination_route
+        policy = AttentionClassPolicy.approval_phase_one()
+        assert destination_route(
+            policy.route_builder_id, policy.destination_id, "approval-1",
+        ) == "/activity?focus=approval&id=approval-1"
+
+    def test_unregistered_builder_is_refused(self):
+        from tools.dashboard.attention_registry import destination_route
+        with pytest.raises(ValueError):
+            destination_route("other.v1", "other", "ref")

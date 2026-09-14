@@ -45,7 +45,10 @@ from tools.dashboard.attention_presentation_service import (
     AttentionPresentationError,
     AttentionPresentationService,
 )
-from tools.dashboard.attention_registry import build_production_attention_registry
+from tools.dashboard.attention_registry import (
+    build_production_attention_registry,
+    destination_route,
+)
 from tools.graph.schemas.central_attention import (
     APPROVAL_REQUEST_SET_ID,
     APPROVAL_RESOLUTION_SET_ID,
@@ -772,6 +775,42 @@ def _review_unavailable(item: AttentionQueryItem) -> JSONResponse:
     )
 
 
+def _application_registration(item: AttentionQueryItem):
+    """The registry row behind a NON-approval item, or None for an
+    approval class (which the approval review path serves)."""
+    payload = item.payload
+    try:
+        registration = _runtime.index.registry.require_class(
+            payload["application_scope"], payload["notification_class"],
+        )
+    except Exception as exc:
+        raise AttentionIndexError("unavailable") from exc
+    if registration.surface_category == "approvals":
+        return None
+    return registration
+
+
+def _application_review(item: AttentionQueryItem, registration) -> dict[str, Any]:
+    """The review for an application item (backup and the other
+    non-approval scopes): no decision, one destination. The href comes
+    from the class policy's closed route builder — the same builder the
+    Web Push payload uses — so the inbox's open button and a phone alert
+    land on the same page. Raises ValueError for an unregistered
+    builder, which the caller reports as review_unavailable."""
+    policy = registration.policy
+    href = destination_route(
+        policy.route_builder_id, policy.destination_id,
+        item.payload["object_ref"],
+    )
+    return {
+        "type": "application",
+        "renderer_id": item.review_renderer_id,
+        "kind": registration.kind,
+        "destination": {"href": href},
+        "actions": [],
+    }
+
+
 def _approval_context(
     item: AttentionQueryItem,
 ) -> tuple[Any, Any, ApprovalStatus] | None:
@@ -875,6 +914,16 @@ async def api_attention_item(request: Request):
         return _no_store({"error": exc.code}, status_code=status)
     if item is None:
         return _no_store({"error": "not_found"}, status_code=404)
+    try:
+        registration = _application_registration(item)
+    except AttentionIndexError:
+        return _no_store({"error": "unavailable"}, status_code=503)
+    if registration is not None:
+        try:
+            review = _application_review(item, registration)
+        except ValueError:
+            return _review_unavailable(item)
+        return _no_store({"item": _safe_item(item), "review": review})
     try:
         context = await asyncio.to_thread(_approval_context, item)
     except ApprovalServiceError as exc:
