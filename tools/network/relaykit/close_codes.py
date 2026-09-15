@@ -3,10 +3,10 @@ each with what it means and what to do about it.
 
 Two families, two authors:
 
-* **44xx — the RELAY closed the viewer.** These are deliberately coarse on
-  the wire: an anonymous viewer must not be able to tell an unknown token
-  from a live link whose connector is offline, so the relay says 4404 for
-  both and logs the distinction on its own side.
+* **44xx — the RELAY closed the viewer.** One code per reason (operator
+  ruling 2026-09-15): the publisher's own dashboard dials its link as a
+  viewer after every publish, and the code it reads is how a
+  misconfiguration is seen. 4404 now means only "unknown token".
 * **45xx — the CONNECTOR refused the channel.** By the time a viewer reaches
   a connector, the relay has already routed a live token to a live tunnel,
   so the connector can be exact without disclosing anything about token
@@ -28,12 +28,26 @@ from dataclasses import dataclass
 
 # ── relay-authored ────────────────────────────────────────────────────────
 CLOSE_UNAUTHENTICATED = 4403
-CLOSE_UNKNOWN_LINK = 4404
+CLOSE_UNKNOWN_LINK = 4404          # the token itself is unknown
 CLOSE_PROTOCOL_MISMATCH = 4406
 CLOSE_REPLACED = 4409
+CLOSE_BYTE_RATE_EXHAUSTED = 4412   # mid-stream: the byte-rate lease ran out
 CLOSE_VIEWER_QUEUE_OVERFLOW = 4413
+CLOSE_TUNNEL_TORN_DOWN = 4414      # the org's tunnel went away under the viewer
+CLOSE_RELAY_WRITER_FAILED = 4415   # the relay could not write to the viewer socket
 CLOSE_LISTENER_FELL_BEHIND = 4416
 CLOSE_MEMBERSHIP_STALE = 4417
+CLOSE_LIMITED_SOURCE = 4420        # rate limiter: the dialer's source/network/process
+CLOSE_LIMITED_LINK = 4421          # rate limiter: this link or its organization
+CLOSE_LINK_EXPIRED = 4422
+CLOSE_LINK_REVOKED = 4423
+CLOSE_ORG_BINDING_DEAD = 4424      # the org's registry binding is missing or expired
+CLOSE_SERVING_MACHINE_OFFLINE = 4425  # pinned link: the declared machine has no tunnel
+CLOSE_NO_TUNNEL = 4426             # live link, but no connector parked for the org
+CLOSE_VIEWER_CAP = 4427            # the org's tunnel is at its viewer-channel cap
+CLOSE_LEASE_DENIED = 4428          # active-connection or byte-bucket lease refused
+CLOSE_OPEN_FAILED = 4429           # the relay could not open the channel on the tunnel
+CLOSE_CHANNEL_NOT_SERVED = 4505    # the connector closed before serving one byte
 
 # ── connector-authored ────────────────────────────────────────────────────
 #: The connector hit an error it does not classify; its log names it.
@@ -50,6 +64,9 @@ CLOSE_AUTHORIZATION_UNAVAILABLE = 4503
 #: fragment key does not match the key the connector holds, or the
 #: channel was corrupted.
 CLOSE_VIEWER_HANDSHAKE_FAILED = 4504
+#: (4505, CLOSE_CHANNEL_NOT_SERVED, is declared with the relay family above:
+#: the connector sends it when its channel ends before the viewer's hello,
+#: and the relay sets it when a connector closes empty before serving.)
 
 CONNECTOR_CODE_RANGE = range(4500, 4600)
 MAX_REASON_BYTES = 200
@@ -120,6 +137,76 @@ MEANINGS: dict[int, CloseMeaning] = {
         "the node cannot build a membership commitment (fleet_doctor: live "
         "worker state, membership)",
     ),
+    CLOSE_BYTE_RATE_EXHAUSTED: CloseMeaning(
+        "byte rate exhausted",
+        "this viewer's byte-rate lease ran out mid-stream",
+        "a heavy viewer; reconnect later, or raise the relay's byte limits",
+    ),
+    CLOSE_TUNNEL_TORN_DOWN: CloseMeaning(
+        "tunnel torn down",
+        "the organization's serving tunnel disconnected while this viewer was open",
+        "fleet_doctor: the connector's tunnel state says why it disconnected",
+    ),
+    CLOSE_RELAY_WRITER_FAILED: CloseMeaning(
+        "relay writer failed",
+        "the relay could not write to the viewer's socket",
+        "the viewer's connection broke; reconnect",
+    ),
+    CLOSE_LIMITED_SOURCE: CloseMeaning(
+        "rate limited: source",
+        "the relay's admission limiter refused this dialer's source, network or the process",
+        "too many dials from this address; wait, or raise the relay's admission limits",
+    ),
+    CLOSE_LIMITED_LINK: CloseMeaning(
+        "rate limited: link",
+        "the relay's admission limiter refused this link or its organization",
+        "too many dials to this link or org; wait, or raise the relay's admission limits",
+    ),
+    CLOSE_LINK_EXPIRED: CloseMeaning(
+        "link expired",
+        "the link's expiry has passed at the relay",
+        "publish again",
+    ),
+    CLOSE_LINK_REVOKED: CloseMeaning(
+        "link revoked",
+        "the link was revoked at the relay",
+        "publish again; if you did not revoke it, a failed publish rolled it back — read its execution row",
+    ),
+    CLOSE_ORG_BINDING_DEAD: CloseMeaning(
+        "org binding dead",
+        "the organization's registry binding is missing or expired",
+        "renew the organization's registration (sign in; the root ceremony renews it)",
+    ),
+    CLOSE_SERVING_MACHINE_OFFLINE: CloseMeaning(
+        "serving machine offline",
+        "the link is pinned to one machine and that machine has no tunnel at the relay",
+        "start or fix the connector on the machine that published this link (fleet_doctor there)",
+    ),
+    CLOSE_NO_TUNNEL: CloseMeaning(
+        "no tunnel",
+        "the link is live but no connector for its organization is connected to the relay",
+        "fleet_doctor: the organization's connector is not SERVING; its tunnel state says why",
+    ),
+    CLOSE_VIEWER_CAP: CloseMeaning(
+        "viewer cap",
+        "the organization's tunnel is at its viewer-channel cap",
+        "wait for viewers to leave, or run more connectors for the organization",
+    ),
+    CLOSE_LEASE_DENIED: CloseMeaning(
+        "lease denied",
+        "the relay refused an active-connection or byte-bucket lease for this viewer",
+        "too many concurrent viewers for this source/link/org; wait or raise the relay's active limits",
+    ),
+    CLOSE_OPEN_FAILED: CloseMeaning(
+        "open failed",
+        "the relay could not open the channel on the organization's tunnel (it died between selection and open)",
+        "the connector was reconnecting; retry",
+    ),
+    CLOSE_CHANNEL_NOT_SERVED: CloseMeaning(
+        "channel not served",
+        "the connector accepted the channel and closed it before serving a single byte",
+        "the connector's log names why (viewer channel ... closed); fleet_doctor prints its last channel failure",
+    ),
     CLOSE_CONNECTOR_ERROR: CloseMeaning(
         "connector error",
         "the serving connector hit an error it does not classify",
@@ -157,7 +244,7 @@ MEANINGS: dict[int, CloseMeaning] = {
 
 def encode_close_payload(code: int, reason: str = "") -> bytes:
     """The close frame payload for a connector-authored close."""
-    if code not in CONNECTOR_CODE_RANGE:
+    if code not in CONNECTOR_CODE_RANGE and code != CLOSE_CHANNEL_NOT_SERVED:
         raise ValueError(f"connector close codes are {CONNECTOR_CODE_RANGE}, got {code}")
     text = (reason or "").encode("utf-8", "replace")[:MAX_REASON_BYTES]
     return code.to_bytes(2, "big") + text
@@ -170,7 +257,7 @@ def decode_close_payload(payload: bytes) -> tuple[int, str]:
     if not payload or len(payload) < 2:
         return 1000, ""
     code = int.from_bytes(payload[:2], "big")
-    if code not in CONNECTOR_CODE_RANGE:
+    if code not in CONNECTOR_CODE_RANGE and code != CLOSE_CHANNEL_NOT_SERVED:
         return 1000, ""
     reason = payload[2:2 + MAX_REASON_BYTES].decode("utf-8", "replace")
     return code, reason

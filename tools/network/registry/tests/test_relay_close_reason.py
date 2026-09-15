@@ -51,3 +51,30 @@ def test_an_empty_close_frame_is_still_a_normal_1000():
         assert viewer.closes == [(1000, "")]
 
     asyncio.run(run())
+
+
+def test_an_empty_close_before_any_byte_served_is_4505_not_1000():
+    """The relay knows whether the connector served this viewer anything.
+    An empty close frame before the first byte is 'channel not served'."""
+    from tools.network.relaykit.close_codes import CLOSE_CHANNEL_NOT_SERVED
+
+    async def run():
+        tunnel = Tunnel(_Socket(), "test-org")
+        viewer = _Socket()
+        channel_id = b"n" * 16
+        channel = tunnel.add_viewer(channel_id, viewer)
+        assert channel.served is False
+        code, reason = decode_close_payload(b"")
+        if code == 1000 and not channel.served:
+            code, reason = CLOSE_CHANNEL_NOT_SERVED, "connector closed before serving a byte"
+        tunnel.close_viewer(channel_id, code, reason)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert viewer.closes == [(4505, "connector closed before serving a byte")]
+        # After a byte reached the viewer, an empty close is a normal end.
+        viewer2 = _Socket()
+        channel2 = tunnel.add_viewer(b"s" * 16, viewer2)
+        tunnel.enqueue_viewer(b"s" * 16, b"hello")
+        assert channel2.served is True
+
+    asyncio.run(run())

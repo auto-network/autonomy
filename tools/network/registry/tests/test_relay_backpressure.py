@@ -11,7 +11,7 @@ import asyncio
 
 import tools.network.registry.relay as relay
 from tools.network.registry.relay import (
-    CLOSE_UNKNOWN_LINK,
+    CLOSE_VIEWER_CAP,
     CLOSE_VIEWER_QUEUE_OVERFLOW,
     VIEWER_QUEUE_MAX_BYTES,
     Tunnel,
@@ -47,7 +47,7 @@ class _ViewerSocket:
         self.payloads.append(payload)
         self.sent.set()
 
-    async def close(self, *, code: int) -> None:
+    async def close(self, *, code: int, reason: str = "") -> None:
         self.close_codes.append(code)
         self.closed.set()
         self._release.set()
@@ -136,7 +136,7 @@ class _AcceptCloseSocket:
     async def accept(self):
         self.accepted = True
 
-    async def close(self, *, code: int):
+    async def close(self, *, code: int, reason: str = ""):
         self.close_codes.append(code)
 
 
@@ -162,7 +162,7 @@ def test_viewer_channel_cap_rejects_when_tunnel_full(monkeypatch):
     asyncio.run(viewer_endpoint(ws, "0" * 32, _Hub(), None, lambda: 0))
 
     assert ws.accepted
-    assert ws.close_codes == [CLOSE_UNKNOWN_LINK]
+    assert ws.close_codes == [CLOSE_VIEWER_CAP]
     assert len(tunnel.channels) == 2  # the rejected viewer was not admitted
 
 

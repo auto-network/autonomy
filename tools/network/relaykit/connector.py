@@ -275,10 +275,12 @@ async def _serve_channel_records(
 
 
 async def _serve_authenticated_channel(*, org: str, token: str, recv, send,
-                                       handler, hello_builder) -> None:
+                                       handler, hello_builder) -> bool:
+    """Serve one channel. Returns False when it ended before the viewer's
+    hello arrived (the channel was dropped under it), True once served."""
     first = await recv()
     if first is None:
-        return
+        return False
     client_eph = parse_client_hello(first)
     eph_priv, server_hello, transcript_hash = hello_builder(client_eph)
     await send(tag_viewer_message(VIEWER_KIND_RECORD, server_hello))
@@ -290,12 +292,13 @@ async def _serve_authenticated_channel(*, org: str, token: str, recv, send,
         send=lambda payload: send(tag_viewer_message(VIEWER_KIND_RECORD, payload)),
         handler=handler,
     )
+    return True
 
 
 async def serve_link_channel(link_key: KeyPair, *, org: str, token: str,
-                             recv, send, handler) -> None:
+                             recv, send, handler) -> bool:
     """Serve a public link authenticated only by its fragment key."""
-    await _serve_authenticated_channel(
+    return await _serve_authenticated_channel(
         org=org, token=token, recv=recv, send=send, handler=handler,
         hello_builder=lambda client_eph: build_link_server_hello(
             link_key, org=org, token=token, client_eph=client_eph),
@@ -304,9 +307,9 @@ async def serve_link_channel(link_key: KeyPair, *, org: str, token: str,
 
 async def serve_certificate_channel(key: KeyPair, cert: DelegationCert, *,
                                     org: str, token: str, recv, send,
-                                    handler) -> None:
+                                    handler) -> bool:
     """Serve an explicitly typed non-link channel with a delegated cert."""
-    await _serve_authenticated_channel(
+    return await _serve_authenticated_channel(
         org=org, token=token, recv=recv, send=send, handler=handler,
         hello_builder=lambda client_eph: build_certificate_server_hello(
             key, cert, org=org, token=token, client_eph=client_eph),
@@ -614,7 +617,8 @@ class TunnelConnector:
                 state[key] = dict(state[key])
         return state
 
-    def _note_channel_failure(self, token: str, exc: BaseException) -> tuple[int, str]:
+    def _note_channel_failure(self, token: str, exc: BaseException,
+                              code: int | None = None) -> tuple[int, str]:
         """A viewer channel ended on an error: the tunnel is up, the link is
         not served. Classified into the close code the viewer will receive
         (relaykit.close_codes), remembered for connector-status, and logged
@@ -622,7 +626,8 @@ class TunnelConnector:
         Returns ``(code, reason)`` for the close frame."""
         from .close_codes import classify_connector_error
 
-        code, reason = classify_connector_error(exc)
+        classified, reason = classify_connector_error(exc)
+        code = classified if code is None else code
         state = self._tunnel_state
         state["channel_failures"] += 1
         state["last_channel_failure"] = {
@@ -1278,9 +1283,9 @@ class TunnelConnector:
                 "handler": self._handler,
             }
             if protocol == "public-link":
-                await serve_link_channel(authorization["key"], **common)
+                served = await serve_link_channel(authorization["key"], **common)
             elif protocol == "fleet-enrollment":
-                await serve_certificate_channel(
+                served = await serve_certificate_channel(
                     self._key, self._channel_cert, **common)
             else:
                 raise PermissionError("channel authorization refused")
@@ -1298,8 +1303,21 @@ class TunnelConnector:
             # Normal completion can be server-initiated (the bounded ICE
             # exchange is the first case). Tell the registry to close its
             # viewer side instead of relying on a cooperative viewer to do it.
+            # A channel that ended BEFORE the viewer's hello (dropped under
+            # us) is not a normal end: say so (4505), never a bare close.
+            payload = b""
+            if served is False:
+                from .close_codes import CLOSE_CHANNEL_NOT_SERVED, encode_close_payload
+
+                payload = encode_close_payload(
+                    CLOSE_CHANNEL_NOT_SERVED,
+                    "channel ended before the viewer hello (dropped by the relay or tunnel torn down)")
+                note = getattr(self, "_note_channel_failure", None)
+                if note is not None:
+                    note(token, ConnectionError("channel ended before the viewer hello"),
+                         code=CLOSE_CHANNEL_NOT_SERVED)
             with contextlib.suppress(Exception):
-                await send_frame(FRAME_CLOSE, channel_id)
+                await send_frame(FRAME_CLOSE, channel_id, payload)
         finally:
             # Always deregister, on every exit path, so no publish ever
             # targets a token whose last channel is gone.
