@@ -2350,7 +2350,7 @@ async def _post_serve_cert_v3(request: Request, body: dict) -> JSONResponse:
             previous_serve.payload.get("cert") == body["cert"]:
         try:
             from tools.dashboard.link_serving_supervisor import get_supervisor
-            await asyncio.to_thread(get_supervisor().ensure, org)
+            await asyncio.to_thread(get_supervisor().ensure, write_org)
         except Exception:
             pass  # reconcile is best-effort; the watchdog retries
         return JSONResponse({"ok": True, "child_pub": cert.child_pub,
@@ -2386,7 +2386,7 @@ async def _post_serve_cert_v3(request: Request, body: dict) -> JSONResponse:
 
     try:
         from tools.dashboard.link_serving_supervisor import get_supervisor
-        get_supervisor().ensure(org)
+        get_supervisor().ensure(write_org)
     except Exception:
         pass  # reconcile is best-effort; the watchdog retries
     return JSONResponse({"ok": True, "child_pub": cert.child_pub,
@@ -2874,7 +2874,7 @@ async def post_serve_cert(request: Request) -> JSONResponse:
     # a launch failure is not a provisioning failure — the watchdog retries.
     try:
         from tools.dashboard.link_serving_supervisor import get_supervisor
-        await asyncio.to_thread(get_supervisor().ensure, org)
+        await asyncio.to_thread(get_supervisor().ensure, write_org)
     except Exception:
         pass
 

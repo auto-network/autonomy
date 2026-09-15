@@ -1920,7 +1920,7 @@ async def get_unlock_state(request: Request) -> JSONResponse:
                 cert_status = _sup.serve_cert_state(scope).get("status", "missing")
             except Exception:
                 continue
-            label = scope or "personal"
+            label = scope
             if cert_status == "missing":
                 cert_never.append(label)
                 continue
@@ -1957,8 +1957,7 @@ async def get_unlock_state(request: Request) -> JSONResponse:
             # code? refusing pulls?) are asked of the personal scope alone; org
             # serve certs are still checked above, because an org connector does
             # serve its own grant-gated targets — that is a different question.
-            is_personal = scope is None or scope == "personal"
-            if not is_personal:
+            if scope != "personal":
                 continue
             try:
                 reply = _sup.control(scope, "connector-status", {})

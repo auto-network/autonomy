@@ -1024,14 +1024,32 @@ def test_startup_org_discovery_covers_every_local_org(env, monkeypatch, tmp_path
     # pins): with GRAPH_DB set, discovery collapses to the pinned database's
     # own scopeless slot — nothing ambient can label or widen it.
     monkeypatch.setenv("GRAPH_DB", str(tmp_path / "pin.db"))
-    assert sup._discover_startup_orgs() == [None]
+    assert sup._discover_startup_orgs() == ["personal"]
 
     monkeypatch.delenv("GRAPH_DB")
+    # The inventory lists the operator's local stores by name beside the
+    # organizations. The personal store is one scope under one name; the
+    # machine store is not a serving scope (live 2026-09-15: a scopeless
+    # None beside "personal" ran two connectors for one credential).
     monkeypatch.setattr(
         "tools.graph.org_ops.list_orgs",
-        lambda: [SimpleNamespace(slug="autonomy"), SimpleNamespace(slug="dynbench")],
+        lambda: [SimpleNamespace(slug="autonomy"), SimpleNamespace(slug="dynbench"),
+                 SimpleNamespace(slug="machine"), SimpleNamespace(slug="personal")],
     )
-    assert sup._discover_startup_orgs() == [None, "autonomy", "dynbench"]
+    assert sup._discover_startup_orgs() == ["personal", "autonomy", "dynbench"]
+
+
+def test_a_scope_is_a_store_name_and_none_is_refused():
+    """The personal store has exactly one name here. A caller that still
+    spells it ``None`` is refused at the call, not routed to a second
+    connector for the same credential."""
+    s = sup.ServingSupervisor(spawn=FakeSpawn())
+    for call in (s.ensure, s.start, s.restart):
+        with pytest.raises(TypeError):
+            call(None)
+    with pytest.raises(TypeError):
+        sup.control(None, "connector-status", {})
+    assert s._managed == set()
 
 
 # ── when a serving credential is due for renewal ──

@@ -245,7 +245,7 @@ def _serving_slot_locator():
     desired = _runtime_generation
     try:
         reply = link_serving_supervisor.control(
-            None, "connector-status", {}, timeout=5.0
+            "personal", "connector-status", {}, timeout=5.0
         )
     except Exception:
         return None
@@ -402,7 +402,7 @@ def _relay_pull_delegate(poll_interval: float = 2.0, deadline: float = 900.0):
             self.code = code
 
     async def delegate(*, peer_machine_pub: str, scope: str,
-                       operation_id: str, org: str | None = None,
+                       operation_id: str, org: str = "personal",
                        slot: "tuple[str, str] | None" = None):
         # A personal peer is reached through the personal connector; an org
         # co-member through THAT org's connector, whose tunnel is on the
@@ -523,7 +523,7 @@ def serving_org_targets() -> list:
     except Exception:
         return targets
     for scope in scopes:
-        if scope is None or scope == "personal":
+        if scope == "personal":
             continue
         try:
             state = _sup.serve_cert_state(scope)
@@ -1054,7 +1054,7 @@ async def relay_probe(request: Request) -> JSONResponse:
                 args["locators"] = locators
     try:
         reply = link_serving_supervisor.control(
-            None, "fleet-relay-probe", args,
+            "personal", "fleet-relay-probe", args,
             timeout=float(body.get("timeout") or 10.0) + 5.0,
         )
     except link_serving_supervisor.TunnelUnavailable as exc:
