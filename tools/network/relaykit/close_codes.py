@@ -47,6 +47,7 @@ CLOSE_NO_TUNNEL = 4426             # live link, but no connector parked for the 
 CLOSE_VIEWER_CAP = 4427            # the org's tunnel is at its viewer-channel cap
 CLOSE_LEASE_DENIED = 4428          # active-connection or byte-bucket lease refused
 CLOSE_OPEN_FAILED = 4429           # the relay could not open the channel on the tunnel
+CLOSE_PUBLISHER_OFFLINE = 4430     # fresh link: the machine that published it has no tunnel
 CLOSE_CHANNEL_NOT_SERVED = 4505    # the connector closed before serving one byte
 
 # ── connector-authored ────────────────────────────────────────────────────
@@ -201,6 +202,14 @@ MEANINGS: dict[int, CloseMeaning] = {
         "open failed",
         "the relay could not open the channel on the organization's tunnel (it died between selection and open)",
         "the connector was reconnecting; retry",
+    ),
+    CLOSE_PUBLISHER_OFFLINE: CloseMeaning(
+        "publisher offline",
+        "the link was published in the last few minutes and routes only to the "
+        "machine that published it until its grant replicates, and that machine "
+        "has no tunnel at the relay",
+        "the publishing machine's connector is not SERVING (fleet_doctor there); "
+        "or wait for the window to pass and the grant to replicate",
     ),
     CLOSE_CHANNEL_NOT_SERVED: CloseMeaning(
         "channel not served",
