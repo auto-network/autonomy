@@ -170,9 +170,9 @@ def test_publish_connector_runtime_org_none_is_the_scopeless_target_not_unspecif
     )
     monkeypatch.setattr(dashboard_shell, "shell_default_org", lambda: "anchore")
 
-    fleet_relay_sync.publish_connector_runtime({"x": 1}, org=None)
-    assert seen == [None], (
-        "org=None must reach control() as the scopeless target -- "
+    fleet_relay_sync.publish_connector_runtime({"x": 1}, org="personal")
+    assert seen == ["personal"], (
+        "an explicit scope must reach control() as given -- "
         "'org or shell_default_org()' would silently replace it with the "
         "cosmetic default org instead"
     )

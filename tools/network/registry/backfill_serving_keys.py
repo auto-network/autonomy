@@ -136,7 +136,7 @@ def collect_manifest() -> dict:
     from tools.dashboard import fleet_enrollment_routes as routes
     from tools.dashboard import link_serving_supervisor as supervisor
 
-    targets = [{"scope": None, "org_uuid": None, "genesis_id": None}]
+    targets = [{"scope": "personal", "org_uuid": None, "genesis_id": None}]
     targets += routes.serving_org_targets()
     entries = []
     commits = set()
