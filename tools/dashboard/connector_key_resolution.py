@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import os
 from pathlib import Path
 import secrets
@@ -17,6 +18,8 @@ import socketserver
 import threading
 
 from tools.graph import settings_ops
+
+_log = logging.getLogger("dashboard.connector_key_resolution")
 
 SET_ID = "autonomy.machine.serving-connector"
 PROTOCOL_VERSION = 1
@@ -88,8 +91,11 @@ def resolve(request):
     if not grant.get("channel_pub"):
         raise PermissionError("link has no channel key")
     key = channel_key_for(token, org)
-    if key.public_hex != grant["channel_pub"] or check_grant(token, org=org) != grant:
-        raise PermissionError("link unavailable")
+    if key.public_hex != grant["channel_pub"]:
+        raise PermissionError(
+            "the vaulted channel key does not match the grant's channel_pub")
+    if check_grant(token, org=org) != grant:
+        raise PermissionError("the grant changed between the two reads")
     return {"ok": True, "seed": key.private_hex}
 
 
@@ -112,14 +118,37 @@ def _read_message(stream):
     return value
 
 
+def respond(request) -> dict:
+    """One resolver request -> one reply. A refusal is generic on the socket
+    (the connector must never learn which check failed) but NAMED in the
+    dashboard log: the exception's own words plus the token prefix and org,
+    never the request, the credential or key material. Before this the
+    reason was computed and discarded here, and a link that the worker's
+    keys, delegate and membership all said was fine still closed every
+    viewer with 1000 and nothing anywhere said why (dynbench, 2026-09-15).
+    """
+    token = request.get("token") if isinstance(request, dict) else None
+    prefix = token[:8] if isinstance(token, str) else "?"
+    try:
+        return resolve_channel(request)
+    except Exception as exc:  # noqa: BLE001 — every refusal is one reply
+        _log.warning(
+            "link key resolution refused for link %s...: %s: %s",
+            prefix, type(exc).__name__, exc,
+        )
+        return {"ok": False, "error": "link key resolution refused"}
+
+
 class _Handler(socketserver.StreamRequestHandler):
     def handle(self):
         self.connection.settimeout(TIMEOUT)
         try:
-            response = resolve_channel(_read_message(self.rfile))
+            request = _read_message(self.rfile)
         except Exception:
-            # Never echo requests, credentials or vault errors to the socket/log.
+            _log.warning("link key resolution refused: malformed request")
             response = {"ok": False, "error": "link key resolution refused"}
+        else:
+            response = respond(request)
         self.wfile.write(json.dumps(response).encode() + b"\n")
 
 

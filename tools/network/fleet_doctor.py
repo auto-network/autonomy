@@ -1792,7 +1792,13 @@ def _tunnel_summary(tunnel) -> str:
     if not isinstance(tunnel, dict):
         return "tunnel state not reported (connector predates it)"
     if tunnel.get("connected_since") is not None:
-        return f"connected since {_fmt_age(tunnel['connected_since'])}"
+        text = f"connected since {_fmt_age(tunnel['connected_since'])}"
+        failure = tunnel.get("last_channel_failure")
+        if failure:
+            text += (f"; {tunnel.get('channel_failures')} viewer channel(s) failed, last "
+                     f"{_fmt_age(failure.get('at'))} on link {failure.get('token_prefix')}...: "
+                     f"{failure.get('error')}")
+        return text
     last = tunnel.get("last_disconnect") or {}
     parts = [f"DOWN; last served {_fmt_age(tunnel.get('last_served_at'))}"]
     attempts = tunnel.get("reconnect_attempts")

@@ -590,6 +590,8 @@ class TunnelConnector:
             "reconnect_attempts": 0,     # failed attempts since last served
             "last_disconnect": None,     # {at, lived_s, close_code, reason, error}
             "next_retry_at": None,       # wall clock of the next dial
+            "channel_failures": 0,       # viewer channels closed on an error
+            "last_channel_failure": None,  # {at, token_prefix, error}
         }
         #: control-frame reply correlation — id -> Future, resolved in the
         #: serve loop; the send hook is live only while a tunnel is up.
@@ -607,9 +609,27 @@ class TunnelConnector:
     def tunnel_state(self) -> dict:
         """A copy of the tunnel's current state (see ``_tunnel_state``)."""
         state = dict(self._tunnel_state)
-        if state["last_disconnect"] is not None:
-            state["last_disconnect"] = dict(state["last_disconnect"])
+        for key in ("last_disconnect", "last_channel_failure"):
+            if state[key] is not None:
+                state[key] = dict(state[key])
         return state
+
+    def _note_channel_failure(self, token: str, exc: BaseException) -> None:
+        """A viewer channel ended on an error: the tunnel is up, the link is
+        not served. Remembered for connector-status and logged with the
+        error's own words (never the token beyond a prefix)."""
+        state = self._tunnel_state
+        state["channel_failures"] += 1
+        state["last_channel_failure"] = {
+            "at": time.time(),
+            "token_prefix": token[:8] if isinstance(token, str) else "?",
+            "error": f"{type(exc).__name__}: {_safe_log_text(exc)}",
+        }
+        logger.warning(
+            "viewer channel for link %s... closed on an error: %s: %s",
+            state["last_channel_failure"]["token_prefix"],
+            type(exc).__name__, _safe_log_text(exc),
+        )
 
     def _note_connected(self) -> None:
         now = time.time()
@@ -1257,7 +1277,11 @@ class TunnelConnector:
                     self._key, self._channel_cert, **common)
             else:
                 raise PermissionError("channel authorization refused")
-        except Exception:  # HandshakeError, RecordError, transport failures
+        except Exception as exc:  # HandshakeError, RecordError, transport failures
+            # A test may drive this method on a bare stand-in for the connector.
+            note = getattr(self, "_note_channel_failure", None)
+            if note is not None:
+                note(token, exc)
             with contextlib.suppress(Exception):
                 await send_frame(FRAME_CLOSE, channel_id)
         else:
