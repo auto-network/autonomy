@@ -8,6 +8,8 @@ don't fight the writer.
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from tools.graph.db import GraphDB
@@ -151,3 +153,103 @@ def test_ro_connection_usable_from_different_thread(orgs_root):
     t.start()
     t.join(timeout=5)
     assert not errors, f"ro connection rejected cross-thread use: {errors}"
+
+
+# ── a pooled read-only handle is shared by threads; its connection is not ──
+#
+# Live 2026-09-15: note-open fired two get_source reads on two thread-pool
+# workers in the same millisecond against the one shared connection and got
+# "sqlite3.InterfaceError: bad parameter or other API misuse". The Python
+# cursor and statement cache are not thread-safe even with
+# check_same_thread=False. Each thread now gets its own connection, opened
+# once and cached for the thread's lifetime.
+
+
+def _seed_sources(slug: str, n: int) -> list[str]:
+    from tools.graph.models import Source
+
+    db = GraphDB.create_org_db(slug)
+    ids = []
+    for i in range(n):
+        source = Source(type="note", platform="local", title=f"n{i}",
+                        file_path=f"note:{i}", metadata={"i": i})
+        db.insert_source(source)
+        ids.append(source.id)
+    db.close()
+    return ids
+
+
+def test_pooled_ro_handle_gives_each_thread_its_own_connection(orgs_root):
+    import threading
+
+    _seed("autonomy")
+    db = GraphDB.for_org("autonomy", mode="ro")
+    mine = db.conn
+    assert db.conn is mine                       # cached: same thread, same connection
+    # All three threads are alive at once (the barrier), so neither thread
+    # ids nor connection objects can be recycled between them.
+    gate = threading.Barrier(3)
+    seen: list = []
+
+    def grab():
+        conn = db.conn
+        assert conn is db.conn and conn is not mine
+        seen.append(conn)
+        gate.wait()
+
+    threads = [threading.Thread(target=grab) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len({id(c) for c in seen}) == 3
+    # Teardown closes every thread's connection, not only the opener's.
+    db.close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        mine.execute("SELECT 1")
+
+
+def test_concurrent_reads_on_a_pooled_ro_handle_do_not_race(orgs_root):
+    import threading
+
+    ids = _seed_sources("autonomy", 40)
+    db = GraphDB.for_org("autonomy", mode="ro")
+    errors: list[str] = []
+
+    def hammer():
+        try:
+            for _ in range(60):
+                for sid in ids:
+                    assert db.get_source(sid) is not None
+        except Exception as exc:  # noqa: BLE001 — the whole point
+            errors.append(repr(exc))
+
+    threads = [threading.Thread(target=hammer) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+
+
+def test_pooled_rw_handle_refuses_another_thread(orgs_root):
+    """The read-write pooled handle (the cache GC's) keeps ONE connection
+    with hook and catalog state; it is single-threaded and says so rather
+    than racing silently."""
+    import threading
+
+    _seed("autonomy")
+    db = GraphDB.for_org("autonomy", mode="rw")
+    assert db.conn is not None
+    caught: list[BaseException] = []
+
+    def use():
+        try:
+            db.conn.execute("SELECT 1")
+        except BaseException as exc:  # noqa: BLE001
+            caught.append(exc)
+
+    t = threading.Thread(target=use)
+    t.start()
+    t.join()
+    assert len(caught) == 1 and isinstance(caught[0], sqlite3.ProgrammingError)
