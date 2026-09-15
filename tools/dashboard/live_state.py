@@ -107,9 +107,10 @@ def _membership(org: str, genesis_id: str | None) -> dict:
     }
 
 
-def collect(*, now_ms: int | None = None) -> dict[str, Any]:
+def collect(*, now_ms: int | None = None, scopes: list[str] | None = None) -> dict[str, Any]:
     """The live per-organization report. Never raises; every probe that
-    fails says so in its own field."""
+    fails says so in its own field. ``scopes`` restricts the organizations
+    reported (an org-bound caller asking about its own); None is all."""
     from tools.dashboard import link_serving_supervisor as sup
     from tools.dashboard import org_storage_delegate, unlock_routes
     from tools.graph import org_ops, settings_ops
@@ -131,6 +132,8 @@ def collect(*, now_ms: int | None = None) -> dict[str, Any]:
 
     organizations = []
     for scope in sup._discover_startup_orgs():
+        if scopes is not None and scope not in scopes:
+            continue
         entry: dict[str, Any] = {"org": scope}
         genesis = None if scope == sup.PERSONAL_SCOPE else _genesis_for(scope)
         entry["genesis_id"] = genesis

@@ -94,7 +94,11 @@ def _req(principal):
 async def _get(principal, monkeypatch):
     from tools.dashboard import api_auth, server
 
-    monkeypatch.setattr(live_state, "collect", lambda: {"pid": 1, "organizations": []})
+    def collect(scopes=None):
+        rows = [{"org": "personal"}, {"org": "anchore"}, {"org": "autonomy"}]
+        return {"pid": 1, "audited_delegate_warm": True, "personal_generation_keys_open": 2,
+                "organizations": [r for r in rows if scopes is None or r["org"] in scopes]}
+    monkeypatch.setattr(live_state, "collect", collect)
     # The compatibility exception (an unenrolled dashboard admits the browser
     # without a cookie) is not what is under test: the gate is enforced here.
     monkeypatch.setattr("tools.dashboard.unlock_routes.gate_enforced", lambda: True)
@@ -110,18 +114,28 @@ async def test_route_refuses_a_credential_less_caller(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_route_refuses_an_org_bound_agent(monkeypatch):
+async def test_an_org_bound_session_sees_its_own_organization_only(monkeypatch):
+    import json
+
     from tools.dashboard import api_auth
 
     agent = api_auth.ApiPrincipal(api_auth.ApiPrincipalKind.ORG_SESSION, subject="s", org="anchore")
     resp = await _get(agent, monkeypatch)
-    assert resp.status_code == 403
+    assert resp.status_code == 200
+    body = json.loads(resp.body)
+    assert [row["org"] for row in body["organizations"]] == ["anchore"]
+    assert "audited_delegate_warm" not in body and "personal_generation_keys_open" not in body
 
 
 @pytest.mark.asyncio
-async def test_route_admits_the_operator_cookie_and_a_local_session(monkeypatch):
+async def test_the_personal_scope_sees_every_organization(monkeypatch):
+    import json
+
     from tools.dashboard import api_auth
 
     for kind in (api_auth.ApiPrincipalKind.OPERATOR_COOKIE, api_auth.ApiPrincipalKind.LOCAL_SESSION):
         resp = await _get(api_auth.ApiPrincipal(kind, subject="s"), monkeypatch)
         assert resp.status_code == 200, kind
+        body = json.loads(resp.body)
+        assert [row["org"] for row in body["organizations"]] == ["personal", "anchore", "autonomy"]
+        assert body["audited_delegate_warm"] is True

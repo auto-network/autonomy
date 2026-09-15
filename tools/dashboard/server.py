@@ -838,14 +838,24 @@ async def api_vault_organizations(request):
     serve-cert status and the connector's own status reply. Exists so a
     diagnostic run in any other process (fleet_doctor on the host, or under
     docker exec) reports the running worker's vault instead of its own cold
-    one. Requires the operator: a dashboard browser session or a local
-    session bearer (the CrossTalk token a host session holds); an org-bound
-    or credential-less caller is refused."""
-    refusal = api_auth.require_global_api_authority(request)
-    if refusal is not None:
-        return refusal
+    one.
+
+    Any authenticated caller may ask about its own tunnel: the personal
+    scope (a browser session or a host session's CrossTalk token) sees every
+    organization; an organization-bound session sees its organization only.
+    No credential, no answer."""
+    principal = api_auth.principal_from_request(request)
+    if not principal.authenticated:
+        return JSONResponse({"error": "authentication required"}, status_code=401)
     from tools.dashboard import live_state
-    return JSONResponse(await asyncio.to_thread(live_state.collect))
+    scopes = None if principal.global_authority else [principal.org]
+    report = await asyncio.to_thread(live_state.collect, scopes=scopes)
+    if scopes is not None:
+        # An organization session asked about its organization; the personal
+        # vault's own facts are not its business.
+        report.pop("audited_delegate_warm", None)
+        report.pop("personal_generation_keys_open", None)
+    return JSONResponse(report)
 
 
 async def api_beads_ready(request):
