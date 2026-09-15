@@ -1795,9 +1795,11 @@ def _tunnel_summary(tunnel) -> str:
         text = f"connected since {_fmt_age(tunnel['connected_since'])}"
         failure = tunnel.get("last_channel_failure")
         if failure:
+            code = failure.get("close_code")
             text += (f"; {tunnel.get('channel_failures')} viewer channel(s) failed, last "
-                     f"{_fmt_age(failure.get('at'))} on link {failure.get('token_prefix')}...: "
-                     f"{failure.get('error')}")
+                     f"{_fmt_age(failure.get('at'))} on link {failure.get('token_prefix')}..."
+                     + (f" (close {code})" if code is not None else "")
+                     + f": {failure.get('error')}")
         return text
     last = tunnel.get("last_disconnect") or {}
     parts = [f"DOWN; last served {_fmt_age(tunnel.get('last_served_at'))}"]

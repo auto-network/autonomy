@@ -156,7 +156,12 @@ def test_resolver_failure_closes_open_without_certificate_fallback(monkeypatch):
     fake = SimpleNamespace(_channel_authorization_for=unavailable, _publisher=None)
     asyncio.run(wire.TunnelConnector._serve_channel(
         fake, b"channel", TOKEN, asyncio.Queue(), send, dropped.append))
-    assert sent == [(FRAME_CLOSE, b"channel")]
+    # Closed, and the viewer is told WHY: a coded close (relaykit.close_codes)
+    # carrying the resolver's refusal, never a bare close frame.
+    from tools.network.relaykit.close_codes import CLOSE_KEY_RESOLUTION_REFUSED, decode_close_payload
+    [(kind, channel_id, payload)] = sent
+    assert (kind, channel_id) == (FRAME_CLOSE, b"channel")
+    assert decode_close_payload(payload) == (CLOSE_KEY_RESOLUTION_REFUSED, "vault unavailable")
     assert dropped == [b"channel"]
 
 
