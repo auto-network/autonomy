@@ -27,7 +27,8 @@ def test_fresh_connector_reports_no_history():
     state = _connector().tunnel_state
     assert state == {"connected_since": None, "last_served_at": None,
                      "reconnect_attempts": 0, "last_disconnect": None,
-                     "next_retry_at": None}
+                     "next_retry_at": None, "channel_failures": 0,
+                     "last_channel_failure": None}
 
 
 def test_disconnect_then_failed_reconnects_are_visible(monkeypatch):
@@ -108,3 +109,31 @@ def test_a_connected_tunnel_reports_since_when(monkeypatch):
     asyncio.run(connector.run())
     assert seen["while_up"]["connected_since"] == 7_000.0
     assert seen["while_up"]["reconnect_attempts"] == 0
+
+
+def test_a_failed_viewer_channel_is_remembered_and_closed(monkeypatch, caplog):
+    """The tunnel is up but the link is not served: the connector closes
+    the viewer AND says why, in its log and in its status."""
+    import logging
+
+    connector = _connector()
+    monkeypatch.setattr(connector_module.time, "time", lambda: 9_000.0)
+    connector._channel_authorization_for = lambda token: (_ for _ in ()).throw(
+        PermissionError("link key resolution refused"))
+    sent = []
+
+    async def send_frame(kind, channel_id, data=b""):
+        sent.append((kind, channel_id))
+
+    caplog.set_level(logging.WARNING, logger=connector_module.__name__)
+    asyncio.run(connector._serve_channel(
+        b"\x01", "ab" * 16, asyncio.Queue(), send_frame, lambda channel_id: None))
+    assert (connector_module.FRAME_CLOSE, b"\x01") in sent
+    state = connector.tunnel_state
+    assert state["channel_failures"] == 1
+    assert state["last_channel_failure"] == {
+        "at": 9_000.0, "token_prefix": "abababab",
+        "error": "PermissionError: link key resolution refused",
+    }
+    assert "viewer channel for link abababab... closed on an error: " \
+           "PermissionError: link key resolution refused" in caplog.text
