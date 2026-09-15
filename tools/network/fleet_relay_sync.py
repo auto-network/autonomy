@@ -581,12 +581,11 @@ _ORG_UNSET = object()
 def publish_connector_runtime(payload: object, *, org=_ORG_UNSET) -> None:
     """Hand the serving subprocess the same short-lived process credential.
 
-    ``org=None`` is a meaningful, valid target -- the scopeless/personal
-    serving connector -- not "unspecified". Only an omitted *org* falls back
-    to ``shell_default_org()``; ``org or shell_default_org()`` would silently
-    treat an explicit ``org=None`` the same as "not passed", which is
-    exactly the bug that misrouted this call to whatever org happened to be
-    cosmetically default instead of the scope the caller actually meant.
+    *org* is the serving scope's store name: ``"personal"`` for the personal
+    serving connector, an organization slug otherwise. Only an OMITTED *org*
+    falls back to ``shell_default_org()``; a sentinel rather than ``org or
+    shell_default_org()`` so an explicit scope is never silently replaced by
+    whatever org happens to be cosmetically default.
     """
     from tools.dashboard import link_serving_supervisor
     from tools.graph.schemas.dashboard_shell import shell_default_org

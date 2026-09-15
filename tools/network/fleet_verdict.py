@@ -174,13 +174,15 @@ def _paths_check() -> dict:
 
 def compute_verdict(org: str | None = None) -> dict:
     """Everything fleet_doctor's top line and /api/fleet/status need,
-    in one call. org=None is the personal/scopeless sync scope."""
-    connector_version = _connector_version_check(org)
+    in one call. org=None is the personal sync scope, whose serving
+    connector the supervisor names "personal"."""
+    scope = "personal" if org is None else org
+    connector_version = _connector_version_check(scope)
     dashboard_version = _dashboard_process_version_check()
-    cred = _cred_check(org)
+    cred = _cred_check(scope)
     data = _data_check(org)
     direct = _direct_check()
-    direct["connector_listener"] = _connector_direct_listener(org)
+    direct["connector_listener"] = _connector_direct_listener(scope)
 
     stale = connector_version.get("status") == "stale" \
         or dashboard_version.get("status") == "stale"

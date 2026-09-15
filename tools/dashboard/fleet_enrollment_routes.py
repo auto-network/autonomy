@@ -813,18 +813,22 @@ def _activate_runtime(
         # it. Same predicate as the other two so the three cannot disagree.
         publish_connector = fleet_tunnel_server.tunnel_serving_permitted()[0]
     if publish_connector:
-        # Serve the fleet connector on the PERSONAL tunnel (org=None →
-        # personal.db), never a shared org's: the fleet is anchored on the
-        # personal root — its roster, delegation cert, and this binding (loaded
-        # above via _reachability_binding → _load_binding(None)) all live in the
-        # personal store — so a virgin system with zero collaborative orgs still
-        # has exactly one tunnel to serve on, its own. Left implicit,
+        # Serve the fleet connector on the PERSONAL tunnel (the "personal"
+        # store), never a shared org's: the fleet is anchored on the personal
+        # root — its roster, delegation cert, and this binding (loaded above
+        # via _reachability_binding → _load_binding(None)) all live in the
+        # personal store — so a virgin system with zero collaborative orgs
+        # still has exactly one tunnel to serve on, its own. Left implicit,
         # publish_connector_runtime would fall back to shell_default_org() (a
-        # UI/attribution default) and notify whatever org is cosmetically first.
+        # UI/attribution default) and notify whatever org is cosmetically
+        # first. The supervisor names the personal scope "personal" and
+        # refuses None (live 2026-09-15: a None here aborted every re-arm
+        # after the dashboard side was configured, so connectors came up
+        # UNARMED and every viewer dial closed 1000).
         try:
             fleet_relay_sync.publish_connector_runtime(
                 {**payload, "org_sync_certs": org_sync_certs} if org_sync_certs else payload,
-                org=None,
+                org="personal",
             )
         except (
             link_serving_supervisor.TunnelUnavailable,
