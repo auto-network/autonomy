@@ -285,7 +285,8 @@ def test_recipient_probe_failure_compensates_grant_and_channel_key(
     recorder = _ControlRecorder()
     _install_control(monkeypatch, recorder)
     async def failed_probe(binding, token, org):
-        return {"live": False, "status": None, "content_length": None}
+        return {"live": False, "status": None, "content_length": None,
+                "detail": "serving probe could not run: link has no channel key"}
     monkeypatch.setattr(link_approvals, "_probe_serving", failed_probe)
     dropped = []
     monkeypatch.setattr(
@@ -299,6 +300,12 @@ def test_recipient_probe_failure_compensates_grant_and_channel_key(
 
     assert execution["ok"] is False
     assert execution["failed_stage"] == "recipient-probe"
+    # The reason the probe gave is recorded and is what the sheet shows
+    # (approval-experiment.js renders execution.error), not "did not finish".
+    assert execution["detail"] == "serving probe could not run: link has no channel key"
+    assert execution["error"] == "recipient-probe: serving probe could not run: link has no channel key"
+    assert execution["probe"] == {"live": False, "status": None,
+                                  "detail": "serving probe could not run: link has no channel key"}
     assert execution["remote_revoked"] is True
     assert execution["grant_cleanup"] is True
     assert execution["key_cleanup"] is True

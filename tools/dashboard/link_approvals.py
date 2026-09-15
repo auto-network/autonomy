@@ -1108,8 +1108,15 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
             _compensate_failed_publish, org, token, "grant-write")
     serving = await _probe_serving(binding, token, org)
     if not serving.get("live"):
+        logger.warning(
+            "share link publish for org=%s rolled back: the serving probe "
+            "was not live (status=%s): %s",
+            org, serving.get("status"), serving.get("detail"),
+        )
         return await asyncio.to_thread(
-            _compensate_failed_publish, org, token, "recipient-probe")
+            _compensate_failed_publish, org, token, "recipient-probe",
+            detail=serving.get("detail"), probe=serving,
+        )
     return {
         "ok": True,
         "url": share_url,
@@ -1124,8 +1131,18 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
     }
 
 
-def _compensate_failed_publish(org, token, stage):
-    """Undo a remotely-created link without disclosing its capabilities."""
+def _compensate_failed_publish(org, token, stage, *, detail=None, probe=None):
+    """Undo a remotely-created link without disclosing its capabilities.
+
+    ``detail`` is WHY the stage failed (the probe's own words: "link has no
+    channel key", a relay close code, a timeout) and ``probe`` the probe
+    result it came from. Both are recorded on the outcome, and ``error``
+    carries the reason to the approval sheet, which shows ``execution.error``
+    when it is present and a generic "did not finish" when it is not. The
+    reason used to be computed and then dropped here, so four identical
+    failures on 2026-09-15 recorded only ``failed_stage`` and diagnosing
+    them meant excavating logs.
+    """
     remote_revoked = False
     try:
         from tools.dashboard.link_serving_supervisor import control
@@ -1136,7 +1153,7 @@ def _compensate_failed_publish(org, token, stage):
         pass
     cleanup = _drop_cached_grant(token, org)
     prefix = token[:8] if isinstance(token, str) else "invalid"
-    return {
+    outcome = {
         "ok": False,
         "token_prefix": prefix,
         "failed_stage": stage,
@@ -1144,6 +1161,15 @@ def _compensate_failed_publish(org, token, stage):
         "grant_cleanup": cleanup["grant_cleanup"],
         "key_cleanup": cleanup["key_cleanup"],
     }
+    if detail:
+        outcome["detail"] = str(detail)
+        outcome["error"] = f"{stage}: {detail}"
+    if isinstance(probe, dict):
+        outcome["probe"] = {
+            key: probe.get(key) for key in ("live", "status", "detail", "via")
+            if key in probe
+        }
+    return outcome
 
 
 #: Grant meta the dashboard keeps to itself and never puts on the wire to

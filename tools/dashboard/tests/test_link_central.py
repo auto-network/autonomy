@@ -816,14 +816,15 @@ def test_publish_probe_failure_compensates_link_state(monkeypatch):
     )
 
     async def unavailable(_binding, _token, _org):
-        return {"live": False, "via": "registry-http"}
+        return {"live": False, "via": "registry-http",
+                "detail": "the serving tunnel did not respond within the probe budget"}
 
     monkeypatch.setattr(link_central.link_approvals, "_probe_serving", unavailable)
     compensation = []
     monkeypatch.setattr(
         link_central.link_approvals,
         "_compensate_failed_publish",
-        lambda org, token, stage: compensation.append((org, token, stage)),
+        lambda org, token, stage, **kw: compensation.append((org, token, stage, kw.get("detail"))),
     )
     consumer = link_central.LinkResultConsumer(
         store=store,
@@ -841,7 +842,9 @@ def test_publish_probe_failure_compensates_link_state(monkeypatch):
     with pytest.raises(link_central.LinkCentralError, match="registry unavailable"):
         consumer.materialize(status)
 
-    assert compensation == [(ORG, "55" * 16, "recipient-probe")]
+    # The probe's own reason travels with the rollback, never discarded.
+    assert compensation == [(ORG, "55" * 16, "recipient-probe",
+                             "the serving tunnel did not respond within the probe budget")]
     assert store.results == {}
 
 
