@@ -10,6 +10,7 @@ import re
 import secrets
 import functools
 import sqlite3
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -636,6 +637,14 @@ class GraphDB:
         self._immutable = False
         self._pooled = False  # set to True by for_org when cached
         self._attach_fleet_sync = bool(attach_fleet_sync)
+        self._conn: sqlite3.Connection | None = None
+        # Per-thread connections for a POOLED READ-ONLY handle (see ``conn``);
+        # None until for_org() enables it. A pooled read-write handle keeps
+        # one connection and records the thread that owns it.
+        self._thread_conns: threading.local | None = None
+        self._thread_conn_list: list[sqlite3.Connection] = []
+        self._thread_conn_lock = threading.Lock()
+        self._owner_thread: int | None = None
         if mode == "ro":
             self._open_ro()
             return
@@ -744,36 +753,126 @@ class GraphDB:
             or sqlite_reported_read_only
         )
 
+    # ── the connection: one per thread on a pooled read-only handle ──
+    #
+    # A pooled read-only handle (``for_org(slug, mode="ro")``) is shared by
+    # every request thread in the dashboard. One sqlite3 connection cannot be:
+    # SQLite serialises the underlying handle, but the Python cursor and
+    # statement cache are not protected, so two threads stepping statements
+    # at once raise "sqlite3.InterfaceError: bad parameter or other API
+    # misuse" (live 2026-09-15: note-open fires two get_source reads on two
+    # thread-pool workers in the same millisecond; three 500s in one day, the
+    # only error in the dashboard log). ``check_same_thread=False`` alone was
+    # never enough; the 2026-04-21 comment that called sharing safe was wrong.
+    #
+    # So ``conn`` is a property. On a pooled read-only handle it returns THIS
+    # thread's connection, opened once per thread and cached in a
+    # thread-local for the thread's lifetime (pool workers are long-lived, so
+    # a store pays one open per worker per process, then nothing). The
+    # read-only open is stateless — no authored-write hook, no catalog, no
+    # transactions — so nothing is split across threads. Every other handle
+    # (a fresh read-write connection opened and closed within one call, or
+    # the pooled read-write handle the cache GC uses from one thread) keeps
+    # its single connection; a pooled read-write handle refuses use from a
+    # thread other than its opener instead of pretending to be shareable.
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        local = self._thread_conns
+        if local is None:
+            owner = self._owner_thread
+            if owner is not None and owner != threading.get_ident():
+                raise sqlite3.ProgrammingError(
+                    "a pooled read-write GraphDB handle is single-threaded: "
+                    "opened on one thread, used from another (open a fresh "
+                    "GraphDB, or use mode='ro' for shared reads)"
+                )
+            return self._conn  # type: ignore[return-value]
+        conn = getattr(local, "conn", None)
+        if conn is None:
+            conn = self._connect_ro()
+            local.conn = conn
+            with self._thread_conn_lock:
+                self._thread_conn_list.append(conn)
+        return conn
+
+    @conn.setter
+    def conn(self, value: sqlite3.Connection) -> None:
+        # On a per-thread handle, assignment replaces THIS thread's
+        # connection (a test wrapping it in a recorder, for instance); the
+        # other threads keep theirs.
+        local = self._thread_conns
+        if local is not None:
+            local.conn = value
+            with self._thread_conn_lock:
+                self._thread_conn_list.append(value)
+            return
+        self._conn = value
+
+    @conn.deleter
+    def conn(self) -> None:
+        local = self._thread_conns
+        if local is not None:
+            local.conn = None
+            return
+        self._conn = None
+
+    def _share_per_thread(self) -> None:
+        """Enable per-thread connections (pooled read-only handles only)."""
+        if not self.read_only:
+            raise ValueError("per-thread connections are for read-only handles")
+        local = threading.local()
+        local.conn = self._conn  # the opener keeps the connection it probed
+        self._thread_conns = local
+        self._thread_conn_list = [self._conn] if self._conn is not None else []
+
+    def _close_connections(self) -> None:
+        """Close every connection this handle opened, on any thread."""
+        with self._thread_conn_lock:
+            conns = list(self._thread_conn_list)
+            self._thread_conn_list = []
+        if self._conn is not None and self._conn not in conns:
+            conns.append(self._conn)
+        for conn in conns:
+            try:
+                conn.close()
+            except (sqlite3.ProgrammingError, sqlite3.OperationalError):
+                pass
+        self._conn = None
+        self._thread_conns = None
+
+    def _connect_ro(self) -> sqlite3.Connection:
+        """One read-only connection to this database: ``mode=ro``, falling
+        back to ``immutable=1`` (a filesystem that refuses the WAL side
+        files). The fallback decision is made once, by the first open, and
+        every later per-thread open follows it (``_immutable``)."""
+        if not self._immutable:
+            try:
+                conn = sqlite3.connect(
+                    f"file:{self.db_path}?mode=ro",
+                    uri=True,
+                    check_same_thread=False,
+                    timeout=_SQLITE_CONNECT_TIMEOUT_S,
+                )
+                conn.row_factory = sqlite3.Row
+                _register_fleet_sync_sql_functions(conn)
+                return conn
+            except (sqlite3.OperationalError, OSError):
+                self._immutable = True
+        conn = sqlite3.connect(
+            f"file:{self.db_path}?immutable=1",
+            uri=True,
+            check_same_thread=False,
+            timeout=_SQLITE_CONNECT_TIMEOUT_S,
+        )
+        conn.row_factory = sqlite3.Row
+        _register_fleet_sync_sql_functions(conn)
+        return conn
+
     def _open_ro(self):
         """Open the DB read-only. Used when the filesystem is ro-mounted
-        or when ``mode='ro'`` is requested explicitly.
-
-        ``check_same_thread=False`` allows the process-lifetime connection
-        pool (``GraphDB.for_org``) to share ro connections across Starlette
-        threadpool workers. SQLite's serialized threading mode + GIL +
-        single-query-per-call (no cursor held across awaits, no
-        transactions on ro connections) make this safe. Hot-patched
-        2026-04-21 after a dashboard 500-error regression; formalize in
-        follow-up bead."""
-        try:
-            self.conn = sqlite3.connect(
-                f"file:{self.db_path}?mode=ro",
-                uri=True,
-                check_same_thread=False,
-                timeout=_SQLITE_CONNECT_TIMEOUT_S,
-            )
-            self.conn.row_factory = sqlite3.Row
-            _register_fleet_sync_sql_functions(self.conn)
-        except (sqlite3.OperationalError, OSError):
-            self.conn = sqlite3.connect(
-                f"file:{self.db_path}?immutable=1",
-                uri=True,
-                check_same_thread=False,
-                timeout=_SQLITE_CONNECT_TIMEOUT_S,
-            )
-            self.conn.row_factory = sqlite3.Row
-            _register_fleet_sync_sql_functions(self.conn)
-            self._immutable = True
+        or when ``mode='ro'`` is requested explicitly."""
+        self.conn = self._connect_ro()
         user_version = self.conn.execute("PRAGMA user_version").fetchone()[0]
         has_settings = self.conn.execute(
             "SELECT 1 FROM sqlite_master "
@@ -1489,10 +1588,7 @@ class GraphDB:
             for k in keys:
                 _CONNECTION_POOL.pop(k, None)
             self._pooled = False
-        try:
-            self.conn.close()
-        except sqlite3.ProgrammingError:
-            pass  # already closed
+        self._close_connections()
 
     def __enter__(self):
         return self
@@ -1594,6 +1690,10 @@ class GraphDB:
             return cached
         db = cls.open_org_db(slug, mode=mode, root=root)
         db._pooled = True
+        if mode == "ro":
+            db._share_per_thread()
+        else:
+            db._owner_thread = threading.get_ident()
         _CONNECTION_POOL[key] = db
         return db
 
@@ -1603,10 +1703,7 @@ class GraphDB:
         and dashboard shutdown."""
         for db in list(_CONNECTION_POOL.values()):
             db._pooled = False
-            try:
-                db.conn.close()
-            except (sqlite3.ProgrammingError, sqlite3.OperationalError):
-                pass
+            db._close_connections()
         _CONNECTION_POOL.clear()
 
     @classmethod
@@ -1620,10 +1717,7 @@ class GraphDB:
         for key, db in matches:
             _CONNECTION_POOL.pop(key, None)
             db._pooled = False
-            try:
-                db.conn.close()
-            except (sqlite3.ProgrammingError, sqlite3.OperationalError):
-                pass
+            db._close_connections()
         return len(matches)
 
     @classmethod
