@@ -552,3 +552,28 @@ def test_exempt_off_by_default_leaves_limits_intact():
     # Same source again hits the source cap (burst 1) -> denied. Exempt is
     # NOT configured, so nothing is bypassed.
     assert lim.begin("203.0.113.7") is None
+
+
+def test_bucket_purge_is_incremental_and_skips_revived_buckets():
+    """A purge pops only the buckets whose refill moment has passed; a
+    bucket that a new lease revived before its moment stays. (The previous
+    purge scanned every bucket on every admission: quadratic.)"""
+    clock = _Clock()
+    limiter = _limiter(clock, byte={"channel": ByteLimit(1_000, 1_000)})
+    key_a, key_b = (1).to_bytes(32, "big"), (2).to_bytes(32, "big")
+    lease_a = limiter.acquire(ResolvedTicket(key_a, key_a, key_a, key_a))
+    lease_b = limiter.acquire(ResolvedTicket(key_b, key_b, key_b, key_b))
+    assert lease_a.charge_bytes(64) and lease_b.charge_bytes(64)
+    lease_a.release()
+    lease_b.release()
+    assert limiter.snapshot()["byte_bucket_keys"]["source"] == 2   # both draining
+    assert len(limiter._expiry) == 8                                # 2 buckets x 4 scopes
+    # Revive A before its moment: it must survive the purge that removes B.
+    lease_a2 = limiter.acquire(ResolvedTicket(key_a, key_a, key_a, key_a))
+    clock.advance(10.0)
+    assert limiter.snapshot()["byte_bucket_keys"]["source"] == 1
+    assert key_a in limiter._buckets["source"] and key_b not in limiter._buckets["source"]
+    assert limiter._expiry == []                                    # stale entries consumed
+    lease_a2.release()
+    clock.advance(10.0)
+    assert limiter.snapshot()["byte_bucket_keys"]["source"] == 0
