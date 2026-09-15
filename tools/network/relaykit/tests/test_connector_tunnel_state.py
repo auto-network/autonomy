@@ -141,3 +141,26 @@ def test_a_failed_viewer_channel_is_remembered_and_closed(monkeypatch, caplog):
     }
     assert "viewer channel for link abababab... closed on an error (close 4502): " \
            "PermissionError: link key resolution refused" in caplog.text
+
+
+def test_a_channel_dropped_before_the_viewer_hello_closes_4505(monkeypatch):
+    """The relay dropped the channel before the viewer's hello arrived: the
+    connector's channel task ends without serving, and says so instead of
+    sending a bare close the relay would call 'normal' (dynbench, 2026-09-15)."""
+    from tools.network.relaykit.close_codes import decode_close_payload
+
+    connector = _connector()
+    monkeypatch.setattr(connector_module.time, "time", lambda: 11_000.0)
+    connector._channel_authorization_for = lambda token: {"protocol": "public-link", "key": object()}
+    sent = []
+
+    async def send_frame(kind, channel_id, data=b""):
+        sent.append((kind, channel_id, data))
+
+    queue = asyncio.Queue()
+    queue.put_nowait(None)   # the relay's FRAME_CLOSE arrived first
+    asyncio.run(connector._serve_channel(b"\x02", "cd" * 16, queue, send_frame, lambda channel_id: None))
+    [(kind, channel_id, payload)] = [f for f in sent if f[0] == connector_module.FRAME_CLOSE]
+    code, reason = decode_close_payload(payload)
+    assert code == 4505 and reason.startswith("channel ended before the viewer hello")
+    assert connector.tunnel_state["last_channel_failure"]["close_code"] == 4505

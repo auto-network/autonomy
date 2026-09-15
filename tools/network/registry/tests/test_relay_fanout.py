@@ -43,7 +43,7 @@ class _ViewerSocket:
         self.payloads.append(payload)
         self.sent.set()
 
-    async def close(self, *, code: int) -> None:
+    async def close(self, *, code: int, reason: str = "") -> None:
         self.close_codes.append(code)
         self.closed.set()
         self._release.set()
@@ -429,7 +429,7 @@ def test_socket_write_failure_removes_the_listener():
             async def send_bytes(self, payload: bytes) -> None:
                 raise RuntimeError("socket died")
 
-            async def close(self, *, code: int) -> None:
+            async def close(self, *, code: int, reason: str = "") -> None:
                 pass
 
         tunnel = _tunnel()

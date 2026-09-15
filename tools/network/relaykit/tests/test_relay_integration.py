@@ -213,9 +213,10 @@ class TestRelayStack:
         assert CANARY not in s2c
         assert CANARY not in c2s
 
-    def test_anti_enumeration_uniform_close(self, stack, root):
+    def test_each_refusal_has_its_own_close_code(self, stack, root):
         """Unknown token and valid-token-but-dashboard-offline close with
-        the SAME code — a prober can't tell them apart (§5.3)."""
+        DIFFERENT codes (operator ruling 2026-09-15): the publisher's own
+        dashboard dials its link after every publish and reads the code."""
         offline_org = "66666666-6666-4666-8666-666666666666"
         offline_root = KeyPair.generate()
         offline_token = register_org_and_link(
@@ -224,7 +225,8 @@ class TestRelayStack:
         async def run():
             unknown = await close_code_for(stack, "0" * 32)
             offline = await close_code_for(stack, offline_token)
-            assert unknown == offline == 4404
+            assert unknown == 4404      # CLOSE_UNKNOWN_LINK
+            assert offline == 4426      # CLOSE_NO_TUNNEL
         asyncio.run(run())
 
     def test_reconnect_after_relay_death(self, stack):

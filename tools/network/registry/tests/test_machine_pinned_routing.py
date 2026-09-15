@@ -21,7 +21,7 @@ import pytest
 
 from tools.network.idkit import KeyPair, Subject, issue_cert
 from tools.network.registry import relay as relay_mod
-from tools.network.registry.relay import CLOSE_UNKNOWN_LINK, Tunnel, viewer_endpoint
+from tools.network.registry.relay import CLOSE_SERVING_MACHINE_OFFLINE, CLOSE_UNKNOWN_LINK, Tunnel, viewer_endpoint
 from tools.network.registry.store import LinkGrant, RegistryStore
 from tools.network.relaykit import hello as hello_mod
 from tools.network.relaykit.frames import (
@@ -334,7 +334,7 @@ class _ViewerSocket:
     async def receive(self):
         return {"type": "websocket.disconnect"}
 
-    async def close(self, *, code: int):
+    async def close(self, *, code: int, reason: str = ""):
         self.close_codes.append(code)
 
 
@@ -381,7 +381,7 @@ def test_pinned_link_routes_only_to_the_declared_machine(monkeypatch):
     assert hub.least_loaded_calls == 0
 
 
-def test_pinned_link_with_its_machine_offline_is_a_uniform_4404(monkeypatch):
+def test_pinned_link_with_its_machine_offline_says_so(monkeypatch):
     sock_x = _TunnelSocket()
     hub = _Hub(Tunnel(sock_x, ORG, machine="11" * 32))
     monkeypatch.setattr(relay_mod, "_resolve_live_link",
@@ -390,7 +390,7 @@ def test_pinned_link_with_its_machine_offline_is_a_uniform_4404(monkeypatch):
     ws = _ViewerSocket()
     asyncio.run(viewer_endpoint(ws, "0" * 32, hub, None, lambda: 0))
 
-    assert ws.close_codes == [CLOSE_UNKNOWN_LINK]
+    assert ws.close_codes == [CLOSE_SERVING_MACHINE_OFFLINE]
     assert not _opened(sock_x)  # never handed to a machine without the content
 
 

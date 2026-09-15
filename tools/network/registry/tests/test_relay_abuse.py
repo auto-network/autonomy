@@ -24,7 +24,7 @@ from tools.network.registry.abuse import (
     _source_inputs,
 )
 from tools.network.registry.app import create_app
-from tools.network.registry.relay import CLOSE_UNKNOWN_LINK, Tunnel, viewer_endpoint
+from tools.network.registry.relay import CLOSE_BYTE_RATE_EXHAUSTED, CLOSE_OPEN_FAILED, CLOSE_UNKNOWN_LINK, Tunnel, viewer_endpoint
 from tools.network.registry.store import LinkGrant
 
 
@@ -404,7 +404,7 @@ class _ViewerSocket:
     async def receive(self) -> dict:
         return {"type": "websocket.receive", "bytes": b"xx"}
 
-    async def close(self, *, code: int) -> None:
+    async def close(self, *, code: int, reason: str = "") -> None:
         self.close_codes.append(code)
 
 
@@ -425,7 +425,7 @@ def test_outbound_byte_refusal_closes_uniformly_and_releases_active_state():
             if socket.close_codes:
                 break
             await asyncio.sleep(0)
-        assert socket.close_codes == [CLOSE_UNKNOWN_LINK]
+        assert socket.close_codes == [CLOSE_BYTE_RATE_EXHAUSTED]
         assert channel_id not in tunnel.channels
         assert limiter.snapshot()["active_process"] == 0
         await tunnel.close_all_viewers(1001)
@@ -505,7 +505,7 @@ def test_listener_attachment_failure_releases_channel_lease(monkeypatch):
             abuse_limiter=limiter,
         )
 
-        assert socket.close_codes == [CLOSE_UNKNOWN_LINK]
+        assert socket.close_codes == [CLOSE_OPEN_FAILED]
         assert tunnel.channels == {}
         assert limiter.snapshot()["active_process"] == 0
 

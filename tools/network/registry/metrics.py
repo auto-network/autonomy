@@ -58,6 +58,7 @@ class RegistryMetrics:
         self._stream_opens: Counter = Counter()      # (org,)
         self._stream_closes: Counter = Counter()     # (org, reason) orderly enums
         self._viewer_closes: Counter = Counter()     # (org, code) relay-initiated viewer closes
+        self._viewer_closes_forwarded: Counter = Counter()  # (org, code) connector-initiated, forwarded
         self._stream_refusals: Counter = Counter()   # (reason,) pre-org-resolve
         self._stream_bytes: Counter = Counter()      # (org, direction)
         self._lease_events: Counter = Counter()      # (org, event)
@@ -81,6 +82,14 @@ class RegistryMetrics:
         on that path and could only be inferred."""
         with self._lock:
             self._viewer_closes[(_san_org(org), str(int(code)))] += 1
+
+    def viewer_close_forwarded(self, org: str, code: int) -> None:
+        """A viewer channel the CONNECTOR ended (its close frame, coded or
+        empty, forwarded to the viewer). Separate from viewer_close so a
+        connector that closes every viewer empty is visible as such rather
+        than indistinguishable from served-then-closed."""
+        with self._lock:
+            self._viewer_closes_forwarded[(_san_org(org), str(int(code)))] += 1
 
     def stream_refused(self, reason: str) -> None:
         # Pre-routing refusals have no resolved org; count by reason only.
@@ -184,6 +193,9 @@ class RegistryMetrics:
         emit("relay_viewer_closes_total",
              "Viewer channels closed by the relay itself, by close code",
              "counter", self._viewer_closes, ("org", "code"))
+        emit("relay_viewer_closes_forwarded_total",
+             "Viewer channels ended by the connector (its close frame forwarded), by close code",
+             "counter", self._viewer_closes_forwarded, ("org", "code"))
         emit("relay_stream_refusals_total",
              "Ingress connections refused before routing, by reason.",
              "counter", self._stream_refusals, ("reason",))
