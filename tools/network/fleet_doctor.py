@@ -473,11 +473,14 @@ def check_serving_readiness(report: dict) -> None:
                 "suppressed, not passed",
                 warn=True,
             )
-        scopes: list[tuple[str, str | None]] = [("personal (scopeless)", None)]
+        # The serving scopes are what the supervisor reconciles: the personal
+        # store once, by name, then each organization. Listing the inventory
+        # here instead produced two rows for the personal store.
         try:
-            scopes.extend((ref.slug, ref.slug) for ref in org_ops.list_orgs())
+            scopes: list[tuple[str, str]] = [
+                (scope, scope) for scope in sup._discover_startup_orgs()]
         except Exception:
-            pass
+            scopes = [("personal", "personal")]
 
         for label, org in scopes:
             try:
@@ -509,20 +512,9 @@ def check_serving_readiness(report: dict) -> None:
                 )
                 continue
             should_run = eligible_by_credentials
-            # org=None (settings_ops' "explicit scopeless write") and
-            # org="personal" resolve to the exact same underlying database
-            # (settings_ops(org=None) deterministically opens the personal
-            # org DB -- see commit 669cf592), so a connector launched under
-            # either name satisfies the other; they are not two independent
-            # scopes that both need their own running process. Symmetric on
-            # purpose -- an earlier one-directional version (None matches
-            # "personal", but not the reverse) produced a live false
-            # positive on the "personal" scope once the connector actually
-            # started reporting --graph-org as unset (None) rather than the
-            # literal string "personal".
-            personal_aliases = {None, "personal"}
-            aliases = personal_aliases if org in personal_aliases else {org}
-            is_running = any(info.get("graph_org") in aliases for info in running.values())
+            # Every connector names its store on its command line
+            # (--graph-org personal|<slug>); the scope IS that name.
+            is_running = any(info.get("graph_org") == org for info in running.values())
             if should_run and not is_running and scan_blind:
                 # The scan could not read the process table, so "not running"
                 # is not a finding (auto-kqpfw).

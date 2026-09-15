@@ -88,7 +88,7 @@ def test_an_org_connector_is_given_a_rider(monkeypatch):
 
 def test_the_personal_connector_is_not(monkeypatch):
     """Personal uses its own serving credential and has no member ledger."""
-    captured = _build(monkeypatch, graph_org=None)
+    captured = _build(monkeypatch, graph_org="personal")
     assert "membership_proof_for" not in captured
     assert "on_reprove" not in captured
 

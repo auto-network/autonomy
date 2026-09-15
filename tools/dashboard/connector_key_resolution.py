@@ -70,7 +70,7 @@ def _authorized_grant(request):
             or payload.get("org_uuid") != credential_id or not _live(payload)):
         raise PermissionError("connector authentication refused")
     token = request.get("token")
-    org = payload["organization"] or None
+    org = payload["organization"]
     grant = check_grant(token, org=org)
     if not grant:
         raise PermissionError("link unavailable")
@@ -145,7 +145,7 @@ def register(pid, credential_id, org, boot_commit):
     auth = secrets.token_hex(32)
     _write(credential_id, {
         "token_hash": hashlib.sha256(auth.encode()).hexdigest(),
-        "organization": org or "", "org_uuid": credential_id,
+        "organization": org, "org_uuid": credential_id,
         "pid": pid, "process_start": start, "boot_commit": boot_commit or "unknown",
         "protocol_version": PROTOCOL_VERSION, "resolver_port": listener_port(),
     })
@@ -155,7 +155,7 @@ def register(pid, credential_id, org, boot_commit):
 def adopt(credential_id, org, pid):
     row = record(credential_id)
     payload = dict(row["payload"]) if row else {}
-    if payload.get("pid") != pid or payload.get("organization") != (org or "") or not _live(payload):
+    if payload.get("pid") != pid or payload.get("organization") != org or not _live(payload):
         return False
     payload["resolver_port"] = listener_port()
     _write(credential_id, payload)

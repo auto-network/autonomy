@@ -1642,9 +1642,9 @@ def _make_ice_serving_connector(
     # checkpoint the REGISTRY has adopted, and refuses — with an operator
     # alarm — when the registry's root contradicts the local fold.
     #
-    # The Personal connector is launched WITHOUT --graph-org and therefore
-    # uses its separately typed Personal serving credential without a ledger.
-    # A collaborative organization is configured with this proof provider;
+    # The Personal connector (--graph-org personal) uses its separately typed
+    # Personal serving credential without a ledger. A collaborative
+    # organization is configured with this proof provider;
     # if it cannot return a current proof, TunnelConnector refuses admission
     # before sending a hello. It never downgrades to the Personal protocol.
     # The scopes that must present v3 are exactly the scopes whose certs must
@@ -1652,7 +1652,7 @@ def _make_ice_serving_connector(
     # two must not disagree or a scope would be asked for a proof its cert
     # cannot use. Personal is excluded on both sides: its org has no adopted
     # membership checkpoint at the registry and does not use this protocol.
-    if machine_key is not None and graph_org and graph_org != "personal":
+    if machine_key is not None and graph_org != "personal":
         stream_kwargs["membership_proof_for"] = _membership_rider
         stream_kwargs["on_reprove"] = _membership_rider_for_seq
 
@@ -2232,8 +2232,9 @@ def main() -> None:
         "--channel-cert-file", required=False, default=None,
         help="identity-neutral cert used only in viewer SERVER_HELLO",
     )
-    parser.add_argument("--graph-org", default=None,
-                        help="dashboard org slug scoping the grant cache")
+    parser.add_argument("--graph-org", default="personal",
+                        help="the store this connector serves: 'personal' or "
+                             "an organization slug (scopes the grant cache)")
     parser.add_argument("--link-key-fd", type=int, required=True,
                         help="inherited pipe containing the resolver credential")
     parser.add_argument("--control-file", default=None,

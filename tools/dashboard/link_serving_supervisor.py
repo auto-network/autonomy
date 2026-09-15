@@ -77,6 +77,26 @@ from tools.graph.schemas.network_identity import (
 _PERSONA_PUB_RE = re.compile(r"^[0-9a-f]{64}$")
 CONNECTOR_STARTUP_TIMEOUT_S = 60.0
 
+#: A serving scope is a STORE NAME: ``"personal"`` for the operator's own
+#: store, an organization slug otherwise. The personal store used to be
+#: spelled ``None`` here as well (the scopeless slot from before 2026-08-19,
+#: when it lived in the org namespace); once the store inventory started
+#: listing it by name, the supervisor enumerated BOTH spellings and ran two
+#: connectors for one credential, which replaced each other at the relay
+#: (4409) until nothing served (live 2026-09-15, home, org 02d833fd). There is
+#: one name now, and a caller that still passes ``None`` is refused loudly so
+#: the mistake is found at the call site rather than at the relay.
+PERSONAL_SCOPE = "personal"
+
+
+def _require_scope(org: object) -> str:
+    if not isinstance(org, str) or not org:
+        raise TypeError(
+            f"serving scope must be a store name (the personal store is "
+            f"{PERSONAL_SCOPE!r}), got {org!r}"
+        )
+    return org
+
 #: How long a connector that HAS served may stay unreachable before the
 #: supervisor replaces it. A connector owns its own reconnect loop, so a
 #: brief gap is normal and restarting into it would fight that loop --
@@ -505,7 +525,7 @@ def serve_cert_requirement(org: str | None, *, now: float | None = None) -> dict
     }
 
 
-def _has_live_grant(org: str | None, now: float) -> bool:
+def _has_live_grant(org: str, now: float) -> bool:
     """Any non-expired grant in the org's own cache — the 'links are live'
     half of the run condition (reuses the I9 validity check)."""
     try:
@@ -522,7 +542,7 @@ def _has_live_grant(org: str | None, now: float) -> bool:
     return False
 
 
-def _has_live_service_publication(org: str | None) -> bool:
+def _has_live_service_publication(org: str) -> bool:
     """True when *org* has an active/paused Service with a bound target.
 
     Services deliberately have no visitor-grant layer: application HTTP auth
@@ -530,7 +550,7 @@ def _has_live_service_publication(org: str | None) -> bool:
     lifecycle cannot be inferred from ``network.link-grant``.  The durable
     reservation plus target Settings are the existing publication authority.
     """
-    if org is None:
+    if org == PERSONAL_SCOPE:
         return False
     try:
         from tools.dashboard import service_publication
@@ -552,11 +572,11 @@ def _has_live_service_publication(org: str | None) -> bool:
         return False
 
 
-def _is_member_scope(org: str | None) -> bool:
+def _is_member_scope(org: str) -> bool:
     """True when this machine holds a persona in collaborative org *org*
     (its ledger has a genesis and ``autonomy.network.persona`` names this
     node's persona for it). Never raises."""
-    if not org or org == "personal":
+    if org == PERSONAL_SCOPE:
         return False
     try:
         from tools.graph import org_ops
@@ -572,18 +592,16 @@ def _is_member_scope(org: str | None) -> bool:
         return False
 
 
-def _is_personal_fleet_scope(org: str | None) -> bool:
+def _is_personal_fleet_scope(org: str) -> bool:
     """True when *org* is the personal fleet's own serving scope.
 
-    The personal fleet serves under the personal store (``org=None`` /
-    ``'personal'``) and, once the personal root is registered as its own org,
-    the deterministic ``personal_org_uuid`` (both stable, both never change).
-    A collaborative org — a real slug/uuid — is never matched, so its serving
-    still requires a genuine published grant.
+    The personal fleet serves under the personal store (``"personal"``) and,
+    once the personal root is registered as its own org, the deterministic
+    ``personal_org_uuid`` (both stable, both never change). A collaborative
+    org — a real slug/uuid — is never matched, so its serving still requires
+    a genuine published grant.
     """
-    from tools.graph import settings_ops
-
-    if settings_ops._resolve_org_arg(org) is None:
+    if org == PERSONAL_SCOPE:
         return True
     try:
         from tools.network import fleet_runtime, fleet_tunnel_server
@@ -682,13 +700,14 @@ class TunnelUnavailable(RuntimeError):
         self.kind = kind
 
 
-def control(org: str | None, op: str, args: dict, *, timeout: float = 12.0) -> dict:
+def control(org: str, op: str, args: dict, *, timeout: float = 12.0) -> dict:
     """Drive one D19 control op on *org*'s serving tunnel (register §3/§4).
 
     Reads the connector's ``.ctl`` descriptor, opens the loopback control
     listener, and returns the connector's reply. Raises
     :class:`TunnelUnavailable` when no connector/tunnel is up — the caller
     (the publish executor) turns that into ``ensure(org)`` + a retry."""
+    _require_scope(org)
     state = serve_cert_state(org)
     key_path = state.get("key_path")
     if not key_path:
@@ -741,7 +760,7 @@ def _materialize_cert(key_path: str, cert_wire: str) -> str:
     return cert_path
 
 
-def _connector_command(binding: dict, org: str | None, key_path: str,
+def _connector_command(binding: dict, org: str, key_path: str,
                        cert_path: str,
                        viewer_cert_path: "str | None",
                        owns_inbound_listener: bool = False) -> tuple[list, dict]:
@@ -760,8 +779,7 @@ def _connector_command(binding: dict, org: str | None, key_path: str,
     ]
     if viewer_cert_path is not None:
         argv += ["--channel-cert-file", viewer_cert_path]
-    if org:
-        argv += ["--graph-org", org]
+    argv += ["--graph-org", org]
     if owns_inbound_listener:
         argv += ["--inbound-listener"]
     # Inherit the environment so the subprocess reads the SAME GRAPH_DB (its
@@ -1077,9 +1095,10 @@ class ServingSupervisor:
         self._stop = threading.Event()
         self._watchdog: threading.Thread | None = None
 
-    def ensure(self, org: str | None) -> dict:
+    def ensure(self, org: str) -> dict:
         """Bring serving for *org* to match the rule. Idempotent; returns
         ``{running, reason}``."""
+        _require_scope(org)
         with self._lock:
             self._managed.add(org)
             return self._reconcile(org)
@@ -1092,12 +1111,13 @@ class ServingSupervisor:
                 except Exception:
                     pass  # one org's failure must not stall the others
 
-    def start(self, org: str | None) -> dict:
+    def start(self, org: str) -> dict:
         """Launch serving for an imminent first publish WITHOUT requiring a live
         grant — on a first publish the grant is created BY riding this tunnel,
         so it cannot pre-exist. The watchdog stays the only teardown: the
         fresh-tunnel grace keeps it from reaping a connector during the one
         interval it takes the publish to cache its grant. Idempotent."""
+        _require_scope(org)
         with self._lock:
             self._managed.add(org)
             permitted, why = self._serving_permitted()
@@ -1141,7 +1161,7 @@ class ServingSupervisor:
             return self._launch(org, state)
 
     @staticmethod
-    def _scope_should_run(org: str | None, state: dict, now: float,
+    def _scope_should_run(org: str, state: dict, now: float,
                           fleet_has_members: bool) -> bool:
         """THE rule for whether a scope's connector runs: a usable serving
         credential, and a live grant, a live service publication, or the
@@ -1170,10 +1190,10 @@ class ServingSupervisor:
         first two keep ownership stable across the moments a running
         connector's own gate is transiently cold (a fresh tunnel whose grant
         has not landed yet), so ownership never flaps a live connector."""
-        candidates: list = [None]
+        candidates: list = [PERSONAL_SCOPE]
         try:
             candidates += sorted(
-                slug for slug in _discover_startup_orgs() if slug is not None
+                slug for slug in _discover_startup_orgs() if slug != PERSONAL_SCOPE
             )
         except Exception:
             pass
@@ -1189,7 +1209,7 @@ class ServingSupervisor:
                 return scope
         return None
 
-    def _reconcile(self, org: str | None) -> dict:
+    def _reconcile(self, org: str) -> dict:
         now = self._now()
         # `eligibility` is still needed below for active_machine_count, and it
         # remains the singular-ownership election. Only the SERVING GATE moves
@@ -1488,7 +1508,7 @@ class ServingSupervisor:
         )
         return None
 
-    def _adopt_incumbent(self, org: str | None, state: dict) -> dict | None:
+    def _adopt_incumbent(self, org: str, state: dict) -> dict | None:
         """Adopt a live, serving connector left by a previous dashboard
         incarnation instead of killing it. None -> no healthy incumbent.
 
@@ -1603,7 +1623,7 @@ class ServingSupervisor:
                          exc_info=True)
             return None
 
-    def _launch(self, org: str | None, state: dict) -> dict:
+    def _launch(self, org: str, state: dict) -> dict:
         """Spawn the connector for *org* (``state`` must be an ``ok``
         serve-cert state) and record its launch time for the fresh-tunnel
         grace. Callers hold the lock."""
@@ -1697,7 +1717,7 @@ class ServingSupervisor:
                 owned.add(pid)
         return owned
 
-    def _reap_strays(self, org: str | None) -> None:
+    def _reap_strays(self, org: str) -> None:
         """Terminate serving connectors for *org* that this supervisor does not
         own — the leaked generations reparented to systemd when a previous
         dashboard died.
@@ -1731,7 +1751,7 @@ class ServingSupervisor:
             _log.warning("stray-connector reap failed for org=%s",
                          org, exc_info=True)
 
-    def _acquire_lock(self, org: str | None, key_path: str) -> bool:
+    def _acquire_lock(self, org: str, key_path: str) -> bool:
         if org in self._locks:
             return True
         lock_path = _lock_path_for(key_path)
@@ -1745,7 +1765,7 @@ class ServingSupervisor:
         self._locks[org] = lock
         return True
 
-    def _release_lock(self, org: str | None) -> None:
+    def _release_lock(self, org: str) -> None:
         lock = self._locks.pop(org, None)
         if lock is None:
             return
@@ -1793,7 +1813,7 @@ class ServingSupervisor:
             watchdog.join(timeout=2)
         self._watchdog = None
 
-    def serving(self, scope: str | None = None) -> bool:
+    def serving(self, scope: str = PERSONAL_SCOPE) -> bool:
         """Deterministic serving liveness for one scope (personal by default).
 
         True ONLY when the scope's connector answers its control socket and
@@ -1825,7 +1845,7 @@ class ServingSupervisor:
         with self._lock:
             return [org for org, p in self._procs.items() if p.alive()]
 
-    def restart(self, org: str | None) -> dict:
+    def restart(self, org: str) -> dict:
         """Stop *org*'s connector (if any) and reconcile it back up.
 
         A running connector holds its Fleet serving credential ONLY in memory
@@ -1835,6 +1855,7 @@ class ServingSupervisor:
         disk — and the precondition for re-arming it, since the credential must
         be re-installed AFTER the new process is up. Idempotent; returns
         ``{running, reason}`` from the relaunch."""
+        _require_scope(org)
         with self._lock:
             proc = self._procs.pop(org, None)
             if proc is not None:
@@ -1891,7 +1912,7 @@ def provisioned_serving_scopes() -> list:
                 continue
         except Exception:
             continue
-        scopes.append((scope, scope or "personal"))
+        scopes.append((scope, scope))
     return scopes
 
 
@@ -1907,13 +1928,13 @@ def scopes_not_serving(provisioned=None) -> list:
     checked = list(provisioned if provisioned is not None
                    else provisioned_serving_scopes())
     if not checked:
-        checked = [(None, "personal")]
+        checked = [(PERSONAL_SCOPE, PERSONAL_SCOPE)]
     supervisor = get_supervisor()
     return [label for scope, label in checked
             if not bool(supervisor.serving(scope))]
 
 
-def _discover_startup_orgs() -> list[str | None]:
+def _discover_startup_orgs() -> list[str]:
     """Return every local Settings scope that may own serving state.
 
     A test-pinned ``GRAPH_DB`` is one physical database, so only its resolved
@@ -1936,14 +1957,21 @@ def _discover_startup_orgs() -> list[str | None]:
                 )
         except Exception:
             pass
-        return [None]
+        return [PERSONAL_SCOPE]
 
     from tools.graph import org_ops
+    from tools.graph.db import LOCAL_STORE_SLUGS
 
-    # org-scope: enumerate — one connector per local org database, plus the
-    # scopeless legacy slot; nothing ambient can add or hide a scope.
-    discovered: list[str | None] = [None]
-    discovered.extend(ref.slug for ref in org_ops.list_orgs())
+    # org-scope: enumerate — the personal store, then one connector per
+    # local organization database; nothing ambient can add or hide a scope.
+    # The inventory lists the operator's local stores by name beside the
+    # organizations: personal is already listed, and the machine store never
+    # serves.
+    discovered: list[str] = [PERSONAL_SCOPE]
+    discovered.extend(
+        ref.slug for ref in org_ops.list_orgs()
+        if ref.slug not in LOCAL_STORE_SLUGS
+    )
     return discovered
 
 
@@ -1952,9 +1980,8 @@ def bootstrap(orgs=None) -> ServingSupervisor:
     watchdog. So a restart with a provisioned cert + live grants brings serving
     back up on its own, and the watchdog keeps it reconciled thereafter.
 
-    *orgs* defaults to every local org database plus the legacy scopeless
-    database. Never raises: startup must not be held hostage by a serving
-    hiccup.
+    *orgs* defaults to the personal store plus every local org database.
+    Never raises: startup must not be held hostage by a serving hiccup.
     """
     supervisor = get_supervisor()
     if orgs is None:
