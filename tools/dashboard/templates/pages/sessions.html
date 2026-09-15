@@ -11,7 +11,7 @@
     <div class="sessions-org-filter" data-testid="org-filter"
          x-org-picker="{orgs: orgFilterList, value: selectedOrg, allowAll: true, allLabel: 'All Orgs', testId: 'org-filter-toggle', menuTestId: 'org-filter-menu', optionTestPrefix: 'org-filter-option-', onChange: slug => pickOrgFilter(slug)}"></div>
     <div x-data="{ open: false }" class="relative sessions-launch-control" data-testid="session-launch-dropdown">
-      <button @click="open = !open"
+      <button @click="open = !open; if (open) _fetchProjects()"
               class="w-8 h-8 flex items-center justify-center rounded-lg
                      bg-green-600 hover:bg-green-500 text-white text-lg font-bold
                      transition-colors">+</button>
