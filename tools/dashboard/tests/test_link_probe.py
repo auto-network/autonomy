@@ -93,3 +93,24 @@ def test_probe_reports_unreachable_on_dead_port():
         assert verdict["live"] is False and verdict["status"] is None, verdict
 
     asyncio.run(run())
+
+
+def test_a_coded_close_is_named_with_its_remedy():
+    """A connector that refused the channel is reported by code, its own
+    words and the remedy — never as '1000 (OK)'."""
+    from websockets.exceptions import ConnectionClosed
+    from websockets.frames import Close
+
+    from tools.dashboard import link_probe
+
+    exc = ConnectionClosed(Close(4501, "connector credential unavailable"), None)
+    out = link_probe._closed(exc, "the far side closed the channel before it served")
+    assert out["live"] is False and out["close_code"] == 4501
+    assert out["close_reason"] == "connector credential unavailable"
+    assert out["detail"].startswith(
+        "the far side closed the channel before it served: close 4501 (connector unarmed); "
+        "the far side said: connector credential unavailable; ")
+    assert "remedy: unlock the dashboard" in out["detail"]
+    # A pre-coded-close connector still closes 1000: say what that means.
+    out = link_probe._closed(ConnectionClosed(Close(1000, ""), None), "mid-probe")
+    assert out["close_code"] == 1000 and "close 1000 (normal closure)" in out["detail"]

@@ -85,8 +85,25 @@ def _interpret(raw: bytes) -> dict:
     }
 
 
-def _unreachable(detail: str) -> dict:
-    return {"live": False, "status": None, "content_length": None, "detail": detail}
+def _unreachable(detail: str, *, close_code: int | None = None,
+                 close_reason: str | None = None) -> dict:
+    out = {"live": False, "status": None, "content_length": None, "detail": detail}
+    if close_code is not None:
+        out["close_code"] = close_code
+        out["close_reason"] = close_reason or ""
+    return out
+
+
+def _closed(exc: BaseException, stage: str) -> dict:
+    """A close from the far side, named: the code, its meaning and the
+    remedy (relaykit.close_codes), never a bare '1000 (OK)'."""
+    from tools.network.relaykit.close_codes import describe
+
+    rcvd = getattr(exc, "rcvd", None)
+    code = getattr(rcvd, "code", None)
+    reason = getattr(rcvd, "reason", None) or ""
+    return _unreachable(f"{stage}: {describe(code, reason)}",
+                        close_code=code, close_reason=reason)
 
 
 async def _attempt_once(relay_url, token, link_pub, org_uuid, operation,
@@ -103,12 +120,16 @@ async def _attempt_once(relay_url, token, link_pub, org_uuid, operation,
     """
     from tools.network.relaykit.viewer import ViewerChannel
 
+    from websockets.exceptions import ConnectionClosed
+
     try:
         channel = await ViewerChannel.connect(
             relay_url, token, link_pub=link_pub,
             org=org_uuid, open_timeout=connect_timeout,
         )
-    except Exception as exc:  # relay refused, connector offline, DNS, TLS…
+    except ConnectionClosed as exc:
+        return _closed(exc, "the far side closed the channel before it served")
+    except Exception as exc:  # DNS, TLS, refused socket, handshake shape…
         return _unreachable(
             "the serving tunnel is not reachable "
             f"(connector offline or relay refused the channel): {exc}"
@@ -118,6 +139,8 @@ async def _attempt_once(relay_url, token, link_pub, org_uuid, operation,
             await channel.send_message(canonical_json({"op": operation, "v": 1}))
             raw = await channel.recv_message()
         return _interpret(raw)
+    except ConnectionClosed as exc:
+        return _closed(exc, "the far side closed the channel mid-probe")
     except Exception as exc:
         return _unreachable(f"the serving channel failed mid-probe: {exc}")
 

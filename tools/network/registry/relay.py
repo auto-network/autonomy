@@ -200,7 +200,7 @@ class _ViewerRelayChannel:
         self._queue.put_nowait(payload)
         return True
 
-    def start_close(self, code: int) -> asyncio.Task:
+    def start_close(self, code: int, reason: str = "") -> asyncio.Task:
         """Cancel the writer, release queued bytes, and close asynchronously."""
         if self._close_task is not None:
             return self._close_task
@@ -208,7 +208,7 @@ class _ViewerRelayChannel:
         self._release_abuse_lease()
         self._release_pending()
         self._writer_task.cancel()
-        self._close_task = asyncio.create_task(self._finish_close(code))
+        self._close_task = asyncio.create_task(self._finish_close(code, reason))
         return self._close_task
 
     async def close(self, code: int) -> None:
@@ -258,10 +258,10 @@ class _ViewerRelayChannel:
         if self._abuse_lease is not None:
             self._abuse_lease.release()
 
-    async def _finish_close(self, code: int) -> None:
+    async def _finish_close(self, code: int, reason: str = "") -> None:
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await self._writer_task
-        await _close_quietly(self.ws, code)
+        await _close_quietly(self.ws, code, reason)
 
 
 class _StreamFrame(NamedTuple):
@@ -463,10 +463,10 @@ class Tunnel:
         channel.start_close(CLOSE_VIEWER_QUEUE_OVERFLOW)
         self._notify_dashboard_closed(channel_id)
 
-    def close_viewer(self, channel_id: bytes, code: int) -> None:
+    def close_viewer(self, channel_id: bytes, code: int, reason: str = "") -> None:
         channel = self.channels.pop(channel_id, None)
         if channel is not None:
-            channel.start_close(code)
+            channel.start_close(code, reason)
 
     def detach_viewer(
         self, channel_id: bytes, channel: _ViewerRelayChannel
@@ -892,9 +892,12 @@ def _verify_tunnel_hello(
     )
 
 
-async def _close_quietly(ws: WebSocket, code: int) -> None:
+async def _close_quietly(ws: WebSocket, code: int, reason: str = "") -> None:
     with contextlib.suppress(Exception):
-        await ws.close(code=code)
+        if reason:
+            await ws.close(code=code, reason=reason)
+        else:
+            await ws.close(code=code)
 
 
 # -- auto-0zdky: serving hostname ownership + live leases ------------------
@@ -2194,7 +2197,14 @@ async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
             if frame.type == FRAME_DATA:
                 tunnel.enqueue_viewer(frame.channel_id, frame.payload)
             elif frame.type == FRAME_CLOSE:
-                tunnel.close_viewer(frame.channel_id, 1000)
+                # A connector that refused the channel says why in the
+                # frame (relaykit.close_codes, 45xx + its own words) and the
+                # viewer hears exactly that. An empty frame is the normal
+                # end of a served channel: 1000, as before.
+                from tools.network.relaykit.close_codes import decode_close_payload
+
+                code, reason = decode_close_payload(frame.payload)
+                tunnel.close_viewer(frame.channel_id, code, reason)
     finally:
         # Lease removal precedes viewer teardown — the same admission-first
         # ordering close_revoked uses, so a routed open can never race onto

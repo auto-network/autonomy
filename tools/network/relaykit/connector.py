@@ -614,22 +614,29 @@ class TunnelConnector:
                 state[key] = dict(state[key])
         return state
 
-    def _note_channel_failure(self, token: str, exc: BaseException) -> None:
+    def _note_channel_failure(self, token: str, exc: BaseException) -> tuple[int, str]:
         """A viewer channel ended on an error: the tunnel is up, the link is
-        not served. Remembered for connector-status and logged with the
-        error's own words (never the token beyond a prefix)."""
+        not served. Classified into the close code the viewer will receive
+        (relaykit.close_codes), remembered for connector-status, and logged
+        with the error's own words (never the token beyond a prefix).
+        Returns ``(code, reason)`` for the close frame."""
+        from .close_codes import classify_connector_error
+
+        code, reason = classify_connector_error(exc)
         state = self._tunnel_state
         state["channel_failures"] += 1
         state["last_channel_failure"] = {
             "at": time.time(),
             "token_prefix": token[:8] if isinstance(token, str) else "?",
+            "close_code": code,
             "error": f"{type(exc).__name__}: {_safe_log_text(exc)}",
         }
         logger.warning(
-            "viewer channel for link %s... closed on an error: %s: %s",
-            state["last_channel_failure"]["token_prefix"],
+            "viewer channel for link %s... closed on an error (close %d): %s: %s",
+            state["last_channel_failure"]["token_prefix"], code,
             type(exc).__name__, _safe_log_text(exc),
         )
+        return code, _safe_log_text(reason)
 
     def _note_connected(self) -> None:
         now = time.time()
@@ -1278,12 +1285,15 @@ class TunnelConnector:
             else:
                 raise PermissionError("channel authorization refused")
         except Exception as exc:  # HandshakeError, RecordError, transport failures
+            # The viewer learns WHY (close_codes): the code and this error's
+            # words ride the close frame; the relay forwards them verbatim.
             # A test may drive this method on a bare stand-in for the connector.
+            from .close_codes import classify_connector_error, encode_close_payload
+
             note = getattr(self, "_note_channel_failure", None)
-            if note is not None:
-                note(token, exc)
+            code, reason = note(token, exc) if note is not None else classify_connector_error(exc)
             with contextlib.suppress(Exception):
-                await send_frame(FRAME_CLOSE, channel_id)
+                await send_frame(FRAME_CLOSE, channel_id, encode_close_payload(code, reason))
         else:
             # Normal completion can be server-initiated (the bounded ICE
             # exchange is the first case). Tell the registry to close its

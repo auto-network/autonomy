@@ -119,7 +119,8 @@ def test_tunnel_summary_names_a_failed_viewer_channel():
     text = fleet_doctor._tunnel_summary({
         "connected_since": time.time() - 120, "channel_failures": 3,
         "last_channel_failure": {"at": time.time() - 10, "token_prefix": "abababab",
+                                 "close_code": 4502,
                                  "error": "PermissionError: link key resolution refused"},
     })
     assert text.startswith("connected since 2m ago; 3 viewer channel(s) failed, last 10s ago "
-                           "on link abababab...: PermissionError: link key resolution refused")
+                           "on link abababab... (close 4502): PermissionError: link key resolution refused")

@@ -123,17 +123,21 @@ def test_a_failed_viewer_channel_is_remembered_and_closed(monkeypatch, caplog):
     sent = []
 
     async def send_frame(kind, channel_id, data=b""):
-        sent.append((kind, channel_id))
+        sent.append((kind, channel_id, data))
 
     caplog.set_level(logging.WARNING, logger=connector_module.__name__)
     asyncio.run(connector._serve_channel(
         b"\x01", "ab" * 16, asyncio.Queue(), send_frame, lambda channel_id: None))
-    assert (connector_module.FRAME_CLOSE, b"\x01") in sent
+    # The close frame carries the code and the error's words for the viewer.
+    from tools.network.relaykit.close_codes import decode_close_payload
+    [(kind, channel_id, payload)] = [f for f in sent if f[0] == connector_module.FRAME_CLOSE]
+    assert channel_id == b"\x01"
+    assert decode_close_payload(payload) == (4502, "link key resolution refused")
     state = connector.tunnel_state
     assert state["channel_failures"] == 1
     assert state["last_channel_failure"] == {
-        "at": 9_000.0, "token_prefix": "abababab",
+        "at": 9_000.0, "token_prefix": "abababab", "close_code": 4502,
         "error": "PermissionError: link key resolution refused",
     }
-    assert "viewer channel for link abababab... closed on an error: " \
+    assert "viewer channel for link abababab... closed on an error (close 4502): " \
            "PermissionError: link key resolution refused" in caplog.text
