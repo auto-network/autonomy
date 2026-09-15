@@ -1760,6 +1760,7 @@ class LinkResultConsumer:
             )
             if not isinstance(serving, Mapping) or type(serving.get("live")) is not bool:
                 serving = {"live": False}
+            probe_detail = dict(serving).get("detail")
             serving = {
                 key: value
                 for key, value in dict(serving).items()
@@ -1767,8 +1768,13 @@ class LinkResultConsumer:
             }
             serving.setdefault("via", "registry-http")
             if not serving["live"]:
+                logger.warning(
+                    "central publish for org=%s rolled back: the serving "
+                    "probe was not live (status=%s): %s",
+                    org, serving.get("status"), probe_detail,
+                )
                 link_approvals._compensate_failed_publish(
-                    org, token, "recipient-probe")
+                    org, token, "recipient-probe", detail=probe_detail)
                 raise LinkCentralError("registry_unavailable")
             result = {
                 "operation": operation,

@@ -832,6 +832,22 @@ async def api_vault_status(request):
         "audited_delegate_warm": settings_ops.personal_delegate_audited_is_warm(),
     })
 
+async def api_vault_organizations(request):
+    """Per-organization live worker state (tools/dashboard/live_state.py):
+    which keys THIS process holds, delegate status, membership commitment,
+    serve-cert status and the connector's own status reply. Exists so a
+    diagnostic run in any other process (fleet_doctor on the host, or under
+    docker exec) reports the running worker's vault instead of its own cold
+    one. Requires the operator: a dashboard browser session or a local
+    session bearer (the CrossTalk token a host session holds); an org-bound
+    or credential-less caller is refused."""
+    refusal = api_auth.require_global_api_authority(request)
+    if refusal is not None:
+        return refusal
+    from tools.dashboard import live_state
+    return JSONResponse(await asyncio.to_thread(live_state.collect))
+
+
 async def api_beads_ready(request):
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse(dao_beads.get_open_beads())
@@ -21432,6 +21448,7 @@ routes = [
     Route("/api/ping", api_ping),
     Route("/api/health", api_health),
     Route("/api/vault/status", api_vault_status),
+    Route("/api/vault/organizations", api_vault_organizations),
     Route("/api/operator/active", api_operator_active, methods=["POST"]),
     Route("/api/voice/diag", api_voice_diag, methods=["POST"]),
     Route("/api/voice/trace", api_voice_trace, methods=["POST"]),

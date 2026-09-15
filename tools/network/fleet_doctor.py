@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -209,7 +210,9 @@ def check_identity(report: dict) -> None:
         }
         _line("local machine_id", local_id or "(none -- not yet enrolled)",
               warn=local_id is None)
-        _line("personal root pub", root_pub or "(none -- vault cold or unenrolled)",
+        _line("personal root pub",
+              root_pub or "(not readable from THIS process -- the vault is warm "
+                          "only inside the running worker; see 'Live worker state')",
               warn=root_pub is None)
         is_selected = (
             state.selected_machine_id is not None
@@ -659,9 +662,22 @@ def check_connectors(report: dict) -> None:
     if not connectors:
         _line("connector subprocesses", "NONE running", warn=True)
     for org_uuid, info in connectors.items():
+        tunnel_text = ""
+        scope = info.get("graph_org")
+        if scope:
+            try:
+                from tools.dashboard import link_serving_supervisor as sup
+                status = sup.control(scope, "connector-status", {}, timeout=3.0)
+                tunnel_text = (
+                    f" {'SERVING' if status.get('serving') else 'NOT serving'}; "
+                    + _tunnel_summary(status.get("tunnel"))
+                )
+            except Exception as exc:  # noqa: BLE001
+                tunnel_text = f" control probe failed: {exc}"
         _line(
             f"connector for org {org_uuid[:8]}...",
-            f"pid={info['pid']} graph-org={info['graph_org']}",
+            f"pid={info['pid']} graph-org={info['graph_org']}{tunnel_text}",
+            warn=("NOT serving" in tunnel_text or "failed" in tunnel_text),
         )
         # Tail that connector's own log for recent trouble, if we can find it.
         try:
@@ -1734,6 +1750,240 @@ def kick_roster_entry(setting_id: str, *, dry_run: bool = True) -> dict:
     return {"found": True, "removed": ok}
 
 
+# ── the running worker (ask it; do not guess from this process) ────────────
+
+
+def _api_get(base: str, path: str, token: str | None, *, timeout: float = 8.0):
+    """GET ``base + path`` from the running dashboard. ``(payload, error)``."""
+    import ssl
+    import urllib.error
+    import urllib.request
+
+    url = base.rstrip("/") + path
+    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+    context = ssl.create_default_context()
+    # The dashboard serves a self-signed certificate on loopback/tailnet.
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    try:
+        with urllib.request.urlopen(request, timeout=timeout, context=context) as resp:
+            return json.loads(resp.read().decode("utf-8")), None
+    except urllib.error.HTTPError as exc:
+        return None, f"HTTP {exc.code} from {url}"
+    except Exception as exc:  # noqa: BLE001 — the report says why, never raises
+        return None, f"{type(exc).__name__}: {exc} ({url})"
+
+
+def _fmt_age(at) -> str:
+    if not isinstance(at, (int, float)):
+        return "never"
+    delta = time.time() - float(at)
+    if delta < 90:
+        return f"{delta:.0f}s ago"
+    if delta < 3600:
+        return f"{delta / 60:.0f}m ago"
+    return f"{delta / 3600:.1f}h ago"
+
+
+def _tunnel_summary(tunnel) -> str:
+    """One line for a connector's tunnel state (connector-status ``tunnel``)."""
+    if not isinstance(tunnel, dict):
+        return "tunnel state not reported (connector predates it)"
+    if tunnel.get("connected_since") is not None:
+        return f"connected since {_fmt_age(tunnel['connected_since'])}"
+    last = tunnel.get("last_disconnect") or {}
+    parts = [f"DOWN; last served {_fmt_age(tunnel.get('last_served_at'))}"]
+    attempts = tunnel.get("reconnect_attempts")
+    if attempts:
+        parts.append(f"{attempts} failed reconnect(s) since")
+    if last:
+        code = last.get("close_code")
+        lived = last.get("lived_s")
+        parts.append(
+            "last disconnect "
+            + ("never served" if lived is None else f"after {lived:.0f}s")
+            + (f", close_code={code}" if code is not None else "")
+            + (f", reason={last.get('reason')!r}" if last.get("reason") else "")
+            + (f", {last.get('error')}" if last.get("error") else "")
+        )
+    if tunnel.get("next_retry_at") is not None:
+        wait = float(tunnel["next_retry_at"]) - time.time()
+        parts.append("retrying now" if wait <= 0 else f"next retry in {wait:.0f}s")
+    return "; ".join(parts)
+
+
+def check_live_worker(report: dict, api_base: str, api_token: str | None) -> None:
+    """What the RUNNING dashboard worker holds, asked of it over HTTP.
+
+    The vault is warm only inside the process that unlocked it. Every
+    diagnostic that read it from its own process — this one included —
+    reported "cold" as fact, and the operator had to explain, each time,
+    that this is not how the vault is checked. So this section never
+    inspects the vault itself: it asks ``/api/vault/status`` and
+    ``/api/vault/organizations`` and prints what the worker says. When the
+    worker cannot be asked, the answer is UNKNOWN with the reason, never
+    "cold".
+    """
+    _section(f"Live worker state (asked of the running dashboard at {api_base})")
+    status, err = _api_get(api_base, "/api/vault/status", api_token)
+    if err or not isinstance(status, dict):
+        report["live_worker"] = {"error": err or "malformed reply"}
+        _line(
+            "running worker",
+            f"UNKNOWN -- could not ask it: {err or 'malformed reply'}. Nothing "
+            "below this line about the vault is knowable from this process. "
+            "Point --api at the dashboard this node runs (GRAPH_API) and pass "
+            "--api-token: the route requires the operator's CrossTalk token "
+            "(CROSSTALK_TOKEN in a host session) or a browser session.",
+            warn=True,
+        )
+        return
+    _line("running worker pid", status.get("pid"))
+    warm = status.get("audited_delegate_warm")
+    _line("personal audited delegate (in the worker)",
+          "WARM" if warm else "cold -- a human unlock is needed", warn=not warm)
+    detail, err = _api_get(api_base, "/api/vault/organizations", api_token)
+    if err or not isinstance(detail, dict):
+        report["live_worker"] = {"pid": status.get("pid"), "warm": warm, "error": err}
+        _line("per-organization state", f"UNKNOWN -- {err or 'malformed reply'}", warn=True)
+        return
+    report["live_worker"] = detail
+    _line("personal generation keys open (in the worker)",
+          detail.get("personal_generation_keys_open"))
+    for org in detail.get("organizations", []):
+        slug = org.get("org")
+        if slug != "personal":
+            gen = org.get("generation_keys") or {}
+            recorded, open_ = gen.get("recorded"), gen.get("open_in_worker")
+            gen_text = ("unreadable" if recorded is None
+                        else f"{open_}/{recorded} open in the worker")
+            keys_bad = recorded and not open_
+            _line(f"{slug}: organization generation keys", gen_text, warn=bool(keys_bad))
+            _line(f"{slug}: organization KEM key held in the worker",
+                  org.get("organization_kem_key_held"),
+                  warn=not org.get("organization_kem_key_held"))
+            delegate = org.get("delegate") or {}
+            _line(f"{slug}: storage delegate", delegate.get("status", "missing"),
+                  warn=delegate.get("status") != "ready")
+            membership = org.get("membership") or {}
+            _line(f"{slug}: membership commitment",
+                  ("capable" + (f" ({membership.get('members')} members"
+                                f"{', this persona is a member' if membership.get('in_member_set') else ''})"
+                                if membership.get("members") is not None else ""))
+                  if membership.get("capable") else f"NOT capable -- {membership.get('detail')}",
+                  warn=not membership.get("capable"))
+        cert = org.get("serve_cert")
+        _line(f"{slug}: serve-cert", cert, warn=cert != "ok")
+        connector = org.get("connector") or {}
+        if not connector.get("reachable"):
+            _line(f"{slug}: connector", f"not reachable -- {connector.get('detail')}", warn=True)
+            continue
+        _line(f"{slug}: connector",
+              f"{'SERVING' if connector.get('serving') else 'NOT serving'}; "
+              f"{_tunnel_summary(connector.get('tunnel'))}; "
+              f"armed={connector.get('fleet_runtime_configured')} "
+              f"boot={str(connector.get('boot_commit') or '?')[:12]} "
+              f"streams={connector.get('active_streams')}",
+              fail=not connector.get("serving"))
+
+
+# ── serving liveness: does a published link actually serve, per org ───────
+
+
+def _probe_candidates(scope: str, now: float) -> list[dict]:
+    """Live grants in *scope*'s cache that carry a channel key: what an
+    end-to-end probe can be pointed at."""
+    from tools.dashboard import link_serving
+    from tools.graph import settings_ops
+    from tools.graph.schemas.network_identity import (
+        NETWORK_LINK_GRANT_REVISION, NETWORK_LINK_GRANT_SET_ID,
+    )
+
+    out = []
+    try:
+        members = settings_ops.read_owned_set(
+            NETWORK_LINK_GRANT_SET_ID, org=scope,
+            target_revision=NETWORK_LINK_GRANT_REVISION,
+        ).members
+    except Exception:
+        return out
+    for member in members:
+        grant = link_serving._grant_valid(member.payload, member.key, now)
+        if grant is not None and grant.get("channel_pub"):
+            out.append(grant)
+    return out
+
+
+def check_serving_liveness(report: dict) -> None:
+    """For every serving scope: does one of its published links actually
+    serve, end to end, right now -- the same probe a publish runs, printed
+    with its verdict and reason instead of discarded. This is the question
+    "why won't the dynbench link serve" answered in one line.
+    """
+    _section("Serving liveness per scope (end-to-end probe of a published link)")
+    import asyncio
+
+    from tools.dashboard import link_serving_supervisor as sup
+    from tools.dashboard.link_approvals import _load_binding
+    from tools.dashboard.link_probe import probe_link, registry_to_relay_ws
+
+    now = time.time()
+    results: dict = {}
+    for scope in sup._discover_startup_orgs():
+        try:
+            cert = sup.serve_cert_state(scope, now=now).get("status", "missing")
+        except Exception as exc:  # noqa: BLE001
+            _line(f"{scope}: serving liveness", f"serve-cert unreadable: {exc!r}", warn=True)
+            continue
+        if cert == "missing":
+            continue  # never provisioned to serve: a quiet fact, not a fault
+        candidates = _probe_candidates(scope, now)
+        if not candidates:
+            _line(f"{scope}: serving liveness",
+                  "no published link with a channel key to probe (not a fault)")
+            results[scope] = {"probed": False}
+            continue
+        binding, binding_error = _load_binding(scope)
+        if binding_error or not binding:
+            _line(f"{scope}: serving liveness",
+                  f"cannot probe: {binding_error or 'no registry binding'}", warn=True)
+            results[scope] = {"probed": False, "detail": binding_error}
+            continue
+        grant = candidates[0]
+        try:
+            result = asyncio.run(probe_link(
+                relay_url=registry_to_relay_ws(binding["registry_url"]),
+                token=grant["token"],
+                link_pub=grant["channel_pub"],
+                org_uuid=binding["org_uuid"],
+                operation="context" if grant.get("target_type") == "org:join" else "head",
+            ))
+        except Exception as exc:  # noqa: BLE001
+            result = {"live": False, "status": None,
+                      "detail": f"the serving probe could not run: {exc!r}"}
+        results[scope] = {"probed": True, **result, "token_prefix": grant["token"][:8]}
+        live = bool(result.get("live"))
+        _line(
+            f"{scope}: serving liveness",
+            f"{'LIVE' if live else 'NOT LIVE'} (link {grant['token'][:8]}..., "
+            f"{len(candidates)} live grant(s), status={result.get('status')}): "
+            f"{result.get('detail')}",
+            fail=not live,
+        )
+        if not live:
+            # The connector's own account of its tunnel, beside the verdict,
+            # so the reason is on the same screen as the failure.
+            try:
+                status = sup.control(scope, "connector-status", {}, timeout=3.0)
+                _line(f"{scope}: connector tunnel", _tunnel_summary(status.get("tunnel")),
+                      warn=True)
+            except Exception as exc:  # noqa: BLE001
+                _line(f"{scope}: connector tunnel", f"not reachable -- {exc}", warn=True)
+    report["serving_liveness"] = results
+
+
 def _run_remote(ssh_target: str, remote_cmd: str, forwarded_args: list[str]) -> int:
     """Re-invoke this same script on a remote node over SSH and relay its
     output, instead of duplicating any diagnostic logic for a second
@@ -1760,6 +2010,17 @@ def main() -> int:
     global _QUIET
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="emit the collected report as JSON instead of text")
+    parser.add_argument(
+        "--api", default=os.environ.get("GRAPH_API") or "https://localhost:8080",
+        help="the RUNNING dashboard to ask for live worker state (vault warmth, "
+             "held keys, connector status) -- the vault is only warm inside that "
+             "process, so nothing about it is read from this one "
+             "(default: $GRAPH_API, else https://localhost:8080)",
+    )
+    parser.add_argument(
+        "--api-token", default=os.environ.get("CROSSTALK_TOKEN"),
+        help="bearer for --api when its routes require one (default: $CROSSTALK_TOKEN)",
+    )
     parser.add_argument(
         "--clear-stale-invite", action="store_true",
         help="clear the stuck fleet:join invite/grant/publish-record chain "
@@ -1813,6 +2074,10 @@ def main() -> int:
             forwarded.append("--repair-catalog")
         if args.yes:
             forwarded.append("--yes")
+        # The remote node's own dashboard is the one to ask; forward an
+        # explicit --api only (the default resolves there, not here).
+        if "--api" in sys.argv:
+            forwarded += ["--api", args.api]
         return _run_remote(args.ssh, args.remote_cmd, forwarded)
 
     if args.clear_stale_invite:
@@ -1838,7 +2103,9 @@ def main() -> int:
     check_local_store_migration(report)
     check_roster(report)
     check_connectors(report)
+    check_live_worker(report, args.api, args.api_token)
     check_serving_readiness(report)
+    check_serving_liveness(report)
     check_org_resolution(report)
     check_sync_data(report)
     check_sync_frontiers(report)

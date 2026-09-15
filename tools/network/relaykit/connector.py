@@ -576,6 +576,21 @@ class TunnelConnector:
         self._stop = asyncio.Event()
         #: set while a tunnel is authenticated and serving (tests await it)
         self.connected = asyncio.Event()
+        #: What the tunnel is doing right now and why, for the control
+        #: channel's connector-status. Before this the connector knew its
+        #: last close code, how long the tunnel lived and its backoff, and
+        #: wrote them ONLY to its log — over the control socket a connector
+        #: that lost its tunnel an hour ago and has failed every reconnect
+        #: since looked identical to one that started five seconds ago
+        #: (dynbench, 2026-09-15: 1006 at 11:03, "never-served" reconnects,
+        #: invisible to every status surface).
+        self._tunnel_state: dict = {
+            "connected_since": None,     # wall clock, this tunnel's hello
+            "last_served_at": None,      # wall clock, last time a tunnel was up
+            "reconnect_attempts": 0,     # failed attempts since last served
+            "last_disconnect": None,     # {at, lived_s, close_code, reason, error}
+            "next_retry_at": None,       # wall clock of the next dial
+        }
         #: control-frame reply correlation — id -> Future, resolved in the
         #: serve loop; the send hook is live only while a tunnel is up.
         self._pending: dict = {}
@@ -587,6 +602,38 @@ class TunnelConnector:
     def relay_base(self) -> str:
         """The relay origin this connector dials (no ``/t/<org>`` suffix)."""
         return self._relay_base
+
+    @property
+    def tunnel_state(self) -> dict:
+        """A copy of the tunnel's current state (see ``_tunnel_state``)."""
+        state = dict(self._tunnel_state)
+        if state["last_disconnect"] is not None:
+            state["last_disconnect"] = dict(state["last_disconnect"])
+        return state
+
+    def _note_connected(self) -> None:
+        now = time.time()
+        self._tunnel_state["connected_since"] = now
+        self._tunnel_state["last_served_at"] = now
+        self._tunnel_state["reconnect_attempts"] = 0
+        self._tunnel_state["next_retry_at"] = None
+
+    def _note_disconnected(self, exc, lived, retry_delay) -> None:
+        now = time.time()
+        state = self._tunnel_state
+        if lived is not None:
+            state["last_served_at"] = now
+        state["connected_since"] = None
+        state["reconnect_attempts"] += 1
+        state["last_disconnect"] = {
+            "at": now,
+            "lived_s": lived,
+            "close_code": getattr(exc, "code", None),
+            "reason": _safe_log_text(getattr(exc, "reason", None)) if exc is not None else None,
+            "error": (f"{type(exc).__name__}: {_safe_log_text(exc)}"
+                      if exc is not None else None),
+        }
+        state["next_retry_at"] = None if retry_delay is None else now + retry_delay
 
     @property
     def org(self) -> str:
@@ -850,6 +897,7 @@ class TunnelConnector:
                     await self._handshake(ws)
                     served_at = time.monotonic()
                     self.connected.set()
+                    self._note_connected()
                     # Always run the keeper for a live tunnel. Production adds
                     # publications after the connector is already connected;
                     # gating task creation on desired_hosts-at-handshake left
@@ -887,9 +935,11 @@ class TunnelConnector:
                 backoff = self._min_backoff
                 self._reset_failure_log_suppression()
             if self._stop.is_set():
+                self._note_disconnected(disconnect_exc, served_for, None)
                 self._log_disconnect(disconnect_exc, served_for, None)
                 return
             retry_delay = backoff * (1 + random.random() * 0.25)
+            self._note_disconnected(disconnect_exc, served_for, retry_delay)
             self._log_disconnect(disconnect_exc, served_for, retry_delay)
             await asyncio.sleep(retry_delay)
             backoff = min(backoff * 2, self._max_backoff)

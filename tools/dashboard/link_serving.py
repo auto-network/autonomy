@@ -1942,6 +1942,12 @@ async def _serve_control_listener(connector, ctl_path: str,
                         # bound, or null: the fleet verdict's proof that the
                         # direct tier is up without an operator session.
                         "direct_listener": connector_runtime.direct_listener,
+                        # Why the tunnel is up or down: when it connected,
+                        # when it last served, how many reconnects have
+                        # failed since, the last close code and reason, and
+                        # when it dials next. ``serving`` alone cannot tell
+                        # a fresh start from an hour of failed reconnects.
+                        "tunnel": getattr(connector, "tunnel_state", None),
                     }
                 elif request.get("op") == "serve-host":
                     # Dashboard-local desired-state seam. Unlike forwarding a
