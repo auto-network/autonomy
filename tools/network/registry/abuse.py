@@ -13,6 +13,7 @@ counter value in the same event-loop process.
 from __future__ import annotations
 
 import hashlib
+import heapq
 import hmac
 import ipaddress
 import logging
@@ -349,6 +350,16 @@ class RelayAbuseLimiter:
         self._buckets: dict[str, dict[bytes, _TokenBucket]] = {
             scope: {} for scope in self._SCOPES
         }
+        #: Buckets awaiting deletion, ordered by the moment they refill, so a
+        #: purge pops only what has expired instead of scanning every bucket
+        #: in every scope on every admission. That scan made admission O(n)
+        #: in live buckets — a hundred million checks over a ten-thousand-
+        #: admission test (four minutes under a tracing test runner) and a
+        #: per-viewer cost proportional to the relay's whole bucket table.
+        #: Entries are (delete_at, tie-breaker, scope, key); a revived or
+        #: already-deleted bucket is recognised and skipped when popped.
+        self._expiry: list[tuple[float, int, str, bytes]] = []
+        self._expiry_seq = 0
         self._bucket_capacity = (
             self._active_limits["process"]
             + self._admission_limits["process"].burst
@@ -535,18 +546,27 @@ class RelayAbuseLimiter:
                     del self._buckets[scope][key]
                 else:
                     bucket.delete_at = full_at
+                    self._expiry_seq += 1
+                    heapq.heappush(
+                        self._expiry, (full_at, self._expiry_seq, scope, key)
+                    )
 
     def _purge_buckets(self, now: float) -> None:
-        for scope, values in self._buckets.items():
-            expired = [
-                key
-                for key, bucket in values.items()
-                if bucket.refs == 0
+        """Delete every bucket whose refill moment has passed. Amortised
+        O(log n) per expired bucket: pops the expiry heap while its head is
+        due, and skips entries whose bucket was revived (a new lease took it
+        and cleared ``delete_at``) or already deleted."""
+        heap = self._expiry
+        while heap and heap[0][0] <= now:
+            delete_at, _seq, scope, key = heapq.heappop(heap)
+            bucket = self._buckets[scope].get(key)
+            if (
+                bucket is not None
+                and bucket.refs == 0
                 and bucket.delete_at is not None
                 and bucket.delete_at <= now
-            ]
-            for key in expired:
-                del values[key]
+            ):
+                del self._buckets[scope][key]
 
     def _digest(self, scope: str, value: bytes) -> bytes:
         return hmac.digest(
