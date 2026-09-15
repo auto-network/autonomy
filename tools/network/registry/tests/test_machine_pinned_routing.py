@@ -408,3 +408,87 @@ def test_org_wide_link_still_takes_the_least_loaded_tunnel(monkeypatch):
 
     assert hub.least_loaded_calls == 1
     assert _opened(sock_x) and not _opened(sock_y)
+
+
+# ── fresh-link pin: a just-published link routes to its publisher ─────────
+#
+# Its grant lives in the publishing machine's grant cache until org sync
+# replicates it; routed anywhere else in the pool it got "link unavailable"
+# from a connector that could not know it yet (dynbench, 2026-09-15: the
+# publish probe landed on the fleet machine's tunnel). Volatile, in-memory,
+# five minutes, swept hourly.
+
+from tools.network.registry.relay import (  # noqa: E402
+    CLOSE_PUBLISHER_OFFLINE, FRESH_LINK_PIN_S, FRESH_LINK_SWEEP_S, TunnelHub,
+)
+
+
+def _pool(now_holder):
+    """A real hub with two tunnels for ORG: the publisher (machine 'aa'…)
+    and another member machine ('bb'…)."""
+    hub = TunnelHub()
+    publisher, other = _TunnelSocket(), _TunnelSocket()
+    hub.register(Tunnel(publisher, ORG, persona_pub="11" * 32, machine="aa" * 32))
+    hub.register(Tunnel(other, ORG, persona_pub="22" * 32, machine="bb" * 32))
+    return hub, publisher, other
+
+
+def test_a_fresh_link_routes_only_to_its_publisher(monkeypatch):
+    hub, publisher, other = _pool(None)
+    monkeypatch.setattr(relay_mod, "_resolve_live_link", lambda store, token, now: _link(None))
+    token = "f" * 32
+    hub.pin_fresh_link(token, "aa" * 32, now=1_000.0)
+    # Load the publisher so least-loaded would have picked the other tunnel.
+    hub.get_slot(ORG, "11" * 32, "aa" * 32).channels[b"x" * 16] = object()
+
+    ws = _ViewerSocket()
+    asyncio.run(viewer_endpoint(ws, token, hub, None, lambda: 1_010))
+    assert _opened(publisher) and not _opened(other)
+
+
+def test_after_the_window_the_pool_rule_returns(monkeypatch):
+    hub, publisher, other = _pool(None)
+    monkeypatch.setattr(relay_mod, "_resolve_live_link", lambda store, token, now: _link(None))
+    token = "e" * 32
+    hub.pin_fresh_link(token, "aa" * 32, now=1_000.0)
+    hub.get_slot(ORG, "11" * 32, "aa" * 32).channels[b"x" * 16] = object()
+
+    ws = _ViewerSocket()
+    asyncio.run(viewer_endpoint(ws, token, hub, None, lambda: 1_000 + int(FRESH_LINK_PIN_S) + 1))
+    assert _opened(other) and not _opened(publisher)   # least-loaded again
+    assert hub.fresh_link_machine(token, 2_000.0) is None  # dropped on lookup
+
+
+def test_publisher_offline_inside_the_window_says_so(monkeypatch):
+    hub = TunnelHub()
+    other = _TunnelSocket()
+    hub.register(Tunnel(other, ORG, persona_pub="22" * 32, machine="bb" * 32))
+    monkeypatch.setattr(relay_mod, "_resolve_live_link", lambda store, token, now: _link(None))
+    token = "d" * 32
+    hub.pin_fresh_link(token, "aa" * 32, now=1_000.0)   # publisher has no tunnel
+
+    ws = _ViewerSocket()
+    asyncio.run(viewer_endpoint(ws, token, hub, None, lambda: 1_010))
+    assert ws.close_codes == [CLOSE_PUBLISHER_OFFLINE]
+    assert not _opened(other)   # never handed to a machine without the grant
+
+
+def test_fresh_link_pins_are_swept_hourly_on_the_create_path():
+    hub = TunnelHub()
+    for i in range(5):
+        hub.pin_fresh_link(f"{i:032x}", "aa" * 32, now=0.0)
+    assert len(hub._fresh_links) == 5
+    # Publishing again inside the hour does not sweep; after an hour it does,
+    # and only the entries whose window has passed are dropped.
+    hub.pin_fresh_link("5" * 32, "aa" * 32, now=FRESH_LINK_SWEEP_S - 10)
+    assert len(hub._fresh_links) == 6
+    hub.pin_fresh_link("6" * 32, "aa" * 32, now=FRESH_LINK_SWEEP_S)
+    assert set(hub._fresh_links) == {"5" * 32, "6" * 32}   # the five expired ones are gone
+
+
+def test_a_machine_pinned_link_is_never_fresh_pinned():
+    """Machine-local links keep their permanent pin; the fresh pin is only
+    for org-wide links whose grant has not replicated yet."""
+    hub = TunnelHub()
+    hub.pin_fresh_link("c" * 32, None, now=0.0)   # no machine: nothing recorded
+    assert hub._fresh_links == {}

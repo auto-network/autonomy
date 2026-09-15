@@ -96,9 +96,21 @@ from tools.network.relaykit.close_codes import (  # noqa: E402
     CLOSE_BYTE_RATE_EXHAUSTED, CLOSE_CHANNEL_NOT_SERVED, CLOSE_LEASE_DENIED,
     CLOSE_LIMITED_LINK, CLOSE_LIMITED_SOURCE, CLOSE_LINK_EXPIRED,
     CLOSE_LINK_REVOKED, CLOSE_NO_TUNNEL, CLOSE_OPEN_FAILED,
-    CLOSE_ORG_BINDING_DEAD, CLOSE_RELAY_WRITER_FAILED,
+    CLOSE_ORG_BINDING_DEAD, CLOSE_PUBLISHER_OFFLINE, CLOSE_RELAY_WRITER_FAILED,
     CLOSE_SERVING_MACHINE_OFFLINE, CLOSE_TUNNEL_TORN_DOWN, CLOSE_VIEWER_CAP,
 )
+
+#: A freshly published link routes ONLY to the machine that published it for
+#: this long. Its grant lives in that machine's grant cache until org sync
+#: replicates it; a viewer routed to any other tunnel in the org's pool got
+#: "link unavailable" from a connector that could not know the link yet
+#: (dynbench, 2026-09-15: the publish probe landed on the fleet machine's
+#: tunnel). Five minutes comfortably covers a sync round.
+FRESH_LINK_PIN_S = 300.0
+#: The fresh-link pins are volatile, in-memory state; expired entries are
+#: dropped on lookup, and the whole map is swept this often on the create
+#: path in case links are published and never viewed.
+FRESH_LINK_SWEEP_S = 3600.0
 CLOSE_UNAUTHENTICATED = 4403
 CLOSE_UNKNOWN_LINK = 4404  # the token itself is unknown
 CLOSE_PROTOCOL_MISMATCH = 4406
@@ -604,6 +616,36 @@ class TunnelHub:
 
     def __init__(self):
         self._tunnels: Dict[str, Dict[tuple, Tunnel]] = {}
+        #: token -> (publishing machine, expires_at); see FRESH_LINK_PIN_S.
+        self._fresh_links: Dict[str, tuple] = {}
+        self._fresh_links_swept_at = 0.0
+
+    def pin_fresh_link(self, token: str, machine: Optional[str], now: float) -> None:
+        """Remember who published *token*, for FRESH_LINK_PIN_S."""
+        if not machine:
+            return
+        self._fresh_links[token] = (machine, now + FRESH_LINK_PIN_S)
+        if now - self._fresh_links_swept_at >= FRESH_LINK_SWEEP_S:
+            self.sweep_fresh_links(now)
+
+    def fresh_link_machine(self, token: str, now: float) -> Optional[str]:
+        """The machine a fresh link is pinned to, or None once the window
+        has passed (the entry is dropped on that lookup)."""
+        entry = self._fresh_links.get(token)
+        if entry is None:
+            return None
+        machine, expires_at = entry
+        if expires_at <= now:
+            self._fresh_links.pop(token, None)
+            return None
+        return machine
+
+    def sweep_fresh_links(self, now: float) -> int:
+        expired = [t for t, (_m, exp) in self._fresh_links.items() if exp <= now]
+        for token in expired:
+            del self._fresh_links[token]
+        self._fresh_links_swept_at = now
+        return len(expired)
 
     @staticmethod
     def _slot(tunnel: Tunnel) -> tuple:
@@ -631,6 +673,7 @@ class TunnelHub:
         slots = self._tunnels.setdefault(tunnel.org, {})
         previous = slots.get(self._slot(tunnel))
         slots[self._slot(tunnel)] = tunnel
+        tunnel.hub = self  # so a create-link over this tunnel can pin its link
         _ops("tunnel.register", org=tunnel.org[:8],
              persona=(tunnel.persona_pub or "")[:16],
              machine=(tunnel.machine or "")[:16],
@@ -1659,6 +1702,9 @@ def _ctrl_create_link(tunnel: "Tunnel", args: dict, store: RegistryStore,
         )
         if status in ("binding_mismatch", "conflict", "inconsistent") or completed is None:
             raise _CtrlError("Central Link operation cannot execute")
+        hub = getattr(tunnel, "hub", None)
+        if hub is not None and serving_machine is None:
+            hub.pin_fresh_link(completed.result_token, tunnel.machine, float(now))
         return {
             "token": completed.result_token,
             "url": f"{base_url}/l/{completed.result_token}",
@@ -2311,8 +2357,12 @@ async def viewer_endpoint(
     # member who has not yet answered the push. Enforcement is the deadline
     # in push_reprove_and_enforce, which closes only a still-behind tunnel.
     tunnel = None
+    fresh_machine = None
     if link is not None:
         serving_machine = getattr(link, "serving_machine", None)
+        fresh_link_machine = getattr(hub, "fresh_link_machine", None)
+        if serving_machine is None and fresh_link_machine is not None:
+            fresh_machine = fresh_link_machine(token, float(now_fn()))
         if serving_machine is not None:
             # auto-nh1po: a machine-pinned link (design/present/mission —
             # stores that do not fleet-sync) routes ONLY to the tunnel whose
@@ -2322,6 +2372,14 @@ async def viewer_endpoint(
             tunnel = next(
                 (t for t in hub.tunnels_for(link.org_uuid)
                  if t.machine == serving_machine),
+                None,
+            )
+        elif fresh_machine is not None:
+            # A link published in the last FRESH_LINK_PIN_S routes only to
+            # the machine that published it: its grant is not replicated yet.
+            tunnel = next(
+                (t for t in hub.tunnels_for(link.org_uuid)
+                 if t.machine == fresh_machine),
                 None,
             )
         else:
@@ -2344,6 +2402,13 @@ async def viewer_endpoint(
             logger.warning(
                 "relay dial refused (%d): link not live (%s), token=%s",
                 code, reason, token,
+            )
+        elif fresh_machine is not None:
+            code, reason = CLOSE_PUBLISHER_OFFLINE, "the machine that published this link has no tunnel (fresh-link window)"
+            logger.warning(
+                "relay dial refused (%d): fresh link pinned to its publisher, "
+                "which has no tunnel, token=%s org=%s machine=%s",
+                code, token, link.org_uuid, fresh_machine[:16],
             )
         elif getattr(link, "serving_machine", None) is not None:
             code, reason = CLOSE_SERVING_MACHINE_OFFLINE, "declared serving machine has no tunnel"
