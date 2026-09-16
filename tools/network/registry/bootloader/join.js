@@ -110,29 +110,40 @@
   function render() {
     var inputs = readInputs();
     if (!looksComplete(inputs)) {
-      $("invite-line").textContent =
-        "This link is missing part of its invitation.";
       $("incomplete").classList.remove("hidden");
       return;
     }
-    $("invite-line").textContent =
-      "An organization has invited you. Two ways in — pick whichever fits.";
-    $("blurb").value = buildBlurb(inputs, location.origin);
-    $("node-link").setAttribute("href", localNodeUrl(inputs, location.origin));
-    $("flows").classList.remove("hidden");
+    var origin = location.origin;
+    $("blurb").value = buildBlurb(inputs, origin);
+    $("node-link").setAttribute("href", localNodeUrl(inputs, origin));
+    $("invitation").classList.remove("hidden");
+    $("copy").addEventListener("click", copyInstructions);
+  }
 
-    $("copy").addEventListener("click", function () {
-      var blurb = $("blurb");
+  // Copy the blurb. The clipboard API needs a secure context and a user
+  // gesture (both true here); when it still refuses, open the instructions
+  // and fall back to the textarea selection so the visitor can copy by hand.
+  function copyInstructions() {
+    var blurb = $("blurb");
+    var done = function () {
+      $("copy-label").textContent = "Instructions copied";
+      $("copy-note").textContent = "Ready to paste into your coding agent.";
+    };
+    var fallback = function () {
+      $("instructions").open = true;
+      blurb.focus();
       blurb.select();
-      var done = function () { $("copied").classList.remove("hidden"); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(blurb.value).then(done, done);
-      } else {
-        document.execCommand("copy");
-        done();
-      }
-    });
-
+      var copied = false;
+      try { copied = document.execCommand("copy"); } catch (e) { copied = false; }
+      if (copied) { done(); return; }
+      $("copy-note").textContent =
+        "Copy didn’t work here. Select the instructions below and copy them.";
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(blurb.value).then(done, fallback);
+    } else {
+      fallback();
+    }
   }
 
   // ── Org self-description over the E2E join channel (auto-r7kk4) ────
@@ -156,24 +167,80 @@
       ? value : null;
   }
 
+  function text(value, max) {
+    return typeof value === "string" ? value.trim().slice(0, max) : "";
+  }
+
+  function initials(name) {
+    return name.split(/\s+/).slice(0, 2).map(function (part) {
+      return part.charAt(0).toUpperCase();
+    }).join("");
+  }
+
+  // "member" → "Member", "org_admin" → "Org Admin": presentation only.
+  function roleLabel(role) {
+    return text(role, 40).replace(/(^|[\s_-])([a-z])/g, function (_m, sep, ch) {
+      return (sep ? " " : "") + ch.toUpperCase();
+    });
+  }
+
+  // invite_expiry is the ledger's millisecond timestamp. Formatted here, in
+  // the visitor's own locale and timezone, with the zone named.
+  function renderExpiry(expiry) {
+    if (typeof expiry !== "number" || !isFinite(expiry) || expiry <= 0) return;
+    var when = new Date(expiry);
+    if (isNaN(when.getTime())) return;
+    $("expiry-date").textContent = when.toLocaleDateString(undefined,
+      { year: "numeric", month: "long", day: "numeric" });
+    $("expiry-time").textContent = when.toLocaleTimeString(undefined,
+      { hour: "numeric", minute: "2-digit", timeZoneName: "short" });
+    $("expiry-time").setAttribute("datetime", when.toISOString());
+    $("expiry-fact").classList.remove("hidden");
+  }
+
   function renderOrgHeader(context, inputs) {
-    var name = typeof context.org_name === "string"
-      ? context.org_name.slice(0, 120) : "";
+    var name = text(context.org_name, 120);
     if (!name) return;
     $("org-name").textContent = name;
-    var byline = typeof context.org_description === "string"
-      ? context.org_description.slice(0, 300) : "";
-    if (byline) $("org-byline").textContent = byline;
+    $("eyebrow").textContent = "You’re invited to join";
+    var byline = text(context.org_description, 300);
+    $("org-byline").textContent = byline;
+    $("org-byline").classList.toggle("hidden", !byline);
     var icon = safeIcon(context.org_icon);
     if (icon) {
       $("org-icon").src = icon;
       $("org-icon").classList.remove("hidden");
+      $("org-initial").classList.add("hidden");
+    } else {
+      $("org-initial").textContent = name.charAt(0).toUpperCase();
     }
     var accent = safeColor(context.org_color);
-    if (accent) $("org-header").style.borderColor = accent;
-    $("org-header").classList.remove("hidden");
-    $("invite-line").textContent =
-      name + " has invited you. Two ways in — pick whichever fits.";
+    if (accent) $("org-mark").style.setProperty("--org", accent);
+
+    // The inviter: the org's own member directory row for the sponsor, or
+    // the honest fallback when the sponsor has no presentation.
+    var sponsor = text(context.sponsor_name, 120);
+    $("sponsor-name").textContent = sponsor || "an authorized member";
+    $("sponsor-initials").textContent = sponsor ? initials(sponsor) : "↗";
+    var avatar = safeIcon(context.sponsor_avatar);
+    if (avatar) {
+      $("sponsor-avatar").src = avatar;
+      $("sponsor-avatar").classList.remove("hidden");
+      $("sponsor-initials").classList.add("hidden");
+    }
+    var sponsorByline = text(context.sponsor_byline, 120);
+    if (sponsorByline) {
+      $("sponsor-byline").textContent = sponsorByline;
+      $("sponsor-byline").classList.remove("hidden");
+    }
+    $("inviter").classList.remove("hidden");
+
+    var role = roleLabel(context.granted_role);
+    if (role) {
+      $("role").textContent = role;
+      renderExpiry(context.invite_expiry);
+      $("facts").classList.remove("hidden");
+    }
   }
 
   function enrichFromOrg(inputs) {
@@ -211,6 +278,7 @@
       decodeFragmentKey: decodeFragmentKey,
       inviteLink: inviteLink, buildBlurb: buildBlurb,
       localNodeUrl: localNodeUrl, looksComplete: looksComplete,
+      roleLabel: roleLabel, initials: initials,
     };
   }
 

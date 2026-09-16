@@ -97,8 +97,9 @@ class TestClientSourceContract:
         # works on the interim registry host and self-upgrades on the apex
         # (same principle as the /install CTA). The origin is passed in, so
         # the builders are also runnable under Node (TestBlurbAndHandoff).
-        assert "buildBlurb(inputs, location.origin)" in JOIN_JS
-        assert "localNodeUrl(inputs, location.origin)" in JOIN_JS
+        assert "var origin = location.origin;" in JOIN_JS
+        assert "buildBlurb(inputs, origin)" in JOIN_JS
+        assert "localNodeUrl(inputs, origin)" in JOIN_JS
         assert "auto.network" not in JOIN_JS
 
     def test_both_affordances_are_static(self):

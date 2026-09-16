@@ -3,71 +3,171 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
 <title>You're invited — Autonomy</title>
 <style>
-  :root { --bg:#12100e; --panel:#1c1916; --line:#3a332a; --ink:#e8e2d8;
-          --dim:#a89d8c; --accent:#b5764a; }
+  :root { --bg:#101218; --surface:#191c25; --inset:#12151d; --line:#303541;
+          --ink:#f3f3f7; --dim:#b2b5c2; --muted:#979bad; --accent:#7770ef;
+          --button:#6359d7; --button-hover:#7066e4; --accent-ink:#c5bfff;
+          --org:#6c63ff; }
   * { box-sizing: border-box; }
+  .hidden { display: none !important; }
   body { margin:0; background:var(--bg); color:var(--ink);
-         font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; }
-  main { max-width:640px; margin:0 auto; padding:3rem 1.25rem 4rem; }
-  h1 { font-size:1.5rem; margin:0 0 .4rem; }
-  .sub { color:var(--dim); margin-bottom:1.6rem; }
-  .card { background:var(--panel); border:1px solid var(--line);
-          border-radius:10px; padding:1.1rem 1.3rem; margin:1rem 0; }
-  .card h2 { font-size:1.02rem; margin:0 0 .5rem; color:#d9a06f; }
-  textarea { width:100%; min-height:9.5rem; background:#0d0c0a; color:#cfc7b8;
-             border:1px solid var(--line); border-radius:6px; padding:.7rem .9rem;
-             font:.88rem/1.5 ui-monospace,monospace; resize:vertical; }
-  button { background:var(--accent); color:#12100e; border:0; border-radius:6px;
-           padding:.5rem 1rem; font-weight:600; cursor:pointer; margin-top:.6rem; }
-  a { color:#d9a06f; }
-  .dim { color:var(--dim); font-size:.88rem; }
-  .hidden { display:none; }
+         font:16px/1.55 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+         -webkit-font-smoothing:antialiased; }
+  button, a, summary { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+  button { font: inherit; cursor: pointer; }
+  a { color: var(--accent-ink); text-underline-offset: 4px; }
+  a:hover { text-decoration: underline; }
+  button:focus-visible, a:focus-visible, summary:focus-visible, textarea:focus-visible {
+    outline: 3px solid var(--accent); outline-offset: 5px; }
+
+  .site-head { max-width:1200px; margin:auto; padding:25px 32px; display:flex;
+               align-items:center; gap:11px; font-size:16px; font-weight:650;
+               letter-spacing:-.3px; }
+  .site-head svg { width:26px; height:26px; border-radius:7px; }
+  .site-head span:last-child { font-size:12px; font-weight:450; letter-spacing:.03em;
+                               color:var(--muted); margin-left:auto; }
+
+  .invitation { max-width:620px; margin:35px auto 60px; padding:0 24px; }
+  .welcome { text-align:center; padding:0 22px 30px; }
+  .org-mark { width:76px; height:76px; display:grid; place-items:center; margin:0 auto 24px;
+              border-radius:22px; background:var(--surface); border:1px solid var(--line);
+              border-bottom:3px solid var(--org); font-size:32px; font-weight:600; overflow:hidden; }
+  .org-mark img { width:100%; height:100%; object-fit:contain; }
+  .eyebrow { font-size:11px; letter-spacing:.16em; text-transform:uppercase; font-weight:650;
+             color:var(--muted); margin:0 0 9px; }
+  h1 { font-size:clamp(29px,4vw,39px); line-height:1.15; letter-spacing:-1.3px; margin:0;
+       font-weight:620; overflow-wrap:anywhere; }
+  .description { color:var(--dim); margin:12px auto 0; max-width:440px; font-size:16px;
+                 overflow-wrap:anywhere; }
+  .inviter { display:flex; align-items:center; justify-content:center; gap:10px; margin-top:23px;
+             text-align:left; font-size:13px; color:var(--dim); }
+  .avatar { display:grid; place-items:center; flex:none; width:34px; height:34px; border-radius:50%;
+            background:var(--line); color:var(--ink); font-size:11px; font-weight:650; overflow:hidden; }
+  .avatar img { width:100%; height:100%; object-fit:cover; }
+  .inviter strong { font-weight:550; color:var(--ink); }
+  .inviter small { display:block; font-size:12px; color:var(--dim); }
+
+  .action-card { background:var(--surface); border:1px solid var(--line); border-radius:20px;
+                 padding:26px 28px; }
+  .facts { display:flex; justify-content:space-between; align-items:flex-start; gap:12px;
+           color:var(--dim); font-size:12px; margin:0 0 20px; padding-bottom:17px;
+           border-bottom:1px solid var(--line); }
+  .facts strong { color:var(--ink); font-weight:550; }
+  .facts .role-fact { flex:0 1 35%; overflow-wrap:anywhere; }
+  .facts .expiry-fact { margin-left:auto; text-align:right; min-width:0; }
+  .facts .expiry-fact strong, .facts .expiry-fact time { display:block; }
+  .facts time { font-variant-numeric: tabular-nums; }
+  h2 { font-size:21px; line-height:1.25; letter-spacing:-.45px; font-weight:600; margin:0 0 9px; }
+  .body-copy { font-size:14px; color:var(--dim); margin:0 0 20px; line-height:1.6; }
+  .primary { display:flex; align-items:center; justify-content:center; gap:12px; min-height:48px;
+             width:100%; padding:11px 18px; border:1px solid transparent; border-radius:10px;
+             background:var(--button); color:#fff; font-weight:600; text-decoration:none; font-size:14px; }
+  .primary:hover { background:var(--button-hover); text-decoration:none; }
+  .primary svg { width:16px; height:16px; stroke:currentColor; fill:none; stroke-width:1.6; }
+  .secondary { display:flex; justify-content:center; align-items:center; min-height:46px; width:100%;
+               padding:10px 12px; border:1px solid var(--line); border-radius:10px; background:transparent;
+               color:var(--ink); text-decoration:none; font-size:13px; font-weight:550; }
+  .secondary:hover { background:var(--inset); text-decoration:none; }
+  .sub-action { text-align:center; font-size:12px; color:var(--dim); margin:10px 0 0; }
+  .sub-action a { display:inline-flex; min-height:44px; align-items:center; }
+  .existing { border-top:1px solid var(--line); margin-top:21px; padding-top:17px; }
+  .existing p { font-size:12px; color:var(--dim); text-align:center; margin:0 0 9px; }
+  .note { font-size:12px; color:var(--dim); margin:14px 0 0; }
+  .page-foot { text-align:center; color:var(--muted); font-size:11px; margin:23px 0 0; }
+
+  details { font-size:12px; margin-top:8px; }
+  summary { min-height:44px; display:flex; align-items:center; justify-content:center; gap:8px;
+            cursor:pointer; color:var(--dim); list-style:none; }
+  summary::-webkit-details-marker { display:none; }
+  summary::after { content:'+'; font-size:17px; }
+  details[open] summary::after { content:'−'; }
+  .instructions { display:block; width:100%; min-height:11rem; background:var(--inset);
+                  border:1px solid var(--line); border-radius:9px; padding:15px;
+                  font:13px/1.7 system-ui,sans-serif; white-space:pre-wrap; overflow-wrap:anywhere;
+                  color:var(--dim); margin:0; resize:vertical; }
+  .status { font-size:12px; color:var(--accent-ink); margin:9px 0 0; text-align:center; }
+  .status:empty { display:none; }
+
+  .waiting-icon { width:46px; height:46px; display:grid; place-items:center; border-radius:50%;
+                  border:1px solid var(--line); color:var(--accent-ink); font-size:23px; margin-bottom:18px; }
+  .error-page { max-width:530px; margin:105px auto 0; padding:0 24px; }
+  .error-page .action-card { padding:32px; }
+  .error-page h1 { font-size:29px; margin-bottom:14px; letter-spacing:-.8px; }
+  .error-page .body-copy { margin-bottom:22px; }
+  .exit { display:flex; align-items:center; justify-content:center; min-height:44px; font-size:13px; margin-top:7px; }
+
+  @media (max-width:767px) {
+    .site-head { padding:19px 22px; } .site-head span:last-child { font-size:11px; }
+    .invitation { margin-top:23px; padding:0 20px; } .welcome { padding:0 4px 23px; }
+    .org-mark { width:62px; height:62px; border-radius:18px; margin-bottom:19px; }
+    h1 { font-size:31px; } .description { font-size:14px; margin-top:9px; }
+    .inviter { margin-top:17px; }
+    .action-card { padding:21px 22px; border-radius:17px; }
+    .facts { font-size:11px; margin-bottom:17px; padding-bottom:14px; }
+    .body-copy { font-size:13px; margin-bottom:17px; } h2 { font-size:20px; }
+    .existing { margin-top:16px; padding-top:14px; } .page-foot { margin-top:17px; }
+    .error-page { margin-top:60px; } .error-page .action-card { padding:26px; }
+  }
 </style>
 </head>
 <body>
+<header class="site-head">
+  <svg viewBox="0 0 512 512" aria-hidden="true"><rect width="512" height="512" fill="#111827"/><polygon points="229.05,107.52 282.95,107.52 386.81,404.48 125.19,404.48" fill="#ffffff"/><polygon points="256.00,139.44 342.34,404.48 169.66,404.48" fill="#111827"/><polygon points="172.08,270.40 339.92,270.40 352.28,305.74 159.72,305.74" fill="#ffffff"/></svg>
+  <span>autonomy</span><span>Your invitation</span>
+</header>
 <main>
-  <h1>You're invited to join an organization on Autonomy</h1>
-  <p class="sub" id="invite-line">Reading your invitation…</p>
-
-  <div id="incomplete" class="card hidden">
-    <h2>This invitation link is incomplete</h2>
-    <p class="dim">Ask the person who invited you for a fresh link — the part
-    after <code>#</code> matters and some apps strip it when forwarding.</p>
-  </div>
-
-  <div id="org-header" class="card hidden">
-    <div style="display:flex;align-items:center;gap:.8rem">
-      <img id="org-icon" class="hidden" alt=""
-           style="width:44px;height:44px;border-radius:9px">
-      <div>
-        <h2 id="org-name" style="margin:0"></h2>
-        <p class="dim" id="org-byline" style="margin:.15rem 0 0"></p>
+  <div id="invitation" class="invitation hidden">
+    <div class="welcome">
+      <div id="org-mark" class="org-mark">
+        <img id="org-icon" class="hidden" alt="">
+        <span id="org-initial">A</span>
+      </div>
+      <p class="eyebrow" id="eyebrow">On Autonomy</p>
+      <h1 id="org-name">You’re invited</h1>
+      <p class="description" id="org-byline">An organization has invited you.</p>
+      <div class="inviter hidden" id="inviter">
+        <span class="avatar"><img id="sponsor-avatar" class="hidden" alt=""><span id="sponsor-initials"></span></span>
+        <div><span>Invited by <strong id="sponsor-name"></strong></span><small id="sponsor-byline" class="hidden"></small></div>
       </div>
     </div>
+
+    <div class="action-card">
+      <div class="facts hidden" id="facts">
+        <span class="role-fact">Role: <strong id="role"></strong></span>
+        <span class="expiry-fact hidden" id="expiry-fact">Expires<strong id="expiry-date"></strong><time id="expiry-time"></time></span>
+      </div>
+      <h2>Get started</h2>
+      <p class="body-copy">Set up Autonomy on your computer, then return to join.</p>
+      <button class="primary" id="copy" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V3H3v13h5"/></svg>
+        <span id="copy-label">Copy setup instructions</span>
+      </button>
+      <p class="sub-action">Paste into your coding agent to get started.</p>
+      <p class="status" role="status" id="copy-note"></p>
+      <details id="instructions">
+        <summary>View setup instructions</summary>
+        <textarea id="blurb" class="instructions" readonly></textarea>
+        <p class="sub-action"><a id="install-link" href="/install" target="_blank" rel="noreferrer">Read the installation guide ↗</a></p>
+      </details>
+      <div class="existing">
+        <p>Already running Autonomy on this computer?</p>
+        <a class="secondary" id="node-link" href="#">Open Autonomy on this computer&nbsp;→</a>
+      </div>
+    </div>
+    <p class="page-foot">Your machine. Your identity. Your Autonomy.</p>
   </div>
 
-  <div id="flows" class="hidden">
-    <div id="agent-panel" class="card">
-      <h2>Have a coding agent set everything up</h2>
-      <p class="dim">Paste this to your coding agent (Claude Code, Codex, …) —
-      it installs Autonomy on your machine with your consent at every step,
-      then completes this invitation:</p>
-      <textarea id="blurb" readonly></textarea>
-      <button id="copy">Copy</button>
-      <span class="dim hidden" id="copied"> copied</span>
+  <div id="incomplete" class="error-page hidden">
+    <div class="action-card">
+      <div class="waiting-icon" aria-hidden="true">↗</div>
+      <h1>This link is incomplete</h1>
+      <p class="body-copy">Part of the invitation link is missing — the part after
+      <code>#</code> matters and some apps strip it when forwarding. Ask the person
+      who invited you for the complete link.</p>
+      <a class="exit" href="/">Back to Autonomy</a>
     </div>
-
-    <div id="node-panel" class="card">
-      <h2 id="node-title">Already running Autonomy on this machine?</h2>
-      <p class="dim"><a id="node-link" href="#">Open your node to accept the
-      invitation</a> — the invitation carries over exactly as-is.</p>
-    </div>
-
-    <p class="dim">Prefer to read first? The full install guide your agent
-    would follow is at <a id="install-link" href="/install">/install</a> —
-    it works for humans too.</p>
   </div>
 </main>
 <script type="module" src="/l-assets/autonet.js?v=4"></script>
