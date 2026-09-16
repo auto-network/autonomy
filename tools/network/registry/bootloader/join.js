@@ -64,25 +64,37 @@
     );
   }
 
-  function buildBlurb(inputs) {
-    // location.origin keeps both URLs correct on every deployment stage
-    // (registry host today, bare apex once DNS serves it) — the same
-    // host-awareness principle as the /install browser CTA.
-    var inviteLink = location.origin + "/l/" + inputs.channelToken +
-      "#t=" + encodeURIComponent(inputs.bearer);
+  // The invitation link the coding agent hands to the install flow. It is
+  // the minted org:join link exactly — the registry grant in the path and
+  // BOTH fragment values (graph://4f9e881c-a9 §3): k, the per-link channel
+  // key the joining node verifies the org's serving endpoint against, and
+  // t, the ledger bearer. tools.network.invitation.invitation_from_join_url
+  // refuses a link missing either, so a bearer-only link is not an
+  // invitation the agent can use. origin keeps the URL correct on every
+  // deployment stage (registry host today, bare apex once DNS serves it).
+  function inviteLink(inputs, origin) {
+    return origin + "/l/" + inputs.channelToken +
+      "#k=" + inputs.linkKey + "&t=" + encodeURIComponent(inputs.bearer);
+  }
+
+  function buildBlurb(inputs, origin) {
     return (
       "I've been invited to join an organization on Autonomy Network! " +
       "Please learn about and install Autonomy Network:\n" +
-      location.origin + "/install\n\n" +
+      origin + "/install\n\n" +
       "Once it's set up, my invitation is here:\n" +
-      inviteLink
+      inviteLink(inputs, origin)
     );
   }
 
-  function localNodeUrl(inputs) {
+  function localNodeUrl(inputs, origin) {
+    // The node's own /network/join page reads the same query and fragment
+    // the bootloader minted, and it requires relay_host: that is the relay
+    // it opens the join channel through. This page's origin IS that relay.
     var query = new URLSearchParams({
       org: inputs.org,
       invite_ref: inputs.inviteRef,
+      relay_host: origin,
     });
     // Same shape the bootloader minted: both credentials in the fragment,
     // so the local hand-off adds no server-visible surface either.
@@ -104,10 +116,9 @@
       return;
     }
     $("invite-line").textContent =
-      "Organization " + inputs.org.slice(0, 8) +
-      "… has invited you. Two ways in — pick whichever fits.";
-    $("blurb").value = buildBlurb(inputs);
-    $("node-link").setAttribute("href", localNodeUrl(inputs));
+      "An organization has invited you. Two ways in — pick whichever fits.";
+    $("blurb").value = buildBlurb(inputs, location.origin);
+    $("node-link").setAttribute("href", localNodeUrl(inputs, location.origin));
     $("flows").classList.remove("hidden");
 
     $("copy").addEventListener("click", function () {
@@ -198,6 +209,8 @@
     module.exports = {
       safeIcon: safeIcon, safeColor: safeColor,
       decodeFragmentKey: decodeFragmentKey,
+      inviteLink: inviteLink, buildBlurb: buildBlurb,
+      localNodeUrl: localNodeUrl, looksComplete: looksComplete,
     };
   }
 
