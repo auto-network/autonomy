@@ -183,7 +183,10 @@
   }
 
   function goToUnlock() {
-    root.location.assign('/unlock?next=' + encodeURIComponent(currentPath()));
+    // The fragment rides the unlock URL itself (never `next`, which reaches
+    // the server); unlock.js restores it on resume.
+    var hash = (root.location && root.location.hash) || '';
+    root.location.assign('/unlock?next=' + encodeURIComponent(currentPath()) + hash);
   }
 
   function openOnboarding(step) {

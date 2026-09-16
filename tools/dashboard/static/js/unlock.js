@@ -136,7 +136,17 @@
         target = '/';
       }
     } catch (e) { /* storage unavailable — normal redirect */ }
-    location.replace(target);
+    location.replace(_withFragment(target));
+  }
+
+  // The gate's 302 carries only path+query in `next`; the browser keeps the
+  // original URL's fragment on this page instead. An invitation hand-off
+  // (/network/join#channel_token=…&k=…&t=…) lives entirely in that
+  // fragment, so the resume must carry it back or the invitation arrives
+  // incomplete. Browser-only: the fragment never reaches the server.
+  function _withFragment(target) {
+    if (target === '/' || target.indexOf('#') !== -1) return target;
+    return target + (location.hash || '');
   }
 
   function _esc(s) {
@@ -956,6 +966,7 @@
       unlockWithPasskey: _unlockWithPasskey,
       unlockWithPassword: _unlockWithPassword,
       nextPath: _nextPath,
+      withFragment: _withFragment,
       domain: UNLOCK_DOMAIN,
     },
   };
