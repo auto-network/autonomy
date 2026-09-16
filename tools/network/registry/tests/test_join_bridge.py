@@ -92,12 +92,13 @@ class TestClientSourceContract:
                           ".sign(", "decrypt", "Ed25519", "keypair"):
             assert forbidden.lower() not in JOIN_JS.lower(), forbidden
 
-    def test_blurb_is_origin_aware(self):
-        # Both blurb URLs derive from location.origin so the copied prompt
+    def test_blurb_and_handoff_derive_from_the_page_origin(self):
+        # Both URLs are built from location.origin so the copied prompt
         # works on the interim registry host and self-upgrades on the apex
-        # (same principle as the /install CTA).
-        assert 'location.origin + "/install' in JOIN_JS
-        assert 'location.origin + "/l/"' in JOIN_JS
+        # (same principle as the /install CTA). The origin is passed in, so
+        # the builders are also runnable under Node (TestBlurbAndHandoff).
+        assert "buildBlurb(inputs, location.origin)" in JOIN_JS
+        assert "localNodeUrl(inputs, location.origin)" in JOIN_JS
         assert "auto.network" not in JOIN_JS
 
     def test_both_affordances_are_static(self):
@@ -186,3 +187,114 @@ class TestOrgSelfDescription:
         # flow must not auto-boot there (it would render its error state
         # into a page with no bootloader UI).
         assert r'/^\/l\/[0-9a-f]{32}$/.test(location.pathname)' in AUTONET_JS
+
+
+_NODE_INPUTS = {
+    "org": "2d4b90cb-1e89-452b-82cb-68ca44fd8e52",
+    "inviteRef": "2c" * 32,
+    "channelToken": "481d320a39a923ac878f90938ac65475",
+    # unpadded base64url of 32 bytes — the fragment spelling of k
+    "linkKey": "yEtVBJQhSxGG4f8wUTa1ZvOWQJdfauLMdLGQD0OhXV0",
+    "bearer": "9b" * 32,
+}
+_ORIGIN = "https://relay.example"
+
+
+def _run_join_builders():
+    import json as _json
+    import shutil as _shutil
+    import subprocess as _subprocess
+
+    if _shutil.which("node") is None:
+        import pytest as _pytest
+        _pytest.skip("node not on PATH")
+    module = str(BOOTLOADER_DIR / "join.js")
+    script = (
+        f"const api = require({_json.dumps(module)});"
+        f"const inputs = {_json.dumps(_NODE_INPUTS)};"
+        f"const origin = {_json.dumps(_ORIGIN)};"
+        "process.stdout.write(JSON.stringify({"
+        "  complete: api.looksComplete(inputs),"
+        "  link: api.inviteLink(inputs, origin),"
+        "  blurb: api.buildBlurb(inputs, origin),"
+        "  local: api.localNodeUrl(inputs, origin),"
+        "}));"
+    )
+    result = _subprocess.run(["node", "-e", script],
+                             capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    return _json.loads(result.stdout)
+
+
+class TestBlurbAndHandoff:
+    """The two URLs the page hands out, run for real under Node.
+
+    The blurb's invite link is what a coding agent feeds to the install
+    flow, and the local hand-off is what the visitor's own node reads. Both
+    have exact consumers; both are asserted against those consumers.
+    """
+
+    def test_blurb_invite_link_is_the_minted_two_value_link(self):
+        out = _run_join_builders()
+        assert out["complete"] is True
+        token = _NODE_INPUTS["channelToken"]
+        expected = (
+            f"{_ORIGIN}/l/{token}"
+            f"#k={_NODE_INPUTS['linkKey']}&t={_NODE_INPUTS['bearer']}"
+        )
+        assert out["link"] == expected
+        # The blurb carries exactly the install primer and that link.
+        assert f"{_ORIGIN}/install\n" in out["blurb"]
+        assert out["blurb"].rstrip().endswith(expected)
+        assert out["blurb"].count("https://") == 2
+
+    def test_blurb_invite_link_converts_to_an_invitation_code(self):
+        # The consumer contract (deploy/install/paths/invite.md): the link
+        # in the blurb, fed verbatim to invitation_from_join_url, yields a
+        # v2 invitation whose channel key is the fragment's k and whose
+        # transport grant is the /l/ path token. A bearer-only link (the
+        # shape the page used to emit) is refused by that same function.
+        from tools.network.invitation import (
+            InvitationError,
+            decode_channel_pub,
+            encode_invitation,
+            invitation_from_join_url,
+        )
+        import pytest as _pytest
+
+        out = _run_join_builders()
+        invitation = invitation_from_join_url(
+            org=_NODE_INPUTS["org"], invite_ref=_NODE_INPUTS["inviteRef"],
+            join_url=out["link"],
+        )
+        assert invitation.channel_token == _NODE_INPUTS["channelToken"]
+        assert invitation.channel_pub == decode_channel_pub(_NODE_INPUTS["linkKey"])
+        assert invitation.claim_token == _NODE_INPUTS["bearer"]
+        assert encode_invitation(invitation)
+        with _pytest.raises(InvitationError):
+            invitation_from_join_url(
+                org=_NODE_INPUTS["org"], invite_ref=_NODE_INPUTS["inviteRef"],
+                join_url=out["link"].split("#")[0] + "#t=" + _NODE_INPUTS["bearer"],
+            )
+
+    def test_local_handoff_carries_everything_the_node_page_requires(self):
+        # The node's /network/join page (static/js/network-join.js
+        # looksComplete) needs org, invite_ref AND relay_host in the query,
+        # and channel_token, k, t in the fragment. relay_host is this page's
+        # own origin: the relay the invitation arrived through.
+        from urllib.parse import parse_qs, urlsplit
+
+        out = _run_join_builders()
+        parsed = urlsplit(out["local"])
+        assert parsed.scheme == "https" and parsed.netloc == "localhost:8080"
+        assert parsed.path == "/network/join"
+        assert parse_qs(parsed.query) == {
+            "org": [_NODE_INPUTS["org"]],
+            "invite_ref": [_NODE_INPUTS["inviteRef"]],
+            "relay_host": [_ORIGIN],
+        }
+        assert parse_qs(parsed.fragment) == {
+            "channel_token": [_NODE_INPUTS["channelToken"]],
+            "k": [_NODE_INPUTS["linkKey"]],
+            "t": [_NODE_INPUTS["bearer"]],
+        }
