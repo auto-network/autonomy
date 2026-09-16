@@ -27,6 +27,9 @@ from __future__ import annotations
 from tools.network.idkit.root_factor_policy import mint_password_armor
 
 import base64
+import shutil
+import subprocess
+from pathlib import Path
 import hashlib
 import hmac as hmac_mod
 import json
@@ -1649,3 +1652,55 @@ def test_design_render_rejects_an_invalid_or_revoked_bearer(env, root, monkeypat
         path, headers={"Authorization": "Bearer bad-token"},
         follow_redirects=False)
     assert bounced.status_code == (401 if path.startswith("/pages/") else 302)
+
+
+# ── the resume carries the URL fragment (invitation hand-off) ──────────
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not on PATH")
+def test_unlock_resume_carries_the_fragment():
+    """A locked dashboard 302s ``/network/join?…#channel_token=…&k=…&t=…``
+    to ``/unlock?next=%2Fnetwork%2Fjoin%3F…``. The gate can only carry the
+    path and query in ``next`` (a fragment never reaches the server); the
+    browser keeps the original fragment on the unlock page instead. The
+    resume must put it back, or the invitation lands on the node's join
+    page incomplete. Run the real unlock.js under jsdom at that URL."""
+    script = r"""
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const { JSDOM } = require('jsdom');
+const next = '/network/join?org=2d4b90cb&invite_ref=abc&relay_host=https%3A%2F%2Frelay.example';
+const hash = '#channel_token=481d320a&k=yEtVBJQhSxGG4f8wUTa1ZvOWQJdfauLMdLGQD0OhXV0&t=9b78';
+const dom = new JSDOM('<!doctype html><html><body></body></html>', {
+  url: 'https://node.test/unlock?next=' + encodeURIComponent(next) + hash,
+  runScripts: 'outside-only',
+});
+const w = dom.window;
+w.fetch = () => Promise.reject(new Error('offline in test'));
+w.eval(fs.readFileSync(process.argv[1], 'utf8'));
+const api = w.AutonomyUnlock._internals;
+assert.equal(api.nextPath(), next);
+assert.equal(api.withFragment(api.nextPath()), next + hash);
+assert.equal(api.withFragment('/'), '/');
+assert.equal(api.withFragment('/beads#tab'), '/beads#tab');
+process.stdout.write('ok');
+"""
+    unlock_js = Path(__file__).resolve().parents[1] / "static" / "js" / "unlock.js"
+    result = subprocess.run(["node", "-e", script, str(unlock_js)],
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "ok"
+
+
+def test_client_guards_send_the_fragment_along_with_the_unlock_url():
+    """The two client-side redirects to /unlock build ``next`` from path and
+    query only (it reaches the server) and append the current fragment to
+    the unlock URL itself, where unlock.js restores it on resume."""
+    static = Path(__file__).resolve().parents[1] / "static" / "js"
+    guard = (static / "unlock-guard.js").read_text(encoding="utf-8")
+    indicator = (static / "identity-indicator.js").read_text(encoding="utf-8")
+    assert "encodeURIComponent(next) +\n                          (location.hash || '')" in guard
+    assert "encodeURIComponent(currentPath()) + hash" in indicator
+    # never inside next: the server must not see the credentials
+    assert "location.search + location.hash" not in guard
+    assert "location.search) + (root.location.hash" not in indicator

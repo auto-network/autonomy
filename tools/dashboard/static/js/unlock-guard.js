@@ -36,7 +36,10 @@
         if (unlock) {
           _redirecting = true;
           var next = location.pathname + location.search;
-          location.assign(unlock + '?next=' + encodeURIComponent(next));
+          // The fragment rides the unlock URL itself (never `next`, which
+          // reaches the server); unlock.js restores it on resume.
+          location.assign(unlock + '?next=' + encodeURIComponent(next) +
+                          (location.hash || ''));
         }
       }
       return resp;
