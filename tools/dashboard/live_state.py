@@ -58,9 +58,11 @@ def _connector_status(org: str) -> dict:
     try:
         reply = sup.control(org, "connector-status", {}, timeout=3.0)
     except sup.TunnelUnavailable as exc:
-        return {"reachable": False, "detail": str(exc), "kind": exc.kind}
+        return {"reachable": False, "detail": str(exc), "kind": exc.kind,
+                **_supervisor_view(org)}
     except Exception as exc:  # noqa: BLE001 — a status surface never raises
-        return {"reachable": False, "detail": f"{type(exc).__name__}: {exc}"}
+        return {"reachable": False, "detail": f"{type(exc).__name__}: {exc}",
+                **_supervisor_view(org)}
     if not isinstance(reply, dict):
         return {"reachable": False, "detail": "malformed connector-status reply"}
     return {
@@ -74,6 +76,29 @@ def _connector_status(org: str) -> dict:
         "locked_refusals": reply.get("locked_refusals"),
         "direct_listener": reply.get("direct_listener"),
         "tunnel": reply.get("tunnel"),
+    }
+
+
+def _supervisor_view(org: str) -> dict:
+    """What the supervisor knows about a connector that does not answer: how
+    many launches exited before serving, and whether its key file exists.
+    The connector cannot say this itself -- it is the process that is not
+    there (graph://1418ca10-588 D2)."""
+    from tools.dashboard import link_serving_supervisor as sup
+
+    try:
+        rows = sup.scope_states([(org, org)])
+    except Exception:  # noqa: BLE001
+        return {}
+    if not rows:
+        return {}
+    row = rows[0]
+    if row.get("launch_exits") is None and row.get("cache_present") is None:
+        return {}  # nothing beyond "not reachable" to say; keep the reply minimal
+    return {
+        "state": row.get("state"),
+        "launch_exits": row.get("launch_exits"),
+        "cache_present": row.get("cache_present"),
     }
 
 

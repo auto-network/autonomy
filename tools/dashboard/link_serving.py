@@ -2339,10 +2339,20 @@ def main() -> None:
         # (fleet_enrollment_routes.py, "publish_connector_runtime(payload,
         # org=None)"). That guess propagated: the tunnel tile repeated it and
         # sent the operator to unlock a vault that was already open.
+        # Name the scope, the file that was looked for, and the remedy
+        # (graph://1418ca10-588 D2). "scope is empty" alone sent an operator
+        # to unlock a vault that was already warm (Home, 2026-09-17).
+        try:
+            looked_for = str(FleetRuntimeWarmCache(args.org).path)
+        except Exception:
+            looked_for = f"<keycache>/fleet-connector-runtime.{args.org}.json"
         parser.error(
-            f"no runtime machine key has been published for scope "
-            f"{args.org or 'personal'} — the warm runtime cache for this "
-            "scope is empty. Not starting; the supervisor retries."
+            f"UNARMED: no runtime machine key for scope "
+            f"{args.graph_org or 'personal'} ({args.org}); the warm runtime "
+            f"cache file {looked_for} is absent. The dashboard has not armed "
+            "this scope: an unlock or a runtime re-arm writes that file, and "
+            "the supervisor relaunches this connector every watchdog interval "
+            "until it exists. Not starting."
         )
 
     from tools.network.relaykit.connector import Publisher
