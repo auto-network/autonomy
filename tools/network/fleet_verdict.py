@@ -137,7 +137,73 @@ def _direct_check() -> dict:
             out["discovered_peers"] = {}
     except Exception:
         pass
+    listeners = _connector_listeners()
+    out["connector_listeners"] = listeners
+    out["listener_verdict"] = _listener_verdict(out, listeners)
     return out
+
+
+def _connector_listeners() -> dict:
+    """scope -> the inbound direct listener that scope's connector reports
+    bound (``[host, port]``), ``None`` when it answered and binds nothing, or
+    ``{"unreachable": reason}`` when its control socket did not answer."""
+    try:
+        from tools.dashboard import link_serving_supervisor as sup
+
+        scopes = [scope for scope, _label in sup.provisioned_serving_scopes()]
+    except Exception:
+        return {}
+    out: dict = {}
+    for scope in scopes:
+        try:
+            status = sup.control(scope, "connector-status", {})
+            listener = status.get("direct_listener") if isinstance(status, dict) else None
+            out[scope] = list(listener) if listener else None
+        except Exception as exc:
+            out[scope] = {"unreachable": repr(exc)[:160]}
+    return out
+
+
+def _listener_verdict(direct: dict, listeners: dict) -> dict:
+    """Does anything actually listen where this machine tells its peers to
+    dial? Home, 2026-09-16/17: fleet-direct advertised port 9410 with
+    serve_in=connector, the personal connector never started, the dashboard
+    itself bound only its loopback-ephemeral port, and every peer's dial was
+    refused for 30 h while every field here read as a plain fact. The
+    verdict is FAIL when advertised and bound disagree, UNKNOWN when nothing
+    could be asked, never a silent null. Design: graph://1418ca10-588 D5."""
+    if "listen_port" not in direct:
+        return {"status": "unknown", "detail": direct.get("detail") or "fleet-direct config unreadable"}
+    if not direct.get("enabled"):
+        return {"status": "ok", "detail": "direct tier not enabled (loopback/ephemeral by config); pulls ride the relay"}
+    advertised = int(direct.get("listen_port") or 0)
+    serve_in = direct.get("serve_in") or "connector"
+    if serve_in == "dashboard":
+        bound = direct.get("listener_bound_port")
+        if bound is None:
+            return {"status": "fail", "detail": f"advertised port {advertised} but the dashboard has bound no listener"}
+        if int(bound) != advertised:
+            return {"status": "fail", "detail": f"advertised port {advertised} but the dashboard bound port {bound}"}
+        return {"status": "ok", "detail": f"dashboard bound the advertised port {advertised}"}
+    owners = {scope: v for scope, v in listeners.items() if isinstance(v, list) and len(v) == 2}
+    unreachable = sorted(scope for scope, v in listeners.items() if isinstance(v, dict))
+    if owners:
+        scope, (host, port) = next(iter(owners.items()))
+        if int(port) != advertised:
+            return {"status": "fail", "owner": scope,
+                    "detail": f"{scope} connector bound {host}:{port} but peers are told port {advertised}"}
+        return {"status": "ok", "owner": scope,
+                "detail": f"{scope} connector bound {host}:{port}, matching the advertised port"}
+    if listeners and len(unreachable) == len(listeners):
+        return {"status": "unknown",
+                "detail": f"advertised port {advertised} (serve_in=connector) but no connector answered its control socket: {', '.join(unreachable)}"}
+    if not listeners:
+        return {"status": "unknown", "detail": f"advertised port {advertised} (serve_in=connector) but no provisioned scope could be listed"}
+    answered = sorted(scope for scope, v in listeners.items() if v is None)
+    return {"status": "fail",
+            "detail": (f"advertised port {advertised} (serve_in=connector) but NO connector has bound the inbound listener; "
+                       f"answered without one: {', '.join(answered) or 'none'}; unreachable: {', '.join(unreachable) or 'none'} "
+                       "-- every peer's direct pull to this machine is refused")}
 
 
 def _connector_direct_listener(org: str | None):

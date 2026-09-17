@@ -170,3 +170,55 @@ def test_host_terminal_session_is_not_refused(monkeypatch):
     monkeypatch.setattr("sys.argv", ["fleet_doctor", "--ssh", "x"])
     monkeypatch.setattr(fleet_doctor, "_run_remote", lambda *a, **k: 0)
     assert fleet_doctor.main() == 0
+
+
+def test_per_channel_lines_carry_their_ages_and_errors(monkeypatch, capsys):
+    """SJC 2026-09-17: 'last success, EMPTY' with no time read as current
+    while the last attempt was 32 h old. Every line now says when."""
+    import time
+
+    now = time.time_ns()
+    hour = 3_600_000_000_000
+    rows = [
+        {"peer": "3996513b6b23" + "0" * 52, "scope": "dynbench", "channel": "direct",
+         "direction": "pull", "payload": {
+             "last_outcome": "success", "last_started_at_ns": now - 32 * hour,
+             "last_success_at_ns": now - 32 * hour, "last_bytes_received": 418,
+             "last_mutation_frames": 0, "last_bytes_sent": 1219,
+             "total_bytes_received": 33_218_751}},
+        {"peer": "3996513b6b23" + "0" * 52, "scope": "personal", "channel": "direct",
+         "direction": "pull", "payload": {
+             "last_outcome": "failed", "last_started_at_ns": now - 20_000_000_000,
+             "last_success_at_ns": now - 30 * hour, "last_bytes_received": 0,
+             "last_mutation_frames": 0, "last_bytes_sent": 0,
+             "total_bytes_received": 486_613_701,
+             "last_error_code": "FleetSyncPeerUnreachable"}},
+    ]
+    monkeypatch.setattr(
+        "tools.network.fleet_sync_telemetry.read_channel_rows", lambda: rows
+    )
+    report: dict = {}
+    fleet_doctor.check_sync_traffic(report)
+    out = capsys.readouterr().out
+    dyn = next(l for l in out.splitlines() if "dynbench/direct" in l)
+    assert "started 32h ago" in dyn and "last success 32h ago" in dyn and "EMPTY" in dyn
+    per = next(l for l in out.splitlines() if "personal/direct" in l)
+    assert "[WARN" in per and "started 20s ago" in per
+    assert "last success 30h ago" in per and "error FleetSyncPeerUnreachable" in per
+
+
+def test_the_verdict_prints_the_listener_line(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "tools.network.fleet_verdict.compute_verdict",
+        lambda org=None: {
+            "top_line": "UNKNOWN",
+            "connector_version": {}, "dashboard_version": {}, "data": {},
+            "direct": {"listener_verdict": {
+                "status": "fail",
+                "detail": "advertised port 9410 (serve_in=connector) but NO connector has bound the inbound listener",
+            }},
+        },
+    )
+    fleet_doctor.check_verdict({})
+    out = capsys.readouterr().out
+    assert "[FAIL] direct listener" in out and "9410" in out
