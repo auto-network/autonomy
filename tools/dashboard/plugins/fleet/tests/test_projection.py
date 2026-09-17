@@ -364,6 +364,8 @@ def test_local_machine_block_reports_probe_facts_or_stays_null():
         "certValidUntil": None,
         "tunnelServing": None,
         "tunnelScopesDown": [],
+        "scopeStates": [],
+        "dashboardCachePresent": None,
         "verdictTopLine": None,
     }
 
@@ -385,6 +387,8 @@ def test_local_machine_block_reports_probe_facts_or_stays_null():
         "certValidUntil": 1_777_086_400_000,
         "tunnelServing": False,
         "tunnelScopesDown": [],
+        "scopeStates": [],
+        "dashboardCachePresent": None,
         "verdictTopLine": "LOCKED",
     }
 
@@ -535,3 +539,25 @@ def test_a_scope_mid_bootstrap_reports_how_much_is_left():
 
     assert row["filling"] == "sweeping"
     assert row["lag"] == 60_000, "must say how much remains, not zero"
+
+
+def test_local_machine_block_carries_per_scope_states_and_dashboard_cache():
+    import dataclasses
+
+    base = _inputs(entries=(LOCAL_ENTRY,), tunnel_serving=False,
+                   tunnel_scopes_down=("personal",))
+    inputs = dataclasses.replace(
+        base,
+        scope_states=({"scope": "personal", "label": "personal", "state": "unarmed",
+                       "serving": False, "launch_exits": {"count": 3, "since": 1.0},
+                       "cache_present": False},),
+        dashboard_cache_present=True,
+    )
+    local = project(inputs)["localMachine"]
+    assert local["dashboardCachePresent"] is True
+    [row] = local["scopeStates"]
+    assert row == {"scope": "personal", "label": "personal", "state": "unarmed",
+                   "serving": False, "launchExits": {"count": 3, "since": 1.0},
+                   "cachePresent": False}
+    absent = project(_inputs(entries=(LOCAL_ENTRY,)))["localMachine"]
+    assert absent["scopeStates"] == [] and absent["dashboardCachePresent"] is None

@@ -67,6 +67,15 @@ class ProjectionInputs:
     #: tunnel_serving is True; naming them is what turns "something is wrong"
     #: into "anchore is wrong".
     tunnel_scopes_down: tuple = ()
+    #: Per provisioned scope, the supervisor's facts (link_serving_supervisor.
+    #: scope_states): {scope, label, state, launch_exits, cache_present}.
+    #: ``state`` is serving / unarmed / launch-failing / down. This is what
+    #: lets the card say "re-arm failed: personal" instead of "Needs unlock"
+    #: when the vault is warm (graph://1418ca10-588 section 4).
+    scope_states: tuple = ()
+    #: Whether the dashboard's OWN cached runtime credential exists. With it
+    #: present an unarmed connector is a re-arm failure, not a locked vault.
+    dashboard_cache_present: bool | None = None
 
 
 def _peer_rows(epoch: str | None) -> dict[str, dict]:
@@ -195,15 +204,26 @@ def _load_inputs(*, now_ms: int) -> ProjectionInputs:
     # callers. Both now go through one helper so they cannot disagree.
     tunnel_serving = None
     tunnel_scopes_down: tuple = ()
+    scope_states: tuple = ()
     try:
-        from tools.dashboard.link_serving_supervisor import scopes_not_serving
+        from tools.dashboard.link_serving_supervisor import scope_states as _scope_states
 
-        down = scopes_not_serving()
+        rows = _scope_states()
+        scope_states = tuple(rows)
+        down = [row["label"] for row in rows if not row.get("serving")]
         tunnel_scopes_down = tuple(down)
         tunnel_serving = not down
     except Exception:
         tunnel_serving = None
         tunnel_scopes_down = ()
+        scope_states = ()
+    dashboard_cache_present = None
+    try:
+        from tools.dashboard import fleet_enrollment_routes as _fer
+
+        dashboard_cache_present = bool(_fer._dashboard_runtime_cache().exists())
+    except Exception:
+        dashboard_cache_present = None
     return ProjectionInputs(
         server_time=now_ms,
         root_pub=root_pub,
@@ -228,6 +248,8 @@ def _load_inputs(*, now_ms: int) -> ProjectionInputs:
         serve_cert=serve_cert,
         tunnel_serving=tunnel_serving,
         tunnel_scopes_down=tunnel_scopes_down,
+        scope_states=scope_states,
+        dashboard_cache_present=dashboard_cache_present,
     )
 
 
@@ -826,6 +848,16 @@ def project(inputs: ProjectionInputs) -> dict:
         ),
         "tunnelServing": inputs.tunnel_serving,
         "tunnelScopesDown": list(inputs.tunnel_scopes_down),
+        "scopeStates": [
+            {
+                "scope": row.get("scope"), "label": row.get("label"),
+                "state": row.get("state"), "serving": bool(row.get("serving")),
+                "launchExits": row.get("launch_exits"),
+                "cachePresent": row.get("cache_present"),
+            }
+            for row in inputs.scope_states
+        ],
+        "dashboardCachePresent": inputs.dashboard_cache_present,
         "verdictTopLine": verdict.get("top_line"),
     }
     from tools.network import build_version
