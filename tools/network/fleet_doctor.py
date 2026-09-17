@@ -83,6 +83,24 @@ def _line(label: str, value, *, warn: bool = False, fail: bool = False) -> None:
     print(f"  [{mark}] {label}: {value}")
 
 
+def _age(ns, now_ns: int) -> str:
+    """'never' or a compact age; a fact with no time on it reads as current."""
+    try:
+        ns = int(ns or 0)
+    except (TypeError, ValueError):
+        ns = 0
+    if ns <= 0:
+        return "never"
+    s = max(0, (now_ns - ns) // 1_000_000_000)
+    if s < 120:
+        return f"{s}s ago"
+    if s < 7200:
+        return f"{s // 60}m ago"
+    if s < 172800:
+        return f"{s // 3600}h ago"
+    return f"{s // 86400}d ago"
+
+
 def _detail(text: str) -> None:
     if not _QUIET:
         print(text)
@@ -111,6 +129,12 @@ def check_verdict(report: dict, *, org: str | None = None) -> None:
     counts = verdict["data"].get("counts")
     if counts:
         print(f"  local data: {counts}")
+    listener = (verdict.get("direct") or {}).get("listener_verdict") or {}
+    status = listener.get("status")
+    _line(
+        "direct listener", listener.get("detail", "not evaluated"),
+        fail=status == "fail", warn=status not in ("ok", "fail"),
+    )
 
 
 # ── identity + designation ──────────────────────────────────────────────
@@ -873,6 +897,16 @@ def check_sync_data(report: dict) -> None:
                     )
     except Exception as exc:
         _line("org-scope check", f"FAILED to run: {exc!r}", warn=True)
+    check_sync_traffic(report)
+
+
+def check_sync_traffic(report: dict) -> None:
+    """Per-channel pull telemetry, WITH TIMES. SJC 2026-09-17: every org
+    channel printed "last success, EMPTY" and read as current while the last
+    attempt was 32 h old; the timestamp was in the row and never printed."""
+    import time as _time
+
+    now_ns = _time.time_ns()
     # Per-channel traffic: which path carried each peer's sync, with bytes,
     # so "is direct actually being used" is answerable at a glance.
     try:
@@ -918,13 +952,19 @@ def check_sync_data(report: dict) -> None:
                 )
                 if empty:
                     outcome = "success, EMPTY (handshake only, no data moved)"
+                failed = payload.get("last_outcome") not in (None, "success")
+                error = payload.get("last_error_code") or ""
                 _line(
                     f"{peer[:12]} {row['scope']}/{row['channel']}",
                     f"last {outcome}, "
+                    f"started {_age(payload.get('last_started_at_ns'), now_ns)}, "
+                    f"last success {_age(payload.get('last_success_at_ns'), now_ns)}, "
                     f"last {got:,}B in/"
                     f"{payload.get('last_bytes_sent', 0):,}B out, "
                     f"total {payload.get('total_bytes_received', 0):,}B in"
-                    f"{marker}",
+                    + (f", error {error}" if failed and error else "")
+                    + f"{marker}",
+                    warn=failed,
                 )
                 if empty:
                     empty_scopes.append(f"{row['scope']}/{row['channel']}")
