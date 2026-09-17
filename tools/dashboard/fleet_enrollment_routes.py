@@ -609,6 +609,38 @@ def _arm_serving_orgs(base_payload: dict, seeds: object) -> None:
             )
 
 
+def _arm_personal_connector(payload: dict, org_uuid: str | None) -> None:
+    """Write the PERSONAL connector's warm cache before it is launched.
+
+    The personal serving connector binds this machine's inbound direct sync
+    listener, and it cannot start without a machine key: since bc79dc9a a
+    keyless connector exits before it opens its control socket, so the socket
+    publish below can only reach a connector that is already armed. Org scopes
+    break that circle in _arm_serving_orgs by writing the cache first; the
+    personal scope never did, so once its cache file was missing (ramfs
+    cleared, or never written on this boot) no unlock could arm it. Observed
+    live on Home 2026-09-16/17: the personal connector exited every 20 s for
+    30 h, port 9410 refused every peer, and SJC fell 35 h behind on every
+    scope. Design of record: graph://1418ca10-588 (D1, D4).
+
+    Same file the connector reads at launch (link_serving.py,
+    attach_warm_cache + rearm_from_cache): the default name_prefix, keyed by
+    the personal registry org_uuid the supervisor passes as --org. The
+    Dashboard's own copy lives under a different prefix and is not this file.
+    A cache write failure logs and never fails the activation.
+    """
+    if not org_uuid:
+        return  # personal org not registered: no personal connector to arm
+    try:
+        fleet_relay_sync.FleetRuntimeWarmCache(org_uuid).store(payload)
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "could not arm the warm cache for the personal serving connector "
+            "(%s); it will only arm over the control socket if it is already up",
+            org_uuid, exc_info=True,
+        )
+
+
 def rearm_local_runtime_from_cache() -> bool:
     """Replay the Dashboard's cached Fleet runtime credential at startup.
 
@@ -825,6 +857,13 @@ def _activate_runtime(
         # refuses None (live 2026-09-15: a None here aborted every re-arm
         # after the dashboard side was configured, so connectors came up
         # UNARMED and every viewer dial closed 1000).
+        # Arm the cache FIRST (graph://1418ca10-588 D4): the launch path reads
+        # it, and the socket publish that follows is only the live-rotation
+        # fast path for a connector that is already up.
+        _arm_personal_connector(
+            {**payload, "org_sync_certs": org_sync_certs} if org_sync_certs else payload,
+            org_uuid,
+        )
         try:
             fleet_relay_sync.publish_connector_runtime(
                 {**payload, "org_sync_certs": org_sync_certs} if org_sync_certs else payload,

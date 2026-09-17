@@ -209,3 +209,25 @@ def test_an_org_with_no_founded_ledger_is_skipped(targets):
     it is today rather than failing the whole unlock."""
     targets["ledger"].pop("anchore")
     assert [t["scope"] for t in fer.serving_org_targets()] == ["dynbench"]
+
+
+def test_the_personal_connector_is_armed_under_the_connector_prefix(arming):
+    """graph://1418ca10-588 D1: the personal scope is pre-seeded exactly like
+    the org scopes, into the file the connector reads at launch."""
+    fer._arm_personal_connector(BASE, "uuid-personal")
+    assert _Cache.stored[("fleet-connector-runtime", "uuid-personal")] == BASE
+
+
+def test_an_unregistered_personal_org_arms_nothing(arming):
+    fer._arm_personal_connector(BASE, None)
+    fer._arm_personal_connector(BASE, "")
+    assert _Cache.stored == {}
+
+
+def test_a_personal_cache_write_failure_does_not_raise(arming, monkeypatch):
+    class _Broken(_Cache):
+        def store(self, payload):
+            raise OSError("no ramfs here")
+
+    monkeypatch.setattr(fer.fleet_relay_sync, "FleetRuntimeWarmCache", _Broken)
+    fer._arm_personal_connector(BASE, "uuid-personal")  # must not raise
