@@ -154,3 +154,19 @@ def test_the_readiness_verdict_never_rests_on_a_probe_that_failed():
     # holding a live tunnel. Home spent 00:31-01:50 on 2026-09-10 in that
     # state with three org connectors replaced every 60s.
     assert 'status.get("serving")' in source
+
+
+def test_refuses_to_run_inside_a_session_container(monkeypatch, capsys):
+    """A session container holds no fleet data; a report from it reads as a
+    healthy-looking empty node (2026-09-17). Only the host terminal runs it."""
+    monkeypatch.setenv("AUTONOMY_SESSION", "auto-0917-094700")
+    monkeypatch.setattr("sys.argv", ["fleet_doctor"])
+    assert fleet_doctor.main() == 2
+    assert "host terminal" in capsys.readouterr().err
+
+
+def test_host_terminal_session_is_not_refused(monkeypatch):
+    monkeypatch.setenv("AUTONOMY_SESSION", "host-0916-103518")
+    monkeypatch.setattr("sys.argv", ["fleet_doctor", "--ssh", "x"])
+    monkeypatch.setattr(fleet_doctor, "_run_remote", lambda *a, **k: 0)
+    assert fleet_doctor.main() == 0

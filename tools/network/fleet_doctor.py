@@ -2016,6 +2016,15 @@ def _run_remote(ssh_target: str, remote_cmd: str, forwarded_args: list[str]) -> 
 
 def main() -> int:
     global _QUIET
+    session = os.environ.get("AUTONOMY_SESSION", "")
+    if session and not session.startswith("host-"):
+        print(
+            f"fleet_doctor runs on the host terminal, not inside session {session}: "
+            "this container holds no fleet data, so any report from here is wrong. "
+            "Ask the host terminal to run it.",
+            file=sys.stderr,
+        )
+        return 2
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="emit the collected report as JSON instead of text")
     parser.add_argument(
