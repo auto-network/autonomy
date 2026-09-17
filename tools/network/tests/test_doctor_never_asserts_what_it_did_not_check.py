@@ -222,3 +222,30 @@ def test_the_verdict_prints_the_listener_line(monkeypatch, capsys):
     fleet_doctor.check_verdict({})
     out = capsys.readouterr().out
     assert "[FAIL] direct listener" in out and "9410" in out
+
+
+def test_an_unarmed_connector_is_a_fail_line_with_count_and_remedy(monkeypatch, capsys):
+    import time as _t
+
+    detail = {
+        "pid": 1, "audited_delegate_warm": True, "personal_generation_keys_open": 0,
+        "organizations": [{
+            "org": "personal", "genesis_id": None, "serve_cert": "ok",
+            "connector": {
+                "reachable": False, "detail": "no control listener",
+                "state": "unarmed", "cache_present": False,
+                "launch_exits": {"count": 5400, "since": _t.time() - 30 * 3600,
+                                 "last_exit_at": _t.time(), "last_exit_code": 2},
+            },
+        }],
+    }
+    monkeypatch.setattr(
+        fleet_doctor, "_api_get",
+        lambda base, path, token: ((detail if "organizations" in path
+                                     else {"pid": 1, "audited_delegate_warm": True}), None),
+    )
+    fleet_doctor.check_live_worker({}, "https://x", "t")
+    out = capsys.readouterr().out
+    line = next(l for l in out.splitlines() if "personal: connector" in l)
+    assert "[FAIL]" in line and "UNARMED" in line and "5400 launch" in line
+    assert "key file ABSENT" in line and "has not armed this scope" in line

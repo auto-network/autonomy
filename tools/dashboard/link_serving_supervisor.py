@@ -882,6 +882,9 @@ class _Proc:
     def alive(self) -> bool:
         return self._p.poll() is None
 
+    def exit_code(self) -> int | None:
+        return self._p.poll()
+
     def serving(self) -> bool:
         """True only when the child reports a completed tunnel handshake."""
         if not self.alive() or not self._ctl_path:
@@ -1077,6 +1080,14 @@ class ServingSupervisor:
         self._procs: dict = {}       # org -> handle
         self._credentials: dict = {} # org -> exact (both cert wires, key path) launched
         self._listener_owner_launched: dict = {}  # org -> launched owning the inbound listener
+        #: org -> {count, since, last_exit_at, last_exit_code}: consecutive
+        #: launches that exited before ever serving. A connector that cannot
+        #: find its key exits at startup (link_serving.py, UNARMED) and the
+        #: watchdog relaunches it every interval; without this tally the
+        #: hundredth exit looked exactly like the first launch ("starting").
+        #: Cleared the moment the scope is observed serving.
+        #: Design: graph://1418ca10-588 D2.
+        self._launch_exits: dict = {}
         self._managed: set = set()   # orgs seen via ensure(), re-checked by the watchdog
         self._started_at: dict = {}  # org -> launch time; fresh-tunnel grace
         self._grace_s: float = CONNECTOR_STARTUP_TIMEOUT_S
@@ -1384,10 +1395,33 @@ class ServingSupervisor:
             self._last_served.pop(org, None)
             self._lame_duck_since.pop(org, None)
             self._boot_commit.pop(org, None)
-        # A dead handle: drop it and relaunch below.
+        # A dead handle: drop it and relaunch below. One that died before it
+        # ever served is a LAUNCH exit, tallied so the state reads UNARMED
+        # after the second one rather than "starting" forever.
+        if proc is not None and self._last_served.get(org) is None:
+            self._record_launch_exit(org, proc)
         self._procs.pop(org, None)
         self._credentials.pop(org, None)
         return self._launch(org, state)
+
+    def _record_launch_exit(self, org: str, proc) -> None:
+        now = self._now()
+        code = None
+        exit_code = getattr(proc, "exit_code", None)
+        if callable(exit_code):
+            with contextlib.suppress(Exception):
+                code = exit_code()
+        entry = self._launch_exits.get(org) or {"count": 0, "since": now}
+        entry["count"] += 1
+        entry["last_exit_at"] = now
+        entry["last_exit_code"] = code
+        self._launch_exits[org] = entry
+
+    def launch_exit_state(self, org: str) -> dict | None:
+        """``{count, since, last_exit_at, last_exit_code}`` of consecutive
+        launches of *org*'s connector that exited before serving, or None."""
+        entry = self._launch_exits.get(org)
+        return dict(entry) if entry else None
 
     @staticmethod
     def _serving_permitted():
@@ -1484,6 +1518,7 @@ class ServingSupervisor:
             serving_now = bool(proc.serving())
         if serving_now:
             self._last_served[org] = self._now()
+            self._launch_exits.pop(org, None)
             return {"running": True, "reason": "already-running"}
         last_served = self._last_served.get(org)
         if last_served is not None:
@@ -1914,6 +1949,49 @@ def provisioned_serving_scopes() -> list:
             continue
         scopes.append((scope, scope))
     return scopes
+
+
+def scope_states(provisioned=None) -> list:
+    """One record per provisioned scope, the facts a card or a doctor needs to
+    name the failing rung (graph://1418ca10-588 section 4):
+
+    ``state`` is ``serving`` (connector answers and reports a live tunnel),
+    ``unarmed`` (its launches keep exiting before serving and its warm-cache
+    key file is absent), or ``down`` (anything else). ``launch_exits`` is the
+    supervisor's tally for the scope, ``cache_present`` whether the file the
+    connector reads at launch exists. Never raises.
+    """
+    checked = list(provisioned if provisioned is not None
+                   else provisioned_serving_scopes())
+    if not checked:
+        checked = [(PERSONAL_SCOPE, PERSONAL_SCOPE)]
+    supervisor = get_supervisor()
+    out = []
+    for scope, label in checked:
+        serving = bool(supervisor.serving(scope))
+        exits = supervisor.launch_exit_state(scope)
+        cache_present = None
+        try:
+            from tools.network.fleet_relay_sync import FleetRuntimeWarmCache
+
+            binding, err = _load_binding(scope)
+            if not err and binding and binding.get("org_uuid"):
+                cache_present = FleetRuntimeWarmCache(binding["org_uuid"]).exists()
+        except Exception:
+            cache_present = None
+        if serving:
+            state = "serving"
+        elif exits and exits.get("count", 0) >= 2 and cache_present is False:
+            state = "unarmed"
+        elif exits and exits.get("count", 0) >= 2:
+            state = "launch-failing"
+        else:
+            state = "down"
+        out.append({
+            "scope": scope, "label": label, "serving": serving, "state": state,
+            "launch_exits": exits, "cache_present": cache_present,
+        })
+    return out
 
 
 def scopes_not_serving(provisioned=None) -> list:

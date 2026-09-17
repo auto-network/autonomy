@@ -1472,3 +1472,80 @@ def test_a_designation_change_alone_no_longer_stops_a_live_connector(env, monkey
 
     assert supervisor.ensure(ORG)["running"] is True
     assert proc.alive() is True
+
+
+# ── launch exits: UNARMED is a named state (graph://1418ca10-588 D2) ────────
+
+def test_launch_exits_before_serving_are_tallied_and_cleared_on_serving(env):
+    """Home 2026-09-17: the personal connector exited every 20 s for 30 h
+    and each relaunch read as 'starting'. Consecutive launch exits are now a
+    tally with a first-exit time, cleared the moment the scope serves."""
+    _provision_serve_cert(env)
+    _put_grant()
+    clock = [1000.0]
+    spawn = FakeSpawn()
+    s = sup.ServingSupervisor(spawn=spawn, now=lambda: clock[0])
+    assert s.ensure(ORG)["reason"] == "launched"
+    assert s.launch_exit_state(ORG) is None
+
+    for expected in (1, 2, 3):
+        proc = spawn.procs[-1]
+        proc.disconnect()   # never served
+        proc.die()          # exited at launch
+        clock[0] += 20
+        s.ensure_all()
+        state = s.launch_exit_state(ORG)
+        assert state["count"] == expected
+        assert state["since"] == 1020.0
+        assert state["last_exit_at"] == clock[0]
+    assert len(spawn.calls) == 4
+
+    spawn.procs[-1].connect()  # the next launch serves
+    s.ensure(ORG)
+    assert s.launch_exit_state(ORG) is None
+
+
+def test_a_crash_after_serving_is_not_a_launch_exit(env):
+    _provision_serve_cert(env)
+    _put_grant()
+    spawn = FakeSpawn()
+    s = sup.ServingSupervisor(spawn=spawn)
+    s.ensure(ORG)
+    s.ensure(ORG)  # observed serving
+    spawn.procs[0].die()
+    s.ensure_all()
+    assert len(spawn.calls) == 2
+    assert s.launch_exit_state(ORG) is None
+
+
+def test_scope_states_names_unarmed_only_with_an_absent_key_file(env, monkeypatch, tmp_path):
+    _provision_serve_cert(env)
+    _put_grant()
+    spawn = FakeSpawn()
+    s = sup.ServingSupervisor(spawn=spawn)
+    monkeypatch.setattr(sup, "get_supervisor", lambda: s)
+    # scope_states asks the authoritative control probe; the fake process
+    # has no control socket, so answer from the fake's own serving flag.
+    monkeypatch.setattr(s, "serving", lambda scope=sup.PERSONAL_SCOPE: spawn.procs[-1].serving())
+    monkeypatch.setattr(
+        sup, "_load_binding",
+        lambda org: ({"org_uuid": "uuid-x", "registry_url": "https://registry.test"}, None),
+    )
+    keycache = tmp_path / "keycache"
+    keycache.mkdir()
+    monkeypatch.setenv("AUTONOMY_KEYCACHE_MOUNT", str(keycache))
+    s.ensure(ORG)
+    for _ in range(2):
+        spawn.procs[-1].disconnect(); spawn.procs[-1].die(); s.ensure_all()
+    spawn.procs[-1].disconnect()
+    row = sup.scope_states([(ORG, ORG)])[0]
+    assert row["state"] == "unarmed" and row["launch_exits"]["count"] == 2
+    assert row["cache_present"] is False and row["serving"] is False
+
+    (keycache / "fleet-connector-runtime.uuid-x.json").write_text("{}")
+    row = sup.scope_states([(ORG, ORG)])[0]
+    assert row["state"] == "launch-failing" and row["cache_present"] is True
+
+    spawn.procs[-1].connect()
+    row = sup.scope_states([(ORG, ORG)])[0]
+    assert row["state"] == "serving"

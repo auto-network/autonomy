@@ -1926,6 +1926,22 @@ def check_live_worker(report: dict, api_base: str, api_token: str | None) -> Non
         _line(f"{slug}: serve-cert", cert, warn=cert != "ok")
         connector = org.get("connector") or {}
         if not connector.get("reachable"):
+            exits = connector.get("launch_exits") or {}
+            if connector.get("state") in ("unarmed", "launch-failing") or exits.get("count"):
+                cache = connector.get("cache_present")
+                cache_text = ("key file ABSENT" if cache is False
+                              else "key file present" if cache else "key file unknown")
+                _line(
+                    f"{slug}: connector",
+                    f"{str(connector.get('state') or 'launch-failing').upper()}: "
+                    f"{exits.get('count', '?')} launch(es) exited before serving "
+                    f"since {_fmt_age(exits.get('since'))} "
+                    f"(last exit code {exits.get('last_exit_code')}); {cache_text}"
+                    + (" -- the dashboard has not armed this scope; an unlock or "
+                       "runtime re-arm writes the file" if cache is False else ""),
+                    fail=True,
+                )
+                continue
             _line(f"{slug}: connector", f"not reachable -- {connector.get('detail')}", warn=True)
             continue
         _line(f"{slug}: connector",

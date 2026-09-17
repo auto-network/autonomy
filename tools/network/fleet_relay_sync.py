@@ -152,6 +152,15 @@ class FleetRuntimeWarmCache:
         self._dir = Path(directory) if directory is not None else _keycache_dir()
         self._path = self._dir / f"{name_prefix}.{org_uuid}.json"
 
+    @property
+    def path(self) -> Path:
+        """Where this credential lives; named in the connector's exit message
+        so an operator can see which file the launch looked for."""
+        return self._path
+
+    def exists(self) -> bool:
+        return self._path.exists()
+
     def store(self, payload: object) -> None:
         from tools.network.storagekit.memory_cache import assert_memory_backed
 
