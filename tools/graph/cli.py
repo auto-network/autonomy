@@ -6766,6 +6766,25 @@ def main():
     from .maintenance.cache_gc import cmd_cache_gc
     p_cache_gc.set_defaults(func=cmd_cache_gc)
 
+    p_drop = maint_sub.add_parser(
+        "drop-retired-tables",
+        help="Drop the retired entities/entity_mentions tables and purge "
+             "their fleet-sync catalog addresses (bounded batches; safe to "
+             "interrupt; idempotent). Never runs on its own -- run it once "
+             "per store after the 2026-09-08 retirement.",
+    )
+    p_drop.add_argument(
+        "--org", default=None,
+        help="Restrict to one store slug (personal, machine, or an org). "
+             "Default: every store.",
+    )
+    p_drop.add_argument(
+        "--batch", type=int, default=20_000,
+        help="Catalog addresses deleted per committed batch (default: 20000).",
+    )
+    from .maintenance.drop_retired import cmd_drop_retired
+    p_drop.set_defaults(func=cmd_drop_retired)
+
     args = parser.parse_args()
 
     # Flip the client dispatcher BEFORE any subcommand runs. ``--force-host``
