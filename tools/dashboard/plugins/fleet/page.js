@@ -26,8 +26,13 @@ function fleetPage() {
         first: 'Not synced yet', synced: 'Synced', idle: '',
         link_off: 'Invite link off',
         degraded: 'Some tunnels down',
+        rearm: 'Re-arm failed',
+        launch_failing: 'Connector not starting',
       },
       note: {
+        locked: 'The serving connector for {scopes} has no key and this dashboard holds no cached credential. Unlock this dashboard to arm it.',
+        rearm: 'The serving connector for {scopes} keeps exiting because its key file was never written, although this dashboard holds the credential. Run the runtime re-arm or restart the dashboard; an unlock is not needed.',
+        launch_failing: 'The serving connector for {scopes} keeps exiting at launch with its key file present. Read its serve log.',
         tunnel: "Your other devices can't reach this dashboard from outside. Bringing the tunnel back needs your root key.",
         degraded: 'This dashboard still serves your fleet, but not every organization it is set up to serve.',
         first: 'This machine has joined your fleet but has not synchronized with this dashboard yet. Syncing starts automatically once it comes online.',
@@ -528,9 +533,24 @@ function fleetPage() {
     },
     machineState(machine) {
       let id, tone;
+      let scopes = [];
       if (machine.isLocalMachine) {
         const serving = this.servingMachineId === machine.entryId;
-        if (serving && !machine.connectorArmed) { id = 'locked'; tone = 'failed'; }
+        // Per-scope supervisor facts (graph://1418ca10-588 section 4): an
+        // UNARMED connector is "Needs unlock" ONLY when this dashboard holds
+        // no cached credential either; with one present, unlocking cannot
+        // help and the honest word is "Re-arm failed" naming the scope.
+        const states = machine.scopeStates || [];
+        const name = (s) => s.label || s.scope;
+        const unarmed = states.filter((s) => s.state === 'unarmed').map(name);
+        const failing = states.filter((s) => s.state === 'launch-failing').map(name);
+        if (serving && unarmed.length) {
+          id = machine.dashboardCachePresent === false ? 'locked' : 'rearm'; tone = 'failed'; scopes = unarmed;
+        }
+        else if (serving && failing.length) { id = 'launch_failing'; tone = 'failed'; scopes = failing; }
+        // A null probe is UNKNOWN, not unarmed: `!null` read Home's warm,
+        // unprobed credential as "Needs unlock" (2026-09-17).
+        else if (serving && machine.connectorArmed === false) { id = 'locked'; tone = 'failed'; scopes = ['this dashboard']; }
         else if (serving && this.tunnelDegraded(machine)) { id = 'degraded'; tone = 'warn'; }
         else if (serving && !machine.tunnelServing) { id = 'tunnel'; tone = 'failed'; }
         else if (serving && machine.certValidUntil != null && Date.now() > machine.certValidUntil) { id = 'cert'; tone = 'failed'; }
@@ -564,7 +584,7 @@ function fleetPage() {
       return {
         id, tone,
         word: this.STRINGS.word[id] || '',
-        note: this.STRINGS.note[id] || '',
+        note: (this.STRINGS.note[id] || '').replace('{scopes}', scopes.join(', ') || 'this dashboard'),
       };
     },
     machineHealthy(machine) { return this.machineState(machine).tone === 'good'; },
