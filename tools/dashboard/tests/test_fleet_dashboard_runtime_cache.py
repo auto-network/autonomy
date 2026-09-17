@@ -160,9 +160,12 @@ def test_activate_runtime_warms_the_dashboard_cache(tmp_path, monkeypatch):
     )
     payload = _runtime_payload(machine_id, machine)
 
-    # A live activation caches the raw payload under the Dashboard file name,
-    # NOT the connector's — a non-serving machine has no connector file at all.
-    fleet_enrollment_routes._activate_runtime(payload)
+    # A live activation caches the raw payload under the Dashboard file name.
+    # On a machine NOT permitted to serve (publish_connector=False) there is no
+    # connector to arm, so the connector's file is never written; the serving
+    # case is test_a_serving_machine_pre_seeds_the_personal_connector_cache
+    # (graph://1418ca10-588 D1).
+    fleet_enrollment_routes._activate_runtime(payload, publish_connector=False)
     assert (tmp_path / "fleet-dashboard-runtime.org-x.json").exists()
     assert not (tmp_path / "fleet-connector-runtime.org-x.json").exists()
     assert fleet_relay_sync.FleetRuntimeWarmCache(
@@ -267,3 +270,36 @@ def test_a_successful_replay_is_also_visible(monkeypatch, caplog):
         assert routes.rearm_local_runtime_from_cache() is True
 
     assert any("replayed" in r.getMessage() for r in caplog.records)
+
+
+def test_a_serving_machine_pre_seeds_the_personal_connector_cache(
+    tmp_path, monkeypatch,
+):
+    """graph://1418ca10-588 D1/D4. On the machine designated to serve, an
+    activation writes the personal CONNECTOR's cache file before the socket
+    publish, so a connector whose file was missing arms on its next launch
+    with nobody present. The socket publish is stubbed: no connector is up."""
+    root = KeyPair.from_private_hex("11" * 32)
+    machine = KeyPair.from_private_hex("22" * 32)
+    machine_id = "33" * 32
+    entry = fleet_roster.enroll(
+        root, machine_id=machine_id, machine_pub=machine.public_hex
+    )
+    _wire_runtime(
+        tmp_path, monkeypatch, machine_id=machine_id, root=root,
+        roster_entries=(entry,), expected_entry=entry,
+    )
+    published = []
+    monkeypatch.setattr(
+        fleet_enrollment_routes.fleet_relay_sync, "publish_connector_runtime",
+        lambda payload, org=None: published.append(org),
+    )
+    payload = _runtime_payload(machine_id, machine)
+
+    fleet_enrollment_routes._activate_runtime(payload, publish_connector=True)
+
+    connector_file = tmp_path / "fleet-connector-runtime.org-x.json"
+    assert connector_file.exists()
+    assert fleet_relay_sync.FleetRuntimeWarmCache("org-x").load() == payload
+    assert (tmp_path / "fleet-dashboard-runtime.org-x.json").exists()
+    assert published == ["personal"]
