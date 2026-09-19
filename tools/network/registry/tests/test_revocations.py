@@ -32,11 +32,18 @@ class TestRevocationAuthority:
         self, app, client, clock, root, bound_org,
     ):
         class Socket:
+            # Shaped like the Starlette WebSocket the hub closes: close()
+            # takes the code and, since c78f54e8, the reason the relay
+            # gives every refusal. A fake without the reason keyword raises
+            # TypeError inside _close_quietly, which suppresses it, and the
+            # socket silently stays open.
             def __init__(self):
                 self.closed = None
+                self.reason = None
 
-            async def close(self, code):
+            async def close(self, code, reason=""):
                 self.closed = code
+                self.reason = reason
 
         serve_key = KeyPair.generate()
         serve_cert = issue_cert(
@@ -68,6 +75,7 @@ class TestRevocationAuthority:
         assert post_revocation(client, record, serve_cert).status_code == 201
         assert app.state.tunnel_hub.get(ORG) is None
         assert socket.closed == 4403
+        assert socket.reason == "signer key revoked"
 
     def test_root_signed_revocation_kills_chain(self, client, clock, root, bound_org,
                                                 session_key, session_cert):
