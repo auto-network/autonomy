@@ -41,6 +41,7 @@ const evidence={run,scope:onboardingOnly?'identity-and-organization-onboarding':
 const openedBrowsers=new Set();
 function command(bin,args,input,options={}){
   const result=spawnSync(bin,args,{input,encoding:'utf8',timeout:180000,...options});
+  if(result.error&&result.error.code==='ENOENT')throw new Error(bin+' is not installed (required by the harness; certutil comes from libnss3-tools)');
   if(result.status!==0)throw new Error(bin+' '+args[0]+' failed (exit '+result.status+')');
   return result.stdout;
 }
