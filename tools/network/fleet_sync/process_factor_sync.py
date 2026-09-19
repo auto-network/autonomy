@@ -150,6 +150,10 @@ def run_factor_process_acceptance(root_dir: Path) -> dict:
         live.append(first_process)
         _wait(lambda: _factor_armor(receiver_db, factor_id) == initial_armor)
         _wait(lambda: _peer_report(receiver_db)["transactions_applied"] >= 1)
+        # The success record (acknowledgements) lands after the stream and
+        # the post-pull drains complete; stopping on data arrival alone
+        # races it, as the sibling dashboard driver already notes.
+        _wait(lambda: _peer_report(receiver_db)["acknowledgements"] >= 1)
         initial_synced = _factor_armor(receiver_db, factor_id) == initial_armor
         reports.append(_stop_worker(first_process))
         live.remove(first_process)
@@ -161,6 +165,7 @@ def run_factor_process_acceptance(root_dir: Path) -> dict:
         live.append(second_process)
         _wait(lambda: _factor_armor(receiver_db, factor_id) == rotated_armor)
         _wait(lambda: _peer_report(receiver_db)["transactions_applied"] >= 2)
+        _wait(lambda: _peer_report(receiver_db)["acknowledgements"] >= 2)
         change_synced = _factor_armor(receiver_db, factor_id) == rotated_armor
         reports.append(_stop_worker(second_process))
         live.remove(second_process)
