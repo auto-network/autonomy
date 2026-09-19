@@ -25,6 +25,7 @@ than hidden behind a client library's label API.
 from __future__ import annotations
 
 import re
+import threading
 from collections import Counter
 from typing import Callable
 
@@ -54,11 +55,17 @@ class RegistryMetrics:
     the live objects registered via :meth:`bind_state`."""
 
     def __init__(self) -> None:
+        # The viewer-close counters lock; the attribute was referenced and
+        # never defined (c78f54e8), so every connector close forwarded on a
+        # live relay raised AttributeError inside the tunnel receive loop
+        # and tore the whole tunnel down with 4414 (2026-09-17).
+        self._lock = threading.Lock()
         # counter_name -> Counter over a label tuple (org, *enums)
         self._stream_opens: Counter = Counter()      # (org,)
         self._stream_closes: Counter = Counter()     # (org, reason) orderly enums
         self._viewer_closes: Counter = Counter()     # (org, code) relay-initiated viewer closes
         self._viewer_closes_forwarded: Counter = Counter()  # (org, code) connector-initiated, forwarded
+        self._viewer_failovers: Counter = Counter()  # (org, code) pre-first-byte refusals failed over
         self._stream_refusals: Counter = Counter()   # (reason,) pre-org-resolve
         self._stream_bytes: Counter = Counter()      # (org, direction)
         self._lease_events: Counter = Counter()      # (org, event)
@@ -90,6 +97,12 @@ class RegistryMetrics:
         than indistinguishable from served-then-closed."""
         with self._lock:
             self._viewer_closes_forwarded[(_san_org(org), str(int(code)))] += 1
+
+    def viewer_failover(self, org: str, code: int) -> None:
+        """A candidate member ended the viewer's channel before serving a byte
+        and the relay moved the viewer to the next candidate (auto-s81lo)."""
+        with self._lock:
+            self._viewer_failovers[(_san_org(org), str(int(code)))] += 1
 
     def stream_refused(self, reason: str) -> None:
         # Pre-routing refusals have no resolved org; count by reason only.
@@ -196,6 +209,9 @@ class RegistryMetrics:
         emit("relay_viewer_closes_forwarded_total",
              "Viewer channels ended by the connector (its close frame forwarded), by close code",
              "counter", self._viewer_closes_forwarded, ("org", "code"))
+        emit("relay_viewer_failovers_total",
+             "Viewer channels moved to another pool member after a pre-first-byte refusal, by the refusing code",
+             "counter", self._viewer_failovers, ("org", "code"))
         emit("relay_stream_refusals_total",
              "Ingress connections refused before routing, by reason.",
              "counter", self._stream_refusals, ("reason",))
