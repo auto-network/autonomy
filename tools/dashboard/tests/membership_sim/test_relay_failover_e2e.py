@@ -76,6 +76,14 @@ def test_a_member_without_the_grant_is_failed_over_to_one_that_has_it(registry, 
     log = (tmp_path / "registry.log").read_text(errors="replace")
     assert "relay viewer failover" in log, log[-2000:]
     assert "4502" in log
+    # The refusing member's TUNNEL survives its refusal. Before 278363d3 the
+    # forwarded-close counter raised inside the tunnel loop and the relay
+    # tore the whole tunnel down with 4414 (the 2026-09-17 incident); the
+    # only unregister lines allowed are the two orderly shutdowns at the end.
+    first_failover = log.index("relay viewer failover")
+    tail = log[first_failover:]
+    assert "the org's tunnel disconnected" not in tail, tail[-2000:]
+    assert tail.count("tunnel.unregister") == 2, tail[-2000:]
 
 
 def test_every_member_lacking_the_grant_yields_one_honest_refusal(registry, tmp_path):
