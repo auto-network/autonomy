@@ -155,7 +155,8 @@ def ensure_quarantine_table(conn: sqlite3.Connection) -> None:
         "frame BLOB,"
         "origin TEXT,"
         "transaction_id TEXT,"
-        "operation_index INTEGER)"
+        "operation_index INTEGER,"
+        "retries INTEGER NOT NULL DEFAULT 0)"
     )
     columns = {
         row[1] for row in conn.execute(
@@ -167,6 +168,7 @@ def ensure_quarantine_table(conn: sqlite3.Connection) -> None:
         "origin": "TEXT",
         "transaction_id": "TEXT",
         "operation_index": "INTEGER",
+        "retries": "INTEGER NOT NULL DEFAULT 0",
     }
     for name, kind in upgrades.items():
         if name not in columns:
@@ -282,9 +284,20 @@ def quarantine_unrealized(
         frame, origin, transaction_id, operation_index = (
             (replay or {}).get(address_blob) or (None, None, None, None)
         )
+        # An upsert, not a replace: a re-parked row keeps its retry count
+        # (auto-l4h2c), and a stored frame is never overwritten by a NULL
+        # from a later sweep.
         conn.execute(
-            "INSERT OR REPLACE INTO fleet_sync_quarantine "
-            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO fleet_sync_quarantine(address,table_name,logical_address,"
+            "reason,watermark,quarantined_at_ns,frame,origin,transaction_id,"
+            "operation_index) VALUES(?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(address) DO UPDATE SET table_name=excluded.table_name,"
+            "logical_address=excluded.logical_address, reason=excluded.reason,"
+            "watermark=excluded.watermark, quarantined_at_ns=excluded.quarantined_at_ns,"
+            "frame=COALESCE(excluded.frame, fleet_sync_quarantine.frame),"
+            "origin=COALESCE(excluded.origin, fleet_sync_quarantine.origin),"
+            "transaction_id=COALESCE(excluded.transaction_id, fleet_sync_quarantine.transaction_id),"
+            "operation_index=COALESCE(excluded.operation_index, fleet_sync_quarantine.operation_index)",
             (
                 address_blob,
                 table,
@@ -2194,6 +2207,69 @@ class MutationCatalog:
                 )
             cleared += 1
         return cleared
+
+    def drain_unrealized_rows(self) -> tuple[int, int]:
+        """Re-apply quarantined ``fk_orphan`` and
+        ``secondary_identity_conflict`` rows from their stored frame
+        (auto-l4h2c). An orphan lands once its parent row exists; a
+        conflict lands once the local row it collided with is gone or now
+        identical. Each goes back through ordinary apply: it lands, or it is
+        inert against a newer winner (stale, cleared), or it is re-parked
+        with its reason and one more retry. Returns (cleared, retried).
+        A swept entry stores no frame and is left for the next sweep."""
+        ensure_quarantine_table(self.conn)
+        holders = ",".join("?" * len(CURSOR_HOLDING_REASONS))
+        rows = self.conn.execute(
+            "SELECT address,frame,origin,transaction_id,operation_index "
+            f"FROM fleet_sync_quarantine WHERE reason IN ({holders}) "
+            "AND frame IS NOT NULL AND origin IS NOT NULL "
+            "AND transaction_id IS NOT NULL AND operation_index IS NOT NULL",
+            CURSOR_HOLDING_REASONS,
+        ).fetchall()
+        cleared = retried = 0
+        for address, frame, origin, transaction_id, operation_index in rows:
+            applied, ignored = self.apply_remote_batch([AuthoredMutation(
+                str(origin), str(transaction_id), int(operation_index),
+                decode_mutation_frame(bytes(frame)),
+            )])
+            with self.conn:
+                if applied or ignored:
+                    self.conn.execute(
+                        "DELETE FROM fleet_sync_quarantine WHERE address=?",
+                        (bytes(address),),
+                    )
+                    cleared += 1
+                    # The apply walked the cursor while this entry still
+                    # held it; walk again now that the hold is gone.
+                    origin_id = self._origin_id(str(origin))
+                    if origin_id is not None:
+                        ensure_origin_cursor_schema(self.conn)
+                        self._advance_cursor(origin_id)
+                else:
+                    self.conn.execute(
+                        "UPDATE fleet_sync_quarantine SET retries=retries+1 WHERE address=?",
+                        (bytes(address),),
+                    )
+                    retried += 1
+        return cleared, retried
+
+    def undrained_by_origin(self) -> dict[str, int]:
+        """``{origin: count}`` of quarantined rows that hold the origin's
+        cursor (fk_orphan, secondary_identity_conflict); what the doctor
+        prints beside the frontier line."""
+        present = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='fleet_sync_quarantine'"
+        ).fetchone() is not None
+        if not present:
+            return {}
+        holders = ",".join("?" * len(CURSOR_HOLDING_REASONS))
+        return {
+            str(row[0]): int(row[1]) for row in self.conn.execute(
+                "SELECT origin, COUNT(*) FROM fleet_sync_quarantine "
+                f"WHERE reason IN ({holders}) AND origin IS NOT NULL GROUP BY origin",
+                CURSOR_HOLDING_REASONS,
+            )
+        }
 
     def record_transactions(
         self, entries: Sequence[tuple[str, str, int]]

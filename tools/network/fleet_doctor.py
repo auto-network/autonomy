@@ -1081,6 +1081,16 @@ def check_sync_frontiers(report: dict) -> None:
                     # that nothing will be written at or below cut_ns. Its
                     # age is how long ago that origin was last known online,
                     # which "newest write" cannot tell.
+                    if "fleet_sync_quarantine" in tables:
+                        held_rows = {
+                            str(r[0]): int(r[1]) for r in conn.execute(
+                                "SELECT origin, COUNT(*) FROM fleet_sync_quarantine "
+                                "WHERE reason IN ('fk_orphan','secondary_identity_conflict') "
+                                "AND origin IS NOT NULL GROUP BY origin"
+                            )
+                        }
+                        for origin in entry["origins"]:
+                            origin["undrained"] = held_rows.get(origin["origin"], 0)
                     if "fleet_sync_origin_cuts" in tables:
                         held = {
                             str(r[0]): int(r[1]) for r in conn.execute(
@@ -1145,6 +1155,10 @@ def check_sync_frontiers(report: dict) -> None:
                     cursor += f"; cut {cut_age}s old"
                 else:
                     cursor += "; no cut held"
+                undrained = int(origin.get("undrained") or 0)
+                if undrained:
+                    behind = True
+                    cursor += f"; {undrained} quarantined row(s) undrained"
                 _line(
                     f"  {slug} <- {origin['origin'][:12]}",
                     f"newest write {human} old, {origin['transactions']} txn(s){cursor}",

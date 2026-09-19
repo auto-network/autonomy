@@ -1559,6 +1559,13 @@ class SQLiteFleetSyncStore:
         finally:
             conn.close()
 
+    def drain_unrealized_rows(self) -> tuple[int, int]:
+        conn, catalog = self._open()
+        try:
+            return catalog.drain_unrealized_rows()
+        finally:
+            conn.close()
+
     def drain_attachments(self, entries) -> int:
         from tools.network.fleet_sync.blob_transport import drain_backlog
 
@@ -4086,6 +4093,20 @@ class FleetSyncScheduler:
             except Exception:
                 logger.warning(
                     "fleet signature drain failed", exc_info=True
+                )
+            try:
+                scope_store = await asyncio.to_thread(self._store_for, scope)
+                cleared, retried = await asyncio.to_thread(
+                    scope_store.drain_unrealized_rows
+                )
+                if cleared or retried:
+                    logger.info(
+                        "fleet sync scope %r: quarantine drain landed %d row(s), "
+                        "%d still held", scope, cleared, retried,
+                    )
+            except Exception:
+                logger.warning(
+                    "fleet quarantine drain failed", exc_info=True
                 )
         except asyncio.CancelledError:
             with contextlib.suppress(Exception):
