@@ -112,6 +112,23 @@ def test_flap_during_bootstrap(tmp_path: Path) -> None:
             finally:
                 conn.close()
 
+        # Convergence compares the sources tables, and the joiner's store
+        # matches the fleet the moment the last row of the ``> F`` half is
+        # applied. The phase row advances to "complete" only after that,
+        # in record_pull_complete, so a read taken right at convergence can
+        # still see "pulling". Wait for the phase the assertion is about;
+        # the bounded wait is the assertion that the pull half finishes.
+        def _phase_complete() -> bool:
+            try:
+                row = _bootstrap_row(fleet.machines[1].db_path)
+            except _sq.Error:
+                return False
+            return row is not None and row[0] == "complete"
+
+        fleet.wait(
+            _phase_complete, timeout=60.0,
+            label="joiner bootstrap phase reaches complete",
+        )
         final = _bootstrap_row(fleet.machines[1].db_path)
         assert final is not None, (
             "the joiner bootstrapped by sweep, so it must hold a bootstrap row"

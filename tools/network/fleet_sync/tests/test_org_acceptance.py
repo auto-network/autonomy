@@ -16,6 +16,7 @@ once and is never rewritten on stable addresses.
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -80,14 +81,60 @@ def test_three_members_sync_the_org_scope_across_fleets(tmp_path: Path, monkeypa
 
         # (3b) a REMOVAL: member 2 is removed; within the deadline every
         # remaining machine refuses it; members 0 and 1 keep syncing.
-        removed_at = time.monotonic()
+        #
+        # The removal reaches each worker when it reloads its config at the
+        # start of its next round, so for up to one round after remove()
+        # the writer still admits member 2, and a row written in that
+        # window is legitimately delivered. The old test wrote at once and
+        # then slept, so the "never arrives" assertion below raced the
+        # reload. Wait for the condition the assertion needs: each of
+        # member 2's machines has had an org-scope pull refused since the
+        # removal. Every worker, member 2's included, reloads the same
+        # rewritten configs, so once member 2 proves under the new
+        # checkpoint (whose member set excludes it) no machine admits it
+        # again, and a refusal observed by member 2 is final. Only member
+        # 2's own pull log can show this: a refused dial reaches it as a
+        # plain close, and the remaining machines dial member 2 only while
+        # its addresses are still current, so their logs cannot be
+        # required to carry the refusal.
+        removed_wall = time.time()
         org.remove(2)
+
+        def refused_since(machine_index: int, since: float) -> bool:
+            """Member 2's machine recorded a failed org-scope pull after
+            *since* (wall clock, the worker's ``at`` stamp on each terminal
+            pull attempt)."""
+            path = org.members[2].fleet.root_dir / f"machine-{machine_index}-pulls.jsonl"
+            try:
+                lines = path.read_text().splitlines()
+            except OSError:
+                return False
+            for line in lines:
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue  # a line still being written
+                if (entry.get("scope") == org.slug
+                        and entry.get("direction") == "pull"
+                        and entry.get("outcome") == "failed"
+                        and float(entry.get("at", 0)) >= since):
+                    return True
+            return False
+
+        org.wait(
+            lambda: all(refused_since(k, removed_wall) for k in range(2)),
+            timeout=60.0, label="both of the removed member's machines refused",
+        )
         org.write_org(1, 0, "after-removal", "written after the removal")
         org.wait(lambda: org.has_org(0, 1, "after-removal"), timeout=60.0,
                  label="row after removal on the founder's second machine")
-        # Give the removed member every chance to still be served.
-        remaining = max(0.0, 8.0 - (time.monotonic() - removed_at))
-        time.sleep(remaining)
+        # The removed member kept dialing after the write and was refused
+        # again: it had every chance to be served and was not.
+        written_wall = time.time()
+        org.wait(
+            lambda: all(refused_since(k, written_wall) for k in range(2)),
+            timeout=60.0, label="the removed member is refused again after the write",
+        )
         for machine in range(2):
             assert not org.has_org(2, machine, "after-removal"), machine
         # Its address rows are no longer offered as peers by anyone else:
