@@ -1377,13 +1377,17 @@ class SQLiteFleetSyncStore:
 
     # ── idle cuts (auto-mmwgu): thin wrappers over fleet_sync.cuts ──────
 
-    def seal_machine_cut(self, signer, now_ns: int) -> int | None:
-        """Seal this store's own origin cut at max(last write, now)."""
+    def seal_machine_cut(self, signer, now_ns: int, *, cert=None) -> int | None:
+        """Seal this store's own origin cut at max(last write, now). *cert*
+        is the machine key's delegation to *signer* when the two differ
+        (production: the process key), and travels with the cut."""
         from tools.network.fleet_sync import cuts
 
         conn, catalog = self._open()
         try:
-            return cuts.seal_machine_cut(conn, signer, catalog.origin_incarnation, now_ns)
+            return cuts.seal_machine_cut(
+                conn, signer, catalog.origin_incarnation, now_ns, cert=cert,
+            )
         finally:
             conn.close()
 
@@ -3269,7 +3273,9 @@ class FleetSyncScheduler:
             except Exception:
                 logger.warning("fleet sync: no store for scope %r at cut time", scope, exc_info=True)
                 continue
-            cut = store.seal_machine_cut(signer, time.time_ns())
+            cut = store.seal_machine_cut(
+                signer, time.time_ns(), cert=self.config.delegation_cert,
+            )
             if cut is None:
                 logger.warning(
                     "fleet sync scope %r: cut paused, the clock is behind the "
@@ -3279,9 +3285,12 @@ class FleetSyncScheduler:
             channel = channels.get(scope)
             if channel is None or scope == "personal":
                 continue
+            # The persona cert names the org channel's key as its leaf, so
+            # that key signs the persona cut (the sync process key may be a
+            # different delegate).
             sealed = store.seal_persona_cut(
-                signer=signer, persona_cert=channel.persona_cert, org=channel.org,
-                roster_machines=roster_machines,
+                signer=channel.machine_key, persona_cert=channel.persona_cert,
+                org=channel.org, roster_machines=roster_machines,
             )
             if sealed is not None:
                 logger.info(
