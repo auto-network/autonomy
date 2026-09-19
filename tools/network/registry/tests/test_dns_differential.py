@@ -16,7 +16,13 @@ from __future__ import annotations
 
 import pytest
 
-dns = pytest.importorskip("dns")
+# Under pytest, tools/network sits on sys.path (this package is imported
+# as ``registry.tests``), so a bare ``import dns`` resolves to the repo's
+# own tools/network/dns package rather than dnspython, and importorskip
+# on ``dns`` alone passed while ``dns.edns`` then failed collection.
+# Probe the dnspython submodule this tier actually needs.
+pytest.importorskip("dns.edns", reason="dnspython is not importable here")
+import dns  # noqa: E402
 import dns.edns  # noqa: E402
 import dns.flags  # noqa: E402
 import dns.message  # noqa: E402
