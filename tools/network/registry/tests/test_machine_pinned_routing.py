@@ -459,7 +459,11 @@ def test_after_the_window_the_pool_rule_returns(monkeypatch):
     assert hub.fresh_link_machine(token, 2_000.0) is None  # dropped on lookup
 
 
-def test_publisher_offline_inside_the_window_says_so(monkeypatch):
+def test_publisher_offline_inside_the_window_tries_the_pool(monkeypatch):
+    """The pin ORDERS candidates; it never refuses (graph://6ad52a52-f75
+    principle 2). With the publisher absent the rest of the pool is tried,
+    and a member that lacks the grant refuses with its own code, which the
+    failover path handles (tests below)."""
     hub = TunnelHub()
     other = _TunnelSocket()
     hub.register(Tunnel(other, ORG, persona_pub="22" * 32, machine="bb" * 32))
@@ -469,8 +473,8 @@ def test_publisher_offline_inside_the_window_says_so(monkeypatch):
 
     ws = _ViewerSocket()
     asyncio.run(viewer_endpoint(ws, token, hub, None, lambda: 1_010))
-    assert ws.close_codes == [CLOSE_PUBLISHER_OFFLINE]
-    assert not _opened(other)   # never handed to a machine without the grant
+    assert _opened(other)
+    assert ws.close_codes == [1001]
 
 
 def test_fresh_link_pins_are_swept_hourly_on_the_create_path():
@@ -492,3 +496,220 @@ def test_a_machine_pinned_link_is_never_fresh_pinned():
     hub = TunnelHub()
     hub.pin_fresh_link("c" * 32, None, now=0.0)   # no machine: nothing recorded
     assert hub._fresh_links == {}
+
+
+# ── viewer failover across the org pool (graph://d9153c5a-76e O-B, auto-s81lo) ─
+#
+# A member that refuses BEFORE serving a byte (unarmed, no key for this
+# link, closed empty, at its cap, tunnel torn down) hands the viewer to the
+# next candidate; the viewer's client hello is replayed; the open budget
+# starts only once the viewer's first frame was forwarded (the channel is
+# viewer-first). 2026-09-17: SJC, 35 h behind, refused half of dynbench's
+# viewer loads with 4502 while Home sat idle.
+
+from tools.network.relaykit.close_codes import (  # noqa: E402
+    CLOSE_CONNECTOR_UNARMED, CLOSE_KEY_RESOLUTION_REFUSED,
+    CLOSE_VIEWER_HANDSHAKE_FAILED,
+)
+from tools.network.relaykit.frames import FRAME_CLOSE, FRAME_DATA  # noqa: E402
+
+
+class _LiveViewerSocket:
+    """A viewer that sends one client-hello frame, then stays connected until
+    the test releases it."""
+
+    def __init__(self, hello=b"client-hello"):
+        self.accepted = False
+        self.close_codes: list[int] = []
+        self.close_reasons: list[str] = []
+        self._hello = hello
+        self._sent_hello = False
+        self.release = asyncio.Event()
+
+    async def accept(self):
+        self.accepted = True
+
+    async def receive(self):
+        if not self._sent_hello:
+            self._sent_hello = True
+            return {"type": "websocket.receive", "bytes": self._hello}
+        await self.release.wait()
+        return {"type": "websocket.disconnect"}
+
+    async def close(self, *, code: int, reason: str = ""):
+        self.close_codes.append(code)
+        self.close_reasons.append(reason)
+
+    async def send_bytes(self, payload: bytes) -> None:
+        pass
+
+
+def _frames(sock: _TunnelSocket, frame_type):
+    return [decode_frame(f) for f in sock.frames if decode_frame(f).type == frame_type]
+
+
+async def _settle(predicate, timeout=2.0):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        if loop.time() > deadline:
+            raise AssertionError("condition not reached")
+        await asyncio.sleep(0.005)
+
+
+def _two(monkeypatch, serving_machine=None):
+    hub = TunnelHub()
+    first, second = _TunnelSocket(), _TunnelSocket()
+    t1 = Tunnel(first, ORG, persona_pub="11" * 32, machine="aa" * 32)
+    t2 = Tunnel(second, ORG, persona_pub="22" * 32, machine="bb" * 32)
+    hub.register(t1)
+    hub.register(t2)
+    # Least-loaded picks t1 first: load t2.
+    t2.channels[b"z" * 16] = object()
+    monkeypatch.setattr(relay_mod, "_resolve_live_link",
+                        lambda store, token, now: _link(serving_machine))
+    return hub, (first, t1), (second, t2)
+
+
+def test_a_member_that_refuses_before_serving_hands_the_viewer_to_the_next(monkeypatch):
+    async def run():
+        hub, (s1, t1), (s2, t2) = _two(monkeypatch)
+        ws = _LiveViewerSocket()
+        task = asyncio.create_task(viewer_endpoint(ws, "a" * 32, hub, None, lambda: 1_010))
+        await _settle(lambda: _frames(s1, FRAME_DATA))          # hello forwarded to t1
+        cid = _frames(s1, FRAME_OPEN)[0].channel_id
+        t1.end_viewer(cid, CLOSE_KEY_RESOLUTION_REFUSED, "link unavailable")   # what the tunnel loop does
+        await _settle(lambda: _frames(s2, FRAME_DATA))          # hello REPLAYED to t2
+        assert _frames(s2, FRAME_DATA)[0].payload == b"client-hello"
+        assert any(f.channel_id == cid for f in _frames(s1, FRAME_CLOSE))   # t1 told to drop it
+        assert ws.close_codes == []                              # viewer still open
+        ws.release.set()
+        await task
+        assert ws.close_codes == [1001]
+    asyncio.run(run())
+
+
+def test_a_dead_first_candidate_is_abandoned_after_the_budget(monkeypatch):
+    monkeypatch.setattr(relay_mod, "FAILOVER_OPEN_BUDGET_S", 0.05)
+    async def run():
+        hub, (s1, t1), (s2, t2) = _two(monkeypatch)
+        ws = _LiveViewerSocket()
+        task = asyncio.create_task(viewer_endpoint(ws, "b" * 32, hub, None, lambda: 1_010))
+        await _settle(lambda: _frames(s2, FRAME_OPEN))           # t1 never answered; t2 opened
+        assert _frames(s2, FRAME_DATA)[0].payload == b"client-hello"
+        ws.release.set()
+        await task
+        assert ws.close_codes == [1001]
+    asyncio.run(run())
+
+
+def test_the_budget_does_not_start_until_the_viewer_speaks(monkeypatch):
+    """Viewer-first channel: a connector that says nothing before the client
+    hello is healthy, not dead."""
+    monkeypatch.setattr(relay_mod, "FAILOVER_OPEN_BUDGET_S", 0.05)
+    async def run():
+        hub, (s1, t1), (s2, t2) = _two(monkeypatch)
+        ws = _LiveViewerSocket()
+        ws._sent_hello = True                                    # never sends a hello
+        task = asyncio.create_task(viewer_endpoint(ws, "c" * 32, hub, None, lambda: 1_010))
+        await asyncio.sleep(0.2)
+        assert _frames(s1, FRAME_OPEN) and not _frames(s2, FRAME_OPEN)
+        ws.release.set()
+        await task
+    asyncio.run(run())
+
+
+def test_a_slow_but_healthy_member_is_not_abandoned(monkeypatch):
+    monkeypatch.setattr(relay_mod, "FAILOVER_OPEN_BUDGET_S", 0.3)
+    async def run():
+        hub, (s1, t1), (s2, t2) = _two(monkeypatch)
+        ws = _LiveViewerSocket()
+        task = asyncio.create_task(viewer_endpoint(ws, "d" * 32, hub, None, lambda: 1_010))
+        await _settle(lambda: _frames(s1, FRAME_DATA))
+        cid = _frames(s1, FRAME_OPEN)[0].channel_id
+        await asyncio.sleep(0.15)
+        t1.enqueue_viewer(cid, b"server-hello")                  # served inside the budget
+        await asyncio.sleep(0.3)
+        assert not _frames(s2, FRAME_OPEN)
+        ws.release.set()
+        await task
+    asyncio.run(run())
+
+
+def test_every_candidate_refusing_closes_with_the_most_actionable_code(monkeypatch):
+    async def run():
+        hub, (s1, t1), (s2, t2) = _two(monkeypatch)
+        ws = _LiveViewerSocket()
+        task = asyncio.create_task(viewer_endpoint(ws, "e" * 32, hub, None, lambda: 1_010))
+        await _settle(lambda: _frames(s1, FRAME_DATA))
+        t1.end_viewer(_frames(s1, FRAME_OPEN)[0].channel_id, CLOSE_KEY_RESOLUTION_REFUSED, "link unavailable")
+        await _settle(lambda: _frames(s2, FRAME_DATA))
+        t2.end_viewer(_frames(s2, FRAME_OPEN)[0].channel_id, CLOSE_CONNECTOR_UNARMED, "unarmed")
+        await task
+        assert ws.close_codes == [CLOSE_CONNECTOR_UNARMED]      # 4501 outranks 4502
+        assert "2 member(s) tried" in ws.close_reasons[0]
+        assert "aaaaaaaa" in ws.close_reasons[0] and "bbbbbbbb" in ws.close_reasons[0]
+    asyncio.run(run())
+
+
+def test_a_link_level_refusal_is_terminal(monkeypatch):
+    """4504 (bad fragment key) is about the link, not the member: no second opinion."""
+    async def run():
+        hub, (s1, t1), (s2, t2) = _two(monkeypatch)
+        ws = _LiveViewerSocket()
+        task = asyncio.create_task(viewer_endpoint(ws, "f" * 32, hub, None, lambda: 1_010))
+        await _settle(lambda: _frames(s1, FRAME_DATA))
+        t1.end_viewer(_frames(s1, FRAME_OPEN)[0].channel_id, CLOSE_VIEWER_HANDSHAKE_FAILED, "bad key")
+        await task
+        assert ws.close_codes == [CLOSE_VIEWER_HANDSHAKE_FAILED]
+        assert not _frames(s2, FRAME_OPEN)
+    asyncio.run(run())
+
+
+def test_a_pinned_link_has_one_candidate_and_no_failover(monkeypatch):
+    async def run():
+        hub, (s1, t1), (s2, t2) = _two(monkeypatch, serving_machine="aa" * 32)
+        ws = _LiveViewerSocket()
+        task = asyncio.create_task(viewer_endpoint(ws, "9" * 32, hub, None, lambda: 1_010))
+        await _settle(lambda: _frames(s1, FRAME_DATA))
+        t1.end_viewer(_frames(s1, FRAME_OPEN)[0].channel_id, CLOSE_KEY_RESOLUTION_REFUSED, "link unavailable")
+        await task
+        assert ws.close_codes == [CLOSE_KEY_RESOLUTION_REFUSED]
+        assert not _frames(s2, FRAME_OPEN)
+    asyncio.run(run())
+
+
+def test_a_refusal_after_the_first_served_byte_closes_the_viewer(monkeypatch):
+    async def run():
+        hub, (s1, t1), (s2, t2) = _two(monkeypatch)
+        ws = _LiveViewerSocket()
+        task = asyncio.create_task(viewer_endpoint(ws, "8" * 32, hub, None, lambda: 1_010))
+        await _settle(lambda: _frames(s1, FRAME_DATA))
+        cid = _frames(s1, FRAME_OPEN)[0].channel_id
+        t1.enqueue_viewer(cid, b"server-hello")
+        await asyncio.sleep(0.02)
+        t1.end_viewer(cid, CLOSE_KEY_RESOLUTION_REFUSED, "late refusal")
+        await asyncio.sleep(0.02)
+        assert ws.close_codes == [CLOSE_KEY_RESOLUTION_REFUSED]   # closed by the tunnel, not failed over
+        ws.release.set()   # a real socket would report the close; the fake must be released
+        await task
+        assert not _frames(s2, FRAME_OPEN)
+    asyncio.run(run())
+
+
+def test_the_fresh_pin_orders_the_publisher_first_and_fails_over_past_it(monkeypatch):
+    async def run():
+        hub, (s1, t1), (s2, t2) = _two(monkeypatch)
+        t1.channels[b"y" * 16] = object()                          # now t2 is least loaded...
+        t1.channels[b"w" * 16] = object()
+        token = "7" * 32
+        hub.pin_fresh_link(token, "aa" * 32, now=1_000.0)       # ...but aa is the publisher
+        ws = _LiveViewerSocket()
+        task = asyncio.create_task(viewer_endpoint(ws, token, hub, None, lambda: 1_010))
+        await _settle(lambda: _frames(s1, FRAME_DATA))
+        assert not _frames(s2, FRAME_OPEN)
+        t1.end_viewer(_frames(s1, FRAME_OPEN)[0].channel_id, CLOSE_KEY_RESOLUTION_REFUSED, "x")
+        await _settle(lambda: _frames(s2, FRAME_OPEN))
+        ws.release.set()
+        await task
+    asyncio.run(run())

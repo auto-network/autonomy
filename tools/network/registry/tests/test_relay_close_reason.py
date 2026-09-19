@@ -78,3 +78,18 @@ def test_an_empty_close_before_any_byte_served_is_4505_not_1000():
         assert channel2.served is True
 
     asyncio.run(run())
+
+
+def test_the_viewer_close_counters_can_actually_be_incremented():
+    """Regression for the undefined lock: viewer_close_forwarded raised
+    AttributeError on every connector close forwarded by a live relay, and
+    because it is called inside the tunnel receive loop that exception tore
+    the tunnel down with 4414 for every viewer on it (2026-09-17)."""
+    from tools.network.registry.metrics import RegistryMetrics
+
+    metrics = RegistryMetrics()
+    metrics.viewer_close("org", 4413)
+    metrics.viewer_close_forwarded("org", 4502)
+    metrics.viewer_failover("org", 4502)
+    text = metrics.render() if hasattr(metrics, "render") else ""
+    assert "relay_viewer_failovers_total" in text or text == ""

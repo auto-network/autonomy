@@ -98,6 +98,8 @@ from tools.network.relaykit.close_codes import (  # noqa: E402
     CLOSE_LINK_REVOKED, CLOSE_NO_TUNNEL, CLOSE_OPEN_FAILED,
     CLOSE_ORG_BINDING_DEAD, CLOSE_PUBLISHER_OFFLINE, CLOSE_RELAY_WRITER_FAILED,
     CLOSE_SERVING_MACHINE_OFFLINE, CLOSE_TUNNEL_TORN_DOWN, CLOSE_VIEWER_CAP,
+    CLOSE_CONNECTOR_UNARMED, CLOSE_KEY_RESOLUTION_REFUSED,
+    CLOSE_AUTHORIZATION_UNAVAILABLE, CLOSE_CONNECTOR_ERROR,
 )
 
 #: A freshly published link routes ONLY to the machine that published it for
@@ -111,6 +113,37 @@ FRESH_LINK_PIN_S = 300.0
 #: dropped on lookup, and the whole map is swept this often on the create
 #: path in case links are published and never viewed.
 FRESH_LINK_SWEEP_S = 3600.0
+#: Viewer failover across the org pool (graph://d9153c5a-76e O-B, bead
+#: auto-s81lo). A refusal that is about THIS member -- unarmed, no key, no
+#: authority, closed before serving, at its cap, or its tunnel torn down --
+#: before the viewer received a byte moves the viewer to the next candidate
+#: instead of ending it. 2026-09-17: a member 35 h behind refused half of an
+#: org's viewer loads with 4502 while a healthy sibling sat idle.
+FAILOVER_CODES = frozenset({
+    CLOSE_CONNECTOR_UNARMED, CLOSE_KEY_RESOLUTION_REFUSED,
+    CLOSE_AUTHORIZATION_UNAVAILABLE, CLOSE_CHANNEL_NOT_SERVED,
+    CLOSE_VIEWER_CAP, CLOSE_TUNNEL_TORN_DOWN, CLOSE_CONNECTOR_ERROR,
+})
+#: The code the viewer finally receives when every candidate failed: the
+#: most actionable one wins, so a first member's "re-arm me" is never
+#: overwritten by a later member's timeout.
+FAILOVER_PRECEDENCE = (
+    CLOSE_CONNECTOR_UNARMED, CLOSE_AUTHORIZATION_UNAVAILABLE,
+    CLOSE_KEY_RESOLUTION_REFUSED, CLOSE_CHANNEL_NOT_SERVED,
+    CLOSE_VIEWER_CAP, CLOSE_TUNNEL_TORN_DOWN, CLOSE_CONNECTOR_ERROR,
+    CLOSE_OPEN_FAILED,
+)
+#: Candidates tried per dial, and the budget each gets to produce its first
+#: byte AFTER the viewer's first frame was forwarded. The channel is
+#: viewer-first (the connector says nothing until the client hello arrives),
+#: so the clock starts only then; 8 s sits above the connector's 5 s key
+#: resolver timeout so a slow healthy member still produces its own code.
+FAILOVER_MAX_CANDIDATES = 3
+FAILOVER_OPEN_BUDGET_S = 8.0
+#: Viewer frames received before the first served byte are kept and replayed
+#: to each subsequent candidate (the client hello is the stateless first
+#: record). Bounded so a viewer cannot make the relay hold a payload.
+FAILOVER_REPLAY_MAX_BYTES = 8 * 1024
 CLOSE_UNAUTHENTICATED = 4403
 CLOSE_UNKNOWN_LINK = 4404  # the token itself is unknown
 CLOSE_PROTOCOL_MISMATCH = 4406
@@ -192,8 +225,31 @@ class _ViewerRelayChannel:
         self.served = False  # a byte from the connector reached this viewer
         self._closing = False
         self._close_task: Optional[asyncio.Task] = None
+        #: Resolved with (code, reason) when the member ended this channel
+        #: BEFORE serving a byte; the viewer endpoint awaits it to fail over
+        #: rather than the tunnel loop closing the viewer socket.
+        self.refusal: asyncio.Future = asyncio.get_running_loop().create_future()
         self._writer_task = asyncio.create_task(self._writer())
         self._writer_task.add_done_callback(self._writer_done)
+
+    def refuse(self, code: int, reason: str = "") -> bool:
+        """Record a pre-first-byte end of this channel for the endpoint to act
+        on. False once a byte was served or a refusal is already recorded:
+        the caller then closes the viewer as before."""
+        if self.served or self.refusal.done():
+            return False
+        self.refusal.set_result((int(code), reason))
+        return True
+
+    def abandon(self) -> None:
+        """Stop this channel WITHOUT closing the viewer socket: the endpoint
+        is moving the same viewer to another candidate tunnel."""
+        if self._closing:
+            return
+        self._closing = True
+        self._release_abuse_lease()
+        self._release_pending()
+        self._writer_task.cancel()
 
     @property
     def queued_bytes(self) -> int:
@@ -492,6 +548,20 @@ class Tunnel:
         if channel is not None:
             channel.start_close(code, reason)
 
+    def end_viewer(self, channel_id: bytes, code: int, reason: str = "") -> None:
+        """The member (its close frame) or this tunnel ended the viewer's
+        channel. Before the first served byte the endpoint may fail over to
+        another candidate, so the channel is only detached and its refusal
+        recorded; after it, the viewer is closed with the code as before."""
+        channel = self.channels.pop(channel_id, None)
+        if channel is None:
+            return
+        if channel.stream_token is not None:
+            self.detach_listener(channel.stream_token, channel_id)
+        if channel.refuse(code, reason):
+            return
+        channel.start_close(code, reason)
+
     def detach_viewer(
         self, channel_id: bytes, channel: _ViewerRelayChannel
     ) -> bool:
@@ -564,9 +634,13 @@ class Tunnel:
         for stream in raw_streams:
             with contextlib.suppress(Exception):
                 await stream.teardown()
-        if channels:
+        # A viewer that has not received a byte yet is handed back to its
+        # endpoint to fail over (graph://d9153c5a-76e O-B); one that has is
+        # closed with the code as before.
+        closing = [channel for channel in channels if not channel.refuse(code, reason)]
+        if closing:
             await asyncio.gather(
-                *(channel.close(code, reason) for channel in channels),
+                *(channel.close(code, reason) for channel in closing),
                 return_exceptions=True,
             )
         tasks = list(self._background_tasks)
@@ -2277,7 +2351,7 @@ async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
                 )
                 if tunnel.metrics is not None:
                     tunnel.metrics.viewer_close_forwarded(org, code)
-                tunnel.close_viewer(frame.channel_id, code, reason)
+                tunnel.end_viewer(frame.channel_id, code, reason)
     finally:
         # Lease removal precedes viewer teardown — the same admission-first
         # ordering close_revoked uses, so a routed open can never race onto
@@ -2356,45 +2430,11 @@ async def viewer_endpoint(
     # accepted removal latency). Closing it here would interrupt an honest
     # member who has not yet answered the push. Enforcement is the deadline
     # in push_reprove_and_enforce, which closes only a still-behind tunnel.
-    tunnel = None
-    fresh_machine = None
+    now = float(now_fn())
+    candidates: list = []
     if link is not None:
-        serving_machine = getattr(link, "serving_machine", None)
-        fresh_link_machine = getattr(hub, "fresh_link_machine", None)
-        if serving_machine is None and fresh_link_machine is not None:
-            fresh_machine = fresh_link_machine(token, float(now_fn()))
-        if serving_machine is not None:
-            # auto-nh1po: a machine-pinned link (design/present/mission —
-            # stores that do not fleet-sync) routes ONLY to the tunnel whose
-            # authenticated hello named the declared machine. Any other
-            # member connector would accept the channel and then fail to
-            # find the content. Declared machine offline == no tunnel.
-            tunnel = next(
-                (t for t in hub.tunnels_for(link.org_uuid)
-                 if t.machine == serving_machine),
-                None,
-            )
-        elif fresh_machine is not None:
-            # A link published in the last FRESH_LINK_PIN_S routes only to
-            # the machine that published it: its grant is not replicated yet.
-            tunnel = next(
-                (t for t in hub.tunnels_for(link.org_uuid)
-                 if t.machine == fresh_machine),
-                None,
-            )
-        else:
-            tunnel = hub.get(link.org_uuid)  # org-wide: least-loaded
-    if link is not None and tunnel is not None:
-        tunnels_for = getattr(hub, "tunnels_for", None)  # test hubs may not have a pool
-        pool = tunnels_for(link.org_uuid) if tunnels_for is not None else [tunnel]
-        logger.info(
-            "relay dial routed: token=%s org=%s tunnel machine=%s persona=%s "
-            "(%d of %d tunnel(s) in the org's pool, %d viewer(s) on it)",
-            token[:8], link.org_uuid[:8], (tunnel.machine or "")[:16],
-            (tunnel.persona_pub or "")[:16], pool.index(tunnel) + 1 if tunnel in pool else 0,
-            len(pool), len(tunnel.channels),
-        )
-    if link is None or tunnel is None:
+        candidates = _route_candidates(link, hub, token, now)
+    if link is None or not candidates:
         # One close code per reason: the publisher's dashboard dials its own
         # link after every publish and reads this code.
         if link is None:
@@ -2402,13 +2442,6 @@ async def viewer_endpoint(
             logger.warning(
                 "relay dial refused (%d): link not live (%s), token=%s",
                 code, reason, token,
-            )
-        elif fresh_machine is not None:
-            code, reason = CLOSE_PUBLISHER_OFFLINE, "the machine that published this link has no tunnel (fresh-link window)"
-            logger.warning(
-                "relay dial refused (%d): fresh link pinned to its publisher, "
-                "which has no tunnel, token=%s org=%s machine=%s",
-                code, token, link.org_uuid, fresh_machine[:16],
             )
         elif getattr(link, "serving_machine", None) is not None:
             code, reason = CLOSE_SERVING_MACHINE_OFFLINE, "declared serving machine has no tunnel"
@@ -2426,92 +2459,245 @@ async def viewer_endpoint(
         await _close_quietly(websocket, code, reason)
         return
 
-    # Bound concurrent viewer channels per org tunnel: one bearer-link holder
-    # cannot open unbounded attachment-streaming channels to exhaust relay
-    # memory on the shared tunnel. Accounting is per this tunnel, not global.
-    if len(tunnel.channels) >= MAX_VIEWER_CHANNELS_PER_TUNNEL:
-        logger.warning(
-            "relay dial refused (%d): tunnel at max viewer channels (%d), "
-            "token=%s org=%s", CLOSE_VIEWER_CAP, MAX_VIEWER_CHANNELS_PER_TUNNEL, token, link.org_uuid,
-        )
-        await _close_quietly(websocket, CLOSE_VIEWER_CAP, "tunnel at its viewer-channel cap")
-        return
+    pool = candidates
+    tunnels_for = getattr(hub, "tunnels_for", None)
+    if tunnels_for is not None:
+        pool = tunnels_for(link.org_uuid)
 
-    abuse_lease = None
-    if abuse_limiter is not None:
-        abuse_lease = abuse_limiter.acquire(resolved)
-        if abuse_lease is None:
-            logger.warning(
-                "relay dial refused (%d): active-connection lease denied, "
-                "token=%s org=%s", CLOSE_LEASE_DENIED, token, link.org_uuid,
-            )
-            await _close_quietly(websocket, CLOSE_LEASE_DENIED, "active-connection lease denied")
-            return
-    channel_id = new_channel_id()
-    try:
-        relay_channel = tunnel.add_viewer(
-            channel_id, websocket, abuse_lease=abuse_lease,
-        )
-    except Exception:
-        if abuse_lease is not None:
-            abuse_lease.release()
-        raise
-    # Every channel is a candidate stream listener (auto-albp6.7) -- the
-    # relay cannot see target_type (it never parses grants, I5), so it
-    # cannot know here whether this token names a session/mission. That
-    # is fine: an un-published-to stream costs one empty buffer and one
-    # idle listener entry, and only auto-albp6.8's connector-side
-    # publisher ever decides which tokens actually receive frames.
-    try:
-        relay_channel.stream_token = token
-        tunnel.attach_listener(token, channel_id, relay_channel)
-        await tunnel.send_frame(FRAME_OPEN, channel_id,
-                                canonical_json({"token": token}))
-    except Exception:
-        tunnel.detach_viewer(channel_id, relay_channel)
-        tunnel.detach_listener(token, channel_id)
-        logger.warning(
-            "relay dial refused (%d): failed to open channel on tunnel "
-            "(send/attach error), token=%s org=%s", CLOSE_OPEN_FAILED, token, link.org_uuid,
-            exc_info=True,
-        )
-        await relay_channel.close(CLOSE_OPEN_FAILED, "could not open the channel on the tunnel")
-        return
+    # The viewer's socket is read by ONE task across every candidate: a
+    # refusal moves the channel, never the socket.
+    loop = asyncio.get_running_loop()
+    recv_task: Optional[asyncio.Task] = None
+    replay: list[bytes] = []
+    replay_bytes = 0
+    tried: list[tuple[str, int, str]] = []
+    metrics = getattr(candidates[0], "metrics", None)
 
-    viewer_close = (1001, "")  # the viewer itself went away
     try:
-        while True:
-            message = await websocket.receive()
-            if message["type"] == "websocket.disconnect":
-                break
-            raw = message.get("bytes")
-            if raw is None:
+        for index, tunnel in enumerate(candidates[:FAILOVER_MAX_CANDIDATES]):
+            machine = (tunnel.machine or "")[:16]
+            # Bound concurrent viewer channels per org tunnel: one bearer-link
+            # holder cannot open unbounded attachment-streaming channels to
+            # exhaust relay memory on the shared tunnel. Per tunnel, not global.
+            if len(tunnel.channels) >= MAX_VIEWER_CHANNELS_PER_TUNNEL:
+                logger.warning(
+                    "relay dial skipped candidate (%d): tunnel at max viewer "
+                    "channels (%d), token=%s org=%s machine=%s",
+                    CLOSE_VIEWER_CAP, MAX_VIEWER_CHANNELS_PER_TUNNEL, token,
+                    link.org_uuid, machine,
+                )
+                tried.append((machine, CLOSE_VIEWER_CAP, "tunnel at its viewer-channel cap"))
                 continue
-            if tunnel.channels.get(channel_id) is not relay_channel:
-                break  # channel torn down from the dashboard side (already coded)
-            if abuse_lease is not None and not abuse_lease.charge_bytes(len(raw)):
-                viewer_close = (CLOSE_BYTE_RATE_EXHAUSTED, "byte-rate lease exhausted")
-                break
+            abuse_lease = None
+            if abuse_limiter is not None:
+                # Charged per candidate: a bearer guesser pays for every
+                # member it makes resolve the token.
+                abuse_lease = abuse_limiter.acquire(resolved)
+                if abuse_lease is None:
+                    logger.warning(
+                        "relay dial refused (%d): active-connection lease denied, "
+                        "token=%s org=%s", CLOSE_LEASE_DENIED, token, link.org_uuid,
+                    )
+                    await _close_quietly(websocket, CLOSE_LEASE_DENIED, "active-connection lease denied")
+                    return
+            channel_id = new_channel_id()
             try:
-                await tunnel.send_frame(FRAME_DATA, channel_id, raw)
+                relay_channel = tunnel.add_viewer(
+                    channel_id, websocket, abuse_lease=abuse_lease,
+                )
             except Exception:
-                viewer_close = (CLOSE_TUNNEL_TORN_DOWN, "the org's tunnel died mid-channel")
-                break
-    finally:
-        if tunnel.detach_viewer(channel_id, relay_channel):
-            tunnel.detach_listener(token, channel_id)
+                if abuse_lease is not None:
+                    abuse_lease.release()
+                raise
+            # Every channel is a candidate stream listener (auto-albp6.7) -- the
+            # relay cannot see target_type (it never parses grants, I5), so it
+            # cannot know here whether this token names a session/mission. That
+            # is fine: an un-published-to stream costs one empty buffer and one
+            # idle listener entry, and only auto-albp6.8's connector-side
+            # publisher ever decides which tokens actually receive frames.
+            try:
+                relay_channel.stream_token = token
+                tunnel.attach_listener(token, channel_id, relay_channel)
+                await tunnel.send_frame(FRAME_OPEN, channel_id,
+                                        canonical_json({"token": token}))
+                for raw in replay:
+                    await tunnel.send_frame(FRAME_DATA, channel_id, raw)
+            except Exception:
+                tunnel.detach_viewer(channel_id, relay_channel)
+                tunnel.detach_listener(token, channel_id)
+                relay_channel.abandon()
+                logger.warning(
+                    "relay dial candidate failed (%d): could not open channel on "
+                    "tunnel (send/attach error), token=%s org=%s machine=%s",
+                    CLOSE_OPEN_FAILED, token, link.org_uuid, machine, exc_info=True,
+                )
+                tried.append((machine, CLOSE_OPEN_FAILED, "could not open the channel on the tunnel"))
+                continue
             logger.info(
-                "relay viewer channel ended: token=%s org=%s code=%d reason=%r "
-                "served=%s originator=%s", token[:8], link.org_uuid[:8],
-                viewer_close[0], viewer_close[1], relay_channel.served,
-                "viewer" if viewer_close[0] == 1001 else "relay",
+                "relay dial routed: token=%s org=%s tunnel machine=%s persona=%s "
+                "(candidate %d of %d; %d of %d tunnel(s) in the org's pool, %d viewer(s) on it)",
+                token[:8], link.org_uuid[:8], machine,
+                (tunnel.persona_pub or "")[:16], index + 1, len(candidates),
+                pool.index(tunnel) + 1 if tunnel in pool else 0,
+                len(pool), len(tunnel.channels),
             )
-            await relay_channel.close(*viewer_close)
-            with contextlib.suppress(Exception):
-                await tunnel.send_frame(FRAME_CLOSE, channel_id)
-        else:
-            await relay_channel.wait_closed()
 
+            # Pump viewer frames to this candidate until it serves, refuses,
+            # or the viewer goes away.
+            deadline: Optional[float] = None
+            if replay:
+                deadline = loop.time() + FAILOVER_OPEN_BUDGET_S
+            viewer_close = (1001, "")  # the viewer itself went away
+            outcome = "ended"
+            while True:
+                if recv_task is None:
+                    recv_task = asyncio.ensure_future(websocket.receive())
+                waits = {recv_task, relay_channel.refusal}
+                timeout = None
+                if deadline is not None and not relay_channel.served:
+                    timeout = max(0.0, deadline - loop.time())
+                done, _pending = await asyncio.wait(
+                    waits, timeout=timeout, return_when=asyncio.FIRST_COMPLETED,
+                )
+                if relay_channel.refusal in done:
+                    outcome = "refused"
+                    break
+                if not done:
+                    if relay_channel.served:
+                        deadline = None
+                        continue
+                    outcome = "timeout"
+                    break
+                message = recv_task.result()
+                recv_task = None
+                if message["type"] == "websocket.disconnect":
+                    break
+                raw = message.get("bytes")
+                if raw is None:
+                    continue
+                if tunnel.channels.get(channel_id) is not relay_channel:
+                    # Torn down from the dashboard side: either a refusal
+                    # (recorded on the channel) or a coded close after serving.
+                    if relay_channel.refusal.done():
+                        outcome = "refused"
+                    break
+                if abuse_lease is not None and not abuse_lease.charge_bytes(len(raw)):
+                    viewer_close = (CLOSE_BYTE_RATE_EXHAUSTED, "byte-rate lease exhausted")
+                    break
+                try:
+                    await tunnel.send_frame(FRAME_DATA, channel_id, raw)
+                except Exception:
+                    viewer_close = (CLOSE_TUNNEL_TORN_DOWN, "the org's tunnel died mid-channel")
+                    break
+                if not relay_channel.served:
+                    if replay_bytes + len(raw) <= FAILOVER_REPLAY_MAX_BYTES:
+                        replay.append(bytes(raw))
+                        replay_bytes += len(raw)
+                    if deadline is None:
+                        deadline = loop.time() + FAILOVER_OPEN_BUDGET_S
+
+            if outcome in ("refused", "timeout"):
+                if outcome == "refused":
+                    code, reason = relay_channel.refusal.result()
+                else:
+                    code, reason = CLOSE_OPEN_FAILED, "no answer within the open budget"
+                if tunnel.detach_viewer(channel_id, relay_channel):
+                    tunnel.detach_listener(token, channel_id)
+                relay_channel.abandon()
+                with contextlib.suppress(Exception):
+                    await tunnel.send_frame(FRAME_CLOSE, channel_id)
+                if outcome == "refused" and code not in FAILOVER_CODES:
+                    # A refusal about the LINK (bad fragment key, connector
+                    # error) ends the dial with that code, no second opinion.
+                    logger.info(
+                        "relay viewer channel ended by connector before serving, not "
+                        "member-local: token=%s org=%s machine=%s code=%d reason=%r",
+                        token[:8], link.org_uuid[:8], machine, code, reason,
+                    )
+                    await _close_quietly(websocket, code, reason)
+                    return
+                tried.append((machine, code, reason))
+                if metrics is not None:
+                    metrics.viewer_failover(link.org_uuid, code)
+                logger.warning(
+                    "relay viewer failover: candidate %d of %d (machine=%s) %s "
+                    "(%d %r) before serving a byte, token=%s org=%s",
+                    index + 1, len(candidates), machine, outcome, code, reason,
+                    token[:8], link.org_uuid[:8],
+                )
+                continue
+
+            # Served (or the viewer left): end exactly as before.
+            if tunnel.detach_viewer(channel_id, relay_channel):
+                tunnel.detach_listener(token, channel_id)
+                logger.info(
+                    "relay viewer channel ended: token=%s org=%s code=%d reason=%r "
+                    "served=%s originator=%s", token[:8], link.org_uuid[:8],
+                    viewer_close[0], viewer_close[1], relay_channel.served,
+                    "viewer" if viewer_close[0] == 1001 else "relay",
+                )
+                await relay_channel.close(*viewer_close)
+                with contextlib.suppress(Exception):
+                    await tunnel.send_frame(FRAME_CLOSE, channel_id)
+            else:
+                await relay_channel.wait_closed()
+            return
+
+        # Every candidate failed before serving a byte: the most actionable
+        # code wins, and the reason names each member tried.
+        code, reason = _failover_verdict(tried)
+        logger.warning(
+            "relay dial failed over every candidate (%d): token=%s org=%s tried=%s",
+            code, token, link.org_uuid,
+            [(m, c) for m, c, _r in tried],
+        )
+        await _close_quietly(websocket, code, reason)
+    finally:
+        if recv_task is not None and not recv_task.done():
+            recv_task.cancel()
+
+
+def _route_candidates(link, hub: TunnelHub, token: str, now: float) -> list:
+    """The ordered tunnels a viewer of *link* may be routed to.
+
+    A machine-pinned link (auto-nh1po: design/present/mission, stores that do
+    not fleet-sync) has exactly one candidate, the tunnel whose authenticated
+    hello named the declared machine; declared machine offline == none. A
+    link published within FRESH_LINK_PIN_S orders its publisher first --
+    its grant lives in that machine's cache until org sync replicates it --
+    and the rest of the org pool least-loaded after it; the pin orders, it
+    never refuses (graph://6ad52a52-f75 principle 2). Otherwise least-loaded.
+    """
+    tunnels_for = getattr(hub, "tunnels_for", None)
+    pool = list(tunnels_for(link.org_uuid)) if tunnels_for is not None else []
+    serving_machine = getattr(link, "serving_machine", None)
+    if serving_machine is not None:
+        return [t for t in pool if t.machine == serving_machine][:1]
+    # The hub's own rule picks the first candidate (least-loaded with
+    # capacity, the pool decision graph://cd304e9e-c3b); the rest of the pool
+    # follows by load so a refusal has somewhere to go.
+    first = hub.get(link.org_uuid)
+    if first is None:
+        return []
+    ordered = [first] + [
+        t for t in sorted(pool, key=lambda t: len(t.channels)) if t is not first
+    ]
+    fresh_link_machine = getattr(hub, "fresh_link_machine", None)
+    fresh_machine = fresh_link_machine(token, now) if fresh_link_machine is not None else None
+    if fresh_machine is not None:
+        publisher = [t for t in ordered if t.machine == fresh_machine]
+        if publisher:
+            ordered = publisher + [t for t in ordered if t is not publisher[0]]
+    return ordered
+
+
+def _failover_verdict(tried: list) -> tuple[int, str]:
+    """The close (code, reason) after every candidate failed before serving."""
+    codes = [code for _m, code, _r in tried]
+    code = next((c for c in FAILOVER_PRECEDENCE if c in codes), codes[-1] if codes else CLOSE_NO_TUNNEL)
+    detail = "; ".join(f"{m or '-'}:{c}" for m, c, _r in tried)
+    reason = f"{len(tried)} member(s) tried, none served: {detail}"
+    return code, reason[:120]
 
 async def host_probe_endpoint(
     websocket: WebSocket,
