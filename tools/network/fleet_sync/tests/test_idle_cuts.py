@@ -129,7 +129,7 @@ def test_an_origin_cut_is_verified_against_the_origin_key(tmp_path: Path) -> Non
     db = GraphDB(tmp_path / "adopt.db")
     MutationCatalog(db.conn, other.public_hex).install()
     good = {"origin": origin.public_hex, "cut_ns": 5_000,
-            "sig": origin.sign_hex(cuts.origin_cut_body(origin.public_hex, 5_000))}
+            "sig": origin.sign_hex(cuts.origin_cut_body(origin.public_hex, 5_000, origin.public_hex))}
     assert cuts.adopt_origin_cut(db.conn, good) is True
     assert cuts.adopt_origin_cut(db.conn, good) is False          # not newer
     assert cuts.origin_cuts(db.conn)[origin.public_hex][0] == 5_000
@@ -137,13 +137,61 @@ def test_an_origin_cut_is_verified_against_the_origin_key(tmp_path: Path) -> Non
     with pytest.raises(cuts.CutError):
         cuts.adopt_origin_cut(db.conn, forged)
     signed_by_other = {"origin": origin.public_hex, "cut_ns": 9_000,
-                       "sig": other.sign_hex(cuts.origin_cut_body(origin.public_hex, 9_000))}
+                       "sig": other.sign_hex(cuts.origin_cut_body(origin.public_hex, 9_000, origin.public_hex))}
     with pytest.raises(cuts.CutError):
         cuts.adopt_origin_cut(db.conn, signed_by_other)
     assert cuts.origin_cuts(db.conn)[origin.public_hex][0] == 5_000
     # The watermark is the greater of cursor and cut.
     assert MutationCatalog(db.conn, other.public_hex).origin_watermarks()[origin.public_hex] == 5_000
     db.close()
+
+
+def test_a_cut_signed_by_the_delegated_process_key_verifies_through_its_chain(tmp_path: Path) -> None:
+    """Production signs with a process key the machine key delegated to
+    (fleet:sync, machine-direct), never with the machine key itself: the
+    origin IS the machine key, and the cut carries the delegation so a
+    receiver walks origin -> signer. Live-fleet failure 2026-09-19."""
+    machine, process, stranger = KeyPair.generate(), KeyPair.generate(), KeyPair.generate()
+    now = int(time.time())
+    cert = issue_cert(
+        machine, process.public_hex, scope=["fleet:sync"], org="personal:" + "ab" * 32,
+        subject=Subject("machine", "m-1"), not_before=now - 60, not_after=now + 3600,
+    )
+    db = GraphDB(tmp_path / "delegated.db")
+    catalog = MutationCatalog(db.conn, machine.public_hex)
+    catalog.install()
+    with catalog.transaction(10, "t0"):
+        _insert_source(db.conn, "s0")
+    # A delegate without its delegation cannot seal.
+    with pytest.raises(cuts.CutError):
+        cuts.seal_machine_cut(db.conn, process, machine.public_hex, 1_000)
+    assert cuts.seal_machine_cut(db.conn, process, machine.public_hex, 1_000, cert=cert) == 1_000
+    record = cuts.origin_cut_records(db.conn)[machine.public_hex]
+    assert record["signer"] == process.public_hex and record["cert"] is not None
+    frame = {"origin": machine.public_hex, **record}
+    assert cuts.verify_origin_cut(frame, now=now)["cut_ns"] == 1_000
+    # A receiver adopts it through the same verification.
+    peer = GraphDB(tmp_path / "peer.db")
+    MutationCatalog(peer.conn, stranger.public_hex).install()
+    assert cuts.adopt_origin_cut(peer.conn, frame) is True
+    assert MutationCatalog(peer.conn, stranger.public_hex).origin_watermarks()[machine.public_hex] == 1_000
+    # A chain anchored elsewhere, a wrong scope, or a leaf that is not the
+    # signer is refused.
+    other_cert = issue_cert(
+        stranger, process.public_hex, scope=["fleet:sync"], org="personal:" + "ab" * 32,
+        subject=Subject("machine", "m-1"), not_before=now - 60, not_after=now + 3600,
+    )
+    with pytest.raises(cuts.CutError):
+        cuts.verify_origin_cut({**frame, "cert": other_cert.to_dict()}, now=now)
+    wide = issue_cert(
+        machine, process.public_hex, scope=["fleet:sync", "link:*"], org="personal:" + "ab" * 32,
+        subject=Subject("machine", "m-1"), not_before=now - 60, not_after=now + 3600,
+    )
+    with pytest.raises(cuts.CutError):
+        cuts.verify_origin_cut({**frame, "cert": wide.to_dict()}, now=now)
+    with pytest.raises(cuts.CutError):
+        cuts.verify_origin_cut({**frame, "signer": stranger.public_hex}, now=now)
+    db.close(); peer.close()
 
 
 # ── propagation through the real pull ──────────────────────────────────────
