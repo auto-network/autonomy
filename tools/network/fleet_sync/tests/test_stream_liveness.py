@@ -270,8 +270,8 @@ def test_mid_stream_silence_is_bounded_by_the_inter_frame_limit(
             # mid-stream wedge means TWO produced frames with the client
             # having received exactly one.
             async def stream():
-                yield encode_transaction_header("c" * 64, "txn-1", 2)
-                yield encode_transaction_header("c" * 64, "txn-2", 2)
+                yield encode_transaction_header("c" * 64, "txn-1", 2, group=0, last=True)
+                yield encode_transaction_header("c" * 64, "txn-2", 2, group=0, last=True)
                 engaged.set()
                 await release.wait()
             return stream()
@@ -333,7 +333,6 @@ def test_silence_timeout_never_downgrades_the_protocol(
             await _eventually(lambda: _peer_row(
                 puller_db, wedged_key.public_hex
             )[0] > 0)
-            assert wedged_key.public_hex not in puller._peer_protocol
         finally:
             release.set()
             await puller.stop()

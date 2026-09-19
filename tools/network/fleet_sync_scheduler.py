@@ -92,12 +92,11 @@ def _log_telemetry_failure(kind: str, scope, exc: BaseException) -> None:
         kind, scope, type(exc).__name__, exc,
     )
 
-FLEET_SYNC_PROTOCOL_VERSION = 4
-#: The server answers in the requester's declared version, so a v3 puller
-#: against a v4 server syncs unchanged. v3 repeats the full transaction
-#: header on every operation; v4 sends one transaction-header frame followed
-#: by bare operation frames.
-SUPPORTED_PROTOCOL_VERSIONS = frozenset({3, 4, 5})
+#: The one wire version. Every machine in a fleet runs the same code, so
+#: there is exactly one version and no negotiation: a peer that declares
+#: another is refused with a typed error and the scope pauses until both
+#: sides match (graph://6ad52a52-f75 principle 3).
+from tools.network.fleet_sync.sweep_receive import FLEET_SYNC_PROTOCOL_VERSION
 _REQUEST_FIELDS = frozenset({
     "v", "op", "roster_epoch", "resume", "compat",
 })
@@ -105,7 +104,6 @@ _REQUEST_OPTIONAL_FIELDS = frozenset({"scope", "bootstrap", "watermarks"})
 from tools.network.fleet_sync.sweep_receive import (
     SWEEP_BEGIN_KIND,
     SWEEP_END_KIND,
-    SWEEP_PROTOCOL_VERSION,
 )
 
 _REFUSAL_FIELDS = frozenset({"v", "kind", "digest"})
@@ -115,7 +113,6 @@ _DONE_FIELDS = frozenset(
         "through_transaction_ref", "through_breadcrumb",
     }
 )
-_MUTATION_MAGIC = b"FST1"
 _DONE_MAGIC = b"FSD1"
 _REFUSAL_MAGIC = b"FSR1"
 _TRANSACTION_MAGIC = b"FSTX"
@@ -529,7 +526,7 @@ def _json_object(raw: bytes, fields: frozenset[str], what: str) -> dict:
         raise FleetSyncProtocolError(
             f"{what} must carry exactly {sorted(fields)}"
         )
-    if value["v"] not in SUPPORTED_PROTOCOL_VERSIONS:
+    if value["v"] != FLEET_SYNC_PROTOCOL_VERSION:
         raise FleetSyncProtocolError(
             f"unsupported {what} version: {value['v']!r}"
         )
@@ -602,7 +599,7 @@ def decode_schema_refusal(raw: bytes) -> tuple[str, str | None]:
         not isinstance(value, dict)
         or not _REFUSAL_FIELDS <= set(value)
         or not set(value) <= (_REFUSAL_FIELDS | {"built_at"})
-        or value["v"] not in SUPPORTED_PROTOCOL_VERSIONS
+        or value["v"] != FLEET_SYNC_PROTOCOL_VERSION
         or value["kind"] != "schema-refused"
     ):
         raise FleetSyncProtocolError("fleet sync refusal is malformed")
@@ -668,7 +665,7 @@ def encode_pull_request(
     """
     if len(resume) > MAX_RESUME_BREADCRUMBS:
         raise FleetSyncProtocolError("fleet sync resume trail exceeds bound")
-    if version not in SUPPORTED_PROTOCOL_VERSIONS:
+    if version != FLEET_SYNC_PROTOCOL_VERSION:
         raise FleetSyncProtocolError("fleet sync request version is unsupported")
     body = {
         "v": version,
@@ -721,7 +718,7 @@ def decode_pull_request(
             f"fleet sync request must carry {sorted(_REQUEST_FIELDS)} "
             f"plus only {sorted(_REQUEST_OPTIONAL_FIELDS)}"
         )
-    if value["v"] not in SUPPORTED_PROTOCOL_VERSIONS:
+    if value["v"] != FLEET_SYNC_PROTOCOL_VERSION:
         raise FleetSyncProtocolError("unsupported fleet sync request version")
     version = int(value["v"])
     scope = value.get("scope", "personal")
@@ -756,81 +753,29 @@ def decode_pull_request(
     ), compat, scope, bootstrap, version, watermarks
 
 
-def encode_authored(item: AuthoredMutation, *, transaction_operations: int) -> bytes:
-    frame = encode_mutation_frame(item.mutation)
-    header = canonical_json(
-        {
-            "origin": item.origin_incarnation,
-            "transaction": item.transaction_id,
-            "operation": item.operation_index,
-            "transaction_operations": transaction_operations,
-        }
-    )
-    message = _MUTATION_MAGIC + struct.pack(">I", len(header)) + header + frame
-    if len(header) > _HEADER_LIMIT or len(message) > MAX_MESSAGE_SIZE:
-        raise FleetSyncProtocolError(
-            "originated mutation exceeds the fleet channel message bound"
-        )
-    return message
-
-
-def decode_authored(raw: bytes) -> tuple[AuthoredMutation, int]:
-    if len(raw) < 8 or raw[:4] != _MUTATION_MAGIC:
-        raise FleetSyncProtocolError("fleet mutation message has wrong magic")
-    header_len = struct.unpack(">I", raw[4:8])[0]
-    if not 1 <= header_len <= _HEADER_LIMIT or 8 + header_len >= len(raw):
-        raise FleetSyncProtocolError("fleet mutation header length is invalid")
-    try:
-        header = json.loads(raw[8:8 + header_len])
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise FleetSyncProtocolError("fleet mutation header is not valid JSON") from exc
-    if not isinstance(header, dict) or set(header) != {
-        "origin", "transaction", "operation", "transaction_operations"
-    }:
-        raise FleetSyncProtocolError("fleet mutation header has wrong fields")
-    origin = header["origin"]
-    transaction = header["transaction"]
-    operation = header["operation"]
-    operation_count = header["transaction_operations"]
-    if (
-        not isinstance(origin, str)
-        or len(origin) != 64
-        or any(ch not in "0123456789abcdef" for ch in origin)
-    ):
-        raise FleetSyncProtocolError("fleet mutation origin is malformed")
-    if not isinstance(transaction, str) or not transaction:
-        raise FleetSyncProtocolError("fleet mutation transaction is malformed")
-    if not isinstance(operation, int) or isinstance(operation, bool) or operation < 0:
-        raise FleetSyncProtocolError("fleet mutation operation is malformed")
-    if (
-        not isinstance(operation_count, int)
-        or isinstance(operation_count, bool)
-        or not 1 <= operation_count <= MAX_TRANSACTION_OPERATIONS
-    ):
-        raise FleetSyncProtocolError(
-            "fleet mutation transaction operation count is malformed"
-        )
-    try:
-        mutation = decode_mutation_frame(raw[8 + header_len:])
-    except Exception as exc:
-        raise FleetSyncProtocolError("fleet mutation frame is malformed") from exc
-    return AuthoredMutation(origin, transaction, operation, mutation), operation_count
-
-
 def encode_transaction_header(
-    origin: str, transaction_id: str, operations: int
+    origin: str, transaction_id: str, operations: int,
+    *, group: int, last: bool,
 ) -> bytes:
-    """Protocol v4: one header frame opens a transaction group.
+    """One header frame opens a transaction group.
 
     The origin, transaction id, and operation count are sent once here
     instead of being repeated inside every operation frame — the wire
     wrapper changes; mutation frame bytes, candidate hashes, and journal
     storage are untouched.
+
+    ``group`` is this group's index within the transaction and ``last``
+    whether it is the transaction's final group, so the receiver knows when
+    a multi-group transaction is COMPLETE and can advance its
+    contiguous-prefix cursor past it (graph://d9153c5a-76e O-G). Without
+    them a crash between two groups stranded the rest forever.
     """
     header = canonical_json({
         "origin": origin,
         "transaction": transaction_id,
         "operations": operations,
+        "group": int(group),
+        "last": bool(last),
     })
     if len(header) > _HEADER_LIMIT:
         raise FleetSyncProtocolError(
@@ -839,7 +784,7 @@ def encode_transaction_header(
     return _TRANSACTION_MAGIC + header
 
 
-def decode_transaction_header(raw: bytes) -> tuple[str, str, int]:
+def decode_transaction_header(raw: bytes) -> tuple[str, str, int, int, bool]:
     if not raw.startswith(_TRANSACTION_MAGIC):
         raise FleetSyncProtocolError("fleet transaction header has wrong magic")
     try:
@@ -849,7 +794,7 @@ def decode_transaction_header(raw: bytes) -> tuple[str, str, int]:
             "fleet transaction header is not valid JSON"
         ) from exc
     if not isinstance(header, dict) or set(header) != {
-        "origin", "transaction", "operations"
+        "origin", "transaction", "operations", "group", "last"
     }:
         raise FleetSyncProtocolError("fleet transaction header has wrong fields")
     origin = header["origin"]
@@ -871,7 +816,13 @@ def decode_transaction_header(raw: bytes) -> tuple[str, str, int]:
         raise FleetSyncProtocolError(
             "fleet transaction operation count is malformed"
         )
-    return origin, transaction, operations
+    group, last = header["group"], header["last"]
+    if (
+        not isinstance(group, int) or isinstance(group, bool) or group < 0
+        or not isinstance(last, bool)
+    ):
+        raise FleetSyncProtocolError("fleet transaction group fields are malformed")
+    return origin, transaction, operations, group, last
 
 
 def encode_operation_frame(item: AuthoredMutation) -> bytes:
@@ -910,8 +861,14 @@ def _sweep_run_frames(run):
     over by one per run, so the receiver rejected the pull, discarded the rows,
     and retried forever without converging.
     """
+    # A swept run is outside the cursor: pages arrive in address order
+    # across many transactions, the receiver applies them as contiguous
+    # address prefixes, and the store seeds every origin's cursor at its
+    # newest transaction when the bootstrap completes. The header fields
+    # are therefore constant here.
     yield encode_transaction_header(
         run[0].origin_incarnation, run[0].transaction_id, len(run),
+        group=0, last=True,
     ), False
     for item in run:
         yield encode_operation_frame(item), True
@@ -1112,6 +1069,16 @@ class SQLiteFleetSyncStore:
                 record_sweep_complete(conn)
             except BootstrapError:
                 return
+        finally:
+            conn.close()
+
+    def seed_cursors_from_newest(self) -> int:
+        """Bootstrap completion: seed every origin's cursor at its newest
+        recorded transaction (graph://d9153c5a-76e O-G migration rule for
+        sweep-built stores)."""
+        conn, catalog = self._open()
+        try:
+            return catalog.seed_cursors_from_newest()
         finally:
             conn.close()
 
@@ -1339,7 +1306,7 @@ class SQLiteFleetSyncStore:
             conn.close()
 
     def apply_many(
-        self, groups: list[list[AuthoredMutation]]
+        self, groups: "list[tuple[list[AuthoredMutation], bool]]"
     ) -> list[tuple[int, int]]:
         """Apply several complete transactions on ONE connection.
 
@@ -1353,7 +1320,10 @@ class SQLiteFleetSyncStore:
         """
         conn, catalog = self._open()
         try:
-            results = [catalog.apply_remote_batch(items) for items in groups]
+            results = [
+                catalog.apply_remote_batch(items, complete=complete)
+                for items, complete in groups
+            ]
             # Fold what was just applied from the WAL into the main file
             # while this connection is still open. PASSIVE never blocks a
             # reader or writer; it does as much as it can. Without it the
@@ -1668,14 +1638,6 @@ async def _observe_stream(stream, observer):
         observer.end()
 
 
-def _transaction_identity(item: AuthoredMutation) -> tuple[str, str, int]:
-    return (
-        item.origin_incarnation,
-        item.transaction_id,
-        item.mutation.timestamp_ns,
-    )
-
-
 #: Transactions fetched per store connection while serving a pull.
 SERVE_PAGE_TRANSACTIONS = 200
 
@@ -1791,11 +1753,6 @@ class FleetSyncScheduler:
         #: controller's decision change behaviour rather than only the log.
         self._relay_hold: dict[str, tuple[str, float]] = {}
         self._activated_scopes: set[Path] = set()
-        #: Per-peer declared pull version. A peer whose server rejected a v4
-        #: request before serving any frame is retried at v3 for the rest of
-        #: this process (v3 works against every server); a restart re-probes
-        #: v4. Only wire efficiency rides on this, never correctness.
-        self._peer_protocol: dict[str, int] = {}
         #: Per-machine random source for peer selection (see rank_peers).
         self._last_prune_at: dict[str, float] = {}
         self._after_serve_tasks: set = set()
@@ -2292,15 +2249,11 @@ class FleetSyncScheduler:
                 # One question, one answer: a peer that needs a bootstrap and
                 # can speak the sweep gets the sweep. There is no second
                 # bootstrap mechanism to negotiate against any more.
-                serve_sweep = (
-                    needs_bootstrap
-                    and protocol_version >= SWEEP_PROTOCOL_VERSION
-                    and server_has_content
-                )
+                serve_sweep = needs_bootstrap and server_has_content
                 if serve_sweep:
-                    # A v5 peer asked for a bootstrap and can handle a
-                    # sweep, so it gets the frontier its sweep is anchored
-                    # to. Emitted ONCE, before any page.
+                    # The peer asked for a bootstrap, so it gets the
+                    # frontier its sweep is anchored to. Emitted ONCE,
+                    # before any page.
                     #
                     # Read BEFORE serving anything, and never advanced: the
                     # partition is SWEEP <= F / PULL > F, so a frontier taken
@@ -2431,29 +2384,15 @@ class FleetSyncScheduler:
                     served_any = False
                     offset = 0
                     more = True
+                    group_index = 0
                     if True:
                         while more:
                             authorize(peer_pub)
                             phase_started = time.monotonic()
-                            # v3 has NO grouping concept: every frame
-                            # declares the transaction's operation count, and
-                            # its receiver rejects a second frame of the same
-                            # transaction declaring a different one. Paging a
-                            # transaction at SERVE_GROUP_OPERATIONS therefore
-                            # declares the size of each PAGE (2000, then the
-                            # remainder), so any transaction with more than
-                            # 2000 surviving operations broke every v3 pull
-                            # permanently. Serve v3 the whole transaction in
-                            # one group: MutationCatalog._next_operation caps
-                            # locally authored transactions at
-                            # MAX_TRANSACTION_OPERATIONS, so one group always
-                            # suffices. v4 keeps its paging -- each group
-                            # carries its own header and the receiver applies
-                            # them as they land.
-                            group_limit = (
-                                SERVE_GROUP_OPERATIONS if protocol_version >= 4
-                                else MAX_TRANSACTION_OPERATIONS
-                            )
+                            # A large transaction is paged: each group
+                            # carries its own header and the receiver
+                            # applies them as they land.
+                            group_limit = SERVE_GROUP_OPERATIONS
                             items, more = await asyncio.to_thread(
                                 store.transaction_group, ref, origin_key,
                                 transaction_id, offset=offset,
@@ -2476,33 +2415,28 @@ class FleetSyncScheduler:
                                 continue
                             served_any = True
                             operation_count = len(items)
-                            if protocol_version >= 4:
-                                # v4: origin, transaction id and the group's
-                                # operation count travel once in a header
-                                # frame. A large transaction arrives as
-                                # several groups under one transaction id;
-                                # the receiver applies each as it lands.
-                                opening = encode_transaction_header(
-                                    origin_key, transaction_id, operation_count,
-                                )
-                                _digest_add(digest, opening)
-                                stats["bytes_sent"] += len(opening)
-                                yield opening
+                            # Origin, transaction id and the group's
+                            # operation count travel once in a header frame.
+                            # A large transaction arrives as several groups
+                            # under one transaction id; the header's `last`
+                            # tells the receiver when it is whole.
+                            opening = encode_transaction_header(
+                                origin_key, transaction_id, operation_count,
+                                group=group_index, last=not more,
+                            )
+                            group_index += 1
+                            _digest_add(digest, opening)
+                            stats["bytes_sent"] += len(opening)
+                            yield opening
                             for item in items:
                                 authorize(peer_pub)
-                                encoded = (
-                                    encode_operation_frame(item)
-                                    if protocol_version >= 4
-                                    else encode_authored(
-                                        item, transaction_operations=operation_count
-                                    )
-                                )
+                                encoded = encode_operation_frame(item)
                                 _digest_add(digest, encoded)
                                 count += 1
                                 stats["mutation_frames"] += 1
                                 stats["bytes_sent"] += len(encoded)
                                 yield encoded
-                    if not served_any and protocol_version >= 4:
+                    if not served_any:
                         # Nothing of this transaction survives here (every
                         # row it wrote was overwritten later). The puller
                         # still needs to advance its watermark past it, so
@@ -3367,9 +3301,7 @@ class FleetSyncScheduler:
         # Initialized BEFORE the try: the except/finally paths read them,
         # and a pull that fails at connect never reaches the in-try inits
         # (a bad candidate stopped being recorded as a retry, 2026-09-06).
-        protocol_version = self._peer_protocol.get(
-            machine_pub, FLEET_SYNC_PROTOCOL_VERSION
-        )
+        protocol_version = FLEET_SYNC_PROTOCOL_VERSION
 
         async def record(
             outcome: str,
@@ -3564,24 +3496,6 @@ class FleetSyncScheduler:
             watermarks = await asyncio.to_thread(
                 store.advertisable_origin_watermarks
             )
-            # Computed ONCE and used everywhere below. The first version of
-            # this assigned a local that encode_pull_request never read, so
-            # the refusal was stated in the code and absent from the wire --
-            # the exact shape of claim this whole bead exists to prevent.
-            if resuming_sweep or bootstrap:
-                # A FRESH joiner must ask v5 too, or bootstrap can never
-                # start: the sweep is an opt-in the receiver enforces on the
-                # requested version, so a store with no bootstrap row would
-                # ask v4, be refused a sweep.begin, and have no way to anchor
-                # one -- the version pin would only ever protect bootstraps
-                # that somehow already existed. `bootstrap` is this store
-                # having no state at all; `resuming_sweep` is one already
-                # anchored. Asking is not committing: only a RESUMING sweep
-                # refuses the downgrade, so a fresh joiner meeting a v4
-                # server still takes whatever that server can serve.
-                protocol_version = max(
-                    protocol_version, SWEEP_PROTOCOL_VERSION
-                )
             request = encode_pull_request(
                 epoch, compat=local_digest, resume=resume_trail,
                 scope=scope, bootstrap=bootstrap, version=protocol_version,
@@ -3614,8 +3528,8 @@ class FleetSyncScheduler:
             # runs go to apply_swept (contiguous prefixes) rather than the
             # delta batcher (which reorders across transactions).
             sweeping = False
-            pending_identity = None
             pending_count: int | None = None
+            pending_complete = True
             transaction_group: tuple[str, str] | None = None
             saw_done = False
             through_transaction_ref = 0
@@ -3626,6 +3540,17 @@ class FleetSyncScheduler:
             async def flush_batch() -> None:
                 nonlocal peer_watermark, transactions, batch, batch_bytes
                 nonlocal empty_transactions
+                # Row groups FIRST, then the empties that follow them in
+                # origin order. The old order committed the empties first,
+                # so a crash between the two commits left the watermark past
+                # rows never applied (graph://54f996b5-b57 section 2). With
+                # the cursor the order no longer decides correctness -- an
+                # empty cannot pass an unresolved row group -- but it keeps
+                # the common path from ever holding a cursor on an empty.
+                groups, batch, batch_bytes = batch, [], 0
+                results = (
+                    await asyncio.to_thread(store.apply_many, groups) if groups else []
+                )
                 if empty_transactions:
                     empties, empty_transactions = empty_transactions, []
                     await asyncio.to_thread(store.record_transactions, empties)
@@ -3633,12 +3558,10 @@ class FleetSyncScheduler:
                     peer_watermark = max(
                         peer_watermark or 0, max(ts for _o, _t, ts in empties)
                     )
-                if not batch:
+                if not groups:
                     return
-                groups, batch, batch_bytes = batch, [], 0
-                results = await asyncio.to_thread(store.apply_many, groups)
                 applied = 0
-                for items, (won, _ignored) in zip(groups, results):
+                for (items, _complete), (won, _ignored) in zip(groups, results):
                     if won == len(items):
                         _emit_settings_materialized(items)
                     elif won:
@@ -3676,14 +3599,16 @@ class FleetSyncScheduler:
                 """
                 await asyncio.to_thread(store.apply_swept_page, items)
 
-            async def apply_pending(items: list[AuthoredMutation]) -> None:
+            async def apply_pending(
+                items: list[AuthoredMutation], *, complete: bool = True,
+            ) -> None:
                 nonlocal batch_bytes, last_flush_at
                 if _PULL_TRACE and items:
                     received_ids.append((
                         items[0].origin_incarnation[:8], items[0].transaction_id,
                         items[0].mutation.timestamp_ns,
                     ))
-                batch.append(list(items))
+                batch.append((list(items), complete))
                 # Operations, not bytes, bound the batch: frames were
                 # already size-checked on decode, and a transaction is at
                 # most MAX_TRANSACTION_OPERATIONS operations.
@@ -3751,7 +3676,7 @@ class FleetSyncScheduler:
                         raise FleetSyncProtocolError("fleet summary is not final")
                     if pending:
                         validate_pending()
-                        await apply_pending(pending)
+                        await apply_pending(pending, complete=pending_complete)
                         pending = []
                     await flush_batch()
                     if message_count != expected_count:
@@ -3769,7 +3694,7 @@ class FleetSyncScheduler:
                     # v4: the header opens a group; a previous group must be
                     # complete before it applies, exactly like the v3
                     # identity-change boundary.
-                    origin, transaction_id, operations = (
+                    origin, transaction_id, operations, _group, is_last = (
                         decode_transaction_header(message)
                     )
                     if pending:
@@ -3777,11 +3702,14 @@ class FleetSyncScheduler:
                         if sweeping:
                             await apply_swept(pending)
                         else:
-                            await apply_pending(pending)
+                            await apply_pending(pending, complete=pending_complete)
                         pending = []
-                    pending_identity = None
                     transaction_group = (origin, transaction_id)
                     pending_count = operations
+                    # The header says whether this is the transaction's last
+                    # group: only then is the transaction complete and the
+                    # origin's cursor allowed past it.
+                    pending_complete = is_last
                     _digest_add(digest, message)
                     continue
                 if message.startswith(_OPERATION_MAGIC):
@@ -3806,7 +3734,8 @@ class FleetSyncScheduler:
                         # waiting for a header that never came (SJC-2
                         # autonomy, 2026-09-07).
                         validate_pending()
-                        await (apply_swept(pending) if sweeping else apply_pending(pending))
+                        await (apply_swept(pending) if sweeping
+                               else apply_pending(pending, complete=pending_complete))
                         pending = []
                         transaction_group = None
                         pending_count = None
@@ -3825,7 +3754,7 @@ class FleetSyncScheduler:
                         # advances past it. Outside the digest.
                         if pending:
                             validate_pending()
-                            await apply_pending(pending)
+                            await apply_pending(pending, complete=pending_complete)
                             pending = []
                         transaction_group = None
                         try:
@@ -3857,19 +3786,6 @@ class FleetSyncScheduler:
                         await asyncio.to_thread(store.record_sweep_delivered)
                         continue
                     if kind == SWEEP_BEGIN_KIND:
-                        # The sweep is an OPT-IN. Accepting a begin this
-                        # client never asked for would let a peer anchor a
-                        # bootstrap unilaterally -- and a store that did not
-                        # request v5 has no sweep receive path to finish it
-                        # with, so it would sit anchored and never complete.
-                        # Refuse on the version this request actually carried,
-                        # not on the record's own claim.
-                        if protocol_version < SWEEP_PROTOCOL_VERSION:
-                            raise FleetSyncProtocolError(
-                                "peer sent a sweep.begin for a pull that asked "
-                                f"v{protocol_version}; the sweep requires "
-                                f"v{SWEEP_PROTOCOL_VERSION}"
-                            )
                         # The serving store's frontier, once, before any page.
                         # Persisted through the SHARED validator -- this
                         # receiver does not parse the record itself, so the
@@ -3900,30 +3816,7 @@ class FleetSyncScheduler:
                     raise FleetSyncProtocolError(
                         "unknown fleet stream control frame"
                     )
-                item, operation_count = decode_authored(message)
-                identity = _transaction_identity(item)
-                if pending_identity is not None and identity != pending_identity:
-                    validate_pending()
-                    await apply_pending(pending)
-                    pending = []
-                pending_identity = identity
-                if pending and pending_count != operation_count:
-                    # Name what changed. This raised anonymously, so a live
-                    # occurrence could not be attributed without reproducing
-                    # it: no transaction, no counts. Metadata only.
-                    raise FleetSyncProtocolError(
-                        "fleet transaction operation count changed: "
-                        f"origin={item.origin_incarnation[:12]} "
-                        f"transaction={item.transaction_id} "
-                        f"declared_before={pending_count} "
-                        f"declared_now={operation_count} "
-                        f"received_so_far={len(pending)}"
-                    )
-                pending_count = operation_count
-                pending.append(item)
-                _digest_add(digest, message)
-                message_count += 1
-                mutation_frames += 1
+                raise FleetSyncProtocolError("unknown fleet stream frame")
             if not saw_done:
                 raise FleetSyncProtocolError("fleet stream ended without summary")
 
@@ -3939,6 +3832,7 @@ class FleetSyncScheduler:
             # start advertising a frontier it never earned -- the exact failure
             # the gate exists to prevent.
             await asyncio.to_thread(store.record_bootstrap_complete)
+            await asyncio.to_thread(store.seed_cursors_from_newest)
 
             logger.warning(
                 "fleet sync pull %s scope %r: got %d transaction(s), %d "
@@ -4015,24 +3909,9 @@ class FleetSyncScheduler:
                     "fleet sync: could not commit the groups received "
                     "before the failure", exc_info=True,
                 )
-            if (
-                protocol_version >= 4
-                and received == 0
-                and not isinstance(
-                    exc, (FleetSyncSchemaMismatch, FleetSyncStreamSilence)
-                )
-            ):
-                # The peer's server closed the pull without serving a single
-                # frame — the signature of pre-v4 software rejecting the
-                # declared request version. Retry this peer at v3 for the
-                # rest of the process; only wire efficiency rides on it,
-                # and a plain transport flake merely costs the same
-                # harmless downgrade.
-                self._peer_protocol[machine_pub] = 3
-                logger.info(
-                    "fleet sync peer %s: retrying at protocol v3",
-                    machine_pub[:12],
-                )
+            # There is one wire version and no downgrade: a peer on another
+            # one refuses with a typed error and the scope pauses until both
+            # sides match (graph://6ad52a52-f75 principle 3).
             failures = self._failures.get(machine_pub, 0) + 1
             self._failures[machine_pub] = failures
             if self.config.on_peer_failure is not None and not isinstance(

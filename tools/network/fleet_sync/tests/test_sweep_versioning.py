@@ -1,9 +1,8 @@
-"""Mixed-version controls for the v5 sweep opt-in.
+"""The sweep.begin record and the bootstrap serve path.
 
-The sweep is an explicit versioned opt-in, not an additive field. A v3/v4
-decoder rejects unknown kinds and versions outright, so "old peers ignore it"
-is not available -- and an old peer that ignored a sweep.begin would be exactly
-the failure this exists to prevent: rows applied with no recorded frontier.
+A bootstrap pull is served a sweep, anchored by exactly one sweep.begin
+record at the one wire version; a record at any other version anchors
+nothing, so rows are never applied with no recorded frontier.
 """
 
 from pathlib import Path
@@ -15,7 +14,7 @@ from tools.graph.db import GraphDB
 from tools.network.fleet_sync.catalog import MutationCatalog
 from tools.network.fleet_sync.sweep_receive import (
     SWEEP_BEGIN_KIND,
-    SWEEP_PROTOCOL_VERSION,
+    FLEET_SYNC_PROTOCOL_VERSION,
     BootstrapNotRecorded,
     SweepBeginInvalid,
     apply_live_page,
@@ -23,8 +22,6 @@ from tools.network.fleet_sync.sweep_receive import (
     read_bootstrap,
 )
 from tools.network.fleet_sync_scheduler import (
-    SUPPORTED_PROTOCOL_VERSIONS,
-    FleetSyncProtocolError,
     decode_pull_request,
     encode_pull_request,
 )
@@ -41,36 +38,11 @@ def _store(path: Path):
     return db, catalog
 
 
-def test_v5_is_requestable_and_round_trips() -> None:
-    """A v5 request is the peer ASKING for a sweep. Nothing infers it."""
-    assert SWEEP_PROTOCOL_VERSION in SUPPORTED_PROTOCOL_VERSIONS
-    request = encode_pull_request(
-        EPOCH, compat=COMPAT, version=SWEEP_PROTOCOL_VERSION
-    )
-    assert decode_pull_request(request)[5] == SWEEP_PROTOCOL_VERSION
-
-
-def test_legacy_versions_still_round_trip_unchanged() -> None:
-    """v3/v4 behaviour is untouched: adding v5 must not alter either."""
-    for version in (3, 4):
-        request = encode_pull_request(EPOCH, compat=COMPAT, version=version)
-        assert decode_pull_request(request)[5] == version
-
-
-def test_an_unsupported_version_is_still_refused() -> None:
-    with pytest.raises(FleetSyncProtocolError):
-        encode_pull_request(EPOCH, compat=COMPAT, version=2)
-    with pytest.raises(FleetSyncProtocolError):
-        encode_pull_request(EPOCH, compat=COMPAT, version=99)
-
-
-def test_a_v4_begin_record_cannot_anchor_a_store(tmp_path: Path) -> None:
-    """If an old or downgraded server sent a begin at v4, the receiver refuses
-    it rather than anchoring a sweep the sender cannot actually serve."""
+def test_a_begin_record_at_another_version_cannot_anchor_a_store(tmp_path: Path) -> None:
     db, _ = _store(tmp_path / "t.db")
     try:
         record = {
-            "v": 4, "kind": SWEEP_BEGIN_KIND, "scope": "personal",
+            "v": 5, "kind": SWEEP_BEGIN_KIND, "scope": "personal",
             "source_machine_pub": ORIGIN, "frontier": {ORIGIN: 10},
         }
         with pytest.raises(SweepBeginInvalid):
@@ -113,7 +85,7 @@ def test_a_reordered_stream_applies_nothing(tmp_path: Path) -> None:
         # And once the begin arrives, the same page applies.
         handle_sweep_begin(
             tgt.conn,
-            {"v": SWEEP_PROTOCOL_VERSION, "kind": SWEEP_BEGIN_KIND,
+            {"v": FLEET_SYNC_PROTOCOL_VERSION, "kind": SWEEP_BEGIN_KIND,
              "scope": "personal", "source_machine_pub": ORIGIN,
              "frontier": {ORIGIN: 1 << 40}},
             expected_scope="personal", expected_source_pub=ORIGIN,
@@ -135,7 +107,7 @@ def test_an_incomplete_bootstrap_still_suppresses_its_frontier(
     try:
         handle_sweep_begin(
             db.conn,
-            {"v": SWEEP_PROTOCOL_VERSION, "kind": SWEEP_BEGIN_KIND,
+            {"v": FLEET_SYNC_PROTOCOL_VERSION, "kind": SWEEP_BEGIN_KIND,
              "scope": "personal", "source_machine_pub": ORIGIN,
              "frontier": {ORIGIN: 10}},
             expected_scope="personal", expected_source_pub=ORIGIN,
@@ -166,7 +138,7 @@ def test_record_sweep_begin_runs_on_the_real_store_object(
 
     store = SQLiteFleetSyncStore(path)
     store.record_sweep_begin(
-        {"v": SWEEP_PROTOCOL_VERSION, "kind": SWEEP_BEGIN_KIND,
+        {"v": FLEET_SYNC_PROTOCOL_VERSION, "kind": SWEEP_BEGIN_KIND,
          "scope": "personal", "source_machine_pub": ORIGIN,
          "frontier": {ORIGIN: 10}},
         "personal", ORIGIN,
@@ -193,7 +165,7 @@ def test_record_sweep_begin_rejects_a_record_from_another_peer(
     store = SQLiteFleetSyncStore(path)
     with pytest.raises(SweepBeginInvalid):
         store.record_sweep_begin(
-            {"v": SWEEP_PROTOCOL_VERSION, "kind": SWEEP_BEGIN_KIND,
+            {"v": FLEET_SYNC_PROTOCOL_VERSION, "kind": SWEEP_BEGIN_KIND,
              "scope": "personal", "source_machine_pub": "c3" * 32,
              "frontier": {ORIGIN: 10}},
             "personal", ORIGIN,
@@ -208,10 +180,8 @@ def test_record_sweep_begin_rejects_a_record_from_another_peer(
 def test_an_incomplete_bootstrap_refuses_to_downgrade(tmp_path: Path) -> None:
     """Implemented, not merely asserted.
 
-    A store part-way through a sweep pins its negotiation: falling back to v4
-    would strand a keyspace it only partially swept
-    against F -- discarding F while
-    keeping the rows anchored to it.
+    A store part-way through a sweep stays pinned to that bootstrap until
+    both halves land; discarding F would strand the rows anchored to it.
     """
     from tools.network.fleet_sync.sweep_receive import (
         Phase, record_pull_complete, record_sweep_complete,
@@ -225,7 +195,7 @@ def test_an_incomplete_bootstrap_refuses_to_downgrade(tmp_path: Path) -> None:
     assert store.bootstrap_in_progress() is False, "no bootstrap, no pin"
 
     store.record_sweep_begin(
-        {"v": SWEEP_PROTOCOL_VERSION, "kind": SWEEP_BEGIN_KIND,
+        {"v": FLEET_SYNC_PROTOCOL_VERSION, "kind": SWEEP_BEGIN_KIND,
          "scope": "personal", "source_machine_pub": ORIGIN,
          "frontier": {ORIGIN: 10}},
         "personal", ORIGIN,
@@ -265,7 +235,7 @@ def test_scope_is_validated_as_the_wire_means_it(tmp_path: Path) -> None:
         try:
             state = handle_sweep_begin(
                 db.conn,
-                {"v": SWEEP_PROTOCOL_VERSION, "kind": SWEEP_BEGIN_KIND,
+                {"v": FLEET_SYNC_PROTOCOL_VERSION, "kind": SWEEP_BEGIN_KIND,
                  "scope": record_scope, "source_machine_pub": ORIGIN,
                  "frontier": {ORIGIN: 10}},
                 expected_scope=None if record_scope is None else wire_scope,
@@ -281,7 +251,7 @@ def test_scope_is_validated_as_the_wire_means_it(tmp_path: Path) -> None:
         with pytest.raises(SweepBeginInvalid):
             handle_sweep_begin(
                 db.conn,
-                {"v": SWEEP_PROTOCOL_VERSION, "kind": SWEEP_BEGIN_KIND,
+                {"v": FLEET_SYNC_PROTOCOL_VERSION, "kind": SWEEP_BEGIN_KIND,
                  "scope": "some-org", "source_machine_pub": ORIGIN,
                  "frontier": {ORIGIN: 10}},
                 expected_scope=wire_scope, expected_source_pub=ORIGIN,
@@ -364,26 +334,10 @@ def _served_kinds(scheduler, personal: Path, peer_pub: str, version: int):
     return asyncio.run(run())
 
 
-def test_a_v4_bootstrap_pull_is_served_without_a_sweep_begin(
-    tmp_path: Path,
-) -> None:
-    """The serve path must not emit a sweep to a peer that cannot read one.
-
-    A v4 decoder rejects the unknown kind outright, so emitting it would fail
-    the pull; worse, a peer that ignored it would apply swept rows with no
-    recorded frontier -- the exact failure the version gate prevents. Asking
-    for a bootstrap is not enough: the peer must also speak v5.
-    """
-    scheduler, personal, peer_pub = _serving_scheduler(tmp_path)
-    assert SWEEP_BEGIN_KIND not in _served_kinds(
-        scheduler, personal, peer_pub, 4
-    )
-
-
-def test_a_v5_bootstrap_pull_is_served_a_sweep_begin(tmp_path: Path) -> None:
-    """The same request one version up gets the frontier, exactly once."""
+def test_a_bootstrap_pull_is_served_a_sweep_begin(tmp_path: Path) -> None:
+    """A bootstrap pull gets the frontier, exactly once."""
     scheduler, personal, peer_pub = _serving_scheduler(tmp_path)
     kinds = _served_kinds(
-        scheduler, personal, peer_pub, SWEEP_PROTOCOL_VERSION
+        scheduler, personal, peer_pub, FLEET_SYNC_PROTOCOL_VERSION
     )
     assert kinds.count(SWEEP_BEGIN_KIND) == 1

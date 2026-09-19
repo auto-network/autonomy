@@ -269,6 +269,7 @@ LOCAL_SYNC_TABLES: Final[frozenset[str]] = frozenset({
     # by code that drops it; ensure_schema_objects drops it on open.
     "fleet_sync_journal",
     "fleet_sync_origins",
+    "fleet_sync_origin_cursor",
     "fleet_sync_peer_state",
     "fleet_sync_prune_cursor",
     "fleet_sync_quarantine",

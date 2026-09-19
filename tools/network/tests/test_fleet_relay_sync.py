@@ -264,7 +264,7 @@ async def test_per_origin_watermarks_serve_each_author_once_and_never_echo(
         assert any(f.startswith(_DONE_MAGIC) for f in frames)
         kinds = [json.loads(f).get("kind") for f in frames if f[:1] in ("{", b"{")]
         assert "sweep.begin" not in kinds
-        return [(origin, tx) for origin, tx, _ops in headers]
+        return [(h[0], h[1]) for h in headers]
 
     server_pub = fleet.server_machine.public_hex
     # Knows nothing about this origin (established elsewhere): receives all
@@ -343,8 +343,8 @@ async def test_server_rebuilds_retired_frames_from_its_rows(
     # with its timestamp so the puller's watermark still passes it;
     # tx-a1's frame is rebuilt from the catalog row and the live row.
     controls, served, ops = await pull({"ee" * 32: 5})
-    assert [tx for _o, tx, _n in served] == ["tx-a1", "tx-a2", "tx-a3"]
-    assert [n for _o, _tx, n in served] == [1, 1, 1]
+    assert [h[1] for h in served] == ["tx-a1", "tx-a2", "tx-a3"]
+    assert [h[2] for h in served] == [1, 1, 1]
     empties = [c for c in controls if c.get("kind") == "transaction.empty"]
     assert [(c["origin"], c["transaction_id"], c["timestamp_ns"]) for c in empties] == [
         (server_pub, "tx-a0", 1_000)
@@ -356,7 +356,7 @@ async def test_server_rebuilds_retired_frames_from_its_rows(
     assert dict(ops[2].values)["title"] == "a0-renamed"
     # Puller already holds through 2000: only the newer two.
     controls, served, _ops = await pull({server_pub: 2_000})
-    assert [tx for _o, tx, _n in served] == ["tx-a2", "tx-a3"]
+    assert [h[1] for h in served] == ["tx-a2", "tx-a3"]
     assert not any(c.get("kind") == "transaction.empty" for c in controls)
 
 
@@ -376,7 +376,7 @@ async def test_puller_connects_with_a_bulk_safe_ping_timeout(monkeypatch):
     monkeypatch.setattr(viewer_module.websockets, "connect", fake_connect)
     with pytest.raises(RuntimeError, match="stop here"):
         await viewer_module.ViewerChannel.connect(
-            "wss://relay.example", "ab" * 16, org="autonomy",
+            "wss://relay.example", "ab" * 16, link_pub="cd" * 32, org="autonomy",
             ping_timeout=fleet_relay_sync.PULL_PING_TIMEOUT_S,
         )
     assert captured["ping_timeout"] == fleet_relay_sync.PULL_PING_TIMEOUT_S
@@ -433,8 +433,10 @@ async def test_large_transaction_is_served_in_bounded_groups_and_applies_whole(
     frames = [f async for f in stream]
     headers = [decode_transaction_header(f) for f in frames if f.startswith(_TRANSACTION_MAGIC)]
     # 105 rows in groups of 40: three groups, one transaction id.
-    assert [n for _o, _tx, n in headers] == [40, 40, 25]
-    assert {tx for _o, tx, _n in headers} == {"tx-bulk"}
+    assert [h[2] for h in headers] == [40, 40, 25]
+    assert {h[1] for h in headers} == {"tx-bulk"}
+    # The group index counts up and only the final group says `last`.
+    assert [(h[3], h[4]) for h in headers] == [(0, False), (1, False), (2, True)]
 
     # The receiver applies every group; all 105 rows land once.
     target = tmp_path / "target.db"

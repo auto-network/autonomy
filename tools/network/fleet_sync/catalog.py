@@ -175,6 +175,77 @@ def ensure_quarantine_table(conn: sqlite3.Connection) -> None:
             )
 
 
+#: Quarantine reasons that hold an origin's cursor below the transaction that
+#: produced them: the row arrived and could not be realized, and nothing yet
+#: drains it (graph://d9153c5a-76e D9). An attachment awaiting its bytes does
+#: NOT hold the cursor: blob transport drains it and it is the steady state.
+CURSOR_HOLDING_REASONS = ("fk_orphan", "secondary_identity_conflict")
+
+
+def ensure_origin_cursor_schema(conn: sqlite3.Connection) -> bool:
+    """The contiguous-prefix cursor per origin and the per-transaction
+    completeness flag (graph://d9153c5a-76e O-G, bead auto-85jlk).
+
+    ``origin_watermarks`` used to be MAX(timestamp_ns) per origin, a value
+    that could pass transactions never applied (a crash between the two
+    commits of one flush, or between the groups of a multi-group
+    transaction). The cursor advances only through RESOLVED transactions in
+    origin order. Created lazily on the write path; when the table is created
+    for the first time every existing origin is seeded at its newest
+    recorded transaction, since every pre-existing row counts as resolved
+    (operational default S6: enforce forward, do not audit history).
+    Returns True when the table was created by this call."""
+    columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(fleet_sync_transactions)")
+    }
+    if "complete" not in columns:
+        conn.execute(
+            "ALTER TABLE fleet_sync_transactions ADD COLUMN "
+            "complete INTEGER NOT NULL DEFAULT 1"
+        )
+    created = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='fleet_sync_origin_cursor'"
+    ).fetchone() is None
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS fleet_sync_origin_cursor("
+        "origin_id INTEGER PRIMARY KEY,"
+        "timestamp_ns INTEGER NOT NULL,"
+        "transaction_id TEXT NOT NULL)"
+    )
+    if created:
+        seed_origin_cursors_from_newest(conn)
+    return created
+
+
+def seed_origin_cursors_from_newest(conn: sqlite3.Connection) -> int:
+    """Set every origin's cursor to its newest recorded transaction. The
+    upgrade seed, and the seed a sweep-built store takes at bootstrap
+    completion, where pages arrive in address order across many transactions
+    by design and the advert gate has held the claim back until now."""
+    rows = conn.execute(
+        "SELECT t.origin_id, t.timestamp_ns, t.transaction_id "
+        "FROM fleet_sync_transactions t JOIN ("
+        "SELECT origin_id, MAX(timestamp_ns) AS newest "
+        "FROM fleet_sync_transactions GROUP BY origin_id"
+        ") m ON m.origin_id=t.origin_id AND m.newest=t.timestamp_ns "
+        "ORDER BY t.origin_id, t.transaction_id DESC"
+    ).fetchall()
+    seen: set[int] = set()
+    count = 0
+    for origin_id, timestamp_ns, transaction_id in rows:
+        if origin_id in seen:
+            continue
+        seen.add(origin_id)
+        conn.execute(
+            "INSERT INTO fleet_sync_origin_cursor(origin_id,timestamp_ns,transaction_id) "
+            "VALUES(?,?,?) ON CONFLICT(origin_id) DO UPDATE SET "
+            "timestamp_ns=excluded.timestamp_ns, transaction_id=excluded.transaction_id",
+            (int(origin_id), int(timestamp_ns), str(transaction_id)),
+        )
+        count += 1
+    return count
+
+
 def quarantine_unrealized(
     conn: sqlite3.Connection,
     rows: list[tuple[str, tuple, str]],
@@ -518,8 +589,14 @@ class MutationCatalog:
             if timestamp_ns <= required:
                 raise WatermarkError(f"write refused before time {required + 1}")
             transaction_id = f"local:{uuid4().hex}"
+            # Incomplete until the commit decides to keep it: an automatic
+            # record that captures nothing is deleted in before_commit, and
+            # the origin's cursor must never step onto a record that may
+            # still vanish.
+            ensure_origin_cursor_schema(self.conn)
             transaction_ref = self._ensure_transaction(
-                self.origin_incarnation, transaction_id, timestamp_ns
+                self.origin_incarnation, transaction_id, timestamp_ns,
+                complete=False,
             )
             self._context = _WriteContext(
                 timestamp_ns,
@@ -551,6 +628,14 @@ class MutationCatalog:
             "UPDATE fleet_sync_state SET last_timestamp=? WHERE singleton=1",
             (context.timestamp_ns,),
         )
+        # Kept: the record is complete and the cursor may pass it.
+        self.conn.execute(
+            "UPDATE fleet_sync_transactions SET complete=1 WHERE id=?",
+            (context.transaction_ref,),
+        )
+        origin_id = self._origin_id(self.origin_incarnation)
+        if origin_id is not None:
+            self._advance_cursor(origin_id)
 
     def after_transaction(self) -> None:
         """Drop process-local authorship state after commit or rollback."""
@@ -744,6 +829,7 @@ class MutationCatalog:
                 origin_id INTEGER NOT NULL,
                 transaction_id TEXT NOT NULL,
                 timestamp_ns INTEGER NOT NULL,
+                complete INTEGER NOT NULL DEFAULT 1,
                 UNIQUE(origin_id,transaction_id),
                 FOREIGN KEY(origin_id) REFERENCES fleet_sync_origins(id)
             )""",
@@ -1391,6 +1477,7 @@ class MutationCatalog:
             required = max(int(floor), int(last))
             if timestamp_ns <= required:
                 raise WatermarkError(f"write refused before time {required + 1}")
+            ensure_origin_cursor_schema(self.conn)
             transaction_ref = self._ensure_transaction(
                 self.origin_incarnation, transaction_id, timestamp_ns
             )
@@ -1403,6 +1490,9 @@ class MutationCatalog:
                 "UPDATE fleet_sync_state SET last_timestamp=? WHERE singleton=1",
                 (timestamp_ns,),
             )
+            origin_id = self._origin_id(self.origin_incarnation)
+            if origin_id is not None:
+                self._advance_cursor(origin_id)
             self.conn.commit()
         except Exception:
             self.conn.rollback()
@@ -1421,8 +1511,13 @@ class MutationCatalog:
         return table, tuple(address)
 
     def _ensure_transaction(
-        self, origin: str, transaction_id: str, timestamp_ns: int
+        self, origin: str, transaction_id: str, timestamp_ns: int,
+        *, complete: bool = True,
     ) -> int:
+        """Record a transaction of *origin*. *complete* is whether every
+        group of it has now been applied; an incomplete one holds the
+        origin's cursor until its last group lands (or it is re-served
+        whole from the cursor on the next pull)."""
         self.conn.execute(
             "INSERT OR IGNORE INTO fleet_sync_origins(incarnation) VALUES(?)",
             (origin,),
@@ -1432,8 +1527,8 @@ class MutationCatalog:
         ).fetchone()[0])
         self.conn.execute(
             "INSERT OR IGNORE INTO fleet_sync_transactions("
-            "origin_id,transaction_id,timestamp_ns) VALUES(?,?,?)",
-            (origin_id, transaction_id, timestamp_ns),
+            "origin_id,transaction_id,timestamp_ns,complete) VALUES(?,?,?,?)",
+            (origin_id, transaction_id, timestamp_ns, 1 if complete else 0),
         )
         row = self.conn.execute(
             "SELECT id,timestamp_ns FROM fleet_sync_transactions "
@@ -1442,7 +1537,63 @@ class MutationCatalog:
         ).fetchone()
         if int(row[1]) != timestamp_ns:
             raise WatermarkError("transaction id reused at another timestamp")
+        # Completeness is sticky: once every group has landed, a re-arriving
+        # partial group (a duplicate delivery) must not un-complete it.
+        self.conn.execute(
+            "UPDATE fleet_sync_transactions SET complete=MAX(complete,?) WHERE id=?",
+            (1 if complete else 0, int(row[0])),
+        )
         return int(row[0])
+
+    def _origin_id(self, origin: str) -> int | None:
+        row = self.conn.execute(
+            "SELECT id FROM fleet_sync_origins WHERE incarnation=?", (origin,)
+        ).fetchone()
+        return int(row[0]) if row else None
+
+    def _advance_cursor(self, origin_id: int) -> None:
+        """Walk the origin's cursor forward over recorded transactions in
+        (timestamp_ns, transaction_id) order, stopping at the first that is
+        not resolved: incomplete, or holding an undrained quarantine row
+        (CURSOR_HOLDING_REASONS). Caller holds the write transaction."""
+        row = self.conn.execute(
+            "SELECT timestamp_ns, transaction_id FROM fleet_sync_origin_cursor "
+            "WHERE origin_id=?", (origin_id,)
+        ).fetchone()
+        ts, txid = (int(row[0]), str(row[1])) if row else (0, "")
+        origin = self.conn.execute(
+            "SELECT incarnation FROM fleet_sync_origins WHERE id=?", (origin_id,)
+        ).fetchone()
+        origin_key = str(origin[0]) if origin else ""
+        quarantine = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='fleet_sync_quarantine'"
+        ).fetchone() is not None
+        holders = ",".join("?" * len(CURSOR_HOLDING_REASONS))
+        advanced = False
+        while True:
+            nxt = self.conn.execute(
+                "SELECT timestamp_ns, transaction_id, complete FROM fleet_sync_transactions "
+                "WHERE origin_id=? AND (timestamp_ns>? OR (timestamp_ns=? AND transaction_id>?)) "
+                "ORDER BY timestamp_ns, transaction_id LIMIT 1",
+                (origin_id, ts, ts, txid),
+            ).fetchone()
+            if nxt is None or not int(nxt[2]):
+                break
+            if quarantine and self.conn.execute(
+                "SELECT 1 FROM fleet_sync_quarantine WHERE origin=? AND transaction_id=? "
+                f"AND reason IN ({holders}) LIMIT 1",
+                (origin_key, str(nxt[1]), *CURSOR_HOLDING_REASONS),
+            ).fetchone():
+                break
+            ts, txid = int(nxt[0]), str(nxt[1])
+            advanced = True
+        if advanced or row is None:
+            self.conn.execute(
+                "INSERT INTO fleet_sync_origin_cursor(origin_id,timestamp_ns,transaction_id) "
+                "VALUES(?,?,?) ON CONFLICT(origin_id) DO UPDATE SET "
+                "timestamp_ns=excluded.timestamp_ns, transaction_id=excluded.transaction_id",
+                (origin_id, ts, txid),
+            )
 
     @staticmethod
     def _live_row(
@@ -1658,22 +1809,78 @@ class MutationCatalog:
             )
 
     def origin_watermarks(self) -> dict[str, int]:
-        """``{origin incarnation: max timestamp_ns held}`` over every
-        transaction this database has learned. Under the per-origin
-        write-floor promise this is W[origin]: every origin-originated
-        transaction at or below it is held."""
-        clause = ""
-        params: tuple = ()
+        """``{origin incarnation: cursor timestamp_ns}``: for every origin
+        this database has learned, the position through which every
+        recorded transaction of that origin is RESOLVED (applied in full,
+        or recorded empty, with no undrained quarantine row holding it).
+        This is W[origin] as a contiguous prefix, not a MAX; see
+        origin_max_timestamps for the old value, kept for diagnostics
+        (graph://d9153c5a-76e O-G). A store that predates the cursor table
+        reports MAX until its first write path creates and seeds it."""
+        present = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='fleet_sync_origin_cursor'"
+        ).fetchone() is not None
+        out = self.origin_max_timestamps()
+        if not present:
+            return out
+        for row in self.conn.execute(
+            "SELECT o.incarnation, c.timestamp_ns FROM fleet_sync_origin_cursor c "
+            "JOIN fleet_sync_origins o ON o.id=c.origin_id"
+        ):
+            out[str(row[0])] = int(row[1])
+        return out
+
+    def origin_max_timestamps(self) -> dict[str, int]:
+        """``{origin incarnation: MAX(timestamp_ns) recorded}`` -- what the
+        watermark used to be. Diagnostics only: the doctor prints it beside
+        the cursor and warns when they differ."""
         return {
             str(row[0]): int(row[1])
             for row in self.conn.execute(
                 "SELECT o.incarnation, MAX(t.timestamp_ns) "
                 "FROM fleet_sync_transactions t "
                 "JOIN fleet_sync_origins o ON o.id=t.origin_id "
-                + clause + "GROUP BY o.incarnation",
-                params,
+                "GROUP BY o.incarnation",
             )
         }
+
+    def unresolved_transactions(self) -> dict[str, int]:
+        """``{origin incarnation: count}`` of recorded transactions above the
+        cursor: incomplete, or held by an undrained quarantine row. What the
+        doctor names when cursor and MAX disagree."""
+        present = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='fleet_sync_origin_cursor'"
+        ).fetchone() is not None
+        if not present:
+            return {}
+        return {
+            str(row[0]): int(row[1])
+            for row in self.conn.execute(
+                "SELECT o.incarnation, COUNT(*) FROM fleet_sync_transactions t "
+                "JOIN fleet_sync_origins o ON o.id=t.origin_id "
+                "LEFT JOIN fleet_sync_origin_cursor c ON c.origin_id=t.origin_id "
+                "WHERE c.origin_id IS NULL OR t.timestamp_ns>c.timestamp_ns "
+                "OR (t.timestamp_ns=c.timestamp_ns AND t.transaction_id>c.transaction_id) "
+                "GROUP BY o.incarnation"
+            )
+            if int(row[1]) > 0
+        }
+
+    def seed_cursors_from_newest(self) -> int:
+        """Bootstrap completion: the sweep built this store out of order by
+        design and the advert gate held its claim; seed every cursor at the
+        newest recorded transaction. Own transaction."""
+        if self._context is not None or self.conn.in_transaction:
+            raise WatermarkError("cannot seed cursors inside another transaction")
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            ensure_origin_cursor_schema(self.conn)
+            count = seed_origin_cursors_from_newest(self.conn)
+            self.conn.execute("COMMIT")
+        except BaseException:
+            self.conn.execute("ROLLBACK")
+            raise
+        return count
     def origin_list(self) -> list[str]:
         return [
             str(row[0]) for row in self.conn.execute(
@@ -1993,10 +2200,17 @@ class MutationCatalog:
             raise WatermarkError("cannot record transactions inside another transaction")
         self.conn.execute("BEGIN IMMEDIATE")
         try:
+            ensure_origin_cursor_schema(self.conn)
+            touched: set[int] = set()
             for origin, transaction_id, timestamp_ns in entries:
                 self._ensure_transaction(
-                    str(origin), str(transaction_id), int(timestamp_ns)
+                    str(origin), str(transaction_id), int(timestamp_ns), complete=True,
                 )
+                origin_id = self._origin_id(str(origin))
+                if origin_id is not None:
+                    touched.add(origin_id)
+            for origin_id in touched:
+                self._advance_cursor(origin_id)
             self.conn.execute("COMMIT")
         except BaseException:
             self.conn.execute("ROLLBACK")
@@ -2287,7 +2501,7 @@ class MutationCatalog:
         return applied == 1
 
     def apply_remote_batch(
-        self, authored_items: Iterable[AuthoredMutation]
+        self, authored_items: Iterable[AuthoredMutation], *, complete: bool = True,
     ) -> tuple[int, int]:
         """Atomically merge one originated transaction in dependency-safe order."""
         items: list[AuthoredMutation] = []
@@ -2316,6 +2530,7 @@ class MutationCatalog:
             raise WatermarkError("cannot apply remote inside another transaction")
         self.conn.execute("BEGIN IMMEDIATE")
         try:
+            ensure_origin_cursor_schema(self.conn)
             winners: list[tuple[AuthoredMutation, bytes]] = []
             ignored = 0
             for originated in items:
@@ -2379,10 +2594,21 @@ class MutationCatalog:
                             continue
                 winners.append((originated, address_blob))
             if not winners:
-                self.conn.rollback()
+                # Every operation lost last-writer-wins: nothing to install,
+                # but the transaction is SEEN AND RESOLVED. Recording it is
+                # what lets the cursor pass it; a rollback here used to leave
+                # a strict cursor stuck behind it forever (review of
+                # graph://d9153c5a-76e, finding 5).
+                self._ensure_transaction(
+                    identity[0], identity[1], timestamp, complete=complete,
+                )
+                origin_id = self._origin_id(identity[0])
+                if origin_id is not None:
+                    self._advance_cursor(origin_id)
+                self.conn.commit()
                 return 0, ignored
             transaction_ref = self._ensure_transaction(
-                identity[0], identity[1], timestamp
+                identity[0], identity[1], timestamp, complete=complete,
             )
             self._context = _WriteContext(
                 timestamp, identity[0], identity[1], transaction_ref,
@@ -2488,6 +2714,9 @@ class MutationCatalog:
                 "MAX(last_timestamp,?) WHERE singleton=1",
                 (mutation.timestamp_ns,),
             )
+            origin_id = self._origin_id(identity[0])
+            if origin_id is not None:
+                self._advance_cursor(origin_id)
             self.conn.commit()
             return len(winners) - deferred_count, ignored
         except Exception:

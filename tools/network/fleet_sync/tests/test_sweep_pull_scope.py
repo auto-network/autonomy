@@ -26,7 +26,7 @@ from tools.network.fleet_sync_channel import FleetAuthenticator
 from tools.network.fleet_sync.catalog import MutationCatalog
 from tools.network.fleet_sync.sweep_receive import (
     SWEEP_BEGIN_KIND,
-    SWEEP_PROTOCOL_VERSION,
+    FLEET_SYNC_PROTOCOL_VERSION,
     begin_bootstrap,
     read_bootstrap,
 )
@@ -224,10 +224,7 @@ def test_a_bootstrapping_store_asks_v5_and_refuses_a_downgrade(
     assert channel.sent, "the client never sent a request"
     decoded = fss.decode_pull_request(channel.sent[0])
     version = decoded[5]
-    assert version >= SWEEP_PROTOCOL_VERSION, (
-        f"a resuming sweep must not negotiate below v{SWEEP_PROTOCOL_VERSION}, "
-        f"asked v{version}"
-    )
+    assert version == FLEET_SYNC_PROTOCOL_VERSION
     # There is no checkpoint field to assert: sync checkpoints are deleted,
     # so a resuming sweep has nothing to refuse and the field is off the wire.
     assert b"accept_checkpoint" not in channel.sent[0]
@@ -253,7 +250,7 @@ def test_a_delivered_begin_anchors_the_store_through_the_real_receiver(
     finally:
         conn.close()
     begin = json.dumps({
-        "v": SWEEP_PROTOCOL_VERSION,
+        "v": FLEET_SYNC_PROTOCOL_VERSION,
         "kind": SWEEP_BEGIN_KIND,
         "scope": "personal",
         "source_machine_pub": PEER,
@@ -291,39 +288,6 @@ def test_a_settled_store_is_unaffected(tmp_path: Path, monkeypatch) -> None:
     assert decoded[5] == fss.FLEET_SYNC_PROTOCOL_VERSION
 
 
-def test_an_unsolicited_begin_on_a_v4_pull_anchors_nothing(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """The sweep is an OPT-IN, so a peer must not anchor one unilaterally.
-
-    A SETTLED store asks the default version -- it needs no bootstrap at all.
-    Accepting a v5 sweep.begin there would anchor a bootstrap this client
-    never requested, and having not asked for v5 it has no sweep receive path
-    to finish with, so it would sit anchored and never complete.
-    """
-    scheduler, personal = _scheduler(tmp_path, settled=True)
-    begin = json.dumps({
-        "v": SWEEP_PROTOCOL_VERSION,
-        "kind": SWEEP_BEGIN_KIND,
-        "scope": "personal",
-        "source_machine_pub": PEER,
-        "frontier": {PEER: 42},
-    }).encode()
-
-    channel = _FakeChannel([begin])
-    error = _drive(
-        monkeypatch, scheduler, channel, expect=fss.FleetSyncProtocolError,
-    )
-    assert "sweep.begin" in str(error)
-
-    conn = sqlite3.connect(personal)
-    try:
-        assert read_bootstrap(conn) is None, (
-            "an unsolicited sweep.begin anchored a store that never asked"
-        )
-    finally:
-        conn.close()
-
 
 def test_a_fresh_joiner_asks_for_the_sweep_without_pre_seeding(
     tmp_path: Path, monkeypatch
@@ -347,10 +311,7 @@ def test_a_fresh_joiner_asks_for_the_sweep_without_pre_seeding(
     _drive(monkeypatch, scheduler, channel)
 
     decoded = fss.decode_pull_request(channel.sent[0])
-    assert decoded[5] >= SWEEP_PROTOCOL_VERSION, (
-        f"a fresh joiner asked v{decoded[5]}, so it can never be served a "
-        f"sweep and bootstrap cannot start"
-    )
+    assert decoded[5] == FLEET_SYNC_PROTOCOL_VERSION
     assert b"accept_checkpoint" not in channel.sent[0], (
         "the request still carries a retired checkpoint concept"
     )
@@ -363,7 +324,7 @@ def test_a_fresh_joiner_can_anchor_from_a_delivered_begin(
     with nothing pre-seeded."""
     scheduler, personal = _scheduler(tmp_path)
     begin = json.dumps({
-        "v": SWEEP_PROTOCOL_VERSION,
+        "v": FLEET_SYNC_PROTOCOL_VERSION,
         "kind": SWEEP_BEGIN_KIND,
         "scope": "personal",
         "source_machine_pub": PEER,
@@ -386,7 +347,7 @@ def test_a_fresh_joiner_can_anchor_from_a_delivered_begin(
 def _sweep_stream(frontier, *, records=(), end=True):
     """A server stream: begin, optional pages, optional end."""
     frames = [json.dumps({
-        "v": SWEEP_PROTOCOL_VERSION, "kind": SWEEP_BEGIN_KIND,
+        "v": FLEET_SYNC_PROTOCOL_VERSION, "kind": SWEEP_BEGIN_KIND,
         "scope": "personal", "source_machine_pub": PEER,
         "frontier": frontier,
     }).encode()]
@@ -395,7 +356,7 @@ def _sweep_stream(frontier, *, records=(), end=True):
         frames.extend(ops)
     if end:
         frames.append(json.dumps({
-            "v": SWEEP_PROTOCOL_VERSION, "kind": "sweep.end",
+            "v": FLEET_SYNC_PROTOCOL_VERSION, "kind": "sweep.end",
             "records": sum(len(o) for _, o in records),
         }).encode())
     return frames

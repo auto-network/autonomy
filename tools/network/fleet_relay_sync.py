@@ -554,13 +554,6 @@ def _scope_db_path(scope: str) -> Path:
 
 _activated_scope_paths: set[Path] = set()
 
-#: Per-peer declared sync protocol version for relay pulls. A server that
-#: refused a v4 declaration before its hello is retried at v3 for the rest
-#: of this process; a restart re-probes v4. Only wire efficiency rides on
-#: this, never correctness.
-_relay_sync_versions: dict[str, int] = {}
-
-
 def _scoped_store(scope: str, machine_pub: str) -> SQLiteFleetSyncStore:
     """The scope's client store, with fleet writers activated once per path.
 

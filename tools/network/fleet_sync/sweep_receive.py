@@ -41,11 +41,12 @@ from .compaction import AuthoredMutation
 from .policies import PolicyKind, TABLE_POLICIES
 from .streaming import BASE_TABLE_ORDER, _key_expressions
 
-#: Protocol version at which a peer is asking for, and can handle, a
-#: keyspace sweep. A v3/v4 peer neither requests nor receives one: their
-#: decoder rejects unknown fields outright, so "additive and ignored" is
-#: not available and silence is the only safe treatment.
-SWEEP_PROTOCOL_VERSION = 5
+#: The one fleet sync wire version. Every machine runs the same code; a
+#: peer declaring another version is refused with a typed error
+#: (graph://6ad52a52-f75 principle 3). 6: transaction headers carry
+#: `group` and `last`, so the receiver knows when a paged transaction is
+#: whole and its origin cursor may pass it.
+FLEET_SYNC_PROTOCOL_VERSION = 6
 
 
 class BootstrapError(Exception):
@@ -440,9 +441,9 @@ def handle_sweep_begin(
         raise SweepBeginInvalid(
             f"expected {SWEEP_BEGIN_KIND!r}, got {record.get('kind')!r}"
         )
-    if record.get("v") != SWEEP_PROTOCOL_VERSION:
+    if record.get("v") != FLEET_SYNC_PROTOCOL_VERSION:
         raise SweepBeginInvalid(
-            f"sweep.begin requires protocol v{SWEEP_PROTOCOL_VERSION}, "
+            f"sweep.begin requires protocol v{FLEET_SYNC_PROTOCOL_VERSION}, "
             f"got {record.get('v')!r}"
         )
     source = record.get("source_machine_pub")
