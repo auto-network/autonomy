@@ -21,11 +21,31 @@ import time
 from pathlib import Path
 
 from tools.network.fleet_org_channel import org_state_key
+from tools.network.fleet_sync.harness.fleet import HarnessFleet
 from tools.network.fleet_sync.harness.org import ORG, HarnessOrg
 
 
 def test_three_members_sync_the_org_scope_across_fleets(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("AUTONOMY_HARNESS_FLEET_SLOTS", "3")
+    # Fleet slots bound how many harness fleets run at once on the machine
+    # (HarnessFleet._acquire_fleet_slot: two flock files by default). This
+    # organization is three two-machine fleets, and each build() took its
+    # own slot, so the test raised the pool to three, took the third slot
+    # at once, and then held it while it waited for two other scenarios to
+    # release theirs: in the 2026-09-19 full runs 12 of its 17 s went to
+    # that wait. The organization now takes ONE slot, on the founder's
+    # fleet, and the other two member fleets ride on it. Its six worker
+    # processes are what two three-machine fleets already put on one pair
+    # of slots, so the concurrency bound is kept, and every assertion below
+    # is unchanged.
+    real_acquire = HarnessFleet._acquire_fleet_slot
+    holder: list = []
+
+    def acquire_once(self, slots=None):
+        if not holder:
+            real_acquire(self, slots)
+            holder.append(self)
+
+    monkeypatch.setattr(HarnessFleet, "_acquire_fleet_slot", acquire_once)
     org = HarnessOrg(tmp_path / "org", members=3, machines_per_member=2).build()
     try:
         org.start_all()
