@@ -36,7 +36,9 @@ Neither test credential is written to the Compose file or preserved logs.
 
 ## CI requirement
 
-The real ladder requires a Linux Docker host with the Compose plugin. Unit
+The real ladder requires a Linux Docker host with the Compose plugin, Node 22,
+`agent-browser`, and `certutil` (package `libnss3-tools`) to trust the simulation
+TLS certificate in the browser. Unit
 tests validate topology isolation, command sequencing, secret handling,
 teardown scoping, the fixture's real ledger/identity records, and the explicit
 sync extension-point refusals without pretending that those are the Docker
