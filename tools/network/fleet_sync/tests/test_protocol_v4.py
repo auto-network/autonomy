@@ -1,11 +1,9 @@
-"""Protocol v4: batched transaction headers on the delta channel.
+"""The delta channel framing: one transaction-header frame, then bare
+operation frames.
 
-v3 repeats the full ~150-byte transaction header inside every operation
-frame; v4 sends one transaction-header frame followed by bare operation
-frames. The server answers in the requester's declared version, so a v3
-puller against a v4 server syncs unchanged. Mutation frame bytes,
-candidate hashes, and journal storage are untouched — the wire wrapper
-only.
+There is one protocol version and every machine runs it. The header carries
+the group index and whether the group is the transaction's last, so the
+receiver knows when a paged transaction is whole (auto-85jlk).
 """
 
 from __future__ import annotations
@@ -27,6 +25,7 @@ from tools.network.fleet_sync_channel import (
     FleetDirectServer,
 )
 from tools.network.fleet_sync_scheduler import (
+    FLEET_SYNC_PROTOCOL_VERSION,
     _digest_add,
     FleetSyncProtocolError,
     FleetSyncRuntimeConfig,
@@ -34,7 +33,6 @@ from tools.network.fleet_sync_scheduler import (
     SQLiteFleetSyncStore,
     decode_operation_frame,
     decode_transaction_header,
-    encode_authored,
     encode_done,
     encode_operation_frame,
     encode_transaction_header,
@@ -115,42 +113,6 @@ def _fan_out(item: AuthoredMutation, operations: int) -> list[AuthoredMutation]:
     ]
 
 
-def test_v4_cuts_wire_bytes_forty_percent_on_multi_op_transactions(
-    tmp_path: Path,
-) -> None:
-    machine = KeyPair.generate()
-    path = tmp_path / "sample.db"
-    _prepare(path, machine)
-    _insert(path, "kept-row", "one realistic row payload")
-    _insert(path, "bulk-row", "one realistic row payload")
-    _delete(path, "bulk-row")
-    # Served from rows: the deleted row's insert transaction has nothing
-    # surviving (its address now cites the tombstone), so take the
-    # realistic insert from the row that is kept.
-    items = [item for tx in _journal_transactions(path) for item in tx]
-    insert_item = next(i for i in items if not i.mutation.tombstone)
-    tombstone_item = next(i for i in items if i.mutation.tombstone)
-
-    def wire(item: AuthoredMutation, operations: int) -> tuple[int, int]:
-        ops = _fan_out(item, operations)
-        v3 = sum(
-            len(encode_authored(op, transaction_operations=operations))
-            for op in ops
-        )
-        v4 = len(encode_transaction_header(
-            item.origin_incarnation, item.transaction_id, operations
-        )) + sum(len(encode_operation_frame(op)) for op in ops)
-        return v3, v4
-
-    # Bulk deletes are the canonical multi-operation transaction: tiny
-    # tombstone frames under a repeated full header.
-    v3, v4 = wire(tombstone_item, 64)
-    assert v4 <= 0.6 * v3, f"tombstone reduction only {1 - v4 / v3:.0%}"
-    # Full row inserts still shed the repeated header.
-    v3_rows, v4_rows = wire(insert_item, 64)
-    assert v4_rows < v3_rows
-
-
 def test_v4_frames_round_trip_and_reject_malformed(tmp_path: Path) -> None:
     machine = KeyPair.generate()
     path = tmp_path / "sample.db"
@@ -159,10 +121,10 @@ def test_v4_frames_round_trip_and_reject_malformed(tmp_path: Path) -> None:
     item = _journal_transactions(path)[0][0]
 
     header = encode_transaction_header(
-        item.origin_incarnation, item.transaction_id, 3
+        item.origin_incarnation, item.transaction_id, 3, group=2, last=True,
     )
     assert decode_transaction_header(header) == (
-        item.origin_incarnation, item.transaction_id, 3
+        item.origin_incarnation, item.transaction_id, 3, 2, True
     )
     frame = encode_operation_frame(item)
     operation, mutation = decode_operation_frame(frame)
@@ -173,8 +135,20 @@ def test_v4_frames_round_trip_and_reject_malformed(tmp_path: Path) -> None:
         decode_transaction_header(b"FSTXnot json")
     with pytest.raises(FleetSyncProtocolError):
         decode_transaction_header(encode_transaction_header(
-            item.origin_incarnation, item.transaction_id, 1
+            item.origin_incarnation, item.transaction_id, 1, group=0, last=True,
         ).replace(b'"operations":1', b'"operations":0'))
+    # group and last are not optional: a header without them, or with a
+    # malformed one, is refused rather than read as "complete".
+    from tools.network.fleet_sync_scheduler import _TRANSACTION_MAGIC
+    import json as _json
+    for body in (
+        {"origin": "a" * 64, "transaction": "tx", "operations": 1},
+        {"origin": "a" * 64, "transaction": "tx", "operations": 1, "group": 0},
+        {"origin": "a" * 64, "transaction": "tx", "operations": 1, "group": -1, "last": True},
+        {"origin": "a" * 64, "transaction": "tx", "operations": 1, "group": 0, "last": 1},
+    ):
+        with pytest.raises(FleetSyncProtocolError):
+            decode_transaction_header(_TRANSACTION_MAGIC + _json.dumps(body).encode())
     with pytest.raises(FleetSyncProtocolError):
         decode_operation_frame(b"FSO1")
     with pytest.raises(FleetSyncProtocolError):
@@ -210,21 +184,11 @@ def _scheduler(key, root, entries, path, peers=None, **extra):
     ))
 
 
-def test_v4_pair_converges_without_any_v3_frames(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """Both sides current: the server must never fall back to per-operation
-    headers. encode_authored raising proves the v3 path stayed cold."""
+def test_a_pair_converges_over_the_delta_channel(tmp_path: Path) -> None:
     async def run() -> None:
         root, left_key, right_key, left_path, right_path, entries = (
             _pair_configs(tmp_path)
         )
-        import tools.network.fleet_sync_scheduler as scheduler_module
-
-        def refuse_v3(*_args, **_kwargs):
-            raise AssertionError("v3 framing used on a v4↔v4 pull")
-
-        monkeypatch.setattr(scheduler_module, "encode_authored", refuse_v3)
         right = _scheduler(right_key, root, entries, right_path)
         await right.start()
         left = _scheduler(
@@ -237,48 +201,6 @@ def test_v4_pair_converges_without_any_v3_frames(
         try:
             await _eventually(
                 lambda: _title(left_path, "v4-crossing") == "arrives batched"
-            )
-        finally:
-            await left.stop()
-            await right.stop()
-
-    asyncio.run(run())
-
-
-def test_v3_puller_against_v4_server_converges_unchanged(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """Mixed-version guarantee: a peer pinned to v3 receives the exact v3
-    per-operation framing (the batched encoders raising proves it) and
-    still converges."""
-    async def run() -> None:
-        root, left_key, right_key, left_path, right_path, entries = (
-            _pair_configs(tmp_path)
-        )
-        import tools.network.fleet_sync_scheduler as scheduler_module
-
-        def refuse_v4(*_args, **_kwargs):
-            raise AssertionError("v4 framing served to a v3 puller")
-
-        monkeypatch.setattr(
-            scheduler_module, "encode_transaction_header", refuse_v4
-        )
-        monkeypatch.setattr(
-            scheduler_module, "encode_operation_frame", refuse_v4
-        )
-        right = _scheduler(right_key, root, entries, right_path)
-        await right.start()
-        left = _scheduler(
-            left_key, root, entries, left_path,
-            peers={right_key.public_hex: [f"ws://127.0.0.1:{right.port}"]},
-        )
-        left._peer_protocol[right_key.public_hex] = 3
-        _insert(right_path, "v3-crossing", "served in v3 framing")
-        _insert(left_path, "left-seed", "keeps the delta path")
-        await left.start()
-        try:
-            await _eventually(
-                lambda: _title(left_path, "v3-crossing") == "served in v3 framing"
             )
         finally:
             await left.stop()
@@ -318,7 +240,7 @@ def _crafted_server_test(tmp_path: Path, frames_from) -> Path:
                     epoch="ab" * 32,
                     count=count,
                     digest=digest.hexdigest(),
-                    version=4,
+                    version=FLEET_SYNC_PROTOCOL_VERSION,
                 )
             return stream()
 
@@ -369,12 +291,13 @@ def test_v4_digest_tamper_blocks_acknowledgement(tmp_path: Path) -> None:
     """The summary digest must cover header and operation frames alike.
 
     Complete, individually authenticated transaction groups legitimately
-    apply as they arrive (v3 semantics, unchanged); what a digest mismatch
+    apply as they arrive; what a digest mismatch
     must prevent is the pull SUCCEEDING — no acknowledgement, no resume
     advancement, a recorded retry."""
     def frames(items, digest):
         header = encode_transaction_header(
-            items[0].origin_incarnation, items[0].transaction_id, len(items)
+            items[0].origin_incarnation, items[0].transaction_id, len(items),
+            group=0, last=True,
         )
         # The header is deliberately left OUT of the summary digest.
         yield header
@@ -391,7 +314,7 @@ def test_v4_operation_count_mismatch_is_refused(tmp_path: Path) -> None:
     def frames(items, digest):
         header = encode_transaction_header(
             items[0].origin_incarnation, items[0].transaction_id,
-            len(items) + 1,
+            len(items) + 1, group=0, last=True,
         )
         _digest_add(digest, header)
         yield header
@@ -423,19 +346,12 @@ def _insert_together(path: Path, rows) -> None:
 def test_a_transaction_larger_than_one_serve_group_arrives(
     tmp_path: Path,
 ) -> None:
-    """v4 carries a transaction that spans several serve groups.
+    """A transaction that spans several serve groups arrives whole.
 
-    Written to reproduce the 2026-09-09 autonomy-scope outage and it did NOT
-    — it passed, which is what proved the fault was v3-only. v4 handles the
-    group boundary correctly at :3486-3505 ("the header opens a group; a
-    previous group must be complete before it applies"), and that is why this
-    passes. The outage was fixed on the serve side in ecefaf6b: v3 has no
-    grouping concept, so v3 must not page a transaction at all.
-
-    Kept because the coverage gap was real even though my diagnosis was not.
-    No test in this suite had ever built a transaction large enough to span a
-    serve group, so the v4 group boundary was exercised by nothing. Both
-    paths are now covered: v3 by test_v3_transaction_grouping.py, v4 here.
+    No test in this suite had ever built a transaction large enough to span
+    a serve group, so the group boundary was exercised by nothing until the
+    2026-09-09 autonomy-scope outage. With the cursor, the receiver also
+    holds the origin's watermark until the LAST group lands.
     """
     from tools.network.fleet_sync_scheduler import SERVE_GROUP_OPERATIONS
 
@@ -474,3 +390,24 @@ def test_a_transaction_larger_than_one_serve_group_arrives(
             await right.stop()
 
     asyncio.run(run())
+
+
+
+
+def test_the_wire_has_one_version_and_refuses_every_other() -> None:
+    """Every machine runs the same code, so there is no negotiation: a
+    request or summary at any other version is refused with a typed error
+    (graph://6ad52a52-f75 principle 3)."""
+    from tools.network.fleet_sync_scheduler import (
+        decode_pull_request, encode_pull_request,
+    )
+    assert FLEET_SYNC_PROTOCOL_VERSION == 6
+    request = encode_pull_request("ab" * 32, compat="cd" * 32)
+    assert decode_pull_request(request)[5] == FLEET_SYNC_PROTOCOL_VERSION
+    for other in (3, 4, 5, 7):
+        with pytest.raises(FleetSyncProtocolError):
+            encode_pull_request("ab" * 32, compat="cd" * 32, version=other)
+        with pytest.raises(FleetSyncProtocolError):
+            decode_pull_request(request.replace(
+                b'"v":%d' % FLEET_SYNC_PROTOCOL_VERSION, b'"v":%d' % other,
+            ))

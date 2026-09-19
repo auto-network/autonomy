@@ -570,10 +570,10 @@ def test_bootstrap_table_is_classified_local_and_survives_reopen(
 
 def _begin_record(frontier, *, scope="personal", source=SOURCE_ORIGIN, v=None):
     from tools.network.fleet_sync.sweep_receive import (
-        SWEEP_BEGIN_KIND, SWEEP_PROTOCOL_VERSION,
+        SWEEP_BEGIN_KIND, FLEET_SYNC_PROTOCOL_VERSION,
     )
     return {
-        "v": SWEEP_PROTOCOL_VERSION if v is None else v,
+        "v": FLEET_SYNC_PROTOCOL_VERSION if v is None else v,
         "kind": SWEEP_BEGIN_KIND,
         "scope": scope,
         "source_machine_pub": source,
@@ -634,7 +634,7 @@ def test_sweep_begin_persists_the_frontier_before_any_apply(
 
 @pytest.mark.parametrize("mutate,why", [
     ({"kind": "sweep.end"}, "wrong kind"),
-    ({"v": 4}, "a v4 record cannot anchor a v5 sweep"),
+    ({"v": 5}, "a record at any other version anchors nothing"),
     ({"source_machine_pub": "c3" * 32}, "source is not the authenticated peer"),
     ({"scope": "other"}, "scope is not the requested one"),
     ({"frontier": []}, "frontier is not a mapping"),

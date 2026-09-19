@@ -1050,6 +1050,33 @@ def check_sync_frontiers(report: dict) -> None:
                             "GROUP BY o.incarnation ORDER BY o.incarnation"
                         )
                     ]
+                    # The contiguous-prefix cursor (graph://d9153c5a-76e O-G):
+                    # the position this store can HONESTLY claim per origin.
+                    # It equals MAX unless a transaction above it is
+                    # unresolved (incomplete groups, or a quarantined row
+                    # nothing drains). A store that predates the cursor
+                    # table shows none.
+                    if "fleet_sync_origin_cursor" in tables:
+                        cursors = {
+                            str(r[0]): int(r[1]) for r in conn.execute(
+                                "SELECT o.incarnation, c.timestamp_ns "
+                                "FROM fleet_sync_origin_cursor c "
+                                "JOIN fleet_sync_origins o ON o.id=c.origin_id"
+                            )
+                        }
+                        unresolved = {
+                            str(r[0]): int(r[1]) for r in conn.execute(
+                                "SELECT o.incarnation, COUNT(*) FROM fleet_sync_transactions t "
+                                "JOIN fleet_sync_origins o ON o.id=t.origin_id "
+                                "LEFT JOIN fleet_sync_origin_cursor c ON c.origin_id=t.origin_id "
+                                "WHERE c.origin_id IS NULL OR t.timestamp_ns>c.timestamp_ns "
+                                "OR (t.timestamp_ns=c.timestamp_ns AND t.transaction_id>c.transaction_id) "
+                                "GROUP BY o.incarnation"
+                            )
+                        }
+                        for origin in entry["origins"]:
+                            origin["cursor_ns"] = cursors.get(origin["origin"])
+                            origin["unresolved"] = unresolved.get(origin["origin"], 0)
                 else:
                     entry["origins"] = None  # sync never activated here
                 for table, column in (("thoughts", "created_at"),
@@ -1081,10 +1108,18 @@ def check_sync_frontiers(report: dict) -> None:
                     else f"{age // 3600}h" if age < 172800
                     else f"{age // 86400}d"
                 )
+                cursor_ns = origin.get("cursor_ns")
+                behind = ""
+                if cursor_ns is not None and cursor_ns < origin["newest_ns"]:
+                    lag = max(0, (origin["newest_ns"] - cursor_ns) // 1_000_000_000)
+                    behind = (
+                        f"; CURSOR {lag}s behind MAX, {origin.get('unresolved', 0)} "
+                        "unresolved transaction(s) hold it"
+                    )
                 _line(
                     f"  {slug} <- {origin['origin'][:12]}",
-                    f"newest write {human} old, {origin['transactions']} txn(s)",
-                    warn=age >= 3600,
+                    f"newest write {human} old, {origin['transactions']} txn(s){behind}",
+                    warn=age >= 3600 or bool(behind),
                 )
             newest_thought = (entry.get("thoughts") or {}).get("newest")
             if newest_thought:
