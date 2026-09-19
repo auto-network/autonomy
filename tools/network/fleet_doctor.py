@@ -1108,18 +1108,27 @@ def check_sync_frontiers(report: dict) -> None:
                     else f"{age // 3600}h" if age < 172800
                     else f"{age // 86400}d"
                 )
+                # The cursor state prints on EVERY origin, healthy or not, so
+                # a reader can see the claim was checked rather than infer
+                # health from an absent warning (host validation of
+                # auto-85jlk could not find the line on a converged fleet).
                 cursor_ns = origin.get("cursor_ns")
-                behind = ""
-                if cursor_ns is not None and cursor_ns < origin["newest_ns"]:
+                behind = False
+                if cursor_ns is None:
+                    cursor = "; cursor not yet seeded (store predates the cursor)"
+                elif cursor_ns < origin["newest_ns"]:
                     lag = max(0, (origin["newest_ns"] - cursor_ns) // 1_000_000_000)
-                    behind = (
+                    behind = True
+                    cursor = (
                         f"; CURSOR {lag}s behind MAX, {origin.get('unresolved', 0)} "
                         "unresolved transaction(s) hold it"
                     )
+                else:
+                    cursor = "; cursor at MAX, 0 unresolved"
                 _line(
                     f"  {slug} <- {origin['origin'][:12]}",
-                    f"newest write {human} old, {origin['transactions']} txn(s){behind}",
-                    warn=age >= 3600 or bool(behind),
+                    f"newest write {human} old, {origin['transactions']} txn(s){cursor}",
+                    warn=age >= 3600 or behind,
                 )
             newest_thought = (entry.get("thoughts") or {}).get("newest")
             if newest_thought:
