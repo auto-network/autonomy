@@ -100,10 +100,15 @@ from tools.network.fleet_sync.sweep_receive import FLEET_SYNC_PROTOCOL_VERSION
 _REQUEST_FIELDS = frozenset({
     "v", "op", "roster_epoch", "resume", "compat",
 })
-_REQUEST_OPTIONAL_FIELDS = frozenset({"scope", "bootstrap", "watermarks"})
+_REQUEST_OPTIONAL_FIELDS = frozenset({"scope", "bootstrap", "watermarks", "personas"})
 from tools.network.fleet_sync.sweep_receive import (
     SWEEP_BEGIN_KIND,
     SWEEP_END_KIND,
+)
+from tools.network.fleet_sync.cuts import (
+    CutError,
+    ORIGIN_CUT_KIND,
+    PERSONA_CUT_KIND,
 )
 
 _REFUSAL_FIELDS = frozenset({"v", "kind", "digest"})
@@ -647,6 +652,7 @@ def encode_pull_request(
     bootstrap: bool = False,
     version: int = FLEET_SYNC_PROTOCOL_VERSION,
     watermarks: Mapping[str, int] | None = None,
+    personas: Mapping[str, int] | None = None,
 ) -> bytes:
     """Ask for every journal transaction after a content-addressed position.
 
@@ -685,6 +691,15 @@ def encode_pull_request(
         body["scope"] = scope
     if bootstrap:
         body["bootstrap"] = True
+    if personas:
+        # The persona cuts the puller already holds, so the server sends
+        # only newer ones (auto-mmwgu). Same bound and shape as watermarks.
+        if len(personas) > MAX_WATERMARK_ORIGINS:
+            raise FleetSyncProtocolError("fleet sync personas map exceeds bound")
+        body["personas"] = {
+            _require_hex64(persona, "fleet sync persona"): int(value)
+            for persona, value in sorted(personas.items())
+        }
     if watermarks is not None:
         if len(watermarks) > MAX_WATERMARK_ORIGINS:
             raise FleetSyncProtocolError("fleet sync watermark map exceeds bound")
@@ -702,7 +717,8 @@ MAX_WATERMARK_ORIGINS = 4096
 def decode_pull_request(
     raw: bytes,
 ) -> tuple[str, tuple[tuple[str, str, int], ...], str, str, bool, int, bool, dict[str, int] | None]:
-    """-> (epoch, resume trail, compat, scope, bootstrap, version, watermarks)."""
+    """-> (epoch, resume trail, compat, scope, bootstrap, version, watermarks,
+    personas)."""
     try:
         value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
@@ -740,6 +756,19 @@ def decode_pull_request(
         ):
             raise FleetSyncProtocolError("fleet sync watermark map is malformed")
         watermarks = {str(k): int(v) for k, v in watermarks.items()}
+    personas = value.get("personas")
+    if personas is not None:
+        if (
+            not isinstance(personas, dict)
+            or len(personas) > MAX_WATERMARK_ORIGINS
+            or any(
+                not isinstance(k, str) or len(k) != 64
+                or not isinstance(v, int) or isinstance(v, bool) or v < 0
+                for k, v in personas.items()
+            )
+        ):
+            raise FleetSyncProtocolError("fleet sync personas map is malformed")
+        personas = {str(k): int(v) for k, v in personas.items()}
     if value["op"] != "pull":
         raise FleetSyncProtocolError("unsupported fleet sync operation")
     epoch = _require_hex64(value["roster_epoch"], "fleet sync roster_epoch")
@@ -750,7 +779,7 @@ def decode_pull_request(
     return epoch, tuple(
         decode_breadcrumb(entry, "fleet sync resume breadcrumb")
         for entry in resume
-    ), compat, scope, bootstrap, version, watermarks
+    ), compat, scope, bootstrap, version, watermarks, personas
 
 
 def encode_transaction_header(
@@ -1343,6 +1372,87 @@ class SQLiteFleetSyncStore:
         conn, catalog = self._open()
         try:
             return catalog.record_transactions(list(entries))
+        finally:
+            conn.close()
+
+    # ── idle cuts (auto-mmwgu): thin wrappers over fleet_sync.cuts ──────
+
+    def seal_machine_cut(self, signer, now_ns: int) -> int | None:
+        """Seal this store's own origin cut at max(last write, now)."""
+        from tools.network.fleet_sync import cuts
+
+        conn, catalog = self._open()
+        try:
+            return cuts.seal_machine_cut(conn, signer, catalog.origin_incarnation, now_ns)
+        finally:
+            conn.close()
+
+    def adopt_origin_cut(self, record) -> bool:
+        from tools.network.fleet_sync import cuts
+
+        conn, _catalog = self._open()
+        try:
+            return cuts.adopt_origin_cut(conn, record)
+        finally:
+            conn.close()
+
+    def origin_cut_frames(self, version: int, watermarks) -> list[bytes]:
+        from tools.network.fleet_sync import cuts
+
+        conn, _catalog = self._open()
+        try:
+            return cuts.origin_cut_frames(conn, version, watermarks)
+        finally:
+            conn.close()
+
+    def origin_cuts(self) -> dict[str, tuple[int, str]]:
+        from tools.network.fleet_sync import cuts
+
+        conn, _catalog = self._open()
+        try:
+            return cuts.origin_cuts(conn)
+        finally:
+            conn.close()
+
+    def seal_persona_cut(self, *, signer, persona_cert, org: str, roster_machines) -> dict | None:
+        """Seal the persona cut from this store's positions for every
+        machine of the persona's roster; None while any is unknown."""
+        from tools.network.fleet_sync import cuts
+
+        conn, catalog = self._open()
+        try:
+            positions = catalog.origin_watermarks()
+            return cuts.seal_persona_cut(
+                conn, signer=signer, persona_cert=persona_cert, org=org,
+                roster_machines=set(roster_machines), positions=positions,
+            )
+        finally:
+            conn.close()
+
+    def adopt_persona_cut(self, record, org: str, now: int) -> bool:
+        from tools.network.fleet_sync import cuts
+
+        conn, _catalog = self._open()
+        try:
+            return cuts.adopt_persona_cut(conn, record, org=org, now=now)
+        finally:
+            conn.close()
+
+    def persona_frontiers(self) -> dict[str, int]:
+        from tools.network.fleet_sync import cuts
+
+        conn, _catalog = self._open()
+        try:
+            return cuts.persona_frontiers(conn)
+        finally:
+            conn.close()
+
+    def persona_cut_frames(self, version: int, known) -> list[bytes]:
+        from tools.network.fleet_sync import cuts
+
+        conn, _catalog = self._open()
+        try:
+            return cuts.persona_cut_frames(conn, version, known)
         finally:
             conn.close()
 
@@ -2152,7 +2262,7 @@ class FleetSyncScheduler:
             )
         (
             _requested_epoch, resume_trail, peer_digest, scope, bootstrap,
-            protocol_version, watermarks,
+            protocol_version, watermarks, known_personas,
         ) = decode_pull_request(message)
         # DIAGNOSTIC (2026-09-08, operator escalation): name every scope a peer
         # actually ASKS for, before any confinement or store resolution. Home
@@ -2474,6 +2584,20 @@ class FleetSyncScheduler:
                     slowest_phase[0] or "none", slowest_phase[1],
                     slowest_phase[2],
                 )
+                # Cuts go AFTER every transaction of the stream and before
+                # the summary, so a receiver that records a cut has already
+                # committed everything at or below it (cuts.py). Outside the
+                # digest and count, like the other control frames.
+                for frame in await asyncio.to_thread(
+                    store.origin_cut_frames, protocol_version, watermarks or {},
+                ):
+                    stats["bytes_sent"] += len(frame)
+                    yield frame
+                for frame in await asyncio.to_thread(
+                    store.persona_cut_frames, protocol_version, known_personas or {},
+                ):
+                    stats["bytes_sent"] += len(frame)
+                    yield frame
                 done = encode_done(
                     epoch=epoch,
                     count=count,
@@ -3112,12 +3236,51 @@ class FleetSyncScheduler:
             # roster is pulled above, then co-members' machines, so a fleet
             # converges internally before it presents one face outward.
             await self._sync_org_peers(set(active), now)
+            # End of the round: seal this machine's cut on every scope store
+            # and, where the whole persona fleet has a known position, the
+            # persona cut (auto-mmwgu). Needs no peer: the promise is about
+            # this machine's own future writes.
+            try:
+                await asyncio.to_thread(self._seal_cuts, set(active))
+            except Exception:
+                logger.warning("fleet sync: sealing cuts failed", exc_info=True)
             try:
                 await asyncio.wait_for(
                     self._stopping.wait(), timeout=self.config.poll_interval
                 )
             except asyncio.TimeoutError:
                 pass
+
+    def _seal_cuts(self, roster_machines: set[str]) -> None:
+        """One machine cut per scope store, then the persona cut per org
+        scope that has a channel. Blocking; run in a worker thread."""
+        signer = self.config.machine_key
+        channels = self._org_channels()
+        for scope in sorted(self._scope_paths()):
+            try:
+                store = self._store_for(scope)
+            except Exception:
+                logger.warning("fleet sync: no store for scope %r at cut time", scope, exc_info=True)
+                continue
+            cut = store.seal_machine_cut(signer, time.time_ns())
+            if cut is None:
+                logger.warning(
+                    "fleet sync scope %r: cut paused, the clock is behind the "
+                    "write floor", scope,
+                )
+                continue
+            channel = channels.get(scope)
+            if channel is None or scope == "personal":
+                continue
+            sealed = store.seal_persona_cut(
+                signer=signer, persona_cert=channel.persona_cert, org=channel.org,
+                roster_machines=roster_machines,
+            )
+            if sealed is not None:
+                logger.info(
+                    "fleet sync scope %r: persona cut sealed at %d over %d machine(s)",
+                    scope, int(sealed["cut_ns"]), len(sealed["machines"]),
+                )
 
     async def _sync_org_peers(self, own_fleet: set[str], now: float) -> None:
         """One round's outward pulls: for every org scope with an org
@@ -3302,6 +3465,13 @@ class FleetSyncScheduler:
         # and a pull that fails at connect never reaches the in-try inits
         # (a bad candidate stopped being recorded as a retry, 2026-09-06).
         protocol_version = FLEET_SYNC_PROTOCOL_VERSION
+        # The organization a persona.cut on this scope must be for: the org
+        # hello's, or this node's own channel for the scope on a
+        # personal-roster pull of an org scope. None on the personal scope.
+        scope_org = org_channel.org if org_channel is not None else None
+        if scope_org is None and scope != "personal":
+            own_channel = self._org_channels().get(scope)
+            scope_org = own_channel.org if own_channel is not None else None
 
         async def record(
             outcome: str,
@@ -3496,10 +3666,14 @@ class FleetSyncScheduler:
             watermarks = await asyncio.to_thread(
                 store.advertisable_origin_watermarks
             )
+            known_personas = (
+                await asyncio.to_thread(store.persona_frontiers)
+                if scope != "personal" else {}
+            )
             request = encode_pull_request(
                 epoch, compat=local_digest, resume=resume_trail,
                 scope=scope, bootstrap=bootstrap, version=protocol_version,
-                watermarks=watermarks,
+                watermarks=watermarks, personas=known_personas,
             )
             sent += len(request)
             # The line that was missing. A SUCCESSFUL pull logged nothing, so
@@ -3798,6 +3972,35 @@ class FleetSyncScheduler:
                             store.record_sweep_begin, control, scope, machine_pub,
                         )
                         sweeping = True
+                        continue
+                    if kind in (ORIGIN_CUT_KIND, PERSONA_CUT_KIND):
+                        # A cut moves an origin's watermark past rows this
+                        # pull may still hold unflushed: commit them first,
+                        # so a cut is never recorded ahead of the rows at or
+                        # below it (cuts.py). Outside the digest.
+                        if pending:
+                            validate_pending()
+                            await (apply_swept(pending) if sweeping
+                                   else apply_pending(pending, complete=pending_complete))
+                            pending = []
+                        transaction_group = None
+                        await flush_batch()
+                        try:
+                            if kind == ORIGIN_CUT_KIND:
+                                await asyncio.to_thread(store.adopt_origin_cut, control)
+                            else:
+                                if scope_org is None:
+                                    raise CutError(
+                                        "persona.cut on a scope with no organization"
+                                    )
+                                await asyncio.to_thread(
+                                    store.adopt_persona_cut, control, scope_org,
+                                    int(time.time()),
+                                )
+                        except CutError as exc:
+                            raise FleetSyncProtocolError(
+                                f"peer sent a cut that does not verify: {exc}"
+                            ) from exc
                         continue
                     if kind == "retired":
                         # The server skipped these origins for this pull

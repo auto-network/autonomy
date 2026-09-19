@@ -1077,6 +1077,20 @@ def check_sync_frontiers(report: dict) -> None:
                         for origin in entry["origins"]:
                             origin["cursor_ns"] = cursors.get(origin["origin"])
                             origin["unresolved"] = unresolved.get(origin["origin"], 0)
+                    # Idle cuts (auto-mmwgu): the origin's signed promise
+                    # that nothing will be written at or below cut_ns. Its
+                    # age is how long ago that origin was last known online,
+                    # which "newest write" cannot tell.
+                    if "fleet_sync_origin_cuts" in tables:
+                        held = {
+                            str(r[0]): int(r[1]) for r in conn.execute(
+                                "SELECT o.incarnation, c.cut_ns "
+                                "FROM fleet_sync_origin_cuts c "
+                                "JOIN fleet_sync_origins o ON o.id=c.origin_id"
+                            )
+                        }
+                        for origin in entry["origins"]:
+                            origin["cut_ns"] = held.get(origin["origin"])
                 else:
                     entry["origins"] = None  # sync never activated here
                 for table, column in (("thoughts", "created_at"),
@@ -1125,6 +1139,12 @@ def check_sync_frontiers(report: dict) -> None:
                     )
                 else:
                     cursor = "; cursor at MAX, 0 unresolved"
+                cut_ns = origin.get("cut_ns")
+                if cut_ns is not None:
+                    cut_age = max(0, (now_ns - cut_ns) // 1_000_000_000)
+                    cursor += f"; cut {cut_age}s old"
+                else:
+                    cursor += "; no cut held"
                 _line(
                     f"  {slug} <- {origin['origin'][:12]}",
                     f"newest write {human} old, {origin['transactions']} txn(s){cursor}",
