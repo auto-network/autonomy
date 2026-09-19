@@ -1821,13 +1821,20 @@ class MutationCatalog:
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='fleet_sync_origin_cursor'"
         ).fetchone() is not None
         out = self.origin_max_timestamps()
-        if not present:
-            return out
-        for row in self.conn.execute(
-            "SELECT o.incarnation, c.timestamp_ns FROM fleet_sync_origin_cursor c "
-            "JOIN fleet_sync_origins o ON o.id=c.origin_id"
-        ):
-            out[str(row[0])] = int(row[1])
+        if present:
+            for row in self.conn.execute(
+                "SELECT o.incarnation, c.timestamp_ns FROM fleet_sync_origin_cursor c "
+                "JOIN fleet_sync_origins o ON o.id=c.origin_id"
+            ):
+                out[str(row[0])] = int(row[1])
+        # A verified cut is the origin's promise that nothing will ever be
+        # written at or below it, and every holder of a cut holds every
+        # transaction at or below it (cuts.py), so the watermark is the
+        # greater of the cursor and the cut (auto-mmwgu).
+        from tools.network.fleet_sync.cuts import origin_cuts
+        for origin, (cut_ns, _sig) in origin_cuts(self.conn).items():
+            if cut_ns > out.get(origin, -1):
+                out[origin] = cut_ns
         return out
 
     def origin_max_timestamps(self) -> dict[str, int]:
