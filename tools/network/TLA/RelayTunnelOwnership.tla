@@ -31,7 +31,9 @@ CONSTANTS
     PoolRegistration,       \* TRUE = intended pool; FALSE = old replacement
     LeastLoadedAdmission,   \* TRUE = shed new viewers to least-loaded member
     RestartBudget,
-    DisconnectBudget
+    DisconnectBudget,
+    RefuseBudget,           \* bounded pre-serving refusals (auto-d8if0)
+    FailoverMaxCandidates   \* tunnels one dial may try (relay FAILOVER_MAX_CANDIDATES)
 
 NoTunnel == "none"
 
@@ -56,6 +58,8 @@ ASSUME PoolRegistration \in BOOLEAN
 ASSUME LeastLoadedAdmission \in BOOLEAN
 ASSUME RestartBudget \in Nat
 ASSUME DisconnectBudget \in Nat
+ASSUME RefuseBudget \in Nat
+ASSUME FailoverMaxCandidates \in Nat \ {0}
 
 VARIABLES
     pool,                   \* [ORGS -> SUBSET TUNNELS]
@@ -67,11 +71,13 @@ VARIABLES
     assignment,             \* [VIEWERS -> TUNNELS \cup {NoTunnel}]
     restartsLeft,
     disconnectsLeft,
+    refusalsLeft,
+    refused,                \* [VIEWERS -> SUBSET TUNNELS]: tunnels that refused this dial
     healthyEvictionSeen,    \* ghost: register removed another live tunnel
     badAdmissionSeen        \* ghost: viewer bypassed a less-loaded tunnel
 
 vars == << pool, connector, backoff, wait, stable, viewer, assignment,
-           restartsLeft, disconnectsLeft,
+           restartsLeft, disconnectsLeft, refusalsLeft, refused,
            healthyEvictionSeen, badAdmissionSeen >>
 
 (***************************************************************************)
@@ -94,6 +100,19 @@ Available(o) ==
 LeastLoaded(t, o) ==
     t \in Available(o)
     /\ \A other \in Available(o) : Load(t) <= Load(other)
+
+\* A tunnel that may still be dialed for viewer v: live, with capacity, and
+\* not one that already refused this dial (auto-s81lo: a refusing member is
+\* skipped, never re-tried for the same dial).
+CanServe(t, v) ==
+    t \in Available(ViewerOrg[v]) /\ t \notin refused[v]
+
+Candidates(v) == {t \in TUNNELS : CanServe(t, v)}
+
+\* Least-loaded among the candidates still open to this dial.
+LeastLoadedCandidate(t, v) ==
+    t \in Candidates(v)
+    /\ \A other \in Candidates(v) : Load(t) <= Load(other)
 
 CrossRelay(v) ==
     assignment[v] # NoTunnel
@@ -118,6 +137,8 @@ Init ==
     /\ assignment = [v \in VIEWERS |-> NoTunnel]
     /\ restartsLeft = RestartBudget
     /\ disconnectsLeft = DisconnectBudget
+    /\ refusalsLeft = RefuseBudget
+    /\ refused = [v \in VIEWERS |-> {}]
     /\ healthyEvictionSeen = FALSE
     /\ badAdmissionSeen = FALSE
 
@@ -167,7 +188,8 @@ Register(t) ==
                     THEN NoTunnel ELSE assignment[v]]
                /\ healthyEvictionSeen' =
                     (healthyEvictionSeen \/ displaced # {})
-    /\ UNCHANGED << restartsLeft, disconnectsLeft, badAdmissionSeen >>
+    /\ UNCHANGED << restartsLeft, disconnectsLeft, refusalsLeft, refused,
+                    badAdmissionSeen >>
 
 \* Abstracts one authenticated MaxBackoff service interval. It is separate
 \* from Register so an immediate post-hello flap cannot masquerade as health.
@@ -176,7 +198,7 @@ MarkStable(t) ==
     /\ ~stable[t]
     /\ stable' = [stable EXCEPT ![t] = TRUE]
     /\ UNCHANGED << pool, connector, backoff, wait, viewer, assignment,
-                    restartsLeft, disconnectsLeft,
+                    restartsLeft, disconnectsLeft, refusalsLeft, refused,
                     healthyEvictionSeen, badAdmissionSeen >>
 
 \* Exact-instance unregister plus ordinary connector retry. Only viewers
@@ -197,8 +219,30 @@ Disconnect(t) ==
               IF assignment[v] = t THEN "new" ELSE viewer[v]]
          /\ assignment' = [v \in VIEWERS |->
               IF assignment[v] = t THEN NoTunnel ELSE assignment[v]]
+         /\ refused' = [v \in VIEWERS |->
+              IF assignment[v] = t THEN {} ELSE refused[v]]
     /\ disconnectsLeft' = disconnectsLeft - 1
-    /\ UNCHANGED << restartsLeft, healthyEvictionSeen, badAdmissionSeen >>
+    /\ UNCHANGED << restartsLeft, refusalsLeft,
+                    healthyEvictionSeen, badAdmissionSeen >>
+
+\* auto-s81lo / auto-d8if0: a connected member ends the viewer's channel
+\* BEFORE serving a byte (no grant, unarmed, key resolution refused). The
+\* tunnel stays in the pool: a refusal is about this link, not the member.
+\* The viewer returns to admission for the same dial, may not be re-assigned
+\* to this tunnel, and a dial tries at most FailoverMaxCandidates tunnels.
+Refuse(t, v) ==
+    /\ refusalsLeft > 0
+    /\ viewer[v] = "open"
+    /\ assignment[v] = t
+    /\ connector[t] = "connected"
+    /\ Cardinality(refused[v]) < FailoverMaxCandidates
+    /\ viewer' = [viewer EXCEPT ![v] = "new"]
+    /\ assignment' = [assignment EXCEPT ![v] = NoTunnel]
+    /\ refused' = [refused EXCEPT ![v] = @ \cup {t}]
+    /\ refusalsLeft' = refusalsLeft - 1
+    /\ UNCHANGED << pool, connector, backoff, wait, stable,
+                    restartsLeft, disconnectsLeft,
+                    healthyEvictionSeen, badAdmissionSeen >>
 
 Tick ==
     /\ \E t \in TUNNELS : connector[t] = "sleeping" /\ wait[t] > 0
@@ -206,7 +250,7 @@ Tick ==
          IF connector[t] = "sleeping" /\ wait[t] > 0
          THEN wait[t] - 1 ELSE wait[t]]
     /\ UNCHANGED << pool, connector, backoff, stable, viewer, assignment,
-                    restartsLeft, disconnectsLeft,
+                    restartsLeft, disconnectsLeft, refusalsLeft, refused,
                     healthyEvictionSeen, badAdmissionSeen >>
 
 Wake(t) ==
@@ -214,7 +258,7 @@ Wake(t) ==
     /\ wait[t] = 0
     /\ connector' = [connector EXCEPT ![t] = "dialing"]
     /\ UNCHANGED << pool, backoff, wait, stable, viewer, assignment,
-                    restartsLeft, disconnectsLeft,
+                    restartsLeft, disconnectsLeft, refusalsLeft, refused,
                     healthyEvictionSeen, badAdmissionSeen >>
 
 \* Atomic relay stop/start abstraction. The in-memory pool disappears;
@@ -241,8 +285,9 @@ RelayRestart ==
               IF t \in live THEN FALSE ELSE stable[t]]
          /\ viewer' = [v \in VIEWERS |-> "new"]
          /\ assignment' = [v \in VIEWERS |-> NoTunnel]
+         /\ refused' = [v \in VIEWERS |-> {}]
     /\ restartsLeft' = restartsLeft - 1
-    /\ UNCHANGED << disconnectsLeft,
+    /\ UNCHANGED << disconnectsLeft, refusalsLeft,
                     healthyEvictionSeen, badAdmissionSeen >>
 
 (***************************************************************************)
@@ -253,15 +298,16 @@ RelayRestart ==
 \* merely because another tunnel later joins or becomes less loaded.
 OpenViewer(v) ==
     /\ viewer[v] = "new"
-    /\ Available(ViewerOrg[v]) # {}
-    /\ \E t \in Available(ViewerOrg[v]) :
-         /\ (LeastLoadedAdmission => LeastLoaded(t, ViewerOrg[v]))
+    /\ Candidates(v) # {}
+    /\ \E t \in Candidates(v) :
+         /\ (LeastLoadedAdmission => LeastLoadedCandidate(t, v))
          /\ viewer' = [viewer EXCEPT ![v] = "open"]
          /\ assignment' = [assignment EXCEPT ![v] = t]
          /\ badAdmissionSeen' =
-              (badAdmissionSeen \/ ~LeastLoaded(t, ViewerOrg[v]))
+              (badAdmissionSeen \/ ~LeastLoadedCandidate(t, v))
     /\ UNCHANGED << pool, connector, backoff, wait, stable,
-                    restartsLeft, disconnectsLeft, healthyEvictionSeen >>
+                    restartsLeft, disconnectsLeft, refusalsLeft, refused,
+                    healthyEvictionSeen >>
 
 (***************************************************************************)
 (* Next / fairness                                                         *)
@@ -270,6 +316,7 @@ OpenViewer(v) ==
 Next ==
     \/ \E t \in TUNNELS : Register(t) \/ MarkStable(t) \/ Disconnect(t) \/ Wake(t)
     \/ \E v \in VIEWERS : OpenViewer(v)
+    \/ \E t \in TUNNELS, v \in VIEWERS : Refuse(t, v)
     \/ Tick
     \/ RelayRestart
 
@@ -300,6 +347,8 @@ TypeOK ==
     /\ assignment \in [VIEWERS -> TUNNELS \cup {NoTunnel}]
     /\ restartsLeft \in 0..RestartBudget
     /\ disconnectsLeft \in 0..DisconnectBudget
+    /\ refusalsLeft \in 0..RefuseBudget
+    /\ refused \in [VIEWERS -> SUBSET TUNNELS]
     /\ healthyEvictionSeen \in BOOLEAN
     /\ badAdmissionSeen \in BOOLEAN
 
@@ -318,6 +367,13 @@ CapacityRespected ==
 
 NoHealthyEviction == ~healthyEvictionSeen
 
+\* A refusal is never assigned twice within one dial, and a dial never
+\* exceeds the relay's candidate bound.
+RefusalsRespected ==
+    \A v \in VIEWERS :
+        /\ (viewer[v] = "open" => assignment[v] \notin refused[v])
+        /\ Cardinality(refused[v]) <= FailoverMaxCandidates
+
 AdmissionUsesLeastLoad == ~badAdmissionSeen
 
 (***************************************************************************)
@@ -333,5 +389,11 @@ EventuallyAllTunnelsRegistered ==
 \* Green configs provision enough aggregate capacity for their viewers.
 EventuallyEveryViewerAssigned ==
     <>[](\A v \in VIEWERS : viewer[v] = "open")
+
+\* With refusals bounded, a viewer that still has a serving candidate is
+\* eventually seated on one; a viewer every candidate refused is the
+\* honest 4502/4503/4505 verdict the relay returns, not a stuck dial.
+EventuallyEveryServableViewerAssigned ==
+    <>[](\A v \in VIEWERS : viewer[v] = "open" \/ Candidates(v) = {})
 
 ===========================================================================
