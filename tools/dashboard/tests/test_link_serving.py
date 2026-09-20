@@ -1105,3 +1105,28 @@ class TestAnonymousLinkCanRead:
                 "tok", None, {"body": {"kind": "pillars"}}, lambda: 0))
         assert out != ls.REFUSED
         assert json.loads(out.split(b"\n")[0])["saw_identity"] == ""
+
+
+def test_check_grant_finds_a_grant_id_keyed_row_by_its_written_token(monkeypatch):
+    """Since O-C a grant row is keyed by the publisher's grant id and carries
+    the token the registry minted. A caller that holds only the token (the
+    publish probe, a Fleet invitation registration) must still find it; a
+    caller with the grant id finds it by key; an unrelated token finds nothing."""
+    import time as _time
+    import types
+    from tools.dashboard import link_serving
+    token, grant_id = "a1" * 16, "b2" * 16
+    payload = {
+        "grant_id": grant_id, "token": token, "target_uuid": str(uuid.uuid4()),
+        "target_type": "note", "meta": {}, "subject": {"kind": "operator", "id": "op-1"},
+        "issued_at": _iso(_time.time()),
+    }
+    member = types.SimpleNamespace(key=grant_id, payload=payload)
+    monkeypatch.setattr(
+        link_serving.settings_ops, "read_owned_set",
+        lambda *a, **k: types.SimpleNamespace(members=[member]),
+    )
+    assert link_serving.check_grant(token, org=ORG) is not None
+    assert link_serving.check_grant(token, org=ORG, grant_id=grant_id) is not None
+    assert link_serving.check_grant("c3" * 16, org=ORG) is None
+    assert link_serving.check_grant(token, org=ORG, grant_id="d4" * 16) is None
