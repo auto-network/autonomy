@@ -59,12 +59,15 @@ class Registry:
     """One real registry subprocess. ``start`` / ``stop`` bracket its life;
     the HTTP helpers are the few registry calls every scenario needs."""
 
-    def __init__(self, tmp_path, org: str = ORG_UUID):
+    def __init__(self, tmp_path, org: str = ORG_UUID, *, log_level: Optional[str] = None):
+        """*log_level* is the registry's ``--log-level`` (auto-0tfuz); at
+        ``"info"`` the relay's per-dial routing lines reach registry.log."""
         self.org = org
         self.port = free_port()
         self._db = tmp_path / "registry.db"
         self._proc = start_registry(
-            self.port, self._db, tmp_path / "registry.log")
+            self.port, self._db, tmp_path / "registry.log",
+            extra_args=("--log-level", log_level) if log_level else ())
 
     @property
     def http(self) -> str:

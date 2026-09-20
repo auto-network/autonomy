@@ -16,11 +16,11 @@ than the note. A dashboard derives that advert from its persona cut
 records; this scenario states it directly. Healing B is B advertising a
 frontier that covers the note.
 
-What the registry log can and cannot show. The control-op result lines
+What the registry log shows. The registry runs with ``--log-level info``
+(auto-0tfuz), so besides the control-op result lines
 (``control ... op=set-link-requires ... result=ok``) and the refusal
-warnings are in the subprocess log. The per-dial ``relay dial routed``
-line is logged at INFO and the registry entry point runs uvicorn at
-warning, so routing decisions are proven at the tunnels instead: A's
+warnings, every dial's ``relay dial routed`` line names the machine it
+was routed to. Routing is asserted both there and at the tunnels: A's
 connector counts ten channel opens and B's counts zero.
 """
 from __future__ import annotations
@@ -47,7 +47,7 @@ from ._harness import (
 
 @pytest.fixture
 def registry(tmp_path):
-    reg = Registry(tmp_path)
+    reg = Registry(tmp_path, log_level="info")
     try:
         yield reg
     finally:
@@ -165,6 +165,11 @@ def test_a_link_is_served_only_by_members_whose_frontier_covers_its_authors(regi
 
                 for _ in range(10):
                     assert await fetch(registry, token, link_key.public_hex) == CONTENT
+                routed = re.findall(
+                    r"relay dial routed: token=\S+ org=\S+ tunnel machine=(\S+) persona=(\S+) ",
+                    log.read_text(errors="replace"),
+                )
+                evidence["routed_before_heal"] = routed
                 evidence["opens_a_before_heal"] = a.opens
                 evidence["opens_b_before_heal"] = b.opens
                 evidence["token"] = token
@@ -201,9 +206,14 @@ def test_a_link_is_served_only_by_members_whose_frontier_covers_its_authors(regi
 
     asyncio.run(run())
 
-    # Ten of ten dials were served by A alone while B was behind.
+    # Ten of ten dials were served by A alone while B was behind: the
+    # relay's own routing lines name A's machine ten times and B's never.
     assert evidence["opens_a_before_heal"] == 10, evidence
     assert evidence["opens_b_before_heal"] == 0, evidence
+    routed_machines = [machine for machine, _persona in evidence["routed_before_heal"]]
+    assert routed_machines == [a.machine16] * 10, evidence["routed_before_heal"]
+    assert all(persona == persona_a[:16] for _m, persona in evidence["routed_before_heal"])
+    assert b.machine16 not in routed_machines
     # With A gone and B behind, the one dial closed 4431 with the reason.
     assert evidence["refused_close"] == (
         CLOSE_NO_COVERING_MEMBER, "no member has synced this link yet",
@@ -224,5 +234,8 @@ def test_a_link_is_served_only_by_members_whose_frontier_covers_its_authors(regi
 
     text = log.read_text(errors="replace")
     assert text.count("relay dial refused (4431)") == 1, text[-2000:]
+    # After the heal every dial was routed to B, A being gone.
+    routed_all = re.findall(r"relay dial routed: token=\S+ org=\S+ tunnel machine=(\S+) ", text)
+    assert routed_all[10:] == [b.machine16] * 10, routed_all
     assert "relay viewer failover" not in text, "no candidate refused after being dialed"
     (tmp_path / "persona-frontier-evidence.json").write_text(json.dumps(evidence, indent=1, sort_keys=True))
