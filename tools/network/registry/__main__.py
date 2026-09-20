@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
+import sys
 from pathlib import Path
 
 import uvicorn
@@ -43,6 +45,27 @@ def _load_build_info(path: str | None) -> dict:
     ):
         return dict(_UNKNOWN_BUILD)
     return value
+
+
+REGISTRY_LOGGER = "tools.network.registry"
+
+
+def configure_registry_logging(level: str, stream=None) -> logging.Logger:
+    """Raise the registry's OWN logger to *level* (auto-0tfuz) so the relay's
+    routing and failover lines reach the log; uvicorn's access and protocol
+    loggers stay at warning regardless, because they record paths that carry
+    bearer link tokens. Idempotent: one handler, however often it is called."""
+    logger = logging.getLogger(REGISTRY_LOGGER)
+    logger.setLevel(getattr(logging, level.upper(), logging.WARNING))
+    if not any(getattr(h, "_registry_handler", False) for h in logger.handlers):
+        handler = logging.StreamHandler(stream or sys.stderr)
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s: %(message)s"
+        ))
+        handler._registry_handler = True  # type: ignore[attr-defined]
+        logger.addHandler(handler)
+    logger.propagate = False
+    return logger
 
 
 def _load_turn_issuer():
@@ -113,7 +136,16 @@ def main() -> None:
              "trusted/premium identity or a controlled stress test). Repeatable. "
              "Off by default; every other source stays fully limited.",
     )
+    parser.add_argument(
+        "--log-level",
+        default="warning",
+        choices=("debug", "info", "warning", "error"),
+        help="level for the registry's own logger (relay routing, failover "
+             "verdicts, control ops). uvicorn's access and protocol loggers "
+             "stay at warning at every setting: their lines carry link tokens.",
+    )
     args = parser.parse_args()
+    configure_registry_logging(args.log_level)
     if bool(args.ssl_certfile) != bool(args.ssl_keyfile):
         parser.error('--ssl-certfile and --ssl-keyfile must be provided together')
     app = create_app(
