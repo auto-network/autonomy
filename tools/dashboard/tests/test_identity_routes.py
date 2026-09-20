@@ -422,7 +422,7 @@ w.TextDecoder = TextDecoder;
 // as the browser uses one realm for both the page and its imported modules.
 w.Uint8Array = Uint8Array;
 w.__AUTONOMY_WELCOME_SHELL__ = true;
-w.AutonomyNetworkSession = { _internals: primitives };
+w.AutonomyNetworkSession = { _internals: { ...primitives, prepareRootMaintenance: async () => [] } };
 w.__dynImport = spec => import(new URL(spec.replace(/^\/static\/js\//, ''), base));
 for (const name of ['network-identity.js', 'network-onboarding.js']) {
   w.eval(fs.readFileSync(new URL(name, base), 'utf8').replace(/\bimport\(/g, '__dynImport('));
@@ -436,6 +436,19 @@ identity.generateEd25519 = async () => {
 };
 let payload;
 w.fetch = async (url, options) => {
+  if (url === '/api/identity/unlock/preparation') {
+    assert.ok(payload, 'identity is persisted before initialization');
+    const { sealToEncapsulationKey } = await import(new URL('ceremony/sealing.js', base));
+    const inputs = { vault: { root_pub: payload.root_pub, inventory: { anchors: [], classes: [] } },
+      organizations: [], runtime: { enabled: false } };
+    const sealed = await sealToEncapsulationKey(new TextEncoder().encode(JSON.stringify(inputs)),
+      payload.delegate_audited_public_key, 'autonomy/identity/sign-in-preparation/v1');
+    return Response.json({ sealed: Buffer.from(sealed).toString('hex') });
+  }
+  if (url.startsWith('/api/identity/vault-anchors') || url === '/api/identity/unlock/vault-keys') {
+    assert.ok(seed.every(byte => byte === 0), 'root seed cleared before handoff');
+    return Response.json({ ok: true });
+  }
   assert.equal(url, '/api/identity/personal');
   assert.ok(seed.every(byte => byte === 0), 'root seed cleared before submission');
   assert.equal(payload, undefined, 'only the existing creation request is made');
