@@ -81,11 +81,20 @@ def test_requirements_fold_row_origins_to_personas_with_the_newest_stamp(tmp_pat
 
     origins = row_origins(own.conn, note_addresses(own.conn, "note-1"))
     assert origins == {M1: 1_000, M2: 1_500}
-    requires = link_requirements(
+    # No cut of the publisher's own persona yet: no requirement is recorded,
+    # because no member could cover one (the link would 4431 after its pin).
+    assert link_requirements(
         own.conn, source_id="note-1", grant_set_id="autonomy.network.link-grant",
         grant_key="tok", own_machines={M1}, own_persona=P1,
+    ) is None
+    own_record = _persona_record(P1, {M1: 900})
+    cuts.store_persona_cut(own.conn, own_record)
+    p1 = own_record["persona"]
+    requires = link_requirements(
+        own.conn, source_id="note-1", grant_set_id="autonomy.network.link-grant",
+        grant_key="tok", own_machines={M1}, own_persona=p1,
     )
-    assert requires == {P1: 1_000, p2: 1_500}
+    assert requires == {p1: 1_000, p2: 1_500}
     own.close(); remote.close()
 
 
@@ -102,10 +111,12 @@ def test_an_unattributed_author_machine_refuses_by_name(tmp_path: Path) -> None:
         _insert_thought(stranger.conn, "th-9", "note-1")
     for items in _served(theirs, M3):
         mine.apply_remote_batch(items)
+    own_record = _persona_record(P1, {M1: 900})
+    cuts.store_persona_cut(own.conn, own_record)
     with pytest.raises(LinkRequirementError, match=M3[:12]):
         link_requirements(
             own.conn, source_id="note-1", grant_set_id="s", grant_key="k",
-            own_machines={M1}, own_persona=P1,
+            own_machines={M1}, own_persona=own_record["persona"],
         )
     own.close(); stranger.close()
 

@@ -101,8 +101,18 @@ def personas_of_origins(
 def link_requirements(
     conn: sqlite3.Connection, *, source_id: str, grant_set_id: str, grant_key: str,
     own_machines: Iterable[str], own_persona: str,
-) -> dict[str, int]:
-    """R for a note link: its rows plus its grant row, folded to personas."""
+) -> dict[str, int] | None:
+    """R for a note link: its rows plus its grant row, folded to personas.
+
+    None when this store holds no persona cut for the publisher's own
+    persona: the frontier a member advertises is derived from persona
+    cuts, so a requirement recorded before the persona's fleet seals cuts
+    is one no member could ever cover, and the link would close 4431 the
+    moment its fresh-link pin lapsed (live fleet 2026-09-20, where no
+    persona cut had ever been sealed). Without a requirement the link
+    routes as before the frontier work."""
+    if own_persona not in cuts.persona_cuts(conn):
+        return None
     addresses = note_addresses(conn, source_id) + settings_addresses(conn, grant_set_id, grant_key)
     return personas_of_origins(
         conn, row_origins(conn, addresses),
