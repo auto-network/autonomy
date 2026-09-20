@@ -1649,42 +1649,6 @@ class SQLiteFleetSyncStore:
         finally:
             conn.close()
 
-    def frameless_hold_addresses(self) -> list[bytes]:
-        conn, catalog = self._open()
-        try:
-            return catalog.frameless_hold_addresses()
-        finally:
-            conn.close()
-
-    def items_at_addresses(self, address_blobs) -> list:
-        conn, catalog = self._open()
-        try:
-            return catalog.items_at_addresses(list(address_blobs))
-        finally:
-            conn.close()
-
-    def apply_fetched_rows(self, items) -> int:
-        """Apply re-fetched rows one by one through ordinary apply; a row
-        that still cannot land is re-parked WITH its frame. Returns rows
-        that landed."""
-        conn, catalog = self._open()
-        try:
-            landed = 0
-            for item in items:
-                applied, ignored = catalog.apply_remote_batch([item])
-                if applied or ignored:
-                    # Landed, or stale against a newer local winner: the
-                    # address-only quarantine entry is cleared and the
-                    # origin's cursor walked past the hold. A row apply
-                    # re-parked keeps its entry, now WITH a frame.
-                    catalog.clear_quarantined_address(
-                        item.mutation.table, item.mutation.address,
-                    )
-                landed += int(applied > 0)
-            return landed
-        finally:
-            conn.close()
-
     def drain_attachments(self, entries) -> int:
         from tools.network.fleet_sync.blob_transport import drain_backlog
 
@@ -2392,11 +2356,6 @@ class FleetSyncScheduler:
                 message, peer_pub, telemetry_channel,
                 authorize=authorize, admitted_org=admitted_org,
             )
-        if peek_request_op(message) == "rows":
-            return self._rows_response(
-                message, peer_pub, telemetry_channel,
-                authorize=authorize, admitted_org=admitted_org,
-            )
         (
             _requested_epoch, resume_trail, peer_digest, scope, bootstrap,
             protocol_version, watermarks, known_personas,
@@ -2966,92 +2925,6 @@ class FleetSyncScheduler:
                 yield frame
 
         return self._observed(response(), telemetry_channel)
-
-    def _rows_response(
-        self, message: bytes, peer_pub: str, telemetry_channel: str = "direct",
-        *, authorize: Callable[[str], None] | None = None,
-        admitted_org: str | None = None,
-    ):
-        """Serve the current rows at the requested catalog addresses of one
-        scope (row_fetch.py), confined like a pull of that scope."""
-        from tools.network.fleet_sync.row_fetch import (
-            RowFetchError, decode_rows_request, iter_row_frames,
-        )
-
-        try:
-            scope, blobs = decode_rows_request(message)
-        except RowFetchError as exc:
-            raise FleetSyncProtocolError(str(exc)) from exc
-        if authorize is None:
-            authorize = self.authenticator.authorize
-        self._confine_scope(scope, admitted_org)
-        store = self._store_for(scope)
-
-        async def response():
-            items = await asyncio.to_thread(store.items_at_addresses, blobs)
-            for frame in iter_row_frames(items, FLEET_SYNC_PROTOCOL_VERSION):
-                authorize(peer_pub)
-                yield frame
-
-        return self._observed(response(), telemetry_channel)
-
-    async def _drain_missing_rows(
-        self, machine_pub: str, addresses: Sequence[str],
-        scope: str = "personal", *, authenticator=None,
-    ) -> None:
-        """Post-pull drain of quarantined rows that stored no frame: ask the
-        peer for those addresses and apply what it holds."""
-        if authenticator is None:
-            authenticator = self.authenticator
-        from tools.network.fleet_sync.row_fetch import (
-            MAX_ROWS_REQUEST, RowReceiver, encode_rows_request,
-        )
-
-        scope_store = await asyncio.to_thread(self._store_for, scope)
-        wanted = await asyncio.to_thread(scope_store.frameless_hold_addresses)
-        if not wanted:
-            return
-        wanted = wanted[:MAX_ROWS_REQUEST]
-        receiver = RowReceiver()
-        channel = None
-        try:
-            last_error: Exception | None = None
-            for address in addresses:
-                try:
-                    channel = await fleet_direct_connect(
-                        address,
-                        authenticator=authenticator,
-                        expected_machine_pub=machine_pub,
-                        session=new_session_id(),
-                        timeout=self.config.connect_timeout,
-                    )
-                    break
-                except Exception as exc:
-                    last_error = exc
-            if channel is None:
-                assert last_error is not None
-                raise last_error
-            await channel.send_message(encode_rows_request(scope, wanted))
-            async for frame, _final in bounded_stream_frames(
-                channel,
-                first_allowance_s=self.config.pull_stream_silence_limit_s,
-                silence_limit_s=self.config.pull_stream_silence_limit_s,
-            ):
-                authenticator.authorize(machine_pub)
-                receiver.feed(frame)
-                if receiver.done:
-                    break
-            if not receiver.done:
-                raise FleetSyncProtocolError("row fetch ended without its terminal frame")
-            landed = await asyncio.to_thread(scope_store.apply_fetched_rows, receiver.items)
-            logger.info(
-                "fleet sync scope %r: row re-fetch asked %d, peer held %d, %d landed",
-                scope, len(wanted), len(receiver.items), landed,
-            )
-        finally:
-            if channel is not None:
-                with contextlib.suppress(Exception):
-                    await channel.close()
 
     def _observed(self, stream, telemetry_channel: str):
         """Wrap a direct-path serve stream with the stream observer, if any.
@@ -4386,12 +4259,6 @@ class FleetSyncScheduler:
                 logger.warning(
                     "fleet signature drain failed", exc_info=True
                 )
-            try:
-                await self._drain_missing_rows(
-                    machine_pub, addresses, scope, authenticator=authenticator,
-                )
-            except Exception:
-                logger.warning("fleet row re-fetch failed", exc_info=True)
             try:
                 scope_store = await asyncio.to_thread(self._store_for, scope)
                 cleared, retried = await asyncio.to_thread(
