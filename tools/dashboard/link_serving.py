@@ -224,7 +224,16 @@ def check_grant(token: str, *, org: str | None = None, now: float | None = None,
     except Exception:
         return None  # unreadable cache → no grant → no bytes (fail closed)
     for member in members:
-        if member.key == key:
+        # By the row key the registry handed over; or, when the caller holds
+        # only the token (a publish probe, a Fleet invitation registration,
+        # any local caller), by the token the publisher wrote into the grant
+        # right after the registry minted it. One resolution for every caller
+        # (operator's order 2026-09-20: this defect is fixed once, here).
+        if member.key == key or (
+            grant_id is None
+            and isinstance(member.payload, dict)
+            and member.payload.get("token") == token
+        ):
             return _grant_valid(member.payload, token,
                                 time.time() if now is None else now)
     return None
