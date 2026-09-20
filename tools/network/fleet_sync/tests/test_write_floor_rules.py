@@ -153,3 +153,36 @@ def test_a_cursor_seed_never_takes_a_claimed_floor_back(tmp_path: Path) -> None:
         assert client.origin_watermarks()[ORIGIN_A] == 1_500
     finally:
         source.close(); target.close()
+
+
+def test_a_settled_fleet_seals_no_floor(tmp_path: Path) -> None:
+    """A floor acknowledges rows taken in. One write: one floor on the writer,
+    one on each machine that applies the row, then silence: ten more rounds
+    change nothing. A received floor never causes one."""
+    source, target, server, client = _pair(tmp_path)
+    try:
+        a, b = KeyPair.generate(), KeyPair.generate()
+        from tools.network.fleet_sync.catalog import MutationCatalog
+        writer = MutationCatalog(source.conn, a.public_hex)
+        # Before any row: nothing to acknowledge, nothing sealed.
+        assert write_floors.seal_machine_write_floor(source.conn, a, a.public_hex, 10) == 10
+        first = write_floors.machine_write_floors(source.conn)[a.public_hex][0]
+        for now in range(20, 120, 10):
+            assert write_floors.seal_machine_write_floor(source.conn, a, a.public_hex, now) == first
+        assert write_floors.machine_write_floors(source.conn)[a.public_hex][0] == first
+        # The writer writes: exactly one new floor, then silence again.
+        _write(writer, source.conn, 1_000, "t0", "s0")
+        sealed = write_floors.seal_machine_write_floor(source.conn, a, a.public_hex, 1_200)
+        assert sealed == 1_200
+        for now in range(1_300, 2_300, 100):
+            assert write_floors.seal_machine_write_floor(source.conn, a, a.public_hex, now) == 1_200
+        # A peer applies the row: one floor on the peer, then silence, and
+        # receiving the writer's floor changes nothing.
+        client.apply_remote_batch(_served(writer, a.public_hex)[0][2], complete=True)
+        assert write_floors.seal_machine_write_floor(target.conn, b, b.public_hex, 1_500) == 1_500
+        record = write_floors.machine_write_floor_records(source.conn)[a.public_hex]
+        assert write_floors.adopt_machine_write_floor(target.conn, {"origin": a.public_hex, **record}, catalog=client) is True
+        for now in range(1_600, 2_600, 100):
+            assert write_floors.seal_machine_write_floor(target.conn, b, b.public_hex, now) == 1_500
+    finally:
+        source.close(); target.close()

@@ -65,12 +65,13 @@ def ensure_write_floor_schema(conn: sqlite3.Connection) -> None:
         "write_floor_ns INTEGER NOT NULL,"
         "sig TEXT NOT NULL,"
         "signer TEXT,"
-        "cert TEXT)"
+        "cert TEXT,"
+        "sealed_ref INTEGER NOT NULL DEFAULT 0)"
     )
     columns = {str(r[1]) for r in conn.execute("PRAGMA table_info(fleet_sync_machine_write_floors)")}
-    for name in ("signer", "cert"):
+    for name, kind in (("signer", "TEXT"), ("cert", "TEXT"), ("sealed_ref", "INTEGER NOT NULL DEFAULT 0")):
         if name not in columns:
-            conn.execute(f"ALTER TABLE fleet_sync_machine_write_floors ADD COLUMN {name} TEXT")
+            conn.execute(f"ALTER TABLE fleet_sync_machine_write_floors ADD COLUMN {name} {kind}")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS fleet_sync_persona_write_floors("
         "persona TEXT PRIMARY KEY,"
@@ -121,15 +122,24 @@ def seal_machine_write_floor(
         origin_id = int(conn.execute(
             "SELECT id FROM fleet_sync_origins WHERE incarnation=?", (origin,)
         ).fetchone()[0])
+        # A floor is an acknowledgement: it is sealed only after this machine
+        # wrote a row or applied one from a peer since its last floor. Every
+        # such row is a fleet_sync_transactions row with a higher id; a
+        # received floor is not. A settled fleet therefore seals nothing.
+        newest = int(conn.execute("SELECT COALESCE(MAX(id),0) FROM fleet_sync_transactions").fetchone()[0])
+        held = conn.execute("SELECT write_floor_ns, sealed_ref FROM fleet_sync_machine_write_floors WHERE origin_id=?", (origin_id,)).fetchone()
+        if held is not None and int(held[1]) >= newest:
+            conn.execute("ROLLBACK")
+            return int(held[0])   # nothing written, nothing applied: the held floor stands
         sig = signer.sign_hex(machine_write_floor_body(origin, sealed_ns, signer.public_hex))
         cert_json = json.dumps(cert.to_dict(), sort_keys=True) if cert is not None else None
         conn.execute(
-            "INSERT INTO fleet_sync_machine_write_floors(origin_id,write_floor_ns,sig,signer,cert) "
-            "VALUES(?,?,?,?,?) "
+            "INSERT INTO fleet_sync_machine_write_floors(origin_id,write_floor_ns,sig,signer,cert,sealed_ref) "
+            "VALUES(?,?,?,?,?,?) "
             "ON CONFLICT(origin_id) DO UPDATE SET write_floor_ns=excluded.write_floor_ns, sig=excluded.sig, "
-            "signer=excluded.signer, cert=excluded.cert "
+            "signer=excluded.signer, cert=excluded.cert, sealed_ref=excluded.sealed_ref "
             "WHERE excluded.write_floor_ns>fleet_sync_machine_write_floors.write_floor_ns",
-            (origin_id, sealed_ns, sig, signer.public_hex, cert_json),
+            (origin_id, sealed_ns, sig, signer.public_hex, cert_json, newest),
         )
         # This machine holds every row it wrote, so its own cursor is its
         # floor: the watermark it advertises for itself, and the position
