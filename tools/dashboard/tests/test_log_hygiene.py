@@ -256,8 +256,13 @@ def test_cert_manager_defers_expected_errors_without_traceback(caplog, monkeypat
         now=lambda: 0, desired_fn=lambda: [("autonomy", "persona-1")],
     )
 
+    cold = (
+        "certificate vault bundle could not be opened (no_key_holder): "
+        "The vault is locked in this process and only the operator can unlock it."
+    )
+
     def unavailable(org, persona):
-        raise service_certificate.ServiceCertificateError("certificate vault bundle is unavailable")
+        raise service_certificate.ServiceCertificateError(cold)
     monkeypatch.setattr(service_certificate, "certificate_metadata", unavailable)
 
     with caplog.at_level(logging.WARNING, logger=scm.logger.name):
@@ -266,7 +271,7 @@ def test_cert_manager_defers_expected_errors_without_traceback(caplog, monkeypat
     assert mgr.errors[("autonomy", "persona-1")].startswith("ServiceCertificateError:")
     rec = [r for r in caplog.records if "Service certificate reconciliation" in r.getMessage()]
     assert len(rec) == 1
-    assert "deferred for autonomy/persona-1: certificate vault bundle is unavailable" in rec[0].getMessage()
+    assert f"deferred for autonomy/persona-1: {cold}" in rec[0].getMessage()
     assert rec[0].exc_info is None, "an expected refusal must not print a traceback"
 
     def unexpected(org, persona):

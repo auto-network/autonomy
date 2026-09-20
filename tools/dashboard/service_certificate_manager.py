@@ -54,10 +54,10 @@ def desired_personas() -> set[tuple[str, str]]:
 _RETRY_AFTER_RE = re.compile(r"retry after (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) UTC")
 MAX_BACKOFF_SECONDS = 15 * 60.0
 # Conditions the operator resolves (an unlock, a restore): no hold, so the
-# next minute's retry picks the fix up. "bundle is unavailable" is the cold
-# vault seen from the read side: the sealed row exists but cannot be opened.
+# next minute's retry picks the fix up. The bundle read forwards the vault's
+# own refusal; "no_key_holder" is its reason code for a cold process.
 NO_BACKOFF_MARKERS = (
-    "vault is locked", "vault cold", "key holder", "vault bundle is unavailable",
+    "vault is locked", "vault cold", "key holder", "no_key_holder",
 )
 
 
