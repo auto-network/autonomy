@@ -1318,11 +1318,15 @@ def test_malformed_publish_success_writes_no_cache_or_result(monkeypatch):
         "upsert_by_key",
         lambda *args, **kwargs: writes.append((args, kwargs)),
     )
+    async def _no_probe(*_args, **_kwargs):
+        # The probe is awaited (it always was; the stub was synchronous and
+        # raised "a coroutine was expected" before reaching the guard under
+        # test). Returning nothing keeps the original intent: this test is
+        # about refusing a malformed success, not about serving.
+        return None
+
     monkeypatch.setattr(
-        link_central.link_approvals,
-        "_probe_serving",
-        lambda *_args: None,
-    )
+        link_central.link_approvals, "_probe_serving", _no_probe)
     consumer = link_central.LinkResultConsumer(
         store=store,
         secret_resolver=lambda: SECRET,
