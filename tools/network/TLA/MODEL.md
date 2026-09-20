@@ -162,3 +162,28 @@ available; the install's id renumbering is modeled as a clean restart of
 the ref space; restore-from-backup is subsumed by the install action (the
 same rewind shape with the same reset). Peer-side receipt bookkeeping and
 the transports are not modeled.
+
+## Pre-serving refusal and failover (auto-s81lo, auto-d8if0)
+
+A connected member may end a viewer's channel before serving a byte: it
+lacks the grant, it is unarmed, or key resolution refused. The relay then
+tries the next candidate in the same dial, never the refusing member again,
+and gives up after `FAILOVER_MAX_CANDIDATES` with the most specific refusal
+code. `Refuse(t, v)` models exactly that: the tunnel stays in the pool (a
+refusal is about the link, not the member, so `PoolCoherent` and
+`NoHealthyEviction` are untouched), the viewer returns to admission with
+`t` added to `refused[v]`, and admission ranges over `Candidates(v)`, the
+live members with capacity that have not refused this dial. `RefuseBudget`
+bounds refusals as an unfair environment act, like disconnects.
+
+Two consequences shape the properties. `EventuallyEveryViewerAssigned` is no
+longer the claim: a viewer every candidate refused is the honest verdict
+the relay returns, not a stuck dial. The claim is
+`EventuallyEveryServableViewerAssigned`: a viewer that still has a serving
+candidate is eventually seated on one. `RefusalsRespected` is the safety
+half: an open viewer is never on a tunnel that refused its dial, and a dial
+never exceeds the candidate bound.
+
+Not modeled, deliberately: the hello replay to the next candidate and the
+open-budget timer. Both are transport mechanics below the ownership
+question this model answers.
