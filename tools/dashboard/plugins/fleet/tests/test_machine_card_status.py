@@ -64,6 +64,31 @@ def _render(cases: list) -> list:
     return json.loads(result.stdout)
 
 
+@pytest.mark.parametrize("status,expected", [
+    ("none", "create"),
+    ("awaiting_signature", "sign"),
+    ("inactive", "reactivate"),
+])
+def test_activate_invitation_continues_its_current_step(status, expected):
+    result = subprocess.run(
+        ["node", "-e", """
+const fs = require('fs');
+global.window = {};
+eval(fs.readFileSync(process.env.PAGE_JS, 'utf8'));
+const page = fleetPage();
+page.view = {invitation: {status: process.env.INVITATION_STATUS}};
+page.createInvitation = () => 'create';
+page.finishInvitation = () => 'sign';
+page.reactivateInvitation = () => 'reactivate';
+console.log(page.beginActivateInvite());
+"""],
+        env={**os.environ, "PAGE_JS": _PAGE_JS, "INVITATION_STATUS": status},
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == expected
+
+
 def _local(**over):
     machine = {
         "entryId": "entry-local", "isLocalMachine": True,

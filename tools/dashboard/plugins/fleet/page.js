@@ -475,6 +475,7 @@ function fleetPage() {
     // never re-minted -- re-minting would strand every machine holding the
     // old link.
     beginActivateInvite() {
+      if (this.invitation.status === 'awaiting_signature') return this.finishInvitation();
       return this.invitation.status === 'inactive'
         ? this.reactivateInvitation()
         : this.createInvitation();

@@ -59,12 +59,12 @@
  </template>
 </div>
 <section class="invitation-card" aria-label="Fleet invitation">
- <div class="invitation-heading"><h2>Invitation</h2><span class="invitation-status" :class="invitation.status==='active'?'good':'muted'" x-text="invitation.status==='active'?'Active':'Inactive'"></span></div>
+ <div class="invitation-heading"><h2>Invitation</h2><span class="invitation-status" :class="invitation.status==='active'?'good':'muted'" x-text="invitation.status==='active'?'Active':invitation.status==='publishing'?'Publishing':invitation.status==='awaiting_signature'?'Ready to sign':'Inactive'"></span></div>
  <div class="invitation-code" x-show="invitation.url" x-text="invitation.url"></div>
  <div class="invitation-buttons">
   <button type="button" x-show="invitation.url" @click="copyValue(invitation.url,'link')" x-text="copied?'Link copied':'Copy invitation link'"></button>
   <button type="button" x-show="invitation.bootstrapCode" @click="copyValue(invitation.bootstrapCode,'install')" x-text="bootstrapCopied?'Code copied':'Copy install code'"></button>
-  <button type="button" class="invite-toggle" :class="{deactivate:invitation.status==='active'}" @click="invitation.status==='active'?beginDisableInvite():beginActivateInvite()" x-text="invitation.status==='active'?'Deactivate invitation':'Activate invitation'"></button>
+  <button type="button" class="invite-toggle" :disabled="inviteBusy || invitation.status==='publishing'" :class="{deactivate:invitation.status==='active'}" @click="invitation.status==='active'?beginDisableInvite():beginActivateInvite()" x-text="invitation.status==='active'?'Deactivate invitation':invitation.status==='publishing'?'Publishing…':'Activate invitation'"></button>
  </div>
  <p class="activity-caption" x-show="copyError" x-text="copyError"></p>
 </section>
