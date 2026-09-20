@@ -40,11 +40,22 @@ def compact_watermark_map(
         and origin not in retired
     ]
     floor = min(online) if online else 0
+    known_set = set(known)
     exceptions: dict[str, int] = {}
     for origin, cursor in watermarks.items():
         final = retired.get(origin)
         if final is not None and int(cursor) == int(final):
             continue                       # retired and held exactly through its end
+        if origin not in known_set:
+            # The server credits an unlisted origin only when it can prove
+            # the puller knows it. An origin no roster or persona cut names
+            # (a member persona that has never sealed a cut) cannot be
+            # credited, and unlisted it would be served from the beginning
+            # on every pull (live fleet 2026-09-20, 100 to 200 MB per
+            # attempt). It is listed with its cursor, exactly as before
+            # compaction.
+            exceptions[origin] = int(cursor)
+            continue
         if int(cursor) < floor:
             exceptions[origin] = int(cursor)
     for origin in known:

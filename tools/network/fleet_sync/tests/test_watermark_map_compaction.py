@@ -39,6 +39,12 @@ def test_a_converged_fleet_lists_nothing_and_a_laggard_is_listed() -> None:
         {A: 900, B: 910, C: 500}, stale, NOW, known={A, B, C}, retired={},
     )
     assert (floor, listed) == (900, {C: 500})
+    # An origin no roster or persona cut names cannot be credited by the
+    # server: it stays listed with its cursor whatever the floor.
+    floor, listed = compact_watermark_map(
+        {A: 900, B: 910, D: 950}, {A: NOW, B: NOW, D: NOW}, NOW, known={A, B}, retired={},
+    )
+    assert (floor, listed) == (900, {D: 950})
     # A known origin never seen is listed at 0 so it is served from the start.
     floor, listed = compact_watermark_map(
         {A: 900, B: 910}, {A: NOW, B: NOW}, NOW, known={A, B, D}, retired={},
