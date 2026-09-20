@@ -268,12 +268,18 @@ def quarantine_unrealized(
     can never realize it — it is still forwarded, because a downstream peer
     holding no such local row can). Recording them keeps a durable, decodable
     backlog so a later repair or fetch can drain it.
-    ``replay`` optionally maps address blobs to the deferred mutation's
-    replay identity ``(frame, origin, transaction_id, operation_index)``: a
-    delta-deferred row is never re-served (the peer's trail advances past
-    it), so the drain rebuilds the originated mutation from the stored frame
-    and re-applies it through ordinary last-writer-wins; swept entries
-    store NULLs because a later sweep carries the row again.
+    ``replay`` maps address blobs to the deferred mutation's replay identity
+    ``(frame, origin, transaction_id, operation_index)``. Every production
+    caller passes it: apply_remote_batch is the only producer, and the
+    bootstrap sweep applies its pages through apply_remote_batch too, so
+    every entry written by current code carries its frame and the drain
+    rebuilds the mutation from it and re-applies it through ordinary
+    last-writer-wins. An entry without a frame, origin or transaction is a
+    legacy row from before 5fe3e5bd (2026-09-02), when the table had no
+    such columns; no current path writes one. (An earlier version of this
+    docstring said swept entries store NULLs because a later sweep carries
+    the row again; that was never true of the sweep and misled a builder
+    on 2026-09-20.)
     Rewritable per address: a later transfer that finally realizes the row
     makes the entry stale, and the drain clears it.
     """
@@ -286,7 +292,7 @@ def quarantine_unrealized(
         )
         # An upsert, not a replace: a re-parked row keeps its retry count
         # (auto-l4h2c), and a stored frame is never overwritten by a NULL
-        # from a later sweep.
+        # (only a legacy entry can lack one).
         conn.execute(
             "INSERT INTO fleet_sync_quarantine(address,table_name,logical_address,"
             "reason,watermark,quarantined_at_ns,frame,origin,transaction_id,"
