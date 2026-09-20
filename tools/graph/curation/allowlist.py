@@ -49,6 +49,12 @@ class Allowlist:
     canonical: list[str] = field(default_factory=list)
     published: list[str] = field(default_factory=list)
     audit_notes: list[dict] = field(default_factory=list)
+    #: The org:follow rendezvous committed for this org (design of record
+    #: graph://5f2f5a49-00d §10.1). ``{org_uuid, rendezvous, link_pub}`` or
+    #: None when the org publishes no standing follow link. Validated on load;
+    #: promote.py ignores it (it drives the follower/first-run path, not
+    #: publication-state promotion).
+    follow: dict | None = None
 
     def tiers(self) -> Iterator[AllowlistEntry]:
         for state in TIER_KEYS:
@@ -105,6 +111,8 @@ def _from_dict(raw: dict, *, path: Path) -> Allowlist:
     if not isinstance(audit_notes, list):
         raise AllowlistError(f"{path}: 'audit_notes' must be a list")
 
+    follow = _parse_follow(raw.get("follow"), path=path)
+
     return Allowlist(
         org=org,
         version=version,
@@ -112,7 +120,41 @@ def _from_dict(raw: dict, *, path: Path) -> Allowlist:
         canonical=lists["canonical"],
         published=lists["published"],
         audit_notes=audit_notes,
+        follow=follow,
     )
+
+
+#: The exact keys an org:follow rendezvous block carries (§10.1). Present ==
+#: required; no extras. An optional ``registry_url`` is accepted for parity
+#: with the follower row (§10.4) but not required here.
+_FOLLOW_REQUIRED = ("org_uuid", "rendezvous", "link_pub")
+_FOLLOW_OPTIONAL = ("registry_url",)
+
+
+def _parse_follow(raw, *, path: Path) -> dict | None:
+    """Validate the optional ``follow:`` block. None when absent."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise AllowlistError(f"{path}: 'follow' must be a mapping")
+    missing = [k for k in _FOLLOW_REQUIRED if k not in raw]
+    if missing:
+        raise AllowlistError(
+            f"{path}: 'follow' is missing required key(s): {missing}"
+        )
+    unknown = set(raw) - set(_FOLLOW_REQUIRED) - set(_FOLLOW_OPTIONAL)
+    if unknown:
+        raise AllowlistError(
+            f"{path}: 'follow' carries unknown key(s): {sorted(unknown)}"
+        )
+    for key in (*_FOLLOW_REQUIRED, *(_FOLLOW_OPTIONAL if any(
+        k in raw for k in _FOLLOW_OPTIONAL) else ())):
+        if key in raw and (not isinstance(raw[key], str) or not raw[key].strip()):
+            raise AllowlistError(
+                f"{path}: 'follow.{key}' must be a non-empty string"
+            )
+    return {k: raw[k].strip() for k in (*_FOLLOW_REQUIRED, *_FOLLOW_OPTIONAL)
+            if k in raw}
 
 
 DEFAULT_AUTONOMY_PATH = Path(__file__).with_name("autonomy-bootstrap-allowlist.yaml")

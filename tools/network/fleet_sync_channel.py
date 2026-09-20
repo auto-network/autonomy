@@ -423,15 +423,25 @@ class Admission:
     organization's genesis id for one admitted by the org hello
     (fleet_org_channel); ``authorize`` is the per-message re-check of the
     authenticator that admitted the peer.
+
+    ``kind`` names which authenticated path built the admission — ``fleet``
+    for a personal-roster hello, ``org`` for an org hello, and ``follow`` for
+    an admission the link server derives from an ``org:follow`` grant with no
+    client credential at all (design of record graph://5f2f5a49-00d §10.1). A
+    ``follow`` admission carries only ``kind`` and ``org``; it never went
+    through a handshake, so its crypto fields are absent and its per-message
+    authorizer is a no-op — authenticity is the link's fragment key, checked
+    once at the viewer handshake.
     """
 
-    client_pub: str
-    client_eph: str
-    private_key: X25519PrivateKey
-    server_hello: bytes
-    transcript: bytes
-    authorize: Callable[[str], None]
-    org: str | None
+    client_pub: str = ""
+    client_eph: str = ""
+    private_key: "X25519PrivateKey | None" = None
+    server_hello: bytes = b""
+    transcript: bytes = b""
+    authorize: "Callable[[str], None] | None" = None
+    org: str | None = None
+    kind: str = "fleet"
 
 
 def hello_org(raw: object) -> str | None:
@@ -480,7 +490,7 @@ def accept_client_hello(
         client_eph = _parse(raw, _CLIENT_FIELDS, "FLEET_CLIENT_HELLO")["eph_pub"]
         return Admission(
             client_pub, client_eph, private_key, hello, transcript,
-            authenticator.authorize, None,
+            authenticator.authorize, None, kind="fleet",
         )
     channel = org_channel_for(org) if org_channel_for is not None else None
     if channel is None:
@@ -493,7 +503,7 @@ def accept_client_hello(
     client_eph = json.loads(raw)["eph_pub"]
     return Admission(
         client_pub, client_eph, private_key, hello, transcript,
-        channel.authorize, channel.org,
+        channel.authorize, channel.org, kind="org",
     )
 
 

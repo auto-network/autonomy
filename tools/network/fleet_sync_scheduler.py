@@ -2344,6 +2344,7 @@ class FleetSyncScheduler:
         telemetry_started_monotonic_ns: int | None = None,
         authorize: Callable[[str], None] | None = None,
         admitted_org: str | None = None,
+        admission=None,
     ):
         """``authorize`` / ``admitted_org``: set by the listener for a
         connection admitted by the ORG hello (fleet_org_channel): the
@@ -2351,9 +2352,22 @@ class FleetSyncScheduler:
         confined to the admitted organization's scope. Absent, the
         connection is a personal-roster one and behaves exactly as before.
 
+        ``admission`` is the whole :class:`fleet_sync_channel.Admission` for a
+        caller that has one to hand — the link server serving an ``org:follow``
+        grant passes ``Admission(kind="follow", org=<meta.org>)`` and no client
+        credential (design of record graph://5f2f5a49-00d §10.1). Its ``org``
+        confines the scope like ``admitted_org``, and a ``follow`` admission
+        carries no per-message authorizer (the link's fragment key already
+        authenticated the whole exchange), so the re-check is a no-op and the
+        stateless follower leaves no ``fleet_sync_peer_state`` frontier row.
 """
         from tools.network.fleet_sync.blob_transport import peek_request_op
 
+        follow_admission = getattr(admission, "kind", None) == "follow"
+        if admission is not None and admitted_org is None:
+            admitted_org = getattr(admission, "org", None)
+        if follow_admission:
+            authorize = lambda _pub: None  # noqa: E731 — link auth, not peer
         if authorize is None:
             authorize = self.authenticator.authorize
         if peek_request_op(message) == "blob":
@@ -2385,7 +2399,10 @@ class FleetSyncScheduler:
         # connected -- a peer can pull every twenty seconds and be sixteen
         # hours behind. Nothing new crosses the wire; this only stops
         # discarding what already did. It must never fail the serve.
-        if watermarks:
+        if watermarks and not follow_admission:
+            # A follow admission has no peer credential and the server holds
+            # no per-follower state (design of record §10.1): the frontier row
+            # is keyed by a peer machine, which a follower is not.
             from tools.network import fleet_sync_peer_scope
 
             with contextlib.suppress(Exception):

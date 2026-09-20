@@ -474,3 +474,45 @@ def test_link_list_hides_peer_published_grant(tmp_path, monkeypatch, capsys):
     assert peer_token not in out
     assert "no share-link grants cached" in out
     GraphDB.close_all_pooled()
+
+
+# ── graph follow publish (bead auto-akcr7, §10.1) ─────────────
+
+
+def test_follow_publish_posts_org_follow_request(monkeypatch, capsys):
+    """`graph follow publish` posts a link_publish approval with target
+    org:follow and no target_uuid (the server resolves it from the binding),
+    then prints the returned URL bare."""
+    captured = {}
+
+    def fake_post_approval(kind, request):
+        captured["kind"] = kind
+        captured["request"] = request
+        return "approval-id"
+
+    monkeypatch.setattr(link_cmd, "_post_approval", fake_post_approval)
+    monkeypatch.setattr(
+        link_cmd, "_await_decision",
+        lambda approval_id, verb: {
+            "url": PUBLIC_LINK_URL + "/l/deadbeefdeadbeefdeadbeefdeadbeef#k=abc",
+        },
+    )
+    link_cmd.cmd_follow_publish(argparse.Namespace(org=ORG, label="Follow us"))
+
+    assert captured["kind"] == "link_publish"
+    assert captured["request"]["target_type"] == "org:follow"
+    assert captured["request"]["org"] == ORG
+    assert "target_uuid" not in captured["request"]  # resolved server-side
+    assert captured["request"]["meta"] == {"label": "Follow us"}
+    out = capsys.readouterr().out
+    assert "org:follow link published: " + PUBLIC_LINK_URL + "/l/" in out
+    assert "#k=abc" in out
+
+
+def test_follow_publish_requires_org(monkeypatch):
+    monkeypatch.setattr(
+        link_cmd, "_post_approval",
+        lambda *a, **k: pytest.fail("should fail before posting"),
+    )
+    with pytest.raises(SystemExit):
+        link_cmd.cmd_follow_publish(argparse.Namespace(org=None, label=None))

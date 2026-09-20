@@ -88,6 +88,7 @@ _TYPE_LABELS = {
     "note": "Note",
     "file": "File",
     "org:join": "Invitation",
+    "org:follow": "Standing follow link",
     "fleet:join": "Fleet machine invitation",
 }
 
@@ -237,6 +238,40 @@ def _org_join_request(request: dict) -> dict:
         raise ValueError("invite_ref is not in the organization ledger")
 
 
+def _follow_publish_request(request: dict) -> dict:
+    """Validate + enrich an org:follow publish (design of record §10.1).
+
+    The operator names only the org slug; the org's UUID is resolved from its
+    registry binding and written onto the request as the target and into
+    ``meta`` (``org`` slug + ``org_uuid``), so the served follow admission
+    can name the org's scope. An org:follow link never expires unless revoked
+    (TTL class indefinite), so ``meta.ttl`` is forbidden — as it is for
+    org:join. Mutates *request* in place, the way the executor then reads it;
+    prepare_create freezes the enriched request onto the approval row."""
+    org = request.get("org")
+    if not isinstance(org, str) or not org:
+        raise ValueError("org:follow publish requires the local org slug")
+    meta = request.get("meta") or {}
+    if not isinstance(meta, dict):
+        raise ValueError("org:follow meta is malformed")
+    if "ttl" in meta:
+        raise ValueError(
+            "an org:follow link never expires unless revoked (TTL class "
+            "indefinite); meta.ttl is forbidden"
+        )
+    if set(meta) - {"label"}:
+        raise ValueError("org:follow meta may carry only label")
+    binding, err = _load_binding(org)
+    if not binding or not binding.get("org_uuid"):
+        raise ValueError(
+            f"no registry binding for {org}: {err or 'org is not registered'}"
+        )
+    org_uuid = binding["org_uuid"]
+    request["target_uuid"] = org_uuid
+    request["meta"] = {**meta, "org": org, "org_uuid": org_uuid}
+    return {"title": f"Standing follow link for {org}", "org_uuid": org_uuid}
+
+
 def _require_startable_serving(org: str | None) -> None:
     """Refuse an org:join publish that could never ride the tunnel.
 
@@ -272,6 +307,9 @@ def prepare_create(_session: str, request: dict) -> tuple[dict, None]:
     if request.get("target_type") == "org:join":
         _org_join_request(request)
         _require_startable_serving(request.get("org"))
+    elif request.get("target_type") == "org:follow":
+        _follow_publish_request(request)
+        _require_startable_serving(request.get("org"))
     elif (_d := _resolve_target(request.get("target_type"), request.get("target_uuid"), request.get("org"), request))["error"]:
         raise ValueError(_d["error"])
     return copy.deepcopy(request), None
@@ -305,6 +343,15 @@ def _resolve_target(
                     "error": "fleet invitation target is not a UUID",
                 }
             return {"title": "Fleet machine invitation", "error": None}
+        if target_type == "org:follow":
+            # The target is the org itself; prepare_create has already
+            # reconciled target_uuid to the org's binding UUID.
+            try:
+                uuid.UUID(str(target_uuid))
+            except (ValueError, AttributeError):
+                return {"title": None,
+                        "error": "org:follow target is not the org UUID"}
+            return {"title": f"Standing follow link for {org}", "error": None}
         if target_type in ("present", "design"):
             from agents.design_db import get_design
             design = get_design(target_uuid)
@@ -1191,7 +1238,11 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
     # It uses the Fleet enrollment protocol, not a keyed content channel.
     serving = (
         {"live": True, "via": "tunnel-control"}
-        if req["target_type"] == "fleet:join"
+        # fleet:join uses the enrollment protocol, not a content channel; an
+        # org:follow link's liveness is the fleet-sync org-sync handler, which
+        # the content probe (fetch/head) cannot exercise — it is checked by
+        # fleet_doctor per §10.4, never rolled back here.
+        if req["target_type"] in ("fleet:join", "org:follow")
         else await _probe_serving(binding, token, org, grant_id=grant_id)
     )
     if not serving.get("live"):
@@ -1298,6 +1349,20 @@ def _tunnel_link_meta(req: dict, decision: dict) -> tuple[dict, str | None]:
                 "it takes no duration"
             )
         return ({"label": base["label"]} if "label" in base else {}), None
+    if req.get("target_type") == "org:follow":
+        # An org:follow link never expires (TTL class indefinite): it takes no
+        # duration. meta carries the followed org's identity (org + org_uuid),
+        # written by prepare_create, plus an optional label.
+        base = req.get("meta") or {}
+        if not isinstance(base, dict):
+            return {}, "request metadata is malformed"
+        if decision.get("ttl") is not None or "ttl" in base:
+            return {}, (
+                "an org:follow link never expires unless revoked; it takes "
+                "no duration"
+            )
+        meta = {k: base[k] for k in ("org", "org_uuid", "label") if k in base}
+        return meta, None
     base = req.get("meta")
     if base is not None and not isinstance(base, dict):
         return {}, "request metadata is malformed"

@@ -113,6 +113,31 @@ def test_build_plan_marks_ok(env, tmp_path):
     assert statuses == {"aaa": "ok", "bbb": "ok"}
 
 
+def test_build_plan_ignores_the_follow_block(env, tmp_path):
+    """promote (dry-run planning) only reads canonical/published; a follow:
+    rendezvous block is loaded and validated but never planned (§10.1)."""
+    db = GraphDB(env)
+    try:
+        _insert_note(db, id="aaa", title="A")
+        allow = tmp_path / "a.yaml"
+        allow.write_text(
+            "org: autonomy\nversion: 1\n"
+            "follow:\n"
+            "  org_uuid: '11111111-1111-4111-8111-111111111111'\n"
+            "  rendezvous: 'https://relay.auto.network/l/abc'\n"
+            "  link_pub: '{}'\n".format("a" * 64)
+            + "canonical:\n  - aaa\n"
+        )
+        loaded = load_allowlist(allow)
+        assert loaded.follow is not None  # loaded, but…
+        plan = promote.build_plan(db=db, allowlist=loaded)
+    finally:
+        db.close()
+    # …the plan is exactly the canonical/published entries — the follow block
+    # contributes no plan entry (its org_uuid is not resolved as a source).
+    assert {e.prefix for e in plan.entries} == {"aaa"}
+
+
 def test_build_plan_blocks_on_pending_comments_for_canonical(env, tmp_path):
     db = GraphDB(env)
     try:

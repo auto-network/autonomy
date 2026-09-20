@@ -426,3 +426,42 @@ async def fetch(registry: Registry, token: str, link_pub: str, *, timeout: float
         return (await ch.recv_message()).partition(b"\n")[2]
     finally:
         await ch.close()
+
+
+async def follow(
+    registry: Registry, token: str, link_pub: str, request: dict,
+    *, timeout: float = 15.0,
+) -> list[bytes]:
+    """A real viewer opens the ``org:follow`` *token* with ONLY its fragment
+    key, sends the ``follow`` op carrying *request* (a fleet-sync pull request
+    object), and returns the reply stream's frames.
+
+    verify_link_server_hello runs inside :meth:`ViewerChannel.connect` (the
+    fragment key is the whole authentication — there is no membership, no
+    client credential); the reply is the org-sync scheduler's sweep/delta
+    stream, streamed back frame by frame (``recv_message_stream``)."""
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        try:
+            ch = await ViewerChannel.connect(registry.ws, token, link_pub=link_pub, org=registry.org)
+            break
+        except Exception as exc:
+            last = exc
+            if _terminal_close(exc):
+                raise
+            await asyncio.sleep(0.25)
+    else:
+        raise AssertionError(f"viewer could not connect in {timeout}s: {last!r}")
+    try:
+        await ch.send_message(
+            json.dumps({"v": 1, "op": "follow", "request": request}).encode()
+        )
+        frames: list[bytes] = []
+        async for message, stream_final in ch.recv_message_stream():
+            frames.append(message)
+            if stream_final:
+                break
+        return frames
+    finally:
+        await ch.close()

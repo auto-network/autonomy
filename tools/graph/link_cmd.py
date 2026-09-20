@@ -438,6 +438,34 @@ def cmd_link_publish(args) -> None:
         print(f"  AUTONOMY_INVITE: {encode_invitation(invitation)}")
 
 
+def cmd_follow_publish(args) -> None:
+    """graph follow publish [--org slug] [--label text]
+
+    Publish the org's standing ``org:follow`` link — a membership-free public
+    link any node can pull the org's public surface from (design of record
+    graph://5f2f5a49-00d §10.1). The link never expires unless revoked (TTL
+    class indefinite); revocation is the ordinary ``graph link revoke <token>``
+    path. The org's UUID is resolved server-side from its registry binding, so
+    the operator names only the org. Prints the complete link URL including the
+    fragment key."""
+    org = _resolve_org(args)
+    meta: dict = {}
+    if getattr(args, "label", None):
+        meta["label"] = args.label
+    request = {"org": org, "target_type": "org:follow", "meta": meta}
+    approval_id = _post_approval("link_publish", request)
+    print(f"⧗ follow-link approval requested ({approval_id}) — waiting for the operator…")
+    execution = _await_decision(approval_id, "follow-link publish")
+    url = execution.get("url")
+    print(f"✓ org:follow link published: {url}")
+    # Same relaying hazard as every other published link: the fragment must
+    # arrive intact, so hand the URL over bare.
+    print("  Note to agents: give this URL to the operator bare, on its own "
+          "line, with nothing before or after it — no wrapping text, no "
+          "trailing punctuation. Anything adjacent gets selected with the "
+          "link and breaks it.")
+
+
 def cmd_link_revoke(args) -> None:
     """graph link revoke <token> [--org slug]"""
     org = _resolve_org(args)

@@ -73,3 +73,65 @@ def test_empty_tier_keys_ok(tmp_path):
     loaded = al.load(p)
     assert loaded.canonical == []
     assert loaded.published == []
+
+
+# ── the org:follow rendezvous block (design of record §10.1) ─────
+
+
+_FOLLOW_YAML = (
+    "org: x\nversion: 1\n"
+    "follow:\n"
+    "  org_uuid: '11111111-1111-4111-8111-111111111111'\n"
+    "  rendezvous: 'https://relay.auto.network/l/abc'\n"
+    "  link_pub: '{}'\n".format("a" * 64)
+)
+
+
+def test_loads_follow_block(tmp_path):
+    loaded = al.load(_write(tmp_path / "a.yaml", _FOLLOW_YAML))
+    assert loaded.follow == {
+        "org_uuid": "11111111-1111-4111-8111-111111111111",
+        "rendezvous": "https://relay.auto.network/l/abc",
+        "link_pub": "a" * 64,
+    }
+
+
+def test_bundled_autonomy_allowlist_carries_a_follow_block():
+    loaded = al.load(al.DEFAULT_AUTONOMY_PATH)
+    assert loaded.follow is not None
+    assert set(loaded.follow) >= {"org_uuid", "rendezvous", "link_pub"}
+
+
+def test_follow_absent_is_none(tmp_path):
+    loaded = al.load(_write(tmp_path / "a.yaml", "org: x\nversion: 1\n"))
+    assert loaded.follow is None
+
+
+def test_follow_missing_required_key_raises(tmp_path):
+    body = "org: x\nversion: 1\nfollow:\n  org_uuid: 'u'\n  rendezvous: 'r'\n"
+    with pytest.raises(al.AllowlistError, match="missing required key"):
+        al.load(_write(tmp_path / "a.yaml", body))
+
+
+def test_follow_unknown_key_raises(tmp_path):
+    body = (
+        "org: x\nversion: 1\nfollow:\n"
+        "  org_uuid: 'u'\n  rendezvous: 'r'\n  link_pub: 'p'\n  extra: 'no'\n"
+    )
+    with pytest.raises(al.AllowlistError, match="unknown key"):
+        al.load(_write(tmp_path / "a.yaml", body))
+
+
+def test_follow_non_mapping_raises(tmp_path):
+    body = "org: x\nversion: 1\nfollow: not-a-map\n"
+    with pytest.raises(al.AllowlistError, match="must be a mapping"):
+        al.load(_write(tmp_path / "a.yaml", body))
+
+
+def test_follow_empty_value_raises(tmp_path):
+    body = (
+        "org: x\nversion: 1\nfollow:\n"
+        "  org_uuid: ''\n  rendezvous: 'r'\n  link_pub: 'p'\n"
+    )
+    with pytest.raises(al.AllowlistError, match="non-empty string"):
+        al.load(_write(tmp_path / "a.yaml", body))

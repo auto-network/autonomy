@@ -409,6 +409,51 @@ def test_link_grant_non_join_refuses_invite_reference():
         )
 
 
+# ── link-grant org:follow (bead auto-akcr7, §10.1) ────────────
+
+
+def test_link_grant_org_follow_is_a_target_type():
+    assert "org:follow" in ni.TARGET_TYPES
+
+
+def test_link_grant_org_follow_requires_org_and_org_uuid():
+    payload = link_grant_payload()
+    payload["target_type"] = "org:follow"
+    payload["meta"] = {"org": "autonomy", "org_uuid": TARGET_UUID}
+    validate_payload(
+        ni.NETWORK_LINK_GRANT_SET_ID, ni.NETWORK_LINK_GRANT_REVISION, payload,
+    )
+
+
+def test_link_grant_org_follow_missing_org_uuid_is_rejected():
+    payload = link_grant_payload()
+    payload["target_type"] = "org:follow"
+    payload["meta"] = {"org": "autonomy"}
+    with pytest.raises(SchemaValidationError, match="org_uuid"):
+        validate_payload(
+            ni.NETWORK_LINK_GRANT_SET_ID, ni.NETWORK_LINK_GRANT_REVISION, payload,
+        )
+
+
+def test_link_grant_org_follow_forbids_ttl():
+    payload = link_grant_payload()
+    payload["target_type"] = "org:follow"
+    payload["meta"] = {"org": "autonomy", "org_uuid": TARGET_UUID, "ttl": 3600}
+    with pytest.raises(SchemaValidationError, match="indefinite"):
+        validate_payload(
+            ni.NETWORK_LINK_GRANT_SET_ID, ni.NETWORK_LINK_GRANT_REVISION, payload,
+        )
+
+
+def test_link_grant_non_follow_refuses_org_meta():
+    payload = link_grant_payload()  # target_type present
+    payload["meta"] = {"org": "autonomy", "org_uuid": TARGET_UUID}
+    with pytest.raises(SchemaValidationError, match="only valid.*org:follow"):
+        validate_payload(
+            ni.NETWORK_LINK_GRANT_SET_ID, ni.NETWORK_LINK_GRANT_REVISION, payload,
+        )
+
+
 # ── link-grant participant_id (auto-xwamk) ────────────────────
 #
 # Same conditional-validity shape as invite_ref/org:join above, deliberately
