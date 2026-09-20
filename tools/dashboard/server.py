@@ -23089,6 +23089,9 @@ class _FleetJoiningMiddleware(BaseHTTPMiddleware):
             # join could never be finished. Let them through.
             or path == "/unlock"
             or path == "/welcome"
+            # The shell fetches this fragment to render the comparison code.
+            # Redirecting it would inject another full shell into the page.
+            or path == "/pages/welcome"
         ):
             return await call_next(request)
         try:

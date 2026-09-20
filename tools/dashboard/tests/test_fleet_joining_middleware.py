@@ -30,6 +30,7 @@ def _client():
             Route("/machines", _page),
             Route("/unlock", _page),
             Route("/welcome", _page),
+            Route("/pages/welcome", _page),
         ],
         middleware=[Middleware(_FleetJoiningMiddleware)],
     )
@@ -68,7 +69,7 @@ def test_unlock_and_welcome_are_reachable_mid_join(monkeypatch):
     monkeypatch.setattr(machine_boot, "machine_id", lambda **_: None)
     monkeypatch.setattr(machine_boot, "is_joining", lambda **_: True)
     client = _client()
-    for path in ("/unlock", "/welcome"):
+    for path in ("/unlock", "/welcome", "/pages/welcome"):
         resp = client.get(path, follow_redirects=False)
         assert resp.status_code == 200, path
         assert resp.text == "machines page"
