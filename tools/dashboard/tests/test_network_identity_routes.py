@@ -993,8 +993,12 @@ def test_register_treats_registry_409_as_idempotent_when_binding_matches(
     the production registry running claim_org's same-root idempotency."""
     monkeypatch.delenv("GRAPH_ORG", raising=False)   # personal scope
     _store_personal_identity(root)
+    # The register route requires the binding row's key to be the registry
+    # URL's host (NetworkBindingV2 is keyed by registry_host): this test had
+    # keyed it "auto.network" against http://registry.test and failed in every
+    # retained run with "local binding key does not match its registry URL".
     settings_ops.add_setting(
-        NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION_2, "auto.network",
+        NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION_2, "registry.test",
         {"org_uuid": PERSONAL_ORG_UUID, "root_pub": root.public_hex,
          "registry_url": REGISTRY_URL, "recovery_policy": {"mode": "none"},
          "binding_generation": "aa" * 32,
@@ -1028,16 +1032,19 @@ def test_register_treats_registry_409_as_idempotent_when_binding_matches(
     assert r.status_code == 200, r.text
     assert r.json().get("already_registered") is True
 
-    # A DIFFERENT root hitting the same 409 must still fail — the idempotency is
-    # scoped to our own persisted binding, not "any 409 is fine". (The stored
-    # binding keeps root's pub; overwriting the personal identity only satisfies
-    # the recoverability precondition so we reach the registry 409.)
+    # A DIFFERENT root must still fail — the idempotency is scoped to our own
+    # persisted binding, not "any 409 is fine". The route refuses it locally
+    # (the signed coordinates do not match the frozen binding) before the
+    # registry is ever asked, and the stored binding keeps root's pub.
     other = KeyPair.generate()
     _store_personal_identity(other)   # singleton upsert
     r2 = env.post("/api/network/register",
                   json={"envelope": _registration_envelope(
                       other, org_uuid=PERSONAL_ORG_UUID)})
-    assert r2.status_code == 502, r2.text
+    assert r2.status_code == 409, r2.text
+    assert "do not match the existing binding" in r2.json()["error"]
+    kept = settings_ops.read_owned_set(NETWORK_BINDING_SET_ID, org="personal").members
+    assert [m.payload["root_pub"] for m in kept] == [root.public_hex]
 
 
 def test_provision_serve_cert_happy_path(env, root, tmp_path, monkeypatch):

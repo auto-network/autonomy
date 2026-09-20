@@ -253,18 +253,30 @@ def _serving_key_ramfs_dir():
     return Path(_keycache_dir()) / "serving"
 
 
+def serving_key_release_path(org_uuid: str, child_pub: str):
+    """Where :func:`_release_serving_key` materializes one connector's key for
+    its launch: ``<keycache>/serving/serve-<org_uuid>-<child_pub>.key`` --
+    mode 0600, in the ramfs mount, gone at reboot."""
+    return _serving_key_ramfs_dir() / f"serve-{org_uuid}-{child_pub}.key"
+
+
 def _release_serving_key(state: dict) -> tuple[str | None, str | None]:
     """Materialize the serving key for an ``ok`` *state* into a mode-0600
     ramfs file the connector reads as ``--key-file`` (graph://67d0aa5f-885
-    D4 as corrected): ``<keycache>/serving/serve-<org_uuid>-<child_pub>.key``.
-    Returns ``(path, None)`` or ``(None, reason)``; a cold vault is a reason,
-    not an exception, so the supervisor reports it and retries next tick."""
+    D4 as corrected): :func:`serving_key_release_path`. Returns
+    ``(path, None)`` or ``(None, reason)``; a cold vault is a reason, not an
+    exception, so the supervisor reports it and retries next tick.
+
+    One serving key per organization: a release left behind by a rotated-out
+    child is dead material (the connector reads its key once, at launch), so
+    the organization's other release files are removed once the new one is
+    in place."""
     try:
         key_hex = serving_key_hex(state)
     except Exception as exc:
         return None, str(exc)
     directory = _serving_key_ramfs_dir()
-    path = directory / f"{os.path.basename(state['work_base'])}.key"
+    path = serving_key_release_path(state["org_uuid"], state["child_pub"])
     try:
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         tmp = path.with_suffix(".key.tmp")
@@ -279,6 +291,10 @@ def _release_serving_key(state: dict) -> tuple[str | None, str | None]:
         os.replace(tmp, path)
     except Exception as exc:
         return None, f"serving key could not be released into ramfs: {exc}"
+    for stale in directory.glob(f"serve-{state['org_uuid']}-*.key"):
+        if stale != path:
+            with contextlib.suppress(OSError):
+                stale.unlink()
     return str(path), None
 
 
@@ -435,6 +451,7 @@ def _ok_state(row: dict, org_uuid: str, not_after: int, *, viewer_cert) -> dict:
         "cert": row.get("cert"),
         "viewer_cert": viewer_cert,
         "child_pub": child_pub,
+        "org_uuid": org_uuid,
         "vault_key": vault_key,
         "work_base": serving_work_base(org_uuid, child_pub),
         "not_after": not_after,
@@ -729,6 +746,10 @@ def _materialize_cert(work_base: str, cert_wire: str) -> str:
     ``--cert-file``. Atomic replace so a concurrent launch never reads a
     half-written cert."""
     cert_path = _cert_path_for(work_base)
+    # The connector working directory may not exist yet: nothing else writes
+    # there since the serving key left the disk, and a restored volume carries
+    # only the files the source node actually had.
+    os.makedirs(os.path.dirname(cert_path), mode=0o700, exist_ok=True)
     tmp = cert_path + ".tmp"
     with open(tmp, "w") as fh:
         fh.write(cert_wire)
@@ -1658,6 +1679,11 @@ class ServingSupervisor:
         if binding_error:
             return {"running": False, "reason": binding_error}
         work_base = state["work_base"]
+        # The connector working directory (certificate, log, control and
+        # lock files) is made here: since the key left the disk
+        # (graph://67d0aa5f-885 D4) nothing writes there before the launch,
+        # and a fresh node has no such directory yet.
+        os.makedirs(os.path.dirname(work_base), mode=0o700, exist_ok=True)
         if not self._acquire_lock(org, work_base):
             return {"running": True, "reason": "owned-by-other-dashboard"}
         adopted = self._adopt_incumbent(org, state)
