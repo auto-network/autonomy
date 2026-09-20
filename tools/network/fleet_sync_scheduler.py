@@ -1505,7 +1505,10 @@ class SQLiteFleetSyncStore:
                 )
                 known, retired_set = every, every - active
             else:
-                known, retired_set = cuts.persona_machines(conn)
+                listed, retired_set = cuts.persona_machines(conn)
+                # The server credits every machine first listed at or
+                # before the declared cut, retired or not: both are known.
+                known = listed | retired_set
             retired = {origin: cut_ns[origin] for origin in retired_set if origin in cut_ns}
         finally:
             conn.close()
