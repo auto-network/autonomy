@@ -114,8 +114,10 @@ def test_a_backward_clock_pauses_write_floors_and_writes_until_it_passes_the_flo
         with catalog.transaction(600, "t1"):
             _insert_source(db.conn, "s1")
     assert catalog.origin_watermarks()[machine.public_hex] == 1_000
-    # The clock passes the floor: write floors resume and never regress.
-    assert write_floors.seal_machine_write_floor(conn, machine, machine.public_hex, 1_100) == 1_100
+    # The clock passes the floor, but nothing was written or applied: the
+    # held floor stands (a floor acknowledges rows, it is not a clock).
+    assert write_floors.seal_machine_write_floor(conn, machine, machine.public_hex, 1_100) == 1_000
+    # A write: the next seal is max(last write, now), never below the last write.
     with catalog.transaction(1_200, "t2"):
         _insert_source(db.conn, "s2")
     assert write_floors.seal_machine_write_floor(conn, machine, machine.public_hex, 1_150) == 1_200, (
@@ -224,11 +226,12 @@ def test_a_write_floor_sealed_on_a_reaches_c_through_b_without_a_serving_c(tmp_p
         try:
             await _eventually(lambda: _title(paths[2], "from-a") == "a wrote once", timeout=10)
             written_at = SQLiteFleetSyncStore(paths[0]).origin_watermarks()[keys[0].public_hex]
-            # A is idle from here on. Its write floor keeps moving and C learns it via B.
-            def c_has_a_floor_above_the_write() -> bool:
+            # A wrote once and is idle from here on: it sealed one floor at or
+            # above that write, acknowledging it, and C learns it via B.
+            def c_has_a_floor_covering_the_write() -> bool:
                 held = SQLiteFleetSyncStore(paths[2]).machine_write_floors().get(keys[0].public_hex)
-                return held is not None and held[0] > written_at
-            await _eventually(c_has_a_floor_above_the_write, timeout=10)
+                return held is not None and held[0] >= written_at
+            await _eventually(c_has_a_floor_covering_the_write, timeout=10)
             write_floor_on_a = SQLiteFleetSyncStore(paths[0]).machine_write_floors()[keys[0].public_hex][0]
             floor_on_c = SQLiteFleetSyncStore(paths[2]).machine_write_floors()[keys[0].public_hex][0]
             assert floor_on_c <= write_floor_on_a
@@ -239,9 +242,11 @@ def test_a_write_floor_sealed_on_a_reaches_c_through_b_without_a_serving_c(tmp_p
                 held = store.machine_write_floors()[keys[0].public_hex][0]
                 return store.origin_watermarks()[keys[0].public_hex] == held
             await _eventually(c_claimed_what_it_holds, timeout=10)
-            # Freshness: an idle A's write floor as held on B is no older than a few rounds.
-            age_s = (time.time_ns() - SQLiteFleetSyncStore(paths[1]).machine_write_floors()[keys[0].public_hex][0]) / 1e9
-            assert age_s < 2.0 + 0.03 * 3, f"write floor held on B is {age_s:.2f}s old"
+            # Settled: A learned nothing since, so its floor does not move, and
+            # B holds exactly the floor A sealed after its write.
+            await asyncio.sleep(0.5)
+            assert SQLiteFleetSyncStore(paths[0]).machine_write_floors()[keys[0].public_hex][0] == write_floor_on_a
+            assert SQLiteFleetSyncStore(paths[1]).machine_write_floors()[keys[0].public_hex][0] == write_floor_on_a
         finally:
             await c.stop(); await b.stop(); await a.stop()
 
