@@ -645,7 +645,14 @@ def _seal_vault_payload(
     # and no consultation of the process key cache or a delegate — so it remains
     # writable when the vault is cold. The delegate's private half, warm at
     # unlock, opens it unattended on read.
-    if schemas.declared_home(set_id) == "personal" and tier == "audited":
+    #
+    # A MACHINE-homed audited Setting takes the same path (graph://67d0aa5f-885
+    # D2, 2026-09-20): the machine store belongs to the operator, so the
+    # recipient is the operator's audited delegate, and the row simply never
+    # replicates. Before this branch a machine-homed audited row fell through
+    # to the organization sealer, which seals under an organization key
+    # generation the machine store does not have.
+    if schemas.declared_home(set_id) in ("personal", "machine") and tier == "audited":
         from tools.graph.schemas.vault_policy_class import (
             VAULT_POLICY_CLASS_SET_ID,
         )
