@@ -87,11 +87,14 @@ def free_port() -> int:
         return sock.getsockname()[1]
 
 
-def start_registry(port: int, db: Path, log: Path) -> subprocess.Popen:
+def start_registry(port: int, db: Path, log: Path,
+                   extra_args: tuple[str, ...] = ()) -> subprocess.Popen:
+    """*extra_args* are appended to the registry command line, for example
+    ``("--log-level", "info")`` so relay routing lines reach *log*."""
     env = {**os.environ, "PYTHONPATH": str(REPO)}
     proc = subprocess.Popen(
         [sys.executable, "-m", "tools.network.registry",
-         "--db", str(db), "--host", "127.0.0.1", "--port", str(port)],
+         "--db", str(db), "--host", "127.0.0.1", "--port", str(port), *extra_args],
         cwd=str(REPO), env=env,
         stdout=open(log, "ab"), stderr=subprocess.STDOUT,
     )
