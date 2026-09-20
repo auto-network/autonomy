@@ -1130,3 +1130,22 @@ def test_check_grant_finds_a_grant_id_keyed_row_by_its_written_token(monkeypatch
     assert link_serving.check_grant(token, org=ORG, grant_id=grant_id) is not None
     assert link_serving.check_grant("c3" * 16, org=ORG) is None
     assert link_serving.check_grant(token, org=ORG, grant_id="d4" * 16) is None
+
+
+def test_note_viewer_page_is_read_never_generated(tmp_path, monkeypatch, caplog):
+    """The page is a generated asset produced at container start. Serving
+    reads it once per process and writes nothing; a missing page is refused
+    with the build command named, never generated on the spot."""
+    import logging
+    from tools.dashboard import link_serving
+    page = tmp_path / "note-viewer.html"; page.write_bytes(b"<html>viewer</html>")
+    monkeypatch.setattr(link_serving, "_NOTE_VIEWER", page)
+    monkeypatch.setattr(link_serving, "_NOTE_VIEWER_CACHE", None)
+    assert link_serving._note_viewer_bytes() == b"<html>viewer</html>"
+    page.unlink()
+    assert link_serving._note_viewer_bytes() == b"<html>viewer</html>"   # cached, not re-read
+    monkeypatch.setattr(link_serving, "_NOTE_VIEWER_CACHE", None)
+    with caplog.at_level(logging.WARNING, logger=link_serving.logger.name):
+        with pytest.raises(FileNotFoundError):
+            link_serving._note_viewer_bytes()
+    assert "build_relay_note_viewer" in caplog.text

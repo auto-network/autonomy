@@ -35,6 +35,12 @@ if [ -x /usr/local/bin/tailwindcss ] && [ "${DASHBOARD_CSS_WATCH:-on}" != off ];
         >/app/data/tailwind.log 2>&1 &
 fi
 
+# The relay note viewer page is a generated asset like the CSS: one HTML
+# file generated from its template and three vendored libraries, produced
+# here once at start. Serving reads it and never generates or writes it.
+python3 -m tools.dashboard.scripts.build_relay_note_viewer >/app/data/note-viewer.log 2>&1 \
+    || echo "note viewer page was not generated; shared notes will not serve (see /app/data/note-viewer.log)" >&2
+
 # Hot-reload the code from the autonomy-code volume, same as the dev box.
 export DASHBOARD_RESTART_TOKEN="${DASHBOARD_RESTART_TOKEN:-$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')}"
 set --

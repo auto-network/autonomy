@@ -298,6 +298,9 @@ try{
   // the checkout. All product source remains read-only inside the simulation.
   command('tailwindcss',['--cwd',repository+'tools/dashboard','-i','tailwind.input.css',
     '-o','static/tailwind.css','--minify']);
+  // The relay note viewer is built once here, like the CSS: inside the
+  // simulation the source tree is read-only, so a member must find it built.
+  command('python3',['-m','tools.dashboard.scripts.build_relay_note_viewer'],undefined,{cwd:repository});
   // Mountpoints for the per-person volumes; /app is bind-mounted read-only.
   for(const mountpoint of ['orgs','attachments'])mkdirSync(repository+mountpoint,{recursive:true});
   process.env.SIM_SOURCE_DIR=repository;
@@ -318,6 +321,9 @@ try{
   command('certutil',['-A','-d','sql:'+nssDirectory,'-t','P,,','-n',run,'-i',tlsDirectory+'/server.crt']);
   const composeFile=directory+'onboarding.compose.yaml';
   const composeEnv=()=>({...process.env,SIM_SOURCE_DIR:repository,SIM_TLS_DIR:tlsDirectory,SIM_RELAY_HOST:process.env.SIM_RELAY_HOST,SIM_RELAY_PORT:relayPort,SIM_ALICE_PORT:alicePort,SIM_BOB_PORT:bobPort});
+  // A scenario may stop and start a dashboard mid-run (the note-serving proof
+  // stops the publisher to make the relay fall over to the other machine).
+  const compose=(...args)=>command('docker',[...composeArgs(run),...args],undefined,{env:composeEnv(),maxBuffer:64*1024*1024});
   const startupLogLines=[];
   let startupAttempts=0;
   while(true){
@@ -352,7 +358,7 @@ try{
   evidence.tls={selfSigned:true,ca:false,verification:'curl and browser',publicCertificate:tlsDirectory+'/server.crt'};
   // Desktop-height viewport so each evidence screenshot holds a whole screen.
 
-scenario({browser,js,action,waitFor,waitValue,lockAndUnlock,memberRows,click,textOf,setPersonalProfile,openOrganizationSettings,save,withStep,evidence,directory,run,output,alicePort,bobPort,launchFleetJoiner,readCopiedText});
+scenario({browser,js,action,waitFor,waitValue,lockAndUnlock,memberRows,click,textOf,setPersonalProfile,openOrganizationSettings,save,withStep,evidence,directory,run,output,alicePort,bobPort,relayOrigin,launchFleetJoiner,readCopiedText,compose});
 
 }catch(error){
   evidence.status='failed';
@@ -388,7 +394,7 @@ scenario({browser,js,action,waitFor,waitValue,lockAndUnlock,memberRows,click,tex
       const container=command('docker',['ps','-aq','--filter',`label=com.docker.compose.project=${run}`,'--filter',`label=com.docker.compose.service=${person}`]).trim();
       if(!container)continue;
       try{
-        const text=command('docker',['exec',container,'sh','-c','if [ -f /app/data/logs/fleet.log ]; then cat /app/data/logs/fleet.log; fi; for f in /app/data/network/*.log; do [ -f "$f" ] || continue; echo "--- $f"; cat "$f"; done'],undefined,{maxBuffer:64*1024*1024});
+        const text=command('docker',['exec',container,'sh','-c','for f in /app/data/logs/fleet.log /app/data/logs/dashboard.log /app/data/logs/http.log; do if [ -f "$f" ]; then echo "--- $f"; cat "$f"; fi; done; for f in /app/data/network/*.log; do [ -f "$f" ] || continue; echo "--- $f"; cat "$f"; done'],undefined,{maxBuffer:64*1024*1024});
         writeFileSync(output+'/'+person+'-fleet.log',text);fleetLogs+=text;
       }catch(error){evidence.cleanup.errors.push(person+' fleet logs: '+error.message);}
     }
@@ -415,6 +421,9 @@ scenario({browser,js,action,waitFor,waitValue,lockAndUnlock,memberRows,click,tex
       directCandidateFailures:count(sections.dashboard,/no candidate connected/g),
       relayPullFailures:count(sections.dashboard,/relay fallback retry after direct failed/g),
     };
+    // The relay's own routing decisions (its registry runs at info here, not
+    // in production): which member each viewer dial was routed to, in order.
+    evidence.relayRouting=(serviceLog.match(/relay dial routed: token=[0-9a-f]+ org=[0-9a-f]+ tunnel machine=[0-9a-f]+[^\n]*/g)||[]).map(line=>line.replace(/^.*relay dial routed: /,''));
   }catch(error){evidence.cleanup.errors.push('service logs: '+error.message);}
   if(!evidence.cleanup.keptRunning){
     for(const person of openedBrowsers)try{browser(person,'close');}catch(error){evidence.cleanup.errors.push(error.message);}
