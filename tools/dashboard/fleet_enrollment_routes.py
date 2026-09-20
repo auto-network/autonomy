@@ -761,10 +761,21 @@ def _activate_runtime(
     # cache the serving connector uses (auto-ixwr3) but under a DISTINCT file
     # name, and replayed at startup by rearm_local_runtime_from_cache(). A cache
     # write failure must never fail an activation that otherwise succeeded.
+    # The cached copy carries EVERYTHING the browser delivered: the base
+    # credential plus the per-org serving seeds and the org sync certificates
+    # that were peeled above for from_browser_payload. A replay re-runs this
+    # function, which peels them again. Until 2026-09-20 the seeds were
+    # peeled BEFORE this store, so every dashboard restart re-armed with the
+    # certificates and no serving key, no org channel was built, and the
+    # persona seal declined every round (operator-ruled fix, session
+    # auto-0919-212441).
+    cached = dict(payload)
+    if org_sync_certs:
+        cached["org_sync_certs"] = org_sync_certs
+    if serving_seeds:
+        cached["serving_machine_private_seeds"] = serving_seeds
     with contextlib.suppress(Exception):
-        _dashboard_runtime_cache().store(
-            {**payload, "org_sync_certs": org_sync_certs} if org_sync_certs else payload
-        )
+        _dashboard_runtime_cache().store(cached)
     _ensure_fleet_catalog(credential.machine_pub)
     from tools.network import fleet_direct_config
 
@@ -833,6 +844,7 @@ def _activate_runtime(
             # for its reachability row, and first-contact peers learned over
             # the join channel until their rows have replicated.
             org_channels=org_sync_channels.provider(_fleet_advertise_addrs),
+            org_channel_report=org_sync_channels.report,
             advertised_addresses=_fleet_advertise_addrs,
             org_relay_slots=org_sync_channels.relay_slots_provider(),
         )

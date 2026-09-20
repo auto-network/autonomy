@@ -324,6 +324,11 @@ class FleetSyncRuntimeConfig:
     org_channels: Callable[
         [], Mapping[str, "OrgFleetAuthenticator"]
     ] | None = None
+    #: What this process holds toward each org channel, for the persona
+    #: seal's decline line: scope slug -> {certificate, key_held, channel}
+    #: (tools.dashboard.org_sync_channels.report). Read, never inferred:
+    #: the line names the part that is missing. None = no report wired.
+    org_channel_report: Callable[[], Mapping[str, Mapping]] | None = None
     #: Co-member machines outside the personal roster, as scope slug ->
     #: {machine_pub: direct address candidates}. Discovery fills this
     #: (auto-mldvv); the harness injects it. A machine that is also in the
@@ -3460,12 +3465,12 @@ class FleetSyncScheduler:
                 continue
             channel = channels.get(scope)
             if channel is None:
-                # No silent exit (auto-mmwgu observability): the seal needs
-                # the fleet:sync certificate the runtime activation installs.
+                # No silent exit (auto-mmwgu observability), and no guessed
+                # cause: the line names which part of the channel this
+                # process lacks, read from the installed state.
                 logger.warning(
-                    "fleet sync scope %r: persona write floor NOT sealed: this process "
-                    "holds no org sync channel (no fleet:sync certificate was "
-                    "installed at the last runtime activation)", scope,
+                    "fleet sync scope %r: persona write floor NOT sealed: %s",
+                    scope, self._org_channel_absence(scope),
                 )
                 continue
             # The persona cert names the org channel's key as its leaf, so
@@ -3489,6 +3494,45 @@ class FleetSyncScheduler:
                 "fleet sync scope %r: persona write floor NOT sealed: %s",
                 scope, reason or "unknown",
             )
+
+    def _org_channel_absence(self, scope: str) -> str:
+        """Why this process holds no org channel for *scope*, read from the
+        installed state (config.org_channel_report), never inferred. An
+        org channel is a fleet:sync certificate paired with the org serving
+        key it names; either part can be the one missing."""
+        base = "this process holds no org sync channel: "
+        held = None
+        provider = self.config.org_channel_report
+        if provider is not None:
+            try:
+                held = dict(provider()).get(scope)
+            except Exception:
+                logger.warning("fleet sync: org channel report failed", exc_info=True)
+        if not isinstance(held, Mapping):
+            return base + (
+                "neither a fleet:sync certificate nor an org serving key is "
+                "installed for this scope"
+            )
+        cert, key = held.get("certificate"), bool(held.get("key_held"))
+        if cert and not key:
+            return base + (
+                "the fleet:sync certificate is installed but the org serving "
+                "key is not held"
+            )
+        if key and not cert:
+            return base + (
+                "the org serving key is held but no fleet:sync certificate is "
+                "installed"
+            )
+        if cert and key:
+            return base + (
+                "certificate and serving key are both held but the channel "
+                "was not built"
+            )
+        return base + (
+            "neither a fleet:sync certificate nor an org serving key is "
+            "installed for this scope"
+        )
 
     async def _sync_org_peers(self, own_fleet: set[str], now: float) -> None:
         """One round's outward pulls: for every org scope with an org
