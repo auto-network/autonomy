@@ -57,10 +57,11 @@ def arming(monkeypatch):
 
 
 def test_each_org_is_armed_with_its_own_key(arming):
-    fer._arm_serving_orgs(BASE, {
-        "uuid-anchore": "11" * 32,
-        "uuid-dynbench": "22" * 32,
-    })
+    fer._arm_connector_caches(
+        {**BASE, "serving_machine_private_seeds": {
+            "uuid-anchore": "11" * 32, "uuid-dynbench": "22" * 32}},
+        personal_org_uuid=None, arm_personal=False,
+    )
     anchore = _Cache.stored[("fleet-connector-runtime", "uuid-anchore")]
     dynbench = _Cache.stored[("fleet-connector-runtime", "uuid-dynbench")]
     assert anchore["serving_machine_private_seed"] == "11" * 32
@@ -79,20 +80,29 @@ def test_a_connector_that_is_not_running_is_still_armed(arming, monkeypatch):
     monkeypatch.setattr(
         fer.fleet_relay_sync, "publish_connector_runtime", refuse,
     )
-    fer._arm_serving_orgs(BASE, {"uuid-anchore": "11" * 32})
+    fer._arm_connector_caches(
+        {**BASE, "serving_machine_private_seeds": {"uuid-anchore": "11" * 32}},
+        personal_org_uuid=None, arm_personal=False,
+    )
     cached = _Cache.stored[("fleet-connector-runtime", "uuid-anchore")]
     assert cached["serving_machine_private_seed"] == "11" * 32
 
 
 def test_an_org_with_no_seed_is_left_alone(arming):
-    fer._arm_serving_orgs(BASE, {"uuid-anchore": "11" * 32})
+    fer._arm_connector_caches(
+        {**BASE, "serving_machine_private_seeds": {"uuid-anchore": "11" * 32}},
+        personal_org_uuid=None, arm_personal=False,
+    )
     assert ("fleet-connector-runtime", "uuid-dynbench") not in _Cache.stored
     assert [org for org, _ in arming] == ["anchore"]
 
 
 def test_no_seeds_at_all_touches_nothing(arming):
-    fer._arm_serving_orgs(BASE, {})
-    fer._arm_serving_orgs(BASE, None)
+    fer._arm_connector_caches(BASE, personal_org_uuid=None, arm_personal=False)
+    fer._arm_connector_caches(
+        {**BASE, "serving_machine_private_seeds": {}},
+        personal_org_uuid=None, arm_personal=False,
+    )
     assert _Cache.stored == {}
     assert arming == []
 
@@ -108,10 +118,11 @@ def test_a_cache_that_cannot_be_written_does_not_stop_the_next_org(
             super().store(payload)
 
     monkeypatch.setattr(fer.fleet_relay_sync, "FleetRuntimeWarmCache", _Selective)
-    fer._arm_serving_orgs(BASE, {
-        "uuid-anchore": "11" * 32,
-        "uuid-dynbench": "22" * 32,
-    })
+    fer._arm_connector_caches(
+        {**BASE, "serving_machine_private_seeds": {
+            "uuid-anchore": "11" * 32, "uuid-dynbench": "22" * 32}},
+        personal_org_uuid=None, arm_personal=False,
+    )
     assert ("fleet-connector-runtime", "uuid-dynbench") in _Cache.stored
 
 
@@ -214,13 +225,14 @@ def test_an_org_with_no_founded_ledger_is_skipped(targets):
 def test_the_personal_connector_is_armed_under_the_connector_prefix(arming):
     """graph://1418ca10-588 D1: the personal scope is pre-seeded exactly like
     the org scopes, into the file the connector reads at launch."""
-    fer._arm_personal_connector(BASE, "uuid-personal")
+    fer._arm_connector_caches(BASE, personal_org_uuid="uuid-personal", arm_personal=True)
     assert _Cache.stored[("fleet-connector-runtime", "uuid-personal")] == BASE
 
 
 def test_an_unregistered_personal_org_arms_nothing(arming):
-    fer._arm_personal_connector(BASE, None)
-    fer._arm_personal_connector(BASE, "")
+    fer._arm_connector_caches(BASE, personal_org_uuid=None, arm_personal=True)
+    fer._arm_connector_caches(BASE, personal_org_uuid="", arm_personal=True)
+    fer._arm_connector_caches(BASE, personal_org_uuid="uuid-personal", arm_personal=False)
     assert _Cache.stored == {}
 
 
@@ -230,4 +242,67 @@ def test_a_personal_cache_write_failure_does_not_raise(arming, monkeypatch):
             raise OSError("no ramfs here")
 
     monkeypatch.setattr(fer.fleet_relay_sync, "FleetRuntimeWarmCache", _Broken)
-    fer._arm_personal_connector(BASE, "uuid-personal")  # must not raise
+    fer._arm_connector_caches(BASE, personal_org_uuid="uuid-personal", arm_personal=True)  # must not raise
+
+
+# ── One complete payload, one derivation, pinned field sets (2026-09-20) ──
+#
+# Operator ruling, item 3 of the credential fixes: every connector file is
+# derived from the ONE complete payload the dashboard caches, by ONE
+# function, and the exact field set each consumer receives is pinned here.
+# The trims used to live in two functions; the trims were the bugs.
+
+COMPLETE = {
+    **BASE,
+    "machine_private_seed": "aa" * 32,
+    "reachability_cert": {"v": 1, "scope": ["node:announce", "node:lookup"]},
+    "serving_machine_private_seeds": {"uuid-anchore": "11" * 32, "uuid-dynbench": "22" * 32},
+    "org_sync_certs": {"anchore": {"child_pub": "a1" * 32}, "dynbench": {"child_pub": "d1" * 32}},
+}
+BASE_FIELDS = {"machine_id", "machine_pub", "process_private_seed", "delegation_cert",
+               "machine_private_seed", "reachability_cert"}
+
+
+def test_the_personal_connector_receives_base_and_certificates_and_no_seed():
+    personal = fer.connector_cache_payload(COMPLETE, org_uuid=None)
+    assert set(personal) == BASE_FIELDS | {"org_sync_certs"}
+    assert personal["org_sync_certs"] == COMPLETE["org_sync_certs"]
+
+
+def test_an_org_connector_receives_base_certificates_and_exactly_its_own_seed():
+    anchore = fer.connector_cache_payload(COMPLETE, org_uuid="uuid-anchore")
+    assert set(anchore) == BASE_FIELDS | {"org_sync_certs", "serving_machine_private_seed"}
+    assert anchore["serving_machine_private_seed"] == "11" * 32
+    assert "22" * 32 not in repr(anchore), "another org's seed must never reach this connector"
+    assert "serving_machine_private_seeds" not in anchore
+
+
+def test_an_org_without_a_seed_gets_no_payload():
+    assert fer.connector_cache_payload(COMPLETE, org_uuid="uuid-blindhash") is None
+
+
+def test_every_connector_payload_is_derived_from_the_complete_one():
+    """Whatever a connector holds, the dashboard's complete copy holds too:
+    the only field a connector has that the complete dict lacks by name is
+    its single seed, and that value comes from the complete seed map."""
+    for org_uuid in (None, "uuid-anchore", "uuid-dynbench"):
+        derived = fer.connector_cache_payload(COMPLETE, org_uuid=org_uuid)
+        for key, value in derived.items():
+            if key == "serving_machine_private_seed":
+                assert COMPLETE["serving_machine_private_seeds"][org_uuid] == value
+            else:
+                assert COMPLETE[key] == value
+
+
+def test_the_writer_arms_personal_and_every_seeded_org_from_one_payload(arming):
+    fer._arm_connector_caches(COMPLETE, personal_org_uuid="uuid-personal", arm_personal=True)
+    assert set(_Cache.stored) == {
+        ("fleet-connector-runtime", "uuid-personal"),
+        ("fleet-connector-runtime", "uuid-anchore"),
+        ("fleet-connector-runtime", "uuid-dynbench"),
+    }
+    assert _Cache.stored[("fleet-connector-runtime", "uuid-personal")] == \
+        fer.connector_cache_payload(COMPLETE, org_uuid=None)
+    assert _Cache.stored[("fleet-connector-runtime", "uuid-anchore")] == \
+        fer.connector_cache_payload(COMPLETE, org_uuid="uuid-anchore")
+    assert sorted(org for org, _ in arming) == ["anchore", "dynbench"]
