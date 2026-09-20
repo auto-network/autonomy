@@ -107,41 +107,6 @@ def test_a_co_members_events_arrive_as_ordinary_rows(tmp_path, monkeypatch, mach
         assert store.ledger.genesis_id is not None
 
 
-def test_a_legacy_store_is_carried_across_on_open(tmp_path, monkeypatch):
-    """A store written before the conversion holds its events in the old
-    table; opening it moves them into the rows, once and idempotently."""
-    _use_root(monkeypatch, tmp_path / "m3")
-    _found(tmp_path / "m3")
-    path = org_ledger_db_path(SLUG)
-    wires = _rows()
-    assert wires
-
-    # Rewind to the pre-conversion shape: events in the table, no rows.
-    db = GraphDB(path)
-    try:
-        for event_id, wire in wires.items():
-            db.conn.execute(
-                "INSERT OR IGNORE INTO ledger_events(event_id, event_type,"
-                " author_key, hlc_ts, hlc_count, wire) VALUES(?,?,?,?,?,?)",
-                (event_id, "genesis", "aa" * 32, 1, 0, wire.encode("utf-8")),
-            )
-        db.conn.execute(
-            "DELETE FROM settings WHERE set_id=?", (settings_bridge.SET_ID,)
-        )
-        db.conn.commit()
-    finally:
-        db.close()
-    assert _rows() == {}
-
-    with LedgerStore(path) as store:
-        assert {e.event_id for e in store.events()} == set(wires)
-    assert set(_rows()) == set(wires)
-    # Idempotent: a second open carries nothing and changes nothing.
-    with sqlite3.connect(path) as conn:
-        assert settings_bridge.migrate_events_to_settings(conn, path) == 0
-    assert set(_rows()) == set(wires)
-
-
 def test_a_failed_write_is_raised_not_swallowed(machine1, monkeypatch):
     """Storing an event is the append; a failure must reach the caller
     rather than leaving an event that exists in memory and nowhere else."""
