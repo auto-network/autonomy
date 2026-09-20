@@ -305,6 +305,7 @@ def test_approval_commits_roster_before_resume_delivers_unchanged_armor(
         armor_provider=lambda: (
             armor, root.public_hex,
             "2026-08-20T01:02:03Z", "2026-08-24T04:05:06Z",
+            "ab" * 32,
         ),
         now_ms=NOW_MS + 2,
     )
@@ -315,6 +316,7 @@ def test_approval_commits_roster_before_resume_delivers_unchanged_armor(
     assert delivered["personal_root_armor"] == armor
     assert delivered["personal_root_created_at"] == "2026-08-20T01:02:03Z"
     assert delivered["personal_root_updated_at"] == "2026-08-24T04:05:06Z"
+    assert delivered["delegate_audited_public_key"] == "ab" * 32
 
     # Retrying approval is idempotent: the content-addressed roster key is
     # updated in place rather than adding another base row.

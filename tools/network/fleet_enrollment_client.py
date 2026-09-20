@@ -99,6 +99,7 @@ class EnrollmentResult:
     personal_root_armor: str | None = None
     personal_root_created_at: str | None = None
     personal_root_updated_at: str | None = None
+    delegate_audited_public_key: str | None = None
     #: For status == "unavailable": which invitation fault the serving side
     #: named — invite_inactive | invite_unknown | invite_expired — so the UI
     #: can tell the operator the exact cause and fix.
@@ -460,6 +461,7 @@ class FleetEnrollmentClient:
             "approval", "roster_entry", "origin_entry",
             "personal_root_armor", "personal_root_created_at",
             "personal_root_updated_at",
+            "delegate_audited_public_key",
         }
         # ``active_roster`` (the whole fleet, for peer bootstrap) is optional so
         # a joiner still verifies against an origin that predates the field.
@@ -474,6 +476,9 @@ class FleetEnrollmentClient:
                 "fleet resume returned an invalid status envelope"
             )
         armor = reply["personal_root_armor"]
+        audited_public = _require_hex64(
+            reply["delegate_audited_public_key"], "delegate_audited_public_key"
+        )
         if not isinstance(armor, str) or not armor:
             raise FleetEnrollmentClientError(
                 "approved fleet response carries no encrypted personal root"
@@ -533,6 +538,7 @@ class FleetEnrollmentClient:
             personal_root_armor=armor,
             personal_root_created_at=timestamps[0],
             personal_root_updated_at=timestamps[1],
+            delegate_audited_public_key=audited_public,
         )
 
     async def _exchange(self, invite: fleet_invite.FleetInvite, message: dict):

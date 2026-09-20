@@ -33,6 +33,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import socket
 import subprocess
 from dataclasses import dataclass, field
@@ -354,6 +355,7 @@ def _run_fleet_join(report: InitReport, invitation, *, client=None) -> None:
             or result.personal_root_armor is None
             or result.personal_root_created_at is None
             or result.personal_root_updated_at is None
+            or result.delegate_audited_public_key is None
         ):
             raise FleetEnrollmentClientError(
                 "approved fleet enrollment returned incomplete delivery"
@@ -363,6 +365,7 @@ def _run_fleet_join(report: InitReport, invitation, *, client=None) -> None:
             expected_root_pub=invitation.personal_root_pub,
             source_created_at=result.personal_root_created_at,
             source_updated_at=result.personal_root_updated_at,
+            delegate_audited_public_key=result.delegate_audited_public_key,
         )
         enrollment_client.state_store.save_delivery(
             recovery.request_id,
@@ -385,8 +388,9 @@ def _run_fleet_join(report: InitReport, invitation, *, client=None) -> None:
 def _store_fleet_personal_armor(
     armor: str, *, expected_root_pub: str,
     source_created_at: str, source_updated_at: str,
+    delegate_audited_public_key: str,
 ) -> None:
-    """Store only the canonical encrypted root delivered after approval."""
+    """Install the approved encrypted identity and public sign-in recipient."""
     import time
 
     from tools.dashboard import identity_routes
@@ -407,6 +411,17 @@ def _store_fleet_personal_armor(
             raise ValueError(
                 "this machine already carries a different personal identity"
             )
+    # Match personal identity creation: sign-in preparation needs this public
+    # recipient before the first unlock. This neither warms nor replaces keys.
+    if not re.fullmatch(r"[0-9a-f]{64}", delegate_audited_public_key):
+        raise ValueError("invalid audited encryption recipient")
+    from tools.graph.schemas.vault_policy_class import VAULT_POLICY_CLASS_SET_ID
+    from tools.vault.key_holder import _scoped_db
+    from tools.vault.store import VaultStore
+
+    with VaultStore(_scoped_db(VAULT_POLICY_CLASS_SET_ID, None)) as store:
+        store.put_delegate_audited_recipient(delegate_audited_public_key)
+    if existing is not None:
         return
     with settings_ops.identity_write_context():
         settings_ops.upsert_by_key(

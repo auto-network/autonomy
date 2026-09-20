@@ -1078,6 +1078,7 @@ async def resume_local_enrollment(request: Request) -> JSONResponse:
                 or result.personal_root_armor is None
                 or result.personal_root_created_at is None
                 or result.personal_root_updated_at is None
+                or result.delegate_audited_public_key is None
             ):
                 raise FleetEnrollmentClientError(
                     "approved fleet enrollment returned incomplete delivery"
@@ -1087,6 +1088,7 @@ async def resume_local_enrollment(request: Request) -> JSONResponse:
                 expected_root_pub=recovery.invite.personal_root_pub,
                 source_created_at=result.personal_root_created_at,
                 source_updated_at=result.personal_root_updated_at,
+                delegate_audited_public_key=result.delegate_audited_public_key,
             )
             state.save_delivery(recovery.request_id, result.delivery)
             unlock_routes.bust_enforce_cache()

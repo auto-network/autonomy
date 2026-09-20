@@ -255,6 +255,7 @@ def test_joining_screen_resumes_approved_delivery_without_node_restart(
                 personal_root_armor="encrypted-personal-armor",
                 personal_root_created_at="2026-08-20T01:02:03Z",
                 personal_root_updated_at="2026-08-24T04:05:06Z",
+                delegate_audited_public_key="ab" * 32,
             )
 
     from tools.init import first_run
@@ -267,9 +268,10 @@ def test_joining_screen_resumes_approved_delivery_without_node_restart(
         first_run,
         "_store_fleet_personal_armor",
         lambda armor, *, expected_root_pub, source_created_at,
-               source_updated_at: stored.update({
+               source_updated_at, delegate_audited_public_key: stored.update({
             "armor": armor, "root_pub": expected_root_pub,
             "created_at": source_created_at, "updated_at": source_updated_at,
+            "recipient": delegate_audited_public_key,
         }),
     )
     monkeypatch.setattr(
@@ -285,6 +287,7 @@ def test_joining_screen_resumes_approved_delivery_without_node_restart(
         "root_pub": invite.personal_root_pub,
         "created_at": "2026-08-20T01:02:03Z",
         "updated_at": "2026-08-24T04:05:06Z",
+        "recipient": "ab" * 32,
         "busted": True,
     }
 

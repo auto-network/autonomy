@@ -80,6 +80,10 @@ def path(tmp_path, monkeypatch):
     origin = fleet_enrollment_service.FleetEnrollmentStore(
         tmp_path / "origin-machine.db"
     )
+    from tools.dashboard.tests.fleet_central_fixtures import configure_central
+    from tools.dashboard import fleet_enrollment_approvals
+    configure_central(monkeypatch, origin, root, NOW_MS / 1000)
+    monkeypatch.setattr(fleet_enrollment_approvals, "_needs_local_bootstrap", lambda: False)
     origin.register_invite(
         target_uuid=TARGET_UUID,
         grant_token=TOKEN,
@@ -116,6 +120,7 @@ def path(tmp_path, monkeypatch):
                     root.public_hex,
                     "2026-08-20T01:02:03Z",
                     "2026-08-24T04:05:06Z",
+                    "ab" * 32,
                 ),
                 now_ms=NOW_MS,
             )
@@ -217,6 +222,7 @@ async def test_resume_verifies_public_approval_and_returns_unchanged_armor(path)
     )
     assert approved.personal_root_created_at == "2026-08-20T01:02:03Z"
     assert approved.personal_root_updated_at == "2026-08-24T04:05:06Z"
+    assert approved.delegate_audited_public_key == "ab" * 32
     join_store.save_delivery(recovery.request_id, approved.delivery)
     assert join_store.load_delivery(recovery.request_id) == approved.delivery
     raw = join_store.path.read_bytes()
