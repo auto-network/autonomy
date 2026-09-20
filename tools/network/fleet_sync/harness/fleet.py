@@ -273,7 +273,16 @@ class HarnessFleet:
         import fcntl
 
         if slots is None:
-            slots = int(os.environ.get("AUTONOMY_HARNESS_FLEET_SLOTS", "2"))
+            # Sized from the machine: the constant two was set when several
+            # three-process fleets on a starved CPU hung the engine
+            # (2026-09-02). On a 32-core box two slots serialized the
+            # suite: in the 2026-09-20 full run the three slowest tests
+            # did 0.8 to 4.7 s of work and waited 6.5 to 13.7 s for a
+            # slot. One fleet per four cores keeps the starvation bound
+            # and lets the rest of the machine work; the stall detector in
+            # wait() names a hang in 45 s if the old one returns.
+            configured = os.environ.get("AUTONOMY_HARNESS_FLEET_SLOTS")
+            slots = int(configured) if configured else max(2, (os.cpu_count() or 8) // 4)
         deadline = time.monotonic() + 300.0
         while True:
             for index in range(slots):
