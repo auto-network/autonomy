@@ -303,3 +303,60 @@ def test_a_serving_machine_pre_seeds_the_personal_connector_cache(
     assert fleet_relay_sync.FleetRuntimeWarmCache("org-x").load() == payload
     assert (tmp_path / "fleet-dashboard-runtime.org-x.json").exists()
     assert published == ["personal"]
+
+
+# ── The cache keeps the whole payload, seeds included (2026-09-20) ────────
+#
+# Home, 2026-09-20: the dashboard's cache file held the org sync certificates
+# and NOT the per-org serving seeds, because _activate_runtime peeled the seeds
+# off the payload before storing it. Every dashboard restart therefore
+# re-armed with certificates and no serving key, no org channel was built,
+# and the persona seal declined every round. The cached copy must carry
+# everything the browser delivered so a replay re-arms the org channels.
+
+
+def test_the_dashboard_cache_keeps_the_serving_seeds_and_a_replay_holds_the_key(
+    tmp_path, monkeypatch
+):
+    from tools.dashboard import org_sync_channels
+
+    root = KeyPair.from_private_hex("11" * 32)
+    machine = KeyPair.from_private_hex("22" * 32)
+    machine_id = "33" * 32
+    entry = fleet_roster.enroll(
+        root, machine_id=machine_id, machine_pub=machine.public_hex
+    )
+    _wire_runtime(
+        tmp_path, monkeypatch, machine_id=machine_id, root=root,
+        roster_entries=(entry,), expected_entry=entry,
+    )
+    # One serving org: the browser derives its serving seed and mints the
+    # persona's fleet:sync certificate over that key.
+    serving = KeyPair.from_private_hex("77" * 32)
+    monkeypatch.setattr(
+        org_sync_channels, "sync_org_targets",
+        lambda: [{"scope": "anchore", "genesis_id": "a" * 64,
+                  "persona_pub": "b" * 64, "org_uuid": "uuid-anchore"}],
+    )
+    # No org connector caches in this test: the property under test is the
+    # DASHBOARD'S OWN copy.
+    monkeypatch.setattr(fleet_enrollment_routes, "serving_org_targets", lambda: [])
+    payload = _runtime_payload(machine_id, machine)
+    payload["serving_machine_private_seeds"] = {"uuid-anchore": serving.private_hex}
+    payload["org_sync_certs"] = {"anchore": {"child_pub": serving.public_hex}}
+
+    fleet_enrollment_routes._activate_runtime(payload, publish_connector=False)
+
+    cached = fleet_relay_sync.FleetRuntimeWarmCache(
+        "org-x", name_prefix="fleet-dashboard-runtime"
+    ).load()
+    assert cached["serving_machine_private_seeds"] == payload["serving_machine_private_seeds"]
+    assert cached["org_sync_certs"] == payload["org_sync_certs"]
+
+    # A restart: the process forgets what it held and replays the cache.
+    org_sync_channels.install({}, {})
+    assert org_sync_channels.report() == {}
+    assert fleet_enrollment_routes.rearm_local_runtime_from_cache() is True
+    held = org_sync_channels.report()["anchore"]
+    assert held["certificate"]["child_pub"] == serving.public_hex
+    assert held["key_held"] is True, held

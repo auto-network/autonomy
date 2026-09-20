@@ -366,3 +366,52 @@ def test_a_round_without_an_org_channel_says_so_at_warning(tmp_path: Path, caplo
         scheduler._seal_write_floors({key.public_hex})
     assert any("scope 'alpha': persona write floor NOT sealed: this process holds no org sync channel" in r.getMessage()
                for r in caplog.records), [r.getMessage() for r in caplog.records]
+
+
+def _decline_line(tmp_path: Path, caplog, report) -> str:
+    """Run one seal round on a scope with no org channel and return the
+    persona-cut decline line the scheduler logged for it."""
+    import logging
+    root, key = KeyPair.generate(), KeyPair.generate()
+    personal, alpha = tmp_path / "personal.db", tmp_path / "alpha.db"
+    _prepare(personal, key); _prepare(alpha, key)
+    entries = [enroll(root, machine_pub=key.public_hex)]
+    scheduler = _scheduler(key, root, entries, personal,
+                           sync_scopes=lambda: {"alpha": alpha}, org_channels=lambda: {},
+                           org_channel_report=report)
+    with caplog.at_level(logging.WARNING, logger="tools.network.fleet_sync_scheduler"):
+        scheduler._seal_write_floors({key.public_hex})
+    lines = [r.getMessage() for r in caplog.records
+             if "scope 'alpha': persona write floor NOT sealed" in r.getMessage()]
+    assert len(lines) == 1, [r.getMessage() for r in caplog.records]
+    return lines[0]
+
+
+def test_decline_names_the_missing_serving_key_when_the_certificate_is_held(tmp_path: Path, caplog) -> None:
+    """2026-09-20 on Home: the certificate was installed and the serving key
+    was not, and the line blamed the certificate. The line must name the
+    part that is actually missing, read from the installed state."""
+    line = _decline_line(tmp_path, caplog, lambda: {
+        "alpha": {"certificate": {"child_pub": "aa" * 32}, "key_held": False, "channel": False},
+    })
+    assert "the fleet:sync certificate is installed but the org serving key is not held" in line
+    assert "no fleet:sync certificate" not in line
+
+
+def test_decline_names_the_missing_certificate_when_the_key_is_held(tmp_path: Path, caplog) -> None:
+    line = _decline_line(tmp_path, caplog, lambda: {
+        "alpha": {"certificate": None, "key_held": True, "channel": False},
+    })
+    assert "the org serving key is held but no fleet:sync certificate is installed" in line
+
+
+def test_decline_names_both_absent_when_the_scope_is_not_reported(tmp_path: Path, caplog) -> None:
+    line = _decline_line(tmp_path, caplog, lambda: {})
+    assert "neither a fleet:sync certificate nor an org serving key is installed" in line
+
+
+def test_decline_names_an_unbuilt_channel_when_both_parts_are_held(tmp_path: Path, caplog) -> None:
+    line = _decline_line(tmp_path, caplog, lambda: {
+        "alpha": {"certificate": {"child_pub": "aa" * 32}, "key_held": True, "channel": False},
+    })
+    assert "certificate and serving key are both held but the channel was not built" in line
