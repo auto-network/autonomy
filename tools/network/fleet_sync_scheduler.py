@@ -1462,15 +1462,6 @@ class SQLiteFleetSyncStore:
         finally:
             conn.close()
 
-    def machines_known_by(self, declared) -> set[str]:
-        from tools.network.fleet_sync import cuts
-
-        conn, _catalog = self._open()
-        try:
-            return cuts.machines_known_by(conn, dict(declared or {}))
-        finally:
-            conn.close()
-
     def persona_cut_records(self) -> dict[str, dict]:
         from tools.network.fleet_sync import cuts
 
@@ -3495,7 +3486,11 @@ class FleetSyncScheduler:
         declared at the same cut_ns this store holds. Blocking."""
         if scope == "personal":
             return {entry.machine_pub for entry in self._roster_snapshot}
-        return store.machines_known_by(declared_personas)
+        known: set[str] = set()
+        for persona, record in store.persona_cut_records().items():
+            if int(declared_personas.get(persona, -1)) == int(record.get("cut_ns", -2)):
+                known.update(str(m) for m in (record.get("machines") or {}))
+        return known
 
     def _seal_cuts(self, roster_machines: set[str]) -> None:
         """One machine cut per scope store, then the persona cut per org
@@ -3942,12 +3937,10 @@ class FleetSyncScheduler:
             # said "asking" while an edit had removed the send, and the puller
             # sat silent for an hour looking like a server fault (2026-09-08).
             logger.warning(
-                "fleet sync pull %s scope %r: asked v%d, floor=%s, %d listed "
-                "origin(s)%s, resume=%d crumb(s), bootstrap=%s",
-                machine_pub[:12], scope, protocol_version, floor, len(watermarks or {}),
-                (" [" + ", ".join(
-                    f"{origin[:12]}@{cursor}" for origin, cursor in sorted(watermarks.items())
-                ) + "]") if watermarks else "",
+                "fleet sync pull %s scope %r: asked v%d, %d watermark(s) "
+                "newest=%s, resume=%d crumb(s), bootstrap=%s",
+                machine_pub[:12], scope, protocol_version, len(watermarks or {}),
+                max(watermarks.values()) if watermarks else None,
                 len(resume_trail), bootstrap,
             )
 
