@@ -27,15 +27,15 @@ def test_scope_field_roundtrip_and_personal_bytes_unchanged() -> None:
     assert b"scope" not in personal  # the personal scope is the wire default
     assert b"accept_checkpoint" not in personal
     assert decode_pull_request(personal) == (
-        epoch, (), compat, "personal", False, 6, None, None, None
+        epoch, (), compat, "personal", False, 6, None, None
     )
     scoped = encode_pull_request(epoch, compat=compat, scope="alpha")
     assert decode_pull_request(scoped) == (
-        epoch, (), compat, "alpha", False, 6, None, None, None
+        epoch, (), compat, "alpha", False, 6, None, None
     )
     boot = encode_pull_request(epoch, compat=compat, bootstrap=True)
     assert decode_pull_request(boot) == (
-        epoch, (), compat, "personal", True, 6, None, None, None
+        epoch, (), compat, "personal", True, 6, None, None
     )
     marked = encode_pull_request(epoch, compat=compat, watermarks={"ab" * 32: 5})
     assert decode_pull_request(marked)[6] == {"ab" * 32: 5}

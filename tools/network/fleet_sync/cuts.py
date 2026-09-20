@@ -73,18 +73,6 @@ def ensure_cut_schema(conn: sqlite3.Connection) -> None:
         "cut_ns INTEGER NOT NULL,"
         "record TEXT NOT NULL)"
     )
-    # Every machine a persona cut ever listed, with the position it was
-    # last listed at; a machine the persona's newest cut omits is retired
-    # (auto-0my5i): the persona's own fleet decided it, nothing else.
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS fleet_sync_persona_machines("
-        "persona TEXT NOT NULL,"
-        "machine TEXT NOT NULL,"
-        "position INTEGER NOT NULL,"
-        "listed_cut_ns INTEGER NOT NULL,"
-        "retired INTEGER NOT NULL DEFAULT 0,"
-        "PRIMARY KEY(persona, machine))"
-    )
 
 
 # ── machine cut ─────────────────────────────────────────────────────────────
@@ -366,22 +354,6 @@ def store_persona_cut(conn: sqlite3.Connection, record: Mapping) -> bool:
                 "record=excluded.record",
                 (persona, org, cut_ns, json.dumps(dict(record), sort_keys=True)),
             )
-            machines = {str(m): int(p) for m, p in (record.get("machines") or {}).items()}
-            for machine, position in machines.items():
-                conn.execute(
-                    "INSERT INTO fleet_sync_persona_machines(persona,machine,position,"
-                    "listed_cut_ns,retired) VALUES(?,?,?,?,0) ON CONFLICT(persona,machine) "
-                    "DO UPDATE SET position=excluded.position, "
-                    "listed_cut_ns=excluded.listed_cut_ns, retired=0",
-                    (persona, machine, position, cut_ns),
-                )
-            if machines:
-                holders = ",".join("?" * len(machines))
-                conn.execute(
-                    "UPDATE fleet_sync_persona_machines SET retired=1 "
-                    f"WHERE persona=? AND machine NOT IN ({holders})",
-                    (persona, *machines),
-                )
         conn.execute("COMMIT")
         return moved
     except BaseException:
@@ -406,20 +378,6 @@ def persona_cuts(conn: sqlite3.Connection) -> dict[str, dict]:
         str(row[0]): json.loads(row[1])
         for row in conn.execute("SELECT persona, record FROM fleet_sync_persona_cuts")
     }
-
-
-def persona_machines(conn: sqlite3.Connection) -> tuple[set[str], set[str]]:
-    """-> (listed, retired): machines any held persona cut currently lists,
-    and machines a persona listed before and its newest cut omits."""
-    present = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='fleet_sync_persona_machines'"
-    ).fetchone() is not None
-    if not present:
-        return set(), set()
-    listed, retired = set(), set()
-    for machine, flag in conn.execute("SELECT machine, retired FROM fleet_sync_persona_machines"):
-        (retired if int(flag) else listed).add(str(machine))
-    return listed, retired - listed
 
 
 def persona_frontiers(conn: sqlite3.Connection) -> dict[str, int]:
