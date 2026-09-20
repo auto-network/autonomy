@@ -46,6 +46,43 @@ TARGET_UUID = str(uuid.UUID("12345678-1234-5678-9234-567812345678"))
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
+@pytest.mark.parametrize("phase,successful,expected", [
+    (None, False, "synchronizing"),
+    (None, True, "complete"),
+    ("sweeping", True, "synchronizing"),
+    ("pulling", True, "synchronizing"),
+    ("complete", True, "complete"),
+])
+def test_local_sync_completion_uses_durable_transport_state(
+    tmp_path, monkeypatch, phase, successful, expected,
+):
+    root = KeyPair.from_private_hex("13" * 32)
+    local = KeyPair.from_private_hex("14" * 32)
+    remote = KeyPair.from_private_hex("15" * 32)
+    entries = [
+        fleet_roster.enroll(root, machine_id="16" * 32, machine_pub=local.public_hex),
+        fleet_roster.enroll(root, machine_id="17" * 32, machine_pub=remote.public_hex),
+    ]
+    monkeypatch.setattr(machine_boot, "machine_id", lambda **kw: "16" * 32)
+    monkeypatch.setattr(fleet_enrollment_routes.fleet_tunnel_server,
+                        "_personal_root_pub", lambda: root.public_hex)
+    monkeypatch.setattr(fleet_roster, "load_entries", lambda **kw: entries)
+    path = tmp_path / "personal.db"
+    monkeypatch.setattr(fleet_enrollment_routes, "_org_db_path", lambda org: path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE fleet_sync_peer_state (roster_epoch TEXT, "
+                     "machine_public_key TEXT, last_success_ns INTEGER)")
+        conn.execute("INSERT INTO fleet_sync_peer_state VALUES (?,?,?)", (
+            fleet_sync_scheduler.roster_epoch(entries, root.public_hex),
+            remote.public_hex, 1 if successful else None,
+        ))
+        if phase is not None:
+            conn.execute("CREATE TABLE fleet_sync_bootstrap "
+                         "(singleton INTEGER, phase TEXT, frontier TEXT)")
+            conn.execute("INSERT INTO fleet_sync_bootstrap VALUES (1,?, '{}')", (phase,))
+    assert fleet_enrollment_routes._local_sync_phase() == expected
+
+
 @pytest.fixture
 def operator_api(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
