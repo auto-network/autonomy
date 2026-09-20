@@ -74,10 +74,15 @@ def _authorized_grant(request):
         raise PermissionError("connector authentication refused")
     token = request.get("token")
     org = payload["organization"]
-    grant = check_grant(token, org=org)
+    # The grant id the relay handed over at the open (O-C); absent for a
+    # link minted before it, whose rows are keyed by the token.
+    grant_id = request.get("grant") or token
+    if not isinstance(grant_id, str):
+        raise PermissionError("link unavailable")
+    grant = check_grant(token, org=org, grant_id=grant_id)
     if not grant:
         raise PermissionError("link unavailable")
-    return token, org, grant
+    return token, org, grant, grant_id
 
 
 def resolve(request):
@@ -85,23 +90,23 @@ def resolve(request):
     from tools.dashboard.link_channel_key import CHANNEL_KEY_TARGET_TYPES, channel_key_for
     from tools.dashboard.link_serving import check_grant
 
-    token, org, grant = _authorized_grant(request)
+    token, org, grant, grant_id = _authorized_grant(request)
     if grant["target_type"] not in CHANNEL_KEY_TARGET_TYPES:
         raise PermissionError("link unavailable")
     if not grant.get("channel_pub"):
         raise PermissionError("link has no channel key")
-    key = channel_key_for(token, org)
+    key = channel_key_for(grant_id, org)
     if key.public_hex != grant["channel_pub"]:
         raise PermissionError(
             "the vaulted channel key does not match the grant's channel_pub")
-    if check_grant(token, org=org) != grant:
+    if check_grant(token, org=org, grant_id=grant_id) != grant:
         raise PermissionError("the grant changed between the two reads")
     return {"ok": True, "seed": key.private_hex}
 
 
 def resolve_channel(request):
     """Classify Fleet enrollment explicitly; all other channels require keys."""
-    token, org, grant = _authorized_grant(request)
+    token, org, grant, _grant_id = _authorized_grant(request)
     if grant["target_type"] == "fleet:join":
         return {"ok": True, "protocol": "fleet-enrollment"}
     keyed = resolve(request)
@@ -206,13 +211,13 @@ def read_bootstrap(fd):
 
 def client(bootstrap):
     """Resolve an explicit channel protocol fresh per OPEN, without a cache."""
-    def fetch(token):
+    def fetch(token, grant=None):
         from tools.network.idkit import KeyPair
         row = record(bootstrap["credential_id"])
         if row is None:
             raise PermissionError("connector credential unavailable")
         port = row["payload"]["resolver_port"]
-        request = {**bootstrap, "token": token}
+        request = {**bootstrap, "token": token, "grant": grant or token}
         with socket.create_connection(("127.0.0.1", port), timeout=TIMEOUT) as sock:
             sock.sendall(json.dumps(request).encode() + b"\n")
             with sock.makefile("rb") as stream:
@@ -228,6 +233,6 @@ def client(bootstrap):
             "key": KeyPair.from_private_hex(response["seed"]),
         }
 
-    async def fetch_async(token):
-        return await asyncio.to_thread(fetch, token)
+    async def fetch_async(token, grant=None):
+        return await asyncio.to_thread(fetch, token, grant)
     return fetch_async

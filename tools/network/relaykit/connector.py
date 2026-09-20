@@ -193,7 +193,7 @@ async def serve_established_channel(
 
 
 async def _serve_channel_records(
-    crypto: ChannelCrypto, *, token: str, recv, send, handler
+    crypto: ChannelCrypto, *, token: str, recv, send, handler, grant: str | None = None
 ) -> None:
     """Serve one established E2E channel; ``send`` is already tagged.
 
@@ -216,7 +216,12 @@ async def _serve_channel_records(
     channel_handler = handler
     factory = getattr(handler, "for_channel", None)
     if factory is not None:
-        channel_handler = factory(token)
+        # The grant id the relay handed over with the token (O-C): a factory
+        # that takes it resolves the grant by it; older factories take the token.
+        if grant is not None and len(inspect.signature(factory).parameters) >= 2:
+            channel_handler = factory(token, grant)
+        else:
+            channel_handler = factory(token)
         if inspect.isawaitable(channel_handler):
             channel_handler = await channel_handler
 
@@ -275,7 +280,8 @@ async def _serve_channel_records(
 
 
 async def _serve_authenticated_channel(*, org: str, token: str, recv, send,
-                                       handler, hello_builder) -> bool:
+                                       handler, hello_builder,
+                                       grant: str | None = None) -> bool:
     """Serve one channel. Returns False when it ended before the viewer's
     hello arrived (the channel was dropped under it), True once served."""
     first = await recv()
@@ -291,15 +297,16 @@ async def _serve_authenticated_channel(*, org: str, token: str, recv, send,
         recv=recv,
         send=lambda payload: send(tag_viewer_message(VIEWER_KIND_RECORD, payload)),
         handler=handler,
+        grant=grant,
     )
     return True
 
 
 async def serve_link_channel(link_key: KeyPair, *, org: str, token: str,
-                             recv, send, handler) -> bool:
+                             recv, send, handler, grant: str | None = None) -> bool:
     """Serve a public link authenticated only by its fragment key."""
     return await _serve_authenticated_channel(
-        org=org, token=token, recv=recv, send=send, handler=handler,
+        org=org, token=token, recv=recv, send=send, handler=handler, grant=grant,
         hello_builder=lambda client_eph: build_link_server_hello(
             link_key, org=org, token=token, client_eph=client_eph),
     )
@@ -307,10 +314,10 @@ async def serve_link_channel(link_key: KeyPair, *, org: str, token: str,
 
 async def serve_certificate_channel(key: KeyPair, cert: DelegationCert, *,
                                     org: str, token: str, recv, send,
-                                    handler) -> bool:
+                                    handler, grant: str | None = None) -> bool:
     """Serve an explicitly typed non-link channel with a delegated cert."""
     return await _serve_authenticated_channel(
-        org=org, token=token, recv=recv, send=send, handler=handler,
+        org=org, token=token, recv=recv, send=send, handler=handler, grant=grant,
         hello_builder=lambda client_eph: build_certificate_server_hello(
             key, cert, org=org, token=token, client_eph=client_eph),
     )
@@ -1206,6 +1213,12 @@ class TunnelConnector:
                             )
                             continue
                         token = meta["token"]
+                        # The grant id the registry stored at create-link
+                        # (O-C); a link from before it carries none and is
+                        # keyed by its token.
+                        grant = meta.get("grant") or token
+                        if not isinstance(grant, str):
+                            raise TypeError("grant must be a string")
                     except (ValueError, KeyError, TypeError):
                         await send_frame(FRAME_CLOSE, frame.channel_id)
                         continue
@@ -1214,7 +1227,8 @@ class TunnelConnector:
                     if self._publisher is not None:
                         self._publisher.attached(token)
                     tasks[frame.channel_id] = asyncio.create_task(
-                        self._serve_channel(frame.channel_id, token, queue, send_frame, drop)
+                        self._serve_channel(frame.channel_id, token, queue, send_frame, drop,
+                                            grant=grant)
                     )
                 elif frame.type == FRAME_DATA:
                     if fleet is not None and fleet.dispatch_data(
@@ -1265,13 +1279,18 @@ class TunnelConnector:
                     await task
 
     async def _serve_channel(self, channel_id: bytes, token: str,
-                             queue: asyncio.Queue, send_frame, drop) -> None:
+                             queue: asyncio.Queue, send_frame, drop,
+                             grant: str | None = None) -> None:
         """One viewer channel: handshake, then request/response messages."""
         try:
             import inspect
             if self._channel_authorization_for is None:
                 raise PermissionError("channel authorization unavailable")
-            authorization = self._channel_authorization_for(token)
+            authorize = self._channel_authorization_for
+            takes_grant = False
+            with contextlib.suppress(ValueError, TypeError):
+                takes_grant = len(inspect.signature(authorize).parameters) >= 2
+            authorization = authorize(token, grant) if takes_grant else authorize(token)
             if inspect.isawaitable(authorization):
                 authorization = await authorization
             protocol = authorization.get("protocol")
@@ -1281,6 +1300,7 @@ class TunnelConnector:
                 "recv": queue.get,
                 "send": lambda data: send_frame(FRAME_DATA, channel_id, data),
                 "handler": self._handler,
+                "grant": grant,
             }
             if protocol == "public-link":
                 served = await serve_link_channel(authorization["key"], **common)

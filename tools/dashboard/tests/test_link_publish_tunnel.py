@@ -19,6 +19,7 @@ rewritten executor runs exactly as production would call it.
 
 from __future__ import annotations
 
+import re
 import time
 
 import pytest
@@ -225,7 +226,9 @@ def _decide_and_wait(client, rid, envelope):
 
 
 def _cached_grants():
-    return {m.key: m.payload
+    """Grants by their token. A grant minted since O-C is keyed by its grant
+    id and carries the token in its payload; an older one is keyed by it."""
+    return {(m.payload or {}).get("token") or m.key: m.payload
             for m in settings_ops.read_set(NETWORK_LINK_GRANT_SET_ID, org=ORG)}
 
 
@@ -265,13 +268,19 @@ def test_authorized_publish_emits_frame_and_caches_grant(
     # The registry saw one create-link, as the org, carrying only the target,
     # meta and (present is machine-local) this machine's serving identity —
     # never a persona.
-    assert recorder.calls == [
-        (ORG, "create-link",
-         {"target_uuid": TARGET, "target_type": "present",
-          "meta": {"ttl": 3600, "label": "binder"},
-          "serving_machine": SERVING_MACHINE}),
-    ]
+    assert len(recorder.calls) == 1
+    call_org, call_op, call_args = recorder.calls[0]
+    # The publisher-minted grant id rides with it (O-C, 2026-09-20).
+    grant_id = call_args.pop("grant_id")
+    assert re.fullmatch(r"[0-9a-f]{32}", grant_id)
+    assert (call_org, call_op, call_args) == (
+        ORG, "create-link",
+        {"target_uuid": TARGET, "target_type": "present",
+         "meta": {"ttl": 3600, "label": "binder"},
+         "serving_machine": SERVING_MACHINE},
+    )
     token = execution["token"]
+    assert _cached_grants()[token]["grant_id"] == grant_id
     grants = _cached_grants()
     assert token in grants
     assert grants[token]["subject"] == {
@@ -338,7 +347,9 @@ def test_recipient_probe_failure_compensates_grant_and_channel_key(
     assert execution["grant_cleanup"] is True
     assert execution["key_cleanup"] is True
     assert _cached_grants() == {}
-    assert dropped == [("c0ffee00" * 4, ORG)]
+    # The key row is keyed by the grant id, not the token (O-C).
+    assert len(dropped) == 1 and dropped[0][1] == ORG
+    assert re.fullmatch(r"[0-9a-f]{32}", dropped[0][0]) and dropped[0][0] != "c0ffee00" * 4
     assert recorder.calls[-1] == (ORG, "revoke-link", {"token": "c0ffee00" * 4})
 
 

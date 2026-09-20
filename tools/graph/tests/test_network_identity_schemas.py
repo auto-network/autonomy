@@ -312,7 +312,7 @@ def test_binding_rejects_malformed_payloads(mutate, match):
     "mutate, match",
     [
         (lambda p: p.update(token="abc123"), "32 lowercase hex"),
-        (lambda p: p.pop("url"), "url"),
+        (lambda p: (p.pop("url"), p.pop("token")), "grant_id or a token"),
         (lambda p: p.update(url="http://relay.auto.network/l/" + TOKEN), "url"),
         (lambda p: p.update(url=ni.NETWORK_PUBLIC_LINK_BASE_URL + "/l/" + "f" * 32), "url"),
         (lambda p: p.update(token=TOKEN.upper()), "32 lowercase hex|non-empty"),

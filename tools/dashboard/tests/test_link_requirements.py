@@ -81,12 +81,6 @@ def test_requirements_fold_row_origins_to_personas_with_the_newest_stamp(tmp_pat
 
     origins = row_origins(own.conn, note_addresses(own.conn, "note-1"))
     assert origins == {M1: 1_000, M2: 1_500}
-    # No write floor of the publisher's own persona yet: no requirement is recorded,
-    # because no member could cover one (the link would 4431 after its pin).
-    assert link_requirements(
-        own.conn, source_id="note-1", grant_set_id="autonomy.network.link-grant",
-        grant_key="tok", own_machines={M1}, own_persona=P1,
-    ) is None
     own_record = _persona_record(P1, {M1: 900})
     write_floors.store_persona_write_floor(own.conn, own_record)
     p1 = own_record["persona"]

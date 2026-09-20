@@ -471,10 +471,12 @@ class NetworkLinkGrantV1(SettingSchema):
     schema_revision = 1
 
     token: str = field(
-        required=True,
+        required=False,
         description=(
             "The 128-bit grant token as 32 lowercase hex chars — CSPRNG "
-            "output, never target-derived (I2). Must equal the row key."
+            "output, never target-derived (I2). The row key for grants "
+            "minted before O-C (2026-09-20); since then the row is keyed by "
+            "grant_id and the token is written in after the registry mints it."
         ),
     )
     target_uuid: str = field(
@@ -516,8 +518,11 @@ class NetworkLinkGrantV1(SettingSchema):
         super().validate(payload)
         if not isinstance(payload, dict):
             return
-        token = _require_str(payload, "token", cls.__name__, max_len=NETWORK_TOKEN_HEX_LEN)
-        if len(token) != NETWORK_TOKEN_HEX_LEN or not _HEX_RE.match(token):
+        token = payload.get("token")
+        if token is not None and (
+            not isinstance(token, str) or len(token) != NETWORK_TOKEN_HEX_LEN
+            or not _HEX_RE.match(token)
+        ):
             raise SchemaValidationError(
                 f"{cls.__name__}: 'token' must be exactly "
                 f"{NETWORK_TOKEN_HEX_LEN} lowercase hex chars (a 128-bit "
@@ -630,7 +635,7 @@ class NetworkLinkGrantV2(NetworkLinkGrantV1):
     schema_revision = 2
 
     url: str = field(
-        required=True,
+        required=False,
         description=(
             "Public HTTPS URL returned by the issuing registry for this "
             "hostname-independent grant token."
@@ -644,6 +649,9 @@ class NetworkLinkGrantV2(NetworkLinkGrantV1):
         super().validate(payload)
         if not isinstance(payload, dict):
             return
+        url = payload.get("url")
+        if url is None:
+            return  # written in after the registry mints the token (O-C)
         url = _require_str(payload, "url", cls.__name__, max_len=512)
         parsed = urlsplit(url)
         expected_path = f"/l/{payload.get('token', '')}"
@@ -831,6 +839,17 @@ class NetworkLinkGrantV6(NetworkLinkGrantV5):
             "authenticates. Null or absent: org-wide, any member connector."
         ),
     )
+    grant_id: str = field(
+        required=False,
+        description=(
+            "Publisher-minted 32 lowercase hex id, the row key of this grant "
+            "and of its channel key row, written BEFORE create-link so the "
+            "link's requirement can name both rows (O-C, 2026-09-20). The "
+            "registry stores it on the link and hands it to the serving "
+            "member at every viewer open. Absent on grants minted earlier, "
+            "whose row key is the token."
+        ),
+    )
 
     @classmethod
     def validate(cls, payload: Any) -> None:
@@ -841,6 +860,14 @@ class NetworkLinkGrantV6(NetworkLinkGrantV5):
             _require_hex(
                 payload, "serving_machine", cls.__name__,
                 length=NETWORK_PUB_HEX_LEN,
+            )
+        if payload.get("grant_id") is not None:
+            _require_hex(
+                payload, "grant_id", cls.__name__, length=NETWORK_TOKEN_HEX_LEN,
+            )
+        if payload.get("grant_id") is None and payload.get("token") is None:
+            raise SchemaValidationError(
+                f"{cls.__name__}: a grant carries a grant_id or a token"
             )
 
     @classmethod

@@ -101,19 +101,14 @@ def personas_of_origins(
 def link_requirements(
     conn: sqlite3.Connection, *, source_id: str, grant_set_id: str, grant_key: str,
     own_machines: Iterable[str], own_persona: str,
-) -> dict[str, int] | None:
-    """R for a note link: its rows plus its grant row, folded to personas.
-
-    None when this store holds no persona write floor for the publisher's own
-    persona: the frontier a member advertises is derived from persona
-    write floors, so a requirement recorded before the persona's fleet seals write floors
-    is one no member could ever cover, and the link would close 4431 the
-    moment its fresh-link pin lapsed (live fleet 2026-09-20, where no
-    persona write floor had ever been sealed). Without a requirement the link
-    routes as before the frontier work."""
-    if own_persona not in write_floors.persona_write_floors(conn):
-        return None
+    key_set_id: str | None = None,
+) -> dict[str, int]:
+    """R for a note link: its rows, its grant row and, when *key_set_id* is
+    given, its channel key row under the same key, folded to personas. Built
+    after those rows commit and sent in the one create-link (O-C)."""
     addresses = note_addresses(conn, source_id) + settings_addresses(conn, grant_set_id, grant_key)
+    if key_set_id is not None:
+        addresses += settings_addresses(conn, key_set_id, grant_key)
     return personas_of_origins(
         conn, row_origins(conn, addresses),
         own_machines=own_machines, own_persona=own_persona,
