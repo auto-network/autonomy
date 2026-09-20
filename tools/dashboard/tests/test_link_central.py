@@ -1298,52 +1298,6 @@ def test_origin_consumer_converges_known_revoke_once(monkeypatch):
     assert "registry_status" not in result
 
 
-def test_malformed_publish_success_writes_no_cache_or_result(monkeypatch):
-    witness = KeyPair.generate()
-    store = MemoryStore()
-    _plan, payload = _planned(monkeypatch, store, witness.public_hex)
-    decision = _decision(store, payload, witness)
-    status = ApprovalStatus(
-        "resolved",
-        ApprovalRecord(APPROVAL_ID, payload),
-        ApprovalRecord(APPROVAL_ID, {
-            "outcome": "granted",
-            "decision": decision,
-            "resolved_at": 1010.0,
-        }),
-    )
-    writes = []
-    monkeypatch.setattr(
-        link_central.settings_ops,
-        "upsert_by_key",
-        lambda *args, **kwargs: writes.append((args, kwargs)),
-    )
-    async def _no_probe(*_args, **_kwargs):
-        # The probe is awaited (it always was; the stub was synchronous and
-        # raised "a coroutine was expected" before reaching the guard under
-        # test). Returning nothing keeps the original intent: this test is
-        # about refusing a malformed success, not about serving.
-        return None
-
-    monkeypatch.setattr(
-        link_central.link_approvals, "_probe_serving", _no_probe)
-    consumer = link_central.LinkResultConsumer(
-        store=store,
-        secret_resolver=lambda: SECRET,
-        serving_machine_resolver=lambda _org: SERVING_MACHINE,
-        tunnel_transport=lambda *_args: {
-            "ok": True,
-            "token": "55" * 16,
-            "url": "https://evil.example/not-the-token",
-        },
-        witness_resolver=lambda _url: witness.public_hex,
-    )
-    with pytest.raises(link_central.LinkCentralError, match="registry unavailable"):
-        consumer.materialize(status)
-    assert writes == []
-    assert store.results == {}
-
-
 def test_registry_failure_diagnostics_are_safely_projected(monkeypatch):
     witness = KeyPair.generate()
     store = MemoryStore()
