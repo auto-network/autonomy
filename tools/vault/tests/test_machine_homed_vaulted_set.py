@@ -159,3 +159,31 @@ def test_an_organization_homed_vaulted_set_still_takes_the_organization_sealer(c
             setting_id="00000000-0000-0000-0000-000000000001",
             payload={"private_key": "x"}, tier="audited", org="anchore",
         )
+
+
+def test_an_organization_homed_vaulted_row_in_the_personal_scope_seals_as_a_personal_row(cold_vault):
+    """Operator ruling 2026-09-20: the personal scope has no organization
+    sealer (no ledger, no storage delegate, no key generation), so a personal
+    share link's channel key, written to the organization-homed vault set
+    with org='personal', seals cold to the operator's audited recipient and
+    opens warm, exactly like a personal row. A real organization still needs
+    the organization sealer (previous test)."""
+    from tools.graph.schemas.network_identity import (
+        NETWORK_LINK_CHANNEL_KEY_REVISION, NETWORK_LINK_CHANNEL_KEY_SET_ID,
+    )
+    from tools.network.idkit.keys import KeyPair
+
+    personal = cold_vault
+    private_hex = _publish_recipient(personal)
+    seed = KeyPair.generate().private_hex
+    assert settings_ops._vault_sealer is None          # COLD: no organization sealer at all
+    setting_id = settings_ops.add_setting(
+        NETWORK_LINK_CHANNEL_KEY_SET_ID, NETWORK_LINK_CHANNEL_KEY_REVISION,
+        "ab" * 16, {"seed": seed}, org="personal",
+    )
+    assert isinstance(setting_id, str) and setting_id
+    member = _row(settings_ops.read_set(NETWORK_LINK_CHANNEL_KEY_SET_ID, org="personal"), "ab" * 16)
+    assert member.payload is None and member.vault_error.reason == settings_ops.VAULT_NO_KEY_HOLDER
+    settings_ops.set_personal_delegate_audited_key(private_hex)
+    member = _row(settings_ops.read_set(NETWORK_LINK_CHANNEL_KEY_SET_ID, org="personal"), "ab" * 16)
+    assert member.vault_error is None and member.payload["seed"] == seed

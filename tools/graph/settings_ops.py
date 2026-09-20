@@ -652,7 +652,16 @@ def _seal_vault_payload(
     # replicates. Before this branch a machine-homed audited row fell through
     # to the organization sealer, which seals under an organization key
     # generation the machine store does not have.
-    if schemas.declared_home(set_id) in ("personal", "machine") and tier == "audited":
+    # An organization-homed audited row written in the PERSONAL scope has no
+    # organization sealer to reach: the personal scope has no ledger, no
+    # storage delegate, no key generation. Its store is the operator's, so it
+    # seals exactly as a personal row does (operator ruling 2026-09-20: a
+    # personal link's channel key vaults in the personal scope, implicitly,
+    # with no second set). A real organization still takes the sealer below.
+    if tier == "audited" and (
+        schemas.declared_home(set_id) in ("personal", "machine")
+        or org == "personal"
+    ):
         from tools.graph.schemas.vault_policy_class import (
             VAULT_POLICY_CLASS_SET_ID,
         )
