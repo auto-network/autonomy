@@ -743,6 +743,14 @@ def rearm_local_runtime_from_vault() -> bool:
     return True
 
 
+def _wake_frontier_advert(scope: str) -> None:
+    """Best effort: the org connector may not be up; then its next hello
+    advertises anyway."""
+    import contextlib as _contextlib
+    with _contextlib.suppress(Exception):
+        link_serving_supervisor.control(scope, "advertise", {}, timeout=3.0)
+
+
 def _activate_runtime(
     payload: object,
     *,
@@ -887,6 +895,10 @@ def _activate_runtime(
             # Every organization database on this machine synchronizes
             # across the personal fleet beside the personal one.
             sync_scopes=fleet_sync_scheduler.discover_org_sync_scopes,
+            # A persona write floor moved for an org scope: wake that org's
+            # connector so it advertises its frontier now (O-C), instead of
+            # a poll finding it later.
+            frontier_changed=_wake_frontier_advert,
             # ... and across the organization's OTHER members' machines
             # (auto-coea3): the org hello per org this machine holds a
             # persona certificate for, this machine's advertised addresses

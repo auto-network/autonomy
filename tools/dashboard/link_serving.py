@@ -1903,6 +1903,13 @@ async def _serve_control_listener(connector, ctl_path: str,
                 elif request.get("op") == EVENT_OP:
                     args = request.get("args") or {}
                     reply = await _dispatch_event(publisher, args)
+                elif request.get("op") == "advertise":
+                    # The scheduler moved a persona write floor for this org:
+                    # send the frontier advert now, not on a poll (O-C).
+                    wake = getattr(connector, "frontier_wake", None)
+                    if wake is not None:
+                        wake.set()
+                    reply = {"ok": True}
                 elif request.get("op") == "connector-status":
                     # Supervisor-local readiness probe.  This never becomes
                     # a registry control frame: it reports whether the

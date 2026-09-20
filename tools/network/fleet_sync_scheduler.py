@@ -297,6 +297,11 @@ class FleetSyncRuntimeConfig:
     #: always first. Databases share the graph schema; each keeps its own
     #: catalog, journal, peer state, and breadcrumb trails.
     sync_scopes: Callable[[], Mapping[str, Path]] | None = None
+    #: Called with the scope slug after a round in which a persona write floor
+    #: of that org scope was sealed here or adopted from a peer: the moment
+    #: the member's advertised frontier can have moved (O-C). The dashboard
+    #: wakes the org's connector, which sends the advert. Best effort.
+    frontier_changed: Callable[[str], None] | None = None
     #: Peers pulled per round (stalest-first ranking fills the slots; zero
     #: or negative means every eligible peer). ONE by default (auto-mfgko):
     #: with per-origin watermarks every server can supply every origin's
@@ -3395,6 +3400,7 @@ class FleetSyncScheduler:
                     "fleet sync scope %r: persona write floor sealed at %d over %d machine(s)",
                     scope, int(sealed["write_floor_ns"]), len(sealed["machines"]),
                 )
+                self._frontier_changed(scope)
                 continue
             reason = store.persona_seal_blocker(
                 persona=str(channel.persona_cert.subject.id),
@@ -3404,6 +3410,18 @@ class FleetSyncScheduler:
                 "fleet sync scope %r: persona write floor NOT sealed: %s",
                 scope, reason or "unknown",
             )
+
+    def _frontier_changed(self, scope: str) -> None:
+        """A persona write floor of *scope* moved here: tell whoever
+        advertises this member's frontier (config.frontier_changed)."""
+        callback = self.config.frontier_changed
+        if callback is None or scope == "personal":
+            return
+        try:
+            callback(scope)
+        except Exception:
+            logger.warning("fleet sync scope %r: frontier-changed callback failed",
+                           scope, exc_info=True)
 
     def _org_channel_absence(self, scope: str) -> str:
         """Why this process holds no org channel for *scope*, read from the
@@ -4159,10 +4177,12 @@ class FleetSyncScheduler:
                                     raise WriteFloorError(
                                         "persona.write_floor on a scope with no organization"
                                     )
-                                await asyncio.to_thread(
+                                moved = await asyncio.to_thread(
                                     store.adopt_persona_write_floor, control, scope_org,
                                     int(time.time()),
                                 )
+                                if moved:
+                                    await asyncio.to_thread(self._frontier_changed, scope)
                         except WriteFloorError as exc:
                             raise FleetSyncProtocolError(
                                 f"peer sent a write floor that does not verify: {exc}"

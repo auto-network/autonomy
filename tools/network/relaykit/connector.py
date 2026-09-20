@@ -586,6 +586,10 @@ class TunnelConnector:
         self._stop = asyncio.Event()
         #: set while a tunnel is authenticated and serving (tests await it)
         self.connected = asyncio.Event()
+        #: The frontier advert's trigger (O-C): set once after each hello and
+        #: by the dashboard's "advertise" control op after a pull that moved
+        #: a persona write floor. Nothing polls for it.
+        self.frontier_wake = asyncio.Event()
         #: What the tunnel is doing right now and why, for the control
         #: channel's connector-status. Before this the connector knew its
         #: last close code, how long the tunnel lived and its backoff, and
@@ -936,6 +940,7 @@ class TunnelConnector:
                     await self._handshake(ws)
                     served_at = time.monotonic()
                     self.connected.set()
+                    self.frontier_wake.set()
                     self._note_connected()
                     # Always run the keeper for a live tunnel. Production adds
                     # publications after the connector is already connected;

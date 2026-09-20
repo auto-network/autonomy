@@ -31,6 +31,9 @@ CALIBRATION = [
     ("calibration/TimestampPrune.cfg", "AckFloor", "DeltaAlwaysServable"),
     ("calibration/SoloPrune.cfg", "AckFloor", "DeltaAlwaysServable"),
     ("calibration/NoAckResetOnInstall.cfg", "AckFloor", "AckSoundness"),
+    # auto-d8if0: with one candidate per dial a refused viewer cannot fail
+    # over, so a viewer with a serving candidate left is never seated.
+    ("calibration/FailoverCap1.cfg", "ScenRelay", "EventuallyEveryServableViewerAssigned"),
     # The record's write floor rules (bead auto-mmwgu, Propagation) break the
     # constitution's principle 1: a floor read after the transaction pages is
     # claimed as a cursor without the rows below it.
