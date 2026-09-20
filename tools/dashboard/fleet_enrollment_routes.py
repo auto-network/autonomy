@@ -554,91 +554,98 @@ def serving_org_targets() -> list:
     return targets
 
 
-def _arm_serving_orgs(base_payload: dict, seeds: object) -> None:
-    """Give every serving org connector its own runtime credential.
+#: The two fields of the complete payload that a CONNECTOR never receives
+#: whole: the per-org seed map (each connector gets exactly its own seed,
+#: custody ruling 2026-09-02, graph://9cb7d4f4-3a4 comment 65bf2e88-527) and,
+#: for the personal connector, nothing per-org at all.
+_CONNECTOR_TRIMMED_FIELDS = ("serving_machine_private_seeds", "org_sync_certs")
 
-    THE POINT OF THIS FUNCTION: an org connector cannot start without a
-    machine key, and the only way it ever received one was the control socket
-    it serves itself — which it cannot serve until it starts. Nothing broke
-    that circle, so activate_local_runtime published for org=None alone and
-    every org connector on sjc-2 died at launch for an hour, once ramfs
-    cleared, with "no runtime machine key is available for this scope".
 
-    Writing the connector's warm cache from HERE breaks it: the cache is the
-    file the connector already reads at launch (link_serving.py, attach_warm_
-    cache + rearm_from_cache), so the next watchdog respawn finds a key
-    without anyone having to be present. The control-socket publish stays as
-    a best-effort live rotation for a connector that is already up.
+def connector_cache_payload(complete: dict, *, org_uuid: str | None) -> dict | None:
+    """The exact payload ONE connector's warm cache receives, derived from the
+    one complete payload the dashboard caches (item 1, 2026-09-20).
 
-    ramfs, 0600, and cleared by a reboot — so a reboot still fails closed to a
-    human unlock, which is the property the cache was built to keep.
+    ``org_uuid=None``: the personal connector. Base credential plus the org
+    sync certificates. No serving seed of any org.
+    ``org_uuid=<registry uuid>``: that org's connector. Base credential plus
+    THAT org's serving seed under ``serving_machine_private_seed`` plus the
+    org sync certificates. None when the complete payload carries no seed for
+    the org (never provisioned to serve it). Never the seed map, never
+    another org's seed.
+
+    This is the only place a connector payload is derived; the field set is
+    pinned by test_serving_org_arming.py.
     """
-    if not isinstance(seeds, dict) or not seeds:
-        return
+    base = {k: v for k, v in dict(complete).items() if k not in _CONNECTOR_TRIMMED_FIELDS}
+    certs = complete.get("org_sync_certs") or {}
+    if certs:
+        base["org_sync_certs"] = certs
+    if org_uuid is None:
+        return base
+    seed = (complete.get("serving_machine_private_seeds") or {}).get(org_uuid)
+    if not isinstance(seed, str) or not seed:
+        return None
+    base["serving_machine_private_seed"] = seed
+    return base
+
+
+def _arm_connector_caches(
+    complete: dict, *, personal_org_uuid: str | None, arm_personal: bool,
+) -> None:
+    """ONE writer for every connector's warm cache, from the ONE complete
+    payload (operator ruling 2026-09-20, item 3 of the credential fixes).
+
+    Until 2026-09-20 two functions trimmed the payload independently, and
+    the trims were the bugs: the personal connector was never pre-armed
+    (30 h without the direct listener, 2026-09-16/17, graph://1418ca10-588)
+    and the dashboard's own copy dropped the seeds. Now every cache is
+    derived by connector_cache_payload from the same complete dict the
+    dashboard caches for itself.
+
+    Why the cache is written before any socket publish: since bc79dc9a a
+    keyless connector exits before it opens its control socket, so the file
+    the launch path reads is the only thing that can arm a connector that is
+    not up (graph://1418ca10-588 D1, D4). The per-org socket publish that
+    follows is the live-rotation fast path for a connector already running
+    and is best-effort. The personal connector's publish stays in
+    _activate_runtime with its own error handling.
+
+    ``arm_personal``: the personal connector runs only where serving is
+    permitted; org connectors arm regardless, because the org tunnels are a
+    different question from who carries Fleet sync. A cache write failure
+    logs and never fails the activation; one org's failure never strands
+    the next.
+    """
     logger = logging.getLogger(__name__)
-    for target in serving_org_targets():
-        seed_hex = seeds.get(target["org_uuid"])
-        if not isinstance(seed_hex, str) or not seed_hex:
-            continue
-        org_payload = dict(base_payload)
-        org_payload["serving_machine_private_seed"] = seed_hex
+    if arm_personal and personal_org_uuid:
+        personal = connector_cache_payload(complete, org_uuid=None)
         try:
-            fleet_relay_sync.FleetRuntimeWarmCache(target["org_uuid"]).store(
-                org_payload
-            )
+            fleet_relay_sync.FleetRuntimeWarmCache(personal_org_uuid).store(personal)
         except Exception:
-            # No ramfs, or a cache this process cannot write: the org keeps the
-            # behaviour it has today. Never fails an activation that otherwise
-            # succeeded.
+            logger.warning(
+                "could not arm the warm cache for the personal serving connector "
+                "(%s); it will only arm over the control socket if it is already up",
+                personal_org_uuid, exc_info=True,
+            )
+    for target in serving_org_targets():
+        org_payload = connector_cache_payload(complete, org_uuid=target["org_uuid"])
+        if org_payload is None:
+            continue
+        try:
+            fleet_relay_sync.FleetRuntimeWarmCache(target["org_uuid"]).store(org_payload)
+        except Exception:
             logger.warning(
                 "could not arm the warm cache for serving org %s",
                 target["scope"], exc_info=True,
             )
             continue
         try:
-            fleet_relay_sync.publish_connector_runtime(
-                org_payload, org=target["scope"]
-            )
+            fleet_relay_sync.publish_connector_runtime(org_payload, org=target["scope"])
         except Exception as exc:
-            # Expected whenever the connector is not up yet — which is the
-            # case this whole function exists to fix. The cache above is what
-            # arms it; this was only the fast path.
             logger.info(
                 "serving org %s is not running yet; it will arm from the warm "
                 "cache on its next launch (%s)", target["scope"], exc,
             )
-
-
-def _arm_personal_connector(payload: dict, org_uuid: str | None) -> None:
-    """Write the PERSONAL connector's warm cache before it is launched.
-
-    The personal serving connector binds this machine's inbound direct sync
-    listener, and it cannot start without a machine key: since bc79dc9a a
-    keyless connector exits before it opens its control socket, so the socket
-    publish below can only reach a connector that is already armed. Org scopes
-    break that circle in _arm_serving_orgs by writing the cache first; the
-    personal scope never did, so once its cache file was missing (ramfs
-    cleared, or never written on this boot) no unlock could arm it. Observed
-    live on Home 2026-09-16/17: the personal connector exited every 20 s for
-    30 h, port 9410 refused every peer, and SJC fell 35 h behind on every
-    scope. Design of record: graph://1418ca10-588 (D1, D4).
-
-    Same file the connector reads at launch (link_serving.py,
-    attach_warm_cache + rearm_from_cache): the default name_prefix, keyed by
-    the personal registry org_uuid the supervisor passes as --org. The
-    Dashboard's own copy lives under a different prefix and is not this file.
-    A cache write failure logs and never fails the activation.
-    """
-    if not org_uuid:
-        return  # personal org not registered: no personal connector to arm
-    try:
-        fleet_relay_sync.FleetRuntimeWarmCache(org_uuid).store(payload)
-    except Exception:
-        logging.getLogger(__name__).warning(
-            "could not arm the warm cache for the personal serving connector "
-            "(%s); it will only arm over the control socket if it is already up",
-            org_uuid, exc_info=True,
-        )
 
 
 def rearm_local_runtime_from_cache() -> bool:
@@ -856,6 +863,13 @@ def _activate_runtime(
         # non-designated machine could launch a connector and then never feed
         # it. Same predicate as the other two so the three cannot disagree.
         publish_connector = fleet_tunnel_server.tunnel_serving_permitted()[0]
+    # Every connector cache, personal and per org, derived from the ONE
+    # complete payload cached above, written BEFORE any socket publish
+    # (graph://1418ca10-588 D1, D4). Org caches arm regardless of
+    # publish_connector; the personal one only where serving is permitted.
+    _arm_connector_caches(
+        cached, personal_org_uuid=org_uuid, arm_personal=bool(publish_connector),
+    )
     if publish_connector:
         # Serve the fleet connector on the PERSONAL tunnel (the "personal"
         # store), never a shared org's: the fleet is anchored on the personal
@@ -872,14 +886,9 @@ def _activate_runtime(
         # Arm the cache FIRST (graph://1418ca10-588 D4): the launch path reads
         # it, and the socket publish that follows is only the live-rotation
         # fast path for a connector that is already up.
-        _arm_personal_connector(
-            {**payload, "org_sync_certs": org_sync_certs} if org_sync_certs else payload,
-            org_uuid,
-        )
         try:
             fleet_relay_sync.publish_connector_runtime(
-                {**payload, "org_sync_certs": org_sync_certs} if org_sync_certs else payload,
-                org="personal",
+                connector_cache_payload(cached, org_uuid=None), org="personal",
             )
         except (
             link_serving_supervisor.TunnelUnavailable,
@@ -897,15 +906,6 @@ def _activate_runtime(
                 "serving connector (%s) -- credential is still configured",
                 exc,
             )
-    # Each serving ORG gets the same base credential plus ITS OWN machine key
-    # (auto-e2ufw). Runs regardless of publish_connector: an org connector's
-    # cache must be armed even on a machine whose personal connector is not
-    # the designated fleet tunnel server, because the org tunnels are a
-    # different question from who carries Fleet sync.
-    _arm_serving_orgs(
-        {**payload, "org_sync_certs": org_sync_certs} if org_sync_certs else payload,
-        serving_seeds,
-    )
     return credential
 
 
