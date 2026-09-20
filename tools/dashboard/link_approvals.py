@@ -1177,7 +1177,13 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
                     _compensate_failed_publish, org, token, "requires-write",
                     detail=reply.get("error"),
                 )
-    serving = await _probe_serving(binding, token, org)
+    # Fleet publishes a rendezvous first, then signs its portable invitation.
+    # It uses the Fleet enrollment protocol, not a keyed content channel.
+    serving = (
+        {"live": True, "via": "tunnel-control"}
+        if req["target_type"] == "fleet:join"
+        else await _probe_serving(binding, token, org)
+    )
     if not serving.get("live"):
         logger.warning(
             "share link publish for org=%s rolled back: the serving probe "

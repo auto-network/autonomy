@@ -203,11 +203,11 @@ def _tunnel_envelope(session_key, cert, pop_path, payload=None):
     )
 
 
-def _create_publish(client, meta=None):
+def _create_publish(client, meta=None, target_type="present"):
     r = client.post("/api/approvals", json={
         "kind": "link_publish", "session": SESSION,
         "request": {"org": ORG, "target_uuid": TARGET,
-                    "target_type": "present", "meta": meta or {}},
+                    "target_type": target_type, "meta": meta or {}},
     })
     assert r.status_code == 200, r.text
     return r.json()["id"]
@@ -277,6 +277,34 @@ def test_authorized_publish_emits_frame_and_caches_grant(
     assert grants[token]["subject"] == {
         "kind": "operator", "id": session_cert.subject.id}
     assert grants[token]["meta"] == {"ttl": 3600, "label": "binder"}
+
+
+def test_fleet_rendezvous_publication_uses_tunnel_acknowledgment(
+    env, session_key, session_cert, monkeypatch,
+):
+    recorder = _ControlRecorder()
+    _install_control(monkeypatch, recorder)
+
+    def unexpected_channel_key(*args, **kwargs):
+        raise AssertionError("Fleet does not use a content channel key")
+
+    async def unexpected_content_probe(*args, **kwargs):
+        raise AssertionError("Fleet does not use the content recipient protocol")
+
+    monkeypatch.setattr(link_channel_key, "mint_channel_key", unexpected_channel_key)
+    monkeypatch.setattr(link_approvals, "_probe_serving", unexpected_content_probe)
+    rid = _create_publish(env, target_type="fleet:join")
+    envelope = _tunnel_envelope(
+        session_key, session_cert, "/control/create-link",
+        {"target_uuid": TARGET, "target_type": "fleet:join"},
+    )
+    execution = _decide_and_wait(env, rid, envelope)["execution"]
+
+    assert execution["ok"] is True, execution
+    assert execution["serving"] == {"live": True, "via": "tunnel-control"}
+    assert execution["channel_pub"] is None
+    assert _cached_grants()[execution["token"]]["target_type"] == "fleet:join"
+    assert [call[1] for call in recorder.calls] == ["create-link"]
 
 
 def test_recipient_probe_failure_compensates_grant_and_channel_key(
