@@ -2339,6 +2339,15 @@ class FleetSyncScheduler:
             for scope, peers in merged.items()
         }
 
+    async def refresh_roster(self) -> None:
+        """Refresh the verified admission snapshot, including serve-only runtimes."""
+        snapshot = await asyncio.to_thread(
+            lambda: tuple(self.config.roster_entries())
+        )
+        resolve(snapshot, anchor_root_pub=self.config.personal_root_pub)
+        self._roster_snapshot = snapshot
+        self.authenticator.invalidate_authorization_cache()
+
     async def _refresh_roster(self) -> None:
         while not self._stopping.is_set():
             try:
@@ -2349,16 +2358,7 @@ class FleetSyncScheduler:
             except asyncio.TimeoutError:
                 pass
             try:
-                snapshot = await asyncio.to_thread(
-                    lambda: tuple(self.config.roster_entries())
-                )
-                # Resolve before publishing. A broken provider never replaces
-                # the last verified authorization snapshot.
-                resolve(snapshot, anchor_root_pub=self.config.personal_root_pub)
-                self._roster_snapshot = snapshot
-                # This is THE roster change point for this process: a kick
-                # must land on open streams now, not within the cache TTL.
-                self.authenticator.invalidate_authorization_cache()
+                await self.refresh_roster()
             except Exception:
                 logger.warning("fleet roster refresh failed", exc_info=True)
 

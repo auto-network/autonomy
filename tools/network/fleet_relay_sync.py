@@ -436,6 +436,10 @@ class ConnectorFleetRuntime:
         """Keep the direct listener matched to config for the process life."""
         while True:
             try:
+                # This serve-only scheduler does not run start()'s outbound
+                # loop or its roster task. Keep admission current here too.
+                if self.scheduler is not None:
+                    await self.scheduler.refresh_roster()
                 await self.ensure_direct_listener()
             except Exception:
                 logger.warning("fleet direct listener maintenance failed",
