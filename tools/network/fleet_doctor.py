@@ -1101,6 +1101,34 @@ def check_sync_frontiers(report: dict) -> None:
                         }
                         for origin in entry["origins"]:
                             origin["cut_ns"] = held.get(origin["origin"])
+                    # Persona frontiers (auto-xs9hz): each persona cut this
+                    # store holds and whether this store covers it, which is
+                    # what its connector advertises to the relay. "Behind on
+                    # which persona" is this line.
+                    if "fleet_sync_persona_cuts" in tables:
+                        held_positions = {
+                            origin["origin"]: max(
+                                int(origin.get("cursor_ns") or 0), int(origin.get("cut_ns") or 0),
+                            ) for origin in entry["origins"]
+                        }
+                        personas = []
+                        for persona, record_json in conn.execute(
+                            "SELECT persona, record FROM fleet_sync_persona_cuts"
+                        ):
+                            try:
+                                record = json.loads(record_json)
+                            except (TypeError, ValueError):
+                                continue
+                            machines = record.get("machines") or {}
+                            behind_on = sorted(
+                                machine for machine, position in machines.items()
+                                if held_positions.get(machine, -1) < int(position)
+                            )
+                            personas.append({
+                                "persona": str(persona), "cut_ns": int(record.get("cut_ns", 0)),
+                                "machines": len(machines), "behind_on": behind_on,
+                            })
+                        entry["personas"] = personas
                 else:
                     entry["origins"] = None  # sync never activated here
                 for table, column in (("thoughts", "created_at"),
@@ -1163,6 +1191,18 @@ def check_sync_frontiers(report: dict) -> None:
                     f"  {slug} <- {origin['origin'][:12]}",
                     f"newest write {human} old, {origin['transactions']} txn(s){cursor}",
                     warn=age >= 3600 or behind,
+                )
+            for persona in entry.get("personas") or []:
+                cut_age = max(0, (now_ns - persona["cut_ns"]) // 1_000_000_000)
+                if persona["behind_on"]:
+                    names = ", ".join(m[:12] for m in persona["behind_on"])
+                    verdict = f"NOT covered: behind on machine(s) {names}"
+                else:
+                    verdict = "covered (advertised to the relay)"
+                _line(
+                    f"  {slug} persona {persona['persona'][:12]}",
+                    f"cut {cut_age}s old over {persona['machines']} machine(s); {verdict}",
+                    warn=bool(persona["behind_on"]),
                 )
             newest_thought = (entry.get("thoughts") or {}).get("newest")
             if newest_thought:
