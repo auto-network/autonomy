@@ -581,14 +581,26 @@ def frontier_advert(previous: "dict[str, int]", current: "dict[str, int]") -> "d
 async def advertise_frontiers_loop(connector, scope: str, machine_pub: str,
                                    *, interval_s: float = FRONTIER_ADVERT_INTERVAL_S) -> None:
     """Send sync-frontier {org_uuid, frontiers} over the live tunnel once
-    after each (re)connect and whenever a covered persona cut rises; an
-    unchanged map sends nothing. Runs for the life of the connector."""
+    after each (re)connect and after each pull that moved a persona write
+    floor, at most once per *interval_s*; an unchanged map sends nothing.
+    Woken by ``connector.frontier_wake``: the connector sets it at hello and
+    the dashboard's ``advertise`` control op sets it after the pull (O-C).
+    Nothing here polls. Runs for the life of the connector."""
     import asyncio
-
+    import time as _time
     sent: dict[str, int] = {}
     was_connected = False
+    last_sent = 0.0
+    wake = connector.frontier_wake
     while True:
-        await asyncio.sleep(interval_s)
+        await wake.wait()
+        wake.clear()
+        # Rate limit: one advert per interval; wakes inside it coalesce into
+        # the next send, which reads the map fresh.
+        wait_s = interval_s - (_time.monotonic() - last_sent)
+        if wait_s > 0:
+            await asyncio.sleep(wait_s)
+            wake.clear()
         connected = connector.connected.is_set()
         if not connected:
             was_connected = False
@@ -613,8 +625,10 @@ async def advertise_frontiers_loop(connector, scope: str, machine_pub: str,
         except Exception:
             logger.warning("frontier advert: control send failed", exc_info=True)
             continue
+        last_sent = _time.monotonic()
         if isinstance(reply, dict) and reply.get("ok") is True:
             sent = advert
+
 
 def _scoped_store(scope: str, machine_pub: str) -> SQLiteFleetSyncStore:
     """The scope's client store, with fleet writers activated once per path.

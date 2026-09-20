@@ -228,14 +228,14 @@ Disconnect(t) ==
 \* auto-s81lo / auto-d8if0: a connected member ends the viewer's channel
 \* BEFORE serving a byte (no grant, unarmed, key resolution refused). The
 \* tunnel stays in the pool: a refusal is about this link, not the member.
-\* The viewer returns to admission for the same dial, may not be re-assigned
-\* to this tunnel, and a dial tries at most FailoverMaxCandidates tunnels.
+\* The viewer returns to admission for the same dial and may not be
+\* re-assigned to this tunnel; whether the dial may try another tunnel is
+\* OpenViewer's bound, not the refuser's.
 Refuse(t, v) ==
     /\ refusalsLeft > 0
     /\ viewer[v] = "open"
     /\ assignment[v] = t
     /\ connector[t] = "connected"
-    /\ Cardinality(refused[v]) < FailoverMaxCandidates
     /\ viewer' = [viewer EXCEPT ![v] = "new"]
     /\ assignment' = [assignment EXCEPT ![v] = NoTunnel]
     /\ refused' = [refused EXCEPT ![v] = @ \cup {t}]
@@ -295,9 +295,13 @@ RelayRestart ==
 (***************************************************************************)
 
 \* Selection happens once, at channel open. The assignment is never moved
-\* merely because another tunnel later joins or becomes less loaded.
+\* merely because another tunnel later joins or becomes less loaded. A dial
+\* tries at most FailoverMaxCandidates tunnels: once that many have refused
+\* it, the viewer is not admitted again for this dial (the relay closes it
+\* with the honest code), whatever candidates remain.
 OpenViewer(v) ==
     /\ viewer[v] = "new"
+    /\ Cardinality(refused[v]) < FailoverMaxCandidates
     /\ Candidates(v) # {}
     /\ \E t \in Candidates(v) :
          /\ (LeastLoadedAdmission => LeastLoadedCandidate(t, v))

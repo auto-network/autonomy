@@ -184,6 +184,15 @@ candidate is eventually seated on one. `RefusalsRespected` is the safety
 half: an open viewer is never on a tunnel that refused its dial, and a dial
 never exceeds the candidate bound.
 
+The candidate bound is a bound on the DIAL: `OpenViewer` admits a viewer
+only while fewer than `FailoverMaxCandidates` tunnels have refused it, so
+an exhausted dial ends with the honest close code whatever candidates
+remain. `calibration/FailoverCap1.cfg` is PoolGreen with the bound at one:
+one refusal ends the dial while other members could serve, and TLC must
+find `EventuallyEveryServableViewerAssigned` violated there. Until 2026-09-20
+the bound sat on `Refuse` instead, which let a refused viewer re-enter
+admission and made the calibration pass vacuously.
+
 Not modeled, deliberately: the hello replay to the next candidate and the
 open-budget timer. Both are transport mechanics below the ownership
 question this model answers.
