@@ -1276,7 +1276,10 @@ var signRegistryRequestCore;
         // fleetRuntimePost); there is no second copy of it anywhere.
         var rc = await _fetchJson('/api/fleet/runtime');
         if (!rc.enabled) throw new Error('Machine runtime is not ready.');
-        if (!(rc.serving_orgs || []).some(function (t) { return t.scope === opts.org; })) {
+        if (opts.org === 'personal' && (!rc.org_uuid || !rc.serves)) {
+          throw new Error('Personal serving runtime is not ready.');
+        }
+        if (opts.org !== 'personal' && !(rc.serving_orgs || []).some(function (t) { return t.scope === opts.org; })) {
           throw new Error('Organization is missing from runtime preparation.');
         }
         var frc = await import('./ceremony/fleet-enrollment.js');
