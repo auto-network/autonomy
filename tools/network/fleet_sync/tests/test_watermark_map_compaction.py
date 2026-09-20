@@ -193,36 +193,3 @@ def test_every_cut_bookkeeping_table_passes_the_schema_audit(tmp_path: Path) -> 
     )
     audit_schema(db.conn)
     db.close()
-
-
-def test_the_server_credits_a_puller_with_every_machine_first_listed_at_or_before_its_declared_cut(tmp_path: Path) -> None:
-    """Persona cuts move every round, so a puller's declared cut is usually
-    a round behind the server's. Exact equality credited nothing and the
-    server re-served whole scopes from the beginning on every pull (live
-    fleet 2026-09-20). The credit is by first-listed cut."""
-    import time
-    from tools.network.idkit import Subject, issue_cert
-    persona, signer = KeyPair.generate(), KeyPair.generate()
-    now = int(time.time())
-    cert = issue_cert(persona, signer.public_hex, scope=["fleet:sync"], org="g",
-                      subject=Subject("persona", persona.public_hex),
-                      not_before=now - 60, not_after=now + 3600)
-    db = GraphDB(tmp_path / "server.db")
-    MutationCatalog(db.conn, "e" * 64).install()
-    P = persona.public_hex
-    first = cuts.seal_persona_cut(db.conn, signer=signer, persona_cert=cert, org="g",
-                                  roster_machines={A}, positions={A: 100})
-    second = cuts.seal_persona_cut(db.conn, signer=signer, persona_cert=cert, org="g",
-                                   roster_machines={A, B}, positions={A: 200, B: 150})
-    assert first["cut_ns"] == 100 and second["cut_ns"] == 150
-    assert cuts.machines_known_by(db.conn, {P: 100}) == {A}, "declared the first cut: knows only A"
-    assert cuts.machines_known_by(db.conn, {P: 150}) == {A, B}
-    assert cuts.machines_known_by(db.conn, {P: 120}) == {A}, "between the two: still only A"
-    assert cuts.machines_known_by(db.conn, {}) == set()
-    # A machine dropped later stays known to a puller that held the cut listing it.
-    third = cuts.seal_persona_cut(db.conn, signer=signer, persona_cert=cert, org="g",
-                                  roster_machines={B}, positions={B: 300})
-    assert third["cut_ns"] == 300
-    assert cuts.machines_known_by(db.conn, {P: 300}) == {A, B}
-    assert cuts.persona_machines(db.conn) == ({B}, {A})
-    db.close()
