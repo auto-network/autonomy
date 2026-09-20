@@ -272,6 +272,8 @@ def prepare_create(_session: str, request: dict) -> tuple[dict, None]:
     if request.get("target_type") == "org:join":
         _org_join_request(request)
         _require_startable_serving(request.get("org"))
+    elif (_d := _resolve_target(request.get("target_type"), request.get("target_uuid"), request.get("org"), request))["error"]:
+        raise ValueError(_d["error"])
     return copy.deepcopy(request), None
 
 
