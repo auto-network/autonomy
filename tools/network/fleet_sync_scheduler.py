@@ -1116,13 +1116,15 @@ class SQLiteFleetSyncStore:
         finally:
             conn.close()
 
-    def record_bootstrap_complete(self) -> None:
+    def record_bootstrap_complete(self) -> bool:
         """The > F half is durably applied. Releases the frontier gate.
 
         Only reached after a stream whose count and digest the receiver
         verified itself, so this records a proven outcome rather than a claim.
         A store that never bootstrapped, or that has not yet delivered its
-        keyspace half, is left alone.
+        keyspace half, is left alone. Returns True only when this call
+        completed a bootstrap: the one moment the cursors are seeded from
+        the newest recorded transaction (O-G migration rule).
         """
         from tools.network.fleet_sync.sweep_receive import (
             BootstrapError, Phase, read_bootstrap, record_pull_complete,
@@ -1132,11 +1134,12 @@ class SQLiteFleetSyncStore:
         try:
             state = read_bootstrap(conn)
             if state is None or state.phase is not Phase.PULLING:
-                return
+                return False
             try:
                 record_pull_complete(conn)
             except BootstrapError:
-                return
+                return False
+            return True
         finally:
             conn.close()
 
@@ -1271,11 +1274,13 @@ class SQLiteFleetSyncStore:
             conn.close()
 
     def next_transaction_heads_for_origin(self, incarnation, after_timestamp_ns,
-                                          after_transaction_id=None, *, limit=200):
+                                          after_transaction_id=None, *, limit=200,
+                                          through_ns=None):
         conn, catalog = self._open()
         try:
             return catalog.next_transaction_heads_for_origin(
                 incarnation, after_timestamp_ns, after_transaction_id, limit=limit,
+                through_ns=through_ns,
             )
         finally:
             conn.close()
@@ -1411,20 +1416,42 @@ class SQLiteFleetSyncStore:
     def adopt_machine_write_floor(self, record) -> bool:
         from tools.network.fleet_sync import write_floors
 
-        conn, _catalog = self._open()
+        conn, catalog = self._open()
         try:
-            return write_floors.adopt_machine_write_floor(conn, record)
+            return write_floors.adopt_machine_write_floor(conn, record, catalog=catalog)
         finally:
             conn.close()
 
-    def machine_write_floor_frames(self, version: int, watermarks) -> list[bytes]:
+    def serve_snapshot(self) -> tuple[dict[str, int], dict[str, dict]]:
+        """One snapshot for one serve, read before the first page: this
+        store's cursor per origin, the bound on everything the serve says
+        about each origin (this machine's own origin unbounded, it holds
+        every row it wrote), and the write floors it holds, sent after the
+        pages only where the bound reaches them."""
         from tools.network.fleet_sync import write_floors
-
-        conn, _catalog = self._open()
+        conn, catalog = self._open()
         try:
-            return write_floors.machine_write_floor_frames(conn, version, watermarks)
+            conn.execute("BEGIN")
+            try:
+                bounds = catalog.origin_watermarks()
+                bounds[catalog.origin_incarnation] = (1 << 63) - 1
+                return bounds, write_floors.machine_write_floor_records(conn)
+            finally:
+                conn.rollback()
         finally:
             conn.close()
+
+    def claim_write_floor(self, origin: str, write_floor_ns: int) -> bool:
+        conn, catalog = self._open()
+        try:
+            return catalog.claim_write_floor(origin, write_floor_ns)
+        finally:
+            conn.close()
+
+    def machine_write_floor_frames(self, version: int, watermarks, snapshot) -> list[bytes]:
+        bounds, records = snapshot
+        from tools.network.fleet_sync import write_floors
+        return write_floors.machine_write_floor_frames(records, version, watermarks, bounds)
 
     def machine_write_floors(self) -> dict[str, tuple[int, str]]:
         from tools.network.fleet_sync import write_floors
@@ -1874,9 +1901,13 @@ class _OriginPager:
     short-lived store connection, as the legacy pager does."""
 
     def __init__(self, store, watermarks, exclude_origin: str | None,
-                 skip_origins: Sequence[str] = ()):
+                 skip_origins: Sequence[str] = (), bounds: Mapping[str, int] | None = None):
         self.store = store
         self.watermarks = dict(watermarks)
+        # The server's own cursor per origin, read once before the first
+        # page: nothing about an origin is served past it (auto-mmwgu,
+        # corrected 2026-09-20). None serves unbounded (bootstrap sweeps).
+        self.bounds = None if bounds is None else dict(bounds)
         self.exclude = exclude_origin
         self.skip = set(skip_origins)
         self._authors: list[str] | None = None
@@ -1907,8 +1938,10 @@ class _OriginPager:
             if self._position is None:
                 self._position = (int(self.watermarks.get(origin, 0)), None)
             timestamp, transaction_id = self._position
+            through_ns = None if self.bounds is None else int(self.bounds.get(origin, -1))
             self._buffer = self.store.next_transaction_heads_for_origin(
                 origin, timestamp, transaction_id, limit=SERVE_PAGE_TRANSACTIONS,
+                through_ns=through_ns,
             )
             if not self._buffer:
                 self._index += 1
@@ -2574,7 +2607,10 @@ class FleetSyncScheduler:
                 # puller's own included (a machine restored from a backup
                 # has lost its own newest writes). Frames are built from
                 # catalog and live rows (catalog.transaction_items).
-                pager = _OriginPager(store, origin_watermarks, None)
+                # One snapshot: the server's cursor per origin, read once,
+                # bounds every page and the write floor frames after them.
+                serve_snapshot = await asyncio.to_thread(store.serve_snapshot)
+                pager = _OriginPager(store, origin_watermarks, None, bounds=serve_snapshot[0])
                 slowest_phase = ("", 0.0, "")
                 while True:
                     authorize(peer_pub)
@@ -2694,6 +2730,7 @@ class FleetSyncScheduler:
                 # digest and count, like the other control frames.
                 for frame in await asyncio.to_thread(
                     store.machine_write_floor_frames, protocol_version, watermarks or {},
+                    serve_snapshot,
                 ):
                     stats["bytes_sent"] += len(frame)
                     yield frame
@@ -4239,6 +4276,10 @@ class FleetSyncScheduler:
                         await flush_batch()
                         try:
                             if kind == MACHINE_WRITE_FLOOR_KIND:
+                                # Stored, and in the same transaction claimed
+                                # as the cursor where every row of that origin
+                                # at or below it is resolved here (zero rows
+                                # resolve): catalog.claim_write_floor_locked.
                                 await asyncio.to_thread(store.adopt_machine_write_floor, control)
                             else:
                                 if scope_org is None:
@@ -4286,8 +4327,14 @@ class FleetSyncScheduler:
             # would let a store declare itself finished while missing rows and
             # start advertising a frontier it never earned -- the exact failure
             # the gate exists to prevent.
-            await asyncio.to_thread(store.record_bootstrap_complete)
-            await asyncio.to_thread(store.seed_cursors_from_newest)
+            # The seed belongs to bootstrap completion only: a sweep-built
+            # store's cursors are unset until now. Run after every pull it
+            # rewrote every cursor to the newest recorded transaction, which
+            # took a claimed write floor back to the last row and moved a
+            # cursor past an unresolved transaction (found 2026-09-20 by the
+            # corrected write floor rules, whose watermark is the cursor).
+            if await asyncio.to_thread(store.record_bootstrap_complete):
+                await asyncio.to_thread(store.seed_cursors_from_newest)
 
             logger.warning(
                 "fleet sync pull %s scope %r: got %d transaction(s), %d "

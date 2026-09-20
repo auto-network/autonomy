@@ -238,10 +238,15 @@ def seed_origin_cursors_from_newest(conn: sqlite3.Connection) -> int:
         if origin_id in seen:
             continue
         seen.add(origin_id)
+        # A cursor never regresses: a seed below a held position (a claimed
+        # write floor, a cursor already walked further) leaves it alone.
         conn.execute(
             "INSERT INTO fleet_sync_origin_cursor(origin_id,timestamp_ns,transaction_id) "
             "VALUES(?,?,?) ON CONFLICT(origin_id) DO UPDATE SET "
-            "timestamp_ns=excluded.timestamp_ns, transaction_id=excluded.transaction_id",
+            "timestamp_ns=excluded.timestamp_ns, transaction_id=excluded.transaction_id "
+            "WHERE excluded.timestamp_ns>fleet_sync_origin_cursor.timestamp_ns "
+            "OR (excluded.timestamp_ns=fleet_sync_origin_cursor.timestamp_ns "
+            "AND excluded.transaction_id>fleet_sync_origin_cursor.transaction_id)",
             (int(origin_id), int(timestamp_ns), str(transaction_id)),
         )
         count += 1
@@ -1614,6 +1619,67 @@ class MutationCatalog:
                 (origin_id, ts, txid),
             )
 
+    def claim_write_floor(self, origin: str, write_floor_ns: int) -> bool:
+        """Move *origin*'s cursor up to a received write floor once every
+        transaction of that origin at or below the floor is resolved: the
+        server that sent the floor served every row at or below it
+        (write_floors.machine_write_floor_frames), so nothing is missing
+        between the cursor and the floor unless it is here and unresolved.
+        Zero transactions resolve, so an idle machine's floor moves the
+        cursor. Returns True when the cursor moved. Own transaction; the
+        receiver claims inside the adoption's transaction instead
+        (write_floors.adopt_machine_write_floor), so a floor is never held
+        and claimable but unclaimed between two commits."""
+        if self.conn.in_transaction:
+            raise ValueError("claim_write_floor opens its own transaction")
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            moved = self.claim_write_floor_locked(origin, write_floor_ns)
+            self.conn.execute("COMMIT")
+            return moved
+        except BaseException:
+            if self.conn.in_transaction:
+                self.conn.execute("ROLLBACK")
+            raise
+
+    def claim_write_floor_locked(self, origin: str, write_floor_ns: int) -> bool:
+        """claim_write_floor inside the caller's write transaction."""
+        ensure_origin_cursor_schema(self.conn)
+        row = self.conn.execute(
+            "SELECT id FROM fleet_sync_origins WHERE incarnation=?", (origin,)
+        ).fetchone()
+        if row is None:
+            self.conn.execute(
+                "INSERT INTO fleet_sync_origins(incarnation) VALUES(?)", (origin,)
+            )
+            row = self.conn.execute(
+                "SELECT id FROM fleet_sync_origins WHERE incarnation=?", (origin,)
+            ).fetchone()
+        origin_id = int(row[0])
+        self._advance_cursor(origin_id)
+        current = self.conn.execute(
+            "SELECT timestamp_ns, transaction_id FROM fleet_sync_origin_cursor "
+            "WHERE origin_id=?", (origin_id,)
+        ).fetchone()
+        ts, txid = (int(current[0]), str(current[1])) if current else (0, "")
+        if int(write_floor_ns) <= ts:
+            return False
+        unresolved = self.conn.execute(
+            "SELECT 1 FROM fleet_sync_transactions WHERE origin_id=? "
+            "AND (timestamp_ns>? OR (timestamp_ns=? AND transaction_id>?)) "
+            "AND timestamp_ns<=? LIMIT 1",
+            (origin_id, ts, ts, txid, int(write_floor_ns)),
+        ).fetchone()
+        if unresolved is not None:
+            return False
+        self.conn.execute(
+            "INSERT INTO fleet_sync_origin_cursor(origin_id,timestamp_ns,transaction_id) "
+            "VALUES(?,?,'') ON CONFLICT(origin_id) DO UPDATE SET "
+            "timestamp_ns=excluded.timestamp_ns, transaction_id=excluded.transaction_id",
+            (origin_id, int(write_floor_ns)),
+        )
+        return True
+
     @staticmethod
     def _live_row(
         conn: sqlite3.Connection, table: str, address: tuple[object, ...]
@@ -1846,14 +1912,10 @@ class MutationCatalog:
                 "JOIN fleet_sync_origins o ON o.id=c.origin_id"
             ):
                 out[str(row[0])] = int(row[1])
-        # A verified write floor is the origin's promise that nothing will ever be
-        # written at or below it, and every holder of a write floor holds every
-        # transaction at or below it (write_floors.py), so the watermark is the
-        # greater of the cursor and the write floor (auto-mmwgu).
-        from tools.network.fleet_sync.write_floors import machine_write_floors
-        for origin, (write_floor_ns, _sig) in machine_write_floors(self.conn).items():
-            if write_floor_ns > out.get(origin, -1):
-                out[origin] = write_floor_ns
+        # The cursor alone (auto-mmwgu, corrected 2026-09-20): a held write
+        # floor is not a position until the rows below it are here, and then
+        # claim_write_floor has moved the cursor to it. This machine's own
+        # floor is its own cursor: seal_machine_write_floor sets it.
         return out
 
     def origin_max_timestamps(self) -> dict[str, int]:
@@ -2161,17 +2223,26 @@ class MutationCatalog:
         after_transaction_id: str | None = None,
         *,
         limit: int = 200,
+        through_ns: int | None = None,
     ) -> list[tuple[int, int, str]]:
         """Up to *limit* ``(ref, timestamp_ns, transaction_id)`` of
-        *incarnation* after the position, in (timestamp_ns, transaction_id)
-        order, without building any items."""
+        *incarnation* after the position and, when *through_ns* is given,
+        at or below it, in (timestamp_ns, transaction_id) order, without
+        building any items."""
         if after_transaction_id is None:
             where = "t.timestamp_ns>?"
-            params: tuple = (incarnation, int(after_timestamp_ns), int(limit))
+            params: tuple = (incarnation, int(after_timestamp_ns))
         else:
             where = "(t.timestamp_ns>? OR (t.timestamp_ns=? AND t.transaction_id>?))"
             params = (incarnation, int(after_timestamp_ns), int(after_timestamp_ns),
-                      after_transaction_id, int(limit))
+                      after_transaction_id)
+        if through_ns is not None:
+            # A server serves nothing about an origin past its own cursor
+            # for it: a row applied beyond a quarantined gap is never served,
+            # so a puller's cursor never crosses a gap it cannot see.
+            where += " AND t.timestamp_ns<=?"
+            params = (*params, int(through_ns))
+        params = (*params, int(limit))
         return [
             (int(r[0]), int(r[1]), str(r[2]))
             for r in self.conn.execute(

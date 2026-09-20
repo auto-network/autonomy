@@ -7,20 +7,25 @@ write is mid-flight, by raising ``fleet_sync_state.write_floor`` to
 max(last write, now). The existing write gate refuses later writes at or
 below the floor, which is what makes the promise true.
 
-A PERSONA WRITE FLOOR is sealed by one machine of a persona's fleet once it holds a
-position (cursor or verified write floor) for every machine in the persona's
-root-signed roster: F is the minimum of those positions. It is signed by
+A PERSONA WRITE FLOOR is sealed by one machine of a persona's fleet once its
+cursor for every machine in the persona's root-signed roster is known: F is
+the minimum of those cursors. It is signed by
 the sealing machine's key and carries the DelegationCert the persona issued
 to that machine (scope fleet:sync), the same chain the org hello proves
 membership with; a machine never holds the persona's private key.
 
-Both travel as control frames on the pull reply (machine.write_floor, persona.write_floor),
-adopted after verification and forwarded unchanged by any holder. A holder
-emits an origin's write floor only after it has served every transaction of that
-origin it holds, and a receiver records a write floor only after committing every
-group received before the frame, so every holder of a write floor holds every
-transaction at or below it and adopting it as the watermark skips nothing
-(graph://d9153c5a-76e, comment e71077e6-306).
+Both travel as control frames on the pull reply (machine.write_floor,
+persona.write_floor), after every transaction of the stream. A server's reply
+is one snapshot bounded by its own cursor per origin, read once before the
+first page: it serves an origin's rows only at or below that cursor and sends
+the origin's write floor only when that cursor has reached it. What a server
+cannot claim itself, it does not pass on. A receiver stores every verified
+floor, and moves its cursor to it (catalog.claim_write_floor) only once every
+transaction of that origin at or below the floor is resolved here; zero
+transactions resolve, so an idle machine's floor moves the cursor. The pull
+request's watermark is the cursor alone. Checked in
+tools/network/TLA/FleetSyncWriteFloors.tla (graph://d9153c5a-76e O-K, the
+operator's correction of 2026-09-20).
 """
 from __future__ import annotations
 
@@ -126,6 +131,18 @@ def seal_machine_write_floor(
             "WHERE excluded.write_floor_ns>fleet_sync_machine_write_floors.write_floor_ns",
             (origin_id, sealed_ns, sig, signer.public_hex, cert_json),
         )
+        # This machine holds every row it wrote, so its own cursor is its
+        # floor: the watermark it advertises for itself, and the position
+        # a persona write floor takes for it.
+        from tools.network.fleet_sync.catalog import ensure_origin_cursor_schema
+        ensure_origin_cursor_schema(conn)
+        conn.execute(
+            "INSERT INTO fleet_sync_origin_cursor(origin_id,timestamp_ns,transaction_id) "
+            "VALUES(?,?,'') ON CONFLICT(origin_id) DO UPDATE SET "
+            "timestamp_ns=excluded.timestamp_ns, transaction_id=excluded.transaction_id "
+            "WHERE excluded.timestamp_ns>fleet_sync_origin_cursor.timestamp_ns",
+            (origin_id, sealed_ns),
+        )
         conn.execute("COMMIT")
         return sealed_ns
     except BaseException:
@@ -182,9 +199,13 @@ def verify_machine_write_floor(record: Mapping, *, now: int | None = None) -> di
             "cert": cert_data if signer != origin else None}
 
 
-def adopt_machine_write_floor(conn: sqlite3.Connection, record: Mapping) -> bool:
-    """Verify and store an origin's write floor if newer than the one held. Returns
-    True when the stored write floor moved. Own transaction."""
+def adopt_machine_write_floor(conn: sqlite3.Connection, record: Mapping, *, catalog=None) -> bool:
+    """Verify and store an origin's write floor if newer than the one held.
+    With *catalog* (the receiving store's MutationCatalog on *conn*), also
+    claim it as the cursor in the same transaction where every row of that
+    origin at or below it is resolved (catalog.claim_write_floor_locked), so
+    no commit lies between holding a floor and claiming it. Returns True
+    when the stored write floor moved. Own transaction."""
     verified = verify_machine_write_floor(record)
     origin, write_floor_ns, sig = verified["origin"], verified["write_floor_ns"], verified["sig"]
     if conn.in_transaction:
@@ -209,6 +230,8 @@ def adopt_machine_write_floor(conn: sqlite3.Connection, record: Mapping) -> bool
                 (origin_id, write_floor_ns, sig, verified["signer"],
                  json.dumps(verified["cert"], sort_keys=True) if verified["cert"] else None),
             )
+        if catalog is not None:
+            catalog.claim_write_floor_locked(origin, write_floor_ns)
         conn.execute("COMMIT")
         return moved
     except BaseException:
@@ -247,13 +270,23 @@ def machine_write_floor_records(conn: sqlite3.Connection) -> dict[str, dict]:
     return out
 
 
-def machine_write_floor_frames(conn: sqlite3.Connection, version: int, watermarks: Mapping[str, int]) -> list[bytes]:
+def machine_write_floor_frames(
+    records: Mapping[str, Mapping], version: int, watermarks: Mapping[str, int],
+    bounds: Mapping[str, int],
+) -> list[bytes]:
     """The machine.write_floor control frames to send a puller that advertised
-    *watermarks*: every held write floor above the puller's watermark for its
-    origin. Emitted after the transaction stream, never before."""
+    *watermarks*: every write floor in *records* above the puller's watermark
+    for its origin AND at or below *bounds* for it. *records* and *bounds*
+    are one snapshot, the server's held floors and its own cursor per origin
+    read together before the first page (SQLiteFleetSyncStore.serve_snapshot),
+    the same bound the transaction pages kept; a floor read later could have
+    moved past the bound during the serve. A floor the server's cursor has
+    not reached is held but not passed on: what a server cannot claim itself,
+    it does not send. Emitted after the transaction stream, never before."""
     frames = []
-    for origin, record in sorted(machine_write_floor_records(conn).items()):
-        if record["write_floor_ns"] > int(watermarks.get(origin, -1)):
+    for origin, record in sorted(records.items()):
+        floor_ns = int(record["write_floor_ns"])
+        if floor_ns > int(watermarks.get(origin, -1)) and floor_ns <= int(bounds.get(origin, -1)):
             body = {
                 "v": version, "kind": MACHINE_WRITE_FLOOR_KIND, "origin": origin,
                 "write_floor_ns": record["write_floor_ns"], "sig": record["sig"], "signer": record["signer"],
