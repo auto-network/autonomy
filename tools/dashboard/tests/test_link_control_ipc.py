@@ -217,20 +217,20 @@ def test_supervisor_control_unavailable_without_provisioning(monkeypatch):
 
 
 def test_supervisor_control_unavailable_without_listener(monkeypatch, tmp_path):
-    key_path = str(tmp_path / "serve.hex")
+    work_base = str(tmp_path / "serve-org-child")
     monkeypatch.setattr(sup, "serve_cert_state",
-                        lambda org, **k: {"status": "ok", "key_path": key_path})
-    # No .ctl file next to the key → the connector is not running.
+                        lambda org, **k: {"status": "ok", "work_base": work_base})
+    # No .ctl file in the working directory → the connector is not running.
     with pytest.raises(sup.TunnelUnavailable) as exc:
         sup.control("org", "create-link", {})
     assert "not running" in str(exc.value)
 
 
 def test_supervisor_control_reaches_a_live_listener(monkeypatch, tmp_path):
-    key_path = str(tmp_path / "serve.hex")
-    ctl = sup._control_path_for(key_path)
+    work_base = str(tmp_path / "serve-org-child")
+    ctl = sup._control_path_for(work_base)
     monkeypatch.setattr(sup, "serve_cert_state",
-                        lambda org, **k: {"status": "ok", "key_path": key_path})
+                        lambda org, **k: {"status": "ok", "work_base": work_base})
     connector = _StubConnector(reply={"ok": True, "token": "q" * 32})
 
     async def body():

@@ -1000,6 +1000,255 @@ class NetworkMembershipCheckpointV1(SettingSchema):
 # ── autonomy.network.serve-cert ───────────────────────────────
 
 
+def _validate_root_serve_cert(payload: dict, cls_name: str, *, require_key_path: bool = True) -> None:
+    """The ROOT-signed serving credential's field and chain checks (revision 2 shape:
+    cert, viewer_cert, dns01_cert?, root_pub, not_after). Shared by the
+    organization-homed NetworkServeCertV2 row and the machine-homed
+    autonomy.machine.serve-cert row, which carries no key_path because its key
+    lives in the machine vault (graph://67d0aa5f-885)."""
+    cert_wire = _require_str(payload, "cert", cls_name, max_len=16384)
+    if require_key_path:
+        _require_str(payload, "key_path", cls_name, max_len=4096)
+    root_pub = _require_hex(payload, "root_pub", cls_name,
+                           length=NETWORK_PUB_HEX_LEN)
+    not_after = payload.get("not_after")
+    if type(not_after) is not int or not_after <= 0:
+        raise SchemaValidationError(
+            f"{cls_name}: 'not_after' must be a positive epoch-seconds "
+            "integer"
+        )
+
+    # Fail-closed crypto gate. Lazy import keeps tools.graph importable
+    # without `cryptography`; unavailable verifier → no write.
+    try:
+        from tools.network.idkit import (
+            DelegationCert,
+            IdkitError,
+            verify_chain,
+        )
+    except Exception as exc:  # pragma: no cover — env without idkit deps
+        raise SchemaValidationError(
+            f"{cls_name}: cannot verify the serve-cert — "
+            f"tools.network.idkit is unavailable ({exc}); refusing the "
+            "write (fail-closed)"
+        ) from exc
+    try:
+        cert = DelegationCert.from_json(cert_wire)
+        viewer_cert = DelegationCert.from_json(
+            _require_str(payload, "viewer_cert", cls_name, max_len=16384)
+        )
+        dns01_wire = payload.get("dns01_cert")
+        dns01_cert = (
+            None if dns01_wire is None else DelegationCert.from_json(
+                _require_str(payload, "dns01_cert", cls_name, max_len=16384)
+            )
+        )
+    except Exception as e:
+        raise SchemaValidationError(
+            f"{cls_name}: serving certificate does not parse as a delegation "
+            f"certificate: {e}"
+        ) from e
+
+    if tuple(cert.scope) != (SERVE_CERT_SCOPE,):
+        raise SchemaValidationError(
+            f"{cls_name}: cert scope must be exactly {SERVE_CERT_SCOPE!r}, "
+            f"got {list(cert.scope)}"
+        )
+    if cert.parent_cert is not None:
+        raise SchemaValidationError(
+            f"{cls_name}: registry cert must be issued directly by the org root"
+        )
+    if (
+        cert.subject.kind != "persona"
+        or re.fullmatch(r"[0-9a-f]{64}", cert.subject.id) is None
+    ):
+        raise SchemaValidationError(
+            f"{cls_name}: cert subject must be a canonical "
+            "organization-scoped persona public key"
+        )
+    if cert.not_after != not_after:
+        raise SchemaValidationError(
+            f"{cls_name}: 'not_after' ({not_after}) does not match the "
+            f"cert's not_after ({cert.not_after})"
+        )
+    if (
+        viewer_cert.child_pub != cert.child_pub
+        or viewer_cert.org != cert.org
+        or tuple(viewer_cert.scope) != tuple(cert.scope)
+        or viewer_cert.not_before != cert.not_before
+        or viewer_cert.not_after != cert.not_after
+    ):
+        raise SchemaValidationError(
+            f"{cls_name}: registry and viewer certificates must name "
+            "the same child key, organization, scope, and validity window"
+        )
+    if viewer_cert.parent_cert is not None:
+        raise SchemaValidationError(
+            f"{cls_name}: viewer cert must be issued directly by the org root"
+        )
+    if (
+        viewer_cert.subject.kind != "operator"
+        or viewer_cert.subject.id != viewer_cert.child_pub
+    ):
+        raise SchemaValidationError(
+            f"{cls_name}: viewer cert subject must be identity-neutral "
+            "{kind: operator, id: child_pub}"
+        )
+    if dns01_cert is not None:
+        if (
+            dns01_cert.child_pub != cert.child_pub
+            or dns01_cert.org != cert.org
+            or tuple(dns01_cert.scope) != ("serve:dns-01",)
+            or dns01_cert.not_before != cert.not_before
+            or dns01_cert.not_after != cert.not_after
+            or dns01_cert.parent_cert is not None
+            or dns01_cert.subject != cert.subject
+        ):
+            raise SchemaValidationError(
+                f"{cls_name}: dns01_cert must be a direct-root "
+                "serve:dns-01 certificate over the same child, persona, "
+                "organization, and validity window"
+            )
+
+    # Settings validation has no injected clock, so verify both chains at
+    # a point inside their common validity window. The HTTP route and
+    # supervisor separately enforce current-time validity.
+    mid = (cert.not_before + cert.not_after) // 2
+    try:
+        candidates = [(cert, SERVE_CERT_SCOPE), (viewer_cert, SERVE_CERT_SCOPE)]
+        if dns01_cert is not None:
+            candidates.append((dns01_cert, "serve:dns-01"))
+        for candidate, required_scope in candidates:
+            verified = verify_chain(
+                candidate,
+                root_pub,
+                org=cert.org,
+                now=mid,
+                required_scope=required_scope,
+            )
+            if verified.depth != 1:
+                raise IdkitError(
+                    "serving delegates must be issued directly by the org root"
+                )
+    except IdkitError as e:
+        raise SchemaValidationError(
+            f"{cls_name}: serving cert does not chain to root_pub with "
+            f"{SERVE_CERT_SCOPE} scope: {e}"
+        ) from e
+
+
+def _validate_persona_serve_cert(payload: dict, cls_name: str, *, require_key_path: bool = True) -> None:
+    """The PERSONA-signed serving credential's field and chain checks (revision 3
+    shape: cert, dns01_cert?, persona_pub, not_after). Shared by the
+    organization-homed NetworkServeCertV3 row and the machine-homed
+    autonomy.machine.serve-cert row (graph://67d0aa5f-885)."""
+    cert_wire = _require_str(payload, "cert", cls_name, max_len=16384)
+    if require_key_path:
+        _require_str(payload, "key_path", cls_name, max_len=4096)
+    persona_pub = _require_hex(payload, "persona_pub", cls_name,
+                               length=NETWORK_PUB_HEX_LEN)
+    not_after = payload.get("not_after")
+    if type(not_after) is not int or not_after <= 0:
+        raise SchemaValidationError(
+            f"{cls_name}: 'not_after' must be a positive epoch-seconds "
+            "integer"
+        )
+    if "viewer_cert" in payload:
+        raise SchemaValidationError(
+            f"{cls_name}: viewer_cert is retired — viewers verify the "
+            "per-link channel key (graph://807b4e11-3e9), not a certificate"
+        )
+    if "root_pub" in payload:
+        raise SchemaValidationError(
+            f"{cls_name}: root_pub is retired — the chain anchors at "
+            "persona_pub; the root never signs serving credentials"
+        )
+
+    try:
+        from tools.network.idkit import (
+            DelegationCert,
+            IdkitError,
+            verify_chain,
+        )
+    except Exception as exc:  # pragma: no cover — env without idkit deps
+        raise SchemaValidationError(
+            f"{cls_name}: cannot verify the serve-cert — "
+            f"tools.network.idkit is unavailable ({exc}); refusing the "
+            "write (fail-closed)"
+        ) from exc
+    try:
+        cert = DelegationCert.from_json(cert_wire)
+        dns01_wire = payload.get("dns01_cert")
+        dns01_cert = (
+            None if dns01_wire is None else DelegationCert.from_json(
+                _require_str(payload, "dns01_cert", cls_name, max_len=16384)
+            )
+        )
+    except Exception as e:
+        raise SchemaValidationError(
+            f"{cls_name}: serving certificate does not parse as a "
+            f"delegation certificate: {e}"
+        ) from e
+
+    if tuple(cert.scope) != (SERVE_CERT_SCOPE,):
+        raise SchemaValidationError(
+            f"{cls_name}: cert scope must be exactly {SERVE_CERT_SCOPE!r}, "
+            f"got {list(cert.scope)}"
+        )
+    if cert.parent_cert is not None:
+        raise SchemaValidationError(
+            f"{cls_name}: the serving cert must be issued directly by "
+            "the persona"
+        )
+    if cert.subject.kind != "persona" or cert.subject.id != persona_pub:
+        raise SchemaValidationError(
+            f"{cls_name}: cert subject must be exactly the anchoring "
+            "persona ({kind: persona, id: persona_pub})"
+        )
+    if cert.not_after != not_after:
+        raise SchemaValidationError(
+            f"{cls_name}: 'not_after' ({not_after}) does not match the "
+            f"cert's not_after ({cert.not_after})"
+        )
+    if dns01_cert is not None and (
+        dns01_cert.child_pub != cert.child_pub
+        or dns01_cert.org != cert.org
+        or tuple(dns01_cert.scope) != ("serve:dns-01",)
+        or dns01_cert.not_before != cert.not_before
+        or dns01_cert.not_after != cert.not_after
+        or dns01_cert.parent_cert is not None
+        or dns01_cert.subject != cert.subject
+    ):
+        raise SchemaValidationError(
+            f"{cls_name}: dns01_cert must be a direct persona-signed "
+            "serve:dns-01 delegate over the same child key, organization, "
+            "persona, and validity window"
+        )
+
+    mid = (cert.not_before + cert.not_after) // 2
+    try:
+        candidates = [(cert, SERVE_CERT_SCOPE)]
+        if dns01_cert is not None:
+            candidates.append((dns01_cert, "serve:dns-01"))
+        for candidate, required_scope in candidates:
+            verified = verify_chain(
+                candidate,
+                persona_pub,
+                org=cert.org,
+                now=mid,
+                required_scope=required_scope,
+            )
+            if verified.depth != 1:
+                raise IdkitError(
+                    "serving delegates must be issued directly by the persona"
+                )
+    except IdkitError as e:
+        raise SchemaValidationError(
+            f"{cls_name}: serving cert does not chain to persona_pub "
+            f"with {required_scope} scope: {e}"
+        ) from e
+
+
 #: Not forced into any one store. This records that the question was
 #: ASKED -- must this live in the operator's own database, or on
 #: this machine alone? -- and answered no, which is different
@@ -1026,6 +1275,11 @@ class NetworkMembershipCheckpointV1(SettingSchema):
 @keyed_per_entity(key_strategy="machine_id")
 class NetworkServeCertV2(SettingSchema):
     """One serving key with two context-specific root-signed certificates.
+
+    DEPRECATED 2026-09-20 (graph://67d0aa5f-885 D5): no code reads or writes
+    this set any more. This machine's serving credential is the machine-homed
+    ``autonomy.machine.serve-cert`` row and its key is a machine-vault row.
+    The class stays so existing rows still validate at their revision.
 
     ``cert`` is persona-bearing and used only for registry tunnel admission.
     ``viewer_cert`` is identity-neutral and is the only certificate permitted
@@ -1112,134 +1366,7 @@ class NetworkServeCertV2(SettingSchema):
         super().validate(payload)
         if not isinstance(payload, dict):
             return
-        cert_wire = _require_str(payload, "cert", cls.__name__, max_len=16384)
-        _require_str(payload, "key_path", cls.__name__, max_len=4096)
-        root_pub = _require_hex(payload, "root_pub", cls.__name__,
-                               length=NETWORK_PUB_HEX_LEN)
-        not_after = payload.get("not_after")
-        if type(not_after) is not int or not_after <= 0:
-            raise SchemaValidationError(
-                f"{cls.__name__}: 'not_after' must be a positive epoch-seconds "
-                "integer"
-            )
-
-        # Fail-closed crypto gate. Lazy import keeps tools.graph importable
-        # without `cryptography`; unavailable verifier → no write.
-        try:
-            from tools.network.idkit import (
-                DelegationCert,
-                IdkitError,
-                verify_chain,
-            )
-        except Exception as exc:  # pragma: no cover — env without idkit deps
-            raise SchemaValidationError(
-                f"{cls.__name__}: cannot verify the serve-cert — "
-                f"tools.network.idkit is unavailable ({exc}); refusing the "
-                "write (fail-closed)"
-            ) from exc
-        try:
-            cert = DelegationCert.from_json(cert_wire)
-            viewer_cert = DelegationCert.from_json(
-                _require_str(payload, "viewer_cert", cls.__name__, max_len=16384)
-            )
-            dns01_wire = payload.get("dns01_cert")
-            dns01_cert = (
-                None if dns01_wire is None else DelegationCert.from_json(
-                    _require_str(payload, "dns01_cert", cls.__name__, max_len=16384)
-                )
-            )
-        except Exception as e:
-            raise SchemaValidationError(
-                f"{cls.__name__}: serving certificate does not parse as a delegation "
-                f"certificate: {e}"
-            ) from e
-
-        if tuple(cert.scope) != (SERVE_CERT_SCOPE,):
-            raise SchemaValidationError(
-                f"{cls.__name__}: cert scope must be exactly {SERVE_CERT_SCOPE!r}, "
-                f"got {list(cert.scope)}"
-            )
-        if cert.parent_cert is not None:
-            raise SchemaValidationError(
-                f"{cls.__name__}: registry cert must be issued directly by the org root"
-            )
-        if (
-            cert.subject.kind != "persona"
-            or re.fullmatch(r"[0-9a-f]{64}", cert.subject.id) is None
-        ):
-            raise SchemaValidationError(
-                f"{cls.__name__}: cert subject must be a canonical "
-                "organization-scoped persona public key"
-            )
-        if cert.not_after != not_after:
-            raise SchemaValidationError(
-                f"{cls.__name__}: 'not_after' ({not_after}) does not match the "
-                f"cert's not_after ({cert.not_after})"
-            )
-        if (
-            viewer_cert.child_pub != cert.child_pub
-            or viewer_cert.org != cert.org
-            or tuple(viewer_cert.scope) != tuple(cert.scope)
-            or viewer_cert.not_before != cert.not_before
-            or viewer_cert.not_after != cert.not_after
-        ):
-            raise SchemaValidationError(
-                f"{cls.__name__}: registry and viewer certificates must name "
-                "the same child key, organization, scope, and validity window"
-            )
-        if viewer_cert.parent_cert is not None:
-            raise SchemaValidationError(
-                f"{cls.__name__}: viewer cert must be issued directly by the org root"
-            )
-        if (
-            viewer_cert.subject.kind != "operator"
-            or viewer_cert.subject.id != viewer_cert.child_pub
-        ):
-            raise SchemaValidationError(
-                f"{cls.__name__}: viewer cert subject must be identity-neutral "
-                "{kind: operator, id: child_pub}"
-            )
-        if dns01_cert is not None:
-            if (
-                dns01_cert.child_pub != cert.child_pub
-                or dns01_cert.org != cert.org
-                or tuple(dns01_cert.scope) != ("serve:dns-01",)
-                or dns01_cert.not_before != cert.not_before
-                or dns01_cert.not_after != cert.not_after
-                or dns01_cert.parent_cert is not None
-                or dns01_cert.subject != cert.subject
-            ):
-                raise SchemaValidationError(
-                    f"{cls.__name__}: dns01_cert must be a direct-root "
-                    "serve:dns-01 certificate over the same child, persona, "
-                    "organization, and validity window"
-                )
-
-        # Settings validation has no injected clock, so verify both chains at
-        # a point inside their common validity window. The HTTP route and
-        # supervisor separately enforce current-time validity.
-        mid = (cert.not_before + cert.not_after) // 2
-        try:
-            candidates = [(cert, SERVE_CERT_SCOPE), (viewer_cert, SERVE_CERT_SCOPE)]
-            if dns01_cert is not None:
-                candidates.append((dns01_cert, "serve:dns-01"))
-            for candidate, required_scope in candidates:
-                verified = verify_chain(
-                    candidate,
-                    root_pub,
-                    org=cert.org,
-                    now=mid,
-                    required_scope=required_scope,
-                )
-                if verified.depth != 1:
-                    raise IdkitError(
-                        "serving delegates must be issued directly by the org root"
-                    )
-        except IdkitError as e:
-            raise SchemaValidationError(
-                f"{cls.__name__}: serving cert does not chain to root_pub with "
-                f"{SERVE_CERT_SCOPE} scope: {e}"
-            ) from e
+        _validate_root_serve_cert(payload, cls.__name__, require_key_path=True)
 
 
 @publication_band(min="raw", max="raw")
@@ -1250,6 +1377,9 @@ class NetworkServeCertV2(SettingSchema):
 @keyed_per_entity(key_strategy="machine_id")
 class NetworkServeCertV3(SettingSchema):
     """One serving key with PERSONA-signed registry-facing certificates.
+
+    DEPRECATED 2026-09-20 (graph://67d0aa5f-885 D5): no code reads or writes
+    this set any more; see NetworkServeCertV2.
 
     The self-service serving credential (graph://da0dd9fb-e75, auto-55vwi):
     the member's persona signs the registry certificate (and the optional
@@ -1311,110 +1441,7 @@ class NetworkServeCertV3(SettingSchema):
         super().validate(payload)
         if not isinstance(payload, dict):
             return
-        cert_wire = _require_str(payload, "cert", cls.__name__, max_len=16384)
-        _require_str(payload, "key_path", cls.__name__, max_len=4096)
-        persona_pub = _require_hex(payload, "persona_pub", cls.__name__,
-                                   length=NETWORK_PUB_HEX_LEN)
-        not_after = payload.get("not_after")
-        if type(not_after) is not int or not_after <= 0:
-            raise SchemaValidationError(
-                f"{cls.__name__}: 'not_after' must be a positive epoch-seconds "
-                "integer"
-            )
-        if "viewer_cert" in payload:
-            raise SchemaValidationError(
-                f"{cls.__name__}: viewer_cert is retired — viewers verify the "
-                "per-link channel key (graph://807b4e11-3e9), not a certificate"
-            )
-        if "root_pub" in payload:
-            raise SchemaValidationError(
-                f"{cls.__name__}: root_pub is retired — the chain anchors at "
-                "persona_pub; the root never signs serving credentials"
-            )
-
-        try:
-            from tools.network.idkit import (
-                DelegationCert,
-                IdkitError,
-                verify_chain,
-            )
-        except Exception as exc:  # pragma: no cover — env without idkit deps
-            raise SchemaValidationError(
-                f"{cls.__name__}: cannot verify the serve-cert — "
-                f"tools.network.idkit is unavailable ({exc}); refusing the "
-                "write (fail-closed)"
-            ) from exc
-        try:
-            cert = DelegationCert.from_json(cert_wire)
-            dns01_wire = payload.get("dns01_cert")
-            dns01_cert = (
-                None if dns01_wire is None else DelegationCert.from_json(
-                    _require_str(payload, "dns01_cert", cls.__name__, max_len=16384)
-                )
-            )
-        except Exception as e:
-            raise SchemaValidationError(
-                f"{cls.__name__}: serving certificate does not parse as a "
-                f"delegation certificate: {e}"
-            ) from e
-
-        if tuple(cert.scope) != (SERVE_CERT_SCOPE,):
-            raise SchemaValidationError(
-                f"{cls.__name__}: cert scope must be exactly {SERVE_CERT_SCOPE!r}, "
-                f"got {list(cert.scope)}"
-            )
-        if cert.parent_cert is not None:
-            raise SchemaValidationError(
-                f"{cls.__name__}: the serving cert must be issued directly by "
-                "the persona"
-            )
-        if cert.subject.kind != "persona" or cert.subject.id != persona_pub:
-            raise SchemaValidationError(
-                f"{cls.__name__}: cert subject must be exactly the anchoring "
-                "persona ({kind: persona, id: persona_pub})"
-            )
-        if cert.not_after != not_after:
-            raise SchemaValidationError(
-                f"{cls.__name__}: 'not_after' ({not_after}) does not match the "
-                f"cert's not_after ({cert.not_after})"
-            )
-        if dns01_cert is not None and (
-            dns01_cert.child_pub != cert.child_pub
-            or dns01_cert.org != cert.org
-            or tuple(dns01_cert.scope) != ("serve:dns-01",)
-            or dns01_cert.not_before != cert.not_before
-            or dns01_cert.not_after != cert.not_after
-            or dns01_cert.parent_cert is not None
-            or dns01_cert.subject != cert.subject
-        ):
-            raise SchemaValidationError(
-                f"{cls.__name__}: dns01_cert must be a direct persona-signed "
-                "serve:dns-01 delegate over the same child key, organization, "
-                "persona, and validity window"
-            )
-
-        mid = (cert.not_before + cert.not_after) // 2
-        try:
-            candidates = [(cert, SERVE_CERT_SCOPE)]
-            if dns01_cert is not None:
-                candidates.append((dns01_cert, "serve:dns-01"))
-            for candidate, required_scope in candidates:
-                verified = verify_chain(
-                    candidate,
-                    persona_pub,
-                    org=cert.org,
-                    now=mid,
-                    required_scope=required_scope,
-                )
-                if verified.depth != 1:
-                    raise IdkitError(
-                        "serving delegates must be issued directly by the persona"
-                    )
-        except IdkitError as e:
-            raise SchemaValidationError(
-                f"{cls.__name__}: serving cert does not chain to persona_pub "
-                f"with {required_scope} scope: {e}"
-            ) from e
+        _validate_persona_serve_cert(payload, cls.__name__, require_key_path=True)
 
     # No upconvert: a revision-2 row targeted at revision 3 reads as absent,
     # and the provisioning repair mints a fresh credential — the crib's

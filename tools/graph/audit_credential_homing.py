@@ -57,8 +57,10 @@ FIELD_SAYS_SECRET = re.compile(
 #: "store the credential, not the path to the file containing it" — so a field
 #: holding one is a DIFFERENT finding: a secret that has not left the
 #: filesystem, which is auto-xhb74's class, not this audit's. Naming it
-#: matters because the value can still LOOK secret: serve-cert's key_path is a
-#: portable basename shaped ``serve-<uuid>``, with no slash to give it away.
+#: matters because the value can still LOOK secret: the deprecated
+#: autonomy.network.serve-cert row's key_path was a portable basename shaped
+#: ``serve-<uuid>``, with no slash to give it away (the serving key is a
+#: machine-vault row since 2026-09-20).
 FIELD_IS_NOT_SECRET = re.compile(
     r"(_sha|_hash|_id$|fingerprint|key_id|_path|rel_path|filename|lastRowId)",
     re.IGNORECASE,

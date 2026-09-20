@@ -35,13 +35,12 @@ from tools.dashboard import link_serving_supervisor as sup
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 from tools.graph import settings_ops
+from tools.dashboard.tests import _serving_vault_kit as vault_kit
 from tools.graph.schemas.network_identity import (
     NETWORK_BINDING_REVISION,
     NETWORK_BINDING_SET_ID,
     NETWORK_LINK_GRANT_REVISION,
     NETWORK_LINK_GRANT_SET_ID,
-    NETWORK_SERVE_CERT_REVISION,
-    NETWORK_SERVE_CERT_SET_ID,
 )
 
 #: These fixtures mint the CURRENT generation: persona-signed revision 3.
@@ -50,7 +49,6 @@ from tools.graph.schemas.network_identity import (
 #: would pin a state the supervisor now deliberately refuses to launch.
 #: Revision 2 remains correct for the PERSONAL scope only, and its rules are
 #: exercised there.
-SERVE_CERT_REVISION_V3 = 3
 from tools.graph.schemas.namespace_reservation import (
     NAMESPACE_RESERVATION_REVISION,
     NAMESPACE_RESERVATION_SET_ID,
@@ -216,7 +214,7 @@ def test_launch_adopts_a_healthy_incumbent_instead_of_reaping(env, monkeypatch):
     handle = supervisor._procs[ORG]
     assert handle.pid() == incumbent_pid
     assert supervisor._credentials[ORG] == (
-        state["cert"], state["viewer_cert"], state["key_path"])
+        state["cert"], state["viewer_cert"], state["child_pub"])
     assert state["viewer_cert"] is None, "revision 3 has no viewer certificate"
 
 
@@ -273,13 +271,29 @@ def env(tmp_path, monkeypatch):
     GraphDB.close_all_pooled()
     GraphDB.create_org_db(ORG).close()
     monkeypatch.delenv("GRAPH_ORG", raising=False)
+    # The serving key is a machine-vault row released into ramfs at launch
+    # (graph://67d0aa5f-885 D4): publish the audited recipient, warm the
+    # delegate as a sign-on would, stand a temp dir in for the ramfs and the
+    # connector working directory.
+    monkeypatch.setenv("AUTONOMY_KEYCACHE_MOUNT", str(tmp_path / "keycache"))
+    (tmp_path / "keycache").mkdir(exist_ok=True)
+    monkeypatch.setenv("AUTONOMY_NETWORK_KEY_DIR", str(tmp_path / "network"))
+    (tmp_path / "network").mkdir(exist_ok=True)
+    global _DELEGATE_PRIVATE
+    _DELEGATE_PRIVATE = vault_kit.publish_recipient(monkeypatch)
+    vault_kit.warm(_DELEGATE_PRIVATE)
     yield tmp_path
+    vault_kit.cold()
     GraphDB.close_all_pooled()
 
 
+_DELEGATE_PRIVATE = None
+
+
 def _provision_serve_cert(tmp_path, *, ttl=30 * 24 * 3600) -> dict:
-    """Mint a real PERSONA-signed tunnel:serve delegate, write its key file
-    (0600), and store the revision-3 serve-cert row + a matching binding."""
+    """Mint a real PERSONA-signed tunnel:serve delegate, seal its key into the
+    machine vault, and store this machine's serve-cert row + a matching
+    binding (graph://67d0aa5f-885 D4, D5)."""
     from tools.network.idkit import KeyPair, Subject, issue_cert
 
     root = KeyPair.generate()
@@ -296,23 +310,6 @@ def _provision_serve_cert(tmp_path, *, ttl=30 * 24 * 3600) -> dict:
         subject=cert.subject,
         not_before=cert.not_before, not_after=cert.not_after,
     )
-    keydir = tmp_path / "network"
-    keydir.mkdir(exist_ok=True)
-    key_path = keydir / "serve.key"
-    key_path.write_text(delegate.private_hex)
-    os.chmod(key_path, 0o600)
-
-    settings_ops.add_setting(
-        NETWORK_SERVE_CERT_SET_ID, SERVE_CERT_REVISION_V3, "default",
-        {
-            "cert": cert.to_json().decode("ascii"),
-            "dns01_cert": dns01_cert.to_json().decode("ascii"),
-            "key_path": str(key_path),
-            "persona_pub": persona.public_hex,
-            "not_after": cert.not_after,
-        },
-        org=ORG,
-    )
     settings_ops.add_setting(
         NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "auto.network",
         {
@@ -324,9 +321,14 @@ def _provision_serve_cert(tmp_path, *, ttl=30 * 24 * 3600) -> dict:
         },
         org=ORG,
     )
+    vault_kit.store_key(ORG_UUID, delegate.private_hex)
+    vault_kit.store_row(
+        ORG_UUID, cert=cert.to_json().decode("ascii"), child_pub=delegate.public_hex,
+        not_after=cert.not_after, dns01_cert=dns01_cert.to_json().decode("ascii"),
+        persona_pub=persona.public_hex,
+    )
     return {"root": root, "persona": persona, "delegate": delegate,
-            "cert": cert, "viewer_cert": None, "dns01_cert": dns01_cert,
-            "key_path": key_path}
+            "cert": cert, "viewer_cert": None, "dns01_cert": dns01_cert}
 
 
 def _put_grant(token="a" * 32, *, meta=None, issued_at=None):
@@ -340,21 +342,6 @@ def _put_grant(token="a" * 32, *, meta=None, issued_at=None):
             "meta": meta or {},
             "subject": {"kind": "operator", "id": "op-1"},
             "issued_at": issued_at or time.strftime(ISO, time.gmtime()),
-        },
-        org=ORG,
-    )
-
-
-def _replace_key_path(provisioned: dict, key_path: str) -> None:
-    settings_ops.upsert_by_key(
-        NETWORK_SERVE_CERT_SET_ID,
-        SERVE_CERT_REVISION_V3,
-        "default",
-        {
-            "cert": provisioned["cert"].to_json().decode("ascii"),
-            "key_path": key_path,
-            "persona_pub": provisioned["persona"].public_hex,
-            "not_after": provisioned["cert"].not_after,
         },
         org=ORG,
     )
@@ -478,13 +465,13 @@ def test_no_launch_when_cert_expired(env):
     assert spawn.calls == []
 
 
-def test_no_launch_when_key_file_missing(env):
-    prov = _provision_serve_cert(env)
+def test_no_launch_when_key_is_not_in_the_machine_vault(env):
+    _provision_serve_cert(env)
     _put_grant()
-    os.remove(prov["key_path"])  # row points at a gone key file
+    vault_kit.remove_key(ORG_UUID)  # the row names a key the vault does not hold
     spawn = FakeSpawn()
     s = sup.ServingSupervisor(spawn=spawn)
-    assert s.ensure(ORG) == {"running": False, "reason": "key-missing"}
+    assert s.ensure(ORG) == {"running": False, "reason": "key-unvaulted"}
     assert spawn.calls == []
 
 
@@ -492,13 +479,56 @@ def test_no_launch_when_key_does_not_match_cert(env):
     from tools.network.idkit import KeyPair
     prov = _provision_serve_cert(env)
     _put_grant()
-    prov["key_path"].write_text(KeyPair.generate().private_hex)  # wrong key
+    # A wrong key sealed under the row's own child name.
+    vault_kit.store_key(ORG_UUID, KeyPair.generate().private_hex,
+                        child_pub=prov["delegate"].public_hex)
     spawn = FakeSpawn()
     s = sup.ServingSupervisor(spawn=spawn)
     out = s.ensure(ORG)
     assert out["running"] is False
     assert "does not match" in out["reason"]
     assert spawn.calls == []
+
+
+def test_no_launch_while_the_vault_cannot_release_the_key(env):
+    """A vaulted key the process cannot open yet (the delegate is not warm) is
+    a reason to wait, reported verbatim from the vault — never a fault and
+    never a guessed cause."""
+    _provision_serve_cert(env)
+    _put_grant()
+    vault_kit.cold()
+    spawn = FakeSpawn()
+    s = sup.ServingSupervisor(spawn=spawn)
+    out = s.ensure(ORG)
+    assert out["running"] is False
+    assert "cannot be opened" in out["reason"], out
+    assert spawn.calls == []
+    # The state itself is still ok: row present, key present, only unopenable.
+    assert sup.serve_cert_state(ORG)["status"] == "ok"
+    vault_kit.warm(_DELEGATE_PRIVATE)
+    assert s.ensure(ORG)["reason"] == "launched"
+
+
+def test_launch_releases_the_key_into_ramfs_and_keeps_working_files_on_disk(env):
+    """graph://67d0aa5f-885 D4 as corrected: --key-file is a mode-0600 ramfs
+    release of the vault row; the certificate, control and log files stay in
+    the connector working directory; no key file exists there."""
+    prov = _provision_serve_cert(env)
+    _put_grant()
+    spawn = FakeSpawn()
+    s = sup.ServingSupervisor(spawn=spawn)
+    assert s.ensure(ORG)["reason"] == "launched"
+    argv = spawn.calls[0]["argv"]
+    key_file = argv[argv.index("--key-file") + 1]
+    cert_file = argv[argv.index("--cert-file") + 1]
+    ctl_file = argv[argv.index("--control-file") + 1]
+    assert key_file.startswith(str(env / "keycache" / "serving"))
+    assert (os.stat(key_file).st_mode & 0o777) == 0o600
+    assert open(key_file).read().strip() == prov["delegate"].private_hex
+    assert cert_file.startswith(str(env / "network"))
+    assert ctl_file.startswith(str(env / "network"))
+    assert spawn.calls[0]["log_path"].startswith(str(env / "network"))
+    assert not list((env / "network").glob("*.key")), "no key material on disk"
 
 
 def test_stops_when_last_grant_revoked(env):
@@ -877,18 +907,10 @@ def test_reprovisioned_credential_restarts_existing_connector(env):
         not_before=now - 10,
         not_after=now + 30 * 24 * 3600,
     )
-    provisioned["key_path"].write_text(replacement.private_hex)
-    settings_ops.upsert_by_key(
-        NETWORK_SERVE_CERT_SET_ID,
-        SERVE_CERT_REVISION_V3,
-        "default",
-        {
-            "cert": cert.to_json().decode("ascii"),
-            "key_path": str(provisioned["key_path"]),
-            "persona_pub": provisioned["persona"].public_hex,
-            "not_after": cert.not_after,
-        },
-        org=ORG,
+    vault_kit.store_key(ORG_UUID, replacement.private_hex)
+    vault_kit.store_row(
+        ORG_UUID, cert=cert.to_json().decode("ascii"), child_pub=replacement.public_hex,
+        not_after=cert.not_after, persona_pub=provisioned["persona"].public_hex,
     )
 
     assert s.ensure(ORG)["reason"] == "launched"
@@ -913,21 +935,16 @@ def test_legacy_operator_serve_cert_requires_reprovision(
         not_before=now - 10,
         not_after=now + 3600,
     )
-    key_path = env / "legacy.key"
-    key_path.write_text(child.private_hex)
     row = {
         "cert": cert.to_json().decode("ascii"),
-        "key_path": str(key_path),
         "root_pub": root.public_hex,
         "not_after": cert.not_after,
+        "child_pub": child.public_hex,
+        "vault_key": f"serving-key.{ORG_UUID}.{child.public_hex}",
     }
-    monkeypatch.setattr(
-        settings_ops,
-        "read_owned_set",
-        lambda *args, **kwargs: SimpleNamespace(
-            members=[SimpleNamespace(payload=row)]
-        ),
-    )
+    monkeypatch.setattr(sup, "_binding_org_uuid", lambda org: ORG_UUID)
+    monkeypatch.setattr(sup, "machine_serve_cert_row", lambda org_uuid: row)
+    monkeypatch.setattr(sup, "serving_key_present", lambda vault_key: True)
 
     # The PERSONAL scope, because that is where revision 2 still lives: an org
     # no longer reaches these identity rules at all (see the org case below).
@@ -947,57 +964,6 @@ def test_serve_cert_ok_reflects_status(env):
     assert sup.serve_cert_ok(ORG) is False
     _provision_serve_cert(env)
     assert sup.serve_cert_ok(ORG) is True
-
-
-def test_portable_basename_resolves_inside_current_serving_key_store(
-    env,
-    monkeypatch,
-):
-    provisioned = _provision_serve_cert(env)
-    monkeypatch.setenv("AUTONOMY_NETWORK_KEY_DIR", str(env / "network"))
-    _replace_key_path(provisioned, provisioned["key_path"].name)
-
-    state = sup.serve_cert_state(ORG)
-    assert state["status"] == "ok"
-    assert state["key_path"] == str(provisioned["key_path"])
-
-
-def test_legacy_absolute_key_path_remains_valid_in_place(env):
-    provisioned = _provision_serve_cert(env)
-    state = sup.serve_cert_state(ORG)
-    assert state["status"] == "ok"
-    assert state["key_path"] == str(provisioned["key_path"])
-
-
-@pytest.mark.parametrize(
-    "stored",
-    [
-        "../serve.key",
-        "nested/serve.key",
-        r"nested\serve.key",
-        ".",
-        "..",
-    ],
-)
-def test_relative_key_path_traversal_and_nesting_fail_closed(
-    env,
-    monkeypatch,
-    stored,
-):
-    provisioned = _provision_serve_cert(env)
-    monkeypatch.setenv("AUTONOMY_NETWORK_KEY_DIR", str(env / "network"))
-    _replace_key_path(provisioned, stored)
-
-    state = sup.serve_cert_state(ORG)
-    assert state["status"] == "key-invalid"
-    assert "bare filename" in state["error"]
-    _put_grant()
-    spawn = FakeSpawn()
-    assert sup.ServingSupervisor(spawn=spawn).ensure(ORG) == {
-        "running": False,
-        "reason": "key-invalid",
-    }
-    assert spawn.calls == []
 
 
 def test_bootstrap_ensures_and_arms_watchdog(env, monkeypatch):
@@ -1527,12 +1493,14 @@ def test_scope_states_names_unarmed_only_with_an_absent_key_file(env, monkeypatc
     # scope_states asks the authoritative control probe; the fake process
     # has no control socket, so answer from the fake's own serving flag.
     monkeypatch.setattr(s, "serving", lambda scope=sup.PERSONAL_SCOPE: spawn.procs[-1].serving())
+    # The binding names the org the credential was provisioned for; the
+    # machine-homed serve-cert row is keyed by that org_uuid.
     monkeypatch.setattr(
         sup, "_load_binding",
-        lambda org: ({"org_uuid": "uuid-x", "registry_url": "https://registry.test"}, None),
+        lambda org: ({"org_uuid": ORG_UUID, "registry_url": "https://registry.test"}, None),
     )
     keycache = tmp_path / "keycache"
-    keycache.mkdir()
+    keycache.mkdir(exist_ok=True)
     monkeypatch.setenv("AUTONOMY_KEYCACHE_MOUNT", str(keycache))
     s.ensure(ORG)
     for _ in range(2):
@@ -1542,7 +1510,7 @@ def test_scope_states_names_unarmed_only_with_an_absent_key_file(env, monkeypatc
     assert row["state"] == "unarmed" and row["launch_exits"]["count"] == 2
     assert row["cache_present"] is False and row["serving"] is False
 
-    (keycache / "fleet-connector-runtime.uuid-x.json").write_text("{}")
+    (keycache / f"fleet-connector-runtime.{ORG_UUID}.json").write_text("{}")
     row = sup.scope_states([(ORG, ORG)])[0]
     assert row["state"] == "launch-failing" and row["cache_present"] is True
 
