@@ -23,7 +23,7 @@ import { prepareSignon } from '../static/js/ceremony/signon-phases.js';
 import { deriveAuditedRecipient } from '../static/js/ceremony/vault-unlock.js';
 import { sealToEncapsulationKey } from '../static/js/ceremony/sealing.js';
 import { bytesToHex } from '../static/js/ceremony/primitives.js';
-import { FLEET_MACHINE_KEY_SALT } from '../static/js/ceremony/fleet-enrollment.js';
+import { FLEET_MACHINE_KEY_SALT, mintFleetEnrollmentEvidence } from '../static/js/ceremony/fleet-enrollment.js';
 import { fleetRuntimePost } from '../static/js/ceremony/fleet-enrollment.js';
 
 const PURPOSE = 'autonomy/identity/sign-in-preparation/v1';
@@ -47,7 +47,7 @@ async function deriveMachineSeed(seed, machineId) {
   }, key, 256));
 }
 
-async function fixture({ orgUuid }) {
+async function fixture({ orgUuid, firstCompletion = false }) {
   const rootSeed = webcrypto.getRandomValues(new Uint8Array(32));
   const rootPub = await ed25519PublicHex(rootSeed);
   const machineId = 'ab'.repeat(32);
@@ -65,10 +65,32 @@ async function fixture({ orgUuid }) {
       serving_orgs: [],
     },
   };
+  if (firstCompletion) {
+    const request = {machine_id: machineId, personal_root_pub: rootPub, invite_id: 'cd'.repeat(32)};
+    const channelBinding = 'ef'.repeat(32);
+    const delivery = await mintFleetEnrollmentEvidence({
+      personalRootSeed: new Uint8Array(rootSeed), rootPub, request, channelBinding,
+    });
+    inputs.completion = {
+      request_id: '01'.repeat(32), request, channel_binding: channelBinding,
+      approval: delivery.approval, roster_entry: delivery.rosterEntry,
+      personal_org_uuid: inputs.runtime.personal_org_uuid,
+    };
+    inputs.runtime = {enabled: false};
+  }
   const audited = await deriveAuditedRecipient(rootSeed);
   const sealed = await sealToEncapsulationKey(enc.encode(JSON.stringify(inputs)), audited.publicKeyHex, PURPOSE);
   const encrypted = { sealed: typeof sealed === 'string' ? sealed : bytesToHex(sealed) };
-  const signon = { _internals: { prepareRootMaintenance: async () => [] } };
+  const signon = { _internals: { prepareRootMaintenance: async (_seed, _orgs, runtime) => {
+    if (!firstCompletion) return [];
+    assert.equal(runtime.personal_root_pub, rootPub);
+    assert.equal(runtime.machine_pub, machinePub);
+    assert.equal(runtime.serves, true);
+    return [
+      {step: 'binding', url: '/api/network/register'},
+      {step: 'serve-cert', url: '/api/network/serve-cert'},
+    ];
+  } } };
   return { rootSeed, encrypted, signon, runtime: inputs.runtime };
 }
 
@@ -77,6 +99,18 @@ function fleetPost(prepared) {
   assert.ok(post, 'a fleet post was prepared');
   return post;
 }
+
+test('first completion prepares connection setup before full runtime activation', async () => {
+  const {rootSeed, encrypted, signon} = await fixture({orgUuid: null, firstCompletion: true});
+  const prepared = await prepareSignon(rootSeed, encrypted, signon);
+  assert.deepEqual(prepared.posts.map(p => p.url), [
+    '/api/fleet/enrollment/local-completion', '/api/network/register',
+    '/api/network/serve-cert', '/api/fleet/runtime',
+  ]);
+  const body = prepared.posts.at(-1).body;
+  assert.equal(body.reachability_cert.org, '7d8c2e1a-1111-4111-8111-111111111111');
+  assert.match(body.machine_private_seed, /^[0-9a-f]{64}$/);
+});
 
 test('unregistered personal org → sync-only credential: no reachability material under an unbound org', async () => {
   const { rootSeed, encrypted, signon } = await fixture({ orgUuid: null });
