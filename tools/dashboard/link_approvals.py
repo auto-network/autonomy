@@ -785,6 +785,18 @@ def _verify_local_publish_authority(
         # WHETHER that persona may publish is decided below by the authority
         # ledger, which is the sole authorization path and is unchanged.
         anchor = cert.subject.id
+        if org_slug == 'personal':
+            # Personal authority is the locally stored root, not an actor
+            # selected by the envelope or an organization membership ledger.
+            from tools.dashboard.identity_routes import _personal_member
+
+            personal = _personal_member()
+            personal_root = personal.payload.get('root_pub') if personal else None
+            if not personal_root or binding['root_pub'] != personal_root:
+                return 'Personal binding does not match this identity'
+            if cert.subject.id != personal_root:
+                return 'Approval does not belong to this personal identity'
+            anchor = personal_root
         verify_chain(
             cert, anchor, org=binding["org_uuid"], now=now,
             required_scope=required_scope,
@@ -816,6 +828,8 @@ def _verify_local_publish_authority(
     # Authenticated: subject.id is now trustworthy for the fold, which
     # authorizes by the dashboard-side org SLUG (its ledger DB), while the
     # chain above verified against the registry-side org UUID.
+    if org_slug == 'personal':
+        return None
     return _authorization_refusal(
         org_slug, subject["id"], required_scope,
         "publish share links" if required_scope == "link:publish"
