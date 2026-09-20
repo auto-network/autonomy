@@ -151,6 +151,27 @@
       delegate_audited_public_key: auditedPublic,
       local_roster_entry: localRosterEntry,
     });
+    // Founding must initialize the personal domain just as sign-in does:
+    // register its root, prepare serving, and arm synchronization. Fetch the
+    // persisted identity's preparation before reopening the local armor, and
+    // clear the root before submitting the same sign-in handoff messages.
+    var phases = await import('./ceremony/signon-phases.js');
+    var encrypted = await phases.fetchPreparation(window.fetch.bind(window));
+    var policy = await import('./ceremony/root-factor-policy.js');
+    var opened = await policy.openArmorWithPassword(armor, password);
+    var prepared;
+    try {
+      prepared = await phases.prepareSignon(opened.seed, encrypted, window.AutonomyNetworkSession);
+    } finally {
+      opened.seed.fill(0);
+      opened.seed = null;
+      opened.signingKey = null;
+    }
+    var report = await phases.submitSignon(prepared, window.fetch.bind(window));
+    if (report.failed.length) {
+      throw new Error('Your identity was created, but setup did not finish: '
+        + report.failed.map(function (failure) { return failure.error; }).join('; '));
+    }
   }
 
   // Step 2: the WebAuthn dance. Options come base64url-encoded; the
