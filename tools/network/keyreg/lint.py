@@ -18,6 +18,12 @@ The checks:
    symbol (when given) appears in that file.
 4. proof_refs_resolve: every proof reference names an existing Tamarin
    theory file containing the named lemma.
+5. certificate_mints_anchored: every browser or Python function that mints
+   a certificate or credential (name matches mint*Cert*, mint*Credential*,
+   issue*Cert*, or a production caller of idkit.issue_cert) is either the
+   source symbol of a mutation entry or named as a helper in a mutation's
+   notes ("Helpers: a, b, c"). A certificate cannot enter the code without
+   a row that records it (2026-09-20: three sign-on certificates had none).
 """
 
 from __future__ import annotations
@@ -156,11 +162,89 @@ def proof_refs_resolve(registry: dict) -> list[str]:
     return errors
 
 
+CERT_MINT_JS_TREES = (
+    "tools/dashboard/static/js/ceremony",
+    "tools/dashboard/static/js/network-signon.mjs",
+)
+CERT_MINT_PY_TREES = ("tools/network", "tools/dashboard")
+CERT_MINT_JS_RE = re.compile(
+    r"^\s*(?:export\s+)?(?:async\s+)?function\s+"
+    r"(_?(?:mint\w*(?:Cert|Credential)\w*|issue\w*Cert\w*))\s*\(", re.M,
+)
+CERT_MINT_PY_RE = re.compile(r"^\s*def\s+(mint\w*cert\w*|issue\w*cert\w*)\s*\(", re.M | re.I)
+ISSUE_CERT_CALL_RE = re.compile(r"\bissue_cert\(")
+HELPERS_RE = re.compile(r"Helpers:\s*([A-Za-z0-9_,\s]+?)(?:\.|$)", re.S)
+_SKIP_PARTS = {"tests", "harness", "acceptance", "generated"}
+
+
+def _certificate_mint_sites() -> dict[str, str]:
+    """function name -> file, for every certificate-minting function in the
+    scanned trees. Test, harness, acceptance and generated code is skipped."""
+    sites: dict[str, str] = {}
+    for tree in CERT_MINT_JS_TREES:
+        root = REPO_ROOT / tree
+        files = [root] if root.is_file() else list(root.rglob("*.js")) + list(root.rglob("*.mjs"))
+        for path in files:
+            if _SKIP_PARTS & set(path.parts) or ".test." in path.name:
+                continue
+            for name in CERT_MINT_JS_RE.findall(path.read_text(errors="ignore")):
+                sites[name] = str(path.relative_to(REPO_ROOT))
+    for tree in CERT_MINT_PY_TREES:
+        for path in (REPO_ROOT / tree).rglob("*.py"):
+            if _SKIP_PARTS & set(path.parts) or path.name.startswith("test_"):
+                continue
+            text = path.read_text(errors="ignore")
+            rel = str(path.relative_to(REPO_ROOT))
+            if rel == "tools/network/idkit/certs.py":
+                continue          # the primitive itself, not a mint site
+            for name in CERT_MINT_PY_RE.findall(text):
+                sites[name] = rel
+            if ISSUE_CERT_CALL_RE.search(text):
+                for name in re.findall(r"^\s*def\s+(\w+)\s*\(", text, re.M):
+                    # every function in a file that calls the primitive is a
+                    # candidate site; the registry names the one that mints
+                    sites.setdefault(f"{rel}::{name}", rel)
+    return sites
+
+
+def certificate_mints_anchored(registry: dict) -> list[str]:
+    covered: set[str] = set()
+    for entry in registry["mutations"].values():
+        symbol = entry["source"].get("symbol")
+        if symbol:
+            covered.add(symbol)
+        notes = entry.get("notes") or ""
+        for match in HELPERS_RE.finditer(notes):
+            covered.update(h.strip() for h in match.group(1).split(",") if h.strip())
+    errors = []
+    for name, rel in sorted(_certificate_mint_sites().items()):
+        bare = name.split("::")[-1]
+        if bare in covered or name in covered:
+            continue
+        if "::" in name:
+            # A file that calls issue_cert: at least one of its functions must
+            # be recorded. Report the file once.
+            if any(f"{rel}::" in other and other.split("::")[-1] in covered
+                   for other in _certificate_mint_sites()):
+                continue
+            errors.append(
+                f"{rel} calls idkit.issue_cert but none of its functions is a "
+                "mutation source symbol or a listed helper in registry.yaml"
+            )
+            continue
+        errors.append(
+            f"certificate mint {bare} in {rel} has no mutation entry in "
+            "registry.yaml (source symbol or 'Helpers:' in notes)"
+        )
+    return sorted(set(errors))
+
+
 ALL_CHECKS = (
     fold_handlers_match,
     purpose_labels_match,
     code_anchors_resolve,
     proof_refs_resolve,
+    certificate_mints_anchored,
 )
 
 
