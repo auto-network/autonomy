@@ -468,21 +468,55 @@ def _relay_pull_delegate(poll_interval: float = 2.0, deadline: float = 900.0):
     return delegate
 
 
-def _dashboard_runtime_cache() -> fleet_relay_sync.FleetRuntimeWarmCache:
-    """The Dashboard's own copy of the Fleet runtime credential (auto-5er0n).
-
-    Stored in the same ramfs warm cache the serving connector uses (auto-ixwr3)
-    but under a DISTINCT file name, keyed by the same registry ``org_uuid`` the
-    connector serves under. The connector's own entry is written ONLY on the
-    machine selected to serve the tunnel — on any other machine no connector
-    process runs, ``link_serving.py`` never executes, and that file never
-    exists — so the Dashboard must read its own entry, never the connector's.
-    """
-    binding = _reachability_binding()
-    org_uuid = binding.get("org_uuid") if binding else None
-    return fleet_relay_sync.FleetRuntimeWarmCache(
-        org_uuid, name_prefix="fleet-dashboard-runtime"
+def _store_runtime_credential(complete: dict) -> None:
+    """Seal the COMPLETE runtime credential into this machine's audited vault
+    (graph://67d0aa5f-885 D3): row ``fleet-runtime`` of
+    ``autonomy.machine.vault.audited``, one canonical JSON string, sealed
+    cold to the operator's audited delegate recipient and opened unattended
+    once the vault is warm. Replaces the hand-carried
+    ``fleet-dashboard-runtime.<uuid>.json`` ramfs file (auto-5er0n): the
+    vault's own warmth already crosses a hot reload in ramfs, so a second
+    carrier for this one credential bought nothing. A write failure logs and
+    never fails an activation that otherwise succeeded."""
+    from tools.graph import settings_ops
+    from tools.graph.schemas.machine_vault import (
+        MACHINE_VAULT_AUDITED_REVISION, MACHINE_VAULT_AUDITED_SET_ID,
+        RUNTIME_CREDENTIAL_KEY,
     )
+
+    try:
+        settings_ops.write_by_key(
+            MACHINE_VAULT_AUDITED_SET_ID, MACHINE_VAULT_AUDITED_REVISION,
+            RUNTIME_CREDENTIAL_KEY,
+            {"value": json.dumps(complete, sort_keys=True)}, org="machine",
+        )
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "the runtime credential could not be sealed into the machine vault; "
+            "this activation stands, but a restart of this process will not "
+            "re-arm without a new activation", exc_info=True,
+        )
+
+
+def _load_runtime_credential() -> "tuple[dict | None, str | None]":
+    """``(payload, None)`` when the vaulted credential opened; ``(None,
+    reason)`` otherwise, with *reason* one of ``"absent"`` (no row: this
+    machine has never activated) or the vault's own refusal text (the row
+    exists but this process cannot open it yet)."""
+    from tools.graph import settings_ops
+    from tools.graph.schemas.machine_vault import (
+        MACHINE_VAULT_AUDITED_SET_ID, RUNTIME_CREDENTIAL_KEY,
+    )
+
+    rows = {
+        s.key: s for s in settings_ops.read_set(MACHINE_VAULT_AUDITED_SET_ID, org="machine")
+    }
+    row = rows.get(RUNTIME_CREDENTIAL_KEY)
+    if row is None:
+        return None, "absent"
+    if row.vault_error is not None or row.payload is None:
+        return None, (row.vault_error.message if row.vault_error else "no payload")
+    return json.loads(row.payload["value"]), None
 
 
 def _sync_org_targets() -> list:
@@ -648,41 +682,48 @@ def _arm_connector_caches(
             )
 
 
-def rearm_local_runtime_from_cache() -> bool:
-    """Replay the Dashboard's cached Fleet runtime credential at startup.
+def rearm_local_runtime_from_vault() -> bool:
+    """Replay the Dashboard's Fleet runtime credential from this machine's
+    audited vault (graph://67d0aa5f-885 D3).
 
-    Returns ``False`` when no payload is cached (a machine that was never
-    unlocked, or whose ramfs was cleared by a reboot — both correctly stay
-    locked until a human unlocks). Otherwise replays the RAW browser payload
-    through :func:`_activate_runtime` and returns ``True``.
+    Returns ``False`` when no credential is vaulted (this machine has never
+    activated), when the row exists but this process cannot open it yet (the
+    delegate is not warm: run again after the vault restore, which is why the
+    startup and activation paths both call this AFTER
+    ``restore_vault_across_hot_reload``), or when the replay itself fails (a
+    stale credential). Otherwise replays the RAW browser payload through
+    :func:`_activate_runtime` and returns ``True``.
 
     Replaying the raw payload rather than a reconstructed credential is
     deliberate: ``_activate_runtime`` re-runs ``from_browser_payload``, which
     verifies the payload against the current ``personal_root_pub`` and the live
     roster entries, so a stale or de-rostered payload fails to activate instead
-    of arming the machine with a credential the fleet no longer accepts. Going
-    through ``_activate_runtime`` also re-arms all three runtime consumers, so
-    no consumer needs re-arming code of its own.
+    of arming the machine with a credential the fleet no longer accepts. The
+    replay does not re-seal what it just opened (``persist_credential=False``).
+    Every outcome is logged at WARNING so an unarmed machine is diagnosable.
     """
     log = logging.getLogger(__name__)
     try:
-        payload = _dashboard_runtime_cache().load()
+        payload, reason = _load_runtime_credential()
     except Exception:
         log.warning(
-            "fleet runtime replay: the dashboard runtime cache could not be "
-            "READ; this machine stays locked until a human unlock",
-            exc_info=True)
+            "fleet runtime replay: the machine vault could not be READ; this "
+            "machine stays unarmed until a new activation", exc_info=True)
         return False
     if payload is None:
-        # Distinct from a failed replay and from a successful one, and until
-        # now indistinguishable from both: all three returned quietly.
-        log.warning(
-            "fleet runtime replay: NO cached payload — this machine was never "
-            "unlocked, or ramfs was cleared. Connectors will start UNARMED "
-            "(hello v1, shared empty-machine relay slot) until a human unlock")
+        if reason == "absent":
+            log.warning(
+                "fleet runtime replay: NO vaulted credential — this machine has "
+                "never activated. Connectors start UNARMED until a sign-on "
+                "activates it")
+        else:
+            log.warning(
+                "fleet runtime replay: the vaulted credential cannot be opened "
+                "in this process yet (%s); retried after the vault restore",
+                reason)
         return False
     try:
-        _activate_runtime(payload)
+        _activate_runtime(payload, persist_credential=False)
     except Exception:
         # THE PATH THAT ACTUALLY HAPPENED (2026-09-09). Home activated at
         # 13:54:07Z and every connector generation after it started cold. The
@@ -691,13 +732,13 @@ def rearm_local_runtime_from_cache() -> bool:
         # a de-rostered machine — was indistinguishable from one that was
         # never attempted. Four connector restarts, no explanation anywhere.
         log.warning(
-            "fleet runtime replay FAILED from a cached payload; the credential "
-            "is stale (expired cert or de-rostered machine) and a fresh "
-            "operator unlock is required. Connectors start UNARMED until then",
+            "fleet runtime replay FAILED from the vaulted credential; it is "
+            "stale (expired cert or de-rostered machine) and a fresh sign-on "
+            "is required. Connectors start UNARMED until then",
             exc_info=True)
         return False
     log.warning(
-        "fleet runtime replayed from the dashboard cache — Fleet sync re-armed "
+        "fleet runtime replayed from the machine vault — Fleet sync re-armed "
         "with nobody present")
     return True
 
@@ -708,6 +749,7 @@ def _activate_runtime(
     root_pub: str | None = None,
     expected_entry: fleet_roster.RosterEntry | None = None,
     publish_connector: bool | None = None,
+    persist_credential: bool = True,
 ) -> fleet_runtime.FleetRuntimeCredential:
     from tools.network import fleet_sync_telemetry
 
@@ -764,10 +806,10 @@ def _activate_runtime(
     # Carry the Dashboard's OWN copy of this credential across a restart
     # (auto-5er0n). It is held only in process memory otherwise, so every
     # Dashboard restart left the machine unable to pull Fleet sync until a human
-    # unlocked again. The raw browser payload is stored in the same ramfs warm
-    # cache the serving connector uses (auto-ixwr3) but under a DISTINCT file
-    # name, and replayed at startup by rearm_local_runtime_from_cache(). A cache
-    # write failure must never fail an activation that otherwise succeeded.
+    # unlocked again. The raw browser payload is sealed into this machine's
+    # audited vault (graph://67d0aa5f-885 D3) and replayed at startup, after
+    # the vault restore, by rearm_local_runtime_from_vault(). A write failure
+    # must never fail an activation that otherwise succeeded.
     # The cached copy carries EVERYTHING the browser delivered: the base
     # credential plus the per-org serving seeds and the org sync certificates
     # that were peeled above for from_browser_payload. A replay re-runs this
@@ -781,8 +823,8 @@ def _activate_runtime(
         cached["org_sync_certs"] = org_sync_certs
     if serving_seeds:
         cached["serving_machine_private_seeds"] = serving_seeds
-    with contextlib.suppress(Exception):
-        _dashboard_runtime_cache().store(cached)
+    if persist_credential:
+        _store_runtime_credential(cached)
     _ensure_fleet_catalog(credential.machine_pub)
     from tools.network import fleet_direct_config
 

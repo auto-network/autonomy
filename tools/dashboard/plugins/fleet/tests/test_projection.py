@@ -365,7 +365,7 @@ def test_local_machine_block_reports_probe_facts_or_stays_null():
         "tunnelServing": None,
         "tunnelScopesDown": [],
         "scopeStates": [],
-        "dashboardCachePresent": None,
+        "dashboardCredentialPresent": None,
         "verdictTopLine": None,
     }
 
@@ -388,7 +388,7 @@ def test_local_machine_block_reports_probe_facts_or_stays_null():
         "tunnelServing": False,
         "tunnelScopesDown": [],
         "scopeStates": [],
-        "dashboardCachePresent": None,
+        "dashboardCredentialPresent": None,
         "verdictTopLine": "LOCKED",
     }
 
@@ -551,13 +551,13 @@ def test_local_machine_block_carries_per_scope_states_and_dashboard_cache():
         scope_states=({"scope": "personal", "label": "personal", "state": "unarmed",
                        "serving": False, "launch_exits": {"count": 3, "since": 1.0},
                        "cache_present": False},),
-        dashboard_cache_present=True,
+        dashboard_credential_present=True,
     )
     local = project(inputs)["localMachine"]
-    assert local["dashboardCachePresent"] is True
+    assert local["dashboardCredentialPresent"] is True
     [row] = local["scopeStates"]
     assert row == {"scope": "personal", "label": "personal", "state": "unarmed",
                    "serving": False, "launchExits": {"count": 3, "since": 1.0},
                    "cachePresent": False}
     absent = project(_inputs(entries=(LOCAL_ENTRY,)))["localMachine"]
-    assert absent["scopeStates"] == [] and absent["dashboardCachePresent"] is None
+    assert absent["scopeStates"] == [] and absent["dashboardCredentialPresent"] is None

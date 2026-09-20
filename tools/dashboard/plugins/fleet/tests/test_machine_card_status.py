@@ -173,7 +173,7 @@ def test_a_null_credential_probe_does_not_read_as_needs_unlock():
 
 def test_unarmed_with_no_dashboard_credential_is_needs_unlock():
     m = _local(tunnelServing=False, tunnelScopesDown=["personal"],
-               scopeStates=[_scope("unarmed")], dashboardCachePresent=False)
+               scopeStates=[_scope("unarmed")], dashboardCredentialPresent=False)
     [row] = _render([{"machine": m, "state": _serving_state(m)}])
     assert row["status"] == "Needs unlock" and row["statusTone"] == "failed"
     assert "personal" in row["note"] and "Unlock" in row["note"]
@@ -182,7 +182,7 @@ def test_unarmed_with_no_dashboard_credential_is_needs_unlock():
 def test_unarmed_with_the_dashboard_credential_present_is_rearm_failed():
     m = _local(tunnelServing=False, tunnelScopesDown=["personal"],
                scopeStates=[_scope("unarmed"), _scope("serving", "anchore", True)],
-               dashboardCachePresent=True)
+               dashboardCredentialPresent=True)
     [row] = _render([{"machine": m, "state": _serving_state(m)}])
     assert row["status"] == "Re-arm failed" and row["statusTone"] == "failed"
     assert "personal" in row["note"] and "anchore" not in row["note"]
@@ -192,7 +192,7 @@ def test_unarmed_with_the_dashboard_credential_present_is_rearm_failed():
 def test_launch_failing_with_the_key_present_names_the_connector():
     m = _local(tunnelServing=False, tunnelScopesDown=["dynbench"],
                scopeStates=[_scope("launch-failing", "dynbench", True)],
-               dashboardCachePresent=True)
+               dashboardCredentialPresent=True)
     [row] = _render([{"machine": m, "state": _serving_state(m)}])
     assert row["status"] == "Connector not starting"
     assert "dynbench" in row["note"] and "serve log" in row["note"]
