@@ -120,6 +120,41 @@ def _configure_relay_server(fleet, personal_path, monkeypatch):
     return server
 
 
+def test_connector_maintenance_admits_newly_approved_machine(tmp_path, monkeypatch):
+    from tools.network.relaykit.channel import HandshakeError
+
+    fleet = _two_machine_fleet()
+    both_entries = fleet.entries
+    fleet.entries = both_entries[:1]
+    server = _configure_relay_server(fleet, tmp_path / "personal.db", monkeypatch)
+    with pytest.raises(HandshakeError, match="not active"):
+        server.scheduler.authenticator.authorize(fleet.client_machine.public_hex)
+    fleet.entries = both_entries
+
+    async def exercise():
+        refreshed = asyncio.Event()
+
+        async def observe_listener():
+            server.scheduler.authenticator.authorize(fleet.client_machine.public_hex)
+            refreshed.set()
+
+        monkeypatch.setattr(server, "ensure_direct_listener", observe_listener)
+        task = asyncio.create_task(server.direct_listener_loop())
+        try:
+            await asyncio.wait_for(refreshed.wait(), timeout=2)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        # Removing the entry must also invalidate an already-warm admission.
+        fleet.entries = both_entries[:1]
+        await server.scheduler.refresh_roster()
+        with pytest.raises(HandshakeError, match="not active"):
+            server.scheduler.authenticator.authorize(fleet.client_machine.public_hex)
+
+    asyncio.run(exercise())
+
+
 def _client_hello(fleet, token: str):
     process, cert, _payload = fleet.runtime(
         fleet.client_machine, fleet.client_id, "70" * 32
@@ -669,5 +704,4 @@ def test_ownership_defaults_to_not_binding():
     assert (
         fleet_relay_sync.ConnectorFleetRuntime()._owns_inbound_listener is False
     )
-
 
