@@ -99,7 +99,7 @@ def test_a_racing_writer_never_commits_at_or_below_a_sealed_write_floor(tmp_path
     db.close(); sealer.close()
 
 
-def test_a_backward_clock_pauses_cuts_and_writes_until_it_passes_the_floor(tmp_path: Path) -> None:
+def test_a_backward_clock_pauses_write_floors_and_writes_until_it_passes_the_floor(tmp_path: Path) -> None:
     machine = KeyPair.generate()
     db = GraphDB(tmp_path / "clock.db")
     catalog = MutationCatalog(db.conn, machine.public_hex)
@@ -124,7 +124,7 @@ def test_a_backward_clock_pauses_cuts_and_writes_until_it_passes_the_floor(tmp_p
     db.close()
 
 
-def test_an_origin_cut_is_verified_against_the_origin_key(tmp_path: Path) -> None:
+def test_a_machine_write_floor_is_verified_against_the_origin_key(tmp_path: Path) -> None:
     origin, other = KeyPair.generate(), KeyPair.generate()
     db = GraphDB(tmp_path / "adopt.db")
     MutationCatalog(db.conn, other.public_hex).install()
@@ -141,12 +141,17 @@ def test_an_origin_cut_is_verified_against_the_origin_key(tmp_path: Path) -> Non
     with pytest.raises(write_floors.WriteFloorError):
         write_floors.adopt_machine_write_floor(db.conn, signed_by_other)
     assert write_floors.machine_write_floors(db.conn)[origin.public_hex][0] == 5_000
-    # The watermark is the greater of cursor and write floor.
-    assert MutationCatalog(db.conn, other.public_hex).origin_watermarks()[origin.public_hex] == 5_000
+    # A stored floor is not a position: the watermark is the cursor alone.
+    catalog = MutationCatalog(db.conn, other.public_hex)
+    assert catalog.origin_watermarks().get(origin.public_hex, 0) == 0
+    # With no row of the origin held, the claim moves the cursor to the floor.
+    assert catalog.claim_write_floor(origin.public_hex, 5_000) is True
+    assert catalog.origin_watermarks()[origin.public_hex] == 5_000
+    assert catalog.claim_write_floor(origin.public_hex, 5_000) is False           # not above
     db.close()
 
 
-def test_a_cut_signed_by_the_delegated_process_key_verifies_through_its_chain(tmp_path: Path) -> None:
+def test_a_write_floor_signed_by_the_delegated_process_key_verifies_through_its_chain(tmp_path: Path) -> None:
     """Production signs with a process key the machine key delegated to
     (fleet:sync, machine-direct), never with the machine key itself: the
     origin IS the machine key, and the write floor carries the delegation so a
@@ -174,7 +179,9 @@ def test_a_cut_signed_by_the_delegated_process_key_verifies_through_its_chain(tm
     peer = GraphDB(tmp_path / "peer.db")
     MutationCatalog(peer.conn, stranger.public_hex).install()
     assert write_floors.adopt_machine_write_floor(peer.conn, frame) is True
-    assert MutationCatalog(peer.conn, stranger.public_hex).origin_watermarks()[machine.public_hex] == 1_000
+    peer_catalog = MutationCatalog(peer.conn, stranger.public_hex)
+    assert peer_catalog.claim_write_floor(machine.public_hex, 1_000) is True
+    assert peer_catalog.origin_watermarks()[machine.public_hex] == 1_000
     # A chain anchored elsewhere, a wrong scope, or a leaf that is not the
     # signer is refused.
     other_cert = issue_cert(
@@ -196,7 +203,7 @@ def test_a_cut_signed_by_the_delegated_process_key_verifies_through_its_chain(tm
 
 # ── propagation through the real pull ──────────────────────────────────────
 
-def test_a_cut_sealed_on_a_reaches_c_through_b_without_a_serving_c(tmp_path: Path) -> None:
+def test_a_write_floor_sealed_on_a_reaches_c_through_b_without_a_serving_c(tmp_path: Path) -> None:
     async def run() -> None:
         root = KeyPair.generate()
         keys = [KeyPair.generate() for _ in range(3)]
@@ -218,14 +225,20 @@ def test_a_cut_sealed_on_a_reaches_c_through_b_without_a_serving_c(tmp_path: Pat
             await _eventually(lambda: _title(paths[2], "from-a") == "a wrote once", timeout=10)
             written_at = SQLiteFleetSyncStore(paths[0]).origin_watermarks()[keys[0].public_hex]
             # A is idle from here on. Its write floor keeps moving and C learns it via B.
-            def c_has_a_cut_above_the_write() -> bool:
+            def c_has_a_floor_above_the_write() -> bool:
                 held = SQLiteFleetSyncStore(paths[2]).machine_write_floors().get(keys[0].public_hex)
                 return held is not None and held[0] > written_at
-            await _eventually(c_has_a_cut_above_the_write, timeout=10)
+            await _eventually(c_has_a_floor_above_the_write, timeout=10)
             write_floor_on_a = SQLiteFleetSyncStore(paths[0]).machine_write_floors()[keys[0].public_hex][0]
             floor_on_c = SQLiteFleetSyncStore(paths[2]).machine_write_floors()[keys[0].public_hex][0]
             assert floor_on_c <= write_floor_on_a
-            assert SQLiteFleetSyncStore(paths[2]).origin_watermarks()[keys[0].public_hex] == floor_on_c
+            # Held, then claimed as the cursor once every row below it is here
+            # (zero rows here): two store writes, so wait for the second.
+            def c_claimed_what_it_holds() -> bool:
+                store = SQLiteFleetSyncStore(paths[2])
+                held = store.machine_write_floors()[keys[0].public_hex][0]
+                return store.origin_watermarks()[keys[0].public_hex] == held
+            await _eventually(c_claimed_what_it_holds, timeout=10)
             # Freshness: an idle A's write floor as held on B is no older than a few rounds.
             age_s = (time.time_ns() - SQLiteFleetSyncStore(paths[1]).machine_write_floors()[keys[0].public_hex][0]) / 1e9
             assert age_s < 2.0 + 0.03 * 3, f"write floor held on B is {age_s:.2f}s old"
@@ -235,7 +248,7 @@ def test_a_cut_sealed_on_a_reaches_c_through_b_without_a_serving_c(tmp_path: Pat
     asyncio.run(run())
 
 
-def test_cut_frames_follow_every_transaction_in_a_served_stream(tmp_path: Path) -> None:
+def test_write_floor_frames_follow_every_transaction_in_a_served_stream(tmp_path: Path) -> None:
     """The adoption invariant on the wire: no machine.write_floor frame precedes any
     transaction header in one pull reply."""
     root, machine, peer = KeyPair.generate(), KeyPair.generate(), KeyPair.generate()
@@ -279,7 +292,7 @@ def _persona_cert(persona: KeyPair, machine: KeyPair, org: str = ORG):
     )
 
 
-def test_a_persona_cut_is_the_minimum_position_over_the_whole_roster(tmp_path: Path) -> None:
+def test_a_persona_write_floor_is_the_minimum_cursor_over_the_whole_roster(tmp_path: Path) -> None:
     persona, sealer = KeyPair.generate(), KeyPair.generate()
     machines = [sealer] + [KeyPair.generate() for _ in range(2)]
     db = GraphDB(tmp_path / "org.db")
