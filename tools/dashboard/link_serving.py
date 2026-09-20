@@ -1269,6 +1269,13 @@ async def _serve_read(token: str, org: str | None, request: dict, clock) -> byte
 #: Ops that hand a viewer the key to a fan-out stream (auto-albp6.8).
 SUBSCRIBE_OPS = ("subscribe",)
 
+#: The ONE op an ``org:follow`` link serves: a node following the org's public
+#: surface (design of record graph://5f2f5a49-00d §10.1). Accepted only on an
+#: ``org:follow`` grant, and an ``org:follow`` grant accepts nothing else. The
+#: follow is served by the org-sync scheduler, so there is no per-target-type
+#: enablement set here — the grant type IS the gate.
+FOLLOW_OPS = ("follow",)
+
 #: target_types whose channels may subscribe to a live stream. Same
 #: default-off discipline as WRITE_ENABLED_TARGET_TYPES: a target_type
 #: not listed here gets the uniform refusal, so no stream key is ever
@@ -1318,11 +1325,19 @@ async def _serve_subscribe(token: str, org: str | None, clock) -> bytes:
         return REFUSED
 
 
-def make_grant_handler(org: str | None = None, *, now=None):
+def make_grant_handler(org: str | None = None, *, now=None, fleet_runtime=None):
     """Build the ``handler(token, message)`` the B2 connector serves with.
 
     *org* scopes the grant cache and graph lookups; *now* (an epoch-seconds
     callable) is the TTL clock, injectable for tests.
+
+    *fleet_runtime* is the process's ``fleet_relay_sync.connector_runtime`` (the
+    same object the fleet stream offer handler is built from). The ``follow``
+    op resolves ``fleet_runtime.scheduler`` at each request and serves the
+    follow through it (design of record graph://5f2f5a49-00d §10.1); an unarmed
+    process (no runtime, or its ``scheduler`` is None) refuses a follow with a
+    typed close, the way the offer handler refuses an offer. Absent, no follow
+    can be served — the safe default for the mock and for isolated tests.
     """
     clock = now or time.time
 
@@ -1374,6 +1389,54 @@ def make_grant_handler(org: str | None = None, *, now=None):
         except Exception:
             return REFUSED
 
+    async def _follow(token: str, request: dict):
+        """One ``follow`` request → the org-sync scheduler's reply stream.
+
+        Accepted ONLY on an ``org:follow`` grant; every other grant refuses
+        it (and an ``org:follow`` grant refuses every other op — see the
+        per-op guards above and the target-type enablement sets). The link's
+        fragment key already authenticated the whole exchange
+        (verify_link_server_hello at the viewer handshake), so the scheduler
+        is called with no peer credential and a follow admission built from
+        the grant. The reply — the scheduler's sweep or delta stream — is an
+        async iterator the connector streams, exactly as ``attachment.fetch``
+        does.
+        """
+        grant = await asyncio.to_thread(
+            check_grant, token, org=org, now=clock(),
+            grant_id=grants_by_token.get(token),
+        )
+        if grant is None or grant.get("target_type") != "org:follow":
+            return REFUSED
+        scheduler = getattr(fleet_runtime, "scheduler", None)
+        if scheduler is None:
+            # Unarmed: no fleet runtime armed to serve the follow. Refuse with
+            # a typed close (PermissionError → CLOSE_CONNECTOR_UNARMED via
+            # classify_connector_error), the same posture the fleet stream
+            # offer handler takes when it refuses an offer while unarmed —
+            # NOT the uniform content refusal.
+            raise PermissionError(
+                "fleet sync runtime is unarmed: follow credential unavailable"
+            )
+        body = request.get("request")
+        if not isinstance(body, dict):
+            return BAD_REQUEST
+        meta = grant.get("meta") or {}
+        from tools.network.fleet_sync_channel import Admission
+
+        # The scheduler confines the served scope to this org's genesis id
+        # (its org channel's ``org``); the grant meta carries it as org_uuid.
+        admission = Admission(
+            kind="follow", org=meta.get("org_uuid") or grant.get("target_uuid"),
+        )
+        pull = canonical_json(body)
+        # No peer credential (""), the follow admission, and the same handler
+        # that serves org sync. Its reply (bytes or async iterator) becomes
+        # the channel response verbatim.
+        return await scheduler._handle(
+            token, pull, "", telemetry_channel="relay", admission=admission,
+        )
+
     async def _handle(
         token: str, message: bytes, channel_state: dict
     ) -> bytes:
@@ -1402,6 +1465,8 @@ def make_grant_handler(org: str | None = None, *, now=None):
             return await _serve_read(token, org, request, clock)
         if op in SUBSCRIBE_OPS:
             return await _serve_subscribe(token, org, clock)
+        if op in FOLLOW_OPS:
+            return await _follow(token, request)
         if op == "attachment.fetch":
             # A well-formed fetch returns a bounded async stream of body
             # frames (or a single error message); the connector streams it
@@ -1457,6 +1522,7 @@ def make_ice_grant_handler(
     publisher=None,
     modules=None,
     now=None,
+    fleet_runtime=None,
 ):
     """Add one bounded ICE capability to the ordinary grant handler.
 
@@ -1478,7 +1544,9 @@ def make_ice_grant_handler(
         raise ValueError("ICE grant handler requires a Publisher")
 
     clock = now or time.time
-    application_handler = make_grant_handler(graph_org, now=clock)
+    application_handler = make_grant_handler(
+        graph_org, now=clock, fleet_runtime=fleet_runtime,
+    )
     responder_org = channel_org if channel_org is not None else graph_org
 
     async def valid_grant(token: str) -> bool:
@@ -1570,6 +1638,13 @@ def _make_ice_serving_connector(
         reply = await connector.control("issue-turn", {})
         return _turn_configuration_from_control(reply)
 
+    # The follow op (org:follow links) is served by the fleet-sync scheduler
+    # reached through this process's connector runtime — the SAME object the
+    # fleet stream offer handler is built from below. Resolved per-op inside
+    # the handler, so an unarmed process refuses a follow the way it refuses
+    # an offer. No new global, no import cycle: the singleton is imported here.
+    from tools.network.fleet_relay_sync import connector_runtime as _follow_rt
+
     handler = make_ice_grant_handler(
         graph_org,
         channel_org=org,
@@ -1579,6 +1654,7 @@ def _make_ice_serving_connector(
         peer_runtime=PeerRuntime(64, per_token_limit=4),
         signaling_capacity=IceCapacity(64, per_token_limit=2),
         publisher=publisher,
+        fleet_runtime=_follow_rt,
     )
     stream_kwargs = {}
     if machine_key is not None:

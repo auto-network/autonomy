@@ -36,7 +36,7 @@ logger = logging.getLogger("dashboard.link_channel_key")
 #: Target types whose links carry a channel keypair. ``org:join`` retains its
 #: separate bearer alongside this key; the two values serve different powers.
 CHANNEL_KEY_TARGET_TYPES = frozenset(
-    {"design", "file", "mission", "note", "org:join", "present"}
+    {"design", "file", "mission", "note", "org:join", "org:follow", "present"}
 )
 
 #: Target types whose backing store is MACHINE-LOCAL, not the fleet-synced

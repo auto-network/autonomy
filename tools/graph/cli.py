@@ -2808,6 +2808,18 @@ def cmd_bead(args):
     db.close()
 
 
+def cmd_follow_router(args):
+    """Route 'graph follow ...' — currently only the publish verb."""
+    pos = args.args_pos or []
+    if pos == ["publish"]:
+        from .link_cmd import cmd_follow_publish
+        cmd_follow_publish(args)
+        return
+    print("Error: usage: graph follow publish [--org slug] [--label text]",
+          file=sys.stderr)
+    sys.exit(1)
+
+
 def cmd_link_router(args):
     """Route 'graph link ...' between share-link ops and the legacy edge form."""
     pos = args.args_pos or []
@@ -6096,6 +6108,20 @@ def main():
     )
     p.add_argument("--org", help="Org slug")
     p.set_defaults(func=cmd_link_router)
+
+    # follow — publish the org's standing org:follow public link
+    p = sub.add_parser(
+        "follow",
+        help="Standing org:follow public link (publish)",
+        epilog="Standing follow link (operator-approved, spec graph://5f2f5a49-00d §10.1):\n"
+               "  graph follow publish [--org slug] [--label text]\n"
+               "A membership-free public link a node pulls the org's public surface\n"
+               "from; never expires unless revoked (revoke with `graph link revoke`).",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("args_pos", nargs="*", metavar="ARGS", help="publish")
+    p.add_argument("--label", help="publish: human label carried on the grant")
+    p.add_argument("--org", help="Org slug")
+    p.set_defaults(func=cmd_follow_router)
 
     # attention
     p = sub.add_parser("attention", help="Show human input from sessions chronologically")

@@ -104,15 +104,25 @@ TARGET_TYPES = (
     "note",
     "present",
     "org:join",
+    "org:follow",
     "fleet:join",
     "fleet:sync",
 )  # §6.1 artifact + membership resolvers
+
+#: Grant target types whose link never expires unless revoked (TTL class
+#: ``indefinite``, design of record graph://5f2f5a49-00d §10.1). Every other
+#: type carries an explicit ``meta.ttl`` (or, for ``fleet:join``, the UI's
+#: seven-day default); revocation stays the ``link_revoke`` approval path.
+INDEFINITE_TTL_TARGET_TYPES = ("org:follow",)
 
 RECOVERY_MODES = ("none", "recovery-key", "org-vouch", "blindhash-escrow")
 RESERVED_RECOVERY_MODES = ("org-vouch", "blindhash-escrow")  # companion ledger spec
 
 GRANT_META_KEYS = frozenset(
-    {"ttl", "label", "require_auth", "participant_id", "ice_policy"}
+    {"ttl", "label", "require_auth", "participant_id", "ice_policy",
+     # org:follow only: the followed org's slug and its founded UUID (§10.1).
+     # The link server reads org_uuid to build the follow admission's scope.
+     "org", "org_uuid"}
 )
 ICE_POLICIES = ("direct_allowed", "relay_only")
 
@@ -579,6 +589,29 @@ class NetworkLinkGrantV1(SettingSchema):
                 raise SchemaValidationError(
                     f"{cls.__name__}: meta.participant_id is only valid for "
                     "target_type='mission'"
+                )
+            # org:follow carries the followed org's identity in meta; org/
+            # org_uuid are meaningful nowhere else (§10.1).
+            if target_type != "org:follow" and (
+                "org" in meta or "org_uuid" in meta
+            ):
+                raise SchemaValidationError(
+                    f"{cls.__name__}: meta.org / meta.org_uuid are only valid "
+                    "for target_type='org:follow'"
+                )
+            if target_type == "org:follow":
+                if not isinstance(meta.get("org"), str) or not meta.get("org"):
+                    raise SchemaValidationError(
+                        f"{cls.__name__}: org:follow requires meta.org "
+                        "(the followed org's slug)"
+                    )
+                _require_uuid(meta, "org_uuid", f"{cls.__name__}.meta")
+            # An org:follow grant never expires unless revoked (TTL class
+            # indefinite): meta.ttl is forbidden, the way org:join's is.
+            if target_type == "org:follow" and "ttl" in meta:
+                raise SchemaValidationError(
+                    f"{cls.__name__}: org:follow never expires unless revoked "
+                    "(TTL class indefinite); meta.ttl is forbidden"
                 )
 
         # Deliberately OUTSIDE the `meta is not None` guard above: a mission

@@ -667,3 +667,66 @@ def test_recipient_avatar_is_a_url_into_the_attachment_store(env, tmp_path, monk
     assert enriched["recipient"]["avatar_url"] == "/api/attachment/att-123"
     # And nothing image-shaped is inlined anywhere in the payload.
     assert "data:image" not in json.dumps(enriched)
+
+
+# ── org:follow publish path (bead auto-akcr7, §10.1) ──────────
+
+
+def test_prepare_create_org_follow_resolves_binding_and_meta(monkeypatch):
+    """The operator names only the org; prepare_create resolves the org UUID
+    from the binding, sets it as the target, and writes org + org_uuid into
+    meta so the served follow admission can name the scope."""
+    monkeypatch.setattr(
+        link_approvals, "_load_binding", lambda org: ({"org_uuid": ORG_UUID}, None)
+    )
+    monkeypatch.setattr(link_approvals, "_require_startable_serving", lambda org: None)
+    staged, _ = link_approvals.prepare_create(
+        "sess", {"org": ORG, "target_type": "org:follow", "meta": {}}
+    )
+    assert staged["target_uuid"] == ORG_UUID
+    assert staged["meta"]["org"] == ORG
+    assert staged["meta"]["org_uuid"] == ORG_UUID
+
+
+def test_prepare_create_org_follow_forbids_ttl(monkeypatch):
+    monkeypatch.setattr(
+        link_approvals, "_load_binding", lambda org: ({"org_uuid": ORG_UUID}, None)
+    )
+    monkeypatch.setattr(link_approvals, "_require_startable_serving", lambda org: None)
+    with pytest.raises(ValueError, match="never expires"):
+        link_approvals.prepare_create(
+            "sess",
+            {"org": ORG, "target_type": "org:follow", "meta": {"ttl": 3600}},
+        )
+
+
+def test_prepare_create_org_follow_needs_a_binding(monkeypatch):
+    monkeypatch.setattr(
+        link_approvals, "_load_binding", lambda org: (None, "not registered")
+    )
+    with pytest.raises(ValueError, match="no registry binding"):
+        link_approvals.prepare_create(
+            "sess", {"org": ORG, "target_type": "org:follow", "meta": {}}
+        )
+
+
+def test_tunnel_link_meta_org_follow_carries_identity_and_rejects_ttl():
+    req = {
+        "target_type": "org:follow",
+        "meta": {"org": ORG, "org_uuid": ORG_UUID, "label": "Follow us"},
+    }
+    meta, err = link_approvals._tunnel_link_meta(req, {})
+    assert err is None
+    assert meta == {"org": ORG, "org_uuid": ORG_UUID, "label": "Follow us"}
+
+    _, err = link_approvals._tunnel_link_meta(
+        {"target_type": "org:follow", "meta": {"org": ORG, "org_uuid": ORG_UUID}},
+        {"ttl": 3600},
+    )
+    assert err and "never expires" in err
+
+
+def test_resolve_target_org_follow_titles_by_org():
+    res = link_approvals._resolve_target("org:follow", ORG_UUID, ORG, {})
+    assert res["error"] is None
+    assert ORG in res["title"]
