@@ -533,18 +533,24 @@ class TestServiceTargetResolution:
         _error(_put(client, port=8001), 409, "target_port_unreachable")
         assert events == []
 
-    def test_stale_container_and_machine_mismatch_refuse_serving(self, target_api):
-        client, events, _service, containers, _reachable = target_api
+    def test_resumed_container_heals_and_machine_mismatch_refuses(self, target_api):
+        client, _events, _service, containers, _reachable = target_api
         _put(client)
-        assert len(events) == 1
+        assert _target_members()[0].payload["container_id"] == CONTAINER_A
+
+        # A RESUME gives the same session a new container. Same session_id,
+        # machine and port — only the container incarnation moved — so check
+        # heals the frozen container id in place instead of refusing.
         containers["session-a"] = _service.ContainerInspection(
             CONTAINER_A_REPLACED, "172.30.0.11"
         )
-        _error(_check(client), 409, "target_stale")
+        healed = _check(client)
+        assert healed.status_code == 200, healed.text
+        assert healed.json()["ok"] is True
+        assert _target_members()[0].payload["container_id"] == CONTAINER_A_REPLACED
 
-        containers["session-a"] = _service.ContainerInspection(
-            CONTAINER_A, "172.30.0.11"
-        )
+        # A genuine machine mismatch still refuses — the target is on a
+        # different machine, not the same session resumed here.
         member = _target_members()[0]
         settings_ops.upsert_by_key(
             TARGET_SET_ID,

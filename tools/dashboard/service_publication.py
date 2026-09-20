@@ -444,7 +444,15 @@ async def resolve_service_target(org: str, key: str) -> ServiceTargetDescriptor:
     if payload.get("machine_id") != machine_id:
         raise ServicePublicationError("target_machine_mismatch", 409)
     if payload.get("container_id") != inspection.container_id:
-        raise ServicePublicationError("target_stale", 409)
+        # Same session_id + machine + port (all validated above); only the
+        # container incarnation changed — that is exactly what a session RESUME
+        # does. Heal the frozen container id in place instead of refusing. A
+        # genuinely different target carries a different session_id and resolves
+        # to a different reservation key, so this never silently re-points.
+        payload = {**payload, "container_id": inspection.container_id,
+                   "updated_at": _utc_now()}
+        settings_ops.upsert_by_key(
+            SERVICE_TARGET_SET_ID, SERVICE_TARGET_REVISION, key, payload, org=org)
     checked_at = _utc_now()
     checked = datetime.strptime(checked_at, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
         tzinfo=timezone.utc
