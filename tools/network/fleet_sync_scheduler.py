@@ -100,7 +100,7 @@ from tools.network.fleet_sync.sweep_receive import FLEET_SYNC_PROTOCOL_VERSION
 _REQUEST_FIELDS = frozenset({
     "v", "op", "roster_epoch", "resume", "compat",
 })
-_REQUEST_OPTIONAL_FIELDS = frozenset({"scope", "bootstrap", "watermarks", "personas"})
+_REQUEST_OPTIONAL_FIELDS = frozenset({"scope", "bootstrap", "watermarks", "personas", "floor"})
 from tools.network.fleet_sync.sweep_receive import (
     SWEEP_BEGIN_KIND,
     SWEEP_END_KIND,
@@ -653,6 +653,7 @@ def encode_pull_request(
     version: int = FLEET_SYNC_PROTOCOL_VERSION,
     watermarks: Mapping[str, int] | None = None,
     personas: Mapping[str, int] | None = None,
+    floor: int | None = None,
 ) -> bytes:
     """Ask for every journal transaction after a content-addressed position.
 
@@ -691,6 +692,13 @@ def encode_pull_request(
         body["scope"] = scope
     if bootstrap:
         body["bootstrap"] = True
+    if floor is not None:
+        # The compact map (watermark_map.py): origins the puller holds and
+        # does not list are served above this floor when the server can
+        # tell the puller knows them.
+        if type(floor) is not int or floor < 0:
+            raise FleetSyncProtocolError("fleet sync floor must be a non-negative integer")
+        body["floor"] = floor
     if personas:
         # The persona cuts the puller already holds, so the server sends
         # only newer ones (auto-mmwgu). Same bound and shape as watermarks.
@@ -718,7 +726,7 @@ def decode_pull_request(
     raw: bytes,
 ) -> tuple[str, tuple[tuple[str, str, int], ...], str, str, bool, int, bool, dict[str, int] | None]:
     """-> (epoch, resume trail, compat, scope, bootstrap, version, watermarks,
-    personas)."""
+    personas, floor)."""
     try:
         value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
@@ -769,6 +777,9 @@ def decode_pull_request(
         ):
             raise FleetSyncProtocolError("fleet sync personas map is malformed")
         personas = {str(k): int(v) for k, v in personas.items()}
+    floor = value.get("floor")
+    if floor is not None and (type(floor) is not int or floor < 0):
+        raise FleetSyncProtocolError("fleet sync floor is malformed")
     if value["op"] != "pull":
         raise FleetSyncProtocolError("unsupported fleet sync operation")
     epoch = _require_hex64(value["roster_epoch"], "fleet sync roster_epoch")
@@ -779,7 +790,7 @@ def decode_pull_request(
     return epoch, tuple(
         decode_breadcrumb(entry, "fleet sync resume breadcrumb")
         for entry in resume
-    ), compat, scope, bootstrap, version, watermarks, personas
+    ), compat, scope, bootstrap, version, watermarks, personas, floor
 
 
 def encode_transaction_header(
@@ -1450,6 +1461,48 @@ class SQLiteFleetSyncStore:
             return cuts.persona_frontiers(conn)
         finally:
             conn.close()
+
+    def persona_cut_records(self) -> dict[str, dict]:
+        from tools.network.fleet_sync import cuts
+
+        conn, _catalog = self._open()
+        try:
+            return cuts.persona_cuts(conn)
+        finally:
+            conn.close()
+
+    def advertisable_watermark_map(
+        self, *, roster_entries: Sequence = (), root_pub: str | None = None,
+        scope: str = "personal",
+    ) -> tuple[int | None, dict[str, int]]:
+        """(floor, exceptions) for the pull request, or (None, {}) while a
+        bootstrap suppresses every claim. Known and retired origins come
+        from the roster (personal) or the held persona cuts (org)."""
+        from tools.network.fleet_sync import cuts
+        from tools.network.fleet_sync.watermark_map import compact_watermark_map
+
+        watermarks = self.advertisable_origin_watermarks()
+        if not watermarks:
+            return None, {}
+        conn, _catalog = self._open()
+        try:
+            cut_records = cuts.origin_cut_records(conn)
+            cut_ns = {origin: int(r["cut_ns"]) for origin, r in cut_records.items()}
+            if scope == "personal":
+                every = {e.machine_pub for e in roster_entries}
+                active = (
+                    set(resolve(roster_entries, anchor_root_pub=root_pub))
+                    if roster_entries and root_pub else every
+                )
+                known, retired_set = every, every - active
+            else:
+                known, retired_set = cuts.persona_machines(conn)
+            retired = {origin: cut_ns[origin] for origin in retired_set if origin in cut_ns}
+        finally:
+            conn.close()
+        return compact_watermark_map(
+            watermarks, cut_ns, time.time_ns(), known=known, retired=retired,
+        )
 
     def covered_persona_frontiers(self) -> dict[str, int]:
         """``{persona: F}`` this member may ADVERTISE (auto-xs9hz): the cut
@@ -2337,7 +2390,7 @@ class FleetSyncScheduler:
             )
         (
             _requested_epoch, resume_trail, peer_digest, scope, bootstrap,
-            protocol_version, watermarks, known_personas,
+            protocol_version, watermarks, known_personas, floor,
         ) = decode_pull_request(message)
         # DIAGNOSTIC (2026-09-08, operator escalation): name every scope a peer
         # actually ASKS for, before any confinement or store resolution. Home
@@ -2359,14 +2412,6 @@ class FleetSyncScheduler:
         # connected -- a peer can pull every twenty seconds and be sixteen
         # hours behind. Nothing new crosses the wire; this only stops
         # discarding what already did. It must never fail the serve.
-        if watermarks:
-            from tools.network import fleet_sync_peer_scope
-
-            with contextlib.suppress(Exception):
-                await asyncio.to_thread(
-                    fleet_sync_peer_scope.record_frontier,
-                    peer_pub, scope=scope, watermarks=watermarks,
-                )
         epoch, state_epoch = self._scope_epochs(scope)
         record_here = telemetry_stats is None
         stats = telemetry_stats if telemetry_stats is not None else {}
@@ -2419,6 +2464,28 @@ class FleetSyncScheduler:
                     dict(watermarks) if watermarks is not None
                     else watermarks_from_trail(resume_trail)
                 )
+                if watermarks is not None and floor:
+                    # A compact map: expand it over every origin this store
+                    # holds before anything reads it, so the pager and the
+                    # retention floor see one full map (watermark_map.py).
+                    from tools.network.fleet_sync.watermark_map import expand_watermark_map
+                    known = await asyncio.to_thread(
+                        self._puller_known_origins, scope, store, known_personas or {},
+                    )
+                    origins = await asyncio.to_thread(store.origin_list)
+                    origin_watermarks = expand_watermark_map(
+                        origin_watermarks, floor, known, origins,
+                    )
+                if watermarks is not None:
+                    # Recorded AFTER expansion, so the doctor's cross-machine
+                    # view sees the full map, never the compact exceptions.
+                    from tools.network import fleet_sync_peer_scope
+
+                    with contextlib.suppress(Exception):
+                        await asyncio.to_thread(
+                            fleet_sync_peer_scope.record_frontier,
+                            peer_pub, scope=scope, watermarks=origin_watermarks,
+                        )
                 # The map proves the prefix it covers, which feeds the same
                 # served-ack floor the trail did (may be 0).
                 cursor = await asyncio.to_thread(
@@ -3412,6 +3479,19 @@ class FleetSyncScheduler:
             except asyncio.TimeoutError:
                 pass
 
+    def _puller_known_origins(self, scope: str, store, declared_personas: Mapping[str, int]) -> set[str]:
+        """The origins a puller of *scope* provably knows exist: on the
+        personal scope every machine the roster ever held (kicked or not);
+        on an org scope every machine listed in a persona cut the puller
+        declared at the same cut_ns this store holds. Blocking."""
+        if scope == "personal":
+            return {entry.machine_pub for entry in self._roster_snapshot}
+        known: set[str] = set()
+        for persona, record in store.persona_cut_records().items():
+            if int(declared_personas.get(persona, -1)) == int(record.get("cut_ns", -2)):
+                known.update(str(m) for m in (record.get("machines") or {}))
+        return known
+
     def _seal_cuts(self, roster_machines: set[str]) -> None:
         """One machine cut per scope store, then the persona cut per org
         scope that has a channel. Blocking; run in a worker thread."""
@@ -3829,8 +3909,10 @@ class FleetSyncScheduler:
             )
             # Gated: an incomplete bootstrap publishes nothing. One shared
             # store method owns the phase check and the catalog read.
-            watermarks = await asyncio.to_thread(
-                store.advertisable_origin_watermarks
+            floor, watermarks = await asyncio.to_thread(
+                store.advertisable_watermark_map,
+                roster_entries=self._roster_snapshot,
+                root_pub=self.config.personal_root_pub, scope=scope,
             )
             known_personas = (
                 await asyncio.to_thread(store.persona_frontiers)
@@ -3839,7 +3921,8 @@ class FleetSyncScheduler:
             request = encode_pull_request(
                 epoch, compat=local_digest, resume=resume_trail,
                 scope=scope, bootstrap=bootstrap, version=protocol_version,
-                watermarks=watermarks, personas=known_personas,
+                watermarks=watermarks if floor is not None else {},
+                personas=known_personas, floor=floor,
             )
             sent += len(request)
             # The line that was missing. A SUCCESSFUL pull logged nothing, so
