@@ -421,3 +421,33 @@ def test_the_legacy_read_does_not_go_through_the_redirected_api(monkeypatch):
         "the legacy read must not pass org='machine' to a resolver that "
         "discards it — that argument is why the migration silently did nothing"
     )
+
+
+def test_read_bundle_names_a_missing_row(monkeypatch):
+    """A bundle row absent on this machine is reported as absent, by key."""
+    monkeypatch.setattr(certs.settings_ops, "read_set_key", lambda *a, **kw: None)
+    with pytest.raises(certs.ServiceCertificateError) as excinfo:
+        certs._read_bundle("service.tls.anchore.persona-x.1")
+    assert "service.tls.anchore.persona-x.1 is not in the audited vault" in str(excinfo.value)
+
+
+def test_read_bundle_forwards_the_vaults_own_refusal(monkeypatch):
+    """A row that did not open carries the vault's reason and message through
+    unchanged, so a cold process reads as cold and a bad key as a bad key."""
+    row = {
+        "payload": None,
+        "vault_error": {
+            "reason": "no_key_holder",
+            "message": "autonomy.vault.audited/k: The vault is locked in this "
+                       "process and only the operator can unlock it.",
+        },
+    }
+    monkeypatch.setattr(certs.settings_ops, "read_set_key", lambda *a, **kw: row)
+    with pytest.raises(certs.ServiceCertificateError) as excinfo:
+        certs._read_bundle("k")
+    text = str(excinfo.value)
+    assert text.startswith("certificate vault bundle could not be opened (no_key_holder): ")
+    assert "The vault is locked in this process" in text
+    # A cold process is a condition the operator resolves: no backoff.
+    from tools.dashboard.service_certificate_manager import failure_hold_seconds
+    assert failure_hold_seconds(f"ServiceCertificateError: {text}", 3, 0.0) == 0.0

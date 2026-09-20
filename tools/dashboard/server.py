@@ -22171,8 +22171,6 @@ async def _on_startup():
         _mark("image_build_worker.start_worker")
         await web_gateway_supervisor.start_worker(event_bus)
         _mark("web_gateway_supervisor.start_worker")
-        await service_certificate_manager.start_worker(event_bus)
-        _mark("service_certificate_manager.start_worker")
         try:
             await web_push.reconcile_approval_attention(
                 approvals_routes.push_eligible_kind,
@@ -22485,6 +22483,14 @@ async def _on_startup():
             "vault hot-reload restore raised on startup; the vault stays locked"
         )
     _mark("restore_vault_across_hot_reload")
+    # The certificate worker's first check reads the audited vault. It starts
+    # only now, after the restore above has handed a reloaded process its keys
+    # back; started earlier it looked while the process was still cold and
+    # reported a false "bundle is unavailable" for a minute after every reload.
+    # Mock mode starts no workers (see the DASHBOARD_MOCK branch above).
+    if not os.environ.get("DASHBOARD_MOCK"):
+        await service_certificate_manager.start_worker(event_bus)
+        _mark("service_certificate_manager.start_worker")
     # Session lifecycle worker (FSM redesign 2026-06-18): start the single
     # off-loop thread that owns workspace start/stop/retry. It sits idle until
     # api_session_create is rewired to enqueue — starting it now is additive and

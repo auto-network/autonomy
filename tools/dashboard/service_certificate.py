@@ -370,8 +370,20 @@ def _read_bundle(vault_key: str) -> dict:
     row = settings_ops.read_set_key(
         VAULT_AUDITED_SET_ID, vault_key, org=None, peers=[]
     )
-    if row is None or row.get("vault_error") is not None:
-        raise ServiceCertificateError("certificate vault bundle is unavailable")
+    if row is None:
+        raise ServiceCertificateError(
+            f"certificate vault bundle {vault_key} is not in the audited vault "
+            "on this machine"
+        )
+    failure = row.get("vault_error")
+    if failure is not None:
+        # The vault's own refusal, verbatim: it names the cold process, the
+        # missing key holder or the failed decryption. Restating it as
+        # "unavailable" hid which one it was.
+        raise ServiceCertificateError(
+            "certificate vault bundle could not be opened "
+            f"({failure['reason']}): {failure['message']}"
+        )
     payload = row.get("payload")
     try:
         bundle = json.loads(payload["value"])
