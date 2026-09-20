@@ -2119,11 +2119,22 @@ async def _serve_control_listener(connector, ctl_path: str,
 
 
 async def _run_connector_with_control(connector, ctl_path: str | None,
-                                      publisher=None) -> None:
+                                      publisher=None, *,
+                                      frontier_scope: str | None = None,
+                                      machine_pub: str | None = None) -> None:
     tasks = []
     if ctl_path is not None:
         tasks.append(asyncio.create_task(
             _serve_control_listener(connector, ctl_path, publisher)))
+    # Persona-frontier adverts (auto-xs9hz): an org connector tells the
+    # relay which member personas it is current for, so links route only
+    # to members that hold their rows.
+    if frontier_scope is not None and frontier_scope != "personal" and machine_pub:
+        from tools.network.fleet_relay_sync import advertise_frontiers_loop
+
+        tasks.append(asyncio.create_task(
+            advertise_frontiers_loop(connector, frontier_scope, machine_pub),
+            name="frontier-advert"))
     # The fleet direct listener (tailnet/LAN peers dial this process
     # directly, bypassing the relay) is bound and kept matched to the
     # fleet-direct row here, on the connector's loop.
@@ -2388,6 +2399,8 @@ def main() -> None:
     # that gate closed.
     asyncio.run(_run_connector_with_control(
         connector, args.control_file, publisher,
+        frontier_scope=args.graph_org,
+        machine_pub=machine_key.public_hex if machine_key is not None else None,
     ))
 
 

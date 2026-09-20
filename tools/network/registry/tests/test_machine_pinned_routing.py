@@ -144,6 +144,7 @@ def test_store_migrates_pre_pinning_tables(tmp_path):
     link_cols = {r["name"] for r in store._conn.execute("PRAGMA table_info(links)")}
     host_cols = {r["name"] for r in store._conn.execute("PRAGMA table_info(serve_hosts)")}
     assert "serving_machine" in link_cols
+    assert "requires" in link_cols
     assert "machine" in host_cols
     owner = store.get_host_ownership("r1")
     assert owner.generation == 3 and owner.machine is None

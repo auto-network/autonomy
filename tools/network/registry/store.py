@@ -108,7 +108,12 @@ CREATE TABLE IF NOT EXISTS links (
     -- stores (design/present/mission) are not fleet-synced, so the relay
     -- routes such a link only to the tunnel whose authenticated hello
     -- named this machine.
-    serving_machine TEXT
+    serving_machine TEXT,
+    -- R (auto-xs9hz): JSON {persona pub (64 hex): newest timestamp_ns} of
+    -- the author personas of the rows this link serves, plus the grant.
+    -- The relay dials only members whose advertised frontiers cover every
+    -- entry. NULL = no requirement recorded (pre-frontier link).
+    requires TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_links_org ON links (org_uuid);
 
@@ -521,6 +526,9 @@ class LinkGrant:
     operation_id: Optional[str] = None
     #: Serving machine key pub the link is pinned to; None = org-wide.
     serving_machine: Optional[str] = None
+    #: {persona pub: newest timestamp_ns} the serving member must cover
+    #: (auto-xs9hz); None = no requirement recorded.
+    requires: Optional[dict] = None
 
     def is_expired_at(self, now_seconds: int) -> bool:
         if self.expires_at_ms is not None:
@@ -707,6 +715,8 @@ class RegistryStore:
         }
         if "serving_machine" not in link_cols:
             self._conn.execute("ALTER TABLE links ADD COLUMN serving_machine TEXT")
+        if "requires" not in link_cols:
+            self._conn.execute("ALTER TABLE links ADD COLUMN requires TEXT")
         host_cols = {
             r["name"] for r in self._conn.execute("PRAGMA table_info(serve_hosts)")
         }
@@ -909,15 +919,29 @@ class RegistryStore:
             expires_at_ms=row["expires_at_ms"],
             operation_id=row["operation_id"],
             serving_machine=row["serving_machine"],
+            requires=json.loads(row["requires"]) if row["requires"] else None,
         )
+
+    @_locked
+    def set_link_requires(self, token: str, org_uuid: str, requires: Optional[dict]) -> bool:
+        """Record a link's persona requirement (auto-xs9hz). Only the org
+        that owns the link may set it. Returns False for an unknown or
+        foreign token."""
+        cur = self._conn.execute(
+            "UPDATE links SET requires=? WHERE token=? AND org_uuid=?",
+            (json.dumps(requires, sort_keys=True) if requires else None, token, org_uuid),
+        )
+        self._conn.commit()
+        return cur.rowcount == 1
 
     @_locked
     def create_link(self, grant: LinkGrant) -> None:
         self._conn.execute(
             "INSERT INTO links (token, org_uuid, target_uuid, target_type, invite_ref, meta,"
             " created_at, expires_at, expires_at_ms, revoked_at,"
-            " signer_pub, subject_kind, subject_id, operation_id, serving_machine)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)",
+            " signer_pub, subject_kind, subject_id, operation_id, serving_machine,"
+            " requires)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)",
             (
                 grant.token,
                 grant.org_uuid,
@@ -933,6 +957,7 @@ class RegistryStore:
                 grant.subject_id,
                 grant.operation_id,
                 grant.serving_machine,
+                json.dumps(grant.requires, sort_keys=True) if grant.requires else None,
             ),
         )
         self._conn.commit()
@@ -1113,8 +1138,8 @@ class RegistryStore:
                 "INSERT INTO links (token, org_uuid, target_uuid, target_type,"
                 " invite_ref, meta, created_at, expires_at, expires_at_ms,"
                 " revoked_at, signer_pub, subject_kind, subject_id, operation_id,"
-                " serving_machine)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)",
+                " serving_machine, requires)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)",
                 (
                     grant.token,
                     grant.org_uuid,
@@ -1130,6 +1155,7 @@ class RegistryStore:
                     grant.subject_id,
                     grant.operation_id,
                     grant.serving_machine,
+                    json.dumps(grant.requires, sort_keys=True) if grant.requires else None,
                 ),
             )
             self._conn.execute(

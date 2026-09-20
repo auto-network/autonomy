@@ -1451,6 +1451,29 @@ class SQLiteFleetSyncStore:
         finally:
             conn.close()
 
+    def covered_persona_frontiers(self) -> dict[str, int]:
+        """``{persona: F}`` this member may ADVERTISE (auto-xs9hz): the cut
+        of each persona whose listed machine positions this store's
+        watermarks all dominate, so everything of that persona at or below
+        F is held here. A persona whose newest cut is not yet covered is
+        omitted; the connector keeps the last value it advertised."""
+        from tools.network.fleet_sync import cuts
+
+        conn, catalog = self._open()
+        try:
+            held = catalog.origin_watermarks()
+            out: dict[str, int] = {}
+            for persona, record in cuts.persona_cuts(conn).items():
+                machines = record.get("machines") or {}
+                if machines and all(
+                    int(held.get(machine, -1)) >= int(position)
+                    for machine, position in machines.items()
+                ):
+                    out[persona] = int(record["cut_ns"])
+            return out
+        finally:
+            conn.close()
+
     def persona_cut_frames(self, version: int, known) -> list[bytes]:
         from tools.network.fleet_sync import cuts
 

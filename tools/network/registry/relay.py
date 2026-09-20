@@ -97,6 +97,7 @@ from tools.network.relaykit.close_codes import (  # noqa: E402
     CLOSE_LIMITED_LINK, CLOSE_LIMITED_SOURCE, CLOSE_LINK_EXPIRED,
     CLOSE_LINK_REVOKED, CLOSE_NO_TUNNEL, CLOSE_OPEN_FAILED,
     CLOSE_ORG_BINDING_DEAD, CLOSE_PUBLISHER_OFFLINE, CLOSE_RELAY_WRITER_FAILED,
+    CLOSE_NO_COVERING_MEMBER,
     CLOSE_SERVING_MACHINE_OFFLINE, CLOSE_TUNNEL_TORN_DOWN, CLOSE_VIEWER_CAP,
     CLOSE_CONNECTOR_UNARMED, CLOSE_KEY_RESOLUTION_REFUSED,
     CLOSE_AUTHORIZATION_UNAVAILABLE, CLOSE_CONNECTOR_ERROR,
@@ -109,6 +110,9 @@ from tools.network.relaykit.close_codes import (  # noqa: E402
 #: (dynbench, 2026-09-15: the publish probe landed on the fleet machine's
 #: tunnel). Five minutes comfortably covers a sync round.
 FRESH_LINK_PIN_S = 300.0
+#: Bound on the persona map a link may require and a member may advertise
+#: (auto-xs9hz): one entry per member persona of the organization.
+PERSONA_MAP_MAX = 256
 #: The fresh-link pins are volatile, in-memory state; expired entries are
 #: dropped on lookup, and the whole map is swept this often on the create
 #: path in case links are published and never viewed.
@@ -485,6 +489,11 @@ class Tunnel:
         self.caps = caps
         #: Membership checkpoint seq this connection proved (v3); None = v1/v2.
         self.proven_seq = proven_seq
+        #: {persona pub: frontier timestamp_ns} this member last advertised
+        #: (ctrl op sync-frontier, auto-xs9hz): the newest persona cut of each
+        #: persona whose listed machine positions this member's cursors all
+        #: dominate. Routing dials only members covering a link's requires.
+        self.frontiers: Dict[str, int] = {}
         #: Relay-minted per-connection identity: lease generations and
         #: channel ids are fenced on it and never survive a reconnect.
         self.connection_id = new_channel_id().hex()
@@ -1522,6 +1531,59 @@ _CENTRAL_LINK_FIELDS = frozenset(
 )
 
 
+def _parse_persona_map(value, what: str) -> "dict[str, int] | None":
+    """{64-hex persona: non-negative int} or None; _CtrlError otherwise."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise _CtrlError(f"{what} must be a JSON object")
+    if len(value) > PERSONA_MAP_MAX:
+        raise _CtrlError(f"{what} exceeds {PERSONA_MAP_MAX} personas")
+    out: dict[str, int] = {}
+    for persona, stamp in value.items():
+        if not isinstance(persona, str) or not _MACHINE_HEX_RE.match(persona):
+            raise _CtrlError(f"{what} keys must be 64 lowercase hex persona keys")
+        if type(stamp) is not int or stamp < 0:
+            raise _CtrlError(f"{what} values must be non-negative integers")
+        out[persona] = stamp
+    return out
+
+
+def _covers(tunnel: "Tunnel", requires: dict) -> bool:
+    frontiers = getattr(tunnel, "frontiers", None) or {}
+    return all(int(frontiers.get(persona, -1)) >= int(stamp) for persona, stamp in requires.items())
+
+
+def _ctrl_set_link_requires(tunnel: "Tunnel", args: dict, store: RegistryStore) -> dict:
+    """Record R on a link this tunnel's org owns, after the publisher's
+    grant row has committed (auto-xs9hz). Replaces the map whole."""
+    if not isinstance(args, dict) or set(args) != {"token", "requires"}:
+        raise _CtrlError("set-link-requires takes exactly token and requires")
+    token = args["token"]
+    if not isinstance(token, str) or not token:
+        raise _CtrlError("token must be a non-empty string")
+    requires = _parse_persona_map(args["requires"], "requires")
+    if not store.set_link_requires(token, tunnel.org, requires):
+        raise _CtrlError("unknown link, or not this organization's")
+    return {"personas": len(requires or {})}
+
+
+def _ctrl_sync_frontier(tunnel: "Tunnel", args: dict) -> dict:
+    """A member's per-persona frontier advert (auto-xs9hz). Replaces the
+    tunnel's map whole. An oversized map is a protocol violation and closes
+    the tunnel with 4406, like any malformed frame."""
+    if not isinstance(args, dict) or set(args) != {"org_uuid", "frontiers"}:
+        raise _CtrlError("sync-frontier takes exactly org_uuid and frontiers")
+    if args["org_uuid"] != tunnel.org:
+        raise _CtrlError("sync-frontier org_uuid is not this tunnel's organization")
+    frontiers = args["frontiers"]
+    if isinstance(frontiers, dict) and len(frontiers) > PERSONA_MAP_MAX:
+        raise FrameError(f"sync-frontier advert exceeds {PERSONA_MAP_MAX} personas")
+    parsed = _parse_persona_map(frontiers, "frontiers")
+    tunnel.frontiers = dict(parsed or {})
+    return {"personas": len(tunnel.frontiers)}
+
+
 class _CtrlError(Exception):
     """A control op that fails cleanly — replied as {ok: false}, tunnel
     stays up. (Distinct from a malformed FRAME payload, which drops it.)"""
@@ -1721,11 +1783,12 @@ def _ctrl_create_link(tunnel: "Tunnel", args: dict, store: RegistryStore,
             raise _CtrlError(
                 "serving_machine is not the machine this tunnel authenticated"
             )
+    requires = _parse_persona_map(args.get("requires"), "requires")
 
     central = _central_operation(tunnel, args, store, witness_key)
     if central is not None:
         allowed = (
-            {"target_uuid", "target_type", "meta", "serving_machine"}
+            {"target_uuid", "target_type", "meta", "serving_machine", "requires"}
             | _CENTRAL_LINK_FIELDS
         )
         if set(args) - allowed:
@@ -1770,6 +1833,7 @@ def _ctrl_create_link(tunnel: "Tunnel", args: dict, store: RegistryStore,
             subject_id=central.subject_id,
             operation_id=args["operation_id"],
             serving_machine=serving_machine,
+            requires=requires,
         )
         status, completed = store.execute_publish_operation(
             tunnel.org, args["operation_id"], grant, now=now
@@ -1803,6 +1867,7 @@ def _ctrl_create_link(tunnel: "Tunnel", args: dict, store: RegistryStore,
             subject_kind="org-tunnel",
             subject_id=None,
             serving_machine=serving_machine,
+            requires=requires,
         )
     )
     result = {"token": token, "url": f"{base_url}/l/{token}"}
@@ -2137,6 +2202,10 @@ async def _handle_ctrl_frame(tunnel: "Tunnel", payload: bytes,
             result = _ctrl_revoke_link(tunnel, args, store, now, witness_key)
         elif op == "re-prove-membership":
             result = _ctrl_reprove_membership(tunnel, args, store, now)
+        elif op == "sync-frontier":
+            result = _ctrl_sync_frontier(tunnel, args)
+        elif op == "set-link-requires":
+            result = _ctrl_set_link_requires(tunnel, args, store)
         elif op == "issue-turn":
             result = _ctrl_issue_turn(tunnel, args, turn_issuer)
         elif op in _HOST_OP_ARGS:
@@ -2189,6 +2258,10 @@ async def _handle_ctrl_frame(tunnel: "Tunnel", payload: bytes,
         else:
             raise _CtrlError(f"unknown control op: {op!r}")
         reply = {"id": correlation, "ok": True, **result}
+    except FrameError:
+        # A protocol violation inside an op (an oversized advert) drops the
+        # tunnel like any malformed frame; it is not an op-level refusal.
+        raise
     except _CtrlError as exc:
         reply = {"id": correlation, "ok": False, "error": str(exc)}
     except Exception:
@@ -2299,7 +2372,18 @@ async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
                         host_routes=host_routes,
                         directed_streams=directed_streams,
                     )
-                except FrameError:
+                except FrameError as exc:
+                    # A protocol violation inside a control op (an oversized
+                    # frontier advert) drops the tunnel with the same code
+                    # as a malformed frame, so the connector's log names it.
+                    logger.warning(
+                        "tunnel dropped (%d) org=%s: control violation: %s",
+                        CLOSE_PROTOCOL_MISMATCH, org[:8], exc,
+                    )
+                    await _close_quietly(
+                        websocket, CLOSE_PROTOCOL_MISMATCH,
+                        f"control violation: {exc}"[:120],
+                    )
                     break
                 continue
             raw_stream = tunnel.raw_streams.get(frame.channel_id)
@@ -2449,6 +2533,15 @@ async def viewer_endpoint(
                 "relay dial refused (%d): declared serving machine has no "
                 "tunnel parked, token=%s org=%s machine=%s",
                 code, token, link.org_uuid, link.serving_machine[:16],
+            )
+        elif getattr(link, "requires", None) and _pool_size(hub, link.org_uuid):
+            code, reason = CLOSE_NO_COVERING_MEMBER, "no member has synced this link yet"
+            logger.warning(
+                "relay dial refused (%d): %d tunnel(s) parked for org but none "
+                "covers the link's %d persona(s), and its publisher has no "
+                "tunnel, token=%s org=%s",
+                code, _pool_size(hub, link.org_uuid), len(link.requires),
+                token, link.org_uuid,
             )
         else:
             code, reason = CLOSE_NO_TUNNEL, "no tunnel parked for the org"
@@ -2657,6 +2750,11 @@ async def viewer_endpoint(
             recv_task.cancel()
 
 
+def _pool_size(hub, org_uuid: str) -> int:
+    tunnels_for = getattr(hub, "tunnels_for", None)
+    return len(list(tunnels_for(org_uuid))) if tunnels_for is not None else 0
+
+
 def _route_candidates(link, hub: TunnelHub, token: str, now: float) -> list:
     """The ordered tunnels a viewer of *link* may be routed to.
 
@@ -2684,10 +2782,19 @@ def _route_candidates(link, hub: TunnelHub, token: str, now: float) -> list:
     ]
     fresh_link_machine = getattr(hub, "fresh_link_machine", None)
     fresh_machine = fresh_link_machine(token, now) if fresh_link_machine is not None else None
-    if fresh_machine is not None:
-        publisher = [t for t in ordered if t.machine == fresh_machine]
-        if publisher:
-            ordered = publisher + [t for t in ordered if t is not publisher[0]]
+    publisher = [t for t in ordered if t.machine == fresh_machine] if fresh_machine else []
+    requires = getattr(link, "requires", None)
+    if requires:
+        # Persona-frontier routing (auto-xs9hz, graph://d9153c5a-76e O-C):
+        # only a member whose advertised frontiers cover every author
+        # persona the link names is dialed; a member behind on one of
+        # them is never tried. The publisher inside the pin window is the
+        # one exception, since it holds the rows by construction even
+        # before its persona cut catches up: the pin orders, it never
+        # refuses.
+        ordered = [t for t in ordered if _covers(t, requires)]
+    if publisher:
+        ordered = publisher + [t for t in ordered if t is not publisher[0]]
     return ordered
 
 
