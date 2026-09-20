@@ -554,6 +554,64 @@ def _scope_db_path(scope: str) -> Path:
 
 _activated_scope_paths: set[Path] = set()
 
+#: How often the serving connector re-reads its org store's persona cuts
+#: and, when a value rose, advertises {persona: F} to the relay
+#: (auto-xs9hz). Bounds advert staleness at one completed pull plus this.
+FRONTIER_ADVERT_INTERVAL_S = 5.0
+
+
+def frontier_advert(previous: "dict[str, int]", current: "dict[str, int]") -> "dict[str, int] | None":
+    """The map to send, or None when nothing rose. Values never regress:
+    a persona whose newest cut this member does not yet cover keeps the
+    value last advertised, so a covering claim is never withdrawn by a
+    later cut arriving before its rows."""
+    merged = dict(previous)
+    changed = False
+    for persona, value in current.items():
+        if int(value) > int(merged.get(persona, -1)):
+            merged[persona] = int(value)
+            changed = True
+    return merged if changed else None
+
+
+async def advertise_frontiers_loop(connector, scope: str, machine_pub: str,
+                                   *, interval_s: float = FRONTIER_ADVERT_INTERVAL_S) -> None:
+    """Send sync-frontier {org_uuid, frontiers} over the live tunnel once
+    after each (re)connect and whenever a covered persona cut rises; an
+    unchanged map sends nothing. Runs for the life of the connector."""
+    import asyncio
+
+    sent: dict[str, int] = {}
+    was_connected = False
+    while True:
+        await asyncio.sleep(interval_s)
+        connected = connector.connected.is_set()
+        if not connected:
+            was_connected = False
+            continue
+        if not was_connected:
+            sent = {}          # a fresh tunnel holds no map: advertise once after hello
+            was_connected = True
+        try:
+            current = await asyncio.to_thread(
+                lambda: _scoped_store(scope, machine_pub).covered_persona_frontiers()
+            )
+        except Exception:
+            logger.warning("frontier advert: could not read the %r store", scope, exc_info=True)
+            continue
+        advert = frontier_advert(sent, current)
+        if advert is None:
+            continue
+        try:
+            reply = await connector.control(
+                "sync-frontier", {"org_uuid": connector.org, "frontiers": advert},
+            )
+        except Exception:
+            logger.warning("frontier advert: control send failed", exc_info=True)
+            continue
+        if isinstance(reply, dict) and reply.get("ok") is True:
+            sent = advert
+
 def _scoped_store(scope: str, machine_pub: str) -> SQLiteFleetSyncStore:
     """The scope's client store, with fleet writers activated once per path.
 

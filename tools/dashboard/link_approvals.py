@@ -62,6 +62,7 @@ import uuid
 from urllib.parse import urlsplit
 
 
+from tools.dashboard.link_requirements import LinkRequirementError
 from tools.dashboard.dao import approval_requests as ar
 from tools.graph import settings_ops
 # Importing registers the autonomy.network.* Setting schemas (they
@@ -901,6 +902,36 @@ def _control_over_tunnel(org, op, args, *, timeout: float = 60.0,
             time.sleep(poll)
 
 
+def _link_requirements(org, source_id: str, token: str):
+    """R for a note link in *org*, or None when this node has no persona in
+    the org (a personal or unregistered scope routes as before)."""
+    from tools.graph import org_ops
+    from tools.graph.db import _org_db_path
+    from tools.network import fleet_roster, fleet_tunnel_server
+    from tools.network.ledger import LedgerStore, org_ledger_db_path
+    from tools.network.fleet_sync_connection import FleetSyncConnection
+    from tools.dashboard.link_requirements import link_requirements
+
+    ledger_path = org_ledger_db_path(org)
+    if not ledger_path.exists():
+        return None
+    with LedgerStore(ledger_path) as ledger:
+        genesis_id = ledger.ledger.genesis_id
+    own_persona = org_ops.persona_pub_for_org(genesis_id) if genesis_id else None
+    root_pub = fleet_tunnel_server._personal_root_pub()
+    if own_persona is None or root_pub is None:
+        return None
+    own_machines = set(fleet_roster.current_roster(root_pub))
+    conn = FleetSyncConnection(str(_org_db_path(org)))
+    try:
+        return link_requirements(
+            conn, source_id=source_id, grant_set_id=NETWORK_LINK_GRANT_SET_ID,
+            grant_key=token, own_machines=own_machines, own_persona=own_persona,
+        )
+    finally:
+        conn.close()
+
+
 def _local_serving_machine(org):
     """The serving-machine identity THIS machine's connector authenticates
     to the relay for *org* — ``serving_slot.machine`` of the live connector
@@ -1106,6 +1137,32 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
     except Exception:
         return await asyncio.to_thread(
             _compensate_failed_publish, org, token, "grant-write")
+    if req["target_type"] == "note" and org not in (None, "personal"):
+        # R: the author personas of the rows this link serves, with the
+        # grant row itself, so the relay dials only members that hold
+        # them (auto-xs9hz). Built AFTER the grant row commits.
+        try:
+            requires = await asyncio.to_thread(
+                _link_requirements, org, req["target_uuid"], token,
+            )
+        except LinkRequirementError as exc:
+            return await asyncio.to_thread(
+                _compensate_failed_publish, org, token, "requires-attribution",
+                detail=str(exc),
+            )
+        if requires is not None:
+            try:
+                reply = await asyncio.to_thread(
+                    _control_over_tunnel, org, "set-link-requires",
+                    {"token": token, "requires": requires},
+                )
+            except TunnelUnavailable as exc:
+                reply = {"ok": False, "error": str(exc)}
+            if not reply.get("ok"):
+                return await asyncio.to_thread(
+                    _compensate_failed_publish, org, token, "requires-write",
+                    detail=reply.get("error"),
+                )
     serving = await _probe_serving(binding, token, org)
     if not serving.get("live"):
         logger.warning(

@@ -48,6 +48,7 @@ CLOSE_VIEWER_CAP = 4427            # the org's tunnel is at its viewer-channel c
 CLOSE_LEASE_DENIED = 4428          # active-connection or byte-bucket lease refused
 CLOSE_OPEN_FAILED = 4429           # the relay could not open the channel on the tunnel
 CLOSE_PUBLISHER_OFFLINE = 4430     # fresh link: the machine that published it has no tunnel
+CLOSE_NO_COVERING_MEMBER = 4431    # no member has synced this link's rows yet, and its publisher has no tunnel
 CLOSE_CHANNEL_NOT_SERVED = 4505    # the connector closed before serving one byte
 
 # ── connector-authored ────────────────────────────────────────────────────
@@ -81,6 +82,14 @@ class CloseMeaning:
 
 
 MEANINGS: dict[int, CloseMeaning] = {
+    CLOSE_NO_COVERING_MEMBER: CloseMeaning(
+        "no member has synced this link yet",
+        "the link names the author personas of its rows with timestamps; no "
+        "connected member advertises a frontier covering all of them and the "
+        "publishing machine has no tunnel",
+        "wait one sync round, or bring the publishing machine's connector "
+        "up; fleet_doctor names which persona each member is behind on",
+    ),
     1000: CloseMeaning(
         "normal closure",
         "the far side ended the channel normally",

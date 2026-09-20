@@ -775,6 +775,7 @@ def create_app(
     app.state.metrics = metrics
     app.state.witness_key = witness_key
     app.state.challenge_hub = challenge_hub
+    app.state.hub = hub   # live tunnels, for tests and the metrics binding
     app.state.abuse_limiter = abuse_limiter
     app.state.turn_issuer = turn_issuer
 
