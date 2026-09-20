@@ -25,7 +25,10 @@ to be a second connection after the first transaction committed -- which is why
 that arrangement needed a repair pass and a correspondence check. Converting
 removes the second copy and every mechanism that existed to reconcile it.
 
-:func:`migrate_events_to_settings` carries a legacy store's rows across on open.
+A one-time ``migrate_events_to_settings`` carried a legacy store's ``ledger_events``
+rows across on open; once every store on every machine had migrated and the
+tables were dropped (2026-09-20), that migration was removed — stores now load
+only from the Settings rows (:func:`read_event_wires`).
 """
 
 from __future__ import annotations
@@ -155,40 +158,3 @@ def write_event(path, event_id: str, wire: str) -> bool:
         return written
     finally:
         db.close()
-
-
-def migrate_events_to_settings(conn, path, label: str = "") -> int:
-    """Carry a legacy ``ledger_events`` table into the Settings set.
-
-    Returns the number of events carried. Idempotent, and a no-op for a store
-    that never held the table or whose rows are already across. The table is
-    left in place: dropping it is a separate, later step once every store on
-    every machine has been through this.
-    """
-    import sqlite3
-
-    try:
-        has_table = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' "
-            "AND name='ledger_events' LIMIT 1"
-        ).fetchone() is not None
-        if not has_table:
-            return 0
-        legacy = {
-            str(row[0]): bytes(row[1]).decode("utf-8")
-            for row in conn.execute("SELECT event_id, wire FROM ledger_events")
-        }
-    except (sqlite3.Error, UnicodeDecodeError):
-        return 0
-    if not legacy:
-        return 0
-    carried = 0
-    for event_id, wire in legacy.items():
-        if write_event(path, event_id, wire):
-            carried += 1
-    if carried:
-        logger.info(
-            "ledger migration: carried %d legacy event(s) of %s into %s",
-            carried, label or "store", SET_ID,
-        )
-    return carried

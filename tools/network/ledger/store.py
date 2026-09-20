@@ -228,16 +228,17 @@ class LedgerStore:
 
         Events ARE Settings rows (design graph://53b5bb04-bc0): one home, and
         replication delivers a co-member's events into the same place this
-        reads from. A legacy store's ``ledger_events`` table is carried across
-        first; heads are computed from the graph rather than stored, since the
-        parents are inside each signed event.
+        reads from. Heads are computed from the graph rather than stored, since
+        the parents are inside each signed event.
+
+        The legacy ``ledger_events`` table migration (``migrate_events_to_settings``)
+        ran on every open until every store on every machine had carried its
+        rows across; once that was verified and the tables dropped (2026-09-20),
+        the migration was removed — a store loads only from the Settings rows.
         """
-        from .settings_bridge import (
-            ensure_settings_table, migrate_events_to_settings, read_event_wires,
-        )
+        from .settings_bridge import ensure_settings_table, read_event_wires
 
         ensure_settings_table(self.db)
-        migrate_events_to_settings(self.db, self.path, label=Path(self.path).stem)
         wires = read_event_wires(self.db)
         events = []
         for event_id, wire in wires.items():
