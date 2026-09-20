@@ -3,7 +3,7 @@ import { hexToBytes } from './primitives.js';
 import { openWithEncapsulationPrivateKey } from './sealing.js';
 import { deriveAuditedRecipient, prepareVault, submitVault } from './vault-unlock.js';
 import { prepareStorageDelegate } from './org-storage-delegate.js';
-import { completeFleetEnrollment, mintFleetRuntimeCredential } from './fleet-enrollment.js';
+import { completeFleetEnrollment, fleetRuntimePost } from './fleet-enrollment.js';
 import { reportStepOutcome } from './step-report.js';
 
 const PURPOSE = 'autonomy/identity/sign-in-preparation/v1';
@@ -63,14 +63,7 @@ export async function prepareSignon(rootSeed, encrypted, signon) {
       rosterEntry: c.roster_entry,
     }) });
   } else if (!fleetError && inputs.runtime.enabled) {
-    const rc = inputs.runtime;
-    posts.push({ step: 'fleet', url: '/api/fleet/runtime', body: await mintFleetRuntimeCredential({
-      personalRootSeed: new Uint8Array(rootSeed), rootPub: rc.personal_root_pub,
-      machineId: rc.machine_id, machinePub: rc.machine_pub,
-      orgUuid: rc.org_uuid || null,
-      servingOrgs: rc.serving_orgs || [],
-      syncOrgs: rc.sync_orgs || [],
-    }) });
+    posts.push(await fleetRuntimePost(rootSeed, inputs.runtime));
   }
   return { vault, posts, failures,
     ready: vault ? organizations.filter(org => !org.serve_cert.required

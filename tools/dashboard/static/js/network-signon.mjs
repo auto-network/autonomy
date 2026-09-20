@@ -13,7 +13,6 @@ import { createBrowserStorage } from './ceremony/storage.js';
 import { wakeVault } from './ceremony/vault-unlock.js';
 import { openArmorWithPassword } from './ceremony/root-factor-policy.js';
 import { enrollPasskey } from './ceremony/enrollment.js';
-import { restoreFleetRuntime } from './ceremony/fleet-restore.js';
 
 var CryptoKeyConstructor = globalThis.CryptoKey;
 if (
@@ -1237,11 +1236,23 @@ var signRegistryRequestCore;
         if (servingState.status !== 'ok') {
           throw new Error('Organization serving setup did not complete. The link has not been published.');
         }
-        await restoreFleetRuntime(new Uint8Array(opened.seed), {
-          fetchImpl: _transport.fetch.bind(_transport),
-          signon: { _internals: { provisionPersonalNetworkIdentity } },
-          requiredOrg: opts.org,
+        // The SAME mint the sign-on uses (fleet-enrollment.js
+        // fleetRuntimePost); there is no second copy of it anywhere.
+        var rc = await _fetchJson('/api/fleet/runtime');
+        if (!rc.enabled) throw new Error('Machine runtime is not ready.');
+        if (!(rc.serving_orgs || []).some(function (t) { return t.scope === opts.org; })) {
+          throw new Error('Organization is missing from runtime preparation.');
+        }
+        var frc = await import('./ceremony/fleet-enrollment.js');
+        var fleetPost = await frc.fleetRuntimePost(opened.seed, rc);
+        var armResp = await _transport.fetch(fleetPost.url, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(fleetPost.body),
         });
+        var armResult = await armResp.json().catch(function () { return {}; });
+        if (!armResp.ok || armResult.ok === false) {
+          throw new Error(armResult.error || ('runtime activation refused (' + armResp.status + ')'));
+        }
       }
     } finally {
       // I1: the personal root plaintext dies here, whatever happened above.
