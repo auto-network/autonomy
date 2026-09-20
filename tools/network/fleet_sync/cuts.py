@@ -83,8 +83,15 @@ def ensure_cut_schema(conn: sqlite3.Connection) -> None:
         "position INTEGER NOT NULL,"
         "listed_cut_ns INTEGER NOT NULL,"
         "retired INTEGER NOT NULL DEFAULT 0,"
+        "first_listed_cut_ns INTEGER NOT NULL DEFAULT 0,"
         "PRIMARY KEY(persona, machine))"
     )
+    columns = {str(r[1]) for r in conn.execute("PRAGMA table_info(fleet_sync_persona_machines)")}
+    if "first_listed_cut_ns" not in columns:
+        conn.execute(
+            "ALTER TABLE fleet_sync_persona_machines ADD COLUMN "
+            "first_listed_cut_ns INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 # ── machine cut ─────────────────────────────────────────────────────────────
@@ -368,12 +375,15 @@ def store_persona_cut(conn: sqlite3.Connection, record: Mapping) -> bool:
             )
             machines = {str(m): int(p) for m, p in (record.get("machines") or {}).items()}
             for machine, position in machines.items():
+                # first_listed_cut_ns is set once and kept: it is the cut at
+                # which a holder of this persona's cut first learned the
+                # machine, which is what the server credits a puller with.
                 conn.execute(
                     "INSERT INTO fleet_sync_persona_machines(persona,machine,position,"
-                    "listed_cut_ns,retired) VALUES(?,?,?,?,0) ON CONFLICT(persona,machine) "
-                    "DO UPDATE SET position=excluded.position, "
+                    "listed_cut_ns,retired,first_listed_cut_ns) VALUES(?,?,?,?,0,?) "
+                    "ON CONFLICT(persona,machine) DO UPDATE SET position=excluded.position, "
                     "listed_cut_ns=excluded.listed_cut_ns, retired=0",
-                    (persona, machine, position, cut_ns),
+                    (persona, machine, position, cut_ns, cut_ns),
                 )
             if machines:
                 holders = ",".join("?" * len(machines))
@@ -420,6 +430,29 @@ def persona_machines(conn: sqlite3.Connection) -> tuple[set[str], set[str]]:
     for machine, flag in conn.execute("SELECT machine, retired FROM fleet_sync_persona_machines"):
         (retired if int(flag) else listed).add(str(machine))
     return listed, retired - listed
+
+
+def machines_known_by(conn: sqlite3.Connection, declared: Mapping[str, int]) -> set[str]:
+    """The machines a puller that declared ``{persona: cut_ns}`` provably
+    knows: every machine first listed by that persona at or before the
+    declared cut, retired or not. Exact and monotone, so a declared cut a
+    round older than the server's still credits every machine it listed
+    (the strict equality this replaced re-served whole scopes from the
+    beginning every round, live fleet 2026-09-20)."""
+    present = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='fleet_sync_persona_machines'"
+    ).fetchone() is not None
+    if not present or not declared:
+        return set()
+    known: set[str] = set()
+    for persona, cut_ns in declared.items():
+        for (machine,) in conn.execute(
+            "SELECT machine FROM fleet_sync_persona_machines "
+            "WHERE persona=? AND first_listed_cut_ns<=?",
+            (str(persona), int(cut_ns)),
+        ):
+            known.add(str(machine))
+    return known
 
 
 def persona_frontiers(conn: sqlite3.Connection) -> dict[str, int]:
