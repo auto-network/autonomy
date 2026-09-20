@@ -1835,6 +1835,17 @@ async def _dispatch_event(publisher, args: dict) -> dict:
     return {"ok": True, "sent": sent}
 
 
+def _org_sync_report() -> dict:
+    """What this connector process holds of org sync certificates and
+    channels, for connector-status (auto-mmwgu observability)."""
+    try:
+        from tools.dashboard import org_sync_channels
+
+        return org_sync_channels.report()
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 async def _serve_control_listener(connector, ctl_path: str,
                                   publisher=None) -> None:
     """A loopback listener the dashboard drives to run D19 control ops on
@@ -1899,6 +1910,7 @@ async def _serve_control_listener(connector, ctl_path: str,
                         # the dashboard could have re-pointed since.
                         "relay_base": connector.relay_base,
                         "org_uuid": connector.org,
+                        "org_sync": _org_sync_report(),
                         # Added live 2026-08-23 while diagnosing "locked for
                         # Fleet sync" persisting across an unlock that
                         # logged no error -- lets a caller ask this exact

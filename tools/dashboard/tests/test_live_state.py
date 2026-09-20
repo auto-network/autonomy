@@ -39,6 +39,12 @@ def test_collect_reports_held_keys_delegates_membership_and_connectors(monkeypat
                 "fleet_runtime_configured": True, "active_streams": 0,
                 "tunnel": {"connected_since": 1.0 if org == "personal" else None}}
     monkeypatch.setattr(sup, "control", control)
+    monkeypatch.setattr(
+        "tools.dashboard.org_sync_channels.report",
+        lambda: {"acme": {"certificate": {"child_pub": "aa" * 32, "persona": "bb" * 32,
+                                          "org": "g-acme", "not_after": 2_000_000_000},
+                          "key_held": True, "channel": True}},
+    )
 
     out = live_state.collect(now_ms=0)
     assert out["audited_delegate_warm"] is True
@@ -51,6 +57,10 @@ def test_collect_reports_held_keys_delegates_membership_and_connectors(monkeypat
     assert by["acme"]["organization_kem_key_held"] is True
     assert by["acme"]["delegate"]["status"] == "ready"
     assert by["acme"]["membership"]["capable"] is True
+    assert by["acme"]["org_sync"]["certificate"]["persona"] == "bb" * 32
+    assert by["acme"]["org_sync"]["channel"] is True
+    assert by["beta"]["org_sync"] is None, "no certificate installed: reported, not inferred"
+    assert "org_sync" not in by["personal"]
     assert by["acme"]["connector"]["serving"] is False
     assert by["acme"]["connector"]["tunnel"] == {"connected_since": None}
     assert by["beta"]["generation_keys"] == {"recorded": None, "open_in_worker": None}

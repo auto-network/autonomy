@@ -102,6 +102,17 @@ def _supervisor_view(org: str) -> dict:
     }
 
 
+def _org_sync_state(org: str) -> dict | None:
+    """The org sync channel this process holds for *org*, or None when no
+    fleet:sync certificate was installed here (auto-mmwgu observability)."""
+    try:
+        from tools.dashboard import org_sync_channels
+
+        return org_sync_channels.report().get(org)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _membership(org: str, genesis_id: str | None) -> dict:
     """Whether this node can produce the membership commitment the relay's
     v3 hello rider needs: the ledger folds, a persona exists for the org,
@@ -171,6 +182,7 @@ def collect(*, now_ms: int | None = None, scopes: list[str] | None = None) -> di
             entry["organization_kem_key_held"] = bool(genesis and genesis in org_kem)
             entry["delegate"] = delegates.get(scope) or {"status": "missing"}
             entry["membership"] = _membership(scope, genesis)
+            entry["org_sync"] = _org_sync_state(scope)
         try:
             entry["serve_cert"] = sup.serve_cert_state(scope).get("status", "missing")
         except Exception as exc:  # noqa: BLE001

@@ -39,6 +39,7 @@ def test_live_worker_report_prints_what_the_worker_holds(monkeypatch, capsys):
                  "organization_kem_key_held": False,
                  "delegate": {"status": "ready"},
                  "membership": {"capable": True, "members": 3, "in_member_set": True},
+                 "org_sync": None,
                  "serve_cert": "ok",
                  "connector": {"reachable": True, "serving": False,
                                "tunnel": {"connected_since": None,
@@ -61,6 +62,7 @@ def test_live_worker_report_prints_what_the_worker_holds(monkeypatch, capsys):
     assert "WARM" in out
     assert "dynbench: organization generation keys: 0/2 open in the worker" in out
     assert "[WARN] dynbench: organization KEM key held in the worker: False" in out
+    assert "[WARN] dynbench: org sync channel: NOT held: no fleet:sync certificate installed in the worker" in out
     assert "[FAIL] dynbench: connector: NOT serving; DOWN; last served 1.0h ago; " \
            "7 failed reconnect(s) since; last disconnect never served, close_code=1006" in out
     assert "[ok  ] personal: connector: SERVING; connected since 30s ago" in out

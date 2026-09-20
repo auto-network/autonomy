@@ -234,6 +234,35 @@ def _build(slug: str, cert_dict: dict, machine_key, advertised) -> Any | None:
         return None
 
 
+def report() -> dict[str, dict]:
+    """What this process holds per org slug, for the status surfaces
+    (auto-mmwgu observability): the fleet:sync certificate's child key, the
+    persona it names and its expiry, whether the matching serving key is
+    held, and whether the channel has been built. A slug absent here has
+    no certificate installed in this process, so its persona cut can never
+    seal here."""
+    with _lock:
+        slugs = set(_certs) | set(_keys)
+        out: dict[str, dict] = {}
+        for slug in sorted(slugs):
+            cert = _certs.get(slug)
+            entry: dict = {
+                "certificate": None,
+                "key_held": slug in _keys,
+                "channel": slug in _channels,
+            }
+            if isinstance(cert, dict):
+                subject = cert.get("subject") if isinstance(cert.get("subject"), dict) else {}
+                entry["certificate"] = {
+                    "child_pub": cert.get("child_pub"),
+                    "persona": subject.get("id"),
+                    "org": cert.get("org"),
+                    "not_after": cert.get("not_after"),
+                }
+            out[slug] = entry
+        return out
+
+
 def provider(advertised_addresses: Callable[[], Any] | None = None):
     """The scheduler's ``org_channels`` provider: slug -> authenticator for
     every org with an installed certificate over an installed key. Built
