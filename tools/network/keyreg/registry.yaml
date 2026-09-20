@@ -1061,6 +1061,33 @@ mutations:
     crib: ["§8"]
     notes: Existing personal branch still emits viewer_cert; do not infer organization content-viewer certificate use from this bootstrap field.
 
+  ceremony.fleet_runtime_mint:
+    source: {kind: ceremony, file: tools/dashboard/static/js/ceremony/fleet-enrollment.js, symbol: mintFleetRuntimeCredential}
+    authority: [personal_root_seed, fleet_operating_signing_key, persona_signing_key]
+    preconditions:
+      - The machine is an active roster member; the server re-checks machine_pub against the current roster (fleet_runtime.FleetRuntimeCredential.from_browser_payload).
+      - The operating seed and the reachability certificate are minted only when the personal organization holds a registry org_uuid.
+      - One serving seed and one org sync certificate per organization the machine is provisioned to serve and holds a persona in (serving_orgs, sync_orgs from /api/fleet/runtime).
+    effects:
+      mints: [fleet_process_signing_key, serving_machine_signing_key]
+      writes:
+        - fleet process delegation certificate (fleet_operating_signing_key -> fleet_process_signing_key, scope fleet:sync, machine-direct, thirty-day maximum)
+        - reachability certificate (personal_root_seed -> fleet_operating_signing_key, scopes node:announce and node:lookup, org = registry org_uuid, seven-day default)
+        - org sync certificate per organization (persona_signing_key -> serving_machine_signing_key, scope fleet:sync, org = genesis id)
+    refusals: [not-active-roster-machine, delegation-chain-invalid, machine-id-mismatch, reachability-pair-incomplete]
+    crib: ["§10", "§12"]
+    notes: >-
+      Helpers: mintRuntimeCredential, mintReachabilityCert, mintOrgSyncCerts.
+      One mint, two call sites (sign-on and first publication) through
+      fleetRuntimePost since b3e67994. The payload is POSTed to
+      /api/fleet/runtime (fleet_enrollment_routes._activate_runtime), which
+      verifies it, peels the serving seeds and org sync certificates,
+      installs the org channels, arms every connector cache, and caches the
+      whole payload in ramfs for replay after a restart; a reboot clears
+      ramfs and fails closed to a sign-on. Recorded 2026-09-20 after the
+      three certificates were found absent from this registry
+      (keyreg-forensics.md, session auto-0919-212441).
+
   ceremony.organization_storage_delegate:
     source: {kind: ceremony, file: tools/dashboard/static/js/ceremony/org-storage-delegate.js, symbol: prepareStorageDelegate}
     authority: [persona_signing_key]

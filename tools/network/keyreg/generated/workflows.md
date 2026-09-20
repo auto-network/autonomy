@@ -13,6 +13,7 @@ See the [reading guide](../GUIDE.md) and [key register](key-register.md).
 - [armor.replace_recovery_slot](#workflow-armor-replace_recovery_slot)
 - [armor.revoke_factor](#workflow-armor-revoke_factor)
 - [armor.set_recovery](#workflow-armor-set_recovery)
+- [ceremony.fleet_runtime_mint](#workflow-ceremony-fleet_runtime_mint)
 - [ceremony.organization_grant_recovery](#workflow-ceremony-organization_grant_recovery)
 - [ceremony.organization_storage_delegate](#workflow-ceremony-organization_storage_delegate)
 - [ceremony.personal_serve_cert_mint](#workflow-ceremony-personal_serve_cert_mint)
@@ -133,6 +134,43 @@ Built at the armor layer; exposed by no route or UI yet.
 **Source:** `tools/network/idkit/root_factor_policy.py:set_recovery` (module-op)
 
 **Crib:** §9
+
+<a id="workflow-ceremony-fleet_runtime_mint"></a>
+## ceremony.fleet_runtime_mint
+
+**Status:** built
+
+**Authority:** personal_root_seed, fleet_operating_signing_key, persona_signing_key
+
+**Preconditions**
+
+- The machine is an active roster member; the server re-checks machine_pub against the current roster (fleet_runtime.FleetRuntimeCredential.from_browser_payload).
+- The operating seed and the reachability certificate are minted only when the personal organization holds a registry org_uuid.
+- One serving seed and one org sync certificate per organization the machine is provisioned to serve and holds a persona in (serving_orgs, sync_orgs from /api/fleet/runtime).
+
+**Mints**
+
+- fleet_process_signing_key
+- serving_machine_signing_key
+
+**Writes**
+
+- fleet process delegation certificate (fleet_operating_signing_key -> fleet_process_signing_key, scope fleet:sync, machine-direct, thirty-day maximum)
+- reachability certificate (personal_root_seed -> fleet_operating_signing_key, scopes node:announce and node:lookup, org = registry org_uuid, seven-day default)
+- org sync certificate per organization (persona_signing_key -> serving_machine_signing_key, scope fleet:sync, org = genesis id)
+
+**Refusals**
+
+- not-active-roster-machine
+- delegation-chain-invalid
+- machine-id-mismatch
+- reachability-pair-incomplete
+
+**Source:** `tools/dashboard/static/js/ceremony/fleet-enrollment.js:mintFleetRuntimeCredential` (ceremony)
+
+**Crib:** §10, §12
+
+Helpers: mintRuntimeCredential, mintReachabilityCert, mintOrgSyncCerts. One mint, two call sites (sign-on and first publication) through fleetRuntimePost since b3e67994. The payload is POSTed to /api/fleet/runtime (fleet_enrollment_routes._activate_runtime), which verifies it, peels the serving seeds and org sync certificates, installs the org channels, arms every connector cache, and caches the whole payload in ramfs for replay after a restart; a reboot clears ramfs and fails closed to a sign-on. Recorded 2026-09-20 after the three certificates were found absent from this registry (keyreg-forensics.md, session auto-0919-212441).
 
 <a id="workflow-ceremony-organization_grant_recovery"></a>
 ## ceremony.organization_grant_recovery

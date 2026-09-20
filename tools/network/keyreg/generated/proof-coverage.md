@@ -44,6 +44,7 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | armor.replace_recovery_slot | mutation | **GAP** |
 | armor.revoke_factor | mutation | **GAP** |
 | armor.set_recovery | mutation | **GAP** |
+| ceremony.fleet_runtime_mint | mutation | **GAP** |
 | ceremony.organization_grant_recovery | mutation | **GAP** |
 | ceremony.organization_storage_delegate | mutation | **GAP** |
 | ceremony.personal_serve_cert_mint | mutation | **GAP** |
@@ -80,4 +81,4 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | vault.create_class | mutation | VaultPolicyClass: root_reaches_every_generation |
 | vault.revoke_class_factor | mutation | VaultPolicyClass: revoked_factor_excluded_forward<br>VaultPolicyClass: revoked_factor_keeps_old |
 
-26 of 69 entries carry at least one model reference; 43 gaps.
+26 of 70 entries carry at least one model reference; 44 gaps.

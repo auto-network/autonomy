@@ -35,6 +35,30 @@ def test_proof_refs_resolve(registry):
     assert lint.proof_refs_resolve(registry) == []
 
 
+def test_certificate_mints_anchored(registry):
+    assert lint.certificate_mints_anchored(registry) == []
+
+
+def test_an_unrecorded_certificate_mint_is_caught_by_name(registry):
+    """Drop the fleet runtime mint row: its source symbol and its three
+    helpers must each be reported, so a certificate cannot land unrecorded."""
+    broken = copy.deepcopy(registry)
+    del broken["mutations"]["ceremony.fleet_runtime_mint"]
+    errors = lint.certificate_mints_anchored(broken)
+    for name in ("mintFleetRuntimeCredential", "mintRuntimeCredential",
+                 "mintReachabilityCert", "mintOrgSyncCerts"):
+        assert any(f"certificate mint {name} in " in e for e in errors), (name, errors)
+
+
+def test_a_helper_dropped_from_the_notes_is_caught(registry):
+    broken = copy.deepcopy(registry)
+    entry = broken["mutations"]["ceremony.fleet_runtime_mint"]
+    entry["notes"] = entry["notes"].replace("mintOrgSyncCerts", "")
+    errors = lint.certificate_mints_anchored(broken)
+    assert any("mintOrgSyncCerts" in e for e in errors), errors
+    assert not any("mintReachabilityCert" in e for e in errors), errors
+
+
 # ── The calibrations: each check fails precisely when it should ────────────
 
 def test_missing_fold_mutation_is_caught_by_name(registry):
