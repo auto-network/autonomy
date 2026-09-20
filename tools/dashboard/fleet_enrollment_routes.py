@@ -954,12 +954,9 @@ def _activate_runtime(
 def _local_sync_phase() -> str:
     """Return the compact first-sync phase from durable local evidence.
 
-    A successful delta pull is not enough for a newly enrolled Dashboard: it
-    may contain only writes made after catalog activation.  The onboarding
-    completion boundary is therefore a COMPLETE bootstrap sweep -- both the
-    ``<= F`` and ``> F`` halves durably applied -- together with a successful
-    pull from one active remote roster member in the current roster epoch.
-    Until both hold the truthful state remains ``synchronizing``.
+    Require a successful pull from an active remote member in the current
+    roster epoch and no unfinished bootstrap. Journal synchronization does
+    not create a sweep record; when a sweep was started it must finish.
     """
     local_id = machine_boot.machine_id(org="machine")
     root_pub = fleet_tunnel_server._personal_root_pub()
@@ -1001,13 +998,11 @@ def _local_sync_phase() -> str:
         ).fetchone()
         if row is None:
             return "synchronizing"
-        # A pull succeeded; the bootstrap it carried must also have finished.
-        # An absent row means this store never bootstrapped by sweep, which
-        # for a freshly enrolled dashboard is not yet complete.
-        from tools.network.fleet_sync.sweep_receive import Phase, read_bootstrap
+        # Use the transport's existing durable frontier gate: no sweep is
+        # required for journal sync, but an incomplete sweep blocks completion.
+        from tools.network.fleet_sync.sweep_receive import may_advertise_frontier
 
-        state = read_bootstrap(conn)
-        if state is None or state.phase is not Phase.COMPLETE:
+        if not may_advertise_frontier(conn):
             return "synchronizing"
         return "complete"
     except sqlite3.Error:
