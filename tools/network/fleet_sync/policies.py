@@ -272,7 +272,6 @@ LOCAL_SYNC_TABLES: Final[frozenset[str]] = frozenset({
     "fleet_sync_origin_cursor",
     "fleet_sync_origin_cuts",
     "fleet_sync_persona_cuts",
-    "fleet_sync_persona_machines",
     "fleet_sync_peer_state",
     "fleet_sync_prune_cursor",
     "fleet_sync_quarantine",
