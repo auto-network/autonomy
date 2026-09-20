@@ -531,6 +531,50 @@ def test_launch_releases_the_key_into_ramfs_and_keeps_working_files_on_disk(env)
     assert not list((env / "network").glob("*.key")), "no key material on disk"
 
 
+def test_release_replaces_the_orgs_rotated_out_ramfs_key_and_no_other(env):
+    """One serving key per organization: releasing the current key removes the
+    release a rotated-out child left in ramfs (dead material: the connector
+    reads its key once, at launch) and touches no other organization's."""
+    from tools.network.idkit import KeyPair
+
+    delegate = KeyPair.generate()
+    vault_key = vault_kit.store_key(ORG_UUID, delegate.private_hex)
+    serving_dir = env / "keycache" / "serving"
+    serving_dir.mkdir(parents=True)
+    rotated_out = serving_dir / f"serve-{ORG_UUID}-{'0' * 64}.key"
+    rotated_out.write_text("old")
+    other_org = serving_dir / f"serve-{'9' * 8}-{'1' * 64}.key"
+    other_org.write_text("theirs")
+    state = {"org_uuid": ORG_UUID, "child_pub": delegate.public_hex,
+             "vault_key": vault_key,
+             "work_base": sup.serving_work_base(ORG_UUID, delegate.public_hex)}
+
+    path, error = sup._release_serving_key(state)
+
+    assert error is None
+    assert Path(path) == sup.serving_key_release_path(ORG_UUID, delegate.public_hex)
+    assert Path(path).read_text() == delegate.private_hex
+    assert (os.stat(path).st_mode & 0o777) == 0o600
+    assert not rotated_out.exists()
+    assert other_org.read_text() == "theirs"
+
+
+def test_launch_creates_the_connector_working_directory_on_a_fresh_node(env):
+    """A fresh node has no connector working directory: the key writer that
+    used to create it as a side effect is gone (graph://67d0aa5f-885 D4), so
+    the launch makes it, mode 0700, before the lock and certificate files."""
+    import shutil
+
+    _provision_serve_cert(env)
+    _put_grant()
+    shutil.rmtree(env / "network")
+    spawn = FakeSpawn()
+    assert sup.ServingSupervisor(spawn=spawn).ensure(ORG)["reason"] == "launched"
+    assert (env / "network").is_dir()
+    assert (os.stat(env / "network").st_mode & 0o777) == 0o700
+    assert not list((env / "network").glob("*.key"))
+
+
 def test_stops_when_last_grant_revoked(env):
     _provision_serve_cert(env)
     _put_grant()

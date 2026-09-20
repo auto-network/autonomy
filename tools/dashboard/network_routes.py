@@ -2231,13 +2231,16 @@ def _store_serving_credential(org_uuid: str, private_key_hex: str, row: dict) ->
 
 def _delete_legacy_serving_key_files(org_uuid: str) -> None:
     """Remove the pre-2026-09-20 mode-0600 key files for *org_uuid* from the
-    connector working directory. Best-effort; the directory keeps the
-    connector's certificate, log, control and lock files."""
+    connector working directory, in both names they were ever written under
+    (``serve-<org_uuid>.key`` until July 2026, ``serve-<org_uuid>-<child>.key``
+    after). Best-effort; the directory keeps the connector's certificate,
+    log, control and lock files."""
     try:
         directory = resolve_store("serving_keys")
-        for path in directory.glob(f"serve-{org_uuid}-*.key"):
-            with contextlib.suppress(OSError):
-                path.unlink()
+        for pattern in (f"serve-{org_uuid}.key", f"serve-{org_uuid}-*.key"):
+            for path in directory.glob(pattern):
+                with contextlib.suppress(OSError):
+                    path.unlink()
     except Exception:
         pass
 

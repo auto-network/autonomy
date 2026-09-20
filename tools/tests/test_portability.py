@@ -6,6 +6,7 @@ from tools.network.idkit.root_factor_policy import mint_password_armor, open_arm
 import io
 import json
 import os
+import re
 import sqlite3
 import tarfile
 import time
@@ -14,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from tools.data_paths import STORE_MANIFEST
+from tools.graph import settings_ops
 from tools.graph.db import GraphDB
 from tools.graph.models import Source
 from tools.network.idkit import (
@@ -60,6 +62,92 @@ def _clear_store_environment(monkeypatch):
     for conn, _lock in identity_sessions._connections.values():
         conn.close()
     identity_sessions._connections.clear()
+
+
+def _seed_serving_credential(volume, *, personal_seed, delegate, cert,
+                             persona_pub, org_root_pub) -> str:
+    """Write one machine's serving credential into *volume* the way the
+    product writes it, and return the vault row key.
+
+    Three rows, through the real settings path with the volume as the data
+    root: the registry binding (the serve-cert row is keyed by its org uuid),
+    this machine's ``autonomy.machine.serve-cert`` row, and the sealed
+    ``autonomy.machine.vault.audited`` row holding the key. The audited seal
+    is a cold write to the operator's published delegate recipient, so no
+    warm vault is needed here — only at the read, which is what the restored
+    node has to do.
+    """
+    from tools.graph import settings_ops
+    from tools.graph.db import GraphDB
+    from tools.graph.schemas.machine_serve_cert import (
+        MACHINE_SERVE_CERT_REVISION,
+        MACHINE_SERVE_CERT_SET_ID,
+        serving_key_vault_key,
+    )
+    from tools.graph.schemas.machine_vault import (
+        MACHINE_VAULT_AUDITED_REVISION,
+        MACHINE_VAULT_AUDITED_SET_ID,
+    )
+    from tools.graph.schemas.network_identity import (
+        NETWORK_BINDING_REVISION,
+        NETWORK_BINDING_SET_ID,
+    )
+    from tools.graph.schemas.vault_policy_class import VAULT_POLICY_CLASS_SET_ID
+    from tools.vault.key_holder import _scoped_db
+    from tools.vault.personal_object import derive_delegate_audited_recipient
+    from tools.vault.store import VaultStore
+
+    previous = os.environ.get("AUTONOMY_DATA_ROOT")
+    os.environ["AUTONOMY_DATA_ROOT"] = str(volume)
+    try:
+        GraphDB.close_all_pooled()
+        settings_ops.upsert_by_key(
+            NETWORK_BINDING_SET_ID,
+            NETWORK_BINDING_REVISION,
+            "registry.invalid",
+            {
+                "org_uuid": PORTABLE_ORG_UUID,
+                "root_pub": org_root_pub,
+                "registry_url": "https://registry.invalid",
+                "recovery_policy": {"mode": "none"},
+                "binding_expires_at": time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 86_400)
+                ),
+            },
+            org="autonomy",
+        )
+        _, recipient_public = derive_delegate_audited_recipient(personal_seed)
+        with VaultStore(_scoped_db(VAULT_POLICY_CLASS_SET_ID, None)) as store:
+            store.put_delegate_audited_recipient(recipient_public)
+        vault_key = serving_key_vault_key(PORTABLE_ORG_UUID, delegate.public_hex)
+        settings_ops.write_by_key(
+            MACHINE_VAULT_AUDITED_SET_ID,
+            MACHINE_VAULT_AUDITED_REVISION,
+            vault_key,
+            {"value": delegate.private_hex},
+            org="machine",
+        )
+        settings_ops.upsert_by_key(
+            MACHINE_SERVE_CERT_SET_ID,
+            MACHINE_SERVE_CERT_REVISION,
+            PORTABLE_ORG_UUID,
+            {
+                "cert": cert.to_json().decode("ascii"),
+                "persona_pub": persona_pub,
+                "not_after": cert.not_after,
+                "child_pub": delegate.public_hex,
+                "vault_key": vault_key,
+            },
+            org="machine",
+        )
+        GraphDB.close_all_pooled()
+    finally:
+        if previous is None:
+            os.environ.pop("AUTONOMY_DATA_ROOT", None)
+        else:
+            os.environ["AUTONOMY_DATA_ROOT"] = previous
+        settings_ops.set_personal_delegate_audited_key(None)
+    return vault_key
 
 
 def _seed_node(volume: Path) -> dict:
@@ -137,62 +225,38 @@ def _seed_node(volume: Path) -> dict:
             ),
         )
 
-    # The tunnel delegate is a filesystem secret plus an inline public cert.
-    # Only the portable basename enters Settings.
+    # The serving credential as the product has stored it since 2026-09-20
+    # (graph://67d0aa5f-885): this machine's serve-cert row and a machine-vault
+    # row holding the delegate key, both machine-homed, plus the registry
+    # binding the serve-cert row is keyed by. No key file exists anywhere --
+    # the key is released into ramfs at connector launch, which is tmpfs and
+    # deliberately does NOT travel in a snapshot. Written through the product's
+    # own settings path so the seal, the routing and the schema are real.
     delegate = KeyPair.generate()
     now = int(time.time())
+    # The serving delegate is issued BY the org persona, directly (the schema
+    # requires depth 1 from persona_pub), never by the org root.
+    persona = derive_persona(personal_seed, founded.genesis_id)
+    assert persona.public_hex == founded.founder_persona_pub
     cert = issue_cert(
-        org_root,
+        persona,
         delegate.public_hex,
         scope=("tunnel:serve",),
         org=PORTABLE_ORG_UUID,
-        # serve-cert v2 requires a canonical org persona subject (not an
-        # operator label) — use the founded org's persona.
-        subject=Subject("persona", founded.founder_persona_pub),
+        subject=Subject("persona", persona.public_hex),
         not_before=now - 60,
         not_after=now + 86_400,
     )
-    # v2 also requires an identity-neutral viewer cert: same delegate key,
-    # org and validity window as the serve cert, subject {operator, child_pub}.
-    viewer_cert = issue_cert(
-        org_root,
-        delegate.public_hex,
-        scope=("tunnel:serve",),
-        org=PORTABLE_ORG_UUID,
-        subject=Subject("operator", delegate.public_hex),
-        not_before=now - 60,
-        not_after=now + 86_400,
+    # No viewer certificate: it is retired (graph://807b4e11-3e9); a viewer
+    # verifies the per-link channel key instead.
+    vault_key = _seed_serving_credential(
+        volume,
+        personal_seed=personal_seed,
+        delegate=delegate,
+        cert=cert,
+        persona_pub=persona.public_hex,
+        org_root_pub=org_root.public_hex,
     )
-    key_file = f"serve-{PORTABLE_ORG_UUID}.key"
-    key_path = volume / "network" / key_file
-    key_path.parent.mkdir(mode=0o700)
-    key_path.write_text(delegate.private_hex, encoding="ascii")
-    key_path.chmod(0o600)
-    serve_payload = json.dumps({
-        "cert": cert.to_json().decode("ascii"),
-        "viewer_cert": viewer_cert.to_json().decode("ascii"),
-        "key_path": key_file,
-        "root_pub": org_root.public_hex,
-        "not_after": cert.not_after,
-    }, sort_keys=True)
-    with sqlite3.connect(org_db) as conn:
-        conn.execute(
-            "INSERT INTO settings("
-            "id,set_id,schema_revision,key,payload,created_at,updated_at,"
-            "publication_state"
-            ") VALUES(?,?,?,?,?,?,?,?)",
-            (
-                "portable-serving-key",
-                "autonomy.network.serve-cert",
-                2,  # NETWORK_SERVE_CERT_REVISION — read_set filters by the
-                    # current revision, so a stale rev-1 row reads as missing
-                "default",
-                serve_payload,
-                "2026-07-26T00:00:00Z",
-                "2026-07-26T00:00:00Z",
-            "canonical",
-            ),
-        )
 
     graph = GraphDB(volume / "personal.db")
     graph.insert_source(Source(
@@ -225,13 +289,15 @@ def _seed_node(volume: Path) -> dict:
         '{"turn":1}\n',
         encoding="utf-8",
     )
+
     return {
         "identity_payload": identity_payload,
         "org_key_payload": org_key_payload,
         "founder": founded.founder_persona_pub,
         "genesis": founded.genesis_id,
-        "serve_key_file": key_file,
-        "serve_key_bytes": delegate.private_hex.encode("ascii"),
+        "serve_child_pub": delegate.public_hex,
+        "serve_key_hex": delegate.private_hex,
+        "serve_vault_key": vault_key,
     }
 
 
@@ -288,9 +354,9 @@ def _assert_same_node(volume: Path, expected: dict) -> None:
     assert row == ("ENDED",)
     assert (volume / "tls.key").read_bytes() == b"same-private-tls-key"
     assert (volume / "tls.crt").read_bytes() == b"same-public-tls-cert"
-    restored_serve_key = volume / "network" / expected["serve_key_file"]
-    assert restored_serve_key.read_bytes() == expected["serve_key_bytes"]
-    assert (restored_serve_key.stat().st_mode & 0o777) == 0o600
+    # The serving key is a sealed machine-vault row, not a file: nothing
+    # under network/ carries key material on either node any more.
+    assert not list((volume / "network").glob("*.key"))
 
 
 def test_snapshot_restore_to_fresh_node_preserves_identity_membership_and_data(
@@ -333,15 +399,27 @@ def test_snapshot_restore_to_fresh_node_preserves_identity_membership_and_data(
     GraphDB.close_all_pooled()
     state = supervisor.serve_cert_state("autonomy")
     assert state["status"] == "ok"
-    assert state["key_path"] == str(
-        node_b / "network" / expected["serve_key_file"]
+    assert state["vault_key"] == expected["serve_vault_key"]
+    assert state["child_pub"] == expected["serve_child_pub"]
+    assert state["work_base"].startswith(str(node_b / "network"))
+    assert not state["work_base"].startswith(str(node_a))
+
+    # The key itself travels sealed inside the machine store, and opens on the
+    # restored node once ITS vault is warm — byte-identical to A's. A cold
+    # restored node holds the row and cannot open it, which is the design
+    # (a reboot fails closed), so the warm step is explicit here.
+    from tools.vault.personal_object import derive_delegate_audited_recipient
+    recipient_private, _ = derive_delegate_audited_recipient(
+        bytes.fromhex("34" * 32)
     )
-    assert not state["key_path"].startswith(str(node_a))
-    assert supervisor._verify_key_matches(
-        state["cert"], state["viewer_cert"], state["key_path"]
-    ) == (True, "ok")
+    settings_ops.set_personal_delegate_audited_key(recipient_private)
+    try:
+        assert supervisor.serving_key_hex(state) == expected["serve_key_hex"]
+    finally:
+        settings_ops.set_personal_delegate_audited_key(None)
+
     materialized_cert = Path(supervisor._materialize_cert(
-        state["key_path"], state["cert"]
+        state["work_base"], state["cert"]
     ))
     assert materialized_cert.parent == node_b / "network"
     assert materialized_cert.read_text() == state["cert"]
@@ -498,19 +576,17 @@ def _seed_expected_from_volume(volume: Path) -> dict:
         org_key_payload = conn.execute(
             "SELECT payload FROM settings WHERE id='portable-org-key'"
         ).fetchone()[0]
+    with sqlite3.connect(volume / "machine.db") as conn:
         serve_payload = json.loads(conn.execute(
-            "SELECT payload FROM settings WHERE id='portable-serving-key'"
+            "SELECT payload FROM settings WHERE set_id='autonomy.machine.serve-cert'"
         ).fetchone()[0])
-    serve_key_file = serve_payload["key_path"]
     return {
         "identity_payload": identity_payload,
         "org_key_payload": org_key_payload,
         "founder": founder,
         "genesis": genesis,
-        "serve_key_file": serve_key_file,
-        "serve_key_bytes": (
-            volume / "network" / serve_key_file
-        ).read_bytes(),
+        "serve_child_pub": serve_payload["child_pub"],
+        "serve_vault_key": serve_payload["vault_key"],
     }
 
 
@@ -604,4 +680,9 @@ def test_deploy_entrypoint_migrates_volume_before_dashboard_start():
     ).read_text(encoding="utf-8")
     migrate = "python3 -m tools.portability migrate-on-mount /app/data"
     assert migrate in entrypoint
-    assert entrypoint.index(migrate) < entrypoint.index("exec python3 -m uvicorn")
+    # Match the exec line by its shape, not by the server module of the day:
+    # this pinned "exec python3 -m uvicorn" and went red on 2026-09-12 when
+    # the script began exec'ing the reload wrapper instead.
+    start = re.search(r"^exec python3 -m \S+", entrypoint, re.MULTILINE)
+    assert start is not None, "serve.sh no longer execs a python module"
+    assert entrypoint.index(migrate) < start.start()
