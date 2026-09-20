@@ -127,7 +127,7 @@ def env(tmp_path, monkeypatch, root, founded_org):
         link_channel_key, "mint_channel_key",
         lambda token, org: channel_key.public_hex,
     )
-    async def live_probe(binding, token, org):
+    async def live_probe(binding, token, org, **_kwargs):
         return {"live": True, "status": 200, "content_length": 42}
     monkeypatch.setattr(link_approvals, "_probe_serving", live_probe)
     # prepare_create now resolves the target and fails closed if it does not
@@ -329,7 +329,7 @@ def test_recipient_probe_failure_compensates_grant_and_channel_key(
 ):
     recorder = _ControlRecorder()
     _install_control(monkeypatch, recorder)
-    async def failed_probe(binding, token, org):
+    async def failed_probe(binding, token, org, **_kwargs):
         return {"live": False, "status": None, "content_length": None,
                 "detail": "serving probe could not run: link has no channel key"}
     monkeypatch.setattr(link_approvals, "_probe_serving", failed_probe)
@@ -901,6 +901,16 @@ def test_present_publish_declares_this_machine_and_caches_the_pin(
 def test_note_publish_stays_org_wide(env, root, session_key, session_cert, monkeypatch):
     recorder = _ControlRecorder()
     _install_control(monkeypatch, recorder)
+    # prepare_create fails closed on a target that does not resolve (485efded):
+    # the note fixture target must resolve in the graph, as the deck does.
+    from tools.graph import ops as graph_ops
+    monkeypatch.setattr(
+        graph_ops, "read_source_full",
+        lambda source_id, **_kw: (
+            {"source": {"id": TARGET, "type": "note", "title": "test note"}, "entries": []}
+            if source_id == TARGET else None
+        ),
+    )
 
     r = env.post("/api/approvals", json={
         "kind": "link_publish", "session": SESSION,

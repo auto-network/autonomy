@@ -83,7 +83,8 @@ AUTONET_MAX_TITLE_CHARS = 500
 # downloadable in v1. This is a serving policy, not a structural limit.
 AUTONET_MAX_ATTACHMENT_BYTES = 16 * 1024 * 1024 * 1024
 _NOTE_VIEWER_DIR = Path(__file__).resolve().parent / "relay_viewer"
-#: Build output, NOT a source file. Generated on demand and gitignored.
+#: Build output, NOT a source file. Generated once at container start
+#: (deploy/serve.sh) and gitignored; serving only reads it.
 #: It used to be committed, which made the generated artifact look like the
 #: real thing -- it is the one that is a megabyte, full of working code, and
 #: named in this module -- while its source looked like a stub with four
@@ -91,7 +92,6 @@ _NOTE_VIEWER_DIR = Path(__file__).resolve().parent / "relay_viewer"
 #: template, so the template silently stopped producing the artifact and a
 #: rebuild reverted a shipped feature. Nothing to edit, nothing to diverge.
 _NOTE_VIEWER = _NOTE_VIEWER_DIR / ".build" / "note-viewer.html"
-_NOTE_VIEWER_TEMPLATE = _NOTE_VIEWER_DIR / "note-viewer.template.html"
 _DASHBOARD_STATIC = Path(__file__).resolve().parent / "static"
 
 _TOKEN_RE = re.compile(r"^[0-9a-f]{%d}$" % NETWORK_TOKEN_HEX_LEN)
@@ -360,25 +360,25 @@ _NOTE_VIEWER_CACHE: bytes | None = None
 
 
 def _note_viewer_bytes() -> bytes:
-    """The note viewer, built on demand from its template.
+    """The note viewer page, generated once at container start
+    (deploy/serve.sh runs tools.dashboard.scripts.build_relay_note_viewer;
+    the simulation harness generates it on the host). Read once per process.
 
-    Rebuilt whenever the template or a vendored asset is newer than the
-    output, so an edit to the source is picked up without a build step in
-    anyone's deploy path.
-    """
+    Serving never generates or writes it: this used to regenerate the page
+    on the first request in every process and write it into the source tree,
+    which failed on a read-only install and refused every shared note.
+    After editing the template, run the build script."""
     global _NOTE_VIEWER_CACHE
-    from tools.dashboard.scripts import build_relay_note_viewer as builder
-
-    sources = [_NOTE_VIEWER_TEMPLATE, *builder.vendor_files()]
-    newest = max(path.stat().st_mtime for path in sources)
-    if (
-        _NOTE_VIEWER_CACHE is None
-        or not _NOTE_VIEWER.exists()
-        or _NOTE_VIEWER.stat().st_mtime < newest
-    ):
-        _NOTE_VIEWER.parent.mkdir(parents=True, exist_ok=True)
-        _NOTE_VIEWER.write_text(builder.build())
-        _NOTE_VIEWER_CACHE = _NOTE_VIEWER.read_bytes()
+    if _NOTE_VIEWER_CACHE is None:
+        try:
+            _NOTE_VIEWER_CACHE = _NOTE_VIEWER.read_bytes()
+        except FileNotFoundError:
+            logger.warning(
+                "note viewer page missing at %s: run "
+                "python3 -m tools.dashboard.scripts.build_relay_note_viewer",
+                _NOTE_VIEWER,
+            )
+            raise
     return _NOTE_VIEWER_CACHE
 
 

@@ -3,7 +3,7 @@ import {randomBytes} from 'node:crypto';
 import {createWorkflow} from './ui-harness.mjs';
 
 createWorkflow({scope:'personal-fleet',initialServices:['alice'],output:process.argv[2]})
-.runScenario(({browser,js,action,waitFor,waitValue,textOf,save,withStep,evidence,alicePort,bobPort,launchFleetJoiner,readCopiedText})=>{
+.runScenario(({browser,js,action,waitFor,waitValue,textOf,save,withStep,evidence,alicePort,bobPort,launchFleetJoiner,readCopiedText,compose})=>{
   const password=randomBytes(24).toString('base64url');
   const noteTitle='Fleet synchronization proof';
   const noteBody='Created on the first dashboard for its second machine: '+randomBytes(12).toString('hex');
@@ -89,5 +89,113 @@ createWorkflow({scope:'personal-fleet',initialServices:['alice'],output:process.
   });
   save('bob','personal-note-synchronized',browser('bob','snapshot','-i'));
   evidence.note={title:noteTitle,exactBodyMatched:true};
+
+  // ---- A note published on the first machine is read through the relay,
+  // reaches the second machine by Fleet sync (its rows, its grant and its
+  // channel key), and is served by the second machine once the first is
+  // gone (operator order 2026-09-20). Every step is a product control or a
+  // product API called from the operator's own signed-on browser session.
+  const sharedBody='Shared over the relay from the first dashboard: '+randomBytes(8).toString('hex');
+  const noteId=withStep('alice','create a graph note to share',()=>js('alice',`(async()=>{
+    const form=new FormData();form.append('content',${JSON.stringify(sharedBody)});
+    const r=await fetch('/api/graph/note',{method:'POST',headers:{'X-Graph-Org':'personal'},body:form});
+    const body=await r.json();if(!r.ok)throw new Error('note create refused: '+JSON.stringify(body));
+    return body.source_id||body.id;})()`));
+  if(typeof noteId!=='string'||!noteId)throw new Error('graph note was not created');
+  withStep('alice','open the note page',()=>{
+    browser('alice','open','https://localhost:'+alicePort+'/graph/'+noteId+'?org=personal');
+    waitFor('alice','[data-testid="asset-share-request"]','.design-presence-note.is-error');
+  });
+  // The share request opens the publish approval in place; it is authorized
+  // and signed exactly like the Fleet invitation above.
+  withStep('alice','request share by link',()=>action('alice','[data-testid="asset-share-request"]',{},'[data-testid="approval-dialog"]','.design-presence-note.is-error',15000));
+  withStep('alice','authorize note publication',()=>action('alice','#primary',{},'#password'));
+  withStep('alice','sign note publication',()=>action('alice','.verify',{'#password':password},'#result[aria-busy="false"] #result-title','#error:not([hidden])',30000));
+  if(resultTitle()!=='Link published')throw new Error('Note publication did not succeed: '+resultTitle());
+  save('alice','note-link-published',browser('alice','snapshot','-i'));
+  withStep('alice','close note publication receipt',()=>action('alice','#primary',{},'[data-testid="asset-share-row"]','.design-presence-note.is-error',30000));
+  // The link itself, from the product's own published-links record: the
+  // canonical registry URL with the channel key in its fragment, which is
+  // exactly what the share control copies and opens.
+  const shareUrl=withStep('alice','read the published note link',()=>js('alice',`(async()=>{
+    const r=await fetch('/api/network/published-links',{headers:{'X-Graph-Org':'personal'}});
+    const j=await r.json();if(!r.ok)throw new Error('published links refused: '+JSON.stringify(j));
+    const share=(j.shares||[]).find(s=>s.target_uuid===${JSON.stringify(noteId)});
+    if(!share)throw new Error('the note is not among the published links: '+JSON.stringify(j.shares||[]).slice(0,300));
+    return share.url;})()`));
+  if(!/^https:\/\/.+\/l\/[0-9a-f]{32}#./.test(shareUrl))throw new Error('the published link is not a fragment-keyed share URL: '+String(shareUrl).slice(0,80));
+  evidence.sharedNote={noteId,tokenPrefix:shareUrl.split('/l/')[1].slice(0,8)};
+  // The viewer: a third browser, no session, only the link. The note body
+  // arrives through the relay from whichever member the relay routed to and
+  // renders inside the viewer page's frame.
+  // The viewer page renders the note inside a sandboxed frame the page's own
+  // script cannot read, so the note is observed the way a person sees it: in
+  // the browser's accessibility snapshot of the whole page, frame included.
+  const viewerSees=(person,timeoutMs)=>{
+    const started=Date.now();let last='';
+    while(Date.now()-started<timeoutMs){
+      const snapshot=JSON.stringify(browser(person,'snapshot','-i'));
+      if(snapshot.includes(sharedBody))return true;
+      last=js(person,`Array.from(document.querySelectorAll('.error-view:not([hidden])')).map(e=>e.id).join(',')`);
+      js(person,'new Promise(r=>setTimeout(r,500))');
+    }
+    throw new Error('viewer did not render the note'+(last?' ('+last+')':''));
+  };
+  withStep('viewer','open the note link through the relay',()=>{
+    browser('viewer','open',shareUrl);
+    browser('viewer','set','viewport','1000','800');
+    viewerSees('viewer',30000);
+  });
+  save('viewer','note-served-through-relay',browser('viewer','snapshot','-i'));
+  // Propagation: the second machine holds the note itself, not a copy the
+  // viewer fetched: its own dashboard renders it from its own store.
+  withStep('bob','observe the shared note synchronized',()=>{
+    let lastError=null;
+    for(let attempt=0;attempt<12;attempt++){
+      try{
+        const body=js('bob',`(async()=>{const r=await fetch('/api/graph/source/${noteId}',{headers:{'X-Graph-Org':'personal'}});if(!r.ok)throw new Error('HTTP '+r.status);const j=await r.json();return JSON.stringify(j);})()`);
+        if(!String(body).includes(sharedBody))throw new Error('note not yet on the second machine');
+        evidence.sharedNoteSyncAttempts=attempt+1;
+        return true;
+      }catch(error){lastError=error;}
+      // One product action per look: the second dashboard's own pull cadence
+      // decides when the row lands; nothing here nudges it.
+      js('bob','new Promise(r=>setTimeout(r,2500))');
+    }
+    throw lastError;
+  });
+  withStep('bob','open the synchronized note page',()=>{
+    browser('bob','open','https://localhost:'+bobPort+'/graph/'+noteId+'?org=personal');
+    waitFor('bob','[data-testid="note-presence"]','.mem-error');
+  });
+  save('bob','shared-note-on-second-machine',browser('bob','snapshot','-i'));
+  // Serving from both: with the publisher gone the relay must route the same
+  // link to the second machine, which resolves the grant and the channel
+  // key from its own synchronized store.
+  withStep('alice','stop the publishing dashboard',()=>compose('stop','alice'));
+  // The viewer page is already at the link's address; opening the same
+  // address again is a same-document navigation (only the fragment could
+  // change) and never reaches the relay. A reload loads the page again and
+  // dials the relay again.
+  withStep('viewer','reopen the note link with the publisher gone',()=>{
+    let lastError=null;
+    for(let attempt=0;attempt<8;attempt++){
+      try{
+        browser('viewer','reload');
+        viewerSees('viewer',20000);
+        evidence.servedByBobAttempts=attempt+1;
+        return true;
+      }catch(error){lastError=error;}
+    }
+    throw lastError;
+  });
+  save('viewer','note-served-by-second-machine',browser('viewer','snapshot','-i'));
+  // The same health wait the run began with: the step ends when the
+  // dashboard answers its health check, not when the container is started.
+  withStep('alice','start the publishing dashboard again',()=>{
+    compose('up','-d','--wait','--wait-timeout','150','alice');
+    browser('alice','open','https://localhost:'+alicePort+'/api/ping');
+  });
+  evidence.sharedNote.servedByBothMachines=true;
   evidence.status='passed';
 });

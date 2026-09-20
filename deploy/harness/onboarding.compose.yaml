@@ -28,7 +28,7 @@ services:
   relay:
     image: autonomy-node:onboarding
     entrypoint: [python, -m, tools.network.registry]
-    command: [--db, /registry/registry.db, --host, 0.0.0.0, --port, '8477', --base-url, 'https://${SIM_RELAY_HOST:?Run workflow.mjs}:${SIM_RELAY_PORT:-19477}', --ssl-certfile, /simulation-tls/server.crt, --ssl-keyfile, /simulation-tls/server.key]
+    command: [--db, /registry/registry.db, --host, 0.0.0.0, --port, '8477', --base-url, 'https://${SIM_RELAY_HOST:?Run workflow.mjs}:${SIM_RELAY_PORT:-19477}', --ssl-certfile, /simulation-tls/server.crt, --ssl-keyfile, /simulation-tls/server.key, --log-level, info]
     volumes:
       - ${SIM_SOURCE_DIR:?Run workflow.mjs}:/app:ro
       - registry:/registry
