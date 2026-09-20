@@ -137,8 +137,9 @@ var signRegistryRequestCore;
 
   // ── module state ───────────────────────────────────────────────────
 
-  // ONE session record, PERSONAL, carrying a map from genesis_id to that
-  // organization's persona entry. Not N records, one per organization:
+  // ONE session record, carrying organization entries by genesis_id and the
+  // personal entry by its bound domain UUID (the personal root has no ledger).
+  // Not N records, one per organization:
   // sign-on is a personal act, and per-organization session records would
   // re-create per-organization sign-on state under another name. The
   // former top-level `org` / `orgSlug` live INSIDE an entry now, because
@@ -203,14 +204,16 @@ var signRegistryRequestCore;
 
   function _hydrateEntry(entry) {
     if (!entry || typeof entry.certWire !== 'string' ||
-        typeof entry.genesisId !== 'string' ||
+        (entry.orgSlug === 'personal'
+          ? (entry.genesisId != null || typeof entry.org !== 'string' || entry.rootPub !== entry.personaPub)
+          : typeof entry.genesisId !== 'string') ||
         typeof entry.personaPub !== 'string') {
       return null;
     }
     var cert;
     try { cert = JSON.parse(entry.certWire); } catch (e) { return null; }
-    // The actor is the persona: a stored entry whose cert names anything
-    // else is not this organization's persona entry and is dropped.
+    // Organization actors are personas; the personal actor is the root.
+    // In either case the stored actor must match the certificate subject.
     if (!cert.subject || cert.subject.id !== entry.personaPub) return null;
     return {
       genesisId: entry.genesisId,
@@ -231,7 +234,7 @@ var signRegistryRequestCore;
     var keys = Object.keys(rec.orgs);
     for (var i = 0; i < keys.length; i++) {
       var entry = _hydrateEntry(rec.orgs[keys[i]]);
-      if (entry) orgs[entry.genesisId] = entry;
+      if (entry) orgs[entry.genesisId || entry.org] = entry;
     }
     return {
       key: rec.key,
@@ -1120,6 +1123,39 @@ var signRegistryRequestCore;
       for (var i = 0; i < slugs.length; i++) {
         var slug = slugs[i];
         var slugQ = '?org=' + encodeURIComponent(slug);
+        if (slug === 'personal') {
+          // Same certificate and session key; personal authority is the
+          // bound root, not membership in an invented personal ledger.
+          var personalBinding = await _fetchJson('/api/network/binding' + slugQ, slug);
+          if (!personalBinding.org_uuid || personalBinding.root_pub !== opened.rootPub) {
+            throw new Error('Personal binding does not match this identity.');
+          }
+          var personalNow = _nowS();
+          var personalPayload = {
+            v: 1, child_pub: sessionPub, scope: ['link:publish', 'link:revoke'],
+            org: personalBinding.org_uuid,
+            subject: { kind: 'operator', id: opened.rootPub },
+            not_before: personalNow - NOT_BEFORE_SKEW_S, not_after: personalNow + ttl,
+          };
+          var personalKey = await _importRootKey(opened.seed);
+          var personalSignature;
+          try {
+            personalSignature = bytesToHex(await crypto.subtle.sign(
+              'Ed25519', personalKey, _domainBytes(CERT_DOMAIN, canonicalJson(personalPayload))));
+          } finally { personalKey = null; }
+          var personalWire = canonicalJson(Object.assign({}, personalPayload, { sig: personalSignature }));
+          orgs[personalBinding.org_uuid] = {
+            genesisId: null, org: personalBinding.org_uuid, orgSlug: slug,
+            personaPub: opened.rootPub, rootPub: opened.rootPub,
+            certWire: personalWire, registryUrl: personalBinding.registry_url, rekeyedAt: null,
+          };
+          reports.push({
+            orgSlug: slug, genesisId: null, org: personalBinding.org_uuid,
+            personaPub: opened.rootPub, certWire: personalWire,
+            notAfter: personalPayload.not_after, rekey: { fired: false },
+          });
+          continue;
+        }
         var heads = null;
         try {
           heads = await _fetchJsonOrNull('/api/network/ledger/heads' + slugQ, slug);
@@ -1734,7 +1770,9 @@ var signRegistryRequestCore;
     var opened = await _openPersonalRoot(passphrase);
     var recordWire;
     try {
-      var persona = await derivePersona(opened.seed, entry.genesisId);
+      var persona = entry.orgSlug === 'personal'
+        ? { publicHex: opened.rootPub, signingKey: await _importRootKey(opened.seed) }
+        : await derivePersona(opened.seed, entry.genesisId);
       if (persona.publicHex !== entry.personaPub) {
         throw new Error('that passphrase derives a different persona for ' +
           'this organization — refusing to revoke');
