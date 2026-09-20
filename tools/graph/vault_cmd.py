@@ -302,7 +302,45 @@ def cmd_vault_status(args) -> None:
     pid = data.get("pid")
     state = "WARM" if warm else "COLD"
     print(f"vault (audited delegate): {state}  [dashboard pid {pid}]")
+    if getattr(args, "all", False):
+        _print_per_org_state(client)
     sys.exit(0 if warm else 2)
+
+
+def _print_per_org_state(client) -> None:
+    """Print the per-organization warmth picture from the running dashboard.
+
+    The audited-delegate bit above is only one factor. Serving actually
+    working also needs, per org, a ready delegate, a held org-sync serving key
+    and installed channel, a serve-cert and a serving connector — all
+    per-process state in the same worker. ``/api/vault/organizations`` reports
+    it authoritatively (a fresh CLI process would see all of it cold), so this
+    is the single command that answers "is everything warm?".
+    """
+    try:
+        report = client._request("GET", "/api/vault/organizations")
+    except Exception as exc:  # noqa: BLE001 — the reach failure is the message
+        print(f"  per-organization state: unknown ({exc})", file=sys.stderr)
+        return
+    orgs = report.get("organizations") or []
+    print(f"per-organization  [dashboard pid {report.get('pid')}]")
+    for o in orgs:
+        parts = [f"serving={(o.get('connector') or {}).get('serving')}"]
+        delegate = o.get("delegate")
+        if delegate is not None:
+            parts.append(f"delegate={delegate.get('status')}")
+        if o.get("serve_cert") is not None:
+            parts.append(f"serve_cert={o.get('serve_cert')}")
+        org_sync = o.get("org_sync")
+        if org_sync is not None:
+            parts.append(
+                f"org_sync(key_held={org_sync.get('key_held')},"
+                f"channel={org_sync.get('channel')})"
+            )
+        gk = o.get("generation_keys")
+        if gk:
+            parts.append(f"gen_keys={gk.get('open_in_worker')}/{gk.get('recorded')}")
+        print(f"  {str(o.get('org')):10s} " + "  ".join(parts))
 
 
 def cmd_vault_share(args) -> None:
@@ -415,5 +453,13 @@ def attach_vault_subparser(sub) -> None:
         "status",
         help="Is the LIVE dashboard vault warm? Reads the per-process warm "
              "flag from the running dashboard, not a cold CLI process",
+    )
+    p_status.add_argument(
+        "--all",
+        action="store_true",
+        help="Also print per-organization delegate, org-sync key/channel, "
+             "serve-cert and connector-serving state, read from the running "
+             "dashboard's /api/vault/organizations — the full warmth picture "
+             "in one command",
     )
     p_status.set_defaults(func=cmd_vault_status)
