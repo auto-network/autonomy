@@ -187,3 +187,36 @@ never exceeds the candidate bound.
 Not modeled, deliberately: the hello replay to the next candidate and the
 open-budget timer. Both are transport mechanics below the ownership
 question this model answers.
+
+## Fleet sync write floors (`FleetSyncWriteFloors.tla`)
+
+The record's rules for write floors (bead auto-mmwgu, Propagation; decision
+note graph://d9153c5a-76e O-K), checked against the constitution's principle 1
+(graph://6ad52a52-f75): a watermark is a contiguous cursor, a number a machine
+can only claim by holding the data.
+
+Model: every machine is the origin of its own rows; a row is its timestamp; a
+write floor is sealed at max(last write, now). A pull is two steps, because
+the server builds it in two steps (`fleet_sync_scheduler.py`: transaction
+pages are streamed first; the write floor frames are read on a fresh
+connection after the last page). The record's rules are taken verbatim: the
+watermark is the greater of cursor and held floor (R1); the server sends every
+floor it holds above the puller's watermark (R2); the puller stores a received
+floor and moves its cursor to it (R3); floors are relayed unchanged (R4).
+
+Result (`FleetSyncWriteFloorsRecord.cfg`, three machines, one row each):
+`CursorHoldsData` is violated in five states. Puller b begins a pull from
+origin a while a has written nothing. Then a writes row 1 and seals floor 2.
+b's reply finishes: zero rows, then a's floor 2, read after the pages. b's
+cursor for a becomes 2 while b holds no row of a. b's watermark for a is now
+2, so a never serves row 1 again: `Converges` fails too.
+
+The record does not say that the floors in a reply are fixed at the same
+instant as its rows, and the code reads them later. Under quarantine the same
+claim is made without a two-step reply: R1 claims a held floor as the
+watermark while the cursor waits below a quarantined row. Both are the same
+defect: a floor claimed without the rows below it.
+
+Deliberate abstractions: no quarantine yet (the two-step reply alone breaks
+the rule); rows apply in one step; each origin writes at most one row and
+seals once, which is enough to reach the violation.

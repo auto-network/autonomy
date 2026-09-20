@@ -29,6 +29,10 @@ CALIBRATION = [
     ("calibration/TimestampPrune.cfg", "AckFloor", "DeltaAlwaysServable"),
     ("calibration/SoloPrune.cfg", "AckFloor", "DeltaAlwaysServable"),
     ("calibration/NoAckResetOnInstall.cfg", "AckFloor", "AckSoundness"),
+    # The record's write floor rules (bead auto-mmwgu, Propagation) break the
+    # constitution's principle 1: a floor read after the transaction pages is
+    # claimed as a cursor without the rows below it.
+    ("FleetSyncWriteFloorsRecord.cfg", "FleetSyncWriteFloors", "CursorHoldsData"),
 ]
 
 VIOLATION_MARKERS = (
