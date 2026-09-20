@@ -1385,9 +1385,21 @@ class SQLiteFleetSyncStore:
 
         conn, catalog = self._open()
         try:
-            return cuts.seal_machine_cut(
+            sealed = cuts.seal_machine_cut(
                 conn, signer, catalog.origin_incarnation, now_ns, cert=cert,
             )
+            # Fold the WAL once per round, here because this runs every
+            # round for every scope store. The fold after apply_many is
+            # PASSIVE and stops at any reader open at that instant; frames
+            # it left behind used to wait for the NEXT apply, which in a
+            # quiet phase was the next arrival, 36 s later on the org
+            # acceptance harness (2026-09-20: a batch folded 28 of 46
+            # frames, the remaining 18 held the row the test waited on).
+            # Anything reading the main file alone, a backup or the harness
+            # observer, now lags applied rows by at most one round.
+            with contextlib.suppress(Exception):
+                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            return sealed
         finally:
             conn.close()
 

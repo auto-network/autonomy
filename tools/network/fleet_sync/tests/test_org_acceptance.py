@@ -93,7 +93,9 @@ def test_three_members_sync_the_org_scope_across_fleets(tmp_path: Path, monkeypa
         # (3a) a REKEY: member 1's persona is rekeyed; every machine adopts
         # the new member set; member 1 keeps receiving.
         org.rekey(1)
-        time.sleep(1.0)
+        # No sleep for the workers to reload the rekeyed certificate: the
+        # row is written now and the wait below is the condition, a row
+        # crossing to the rekeyed member's machines under its new persona.
         org.write_org(0, 0, "after-rekey", "written after the rekey")
         for machine in range(2):
             org.wait(lambda k=machine: org.has_org(1, k, "after-rekey"), timeout=60.0,
