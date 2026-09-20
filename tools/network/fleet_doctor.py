@@ -1077,8 +1077,8 @@ def check_sync_frontiers(report: dict) -> None:
                         for origin in entry["origins"]:
                             origin["cursor_ns"] = cursors.get(origin["origin"])
                             origin["unresolved"] = unresolved.get(origin["origin"], 0)
-                    # Idle cuts (auto-mmwgu): the origin's signed promise
-                    # that nothing will be written at or below cut_ns. Its
+                    # Write floors (auto-mmwgu): the origin's signed promise
+                    # that nothing will be written at or below write_floor_ns. Its
                     # age is how long ago that origin was last known online,
                     # which "newest write" cannot tell.
                     if "fleet_sync_quarantine" in tables:
@@ -1091,29 +1091,29 @@ def check_sync_frontiers(report: dict) -> None:
                         }
                         for origin in entry["origins"]:
                             origin["undrained"] = held_rows.get(origin["origin"], 0)
-                    if "fleet_sync_origin_cuts" in tables:
+                    if "fleet_sync_machine_write_floors" in tables:
                         held = {
                             str(r[0]): int(r[1]) for r in conn.execute(
-                                "SELECT o.incarnation, c.cut_ns "
-                                "FROM fleet_sync_origin_cuts c "
+                                "SELECT o.incarnation, c.write_floor_ns "
+                                "FROM fleet_sync_machine_write_floors c "
                                 "JOIN fleet_sync_origins o ON o.id=c.origin_id"
                             )
                         }
                         for origin in entry["origins"]:
-                            origin["cut_ns"] = held.get(origin["origin"])
-                    # Persona frontiers (auto-xs9hz): each persona cut this
+                            origin["write_floor_ns"] = held.get(origin["origin"])
+                    # Persona frontiers (auto-xs9hz): each persona write floor this
                     # store holds and whether this store covers it, which is
                     # what its connector advertises to the relay. "Behind on
                     # which persona" is this line.
-                    if "fleet_sync_persona_cuts" in tables:
+                    if "fleet_sync_persona_write_floors" in tables:
                         held_positions = {
                             origin["origin"]: max(
-                                int(origin.get("cursor_ns") or 0), int(origin.get("cut_ns") or 0),
+                                int(origin.get("cursor_ns") or 0), int(origin.get("write_floor_ns") or 0),
                             ) for origin in entry["origins"]
                         }
                         personas = []
                         for persona, record_json in conn.execute(
-                            "SELECT persona, record FROM fleet_sync_persona_cuts"
+                            "SELECT persona, record FROM fleet_sync_persona_write_floors"
                         ):
                             try:
                                 record = json.loads(record_json)
@@ -1125,7 +1125,7 @@ def check_sync_frontiers(report: dict) -> None:
                                 if held_positions.get(machine, -1) < int(position)
                             )
                             personas.append({
-                                "persona": str(persona), "cut_ns": int(record.get("cut_ns", 0)),
+                                "persona": str(persona), "write_floor_ns": int(record.get("write_floor_ns", 0)),
                                 "machines": len(machines), "behind_on": behind_on,
                             })
                         entry["personas"] = personas
@@ -1177,12 +1177,12 @@ def check_sync_frontiers(report: dict) -> None:
                     )
                 else:
                     cursor = "; cursor at MAX, 0 unresolved"
-                cut_ns = origin.get("cut_ns")
-                if cut_ns is not None:
-                    cut_age = max(0, (now_ns - cut_ns) // 1_000_000_000)
-                    cursor += f"; cut {cut_age}s old"
+                write_floor_ns = origin.get("write_floor_ns")
+                if write_floor_ns is not None:
+                    floor_age = max(0, (now_ns - write_floor_ns) // 1_000_000_000)
+                    cursor += f"; write floor {floor_age}s old"
                 else:
-                    cursor += "; no cut held"
+                    cursor += "; no write floor held"
                 undrained = int(origin.get("undrained") or 0)
                 if undrained:
                     behind = True
@@ -1193,7 +1193,7 @@ def check_sync_frontiers(report: dict) -> None:
                     warn=age >= 3600 or behind,
                 )
             for persona in entry.get("personas") or []:
-                cut_age = max(0, (now_ns - persona["cut_ns"]) // 1_000_000_000)
+                floor_age = max(0, (now_ns - persona["write_floor_ns"]) // 1_000_000_000)
                 if persona["behind_on"]:
                     names = ", ".join(m[:12] for m in persona["behind_on"])
                     verdict = f"NOT covered: behind on machine(s) {names}"
@@ -1201,7 +1201,7 @@ def check_sync_frontiers(report: dict) -> None:
                     verdict = "covered (advertised to the relay)"
                 _line(
                     f"  {slug} persona {persona['persona'][:12]}",
-                    f"cut {cut_age}s old over {persona['machines']} machine(s); {verdict}",
+                    f"write floor {floor_age}s old over {persona['machines']} machine(s); {verdict}",
                     warn=bool(persona["behind_on"]),
                 )
             newest_thought = (entry.get("thoughts") or {}).get("newest")
@@ -2050,7 +2050,7 @@ def check_live_worker(report: dict, api_base: str, api_token: str | None) -> Non
                 _line(
                     f"{slug}: org sync channel",
                     "NOT held: no fleet:sync certificate installed in the worker; "
-                    "the persona cut cannot seal and nothing is advertised to the relay",
+                    "the persona write floor cannot seal and nothing is advertised to the relay",
                     warn=True,
                 )
             membership = org.get("membership") or {}
