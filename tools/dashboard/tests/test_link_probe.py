@@ -53,6 +53,84 @@ def test_publication_probe_executes_real_grant_gate():
     assert verdict["detail"] == "serving probe could not run: link has no channel key"
 
 
+def test_publication_probe_finds_the_grant_by_its_row_key(tmp_path, monkeypatch):
+    """The row is keyed by the publisher-minted grant id since 1ed46d1f, and
+    the probe must look it up by that key.
+
+    Before this, the probe asked for the row by TOKEN, found nothing, and
+    reported "link has no channel key" — which rolled back every real publish
+    while every publish test stubbed the probe out. The only test that ran the
+    real probe passed a malformed token, so it asserted that same string for a
+    different reason and stayed green.
+    """
+    import os
+
+    from tools.dashboard import link_approvals
+    from tools.graph import settings_ops
+    from tools.graph.schemas.network_identity import (
+        NETWORK_LINK_GRANT_REVISION,
+        NETWORK_LINK_GRANT_SET_ID,
+    )
+
+    token = "b" * 32
+    grant_id = "c" * 32
+    channel_pub = "d" * 64
+    seen = {}
+
+    async def fake_probe_link(**kwargs):
+        seen.update(kwargs)
+        return {"live": True, "status": 200, "content_length": 7}
+
+    monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        "tools.dashboard.link_probe.probe_link", fake_probe_link)
+    settings_ops.add_setting(
+        NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION, grant_id,
+        {
+            "token": token,
+            "url": f"https://relay.auto.network/l/{token}",
+            "target_uuid": "11111111-1111-5111-8111-111111111111",
+            "target_type": "note",
+            "meta": {},
+            "subject": {"kind": "operator", "id": "op-1"},
+            "issued_at": "2026-09-20T00:00:00Z",
+            "channel_pub": channel_pub,
+        },
+        org="personal",
+    )
+
+    binding = {"registry_url": "http://127.0.0.1:8477",
+               "org_uuid": "11111111-1111-5111-8111-111111111111"}
+    verdict = asyncio.run(link_approvals._probe_serving(
+        binding, token, "personal", grant_id=grant_id))
+
+    assert verdict["live"] is True, verdict
+    assert seen["token"] == token
+    assert seen["link_pub"] == channel_pub
+
+    # Link Central writes its row under the token and passes no grant id; the
+    # same probe must still find that row.
+    legacy_token = "e" * 32
+    settings_ops.add_setting(
+        NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION, legacy_token,
+        {
+            "token": legacy_token,
+            "url": f"https://relay.auto.network/l/{legacy_token}",
+            "target_uuid": "11111111-1111-5111-8111-111111111111",
+            "target_type": "note",
+            "meta": {},
+            "subject": {"kind": "operator", "id": "op-1"},
+            "issued_at": "2026-09-20T00:00:00Z",
+            "channel_pub": channel_pub,
+        },
+        org="personal",
+    )
+    verdict = asyncio.run(link_approvals._probe_serving(
+        binding, legacy_token, "personal"))
+    assert verdict["live"] is True, verdict
+    assert seen["token"] == legacy_token
+
+
 def test_probe_does_not_hang_on_silent_relay():
     """The hang regression: reachable relay, handshake never completes → the
     probe returns not-live/None BOUNDED by total_timeout, not forever."""

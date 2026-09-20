@@ -1192,7 +1192,7 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
     serving = (
         {"live": True, "via": "tunnel-control"}
         if req["target_type"] == "fleet:join"
-        else await _probe_serving(binding, token, org)
+        else await _probe_serving(binding, token, org, grant_id=grant_id)
     )
     if not serving.get("live"):
         logger.warning(
@@ -1322,15 +1322,23 @@ def _tunnel_link_meta(req: dict, decision: dict) -> tuple[dict, str | None]:
     return meta, None
 
 
-async def _probe_serving(binding: dict, token: str, org: str) -> dict:
+async def _probe_serving(binding: dict, token: str, org: str,
+                         *, grant_id: str | None = None) -> dict:
     """End-to-end liveness probe of a freshly published link. Never raises —
     a probe that cannot run is reported as not-live, never an exception into
     the publish result (the grant is already cached). Shared with Link Central
-    (link_central.py), which probes serving after a central publish."""
+    (link_central.py), which probes serving after a central publish.
+
+    *grant_id* is the row key the grant was written under. Since 1ed46d1f the
+    publish path keys the row by a publisher-minted grant id, so a probe that
+    looked the row up by token found nothing and reported "link has no channel
+    key" — a true statement about a row it never located. Link Central still
+    writes its row keyed by the token and passes no grant id; ``check_grant``
+    resolves ``grant_id or token``, so both callers find their own row."""
     from tools.dashboard.link_probe import probe_link, registry_to_relay_ws
     from tools.dashboard.link_serving import check_grant
     try:
-        grant = check_grant(token, org=org)
+        grant = check_grant(token, org=org, grant_id=grant_id)
         if not grant or not grant.get("channel_pub"):
             raise PermissionError("link has no channel key")
         return await probe_link(
