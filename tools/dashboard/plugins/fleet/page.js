@@ -545,7 +545,7 @@ function fleetPage() {
         const unarmed = states.filter((s) => s.state === 'unarmed').map(name);
         const failing = states.filter((s) => s.state === 'launch-failing').map(name);
         if (serving && unarmed.length) {
-          id = machine.dashboardCachePresent === false ? 'locked' : 'rearm'; tone = 'failed'; scopes = unarmed;
+          id = machine.dashboardCredentialPresent === false ? 'locked' : 'rearm'; tone = 'failed'; scopes = unarmed;
         }
         else if (serving && failing.length) { id = 'launch_failing'; tone = 'failed'; scopes = failing; }
         // A null probe is UNKNOWN, not unarmed: `!null` read Home's warm,

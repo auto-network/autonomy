@@ -73,9 +73,11 @@ class ProjectionInputs:
     #: lets the card say "re-arm failed: personal" instead of "Needs unlock"
     #: when the vault is warm (graph://1418ca10-588 section 4).
     scope_states: tuple = ()
-    #: Whether the dashboard's OWN cached runtime credential exists. With it
-    #: present an unarmed connector is a re-arm failure, not a locked vault.
-    dashboard_cache_present: bool | None = None
+    #: Whether this machine's vaulted runtime credential can be opened in this
+    #: process right now (graph://67d0aa5f-885 D3). With it present an unarmed
+    #: connector is a re-arm failure, not a locked vault; absent means either
+    #: no activation ever happened here or the vault is cold.
+    dashboard_credential_present: bool | None = None
 
 
 def _peer_rows(epoch: str | None) -> dict[str, dict]:
@@ -217,13 +219,14 @@ def _load_inputs(*, now_ms: int) -> ProjectionInputs:
         tunnel_serving = None
         tunnel_scopes_down = ()
         scope_states = ()
-    dashboard_cache_present = None
+    dashboard_credential_present = None
     try:
         from tools.dashboard import fleet_enrollment_routes as _fer
 
-        dashboard_cache_present = bool(_fer._dashboard_runtime_cache().exists())
+        payload, _reason = _fer._load_runtime_credential()
+        dashboard_credential_present = payload is not None
     except Exception:
-        dashboard_cache_present = None
+        dashboard_credential_present = None
     return ProjectionInputs(
         server_time=now_ms,
         root_pub=root_pub,
@@ -249,7 +252,7 @@ def _load_inputs(*, now_ms: int) -> ProjectionInputs:
         tunnel_serving=tunnel_serving,
         tunnel_scopes_down=tunnel_scopes_down,
         scope_states=scope_states,
-        dashboard_cache_present=dashboard_cache_present,
+        dashboard_credential_present=dashboard_credential_present,
     )
 
 
@@ -857,7 +860,7 @@ def project(inputs: ProjectionInputs) -> dict:
             }
             for row in inputs.scope_states
         ],
-        "dashboardCachePresent": inputs.dashboard_cache_present,
+        "dashboardCredentialPresent": inputs.dashboard_credential_present,
         "verdictTopLine": verdict.get("top_line"),
     }
     from tools.network import build_version

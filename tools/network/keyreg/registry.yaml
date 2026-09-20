@@ -1074,6 +1074,7 @@ mutations:
         - fleet process delegation certificate (fleet_operating_signing_key -> fleet_process_signing_key, scope fleet:sync, machine-direct, thirty-day maximum)
         - reachability certificate (personal_root_seed -> fleet_operating_signing_key, scopes node:announce and node:lookup, org = registry org_uuid, seven-day default)
         - org sync certificate per organization (persona_signing_key -> serving_machine_signing_key, scope fleet:sync, org = genesis id)
+        - the complete credential sealed into autonomy.machine.vault.audited row fleet-runtime (machine store, audited tier, opened unattended by the warm delegate; graph://67d0aa5f-885 D3)
     refusals: [not-active-roster-machine, delegation-chain-invalid, machine-id-mismatch, reachability-pair-incomplete]
     crib: ["§10", "§12"]
     notes: >-

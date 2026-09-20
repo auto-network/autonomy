@@ -22240,18 +22240,6 @@ async def _on_startup():
     # database open.
     _mark("fleet_sync_scheduler.configure")
 
-    # Replay the Dashboard's OWN Fleet runtime credential from the warm ramfs
-    # cache so a restarted machine re-arms Fleet sync with nobody present
-    # (auto-5er0n). The credential is delivered by the browser at unlock and
-    # held only in process memory, so every restart lost it until a human
-    # unlocked again. Best-effort: a replay failure must not down startup, and a
-    # machine with no cached payload simply stays locked. The scheduler above is
-    # already started, so the replayed credential's consumers configure onto a
-    # live service.
-    with contextlib.suppress(Exception):
-        fleet_enrollment_routes.rearm_local_runtime_from_cache()
-    _mark("fleet_enrollment_routes.rearm_local_runtime_from_cache")
-
     # Restore EventBus sequence/buffer state from the prior process. restore()
     # advances the persisted epoch so clients show the existing reload banner
     # while still retaining gap-replay continuity.
@@ -22483,6 +22471,15 @@ async def _on_startup():
             "vault hot-reload restore raised on startup; the vault stays locked"
         )
     _mark("restore_vault_across_hot_reload")
+    # Replay the Dashboard's Fleet runtime credential from this machine's
+    # audited vault (graph://67d0aa5f-885 D3), AFTER the restore above has
+    # warmed the delegate that opens it: a reloaded process re-arms Fleet sync
+    # with nobody present. Best-effort: a replay failure must not down
+    # startup; a machine that never activated, or a cold boot, stays unarmed
+    # and says so at WARNING.
+    with contextlib.suppress(Exception):
+        fleet_enrollment_routes.rearm_local_runtime_from_vault()
+    _mark("fleet_enrollment_routes.rearm_local_runtime_from_vault")
     # The certificate worker's first check reads the audited vault. It starts
     # only now, after the restore above has handed a reloaded process its keys
     # back; started earlier it looked while the process was still cold and
@@ -22878,6 +22875,10 @@ async def _activate_worker(reason: str) -> None:
             await asyncio.to_thread(restore_vault_across_hot_reload)
         except Exception:
             logger.exception("vault restore at activation raised; keeping current state")
+        # An unlock during the overlap window may have vaulted a credential
+        # the startup replay could not open yet (graph://67d0aa5f-885 D3).
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(fleet_enrollment_routes.rearm_local_runtime_from_vault)
 
     try:
         from agents.dispatch_db import fail_stale_prelaunch_runs
