@@ -1433,6 +1433,18 @@ class SQLiteFleetSyncStore:
         finally:
             conn.close()
 
+    def persona_seal_blocker(self, *, persona: str, roster_machines) -> str | None:
+        from tools.network.fleet_sync import cuts
+
+        conn, catalog = self._open()
+        try:
+            return cuts.persona_seal_blocker(
+                conn, persona=persona, roster_machines=set(roster_machines),
+                positions=catalog.origin_watermarks(),
+            )
+        finally:
+            conn.close()
+
     def adopt_persona_cut(self, record, org: str, now: int) -> bool:
         from tools.network.fleet_sync import cuts
 
@@ -3432,8 +3444,17 @@ class FleetSyncScheduler:
                     "write floor", scope,
                 )
                 continue
+            if scope == "personal":
+                continue
             channel = channels.get(scope)
-            if channel is None or scope == "personal":
+            if channel is None:
+                # No silent exit (auto-mmwgu observability): the seal needs
+                # the fleet:sync certificate the runtime activation installs.
+                logger.warning(
+                    "fleet sync scope %r: persona cut NOT sealed: this process "
+                    "holds no org sync channel (no fleet:sync certificate was "
+                    "installed at the last runtime activation)", scope,
+                )
                 continue
             # The persona cert names the org channel's key as its leaf, so
             # that key signs the persona cut (the sync process key may be a
@@ -3447,6 +3468,15 @@ class FleetSyncScheduler:
                     "fleet sync scope %r: persona cut sealed at %d over %d machine(s)",
                     scope, int(sealed["cut_ns"]), len(sealed["machines"]),
                 )
+                continue
+            reason = store.persona_seal_blocker(
+                persona=str(channel.persona_cert.subject.id),
+                roster_machines=roster_machines,
+            )
+            logger.warning(
+                "fleet sync scope %r: persona cut NOT sealed: %s",
+                scope, reason or "unknown",
+            )
 
     async def _sync_org_peers(self, own_fleet: set[str], now: float) -> None:
         """One round's outward pulls: for every org scope with an org

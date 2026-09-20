@@ -2033,6 +2033,26 @@ def check_live_worker(report: dict, api_base: str, api_token: str | None) -> Non
             delegate = org.get("delegate") or {}
             _line(f"{slug}: storage delegate", delegate.get("status", "missing"),
                   warn=delegate.get("status") != "ready")
+            org_sync = org.get("org_sync")
+            if org_sync and org_sync.get("certificate"):
+                cert = org_sync["certificate"]
+                expires = cert.get("not_after")
+                days = ("" if not isinstance(expires, (int, float))
+                        else f", expires in {int((expires - _time.time()) // 86400)}d")
+                _line(
+                    f"{slug}: org sync channel",
+                    f"held: persona {str(cert.get('persona') or '')[:12]} via serving key "
+                    f"{str(cert.get('child_pub') or '')[:12]}{days}; key "
+                    f"{'held' if org_sync.get('key_held') else 'MISSING'}",
+                    warn=not org_sync.get("key_held"),
+                )
+            else:
+                _line(
+                    f"{slug}: org sync channel",
+                    "NOT held: no fleet:sync certificate installed in the worker; "
+                    "the persona cut cannot seal and nothing is advertised to the relay",
+                    warn=True,
+                )
             membership = org.get("membership") or {}
             _line(f"{slug}: membership commitment",
                   ("capable" + (f" ({membership.get('members')} members"

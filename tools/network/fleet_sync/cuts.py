@@ -297,6 +297,25 @@ def seal_persona_cut(
     return record if store_persona_cut(conn, record) else None
 
 
+def persona_seal_blocker(
+    conn: sqlite3.Connection, *, persona: str, roster_machines: set[str],
+    positions: Mapping[str, int],
+) -> str | None:
+    """Why seal_persona_cut would decline right now, in words, or None when
+    it would seal: an empty roster, a roster machine with no position in
+    this store, or a minimum not above the persona cut already held."""
+    if not roster_machines:
+        return "the persona's roster lists no machines"
+    missing = sorted(m for m in roster_machines if m not in positions)
+    if missing:
+        return "no position held for roster machine(s) " + ", ".join(m[:12] for m in missing)
+    minimum = min(int(positions[m]) for m in roster_machines)
+    held = persona_cuts(conn).get(persona)
+    if held is not None and int(held.get("cut_ns", 0)) >= minimum:
+        return f"minimum position {minimum} is not above the held persona cut {int(held['cut_ns'])}"
+    return None
+
+
 def verify_persona_cut(record: Mapping, *, org: str, now: int) -> tuple[str, int]:
     """-> (persona, cut_ns) or CutError. The cert chain anchors at the
     persona the record names, must be for *org* and scope fleet:sync, and

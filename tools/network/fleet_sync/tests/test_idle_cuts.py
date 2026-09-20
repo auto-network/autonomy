@@ -328,3 +328,41 @@ def test_the_wire_carries_the_known_persona_cuts(tmp_path: Path) -> None:
     assert decode_pull_request(request)[7] == {"ef" * 32: 77}
     assert decode_pull_request(encode_pull_request("ab" * 32, compat="cd" * 32))[7] is None
     assert FLEET_SYNC_PROTOCOL_VERSION == 6, "no version bump inside the sprint"
+
+
+def test_the_seal_names_why_it_declined(tmp_path: Path) -> None:
+    persona, sealer, m1, m2 = KeyPair.generate(), KeyPair.generate(), KeyPair.generate(), KeyPair.generate()
+    db = GraphDB(tmp_path / "why.db")
+    MutationCatalog(db.conn, sealer.public_hex).install()
+    cert = _persona_cert(persona, sealer)
+    P = persona.public_hex
+    assert cuts.persona_seal_blocker(db.conn, persona=P, roster_machines=set(), positions={}) \
+        == "the persona's roster lists no machines"
+    reason = cuts.persona_seal_blocker(
+        db.conn, persona=P, roster_machines={m1.public_hex, m2.public_hex},
+        positions={m1.public_hex: 100},
+    )
+    assert reason == "no position held for roster machine(s) " + m2.public_hex[:12]
+    assert cuts.seal_persona_cut(db.conn, signer=sealer, persona_cert=cert, org=ORG,
+                                 roster_machines={m1.public_hex}, positions={m1.public_hex: 100})
+    assert cuts.persona_seal_blocker(
+        db.conn, persona=P, roster_machines={m1.public_hex}, positions={m1.public_hex: 100},
+    ) == "minimum position 100 is not above the held persona cut 100"
+    assert cuts.persona_seal_blocker(
+        db.conn, persona=P, roster_machines={m1.public_hex}, positions={m1.public_hex: 150},
+    ) is None
+    db.close()
+
+
+def test_a_round_without_an_org_channel_says_so_at_warning(tmp_path: Path, caplog) -> None:
+    import logging
+    root, key = KeyPair.generate(), KeyPair.generate()
+    personal, alpha = tmp_path / "personal.db", tmp_path / "alpha.db"
+    _prepare(personal, key); _prepare(alpha, key)
+    entries = [enroll(root, machine_pub=key.public_hex)]
+    scheduler = _scheduler(key, root, entries, personal,
+                           sync_scopes=lambda: {"alpha": alpha}, org_channels=lambda: {})
+    with caplog.at_level(logging.WARNING, logger="tools.network.fleet_sync_scheduler"):
+        scheduler._seal_cuts({key.public_hex})
+    assert any("scope 'alpha': persona cut NOT sealed: this process holds no org sync channel" in r.getMessage()
+               for r in caplog.records), [r.getMessage() for r in caplog.records]
