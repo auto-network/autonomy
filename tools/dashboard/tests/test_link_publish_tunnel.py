@@ -130,6 +130,14 @@ def env(tmp_path, monkeypatch, root, founded_org):
     async def live_probe(binding, token, org):
         return {"live": True, "status": 200, "content_length": 42}
     monkeypatch.setattr(link_approvals, "_probe_serving", live_probe)
+    # prepare_create now resolves the target and fails closed if it does not
+    # exist (485efded); the present-deck fixture target must resolve in Design
+    # Studio for the publish to be prepared.
+    import agents.design_db as _design_db
+    monkeypatch.setattr(
+        _design_db, "get_design",
+        lambda uuid: {"title": "test present deck"} if uuid == TARGET else None,
+    )
     settings_ops.add_setting(
         NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "registry.test",
         {
