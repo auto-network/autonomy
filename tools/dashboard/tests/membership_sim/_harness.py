@@ -386,6 +386,22 @@ def identity_admitted(registry: Registry, org: Org, persona: KeyPair, *, seq: in
     return asyncio.run(run())
 
 
+#: Relay close codes that end a dial for good: every candidate refused
+#: (4502 no key, 4431 no covering member, 4404 no tunnel). Others (a
+#: transient transport error, a candidate still coming up) are retried.
+_TERMINAL_CLOSES = {4502, 4431, 4404}
+
+
+def _terminal_close(exc: BaseException) -> bool:
+    seen = exc
+    while seen is not None:
+        rcvd = getattr(seen, "rcvd", None)
+        if rcvd is not None:
+            return int(rcvd.code) in _TERMINAL_CLOSES
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
 async def fetch(registry: Registry, token: str, link_pub: str, *, timeout: float = 15.0) -> bytes:
     """A real viewer opens *token* with its fragment key and fetches; returns
     the served body (after the status line)."""
@@ -397,6 +413,11 @@ async def fetch(registry: Registry, token: str, link_pub: str, *, timeout: float
             break
         except Exception as exc:
             last = exc
+            # A close the relay sends after trying every candidate is the
+            # answer, not a transient: retrying it only burned the whole
+            # deadline (6 s, 24 identical refusals) before raising.
+            if _terminal_close(exc):
+                raise
             await asyncio.sleep(0.25)
     else:
         raise AssertionError(f"viewer could not connect in {timeout}s: {last!r}")
