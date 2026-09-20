@@ -105,10 +105,10 @@ from tools.network.fleet_sync.sweep_receive import (
     SWEEP_BEGIN_KIND,
     SWEEP_END_KIND,
 )
-from tools.network.fleet_sync.cuts import (
-    CutError,
-    ORIGIN_CUT_KIND,
-    PERSONA_CUT_KIND,
+from tools.network.fleet_sync.write_floors import (
+    WriteFloorError,
+    MACHINE_WRITE_FLOOR_KIND,
+    PERSONA_WRITE_FLOOR_KIND,
 )
 
 _REFUSAL_FIELDS = frozenset({"v", "kind", "digest"})
@@ -349,7 +349,7 @@ class FleetSyncRuntimeConfig:
     #: same set as their addresses. None: publish nothing.
     advertised_addresses: Callable[[], Sequence[str]] | None = None
     #: Called with a peer's machine key when a pull of it failed at the
-    #: transport (no candidate connected, stream cut). The dashboard wires
+    #: transport (no candidate connected, stream write floor). The dashboard wires
     #: the reachability cache's note_failed so that peer is looked up again
     #: before the next full interval (auto-8dw0w); None: nothing.
     on_peer_failure: Callable[[str], None] | None = None
@@ -692,7 +692,7 @@ def encode_pull_request(
     if bootstrap:
         body["bootstrap"] = True
     if personas:
-        # The persona cuts the puller already holds, so the server sends
+        # The persona write floors the puller already holds, so the server sends
         # only newer ones (auto-mmwgu). Same bound and shape as watermarks.
         if len(personas) > MAX_WATERMARK_ORIGINS:
             raise FleetSyncProtocolError("fleet sync personas map exceeds bound")
@@ -1375,17 +1375,17 @@ class SQLiteFleetSyncStore:
         finally:
             conn.close()
 
-    # ── idle cuts (auto-mmwgu): thin wrappers over fleet_sync.cuts ──────
+    # ── write floors (auto-mmwgu): thin wrappers over fleet_sync.write_floors ──────
 
-    def seal_machine_cut(self, signer, now_ns: int, *, cert=None) -> int | None:
-        """Seal this store's own origin cut at max(last write, now). *cert*
+    def seal_machine_write_floor(self, signer, now_ns: int, *, cert=None) -> int | None:
+        """Seal this store's own machine write floor at max(last write, now). *cert*
         is the machine key's delegation to *signer* when the two differ
-        (production: the process key), and travels with the cut."""
-        from tools.network.fleet_sync import cuts
+        (production: the process key), and travels with the write floor."""
+        from tools.network.fleet_sync import write_floors
 
         conn, catalog = self._open()
         try:
-            sealed = cuts.seal_machine_cut(
+            sealed = write_floors.seal_machine_write_floor(
                 conn, signer, catalog.origin_incarnation, now_ns, cert=cert,
             )
             # Fold the WAL once per round, here because this runs every
@@ -1403,42 +1403,42 @@ class SQLiteFleetSyncStore:
         finally:
             conn.close()
 
-    def adopt_origin_cut(self, record) -> bool:
-        from tools.network.fleet_sync import cuts
+    def adopt_machine_write_floor(self, record) -> bool:
+        from tools.network.fleet_sync import write_floors
 
         conn, _catalog = self._open()
         try:
-            return cuts.adopt_origin_cut(conn, record)
+            return write_floors.adopt_machine_write_floor(conn, record)
         finally:
             conn.close()
 
-    def origin_cut_frames(self, version: int, watermarks) -> list[bytes]:
-        from tools.network.fleet_sync import cuts
+    def machine_write_floor_frames(self, version: int, watermarks) -> list[bytes]:
+        from tools.network.fleet_sync import write_floors
 
         conn, _catalog = self._open()
         try:
-            return cuts.origin_cut_frames(conn, version, watermarks)
+            return write_floors.machine_write_floor_frames(conn, version, watermarks)
         finally:
             conn.close()
 
-    def origin_cuts(self) -> dict[str, tuple[int, str]]:
-        from tools.network.fleet_sync import cuts
+    def machine_write_floors(self) -> dict[str, tuple[int, str]]:
+        from tools.network.fleet_sync import write_floors
 
         conn, _catalog = self._open()
         try:
-            return cuts.origin_cuts(conn)
+            return write_floors.machine_write_floors(conn)
         finally:
             conn.close()
 
-    def seal_persona_cut(self, *, signer, persona_cert, org: str, roster_machines) -> dict | None:
-        """Seal the persona cut from this store's positions for every
+    def seal_persona_write_floor(self, *, signer, persona_cert, org: str, roster_machines) -> dict | None:
+        """Seal the persona write floor from this store's positions for every
         machine of the persona's roster; None while any is unknown."""
-        from tools.network.fleet_sync import cuts
+        from tools.network.fleet_sync import write_floors
 
         conn, catalog = self._open()
         try:
             positions = catalog.origin_watermarks()
-            return cuts.seal_persona_cut(
+            return write_floors.seal_persona_write_floor(
                 conn, signer=signer, persona_cert=persona_cert, org=org,
                 roster_machines=set(roster_machines), positions=positions,
             )
@@ -1446,64 +1446,64 @@ class SQLiteFleetSyncStore:
             conn.close()
 
     def persona_seal_blocker(self, *, persona: str, roster_machines) -> str | None:
-        from tools.network.fleet_sync import cuts
+        from tools.network.fleet_sync import write_floors
 
         conn, catalog = self._open()
         try:
-            return cuts.persona_seal_blocker(
+            return write_floors.persona_seal_blocker(
                 conn, persona=persona, roster_machines=set(roster_machines),
                 positions=catalog.origin_watermarks(),
             )
         finally:
             conn.close()
 
-    def adopt_persona_cut(self, record, org: str, now: int) -> bool:
-        from tools.network.fleet_sync import cuts
+    def adopt_persona_write_floor(self, record, org: str, now: int) -> bool:
+        from tools.network.fleet_sync import write_floors
 
         conn, _catalog = self._open()
         try:
-            return cuts.adopt_persona_cut(conn, record, org=org, now=now)
+            return write_floors.adopt_persona_write_floor(conn, record, org=org, now=now)
         finally:
             conn.close()
 
     def persona_frontiers(self) -> dict[str, int]:
-        from tools.network.fleet_sync import cuts
+        from tools.network.fleet_sync import write_floors
 
         conn, _catalog = self._open()
         try:
-            return cuts.persona_frontiers(conn)
+            return write_floors.persona_frontiers(conn)
         finally:
             conn.close()
 
     def covered_persona_frontiers(self) -> dict[str, int]:
-        """``{persona: F}`` this member may ADVERTISE (auto-xs9hz): the cut
+        """``{persona: F}`` this member may ADVERTISE (auto-xs9hz): the write floor
         of each persona whose listed machine positions this store's
         watermarks all dominate, so everything of that persona at or below
-        F is held here. A persona whose newest cut is not yet covered is
+        F is held here. A persona whose newest write floor is not yet covered is
         omitted; the connector keeps the last value it advertised."""
-        from tools.network.fleet_sync import cuts
+        from tools.network.fleet_sync import write_floors
 
         conn, catalog = self._open()
         try:
             held = catalog.origin_watermarks()
             out: dict[str, int] = {}
-            for persona, record in cuts.persona_cuts(conn).items():
+            for persona, record in write_floors.persona_write_floors(conn).items():
                 machines = record.get("machines") or {}
                 if machines and all(
                     int(held.get(machine, -1)) >= int(position)
                     for machine, position in machines.items()
                 ):
-                    out[persona] = int(record["cut_ns"])
+                    out[persona] = int(record["write_floor_ns"])
             return out
         finally:
             conn.close()
 
-    def persona_cut_frames(self, version: int, known) -> list[bytes]:
-        from tools.network.fleet_sync import cuts
+    def persona_write_floor_frames(self, version: int, known) -> list[bytes]:
+        from tools.network.fleet_sync import write_floors
 
         conn, _catalog = self._open()
         try:
-            return cuts.persona_cut_frames(conn, version, known)
+            return write_floors.persona_write_floor_frames(conn, version, known)
         finally:
             conn.close()
 
@@ -1792,7 +1792,7 @@ SERVE_GROUP_OPERATIONS = 2_000
 SLOW_SERVE_PHASE_S = 2.0
 
 #: Longest a pull holds received, unapplied transactions before committing
-#: them: progress survives a round that is cut after this many seconds.
+#: them: progress survives a round that is write floor after this many seconds.
 APPLY_FLUSH_INTERVAL_S = 5.0
 APPLY_BATCH_TRANSACTIONS = 200
 APPLY_BATCH_OPERATIONS = 5_000
@@ -2683,17 +2683,17 @@ class FleetSyncScheduler:
                     slowest_phase[0] or "none", slowest_phase[1],
                     slowest_phase[2],
                 )
-                # Cuts go AFTER every transaction of the stream and before
-                # the summary, so a receiver that records a cut has already
-                # committed everything at or below it (cuts.py). Outside the
+                # Write floors go AFTER every transaction of the stream and before
+                # the summary, so a receiver that records a write floor has already
+                # committed everything at or below it (write_floors.py). Outside the
                 # digest and count, like the other control frames.
                 for frame in await asyncio.to_thread(
-                    store.origin_cut_frames, protocol_version, watermarks or {},
+                    store.machine_write_floor_frames, protocol_version, watermarks or {},
                 ):
                     stats["bytes_sent"] += len(frame)
                     yield frame
                 for frame in await asyncio.to_thread(
-                    store.persona_cut_frames, protocol_version, known_personas or {},
+                    store.persona_write_floor_frames, protocol_version, known_personas or {},
                 ):
                     stats["bytes_sent"] += len(frame)
                     yield frame
@@ -3421,14 +3421,14 @@ class FleetSyncScheduler:
             # roster is pulled above, then co-members' machines, so a fleet
             # converges internally before it presents one face outward.
             await self._sync_org_peers(set(active), now)
-            # End of the round: seal this machine's cut on every scope store
+            # End of the round: seal this machine's write floor on every scope store
             # and, where the whole persona fleet has a known position, the
-            # persona cut (auto-mmwgu). Needs no peer: the promise is about
+            # persona write floor (auto-mmwgu). Needs no peer: the promise is about
             # this machine's own future writes.
             try:
-                await asyncio.to_thread(self._seal_cuts, set(active))
+                await asyncio.to_thread(self._seal_write_floors, set(active))
             except Exception:
-                logger.warning("fleet sync: sealing cuts failed", exc_info=True)
+                logger.warning("fleet sync: sealing write floors failed", exc_info=True)
             try:
                 await asyncio.wait_for(
                     self._stopping.wait(), timeout=self.config.poll_interval
@@ -3436,8 +3436,8 @@ class FleetSyncScheduler:
             except asyncio.TimeoutError:
                 pass
 
-    def _seal_cuts(self, roster_machines: set[str]) -> None:
-        """One machine cut per scope store, then the persona cut per org
+    def _seal_write_floors(self, roster_machines: set[str]) -> None:
+        """One machine write floor per scope store, then the persona write floor per org
         scope that has a channel. Blocking; run in a worker thread."""
         signer = self.config.machine_key
         channels = self._org_channels()
@@ -3445,14 +3445,14 @@ class FleetSyncScheduler:
             try:
                 store = self._store_for(scope)
             except Exception:
-                logger.warning("fleet sync: no store for scope %r at cut time", scope, exc_info=True)
+                logger.warning("fleet sync: no store for scope %r at write floor time", scope, exc_info=True)
                 continue
-            cut = store.seal_machine_cut(
+            floor = store.seal_machine_write_floor(
                 signer, time.time_ns(), cert=self.config.delegation_cert,
             )
-            if cut is None:
+            if floor is None:
                 logger.warning(
-                    "fleet sync scope %r: cut paused, the clock is behind the "
+                    "fleet sync scope %r: write floor paused, the clock is behind the "
                     "write floor", scope,
                 )
                 continue
@@ -3463,22 +3463,22 @@ class FleetSyncScheduler:
                 # No silent exit (auto-mmwgu observability): the seal needs
                 # the fleet:sync certificate the runtime activation installs.
                 logger.warning(
-                    "fleet sync scope %r: persona cut NOT sealed: this process "
+                    "fleet sync scope %r: persona write floor NOT sealed: this process "
                     "holds no org sync channel (no fleet:sync certificate was "
                     "installed at the last runtime activation)", scope,
                 )
                 continue
             # The persona cert names the org channel's key as its leaf, so
-            # that key signs the persona cut (the sync process key may be a
+            # that key signs the persona write floor (the sync process key may be a
             # different delegate).
-            sealed = store.seal_persona_cut(
+            sealed = store.seal_persona_write_floor(
                 signer=channel.machine_key, persona_cert=channel.persona_cert,
                 org=channel.org, roster_machines=roster_machines,
             )
             if sealed is not None:
                 logger.info(
-                    "fleet sync scope %r: persona cut sealed at %d over %d machine(s)",
-                    scope, int(sealed["cut_ns"]), len(sealed["machines"]),
+                    "fleet sync scope %r: persona write floor sealed at %d over %d machine(s)",
+                    scope, int(sealed["write_floor_ns"]), len(sealed["machines"]),
                 )
                 continue
             reason = store.persona_seal_blocker(
@@ -3486,7 +3486,7 @@ class FleetSyncScheduler:
                 roster_machines=roster_machines,
             )
             logger.warning(
-                "fleet sync scope %r: persona cut NOT sealed: %s",
+                "fleet sync scope %r: persona write floor NOT sealed: %s",
                 scope, reason or "unknown",
             )
 
@@ -3673,7 +3673,7 @@ class FleetSyncScheduler:
         # and a pull that fails at connect never reaches the in-try inits
         # (a bad candidate stopped being recorded as a retry, 2026-09-06).
         protocol_version = FLEET_SYNC_PROTOCOL_VERSION
-        # The organization a persona.cut on this scope must be for: the org
+        # The organization a persona.write_floor on this scope must be for: the org
         # hello's, or this node's own channel for the scope on a
         # personal-roster pull of an org scope. None on the personal scope.
         scope_org = org_channel.org if org_channel is not None else None
@@ -3999,9 +3999,9 @@ class FleetSyncScheduler:
                 if (
                     len(batch) >= APPLY_BATCH_TRANSACTIONS
                     or batch_bytes >= APPLY_BATCH_OPERATIONS
-                    # Time also bounds a batch: a round cut by the server
+                    # Time also bounds a batch: a round write floor by the server
                     # (a connector recycled mid-serve, a dropped link)
-                    # keeps what arrived before the cut instead of losing
+                    # keeps what arrived before the write floor instead of losing
                     # the whole round and repeating it identically
                     # (SJC-2 autonomy, 23 identical failed rounds,
                     # 2026-09-07).
@@ -4181,11 +4181,11 @@ class FleetSyncScheduler:
                         )
                         sweeping = True
                         continue
-                    if kind in (ORIGIN_CUT_KIND, PERSONA_CUT_KIND):
-                        # A cut moves an origin's watermark past rows this
+                    if kind in (MACHINE_WRITE_FLOOR_KIND, PERSONA_WRITE_FLOOR_KIND):
+                        # A write floor moves an origin's watermark past rows this
                         # pull may still hold unflushed: commit them first,
-                        # so a cut is never recorded ahead of the rows at or
-                        # below it (cuts.py). Outside the digest.
+                        # so a write floor is never recorded ahead of the rows at or
+                        # below it (write_floors.py). Outside the digest.
                         if pending:
                             validate_pending()
                             await (apply_swept(pending) if sweeping
@@ -4194,20 +4194,20 @@ class FleetSyncScheduler:
                         transaction_group = None
                         await flush_batch()
                         try:
-                            if kind == ORIGIN_CUT_KIND:
-                                await asyncio.to_thread(store.adopt_origin_cut, control)
+                            if kind == MACHINE_WRITE_FLOOR_KIND:
+                                await asyncio.to_thread(store.adopt_machine_write_floor, control)
                             else:
                                 if scope_org is None:
-                                    raise CutError(
-                                        "persona.cut on a scope with no organization"
+                                    raise WriteFloorError(
+                                        "persona.write_floor on a scope with no organization"
                                     )
                                 await asyncio.to_thread(
-                                    store.adopt_persona_cut, control, scope_org,
+                                    store.adopt_persona_write_floor, control, scope_org,
                                     int(time.time()),
                                 )
-                        except CutError as exc:
+                        except WriteFloorError as exc:
                             raise FleetSyncProtocolError(
-                                f"peer sent a cut that does not verify: {exc}"
+                                f"peer sent a write floor that does not verify: {exc}"
                             ) from exc
                         continue
                     if kind == "retired":
@@ -4329,7 +4329,7 @@ class FleetSyncScheduler:
             raise
         except Exception as exc:
             # Complete transaction groups received before the failure
-            # are verified units; commit them so a round cut short
+            # are verified units; commit them so a round write floor short
             # keeps its progress instead of repeating identically
             # (SJC-2 autonomy: 35 identical failed rounds, 2026-09-07).
             try:

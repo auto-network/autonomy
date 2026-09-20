@@ -1846,14 +1846,14 @@ class MutationCatalog:
                 "JOIN fleet_sync_origins o ON o.id=c.origin_id"
             ):
                 out[str(row[0])] = int(row[1])
-        # A verified cut is the origin's promise that nothing will ever be
-        # written at or below it, and every holder of a cut holds every
-        # transaction at or below it (cuts.py), so the watermark is the
-        # greater of the cursor and the cut (auto-mmwgu).
-        from tools.network.fleet_sync.cuts import origin_cuts
-        for origin, (cut_ns, _sig) in origin_cuts(self.conn).items():
-            if cut_ns > out.get(origin, -1):
-                out[origin] = cut_ns
+        # A verified write floor is the origin's promise that nothing will ever be
+        # written at or below it, and every holder of a write floor holds every
+        # transaction at or below it (write_floors.py), so the watermark is the
+        # greater of the cursor and the write floor (auto-mmwgu).
+        from tools.network.fleet_sync.write_floors import machine_write_floors
+        for origin, (write_floor_ns, _sig) in machine_write_floors(self.conn).items():
+            if write_floor_ns > out.get(origin, -1):
+                out[origin] = write_floor_ns
         return out
 
     def origin_max_timestamps(self) -> dict[str, int]:

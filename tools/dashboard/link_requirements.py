@@ -3,21 +3,21 @@
 A link serves rows. Every row was authored by one origin machine, recorded
 in the org store's catalog with that origin and the origin's own timestamp.
 The publisher maps each origin to the persona it belongs to (its own
-personal roster for its own machines; the persona cut record listing the
+personal roster for its own machines; the persona write floor record listing the
 machine for every other persona) and keeps the newest timestamp per
 persona. The registry stores that map on the link row and the relay dials
 only members whose advertised frontiers cover every entry.
 
-An author machine that no persona cut record lists yet cannot be
+An author machine that no persona write floor record lists yet cannot be
 attributed, and the publish refuses with that machine named rather than
-guessing (expected only for a persona whose first cut has not propagated).
+guessing (expected only for a persona whose first write floor has not propagated).
 """
 from __future__ import annotations
 
 import sqlite3
 from typing import Iterable, Mapping
 
-from tools.network.fleet_sync import cuts
+from tools.network.fleet_sync import write_floors
 from tools.network.fleet_sync.codec import encode_value
 from tools.network.fleet_sync.policies import TABLE_POLICIES
 from tools.network.fleet_sync.snapshot import _logical_address
@@ -81,7 +81,7 @@ def personas_of_origins(
     """Fold ``{origin: ts}`` into ``{persona: newest ts}``."""
     own = set(own_machines)
     listed: dict[str, str] = {}
-    for persona, record in cuts.persona_cuts(conn).items():
+    for persona, record in write_floors.persona_write_floors(conn).items():
         for machine in (record.get("machines") or {}):
             listed[str(machine)] = persona
     out: dict[str, int] = {}
@@ -90,7 +90,7 @@ def personas_of_origins(
         if persona is None:
             raise LinkRequirementError(
                 f"author machine {origin[:12]} is not yet attributed to a "
-                "persona (no persona cut lists it); publish again after one "
+                "persona (no persona write floor lists it); publish again after one "
                 "sync round"
             )
         if stamp > out.get(persona, -1):
@@ -104,14 +104,14 @@ def link_requirements(
 ) -> dict[str, int] | None:
     """R for a note link: its rows plus its grant row, folded to personas.
 
-    None when this store holds no persona cut for the publisher's own
+    None when this store holds no persona write floor for the publisher's own
     persona: the frontier a member advertises is derived from persona
-    cuts, so a requirement recorded before the persona's fleet seals cuts
+    write floors, so a requirement recorded before the persona's fleet seals write floors
     is one no member could ever cover, and the link would close 4431 the
     moment its fresh-link pin lapsed (live fleet 2026-09-20, where no
-    persona cut had ever been sealed). Without a requirement the link
+    persona write floor had ever been sealed). Without a requirement the link
     routes as before the frontier work."""
-    if own_persona not in cuts.persona_cuts(conn):
+    if own_persona not in write_floors.persona_write_floors(conn):
         return None
     addresses = note_addresses(conn, source_id) + settings_addresses(conn, grant_set_id, grant_key)
     return personas_of_origins(
