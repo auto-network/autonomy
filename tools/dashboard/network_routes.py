@@ -74,8 +74,6 @@ from tools.graph.schemas.network_identity import (  # noqa: F401
     NETWORK_BINDING_SET_ID,
     NETWORK_ORG_KEY_REVISION,
     NETWORK_ORG_KEY_SET_ID,
-    NETWORK_SERVE_CERT_REVISION,
-    NETWORK_SERVE_CERT_SET_ID,
     SERVE_CERT_SCOPE,
 )
 from tools.graph.schemas.personal_identity import PERSONAL_IDENTITY_SET_ID
@@ -130,56 +128,33 @@ def _validated_binding_response(value, *, registration: bool) -> dict | None:
 def _serve_child_used_by_another_local_org(
     child_pub: str, current_org
 ) -> bool:
-    """Refuse cross-org child-key reuse using only this dashboard's stores.
+    """Refuse cross-org child-key reuse using only this machine's store.
 
     This is the client-side A1 check. The registry deliberately keeps no
     cross-org key index because such an index would itself be an identity
-    correlation mechanism. A pinned GRAPH_DB represents a single settings
-    scope and therefore has no other local org databases to compare.
+    correlation mechanism. Every organization's serving credential on this
+    machine is one row of the machine-homed set ``autonomy.machine.serve-cert``
+    keyed by org_uuid (graph://67d0aa5f-885 D5), so the scan is one read. A
+    pinned GRAPH_DB represents a single settings scope and has no machine
+    store to compare.
     """
     if os.environ.get("GRAPH_DB"):
         return False
-    current_slug = settings_ops._resolve_org_arg(current_org)
+    from tools.dashboard.link_serving_supervisor import _binding_org_uuid
+    from tools.graph.schemas.machine_serve_cert import MACHINE_SERVE_CERT_SET_ID
+
+    current_uuid = _binding_org_uuid(current_org)
     try:
-        from tools.graph import org_ops
-
-        scopes: list[str | None] = [None]
-        scopes.extend(ref.slug for ref in org_ops.list_orgs())
+        members = settings_ops.read_set(MACHINE_SERVE_CERT_SET_ID, org="machine")
     except Exception:
-        return True  # no enumeration is not proof of uniqueness
-    for scope in scopes:
-        if scope == current_slug:
+        # Fresh-per-org serving children are a privacy boundary. A store we
+        # cannot inspect is not evidence that the child is new.
+        return True
+    for member in members:
+        if member.key == current_uuid or not isinstance(member.payload, dict):
             continue
-        try:
-            members = settings_ops.read_owned_set(
-                NETWORK_SERVE_CERT_SET_ID, org=scope
-            ).members
-        except schemas.SchemaValidationError:
-            # This store CANNOT hold a serving credential: the setting
-            # declares organization scope, and a machine or personal store
-            # refuses it by declaration. That is not an uninspectable store,
-            # it is a store where no serving child can exist, so it is no
-            # evidence either way and the scan continues.
-            #
-            # Failing closed here refused EVERY mint as soon as such a store
-            # existed locally -- reported as "child keys cannot be reused",
-            # which names the one thing that was not wrong.
-            continue
-        except Exception:
-            # Fresh-per-org serving children are a privacy boundary. A local
-            # store we cannot inspect is not evidence that the child is new.
+        if member.payload.get("child_pub") == child_pub:
             return True
-        for member in members:
-            if not isinstance(member.payload, dict):
-                continue
-            try:
-                from tools.network.idkit import DelegationCert
-
-                other = DelegationCert.from_json(member.payload.get("cert"))
-            except Exception:
-                continue
-            if other.child_pub == child_pub:
-                return True
     return False
 
 
@@ -2203,25 +2178,68 @@ async def post_renew(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "registry": member.key, "binding": binding})
 
 
-def _write_serve_key(path: Path, private_key_hex: str) -> None:
-    """Write the delegate key to *path* as a mode-0600 file, atomically.
+def _store_serving_credential(org_uuid: str, private_key_hex: str, row: dict) -> str | None:
+    """Store one serving credential the way the design of record says
+    (graph://67d0aa5f-885 D4, D5): the private key as the machine-vault row
+    ``serving-key.<org_uuid>.<child_pub>`` (sealed cold to the operator's audited
+    delegate recipient, opened unattended once the vault is warm, never
+    replicated), then the certificates as this machine's
+    ``autonomy.machine.serve-cert`` row keyed by *org_uuid*. No file anywhere.
 
-    The directory is 0700 and the file 0600 — the serving key is a
-    process-user-only filesystem credential, the same trust boundary as the
-    TLS key. Atomic replace so a concurrent read never sees a partial key.
+    Returns None on success or the error text. The key is written first: a
+    row that names a key not yet in the vault would read ``key-unvaulted``
+    and re-mint, whereas a vaulted key with no row is inert and is overwritten
+    by the next mint. Legacy key files for this organization under the
+    connector working directory are deleted once the row is durable (D6:
+    migration is the next sign-on; no dual read).
     """
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    from tools.graph.schemas.machine_serve_cert import (
+        MACHINE_SERVE_CERT_REVISION, MACHINE_SERVE_CERT_SET_ID, serving_key_vault_key,
+    )
+    from tools.graph.schemas.machine_vault import (
+        MACHINE_VAULT_AUDITED_REVISION, MACHINE_VAULT_AUDITED_SET_ID,
+    )
+
+    vault_key = serving_key_vault_key(org_uuid, row["child_pub"])
     try:
-        with os.fdopen(fd, "w") as fh:
-            fh.write(private_key_hex.strip())
-    except BaseException:
-        try:
-            os.remove(tmp)
-        finally:
-            raise
-    os.replace(tmp, path)
+        settings_ops.write_by_key(
+            MACHINE_VAULT_AUDITED_SET_ID, MACHINE_VAULT_AUDITED_REVISION,
+            vault_key, {"value": private_key_hex.strip()}, org="machine",
+        )
+    except Exception as e:
+        return f"could not seal the serving key into the machine vault: {e}"
+    payload = dict(row)
+    payload["vault_key"] = vault_key
+    try:
+        settings_ops.upsert_by_key(
+            MACHINE_SERVE_CERT_SET_ID, MACHINE_SERVE_CERT_REVISION, org_uuid,
+            payload, org="machine",
+        )
+    except Exception as e:
+        # The previous row still names its own key, which is untouched; the
+        # new key's row is inert and is overwritten or removed by the next
+        # successful mint.
+        return f"could not store the serve cert: {e}"
+    # The switch is durable: retire every other serving key of this org.
+    with contextlib.suppress(Exception):
+        for member in settings_ops.read_set(MACHINE_VAULT_AUDITED_SET_ID, org="machine"):
+            if member.key.startswith(f"serving-key.{org_uuid}.") and member.key != vault_key:
+                settings_ops.remove_setting(member.id, org="machine")
+    _delete_legacy_serving_key_files(org_uuid)
+    return None
+
+
+def _delete_legacy_serving_key_files(org_uuid: str) -> None:
+    """Remove the pre-2026-09-20 mode-0600 key files for *org_uuid* from the
+    connector working directory. Best-effort; the directory keeps the
+    connector's certificate, log, control and lock files."""
+    try:
+        directory = resolve_store("serving_keys")
+        for path in directory.glob(f"serve-{org_uuid}-*.key"):
+            with contextlib.suppress(OSError):
+                path.unlink()
+    except Exception:
+        pass
 
 
 #: Renew a serving credential once fewer than this many days remain. The
@@ -2341,13 +2359,10 @@ async def _post_serve_cert_v3(request: Request, body: dict) -> JSONResponse:
             "across local organizations"
         )}, status_code=409)
 
-    # THIS machine's own credential — never a peer's (auto-527te). Rows are
-    # keyed per machine now, so the lexically-first member can belong to
-    # another node entirely.
-    from tools.dashboard.link_serving_supervisor import local_serve_cert_member
-    previous_serve = local_serve_cert_member(org)
-    if previous_serve is not None and \
-            previous_serve.payload.get("cert") == body["cert"]:
+    from tools.dashboard.link_serving_supervisor import machine_serve_cert_row
+    write_org = "personal" if settings_ops._resolve_org_arg(org) is None else org
+    previous_serve = machine_serve_cert_row(org_uuid)
+    if previous_serve is not None and previous_serve.get("cert") == body["cert"]:
         try:
             from tools.dashboard.link_serving_supervisor import get_supervisor
             await asyncio.to_thread(get_supervisor().ensure, write_org)
@@ -2356,33 +2371,15 @@ async def _post_serve_cert_v3(request: Request, body: dict) -> JSONResponse:
         return JSONResponse({"ok": True, "child_pub": cert.child_pub,
                              "not_after": cert.not_after})
 
-    key_file = f"serve-{org_uuid}-{cert.child_pub}.key"
-    key_path = resolve_store("serving_keys") / key_file
-    try:
-        _write_serve_key(key_path, body["private_key"])
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": f"could not write the serve key file: {e}"},
-                            status_code=500)
-    write_org = "personal" if settings_ops._resolve_org_arg(org) is None else org
-    payload = {"cert": body["cert"], "key_path": key_file,
-               "persona_pub": body["persona_pub"], "not_after": cert.not_after}
+    payload = {"cert": body["cert"], "persona_pub": body["persona_pub"],
+               "not_after": cert.not_after, "child_pub": cert.child_pub}
     if body.get("dns01_cert") is not None:
         payload["dns01_cert"] = body["dns01_cert"]
-    # KEYED BY MACHINE, never fleet-wide. The credential's private key is a
-    # mode-0600 local file that must never replicate, so the row naming it
-    # belongs to this machine alone; a single shared key made every other
-    # machine in the fleet read `key-missing` and made each mint evict the last
-    # working machine (graph://90ba11c8-3d3, auto-527te).
-    from tools.dashboard.link_serving_supervisor import local_serve_cert_key
-    try:
-        settings_ops.upsert_by_key(
-            NETWORK_SERVE_CERT_SET_ID, 3, local_serve_cert_key(), payload,
-            org=write_org,
-        )
-    except Exception as e:
-        with contextlib.suppress(Exception):
-            key_path.unlink()
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    error = await asyncio.to_thread(
+        _store_serving_credential, org_uuid, body["private_key"], payload,
+    )
+    if error is not None:
+        return JSONResponse({"ok": False, "error": error}, status_code=400)
 
     try:
         from tools.dashboard.link_serving_supervisor import get_supervisor
@@ -2775,22 +2772,14 @@ async def post_serve_cert(request: Request) -> JSONResponse:
             f"cert does not chain to this org's root with {SERVE_CERT_SCOPE} scope: {e}"
         )}, status_code=400)
 
-    # Use a child-keyed filename so replacing a credential is transactional:
-    # a failed Settings write can remove only the new file and can never leave
-    # the previous row pointing at overwritten key material.
-    # Persist only the portable basename in Settings. The current node's
-    # manifest-rooted serving-key directory is resolved at every read, so a
-    # restored volume does not retain the source node's absolute path.
-    # THIS machine's own credential — never a peer's (auto-527te). Rows are
-    # keyed per machine now, so the lexically-first member can belong to
-    # another node entirely.
-    from tools.dashboard.link_serving_supervisor import local_serve_cert_member
-    previous_serve = local_serve_cert_member(org)
+    # THIS machine's credential for this organization, from the machine-homed
+    # row (graph://67d0aa5f-885 D5); never a peer's, because the machine
+    # store holds only this machine's rows.
+    from tools.dashboard.link_serving_supervisor import machine_serve_cert_row
+    previous_serve = machine_serve_cert_row(org_uuid)
     if previous_serve is not None:
         try:
-            previous_cert = DelegationCert.from_json(
-                previous_serve.payload.get("cert")
-            )
+            previous_cert = DelegationCert.from_json(previous_serve.get("cert"))
         except Exception:
             previous_cert = None
         if previous_cert is not None and previous_cert.child_pub == cert.child_pub:
@@ -2798,9 +2787,9 @@ async def post_serve_cert(request: Request) -> JSONResponse:
             # reissuing a different certificate over the same child violates
             # the fresh-key-per-provisioning privacy contract.
             if (
-                previous_serve.payload.get("cert") == body["cert"]
-                and previous_serve.payload.get("viewer_cert") == body["viewer_cert"]
-                and previous_serve.payload.get("dns01_cert") == body["dns01_cert"]
+                previous_serve.get("cert") == body["cert"]
+                and previous_serve.get("viewer_cert") == body["viewer_cert"]
+                and previous_serve.get("dns01_cert") == body["dns01_cert"]
             ):
                 from tools.dashboard.link_serving_supervisor import serve_cert_state
 
@@ -2814,60 +2803,20 @@ async def post_serve_cert(request: Request) -> JSONResponse:
                 "every serving credential provisioning must use a fresh "
                 "organization-scoped child key"
             )}, status_code=409)
-    key_file = f"serve-{org_uuid}-{cert.child_pub}.key"
-    key_path = resolve_store("serving_keys") / key_file
-    try:
-        _write_serve_key(key_path, body["private_key"])
-    except Exception as e:
-        logger.warning(
-            "post_serve_cert: could not write serve key file %s for org=%r: %r",
-            key_path, org, e,
-        )
-        return JSONResponse({"ok": False, "error": f"could not write the serve key file: {e}"},
-                            status_code=500)
-    # NetworkServeCertV2 is @home("organization") — same as the binding, an
-    # org-homed set refuses a scopeless (org=None) write. The personal org's
-    # serve-cert lives in the operator's own store ("personal"), which resolves
-    # to the same personal.db that serve_cert_state(None) reads. Without this the
-    # personal serve-cert POST 500s ("declares no single home"), the browser's
-    # best-effort provisioning swallows it, and the tunnel never comes up.
+    # The personal org's credential is written under the machine store like
+    # every other organization's; "personal" only names the supervisor scope
+    # the reconcile below is asked for.
     write_org = "personal" if settings_ops._resolve_org_arg(org) is None else org
-    # Keyed by machine (auto-527te) — see the revision-3 write above.
-    from tools.dashboard.link_serving_supervisor import local_serve_cert_key
-    try:
-        settings_ops.upsert_by_key(
-            NETWORK_SERVE_CERT_SET_ID, NETWORK_SERVE_CERT_REVISION,
-            local_serve_cert_key(),
-            {"cert": body["cert"], "viewer_cert": body["viewer_cert"],
-             "dns01_cert": body["dns01_cert"],
-             "key_path": key_file,
-             "root_pub": root_pub, "not_after": cert.not_after},
-            org=write_org,
-        )
-    except Exception as e:
-        logger.warning(
-            "post_serve_cert: could not store serve cert settings row for org=%r: %r",
-            org, e,
-        )
-        with contextlib.suppress(OSError):
-            key_path.unlink()
-        return JSONResponse({"ok": False, "error": f"could not store the serve cert: {e}"},
-                            status_code=500)
-
-    # The new row is durable. Remove a superseded managed key only when its
-    # locator is a bare filename inside the current serving-key store. An
-    # absolute locator may identify an operator-managed file outside this
-    # contract and is therefore never deleted here.
-    if previous_serve is not None:
-        old_file = previous_serve.payload.get("key_path")
-        if (
-            isinstance(old_file, str)
-            and old_file != key_file
-            and Path(old_file).name == old_file
-            and old_file not in {".", ".."}
-        ):
-            with contextlib.suppress(OSError):
-                (resolve_store("serving_keys") / old_file).unlink()
+    error = await asyncio.to_thread(
+        _store_serving_credential, org_uuid, body["private_key"],
+        {"cert": body["cert"], "viewer_cert": body["viewer_cert"],
+         "dns01_cert": body["dns01_cert"],
+         "root_pub": root_pub, "not_after": cert.not_after,
+         "child_pub": cert.child_pub},
+    )
+    if error is not None:
+        logger.warning("post_serve_cert: %s (org=%r)", error, org)
+        return JSONResponse({"ok": False, "error": error}, status_code=500)
 
     # Reconcile serving now (a publish's grant may already be cached, or the
     # publish that triggered this will cache one and re-ensure). Best-effort:

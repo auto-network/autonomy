@@ -124,7 +124,10 @@ def load_dns01_client(org: str) -> Dns01Client:
         )
     try:
         cert = DelegationCert.from_json(wire)
-        key = KeyPair.from_private_hex(Path(state["key_path"]).read_text().strip())
+        # The serving key is a machine-vault row (graph://67d0aa5f-885 D4),
+        # opened here in the dashboard process; never a file.
+        from tools.dashboard.link_serving_supervisor import serving_key_hex
+        key = KeyPair.from_private_hex(serving_key_hex(state))
         authority = Dns01Authority(key=key, cert=cert)
     except Exception as exc:
         raise ServiceCertificateError("DNS-01 authority is invalid") from exc

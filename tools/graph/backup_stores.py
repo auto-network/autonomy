@@ -97,7 +97,7 @@ from tools.data_paths import (  # noqa: E402
 # size; the NAS tier must stay bounded.
 _DIR_ACTIONS = {
     "orgs": "orgs-sqlite",       # the secret store: one .backup per org DB
-    "serving_keys": "copy",      # small key material — belongs in every tier
+    "serving_keys": "verify",    # connector working files only; the keys are vault rows since 2026-09-20
     "web_push_keys": "copy",     # small key material — belongs in every tier
     "agent_runs": "verify",      # large; restic dedup handles it offsite
     "session_traces": "verify",  # large; restic dedup handles it offsite

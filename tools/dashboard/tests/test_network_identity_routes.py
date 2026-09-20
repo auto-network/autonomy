@@ -26,13 +26,13 @@ from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
 from tools.dashboard import network_routes
+from tools.dashboard.tests import _serving_vault_kit as vault_kit
 from tools.graph import settings_ops
 from tools.graph.schemas.network_identity import (
     NETWORK_BINDING_REVISION,
     NETWORK_BINDING_REVISION_2,
     NETWORK_BINDING_SET_ID,
     NETWORK_ORG_KEY_SET_ID,
-    NETWORK_SERVE_CERT_SET_ID,
 )
 from tools.network.idkit import KeyPair, Subject, issue_cert
 from tools.network.registry.app import create_app as create_registry_app
@@ -72,6 +72,11 @@ def env(tmp_path, monkeypatch, registry_app):
     GraphDB.close_all_pooled()
     GraphDB.create_org_db(ORG).close()
     monkeypatch.setenv("GRAPH_ORG", ORG)  # this dashboard IS this org — own-org caller
+    # Serving keys are machine-vault rows (graph://67d0aa5f-885 D4): publish
+    # the audited recipient and warm the delegate as a sign-on would.
+    monkeypatch.setenv("AUTONOMY_KEYCACHE_MOUNT", str(tmp_path / "keycache"))
+    (tmp_path / "keycache").mkdir(exist_ok=True)
+    vault_kit.warm(vault_kit.publish_recipient(monkeypatch))
     monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
     monkeypatch.setenv("AUTONOMY_NETWORK_REGISTRY_URL", REGISTRY_URL)
 
@@ -924,6 +929,22 @@ def _serve_key_dir(monkeypatch, tmp_path):
 PERSONAL_ORG_UUID = "02d833fd-a664-5b08-86ca-86615db52f6f"
 
 
+def _bind_personal(root, monkeypatch):
+    """The PERSONAL scope's binding, where a ROOT-signed serving credential is
+    the current design (a collaborative org's root-signed credential reads
+    legacy-root-signed since 2026-09-10, e16f4f03)."""
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    settings_ops.add_setting(
+        NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION_2, "auto.network",
+        {"org_uuid": PERSONAL_ORG_UUID, "root_pub": root.public_hex,
+         "registry_url": REGISTRY_URL, "recovery_policy": {"mode": "none"},
+         "binding_generation": "aa" * 32,
+         "binding_expires_at": time.strftime(
+             "%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(time.time()) + 30 * 86400))},
+        org="personal",
+    )
+
+
 def test_provision_serve_cert_personal_scope(env, root, tmp_path, monkeypatch):
     """A personal-org serve-cert (org=None) must be WRITTEN under the "personal"
     store, not refused as a scopeless write to the @home("organization") set.
@@ -957,10 +978,9 @@ def test_provision_serve_cert_personal_scope(env, root, tmp_path, monkeypatch):
     assert r.json()["child_pub"] == delegate.public_hex
     # The row landed in the personal store the runtime reads (org=None), proving
     # the org-homed scopeless-write refusal is gone.
-    members = settings_ops.read_owned_set(
-        NETWORK_SERVE_CERT_SET_ID, org=None).members
-    assert any(delegate.public_hex in (m.payload.get("cert") or "")
-               for m in members), "personal serve-cert row not written"
+    row = vault_kit.machine_row(PERSONAL_ORG_UUID)
+    assert row is not None and delegate.public_hex in row["cert"], \
+        "personal serve-cert row not written"
 
 
 def test_register_treats_registry_409_as_idempotent_when_binding_matches(
@@ -1029,29 +1049,30 @@ def test_provision_serve_cert_happy_path(env, root, tmp_path, monkeypatch):
     assert r.status_code == 200, r.text
     assert r.json()["child_pub"] == delegate.public_hex
 
-    # Key file exists, mode 0600, holds exactly the delegate key — and the
-    # settings row points at it, never carrying the key itself.
-    import os
-    key_path = (
-        tmp_path / "serve-keys" / f"serve-{ORG_UUID}-{delegate.public_hex}.key"
-    )
-    assert key_path.is_file()
-    assert (os.stat(key_path).st_mode & 0o777) == 0o600
-    assert key_path.read_text().strip() == delegate.private_hex
-
-    row = settings_ops.read_owned_set(NETWORK_SERVE_CERT_SET_ID, org=ORG).members[0].payload
-    assert row["key_path"] == key_path.name
+    # No key file anywhere: the key is a machine-vault row (D4), the
+    # certificates this machine's serve-cert row (D5).
+    assert not list((tmp_path / "serve-keys").glob("*.key")) if (tmp_path / "serve-keys").exists() else True
+    row = vault_kit.machine_row(ORG_UUID)
     assert row["root_pub"] == root.public_hex
     assert row["not_after"] == cert.not_after
-    assert "private_key" not in row  # the secret is NOT in the settings store
+    assert row["child_pub"] == delegate.public_hex
+    assert row["vault_key"] == f"serving-key.{ORG_UUID}.{delegate.public_hex}"
+    assert "private_key" not in row and "key_path" not in row
+    keys = vault_kit.vaulted_keys(ORG_UUID)
+    assert set(keys) == {row["vault_key"]}
+    assert keys[row["vault_key"]].payload["value"] == delegate.private_hex
 
 
 def test_serve_cert_status_is_a_cheap_required_or_ok_signal(
     env, root, tmp_path, monkeypatch,
 ):
+    """Failed in every retained run since e16f4f03 (2026-09-10) because it
+    minted a ROOT-signed credential for a collaborative org, which that ruling
+    reports as legacy-root-signed. The signal it tests is real; it is tested
+    here on the personal scope, where root-signed is the current design."""
     _serve_key_dir(monkeypatch, tmp_path)
-    _store_binding(root)
-    missing = env.get(f"/api/network/serve-cert?org={ORG}")
+    _bind_personal(root, monkeypatch)
+    missing = env.get("/api/network/serve-cert?org=personal")
     assert missing.status_code == 200
     assert missing.json() == {
         "required": True, "status": "missing",
@@ -1060,11 +1081,12 @@ def test_serve_cert_status_is_a_cheap_required_or_ok_signal(
         "days_remaining": None,
     }
 
-    delegate, cert = _mint_serve(root)
+    delegate, cert = _mint_serve(root, org_uuid=PERSONAL_ORG_UUID)
     stored = env.post(
-        "/api/network/serve-cert", json=_serve_body(root, delegate, cert))
+        "/api/network/serve-cert",
+        json=_serve_body(root, delegate, cert, org="personal"))
     assert stored.status_code == 200, stored.text
-    ready = env.get(f"/api/network/serve-cert?org={ORG}")
+    ready = env.get("/api/network/serve-cert?org=personal")
     assert ready.json() == {
         "required": False, "status": "ok", "days_remaining": 30.0,
     }
@@ -1073,7 +1095,10 @@ def test_serve_cert_status_is_a_cheap_required_or_ok_signal(
 def test_failed_serve_cert_update_preserves_previous_row_and_key(
     env, root, tmp_path, monkeypatch,
 ):
-    key_dir = _serve_key_dir(monkeypatch, tmp_path)
+    """The key is sealed under its own child-named row BEFORE the serve-cert
+    row switches to it, so a failed row write leaves the previous row naming
+    its own, still-present key."""
+    _serve_key_dir(monkeypatch, tmp_path)
     _store_binding(root)
     first_key, first_cert = _mint_serve(root)
     first = env.post(
@@ -1081,11 +1106,7 @@ def test_failed_serve_cert_update_preserves_previous_row_and_key(
         json=_serve_body(root, first_key, first_cert),
     )
     assert first.status_code == 200, first.text
-    first_row = settings_ops.read_owned_set(
-        NETWORK_SERVE_CERT_SET_ID, org=ORG
-    ).members[0].payload
-    first_path = key_dir / first_row["key_path"]
-    assert first_path.read_text().strip() == first_key.private_hex
+    first_row = vault_kit.machine_row(ORG_UUID)
 
     second_key, second_cert = _mint_serve(root)
 
@@ -1098,27 +1119,27 @@ def test_failed_serve_cert_update_preserves_previous_row_and_key(
         json=_serve_body(root, second_key, second_cert),
     )
     assert second.status_code == 500
-    current = settings_ops.read_owned_set(
-        NETWORK_SERVE_CERT_SET_ID, org=ORG
-    ).members[0].payload
-    assert current == first_row
-    assert first_path.read_text().strip() == first_key.private_hex
-    assert not (key_dir / f"serve-{ORG_UUID}-{second_key.public_hex}.key").exists()
+    assert vault_kit.machine_row(ORG_UUID) == first_row
+    keys = vault_kit.vaulted_keys(ORG_UUID)
+    assert keys[first_row["vault_key"]].payload["value"] == first_key.private_hex
 
 
 def test_exact_serve_cert_retry_is_idempotent(env, root, tmp_path, monkeypatch):
-    key_dir = _serve_key_dir(monkeypatch, tmp_path)
-    _store_binding(root)
-    delegate, cert = _mint_serve(root)
-    body = _serve_body(root, delegate, cert)
+    """Failed in every retained run since e16f4f03 for the same reason as the
+    status test above; exercised on the personal scope."""
+    _serve_key_dir(monkeypatch, tmp_path)
+    _bind_personal(root, monkeypatch)
+    delegate, cert = _mint_serve(root, org_uuid=PERSONAL_ORG_UUID)
+    body = _serve_body(root, delegate, cert, org="personal")
     assert env.post("/api/network/serve-cert", json=body).status_code == 200
-    key_path = key_dir / f"serve-{ORG_UUID}-{delegate.public_hex}.key"
-    before = key_path.stat().st_mtime_ns
+    row_before = vault_kit.machine_row(PERSONAL_ORG_UUID)
+    keys_before = {k: m.id for k, m in vault_kit.vaulted_keys(PERSONAL_ORG_UUID).items()}
 
     retried = env.post("/api/network/serve-cert", json=body)
     assert retried.status_code == 200, retried.text
     assert retried.json()["child_pub"] == delegate.public_hex
-    assert key_path.stat().st_mtime_ns == before
+    assert vault_kit.machine_row(PERSONAL_ORG_UUID) == row_before
+    assert {k: m.id for k, m in vault_kit.vaulted_keys(PERSONAL_ORG_UUID).items()} == keys_before
 
 
 def test_same_child_cannot_be_recertified(env, root, tmp_path, monkeypatch):
@@ -1160,49 +1181,46 @@ def test_provision_rejects_key_not_matching_cert(env, root, tmp_path, monkeypatc
 
 
 def test_local_cross_org_child_key_reuse_is_refused(monkeypatch):
-    from tools.graph import org_ops
+    """Every organization's serving credential on this machine is one row of
+    the machine-homed set keyed by org_uuid; a child already named by another
+    organization's row is refused."""
+    from tools.dashboard import link_serving_supervisor as sup
 
     root = KeyPair.generate()
     child, cert = _mint_serve(root)
     monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.setattr(sup, "_binding_org_uuid", lambda org: "uuid-a")
     monkeypatch.setattr(
-        org_ops,
-        "list_orgs",
-        lambda: [SimpleNamespace(slug="org-a"), SimpleNamespace(slug="org-b")],
+        settings_ops, "read_set",
+        lambda set_id, org=None, **kw: [
+            SimpleNamespace(key="uuid-b", payload={"child_pub": child.public_hex}),
+        ],
     )
-    monkeypatch.setattr(
-        settings_ops,
-        "read_owned_set",
-        lambda set_id, org=None: SimpleNamespace(
-            members=(
-                [SimpleNamespace(payload={"cert": cert.to_json().decode("ascii")})]
-                if org == "org-b"
-                else []
-            )
-        ),
-    )
-
     assert network_routes._serve_child_used_by_another_local_org(
+        child.public_hex, "org-a"
+    )
+    # This organization's own row is not "another" organization.
+    monkeypatch.setattr(
+        settings_ops, "read_set",
+        lambda set_id, org=None, **kw: [
+            SimpleNamespace(key="uuid-a", payload={"child_pub": child.public_hex}),
+        ],
+    )
+    assert not network_routes._serve_child_used_by_another_local_org(
         child.public_hex, "org-a"
     )
 
 
-def test_unreadable_local_org_store_fails_closed_for_child_reuse(monkeypatch):
-    from tools.graph import org_ops
+def test_unreadable_machine_store_fails_closed_for_child_reuse(monkeypatch):
+    from tools.dashboard import link_serving_supervisor as sup
 
     monkeypatch.delenv("GRAPH_DB", raising=False)
-    monkeypatch.setattr(
-        org_ops,
-        "list_orgs",
-        lambda: [SimpleNamespace(slug="org-a"), SimpleNamespace(slug="org-b")],
-    )
+    monkeypatch.setattr(sup, "_binding_org_uuid", lambda org: "uuid-a")
 
-    def unreadable(set_id, org=None):
-        if org == "org-b":
-            raise OSError("injected unreadable store")
-        return SimpleNamespace(members=[])
+    def unreadable(set_id, org=None, **kw):
+        raise OSError("injected unreadable store")
 
-    monkeypatch.setattr(settings_ops, "read_owned_set", unreadable)
+    monkeypatch.setattr(settings_ops, "read_set", unreadable)
     assert network_routes._serve_child_used_by_another_local_org(
         "ab" * 32, "org-a"
     )
@@ -1464,16 +1482,15 @@ def test_persona_serve_cert_stored_when_membership_ready(
     assert r.status_code == 200, r.text
     assert r.json()["ok"] is True
     assert r.json()["child_pub"] == delegate.public_hex
-    # Stored at revision 3, no viewer cert, persona anchor recorded.
-    members = settings_ops.read_owned_set(
-        NETWORK_SERVE_CERT_SET_ID, org=ORG, target_revision=3).members
-    rows = [m.payload for m in members]
-    assert rows and rows[0]["persona_pub"] == persona.public_hex
-    assert "viewer_cert" not in rows[0]
-    # The supervisor's dual-read resolves it as the org's credential.
+    # Stored as this machine's row: persona anchor recorded, no viewer cert,
+    # the key in the machine vault under the child's own row.
+    row = vault_kit.machine_row(ORG_UUID)
+    assert row["persona_pub"] == persona.public_hex
+    assert "viewer_cert" not in row and "key_path" not in row
+    assert row["vault_key"] == f"serving-key.{ORG_UUID}.{delegate.public_hex}"
+    assert vault_kit.vaulted_keys(ORG_UUID)[row["vault_key"]].payload["value"] == delegate.private_hex
     from tools.dashboard.link_serving_supervisor import serve_cert_state
-    state = serve_cert_state(ORG)
-    assert state["status"] in ("ok", "key-missing", "key-invalid")
+    assert serve_cert_state(ORG)["status"] == "ok"
 
 
 def test_persona_serve_cert_wrong_signer_refused(env, root, tmp_path, monkeypatch):

@@ -39,7 +39,7 @@ Custody describes intended storage; read each snapshot's stated conditions separ
 | [recovery_slot_recipient](#key-recovery_slot_recipient) | recovery | kem | cold | built |
 | [root_anchor_seed](#key-root_anchor_seed) | vault-classes | seed | cold | built |
 | [sealed_index](#key-sealed_index) | sealed-stores | seed | cold | built |
-| [serving_delegate_key](#key-serving_delegate_key) | org-authority | signing | disk | built |
+| [serving_delegate_key](#key-serving_delegate_key) | org-authority | signing | memory | built |
 | [serving_machine_signing_key](#key-serving_machine_signing_key) | fleet | signing | memory | built |
 | [vault_factor_recipient](#key-vault_factor_recipient) | vault-classes | kem | cold | built |
 
@@ -368,6 +368,19 @@ Custody describes intended storage; read each snapshot's stated conditions separ
 - **crib** §9, §13, §14
 - **notes** Initial founding and admission derive counter zero, then bind the pair with kem_purpose(genesis_id). PersonaKemCredential has no counter field. Personal and organization sign-in handoffs open existing grants and keep KEM keys in process memory. Organization reads open late grants, and graceful reload uses the existing RAM-backed carrier to retain KEM keys, not generation secrets (graph://35308bf7-584, auto-a1pub). This key is not stored in audited Settings; cold restart needs sign-in.
 
+<a id="key-serving_delegate_key"></a>
+### serving_delegate_key — signing, memory (Vault-held since 2026-09-20 (graph://67d0aa5f-885 D4): a row of the machine-homed audited set autonomy.machine.vault.audited, sealed cold to the operator's audited delegate recipient, opened unattended once the vault is warm and released into ramfs for the connector at launch; never a disk file, never replicated. No content decryption; the serving child has bounded certificate scopes enforced by its relying parties.)
+
+- **minted** at random
+- **reaches** Authentication through tunnel:serve and serve:dns-01 certificates over the same serving child.
+- **snapshot** No content decryption; possession permits use of accepted certificate scopes.
+- **live?** Yes.
+- **revoke** Re-mint; thirty-day TTL, renewal below twenty days remaining.
+- **bound** The TTL.
+- **code** `tools/network/idkit/certs.py` · `tools/dashboard/static/js/network-signon.mjs:_mintServeCredentialPersona` · `tools/dashboard/network_routes.py:_store_serving_credential` · `tools/dashboard/link_serving_supervisor.py:_release_serving_key` · `tools/graph/schemas/machine_serve_cert.py`
+- **crib** §8, §9
+- **notes** Organization registry and DNS01 certificates are persona-signed, not org-root-signed. No content viewer certificate is minted. Personal-org bootstrap remains a separate root-signed branch. The certificates live in the machine-homed autonomy.machine.serve-cert row keyed by org_uuid; the organization-homed autonomy.network.serve-cert set is deprecated.
+
 <a id="key-serving_machine_signing_key"></a>
 ### serving_machine_signing_key — signing, memory (Derived at root unlock for unattended serving; not stored separately.)
 
@@ -424,16 +437,3 @@ Custody describes intended storage; read each snapshot's stated conditions separ
 - **code** `tools/dashboard/link_channel_key.py:mint_channel_key` · `tools/dashboard/link_channel_key.py:channel_key_for` · `tools/dashboard/connector_key_resolution.py`
 - **crib** §8
 - **notes** graph://807b4e11-3e9. Random Ed25519 minted at publication, not sign-in. Seed lives in autonomy.network.link-channel-key; channel_pub is on the grant and projected into copied URL fragments. Dashboard opens it per viewer OPEN and gives only this key to the connector, never the org KEM. Content failures close the channel. Organization invitations use this same endpoint-authentication key alongside a separate claim bearer.
-
-<a id="key-serving_delegate_key"></a>
-### serving_delegate_key — signing, disk (No content decryption; retained serving child has bounded certificate scopes enforced by its relying parties.)
-
-- **minted** at random
-- **reaches** Authentication through tunnel:serve and serve:dns-01 certificates over the same serving child.
-- **snapshot** No content decryption; possession permits use of accepted certificate scopes.
-- **live?** Yes.
-- **revoke** Re-mint; thirty-day TTL, renewal below twenty days remaining.
-- **bound** The TTL.
-- **code** `tools/network/idkit/certs.py` · `tools/dashboard/static/js/network-signon.mjs:_mintServeCredentialPersona`
-- **crib** §8, §9
-- **notes** Organization registry and DNS01 certificates are persona-signed, not org-root-signed. No content viewer certificate is minted. Personal-org bootstrap remains a separate root-signed branch.

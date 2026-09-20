@@ -169,125 +169,117 @@ _CONNECTOR_MODULE = "tools.dashboard.link_serving"
 # ── provisioning state (also the enrich precondition) ─────────
 
 
-def _resolve_key_path(stored: object) -> tuple[str | None, str | None]:
-    """Resolve a portable key basename, preserving legacy absolute rows.
-
-    New rows contain exactly one filename and move with the node volume.
-    Existing absolute rows remain valid in place. Any other relative shape is
-    rejected before filesystem access so ``..`` or a nested path cannot
-    escape the manifest-rooted serving-key directory.
-    """
-    if not isinstance(stored, str) or not stored:
-        return None, "serve-cert key_path is missing"
-    path = Path(stored)
-    if path.is_absolute():
-        return str(path), None
-    if (
-        path.name != stored
-        or stored in {".", ".."}
-        or "/" in stored
-        or "\\" in stored
-    ):
-        return None, "serve-cert key_path must be a bare filename"
+def _binding_org_uuid(org: str | None) -> str | None:
+    """The registry org_uuid of *org*'s binding, or None when unbound."""
     try:
-        root = resolve_store("serving_keys").resolve()
-        resolved = (root / stored).resolve()
-        resolved.relative_to(root)
-    except Exception:
-        return (
-            None,
-            "serve-cert key_path does not resolve inside the serving-key store",
-        )
-    return str(resolved), None
-
-
-#: The settings key legacy serving credentials were stored under — ONE row per
-#: org for the whole fleet. That cardinality was the bug: a serving credential
-#: is per MACHINE (its private key is a mode-0600 local file that must never
-#: replicate), but the org settings store replicates, so the single row landed
-#: on every machine and only the minting machine held the key. Every other
-#: machine read `key-missing` and could neither serve nor run DNS-01 issuance,
-#: and each new mint evicted whichever machine last worked. Evidence and the
-#: full audit: graph://90ba11c8-3d3.
-LEGACY_SERVE_CERT_KEY = "default"
-
-
-def local_serve_cert_key() -> str:
-    """The settings key THIS machine's serving credential belongs under.
-
-    The machine id when this node is enrolled in a fleet; otherwise the legacy
-    key, which is correct for a single-machine install — there is no second
-    machine for it to collide with.
-    """
-    try:
-        from tools.network import machine_boot
-        machine_id = machine_boot.machine_id(org="machine")
-    except Exception:
-        machine_id = None
-    return machine_id or LEGACY_SERVE_CERT_KEY
-
-
-def local_serve_cert_member(org: str | None, *, revision: int | None = None):
-    """THIS machine's serving-credential member, or None.
-
-    The mint path uses it to find the credential it is replacing — which must
-    be its own. ``_first_member`` returns the lexically first key, and once
-    rows are keyed per machine that can be a PEER's row: the mint would then
-    compare its idempotency check against a peer's certificate and try to
-    unlink a key file that is not its own.
-    """
-    try:
-        result = settings_ops.read_owned_set(
-            NETWORK_SERVE_CERT_SET_ID, org=org,
-            **({"target_revision": revision} if revision is not None else {}),
-        )
+        binding, err = _load_binding(org)
     except Exception:
         return None
-    local_key = local_serve_cert_key()
-    legacy = None
-    for member in result.members:
-        if not isinstance(member.payload, dict):
-            continue
-        member_key = getattr(member, "key", LEGACY_SERVE_CERT_KEY)
-        if member_key == local_key:
-            return member
-        if member_key == LEGACY_SERVE_CERT_KEY:
-            key_path, key_error = _resolve_key_path(member.payload.get("key_path"))
-            if key_error is None and key_path and os.path.isfile(key_path):
-                legacy = member
-    return legacy
+    if err or not isinstance(binding, dict):
+        return None
+    value = binding.get("org_uuid")
+    return value if isinstance(value, str) and value else None
 
 
-def _rows_owned_by_this_machine(members) -> list:
-    """The credential rows this machine may actually use.
+def machine_serve_cert_row(org_uuid: str) -> dict | None:
+    """THIS machine's serving credential for *org_uuid*, from the machine-homed
+    set ``autonomy.machine.serve-cert`` (graph://67d0aa5f-885 D5), or None.
 
-    A peer's row must never make this machine look provisioned NOR make it look
-    broken: it is simply not ours, so it reads as absent and the next unlock
-    mints our own. Two things count as ours:
-
-    * a row keyed by this machine's id — the post-fix shape; and
-    * a legacy ``default`` row WHOSE KEY FILE IS PRESENT HERE. That file test is
-      the honest ownership question during migration: the machine holding the
-      key is the one that minted it, so it keeps serving uninterrupted, while
-      every other machine correctly ignores the same row.
+    There is no ownership question any more: the machine store holds only
+    this machine's rows and never replicates, so a peer's credential cannot
+    appear here. The organization-homed ``autonomy.network.serve-cert`` set
+    is deprecated and not read.
     """
-    local_key = local_serve_cert_key()
-    mine = []
+    from tools.graph.schemas.machine_serve_cert import MACHINE_SERVE_CERT_SET_ID
+
+    try:
+        members = settings_ops.read_set(MACHINE_SERVE_CERT_SET_ID, org="machine")
+    except Exception:
+        return None
     for member in members:
-        payload = member.payload
-        if not isinstance(payload, dict):
+        if member.key == org_uuid and isinstance(member.payload, dict):
+            return member.payload
+    return None
+
+
+def serving_work_base(org_uuid: str, child_pub: str) -> str:
+    """The base path, in the connector working directory, from which this
+    connector's NON-SECRET files are named: ``<base>.cert``, ``.viewer.cert``,
+    ``.log``, ``.ctl`` and ``.ctl.lock``. The private key is never here: it is
+    a machine-vault row, released into ramfs at launch
+    (:func:`_release_serving_key`)."""
+    return str(resolve_store("serving_keys") / f"serve-{org_uuid}-{child_pub}")
+
+
+def serving_key_present(vault_key: str) -> bool:
+    """Whether the machine vault holds a row under *vault_key*. Row presence
+    is visible while the vault is cold; whether it can be OPENED is not, and
+    is asked only at launch."""
+    from tools.graph.schemas.machine_vault import MACHINE_VAULT_AUDITED_SET_ID
+
+    try:
+        members = settings_ops.read_set(MACHINE_VAULT_AUDITED_SET_ID, org="machine")
+    except Exception:
+        return False
+    return any(member.key == vault_key for member in members)
+
+
+def serving_key_hex(state: dict) -> str:
+    """Open the serving key named by an ``ok`` serve-cert *state* from the
+    machine vault and return its private hex. Raises ``RuntimeError`` naming
+    the vault's own refusal when the row cannot be opened in this process,
+    or when it is absent."""
+    from tools.graph.schemas.machine_vault import MACHINE_VAULT_AUDITED_SET_ID
+
+    vault_key = state.get("vault_key")
+    members = settings_ops.read_set(MACHINE_VAULT_AUDITED_SET_ID, org="machine")
+    for member in members:
+        if member.key != vault_key:
             continue
-        # A member carrying no key at all predates keying and IS the legacy
-        # shape, so it takes the legacy path's ownership test.
-        member_key = getattr(member, "key", LEGACY_SERVE_CERT_KEY)
-        if member_key == local_key:
-            mine.append(payload)
-            continue
-        if member_key == LEGACY_SERVE_CERT_KEY:
-            key_path, key_error = _resolve_key_path(payload.get("key_path"))
-            if key_error is None and key_path and os.path.isfile(key_path):
-                mine.append(payload)
-    return mine
+        if member.vault_error is not None or member.payload is None:
+            message = member.vault_error.message if member.vault_error else "no payload"
+            raise RuntimeError(f"serving key {vault_key} cannot be opened: {message}")
+        value = member.payload.get("value")
+        if not isinstance(value, str) or not value.strip():
+            raise RuntimeError(f"serving key {vault_key} is empty")
+        return value.strip()
+    raise RuntimeError(f"serving key {vault_key} is not in the machine vault")
+
+
+def _serving_key_ramfs_dir():
+    from pathlib import Path
+    from tools.network.fleet_relay_sync import _keycache_dir
+
+    return Path(_keycache_dir()) / "serving"
+
+
+def _release_serving_key(state: dict) -> tuple[str | None, str | None]:
+    """Materialize the serving key for an ``ok`` *state* into a mode-0600
+    ramfs file the connector reads as ``--key-file`` (graph://67d0aa5f-885
+    D4 as corrected): ``<keycache>/serving/serve-<org_uuid>-<child_pub>.key``.
+    Returns ``(path, None)`` or ``(None, reason)``; a cold vault is a reason,
+    not an exception, so the supervisor reports it and retries next tick."""
+    try:
+        key_hex = serving_key_hex(state)
+    except Exception as exc:
+        return None, str(exc)
+    directory = _serving_key_ramfs_dir()
+    path = directory / f"{os.path.basename(state['work_base'])}.key"
+    try:
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        tmp = path.with_suffix(".key.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(key_hex)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
+        os.replace(tmp, path)
+    except Exception as exc:
+        return None, f"serving key could not be released into ramfs: {exc}"
+    return str(path), None
 
 
 def serve_cert_state(org: str | None, *, now: float | None = None) -> dict:
@@ -296,13 +288,13 @@ def serve_cert_state(org: str | None, *, now: float | None = None) -> dict:
     Owning-scope read (P2): a peer's serve-cert must never make this org look
     provisioned. ``status`` is one of:
 
-    * ``ok`` — a non-expired cert whose key file is present (the browser need
-      NOT mint; the connector CAN run);
+    * ``ok`` — a non-expired cert whose serving key is in the machine vault
+      (the browser need NOT mint; the connector CAN run once the vault is
+      warm enough to release the key);
     * ``missing`` — no serve-cert row at all;
     * ``expired`` — a row whose delegate has passed ``not_after``;
-    * ``key-invalid`` — a relative key locator is not a safe basename or its
-      manifest root cannot be resolved;
-    * ``key-missing`` — a row whose ``key_path`` file is gone;
+    * ``key-unvaulted`` — a row whose serving key is not in the machine vault
+      (autonomy.machine.vault.audited, row ``vault_key``);
     * ``legacy-root-signed`` — a collaborative org still holding a root-signed
       revision-2 cert, which the relay cannot accept from a v3 hello. Repair
       is a sign-in; see the branch below.
@@ -311,28 +303,12 @@ This is the cheap pre-unlock check: every organization-root sign-on mints a
 fresh serving credential iff the status is anything but ``ok``.
     """
     now = time.time() if now is None else now
-    # Dual-read for the migration window (auto-55vwi/auto-tmers): a
-    # PERSONA-signed revision-3 credential is preferred; a root-signed
-    # revision-2 row keeps serving until repair replaces it. Reading each
-    # revision separately is deliberate — revision 3 has no upconvert from 2.
-    rows = []
-    for revision in (3, NETWORK_SERVE_CERT_REVISION):
-        try:
-            members = settings_ops.read_owned_set(
-                NETWORK_SERVE_CERT_SET_ID,
-                org=org,
-                target_revision=revision,
-            ).members
-        except Exception:
-            continue
-        rows.extend(_rows_owned_by_this_machine(members))
-        if rows:
-            break
-    if not rows:
+    org_uuid = _binding_org_uuid(org)
+    if org_uuid is None:
         return {"status": "missing"}
-    # One credential per org PER MACHINE. If corrupt storage contains several
-    # rows for this machine, select the freshest valid candidate deterministically.
-    row = max(rows, key=lambda p: p.get("not_after") or 0)
+    row = machine_serve_cert_row(org_uuid)
+    if row is None:
+        return {"status": "missing"}
     not_after = row.get("not_after")
     if not isinstance(not_after, int) or now >= not_after:
         return {"status": "expired", "row": row}
@@ -354,19 +330,7 @@ fresh serving credential iff the status is anything but ``ok``.
             return {"status": "identity-invalid", "row": row,
                     "error": ("serve cert must be a direct persona-signed "
                               "tunnel:serve delegate; reprovision serving")}
-        key_path, key_error = _resolve_key_path(row.get("key_path"))
-        if key_error is not None:
-            return {"status": "key-invalid", "row": row, "error": key_error}
-        if not os.path.isfile(key_path):
-            return {"status": "key-missing", "row": row}
-        return {
-            "status": "ok",
-            "row": row,
-            "cert": row.get("cert"),
-            "viewer_cert": None,
-            "key_path": key_path,
-            "not_after": not_after,
-        }
+        return _ok_state(row, org_uuid, not_after, viewer_cert=None)
 
     # REVISION 2 — root-signed. For a COLLABORATIVE org this is now obsolete,
     # and reporting it "ok" is what kept it alive: the relay anchors a v3 hello
@@ -453,17 +417,26 @@ fresh serving credential iff the status is anything but ``ok``.
                 "reprovision serving"
             ),
         }
-    key_path, key_error = _resolve_key_path(row.get("key_path"))
-    if key_error is not None:
-        return {"status": "key-invalid", "row": row, "error": key_error}
-    if not os.path.isfile(key_path):
-        return {"status": "key-missing", "row": row}
+    return _ok_state(row, org_uuid, not_after, viewer_cert=row.get("viewer_cert"))
+
+
+def _ok_state(row: dict, org_uuid: str, not_after: int, *, viewer_cert) -> dict:
+    """The ``ok`` (or ``key-unvaulted``) state for a validated row."""
+    vault_key = row.get("vault_key")
+    child_pub = row.get("child_pub")
+    if not isinstance(vault_key, str) or not isinstance(child_pub, str):
+        return {"status": "identity-invalid", "row": row,
+                "error": "serve cert row names no vault_key or child_pub"}
+    if not serving_key_present(vault_key):
+        return {"status": "key-unvaulted", "row": row}
     return {
         "status": "ok",
         "row": row,
         "cert": row.get("cert"),
-        "viewer_cert": row.get("viewer_cert"),
-        "key_path": key_path,
+        "viewer_cert": viewer_cert,
+        "child_pub": child_pub,
+        "vault_key": vault_key,
+        "work_base": serving_work_base(org_uuid, child_pub),
         "not_after": not_after,
     }
 
@@ -662,28 +635,30 @@ def _verify_key_matches(cert_wire: str, viewer_cert_wire: str,
     return True, "ok"
 
 
-def _cert_path_for(key_path: str) -> str:
-    return os.path.splitext(key_path)[0] + ".cert"
+def _cert_path_for(work_base: str) -> str:
+    return os.path.splitext(work_base)[0] + ".cert"
 
 
-def _viewer_cert_path_for(key_path: str) -> str:
-    return os.path.splitext(key_path)[0] + ".viewer.cert"
+def _viewer_cert_path_for(work_base: str) -> str:
+    return os.path.splitext(work_base)[0] + ".viewer.cert"
 
 
-def _log_path_for(key_path: str) -> str:
-    return os.path.splitext(key_path)[0] + ".log"
+def _log_path_for(work_base: str) -> str:
+    return os.path.splitext(work_base)[0] + ".log"
 
 
-def _control_path_for(key_path: str) -> str:
+def _control_path_for(work_base: str) -> str:
     """The loopback control-listener descriptor file the connector writes
     ({port, auth}) so the dashboard can drive D19 control ops on its
-    tunnel. Sits next to the serving key, same convention as .cert/.log."""
-    return os.path.splitext(key_path)[0] + ".ctl"
+    tunnel. In the connector working directory, same convention as
+    .cert/.log; the serving key itself is a machine-vault row released into
+    ramfs at launch and never sits here (graph://67d0aa5f-885 D4)."""
+    return os.path.splitext(work_base)[0] + ".ctl"
 
 
-def _lock_path_for(key_path: str) -> str:
+def _lock_path_for(work_base: str) -> str:
     """Cross-process ownership lock for one org's serving connector."""
-    return _control_path_for(key_path) + ".lock"
+    return _control_path_for(work_base) + ".lock"
 
 
 class TunnelUnavailable(RuntimeError):
@@ -709,12 +684,12 @@ def control(org: str, op: str, args: dict, *, timeout: float = 12.0) -> dict:
     (the publish executor) turns that into ``ensure(org)`` + a retry."""
     _require_scope(org)
     state = serve_cert_state(org)
-    key_path = state.get("key_path")
-    if not key_path:
+    work_base = state.get("work_base")
+    if not work_base:
         raise TunnelUnavailable(
             "no serving delegate is provisioned for this org — provision "
             "serving, then retry", kind="no-delegate")
-    ctl_path = _control_path_for(key_path)
+    ctl_path = _control_path_for(work_base)
     try:
         with open(ctl_path) as fh:
             descriptor = json.load(fh)
@@ -749,10 +724,11 @@ def control(org: str, op: str, args: dict, *, timeout: float = 12.0) -> dict:
     return reply
 
 
-def _materialize_cert(key_path: str, cert_wire: str) -> str:
-    """Write the (public) cert next to the key file for ``--cert-file``.
-    Atomic replace so a concurrent launch never reads a half-written cert."""
-    cert_path = _cert_path_for(key_path)
+def _materialize_cert(work_base: str, cert_wire: str) -> str:
+    """Write the (public) cert into the connector working directory for
+    ``--cert-file``. Atomic replace so a concurrent launch never reads a
+    half-written cert."""
+    cert_path = _cert_path_for(work_base)
     tmp = cert_path + ".tmp"
     with open(tmp, "w") as fh:
         fh.write(cert_wire)
@@ -763,19 +739,22 @@ def _materialize_cert(key_path: str, cert_wire: str) -> str:
 def _connector_command(binding: dict, org: str, key_path: str,
                        cert_path: str,
                        viewer_cert_path: "str | None",
-                       owns_inbound_listener: bool = False) -> tuple[list, dict]:
+                       owns_inbound_listener: bool = False,
+                       *, ctl_path: str) -> tuple[list, dict]:
     """The argv + env to launch the serving connector against *binding*.
 
-    *viewer_cert_path* is None for a revision-3 (persona-signed) credential:
-    viewers verify the per-link channel key, so no channel certificate file
-    exists and the connector serves per-link links only."""
+    *key_path* is the serving key RELEASED from the machine vault into ramfs
+    for this launch; *ctl_path* is the control descriptor in the connector
+    working directory. *viewer_cert_path* is None for a persona-signed
+    credential: viewers verify the per-link channel key, so no channel
+    certificate file exists and the connector serves per-link links only."""
     argv = [
         sys.executable, "-m", "tools.dashboard.link_serving",
         "--relay", registry_to_relay_ws(binding["registry_url"]),
         "--org", binding["org_uuid"],
         "--key-file", key_path,
         "--cert-file", cert_path,
-        "--control-file", _control_path_for(key_path),
+        "--control-file", ctl_path,
     ]
     if viewer_cert_path is not None:
         argv += ["--channel-cert-file", viewer_cert_path]
@@ -1141,7 +1120,7 @@ class ServingSupervisor:
                 if (
                     state["status"] == "ok"
                     and self._credentials.get(org)
-                    == (state["cert"], state["viewer_cert"], state["key_path"])
+                    == (state["cert"], state["viewer_cert"], state["child_pub"])
                 ):
                     current = self._live_process_state(org, proc)
                     if current is not None:
@@ -1291,7 +1270,7 @@ class ServingSupervisor:
                 proc = None
         if proc is not None and proc.alive():
             if self._credentials.get(org) == (
-                state["cert"], state["viewer_cert"], state["key_path"]
+                state["cert"], state["viewer_cert"], state["child_pub"]
             ):
                 # CODE CURRENCY, every pass — not only at adoption. A merge
                 # that touches only tools/network never hot-reloads the
@@ -1306,7 +1285,7 @@ class ServingSupervisor:
                     disk = build_version.disk_head()
                     if disk is not None and disk != booted:
                         status = _probe_ctl_status(
-                            _control_path_for(state["key_path"]))
+                            _control_path_for(state["work_base"]))
                         streams = (status or {}).get("active_streams")
                         # A failed probe is UNKNOWN, not idle: drain it
                         # (bounded by the deadline) rather than kill a
@@ -1339,7 +1318,7 @@ class ServingSupervisor:
                     # moment its streams drain, or when the drain deadline
                     # bounds how long stale code may keep serving.
                     ctl_path = (getattr(proc, "_ctl_path", None)
-                                or _control_path_for(state["key_path"]))
+                                or _control_path_for(state["work_base"]))
                     status = _probe_ctl_status(ctl_path)
                     streams = (status or {}).get("active_streams")
                     # Unknown (probe timed out under load) is NOT drained;
@@ -1560,7 +1539,7 @@ class ServingSupervisor:
             org_uuid = binding.get("org_uuid")
             if not org_uuid:
                 return None
-            ctl_path = _control_path_for(state["key_path"])
+            ctl_path = _control_path_for(state["work_base"])
             status = _probe_ctl_status(ctl_path)
             if status is None and not os.path.exists(ctl_path):
                 # No control descriptor at all: an unmanageable orphan (a
@@ -1583,7 +1562,7 @@ class ServingSupervisor:
                 self._procs[org] = _AdoptedProc(pid, ctl_path=ctl_path)
                 self._boot_commit[org] = None
                 self._credentials[org] = (
-                    state["cert"], state["viewer_cert"], state["key_path"])
+                    state["cert"], state["viewer_cert"], state["child_pub"])
                 self._started_at[org] = self._now()
                 self._last_served[org] = self._now()
                 self._lame_duck_since[org] = self._now()
@@ -1627,7 +1606,7 @@ class ServingSupervisor:
             self._procs[org] = _AdoptedProc(pid, ctl_path=ctl_path)
             self._boot_commit[org] = boot
             self._credentials[org] = (
-                state["cert"], state["viewer_cert"], state["key_path"])
+                state["cert"], state["viewer_cert"], state["child_pub"])
             self._started_at[org] = self._now()
             self._last_served[org] = self._now()
             if stale:
@@ -1661,54 +1640,40 @@ class ServingSupervisor:
     def _launch(self, org: str, state: dict) -> dict:
         """Spawn the connector for *org* (``state`` must be an ``ok``
         serve-cert state) and record its launch time for the fresh-tunnel
-        grace. Callers hold the lock."""
+        grace. Callers hold the lock.
+
+        The serving key is a machine-vault row (graph://67d0aa5f-885 D4):
+        it is released into a mode-0600 ramfs file for this launch and the
+        connector reads it as ``--key-file``. A vault that cannot open it yet
+        is a reason to wait, not a fault: the watchdog retries after the
+        restore or the sign-on that warms it."""
+        key_path, release_error = _release_serving_key(state)
+        if release_error is not None:
+            return {"running": False, "reason": release_error}
         ok, detail = _verify_key_matches(
-            state["cert"], state["viewer_cert"], state["key_path"])
+            state["cert"], state["viewer_cert"], key_path)
         if not ok:
             return {"running": False, "reason": detail}
         binding, binding_error = _load_binding(org)
         if binding_error:
             return {"running": False, "reason": binding_error}
-        # Several workers of one dashboard installation can legitimately
-        # share the same org store.  Exactly one may own its connector.
-        # Acquire BEFORE touching the shared cert or control descriptor; a
-        # non-owner simply uses the owner's loopback control listener when
-        # publish calls control().  This is local process coordination, not
-        # cross-container isolation; mock dashboards never bootstrap serving.
-        if not self._acquire_lock(org, state["key_path"]):
+        work_base = state["work_base"]
+        if not self._acquire_lock(org, work_base):
             return {"running": True, "reason": "owned-by-other-dashboard"}
-        # ADOPT a healthy survivor before considering anything a stray. A hot
-        # reload replaces this dashboard process but no longer kills the
-        # connector (see _default_spawn); the incumbent may be mid-serve for a
-        # fleet member. Killing it severed every in-flight sync stream on every
-        # code merge. If it answers its control socket as serving, it is ours
-        # now — record it and walk away.
         adopted = self._adopt_incumbent(org, state)
         if adopted is not None:
             return adopted
-        # We hold the per-org ownership lock, so every OTHER connector for this
-        # org is a stray — an orphan a dead dashboard left behind (a live sibling
-        # would still hold this lock). Reap them before spawning ours, so the new
-        # connector does not just join the crowd fighting for the relay slot.
         self._reap_strays(org)
         try:
-            cert_path = _materialize_cert(state["key_path"], state["cert"])
-            # Revision-3 (persona-signed) credentials carry no viewer
-            # certificate: viewers verify the per-link channel key
-            # (graph://807b4e11-3e9), so the connector serves per-link links
-            # only and gets no --channel-cert-file.
+            cert_path = _materialize_cert(work_base, state["cert"])
             viewer_cert_path = None
             if state.get("viewer_cert"):
-                viewer_cert_path = _viewer_cert_path_for(state["key_path"])
+                viewer_cert_path = _viewer_cert_path_for(work_base)
                 viewer_tmp = viewer_cert_path + ".tmp"
                 with open(viewer_tmp, "w") as fh:
                     fh.write(state["viewer_cert"])
                 os.replace(viewer_tmp, viewer_cert_path)
-            ctl_path = _control_path_for(state["key_path"])
-            # A stale descriptor from a previous killed connector would
-            # mislead control() until the new connector rewrites it; clear it
-            # up front.  All shared-file preparation stays inside this guard:
-            # failure must release ownership so another dashboard can serve.
+            ctl_path = _control_path_for(work_base)
             with contextlib.suppress(OSError):
                 os.remove(ctl_path)
             launch_now = self._now()
@@ -1718,24 +1683,22 @@ class ServingSupervisor:
             owns_listener = self._inbound_listener_owner(
                 launch_now, launch_fleet_has_members, launching=org) == org
             argv, env = _connector_command(
-                binding, org, state["key_path"], cert_path, viewer_cert_path,
-                owns_inbound_listener=owns_listener)
+                binding, org, key_path, cert_path, viewer_cert_path,
+                owns_inbound_listener=owns_listener, ctl_path=ctl_path)
             self._listener_owner_launched[org] = owns_listener
             self._procs[org] = self._spawn(
-                argv, env, log_path=_log_path_for(state["key_path"]),
+                argv, env, log_path=_log_path_for(work_base),
                 ctl_path=ctl_path,
             )
         except Exception:
             self._release_lock(org)
             raise
         self._credentials[org] = (
-            state["cert"], state["viewer_cert"], state["key_path"])
+            state["cert"], state["viewer_cert"], state["child_pub"])
         self._started_at[org] = self._now()
         self._last_served.pop(org, None)
         self._lame_duck_since.pop(org, None)
         self._boot_commit.pop(org, None)
-        # The child imports whatever is on disk right now; that is its code
-        # generation until the watchdog sees the disk head move.
         from tools.network import build_version
         self._boot_commit[org] = build_version.disk_head()
         return {"running": True, "reason": "launched"}
@@ -1786,10 +1749,10 @@ class ServingSupervisor:
             _log.warning("stray-connector reap failed for org=%s",
                          org, exc_info=True)
 
-    def _acquire_lock(self, org: str, key_path: str) -> bool:
+    def _acquire_lock(self, org: str, work_base: str) -> bool:
         if org in self._locks:
             return True
-        lock_path = _lock_path_for(key_path)
+        lock_path = _lock_path_for(work_base)
         lock = open(lock_path, "a+")
         os.chmod(lock_path, 0o600)
         try:

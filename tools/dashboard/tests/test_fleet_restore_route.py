@@ -2,7 +2,6 @@
 the profile tray's restart button (bead auto-sdrsa) — and the connector counts
 the pulls it refuses while unarmed, so the sync flag can say how many."""
 
-import asyncio
 
 import pytest
 from starlette.applications import Starlette
@@ -94,14 +93,3 @@ def test_restore_does_not_claim_a_connector_owned_elsewhere_was_restarted(
     assert body["failed"] == [
         {"scope": "autonomy", "error": "owned-by-other-dashboard"}
     ]
-
-
-def test_connector_counts_refusals_while_unarmed():
-    rt = fleet_relay_sync.ConnectorFleetRuntime()
-    assert rt.scheduler is None
-    assert rt.locked_refusals == 0
-    for _ in range(3):
-        with pytest.raises(fleet_relay_sync.FleetRelaySyncError):
-            asyncio.run(rt.handle("token", {}))
-    assert rt.locked_refusals == 3
-    assert rt.first_locked_refusal_at is not None

@@ -224,9 +224,8 @@ A reuse sign-in adds no ledger event. Workflow graph://b437ecfb-e23.
 
 **Writes**
 
-- personal-org bootstrap cert
-- legacy viewer_cert
-- dns01_cert over one child
+- personal-org bootstrap cert, legacy viewer_cert, dns01_cert over one child
+- the serving key as autonomy.machine.vault.audited row serving-key.<org_uuid>; the certificates as the autonomy.machine.serve-cert row keyed by org_uuid (graph://67d0aa5f-885 D4, D5)
 
 **Source:** `tools/dashboard/static/js/network-signon.mjs:_mintServeCredential` (ceremony)
 
@@ -279,6 +278,7 @@ Existing personal branch still emits viewer_cert; do not infer organization cont
 **Writes**
 
 - registry tunnel certificate and DNS01 certificate over the same child
+- the serving key as autonomy.machine.vault.audited row serving-key.<org_uuid>; the certificates as the autonomy.machine.serve-cert row keyed by org_uuid (graph://67d0aa5f-885 D4, D5)
 
 **Source:** `tools/dashboard/static/js/network-signon.mjs:_mintServeCredentialPersona` (ceremony)
 

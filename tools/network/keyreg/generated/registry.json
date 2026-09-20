@@ -952,15 +952,18 @@
     "serving_delegate_key": {
       "code": [
         "tools/network/idkit/certs.py",
-        "tools/dashboard/static/js/network-signon.mjs:_mintServeCredentialPersona"
+        "tools/dashboard/static/js/network-signon.mjs:_mintServeCredentialPersona",
+        "tools/dashboard/network_routes.py:_store_serving_credential",
+        "tools/dashboard/link_serving_supervisor.py:_release_serving_key",
+        "tools/graph/schemas/machine_serve_cert.py"
       ],
       "crib": [
         "\u00a78",
         "\u00a79"
       ],
       "custody": {
-        "class": "disk",
-        "forced_by": "No content decryption; retained serving child has bounded certificate scopes enforced by its relying parties."
+        "class": "memory",
+        "forced_by": "Vault-held since 2026-09-20 (graph://67d0aa5f-885 D4): a row of the machine-homed audited set autonomy.machine.vault.audited, sealed cold to the operator's audited delegate recipient, opened unattended once the vault is warm and released into ramfs for the connector at launch; never a disk file, never replicated. No content decryption; the serving child has bounded certificate scopes enforced by its relying parties."
       },
       "derivation": null,
       "descriptor": {
@@ -972,7 +975,7 @@
       },
       "group": "org-authority",
       "kind": "signing",
-      "notes": "Organization registry and DNS01 certificates are persona-signed, not org-root-signed. No content viewer certificate is minted. Personal-org bootstrap remains a separate root-signed branch."
+      "notes": "Organization registry and DNS01 certificates are persona-signed, not org-root-signed. No content viewer certificate is minted. Personal-org bootstrap remains a separate root-signed branch. The certificates live in the machine-homed autonomy.machine.serve-cert row keyed by org_uuid; the organization-homed autonomy.network.serve-cert set is deprecated."
     },
     "serving_machine_signing_key": {
       "code": [
@@ -1221,9 +1224,8 @@
           "serving_delegate_key"
         ],
         "writes": [
-          "personal-org bootstrap cert",
-          "legacy viewer_cert",
-          "dns01_cert over one child"
+          "personal-org bootstrap cert, legacy viewer_cert, dns01_cert over one child",
+          "the serving key as autonomy.machine.vault.audited row serving-key.<org_uuid>; the certificates as the autonomy.machine.serve-cert row keyed by org_uuid (graph://67d0aa5f-885 D4, D5)"
         ]
       },
       "notes": "Existing personal branch still emits viewer_cert; do not infer organization content-viewer certificate use from this bootstrap field.",
@@ -1284,7 +1286,8 @@
           "serving_delegate_key"
         ],
         "writes": [
-          "registry tunnel certificate and DNS01 certificate over the same child"
+          "registry tunnel certificate and DNS01 certificate over the same child",
+          "the serving key as autonomy.machine.vault.audited row serving-key.<org_uuid>; the certificates as the autonomy.machine.serve-cert row keyed by org_uuid (graph://67d0aa5f-885 D4, D5)"
         ]
       },
       "notes": "Organization branch; no content viewer certificate.",

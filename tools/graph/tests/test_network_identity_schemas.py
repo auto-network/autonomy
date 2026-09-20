@@ -17,6 +17,7 @@ enums and the crypto library can never drift apart silently.
 from __future__ import annotations
 
 import copy
+import time
 import re
 import uuid
 from pathlib import Path
@@ -816,3 +817,99 @@ def test_link_grant_stored_before_pinning_reads_back_org_wide(graph_db_env):
         target_revision=ni.NETWORK_LINK_GRANT_REVISION,
     ).members[0]
     assert current.payload.get("serving_machine") is None
+
+
+# ── autonomy.machine.serve-cert (graph://67d0aa5f-885 D5) ─────────────────
+#
+# This machine's serving credential: the certificates, keyed by org_uuid in
+# the machine store, and the name of the machine-vault row holding the key.
+# Both certificate shapes validate with the same shared checks as the
+# deprecated organization-homed revisions; the row carries no key_path.
+
+from tools.graph.schemas import machine_serve_cert as msc  # noqa: E402
+
+
+def _machine_root_payload():
+    root, cert, viewer_cert = _mint_serve_cert()
+    from tools.network.idkit import DelegationCert
+    child = DelegationCert.from_json(cert.to_json().decode("ascii")).child_pub
+    return {
+        "cert": cert.to_json().decode("ascii"),
+        "viewer_cert": viewer_cert.to_json().decode("ascii"),
+        "root_pub": root.public_hex,
+        "not_after": cert.not_after,
+        "child_pub": child,
+        "vault_key": f"serving-key.2d4b90cb-0000-4000-8000-000000000000.{child}",
+    }
+
+
+def _machine_persona_payload():
+    from tools.network.idkit import KeyPair, Subject, issue_cert
+    persona, delegate = KeyPair.generate(), KeyPair.generate()
+    now = int(time.time())
+    cert = issue_cert(
+        persona, delegate.public_hex, scope=("tunnel:serve",),
+        org="2d4b90cb-0000-4000-8000-000000000000",
+        subject=Subject("persona", persona.public_hex),
+        not_before=now - 300, not_after=now + 30 * 86400,
+    )
+    return {
+        "cert": cert.to_json().decode("ascii"),
+        "persona_pub": persona.public_hex,
+        "not_after": cert.not_after,
+        "child_pub": delegate.public_hex,
+        "vault_key": f"serving-key.2d4b90cb-0000-4000-8000-000000000000.{delegate.public_hex}",
+    }
+
+
+def test_machine_serve_cert_is_machine_homed_and_registered():
+    from tools.graph import schemas
+    assert schemas.declared_home(msc.MACHINE_SERVE_CERT_SET_ID) == "machine"
+    assert get_schema(msc.MACHINE_SERVE_CERT_SET_ID, msc.MACHINE_SERVE_CERT_REVISION) is not None
+
+
+def test_machine_serve_cert_root_shape_validates():
+    validate_payload(msc.MACHINE_SERVE_CERT_SET_ID, msc.MACHINE_SERVE_CERT_REVISION,
+                     _machine_root_payload())
+
+
+def test_machine_serve_cert_persona_shape_validates():
+    validate_payload(msc.MACHINE_SERVE_CERT_SET_ID, msc.MACHINE_SERVE_CERT_REVISION,
+                     _machine_persona_payload())
+
+
+def test_machine_serve_cert_refuses_a_key_path():
+    payload = _machine_persona_payload()
+    payload["key_path"] = "serve.key"
+    with pytest.raises(SchemaValidationError, match="key_path is retired"):
+        validate_payload(msc.MACHINE_SERVE_CERT_SET_ID, msc.MACHINE_SERVE_CERT_REVISION, payload)
+
+
+def test_machine_serve_cert_requires_exactly_one_anchor():
+    payload = _machine_persona_payload()
+    payload["root_pub"] = "cc" * 32
+    with pytest.raises(SchemaValidationError, match="exactly one"):
+        validate_payload(msc.MACHINE_SERVE_CERT_SET_ID, msc.MACHINE_SERVE_CERT_REVISION, payload)
+    payload.pop("root_pub"); payload.pop("persona_pub")
+    with pytest.raises(SchemaValidationError, match="exactly one"):
+        validate_payload(msc.MACHINE_SERVE_CERT_SET_ID, msc.MACHINE_SERVE_CERT_REVISION, payload)
+
+
+def test_machine_serve_cert_binds_child_pub_and_vault_key_to_the_cert():
+    payload = _machine_persona_payload()
+    payload["vault_key"] = "serving-key.2d4b90cb-0000-4000-8000-000000000000.other"
+    with pytest.raises(SchemaValidationError, match="vault_key"):
+        validate_payload(msc.MACHINE_SERVE_CERT_SET_ID, msc.MACHINE_SERVE_CERT_REVISION, payload)
+    payload = _machine_persona_payload()
+    other = "ab" * 32
+    payload["child_pub"] = other
+    payload["vault_key"] = f"serving-key.2d4b90cb-0000-4000-8000-000000000000.{other}"
+    with pytest.raises(SchemaValidationError, match="child_pub"):
+        validate_payload(msc.MACHINE_SERVE_CERT_SET_ID, msc.MACHINE_SERVE_CERT_REVISION, payload)
+
+
+def test_machine_serve_cert_shares_the_chain_checks():
+    payload = _machine_root_payload()
+    payload["not_after"] += 5
+    with pytest.raises(SchemaValidationError, match="not_after"):
+        validate_payload(msc.MACHINE_SERVE_CERT_SET_ID, msc.MACHINE_SERVE_CERT_REVISION, payload)

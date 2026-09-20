@@ -39,12 +39,11 @@ from tools.graph.schemas.network_identity import (
 from tools.network.idkit import KeyPair, Subject, canonical_json, issue_cert
 from tools.network.registry.signing import sign_request
 from tools.dashboard import link_serving_supervisor as sup
+from tools.dashboard.tests import _serving_vault_kit as vault_kit
 from tools.dashboard.link_probe import probe_link
 from tools.graph.schemas.network_identity import (
     NETWORK_BINDING_REVISION,
     NETWORK_BINDING_SET_ID,
-    NETWORK_SERVE_CERT_REVISION,
-    NETWORK_SERVE_CERT_SET_ID,
 )
 from tools.graph.schemas.personal_identity import (
     PERSONAL_IDENTITY_REVISION,
@@ -116,14 +115,14 @@ def publish_link(db, target_uuid: str) -> str:
     return mint_link_at(db, ORG_UUID, target_uuid)
 
 
-def test_link_key(token: str) -> KeyPair:
+def _link_key(token: str) -> KeyPair:
     """Stable per-token keypair for this hermetic serving stack."""
     return KeyPair.from_private_hex(hashlib.sha256(token.encode()).hexdigest())
 
 
 def cache_grant(token: str, target_uuid: str, *, meta: dict | None = None,
                 issued_at: str | None = None, channel_pub: str | None = None) -> None:
-    channel_pub = channel_pub or test_link_key(token).public_hex
+    channel_pub = channel_pub or _link_key(token).public_hex
     settings_ops.add_setting(
         NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION, token,
         {
@@ -233,7 +232,7 @@ def stack(tmp_path, monkeypatch):
             channel_cert=channel_cert,
             channel_authorization_for=lambda token: {
                 "protocol": "public-link",
-                "key": test_link_key(token),
+                "key": _link_key(token),
             } if link_serving.check_grant(token, org=ORG) else (_ for _ in ()).throw(
                 PermissionError("link unavailable")),
             machine_key=KeyPair.generate(),
@@ -269,7 +268,7 @@ def test_tunnel_serves_only_against_local_grants(stack):
             await asyncio.wait_for(connector.connected.wait(), timeout=15)
 
             served = await fetch_over_tunnel(
-                stack["port"], granted, test_link_key(granted).public_hex)
+                stack["port"], granted, _link_key(granted).public_hex)
             header, _, body = served.partition(b"\n")
             assert json.loads(header) == {
                 "v": 1, "status": "ok", "kind": "present",
@@ -286,10 +285,10 @@ def test_tunnel_serves_only_against_local_grants(stack):
             # grant/key. Both close before authentication or application data.
             await assert_authentication_refused(
                 stack["port"], registry_only,
-                test_link_key(registry_only).public_hex,
+                _link_key(registry_only).public_hex,
             )
             await assert_authentication_refused(
-                stack["port"], expired, test_link_key(expired).public_hex,
+                stack["port"], expired, _link_key(expired).public_hex,
             )
         finally:
             connector.stop()
@@ -327,7 +326,7 @@ def test_probe_confirms_live_link_and_flags_dead_grant(stack):
 
             live = await probe_link(
                 relay_url=relay, token=granted,
-                link_pub=test_link_key(granted).public_hex, org_uuid=ORG_UUID,
+                link_pub=_link_key(granted).public_hex, org_uuid=ORG_UUID,
                 operation="head",
                 total_timeout=15.0,
             )
@@ -339,7 +338,7 @@ def test_probe_confirms_live_link_and_flags_dead_grant(stack):
             # there is deliberately no application status.
             dead = await probe_link(
                 relay_url=relay, token=registry_only,
-                link_pub=test_link_key(registry_only).public_hex, org_uuid=ORG_UUID,
+                link_pub=_link_key(registry_only).public_hex, org_uuid=ORG_UUID,
                 operation="head",
                 total_timeout=15.0,
             )
@@ -355,8 +354,8 @@ def test_probe_confirms_live_link_and_flags_dead_grant(stack):
 
 
 def _provision_serve_cert(tmp_path, root, port):
-    """Mint the personal scope's root-signed tunnel:serve delegate, write its
-    0600 key file, and store the revision-2 serve-cert row + binding.
+    """Mint the personal scope's root-signed tunnel:serve delegate, seal its
+    key into the machine vault, and store this machine's serve-cert row + binding.
 
     Revision 2 is correct HERE and only here: an org scope's root-signed row
     now reports legacy-root-signed and will not launch a connector."""
@@ -372,18 +371,14 @@ def _provision_serve_cert(tmp_path, root, port):
         subject=Subject("operator", delegate.public_hex),
         not_before=cert.not_before, not_after=cert.not_after,
     )
-    keydir = tmp_path / "network"
-    keydir.mkdir(exist_ok=True)
-    key_path = keydir / "serve.key"
-    key_path.write_text(delegate.private_hex)
-    os.chmod(key_path, 0o600)
-    settings_ops.add_setting(
-        NETWORK_SERVE_CERT_SET_ID, NETWORK_SERVE_CERT_REVISION, "default",
-        {"cert": cert.to_json().decode("ascii"),
-         "viewer_cert": viewer_cert.to_json().decode("ascii"),
-         "key_path": str(key_path),
-         "root_pub": root.public_hex, "not_after": cert.not_after},
-        org=ORG,
+    # The key is a machine-vault row released into ramfs at launch; the
+    # certificates are this machine's serve-cert row (graph://67d0aa5f-885).
+    vault_kit.store_key(ORG_UUID, delegate.private_hex)
+    vault_kit.store_row(
+        ORG_UUID, cert=cert.to_json().decode("ascii"),
+        viewer_cert=viewer_cert.to_json().decode("ascii"),
+        child_pub=delegate.public_hex, not_after=cert.not_after,
+        root_pub=root.public_hex,
     )
     settings_ops.add_setting(
         NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "auto.network",
@@ -475,6 +470,10 @@ def test_supervisor_brings_serving_live_end_to_end(stack, tmp_path, monkeypatch)
     # Only the dashboard holds the key; the REAL child must ask its resolver.
     from tools.dashboard import link_channel_key
     monkeypatch.setattr(link_channel_key, "channel_key_for", lambda *args: link_key)
+    # The serving key is a machine-vault row: publish the audited recipient
+    # and warm the delegate as a sign-on would, so the supervisor can release
+    # the key into the (stand-in) ramfs at launch.
+    vault_kit.warm(vault_kit.publish_recipient(monkeypatch))
     _provision_serve_cert(tmp_path, stack["root"], stack["port"])
     connector_log = _enroll_fleet_machine(tmp_path, monkeypatch, stack["root"])
 
@@ -536,7 +535,7 @@ def test_probe_reports_unreachable_when_no_connector(stack):
         # connector deliberately NOT started.
         verdict = await probe_link(
             relay_url=relay, token=token,
-            link_pub=test_link_key(token).public_hex, org_uuid=ORG_UUID,
+            link_pub=_link_key(token).public_hex, org_uuid=ORG_UUID,
             operation="head",
             total_timeout=4.0, connect_timeout=1.5,
         )
