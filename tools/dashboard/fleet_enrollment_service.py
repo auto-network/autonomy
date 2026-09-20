@@ -784,7 +784,7 @@ def handle_request(
                     "approved request carries no signed delivery evidence"
                 )
             provider = armor_provider or _personal_root_armor
-            armor, anchor, armor_created_at, armor_updated_at = provider()
+            armor, anchor, armor_created_at, armor_updated_at, audited_public = provider()
             if anchor != pending.request.personal_root_pub:
                 raise FleetEnrollmentChannelError(
                     "stored personal identity no longer matches this invitation"
@@ -829,6 +829,7 @@ def handle_request(
                 "personal_root_armor": armor,
                 "personal_root_created_at": armor_created_at,
                 "personal_root_updated_at": armor_updated_at,
+                "delegate_audited_public_key": audited_public,
             })
         return reply
     raise FleetEnrollmentChannelError("unknown fleet invitation operation")
@@ -865,8 +866,8 @@ def _pending(row: sqlite3.Row) -> PendingEnrollment:
     )
 
 
-def _personal_root_armor() -> tuple[str, str, str, str]:
-    """Return encrypted armor, root anchor, and its original row timestamps."""
+def _personal_root_armor() -> tuple[str, str, str, str, str]:
+    """Return encrypted identity and its existing public preparation recipient."""
     from tools.graph import settings_ops
     from tools.graph.schemas.personal_identity import PERSONAL_IDENTITY_SET_ID
 
@@ -890,9 +891,15 @@ def _personal_root_armor() -> tuple[str, str, str, str]:
         from tools.network.idkit.armor import armor_root_pub
 
         root_pub = armor_root_pub(payload["armored_private_key"])
+    from tools.graph.schemas.vault_policy_class import VAULT_POLICY_CLASS_SET_ID
+    from tools.vault.key_holder import _scoped_db
+    from tools.vault.store import VaultStore
+
+    with VaultStore(_scoped_db(VAULT_POLICY_CLASS_SET_ID, None)) as store:
+        audited_public = store.get_delegate_audited_recipient()
     return (
         payload["armored_private_key"], root_pub,
-        member.created_at, member.updated_at,
+        member.created_at, member.updated_at, audited_public,
     )
 
 

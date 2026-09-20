@@ -81,6 +81,30 @@ def test_invite_branch_founds_no_shared_org(volume):
     assert join.action == PENDING
 
 
+def test_fleet_identity_delivery_installs_existing_public_recipient(volume):
+    from tools.init.first_run import _store_fleet_personal_armor
+    from tools.network.idkit.root_factor_policy import mint_password_armor
+    from tools.vault.personal_object import derive_delegate_audited_recipient
+    from tools.vault.store import VaultStore
+    from tools.vault.key_holder import _scoped_db
+    from tools.graph.schemas.vault_policy_class import VAULT_POLICY_CLASS_SET_ID
+    from tools.dashboard import identity_routes
+
+    initialize(volume, invite=code(), tls=False)
+    root = KeyPair.from_private_hex("34" * 32)
+    _, public = derive_delegate_audited_recipient(bytes.fromhex(root.private_hex))
+    armor = mint_password_armor(root, "fleet-test-password", iterations=10000)
+    _store_fleet_personal_armor(
+        armor, expected_root_pub=root.public_hex,
+        source_created_at="2026-08-20T01:02:03Z",
+        source_updated_at="2026-08-24T04:05:06Z",
+        delegate_audited_public_key=public,
+    )
+    with VaultStore(_scoped_db(VAULT_POLICY_CLASS_SET_ID, None)) as store:
+        assert store.get_delegate_audited_recipient() == public
+    assert identity_routes._personal_member().payload["armored_private_key"] == armor
+
+
 def test_create_branch_still_founds(volume):
     report = initialize(volume, first_org="acme", tls=False)
     orgs = {p.stem for p in (volume / "data" / "orgs").glob("*.db")}
