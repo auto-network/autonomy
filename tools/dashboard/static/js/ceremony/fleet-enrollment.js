@@ -230,6 +230,22 @@ async function mintOrgSyncCerts(seed, machineId, syncOrgs) {
   return certs;
 }
 
+/**
+ * The one place a Fleet runtime credential is minted from the server's
+ * `/api/fleet/runtime` reply. Every ceremony that activates the runtime
+ * (sign-on, first publication) calls this; a new runtime field is read
+ * here and nowhere else. Returns the post to submit.
+ */
+export async function fleetRuntimePost(rootSeed, rc) {
+  return { step: 'fleet', url: '/api/fleet/runtime', body: await mintFleetRuntimeCredential({
+    personalRootSeed: new Uint8Array(rootSeed), rootPub: rc.personal_root_pub,
+    machineId: rc.machine_id, machinePub: rc.machine_pub,
+    orgUuid: rc.org_uuid || null,
+    servingOrgs: rc.serving_orgs || [],
+    syncOrgs: rc.sync_orgs || [],
+  }) };
+}
+
 export async function mintFleetRuntimeCredential({
   personalRootSeed,
   rootPub,
