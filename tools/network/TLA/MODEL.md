@@ -217,6 +217,35 @@ claim is made without a two-step reply: R1 claims a held floor as the
 watermark while the cursor waits below a quarantined row. Both are the same
 defect: a floor claimed without the rows below it.
 
-Deliberate abstractions: no quarantine yet (the two-step reply alone breaks
-the rule); rows apply in one step; each origin writes at most one row and
-seals once, which is enough to reach the violation.
+The correction (`Corrected = TRUE`, `FleetSyncWriteFloorsCorrected.cfg`),
+three rules that replace the record's Propagation paragraph:
+
+- C1 A server's reply is one snapshot, and everything it sends about a
+  machine is bounded by its own cursor for that machine: the rows at or below
+  its cursor, and the machine's floor only when its cursor reaches it. What a
+  server cannot claim itself, it does not pass on.
+- C2 A puller moves its cursor for a machine to a received floor only once
+  every row of that machine in the same reply has resolved without
+  quarantine. Zero rows resolves, so an idle machine's floor moves the
+  cursor. The floor is stored either way and relays as before.
+- C3 The pull request's watermark is the cursor alone.
+
+Result: `CursorHoldsData` and `Converges` both hold, at one row per writer
+(3,431 distinct states) and at two rows with two seals
+(`FleetSyncWriteFloorsWide.cfg`, 37,721 distinct states). Quarantine is in
+the model: a delivered row may be held unresolved; the cursor waits below it;
+a server serves only resolved rows; a row already resolved is a no-op when
+delivered again.
+
+The wider bound found a second hole before C1 took its final form. With
+floors handled but rows unbounded, a relay holding row 1 in quarantine and
+row 2 applied served row 2 to a puller whose watermark was 0; the puller's
+cursor advanced to 2 across a gap it could not see. The record's O-G rule
+lets a server serve every applied row above the puller's watermark, past its
+own cursor. Bounding rows by the server's cursor closes it; the floor rule is
+the same bound applied to floors.
+
+Deliberate abstractions: rows apply in one step; one reply in flight at a
+time, so pulls take strong fairness (each pair keeps pulling, as the
+scheduler's rounds do); one origin writes at most one row and seals twice,
+which reaches every ordering that matters.

@@ -21,6 +21,8 @@ GREEN = [
     ("PoolGreen.cfg", "ScenRelay"),
     ("AnycastPoolGreen.cfg", "ScenRelay"),
     ("AckFloorGreen.cfg", "AckFloor"),
+    ("FleetSyncWriteFloorsCorrected.cfg", "FleetSyncWriteFloors"),
+    ("FleetSyncWriteFloorsWide.cfg", "FleetSyncWriteFloors"),
 ]
 
 CALIBRATION = [
