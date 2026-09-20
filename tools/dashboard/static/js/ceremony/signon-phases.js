@@ -53,17 +53,32 @@ export async function prepareSignon(rootSeed, encrypted, signon) {
   if (fleetError) failures.push({ step: 'fleet', error: fleetError });
   const personalServeError = inputs.personal_serve?.error;
   if (personalServeError) failures.push({ step: 'serve-cert', error: personalServeError });
-  const posts = await signon._internals.prepareRootMaintenance(rootSeed,
-    organizations, fleetError || personalServeError ? null : inputs.runtime, inputs.personal_serve);
+  const posts = [];
+  let runtime = inputs.runtime;
   if (!fleetError && inputs.completion) {
     const c = inputs.completion;
+    // Verify completion before preparing the same personal setup as sign-in.
+    // Submission completes enrollment before registration and activation.
     posts.push({ step: 'fleet', url: '/api/fleet/enrollment/local-completion', body: await completeFleetEnrollment({
       personalRootSeed: new Uint8Array(rootSeed), requestId: c.request_id,
       request: c.request, channelBinding: c.channel_binding, approval: c.approval,
       rosterEntry: c.roster_entry,
     }) });
-  } else if (!fleetError && inputs.runtime.enabled) {
-    posts.push(await fleetRuntimePost(rootSeed, inputs.runtime));
+    runtime = {
+      enabled: true, personal_root_pub: c.request.personal_root_pub,
+      machine_id: c.request.machine_id, machine_pub: c.roster_entry.machine_pub,
+      personal_org_uuid: c.personal_org_uuid, org_uuid: null, serves: true,
+      serving_orgs: [], sync_orgs: [],
+    };
+  }
+  posts.push(...await signon._internals.prepareRootMaintenance(rootSeed,
+    organizations, fleetError || personalServeError ? null : runtime, inputs.personal_serve));
+  if (!fleetError && runtime.enabled) {
+    // First completion registers this UUID in the preceding handoff. Reuse
+    // master's single runtime mint; ordinary sign-ins retain their binding.
+    const activation = inputs.completion
+      ? { ...runtime, org_uuid: runtime.personal_org_uuid } : runtime;
+    posts.push(await fleetRuntimePost(rootSeed, activation));
   }
   return { vault, posts, failures,
     ready: vault ? organizations.filter(org => !org.serve_cert.required

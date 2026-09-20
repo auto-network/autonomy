@@ -96,11 +96,14 @@ def collect():
     try:
         _, recovery, delivery = fleet._local_completion_state()
         if recovery is not None and delivery is not None:
+            from tools.network import fleet_runtime
             completion = {"request_id": recovery.request_id,
                           "request": recovery.request.to_dict(),
                           "channel_binding": recovery.channel_binding,
                           "approval": delivery.approval.to_dict(),
-                          "roster_entry": delivery.roster_entry.to_dict()}
+                          "roster_entry": delivery.roster_entry.to_dict(),
+                          "personal_org_uuid": fleet_runtime.personal_org_uuid(
+                              recovery.request.personal_root_pub)}
     except Exception:
         logger.exception("sign-in fleet completion preparation unavailable")
         completion = {"error": "fleet-completion-unavailable"}
