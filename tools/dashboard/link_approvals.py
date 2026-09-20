@@ -57,6 +57,7 @@ import contextlib
 import logging
 import copy
 import re
+import secrets
 import time
 import uuid
 from urllib.parse import urlsplit
@@ -586,7 +587,9 @@ def _cached_grant(token: str, org: str | None) -> dict | None:
             org=org,
             target_revision=NETWORK_LINK_GRANT_REVISION,
         ).members:
-            if m.key == token and isinstance(m.payload, dict):
+            if isinstance(m.payload, dict) and (
+                m.key == token or m.payload.get("token") == token
+            ):
                 return m.payload
     except Exception:
         pass
@@ -916,15 +919,17 @@ def _control_over_tunnel(org, op, args, *, timeout: float = 60.0,
             time.sleep(poll)
 
 
-def _link_requirements(org, source_id: str, token: str):
-    """R for a note link in *org*, or None when this node has no persona in
-    the org (a personal or unregistered scope routes as before)."""
+def _link_requirements(org, source_id: str, grant_id: str):
+    """R for a note link in *org* whose grant row and channel key row are
+    keyed by *grant_id*, or None when this node has no persona in the org
+    (a personal or unregistered scope routes as before)."""
     from tools.graph import org_ops
     from tools.graph.db import _org_db_path
     from tools.network import fleet_roster, fleet_tunnel_server
     from tools.network.ledger import LedgerStore, org_ledger_db_path
     from tools.network.fleet_sync_connection import FleetSyncConnection
     from tools.dashboard.link_requirements import link_requirements
+    from tools.graph.schemas.network_identity import NETWORK_LINK_CHANNEL_KEY_SET_ID
 
     ledger_path = org_ledger_db_path(org)
     if not ledger_path.exists():
@@ -940,7 +945,8 @@ def _link_requirements(org, source_id: str, token: str):
     try:
         return link_requirements(
             conn, source_id=source_id, grant_set_id=NETWORK_LINK_GRANT_SET_ID,
-            grant_key=token, own_machines=own_machines, own_persona=own_persona,
+            grant_key=grant_id, own_machines=own_machines, own_persona=own_persona,
+            key_set_id=NETWORK_LINK_CHANNEL_KEY_SET_ID,
         )
     finally:
         conn.close()
@@ -1056,74 +1062,27 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
                 f"{req['target_type']} link cannot be pinned to it — the "
                 "serving connector did not report its machine")
         args["serving_machine"] = serving_machine
-    try:
-        reply = await asyncio.to_thread(_create_link_over_tunnel, org, args)
-    except TunnelUnavailable as exc:
-        return _fail(f"the serving tunnel did not come up in time ({exc})")
-    if not reply.get("ok"):
-        return _fail(reply.get("error", "the registry refused the link"))
-    token, url = reply.get("token"), reply.get("url")
-    if not isinstance(token, str) or not _TOKEN_RE.match(token):
-        return await asyncio.to_thread(
-            _compensate_failed_publish, org, token, "registry-response")
-    try:
-        parsed_url = urlsplit(url) if isinstance(url, str) else None
-    except ValueError:
-        parsed_url = None
-    if not (
-        parsed_url
-        and parsed_url.scheme == "https"
-        and parsed_url.netloc
-        and parsed_url.username is None
-        and parsed_url.password is None
-        and parsed_url.path == f"/l/{token}"
-        and not parsed_url.query
-        and not parsed_url.fragment
-    ):
-        return await asyncio.to_thread(
-            _compensate_failed_publish, org, token, "registry-response")
-    # org:join's lifetime is the invitation's: the relay must echo the exact
-    # expiry we sent, or the link would outlive/undercut the invite. Refuse to
-    # cache on any mismatch (mirrors the retired HTTP path's guard).
-    if (
-        req.get("target_type") == "org:join"
-        and reply.get("expires_at") != req.get("expires_at")
-    ):
-        return await asyncio.to_thread(
-            _compensate_failed_publish, org, token, "invitation-expiry")
-
-    # Per-link channel key (graph://807b4e11-3e9): mint the keypair, vault the
-    # private seed org-wide, and carry the public key on the grant row. The
-    # shareable URL gains the key as a FRAGMENT — presentation-side only; the
-    # registry minted and stores the canonical url and never sees the key.
-    #
+    # O-C (2026-09-20): the grant row and the channel key row are written
+    # BEFORE create-link under a publisher-minted grant id, so the link's
+    # requirement R can name them and ride in the one create-link. The
+    # registry mints the token; it is written into the grant afterwards for
+    # display and revocation, a later version no member needs in order to
+    # serve. The registry hands the grant id to the serving member with the
+    # token at every viewer open; the member finds its rows by it.
     from tools.dashboard.link_channel_key import (
         CHANNEL_KEY_TARGET_TYPES,
         fragment_url,
         mint_channel_key,
     )
+    grant_id = secrets.token_hex(16)
     channel_pub = None
-    share_url = url
     if req["target_type"] in CHANNEL_KEY_TARGET_TYPES:
         try:
-            channel_pub = mint_channel_key(token, org)
-        except Exception:
-            return await asyncio.to_thread(
-                _compensate_failed_publish, org, token, "channel-key")
-        # A content share link carries only the channel key in its fragment, so
-        # the executor can assemble the complete URL here. An org:join link's
-        # complete URL needs BOTH the channel key and the invitation bearer
-        # (graph://4f9e881c-a9 §3), and the bearer is not held server-side at
-        # publish (it is minted client-side / retained separately). So the
-        # canonical url and channel_pub are returned independently and the
-        # caller (CLI, Membership browser) builds the two-value fragment with
-        # the one shared serializer — never a bearer-only or key-only URL.
-        if channel_pub is not None and req["target_type"] != "org:join":
-            share_url = fragment_url(url, channel_pub)
-
+            channel_pub = await asyncio.to_thread(mint_channel_key, grant_id, org)
+        except Exception as exc:
+            return _fail(f"could not vault the link's channel key ({exc})")
     grant = {
-        "token": token,
-        "url": url,
+        "grant_id": grant_id,
         "target_uuid": req["target_uuid"],
         "target_type": req["target_type"],
         "meta": meta or {},
@@ -1140,43 +1099,92 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
         from tools.graph import schemas
         schemas.validate_payload(
             NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION, grant)
-    except Exception:
-        return await asyncio.to_thread(
-            _compensate_failed_publish, org, token, "grant-schema")
-    try:
-        settings_ops.upsert_by_key(
+        await asyncio.to_thread(
+            settings_ops.upsert_by_key,
             NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION,
-            token, grant, org=org,
+            grant_id, grant, org=org,
+        )
+    except Exception as exc:
+        await asyncio.to_thread(_drop_cached_grant, grant_id, org)
+        return _fail(f"could not write the link's grant ({exc})")
+    if req["target_type"] == "note" and org not in (None, "personal"):
+        # R: the author personas of the rows this link serves, its grant row
+        # and its channel key row, so the relay dials only members that hold
+        # all of them (auto-xs9hz). Built AFTER those rows commit.
+        try:
+            requires = await asyncio.to_thread(
+                _link_requirements, org, req["target_uuid"], grant_id,
+            )
+        except LinkRequirementError as exc:
+            await asyncio.to_thread(_drop_cached_grant, grant_id, org)
+            return _fail(f"requires-attribution: {exc}")
+        if requires is not None:
+            args["requires"] = requires
+    args["grant_id"] = grant_id
+    try:
+        reply = await asyncio.to_thread(_create_link_over_tunnel, org, args)
+    except TunnelUnavailable as exc:
+        await asyncio.to_thread(_drop_cached_grant, grant_id, org)
+        return _fail(f"the serving tunnel did not come up in time ({exc})")
+    if not reply.get("ok"):
+        await asyncio.to_thread(_drop_cached_grant, grant_id, org)
+        return _fail(reply.get("error", "the registry refused the link"))
+    token, url = reply.get("token"), reply.get("url")
+    if not isinstance(token, str) or not _TOKEN_RE.match(token):
+        return await asyncio.to_thread(
+            _compensate_failed_publish, org, token, "registry-response",
+            grant_id=grant_id)
+    try:
+        parsed_url = urlsplit(url) if isinstance(url, str) else None
+    except ValueError:
+        parsed_url = None
+    if not (
+        parsed_url
+        and parsed_url.scheme == "https"
+        and parsed_url.netloc
+        and parsed_url.username is None
+        and parsed_url.password is None
+        and parsed_url.path == f"/l/{token}"
+        and not parsed_url.query
+        and not parsed_url.fragment
+    ):
+        return await asyncio.to_thread(
+            _compensate_failed_publish, org, token, "registry-response",
+            grant_id=grant_id)
+    # org:join's lifetime is the invitation's: the relay must echo the exact
+    # expiry we sent, or the link would outlive/undercut the invite. Refuse to
+    # cache on any mismatch (mirrors the retired HTTP path's guard).
+    if (
+        req.get("target_type") == "org:join"
+        and reply.get("expires_at") != req.get("expires_at")
+    ):
+        return await asyncio.to_thread(
+            _compensate_failed_publish, org, token, "invitation-expiry",
+            grant_id=grant_id)
+    share_url = url
+    # A content share link carries only the channel key in its fragment, so
+    # the executor can assemble the complete URL here. An org:join link's
+    # complete URL needs BOTH the channel key and the invitation bearer
+    # (graph://4f9e881c-a9 §3), and the bearer is not held server-side at
+    # publish (it is minted client-side / retained separately). So the
+    # canonical url and channel_pub are returned independently and the
+    # caller (CLI, Membership browser) builds the two-value fragment with
+    # the one shared serializer — never a bearer-only or key-only URL.
+    if channel_pub is not None and req["target_type"] != "org:join":
+        share_url = fragment_url(url, channel_pub)
+    # The token and url, now minted, into the grant for display and
+    # revocation: a later version of the row that serving never needs.
+    grant.update({"token": token, "url": url})
+    try:
+        await asyncio.to_thread(
+            settings_ops.upsert_by_key,
+            NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION,
+            grant_id, grant, org=org,
         )
     except Exception:
         return await asyncio.to_thread(
-            _compensate_failed_publish, org, token, "grant-write")
-    if req["target_type"] == "note" and org not in (None, "personal"):
-        # R: the author personas of the rows this link serves, with the
-        # grant row itself, so the relay dials only members that hold
-        # them (auto-xs9hz). Built AFTER the grant row commits.
-        try:
-            requires = await asyncio.to_thread(
-                _link_requirements, org, req["target_uuid"], token,
-            )
-        except LinkRequirementError as exc:
-            return await asyncio.to_thread(
-                _compensate_failed_publish, org, token, "requires-attribution",
-                detail=str(exc),
-            )
-        if requires is not None:
-            try:
-                reply = await asyncio.to_thread(
-                    _control_over_tunnel, org, "set-link-requires",
-                    {"token": token, "requires": requires},
-                )
-            except TunnelUnavailable as exc:
-                reply = {"ok": False, "error": str(exc)}
-            if not reply.get("ok"):
-                return await asyncio.to_thread(
-                    _compensate_failed_publish, org, token, "requires-write",
-                    detail=reply.get("error"),
-                )
+            _compensate_failed_publish, org, token, "grant-write",
+            grant_id=grant_id)
     # Fleet publishes a rendezvous first, then signs its portable invitation.
     # It uses the Fleet enrollment protocol, not a keyed content channel.
     serving = (
@@ -1208,7 +1216,8 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
     }
 
 
-def _compensate_failed_publish(org, token, stage, *, detail=None, probe=None):
+def _compensate_failed_publish(org, token, stage, *, detail=None, probe=None,
+                               grant_id=None):
     """Undo a remotely-created link without disclosing its capabilities.
 
     ``detail`` is WHY the stage failed (the probe's own words: "link has no
@@ -1228,7 +1237,7 @@ def _compensate_failed_publish(org, token, stage, *, detail=None, probe=None):
                               "unknown link" in (reply.get("error") or ""))
     except Exception:
         pass
-    cleanup = _drop_cached_grant(token, org)
+    cleanup = _drop_cached_grant(grant_id or token, org)
     prefix = token[:8] if isinstance(token, str) else "invalid"
     outcome = {
         "ok": False,
@@ -1395,13 +1404,17 @@ def _drop_cached_grant(token: str, org: str | None) -> dict:
     """Close the serving gate first, then clean up the now-powerless seed."""
     from tools.dashboard.link_channel_key import drop_channel_key
     grant_cleanup = False
+    row_key = token  # a grant minted before O-C is keyed by its token
     try:
         for m in settings_ops.read_owned_set(
             NETWORK_LINK_GRANT_SET_ID,
             org=org,
             target_revision=NETWORK_LINK_GRANT_REVISION,
         ).members:
-            if m.key == token:
+            if m.key == token or (
+                isinstance(m.payload, dict) and m.payload.get("token") == token
+            ):
+                row_key = m.key
                 settings_ops.remove_setting(m.id, org=org)
                 break
         # A successful owning-set read plus a successful remove (or absence)
@@ -1414,14 +1427,14 @@ def _drop_cached_grant(token: str, org: str | None) -> dict:
     # grant removal failed, leave it intact for a repair retry.
     key_cleanup = False
     if grant_cleanup:
-        key_cleanup = bool(drop_channel_key(token, org))
+        key_cleanup = bool(drop_channel_key(row_key, org))
     if grant_cleanup and not key_cleanup:
         try:
             from tools.graph.schemas.network_identity import (
                 NETWORK_LINK_CHANNEL_KEY_SET_ID,
             )
             key_cleanup = settings_ops.read_set_key(
-                NETWORK_LINK_CHANNEL_KEY_SET_ID, token, org=org) is None
+                NETWORK_LINK_CHANNEL_KEY_SET_ID, row_key, org=org) is None
         except Exception:
             key_cleanup = False
     return {"grant_cleanup": grant_cleanup, "key_cleanup": key_cleanup}

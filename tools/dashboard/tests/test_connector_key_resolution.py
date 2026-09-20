@@ -23,7 +23,7 @@ def setup(monkeypatch, tmp_path):
     monkeypatch.delenv("GRAPH_DB", raising=False)
     key = KeyPair.generate()
     state = {"key": key, "active": True}
-    def grant(token, *, org):
+    def grant(token, *, org, grant_id=None):
         if token == TOKEN and org == "autonomy" and state["active"]:
             return {"target_type": "present", "channel_pub": state["key"].public_hex}
     monkeypatch.setattr(link_serving, "check_grant", grant)

@@ -86,7 +86,7 @@ def valid_cancel_request(request: dict) -> bool:
     )
 
 
-def _authorize(token: str, ref: str, org: Optional[str], clock):
+def _authorize(token: str, ref: str, org: Optional[str], clock, grant_id=None):
     """Resolve *ref* to a servable attachment row for the granted note.
 
     Returns ``(attachment_row, None)`` on success or ``(None, error_code)``.
@@ -94,7 +94,7 @@ def _authorize(token: str, ref: str, org: Optional[str], clock):
     """
     from tools.dashboard import link_serving
 
-    grant = link_serving.check_grant(token, org=org, now=clock())
+    grant = link_serving.check_grant(token, org=org, now=clock(), grant_id=grant_id)
     if grant is None or grant.get("target_type") != "note":
         # A non-note grant (or none) never serves an attachment.
         return None, "not_authorized"
@@ -128,7 +128,8 @@ def _authorize(token: str, ref: str, org: Optional[str], clock):
 
 
 async def fetch_stream(
-    token: str, request: dict, *, org: Optional[str] = None, now=None
+    token: str, request: dict, *, org: Optional[str] = None, now=None,
+    grant_id: Optional[str] = None,
 ) -> AsyncIterator[bytes]:
     """Stream one window of an attachment as body frames, or one error message.
 
@@ -147,7 +148,7 @@ async def fetch_stream(
     # Exception deliberately does not catch CancelledError/GeneratorExit
     # (both BaseException), so cancellation still unwinds normally.
     try:
-        att, err = await asyncio.to_thread(_authorize, token, ref, org, clock)
+        att, err = await asyncio.to_thread(_authorize, token, ref, org, clock, grant_id)
     except Exception:
         yield _error(ref, "unavailable")
         return

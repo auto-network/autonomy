@@ -166,21 +166,24 @@ def test_create_link_stores_requires_as_persona_keys_and_integers_only(app, clie
         assert plain["ok"] is True and app.state.store.get_link(plain["token"]).requires is None
 
 
-def test_set_link_requires_records_the_map_only_for_the_owning_org(app, client, clock, root):
+def test_create_link_carries_the_grant_id_and_hands_it_to_the_member(app, client, clock, root):
+    """O-C (2026-09-20): R and the publisher-minted grant id ride in the one
+    create-link; the registry stores the id on the link. A link without one
+    is resolved by its token."""
     register(client, clock, root, org_uuid=ORG)
     with _tunnel(client, clock, root, caps=()) as (ws, machine):
-        made = _ctrl(ws, "create-link", {"target_uuid": TARGET, "target_type": "note"})
+        made = _ctrl(ws, "create-link", {
+            "target_uuid": TARGET, "target_type": "note",
+            "requires": {P1: 12}, "grant_id": "ab" * 16,
+        })
         assert made["ok"] is True
-        token = made["token"]
-        assert app.state.store.get_link(token).requires is None
-        reply = _ctrl(ws, "set-link-requires", {"token": token, "requires": {P1: 12}})
-        assert reply["ok"] is True and reply["personas"] == 1
-        assert app.state.store.get_link(token).requires == {P1: 12}
-        assert _ctrl(ws, "set-link-requires", {"token": "nope", "requires": {P1: 1}})["ok"] is False
-        assert _ctrl(ws, "set-link-requires", {"token": token, "requires": {"x": 1}})["ok"] is False
-        assert _ctrl(ws, "set-link-requires", {"token": token})["ok"] is False
-        assert app.state.store.get_link(token).requires == {P1: 12}
-    # Another organization's tunnel cannot touch it: the store refuses a
-    # foreign org_uuid outright.
-    assert app.state.store.set_link_requires(token, "other-org", {P1: 99}) is False
-    assert app.state.store.get_link(token).requires == {P1: 12}
+        link = app.state.store.get_link(made["token"])
+        assert link.requires == {P1: 12} and link.grant_id == "ab" * 16
+        for bad in ("short", "AB" * 16, 7):
+            refused = _ctrl(ws, "create-link", {
+                "target_uuid": TARGET, "target_type": "note", "grant_id": bad,
+            })
+            assert refused["ok"] is False, bad
+        plain = _ctrl(ws, "create-link", {"target_uuid": TARGET, "target_type": "note"})
+        assert app.state.store.get_link(plain["token"]).grant_id is None
+        assert _ctrl(ws, "set-link-requires", {"token": made["token"], "requires": {P1: 1}})["ok"] is False

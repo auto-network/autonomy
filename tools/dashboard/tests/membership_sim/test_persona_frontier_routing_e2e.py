@@ -4,7 +4,7 @@ graph://d9153c5a-76e O-C, constitution graph://6ad52a52-f75 piece 5).
 Everything real: a registry subprocess, two admitted member personas A and
 B each with its own authenticated connector, and a real viewer dialing the
 link with only its fragment key. A publishes a note link OVER ITS TUNNEL
-(create-link, then set-link-requires naming its own persona at the note's
+(create-link carrying R naming its own persona at the note's
 write time), so the requirement is recorded the way a dashboard records
 it. B holds the link key too, so any dial that reached B would serve; the
 only thing keeping B out is routing.
@@ -18,7 +18,7 @@ frontier that covers the note.
 
 What the registry log shows. The registry runs with ``--log-level info``
 (auto-0tfuz), so besides the control-op result lines
-(``control ... op=set-link-requires ... result=ok``) and the refusal
+(``control ... op=create-link ... result=ok``) and the refusal
 warnings, every dial's ``relay dial routed`` line names the machine it
 was routed to. Routing is asserted both there and at the tunnels: A's
 connector counts ten channel opens and B's counts zero.
@@ -134,24 +134,21 @@ def test_a_link_is_served_only_by_members_whose_frontier_covers_its_authors(regi
             async with run_connector(a.conn):
                 # A writes the note and publishes its link over its own tunnel.
                 written_at_ns = time.time_ns()
+                # The grant row committed; R names the author persona at the
+                # newest timestamp of the rows the link serves, and rides in
+                # the one create-link with the publisher-minted grant id (O-C).
+                stamp = time.time_ns()
+                assert stamp >= written_at_ns
                 made = await a.conn.control("create-link", {
                     "target_uuid": note_uuid, "target_type": "note",
+                    "requires": {persona_a: stamp}, "grant_id": "cd" * 16,
                 })
                 assert made.get("ok") is True, made
                 token = made["token"]
                 a.held[token] = link_key
                 b.held[token] = link_key
-                # The grant row committed; R names the author persona at the
-                # newest timestamp of the rows the link serves.
-                stamp = time.time_ns()
-                assert stamp >= written_at_ns
-                requires_reply = await a.conn.control("set-link-requires", {
-                    "token": token, "requires": {persona_a: stamp},
-                })
-                assert requires_reply.get("ok") is True, requires_reply
-                assert requires_reply["personas"] == 1
                 evidence["requires_line"] = _wait_log(
-                    log, rf"control org=\S+ op=set-link-requires id={requires_reply['id']} result=ok",
+                    log, rf"control org=\S+ op=create-link id={made['id']} result=ok",
                 )
                 # A's frontier covers its own write; B's advert is behind on
                 # A's persona (its store has not received A's persona cut).

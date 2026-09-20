@@ -264,7 +264,8 @@ class TestGrantGate:
         }
         assert link_serving._grant_valid(dict(base), _token(8), now) is not None
         cases = [
-            {"token": _token(9)},                        # key/payload mismatch
+            # (a payload token that differs from the dialed token is no longer
+            # a refusal: the row is found by the registry's grant id, O-C)
             {"target_type": "session"},                  # not a §6.1 kind
             {"target_uuid": "not-a-uuid"},
             {"meta": {"require_auth": True}},            # rung-2 reservation

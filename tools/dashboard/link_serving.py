@@ -148,7 +148,11 @@ def _grant_valid(payload, token: str, now: float):
     these unrepresentable, but the serving path re-checks because a cache
     row is the last line between a token and artifact bytes (I9).
     """
-    if not isinstance(payload, dict) or payload.get("token") != token:
+    # The grant's own token is no longer compared to the dialed token: the
+    # row is found by the grant id the registry hands the member with the
+    # token (O-C, 2026-09-20), and the channel key in the URL fragment pins
+    # the content to the right viewer whatever the relay says.
+    if not isinstance(payload, dict):
         return None
     if payload.get("target_type") not in TARGET_TYPES:
         return None
@@ -185,8 +189,13 @@ def _grant_valid(payload, token: str, now: float):
     return payload
 
 
-def check_grant(token: str, *, org: str | None = None, now: float | None = None):
+def check_grant(token: str, *, org: str | None = None, now: float | None = None,
+                grant_id: str | None = None):
     """THE I9 gate: token → valid LOCAL grant payload, or None.
+
+    *grant_id* is the row key the registry handed the member with the token
+    at the viewer open (O-C, 2026-09-20); a link minted before that carries
+    none, and its row is keyed by the token.
 
 
     Only the dashboard's own ``autonomy.network.link-grant`` cache is
@@ -196,6 +205,11 @@ def check_grant(token: str, *, org: str | None = None, now: float | None = None)
     """
     if not isinstance(token, str) or not _TOKEN_RE.match(token):
         return None
+    if grant_id is not None and (
+        not isinstance(grant_id, str) or not _TOKEN_RE.match(grant_id)
+    ):
+        return None
+    key = grant_id or token
     try:
         # Owning-scope read (P2): the serving gate must consult only THIS
         # org's own grant cache. A peer-published grant row must never be
@@ -210,7 +224,7 @@ def check_grant(token: str, *, org: str | None = None, now: float | None = None)
     except Exception:
         return None  # unreadable cache → no grant → no bytes (fail closed)
     for member in members:
-        if member.key == token:
+        if member.key == key:
             return _grant_valid(member.payload, token,
                                 time.time() if now is None else now)
     return None
@@ -1303,8 +1317,11 @@ def make_grant_handler(org: str | None = None, *, now=None):
     """
     clock = now or time.time
 
+    # token -> grant id, filled at each viewer open from the registry's hand-off
+    grants_by_token: dict[str, str] = {}
+
     def _serve(token: str, head: bool = False) -> bytes:
-        grant = check_grant(token, org=org, now=clock())
+        grant = check_grant(token, org=org, now=clock(), grant_id=grants_by_token.get(token))
         if grant is None:
             return REFUSED
         resolved = resolve_target(grant, org=org)
@@ -1326,13 +1343,13 @@ def make_grant_handler(org: str | None = None, *, now=None):
         return canonical_json(header) + b"\n" + body
 
     def _join(token: str, request: dict) -> bytes:
-        grant = check_grant(token, org=org, now=clock())
+        grant = check_grant(token, org=org, now=clock(), grant_id=grants_by_token.get(token))
         if grant is None or grant["target_type"] != "org:join":
             return REFUSED  # a content token never serves the join protocol
         return _serve_join(grant, org, request)
 
     def _fleet_join(token: str, request: dict, channel_state: dict) -> bytes:
-        grant = check_grant(token, org=org, now=clock())
+        grant = check_grant(token, org=org, now=clock(), grant_id=grants_by_token.get(token))
         if grant is None or grant["target_type"] != "fleet:join":
             return REFUSED
         try:
@@ -1384,7 +1401,8 @@ def make_grant_handler(org: str | None = None, *, now=None):
             if not attachment_serving.valid_fetch_request(request):
                 return BAD_REQUEST
             return attachment_serving.fetch_stream(
-                token, request, org=org, now=clock
+                token, request, org=org, now=clock,
+                grant_id=grants_by_token.get(token),
             )
         if op == "attachment.cancel":
             # The real cancel is the client not requesting the next window;
@@ -1401,8 +1419,12 @@ def make_grant_handler(org: str | None = None, *, now=None):
     async def handler(token: str, message: bytes) -> bytes:
         return await _handle(token, message, {})
 
-    async def for_channel(_token: str):
+    async def for_channel(_token: str, grant: str | None = None):
         channel_state: dict = {}
+        if grant:
+            # One link has one grant id, so every viewer of the token maps to
+            # the same row; the serve/join/attachment paths read it from here.
+            grants_by_token[_token] = grant
 
         async def channel_handler(token: str, message: bytes) -> bytes:
             return await _handle(token, message, channel_state)
@@ -1618,13 +1640,13 @@ def _make_ice_serving_connector(
         telling us to look again, not an input we should trust into a proof."""
         return await _membership_rider()
 
-    def _link_key_for(token):
+    def _link_key_for(token, grant=None):
         from tools.dashboard.link_channel_key import (
             ChannelKeyUnavailable,
             channel_key_for,
         )
         try:
-            return channel_key_for(token, graph_org)
+            return channel_key_for(grant or token, graph_org)
         except ChannelKeyUnavailable:
             return None
 
@@ -1667,7 +1689,9 @@ def _make_ice_serving_connector(
         max_backoff=max_backoff,
         publisher=publisher,
         channel_authorization_for=(
-            lambda token: {"protocol": "public-link", "key": _link_key_for(token)}
+            lambda token, grant=None: {
+                "protocol": "public-link", "key": _link_key_for(token, grant),
+            }
         ),
         **stream_kwargs,
     )

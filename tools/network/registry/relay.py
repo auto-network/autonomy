@@ -1554,20 +1554,6 @@ def _covers(tunnel: "Tunnel", requires: dict) -> bool:
     return all(int(frontiers.get(persona, -1)) >= int(stamp) for persona, stamp in requires.items())
 
 
-def _ctrl_set_link_requires(tunnel: "Tunnel", args: dict, store: RegistryStore) -> dict:
-    """Record R on a link this tunnel's org owns, after the publisher's
-    grant row has committed (auto-xs9hz). Replaces the map whole."""
-    if not isinstance(args, dict) or set(args) != {"token", "requires"}:
-        raise _CtrlError("set-link-requires takes exactly token and requires")
-    token = args["token"]
-    if not isinstance(token, str) or not token:
-        raise _CtrlError("token must be a non-empty string")
-    requires = _parse_persona_map(args["requires"], "requires")
-    if not store.set_link_requires(token, tunnel.org, requires):
-        raise _CtrlError("unknown link, or not this organization's")
-    return {"personas": len(requires or {})}
-
-
 def _ctrl_sync_frontier(tunnel: "Tunnel", args: dict) -> dict:
     """A member's per-persona frontier advert (auto-xs9hz). Replaces the
     tunnel's map whole. An oversized map is a protocol violation and closes
@@ -1784,11 +1770,20 @@ def _ctrl_create_link(tunnel: "Tunnel", args: dict, store: RegistryStore,
                 "serving_machine is not the machine this tunnel authenticated"
             )
     requires = _parse_persona_map(args.get("requires"), "requires")
+    # O-C (2026-09-20): the publisher's grant row and channel key row are
+    # keyed by a 32-hex id it minted BEFORE this request, so R can name them.
+    # Stored on the link and handed to the serving member at every viewer
+    # open; a link without one is resolved by its token.
+    grant_id = args.get("grant_id")
+    if grant_id is not None and (
+        not isinstance(grant_id, str) or _re.fullmatch(r"[0-9a-f]{32}", grant_id) is None
+    ):
+        raise _CtrlError("grant_id must be 32 lowercase hex")
 
     central = _central_operation(tunnel, args, store, witness_key)
     if central is not None:
         allowed = (
-            {"target_uuid", "target_type", "meta", "serving_machine", "requires"}
+            {"target_uuid", "target_type", "meta", "serving_machine", "requires", "grant_id"}
             | _CENTRAL_LINK_FIELDS
         )
         if set(args) - allowed:
@@ -1834,6 +1829,7 @@ def _ctrl_create_link(tunnel: "Tunnel", args: dict, store: RegistryStore,
             operation_id=args["operation_id"],
             serving_machine=serving_machine,
             requires=requires,
+            grant_id=grant_id,
         )
         status, completed = store.execute_publish_operation(
             tunnel.org, args["operation_id"], grant, now=now
@@ -1868,6 +1864,7 @@ def _ctrl_create_link(tunnel: "Tunnel", args: dict, store: RegistryStore,
             subject_id=None,
             serving_machine=serving_machine,
             requires=requires,
+            grant_id=grant_id,
         )
     )
     result = {"token": token, "url": f"{base_url}/l/{token}"}
@@ -2204,8 +2201,6 @@ async def _handle_ctrl_frame(tunnel: "Tunnel", payload: bytes,
             result = _ctrl_reprove_membership(tunnel, args, store, now)
         elif op == "sync-frontier":
             result = _ctrl_sync_frontier(tunnel, args)
-        elif op == "set-link-requires":
-            result = _ctrl_set_link_requires(tunnel, args, store)
         elif op == "issue-turn":
             result = _ctrl_issue_turn(tunnel, args, turn_issuer)
         elif op in _HOST_OP_ARGS:
@@ -2611,8 +2606,11 @@ async def viewer_endpoint(
             try:
                 relay_channel.stream_token = token
                 tunnel.attach_listener(token, channel_id, relay_channel)
+                # The member resolves its grant and channel key by this id;
+                # a link from before O-C carries none and is keyed by its token.
                 await tunnel.send_frame(FRAME_OPEN, channel_id,
-                                        canonical_json({"token": token}))
+                                        canonical_json({"token": token,
+                                                        "grant": getattr(link, "grant_id", None) or token}))
                 for raw in replay:
                     await tunnel.send_frame(FRAME_DATA, channel_id, raw)
             except Exception:
