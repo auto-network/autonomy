@@ -132,3 +132,23 @@ EOF
 
 log "Rebuilt successfully: ${REASONS[*]}"
 graph note "autonomy-session image rebuilt: ${REASONS[*]}" --tags ops,image-update 2>/dev/null || true
+
+# ── Rebuild every per-workspace image in series ──
+# The base images just changed, so every <org>/<workspace-id> image built FROM
+# them is now stale (this is why Enterprise NG sat 32 Claude releases behind).
+# image_builder keys its skip-hash on the provision Dockerfile (unchanged here),
+# so --force is required to re-inherit the fresh base. The per-org Settings DBs
+# and the docker socket live in the dashboard container, not this host checkout,
+# so the sweep runs there. A sweep failure does NOT fail the run: the base — the
+# actual harness update — already rebuilt; the workspace images just stay stale
+# until the next successful sweep.
+DASH_CONTAINER="${DASH_CONTAINER:-autonomy-dashboard-1}"
+log "Rebuilding all workspace images in series (--force) via $DASH_CONTAINER"
+if docker exec -u autonomy -w /app "$DASH_CONTAINER" \
+        python3 -m agents.image_builder --force >>"$LOG_FILE" 2>&1; then
+    log "Workspace image sweep complete"
+    graph note "workspace images rebuilt after base update: ${REASONS[*]}" --tags ops,image-update 2>/dev/null || true
+else
+    log "WARN: workspace image sweep failed — base rebuilt, project images may be stale"
+    graph note "auto-update-image: base rebuilt but workspace sweep FAILED" --tags ops,image-update,failure 2>/dev/null || true
+fi
