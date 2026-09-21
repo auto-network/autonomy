@@ -74,6 +74,7 @@ from tools.graph.schemas.network_identity import (
     TARGET_TYPES,
 )
 from tools.network.idkit import canonical_json
+from tools.network.relaykit.close_codes import FollowBehind, FollowNoFrontier
 
 AUTONET_MAX_ARTIFACT_BYTES = 48 * 1024 * 1024
 AUTONET_MAX_FAVICON_BYTES = 512 * 1024
@@ -1444,6 +1445,33 @@ def make_grant_handler(org: str | None = None, *, now=None, fleet_runtime=None):
         genesis = _follow_genesis_id(str(meta.get("org") or ""))
         if not genesis:
             return REFUSED
+        # Member-local refusals, made BEFORE a byte is served so the relay can
+        # fail the dial over to another member (design of record
+        # graph://5f2f5a49-00d §10.2, §10.3). This member can serve a follower
+        # only up to the org frontier F it can claim — the minimum over its
+        # covered persona write floors. No F → it holds no covered floor and
+        # cannot serve; the follower's cursor above F → it would serve nothing
+        # below the cursor. Both raise typed closes the relay treats as
+        # failover (CLOSE_FOLLOW_NO_FRONTIER / CLOSE_FOLLOW_BEHIND); the
+        # scheduler's in-band follow-no-frontier record is the same refusal for
+        # a reply already begun.
+        frontier = await asyncio.to_thread(scheduler.follow_frontier, genesis)
+        if frontier is None:
+            raise FollowNoFrontier(
+                "no covered persona write floor for org "
+                f"{genesis[:12]}: this member cannot claim an org frontier"
+            )
+        watermarks = body.get("watermarks")
+        cursor = 0
+        if isinstance(watermarks, dict):
+            raw = watermarks.get(genesis, 0)
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+                cursor = raw
+        if cursor > frontier:
+            raise FollowBehind(
+                f"follower cursor {cursor} is above this member's org "
+                f"frontier {frontier} for org {genesis[:12]}"
+            )
         admission = Admission(kind="follow", org=genesis)
         pull = canonical_json(body)
         # No peer credential (""), the follow admission, and the same handler

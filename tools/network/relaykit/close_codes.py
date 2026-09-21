@@ -69,9 +69,38 @@ CLOSE_VIEWER_HANDSHAKE_FAILED = 4504
 #: (4505, CLOSE_CHANNEL_NOT_SERVED, is declared with the relay family above:
 #: the connector sends it when its channel ends before the viewer's hello,
 #: and the relay sets it when a connector closes empty before serving.)
+#: A follow (org:follow link): this member holds no covered persona write
+#: floor for the organization, so it cannot claim an org frontier and cannot
+#: serve the follower. A member-local refusal made before a byte is served,
+#: so the relay fails the dial over to another member (design of record
+#: graph://5f2f5a49-00d §10.3; graph://6ad52a52-f75 pieces 4 and 6).
+CLOSE_FOLLOW_NO_FRONTIER = 4506
+#: A follow (org:follow link): the follower's cursor is above this member's
+#: org frontier, so it would serve nothing below the cursor and refuses. Also
+#: a member-local, before-serving refusal that fails the dial over to a
+#: member that is further ahead (design of record graph://5f2f5a49-00d §10.3).
+CLOSE_FOLLOW_BEHIND = 4507
 
 CONNECTOR_CODE_RANGE = range(4500, 4600)
 MAX_REASON_BYTES = 200
+
+
+class FollowRefused(Exception):
+    """A member-local refusal the link server raises for a follow (org:follow)
+    dial BEFORE serving a byte, so the relay fails the dial over to another
+    member (design of record graph://5f2f5a49-00d §10.3). Its subclasses map
+    to the two follow close codes below, exactly as an unarmed connector's
+    PermissionError maps to CLOSE_CONNECTOR_UNARMED."""
+
+
+class FollowNoFrontier(FollowRefused):
+    """No covered persona write floor for the organization: this member cannot
+    claim an org frontier and cannot serve the follower (CLOSE_FOLLOW_NO_FRONTIER)."""
+
+
+class FollowBehind(FollowRefused):
+    """The follower's cursor is above this member's org frontier: it would
+    serve nothing below the cursor and refuses (CLOSE_FOLLOW_BEHIND)."""
 
 
 @dataclass(frozen=True)
@@ -257,6 +286,22 @@ MEANINGS: dict[int, CloseMeaning] = {
         "the link URL's fragment key does not match the vaulted key: the "
         "link was re-minted, or the URL was copied wrong",
     ),
+    CLOSE_FOLLOW_NO_FRONTIER: CloseMeaning(
+        "follow: no org frontier",
+        "this member holds no covered persona write floor for the "
+        "organization, so it cannot claim an org frontier and serves the "
+        "follower nothing; the relay fails the dial over to another member",
+        "wait one sync round, or bring up a member whose machines have "
+        "caught up to a persona write floor (fleet_doctor names the gap)",
+    ),
+    CLOSE_FOLLOW_BEHIND: CloseMeaning(
+        "follow: member behind the follower",
+        "the follower's cursor is above this member's org frontier, so it "
+        "would serve nothing below the cursor and refuses; the relay fails "
+        "the dial over to a member further ahead",
+        "wait for this member to catch up, or let the failover reach a "
+        "member whose org frontier is at or above the follower's cursor",
+    ),
 }
 
 
@@ -285,6 +330,14 @@ def classify_connector_error(exc: BaseException) -> tuple[int, str]:
     """The close code and reason for an error that ended a viewer channel
     inside the connector. The reason is the error's own words."""
     text = str(exc) or type(exc).__name__
+    # A follow (org:follow) member-local refusal: raised by the link server
+    # before a byte is served so the relay fails the dial over to another
+    # member (registry FAILOVER_CODES). Mapped from its own typed exceptions,
+    # the way CLOSE_CONNECTOR_UNARMED is mapped from a PermissionError.
+    if isinstance(exc, FollowNoFrontier):
+        return CLOSE_FOLLOW_NO_FRONTIER, text
+    if isinstance(exc, FollowBehind):
+        return CLOSE_FOLLOW_BEHIND, text
     if isinstance(exc, PermissionError):
         if "credential unavailable" in text:
             return CLOSE_CONNECTOR_UNARMED, text

@@ -101,6 +101,7 @@ from tools.network.relaykit.close_codes import (  # noqa: E402
     CLOSE_SERVING_MACHINE_OFFLINE, CLOSE_TUNNEL_TORN_DOWN, CLOSE_VIEWER_CAP,
     CLOSE_CONNECTOR_UNARMED, CLOSE_KEY_RESOLUTION_REFUSED,
     CLOSE_AUTHORIZATION_UNAVAILABLE, CLOSE_CONNECTOR_ERROR,
+    CLOSE_FOLLOW_NO_FRONTIER, CLOSE_FOLLOW_BEHIND,
 )
 
 #: A freshly published link routes ONLY to the machine that published it for
@@ -123,10 +124,17 @@ FRESH_LINK_SWEEP_S = 3600.0
 #: before the viewer received a byte moves the viewer to the next candidate
 #: instead of ending it. 2026-09-17: a member 35 h behind refused half of an
 #: org's viewer loads with 4502 while a healthy sibling sat idle.
+#: A follow (org:follow) dial adds two member-local refusals to the set: a
+#: member with no covered persona write floor for the org (no frontier to
+#: claim) and a member whose org frontier is below the follower's cursor.
+#: Either means "this member cannot serve THIS follower" -- exactly the
+#: member-local shape failover exists for -- so the dial moves to the next
+#: candidate (design of record graph://5f2f5a49-00d §10.1, §10.3).
 FAILOVER_CODES = frozenset({
     CLOSE_CONNECTOR_UNARMED, CLOSE_KEY_RESOLUTION_REFUSED,
     CLOSE_AUTHORIZATION_UNAVAILABLE, CLOSE_CHANNEL_NOT_SERVED,
     CLOSE_VIEWER_CAP, CLOSE_TUNNEL_TORN_DOWN, CLOSE_CONNECTOR_ERROR,
+    CLOSE_FOLLOW_NO_FRONTIER, CLOSE_FOLLOW_BEHIND,
 })
 #: The code the viewer finally receives when every candidate failed: the
 #: most actionable one wins, so a first member's "re-arm me" is never
@@ -135,6 +143,7 @@ FAILOVER_PRECEDENCE = (
     CLOSE_CONNECTOR_UNARMED, CLOSE_AUTHORIZATION_UNAVAILABLE,
     CLOSE_KEY_RESOLUTION_REFUSED, CLOSE_CHANNEL_NOT_SERVED,
     CLOSE_VIEWER_CAP, CLOSE_TUNNEL_TORN_DOWN, CLOSE_CONNECTOR_ERROR,
+    CLOSE_FOLLOW_NO_FRONTIER, CLOSE_FOLLOW_BEHIND,
     CLOSE_OPEN_FAILED,
 )
 #: Candidates tried per dial, and the budget each gets to produce its first

@@ -30,11 +30,23 @@ def test_an_empty_or_foreign_payload_is_a_plain_1000():
     (PermissionError("channel authorization refused"), cc.CLOSE_KEY_RESOLUTION_REFUSED),
     (type("HandshakeError", (Exception,), {})("bad record"), cc.CLOSE_VIEWER_HANDSHAKE_FAILED),
     (RuntimeError("boom"), cc.CLOSE_CONNECTOR_ERROR),
+    # The two follow member-local refusals map from their own typed exceptions,
+    # the way the unarmed PermissionError maps to CLOSE_CONNECTOR_UNARMED.
+    (cc.FollowNoFrontier("no covered persona write floor"), cc.CLOSE_FOLLOW_NO_FRONTIER),
+    (cc.FollowBehind("cursor 900 above frontier 500"), cc.CLOSE_FOLLOW_BEHIND),
 ])
 def test_classification(exc, code):
     got, reason = cc.classify_connector_error(exc)
     assert got == code
     assert str(exc) in reason
+
+
+def test_follow_close_codes_round_trip_the_close_frame():
+    # Both are connector-authored (4500-range), so a coded close frame carries
+    # them verbatim to the viewer and the relay.
+    for code in (cc.CLOSE_FOLLOW_NO_FRONTIER, cc.CLOSE_FOLLOW_BEHIND):
+        got, reason = cc.decode_close_payload(cc.encode_close_payload(code, "why"))
+        assert got == code and reason == "why"
 
 
 def test_every_code_has_a_name_a_meaning_and_a_remedy():
