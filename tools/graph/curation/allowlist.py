@@ -124,11 +124,13 @@ def _from_dict(raw: dict, *, path: Path) -> Allowlist:
     )
 
 
-#: The exact keys an org:follow rendezvous block carries (§10.1). Present ==
-#: required; no extras. An optional ``registry_url`` is accepted for parity
-#: with the follower row (§10.4) but not required here.
-_FOLLOW_REQUIRED = ("org_uuid", "rendezvous", "link_pub")
-_FOLLOW_OPTIONAL = ("registry_url",)
+#: The keys an org:follow block carries (§10.1). ``org_uuid`` is committed
+#: as soon as the org exists; ``rendezvous`` and ``link_pub`` only after the
+#: operator publishes the follow link, so a block may lack them and still
+#: load. First run (§10.5) seeds nothing from a block without all three.
+#: ``registry_url`` is accepted for parity with the follower row (§10.4).
+_FOLLOW_REQUIRED = ("org_uuid",)
+_FOLLOW_OPTIONAL = ("rendezvous", "link_pub", "registry_url")
 
 
 def _parse_follow(raw, *, path: Path) -> dict | None:
@@ -147,8 +149,7 @@ def _parse_follow(raw, *, path: Path) -> dict | None:
         raise AllowlistError(
             f"{path}: 'follow' carries unknown key(s): {sorted(unknown)}"
         )
-    for key in (*_FOLLOW_REQUIRED, *(_FOLLOW_OPTIONAL if any(
-        k in raw for k in _FOLLOW_OPTIONAL) else ())):
+    for key in (*_FOLLOW_REQUIRED, *_FOLLOW_OPTIONAL):
         if key in raw and (not isinstance(raw[key], str) or not raw[key].strip()):
             raise AllowlistError(
                 f"{path}: 'follow.{key}' must be a non-empty string"

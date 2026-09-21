@@ -99,7 +99,11 @@ def test_loads_follow_block(tmp_path):
 def test_bundled_autonomy_allowlist_carries_a_follow_block():
     loaded = al.load(al.DEFAULT_AUTONOMY_PATH)
     assert loaded.follow is not None
-    assert set(loaded.follow) >= {"org_uuid", "rendezvous", "link_pub"}
+    # The org uuid is committed now; the link values arrive only when the
+    # operator publishes the follow link (record v5 §10.1), so their
+    # absence is the expected state of the bundled file until then.
+    assert loaded.follow["org_uuid"] == "2d4b90cb-1e89-452b-82cb-68ca44fd8e52"
+    assert "0000" not in loaded.follow["org_uuid"]
 
 
 def test_follow_absent_is_none(tmp_path):
@@ -108,9 +112,15 @@ def test_follow_absent_is_none(tmp_path):
 
 
 def test_follow_missing_required_key_raises(tmp_path):
-    body = "org: x\nversion: 1\nfollow:\n  org_uuid: 'u'\n  rendezvous: 'r'\n"
+    body = "org: x\nversion: 1\nfollow:\n  rendezvous: 'r'\n  link_pub: 'k'\n"
     with pytest.raises(al.AllowlistError, match="missing required key"):
         al.load(_write(tmp_path / "a.yaml", body))
+
+
+def test_follow_block_loads_with_only_the_org_uuid(tmp_path):
+    body = "org: x\nversion: 1\nfollow:\n  org_uuid: 'u'\n"
+    loaded = al.load(_write(tmp_path / "a.yaml", body))
+    assert loaded.follow == {"org_uuid": "u"}
 
 
 def test_follow_unknown_key_raises(tmp_path):
