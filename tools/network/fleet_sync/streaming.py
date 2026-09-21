@@ -16,6 +16,7 @@ from typing import Iterator
 
 from .codec import Mutation
 from .policies import PolicyKind, TABLE_POLICIES, TablePolicy, audit_schema
+from .projection import Projection, public_predicate_sql
 from .snapshot import _logical_address, _logical_values, _row_timestamp
 
 
@@ -139,11 +140,18 @@ def iter_indexed_snapshot_mutations(
     *,
     start_after: tuple[str, tuple[object, ...]] | None = None,
     audit: bool = True,
+    projection: Projection = Projection.FULL,
 ) -> Iterator[Mutation]:
     """Yield a WAL-snapshot base in table/key order using keyset seeks.
 
     ``start_after`` is an exclusive ``(table, logical_address)`` cursor.  It
     provides direct resume without OFFSET or replaying prior tables.
+
+    ``projection`` filters the emitted surface. Under
+    :attr:`Projection.FULL` (the default) every table and row is emitted, so
+    the output is byte-identical to the unprojected walk. Under
+    :attr:`Projection.PUBLIC` tables outside the public surface are skipped and
+    each projected table gains its public predicate as an extra WHERE clause.
     """
     register_streaming_functions(conn)
     if audit:
@@ -165,6 +173,12 @@ def iter_indexed_snapshot_mutations(
         expressions = _key_expressions(policy)
         where = ""
         params: tuple[object, ...] = ()
+        if projection is Projection.PUBLIC:
+            predicate = public_predicate_sql(table)
+            if predicate is None:
+                # An excluded table: never emitted under PUBLIC.
+                continue
+            where = f" WHERE ({predicate})"
         if table == "settings":
             # A logical setting has exactly one live base value per natural key
             # but may carry many override/exclusion patches. Base rows collapse
@@ -179,10 +193,11 @@ def iter_indexed_snapshot_mutations(
             # deprecated BASE rows only (the winner is the sole ``deprecated=0``
             # base row); override/exclusion rows keep their own per-id addresses
             # and all stream, matching the catalog exactly.
-            where = (
-                ' WHERE (supersedes IS NOT NULL OR excludes IS NOT NULL'
+            history = (
+                '(supersedes IS NOT NULL OR excludes IS NOT NULL'
                 ' OR deprecated = 0)'
             )
+            where += (" AND " if where else " WHERE ") + history
         if start_table == table:
             comparison = f"({','.join(expressions)}) > ({','.join('?' for _ in expressions)})"
             where += (" AND " if where else " WHERE ") + comparison
