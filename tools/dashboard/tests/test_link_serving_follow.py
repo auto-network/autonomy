@@ -64,8 +64,17 @@ class StubRuntime:
         self.scheduler = scheduler
 
 
+#: The organization's id on the wire: its ledger genesis id (64 hex), which
+#: the link server resolves from the grant's org slug (auto-8cpnm).
+GENESIS = "9a" * 32
+
+
 @pytest.fixture
 def grants(monkeypatch):
+    monkeypatch.setattr(
+        link_serving, "_follow_genesis_id",
+        lambda slug: GENESIS if slug == ORG else None,
+    )
     rows = {
         FOLLOW_TOKEN: {
             "token": FOLLOW_TOKEN, "target_type": "org:follow",
@@ -128,12 +137,24 @@ def test_follow_on_org_follow_grant_streams_the_scheduler_reply(grants):
     assert frames == [b"sweep-frame-1", b"sweep-frame-2"]
     assert len(sched.calls) == 1
     call = sched.calls[0]
-    # No peer credential; a follow admission carrying kind + the org uuid.
+    # No peer credential; a follow admission carrying kind + the org's
+    # ledger genesis id (never the registry uuid the grant meta names).
     assert call["peer_pub"] == ""
     assert call["admission"].kind == "follow"
-    assert call["admission"].org == ORG_UUID
+    assert call["admission"].org == GENESIS
     # The nested pull request is what crossed to the scheduler.
     assert json.loads(call["message"]) == PULL
+
+
+def test_follow_is_refused_for_an_org_this_node_holds_no_ledger_for(grants, monkeypatch):
+    monkeypatch.setattr(link_serving, "_follow_genesis_id", lambda slug: None)
+    sched = StubScheduler()
+    frames = _call(
+        FOLLOW_TOKEN, {"v": 1, "op": "follow", "request": PULL},
+        fleet_runtime=StubRuntime(sched),
+    )
+    assert sched.calls == []
+    assert frames == link_serving.REFUSED
 
 
 def test_follow_admission_cannot_be_obtained_by_a_fleet_join_grant(grants):

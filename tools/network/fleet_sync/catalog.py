@@ -2578,32 +2578,59 @@ class MutationCatalog:
             return int(newest[0]) if newest else 0
         return max(0, first_uncovered - 1)
 
-    def follow_delta_too_old(self, watermarks: dict[str, int]) -> bool:
-        """Whether a follow delta from these per-origin watermarks would be
-        incomplete because the catalog no longer retains everything between the
-        watermark and the oldest retained transaction of some origin.
+    def follow_delta_too_old(self, cursor: int) -> bool:
+        """Whether a follow delta from the follower's single cursor would be
+        incomplete because the catalog no longer retains everything above it.
 
-        A follower's watermark for an origin sitting BELOW the oldest retained
-        transaction of that origin means the run in between was pruned, so a
-        demotion tombstone that once lived there may be gone. Rather than serve
-        a partial delta that silently keeps a demoted row, the serve refuses
-        with a typed too-old error and the follower answers with a full sweep
-        (design of record §10.2; Kafka ``delete.retention.ms`` /
-        AT-Protocol cursor-too-old). A watermark of 0 for an origin is a fresh
-        follower that has never held that origin, so it is never too old --
-        that follower bootstraps.
+        A follower's cursor is one integer for the organization (bead
+        auto-8cpnm): the org frontier it last pulled through. If it sits
+        below the oldest transaction this catalog still retains, the run
+        between was pruned and a demotion tombstone that once lived there may
+        be gone. Rather than serve a partial delta that silently keeps a
+        demoted row, the serve refuses with a typed too-old error and the
+        follower answers with a full sweep (design of record §10.2; Kafka
+        ``delete.retention.ms`` / AT-Protocol cursor-too-old). A cursor of 0
+        is a fresh follower, never too old: it bootstraps.
         """
-        for origin, floor in self.conn.execute(
-            "SELECT o.incarnation, MIN(t.timestamp_ns) "
-            "FROM fleet_sync_transactions t "
-            "JOIN fleet_sync_origins o ON o.id=t.origin_id GROUP BY o.id"
-        ).fetchall():
-            if floor is None:
-                continue
-            presented = int(watermarks.get(str(origin), 0))
-            if 0 < presented < int(floor):
-                return True
-        return False
+        presented = int(cursor)
+        if presented <= 0:
+            return False
+        row = self.conn.execute(
+            "SELECT MIN(timestamp_ns) FROM fleet_sync_transactions"
+        ).fetchone()
+        floor = row[0] if row is not None else None
+        return floor is not None and presented < int(floor)
+
+    def next_follow_transaction_heads(
+        self,
+        after_timestamp_ns: int,
+        after_transaction_id: str | None = None,
+        *,
+        through_ns: int,
+        limit: int = 200,
+    ) -> list[tuple[int, int, str, str]]:
+        """Up to *limit* ``(ref, timestamp_ns, transaction_id, incarnation)``
+        of EVERY origin after the position and at or below ``through_ns``, in
+        (timestamp_ns, transaction_id) order across origins: the one stream a
+        follower sees (bead auto-8cpnm), without building any items."""
+        if after_transaction_id is None:
+            where = "t.timestamp_ns>?"
+            params: tuple = (int(after_timestamp_ns),)
+        else:
+            where = "(t.timestamp_ns>? OR (t.timestamp_ns=? AND t.transaction_id>?))"
+            params = (int(after_timestamp_ns), int(after_timestamp_ns), after_transaction_id)
+        params = (*params, int(through_ns), int(limit))
+        return [
+            (int(r[0]), int(r[1]), str(r[2]), str(r[3]))
+            for r in self.conn.execute(
+                "SELECT t.id,t.timestamp_ns,t.transaction_id,o.incarnation "
+                "FROM fleet_sync_transactions t "
+                "JOIN fleet_sync_origins o ON o.id=t.origin_id "
+                f"WHERE {where} AND t.timestamp_ns<=? "
+                "ORDER BY t.timestamp_ns, t.transaction_id LIMIT ?",
+                params,
+            ).fetchall()
+        ]
 
     def journal_breadcrumb(
         self, transaction_ref: int
