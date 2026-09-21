@@ -132,11 +132,28 @@ def env(tmp_path, monkeypatch, root, founded_org):
     GraphDB.close_all_pooled()
 
 
-def _create_publish(client, meta=None):
+@pytest.fixture
+def present_target(tmp_path, monkeypatch):
+    """A Present deck that really is in Design Studio, and its revision id.
+
+    Since 485efded, prepare_create resolves the target against the publish
+    org and raises before persisting, so a publish whose deck does not
+    exist never mints an approval. These tests are about what happens
+    AFTER an approval exists, so they need a target that resolves.
+    """
+    from agents import design_db
+    monkeypatch.setattr(design_db, "DB_PATH", tmp_path / "designs.db")
+    monkeypatch.setattr(design_db, "_initialized", False)  # re-init at tmp path
+    return design_db.create_design(
+        title="Publish approval deck",
+        variants=[{"id": "a", "html": "<section>deck</section>"}])
+
+
+def _create_publish(client, target, meta=None):
     """POST the approval exactly the way `graph link publish` does."""
     r = client.post("/api/approvals", json={
         "kind": "link_publish", "session": SESSION,
-        "request": {"org": ORG, "target_uuid": TARGET,
+        "request": {"org": ORG, "target_uuid": target,
                     "target_type": "present", "meta": meta or {}},
     })
     assert r.status_code == 200, r.text
@@ -337,6 +354,11 @@ def test_unknown_mission_target_errors_cleanly(env, tmp_path, monkeypatch):
     monkeypatch.setattr(mdb, "DB_PATH", tmp_path / "mission_control.db")
     mdb.init_db(tmp_path / "mission_control.db")
 
+    # Since 485efded the refusal happens at creation, not at enrichment: a
+    # publish whose target does not resolve never mints an approval, so the
+    # operator is never asked to approve something that cannot work. Clean
+    # means a 400 naming the target, not a traceback and not an approval
+    # that carries its own error to the operator's device.
     r = env.post("/api/approvals", json={
         "kind": "link_publish", "session": SESSION,
         "request": {
@@ -345,22 +367,22 @@ def test_unknown_mission_target_errors_cleanly(env, tmp_path, monkeypatch):
             "target_type": "mission",
         },
     })
-    enriched = env.get(f"/api/approvals/{r.json()['id']}").json()
-    assert enriched["target_title"] is None
-    assert "not found" in (enriched.get("target_error") or "")
+    assert r.status_code == 400, r.text
+    assert "mission nope-not-a-real-mission not found" in r.json()["error"]
+    assert "Traceback" not in r.text
 
 
-def test_decline_surfaces_to_requester(env):
-    rid = _create_publish(env)
+def test_decline_surfaces_to_requester(env, present_target):
+    rid = _create_publish(env, present_target)
     result = _decide_and_wait(env, rid, {"approved": False})
     assert result == {"approved": False}          # the CLI's clean-deny state
     assert _cached_grants() == {}                 # nothing published, nothing cached
     assert ar.pending_for_session(SESSION) is None
 
 
-def test_no_envelope_has_an_actionable_error(env):
+def test_no_envelope_has_an_actionable_error(env, present_target):
     """Approving without a browser signature fails with operator wording."""
-    rid = _create_publish(env)
+    rid = _create_publish(env, present_target)
     result = _decide_and_wait(env, rid, {"approved": True})
     execution = result["execution"]
     assert execution["ok"] is False
@@ -368,9 +390,9 @@ def test_no_envelope_has_an_actionable_error(env):
     assert _cached_grants() == {}
 
 
-def test_root_direct_envelope_refused_i6(env, root):
+def test_root_direct_envelope_refused_i6(env, root, present_target):
     """A certless (root-direct) envelope names no subject — refused."""
-    rid = _create_publish(env)
+    rid = _create_publish(env, present_target)
     rr = env.get(f"/api/approvals/{rid}").json()["registry_request"]
     envelope = sign_request(root, rr["method"], rr["path"], rr["payload"],
                             ts=int(time.time()))
@@ -380,12 +402,12 @@ def test_root_direct_envelope_refused_i6(env, root):
     assert _cached_grants() == {}
 
 
-def test_rerender_shows_frozen_destination_and_drift(env, session_key,
+def test_rerender_shows_frozen_destination_and_drift(env, session_key, present_target,
                                                      session_cert):
     """A re-open after a binding swap still shows the FROZEN destination —
     the operator can never see (and approve) a moved target — plus a drift
     flag the dialog turns into a warning."""
-    rid = _create_publish(env)
+    rid = _create_publish(env, present_target)
     first = env.get(f"/api/approvals/{rid}").json()
     assert first["registry_request"]["registry_url"] == REGISTRY_URL
     assert first["binding_drift"] is False

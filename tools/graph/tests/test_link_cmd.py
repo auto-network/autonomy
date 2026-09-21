@@ -88,6 +88,72 @@ def operator_env(tmp_path, monkeypatch):
     # imports are function-local, so module-attribute patches take effect.
     import tools.dashboard.link_serving_supervisor as _sup_mod
 
+    # The publish path vaults the link's channel key (9a51c3aa/bf675747) and
+    # fails closed when the vault is cold, which it always is in a test: no
+    # operator has signed in and no warm client is running. Supply the vault
+    # rather than remove the step, so the key is still generated, stored and
+    # read back — only the sealing is in memory. Every other settings write
+    # this fixture makes (the org binding) goes to the real store.
+    from tools.graph import settings_ops as _settings_ops
+    from tools.graph.schemas.network_identity import (
+        NETWORK_LINK_CHANNEL_KEY_SET_ID as _CHANNEL_SET,
+    )
+
+    _vault: dict = {}
+    _real_add = _settings_ops.add_setting
+    _real_read = _settings_ops.read_set_key
+
+    def _add_setting(set_id, rev, key, payload, *, org=None, **kw):
+        if set_id != _CHANNEL_SET:
+            return _real_add(set_id, rev, key, payload, org=org, **kw)
+        _vault[(org, key)] = dict(payload)
+        return f"channel-key-{key}"
+
+    def _read_set_key(set_id, key, *, org=None, **kw):
+        if set_id != _CHANNEL_SET:
+            return _real_read(set_id, key, org=org, **kw)
+        payload = _vault.get((org, key))
+        return None if payload is None else {"payload": payload}
+
+    _real_owned = _settings_ops.read_owned_set
+    _real_remove = _settings_ops.remove_setting
+
+    def _read_owned_set(set_id, *, org=None, target_revision=None, **kw):
+        if set_id != _CHANNEL_SET:
+            return _real_owned(set_id, org=org, target_revision=target_revision, **kw)
+
+        class _Member:
+            def __init__(self, key):
+                self.key, self.id = key, f"channel-key-{key}"
+
+        class _Resolved:
+            members = [_Member(k) for (o, k) in _vault if o == org]
+
+        return _Resolved()
+
+    def _remove_setting(member_id, *, org=None, **kw):
+        if not str(member_id).startswith("channel-key-"):
+            return _real_remove(member_id, org=org, **kw)
+        _vault.pop((org, str(member_id)[len("channel-key-"):]), None)
+        return True
+
+    monkeypatch.setattr(_settings_ops, "add_setting", _add_setting)
+    monkeypatch.setattr(_settings_ops, "read_set_key", _read_set_key)
+    monkeypatch.setattr(_settings_ops, "read_owned_set", _read_owned_set)
+    monkeypatch.setattr(_settings_ops, "remove_setting", _remove_setting)
+
+    # Publish also proves the link actually serves before reporting success
+    # (1bd9e619), which dials the relay named in the binding — unreachable
+    # from a test. Stub the socket, not the judgment: link_approvals still
+    # decides live/not-live and still rolls back on a dead link; only the
+    # dial is replaced. Same seam the fleet doctor's live test patches.
+    async def _probe_link(*, relay_url, token, link_pub, org_uuid, operation,
+                          **_kw):
+        return {"live": True, "status": 200, "content_length": 0,
+                "detail": "the link serves"}
+
+    monkeypatch.setattr("tools.dashboard.link_probe.probe_link", _probe_link)
+
     fixture_token = "cafe" * 8  # 32 lowercase hex, matches _TOKEN_RE
 
     class _TunnelStub:
@@ -353,7 +419,9 @@ def test_publish_prints_url(operator_env, capsys):
     # URL's last path segment (link_cmd.py's own comment), and the CLI
     # prints the URL bare so it stays selectable.
     url = out.split("✓ share-link published: ")[1].split()[0]
-    token = url.rsplit("/", 1)[1]
+    # The printed URL now carries the channel key in its fragment, so the
+    # token is the last path segment BEFORE the '#'.
+    token = url.rsplit("/", 1)[1].split("#")[0]
     assert len(token) == 32 and all(c in "0123456789abcdef" for c in token)
 
 
@@ -361,7 +429,9 @@ def test_publish_then_list_then_revoke(operator_env, capsys):
     link_cmd.cmd_link_publish(_publish_args())
     out = capsys.readouterr().out
     url = out.split("✓ share-link published: ")[1].split()[0]
-    token = url.rsplit("/", 1)[1]
+    # The printed URL now carries the channel key in its fragment, so the
+    # token is the last path segment BEFORE the '#'.
+    token = url.rsplit("/", 1)[1].split("#")[0]
 
     link_cmd.cmd_link_list(argparse.Namespace(org=ORG))
     listed = capsys.readouterr().out
