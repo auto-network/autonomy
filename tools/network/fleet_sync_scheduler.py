@@ -55,6 +55,7 @@ from tools.network.fleet_sync.codec import (
     decode_mutation_frame,
     encode_mutation_frame,
 )
+from tools.network.fleet_sync.projection import Projection
 from tools.network.idkit import KeyPair, canonical_json
 from tools.network.idkit import DelegationCert
 from tools.network.relaykit.channel import MAX_MESSAGE_SIZE
@@ -120,6 +121,16 @@ _DONE_FIELDS = frozenset(
 )
 _DONE_MAGIC = b"FSD1"
 _REFUSAL_MAGIC = b"FSR1"
+#: The control record a follow reply (org:follow admission) opens with, so the
+#: follower can refuse any reply that is not projected (design §10.2). A
+#: bootstrap sweep carries the marker on its existing ``sweep.begin``; a delta
+#: reply, which otherwise opens straight with its first transaction header,
+#: opens with this record instead.
+PULL_BEGIN_KIND = "pull.begin"
+#: The typed refusal a follow pull receives when its watermark predates the
+#: catalog's retention window: no delta rows follow it, and the follower
+#: answers by starting a full sweep (design §10.2).
+PULL_TOO_OLD_KIND = "pull-too-old"
 _TRANSACTION_MAGIC = b"FSTX"
 _OPERATION_MAGIC = b"FSO1"
 _HEADER_LIMIT = 4096
@@ -622,6 +633,28 @@ def decode_schema_refusal(raw: bytes) -> tuple[str, str | None]:
     if built_at is not None and not isinstance(built_at, str):
         raise FleetSyncProtocolError("fleet sync refusal built_at is malformed")
     return _require_hex64(value["digest"], "fleet sync refusal digest"), built_at
+
+
+def encode_follow_too_old_refusal(
+    *, scope: str, version: int = FLEET_SYNC_PROTOCOL_VERSION,
+) -> bytes:
+    """A typed too-old refusal for a follow pull whose watermark predates the
+    catalog's retention window. It opens (and is) the whole reply: no delta
+    rows follow. The follower answers by starting a full sweep (§10.2)."""
+    return _REFUSAL_MAGIC + canonical_json({
+        "v": version, "kind": PULL_TOO_OLD_KIND, "scope": scope,
+    })
+
+
+def is_follow_too_old_refusal(raw: bytes) -> bool:
+    """Whether *raw* is the typed too-old refusal a follow pull may receive."""
+    if not raw.startswith(_REFUSAL_MAGIC):
+        return False
+    try:
+        value = json.loads(raw[len(_REFUSAL_MAGIC):])
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+        return False
+    return isinstance(value, dict) and value.get("kind") == PULL_TOO_OLD_KIND
 
 
 def watermarks_from_trail(
@@ -1159,12 +1192,15 @@ class SQLiteFleetSyncStore:
             conn.close()
 
     def sweep_page(
-        self, frontier: dict, start_after, max_records: int, max_bytes: int
+        self, frontier: dict, start_after, max_records: int, max_bytes: int,
+        *, projection: Projection = Projection.FULL,
     ):
         """One bounded page of live rows at or below ``frontier``.
 
         Opens and closes its own connection so the caller hands the whole
         read to a worker thread, matching the other store methods here.
+        ``projection`` selects the served surface (FULL for a fleet/org peer,
+        PUBLIC for an org:follow admission).
         """
         from tools.network.fleet_sync.authored_sweep import (
             read_live_authored_page,
@@ -1175,6 +1211,7 @@ class SQLiteFleetSyncStore:
             return read_live_authored_page(
                 conn, frontier=frontier, start_after=start_after,
                 max_records=max_records, max_bytes=max_bytes,
+                projection=projection,
             )
         finally:
             conn.close()
@@ -1291,15 +1328,26 @@ class SQLiteFleetSyncStore:
             conn.close()
 
     def transaction_group(self, transaction_ref, incarnation, transaction_id,
-                          *, offset: int, limit: int):
+                          *, offset: int, limit: int,
+                          projection: Projection = Projection.FULL):
         """One bounded slice of a transaction's items on a fresh connection;
-        returns ``(items, more)``."""
+        returns ``(items, more)``. ``projection`` selects the served surface
+        (FULL for a fleet/org peer, PUBLIC for an org:follow admission)."""
         conn, catalog = self._open()
         try:
             return catalog.transaction_group(
                 transaction_ref, incarnation, transaction_id,
-                offset=offset, limit=limit,
+                offset=offset, limit=limit, projection=projection,
             )
+        finally:
+            conn.close()
+
+    def follow_delta_too_old(self, watermarks) -> bool:
+        """Whether a follow delta from ``watermarks`` predates retention and
+        must be refused so the follower full-sweeps instead (§10.2)."""
+        conn, catalog = self._open()
+        try:
+            return catalog.follow_delta_too_old(watermarks)
         finally:
             conn.close()
 
@@ -2364,6 +2412,10 @@ class FleetSyncScheduler:
         from tools.network.fleet_sync.blob_transport import peek_request_op
 
         follow_admission = getattr(admission, "kind", None) == "follow"
+        # A follow admission serves only the public projection; every fleet or
+        # org peer serves the full replicated surface, byte-identical to before
+        # (design of record graph://5f2f5a49-00d §10.2).
+        projection = Projection.PUBLIC if follow_admission else Projection.FULL
         if admission is not None and admitted_org is None:
             admitted_org = getattr(admission, "org", None)
         if follow_admission:
@@ -2478,6 +2530,20 @@ class FleetSyncScheduler:
                 # can speak the sweep gets the sweep. There is no second
                 # bootstrap mechanism to negotiate against any more.
                 serve_sweep = needs_bootstrap and server_has_content
+                if follow_admission and not serve_sweep:
+                    # A follow delta whose watermark predates the catalog's
+                    # retention window may have missed a pruned demotion
+                    # tombstone. Refuse with a typed too-old error and no
+                    # rows; the follower answers with a full sweep (§10.2).
+                    too_old = await asyncio.to_thread(
+                        store.follow_delta_too_old, origin_watermarks
+                    )
+                    if too_old:
+                        refusal = encode_follow_too_old_refusal(scope=scope)
+                        stats["bytes_sent"] += len(refusal)
+                        error_code = "pull_too_old"
+                        yield refusal
+                        return
                 if serve_sweep:
                     # The peer asked for a bootstrap, so it gets the
                     # frontier its sweep is anchored to. Emitted ONCE,
@@ -2491,13 +2557,18 @@ class FleetSyncScheduler:
                     sweep_frontier = await asyncio.to_thread(
                         store.origin_watermarks
                     )
-                    begin = canonical_json({
+                    begin_body = {
                         "v": protocol_version,
                         "kind": SWEEP_BEGIN_KIND,
                         "scope": scope,
                         "source_machine_pub": self.authenticator.machine_pub,
                         "frontier": sweep_frontier,
-                    })
+                    }
+                    if follow_admission:
+                        # The follow reply's opening marker; absent under FULL,
+                        # so a fleet member's sweep does not change by a byte.
+                        begin_body["projection"] = "public"
+                    begin = canonical_json(begin_body)
                     stats["bytes_sent"] += len(begin)
                     yield begin
 
@@ -2516,6 +2587,7 @@ class FleetSyncScheduler:
                         page = await asyncio.to_thread(
                             store.sweep_page, sweep_frontier, sweep_cursor,
                             SERVE_GROUP_OPERATIONS, MAX_TRANSACTION_FRAME_BYTES,
+                            projection=projection,
                         )
                         run: list = []
                         run_identity = None
@@ -2584,6 +2656,19 @@ class FleetSyncScheduler:
                     # halves meet exactly: nothing is served twice and nothing
                     # falls between them.
                     origin_watermarks = sweep_frontier
+                elif follow_admission:
+                    # A pure delta reply to a follow admission opens with its
+                    # own control record (a bootstrap reply already opened with
+                    # sweep.begin, which carried the marker). The follower
+                    # refuses any reply that does not open projected (§10.2).
+                    pull_begin = canonical_json({
+                        "v": protocol_version,
+                        "kind": PULL_BEGIN_KIND,
+                        "scope": scope,
+                        "projection": "public",
+                    })
+                    stats["bytes_sent"] += len(pull_begin)
+                    yield pull_begin
                 # Every origin is served from the puller's watermark, the
                 # puller's own included (a machine restored from a backup
                 # has lost its own newest writes). Frames are built from
@@ -2627,7 +2712,7 @@ class FleetSyncScheduler:
                             items, more = await asyncio.to_thread(
                                 store.transaction_group, ref, origin_key,
                                 transaction_id, offset=offset,
-                                limit=group_limit,
+                                limit=group_limit, projection=projection,
                             )
                             phase_s = time.monotonic() - phase_started
                             if phase_s > slowest_phase[1]:

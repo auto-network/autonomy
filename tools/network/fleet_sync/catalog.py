@@ -33,6 +33,14 @@ from .merge import mutation_wins
 from .policies import (
     RETIRED_LOGICAL_TABLES, PolicyKind, TABLE_POLICIES, audit_schema,
 )
+from .projection import (
+    PROJECTED_TABLES,
+    SOURCE_LINKED_SATELLITE_TABLES,
+    Projection,
+    SATELLITE_TABLES,
+    settings_row_is_public,
+    source_row_is_public,
+)
 from .snapshot import _logical_address, _logical_values, _row_timestamp
 from .streaming import ensure_streaming_indexes, iter_indexed_snapshot_mutations
 
@@ -1740,9 +1748,120 @@ class MutationCatalog:
             raise WatermarkError(f"catalog points to missing live row: {table}")
         return dict(raw)
 
+    @staticmethod
+    def _source_is_public(
+        conn: sqlite3.Connection, source_id: object
+    ) -> bool:
+        """Whether *source_id* names a source admitted to the public surface."""
+        row = conn.execute(
+            "SELECT publication_state FROM sources WHERE id=?", (source_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        return source_row_is_public({"publication_state": row[0]})
+
+    @classmethod
+    def _satellite_tombstones(
+        cls, conn: sqlite3.Connection, source_id: object, timestamp: int
+    ) -> Iterator[Mutation]:
+        """Tombstones for every live satellite of *source_id*, address order.
+
+        Enumerated eagerly from the live store, one query per source-linked
+        satellite table (``thoughts``, ``derivations``, ``attachments`` -- the
+        four record §10.2 names minus ``tags``, which has no ``source_id``
+        column and so names no source). A demoted source is rare and its
+        satellites are bounded, so no bulk query is warranted.
+        """
+        prior = conn.row_factory
+        conn.row_factory = sqlite3.Row
+        try:
+            collected: list[tuple[tuple[object, ...], str]] = []
+            for table in SOURCE_LINKED_SATELLITE_TABLES:
+                policy = TABLE_POLICIES[table]
+                for raw in conn.execute(
+                    f'SELECT * FROM "{table}" WHERE source_id=?', (source_id,)
+                ).fetchall():
+                    address = _logical_address(policy, dict(raw))
+                    collected.append((address, table))
+        finally:
+            conn.row_factory = prior
+        for address, table in sorted(collected, key=lambda item: (item[0], item[1])):
+            # Address order, table breaking a tie; the source-linked satellite
+            # tables carry disjoint id spaces, so this is a total, deterministic
+            # order for the fixed satellite tuple.
+            yield Mutation(table, address, timestamp, True, ())
+
+    @classmethod
+    def _projected_public_mutations(
+        cls,
+        conn: sqlite3.Connection,
+        table: str,
+        address: tuple[object, ...],
+        timestamp: int,
+        catalog_tombstone: bool,
+    ) -> Iterator[Mutation]:
+        """The PUBLIC projection of one catalog entry (design §10.2).
+
+        Excluded tables emit nothing. A projected table's genuine catalog
+        tombstone propagates unchanged. A live ``sources`` row that fails the
+        public predicate is a demotion: its address is unchanged (publication
+        _state is not in the key), so the catalog never tombstoned it -- the
+        tombstone is synthesized here, followed immediately by tombstones for
+        the source's still-live satellites, which the demotion never touched.
+        A live satellite whose source is not public is tombstoned. A demoted
+        or deprecated ``settings`` row already changed its address (the state
+        is in the settings key) and so was tombstoned by the settings trigger;
+        nothing is synthesized for it here.
+        """
+        if table not in PROJECTED_TABLES:
+            return
+        if catalog_tombstone:
+            yield Mutation(table, address, timestamp, True, ())
+            return
+        row = cls._live_row(conn, table, address)
+        if table == "sources":
+            if source_row_is_public(row):
+                yield Mutation(
+                    table, address, timestamp, False,
+                    _logical_values(TABLE_POLICIES[table], row),
+                )
+            else:
+                yield Mutation(table, address, timestamp, True, ())
+                yield from cls._satellite_tombstones(
+                    conn, row["id"], timestamp
+                )
+            return
+        if table == "settings":
+            if settings_row_is_public(row):
+                yield Mutation(
+                    table, address, timestamp, False,
+                    _logical_values(TABLE_POLICIES[table], row),
+                )
+            return
+        # A satellite table (thoughts, derivations, tags, attachments).
+        source_id = row.get("source_id")
+        if source_id is not None and cls._source_is_public(conn, source_id):
+            yield Mutation(
+                table, address, timestamp, False,
+                _logical_values(TABLE_POLICIES[table], row),
+            )
+        else:
+            yield Mutation(table, address, timestamp, True, ())
+
     def iter_mutations(
-        self, cut: FrozenCatalogCut | None = None
+        self, cut: FrozenCatalogCut | None = None,
+        *, projection: Projection = Projection.FULL,
     ) -> Iterator[AuthoredMutation]:
+        """Every catalog winner as a wire mutation, in the catalog's order.
+
+        Under :attr:`Projection.FULL` (the default) the output is byte-
+        identical to the unprojected walk. Under :attr:`Projection.PUBLIC` the
+        per-entry PUBLIC projection is applied (§10.2): excluded tables are
+        dropped, demoted sources become tombstones followed by tombstones for
+        their satellites, and satellites of a non-public source become
+        tombstones -- all sharing the entry's provenance and timestamp so a
+        source's satellites follow it immediately.
+        """
         conn = cut.reader if cut is not None else self.conn
         watermark = cut.watermark if cut is not None else (1 << 63) - 1
         rows = conn.execute(
@@ -1754,10 +1873,22 @@ class MutationCatalog:
             "t.transaction_id,c.operation_index,c.address",
             (watermark,),
         )
+        if projection is Projection.PUBLIC:
+            # Materialize before the nested per-source satellite queries run on
+            # the same connection.
+            rows = rows.fetchall()
         for raw in rows:
             table, address = self._decode_address(bytes(raw[0]))
             timestamp = int(raw[1])
             tombstone = bool(raw[2])
+            if projection is Projection.PUBLIC:
+                for mutation in self._projected_public_mutations(
+                    conn, table, address, timestamp, tombstone
+                ):
+                    yield AuthoredMutation(
+                        str(raw[3]), str(raw[4]), int(raw[5]), mutation
+                    )
+                continue
             values = ()
             if not tombstone:
                 row = self._live_row(conn, table, address)
@@ -1768,9 +1899,10 @@ class MutationCatalog:
             )
 
     def iter_winner_metadata(
-        self, cut: FrozenCatalogCut | None = None
+        self, cut: FrozenCatalogCut | None = None,
+        *, projection: Projection = Projection.FULL,
     ) -> Iterator[WinnerMetadata]:
-        for item in self.iter_mutations(cut):
+        for item in self.iter_mutations(cut, projection=projection):
             mutation = item.mutation
             yield WinnerMetadata(
                 item.origin_incarnation, item.transaction_id,
@@ -2067,13 +2199,24 @@ class MutationCatalog:
     def transaction_group(
         self, transaction_ref: int, incarnation: str, transaction_id: str,
         *, offset: int, limit: int,
+        projection: Projection = Projection.FULL,
     ) -> tuple[list[AuthoredMutation], bool]:
         """One bounded slice of a transaction's items, built from rows on
         THIS connection: the cited catalog rows ``[offset, offset+limit)``
         in operation order, plus (in the first slice only) the rows parked
         in the quarantine with their frame. Returns ``(items, more)``.
         Stateless per call so a serve can fetch each slice on whatever
-        worker thread it runs on (sqlite connections are thread-bound)."""
+        worker thread it runs on (sqlite connections are thread-bound).
+
+        ``projection`` filters the served surface. Under
+        :attr:`Projection.FULL` (the default) the output is byte-identical to
+        the unprojected serve. Under :attr:`Projection.PUBLIC` excluded-table
+        rows are dropped, a demoted source becomes a tombstone followed by its
+        satellites' tombstones, and a satellite of a non-public source becomes
+        a tombstone (design §10.2). Extra synthesized items share the source's
+        operation index so they sort immediately after it; ``more`` is still
+        judged by the catalog rows read, so paging stays exact.
+        """
         items: list[AuthoredMutation] = []
         if offset == 0:
             ensure_quarantine_table(self.conn)
@@ -2084,9 +2227,16 @@ class MutationCatalog:
                 "AND reason!='settings_signature_invalid'",
                 (incarnation, transaction_id),
             ).fetchall():
+                parked = decode_mutation_frame(bytes(frame))
+                if (
+                    projection is Projection.PUBLIC
+                    and parked.table not in PROJECTED_TABLES
+                ):
+                    # A parked mutation of an excluded table never enters the
+                    # public surface.
+                    continue
                 items.append(AuthoredMutation(
-                    incarnation, transaction_id, int(operation),
-                    decode_mutation_frame(bytes(frame)),
+                    incarnation, transaction_id, int(operation), parked,
                 ))
         rows = self.conn.execute(
             "SELECT address,timestamp_ns,tombstone,operation_index "
@@ -2097,6 +2247,32 @@ class MutationCatalog:
         for raw in rows:
             table, address = self._decode_address(bytes(raw[0]))
             if not self._serveable(table, address, transaction_id):
+                continue
+            if projection is Projection.PUBLIC:
+                try:
+                    projected = list(self._projected_public_mutations(
+                        self.conn, table, address, int(raw[1]), bool(raw[2]),
+                    ))
+                except WatermarkError as exc:
+                    if table == "settings" and str(address[4]) == "base":
+                        logger.warning(
+                            "fleet sync: catalog cites a settings base with "
+                            "no live row; serving a tombstone: address=%r "
+                            "transaction=%s (%s)", address, transaction_id, exc,
+                        )
+                        projected = [Mutation(table, address, int(raw[1]), True)]
+                    else:
+                        logger.warning(
+                            "fleet sync: catalog cites a live row this store "
+                            "cannot resolve; skipping it in the serve: "
+                            "table=%s address=%r transaction=%s (%s)",
+                            table, address, transaction_id, exc,
+                        )
+                        projected = []
+                for mutation in projected:
+                    items.append(AuthoredMutation(
+                        incarnation, transaction_id, int(raw[3]), mutation,
+                    ))
                 continue
             if bool(raw[2]):
                 mutation = Mutation(table, address, int(raw[1]), True)
@@ -2401,6 +2577,33 @@ class MutationCatalog:
             ).fetchone()
             return int(newest[0]) if newest else 0
         return max(0, first_uncovered - 1)
+
+    def follow_delta_too_old(self, watermarks: dict[str, int]) -> bool:
+        """Whether a follow delta from these per-origin watermarks would be
+        incomplete because the catalog no longer retains everything between the
+        watermark and the oldest retained transaction of some origin.
+
+        A follower's watermark for an origin sitting BELOW the oldest retained
+        transaction of that origin means the run in between was pruned, so a
+        demotion tombstone that once lived there may be gone. Rather than serve
+        a partial delta that silently keeps a demoted row, the serve refuses
+        with a typed too-old error and the follower answers with a full sweep
+        (design of record §10.2; Kafka ``delete.retention.ms`` /
+        AT-Protocol cursor-too-old). A watermark of 0 for an origin is a fresh
+        follower that has never held that origin, so it is never too old --
+        that follower bootstraps.
+        """
+        for origin, floor in self.conn.execute(
+            "SELECT o.incarnation, MIN(t.timestamp_ns) "
+            "FROM fleet_sync_transactions t "
+            "JOIN fleet_sync_origins o ON o.id=t.origin_id GROUP BY o.id"
+        ).fetchall():
+            if floor is None:
+                continue
+            presented = int(watermarks.get(str(origin), 0))
+            if 0 < presented < int(floor):
+                return True
+        return False
 
     def journal_breadcrumb(
         self, transaction_ref: int
