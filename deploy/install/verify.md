@@ -53,10 +53,12 @@ python3 -m tools.portability snapshot --help
 ```
 
 The snapshot/restore path is quiesced and fail-closed (refuses torn or
-newer-format volumes). The full round-trip — snapshot A, restore into a
-fresh C, C serves A's identity and content — is exercised by the project's
-multi-node acceptance ladder (`python3 -m deploy.harness`, needs Docker
-and ~10 minutes; offer, don't force).
+newer-format volumes). The round-trip — snapshot one machine, restore into a
+fresh one, and confirm the restored machine carries the same identity,
+membership, data and serving credential — is exercised by
+`tools/tests/test_portability.py`, which needs no Docker. That a second
+machine serves a published note after the publisher stops is exercised by
+`node deploy/harness/fleet-workflow.mjs` (needs Docker; offer, don't force).
 
 ## The project network sits clear of the operator's own LAN
 

@@ -33,8 +33,8 @@ it, so it cannot recreate the org-collapsing failure a whole-database
 `AUTONOMY_DATA_ROOT` → the caller's explicit root → the repository-local
 default (refused under `AUTONOMY_REFUSE_REAL_DATA_FALLBACK`). Relative
 values are refused. An ambient-rooted deployment never falls back to the
-repository-relative legacy database. The node containers the multi-node
-harness generates set it to `/app/data`.
+repository-relative legacy database. The node containers the workflow
+simulation generates set it to `/app/data`.
 
 ## Sovereign distribution (Docker Compose)
 
@@ -174,7 +174,7 @@ file. With no one-time stdin password, a fresh headless node validates and
 stages the invitation without minting an identity or membership claim; the
 personal identity ceremony remains an explicit interactive operation.
 
-The multi-node harness has a separately named, doubly guarded mounted-file
+The workflow simulation has a separately named, doubly guarded mounted-file
 input for synthetic test identities. It is documented only in
 `deploy/harness/README.md` and is not mounted by the production dashboard.
 
@@ -257,13 +257,8 @@ digest in Compose. The explicit `--insecure-ignore-tlog` means “the tracked
 project key is the trust root; do not require Rekor,” not “skip signature or
 digest validation.”
 
-For a paced, screen-capture-ready run of the real multi-node ladder, use:
-
-```bash
-python3 -m deploy.demo \
-  --image registry.example/autonomy/autonomy-node@sha256:<digest> \
-  --cosign-public-key deploy/cosign.pub
-```
+The signed digest is also what the product workflow simulation builds from;
+see `deploy/harness/README.md`.
 
 This presentation path refuses source builds and verifies the exact digest
 before starting any container. It opens the HTTPS dashboards, real relay note,
@@ -443,7 +438,7 @@ the personal/org root material, ledgers, memberships, configuration, and TLS
 keys byte-for-byte. On a new machine, use the existing personal password or
 recovery path when a machine-bound passkey factor is unavailable; plaintext
 roots still never leave the client. Relay re-announcement is a serving-layer
-startup concern and is exercised by the multi-node harness.
+startup concern and is exercised by the workflow simulation.
 
 The older `tools/graph/backup-*.sh` jobs remain useful rolling/offsite
 single-store backups. They are not a claim of cross-store coherent
@@ -519,20 +514,24 @@ a lost identity or passkey. `DASHBOARD_AUTH=off` remains the recovery path if
 the session database is unavailable during rollout; remove the override after
 the store is writable.
 
-## Multi-node production-path acceptance
+## Product workflow acceptance
 
-On a Linux Docker host, the one-command container acceptance is:
+On a Linux Docker host, the acceptance test is a browser driving the real user
+interface against isolated services:
 
 ```bash
-python3 -m deploy.harness
+node deploy/harness/workflow.mjs
+node deploy/harness/fleet-workflow.mjs
 ```
 
-It drives a real registry/relay and isolated node containers through founding,
-invite/join, two-party admission, quiesced snapshot/restore, restored tunnel
-reconnect, and a content fetch from the restored node. See
-[`deploy/harness/README.md`](deploy/harness/README.md) for the phase contract,
-security boundary, configurable node count, and the deliberately-unimplemented
-sync/partition extension points.
+The first covers organization invitation, join, approval and synchronization.
+The second covers personal fleet enrollment, and ends by serving a published
+note from the second machine after the publishing dashboard is stopped. See
+[`deploy/harness/README.md`](deploy/harness/README.md) for the scenarios,
+options and the rule that no harness step may perform a product transition.
+
+Volume snapshot and restore onto a fresh machine is covered without Docker by
+`tools/tests/test_portability.py`.
 
 ## Clean-clone smoke
 
