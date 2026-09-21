@@ -39,7 +39,13 @@ const silentTransport = {
 const started = Date.now();
 autonet.withTimeout(
   autonet.performHandshake(silentTransport, {
+    // linkPub is required since the bootloader took the channel key from
+    // the URL fragment: without it the handshake rejects at 0 ms on hex
+    // validation, which is not the hang this probe is about. Any valid
+    // 64-hex value works — the transport never answers, so the key is
+    // never used.
     org: "org-uuid", token: "a".repeat(32), rootPub: "b".repeat(64),
+    linkPub: "c".repeat(64),
   }),
   150, "handshake",
 ).then(
