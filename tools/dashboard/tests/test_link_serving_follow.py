@@ -19,6 +19,13 @@ import json
 import pytest
 
 from tools.dashboard import link_serving
+from tools.network.relaykit.close_codes import (
+    CLOSE_FOLLOW_BEHIND,
+    CLOSE_FOLLOW_NO_FRONTIER,
+    FollowBehind,
+    FollowNoFrontier,
+    classify_connector_error,
+)
 
 ORG = "followorg"
 ORG_UUID = "99999999-9999-4999-8999-999999999999"
@@ -42,8 +49,16 @@ class StubScheduler:
     returns a two-frame async iterator — the shape a real sweep/delta reply
     has. Proves the follow op reaches the scheduler and streams its reply."""
 
-    def __init__(self):
+    def __init__(self, frontier=1000):
         self.calls = []
+        self.frontier = frontier
+        self.frontier_calls = []
+
+    def follow_frontier(self, org):
+        # The link server asks for the org frontier BEFORE handing the follow
+        # to _handle (member-local refusal path, design §10.3).
+        self.frontier_calls.append(org)
+        return self.frontier
 
     async def _handle(self, token, message, peer_pub, *, admission=None,
                       telemetry_channel=None, **kw):
@@ -188,6 +203,61 @@ def test_follow_refused_on_an_unknown_token(grants):
     )
     assert reply == link_serving.REFUSED
     assert sched.calls == []
+
+
+# ── member-local refusals (typed closes the relay fails over) ─────
+
+
+def test_follow_with_no_frontier_closes_no_frontier_before_any_serve(grants):
+    """A member holding no covered persona write floor cannot claim the org
+    frontier: the link server refuses BEFORE handing the follow to the
+    scheduler, raising FollowNoFrontier → CLOSE_FOLLOW_NO_FRONTIER, so the
+    relay fails the dial over (design of record §10.3)."""
+    sched = StubScheduler(frontier=None)
+    with pytest.raises(FollowNoFrontier) as excinfo:
+        _call(FOLLOW_TOKEN, {"v": 1, "op": "follow", "request": PULL},
+              fleet_runtime=StubRuntime(sched))
+    assert classify_connector_error(excinfo.value)[0] == CLOSE_FOLLOW_NO_FRONTIER
+    # The scheduler's serve path is never reached; only its frontier is asked.
+    assert sched.calls == []
+    assert sched.frontier_calls == [GENESIS]
+
+
+def test_follow_cursor_above_frontier_closes_behind_before_any_serve(grants):
+    """A follower whose cursor is above this member's org frontier is refused
+    with FollowBehind → CLOSE_FOLLOW_BEHIND, before any serve, so the relay
+    fails the dial over to a member further ahead (design of record §10.3)."""
+    sched = StubScheduler(frontier=500)
+    pull = {**PULL, "watermarks": {GENESIS: 900}}
+    with pytest.raises(FollowBehind) as excinfo:
+        _call(FOLLOW_TOKEN, {"v": 1, "op": "follow", "request": pull},
+              fleet_runtime=StubRuntime(sched))
+    assert classify_connector_error(excinfo.value)[0] == CLOSE_FOLLOW_BEHIND
+    assert sched.calls == []
+
+
+def test_follow_cursor_at_or_below_frontier_is_served(grants):
+    """A cursor at the frontier (or with no watermark → 0) is complete below
+    it: the follow proceeds to the scheduler's reply stream."""
+    sched = StubScheduler(frontier=500)
+    pull = {**PULL, "watermarks": {GENESIS: 500}}
+    frames = _call(FOLLOW_TOKEN, {"v": 1, "op": "follow", "request": pull},
+                   fleet_runtime=StubRuntime(sched))
+    assert frames == [b"sweep-frame-1", b"sweep-frame-2"]
+    assert len(sched.calls) == 1
+
+
+def test_follow_reads_the_cursor_under_the_genesis_id_only(grants):
+    """The follower's cursor is read from the watermark under the org's
+    genesis id; a watermark under another key is not this org's cursor."""
+    sched = StubScheduler(frontier=500)
+    # 900 under a foreign key must NOT be treated as the cursor (that would
+    # spuriously refuse); the genesis key is absent → cursor 0 → served.
+    pull = {**PULL, "watermarks": {"ab" * 32: 900}}
+    frames = _call(FOLLOW_TOKEN, {"v": 1, "op": "follow", "request": pull},
+                   fleet_runtime=StubRuntime(sched))
+    assert frames == [b"sweep-frame-1", b"sweep-frame-2"]
+    assert len(sched.calls) == 1
 
 
 # ── the unarmed refusal (typed close, not the uniform refusal) ────

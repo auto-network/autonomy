@@ -2253,17 +2253,49 @@ class FleetSyncScheduler:
             if channel.org == admitted_org and scope != "personal"
         ]
 
-    def _confine_scope(self, scope: str, admitted_org: str | None) -> None:
+    def _confine_scope(
+        self, scope: str, admitted_org: str | None, *, follow: bool = False
+    ) -> None:
         """A connection admitted by an org hello may request only that
         organization's scope: never the personal scope, never another
-        organization's. A personal-admitted connection is unrestricted."""
+        organization's. A personal-admitted connection is unrestricted.
+
+        A ``follow`` admission (org:follow link, design of record
+        graph://5f2f5a49-00d §10.3) is confined the same way to the scope
+        ``_org_scopes_for`` maps its organization to; the check names itself so
+        a refused personal or cross-org follow is unambiguous in the log."""
         if admitted_org is None:
             return
         if scope not in self._org_scopes_for(admitted_org):
+            if follow:
+                raise FleetSyncProtocolError(
+                    f"follow scope confinement: scope {scope!r} is not the "
+                    "organization this follow admission names"
+                )
             raise FleetSyncProtocolError(
                 f"scope {scope!r} is not the organization this connection "
                 "was admitted to"
             )
+
+    def follow_frontier(self, org: str) -> int | None:
+        """The organization's frontier F this member can serve a follower up
+        to: the minimum over its covered persona write floors for the org's
+        scope, the same value ``_handle`` computes for a follow admission
+        (design of record graph://5f2f5a49-00d §10.2; graph://6ad52a52-f75
+        pieces 4 and 6). ``None`` when this member holds no covered persona
+        write floor for the organization — it cannot claim F, so the link
+        server refuses the follow before a byte is served (the member-local
+        CLOSE_FOLLOW_NO_FRONTIER refusal, §10.3). Blocking (opens the store):
+        callers on an event loop wrap it in ``asyncio.to_thread``."""
+        floors: list[int] = []
+        for scope in self._org_scopes_for(org):
+            store = self._store_for(scope)
+            floors.extend(
+                int(v) for v in store.covered_persona_frontiers().values()
+            )
+        if not floors:
+            return None
+        return min(floors)
 
     def _blob_paths(self, admitted_org: str | None) -> list[Path]:
         """Stores a blob request may be answered from: every synchronized
@@ -2500,6 +2532,13 @@ class FleetSyncScheduler:
         if authorize is None:
             authorize = self.authenticator.authorize
         if peek_request_op(message) == "blob":
+            if follow_admission:
+                # A follow admission serves attachment METADATA only; blob
+                # BODIES are deferred to a later version (design of record
+                # graph://5f2f5a49-00d §10.3). Answer any blob request with an
+                # empty response — every requested digest reported missing, no
+                # chunk served, no store touched.
+                return self._follow_blob_response(message)
             return self._blob_response(
                 message, peer_pub, telemetry_channel,
                 authorize=authorize, admitted_org=admitted_org,
@@ -2520,7 +2559,7 @@ class FleetSyncScheduler:
             peer_pub[:12], scope, admitted_org, bootstrap, protocol_version,
             len(watermarks or ()), sorted(self._scope_paths()),
         )
-        self._confine_scope(scope, admitted_org)
+        self._confine_scope(scope, admitted_org, follow=follow_admission)
         store = await asyncio.to_thread(self._store_for, scope)
         # The peer's frontier arrives here on every pull because the server
         # cannot page a delta without it. Keeping it is what lets the Fleet
@@ -3170,6 +3209,24 @@ class FleetSyncScheduler:
                 yield frame
 
         return self._observed(response(), telemetry_channel)
+
+    def _follow_blob_response(self, message: bytes):
+        """A blob request on a follow admission (design of record
+        graph://5f2f5a49-00d §10.3): attachment metadata crosses, blob bodies
+        do not in v1, so this returns an empty response — one blob.done frame
+        reporting every requested digest missing and no chunk served. No store
+        is opened and no path is authorized: a follower cannot reach a body."""
+        from tools.network.fleet_sync.blob_transport import (
+            decode_blob_request,
+            done_frame,
+        )
+
+        digests = decode_blob_request(message)
+
+        async def response():
+            yield done_frame([], list(digests))
+
+        return response()
 
     def _observed(self, stream, telemetry_channel: str):
         """Wrap a direct-path serve stream with the stream observer, if any.

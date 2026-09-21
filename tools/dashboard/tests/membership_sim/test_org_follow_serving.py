@@ -46,8 +46,12 @@ class StubScheduler:
     """Records the admission it is called with and streams a two-frame reply
     — the shape a real org-sync sweep/delta has."""
 
-    def __init__(self):
+    def __init__(self, frontier=1000):
         self.calls = []
+        self.frontier = frontier
+
+    def follow_frontier(self, org):
+        return self.frontier
 
     async def _handle(self, token, message, peer_pub, *, admission=None,
                       telemetry_channel=None, **kw):
@@ -130,6 +134,53 @@ def _serving_member(registry, org, persona, *, seq, token, link_key, scheduler):
 
 
 GENESIS = "7e" * 32  # the org's ledger genesis id: the follow admission's org
+
+
+def test_a_member_with_no_frontier_closes_the_follow_with_the_typed_code(
+    registry, grant_cache, monkeypatch,
+):
+    """A member holding no covered persona write floor refuses the follow with
+    CLOSE_FOLLOW_NO_FRONTIER (4506) BEFORE reaching the scheduler's serve path
+    (design of record §10.3). The viewer's channel closes with that typed code
+    and no reply frame is served.
+
+    NOTE (verified obstacle, see bead auto-zltlg discovered work): the relay's
+    O-B failover (graph://d9153c5a-76e) replays only the viewer's PRE-handshake
+    frames and fires only on a PRE-first-byte refusal. The follow op carries
+    the cursor and arrives AFTER the server hello (which sets the relay's
+    ``served`` flag), so a follow-op refusal is structurally post-first-byte
+    and the relay forwards its code to the viewer rather than failing over.
+    The codes ARE in FAILOVER_CODES (test_relay_failover_codes), so a follow
+    refusal that ever occurs pre-serve would fail over; a follow-op refusal
+    does not. Making it fail over needs a decision outside this bead."""
+    from tools.network.relaykit.close_codes import CLOSE_FOLLOW_NO_FRONTIER
+
+    monkeypatch.setattr(link_serving, "_follow_genesis_id", lambda slug: GENESIS)
+    org = Org.found()
+    registry.register(org.sim.root)
+    registry.commit_checkpoint(org.sim, seq=0)
+
+    link_key = KeyPair.generate()
+    token = registry.mint_link(target_type="org:follow")
+    _cache_follow_grant(token, registry.org)
+
+    no_frontier = StubScheduler(frontier=None)
+    member = _serving_member(
+        registry, org, org.founder, seq=0,
+        token=token, link_key=link_key, scheduler=no_frontier,
+    )
+
+    async def run():
+        async with run_connector(member):
+            with pytest.raises(Exception) as excinfo:
+                await follow(registry, token, link_key.public_hex, PULL, timeout=6.0)
+            return excinfo.value
+
+    exc = asyncio.run(run())
+    # The viewer's channel closed with the typed follow code; the serve path
+    # was never reached (the refusal is before any reply).
+    assert str(CLOSE_FOLLOW_NO_FRONTIER) in str(exc), exc
+    assert no_frontier.calls == []
 
 
 def test_follow_link_opens_with_fragment_key_and_streams_scheduler_reply(
