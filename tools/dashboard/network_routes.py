@@ -3301,6 +3301,16 @@ async def check_service_target(request: Request) -> JSONResponse:
         )
     except service_publication.ServicePublicationError as exc:
         return _service_publication_error(exc.code, exc.status_code)
+    # Refresh re-checks the TARGET; force a gateway reload too so a stale
+    # gateway/connection binding is rebuilt — a plain re-check never touched the
+    # gateway, which is why "Refresh says Live" could not clear a serve-gateway
+    # 502 (graph note ce276e04-7e2). Best-effort: a reload failure must not fail
+    # the refresh the operator asked for.
+    try:
+        from tools.dashboard import web_gateway_supervisor
+        await web_gateway_supervisor.request_reload()
+    except Exception:
+        pass
     return JSONResponse(
         {
             "ok": True,

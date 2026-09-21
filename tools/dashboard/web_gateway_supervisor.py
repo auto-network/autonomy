@@ -565,7 +565,7 @@ class GatewayReconcileWorker:
             in {NAMESPACE_RESERVATION_SET_ID, SERVICE_TARGET_SET_ID}
         )
 
-    async def reconcile_once(self) -> dict:
+    async def reconcile_once(self, force: bool = False) -> dict:
         # Hostname registration must precede certificate readiness: the
         # registry's persona-label binding is what DNS-01 uses to derive the
         # challenge name on first issuance.
@@ -576,7 +576,7 @@ class GatewayReconcileWorker:
             # independent.  An unreadable Settings fold must still reach the
             # planner, which removes any previously loaded Caddy routes.
             logger.warning("Hostname lease reconciliation failed", exc_info=True)
-        return await self._supervisor.reconcile(await self._planner())
+        return await self._supervisor.reconcile(await self._planner(), force=force)
 
     async def _run(self, event_bus) -> None:
         queue = event_bus.subscribe(client_id="web-gateway-supervisor")
@@ -663,7 +663,7 @@ class WebGatewaySupervisor:
             result["error"] = self._last_error
         return result
 
-    async def reconcile(self, desired: GatewayDesiredState) -> dict:
+    async def reconcile(self, desired: GatewayDesiredState, force: bool = False) -> dict:
         async with self._lock:
             if not desired.routes or not desired.ready:
                 return await self._stop(
@@ -694,7 +694,8 @@ class WebGatewaySupervisor:
                 self._loaded_routes = ()
                 self._loaded_instance_marker = None
             unchanged = (
-                healthy
+                not force
+                and healthy
                 and marker is not None
                 and self._loaded_instance_marker == marker
                 and self._loaded_config == desired.caddyfile
@@ -814,6 +815,18 @@ _worker = GatewayReconcileWorker(supervisor=_supervisor)
 def status() -> dict:
     """Return process-local observed state; durable rows remain authoritative."""
     return _supervisor.status()
+
+
+async def request_reload() -> dict:
+    """Force the gateway to re-load its config even when it is unchanged.
+
+    A plain reconcile short-circuits when the rendered caddyfile matches what is
+    loaded, so it cannot rebuild stale gateway/connection state. This forces the
+    reload — the one lever that cleared the 2026-09-21 serve-gateway 502 (graph
+    note ce276e04-7e2). Wired into the Published Links "Refresh" action so that
+    button actually rebuilds the gateway binding, not just re-checks the target.
+    """
+    return await _worker.reconcile_once(force=True)
 
 
 async def start_worker(event_bus) -> None:
