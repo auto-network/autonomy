@@ -16,19 +16,17 @@
 org: autonomy
 version: 1
 
-# The standing org:follow rendezvous a new node pulls Autonomy's public
-# surface from (design of record graph://5f2f5a49-00d §10.1). Committed here so
-# first run can seed the follower row; promote.py ignores this block, it is not
-# a publication-state entry. The values below are filled in when the operator
-# publishes the standing follow link from Published Links (`graph follow
-# publish`): org_uuid is Autonomy's founded org UUID, link_pub is the minted
-# channel public key, and rendezvous is the /l/<token> link URL. Until then
-# they are placeholders — no code consumes them yet (the follower + first-run
-# seeding land in F4/§10.5), and allowlist.load only validates their shape.
+# Autonomy's standing org:follow link (design of record graph://5f2f5a49-00d
+# §10.1). org_uuid is Autonomy's founded org id, from its registry binding.
+# rendezvous (the /l/<token> link URL) and link_pub (the minted channel public
+# key) are added only after the operator publishes the follow link from
+# Published Links (`graph follow publish`), which waits for the public
+# projection and the follow confinement (§10.2, §10.3) to be merged: before
+# them the link would serve the whole organization scope. First run (§10.5)
+# seeds no follow row until all three values are present. promote.py ignores
+# this block; it is not a publication-state entry.
 follow:
-  org_uuid: "00000000-0000-4000-8000-000000000000"   # TODO: Autonomy org UUID at publish
-  rendezvous: "https://relay.auto.network/l/0000000000000000000000000000000000"  # TODO: published follow link
-  link_pub: "0000000000000000000000000000000000000000000000000000000000000000"   # TODO: minted channel pub
+  org_uuid: "2d4b90cb-1e89-452b-82cb-68ca44fd8e52"
 
 canonical:
   # Promoted in v1 bootstrap (2026-04-21) — entries below cleared comment
