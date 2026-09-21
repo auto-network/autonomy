@@ -241,6 +241,15 @@ def render_caddyfile(
         cert_path, key_path = certificates[route.hostname]
         lines.extend([
             f"https://{route.hostname}:{LISTEN_PORT} {{",
+            # Per-site access log so a 502 (or any status) is observable in the
+            # gateway container's stdout — the upstream health probe alone hides
+            # per-request failures. Output to stderr -> `docker logs
+            # autonomy-service-gateway-1`; JSON carries status, uri, upstream,
+            # duration and the reverse-proxy error.
+            "\tlog {",
+            "\t\toutput stderr",
+            "\t\tformat json",
+            "\t}",
             f"\ttls {cert_path} {key_path}",
             f"\treverse_proxy {route.upstream_ip}:{route.port} {{",
             "\t\tflush_interval -1",
