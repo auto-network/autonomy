@@ -426,9 +426,94 @@ def _enroll_fleet_machine(
         "tools.network.storagekit.memory_cache.assert_memory_backed",
         lambda *a, **k: None,
     )
-    from deploy.harness.fixture_ops import provision_fleet_runtime
-    provision_fleet_runtime(personal_root=root, org_uuid=org_uuid)
+    _provision_fleet_runtime(personal_root=root, org_uuid=org_uuid)
     return tmp_path / "network" / "serve.log"
+
+
+
+def _provision_fleet_runtime(*, personal_root, org_uuid: str) -> None:
+    """Enroll one synthetic machine and arm its organization connector.
+
+    Moved here from the retired deploy.harness fixture, which this was the
+    only remaining caller of. It writes the roster entry, the machine
+    identity and the registry binding, then arms the connector's warm cache
+    so the real connector subprocess below starts armed."""
+    from tools.graph import settings_ops
+    from tools.graph.schemas.machine_identity import (
+        MACHINE_IDENTITY_KEY,
+        MACHINE_IDENTITY_REVISION,
+        MACHINE_IDENTITY_SET_ID,
+    )
+    from tools.graph.schemas.network_identity import (
+        NETWORK_BINDING_REVISION,
+        NETWORK_BINDING_SET_ID,
+    )
+    from tools.network import fleet_roster
+    from tools.network.fleet_relay_sync import FleetRuntimeWarmCache
+    from tools.network.idkit import KeyPair, Subject, issue_cert
+
+    machine = KeyPair.generate()
+    process = KeyPair.generate()
+    machine_id = machine.public_hex
+    now = int(time.time())
+    fleet_roster.store_entry(
+        fleet_roster.enroll(
+            personal_root,
+            machine_id=machine_id,
+            machine_pub=machine.public_hex,
+        ),
+        org=None,
+    )
+    settings_ops.upsert_by_key(
+        MACHINE_IDENTITY_SET_ID,
+        MACHINE_IDENTITY_REVISION,
+        MACHINE_IDENTITY_KEY,
+        {"machine_id": machine_id},
+        org="machine",
+        state="raw",
+    )
+    settings_ops.upsert_by_key(
+        NETWORK_BINDING_SET_ID,
+        NETWORK_BINDING_REVISION,
+        "fixture-runtime",
+        {
+            "org_uuid": org_uuid,
+            "root_pub": personal_root.public_hex,
+            "registry_url": "http://relay:8477",
+            "recovery_policy": {"mode": "none"},
+            "binding_expires_at": time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + 24 * 60 * 60)
+            ),
+        },
+        org="personal",
+        state="raw",
+    )
+    delegation = issue_cert(
+        machine,
+        process.public_hex,
+        scope=("fleet:sync",),
+        org=f"personal:{personal_root.public_hex}",
+        subject=Subject("machine", machine_id),
+        not_before=now - 30,
+        not_after=now + 3600,
+    )
+    reachability = issue_cert(
+        personal_root,
+        machine.public_hex,
+        scope=("node:announce", "node:lookup"),
+        org=org_uuid,
+        subject=Subject("machine", machine_id),
+        not_before=now - 30,
+        not_after=now + 3600,
+    )
+    FleetRuntimeWarmCache(org_uuid).store({
+        "machine_id": machine_id,
+        "machine_pub": machine.public_hex,
+        "process_private_seed": process.private_hex,
+        "delegation_cert": delegation.to_dict(),
+        "machine_private_seed": machine.private_hex,
+        "reachability_cert": reachability.to_dict(),
+    })
 
 
 # The real connector, in a real subprocess, with exactly one thing
