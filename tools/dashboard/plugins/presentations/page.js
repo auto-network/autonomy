@@ -239,6 +239,13 @@
       'function schedule(){if(scheduled)return;scheduled=true;requestAnimationFrame(report);}' +
       'function go(index,behavior){index=Math.max(0,Math.min(slides.length-1,Number(index)||0));reveal(index);var el=slides[index];if(el&&root){root.scrollTo({top:el.offsetTop||0,behavior:behavior||"smooth"});}setTimeout(report,80);}' +
       'window.__presentGoToSlide=go;' +
+      // In-deck anchors: `<a href="#id">` whose target sits inside a slide route
+      // through go() instead of native fragment navigation. The document is
+      // doc.write()n into the iframe, so a hash change would move the iframe's
+      // location without telling the parent; go() is the one path that scrolls
+      // the root AND posts present:active so the counter and URL follow.
+      'function slideForHash(href){if(!href||href.charAt(0)!=="#"||href.length<2)return null;var id;try{id=decodeURIComponent(href.slice(1));}catch(_){id=href.slice(1);}var t=document.getElementById(id);if(!t)return null;return t.closest?t.closest(".present-runtime-slide"):null;}' +
+      'document.addEventListener("click",function(ev){if(ev.defaultPrevented||ev.button)return;var a=ev.target&&ev.target.closest?ev.target.closest("a[href]"):null;if(!a)return;var s=slideForHash(a.getAttribute("href"));if(!s)return;ev.preventDefault();go(Number(s.getAttribute("data-present-index")));},true);' +
       'window.addEventListener("message",function(event){var data=event.data||{};if(data.type==="present:goto")go(data.index);});' +
       'collect();applySnapMode();root.addEventListener("scroll",schedule,{passive:true});' +
       'window.addEventListener("resize",function(){applySnapMode();schedule();});' +
