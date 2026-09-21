@@ -32,6 +32,7 @@ from .codec import CanonicalValue, Mutation, encode_value
 from .compaction import AuthoredMutation
 from .delta import MAX_DELTA_FRAME_BYTES, encode_authored_frame
 from .policies import PolicyKind, TABLE_POLICIES, audit_schema
+from .projection import Projection, public_predicate_sql
 from .snapshot import _logical_address, _logical_values
 from .streaming import (
     BASE_TABLE_ORDER,
@@ -120,6 +121,7 @@ def read_live_authored_page(
     max_records: int,
     max_bytes: int,
     max_examined: int | None = None,
+    projection: Projection = Projection.FULL,
 ) -> LivePage:
     """Read one bounded page of live rows at or below ``frontier``.
 
@@ -127,6 +129,15 @@ def read_live_authored_page(
     had absorbed when the sweep began. An origin absent from the map is read as
     ``0``, so rows from an origin that appeared after the sweep started are
     assigned to PULL, which is correct.
+
+    ``projection`` filters the swept surface. Under :attr:`Projection.FULL`
+    (the default) every table and row is read, so a swept page is byte-
+    identical to the unprojected sweep. Under :attr:`Projection.PUBLIC` tables
+    outside the public surface are skipped and each projected table gains its
+    public predicate as an extra WHERE clause; a completed PUBLIC sweep
+    therefore enumerates exactly the live public surface (no tombstones -- a
+    walk over live rows has none), which is the property re-sync-by-generation
+    relies on.
 
     The whole page is built under one owned read view, which is closed before
     returning; nothing is yielded while the view is open. An already-active
@@ -200,17 +211,25 @@ def read_live_authored_page(
             if start_table is not None and ranks[table] < ranks[start_table]:
                 continue
             policy = TABLE_POLICIES[table]
+            if projection is Projection.PUBLIC:
+                predicate = public_predicate_sql(table)
+                if predicate is None:
+                    # An excluded table: never swept under PUBLIC.
+                    continue
             expressions = _key_expressions(policy)
             where = ""
             params: tuple[Any, ...] = ()
+            if projection is Projection.PUBLIC:
+                where = f" WHERE ({predicate})"
             if table == "settings":
                 # Matches the existing snapshot rule: a logical setting has one
                 # live base row, and superseded bases are retained only as local
                 # history. Override and exclusion rows carry their own addresses.
-                where = (
-                    ' WHERE (supersedes IS NOT NULL OR excludes IS NOT NULL'
+                history = (
+                    '(supersedes IS NOT NULL OR excludes IS NOT NULL'
                     ' OR deprecated = 0)'
                 )
+                where += (" AND " if where else " WHERE ") + history
             if start_table == table:
                 comparison = (
                     f"({','.join(expressions)}) > "
