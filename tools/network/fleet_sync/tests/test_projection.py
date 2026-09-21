@@ -344,17 +344,17 @@ def test_follow_delta_too_old(tmp_path: Path) -> None:
         for ts, name in ((1000, "a"), (2000, "b"), (3000, "c")):
             with catalog.transaction(ts, name):
                 _insert_source(db.conn, f"s_{name}", "published")
-        # The oldest retained transaction is at 1000.
-        assert catalog.follow_delta_too_old({ORIGIN: 500}) is True
-        assert catalog.follow_delta_too_old({ORIGIN: 1500}) is False
-        assert catalog.follow_delta_too_old({ORIGIN: 0}) is False  # fresh
-        assert catalog.follow_delta_too_old({}) is False
+        # The follower's cursor is ONE integer for the organization (bead
+        # auto-8cpnm). The oldest retained transaction is at 1000.
+        assert catalog.follow_delta_too_old(500) is True
+        assert catalog.follow_delta_too_old(1500) is False
+        assert catalog.follow_delta_too_old(0) is False  # fresh follower
         # Simulate a prune that retired the 1000 transaction: the floor rises.
         db.conn.execute("DELETE FROM fleet_sync_catalog WHERE timestamp_ns=1000")
         db.conn.execute("DELETE FROM fleet_sync_transactions WHERE timestamp_ns=1000")
         db.conn.commit()
-        assert catalog.follow_delta_too_old({ORIGIN: 1500}) is True
-        assert catalog.follow_delta_too_old({ORIGIN: 2500}) is False
+        assert catalog.follow_delta_too_old(1500) is True
+        assert catalog.follow_delta_too_old(2500) is False
     finally:
         db.close()
 

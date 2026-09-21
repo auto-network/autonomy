@@ -131,6 +131,11 @@ PULL_BEGIN_KIND = "pull.begin"
 #: catalog's retention window: no delta rows follow it, and the follower
 #: answers by starting a full sweep (design §10.2).
 PULL_TOO_OLD_KIND = "pull-too-old"
+#: The typed refusal a follow pull receives from a member that holds no
+#: covered persona write floor for the organization: it cannot claim the org
+#: frontier and serves nothing; the relay's failover moves the follower on
+#: (graph://6ad52a52-f75 principle 5, pieces 4 and 6; bead auto-8cpnm).
+FOLLOW_NO_FRONTIER_KIND = "follow-no-frontier"
 _TRANSACTION_MAGIC = b"FSTX"
 _OPERATION_MAGIC = b"FSO1"
 _HEADER_LIMIT = 4096
@@ -646,6 +651,17 @@ def encode_follow_too_old_refusal(
     })
 
 
+def encode_follow_no_frontier_refusal(
+    *, scope: str, version: int = FLEET_SYNC_PROTOCOL_VERSION,
+) -> bytes:
+    """A typed refusal for a follow pull served by a member that holds no
+    covered persona write floor for the organization, so it cannot claim an
+    org frontier. It is the whole reply: no rows follow."""
+    return _REFUSAL_MAGIC + canonical_json({
+        "v": version, "kind": FOLLOW_NO_FRONTIER_KIND, "scope": scope,
+    })
+
+
 def is_follow_too_old_refusal(raw: bytes) -> bool:
     """Whether *raw* is the typed too-old refusal a follow pull may receive."""
     if not raw.startswith(_REFUSAL_MAGIC):
@@ -923,8 +939,11 @@ def decode_operation_frame(raw: bytes):
     return operation, mutation
 
 
-def _sweep_run_frames(run):
+def _sweep_run_frames(run, origin: str | None = None):
     """One contiguous run of a single transaction, as v4 frames.
+
+    ``origin`` overrides the header's origin: a follower is told the
+    organization's id, never a machine or persona origin (auto-8cpnm).
 
     Yields ``(frame, counted)``. Both kinds enter the digest, but only
     OPERATION frames are counted -- the receiver increments its message count
@@ -939,8 +958,8 @@ def _sweep_run_frames(run):
     # newest transaction when the bootstrap completes. The header fields
     # are therefore constant here.
     yield encode_transaction_header(
-        run[0].origin_incarnation, run[0].transaction_id, len(run),
-        group=0, last=True,
+        origin if origin is not None else run[0].origin_incarnation,
+        run[0].transaction_id, len(run), group=0, last=True,
     ), False
     for item in run:
         yield encode_operation_frame(item), True
@@ -1342,12 +1361,28 @@ class SQLiteFleetSyncStore:
         finally:
             conn.close()
 
-    def follow_delta_too_old(self, watermarks) -> bool:
-        """Whether a follow delta from ``watermarks`` predates retention and
-        must be refused so the follower full-sweeps instead (§10.2)."""
+    def follow_delta_too_old(self, cursor: int) -> bool:
+        """Whether a follow delta from the follower's single cursor predates
+        retention and must be refused so the follower full-sweeps (§10.2)."""
         conn, catalog = self._open()
         try:
-            return catalog.follow_delta_too_old(watermarks)
+            return catalog.follow_delta_too_old(cursor)
+        finally:
+            conn.close()
+
+    def next_follow_transaction_heads(
+        self, after_timestamp_ns: int, after_transaction_id: str | None,
+        *, through_ns: int, limit: int,
+    ) -> list[tuple[int, int, str, str]]:
+        """Retained transactions of EVERY origin after the position and at or
+        below ``through_ns``, in (timestamp_ns, transaction_id) order: the one
+        stream a follower sees (bead auto-8cpnm)."""
+        conn, catalog = self._open()
+        try:
+            return catalog.next_follow_transaction_heads(
+                after_timestamp_ns, after_transaction_id,
+                through_ns=through_ns, limit=limit,
+            )
         finally:
             conn.close()
 
@@ -1966,6 +2001,48 @@ class _OriginPager:
         return None
 
 
+class _FollowPager:
+    """One-origin paging for a follower (bead auto-8cpnm, graph://6ad52a52-f75
+    piece 6): every retained transaction of every origin with timestamp in
+    ``(cursor, frontier]``, in (timestamp_ns, transaction_id) order across
+    origins, so the follower sees the organization as one author with one
+    position. Per-origin ``bounds`` (the server's own cursor per origin) still
+    hold: a transaction beyond this server's cursor for its origin is never
+    served, whatever the frontier says."""
+
+    def __init__(self, store, cursor: int, frontier: int,
+                 bounds: Mapping[str, int] | None = None):
+        self.store = store
+        self.frontier = int(frontier)
+        self.bounds = None if bounds is None else dict(bounds)
+        self._position: tuple[int, str | None] = (int(cursor), None)
+        self._buffer: list = []
+        self._exhausted = False
+        self.newest_ref = 0
+
+    def next(self):
+        while True:
+            if self._buffer:
+                ref, timestamp, transaction_id, origin = self._buffer.pop(0)
+                self._position = (timestamp, transaction_id)
+                if (
+                    self.bounds is not None
+                    and timestamp > int(self.bounds.get(origin, -1))
+                ):
+                    continue
+                self.newest_ref = max(self.newest_ref, ref)
+                return ref, (origin, transaction_id, timestamp)
+            if self._exhausted:
+                return None
+            timestamp, transaction_id = self._position
+            self._buffer = self.store.next_follow_transaction_heads(
+                timestamp, transaction_id,
+                through_ns=self.frontier, limit=SERVE_PAGE_TRANSACTIONS,
+            )
+            if not self._buffer:
+                self._exhausted = True
+
+
 class FleetSyncScheduler:
     """One direct listener plus bounded, roster-filtered outbound pulls."""
 
@@ -2530,13 +2607,36 @@ class FleetSyncScheduler:
                 # can speak the sweep gets the sweep. There is no second
                 # bootstrap mechanism to negotiate against any more.
                 serve_sweep = needs_bootstrap and server_has_content
+                # A follower sees the organization as one author with one
+                # position (graph://6ad52a52-f75 principle 5, pieces 4 and 6;
+                # bead auto-8cpnm): the org frontier F is this member's
+                # minimum over its covered persona write floors, the follower's
+                # cursor c is one integer presented under the organization's
+                # id, nothing above F is served, and no machine, persona or
+                # origin map ever crosses. Without a covered floor the member
+                # cannot claim F and refuses.
+                follow_frontier: int | None = None
+                follow_cursor = 0
+                if follow_admission:
+                    covered = await asyncio.to_thread(
+                        store.covered_persona_frontiers
+                    )
+                    if not covered:
+                        refusal = encode_follow_no_frontier_refusal(scope=scope)
+                        stats["bytes_sent"] += len(refusal)
+                        error_code = "follow_no_frontier"
+                        yield refusal
+                        return
+                    follow_frontier = min(int(v) for v in covered.values())
+                    follow_cursor = int((watermarks or {}).get(admitted_org, 0))
+                    serve_sweep = follow_cursor == 0 and server_has_content
                 if follow_admission and not serve_sweep:
-                    # A follow delta whose watermark predates the catalog's
+                    # A follow delta whose cursor predates the catalog's
                     # retention window may have missed a pruned demotion
                     # tombstone. Refuse with a typed too-old error and no
                     # rows; the follower answers with a full sweep (§10.2).
                     too_old = await asyncio.to_thread(
-                        store.follow_delta_too_old, origin_watermarks
+                        store.follow_delta_too_old, follow_cursor
                     )
                     if too_old:
                         refusal = encode_follow_too_old_refusal(scope=scope)
@@ -2557,6 +2657,15 @@ class FleetSyncScheduler:
                     sweep_frontier = await asyncio.to_thread(
                         store.origin_watermarks
                     )
+                    if follow_admission:
+                        # The partition for a follower is F for every origin,
+                        # never above this server's own cursor for it: a
+                        # completed follow sweep is the live public surface at
+                        # or below F, and nothing above F is served.
+                        sweep_frontier = {
+                            origin: min(int(follow_frontier), int(held))
+                            for origin, held in sweep_frontier.items()
+                        }
                     begin_body = {
                         "v": protocol_version,
                         "kind": SWEEP_BEGIN_KIND,
@@ -2568,6 +2677,11 @@ class FleetSyncScheduler:
                         # The follow reply's opening marker; absent under FULL,
                         # so a fleet member's sweep does not change by a byte.
                         begin_body["projection"] = "public"
+                        # One origin, one position: the organization at F. The
+                        # source is the organization too: no machine identity
+                        # crosses to a follower.
+                        begin_body["source_machine_pub"] = admitted_org
+                        begin_body["frontier"] = {admitted_org: int(follow_frontier)}
                     begin = canonical_json(begin_body)
                     stats["bytes_sent"] += len(begin)
                     yield begin
@@ -2597,7 +2711,9 @@ class FleetSyncScheduler:
                             )
                             if identity != run_identity:
                                 if run:
-                                    for frame, counted in _sweep_run_frames(run):
+                                    for frame, counted in _sweep_run_frames(
+                                        run, admitted_org if follow_admission else None,
+                                    ):
                                         # Swept frames must enter the digest,
                                         # and OPERATION frames the count, on
                                         # exactly the terms the receiver uses.
@@ -2613,7 +2729,9 @@ class FleetSyncScheduler:
                                 run_identity = identity
                             run.append(item)
                         if run:
-                            for frame, counted in _sweep_run_frames(run):
+                            for frame, counted in _sweep_run_frames(
+                                run, admitted_org if follow_admission else None,
+                            ):
                                 _digest_add(digest, frame)
                                 if counted:
                                     count += 1
@@ -2638,7 +2756,9 @@ class FleetSyncScheduler:
                 # this journal's prefix through that transaction. Record it
                 # before serving; the fleet-wide floor of these
                 # acknowledgements is what authorizes journal pruning.
-                if cursor > 0:
+                if cursor > 0 and not follow_admission:
+                    # A follower leaves no served-ack row: the server keeps no
+                    # per-follower state (§10.2, QA-5).
                     try:
                         await asyncio.to_thread(
                             store.record_served_ack,
@@ -2666,6 +2786,7 @@ class FleetSyncScheduler:
                         "kind": PULL_BEGIN_KIND,
                         "scope": scope,
                         "projection": "public",
+                        "frontier": {admitted_org: int(follow_frontier)},
                     })
                     stats["bytes_sent"] += len(pull_begin)
                     yield pull_begin
@@ -2676,7 +2797,17 @@ class FleetSyncScheduler:
                 # One snapshot: the server's cursor per origin, read once,
                 # bounds every page and the write floor frames after them.
                 serve_snapshot = await asyncio.to_thread(store.serve_snapshot)
-                pager = _OriginPager(store, origin_watermarks, None, bounds=serve_snapshot[0])
+                if follow_admission:
+                    # Nothing above F is served: after a follow sweep (which
+                    # delivered everything at or below F) there is no delta in
+                    # this reply; a delta reply serves (c, F] as one origin.
+                    pager = (
+                        _FollowPager(store, follow_frontier, follow_frontier)
+                        if served_bootstrap else
+                        _FollowPager(store, follow_cursor, follow_frontier, bounds=serve_snapshot[0])
+                    )
+                else:
+                    pager = _OriginPager(store, origin_watermarks, None, bounds=serve_snapshot[0])
                 slowest_phase = ("", 0.0, "")
                 while True:
                     authorize(peer_pub)
@@ -2737,7 +2868,8 @@ class FleetSyncScheduler:
                             # under one transaction id; the header's `last`
                             # tells the receiver when it is whole.
                             opening = encode_transaction_header(
-                                origin_key, transaction_id, operation_count,
+                                admitted_org if follow_admission else origin_key,
+                                transaction_id, operation_count,
                                 group=group_index, last=not more,
                             )
                             group_index += 1
@@ -2774,6 +2906,11 @@ class FleetSyncScheduler:
                     )
                     cursor = max(cursor, newest)
                 through_breadcrumb = None
+                if follow_admission:
+                    # No breadcrumb (it names a machine origin) and no write
+                    # floors: a follower's position is F, carried in the
+                    # opening record, and no map crosses.
+                    cursor = 0
                 if cursor:
                     through_breadcrumb = await asyncio.to_thread(
                         store.breadcrumb, cursor
@@ -2794,17 +2931,18 @@ class FleetSyncScheduler:
                 # the summary, so a receiver that records a write floor has already
                 # committed everything at or below it (write_floors.py). Outside the
                 # digest and count, like the other control frames.
-                for frame in await asyncio.to_thread(
-                    store.machine_write_floor_frames, protocol_version, watermarks or {},
-                    serve_snapshot,
-                ):
-                    stats["bytes_sent"] += len(frame)
-                    yield frame
-                for frame in await asyncio.to_thread(
-                    store.persona_write_floor_frames, protocol_version, known_personas or {},
-                ):
-                    stats["bytes_sent"] += len(frame)
-                    yield frame
+                if not follow_admission:
+                    for frame in await asyncio.to_thread(
+                        store.machine_write_floor_frames, protocol_version, watermarks or {},
+                        serve_snapshot,
+                    ):
+                        stats["bytes_sent"] += len(frame)
+                        yield frame
+                    for frame in await asyncio.to_thread(
+                        store.persona_write_floor_frames, protocol_version, known_personas or {},
+                    ):
+                        stats["bytes_sent"] += len(frame)
+                        yield frame
                 done = encode_done(
                     epoch=epoch,
                     count=count,

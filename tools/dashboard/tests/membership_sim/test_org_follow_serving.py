@@ -129,9 +129,15 @@ def _serving_member(registry, org, persona, *, seq, token, link_key, scheduler):
     )
 
 
+GENESIS = "7e" * 32  # the org's ledger genesis id: the follow admission's org
+
+
 def test_follow_link_opens_with_fragment_key_and_streams_scheduler_reply(
-    registry, grant_cache,
+    registry, grant_cache, monkeypatch,
 ):
+    # The link server names the org by its ledger genesis id, resolved from
+    # the grant's org slug (auto-8cpnm); this harness org has no ledger file.
+    monkeypatch.setattr(link_serving, "_follow_genesis_id", lambda slug: GENESIS)
     org = Org.found()
     registry.register(org.sim.root)
     registry.commit_checkpoint(org.sim, seq=0)
@@ -158,4 +164,4 @@ def test_follow_link_opens_with_fragment_key_and_streams_scheduler_reply(
     # No client credential; a follow admission built from the grant.
     assert call["peer_pub"] == ""
     assert call["admission"].kind == "follow"
-    assert call["admission"].org == registry.org
+    assert call["admission"].org == GENESIS

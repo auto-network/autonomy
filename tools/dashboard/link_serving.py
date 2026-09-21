@@ -1325,6 +1325,18 @@ async def _serve_subscribe(token: str, org: str | None, clock) -> bytes:
         return REFUSED
 
 
+def _follow_genesis_id(slug: str) -> str | None:
+    """The ledger genesis id of the local organization *slug*, or None when
+    this node holds no ledger for it. The follow admission names the org by
+    this id, as the org hello does (fleet_org_channel), so scope confinement
+    and the follower's single origin key agree with every other path."""
+    if not slug:
+        return None
+    from tools.dashboard.org_sync_channels import _genesis_id
+
+    return _genesis_id(slug)
+
+
 def make_grant_handler(org: str | None = None, *, now=None, fleet_runtime=None):
     """Build the ``handler(token, message)`` the B2 connector serves with.
 
@@ -1424,11 +1436,15 @@ def make_grant_handler(org: str | None = None, *, now=None, fleet_runtime=None):
         meta = grant.get("meta") or {}
         from tools.network.fleet_sync_channel import Admission
 
-        # The scheduler confines the served scope to this org's genesis id
-        # (its org channel's ``org``); the grant meta carries it as org_uuid.
-        admission = Admission(
-            kind="follow", org=meta.get("org_uuid") or grant.get("target_uuid"),
-        )
+        # The organization's id on the wire is its ledger genesis id (64 hex,
+        # the id every org channel and every origin key already carries), not
+        # the registry binding's uuid the grant meta names. Resolve it from the
+        # grant's org slug; an org this node holds no ledger for cannot be
+        # served (bead auto-8cpnm; record §10.1).
+        genesis = _follow_genesis_id(str(meta.get("org") or ""))
+        if not genesis:
+            return REFUSED
+        admission = Admission(kind="follow", org=genesis)
         pull = canonical_json(body)
         # No peer credential (""), the follow admission, and the same handler
         # that serves org sync. Its reply (bytes or async iterator) becomes
