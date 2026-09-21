@@ -130,3 +130,32 @@ Consequences:
 - Ship a single self-contained HTML file — no external assets of your own.
 - Arrow keys / space / scrubbing are handled by the viewer; your document receives
   `present:goto` postMessages and may expose `window.__presentGoToSlide`.
+
+## Linking to another slide from inside the deck
+
+Give the target slide an `id` and write a plain anchor — no JavaScript needed:
+
+```html
+<section id="roster">…<a href="#story-4">open story 4</a>…</section>
+<section id="story-4">…</section>
+```
+
+The runtime intercepts clicks on `a[href^="#"]` whose target is a slide element
+(or anything inside one), resolves that slide's index, and routes through the
+same `go(index)` the arrow keys use. The root scrolls to the slide, it becomes
+active, and the viewer's counter and URL follow. The target may be nested — an
+anchor to a paragraph inside slide 7 lands on slide 7. Anchors whose target is
+not inside a slide, or does not exist, are left to the browser untouched.
+
+Why the runtime intercepts instead of letting fragment navigation happen: the
+document is `doc.write()`n into the iframe, so a hash change would move the
+iframe's location and scroll the container without the parent ever hearing
+about it. Only `go()` posts the `present:active` message that updates the
+counter and URL.
+
+The programmatic form still works when you need it (zero-based, document order
+of slide elements):
+
+```html
+<a href="#" onclick="window.__presentGoToSlide(9);return false">go to slide 10</a>
+```

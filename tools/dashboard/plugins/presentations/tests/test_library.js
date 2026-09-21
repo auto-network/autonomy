@@ -138,3 +138,90 @@ test('Slides preserves human participant kinds for the shared presence renderer'
   assert.equal(rows.find(row=>row.id==='member-key').participant_kind,'operator');
   assert.equal(rows.find(row=>row.id==='auto-editor').id,'auto-editor');
 });
+
+// Build the real iframe document the viewer doc.write()s, run its runtime in
+// jsdom with just enough layout stubbed (each slide 800px tall) for go() and
+// activeIndex() to agree, and record what the runtime posts to the parent.
+function slideRuntime(deckHtml) {
+  const { sandbox } = harness();
+  const html = sandbox.PresentationsTest.iframeDocument({ variants: [{ id: 'main', html: deckHtml }] }, 0);
+  const posted = [];
+  const dom = new JSDOM(html, {
+    url: 'https://example.test/present/d1/1',
+    runScripts: 'dangerously',
+    pretendToBeVisual: true,
+    beforeParse(window) {
+      const SLIDE = 800;
+      const idx = (el) => { const v = el.getAttribute && el.getAttribute('data-present-index'); return v === null || v === undefined ? NaN : Number(v); };
+      window.postMessage = (msg) => { posted.push(msg); };
+      window.Element.prototype.scrollTo = function (opts) { this.scrollTop = Number(opts && opts.top) || 0; };
+      Object.defineProperty(window.HTMLElement.prototype, 'offsetTop', {
+        get() { const i = idx(this); return Number.isFinite(i) ? i * SLIDE : 0; },
+      });
+      Object.defineProperty(window.HTMLElement.prototype, 'offsetHeight', { get() { return SLIDE; } });
+      Object.defineProperty(window.HTMLElement.prototype, 'clientHeight', { get() { return SLIDE; } });
+      window.Element.prototype.getBoundingClientRect = function () {
+        const i = idx(this);
+        const root = this.ownerDocument.getElementById('present-scroll-root');
+        const top = Number.isFinite(i) ? i * SLIDE - (root ? root.scrollTop : 0) : 0;
+        return { top, bottom: top + SLIDE, left: 0, right: 0, width: 0, height: SLIDE };
+      };
+    },
+  });
+  return { dom, posted };
+}
+
+function click(el) {
+  const ev = new el.ownerDocument.defaultView.MouseEvent('click', { bubbles: true, cancelable: true });
+  return el.dispatchEvent(ev); // false when the runtime called preventDefault()
+}
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Messages are minted in the jsdom realm; copy them so deepEqual compares values, not prototypes.
+const last = (posted) => ({ ...posted.at(-1) });
+
+test('an in-deck anchor to another slide routes through go() so the parent learns the new index', async () => {
+  const { dom, posted } = slideRuntime(
+    '<section id="a"><a id="jump" href="#b">next</a></section>' +
+    '<section id="b"><p id="deep">two</p><a id="back" href="#a">back</a></section>' +
+    '<section id="c"><a id="inner" href="#deep">into the middle of slide two</a></section>');
+  const doc = dom.window.document;
+  await wait(150);
+  assert.deepEqual(last(posted), { type: 'present:active', index: 0, count: 3 });
+
+  assert.equal(click(doc.getElementById('jump')), false, 'fragment navigation is intercepted');
+  await wait(150);
+  assert.equal(doc.getElementById('present-scroll-root').scrollTop, 800);
+  assert.deepEqual(last(posted), { type: 'present:active', index: 1, count: 3 });
+  assert.equal(dom.window.location.hash, '', 'the iframe location is not moved by the anchor');
+  assert.ok(doc.getElementById('b').classList.contains('present-runtime-active'));
+
+  // A target nested inside a slide resolves to that slide.
+  assert.equal(click(doc.getElementById('inner')), false);
+  await wait(150);
+  assert.deepEqual(last(posted), { type: 'present:active', index: 1, count: 3 });
+
+  assert.equal(click(doc.getElementById('back')), false);
+  await wait(150);
+  assert.equal(doc.getElementById('present-scroll-root').scrollTop, 0);
+  assert.deepEqual(last(posted), { type: 'present:active', index: 0, count: 3 });
+});
+
+test('anchors that do not target a slide are left to the browser', async () => {
+  const { dom, posted } = slideRuntime(
+    '<section id="a"><a id="missing" href="#nowhere">gone</a><a id="ext" href="https://example.org/">out</a>' +
+    '<a id="empty" href="#">top</a><a id="side" href="#aside">aside</a></section>' +
+    '<div id="aside">not a slide</div><section id="b">two</section>');
+  const doc = dom.window.document;
+  await wait(150);
+  const before = posted.length;
+  for (const id of ['missing', 'empty', 'side']) {
+    assert.equal(click(doc.getElementById(id)), true, id + ' is not intercepted');
+  }
+  const ext = doc.getElementById('ext');
+  ext.addEventListener('click', (ev) => ev.preventDefault()); // keep jsdom from navigating
+  assert.equal(click(ext), false);
+  await wait(150);
+  assert.equal(doc.getElementById('present-scroll-root').scrollTop, 0);
+  assert.equal(posted.slice(before).filter((m) => m.type === 'present:active').length, 0);
+});
