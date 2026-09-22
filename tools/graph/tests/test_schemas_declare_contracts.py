@@ -236,19 +236,18 @@ def test_no_schema_leaves_its_entity_unnamed(registered_schemas):
 # derivation input is worse than a duplicated label, not better: if the two
 # ever disagree you derive against the wrong org.
 _KEY_DUPLICATION_GRANDFATHERED = {
-    # The row is SIGNED by the machine over its canonical bytes, machine_pub
-    # included: it is the signed statement's subject, not a repeated label.
-    # Dropping it would invalidate every signature and need a second verify
-    # path for old rows. Operator ruling 2026-09-22 with the other two
-    # repeaters migrated (voice-notes note_id, serving-connector org_uuid).
-    ("autonomy.personal.fleet-reachability", 1, "machine_pub"),
-    # Revision 1 stays registered so its rows upconvert; revision 2 drops the
-    # field (2026-09-22). The signature is not an obstacle: it is computed
-    # over the body WITH machine_pub and the verifier reinserts it from the
-    # row key, so both shapes sign identical bytes.
-    ("autonomy.org.fleet-reachability", 1, "machine_pub"),
     # Landed revisions stay registered so their rows upconvert; revision 2 of
     # each dropped the field (2026-09-22).
+    #
+    # Both reachability sets were once excused here on the grounds that the
+    # machine signs the row and so must carry machine_pub in it. That reason
+    # was wrong, and the entry outlived a check of it: the signature is
+    # computed over the body WITH machine_pub, and the verifier reinserts the
+    # field FROM THE ROW KEY before checking, so a revision-1 row and a
+    # revision-2 row produce identical signed bytes. A signed field that the
+    # verifier already knows is not a reason to store it twice.
+    ("autonomy.personal.fleet-reachability", 1, "machine_pub"),
+    ("autonomy.org.fleet-reachability", 1, "machine_pub"),
     ("autonomy.machine.serving-connector", 1, "org_uuid"),
     ("dashboard.voice-notes.note", 1, "note_id"),
     ("autonomy.identity.passkey", 1, "credential_id"),

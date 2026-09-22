@@ -168,25 +168,45 @@ def _run_compose_config(env: dict) -> subprocess.CompletedProcess:
     )
 
 
+def _compose_env(**overrides: str) -> dict:
+    """The environment `docker compose config` needs, minus the one variable
+    under test.
+
+    The compose file pins more than one variable with the fail-closed `:?`
+    operator. A host that runs the stack has them all in `.env`; a test
+    container has none of them, so inheriting os.environ makes these tests fail
+    on AUTONOMY_HOST_HOME — a variable neither of them is about. Every required
+    variable except the subject is supplied here, so a failure can only be the
+    subject's.
+    """
+    import os
+
+    env = dict(os.environ)
+    env.setdefault("AUTONOMY_HOST_HOME", str(Path.home()))
+    for name, value in overrides.items():
+        if value is None:
+            env.pop(name, None)
+        else:
+            env[name] = value
+    return env
+
+
 def test_compose_config_fails_without_subnet():
     base = _compose_argv()
     if base is None:
         pytest.skip("docker compose CLI not available")
-    import os
-    env = {k: v for k, v in os.environ.items() if k != "AUTONOMY_SUBNET"}
-    result = _run_compose_config(env)
+    result = _run_compose_config(_compose_env(AUTONOMY_SUBNET=None))
     assert result.returncode != 0, result.stdout
-    assert "AUTONOMY_SUBNET" in (result.stderr + result.stdout)
+    # The failing variable must be the subject, not some other unset one.
+    assert "required variable AUTONOMY_SUBNET is missing" in (
+        result.stderr + result.stdout)
 
 
 def test_compose_config_resolves_with_subnet():
     base = _compose_argv()
     if base is None:
         pytest.skip("docker compose CLI not available")
-    import os
-    env = dict(os.environ)
-    env["AUTONOMY_SUBNET"] = "172.16.0.0/24"
-    result = _run_compose_config(env)
+    result = _run_compose_config(_compose_env(AUTONOMY_SUBNET="172.16.0.0/24"))
     assert result.returncode == 0, result.stderr
     assert "172.16.0.0/24" in result.stdout
 

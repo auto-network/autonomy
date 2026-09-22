@@ -27,6 +27,12 @@ Two rules here are load-bearing and easy to lose:
   deduplicated, truncated, re-ordered or rewrote a received row and then checked
   the signature would be verifying a body the signer never produced. Received
   rows must ALREADY be canonical; if they are not, they are refused.
+* **The stored row does not repeat its own key** (revision 2). The signature is
+  computed over the body WITH ``machine_pub``; the stored row omits it because
+  the row key IS that value, and every verifier here reinserts it from the key
+  through :func:`_signed_body` before checking. Both shapes therefore sign
+  identical bytes, which is why a revision-1 row on disk still verifies and
+  does not need republishing.
 """
 
 from __future__ import annotations
@@ -46,6 +52,7 @@ from tools.graph.schemas.personal_fleet_reachability import (
     PERSONAL_FLEET_REACHABILITY_SET_ID,
     ROW_VERSION,
     PersonalFleetReachabilityV1,
+    PersonalFleetReachabilityV2,
     row_bytes,
 )
 from tools.graph.schemas.registry import SchemaValidationError
@@ -258,7 +265,10 @@ def build_row(
     body["sig"] = _SIG_PLACEHOLDER
     PersonalFleetReachabilityV1.validate(body)
     body["sig"] = machine_key.sign_hex(_signing_input(body))
-    return body
+    # The signature covers machine_pub; the STORED row does not repeat it,
+    # because the row key IS that value. Every verifier below puts it back from
+    # the key before checking, so both shapes sign identical bytes.
+    return {k: v for k, v in body.items() if k != "machine_pub"}
 
 
 def stored_row(machine_pub: str) -> dict[str, Any] | None:
@@ -314,6 +324,32 @@ def publish_if_changed(
     return True
 
 
+def _signed_body(row: Any, machine_pub: str) -> dict[str, Any] | None:
+    """The body the machine actually signed, or None if *row* is not one.
+
+    Stored rows come in two shapes and this is the only place that knows it:
+    a revision-2 row omits ``machine_pub`` (the row key carries it), a
+    revision-1 row repeats it. Both are reduced to the same signed body —
+    with the field, taken from the row key — so exactly one set of bytes is
+    ever verified. A revision-1 row whose copy disagrees with its key is
+    refused here rather than silently preferring one source.
+    """
+    if not isinstance(row, dict):
+        return None
+    if "machine_pub" in row:
+        if row["machine_pub"] != machine_pub:
+            return None
+        row = {k: v for k, v in row.items() if k != "machine_pub"}
+    try:
+        PersonalFleetReachabilityV2.validate(row)
+    except (SchemaValidationError, UnicodeError, ValueError, TypeError):
+        # Malformed Unicode or a failed value conversion is INVALID INPUT, not
+        # an exception for a caller to handle. Anything that cannot be
+        # canonicalized cannot have been signed in this form.
+        return None
+    return {**row, "machine_pub": machine_pub}
+
+
 def verify_own_row(row: Any, machine_pub: str) -> dict[str, Any] | None:
     """Integrity check of THIS machine's own stored row, for change detection.
 
@@ -329,20 +365,19 @@ def verify_own_row(row: Any, machine_pub: str) -> dict[str, Any] | None:
     """
     if row is None:
         return None
-    try:
-        PersonalFleetReachabilityV1.validate(row)
-    except (SchemaValidationError, UnicodeError, ValueError, TypeError):
-        # Same malformed-value boundary as the peer verifier. A stored own row
-        # carrying malformed Unicode or an unencodable integer must be REJECTED
-        # and republished, never allowed to abort publication.
-        return None
-    if row.get("machine_pub") != machine_pub:
+    # Shape, row key and signature all live in the signed body: a stored own
+    # row carrying malformed Unicode or an unencodable integer must be
+    # REJECTED and republished, never allowed to abort publication.
+    body = _signed_body(row, machine_pub)
+    if body is None:
         return None
     try:
-        verify_signature(machine_pub, row["sig"], _signing_input(row))
+        verify_signature(machine_pub, body["sig"], _signing_input(body))
     except Exception:
         return None
-    return row
+    # The caller compares semantic tuples against a freshly built row, which
+    # is stored-shaped, so hand back the stored shape too.
+    return {k: v for k, v in body.items() if k != "machine_pub"}
 
 
 def verify_row(
@@ -363,14 +398,16 @@ def verify_row(
     requires the received body to be already canonical, so a non-canonical row
     is refused rather than repaired into one that verifies.
     """
+    # The row key IS the signing key: one member cannot publish another's
+    # location, because the body verified here is built from the key it was
+    # stored under, not from a field the sender chose.
+    body = _signed_body(row, member_key)
+    if body is None:
+        return None
     try:
-        PersonalFleetReachabilityV1.validate(row)
-        if row_bytes(row) > MAX_ROW_BYTES:
+        if row_bytes(body) > MAX_ROW_BYTES:
             return None
-    except (SchemaValidationError, UnicodeError, ValueError, TypeError):
-        # Malformed Unicode or a failed value conversion is INVALID INPUT, not
-        # an exception for a caller to handle. Anything that cannot be
-        # canonicalized cannot have been signed in this form.
+    except (UnicodeError, ValueError, TypeError):
         return None
 
     # Received addresses must ALREADY be canonical. Normalizing them here and
@@ -378,25 +415,22 @@ def verify_row(
     # un-normalized spellings would let one endpoint appear as several
     # candidates.
     try:
-        for address in row["addresses"]:
+        for address in body["addresses"]:
             if address != normalize_address(address):
                 return None
     except (SchemaValidationError, UnicodeError, ValueError, TypeError):
         return None
 
-    machine_pub = row["machine_pub"]
-    # The row key and the signing key must be the SAME durable machine, or one
-    # member could publish another member's location under their key.
-    if member_key != machine_pub:
-        return None
+    machine_pub = member_key
     if machine_pub not in set(active_machine_pubs):
         return None
 
     try:
         # Raises on mismatch or malformed input; returns None on success.
-        verify_signature(machine_pub, row["sig"], _signing_input(row))
+        verify_signature(machine_pub, body["sig"], _signing_input(body))
     except Exception:
         return None
+    row = body
 
     relay = row.get("relay")
     if relay is not None:
@@ -420,4 +454,6 @@ def verify_row(
             return None
         if relay["org_uuid"] != configured_org_uuid:
             return None
-    return row
+    # Hand back the STORED shape, not the signed one: callers key these by
+    # machine and must not see the field twice again.
+    return {k: v for k, v in row.items() if k != "machine_pub"}
