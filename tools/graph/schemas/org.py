@@ -32,7 +32,10 @@ ORG_SET_ID = "autonomy.org"
 #: of an older class, which would relabel a landed revision (auto-j1y0z).
 ORG_REVISION = 3
 
-VALID_ORG_TYPES = ("shared", "personal")
+#: The ONE list of organization types; org_ops and db import it. ``followed``
+#: is a read-only mirror of another organization's public surface (design of
+#: record graph://5f2f5a49-00d §10.4). Operator ruling 2026-09-22: single owner.
+VALID_ORG_TYPES = ("shared", "personal", "followed")
 
 #: The bounded compact icon derivative is a 64x64 WebP encoded as a
 #: ``data:image/webp;base64,...`` URI. The processor holds the byte bound

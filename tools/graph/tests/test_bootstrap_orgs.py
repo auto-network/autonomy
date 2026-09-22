@@ -42,14 +42,17 @@ def stub_org_schema():
     so we drop the production registration first; the autouse
     ``_isolate_registry`` fixture restores it after the test.
     """
+    from tools.graph.schemas.org import ORG_REVISION
     from tools.graph.schemas.registry import unregister_schema
-    unregister_schema("autonomy.org", 1)
+    # The seed writes at the schema's CURRENT revision (single owner,
+    # operator ruling 2026-09-22): the stub stands in at that revision.
+    unregister_schema("autonomy.org", ORG_REVISION)
 
-    class OrgV1(schemas.SettingSchema):
+    class OrgStub(schemas.SettingSchema):
         set_id = "autonomy.org"
-        schema_revision = 1
+        schema_revision = ORG_REVISION
 
-    return OrgV1
+    return OrgStub
 
 
 @pytest.fixture
@@ -112,8 +115,9 @@ def test_bootstrap_skips_seed_when_schema_unregistered(orgs_root):
     # Explicitly unregister autonomy.org#1 (normally registered at import
     # time by tools.graph.schemas.org) to simulate the pre-S1 world.
     # The autouse _isolate_schema_registry fixture restores it after.
+    from tools.graph.schemas.org import ORG_REVISION
     from tools.graph.schemas.registry import unregister_schema
-    unregister_schema("autonomy.org", 1)
+    unregister_schema("autonomy.org", ORG_REVISION)
     refs = org_ops.ensure_bootstrap_orgs(first_org="acme")
     assert sorted(r.slug for r in refs) == ["acme", "personal"]
     # DB exists, but no autonomy.org#1 Setting was seeded.

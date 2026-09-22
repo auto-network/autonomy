@@ -37,10 +37,15 @@ from .schemas.registry import SchemaValidationError
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ORGS_DIR = DATA_ROOT / "orgs"
 
-VALID_ORG_TYPES = ("shared", "personal")
-
-ORG_IDENTITY_SET_ID = "autonomy.org"
-ORG_IDENTITY_REVISION = 1
+# The organization schema owns these (operator ruling 2026-09-22, single
+# owner): a local copy of the identity revision had drifted to 1 while the
+# schema was at 3, so every identity row was written two revisions behind and
+# the migration's existence probe never found it.
+from .schemas.org import (  # noqa: E402
+    ORG_REVISION as ORG_IDENTITY_REVISION,
+    ORG_SET_ID as ORG_IDENTITY_SET_ID,
+    VALID_ORG_TYPES,
+)
 
 
 # ── Errors ───────────────────────────────────────────────────
