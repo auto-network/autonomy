@@ -11,8 +11,6 @@ from tools.network.idkit.root_factor_policy import mint_password_armor, open_arm
 import pytest
 
 from tools.network.idkit import KeyPair, recovery
-from tools.network.idkit.armor import (
-)
 from tools.network.idkit.errors import MalformedError, SignatureError
 from tools.network.idkit.root_rotation import (
     make_rotation,
