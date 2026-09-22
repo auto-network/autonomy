@@ -19,6 +19,8 @@ from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.testclient import TestClient
 
+from tools.graph.schemas.org import ORG_REVISION
+
 from tools.dashboard import org_membership_routes
 from tools.graph import org_ops
 from tools.graph.db import GraphDB
@@ -115,9 +117,20 @@ def test_unknown_org_is_404(client):
     assert r.status_code == 404
 
 
-def test_revision_1_seed_reads_back_before_any_put(client):
+def test_seeded_identity_reads_back_before_any_put(client):
+    """The seeded identity row reads back at the schema's CURRENT revision.
+
+    This asserted 1 and was renamed from test_revision_1_... because the
+    number is not the point: org identity rows used to be written at a
+    hardcoded revision 1 while the schema had moved to 3, which made the
+    orgs migration non-idempotent (reported 2026-09-22, fixed at
+    8b75bbda). The fix landed while this whole file was uncollectable —
+    Pillow was missing from the session image — so nothing caught the
+    stale assertion. It now reads the constant, so the next revision
+    bump cannot strand it again.
+    """
     identity = _identity("charterorg")
-    assert identity["schema_revision"] == 1
+    assert identity["schema_revision"] == ORG_REVISION
     assert identity["payload"]["name"] == "Charter Org"
 
 
