@@ -43,6 +43,9 @@ def test_one_failing_scope_does_not_starve_the_rest():
             "anchore": Path("a"), "autonomy": Path("b"),
         })
         config = None
+        # No followed mirrors in this fleet: the round consults the set
+        # before iterating scopes (auto-3534i), so the stub carries it.
+        _followed_scopes = staticmethod(lambda: set())
 
         async def _sync_scope(self, machine_pub, addresses, scope, *, org_channel=None):
             attempted.append(scope)
@@ -67,6 +70,9 @@ def test_an_unreachable_peer_still_stops_the_round():
             "personal": Path("p"), "anchore": Path("a"), "autonomy": Path("b"),
         })
         config = None
+        # No followed mirrors in this fleet: the round consults the set
+        # before iterating scopes (auto-3534i), so the stub carries it.
+        _followed_scopes = staticmethod(lambda: set())
 
         async def _sync_scope(self, machine_pub, addresses, scope, *, org_channel=None):
             attempted.append(scope)
