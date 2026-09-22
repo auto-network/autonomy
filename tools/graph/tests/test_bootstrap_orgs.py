@@ -74,9 +74,13 @@ def _read_settings(db_path):
     return [dict(r) for r in rows]
 
 
-def test_ensure_bootstrap_unnamed_creates_no_shared_org(orgs_root, stub_org_schema):
+def test_ensure_bootstrap_unnamed_founds_myorg(orgs_root, stub_org_schema):
+    # A fresh node that names no first org founds ``myorg`` (D7,
+    # graph://5f2f5a49-00d §10.5) — never ``autonomy``, which is reserved for
+    # the followed Autonomy public-surface mirror.
     refs = org_ops.ensure_bootstrap_orgs()
-    assert sorted(r.slug for r in refs) == ["personal"]
+    assert sorted(r.slug for r in refs) == ["myorg", "personal"]
+    assert (orgs_root / "myorg.db").exists()
     assert not (orgs_root / "autonomy.db").exists()
     assert (orgs_root.parent / "personal.db").exists()
 

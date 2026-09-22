@@ -212,6 +212,7 @@ def _initialize_data_root(
         _init_orgs(data, report, first_org=first_org, first_org_name=first_org_name)
     _init_operational_dbs(data, report)
     _seed_bootstrap_allowlist(data, report)
+    _seed_follow_defaults(data, report)
     if tls:
         _init_tls(data, report, domain=tls_domain)
     else:
@@ -469,6 +470,19 @@ def _init_orgs(
 
     orgs_root = resolve_store("orgs", root=data)
     slug = org_ops.resolve_first_org_slug(first_org)
+    if slug is None and not any(
+        o.type == "shared" for o in org_ops.list_orgs(root=orgs_root)
+    ):
+        # Mirror ensure_bootstrap_orgs' fresh-node fallback (D7,
+        # graph://5f2f5a49-00d §10.5) so this report and the shell default-org
+        # seed name the org that ensure_bootstrap_orgs is about to found.
+        slug = org_ops.FALLBACK_FIRST_ORG_SLUG
+    if slug is not None:
+        # Validate before the report loop formats the slug into a db path:
+        # ``_org_db_path`` raises a bare ValueError on a bad slug, so an
+        # invalid first-org name would otherwise surface as ValueError here
+        # rather than the OrgError ensure_bootstrap_orgs raises for it.
+        org_ops._validate_slug(slug)
     for org_slug in ((slug, "personal") if slug else ("personal",)):
         # Routed: "personal" is a local store living beside orgs/
         # (auto-35kmy); checking the legacy path would report it created
@@ -666,11 +680,17 @@ def _seed_bootstrap_allowlist(data: Path, report: InitReport) -> None:
         report.add(name, SKIPPED, f"allowlist YAML unreadable: {exc}")
         return
 
+    try:
+        source = str(ALLOWLIST_YAML.relative_to(REPO_ROOT))
+    except ValueError:
+        # A YAML outside this checkout (e.g. a test fixture): record the bare
+        # filename rather than crash on ``relative_to``.
+        source = ALLOWLIST_YAML.name
     payload = {
         "version": allow.version,
         "canonical": list(allow.canonical),
         "published": list(allow.published),
-        "source": str(ALLOWLIST_YAML.relative_to(REPO_ROOT)),
+        "source": source,
     }
     schemas.validate_payload(SET_ID, SCHEMA_REVISION, payload)
 
@@ -703,6 +723,155 @@ def _seed_bootstrap_allowlist(data: Path, report: InitReport) -> None:
         )
         db.conn.commit()
         report.add(name, CREATED, f"{SET_ID}#{SCHEMA_REVISION} key={allow.org}")
+    finally:
+        db.close()
+
+
+#: Whole-value sentinels that mark a follow-block value as an unfilled
+#: placeholder rather than a real published link (§10.1: rendezvous/link_pub
+#: are committed only after the operator publishes the org:follow link). Matched
+#: against the entire (lowercased) value so a legitimate random link token or
+#: hex key is never mistaken for one.
+_FOLLOW_PLACEHOLDER_SENTINELS = frozenset(
+    {"placeholder", "changeme", "change-me", "todo", "tbd", "xxx", "none", "null"}
+)
+
+
+def _is_follow_placeholder(value) -> bool:
+    """True when *value* is missing, blank, or an obvious unfilled placeholder.
+
+    Precise on purpose: angle brackets (never valid in a URL, uuid or hex key)
+    and the substring ``placeholder`` are high-signal, but every other sentinel
+    must match the WHOLE value, so a real rendezvous token that merely contains
+    ``tbd`` is not falsely rejected."""
+    if not isinstance(value, str) or not value.strip():
+        return True
+    low = value.strip().lower()
+    if "<" in low or ">" in low or "placeholder" in low:
+        return True
+    return low in _FOLLOW_PLACEHOLDER_SENTINELS
+
+
+def _seed_follow_defaults(data: Path, report: InitReport) -> None:
+    """Seed the Autonomy ``autonomy.org.follow#1`` row into ``personal.db``.
+
+    A fresh node knows which organization's public surface it should mirror —
+    the ``follow:`` block committed in the bootstrap allowlist YAML
+    (``{org_uuid, rendezvous, link_pub}``, design of record
+    graph://5f2f5a49-00d §10.5, FR6). This step writes the follow row so the
+    credential-free follow loop can pull that surface into a local read-only
+    mirror; the follow *client* (F4) and the YAML block (F1) are seeded here,
+    not defined here.
+
+    Skipped, with a reported reason and never an error, when:
+
+    * the allowlist YAML is absent or carries no ``follow:`` block;
+    * the block lacks ``rendezvous`` or ``link_pub`` or any value is a
+      placeholder — the operator has not published the org:follow link yet
+      (§10.1); a missing link is a skip, not a failure;
+    * this node IS the followed organization (its own org's ``orgs.id`` equals
+      the block's ``org_uuid``) — a node never follows itself;
+    * the follow row already exists (idempotent second run).
+    """
+    from tools.graph import schemas
+    from tools.graph.curation import allowlist as allowlist_mod
+    from tools.graph.db import GraphDB, _local_store_db_path
+    from tools.graph.org_ops import _now_iso, uuid7
+    from tools.graph.schemas.org_follow import (
+        ORG_FOLLOW_REVISION,
+        ORG_FOLLOW_SET_ID,
+    )
+
+    name = "setting:org-follow"
+    if not ALLOWLIST_YAML.exists():
+        report.add(name, SKIPPED, f"allowlist YAML not found: {ALLOWLIST_YAML}")
+        return
+    try:
+        allow = allowlist_mod.load(ALLOWLIST_YAML)
+    except Exception as exc:
+        report.add(name, SKIPPED, f"allowlist YAML unreadable: {exc}")
+        return
+
+    follow = allow.follow
+    if not follow:
+        report.add(name, SKIPPED, "allowlist carries no follow: block")
+        return
+
+    org_uuid = follow.get("org_uuid")
+    rendezvous = follow.get("rendezvous")
+    link_pub = follow.get("link_pub")
+    if _is_follow_placeholder(org_uuid):
+        report.add(name, SKIPPED, "follow block has no usable org_uuid")
+        return
+    if _is_follow_placeholder(rendezvous) or _is_follow_placeholder(link_pub):
+        report.add(
+            name, SKIPPED,
+            "follow link not yet published (rendezvous/link_pub absent or "
+            "placeholder)",
+        )
+        return
+
+    orgs_root = resolve_store("orgs", root=data)
+    # Self-node skip: a node never follows an organization it already holds.
+    from tools.graph import org_ops
+
+    if any(o.id == org_uuid for o in org_ops.list_orgs(root=orgs_root)):
+        report.add(
+            name, SKIPPED,
+            f"this node holds org {org_uuid} (the followed org); no self-follow",
+        )
+        return
+
+    slug = allow.org
+    payload = {
+        "org_uuid": org_uuid,
+        "rendezvous": rendezvous,
+        "link_pub": link_pub,
+        "enabled": True,
+        "added_at": _now_iso(),
+    }
+    registry_url = follow.get("registry_url")
+    if registry_url and not _is_follow_placeholder(registry_url):
+        payload["registry_url"] = registry_url
+    try:
+        schemas.validate_payload(ORG_FOLLOW_SET_ID, ORG_FOLLOW_REVISION, payload)
+    except Exception as exc:
+        report.add(name, SKIPPED, f"follow block failed schema validation: {exc}")
+        return
+
+    personal = _local_store_db_path("personal", orgs_root)
+    if not personal.exists():
+        report.add(name, SKIPPED, f"personal org DB missing: {personal}")
+        return
+
+    db = GraphDB(personal)
+    try:
+        row = db.conn.execute(
+            "SELECT id FROM settings WHERE set_id = ? AND key = ? "
+            "AND schema_revision = ?",
+            (ORG_FOLLOW_SET_ID, slug, ORG_FOLLOW_REVISION),
+        ).fetchone()
+        if row is not None:
+            report.add(
+                name, EXISTS,
+                f"{ORG_FOLLOW_SET_ID}#{ORG_FOLLOW_REVISION} key={slug}",
+            )
+            return
+        now = _now_iso()
+        db.conn.execute(
+            "INSERT INTO settings(id, set_id, schema_revision, key, payload, "
+            "created_at, updated_at, expires_at) VALUES(?,?,?,?,?,?,?,?)",
+            (
+                uuid7(), ORG_FOLLOW_SET_ID, ORG_FOLLOW_REVISION, slug,
+                json.dumps(payload), now, now,
+                schemas.cache_expires_at(ORG_FOLLOW_SET_ID, ORG_FOLLOW_REVISION, now),
+            ),
+        )
+        db.conn.commit()
+        report.add(
+            name, CREATED,
+            f"{ORG_FOLLOW_SET_ID}#{ORG_FOLLOW_REVISION} key={slug} → {org_uuid}",
+        )
     finally:
         db.close()
 
