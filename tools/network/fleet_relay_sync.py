@@ -58,6 +58,21 @@ def _materialize_then_discover_org_scopes():
             )
     except Exception:
         logger.exception("materialize_org_scopes_from_roster failed; continuing")
+    # Followed-org mirrors (design of record graph://5f2f5a49-00d §10.4): a
+    # read-only cache of another org's public surface, created from the local
+    # autonomy.org.follow#1 rows so discovery returns it and _sync_follow_scope
+    # fills it. Idempotent; a node that follows nothing creates nothing.
+    try:
+        from tools.network.fleet_sync_scheduler import materialize_follow_scopes
+
+        newly_followed = materialize_follow_scopes()
+        if newly_followed:
+            logger.info(
+                "follow: materialised %d followed mirror(s): %s",
+                len(newly_followed), ", ".join(newly_followed),
+            )
+    except Exception:
+        logger.exception("materialize_follow_scopes failed; continuing")
     return discover_org_sync_scopes()
 
 

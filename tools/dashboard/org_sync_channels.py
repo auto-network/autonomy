@@ -54,8 +54,14 @@ def _org_slugs() -> list[str]:
     from tools.graph import org_ops
 
     try:
+        # A followed mirror (orgs.type='followed') is a read-only cache of
+        # another org's public surface (design of record graph://5f2f5a49-00d
+        # §10.4): this node holds no persona in it and mints no fleet:sync
+        # certificate for it, so it is not an org-sync target. Skipping it here
+        # also skips it in sync_org_targets, which iterates this list.
         return [ref.slug for ref in org_ops.list_orgs()
-                if ref.slug not in ("personal", "machine")]
+                if ref.slug not in ("personal", "machine")
+                and ref.type != "followed"]
     except Exception:
         return []
 

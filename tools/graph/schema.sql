@@ -348,7 +348,7 @@ END;
 CREATE TABLE IF NOT EXISTS orgs (
     id          TEXT PRIMARY KEY,        -- UUID v7, minted at DB create
     slug        TEXT NOT NULL,           -- matches data/orgs/<slug>.db filename
-    type        TEXT NOT NULL CHECK (type IN ('shared','personal')),
+    type        TEXT NOT NULL CHECK (type IN ('shared','personal','followed')),
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 

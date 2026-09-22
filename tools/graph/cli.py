@@ -2809,14 +2809,42 @@ def cmd_bead(args):
 
 
 def cmd_follow_router(args):
-    """Route 'graph follow ...' — currently only the publish verb."""
+    """Route 'graph follow ...': publish (org side) and add/list/status/remove
+    (follower side)."""
     pos = args.args_pos or []
-    if pos == ["publish"]:
+    verb = pos[0] if pos else None
+    rest = pos[1:]
+    if verb == "publish" and not rest:
         from .link_cmd import cmd_follow_publish
         cmd_follow_publish(args)
         return
-    print("Error: usage: graph follow publish [--org slug] [--label text]",
-          file=sys.stderr)
+    if verb == "add" and len(rest) == 1:
+        from .follow_cmd import cmd_follow_add
+        args.target = rest[0]
+        cmd_follow_add(args)
+        return
+    if verb == "list" and not rest:
+        from .follow_cmd import cmd_follow_list
+        cmd_follow_list(args)
+        return
+    if verb == "status" and not rest:
+        from .follow_cmd import cmd_follow_status
+        cmd_follow_status(args)
+        return
+    if verb == "remove" and len(rest) == 1:
+        from .follow_cmd import cmd_follow_remove
+        args.target = rest[0]
+        cmd_follow_remove(args)
+        return
+    print(
+        "Error: usage:\n"
+        "  graph follow publish [--org slug] [--label text]\n"
+        "  graph follow add <url>\n"
+        "  graph follow list\n"
+        "  graph follow status\n"
+        "  graph follow remove <slug> [--keep-mirror]",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 
@@ -6109,17 +6137,26 @@ def main():
     p.add_argument("--org", help="Org slug")
     p.set_defaults(func=cmd_link_router)
 
-    # follow — publish the org's standing org:follow public link
+    # follow — publish (org side) + add/list/status/remove (follower side)
     p = sub.add_parser(
         "follow",
-        help="Standing org:follow public link (publish)",
-        epilog="Standing follow link (operator-approved, spec graph://5f2f5a49-00d §10.1):\n"
+        help="Follow an org's public surface, or publish the follow link",
+        epilog="Follower side (design of record graph://5f2f5a49-00d §10.4):\n"
+               "  graph follow add <url>          follow an org from its link\n"
+               "  graph follow list               orgs this node follows\n"
+               "  graph follow status             last pull, rows, projection\n"
+               "  graph follow remove <slug>      stop following (drops mirror)\n"
+               "    --keep-mirror                 keep the read-only mirror\n"
+               "Org side (operator-approved, §10.1):\n"
                "  graph follow publish [--org slug] [--label text]\n"
                "A membership-free public link a node pulls the org's public surface\n"
                "from; never expires unless revoked (revoke with `graph link revoke`).",
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("args_pos", nargs="*", metavar="ARGS", help="publish")
+    p.add_argument("args_pos", nargs="*", metavar="ARGS",
+                   help="publish | add <url> | list | status | remove <slug>")
     p.add_argument("--label", help="publish: human label carried on the grant")
+    p.add_argument("--keep-mirror", dest="keep_mirror", action="store_true",
+                   help="remove: keep the read-only mirror, only stop pulling")
     p.add_argument("--org", help="Org slug")
     p.set_defaults(func=cmd_follow_router)
 
