@@ -95,6 +95,7 @@ from . import workspace_provision  # noqa: F401 — autonomy.workspace.provision
 from . import workspace_image_build  # noqa: F401 — autonomy.workspace.image-build#1
 from . import artifact_path  # noqa: F401 — autonomy.artifact-path#1
 from . import org_peer_subscription  # noqa: F401 — autonomy.org.peer-subscription#1
+from . import org_follow  # noqa: F401 — autonomy.org.follow#1
 from . import mount  # noqa: F401 — autonomy.workspace.mount#1
 from . import agent_actions  # noqa: F401 — dashboard.agent-actions#1
 from . import capability_contract  # noqa: F401 — autonomy.capability.contract#1

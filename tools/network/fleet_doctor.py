@@ -844,7 +844,12 @@ def check_sync_data(report: dict) -> None:
     try:
         from tools.network.fleet_sync_scheduler import discover_org_sync_scopes
 
-        scopes = discover_org_sync_scopes()
+        from tools.graph.db import is_followed_org
+
+        scopes = {
+            slug: path for slug, path in discover_org_sync_scopes().items()
+            if not is_followed_org(slug)  # followed mirrors get their own section
+        }
         report["org_sync_scopes"] = sorted(scopes)
         if scopes:
             _section("Organization sync scopes")
@@ -897,7 +902,54 @@ def check_sync_data(report: dict) -> None:
                     )
     except Exception as exc:
         _line("org-scope check", f"FAILED to run: {exc!r}", warn=True)
+    check_followed_scopes(report)
     check_sync_traffic(report)
+
+
+def check_followed_scopes(report: dict) -> None:
+    """One line per followed-org mirror (design of record graph://5f2f5a49-00d
+    §10.4): its public row count, cursor and last pull outcome. A followed
+    mirror is a read-only cache another org's public surface is pulled into over
+    a credential-free org:follow link, so it is reported apart from the fleet
+    and org sync scopes above."""
+    try:
+        from tools.graph.db import _org_db_path, is_followed_org
+        from tools.network.fleet_sync import follow_mirror
+        from tools.network.fleet_sync_scheduler import discover_org_sync_scopes
+
+        scopes = discover_org_sync_scopes()
+        followed = sorted(
+            slug for slug in scopes if is_followed_org(slug)
+        )
+        report["followed_scopes"] = followed
+        if not followed:
+            return
+        _section("Followed organizations")
+        for slug in followed:
+            path = _org_db_path(slug)
+            if not Path(path).exists():
+                _line(f"follow {slug}", "mirror missing", warn=True)
+                continue
+            with _observe(path) as conn:
+                cur = follow_mirror.read_follow_cursor(conn)
+                status = follow_mirror.read_follow_status(conn)
+                try:
+                    rows = conn.execute(
+                        "SELECT COUNT(*) FROM sources WHERE publication_state "
+                        "IN ('published','canonical')"
+                    ).fetchone()[0]
+                except sqlite3.OperationalError:
+                    rows = "?"
+                outcome = (status or {}).get("outcome") or "never pulled"
+                cursor = cur[1] if cur else None
+                warn = outcome not in ("ok", "never pulled")
+                _line(
+                    f"follow {slug}",
+                    f"{rows} public rows, cursor {cursor}, last: {outcome}",
+                    warn=warn,
+                )
+    except Exception as exc:
+        _line("follow-scope check", f"FAILED to run: {exc!r}", warn=True)
 
 
 def check_sync_traffic(report: dict) -> None:

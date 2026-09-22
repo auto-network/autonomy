@@ -379,6 +379,17 @@ class FleetSyncRuntimeConfig:
     #: the reachability cache's note_failed so that peer is looked up again
     #: before the next full interval (auto-8dw0w); None: nothing.
     on_peer_failure: Callable[[str], None] | None = None
+    #: Follower dial (design of record graph://5f2f5a49-00d §10.4). An async
+    #: callable ``(row: dict) -> ViewerChannel`` opening the org:follow channel
+    #: for one follow row (its rendezvous, link_pub and org_uuid). None uses
+    #: the built-in dialer that parses the rendezvous URL and calls
+    #: ``ViewerChannel.connect``; the harness injects one that reaches the test
+    #: registry over the open link path.
+    follow_connect: Callable[[Mapping], "Awaitable[object]"] | None = None
+    #: Called with (slug, status: dict) after every follow-scope attempt so the
+    #: status surface (``graph follow status``) can report the last pull, the
+    #: last refusal and when the follower will retry. None: nothing recorded.
+    follow_status_recorder: Callable[[str, Mapping], None] | None = None
 
 
 #: File stems in data/orgs/ that are never an organization scope. "personal"
@@ -467,6 +478,105 @@ def materialize_org_scopes_from_roster() -> list[str]:
         except Exception:
             # A single bad entry (unwritable path, bad id) must not stop the
             # rest of the fleet's orgs from bootstrapping.
+            continue
+    return created
+
+
+def _enabled_follow_rows() -> list[tuple[str, dict]]:
+    """The enabled ``autonomy.org.follow#1`` rows as ``(slug, payload)``.
+
+    Read from the personal store (the set's home); every failure is an empty
+    list, never a raise, so the follow machinery never destabilizes a round."""
+    try:
+        from tools.graph import settings_ops
+        from tools.graph.schemas.org_follow import (
+            ORG_FOLLOW_REVISION, ORG_FOLLOW_SET_ID,
+        )
+    except Exception:
+        return []
+    try:
+        members = settings_ops.read_set(
+            ORG_FOLLOW_SET_ID, org=None, peers=[],
+            target_revision=ORG_FOLLOW_REVISION,
+        )
+    except Exception:
+        return []
+    rows: list[tuple[str, dict]] = []
+    for member in members:
+        payload = member.payload if isinstance(member.payload, dict) else {}
+        if not payload.get("enabled"):
+            continue
+        slug = member.key
+        if not slug or not isinstance(slug, str):
+            continue
+        rows.append((slug, payload))
+    return rows
+
+
+def materialize_follow_scopes() -> list[str]:
+    """Create the local read-only mirror ``orgs/<slug>.db`` for every enabled
+    followed organization this machine does not yet have, so
+    :func:`discover_org_sync_scopes` finds it and ``_sync_follow_scope`` fills
+    it (design of record graph://5f2f5a49-00d §10.4).
+
+    The stub is created with ``type_="followed"`` and the followed org's
+    ``org_uuid`` so the mirror IS that organization (the existing peer read
+    path serves it as a public-surface peer). Idempotent: an existing mirror is
+    left untouched; a mirror whose ``orgs.id`` disagrees with the follow row's
+    ``org_uuid`` is a slug collision (D7) and is refused with a report naming
+    BOTH ids, never silently reused. Returns the slugs newly created.
+    """
+    from tools.graph.db import GraphDB, _org_db_path
+
+    rows = _enabled_follow_rows()
+    if not rows:
+        return []
+    orgs_dir = Path(_org_db_path("personal")).parent / "orgs"
+    created: list[str] = []
+    for slug, payload in rows:
+        org_uuid = payload.get("org_uuid")
+        if not org_uuid or not isinstance(org_uuid, str):
+            continue
+        path = orgs_dir / f"{slug}.db"
+        if path.exists():
+            # Slug collision guard (D7): a mirror already on disk must be the
+            # SAME organization this follow names. A local org (or a mirror of
+            # a different org) sharing the slug is refused, loudly, naming both
+            # ids — never reused as if it were the followed org.
+            import sqlite3 as _sqlite3
+
+            existing_id = None
+            try:
+                conn = _sqlite3.connect(
+                    f"file:{path}?mode=ro", uri=True, timeout=2.0
+                )
+                try:
+                    r = conn.execute("SELECT id FROM orgs LIMIT 1").fetchone()
+                    existing_id = r[0] if r else None
+                finally:
+                    conn.close()
+            except Exception:
+                existing_id = None
+            if existing_id is not None and str(existing_id) != org_uuid:
+                logger.error(
+                    "follow: refusing to mirror org %r — a database at %s "
+                    "already exists with orgs.id %s, but the follow names "
+                    "org_uuid %s. Resolve the slug collision before following "
+                    "(design of record graph://5f2f5a49-00d D7).",
+                    slug, path, existing_id, org_uuid,
+                )
+            continue
+        try:
+            GraphDB.create_org_db(
+                slug, type_="followed", org_id=org_uuid, path=path,
+            ).close()
+            created.append(slug)
+        except FileExistsError:
+            continue
+        except Exception:
+            logger.warning(
+                "follow: could not create mirror for %r", slug, exc_info=True,
+            )
             continue
     return created
 
@@ -671,6 +781,42 @@ def is_follow_too_old_refusal(raw: bytes) -> bool:
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
         return False
     return isinstance(value, dict) and value.get("kind") == PULL_TOO_OLD_KIND
+
+
+def _follow_refusal_kind(raw: bytes) -> str | None:
+    """The ``kind`` of a refusal frame (``schema-refused``, ``pull-too-old``,
+    ``follow-no-frontier``), or None if it is not a well-formed refusal."""
+    if not raw.startswith(_REFUSAL_MAGIC):
+        return None
+    try:
+        value = json.loads(raw[len(_REFUSAL_MAGIC):])
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+        return None
+    return value.get("kind") if isinstance(value, dict) else None
+
+
+class _FollowRefusal(Exception):
+    """A post-handshake typed refusal on a follow reply (too-old / no-frontier):
+    the follower backs off and retries, and ``graph follow status`` reports the
+    refusal (operator ruling 2026-09-20, record v10). ``kind`` is the outcome
+    string the scheduler records and returns."""
+
+    def __init__(self, kind: str):
+        self.kind = kind
+        super().__init__(kind)
+
+
+def _parse_follow_rendezvous(rendezvous: str) -> tuple[str, str]:
+    """Split a stored ``org:follow`` rendezvous (``https://host[:port]/l/<token>``,
+    fragment already stripped) into the relay websocket base and the link token.
+    ``http(s)`` maps to ``ws(s)``; a bare ``ws(s)`` base is passed through."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    parts = urlsplit(rendezvous)
+    scheme = {"http": "ws", "https": "wss"}.get(parts.scheme, parts.scheme)
+    token = parts.path.rstrip("/").rsplit("/", 1)[-1]
+    relay = urlunsplit((scheme, parts.netloc, "", "", ""))
+    return relay, token
 
 
 def watermarks_from_trail(
@@ -1207,6 +1353,62 @@ class SQLiteFleetSyncStore:
         conn, catalog = self._open()
         try:
             apply_live_page(catalog, items)
+        finally:
+            conn.close()
+
+    # -- follower mirror state (design of record graph://5f2f5a49-00d §10.4) --
+
+    def follow_cursor(self) -> tuple[str, int] | None:
+        """The mirror's ``(genesis, cursor)`` for its followed org, or None."""
+        from tools.network.fleet_sync import follow_mirror
+
+        conn, _ = self._open()
+        try:
+            return follow_mirror.read_follow_cursor(conn)
+        finally:
+            conn.close()
+
+    def set_follow_cursor(self, genesis: str, cursor: int) -> None:
+        """Record the follower's cursor after a completed reply (it is F)."""
+        from tools.network.fleet_sync import follow_mirror
+
+        conn, _ = self._open()
+        try:
+            follow_mirror.write_follow_cursor(conn, genesis, cursor)
+        finally:
+            conn.close()
+
+    def reset_follow_bootstrap(self) -> None:
+        """Clear the bootstrap row so a too-old refusal can force a fresh
+        sweep that anchors cleanly instead of colliding with a COMPLETE row."""
+        from tools.network.fleet_sync import follow_mirror
+
+        conn, _ = self._open()
+        try:
+            follow_mirror.reset_bootstrap(conn)
+        finally:
+            conn.close()
+
+    def prune_follow_generation(self, carried_source_ids) -> int:
+        """After a completed sweep, delete every public row the sweep did not
+        carry (mark-and-sweep by generation) and the satellites it orphaned."""
+        from tools.network.fleet_sync import follow_mirror
+
+        conn, _ = self._open()
+        try:
+            return follow_mirror.prune_to_generation(
+                conn, set(carried_source_ids)
+            )
+        finally:
+            conn.close()
+
+    def set_follow_status(self, fields: dict) -> None:
+        """Record the last follow attempt's outcome for ``graph follow status``."""
+        from tools.network.fleet_sync import follow_mirror
+
+        conn, _ = self._open()
+        try:
+            follow_mirror.write_follow_status(conn, dict(fields))
         finally:
             conn.close()
 
@@ -3638,6 +3840,14 @@ class FleetSyncScheduler:
             # roster is pulled above, then co-members' machines, so a fleet
             # converges internally before it presents one face outward.
             await self._sync_org_peers(set(active), now)
+            # Followed-org mirrors (design of record graph://5f2f5a49-00d
+            # §10.4): each pulls another org's public surface over its own
+            # credential-free org:follow link. Independent of the fleet and org
+            # paths above; a follow failure never stops them.
+            try:
+                await self._sync_follow_scopes(now)
+            except Exception:
+                logger.warning("follow: round failed", exc_info=True)
             # End of the round: seal this machine's write floor on every scope store
             # and, where the whole persona fleet has a known position, the
             # persona write floor (auto-mmwgu). Needs no peer: the promise is about
@@ -3759,6 +3969,26 @@ class FleetSyncScheduler:
             "installed for this scope"
         )
 
+    def _followed_scopes(self) -> set[str]:
+        """The scope slugs whose local database is a followed mirror
+        (``orgs.type='followed'``). These sync ONLY over their org:follow link
+        (``_sync_follow_scope``), never through the personal roster or an org
+        hello. Resolved fresh each round so a newly materialized mirror joins
+        without a restart; a store that cannot be read is treated as not
+        followed (it is then pulled the ordinary way, which merely fails)."""
+        from tools.graph.db import is_followed_org
+
+        followed: set[str] = set()
+        for scope in self._scope_paths():
+            if scope == "personal":
+                continue
+            try:
+                if is_followed_org(scope):
+                    followed.add(scope)
+            except Exception:
+                continue
+        return followed
+
     async def _sync_org_peers(self, own_fleet: set[str], now: float) -> None:
         """One round's outward pulls: for every org scope with an org
         channel, a bounded stalest-first selection of co-member machines
@@ -3805,6 +4035,317 @@ class FleetSyncScheduler:
                 return_exceptions=True,
             )
 
+    # -- followed-org mirrors (design of record graph://5f2f5a49-00d §10.4) ---
+
+    async def _sync_follow_scopes(self, now: float) -> None:
+        """One round's follow pulls: for every enabled followed mirror, pull
+        its public surface over its own org:follow link. Each is independent;
+        one failing never stops the others, and a followed mirror is never
+        pulled any other way."""
+        followed = self._followed_scopes()
+        if not followed:
+            return
+        rows_by_slug = dict(_enabled_follow_rows())
+        for scope in sorted(followed):
+            row = rows_by_slug.get(scope)
+            if row is None:
+                # The mirror exists but its follow row is gone or disabled;
+                # leave the mirror in place (readable) and pull nothing.
+                continue
+            try:
+                await self._sync_follow_scope(scope, row)
+            except Exception:
+                logger.warning(
+                    "follow: scope %r pull failed", scope, exc_info=True,
+                )
+
+    async def _follow_channel(self, row: Mapping):
+        """Open the org:follow channel for one follow row. The harness injects
+        ``config.follow_connect``; the built-in dialer parses the rendezvous
+        URL and dials with only the link's fragment key (no membership, no
+        client credential — verify_link_server_hello is the whole auth)."""
+        if self.config.follow_connect is not None:
+            return await self.config.follow_connect(row)
+        from tools.network.relaykit.viewer import ViewerChannel
+
+        relay_url, token = _parse_follow_rendezvous(str(row.get("rendezvous") or ""))
+        return await ViewerChannel.connect(
+            relay_url, token,
+            link_pub=str(row.get("link_pub") or ""),
+            org=str(row.get("org_uuid") or ""),
+            ping_timeout=None,
+        )
+
+    async def _sync_follow_scope(self, scope: str, row: Mapping) -> str:
+        """Pull one followed org's public surface into its mirror.
+
+        Opens the org:follow channel, sends the ``follow`` op carrying the
+        mirror's single integer cursor for the org (under the org's genesis id),
+        reads the reply with the same streamed pull loop org sync uses, and
+        applies it through the shared sweep/delta apply path. The reply MUST
+        open with the projection marker (``sweep.begin``/``pull.begin`` carrying
+        ``projection: public``); a reply that does not is refused before any row
+        is applied. On a completed bootstrap sweep the mirror is pruned by
+        generation (mark-and-sweep). On a too-old refusal the follower resets
+        and starts a full sweep; on a no-frontier refusal it backs off and
+        retries next round. Returns a short outcome string.
+        """
+        store = await asyncio.to_thread(self._store_for, scope)
+        outcome = await self._follow_attempt(scope, row, store, force_sweep=False)
+        if outcome == "too_old":
+            # The delta cursor predates retention: reset and full-sweep now, so
+            # a demotion pruned past the tombstone is reconciled within one
+            # round rather than waiting for the next (§10.2).
+            await asyncio.to_thread(store.reset_follow_bootstrap)
+            outcome = await self._follow_attempt(
+                scope, row, store, force_sweep=True,
+            )
+        return outcome
+
+    async def _record_follow_status(
+        self, scope: str, store: "SQLiteFleetSyncStore | None" = None, **fields,
+    ) -> None:
+        # Persist into the mirror so `graph follow status` (a separate process)
+        # can read it. Best effort: a status write must never fail a pull.
+        if store is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(store.set_follow_status, dict(fields))
+        recorder = self.config.follow_status_recorder
+        if recorder is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(recorder, scope, dict(fields))
+
+    async def _follow_attempt(
+        self, scope: str, row: Mapping, store: "SQLiteFleetSyncStore",
+        *, force_sweep: bool,
+    ) -> str:
+        cursor_row = None if force_sweep else await asyncio.to_thread(
+            store.follow_cursor
+        )
+        bootstrap_incomplete = await asyncio.to_thread(store.bootstrap_in_progress)
+        has_state = await asyncio.to_thread(store.has_state)
+        watermarks: dict[str, int] | None = None
+        if (
+            cursor_row is not None
+            and not bootstrap_incomplete
+            and has_state
+        ):
+            # A completed prior pull: ask for the delta above F, presented as
+            # the one watermark under the org's genesis id.
+            genesis, cursor = cursor_row
+            watermarks = {genesis: int(cursor)}
+        # else: cursor 0 (no key) -> the server serves a full sweep.
+        local_digest = await asyncio.to_thread(store.compatibility_digest)
+        request = json.loads(encode_pull_request(
+            "00" * 32, compat=local_digest, scope=scope,
+            bootstrap=watermarks is None,
+            watermarks=watermarks,
+        ))
+        try:
+            channel = await self._follow_channel(row)
+        except Exception as exc:
+            await self._record_follow_status(
+                scope, store, outcome="unreachable",
+                error=f"{type(exc).__name__}: {exc}"[:200],
+                at=time.time(),
+            )
+            logger.info("follow: %r rendezvous unreachable: %s", scope, exc)
+            return "unreachable"
+        try:
+            await channel.send_message(json.dumps(
+                {"v": 1, "op": "follow", "request": request}
+            ).encode())
+            return await self._follow_receive(scope, store, channel)
+        except _FollowRefusal as refusal:
+            await self._record_follow_status(
+                scope, store, outcome=refusal.kind, refusal=refusal.kind,
+                at=time.time(),
+                retry_after=time.time() + self.config.max_backoff,
+            )
+            return refusal.kind
+        finally:
+            with contextlib.suppress(Exception):
+                await channel.close()
+
+    async def _follow_receive(
+        self, scope: str, store: "SQLiteFleetSyncStore", channel,
+    ) -> str:
+        """Read and apply one follow reply. Raises :class:`_FollowRefusal` on a
+        typed refusal; returns the outcome on a completed reply."""
+        digest = hashlib.sha256()
+        message_count = 0
+        opened_projected = False
+        sweeping = False
+        was_sweep = False
+        learned_genesis: str | None = None
+        frontier_F: int | None = None
+        carried_source_ids: set[str] = set()
+        pending: list[AuthoredMutation] = []
+        header: tuple[str, str, int, int, bool] | None = None
+        saw_done = False
+
+        async def flush() -> None:
+            nonlocal pending
+            if not pending:
+                return
+            items = pending
+            pending = []
+            if was_sweep:
+                for item in items:
+                    if (
+                        item.mutation.table == "sources"
+                        and not item.mutation.tombstone
+                    ):
+                        carried_source_ids.add(str(item.mutation.address[0]))
+            await asyncio.to_thread(store.apply_swept_page, items)
+
+        async for message, stream_final in bounded_stream_frames(
+            channel,
+            first_allowance_s=self.config.pull_first_frame_allowance_s,
+            silence_limit_s=self.config.pull_stream_silence_limit_s,
+        ):
+            if message.startswith(_REFUSAL_MAGIC):
+                kind = _follow_refusal_kind(message)
+                if kind == "schema-refused":
+                    raise FleetSyncSchemaMismatch(
+                        "follow peer replicated schema differs"
+                    )
+                if kind == PULL_TOO_OLD_KIND:
+                    raise _FollowRefusal("too_old")
+                if kind == FOLLOW_NO_FRONTIER_KIND:
+                    raise _FollowRefusal("no_frontier")
+                raise FleetSyncProtocolError("unknown follow refusal frame")
+            if message.startswith(_DONE_MAGIC):
+                _epoch, expected_count, expected_digest, _through, _bc = (
+                    decode_done(message)
+                )
+                if not stream_final:
+                    raise FleetSyncProtocolError("follow summary is not final")
+                await flush()
+                if not opened_projected:
+                    # A reply that never carried the projection marker is
+                    # refused, having applied nothing (design §10.2).
+                    raise FleetSyncProtocolError(
+                        "follow reply did not open with the projection marker"
+                    )
+                if message_count != expected_count:
+                    raise FleetSyncProtocolError("follow message count mismatch")
+                if digest.hexdigest() != expected_digest:
+                    raise FleetSyncProtocolError("follow stream digest mismatch")
+                saw_done = True
+                break
+            if stream_final:
+                raise FleetSyncProtocolError("follow mutation ended the stream")
+            if message.startswith(_TRANSACTION_MAGIC):
+                if not opened_projected:
+                    raise FleetSyncProtocolError(
+                        "follow reply served rows before the projection marker"
+                    )
+                await flush()
+                header = decode_transaction_header(message)
+                _digest_add(digest, message)
+                continue
+            if message.startswith(_OPERATION_MAGIC):
+                if header is None or not opened_projected:
+                    raise FleetSyncProtocolError(
+                        "follow operation frame arrived before its header"
+                    )
+                operation, mutation = decode_operation_frame(message)
+                # Every row the follower applies names the org's genesis id as
+                # origin (the header carries it), never a machine or persona.
+                pending.append(AuthoredMutation(
+                    header[0], header[1], operation, mutation,
+                ))
+                _digest_add(digest, message)
+                message_count += 1
+                continue
+            if message.startswith(b"{"):
+                control = _json_loose(message)
+                kind = control.get("kind")
+                if kind == "keepalive":
+                    continue
+                if kind == SWEEP_BEGIN_KIND:
+                    if control.get("projection") != "public":
+                        raise FleetSyncProtocolError(
+                            "follow sweep did not carry projection=public"
+                        )
+                    source = control.get("source_machine_pub")
+                    frontier = control.get("frontier")
+                    if not isinstance(frontier, dict) or len(frontier) != 1:
+                        raise FleetSyncProtocolError(
+                            "follow sweep frontier is not one origin"
+                        )
+                    learned_genesis = next(iter(frontier))
+                    frontier_F = int(frontier[learned_genesis])
+                    # The channel's fragment key already authenticated the
+                    # server; the sweep names the org by its genesis id, which
+                    # is the one origin the follower stamps every row with.
+                    await asyncio.to_thread(
+                        store.record_sweep_begin, control, scope, str(source),
+                    )
+                    sweeping = True
+                    was_sweep = True
+                    opened_projected = True
+                    continue
+                if kind == PULL_BEGIN_KIND:
+                    if control.get("projection") != "public":
+                        raise FleetSyncProtocolError(
+                            "follow delta did not carry projection=public"
+                        )
+                    frontier = control.get("frontier")
+                    if not isinstance(frontier, dict) or len(frontier) != 1:
+                        raise FleetSyncProtocolError(
+                            "follow delta frontier is not one origin"
+                        )
+                    learned_genesis = next(iter(frontier))
+                    frontier_F = int(frontier[learned_genesis])
+                    opened_projected = True
+                    continue
+                if kind == SWEEP_END_KIND:
+                    await flush()
+                    header = None
+                    sweeping = False
+                    await asyncio.to_thread(store.record_sweep_delivered)
+                    continue
+                if kind == "transaction.empty":
+                    # A transaction of which nothing survives; the follower's
+                    # position is F (set at completion), so nothing to record.
+                    await flush()
+                    header = None
+                    continue
+                # write-floor / retired / origin-map frames never cross to a
+                # follower (§10.2); anything else is a protocol error.
+                raise FleetSyncProtocolError(
+                    "unexpected control frame on a follow reply"
+                )
+            raise FleetSyncProtocolError("unknown follow stream frame")
+
+        if not saw_done:
+            raise FleetSyncProtocolError("follow stream ended without summary")
+
+        if was_sweep:
+            # sweep.end advanced SWEEPING->PULLING; the follow reply has no
+            # delta half, so the pull half is complete now.
+            completed = await asyncio.to_thread(store.record_bootstrap_complete)
+            if completed and learned_genesis is not None:
+                # Mark-and-sweep prune: everything the completed sweep did not
+                # carry is stale and deleted; the mirror stays readable.
+                pruned = await asyncio.to_thread(
+                    store.prune_follow_generation, carried_source_ids,
+                )
+                logger.info(
+                    "follow: %r sweep complete, %d public row(s) carried, "
+                    "%d pruned", scope, len(carried_source_ids), pruned,
+                )
+        if learned_genesis is not None and frontier_F is not None:
+            await asyncio.to_thread(
+                store.set_follow_cursor, learned_genesis, int(frontier_F),
+            )
+        await self._record_follow_status(
+            scope, store, outcome="ok", at=time.time(), projection="public",
+        )
+        return "ok"
+
     async def _sync_peer(self, machine_pub: str, addresses: Sequence[str]) -> None:
         """Pull every synchronized scope from one peer, personal first.
 
@@ -3820,7 +4361,14 @@ class FleetSyncScheduler:
         # first) kept working and every check read green. Transport failures
         # still back the peer off through the caller's normal path; they no
         # longer decide the fate of unrelated scopes.
+        followed = self._followed_scopes()
         for scope in self._scope_paths():
+            if scope in followed:
+                # A followed mirror is pulled only over its own org:follow link
+                # by _sync_follow_scope, never from a personal-roster peer
+                # (design of record graph://5f2f5a49-00d §10.4). A rostered peer
+                # is not serving another org's public surface.
+                continue
             outcome = await self._sync_scope(machine_pub, addresses, scope)
             if outcome == "peer_unreachable":
                 # The peer itself is not answering. Trying the remaining
