@@ -479,6 +479,43 @@ def test_the_fold_builds_once_per_ledger_advancement_not_once_per_call(
     )
 
 
+def test_a_replicated_event_row_rebuilds_the_fold(orgs_env):
+    """A co-member's event arrives as a replicated Settings row, never
+    through this node's ``append``. The resolver keys its fold cache on the
+    event rows themselves (design graph://53b5bb04-bc0), so the arrival
+    alone rebuilds the fold, exactly once."""
+    from tools.network.ledger.settings_bridge import _insert
+
+    org = OrgEvents()
+    a, b = org.personas
+    root = orgs_env("fold-replicated")
+    path = make_store(root, org)
+    deliver(path, slot_row(a, NOW_MS - MIN_MS))
+    deliver(path, slot_row(b, NOW_MS - 2 * MIN_MS))
+
+    settings_ops._FOLD_VIEW_CACHE.clear()
+    settings_ops._fold_builds = 0
+    resolve()
+    assert settings_ops._fold_builds == 1
+
+    # The revocation lands the way replication delivers it: a bare row on
+    # its own connection, no store, no append.
+    org.revoke_claim(1)
+    event = org.events[-1]
+    raw = sqlite3.connect(path)
+    try:
+        with raw:
+            assert _insert(raw, event.event_id, event.to_json().decode("utf-8"))
+    finally:
+        raw.close()
+    GraphDB.close_all_pooled()
+    for _ in range(3):
+        resolve()
+    assert settings_ops._fold_builds == 2, (
+        "an event row that arrived by replication is a ledger advancement"
+    )
+
+
 # ── the store ladder: most local wins ────────────────────────
 
 def make_plain_store(root, slug):

@@ -3,11 +3,11 @@
 Operator ruling 2026-09-06 (bead auto-dqemk): standardize on Settings as the
 table-synchronization method. The org authority ledger's events become rows
 of an org-homed append-only set so the existing settings replication carries
-them; each receiving node feeds an arriving row's ``wire`` through
-``LedgerStore.append_wire``, which re-verifies the content hash and the
-author signature and maintains that store's own ``ledger_parents`` /
-``ledger_heads`` indexes. The row is the transport, never the store: the
-ledger tables stay LOCAL in fleet-sync policy and are rebuilt per node.
+them. The row IS the store (design graph://53b5bb04-bc0): a node's ledger is
+hydrated from these rows on open, whether it appended them or replication
+delivered a co-member's; heads are computed from the parents inside each
+signed event, never stored, and the settings resolver keys its fold cache
+on the set of event ids in these rows.
 
 Rows are deliberately UNSIGNED settings rows: the event's own ``author_key``
 and ``sig`` inside ``wire`` are the authority evidence, verified by the

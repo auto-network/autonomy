@@ -55,7 +55,6 @@ def test_store_targets_org_db(orgs_dir):
             "ledger_meta",
             "ledger_events",
             "ledger_parents",
-            "ledger_heads",
             "ledger_projections",
         } <= tables
         store.refresh_projections()
@@ -119,7 +118,6 @@ def test_migration_relocates_and_matches_fold(orgs_dir):
         for old, new in (
             ("ledger_events", "events"),
             ("ledger_parents", "parents"),
-            ("ledger_heads", "heads"),
             ("ledger_projections", "projections"),
             ("ledger_meta", "meta"),
         ):
