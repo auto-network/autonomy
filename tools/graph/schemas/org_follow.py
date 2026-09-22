@@ -35,7 +35,22 @@ from __future__ import annotations
 import re
 from typing import Any
 
+SYNOPSIS = {
+    "summary": (
+        "One organization this node follows: its public surface is pulled, "
+        "credential-free, over the org's standing org:follow link into a "
+        "read-only local mirror. Personal-homed so the operator's whole fleet "
+        "follows the same organizations; each machine holds its own mirror."
+    ),
+    "nouns": [
+        "follow", "followed organization", "follow link", "rendezvous",
+        "mirror", "public surface",
+    ],
+    "related_set_ids": ["autonomy.network.link-grant#1", "autonomy.org#1"],
+}
+
 from .registry import (
+    keyed_per_entity,
     SettingSchema,
     SchemaValidationError,
     home,
@@ -53,6 +68,7 @@ _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 
 @publication_band(min="raw", max="raw")
 @home("personal")
+@keyed_per_entity(key_strategy="org_slug")
 class OrgFollowV1(SettingSchema):
     """One organization this node follows, keyed by its slug."""
 
