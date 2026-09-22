@@ -14,7 +14,7 @@ def _grant(pub: str) -> dict:
 
 def test_respond_logs_the_reason_and_answers_generically(monkeypatch, caplog):
     monkeypatch.setattr(ckr, "_authorized_grant",
-                        lambda request: ("cd" * 16, "dynbench", _grant("deadbeef")))
+                        lambda request: ("cd" * 16, "dynbench", _grant("deadbeef"), "cd" * 16))
     monkeypatch.setattr("tools.dashboard.link_channel_key.channel_key_for",
                         lambda token, org: (_ for _ in ()).throw(
                             RuntimeError("the link's channel key did not open: no key holder")))
@@ -32,9 +32,9 @@ def test_resolve_names_which_check_failed(monkeypatch):
     monkeypatch.setattr("tools.dashboard.link_channel_key.channel_key_for", lambda token, org: pair)
     # The vaulted key does not match the grant's channel_pub.
     monkeypatch.setattr(ckr, "_authorized_grant",
-                        lambda request: ("cd" * 16, "dynbench", _grant("not-this-key")))
+                        lambda request: ("cd" * 16, "dynbench", _grant("not-this-key"), "cd" * 16))
     monkeypatch.setattr("tools.dashboard.link_serving.check_grant",
-                        lambda token, org=None, now=None: _grant("not-this-key"))
+                        lambda token, org=None, now=None, grant_id=None: _grant("not-this-key"))
     try:
         ckr.resolve({})
     except PermissionError as exc:
@@ -43,9 +43,9 @@ def test_resolve_names_which_check_failed(monkeypatch):
         raise AssertionError("expected a refusal")
     # The key matches but the grant changed between the two reads.
     grant = _grant(pair.public_hex)
-    monkeypatch.setattr(ckr, "_authorized_grant", lambda request: ("cd" * 16, "dynbench", grant))
+    monkeypatch.setattr(ckr, "_authorized_grant", lambda request: ("cd" * 16, "dynbench", grant, "cd" * 16))
     monkeypatch.setattr("tools.dashboard.link_serving.check_grant",
-                        lambda token, org=None, now=None: {**grant, "expires_at": 1})
+                        lambda token, org=None, now=None, grant_id=None: {**grant, "expires_at": 1})
     try:
         ckr.resolve({})
     except PermissionError as exc:
@@ -54,5 +54,5 @@ def test_resolve_names_which_check_failed(monkeypatch):
         raise AssertionError("expected a refusal")
     # Everything agrees: the seed is released.
     monkeypatch.setattr("tools.dashboard.link_serving.check_grant",
-                        lambda token, org=None, now=None: grant)
+                        lambda token, org=None, now=None, grant_id=None: grant)
     assert ckr.resolve({}) == {"ok": True, "seed": pair.private_hex}

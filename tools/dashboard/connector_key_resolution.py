@@ -22,6 +22,10 @@ from tools.graph import settings_ops
 _log = logging.getLogger("dashboard.connector_key_resolution")
 
 SET_ID = "autonomy.machine.serving-connector"
+# Revision 2: the payload no longer repeats the key (org_uuid).
+from tools.graph.schemas.network_identity import (  # noqa: E402
+    MACHINE_SERVING_CONNECTOR_REVISION as SCHEMA_REVISION,
+)
 PROTOCOL_VERSION = 1
 MAX_MESSAGE = 16384
 TIMEOUT = 5
@@ -47,7 +51,14 @@ def record(credential_id: str):
 
 def _write(credential_id, payload):
     with settings_ops.identity_write_context():
-        settings_ops.upsert_by_key(SET_ID, 1, credential_id, payload, org="machine")
+        # Rows written at revision 1 (before the repeated key was dropped)
+        # are rewritten to the current revision first, so a write never
+        # leaves one row per revision under the same key.
+        try:
+            settings_ops.migrate_setting_revisions(SET_ID, SCHEMA_REVISION, org="machine")
+        except Exception:
+            logger.warning("serving-connector: revision upgrade skipped", exc_info=True)
+        settings_ops.upsert_by_key(SET_ID, SCHEMA_REVISION, credential_id, payload, org="machine")
 
 
 def _live(payload):
@@ -69,8 +80,10 @@ def _authorized_grant(request):
     row = record(credential_id)
     payload = row["payload"] if row else {}
     digest = hashlib.sha256(auth.encode()).hexdigest()
+    # The row was read by credential_id, which IS its key; nothing in the
+    # payload repeats it.
     if (not hmac.compare_digest(digest, payload.get("token_hash", ""))
-            or payload.get("org_uuid") != credential_id or not _live(payload)):
+            or not _live(payload)):
         raise PermissionError("connector authentication refused")
     token = request.get("token")
     org = payload["organization"]
@@ -179,7 +192,7 @@ def register(pid, credential_id, org, boot_commit):
     auth = secrets.token_hex(32)
     _write(credential_id, {
         "token_hash": hashlib.sha256(auth.encode()).hexdigest(),
-        "organization": org, "org_uuid": credential_id,
+        "organization": org,
         "pid": pid, "process_start": start, "boot_commit": boot_commit or "unknown",
         "protocol_version": PROTOCOL_VERSION, "resolver_port": listener_port(),
     })

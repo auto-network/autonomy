@@ -13,21 +13,22 @@ def _client(monkeypatch):
 
 def test_list_notes_returns_newest_first(monkeypatch):
     members = [
-        SimpleNamespace(payload={
-            "note_id": "note-old", "title": "Old", "body": "Earlier",
+        SimpleNamespace(key="note-old", payload={
+            "title": "Old", "body": "Earlier",
             "created_at": "2026-08-20T00:00:00Z",
             "updated_at": "2026-08-20T01:00:00Z",
         }),
-        SimpleNamespace(payload={
-            "note_id": "note-new", "title": "New", "body": "Later",
+        SimpleNamespace(key="note-new", payload={
+            "title": "New", "body": "Later",
             "created_at": "2026-08-21T00:00:00Z",
             "updated_at": "2026-08-21T01:00:00Z",
         }),
     ]
+    monkeypatch.setattr(api, "_upgrade_rows", lambda organization: None)
     monkeypatch.setattr(
         api.settings_ops,
         "read_owned_set",
-        lambda set_id, org: SimpleNamespace(members=members),
+        lambda set_id, org, target_revision=None: SimpleNamespace(members=members),
     )
 
     response = _client(monkeypatch).get("/api/plugins/voice-notes/notes")
@@ -53,6 +54,7 @@ def test_put_note_persists_private_org_record_and_preserves_created_at(monkeypat
         lambda *args, **kwargs: writes.append((args, kwargs)),
     )
 
+    monkeypatch.setattr(api, "_upgrade_rows", lambda organization: None)
     response = _client(monkeypatch).put(
         "/api/plugins/voice-notes/notes/note-123",
         json={"title": "  Field observation  ", "body": "Wind from the east."},
