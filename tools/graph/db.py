@@ -162,7 +162,7 @@ DEFAULT_ORGS_DIR = DATA_ROOT / "orgs"
 _SQLITE_CONNECT_TIMEOUT_S = 5.0
 _RW_OPEN_BACKOFF_S = (0.05, 0.1, 0.2)
 
-VALID_ORG_TYPES = ("shared", "personal", "followed")
+from .schemas.org import VALID_ORG_TYPES  # the schema module owns the list (operator ruling 2026-09-22)
 
 
 def _fleet_sha256_text(value: object) -> str:

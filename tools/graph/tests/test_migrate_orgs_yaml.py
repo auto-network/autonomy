@@ -88,7 +88,10 @@ def prebootstrapped_orgs_dir(tmp_path, monkeypatch) -> Path:
     """Orgs dir pre-seeded by ``ensure_bootstrap_orgs`` (autonomy + personal)."""
     d = tmp_path / "orgs"
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(d))
-    org_ops.ensure_bootstrap_orgs(root=d)
+    # A shared org is created only when one is named (no default slug is
+    # assumed here; the fallback is the deploy's, bead auto-krbtk), so the
+    # fixture names the org the test reads back.
+    org_ops.ensure_bootstrap_orgs(first_org="autonomy", root=d)
     return d
 
 
