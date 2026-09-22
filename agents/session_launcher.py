@@ -740,6 +740,17 @@ def _resolve_credentials_via_substrate(
     rng = rng or random
     tokens = _setup_token_rows()
     if not tokens:
+        # No minted setup token: the operator's own sign-in, imported from
+        # this machine, launches the session without a browser (FR7a). The
+        # file is declared through the mount plan and written after mount
+        # validation, so nothing is emitted here but the decision.
+        bundle = _pick_claude_bundle_row(_credentials_rows())
+        if bundle is not None:
+            return {
+                "type": "bundle",
+                "alias": (bundle.payload or {}).get("alias"),
+                "org_uuid": getattr(bundle, "key", None),
+            }
         # Auto-install path. Best-effort: failures here surface to the
         # caller as None and the existing "No Claude credentials found"
         # error message takes over.
@@ -891,6 +902,9 @@ def _setup_auth_docker_args(creds: dict, run_dir: Path) -> list[str] | None:
     """
     if creds["type"] == "token":
         return ["-e", f"CLAUDE_CODE_OAUTH_TOKEN={creds['token']}"]
+    if creds["type"] == "bundle":
+        # The credentials file rides the mount plan; no environment needed.
+        return []
 
     return None
 
@@ -1121,6 +1135,91 @@ def _materialize_codex_auth_json(run_dir: Path) -> Path | None:
             pass
         return None
     return out
+
+
+CLAUDE_BUNDLE_FILENAME = "claude-credentials.json"
+CLAUDE_BUNDLE_CONTAINER_PATH = "/home/agent/.claude/.credentials.json"
+
+
+def _pick_claude_bundle_row(rows: list[Any], *, now_ms: int | None = None) -> Any | None:
+    """The freshest usable ``dashboard.claude.credentials`` row, or None.
+
+    A row is usable when it carries the OAuth pair and its ``expires_at_ms``
+    is still ahead of now; the refresh poller keeps imported rows ahead of
+    expiry, so an expired row means the poller could not refresh it and the
+    sign-in is genuinely gone. Ties break on key so the pick is deterministic.
+    """
+    now = now_ms if now_ms is not None else int(time.time() * 1000)
+
+    def _exp(row: Any) -> int:
+        payload = getattr(row, "payload", None)
+        v = payload.get("expires_at_ms") if isinstance(payload, dict) else None
+        return v if isinstance(v, int) and not isinstance(v, bool) else -1
+
+    usable = []
+    for row in rows:
+        payload = getattr(row, "payload", None)
+        if not isinstance(payload, dict):
+            continue
+        if not all(
+            isinstance(payload.get(k), str) and payload.get(k)
+            for k in ("access_token", "refresh_token")
+        ):
+            continue
+        if _exp(row) <= now:
+            continue
+        usable.append(row)
+    if not usable:
+        return None
+    usable.sort(key=lambda r: (-_exp(r), str(getattr(r, "key", ""))))
+    return usable[0]
+
+
+def _materialize_claude_bundle(run_dir: Path) -> Path | None:
+    """Rebuild ``~/.claude/.credentials.json`` from the imported bundle row.
+
+    The operator's own sign-in, imported by ``graph credentials import``
+    (design of record graph://5f2f5a49-00d v12 FR7a: a session starts with
+    the token found on the machine, no browser). Written per session into
+    ``run_dir`` in the exact shape the ``claude`` binary reads, mounted
+    read-only at the container's home. Returns None when no usable row
+    exists.
+    """
+    row = _pick_claude_bundle_row(_credentials_rows())
+    if row is None:
+        return None
+    payload = row.payload
+    bundle = {
+        "accessToken": payload["access_token"],
+        "refreshToken": payload["refresh_token"],
+        "expiresAt": payload.get("expires_at_ms"),
+        "scopes": list(payload.get("scopes") or []),
+    }
+    if isinstance(payload.get("subscription_type"), str):
+        bundle["subscriptionType"] = payload["subscription_type"]
+    out = Path(run_dir) / CLAUDE_BUNDLE_FILENAME
+    try:
+        out.write_text(json.dumps({"claudeAiOauth": bundle}, indent=2))
+        out.chmod(0o600)
+    except OSError:
+        logger.exception("session_launcher: could not write the Claude credentials file")
+        try:
+            out.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+    return out
+
+
+def _claude_bundle_target(run_dir) -> "Path | None":
+    """The path _materialize_claude_bundle WOULD write, iff a usable bundle
+    row exists: a declaration with no write, so the mount plan can carry the
+    credential's future location before validation (as for Codex)."""
+    if run_dir is None:
+        return None
+    if _pick_claude_bundle_row(_credentials_rows()) is None:
+        return None
+    return Path(run_dir) / CLAUDE_BUNDLE_FILENAME
 
 
 def _codex_auth_target(run_dir) -> "Path | None":
@@ -1375,6 +1474,7 @@ def _resolve_optional_tool_mounts(
     worktree_host: Path | None = None,
     run_dir: Path | None = None,
     materialize_auth: bool = True,
+    claude_bundle: bool = False,
 ) -> dict[str, str]:
     """Return optional host mounts that make Codex usable inside containers.
 
@@ -1432,6 +1532,13 @@ def _resolve_optional_tool_mounts(
         )
         if codex_auth is not None:
             mounts[str(codex_auth)] = "/home/agent/.codex/auth.json:ro"
+        if claude_bundle:
+            claude_auth = (
+                _materialize_claude_bundle(run_dir) if materialize_auth
+                else _claude_bundle_target(run_dir)
+            )
+            if claude_auth is not None:
+                mounts[str(claude_auth)] = f"{CLAUDE_BUNDLE_CONTAINER_PATH}:ro"
 
     agents_home = Path.home() / ".agents"
     if agents_home.exists():
@@ -1482,6 +1589,7 @@ def build_mount_plan(
     capabilities=(),
     global_claude_md=None,
     startup_script=None,
+    claude_bundle: bool = False,
 ):
     """The one dest-keyed MountPlan both entry points build and emit (auto-vm8qh).
 
@@ -1612,6 +1720,7 @@ def build_mount_plan(
     codex_auth_target = None
     for host_path, container_spec in _resolve_optional_tool_mounts(
         worktree_host=worktree_host, run_dir=run_dir, materialize_auth=False,
+        claude_bundle=claude_bundle,
     ).items():
         plan.set(mount_spec(host_path, container_spec))
         if container_spec.split(":")[0] == "/home/agent/.codex/auth.json":
@@ -1923,7 +2032,12 @@ def launch_session(
         capabilities=capabilities,
         global_claude_md=global_claude_md,
         startup_script=startup_script,
+        claude_bundle=bool(creds and creds.get("type") == "bundle"),
     )
+    claude_bundle_target = None
+    for _s in plan.specs():
+        if _s.dest == CLAUDE_BUNDLE_CONTAINER_PATH:
+            claude_bundle_target = str(_s.source)
 
     # Resolve+validate the DECLARED plan into argv NOW — before any authority is
     # minted below (the session token, the materialized Codex credential). A
@@ -1963,6 +2077,17 @@ def launch_session(
             )
             return None
         codex_auth_copy = codex_auth_target  # str path, for post-exit cleanup
+    if creds is not None and creds.get("type") == "bundle":
+        if claude_bundle_target is None or _materialize_claude_bundle(run_dir) is None:
+            if claude_bundle_target is not None:
+                _delete_if_present(claude_bundle_target)
+            print(
+                f"  ERROR: refusing to launch session '{name}': the imported "
+                "Claude sign-in was declared but failed to materialize",
+                file=sys.stderr,
+            )
+            return None
+        creds["creds_copy"] = claude_bundle_target  # post-exit cleanup
 
     # Preflight EVERY input the docker run depends on that could be missing —
     # the image, the runtime, and every mount source (host binds AND

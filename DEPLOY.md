@@ -471,7 +471,7 @@ default (e.g. a container whose mount points don't match the host).
 |---|---|---|
 | `AUTONOMY_ROOT` | script's repo root (`<script>/../..`) | Repo root used by the shell tooling (`tools/graph/backup-*.sh`, `tools/dashboard/renew-tls-cert.sh`). |
 | `AUTONOMY_HOST_ROOT` | repo root (`Path(__file__)`-derived) | Canonical host repo prefix that container-observed session paths are rewritten to (session-trace dedup identity). |
-| `AUTONOMY_HOST_HOME` | `Path.home()` | Canonical host home prefix for the same rewrite. |
+| `AUTONOMY_HOST_HOME` | `Path.home()` | Canonical host home prefix for the same rewrite. On a Compose node the operator's `~/.claude`, `~/.codex` and `~/.grok` are mounted read-only at these paths so the Getting Started sign-in scan (`graph credentials import`) reads the harness sign-ins where they live; nothing there is written. |
 | `AUTONOMY_CONTAINER_ROOT` | `/workspace/repo` | Container mount point of the repo, the *source* prefix rewritten to `AUTONOMY_HOST_ROOT`. |
 | `AUTONOMY_CONTAINER_HOME` | `/home/agent` | Container home mount, the *source* prefix rewritten to `AUTONOMY_HOST_HOME`. |
 | `AUTONOMY_HOST_PROJECT_ORGS` | *(unset)* | JSON object `{"<abs-cwd>": "<org-slug>"}` overlaying the Claude-Code project-dir → org routing table (`tools/graph/ingest.py`). Keys are absolute cwds; they are slugified internally. |
