@@ -47,3 +47,16 @@ empirical confirmation that the keystroke works.
 
 Until that pair is real-captured, the synthetic fixtures here cover
 the detection logic but not the confirm-clears-dialog assertion.
+
+## Grok Build (xAI) fixtures — real captures, v1.0.40, 2026-09-22
+
+- `grok_trust_dialog.txt` — "Do you trust the contents of this directory?"
+  with `Yes, proceed  y` / `No, quit  n`. The adapter answers with a bare
+  literal `y` (the dialog binds the key; no Enter).
+- `grok_composer_ready.txt` — welcome card plus the rounded composer box
+  whose prompt line is `│ ❯`, footer rule naming the model and
+  `always-approve`.
+- `grok_busy.txt` — a turn in flight: the `⠙ Waiting for response…` spinner
+  and `[stop]` above the box while the `│ ❯` line stays visible, so
+  readiness must key on the spinner's absence, not the glyph alone.
+- `grok_after_reply.txt` — idle again after a reply ("Worked for 6.7s").

@@ -1100,7 +1100,7 @@ def test_schema_migration_declarative_field_metadata():
     assert set(meta.keys()) == expected_fields
     # Required fields carry descriptions.
     assert meta["harness"]["required"] is True
-    assert meta["harness"]["enum"] == ["claude", "codex"]
+    assert meta["harness"]["enum"] == ["claude", "codex", "grok"]
     assert "Harness this row reports for" in meta["harness"]["description"]
     # ``alias`` is optional with a None default so the launcher can omit it
     # for legacy compat paths.

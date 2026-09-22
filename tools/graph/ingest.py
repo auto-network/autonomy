@@ -7,6 +7,7 @@ into structured graph objects.
 from __future__ import annotations
 import json
 import os
+import hashlib
 import re
 import subprocess
 from pathlib import Path
@@ -723,6 +724,186 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _META_WALK_MAX_DEPTH = 5
 
 
+
+# ── Grok Build (xAI) ────────────────────────────────────────────────────────
+
+GROK_TRANSCRIPT_NAME = "updates.jsonl"
+
+
+def _grok_session_id(file_path: Path) -> str:
+    """Every Grok transcript is ``updates.jsonl``; the directory is the UUID."""
+    return file_path.parent.name if file_path.name == GROK_TRANSCRIPT_NAME else file_path.stem
+
+
+def _grok_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        if content.get("type") == "text":
+            return str(content.get("text") or "")
+        if content.get("type") == "content":
+            return _grok_text(content.get("content"))
+        return ""
+    if isinstance(content, list):
+        return "".join(_grok_text(c) for c in content)
+    return ""
+
+
+def _grok_iso_ts(entry: dict, meta: dict) -> str:
+    from datetime import datetime, timezone
+    ms = meta.get("agentTimestampMs")
+    try:
+        if isinstance(ms, (int, float)) and ms > 0:
+            return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).isoformat(
+                timespec="milliseconds").replace("+00:00", "Z")
+        ts = entry.get("timestamp")
+        if isinstance(ts, (int, float)) and ts > 0:
+            return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat(
+                timespec="milliseconds").replace("+00:00", "Z")
+    except (OverflowError, OSError, ValueError):
+        pass
+    return ""
+
+
+def _grok_message_id(meta: dict, role: str, text: str) -> str:
+    """The ACP ``eventId`` (unique per line) when present, else a content
+    digest — the same shape the viewer overlay computes for this harness."""
+    event_id = meta.get("eventId")
+    if isinstance(event_id, str) and event_id:
+        return event_id
+    digest = hashlib.sha1(f"{role}\n{text}".encode("utf-8")).hexdigest()[:16]
+    return f"grok-{role}:{digest}"
+
+
+class GrokTurnExtractor:
+    """Stateful incremental extractor for Grok Build ``updates.jsonl`` turns.
+
+    Same contract as :class:`ClaudeTurnExtractor` — ``feed(entry)`` returns
+    a turn dict or ``None``; ``.state`` / ``from_state()`` carry everything
+    needed to resume mid-file. Chat comes from ``user_message_chunk`` and
+    ``agent_message_chunk`` updates (persisted whole, one per message
+    segment). Token totals accumulate from each ``turn_completed.usage`` —
+    one per turn, so the running sum is the session's spend. Operator briefs
+    (the orientation paste and CrossTalk envelopes) are stored with
+    ``role='injected'`` exactly as Codex's are, so they stay searchable
+    without polluting attention.
+    """
+
+    def __init__(self, state: dict | None = None):
+        self._s: dict = {
+            "turn_number": 0,
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "model": None,
+            "first_ts": None,
+            "last_ts": None,
+        }
+        if state:
+            self._s.update(state)
+
+    @property
+    def state(self) -> dict:
+        return dict(self._s)
+
+    @classmethod
+    def from_state(cls, state: dict) -> "GrokTurnExtractor":
+        return cls(state=state)
+
+    def feed(self, entry: dict) -> dict | None:
+        s = self._s
+        if not isinstance(entry, dict):
+            return None
+        if entry.get("method") not in ("session/update", "_x.ai/session/update"):
+            return None
+        params = entry.get("params")
+        if not isinstance(params, dict):
+            return None
+        update = params.get("update")
+        if not isinstance(update, dict):
+            return None
+        meta = params.get("_meta") if isinstance(params.get("_meta"), dict) else {}
+        ts = _grok_iso_ts(entry, meta)
+        if ts:
+            if s["first_ts"] is None:
+                s["first_ts"] = ts
+            s["last_ts"] = ts
+
+        inner_meta = update.get("_meta") if isinstance(update.get("_meta"), dict) else {}
+        model = inner_meta.get("modelId")
+        if isinstance(model, str) and model:
+            s["model"] = model
+
+        kind = update.get("sessionUpdate")
+        if kind == "turn_completed":
+            usage = update.get("usage") or {}
+            if isinstance(usage, dict):
+                s["total_input_tokens"] += _safe_int(usage.get("inputTokens"))
+                s["total_output_tokens"] += _safe_int(usage.get("outputTokens"))
+                per_model = usage.get("modelUsage")
+                if isinstance(per_model, dict) and per_model:
+                    s["model"] = str(list(per_model.keys())[-1])
+            return None
+
+        if kind == "user_message_chunk":
+            role = "user"
+        elif kind == "agent_message_chunk":
+            role = "assistant"
+        else:
+            return None
+
+        text = _clean_codex_text(_grok_text(update.get("content")))
+        if len(text) < 5:
+            return None
+        message_id = _grok_message_id(meta, role, text)
+        stored_role = role
+        if role == "user" and _is_codex_noise_text(text):
+            stored_role = "injected"
+        s["turn_number"] += 1
+        return {
+            "turn_number": s["turn_number"],
+            "role": stored_role,
+            "content": text,
+            "message_id": message_id,
+            "timestamp": ts,
+        }
+
+
+def parse_grok_session(file_path: Path) -> tuple[dict, list[dict]]:
+    """Parse a Grok Build ``updates.jsonl`` session into metadata and turns.
+
+    Keeps only operator-visible chat text; tool calls, tool results, plans
+    and turn accounting are excluded from graph content ingest.
+    """
+    meta = {
+        "session_id": _grok_session_id(file_path),
+        "platform": "grok-build",
+    }
+    extractor = GrokTurnExtractor()
+    turns: list[dict] = []
+    with open(file_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            turn = extractor.feed(entry)
+            if turn is not None:
+                turns.append(turn)
+    state = extractor.state
+    meta["turn_count"] = len(turns)
+    meta["total_input_tokens"] = state["total_input_tokens"]
+    meta["total_output_tokens"] = state["total_output_tokens"]
+    if state["model"]:
+        meta["model"] = state["model"]
+    if state["first_ts"]:
+        meta["started_at"] = state["first_ts"]
+    if state["last_ts"]:
+        meta["ended_at"] = state["last_ts"]
+    return meta, turns
+
 def _load_session_meta(file_path: Path) -> dict:
     """Look upward from *file_path* for a ``.session_meta.json``.
 
@@ -1037,10 +1218,14 @@ def detect_session_format(file_path: Path) -> str:
     harness = str(session_meta.get("harness") or "").strip().lower()
     if harness == "codex":
         return "codex"
+    if harness == "grok":
+        return "grok"
     if harness == "claude":
         return "claude"
     if file_path.name.startswith("rollout-"):
         return "codex"
+    if file_path.name == GROK_TRANSCRIPT_NAME:
+        return "grok"
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             first_line = f.readline().strip()
@@ -1369,9 +1554,10 @@ def _ingest_text_session(
     abs_path = _normalize_session_path(file_path)
 
     # Content attribution stamped on every row this ingest writes. session_id is
-    # the session's UUID (the JSONL transcript filename stem); persona_id is the
-    # operator's one configured persona. Read once, threaded through.
-    session_uuid = file_path.stem
+    # the session's UUID (the JSONL transcript filename stem — or, for Grok,
+    # the transcript directory); persona_id is the operator's one configured
+    # persona. Read once, threaded through.
+    session_uuid = _grok_session_id(file_path)
     persona_id = _ingest_persona()
 
     session_meta = _load_session_meta(file_path)
@@ -1609,13 +1795,30 @@ def ingest_codex_session(
     )
 
 
+def ingest_grok_session(
+    db: GraphDB, file_path: str | Path, force: bool = False,
+) -> dict:
+    """Ingest a Grok Build ``updates.jsonl`` session into the graph."""
+    return _ingest_text_session(
+        db,
+        file_path,
+        parser=parse_grok_session,
+        platform="grok-build",
+        default_model="grok-build",
+        force=force,
+    )
+
+
 def ingest_session_file(
     db: GraphDB, file_path: str | Path, force: bool = False,
 ) -> dict:
     """Ingest a JSONL session file, routing by detected harness format."""
     path = Path(file_path)
-    if detect_session_format(path) == "codex":
+    fmt = detect_session_format(path)
+    if fmt == "codex":
         return ingest_codex_session(db, path, force=force)
+    if fmt == "grok":
+        return ingest_grok_session(db, path, force=force)
     return ingest_claude_code_session(db, path, force=force)
 
 

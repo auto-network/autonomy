@@ -49,6 +49,9 @@ from tools.dashboard.session_harness import (
     SessionHarness,
     resolve_harness_for_path,
     resolve_harness_for_session_row,
+    classify_grok_transcript,
+    is_grok_sidecar,
+    is_grok_transcript,
 )
 from tools.dashboard import harness_usage_settings as _harness_usage_settings
 from tools.graph import ops as graph_ops
@@ -242,12 +245,28 @@ def _classify_codex_rollout(jsonl_path: Path) -> _CodexRolloutClassification:
     return _CodexRolloutClassification("main", "session_meta_main", size_bytes)
 
 
+def _classify_transcript(path: Path) -> _CodexRolloutClassification:
+    """Harness-aware identity decision for a transcript candidate: Grok
+    transcripts classify by their ``summary.json``; everything else by the
+    Codex rollout contract (which calls a non-rollout ``main``)."""
+    if is_grok_transcript(path):
+        kind, reason = classify_grok_transcript(path)
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = None
+        return _CodexRolloutClassification(kind, reason, size)
+    return _classify_codex_rollout(path)
+
+
 def _is_primary_jsonl(jsonl_path: Path) -> bool:
     """True only for a path that is positively identified as a main trace."""
 
     if "subagents" in jsonl_path.parts:
         return False
-    return _classify_codex_rollout(jsonl_path).kind == "main"
+    if is_grok_sidecar(jsonl_path):
+        return False
+    return _classify_transcript(jsonl_path).kind == "main"
 
 
 def _find_primary_jsonls(directory: Path) -> list[Path]:
@@ -986,7 +1005,7 @@ def _apply_activity_entries(ts: _TailState, entries: list[dict]) -> str:
             else:
                 ts.pending_tool_ids.discard(tid)
                 ts.completed_tool_ids.add(tid)
-        elif etype == "codex_task_complete":
+        elif etype in ("codex_task_complete", "grok_turn_complete"):
             ts.completed_tool_ids.update(ts.pending_tool_ids)
             ts.pending_tool_ids.clear()
         if etype:
@@ -2332,6 +2351,8 @@ class SessionMonitor:
             return False
         if jsonl_path.suffix != ".jsonl":
             return False
+        if is_grok_sidecar(jsonl_path):
+            return False
         row = get_session(tmux_name)
         if row is None:
             return False
@@ -2379,6 +2400,10 @@ class SessionMonitor:
         """
         path = Path(jsonl_path)
         if "subagents" in path.parts or path.suffix != ".jsonl":
+            return False
+        if is_grok_sidecar(path):
+            # A Grok session directory holds several JSONLs; only updates.jsonl
+            # is the transcript (chat_history.jsonl is the raw model wire).
             return False
         key = (tmux_name, str(path))
         track = self._tracks.get(key)
@@ -2449,7 +2474,7 @@ class SessionMonitor:
             )
             self._tracks[key] = track
 
-        if create_event or path.name.startswith("rollout-"):
+        if create_event or path.name.startswith("rollout-") or is_grok_transcript(path):
             track.supersede_candidate = True
         if row.get("jsonl_path") == str(path):
             # N5 / N3 refinement: the row's own linked path ALWAYS
@@ -2474,7 +2499,7 @@ class SessionMonitor:
         if track.state in (TRACK_IGNORED, TRACK_CLOSED, TRACK_STREAMING):
             return
         path = Path(track.path)
-        classification = _classify_codex_rollout(path)
+        classification = _classify_transcript(path)
         if classification.kind == "unknown":
             # Retain the watch and responsibility; no bytes released.
             track.state = TRACK_CHARACTERIZING
@@ -2763,7 +2788,7 @@ class SessionMonitor:
         diagnostic. The caller's still-CHARACTERIZING check and this call
         are await-free as a pair (a track that promoted meanwhile must not
         be quarantined under it)."""
-        classification = _classify_codex_rollout(Path(track.path))
+        classification = _classify_transcript(Path(track.path))
         logger.warning(
             "session_monitor: characterization deadline expired tmux=%s "
             "path=%s reason=%s size_bytes=%s — quarantined (re-opens only "
@@ -3742,7 +3767,7 @@ class SessionMonitor:
 
         session_meta = _load_session_meta(jsonl_path)
         harness = str(row.get("harness") or "claude").strip().lower()
-        default_model = "codex-cli" if harness == "codex" else "claude-code"
+        default_model = {"codex": "codex-cli", "grok": "grok-build"}.get(harness, "claude-code")
         return GraphAppender.from_source(
             source, org=org, file_path=jsonl_path, session_meta=session_meta,
             harness=harness, default_model=default_model,

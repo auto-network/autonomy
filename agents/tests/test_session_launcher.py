@@ -494,6 +494,185 @@ def test_codex_noninteractive_resume_uses_exec_resume(
     assert "--model gpt-5.4" in shell_cmd
 
 
+# ── Grok Build (xAI) harness ─────────────────────────────────────────
+
+def _grok_shell(cmd: list[str]) -> str:
+    """The `sh -c` body every Grok launch execs through the shared entrypoint."""
+    assert cmd[cmd.index("sh") + 1] == "-c"
+    return cmd[cmd.index("sh") + 2]
+
+
+def test_grok_interactive_launches_the_tui_with_trust_and_always_approve(
+    tmp_path, fake_crosstalk, captured_run, monkeypatch,
+):
+    monkeypatch.setattr(session_launcher, "_resolve_credentials", lambda: None)
+    monkeypatch.setattr(session_launcher, "_grok_vault_key_available", lambda: False)
+    out = _run(
+        output_dir=str(tmp_path / "run"),
+        harness="grok",
+        image="autonomy-session-platform",
+        model="grok-4.6",
+    )
+    assert out == "fake-container-id"
+    cmd = captured_run[0]
+    assert "--entrypoint" not in cmd
+    assert cmd[cmd.index("autonomy-session-platform") + 1] == "sh"
+    shell = _grok_shell(cmd)
+    assert "exec grok --trust --always-approve -m grok-4.6 --session-id " in shell
+    assert shell.endswith("--no-alt-screen")
+    assert "grok login" not in shell                      # first-party: no sign-in step
+    assert "cp /workspace/output/grok-config.toml" in shell
+    assert "GROK_HOME=/home/agent/.grok" in " ".join(cmd)
+    # The transcript tree binds where Grok writes sessions/.
+    assert f"{tmp_path / 'run' / 'sessions'}:/home/agent/.grok/sessions" in " ".join(cmd)
+    # No Claude credential mount, no Codex home mounts.
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in " ".join(cmd)
+    assert "--dangerously-skip-permissions" not in shell
+    config = (tmp_path / "run" / "grok-config.toml").read_text()
+    assert 'permission_mode = "always-approve"' in config
+    assert "[auth]" not in config
+    assert 'default = "grok-4.6"' in config
+    meta = json.loads((tmp_path / "run" / "sessions" / ".session_meta.json").read_text())
+    assert meta["harness"] == "grok"
+    assert meta["grok_mode"] == "xai"
+    assert meta["grok_session_id"] in shell
+
+
+def test_grok_first_party_key_defaults_from_the_vault(
+    tmp_path, fake_crosstalk, captured_run, monkeypatch,
+):
+    monkeypatch.setattr(session_launcher, "_resolve_credentials", lambda: None)
+    monkeypatch.setattr(session_launcher, "_grok_vault_key_available", lambda: True)
+    resolved = {}
+    def _resolve(key):
+        resolved["key"] = key
+        return "xai-secret"
+    monkeypatch.setattr(session_launcher, "_resolve_credential", _resolve)
+    _run(output_dir=str(tmp_path / "run"), harness="grok")
+    joined = " ".join(captured_run[0])
+    assert resolved["key"] == "grok.api-key"
+    assert "XAI_API_KEY=xai-secret" in joined
+    assert "credential:grok.api-key" not in joined
+
+
+def test_grok_workspace_key_wins_over_the_vault_default(
+    tmp_path, fake_crosstalk, captured_run, monkeypatch,
+):
+    monkeypatch.setattr(session_launcher, "_resolve_credentials", lambda: None)
+    monkeypatch.setattr(session_launcher, "_grok_vault_key_available", lambda: True)
+    monkeypatch.setattr(session_launcher, "_resolve_credential", lambda key: f"resolved:{key}")
+    _run(output_dir=str(tmp_path / "run"), harness="grok",
+         extra_env={"XAI_API_KEY": "credential:xai.team-key"})
+    joined = " ".join(captured_run[0])
+    assert "XAI_API_KEY=resolved:xai.team-key" in joined
+    assert "grok.api-key" not in joined
+
+
+def test_grok_gateway_mode_writes_catalog_and_signs_in_first(
+    tmp_path, fake_crosstalk, captured_run, monkeypatch,
+):
+    monkeypatch.setattr(session_launcher, "_resolve_credentials", lambda: None)
+    monkeypatch.setattr(session_launcher, "_resolve_credential", lambda key: "sk-or-gateway")
+    _run(
+        output_dir=str(tmp_path / "run"),
+        harness="grok",
+        model="x-ai/grok-4.6",
+        extra_env={
+            "GROK_GATEWAY_BASE_URL": "https://openrouter.ai/api/v1/",
+            "GROK_GATEWAY_API_KEY": "credential:autonomy:openrouter.api-key",
+            "GROK_GATEWAY_MODELS": "x-ai/grok-4.7,x-ai/grok-build-0.1",
+        },
+    )
+    cmd = captured_run[0]
+    joined = " ".join(cmd)
+    shell = _grok_shell(cmd)
+    assert "grok login >/dev/null 2>&1 || true; exec grok --trust --always-approve -m x-ai-grok-4-6 " in shell
+    assert "GROK_GATEWAY_API_KEY=sk-or-gateway" in joined
+    assert "XAI_API_KEY" not in joined                    # never a first-party key for a gateway
+    config = (tmp_path / "run" / "grok-config.toml").read_text()
+    assert 'auth_provider_command = "/usr/local/bin/autonomy-grok-auth"' in config
+    assert 'default = "x-ai-grok-4-6"' in config
+    for key, model_id in (("x-ai-grok-4-6", "x-ai/grok-4.6"), ("x-ai-grok-4-7", "x-ai/grok-4.7"),
+                          ("x-ai-grok-build-0-1", "x-ai/grok-build-0.1")):
+        assert f"[model.{key}]" in config
+        assert f'model = "{model_id}"' in config
+    assert 'base_url = "https://openrouter.ai/api/v1"' in config   # trailing slash trimmed
+    assert 'env_key = "GROK_GATEWAY_API_KEY"' in config
+    assert "sk-or-gateway" not in config                  # the config never holds the key
+    meta = json.loads((tmp_path / "run" / "sessions" / ".session_meta.json").read_text())
+    assert meta["grok_mode"] == "gateway"
+
+
+def test_grok_noninteractive_runs_headless_with_prompt_file(
+    tmp_path, fake_crosstalk, captured_run, monkeypatch,
+):
+    monkeypatch.setattr(session_launcher, "_resolve_credentials", lambda: None)
+    monkeypatch.setattr(session_launcher, "_grok_vault_key_available", lambda: False)
+    _run(
+        output_dir=str(tmp_path / "run"),
+        harness="grok",
+        image="autonomy-session-platform",
+        prompt="Write a summary.",
+        model=None,
+    )
+    cmd = captured_run[0]
+    shell = _grok_shell(cmd)
+    assert "--output-format streaming-json --prompt-file /workspace/output/.prompt.md" in shell
+    assert "--no-alt-screen" not in shell
+    assert " -m " not in shell                            # no model → Grok's own default
+    assert (tmp_path / "run" / ".prompt.md").read_text() == "Write a summary."
+
+
+def test_grok_resume_passes_the_session_uuid_and_no_new_id(
+    tmp_path, fake_crosstalk, captured_run, monkeypatch,
+):
+    monkeypatch.setattr(session_launcher, "_resolve_credentials", lambda: None)
+    monkeypatch.setattr(session_launcher, "_grok_vault_key_available", lambda: False)
+    run_dir = tmp_path / "run"
+    (run_dir / "sessions").mkdir(parents=True)
+    _run(
+        output_dir=str(run_dir),
+        harness="grok",
+        resume_uuid="01a0c7a2-98ab-70d1-9905-1dcb9489fc45",
+        model="grok-4.6",
+    )
+    shell = _grok_shell(captured_run[0])
+    assert "--resume 01a0c7a2-98ab-70d1-9905-1dcb9489fc45" in shell
+    assert "--session-id" not in shell
+
+
+def test_grok_capability_skills_project_into_the_claude_skills_dir(tmp_path, monkeypatch):
+    """Grok scans ~/.claude/skills (Claude compatibility on by default), so
+    the personal-dir projection Claude gets applies to Grok too; Codex keeps
+    its deliberate gap."""
+    skill = tmp_path / "repo" / "agents" / "capabilities" / "demo" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: demo\ndescription: A demo skill\n---\n# Demo\n")
+    monkeypatch.setattr(session_launcher, "REPO_ROOT", tmp_path / "repo")
+    cap = MaterializedCapability(
+        contract="demo@1", contract_version=1, implementation="autonomy/demo",
+        implementation_version=1, delivery_mode="package",
+        package_root=str(tmp_path / "pkg"),
+        mount_target="/opt/autonomy/capabilities/autonomy-demo",
+        skill_path="agents/capabilities/demo/SKILL.md",
+    )
+    run_dir = tmp_path / "run"
+    grok_mounts = session_launcher._capability_skill_surface((cap,), run_dir, "grok")
+    assert list(grok_mounts.values()) == ["/home/agent/.claude/skills/demo:ro"]
+    assert session_launcher._capability_skill_surface((cap,), run_dir, "codex") == {}
+
+
+def test_render_grok_config_uses_toml_safe_model_keys():
+    from agents.session_launcher import grok_model_key, render_grok_config, GrokLaunchProfile
+    assert grok_model_key("x-ai/grok-4.6") == "x-ai-grok-4-6"
+    assert grok_model_key("grok-4.6") == "grok-4-6"
+    assert grok_model_key("") == "gateway-model"
+    profile = GrokLaunchProfile(mode="gateway", base_url="https://gw.example/v1",
+                                models=("a/b.c",), default_model="a-b-c", context_window=128000)
+    text = render_grok_config(profile)
+    assert "[model.a-b-c]" in text and "context_window = 128000" in text
+
+
 # ── Hardcoded license overlay removed (replaced by artifacts mechanism) ──────
 
 def _github_capability() -> MaterializedCapability:
@@ -1972,6 +2151,7 @@ def test_golden_mount_argv_is_byte_identical(
         "-e", "GRAPH_API=https://localhost:8080",
         "-e", "CROSSTALK_TOKEN=TOKEN",
         "-e", "CODEX_HOME=/home/agent/.codex",
+        "-e", "GROK_HOME=/home/agent/.grok",
         "-e", "CLAUDE_CODE_OAUTH_TOKEN=tok-xyz",
         "-v", "{DATA}/.beads:/data/.beads",
         "-v", "/dev/null:/data/.beads/.beads-credential-key:ro",

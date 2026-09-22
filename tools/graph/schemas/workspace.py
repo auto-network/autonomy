@@ -59,7 +59,7 @@ SYNOPSIS = {
 
 # ── Repo mount entry ────────────────────────────────────────
 
-_VALID_HARNESSES = {"claude", "codex"}
+_VALID_HARNESSES = {"claude", "codex", "grok"}
 
 
 #: Components of a derived local-repository path (org slug, workspace id).

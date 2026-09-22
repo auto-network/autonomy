@@ -45,6 +45,39 @@ DEFAULT_IMAGE = "autonomy-session-platform"
 
 DEFAULT_OPUS_MODEL = "claude-opus-4-8[1m]"
 
+#: Every harness a session can run. The launcher, the CLI, the workspace
+#: schema and the dashboard all validate against the same tuple.
+SUPPORTED_HARNESSES = ("claude", "codex", "grok")
+
+# ── Grok Build (xAI) ─────────────────────────────────────────────────────────
+# The third harness. Grok keeps its state root under $GROK_HOME (transcripts in
+# sessions/, the folder-trust store, the stored sign-in); the launcher binds
+# the session's run_dir/sessions there so the dashboard tails the ACP
+# ``updates.jsonl`` exactly as it tails a Claude JSONL or a Codex rollout.
+#
+# Where Grok's requests go is a workspace decision expressed in its ``env``:
+#   * ``XAI_API_KEY`` (usually ``credential:<key>``) — first-party xAI. When a
+#     workspace sets nothing, the launcher offers the operator's vault row
+#     ``grok.api-key`` (audited vault, a ROW not a schema: see
+#     tools/graph/schemas/vault_credential.py).
+#   * ``GROK_GATEWAY_BASE_URL`` + ``GROK_GATEWAY_API_KEY`` (+ optional
+#     ``GROK_GATEWAY_MODELS`` comma list) — any OpenAI-compatible endpoint
+#     (OpenRouter, a corporate gateway). Grok Build refuses to start without a
+#     stored sign-in or a first-party key, so gateway sessions mint the stored
+#     sign-in through Grok's external-auth-provider contract: the image ships
+#     ``autonomy-grok-auth``, which prints the gateway key, and the launch runs
+#     ``grok login`` once before the TUI. Verified live 2026-09-22 (v1.0.40).
+GROK_HOME = "/home/agent/.grok"
+GROK_AUTH_SHIM = "/usr/local/bin/autonomy-grok-auth"
+GROK_API_KEY_ENV = "XAI_API_KEY"
+GROK_VAULT_KEY = "grok.api-key"
+GROK_GATEWAY_BASE_URL_ENV = "GROK_GATEWAY_BASE_URL"
+GROK_GATEWAY_API_KEY_ENV = "GROK_GATEWAY_API_KEY"
+GROK_GATEWAY_MODELS_ENV = "GROK_GATEWAY_MODELS"
+GROK_GATEWAY_CONTEXT_WINDOW_ENV = "GROK_GATEWAY_CONTEXT_WINDOW"
+GROK_GATEWAY_DEFAULT_CONTEXT_WINDOW = 500_000
+GROK_CONFIG_FILENAME = "grok-config.toml"
+
 
 # ── Capability materialization ────────────────────────────────────────────────
 
@@ -215,8 +248,12 @@ def _capability_skill_surface(capabilities, run_dir: Path, harness: str) -> dict
     Codex projection is a deliberate gap for now: its skills directory is a
     bind of the host user's home, and nesting mounts there would create
     directories in the operator's real home.
+
+    Grok Build scans ``~/.claude/skills`` too (its Claude-compatibility
+    layer is on by default — verified with ``grok inspect`` 2026-09-22), so
+    the same personal-dir projection serves it unchanged.
     """
-    if harness != "claude":
+    if harness not in ("claude", "grok"):
         return {}
     mounts: dict[str, str] = {}
     for cap in capabilities:
@@ -1098,6 +1135,242 @@ def _codex_auth_target(run_dir) -> "Path | None":
     return Path(run_dir) / "codex-auth.json"
 
 
+
+# ── Grok launch profile ───────────────────────────────────────────────────────
+
+class GrokLaunchProfile:
+    """How one Grok session reaches a model, derived from the workspace env.
+
+    ``mode`` is ``"xai"`` (first-party key in ``XAI_API_KEY``) or
+    ``"gateway"`` (OpenAI-compatible ``base_url`` + key). ``default_model`` is
+    what the launcher passes as ``-m``: the raw model id for xAI, the TOML
+    ``[model.<key>]`` name for a gateway (Grok resolves ``-m`` against the
+    catalog key, and TOML splits dotted keys, so ``x-ai/grok-4.6`` becomes
+    ``x-ai-grok-4-6``).
+    """
+
+    __slots__ = ("mode", "base_url", "models", "default_model", "context_window")
+
+    def __init__(self, *, mode: str, base_url: str | None = None,
+                 models: tuple[str, ...] = (), default_model: str | None = None,
+                 context_window: int = GROK_GATEWAY_DEFAULT_CONTEXT_WINDOW):
+        self.mode = mode
+        self.base_url = base_url
+        self.models = tuple(models)
+        self.default_model = default_model
+        self.context_window = context_window
+
+    @property
+    def needs_login(self) -> bool:
+        return self.mode == "gateway"
+
+
+def grok_model_key(model_id: str) -> str:
+    """The TOML-safe ``[model.<key>]`` name for a gateway model id.
+
+    Dots split TOML keys (``[model.grok-4.6]`` is ``model.grok-4.6`` → three
+    nested tables, and Grok then reports "preferred model not in available
+    models") and slashes are not bare-key characters, so both collapse to
+    ``-``. Deterministic, so the launcher's ``-m`` and the config agree.
+    """
+    key = re.sub(r"[^A-Za-z0-9_-]+", "-", str(model_id or "")).strip("-")
+    return key or "gateway-model"
+
+
+def _grok_launch_profile(extra_env, model: str | None) -> GrokLaunchProfile:
+    """Read the workspace env (raw, unresolved) and decide the Grok mode.
+
+    Only *presence* and literal values matter here — ``credential:`` refs are
+    resolved later, at docker-cmd assembly, like every other workspace env.
+    """
+    env = {str(k): v for k, v in (extra_env or {}).items()}
+    base_url = str(env.get(GROK_GATEWAY_BASE_URL_ENV) or "").strip()
+    if not base_url:
+        return GrokLaunchProfile(mode="xai", default_model=model or None)
+    models = [
+        m.strip() for m in str(env.get(GROK_GATEWAY_MODELS_ENV) or "").split(",")
+        if m.strip()
+    ]
+    if model and model not in models:
+        models.insert(0, model)
+    try:
+        ctx = int(str(env.get(GROK_GATEWAY_CONTEXT_WINDOW_ENV) or "").strip()
+                  or GROK_GATEWAY_DEFAULT_CONTEXT_WINDOW)
+    except ValueError:
+        ctx = GROK_GATEWAY_DEFAULT_CONTEXT_WINDOW
+    default = grok_model_key(model or (models[0] if models else "")) if (model or models) else None
+    return GrokLaunchProfile(
+        mode="gateway", base_url=base_url.rstrip("/"), models=tuple(models),
+        default_model=default, context_window=ctx,
+    )
+
+
+def _toml_str(value: str) -> str:
+    return json.dumps(str(value))
+
+
+def render_grok_config(profile: GrokLaunchProfile) -> str:
+    """The per-session ``config.toml`` Grok Build reads from ``$GROK_HOME``.
+
+    Contains no secret: gateway models name the ENV VAR holding the key
+    (``env_key``), never the key. Always-approve is the launch flag's config
+    twin so a ``/new`` inside the session keeps the same permission mode.
+    """
+    lines = [
+        "# Generated by agents/session_launcher.py for one Autonomy session.",
+        "[cli]",
+        "auto_update = false",
+        "",
+        "[features]",
+        "telemetry = false",
+        "",
+        "[ui]",
+        'permission_mode = "always-approve"',
+        "",
+    ]
+    if profile.mode == "gateway":
+        lines += [
+            "[auth]",
+            f"auth_provider_command = {_toml_str(GROK_AUTH_SHIM)}",
+            'auth_provider_label = "Autonomy gateway"',
+            "auth_token_ttl = 2592000",
+            "",
+        ]
+        if profile.default_model:
+            lines += ["[models]", f"default = {_toml_str(profile.default_model)}", ""]
+        for model_id in profile.models:
+            key = grok_model_key(model_id)
+            lines += [
+                f"[model.{key}]",
+                f"model = {_toml_str(model_id)}",
+                f"base_url = {_toml_str(profile.base_url or '')}",
+                f"name = {_toml_str(model_id + ' (gateway)')}",
+                f'env_key = "{GROK_GATEWAY_API_KEY_ENV}"',
+                'api_backend = "chat_completions"',
+                f"context_window = {int(profile.context_window)}",
+                "",
+            ]
+    elif profile.default_model:
+        lines += ["[models]", f"default = {_toml_str(profile.default_model)}", ""]
+    return "\n".join(lines)
+
+
+def _generate_grok_config(run_dir: Path, profile: GrokLaunchProfile) -> Path:
+    """Write the session's Grok config into run_dir (mounted at
+    /workspace/output); the launch script copies it into ``$GROK_HOME`` so
+    Grok can still append its own bookkeeping keys to a writable file."""
+    out = Path(run_dir) / GROK_CONFIG_FILENAME
+    out.write_text(render_grok_config(profile))
+    return out
+
+
+def _grok_vault_key_available() -> bool:
+    """True when the operator's audited vault holds ``grok.api-key``.
+
+    Presence only — never the value. Lets the launcher offer the default key
+    binding only when it exists, so a gateway-less workspace with no key logs
+    one clear "no Grok credential" line instead of a phantom resolve failure.
+    """
+    try:
+        from tools.graph import ops as _ops
+        from tools.graph.schemas.vault_credential import VAULT_AUDITED_SET_ID
+        members = _ops.read_set(VAULT_AUDITED_SET_ID, org=None, peers=[])
+    except Exception:
+        return False
+    return any(getattr(row, "key", None) == GROK_VAULT_KEY
+               for row in getattr(members, "members", []) or [])
+
+
+def _grok_env_with_default_key(extra_env, profile: GrokLaunchProfile) -> dict:
+    """Workspace env plus the vault default for first-party Grok sessions.
+
+    A workspace that names ``XAI_API_KEY`` itself (usually a ``credential:``
+    reference) is left alone; a gateway workspace never gets a first-party
+    key. Everything else receives ``credential:grok.api-key`` when that vault
+    row exists, resolved by the same path as every workspace credential.
+    """
+    env = dict(extra_env or {})
+    if profile.mode != "xai" or env.get(GROK_API_KEY_ENV):
+        return env
+    if _grok_vault_key_available():
+        env[GROK_API_KEY_ENV] = f"credential:{GROK_VAULT_KEY}"
+    else:
+        logger.warning(
+            "grok: no %s in the workspace env and no vault row %r — the session "
+            "will start but Grok will refuse to run until a key is provided",
+            GROK_API_KEY_ENV, GROK_VAULT_KEY,
+        )
+    return env
+
+
+_UUID_RE = re.compile(
+    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$", re.IGNORECASE,
+)
+
+
+def grok_resume_id(resume_uuid: str) -> str:
+    """The Grok session UUID from a dashboard ``session_uuid``.
+
+    The dashboard stores the transcript directory's name (the session UUID)
+    for Grok rows; accept a bare UUID or anything ending in one.
+    """
+    m = _UUID_RE.search(str(resume_uuid or ""))
+    return m.group(1) if m else str(resume_uuid)
+
+
+def _grok_common_args(profile: GrokLaunchProfile, *, resume_uuid: str | None,
+                      session_id: str | None) -> list[str]:
+    args = ["--trust", "--always-approve"]
+    if profile.default_model:
+        args += ["-m", profile.default_model]
+    if resume_uuid:
+        args += ["--resume", grok_resume_id(resume_uuid)]
+    elif session_id:
+        args += ["--session-id", session_id]
+    return args
+
+
+def grok_launch_script(
+    profile: GrokLaunchProfile,
+    *,
+    prompt_file: str | None,
+    resume_uuid: str | None,
+    session_id: str | None,
+) -> str:
+    """The ``sh -c`` body every Grok session runs.
+
+    1. Install the generated config into ``$GROK_HOME`` (a writable copy —
+       Grok appends bookkeeping keys to it at startup).
+    2. Gateway mode: ``grok login`` mints the stored sign-in through the
+       auth shim, non-interactively (0.2s, verified 2026-09-22).
+    3. exec the harness: headless with ``--prompt-file`` (session still
+       persisted under sessions/, so the viewer renders dispatch runs too),
+       or the TUI with ``--no-alt-screen`` so tmux capture-pane sees it.
+    """
+    config_src = f"/workspace/output/{GROK_CONFIG_FILENAME}"
+    home = f'"${{GROK_HOME:-{GROK_HOME}}}"'
+    # A config that cannot be installed must stop the launch here, loudly: a
+    # gateway session without its [auth] block would otherwise sit in
+    # `grok login` waiting for a browser that never comes (seen 2026-09-22
+    # when the home dir was root-owned in a scratch container).
+    install = (
+        f"mkdir -p {home} && cp {shlex.quote(config_src)} {home}/config.toml"
+        f" || {{ echo 'grok: cannot install config into {home}' >&2; exit 97; }}"
+    )
+    steps = [install]
+    if profile.needs_login:
+        # The auth shim answers in milliseconds; the timeout only bounds the
+        # failure mode where Grok escalates to an interactive sign-in.
+        steps.append("timeout 120 grok login >/dev/null 2>&1 || true")
+    argv = ["grok", *_grok_common_args(profile, resume_uuid=resume_uuid, session_id=session_id)]
+    if prompt_file is not None:
+        argv += ["--output-format", "streaming-json", "--prompt-file", prompt_file]
+    else:
+        argv += ["--no-alt-screen"]
+    steps.append("exec " + shlex.join(argv))
+    return "; ".join(steps)
+
+
 def _resolve_optional_tool_mounts(
     worktree_host: Path | None = None,
     run_dir: Path | None = None,
@@ -1224,10 +1497,10 @@ def build_mount_plan(
     """
     from agents.mount_plan import MountPlan, mount_spec
 
-    transcript_mount = (
-        "/home/agent/.codex/sessions" if harness == "codex"
-        else "/home/agent/.claude/projects"
-    )
+    transcript_mount = {
+        "codex": "/home/agent/.codex/sessions",
+        "grok": f"{GROK_HOME}/sessions",
+    }.get(harness, "/home/agent/.claude/projects")
     plan = MountPlan()
     # Beads state comes from the STATE volume, not the code volume. It is
     # Dolt-backed accumulated state — the same category as worktrees and
@@ -1396,8 +1669,9 @@ def launch_session(
         image: Docker image to use.
         working_dir: Working directory inside the container.
         harness: Agent CLI to launch inside the container. ``claude``
-                    remains the default; ``codex`` is also supported for
-                    interactive and non-interactive runs.
+                    remains the default; ``codex`` and ``grok`` (xAI Grok
+                    Build) are also supported for interactive and
+                    non-interactive runs.
         extra_env: Additional environment variables {key: value}.
         output_dir: Pre-created output directory. If None, a new directory under
                     data/agent-runs/ is created using name + UTC timestamp.
@@ -1444,7 +1718,7 @@ def launch_session(
         detach=True:  container_id string on success, None on failure.
         detach=False: docker command string on success, None on failure.
     """
-    if harness not in {"claude", "codex"}:
+    if harness not in SUPPORTED_HARNESSES:
         print(
             f"  ERROR: unsupported harness {harness!r} for session '{name}'",
             file=sys.stderr,
@@ -1472,6 +1746,17 @@ def launch_session(
         )
         runtime_args = [f"--runtime={docker_runtime}"]
     resolved_model = model or (DEFAULT_OPUS_MODEL if harness == "claude" else None)
+    # Grok: decide the request path from the workspace env before anything is
+    # written, and pin the session UUID so the transcript directory is known
+    # from byte zero (a resume keeps the original session instead).
+    grok_profile: GrokLaunchProfile | None = None
+    grok_session_id: str | None = None
+    if harness == "grok":
+        grok_profile = _grok_launch_profile(extra_env, model)
+        extra_env = _grok_env_with_default_key(extra_env, grok_profile)
+        if not resume_uuid:
+            import uuid as _uuid
+            grok_session_id = str(_uuid.uuid4())
 
     # Per-step launch timing. launch_session was opaquely eating ~12-15s of
     # session-create wall-clock (the worktrees finish in ~2s); these markers
@@ -1492,8 +1777,9 @@ def launch_session(
 
     # ── Credentials ───────────────────────────────────────────
     # Claude sessions need host auth injected into the container. Codex
-    # sessions use the optional ~/.codex mounts instead, so they must not
-    # hard-fail on missing Claude credentials.
+    # sessions use the optional ~/.codex mounts instead, and Grok sessions
+    # carry their key in the env (see _grok_env_with_default_key), so neither
+    # must hard-fail on missing Claude credentials.
     auth_args: list[str] = []
     creds: dict | None = None
     if harness == "claude":
@@ -1553,6 +1839,11 @@ def launch_session(
             "needs_nested_docker": needs_nested_docker,
             "session_runtime": resolved_runtime,
         }
+        if grok_profile is not None:
+            # The transcript lands at sessions/<encoded cwd>/<uuid>/updates.jsonl;
+            # recording the uuid lets a reader find it without a directory walk.
+            meta_doc["grok_session_id"] = grok_session_id
+            meta_doc["grok_mode"] = grok_profile.mode
         if creds is not None and creds.get("harness_token"):
             # Operator-facing credential pointer for triage. The dashboard
             # reads this back when the session is registered so the drawer
@@ -1568,6 +1859,11 @@ def launch_session(
                 if resolved:
                     meta_doc["graph_org"] = resolved
         (sessions_dir / ".session_meta.json").write_text(json.dumps(meta_doc, indent=2))
+
+    if grok_profile is not None:
+        # Config carries no secret (env var NAMES only), so writing it before
+        # mount validation leaks nothing on a refused launch.
+        _generate_grok_config(run_dir, grok_profile)
 
     # ── Auth args (may copy creds file into run_dir) ───────────
     if creds is not None:
@@ -1790,6 +2086,7 @@ def launch_session(
         "-e", f"GRAPH_API={graph_api}",
         "-e", f"CROSSTALK_TOKEN={raw_token}",
         "-e", "CODEX_HOME=/home/agent/.codex",
+        "-e", f"GROK_HOME={GROK_HOME}",
         *auth_args,
     ]
 
@@ -1874,6 +2171,14 @@ def launch_session(
                 f"--model {shlex.quote(resolved_model or DEFAULT_OPUS_MODEL)}"
                 f"{resume_flag} -p"
             )
+        elif harness == "grok":
+            assert grok_profile is not None
+            shell_cmd = grok_launch_script(
+                grok_profile,
+                prompt_file="/workspace/output/.prompt.md",
+                resume_uuid=resume_uuid,
+                session_id=grok_session_id,
+            )
         else:
             if resume_uuid:
                 m = re.search(
@@ -1915,6 +2220,16 @@ def launch_session(
             ]
             if resume_uuid:
                 cmd += ["--resume", resume_uuid]
+        elif harness == "grok":
+            assert grok_profile is not None
+            # One shared entrypoint execs this argv; the script installs the
+            # config, signs in (gateway mode) and execs the TUI.
+            cmd += [image, "sh", "-c", grok_launch_script(
+                grok_profile,
+                prompt_file=None,
+                resume_uuid=resume_uuid,
+                session_id=grok_session_id,
+            )]
         else:
             codex_args = [
                 "codex",

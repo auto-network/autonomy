@@ -1,0 +1,40 @@
+
+  master <workspace>                                                                      2.3K / 500K │ [Dashboard]
+
+
+     ❯ Reply with the fruit word you were told, then wait.                                                   5:51 AM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ⠙ Waiting for response… 1.2s                                                                    1.2s ⇣2.26k [stop]
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                                                                │
+  ╰───────────────────────────────────────────────────────────────────────── Grok 4.6 (OpenRouter) · always-approve ─╯
+
+  Shift+Tab:mode  │  Ctrl+c:cancel  │  Ctrl+x:shortcuts
+

@@ -234,6 +234,9 @@
 .sc-model-name { line-height: 1; }
 .sc-harness-claude  { background: #2e1065; color: #c4b5fd; }
 .sc-harness-codex   { background: #052e16; color: #86efac; }
+/* Grok's official icon is a dark rounded square; a neutral dark pill keeps the
+   white mark legible without inventing a brand colour. */
+.sc-harness-grok    { background: #111827; color: #e5e7eb; }
 .sc-harness-unknown { background: #1f2937; color: #6b7280; }
 
 /* Type badge classes (color-coded per session_type) */

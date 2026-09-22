@@ -12,18 +12,21 @@
 <span class="sc-harness"
       :class="harness === 'codex' ? 'sc-harness-codex' :
               harness === 'claude' ? 'sc-harness-claude' :
+              harness === 'grok' ? 'sc-harness-grok' :
               'sc-harness-unknown'"
-      :title="(harness === 'codex' ? 'Codex' : harness === 'claude' ? 'Claude' : (harness || 'Unknown')) + (model ? ' · ' + model : '')"
+      :title="(harness === 'codex' ? 'Codex' : harness === 'claude' ? 'Claude' : harness === 'grok' ? 'Grok Build' : (harness || 'Unknown')) + (model ? ' · ' + model : '')"
       data-testid="session-harness-badge"
       :data-harness="harness || 'unknown'"
       :data-model="model || ''">
   <img class="sc-harness-icon"
-       x-show="harness === 'claude' || harness === 'codex'"
+       x-show="harness === 'claude' || harness === 'codex' || harness === 'grok'"
        :src="(harness === 'claude'
          ? '/static/img/providers/claude-32.png'
-         : '/static/img/providers/openai-32.svg') + (window.STATIC_V || '')"
+         : harness === 'grok'
+           ? '/static/img/providers/grok-32.svg'
+           : '/static/img/providers/openai-32.svg') + (window.STATIC_V || '')"
        alt="" aria-hidden="true" width="12" height="12">
   <span class="sc-model-name"
-        x-show="model || (harness !== 'claude' && harness !== 'codex')"
+        x-show="model || (harness !== 'claude' && harness !== 'codex' && harness !== 'grok')"
         x-text="window.compactSessionModel(model) || '?'"></span>
 </span>

@@ -254,3 +254,11 @@ def test_verify_endpoint_records(test_client, graph_db, monkeypatch):
 def test_verify_endpoint_rejects_bad_harness(test_client):
     r = test_client.post("/api/bootstrap/verify", json={"harness": "nope"})
     assert r.status_code == 400
+
+
+def test_grok_is_a_bootstrap_harness_with_headless_noop():
+    spec = hb.HARNESS_SPECS["grok"]
+    assert spec["version_cmd"] == ["grok", "--version"]
+    assert spec["noop_cmd"][:2] == ["grok", "-p"] and "--always-approve" in spec["noop_cmd"]
+    assert spec["install_cmd"] == "npm install -g @xai-official/grok"
+    assert "grok" in hb.VALID_HARNESSES

@@ -81,6 +81,16 @@ window.compactSessionModel = function(model) {
     return codex[1] + (codexFamily ? '-' + codexFamily : '');
   }
 
+  // Grok ids arrive bare from xAI (`grok-4.6`) or provider-prefixed from a
+  // gateway (`x-ai/grok-4.6`, `x-ai/grok-build-0.1`); both compact to the
+  // family + version the card has room for.
+  var grok = value.match(/^(?:x-ai\/)?grok-([a-z0-9.]+(?:-[a-z0-9.]+)*)$/i);
+  if (grok) {
+    return 'Grok-' + grok[1].split('-').map(function(part) {
+      return /^[a-z]/i.test(part) ? part.charAt(0).toUpperCase() + part.slice(1) : part;
+    }).join('-');
+  }
+
   var claude = value.match(/^claude-(opus|sonnet|haiku|fable)-([0-9]+)(?:-([0-9]+))?(?:-[0-9]{8})?$/i);
   if (claude) {
     return claude[1].charAt(0).toUpperCase() + claude[1].slice(1).toLowerCase()
@@ -537,7 +547,7 @@ window.getSessionStore = function(sessionId) {
       resultMap: {},     // tool_id -> tool_result entry
       activityState: 'idle',       // server-derived: idle | thinking | tool_running | dead
       pendingToolIds: {},          // server-derived: tool_id -> true (set-like object)
-      harness: '',                 // auto-ngis4: claude | codex | future
+      harness: '',                 // auto-ngis4: claude | codex | grok | future
       model: null,                 // auto-ngis4: most-recent assistant-turn model id
       harnessToken: null,          // auto-08n3f: Anthropic org UUID (substrate key on dashboard.claude.credentials)
       harnessTokenAlias: null,     // auto-08n3f: friendly alias from dashboard.claude.credentials.alias (UI display)

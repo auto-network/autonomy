@@ -8,7 +8,7 @@ every entry re-probes fresh.
 
 Three responsibilities:
 
-1. DISCOVER — probe for an installed ``claude`` / ``codex`` CLI on PATH, parse
+1. DISCOVER — probe for an installed ``claude`` / ``codex`` / ``grok`` CLI on PATH, parse
    ``--version``, and (when present) run one authenticated no-op to tell
    *installed-needs-sign-in* apart from *ready*.
 2. RECORD — on a successful probe, upsert one ``autonomy.harness.bootstrap#1``
@@ -60,6 +60,19 @@ HARNESS_SPECS: dict[str, dict[str, Any]] = {
         "install_cmd": "npm install -g @openai/codex",
         "signin_cmd": "codex login",
         "signin_how": "Run this in a terminal and finish in your browser.",
+    },
+    "grok": {
+        "label": "Grok Build",
+        "version_cmd": ["grok", "--version"],
+        # Headless one-turn no-op; exits non-zero ("Not signed in") without a
+        # stored sign-in or a usable XAI_API_KEY.
+        "noop_cmd": ["grok", "-p", "ok", "--max-turns", "1", "--always-approve"],
+        "install_cmd": "npm install -g @xai-official/grok",
+        "signin_cmd": "grok login --device-code",
+        "signin_how": (
+            "Run this in a terminal and enter the code at the URL it prints, "
+            "or export XAI_API_KEY from console.x.ai."
+        ),
     },
 }
 

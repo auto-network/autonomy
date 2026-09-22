@@ -590,7 +590,7 @@ def _workspace_from_setting(
     env_raw = setting_payload.get("env") or {}
     env = {str(k): str(v) for k, v in env_raw.items()}
     harness = setting_payload.get("harness") or "claude"
-    if not isinstance(harness, str) or harness not in {"claude", "codex"}:
+    if not isinstance(harness, str) or harness not in {"claude", "codex", "grok"}:
         raise WorkspaceSettingsError(
             f"workspace {workspace_id!r}: invalid harness {harness!r}"
         )

@@ -130,6 +130,23 @@ def test_workspace_from_setting_defaults_harness_to_claude():
     assert workspace.harness == "claude"
 
 
+def test_workspace_from_setting_reads_grok_harness():
+    workspace = _workspace_from_setting(
+        {
+            "name": "Autonomy Grok",
+            "image": "autonomy-session-platform",
+            "harness": "grok",
+            "model": "x-ai/grok-4.6",
+        },
+        workspace_id="autonomy-grok",
+        graph_project="autonomy",
+        artifacts=(),
+        mounts={},
+    )
+    assert workspace.harness == "grok"
+    assert workspace.model == "x-ai/grok-4.6"
+
+
 def test_workspace_from_setting_reads_codex_harness():
     workspace = _workspace_from_setting(
         {

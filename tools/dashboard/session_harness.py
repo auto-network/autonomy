@@ -2,6 +2,10 @@
 
 Harnesses own raw transcript parsing.  The dashboard above this module owns
 shared normalized entries, activity state, SSE delivery, and rendering.
+
+Three adapters live here: Claude Code (``CLAUDE_HARNESS``), Codex
+(``CODEX_HARNESS``) and xAI Grok Build (``GROK_HARNESS``); ``HARNESSES`` is
+the registry every consumer resolves by name.
 """
 
 from __future__ import annotations
@@ -3270,9 +3274,627 @@ def _claude_read_screen_state(
     return new_state, keystrokes
 
 
+
+# ── Grok Build (xAI) adapter ─────────────────────────────────────────────────
+#
+# Grok Build persists every session as an ACP ``session/update`` stream:
+# ``$GROK_HOME/sessions/<url-encoded cwd>/<session uuid>/updates.jsonl``. Each
+# line is ``{"timestamp": <epoch s>, "method": "session/update" |
+# "_x.ai/session/update", "params": {"sessionId", "update": {"sessionUpdate":
+# <kind>, ...}, "_meta": {"eventId", "agentTimestampMs", "promptId",
+# "totalTokens", ...}}}``. Beside it sit sidecars that are NOT transcripts
+# (``chat_history.jsonl`` — the raw model wire, ``events.jsonl``,
+# ``rewind_points.jsonl``, ``feedback.jsonl``; ``prompt_history.jsonl`` one
+# level up) plus ``summary.json`` (index entry: title, model, timestamps,
+# ``parent_session_id`` for a fork or subagent). Format verified against
+# v1.0.40 on 2026-09-22 (graph note 7d172e94-4f3).
+
+GROK_TRANSCRIPT_NAME = "updates.jsonl"
+GROK_SIDECAR_JSONL = frozenset({
+    "chat_history.jsonl", "events.jsonl", "rewind_points.jsonl",
+    "feedback.jsonl", "prompt_history.jsonl",
+})
+
+#: Grok tool → the tile name the shared renderer already knows (Claude's
+#: vocabulary), plus the input-key renames that make the tile read correctly.
+#: Unlisted tools keep their Grok name and raw input — the renderer's generic
+#: tool tile handles them.
+_GROK_TOOL_MAP: dict[str, tuple[str, dict[str, str]]] = {
+    "run_terminal_command": ("Bash", {}),
+    "read_file": ("Read", {"target_file": "file_path"}),
+    "search_replace": ("Edit", {}),
+    "write": ("Write", {}),
+    "grep": ("Grep", {}),
+    "list_dir": ("Glob", {"target_directory": "path"}),
+    "web_search": ("WebSearch", {}),
+    "web_fetch": ("WebFetch", {}),
+    "todo_write": ("TodoWrite", {}),
+    "spawn_subagent": ("Task", {}),
+}
+
+
+def is_grok_sidecar(path: Path | str) -> bool:
+    """True for a Grok session file that is JSONL but not the transcript.
+
+    The monitor watches the whole ``sessions/`` tree for ``*.jsonl``; without
+    this filter ``chat_history.jsonl`` (written first, and larger) would be
+    linked as the session and the viewer would render the raw model wire.
+    Claude and Codex never write these names, so the check is harness-free.
+    """
+    return Path(path).name in GROK_SIDECAR_JSONL
+
+
+def is_grok_transcript(path: Path | str) -> bool:
+    return Path(path).name == GROK_TRANSCRIPT_NAME
+
+
+def grok_session_uuid_for_path(path: Path | str) -> str:
+    """The session id a Grok transcript belongs to: its directory name.
+
+    Every Grok transcript is called ``updates.jsonl``, so the file stem (what
+    the dashboard stores as ``session_uuid`` for Claude and Codex) would be
+    the same for every session; the directory carries the UUID that
+    ``grok --resume`` accepts.
+    """
+    p = Path(path)
+    return p.parent.name if is_grok_transcript(p) else p.stem
+
+
+def transcript_session_uuid(path: Path | str) -> str:
+    """``session_uuid`` for any harness's transcript path (stem, or the Grok
+    directory name)."""
+    return grok_session_uuid_for_path(path)
+
+
+def classify_grok_transcript(path: Path | str) -> tuple[str, str]:
+    """``(kind, reason)`` with kind in ``main`` / ``subagent`` / ``unknown``.
+
+    Grok subagents are ordinary sessions in the same ``sessions/<cwd>/`` tree,
+    distinguished only by ``summary.json``'s ``parent_session_id``. Until that
+    file exists the answer is ``unknown`` — never ``main`` — so the monitor
+    re-checks instead of adopting a child as the parent's rollover (the same
+    fail-closed rule Codex forks needed).
+    """
+    p = Path(path)
+    if not is_grok_transcript(p):
+        return "main", "not_grok_transcript"
+    summary = p.parent / "summary.json"
+    try:
+        doc = json.loads(summary.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return "unknown", "summary_missing"
+    except (OSError, json.JSONDecodeError):
+        return "unknown", "summary_unreadable"
+    if not isinstance(doc, dict):
+        return "unknown", "summary_invalid"
+    if doc.get("parent_session_id"):
+        return "subagent", "parent_session_id"
+    if "subagents" in p.parts:
+        return "subagent", "subagents_dir"
+    return "main", "summary_main"
+
+
+def _grok_iso(raw: dict, meta: dict | None) -> str:
+    """ISO-8601 UTC timestamp for one update: the agent's millisecond clock
+    when present, else the line's epoch seconds."""
+    ms = (meta or {}).get("agentTimestampMs")
+    try:
+        if isinstance(ms, (int, float)) and ms > 0:
+            return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).isoformat(
+                timespec="milliseconds").replace("+00:00", "Z")
+        ts = raw.get("timestamp")
+        if isinstance(ts, (int, float)) and ts > 0:
+            return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat(
+                timespec="milliseconds").replace("+00:00", "Z")
+    except (OverflowError, OSError, ValueError):
+        pass
+    return ""
+
+
+def _grok_unwrap(raw: dict) -> tuple[dict, dict, dict] | None:
+    """``(update, meta, params)`` for a session/update line, else None."""
+    if not isinstance(raw, dict):
+        return None
+    method = raw.get("method")
+    if method not in ("session/update", "_x.ai/session/update"):
+        return None
+    params = raw.get("params")
+    if not isinstance(params, dict):
+        return None
+    update = params.get("update")
+    if not isinstance(update, dict):
+        return None
+    meta = params.get("_meta")
+    return update, (meta if isinstance(meta, dict) else {}), params
+
+
+def _grok_content_text(content: Any) -> str:
+    """Flatten an ACP content block (or list of them) to text."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        if content.get("type") == "text":
+            return str(content.get("text") or "")
+        if content.get("type") == "content":
+            return _grok_content_text(content.get("content"))
+        return ""
+    if isinstance(content, list):
+        return "".join(_grok_content_text(c) for c in content)
+    return ""
+
+
+def _grok_identity(meta: dict) -> dict:
+    event_id = meta.get("eventId")
+    return {"message_id": str(event_id)} if event_id else {}
+
+
+def _grok_tool_entry(update: dict, timestamp: str) -> dict:
+    """A ``tool_use`` tile from an ACP ``tool_call`` update."""
+    xai = ((update.get("_meta") or {}).get("x.ai/tool") or {}) if isinstance(update.get("_meta"), dict) else {}
+    native = str(xai.get("name") or update.get("title") or "?")
+    raw_input = update.get("rawInput")
+    tool_input = dict(raw_input) if isinstance(raw_input, dict) else {"input": raw_input}
+    mapped, renames = _GROK_TOOL_MAP.get(native, (native, {}))
+    for src, dst in renames.items():
+        if src in tool_input and dst not in tool_input:
+            tool_input[dst] = tool_input.pop(src)
+    entry = {
+        "type": "tool_use",
+        "role": "assistant",
+        "tool_name": mapped,
+        "native_tool_name": native,
+        "tool_id": str(update.get("toolCallId") or ""),
+        "input": tool_input,
+        "timestamp": timestamp,
+    }
+    kind = update.get("kind") or xai.get("kind")
+    if kind:
+        entry["tool_kind"] = str(kind)
+    return entry
+
+
+def _grok_todo_plan(update: dict, timestamp: str) -> dict | None:
+    """ACP ``plan`` update → the shared ``todo_plan`` tile."""
+    entries = update.get("entries")
+    if not isinstance(entries, list):
+        return None
+    todos = []
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        subject = str(item.get("content") or "").strip()
+        if not subject:
+            continue
+        todos.append({
+            "subject": subject,
+            "status": str(item.get("status") or "pending"),
+            "priority": str(item.get("priority") or ""),
+        })
+    if not todos:
+        return None
+    return {"type": "todo_plan", "role": "assistant", "todos": todos, "timestamp": timestamp}
+
+
+def parse_grok_log_line(line: str, ctx: dict | None = None) -> dict | list[dict] | None:
+    """Normalize one ``updates.jsonl`` line into viewer entries.
+
+    ``ctx`` is unused: Grok's tool calls carry their own ids, and its persisted
+    ``agent_message_chunk`` lines are whole message segments (one per response
+    between tool calls — measured, not streamed deltas), so no cross-line
+    pairing or chunk merging is needed.
+    """
+    _ = ctx
+    try:
+        raw = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    unwrapped = _grok_unwrap(raw)
+    if unwrapped is None:
+        return None
+    update, meta, _params = unwrapped
+    kind = update.get("sessionUpdate")
+    timestamp = _grok_iso(raw, meta)
+
+    if kind == "user_message_chunk":
+        text = _grok_content_text(update.get("content"))
+        if not text:
+            return None
+        ct = _classify_crosstalk(text)
+        if ct:
+            return {
+                "type": "crosstalk",
+                "role": "crosstalk",
+                "content": ct["message"],
+                "sender": ct["from"],
+                "sender_label": ct["label"],
+                "source_id": ct["source"],
+                "turn": ct["turn"],
+                "kind": ct.get("kind", ""),
+                "href": _sender_href(ct),
+                "timestamp": timestamp,
+            }
+        sys_info = _classify_system_message(text)
+        if sys_info:
+            entry = {
+                "type": "system",
+                "role": "system",
+                "content": sys_info["summary"],
+                "tag": sys_info["tag"],
+                "timestamp": timestamp,
+            }
+            if sys_info.get("body"):
+                entry["body"] = sys_info["body"]
+            return entry
+        return {
+            "type": "user",
+            "role": "user",
+            "content": text,
+            "timestamp": timestamp,
+            **_grok_identity(meta),
+        }
+
+    if kind == "agent_message_chunk":
+        text = _grok_content_text(update.get("content")).strip()
+        if not text:
+            return None
+        return {
+            "type": "assistant_text",
+            "role": "assistant",
+            "content": text,
+            "timestamp": timestamp,
+            **_grok_identity(meta),
+        }
+
+    if kind == "agent_thought_chunk":
+        text = _grok_content_text(update.get("content")).strip()
+        if not text:
+            return None
+        return {"type": "thinking", "role": "assistant", "content": text, "timestamp": timestamp}
+
+    if kind == "tool_call":
+        entry = _grok_tool_entry(update, timestamp)
+        if entry["native_tool_name"] == "todo_write":
+            todos_raw = entry["input"].get("todos")
+            plan = _grok_todo_plan({"entries": todos_raw}, timestamp) if isinstance(todos_raw, list) else None
+            if plan:
+                return [entry, plan]
+        return entry
+
+    if kind == "tool_call_update":
+        status = update.get("status")
+        if status not in ("completed", "failed"):
+            # In-progress refinement (title/kind/rawInput) — the tool_use tile
+            # already exists; nothing to render until the result lands.
+            return None
+        tool_id = str(update.get("toolCallId") or "")
+        content = _grok_content_text(update.get("content"))
+        if not content:
+            raw_output = update.get("rawOutput")
+            if isinstance(raw_output, dict):
+                content = str(raw_output.get("output_for_prompt") or raw_output.get("output") or "")
+                if not isinstance(raw_output.get("output_for_prompt"), str) and not isinstance(raw_output.get("output"), str):
+                    content = json.dumps(raw_output)[:4000]
+            elif raw_output is not None:
+                content = str(raw_output)
+        base = {
+            "type": "tool_result",
+            "role": "tool",
+            "tool_id": tool_id,
+            "content": content,
+            "is_error": status == "failed",
+            "timestamp": timestamp,
+        }
+        out = [base]
+        va = _upconvert_viewer_attachment(content, timestamp, tool_id=tool_id)
+        if va:
+            out.append(va)
+        sem = _upconvert_graph_result(content, timestamp, tool_id=tool_id)
+        if sem:
+            _enrich_semantic_tile(sem)
+            out.append(sem)
+        return out if len(out) > 1 else base
+
+    if kind == "plan":
+        return _grok_todo_plan(update, timestamp)
+
+    if kind == "turn_completed":
+        # Turn boundary: the monitor uses it to settle any tool the stream
+        # never marked completed (same contract as codex_task_complete).
+        return {
+            "type": "grok_turn_complete",
+            "role": "system",
+            "timestamp": timestamp,
+            "internal": True,
+        }
+
+    return None
+
+
+def postprocess_grok_entries(
+    entries: list[dict],
+    *,
+    session_dir: Path | None = None,
+    state: dict | None = None,
+) -> list[dict]:
+    """Grok entries are already normalized per line; nothing to fold."""
+    _ = session_dir, state
+    return entries
+
+
+def extract_grok_message_text(raw_entry: dict) -> str:
+    unwrapped = _grok_unwrap(raw_entry)
+    if unwrapped is None:
+        return ""
+    update, _meta, _params = unwrapped
+    if update.get("sessionUpdate") not in ("user_message_chunk", "agent_message_chunk"):
+        return ""
+    text = _grok_content_text(update.get("content")).strip()
+    return text[:150] if len(text) > 5 else ""
+
+
+def extract_grok_context_tokens(raw_entry: dict, current_tokens: int) -> int:
+    """``_meta.totalTokens`` on agent updates is the live context size."""
+    unwrapped = _grok_unwrap(raw_entry)
+    if unwrapped is None:
+        return current_tokens
+    _update, meta, _params = unwrapped
+    total = meta.get("totalTokens")
+    if isinstance(total, (int, float)) and total > 0:
+        return int(total)
+    return current_tokens
+
+
+def extract_grok_usage_delta(raw_entry: dict) -> dict[str, int] | None:
+    """Per-turn billed tokens from ``turn_completed.usage``.
+
+    Verified against v1.0.40: ``inputTokens`` is the FULL prompt sum (cache
+    reads included — ``totalTokens == inputTokens + outputTokens``), so the
+    uncached input the ledger wants is ``inputTokens - cachedReadTokens -
+    cacheCreationTokens``. One event per turn, so summing is exact.
+    """
+    unwrapped = _grok_unwrap(raw_entry)
+    if unwrapped is None:
+        return None
+    update, _meta, _params = unwrapped
+    if update.get("sessionUpdate") != "turn_completed":
+        return None
+    usage = update.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    full_input = _usage_int(usage.get("inputTokens"))
+    cache_read = _usage_int(usage.get("cachedReadTokens"))
+    cache_creation = _usage_int(usage.get("cacheCreationTokens"))
+    delta = {
+        "usage_input_tokens": max(0, full_input - cache_read - cache_creation),
+        "usage_cache_creation_tokens": cache_creation,
+        "usage_cache_read_tokens": cache_read,
+        "usage_output_tokens": _usage_int(usage.get("outputTokens")),
+    }
+    return delta if any(delta.values()) else None
+
+
+def extract_grok_model(raw_entry: dict, current_model: str | None) -> str | None:
+    """The model id: ``_meta.modelId`` on the user turn (bound at prompt time),
+    else the ``modelUsage`` key on ``turn_completed``."""
+    unwrapped = _grok_unwrap(raw_entry)
+    if unwrapped is None:
+        return current_model
+    update, _meta, _params = unwrapped
+    inner = update.get("_meta") if isinstance(update.get("_meta"), dict) else {}
+    model = inner.get("modelId")
+    if isinstance(model, str) and model:
+        return model
+    if update.get("sessionUpdate") == "turn_completed":
+        usage = update.get("usage")
+        if isinstance(usage, dict):
+            per_model = usage.get("modelUsage")
+            if isinstance(per_model, dict) and per_model:
+                # The last model that billed this turn is the live one.
+                return str(list(per_model.keys())[-1])
+    return current_model
+
+
+def extract_grok_harness_state(
+    raw_entry: dict,
+    current_state: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Track the last operator message timestamp (the shared input-gate signal)."""
+    unwrapped = _grok_unwrap(raw_entry)
+    if unwrapped is None:
+        return current_state
+    update, meta, _params = unwrapped
+    if update.get("sessionUpdate") != "user_message_chunk":
+        return current_state
+    timestamp = _grok_iso(raw_entry, meta)
+    if not timestamp:
+        return current_state
+    state = dict(current_state or {})
+    if state.get("last_user_message_at") == timestamp:
+        return current_state
+    state["last_user_message_at"] = timestamp
+    return state
+
+
+# Grok Build TUI screen-state inference (real captures, v1.0.40, 2026-09-22 —
+# fixtures under tests/fixtures/harness_pane_snapshots/grok_*.txt).
+#
+# Trust dialog: "Do you trust the contents of this directory?" with the
+# options "Yes, proceed  y" / "No, quit  n". Launches pass ``--trust`` so it
+# should never appear, but a resumed host session can still hit it.
+# Composer: a rounded box whose prompt line is ``│ ❯`` (with the typed text
+# after the glyph); the footer rule names the model and permission mode
+# (``… Grok 4.6 (OpenRouter) · always-approve ─╯``). While a turn runs a
+# spinner line ("⠙ Waiting for response…" / "Responding…") sits above the
+# box and the prompt line stays — so readiness keys on the ABSENCE of the
+# spinner, not merely on the glyph.
+_GROK_TRUST_DIALOG_RE = re.compile(
+    r"do\s+you\s+trust\s+the\s+contents\s+of\s+this\s+directory", re.IGNORECASE,
+)
+_GROK_TRUST_CONFIRM_RE = re.compile(r"yes,?\s+proceed\b", re.IGNORECASE)
+_GROK_COMPOSER_PROMPT_RE = re.compile(r"(?:^|\n)[ \t]*│[ \t]*❯[ \t]")
+_GROK_BUSY_RE = re.compile(
+    r"waiting\s+for\s+response|responding…|responding\.\.\.|\[stop\]",
+    re.IGNORECASE,
+)
+_GROK_AUTH_RE = re.compile(
+    r"not\s+signed\s+in|sign\s+in\s+to\s+continue|grok\s+login\s+--device-code|"
+    r"authentication\s+failed|set\s+the\s+XAI_API_KEY",
+    re.IGNORECASE,
+)
+
+
+def _grok_read_screen_state(
+    pane_text: str,
+    current_state: dict[str, Any] | None,
+) -> tuple[dict[str, Any], list[dict]]:
+    prev = dict(current_state or {})
+    new_state = dict(prev)
+    keys: list[dict] = []
+    text = pane_text or ""
+
+    trust_visible = bool(
+        _GROK_TRUST_DIALOG_RE.search(text) and _GROK_TRUST_CONFIRM_RE.search(text)
+    )
+    was_confirming = bool(prev.get("confirming_trust_prompt"))
+    new_state["confirming_trust_prompt"] = trust_visible
+    if trust_visible and not was_confirming:
+        # The dialog binds a bare `y` to "Yes, proceed" (no Enter needed).
+        keys.append({"kind": "literal", "value": "y"})
+
+    blocking_modal = "auth_required" if _GROK_AUTH_RE.search(text) else None
+    new_state["blocking_modal"] = blocking_modal
+    new_state["in_planning_mode"] = False
+    new_state["composer_ready"] = bool(
+        _GROK_COMPOSER_PROMPT_RE.search(text)
+        and not _GROK_BUSY_RE.search(text)
+        and not trust_visible
+        and not blocking_modal
+    )
+    return new_state, keys
+
+
+class GrokSessionHarness:
+    """xAI Grok Build adapter over the ACP ``updates.jsonl`` transcript."""
+
+    name = "grok"
+
+    async def register_session(
+        self,
+        *,
+        monitor: Any,
+        tmux_name: str,
+        session_type: str,
+        project: str,
+        run_dir: Path | None = None,
+        seed_message: str = "",
+        session_uuid: str | None = None,
+        jsonl_path: Path | None = None,
+        resolution_dir: Path | None = None,
+        bead_id: str | None = None,
+    ) -> None:
+        sess_dir = resolution_dir
+        if sess_dir is None:
+            if run_dir is not None:
+                sess_dir = run_dir / "sessions"
+            elif jsonl_path is not None:
+                sess_dir = jsonl_path if jsonl_path.is_dir() else jsonl_path.parent
+        await monitor.register(
+            tmux_name=tmux_name,
+            session_type=session_type,
+            project=project,
+            jsonl_path=sess_dir,
+            bead_id=bead_id,
+            seed_message=seed_message,
+            session_uuid=session_uuid,
+            resolution_dir=sess_dir,
+            harness=self.name,
+        )
+
+    def resolve_session(
+        self,
+        *,
+        tmux_name: str,
+        row: dict | None = None,
+        jsonl_path: Path | None = None,
+        handshake_text: str | None = None,
+    ) -> dict | None:
+        _ = handshake_text
+        if jsonl_path is None or not is_grok_transcript(jsonl_path):
+            return None
+        return _link_session_file(
+            tmux_name,
+            jsonl_path,
+            project=(row or {}).get("project"),
+        )
+
+    def attach_live_monitoring(
+        self,
+        *,
+        monitor: Any,
+        tmux_name: str,
+        jsonl_path: Path,
+        resolution_dir: Path | None = None,
+        reset_offset: bool = False,
+        reset_state: bool = False,
+    ) -> None:
+        _attach_live_monitoring(
+            monitor,
+            tmux_name=tmux_name,
+            jsonl_path=jsonl_path,
+            resolution_dir=resolution_dir,
+            reset_offset=reset_offset,
+            reset_state=reset_state,
+        )
+
+    def parse_line(self, line: str, ctx: dict | None = None) -> dict | list[dict] | None:
+        return parse_grok_log_line(line, ctx=ctx)
+
+    def postprocess_entries(
+        self,
+        entries: list[dict],
+        *,
+        session_dir: Path | None = None,
+        state: dict | None = None,
+    ) -> list[dict]:
+        return postprocess_grok_entries(entries, session_dir=session_dir, state=state)
+
+    def new_postprocess_state(self) -> dict:
+        return {}
+
+    def extract_message_text(self, raw_entry: dict) -> str:
+        return extract_grok_message_text(raw_entry)
+
+    def extract_context_tokens(self, raw_entry: dict, current_tokens: int) -> int:
+        return extract_grok_context_tokens(raw_entry, current_tokens)
+
+    def extract_usage_delta(self, raw_entry: dict) -> dict[str, int] | None:
+        return extract_grok_usage_delta(raw_entry)
+
+    def extract_model(self, raw_entry: dict, current_model: str | None) -> str | None:
+        return extract_grok_model(raw_entry, current_model)
+
+    def extract_harness_state(
+        self,
+        raw_entry: dict,
+        current_state: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        return extract_grok_harness_state(raw_entry, current_state)
+
+    def read_screen_state(
+        self,
+        pane_text: str,
+        current_state: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], list[dict]]:
+        return _grok_read_screen_state(pane_text, current_state)
+
+
+GROK_HARNESS = GrokSessionHarness()
+
+
 HARNESSES: dict[str, SessionHarness] = {
     "claude": CLAUDE_HARNESS,
     "codex": CODEX_HARNESS,
+    "grok": GROK_HARNESS,
 }
 
 _HOST_LAUNCH_LOCKS: dict[str, asyncio.Lock] = {}
@@ -3306,6 +3928,8 @@ def _detect_harness_for_path(path: str | Path | None) -> SessionHarness:
         return get_session_harness(str(meta["harness"]))
     if ".codex" in p.parts or p.name.startswith("rollout-"):
         return CODEX_HARNESS
+    if ".grok" in p.parts or is_grok_transcript(p):
+        return GROK_HARNESS
     if ".claude" in p.parts:
         return CLAUDE_HARNESS
     try:
@@ -3411,7 +4035,9 @@ def _link_session_file(
     from tools.dashboard.dao import dashboard_db
 
     project = project or jsonl_path.parent.name
-    session_uuid = jsonl_path.stem
+    # Claude/Codex: the file stem. Grok: every transcript is updates.jsonl, so
+    # the enclosing directory name is the session UUID (what --resume takes).
+    session_uuid = transcript_session_uuid(jsonl_path)
     # auto-suvcp B6: the generation identity is written IN THE SAME UPDATE
     # as jsonl_path — every path writer establishes matching
     # generation+cursor atomically, so no reader can observe a link whose

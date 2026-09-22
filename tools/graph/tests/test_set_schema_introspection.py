@@ -136,7 +136,7 @@ def test_workspace_schema_payload_shape(graph_db_env):
     assert properties["name"]["description"]
     assert properties["image"]["description"]
     # Enum + default for harness.
-    assert properties["harness"]["enum"] == ["claude", "codex"]
+    assert properties["harness"]["enum"] == ["claude", "codex", "grok"]
     assert properties["harness"]["default"] == "claude"
     # Element shape for repos.
     repos = properties["repos"]
@@ -173,7 +173,7 @@ def test_set_schema_prints_required_optional_descriptions(graph_db_env):
     assert "image (string)" in out
     # Optional: harness with enum + default
     assert "harness (string)" in out
-    assert "[enum: claude, codex]" in out
+    assert "[enum: claude, codex, grok]" in out
     assert "[default: \"claude\"]" in out
     # Element shape for repos
     assert "Element shape:" in out

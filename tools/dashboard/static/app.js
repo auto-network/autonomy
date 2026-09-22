@@ -790,7 +790,7 @@ function freshHarnessUsageSettings(members) {
   // account. Sorting by updated_at churned the order as accounts
   // refreshed, so page 0 kept showing a different identity.
   items.sort((a, b) => {
-    const order = { claude: 0, codex: 1 };
+    const order = { claude: 0, codex: 1, grok: 2 };
     const byHarness = (order[a.harness] ?? 99) - (order[b.harness] ?? 99);
     if (byHarness) return byHarness;
     return String(a.identity_label || '').localeCompare(String(b.identity_label || ''));
