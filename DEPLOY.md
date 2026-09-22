@@ -485,7 +485,7 @@ no configuration is needed there either.
 | Variable | Default | Purpose |
 |---|---|---|
 | `AUTONOMY_ORGS_DIR` | `<repo>/data/orgs` | Per-org graph DB directory (`<slug>.db`). |
-| `AUTONOMY_FIRST_ORG` | `myorg` | Slug of the first shared org created by first-run init / dashboard startup bootstrap. When unset (and no shared org exists yet) a fresh node founds `myorg`, never `autonomy` — that slug is reserved for the followed Autonomy public-surface mirror. |
+| `AUTONOMY_FIRST_ORG` | unset | Slug of a first shared org to create at first-run init / dashboard startup, for deploys that name one. Unset, no organization is created: the operator creates or joins one in onboarding, or has none. |
 | `AUTONOMY_FIRST_ORG_NAME` | title-cased slug | Display name seeded into the first org's `autonomy.org#1` identity Setting. |
 | `GRAPH_DB` / `GRAPH_API` | `<repo>/data/graph.db` / *(unset → local DB)* | Graph DB path, or a remote graph API base URL. |
 | `DASHBOARD_DB` | `<repo>/data/dashboard.db` | Dashboard overlay DB. |
