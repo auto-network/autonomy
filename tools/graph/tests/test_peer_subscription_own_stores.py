@@ -36,7 +36,7 @@ def pin_subscription(caller: str, peers: list[str]) -> None:
     settings_ops.add_setting(
         cross_org.PEER_SUBSCRIPTION_SET_ID, 1,
         key=caller, payload={"peers": peers},
-        org="personal", state="canonical",
+        org="personal", state="raw",
     )
 
 

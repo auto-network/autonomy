@@ -125,7 +125,7 @@ def test_resolve_peers_honours_subscription_setting(orgs_root):
         key="anchore",
         payload={"peers": ["autonomy"]},
         org="personal",
-        state="canonical",
+        state="raw",
     )
 
     peers = cross_org.resolve_peers("anchore", None)
@@ -147,7 +147,7 @@ def test_resolve_peers_empty_subscription_means_isolated(orgs_root):
         key="anchore",
         payload={"peers": []},
         org="personal",
-        state="canonical",
+        state="raw",
     )
 
     # Isolated from every other ORGANIZATION — the operator's own store is

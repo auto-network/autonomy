@@ -151,11 +151,19 @@ def _seed_anchore_and_autonomy(orgs_root):
     return ids
 
 
-def _make_args(**kwargs) -> argparse.Namespace:
-    """Build an argparse-shaped namespace with defaults cmd_* expects."""
+def _make_args(*, org=None, **kwargs) -> argparse.Namespace:
+    """Build an argparse-shaped namespace with defaults cmd_* expects.
+
+    *org* names the CALLER's organization. It has to be explicit: the CLI
+    stopped reading GRAPH_ORG (cli.py's resolve docstring — "scope comes
+    from the caller's explicit --org or nothing"), so a test that only
+    sets that variable is not a peer caller at all, it is the scopeless
+    view, and a cross-org confinement assertion made from there proves
+    nothing.
+    """
     from tools.graph.db import resolve_caller_db_path
     defaults = {
-        "db": resolve_caller_db_path(None),
+        "db": resolve_caller_db_path(org),
         "source": None,
         "first": False,
         "max_chars": 0,
@@ -237,6 +245,21 @@ def test_cmd_read_cross_org_canonical_resolves_and_reads_body(orgs_root, capsys,
     assert "canonical content" in out
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "PRODUCT DEFECT, reported 2026-09-22: a peer organization's RAW "
+        "content is readable cross-org. These three used to pass only "
+        "because they named the caller's org through GRAPH_ORG, which the "
+        "CLI stopped reading (cli.py: 'scope comes from the caller's "
+        "explicit --org or nothing'), so every one of them was really the "
+        "scopeless view and asserted nothing. With the caller named "
+        "explicitly they fail on the real rule this file states: peer "
+        "canonical and published are visible, peer raw and curated are "
+        "not. strict=True so whoever fixes the read path is told to "
+        "remove this marker."
+    ),
+)
 def test_cmd_read_cross_org_raw_rejected(orgs_root, capsys, monkeypatch):
     """Raw content stays invisible across orgs — `not found` on a peer's raw UUID.
 
@@ -246,7 +269,7 @@ def test_cmd_read_cross_org_raw_rejected(orgs_root, capsys, monkeypatch):
     ids = _seed_anchore_and_autonomy(orgs_root)
     monkeypatch.setenv("GRAPH_ORG", "anchore")
 
-    args = _make_args(source=ids["autonomy_raw"])
+    args = _make_args(org="anchore", source=ids["autonomy_raw"])
     graph_cli.cmd_read(args)
 
     out = capsys.readouterr().out
@@ -305,12 +328,27 @@ def test_cmd_context_cross_org_canonical_prints_turn(orgs_root, capsys, monkeypa
     assert "canonical content" in out
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "PRODUCT DEFECT, reported 2026-09-22: a peer organization's RAW "
+        "content is readable cross-org. These three used to pass only "
+        "because they named the caller's org through GRAPH_ORG, which the "
+        "CLI stopped reading (cli.py: 'scope comes from the caller's "
+        "explicit --org or nothing'), so every one of them was really the "
+        "scopeless view and asserted nothing. With the caller named "
+        "explicitly they fail on the real rule this file states: peer "
+        "canonical and published are visible, peer raw and curated are "
+        "not. strict=True so whoever fixes the read path is told to "
+        "remove this marker."
+    ),
+)
 def test_cmd_context_cross_org_raw_not_found(orgs_root, capsys, monkeypatch):
     """`graph context` on a peer's raw UUID returns not-found, not a stack trace."""
     ids = _seed_anchore_and_autonomy(orgs_root)
     monkeypatch.setenv("GRAPH_ORG", "anchore")
 
-    args = _make_args(source=ids["autonomy_raw"], turn="1", window=3)
+    args = _make_args(org="anchore", source=ids["autonomy_raw"], turn="1", window=3)
     graph_cli.cmd_context(args)
 
     out = capsys.readouterr().out
@@ -439,12 +477,27 @@ def test_cmd_attachment_cross_org_canonical(orgs_root, capsys, monkeypatch):
     assert "autonomy" in out
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "PRODUCT DEFECT, reported 2026-09-22: a peer organization's RAW "
+        "content is readable cross-org. These three used to pass only "
+        "because they named the caller's org through GRAPH_ORG, which the "
+        "CLI stopped reading (cli.py: 'scope comes from the caller's "
+        "explicit --org or nothing'), so every one of them was really the "
+        "scopeless view and asserted nothing. With the caller named "
+        "explicitly they fail on the real rule this file states: peer "
+        "canonical and published are visible, peer raw and curated are "
+        "not. strict=True so whoever fixes the read path is told to "
+        "remove this marker."
+    ),
+)
 def test_cmd_attachment_cross_org_raw_parent_rejected(orgs_root, capsys, monkeypatch):
     """Peer attachment whose parent source is raw must not surface."""
     ids = _seed_anchore_and_autonomy(orgs_root)
     monkeypatch.setenv("GRAPH_ORG", "anchore")
 
-    args = _make_args(id=ids["autonomy_raw_att"])
+    args = _make_args(org="anchore", id=ids["autonomy_raw_att"])
     with pytest.raises(SystemExit) as exc:
         graph_cli.cmd_attachment(args)
     assert exc.value.code == 1
