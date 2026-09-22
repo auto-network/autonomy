@@ -2068,7 +2068,15 @@ def test_agent_test_capability_exposes_cli_and_refuses_raw_pytest_commands(
     )
     stdout, stderr = process.communicate(timeout=10)
     assert process.returncode == 0, stderr
-    assert stdout.strip() == "0.5.1"
+    # Compared against the package's own constant, not a literal. The literal
+    # was "0.5.1" and sat here broken from 08996c23 (2026-09-10) until
+    # at-0922-180743-8e73: what this line is for is that the shim resolves and
+    # the CLI runs, and pinning a version string turns every legitimate bump
+    # into a failure in a file that has nothing to do with agent-test's
+    # version.
+    from tools.agent_test import __version__ as agent_test_version
+
+    assert stdout.strip() == agent_test_version
 
     for command in ("pytest", "py.test"):
         gate = run_dir / "cap-bin" / command
