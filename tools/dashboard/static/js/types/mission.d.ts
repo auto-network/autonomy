@@ -57,6 +57,8 @@ export interface MissionContentV1 {
   title: string;
   /** Supporting prose; markdown subset (headings, lists, fences, links, graph://ids, images -> gallery) */
   body?: string;
+  /** Optional Ops subtitle, recommendation, impact, options and artifact links; display advice, not authority */
+  briefing?: Record<string, unknown>;
   /** Explicit pin within a tab; 0 defers to the tab's own rule (news: newest first; delivery: bead topology) */
   order?: number;
   /** Optional group heading within the item's tab (e.g. a phase name); blank means ungrouped */
