@@ -31,7 +31,7 @@ from tools.dashboard.crosstalk_directive import (
     CROSSTALK_DIRECTIVE_NAMESPACE,
     CrosstalkDirective,
 )
-from tools.graph.schemas.registry import home
+from tools.graph.schemas.registry import home, publication_band
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +41,13 @@ _PERSONAL = "personal"
 
 
 @home("personal")
+@publication_band(max="raw")
 class FleetCrosstalkV1(CrosstalkDirective):
     """A crosstalk message that crosses the operator's own fleet.
+
+    Owner-local (``raw`` only): a message between the operator's own sessions
+    never counts as visible to another organization and no peer database is
+    consulted to read it. Operator ruling 2026-09-22.
 
     Personal-homed so the row replicates to every machine the operator owns.
     Inherits the base ``deliver`` — ``session_send(target_session, body)`` — so
