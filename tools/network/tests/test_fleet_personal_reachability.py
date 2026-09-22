@@ -21,7 +21,9 @@ from tools.graph.schemas.personal_fleet_reachability import (
     MAX_ADDRESS_BYTES,
     MAX_RELAY_BASE_BYTES,
     MAX_ROW_BYTES,
+    PERSONAL_FLEET_REACHABILITY_REVISION,
     PersonalFleetReachabilityV1,
+    PersonalFleetReachabilityV2,
     row_bytes,
 )
 from tools.graph.schemas.registry import SchemaValidationError
@@ -35,6 +37,16 @@ ORIGIN = "wss://relay.auto.network"
 @pytest.fixture
 def machine():
     return KeyPair.generate()
+
+
+def _signed(row: dict, machine: KeyPair) -> dict:
+    """The body the machine signed: the stored row with its key put back.
+
+    A stored row omits ``machine_pub`` (revision 2 — the row key is that
+    value), but the signature and every byte bound are over the body WITH it,
+    so anything measuring or re-signing measures this.
+    """
+    return {**row, "machine_pub": machine.public_hex}
 
 
 def _relay(serving_pub: str | None = None) -> dict:
@@ -123,7 +135,7 @@ def test_a_received_row_with_duplicate_addresses_is_refused_not_repaired(machine
     row["addresses"] = ["wss://a.example/s", "wss://a.example/s"]
 
     with pytest.raises(SchemaValidationError):
-        PersonalFleetReachabilityV1.validate(row)
+        PersonalFleetReachabilityV2.validate(row)
     assert pr.verify_row(
         row, machine.public_hex, active_machine_pubs=[machine.public_hex]) is None
 
@@ -147,7 +159,7 @@ def test_an_unknown_field_is_refused(machine):
     row["extra"] = "x"
 
     with pytest.raises(SchemaValidationError):
-        PersonalFleetReachabilityV1.validate(row)
+        PersonalFleetReachabilityV2.validate(row)
 
 
 def test_the_largest_valid_descriptor_fits_the_byte_ceiling(machine):
@@ -160,8 +172,11 @@ def test_the_largest_valid_descriptor_fits_the_byte_ceiling(machine):
     row = pr.build_row(machine, addresses, _relay())
 
     assert len(row["addresses"]) == MAX_ADDRESSES
-    assert row_bytes(row) <= MAX_ROW_BYTES, (
-        f"largest valid descriptor is {row_bytes(row)} bytes, over {MAX_ROW_BYTES}")
+    # The cap is over the SIGNED bytes, which include the row key; the stored
+    # row is smaller by exactly that field and measuring it would flatter us.
+    assert row_bytes(_signed(row, machine)) <= MAX_ROW_BYTES, (
+        f"largest valid descriptor is {row_bytes(_signed(row, machine))} bytes, "
+        f"over {MAX_ROW_BYTES}")
 
 
 def test_an_over_bound_address_is_dropped_by_the_writer(machine):
@@ -411,7 +426,9 @@ def test_a_maximal_address_and_relay_fixture_stays_within_the_cap(machine):
     row = pr.build_row(machine, addresses, relay, now=9999999999)
 
     assert len(row["addresses"]) == MAX_ADDRESSES
-    assert row_bytes(row) <= MAX_ROW_BYTES
+    # Measured on the signed body, which carries the row key; the stored row is
+    # smaller by exactly that field and measuring it would flatter the fixture.
+    assert row_bytes(_signed(row, machine)) <= MAX_ROW_BYTES
 
 
 def test_the_relay_key_must_be_present_even_when_null(machine):
@@ -421,7 +438,7 @@ def test_the_relay_key_must_be_present_even_when_null(machine):
     del row["relay"]
 
     with pytest.raises(SchemaValidationError):
-        PersonalFleetReachabilityV1.validate(row)
+        PersonalFleetReachabilityV2.validate(row)
 
 
 def test_a_boolean_version_is_refused(machine):
@@ -430,17 +447,24 @@ def test_a_boolean_version_is_refused(machine):
     row["v"] = True
 
     with pytest.raises(SchemaValidationError):
-        PersonalFleetReachabilityV1.validate(row)
+        PersonalFleetReachabilityV2.validate(row)
 
 
-@pytest.mark.parametrize("field", ["machine_pub", "sig"])
-def test_a_trailing_newline_in_hex_is_refused(machine, field):
+def test_a_trailing_newline_in_hex_is_refused(machine):
     """`$` matches before a final newline; only fullmatch refuses this."""
     row = pr.build_row(machine, ["wss://a.example/s"])
-    row[field] = row[field] + "\n"
+    row["sig"] = row["sig"] + "\n"
 
     with pytest.raises(SchemaValidationError):
-        PersonalFleetReachabilityV1.validate(row)
+        PersonalFleetReachabilityV2.validate(row)
+
+
+@pytest.mark.parametrize("bad_key", ["AA" * 32, "aa" * 31, "aa" * 32 + "\n"])
+def test_a_noncanonical_machine_key_is_refused(machine, bad_key):
+    """``machine_pub`` left the payload at revision 2, so the same property now
+    belongs to the ROW KEY — the one remaining statement of that value."""
+    with pytest.raises(SchemaValidationError):
+        PersonalFleetReachabilityV2.validate_member_key(bad_key)
 
 
 def test_a_non_string_org_uuid_is_refused_not_coerced(machine):
@@ -449,7 +473,7 @@ def test_a_non_string_org_uuid_is_refused_not_coerced(machine):
     row["relay"]["org_uuid"] = 12345
 
     with pytest.raises(SchemaValidationError):
-        PersonalFleetReachabilityV1.validate(row)
+        PersonalFleetReachabilityV2.validate(row)
 
 
 def test_malformed_unicode_is_invalid_input_not_an_exception(machine):
@@ -469,19 +493,15 @@ def test_a_nested_relay_object_is_refused_before_canonicalization(machine):
         pr.build_row(machine, [], {"relay_base": {"nested": ["deep"] * 100}})
 
 
-@pytest.mark.parametrize("field,value", [
-    ("machine_pub", "AA" * 32),
-    ("machine_pub", "aa" * 31),
-    ("sig", "ff" * 63),
-])
-def test_noncanonical_hex_is_refused(machine, field, value):
+@pytest.mark.parametrize("value", ["FF" * 64, "ff" * 63])
+def test_noncanonical_hex_is_refused(machine, value):
     """Uppercase or wrong-length hex is refused rather than normalized, so two
     parties cannot disagree about the signed bytes."""
     row = pr.build_row(machine, ["wss://a.example/s"])
-    row[field] = value
+    row["sig"] = value
 
     with pytest.raises(SchemaValidationError):
-        PersonalFleetReachabilityV1.validate(row)
+        PersonalFleetReachabilityV2.validate(row)
 
 
 @pytest.mark.parametrize("bad_uuid", [
@@ -492,7 +512,7 @@ def test_a_noncanonical_relay_uuid_is_refused(machine, bad_uuid):
     row["relay"]["org_uuid"] = bad_uuid
 
     with pytest.raises(SchemaValidationError):
-        PersonalFleetReachabilityV1.validate(row)
+        PersonalFleetReachabilityV2.validate(row)
 
 
 # -- review 3: signing discipline, shared normalization, own-baseline boundary --
@@ -579,3 +599,90 @@ def test_verify_own_row_rejects_a_row_signed_by_another_machine(machine):
     row = pr.build_row(other, ["wss://a.example/s"])
 
     assert pr.verify_own_row(row, machine.public_hex) is None
+
+
+# -- revision 2: the row key is not repeated in the payload ---------------------
+
+
+def test_a_stored_row_does_not_repeat_its_own_key(machine):
+    """The key IS ``machine_pub``. Storing it again gave every reader two
+    sources for one fact and a disagreement nothing arbitrated."""
+    row = pr.build_row(machine, ["wss://a.example/s"])
+
+    assert "machine_pub" not in row
+    assert sorted(row) == ["addresses", "relay", "sig", "updated_at", "v"]
+    with pytest.raises(SchemaValidationError):
+        PersonalFleetReachabilityV2.validate(_signed(row, machine))
+
+
+def test_both_shapes_sign_identical_bytes(machine):
+    """THE ONE THAT MATTERS for this change. Dropping the field was excused for
+    months on the grounds that it would invalidate the signature. It does not:
+    the signature is over the body WITH ``machine_pub``, and the verifier
+    reinserts it from the row key, so a revision-1 row and a revision-2 row
+    produce the same signed bytes and the same verdict."""
+    row = pr.build_row(machine, ["wss://a.example/s"], _relay())
+
+    # The body the PRE-CHANGE writer built, reconstructed here rather than
+    # derived from the new one, and signed independently.
+    legacy = {
+        "v": row["v"], "machine_pub": machine.public_hex,
+        "addresses": row["addresses"], "relay": row["relay"],
+        "updated_at": row["updated_at"],
+    }
+    legacy["sig"] = machine.sign_hex(pr._signing_input(legacy))
+
+    assert legacy["sig"] == row["sig"]
+    assert {k: v for k, v in legacy.items() if k != "machine_pub"} == row
+    for shape in (row, legacy):
+        assert pr.verify_row(
+            shape, machine.public_hex, active_machine_pubs=[machine.public_hex],
+            configured_relay_origin=ORIGIN, configured_org_uuid=ORG_UUID) is not None
+
+
+def test_a_revision_1_row_whose_copy_disagrees_with_its_key_is_refused(machine):
+    """The drift the duplication always permitted. While both shapes are on
+    disk the verifier must refuse the disagreement outright, never silently
+    prefer one source — the row key wins is a policy, and this row has no
+    policy behind it."""
+    other = KeyPair.generate()
+    row = pr.build_row(machine, ["wss://a.example/s"])
+    lying = {**row, "machine_pub": other.public_hex}
+
+    assert pr.verify_row(
+        lying, machine.public_hex,
+        active_machine_pubs=[machine.public_hex, other.public_hex]) is None
+    assert pr.verify_own_row(lying, machine.public_hex) is None
+
+
+def test_the_upconverter_produces_exactly_the_stored_shape(machine):
+    """A revision-1 row on disk upconverts to what a revision-2 writer would
+    have stored — not merely to something that validates."""
+    from tools.graph.schemas.personal_fleet_reachability import (
+        PERSONAL_FLEET_REACHABILITY_SET_ID as SET_ID,
+    )
+    from tools.graph.schemas.registry import UPCONVERTERS, _hop_key
+
+    row = pr.build_row(machine, ["wss://a.example/s"], _relay())
+    upconvert = UPCONVERTERS[_hop_key(SET_ID, 1, PERSONAL_FLEET_REACHABILITY_REVISION)]
+
+    assert upconvert(_signed(row, machine)) == row
+
+
+def test_a_stored_revision_1_row_is_not_republished(store, machine):
+    """An upgraded machine must not rewrite its row just because the shape
+    changed: the semantic tuple is unchanged, and this row is change-driven.
+    A republish here would put the whole fleet's rows on the wire at once."""
+    from tools.graph import settings_ops
+    from tools.graph.schemas.personal_fleet_reachability import (
+        PERSONAL_FLEET_REACHABILITY_SET_ID as SET_ID,
+    )
+
+    cert = object()
+    legacy = _signed(pr.build_row(machine, ["wss://a.example/s"]), machine)
+    settings_ops.upsert_by_key(
+        SET_ID, 1, machine.public_hex, legacy, org="personal")
+
+    assert pr.publish_if_changed(machine, cert, ["wss://a.example/s"]) is False
+    assert pr.publish_if_changed(machine, cert, ["wss://b.example/s"]) is True
+    assert "machine_pub" not in pr.stored_row(machine.public_hex)

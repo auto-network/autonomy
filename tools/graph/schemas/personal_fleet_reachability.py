@@ -52,10 +52,11 @@ from tools.graph.schemas.registry import (
     home,
     keyed_per_entity,
     publication_band,
+    register_upconverter,
 )
 
 PERSONAL_FLEET_REACHABILITY_SET_ID = "autonomy.personal.fleet-reachability"
-PERSONAL_FLEET_REACHABILITY_REVISION = 1
+PERSONAL_FLEET_REACHABILITY_REVISION = 2
 ROW_VERSION = 1
 
 #: Matches org_fleet_reachability.MAX_ADDRESSES, itself the personal announce's
@@ -97,10 +98,15 @@ def row_bytes(payload: Any) -> int:
 @home("personal")
 @keyed_per_entity(key_strategy="machine_pub")
 class PersonalFleetReachabilityV1(SettingSchema):
-    """One personal-fleet machine's direct addresses and optional relay slot."""
+    """One personal-fleet machine's direct addresses and optional relay slot.
+
+    Revision 1 repeated ``machine_pub`` in the payload; revision 2 drops it,
+    the row key being that same value. The class stays registered so stored
+    revision-1 rows upconvert on read.
+    """
 
     set_id = PERSONAL_FLEET_REACHABILITY_SET_ID
-    schema_revision = PERSONAL_FLEET_REACHABILITY_REVISION
+    schema_revision = 1
 
     _field_metadata: dict[str, dict] = {
         "v": {"type": "integer", "required": True, "description": "Row version (1)"},
@@ -244,3 +250,55 @@ class PersonalFleetReachabilityV1(SettingSchema):
             raise SchemaValidationError(
                 f"{cls.__name__}: keys are machine public keys (64 lowercase hex), got {key!r}"
             )
+
+
+@publication_band(min="raw", max="raw")
+@home("personal")
+@keyed_per_entity(key_strategy="machine_pub")
+class PersonalFleetReachabilityV2(SettingSchema):
+    """Revision 2: the same descriptor without repeating its own row key.
+
+    ``machine_pub`` is the member key. Storing it again in the payload gave
+    every reader two sources for one fact and a mismatch to handle.
+
+    THE SIGNATURE IS UNAFFECTED. It is computed over the body WITH
+    ``machine_pub`` (``fleet_personal_reachability._signing_input``), and a
+    verifier reinserts the field from the row key before checking, so a
+    revision-1 row and a revision-2 row produce identical signed bytes. The
+    byte bound is measured on those same bytes, through V1 below, so
+    ``MAX_ROW_BYTES`` keeps meaning exactly what it meant.
+    """
+
+    set_id = PERSONAL_FLEET_REACHABILITY_SET_ID
+    schema_revision = PERSONAL_FLEET_REACHABILITY_REVISION
+
+    _field_metadata: dict[str, dict] = {
+        key: value
+        for key, value in PersonalFleetReachabilityV1._field_metadata.items()
+        if key != "machine_pub"
+    }
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        if isinstance(payload, dict) and "machine_pub" in payload:
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'machine_pub' is the row key and must not be "
+                "repeated in the payload"
+            )
+        # Check the SIGNED body: the field the key carries, put back. A
+        # fixed-length stand-in is enough — a machine key is always 64 hex, so
+        # the byte bound measures exactly what a real one would.
+        probe = dict(payload) if isinstance(payload, dict) else payload
+        if isinstance(probe, dict):
+            probe["machine_pub"] = "0" * 64
+        PersonalFleetReachabilityV1.validate(probe)
+
+    @classmethod
+    def validate_member_key(cls, key: str) -> None:
+        PersonalFleetReachabilityV1.validate_member_key(key)
+
+
+register_upconverter(
+    PERSONAL_FLEET_REACHABILITY_SET_ID, 1, PERSONAL_FLEET_REACHABILITY_REVISION,
+    lambda payload: {k: v for k, v in dict(payload).items() if k != "machine_pub"},
+)
