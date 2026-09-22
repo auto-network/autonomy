@@ -36,6 +36,26 @@ def acme(tmp_path, monkeypatch):
     GraphDB.close_all_pooled()
 
 
+def _provision(org: str, target_key: str) -> None:
+    """Provision the secure setting a reference points at.
+
+    7f7dbcd9 deleted this helper along with the test that exercised it,
+    but left the call below, so the file raised NameError before reaching
+    its assertion.
+    """
+    settings_ops.add_setting(
+        SECRETS, 1, f"{org}:{target_key}",
+        {
+            "ciphertext_hex": "ab" * 40,
+            "key_id": "c" * 64,
+            "purpose": f"autonomy.secure-setting.v1|{org}|{target_key}|" + "d" * 64,
+            "origin": "operator",
+            "provisioned_at": 1.0,
+        },
+        org="personal",
+    )
+
+
 def _workspace(*hosts: str) -> dict:
     return {
         "name": "w",
@@ -74,7 +94,9 @@ def test_a_repository_is_named_one_way_or_the_other(acme):
     validate_payload("autonomy.workspace", 1, dict(base, repos=[
         {"local_path": "/home/j/mirror", "mount": "/m"}]))
 
-    with pytest.raises(SchemaValidationError, match="one or the other"):
+    # The message moved (now "mixes repository forms … exactly one"); the
+    # rule it states — one form, never both — is unchanged.
+    with pytest.raises(SchemaValidationError, match="mixes repository forms"):
         validate_payload("autonomy.workspace", 1, dict(base, repos=[
             {"host": "h", "repo": "o/r", "local_path": "/p", "mount": "/m"}]))
     with pytest.raises(SchemaValidationError, match="needs both"):

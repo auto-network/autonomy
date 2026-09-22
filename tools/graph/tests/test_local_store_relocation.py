@@ -172,7 +172,7 @@ def test_local_stores_enter_a_peer_set_only_via_the_explicit_rule(
 
     settings_ops.add_setting(
         cross_org.PEER_SUBSCRIPTION_SET_ID, 1, key="acme",
-        payload={"peers": []}, org="personal", state="canonical",
+        payload={"peers": []}, org="personal", state="raw",
     )
     pinned = cross_org.resolve_peers("acme", None)
     assert "personal" in pinned and "machine" in pinned

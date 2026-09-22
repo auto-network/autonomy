@@ -160,7 +160,7 @@ def test_a_pinned_subscription_org_resolves_every_schema_identically(
 
     settings_ops.add_setting(
         cross_org.PEER_SUBSCRIPTION_SET_ID, 1, key="pinned",
-        payload={"peers": []}, org="personal", state="canonical",
+        payload={"peers": []}, org="personal", state="raw",
     )
     # The pin is live: the pinned org's peer set drops 'unpinned' but
     # keeps the operator's own stores.
