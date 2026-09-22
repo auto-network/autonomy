@@ -236,6 +236,16 @@ def test_no_schema_leaves_its_entity_unnamed(registered_schemas):
 # derivation input is worse than a duplicated label, not better: if the two
 # ever disagree you derive against the wrong org.
 _KEY_DUPLICATION_GRANDFATHERED = {
+    # The row is SIGNED by the machine over its canonical bytes, machine_pub
+    # included: it is the signed statement's subject, not a repeated label.
+    # Dropping it would invalidate every signature and need a second verify
+    # path for old rows. Operator ruling 2026-09-22 with the other two
+    # repeaters migrated (voice-notes note_id, serving-connector org_uuid).
+    ("autonomy.personal.fleet-reachability", 1, "machine_pub"),
+    # Landed revisions stay registered so their rows upconvert; revision 2 of
+    # each dropped the field (2026-09-22).
+    ("autonomy.machine.serving-connector", 1, "org_uuid"),
+    ("dashboard.voice-notes.note", 1, "note_id"),
     ("autonomy.identity.passkey", 1, "credential_id"),
     ("autonomy.network.ledger-projection", 1, "projection"),
     ("autonomy.network.ledger-state", 1, "genesis_id"),

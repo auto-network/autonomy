@@ -44,6 +44,7 @@ import uuid as uuid_mod
 from datetime import datetime
 from typing import Any
 
+from .registry import register_upconverter as _register_upconverter
 from .registry import (
     publication_band,
     SchemaValidationError,
@@ -1002,6 +1003,34 @@ class MachineServingConnectorV1(SettingSchema):
     boot_commit: str = field(required=True, description="Loaded connector code generation.")
     protocol_version: int = field(required=True, description="Resolver wire version.")
     resolver_port: int = field(required=True, description="Warm dashboard loopback port.")
+
+
+@home("machine")
+@publication_band(max="raw")
+@keyed_per_entity(key_strategy="org_uuid")
+class MachineServingConnectorV2(SettingSchema):
+    """Supervisor-owned process credential index; never contains the bearer.
+
+    Revision 2 drops ``org_uuid`` from the payload: the key already carries
+    it (operator ruling 2026-09-22; a repeated key invites drift). Revision 1
+    rows upconvert by dropping the field."""
+
+    set_id = "autonomy.machine.serving-connector"
+    schema_revision = 2
+    token_hash: str = field(required=True, description="SHA256 of process bearer.")
+    organization: str = field(required=True, description="Local owning graph scope.")
+    pid: int = field(required=True, description="Recorded connector process ID.")
+    process_start: str = field(required=True, description="Kernel boot/start identity.")
+    boot_commit: str = field(required=True, description="Loaded connector code generation.")
+    protocol_version: int = field(required=True, description="Resolver wire version.")
+    resolver_port: int = field(required=True, description="Warm dashboard loopback port.")
+
+
+MACHINE_SERVING_CONNECTOR_REVISION = 2
+_register_upconverter(
+    "autonomy.machine.serving-connector", 1, MACHINE_SERVING_CONNECTOR_REVISION,
+    lambda payload: {k: v for k, v in dict(payload).items() if k != "org_uuid"},
+)
 
 
 # ── autonomy.network.membership-checkpoint (local adopted cache) ──
