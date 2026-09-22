@@ -6,6 +6,8 @@ import asyncio
 import json
 import time
 
+import pytest
+
 from tools.network.idkit import DelegationCert, KeyPair, Subject, issue_cert
 from tools.network.relaykit.channel import build_client_hello
 from tools.network.relaykit.connector import TunnelConnector
@@ -43,13 +45,28 @@ def _credential_pair():
     return child, registry_cert, viewer_cert
 
 
-def test_actual_registry_and_viewer_hello_bytes_use_distinct_certificates():
+@pytest.mark.parametrize("protocol", ["fleet-enrollment", "org-peer"])
+def test_actual_registry_and_viewer_hello_bytes_use_distinct_certificates(protocol):
+    """Every certificate-authenticated protocol, not one chosen arbitrarily.
+
+    Since bf675747 a channel is served only against a declared protocol,
+    and since 761b6d9 there are two that present a certificate:
+    fleet-enrollment and org-peer, one wire shape under two names. This
+    test simulates neither scenario in particular — it asserts the
+    connector's certificate boundary, which must hold for every protocol
+    that presents a certificate at all. Declaring just one would claim
+    this is a Fleet enrollment, or a peer-relayed org channel, and it is
+    neither; running both states the contract instead of picking a name.
+    public-link is deliberately absent: it presents the link's fragment
+    key and no certificate, so it cannot exercise this boundary.
+    """
     child, registry_cert, viewer_cert = _credential_pair()
     connector = TunnelConnector(
         "ws://relay.invalid", ORG, child, registry_cert,
         channel_cert=viewer_cert,
-                machine_key=KeyPair.generate(),
-            )
+        machine_key=KeyPair.generate(),
+        channel_authorization_for=lambda *_args: {"protocol": protocol},
+    )
 
     class FakeRegistrySocket:
         def __init__(self):
