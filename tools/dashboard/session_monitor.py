@@ -52,6 +52,7 @@ from tools.dashboard.session_harness import (
     classify_grok_transcript,
     is_grok_sidecar,
     is_grok_transcript,
+    transcript_session_uuid,
 )
 from tools.dashboard import harness_usage_settings as _harness_usage_settings
 from tools.graph import ops as graph_ops
@@ -1495,7 +1496,7 @@ class SessionMonitor:
 
         session_uuid = None
         if jp is not None and not jp.is_dir() and jp.suffix == ".jsonl":
-            session_uuid = jp.stem
+            session_uuid = transcript_session_uuid(jp)
 
         proj = project
         if proj is None and jp is not None and not jp.is_dir():
@@ -2666,7 +2667,7 @@ class SessionMonitor:
             generation = f"{st.st_dev}:{st.st_ino}:{seq}"
             update_jsonl_link(
                 tmux_name,
-                session_uuid=path.stem,
+                session_uuid=transcript_session_uuid(path),
                 jsonl_path=str(path),
                 project=row.get("project"),
                 generation=generation,
@@ -3669,7 +3670,7 @@ class SessionMonitor:
             src = graph_ops.insert_eager_session_source(
                 org=org,
                 file_path=abs_path,
-                session_uuid=jsonl_path.stem,
+                session_uuid=transcript_session_uuid(jsonl_path),
                 platform=(row.get("harness") if row else None) or "claude",
                 container_name=tmux_name,
             )
@@ -4524,7 +4525,7 @@ class SessionMonitor:
             seq = next_link_seq(tmux_name)
             update_jsonl_link(
                 tmux_name,
-                session_uuid=new_path.stem,
+                session_uuid=transcript_session_uuid(new_path),
                 jsonl_path=str(new_path),
                 generation=f"{st_dev}:{new_inode}:{seq}",
                 file_offset=0,
@@ -5460,7 +5461,7 @@ class SessionMonitor:
                     harness=str(meta.get("harness") or "claude"),
                     bead_id=meta.get("bead_id"),
                     jsonl_path=str(jsonl),
-                    session_uuid=jsonl.stem,
+                    session_uuid=transcript_session_uuid(jsonl),
                     resolution_dir=str(jsonl.parent),
                     session_uuids=json.dumps([jsonl.stem]),
                     curr_jsonl_file=str(jsonl),
@@ -5505,7 +5506,7 @@ class SessionMonitor:
                     project=jsonl.parent.name,
                     harness="claude",
                     jsonl_path=str(jsonl),
-                    session_uuid=jsonl.stem,
+                    session_uuid=transcript_session_uuid(jsonl),
                     resolution_dir=str(jsonl.parent),
                     session_uuids=json.dumps([jsonl.stem]),
                     curr_jsonl_file=str(jsonl),
