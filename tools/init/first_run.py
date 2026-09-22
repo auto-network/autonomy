@@ -470,13 +470,6 @@ def _init_orgs(
 
     orgs_root = resolve_store("orgs", root=data)
     slug = org_ops.resolve_first_org_slug(first_org)
-    if slug is None and not any(
-        o.type == "shared" for o in org_ops.list_orgs(root=orgs_root)
-    ):
-        # Mirror ensure_bootstrap_orgs' fresh-node fallback (D7,
-        # graph://5f2f5a49-00d §10.5) so this report and the shell default-org
-        # seed name the org that ensure_bootstrap_orgs is about to found.
-        slug = org_ops.FALLBACK_FIRST_ORG_SLUG
     if slug is not None:
         # Validate before the report loop formats the slug into a db path:
         # ``_org_db_path`` raises a bare ValueError on a bad slug, so an

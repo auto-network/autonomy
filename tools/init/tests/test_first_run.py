@@ -187,13 +187,12 @@ def test_startup_bootstrap_respects_operator_named_org(tmp_path):
     assert not (tmp_path / "data" / "orgs" / "autonomy.db").exists()
 
 
-def test_no_first_org_named_founds_myorg_not_autonomy(tmp_path):
-    # A fresh node with no AUTONOMY_FIRST_ORG founds ``myorg`` (D7,
-    # graph://5f2f5a49-00d §10.5), never ``autonomy`` — that slug is reserved
-    # for the followed Autonomy public-surface mirror.
+def test_no_first_org_named_creates_no_shared_org(tmp_path):
+    # No AUTONOMY_FIRST_ORG: first run creates no shared organization. The
+    # operator creates or joins one in onboarding, or has none
+    # (graph://5f2f5a49-00d D7).
     initialize(tmp_path, tls=False)
-    assert (tmp_path / "data" / "orgs" / "myorg.db").exists()
-    assert not (tmp_path / "data" / "orgs" / "autonomy.db").exists()
+    assert not list((tmp_path / "data" / "orgs").glob("*.db"))
     assert (tmp_path / "data" / "personal.db").exists()
 
 
@@ -263,10 +262,10 @@ def full_follow_allowlist(tmp_path, monkeypatch):
 
 
 def test_follow_defaults_seeded_no_env(tmp_path, full_follow_allowlist):
-    # No AUTONOMY_FIRST_ORG: the node founds myorg (its own random id) and
-    # seeds the Autonomy follow row from the published follow: block.
+    # No AUTONOMY_FIRST_ORG: a personal-only node seeds the Autonomy follow
+    # row from the published follow: block; no shared org is needed for it.
     initialize(tmp_path, tls=False)
-    assert (tmp_path / "data" / "orgs" / "myorg.db").exists()
+    assert not list((tmp_path / "data" / "orgs").glob("*.db"))
 
     rows = _follow_rows(tmp_path)
     assert len(rows) == 1
@@ -298,13 +297,13 @@ def test_follow_defaults_idempotent(tmp_path, full_follow_allowlist):
 
 
 def test_follow_defaults_skipped_on_self_node(tmp_path, monkeypatch):
-    # First run founds myorg (real committed allowlist: follow link not yet
-    # published, so nothing is seeded). Capture myorg's id.
-    initialize(tmp_path, tls=False)
+    # First run founds the named org acme (real committed allowlist: follow
+    # link not yet published, so nothing is seeded). Capture acme's id.
+    initialize(tmp_path, first_org="acme", tls=False)
     assert _follow_rows(tmp_path) == []
-    conn = sqlite3.connect(str(tmp_path / "data" / "orgs" / "myorg.db"))
+    conn = sqlite3.connect(str(tmp_path / "data" / "orgs" / "acme.db"))
     try:
-        (myorg_id,) = conn.execute("SELECT id FROM orgs LIMIT 1").fetchone()
+        (own_org_id,) = conn.execute("SELECT id FROM orgs LIMIT 1").fetchone()
     finally:
         conn.close()
 
@@ -313,7 +312,7 @@ def test_follow_defaults_skipped_on_self_node(tmp_path, monkeypatch):
     path = _write_allowlist(
         tmp_path / "self_follow.yaml",
         follow={
-            "org_uuid": myorg_id,
+            "org_uuid": own_org_id,
             "rendezvous": _FAKE_RENDEZVOUS,
             "link_pub": _FAKE_LINK_PUB,
         },

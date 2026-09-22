@@ -2,7 +2,7 @@
 
 Examples::
 
-    python -m tools.init                          # defaults (first org: myorg)
+    python -m tools.init                          # defaults (no first org: onboarding creates or joins one)
     python -m tools.init --org acme --org-name "Acme Corp"
     python -m tools.init --no-tls --json
 
@@ -29,7 +29,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--org", metavar="SLUG",
-        help="slug of the first shared org (default: $AUTONOMY_FIRST_ORG or 'myorg')",
+        help="slug of a first shared org to create (default: $AUTONOMY_FIRST_ORG, else none: onboarding creates or joins one)",
     )
     parser.add_argument(
         "--org-name", metavar="NAME",
