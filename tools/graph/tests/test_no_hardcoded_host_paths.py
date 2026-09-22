@@ -13,6 +13,7 @@ host *paths*, never legitimate anywhere. Operator *identity* strings (e.g. a
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,9 @@ _SKIP_DIRS = {".browser_profile", "__pycache__", ".git", "node_modules", ".venv"
 
 # This guard necessarily contains the forbidden substrings itself.
 _SELF = Path(__file__).resolve()
+#: A reStructuredText inline literal: ``like this``. Prose that quotes a
+#: path shape is documentation, not a dependency on that path.
+_DOC_LITERAL = re.compile(r"``[^`]*``")
 
 
 def _iter_text_files():
@@ -57,8 +61,16 @@ def test_no_hardcoded_operator_host_paths():
         except (UnicodeDecodeError, OSError):
             continue  # binary or unreadable — not source we can host-pin
         for lineno, line in enumerate(text.splitlines(), 1):
+            # Documentation that NAMES the historical shape is not a
+            # hardcoded path: two docstrings explain why stored paths are
+            # re-rooted, and they have to quote the forms they re-root
+            # (data_paths.py and ops.py). Both write them as reST
+            # literals, so strip ``...`` spans before matching. A real
+            # path in code — path = "/home/jeremy/x" — carries no
+            # backticks and is still caught.
+            scannable = _DOC_LITERAL.sub("", line)
             for token in _FORBIDDEN:
-                if token in line:
+                if token in scannable:
                     rel = path.relative_to(_REPO_ROOT)
                     offenders.append(f"{rel}:{lineno}: {line.strip()}")
 
