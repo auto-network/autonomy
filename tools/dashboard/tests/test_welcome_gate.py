@@ -293,9 +293,12 @@ def test_shell_carries_no_ceremony_code():
                    "publickeycredential", "/api/identity/personal",
                    "/api/identity/passkey", "deriveorgslug"):
         assert banned not in lowered, banned
-    # The only POST advances an already-persisted Fleet request. Identity,
-    # organization, session, and signing ceremonies remain composed flows.
-    assert lowered.count("method: 'post'") == 1
+    # Two POSTs: one advances an already-persisted Fleet request, one starts
+    # the first session through the ordinary session-create path
+    # (graph://5f2f5a49-00d v11 §10.6). Identity, organization and signing
+    # ceremonies remain composed flows.
+    assert lowered.count("method: 'post'") == 2
+    assert "/api/session/create" in lowered
     assert "/api/fleet/enrollment/local-resume" in lowered
     assert '"post"' not in lowered
 
@@ -308,8 +311,11 @@ def test_shell_composes_the_delivered_flows():
     assert "AutonomyCreateOrg" in SHELL
     # join → the delivered stepped accept flow (same target the profile menu uses)
     assert "/network/join" in SHELL
-    # workspace → the session UI
-    assert "/beads" in SHELL
+    # workspace → the first session, started in Getting Started and landed
+    # on; never a bare list page
+    assert "project: 'getting-started'" in SHELL
+    assert "'/session/'" in SHELL
+    assert "/beads" not in SHELL
     # and it reads the same status the profile menu reads (one source of truth)
     assert "/api/identity/status" in SHELL
     assert "/api/orgs" in SHELL

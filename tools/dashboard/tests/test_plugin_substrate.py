@@ -814,3 +814,73 @@ def test_plugin_declared_setting_disabled_deprecates_unchanged_row(
         peers=[],
     ).to_dict()["settingplug:dashboard.agent-actions#2:design.refresh-preview"]
     assert owner.payload["status"] == "uninstalled"
+
+
+# ── Settings-only plugins (no page) ─────────────────────────────────
+
+
+_SETTINGS_ONLY_FIELDS = {"id": "rows", "api_version": 1, "org": "personal"}
+
+
+def test_manifest_accepts_a_settings_only_plugin():
+    manifest = PluginManifest.model_validate(_SETTINGS_ONLY_FIELDS)
+    assert manifest.has_page is False
+    assert manifest.paths == []
+    assert manifest.nav is None and manifest.assets is None and manifest.frontend is None
+
+
+def test_manifest_rejects_a_partial_page():
+    for key in ("paths", "assets", "nav", "frontend"):
+        bad = {**_SETTINGS_ONLY_FIELDS, key: _MIN_MANIFEST_FIELDS[key]}
+        with pytest.raises(Exception):
+            PluginManifest.model_validate(bad)
+
+
+def test_loader_loads_a_settings_only_plugin(tmp_path):
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+    _write_plugin(plugins_dir, "rows", "id: rows\napi_version: 1\norg: personal\n")
+    loaded = loader.load_all(plugins_dir=plugins_dir)
+    by_id = {p.id: p for p in loaded}
+    assert by_id["rows"].paths == []
+    assert by_id["rows"].nav_label is None
+    assert by_id["rows"].template is None
+
+
+def test_getting_started_plugin_installs_two_personal_workspaces(org_graph):
+    """The shipped Getting Started plugin (graph://5f2f5a49-00d v11 §10.6)
+    installs its two workspace rows and two primer blocks into personal.db
+    at raw, and load_workspaces discovers them as personal workspaces."""
+    from agents import workspace_settings
+
+    # A real node's personal store exists before the dashboard reconciles
+    # plugins: first run / startup creates it with its inventory row.
+    org_ops.ensure_bootstrap_orgs(root=org_graph)
+
+    loaded = [p for p in loader.load_all() if p.id == "getting_started"]
+    assert len(loaded) == 1
+    assert loaded[0].manifest.has_page is False
+    assert loaded[0].manifest.org == "personal"
+
+    results = loader.reconcile_declared_settings(loaded)
+    assert sorted((r["set_id"], r["key"], r["action"]) for r in results) == [
+        ("autonomy.workspace", "getting-started", "installed"),
+        ("autonomy.workspace", "idea-board", "installed"),
+        ("autonomy.workspace.primer", "getting-started", "installed"),
+        ("autonomy.workspace.primer", "idea-board", "installed"),
+    ]
+    workspace_settings.invalidate_caches()
+    workspaces = workspace_settings.load_workspaces()
+    for wid in ("getting-started", "idea-board"):
+        ws = workspaces[wid]
+        assert ws.graph_project == "personal"
+        assert ws.image == "autonomy-session-platform"
+        assert ws.repos == ()
+        assert ws.artifacts == ()
+    rows = graph_ops.read_set("autonomy.workspace.primer", org="personal", peers=[]).to_dict()
+    assert "## Getting Started" in rows["getting-started"].payload["markdown"]
+    assert rows["getting-started"].state == "raw"
+
+    # A second reconcile changes nothing.
+    again = loader.reconcile_declared_settings(loaded)
+    assert {r["action"] for r in again} == {"unchanged"}

@@ -1,0 +1,8 @@
+{
+  "name": "Getting Started",
+  "description": "the operator's first session: what this system is and what to do first",
+  "image": "autonomy-session-platform",
+  "harness": "claude",
+  "working_dir": "/workspace/output",
+  "network_host": false
+}

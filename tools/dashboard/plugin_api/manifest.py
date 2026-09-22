@@ -125,10 +125,13 @@ class PluginManifest(BaseModel):
     # ``dashboard.plugin#1`` toggle row from ``<org>.db``. Operators
     # override per-installation by writing a payload with ``org: <slug>``.
     org: str
-    paths: List[str] = Field(min_length=1)
-    assets: PluginAssets
-    nav: PluginNav
-    frontend: PluginFrontend
+    # A plugin with a page declares all four of paths, assets, nav and
+    # frontend. A plugin that only carries Settings rows declares none of
+    # them and registers no route, fragment or nav entry.
+    paths: List[str] = Field(default_factory=list)
+    assets: Optional[PluginAssets] = None
+    nav: Optional[PluginNav] = None
+    frontend: Optional[PluginFrontend] = None
     # Optional direct link from a deterministic dashboard projection to the
     # workspace capability that supplies its agent-facing tools and primer.
     capability: Optional[PluginCapability] = None
@@ -146,3 +149,18 @@ class PluginManifest(BaseModel):
     # session while the plugin is enabled, and served at
     # GET /api/plugins/{id}/skill.
     skill: Optional[str] = None
+
+    @property
+    def has_page(self) -> bool:
+        return bool(self.paths)
+
+    @model_validator(mode="after")
+    def _validate_page_fields(self):
+        page = (bool(self.paths), self.assets is not None,
+                self.nav is not None, self.frontend is not None)
+        if any(page) and not all(page):
+            raise ValueError(
+                "a plugin with a page declares paths, assets, nav and "
+                "frontend together; a Settings-only plugin declares none"
+            )
+        return self

@@ -1,0 +1,8 @@
+{
+  "name": "Idea Board",
+  "description": "the operator's personal thinking space",
+  "image": "autonomy-session-platform",
+  "harness": "claude",
+  "working_dir": "/workspace/output",
+  "network_host": false
+}

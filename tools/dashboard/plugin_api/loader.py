@@ -67,10 +67,10 @@ class LoadedPlugin:
     """
     id: str
     paths: list[str]
-    nav_label: str
-    alpine_root: str
-    template: str
-    script: str
+    nav_label: str | None
+    alpine_root: str | None
+    template: str | None
+    script: str | None
     style: str | None
     plugin_dir: Path
     manifest: PluginManifest
@@ -335,11 +335,11 @@ def _resolve_entrypoints(
     return LoadedPlugin(
         id=manifest.id,
         paths=list(manifest.paths),
-        nav_label=manifest.nav.label,
-        alpine_root=manifest.frontend.alpine_root,
-        template=manifest.assets.template,
-        script=manifest.assets.script,
-        style=manifest.assets.style,
+        nav_label=manifest.nav.label if manifest.nav else None,
+        alpine_root=manifest.frontend.alpine_root if manifest.frontend else None,
+        template=manifest.assets.template if manifest.assets else None,
+        script=manifest.assets.script if manifest.assets else None,
+        style=manifest.assets.style if manifest.assets else None,
         plugin_dir=discovered.plugin_dir,
         manifest=manifest,
         effective_org=resolved_org,
