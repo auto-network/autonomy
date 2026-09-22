@@ -740,17 +740,12 @@ def _resolve_credentials_via_substrate(
     rng = rng or random
     tokens = _setup_token_rows()
     if not tokens:
-        # No minted setup token: the operator's own sign-in, imported from
-        # this machine, launches the session without a browser (FR7a). The
-        # file is declared through the mount plan and written after mount
-        # validation, so nothing is emitted here but the decision.
-        bundle = _pick_claude_bundle_row(_credentials_rows())
-        if bundle is not None:
-            return {
-                "type": "bundle",
-                "alias": (bundle.payload or {}).get("alias"),
-                "org_uuid": getattr(bundle, "key", None),
-            }
+        # No minted setup token: the operator's own sign-in, sealed in the
+        # vault by the Getting Started scan, launches the session without a
+        # browser (FR7a). The file is declared through the mount plan and
+        # written after mount validation, so nothing is opened here.
+        if _claude_vault_present():
+            return {"type": "vault"}
         # Auto-install path. Best-effort: failures here surface to the
         # caller as None and the existing "No Claude credentials found"
         # error message takes over.
@@ -902,7 +897,7 @@ def _setup_auth_docker_args(creds: dict, run_dir: Path) -> list[str] | None:
     """
     if creds["type"] == "token":
         return ["-e", f"CLAUDE_CODE_OAUTH_TOKEN={creds['token']}"]
-    if creds["type"] == "bundle":
+    if creds["type"] == "vault":
         # The credentials file rides the mount plan; no environment needed.
         return []
 
@@ -1072,154 +1067,163 @@ def _pick_codex_credential_row(rows: list[Any]) -> Any | None:
 
 
 def _materialize_codex_auth_json(run_dir: Path) -> Path | None:
-    """Reconstruct ``~/.codex/auth.json`` from the substrate row into ``run_dir``.
+    """Reconstruct ``~/.codex/auth.json`` into ``run_dir`` for this session.
 
-    The single credential path (bead auto-l1h3f): Codex sessions no longer
-    read the operator's host ``~/.codex/auth.json``. Instead we rebuild the
-    on-disk auth.json shape Codex expects from the account-keyed
-    ``dashboard.codex.credentials`` row (the account_id is the row key, not
-    a payload field) and mount that per-session copy read-only. The refresh
-    poller keeps the substrate row ahead of expiry, so the materialized copy
-    is fresh at launch.
+    The source is the operator's vault: the rows ``codex.oauth.*`` sealed by
+    ``graph credentials import`` (tools/graph/harness_credentials.py), opened
+    at launch while the operator is unlocked. The pre-vault
+    ``dashboard.codex.credentials`` row is read only when the vault holds no
+    Codex sign-in, with the remedy logged, until nothing holds one. The host
+    ``~/.codex/auth.json`` is never read here (bead auto-l1h3f).
 
     Returns the host path to the written file, or ``None`` when no usable
-    row exists. A missing row means Codex is unavailable to the session; we
-    WARN with the remedy (``graph credentials import``) before returning
-    ``None`` so a missed migration surfaces as an operator-visible error
-    rather than a silent sign-in prompt.
+    source exists; a None is WARNED with the remedy so a missing sign-in is
+    an operator-visible error rather than a silent prompt in the session.
     """
-    row = _pick_codex_credential_row(_codex_credential_rows())
-    if row is None:
-        # No usable Codex credential row: the launch mounts nothing and the
-        # session prompts for sign-in with no operator-visible cause. A
-        # missed migration must present as an error message, not an outage —
-        # WARN with the remedy inline instead of returning None silently.
-        logger.warning(
-            "session_launcher: no usable Codex credential row — the session "
-            "will launch WITHOUT mounted Codex auth and will prompt for "
-            "sign-in. Remedy: run `graph credentials import`.",
-        )
-        return None
-    payload = row.payload
+    from tools.graph import harness_credentials as hv
     now_iso = (
         datetime.now(timezone.utc)
         .replace(microsecond=0)
         .isoformat()
         .replace("+00:00", "Z")
     )
-    auth_doc = {
-        "auth_mode": payload.get("auth_mode") or "chatgpt",
-        "OPENAI_API_KEY": None,
-        "tokens": {
-            "id_token": payload["id_token"],
-            "access_token": payload["access_token"],
-            "refresh_token": payload["refresh_token"],
-            "account_id": row.key,
-        },
-        # Informational only for Codex; carry the poller's stamp when present.
-        "last_refresh": payload.get("last_refresh_at") or now_iso,
-    }
+    values = hv.open_values(hv.CODEX_KEYS)
+    if all(k in values for k in hv.CODEX_REQUIRED):
+        auth_doc = {
+            "auth_mode": "chatgpt",
+            "OPENAI_API_KEY": None,
+            "tokens": {
+                "id_token": values[hv.CODEX_ID],
+                "access_token": values[hv.CODEX_ACCESS],
+                "refresh_token": values[hv.CODEX_REFRESH],
+                "account_id": values[hv.CODEX_ACCOUNT],
+            },
+            "last_refresh": now_iso,
+        }
+    else:
+        row = _pick_codex_credential_row(_codex_credential_rows())
+        if row is None:
+            logger.warning(
+                "session_launcher: no Codex sign-in in the vault and no usable "
+                "Codex credential row — the session will launch WITHOUT mounted "
+                "Codex auth and will prompt for sign-in. Remedy: run "
+                "`graph credentials import`.",
+            )
+            return None
+        logger.warning(
+            "session_launcher: Codex launched from the pre-vault credential "
+            "row; run `graph credentials import` to seal it into the vault",
+        )
+        payload = row.payload
+        auth_doc = {
+            "auth_mode": payload.get("auth_mode") or "chatgpt",
+            "OPENAI_API_KEY": None,
+            "tokens": {
+                "id_token": payload["id_token"],
+                "access_token": payload["access_token"],
+                "refresh_token": payload["refresh_token"],
+                "account_id": row.key,
+            },
+            "last_refresh": payload.get("last_refresh_at") or now_iso,
+        }
     out = Path(run_dir) / "codex-auth.json"
-    try:
-        out.write_text(json.dumps(auth_doc, indent=2))
-        out.chmod(0o600)
-    except OSError:
-        logger.exception("session_launcher: could not write codex auth.json")
-        # A partial write (or a write that landed before chmod failed) would
-        # leave a credential file behind — possibly at default perms. Remove it
-        # so a None return always means "nothing on disk", never a lingering,
-        # possibly world-readable credential.
-        try:
-            out.unlink(missing_ok=True)
-        except OSError:
-            pass
-        return None
-    return out
+    return _write_private_json(out, auth_doc, "Codex auth.json")
 
 
 CLAUDE_BUNDLE_FILENAME = "claude-credentials.json"
 CLAUDE_BUNDLE_CONTAINER_PATH = "/home/agent/.claude/.credentials.json"
+GROK_AUTH_FILENAME = "grok-auth.json"
+GROK_AUTH_CONTAINER_PATH = f"{GROK_HOME}/auth.json"
 
 
-def _pick_claude_bundle_row(rows: list[Any], *, now_ms: int | None = None) -> Any | None:
-    """The freshest usable ``dashboard.claude.credentials`` row, or None.
-
-    A row is usable when it carries the OAuth pair and its ``expires_at_ms``
-    is still ahead of now; the refresh poller keeps imported rows ahead of
-    expiry, so an expired row means the poller could not refresh it and the
-    sign-in is genuinely gone. Ties break on key so the pick is deterministic.
-    """
-    now = now_ms if now_ms is not None else int(time.time() * 1000)
-
-    def _exp(row: Any) -> int:
-        payload = getattr(row, "payload", None)
-        v = payload.get("expires_at_ms") if isinstance(payload, dict) else None
-        return v if isinstance(v, int) and not isinstance(v, bool) else -1
-
-    usable = []
-    for row in rows:
-        payload = getattr(row, "payload", None)
-        if not isinstance(payload, dict):
-            continue
-        if not all(
-            isinstance(payload.get(k), str) and payload.get(k)
-            for k in ("access_token", "refresh_token")
-        ):
-            continue
-        if _exp(row) <= now:
-            continue
-        usable.append(row)
-    if not usable:
-        return None
-    usable.sort(key=lambda r: (-_exp(r), str(getattr(r, "key", ""))))
-    return usable[0]
+def _claude_vault_present() -> bool:
+    """True when the operator's vault holds the imported Claude sign-in
+    (presence only; nothing is opened)."""
+    from tools.graph import harness_credentials as hv
+    return hv.present(hv.CLAUDE_REQUIRED)
 
 
 def _materialize_claude_bundle(run_dir: Path) -> Path | None:
-    """Rebuild ``~/.claude/.credentials.json`` from the imported bundle row.
+    """Rebuild ``~/.claude/.credentials.json`` from the vault rows.
 
-    The operator's own sign-in, imported by ``graph credentials import``
-    (design of record graph://5f2f5a49-00d v12 FR7a: a session starts with
-    the token found on the machine, no browser). Written per session into
-    ``run_dir`` in the exact shape the ``claude`` binary reads, mounted
-    read-only at the container's home. Returns None when no usable row
-    exists.
+    The operator's own sign-in, sealed by ``graph credentials import``
+    (design of record graph://5f2f5a49-00d v12 FR7a) under the keys in
+    tools/graph/harness_credentials.py. Opened here, at launch, while the
+    operator is unlocked; written per session into ``run_dir`` in the exact
+    shape the ``claude`` binary reads; mounted read-only at the container's
+    home. None when the rows are absent or cannot be opened.
     """
-    row = _pick_claude_bundle_row(_credentials_rows())
-    if row is None:
+    from tools.graph import harness_credentials as hv
+    values = hv.open_values(hv.CLAUDE_KEYS)
+    if not all(k in values for k in hv.CLAUDE_REQUIRED):
+        logger.warning(
+            "session_launcher: the Claude sign-in rows are absent or the "
+            "vault is not open; remedy: unlock, or run `graph credentials import`",
+        )
         return None
-    payload = row.payload
     bundle = {
-        "accessToken": payload["access_token"],
-        "refreshToken": payload["refresh_token"],
-        "expiresAt": payload.get("expires_at_ms"),
-        "scopes": list(payload.get("scopes") or []),
+        "accessToken": values[hv.CLAUDE_ACCESS],
+        "refreshToken": values[hv.CLAUDE_REFRESH],
+        "expiresAt": hv.expires_ms(values.get(hv.CLAUDE_EXPIRES)),
+        "scopes": [
+            sc for sc in (values.get(hv.CLAUDE_SCOPES) or "").split(",")
+            if sc and sc != "-"
+        ],
     }
-    if isinstance(payload.get("subscription_type"), str):
-        bundle["subscriptionType"] = payload["subscription_type"]
     out = Path(run_dir) / CLAUDE_BUNDLE_FILENAME
+    return _write_private_json(out, {"claudeAiOauth": bundle}, "Claude credentials")
+
+
+def _claude_bundle_target(run_dir) -> "Path | None":
+    """The path _materialize_claude_bundle WOULD write, iff the vault holds
+    the sign-in: a declaration with no write, so the mount plan can carry
+    the credential's future location before validation (as for Codex)."""
+    if run_dir is None or not _claude_vault_present():
+        return None
+    return Path(run_dir) / CLAUDE_BUNDLE_FILENAME
+
+
+def _grok_vault_present() -> bool:
+    from tools.graph import harness_credentials as hv
+    return hv.present((hv.GROK_AUTH,))
+
+
+def _materialize_grok_auth(run_dir: Path) -> Path | None:
+    """Rebuild ``~/.grok/auth.json`` from the vault row ``grok.auth``."""
+    from tools.graph import harness_credentials as hv
+    text = hv.open_value(hv.GROK_AUTH)
+    if text is None:
+        logger.warning(
+            "session_launcher: the Grok stored sign-in is absent or the vault "
+            "is not open; remedy: unlock, or run `graph credentials import`",
+        )
+        return None
+    out = Path(run_dir) / GROK_AUTH_FILENAME
     try:
-        out.write_text(json.dumps({"claudeAiOauth": bundle}, indent=2))
+        out.write_text(text)
         out.chmod(0o600)
     except OSError:
-        logger.exception("session_launcher: could not write the Claude credentials file")
-        try:
-            out.unlink(missing_ok=True)
-        except OSError:
-            pass
+        logger.exception("session_launcher: could not write the Grok sign-in file")
+        _delete_if_present(str(out))
         return None
     return out
 
 
-def _claude_bundle_target(run_dir) -> "Path | None":
-    """The path _materialize_claude_bundle WOULD write, iff a usable bundle
-    row exists: a declaration with no write, so the mount plan can carry the
-    credential's future location before validation (as for Codex)."""
-    if run_dir is None:
+def _grok_auth_target(run_dir) -> "Path | None":
+    if run_dir is None or not _grok_vault_present():
         return None
-    if _pick_claude_bundle_row(_credentials_rows()) is None:
+    return Path(run_dir) / GROK_AUTH_FILENAME
+
+
+def _write_private_json(out: Path, doc: dict, what: str) -> Path | None:
+    try:
+        out.write_text(json.dumps(doc, indent=2))
+        out.chmod(0o600)
+    except OSError:
+        logger.exception("session_launcher: could not write the %s file", what)
+        _delete_if_present(str(out))
         return None
-    return Path(run_dir) / CLAUDE_BUNDLE_FILENAME
+    return out
 
 
 def _codex_auth_target(run_dir) -> "Path | None":
@@ -1229,7 +1233,9 @@ def _codex_auth_target(run_dir) -> "Path | None":
     criterion 6: no credential is written until resolve/emit has passed)."""
     if run_dir is None:
         return None
-    if _pick_codex_credential_row(_codex_credential_rows()) is None:
+    from tools.graph import harness_credentials as hv
+    if not hv.present(hv.CODEX_REQUIRED) and \
+            _pick_codex_credential_row(_codex_credential_rows()) is None:
         return None
     return Path(run_dir) / "codex-auth.json"
 
@@ -1478,12 +1484,14 @@ def _resolve_optional_tool_mounts(
 ) -> dict[str, str]:
     """Return optional host mounts that make Codex usable inside containers.
 
-    Claude is already handled via dedicated credential resolution plus the
-    mounted sessions directory. Codex's *credentials* are now resolved the
-    same way — from the ``dashboard.codex.credentials`` substrate row, NOT
-    the host ``~/.codex/auth.json`` (retired in bead auto-l1h3f). Its
-    config/skills/rules are ordinary host content (not credentials) and are
-    still mounted from ``~/.codex`` read-only.
+    Credentials come from the operator's vault (tools/graph/harness_credentials.py):
+    the Claude sign-in when the launch chose it (``claude_bundle``), the Codex
+    sign-in (with the pre-vault ``dashboard.codex.credentials`` row as the
+    fallback until nothing holds one), and the Grok stored sign-in. Each is
+    declared here at the path it will occupy and written only after mount
+    validation. The host ``~/.codex/auth.json`` is never read (bead
+    auto-l1h3f). Codex's config/skills/rules are ordinary host content (not
+    credentials) and are still mounted from ``~/.codex`` read-only.
 
     When ``worktree_host`` and ``run_dir`` are supplied, mount a generated
     per-session ``config.toml`` that pre-trusts the worktree's git-root instead
@@ -1539,6 +1547,12 @@ def _resolve_optional_tool_mounts(
             )
             if claude_auth is not None:
                 mounts[str(claude_auth)] = f"{CLAUDE_BUNDLE_CONTAINER_PATH}:ro"
+        grok_auth = (
+            _materialize_grok_auth(run_dir) if materialize_auth
+            else _grok_auth_target(run_dir)
+        )
+        if grok_auth is not None:
+            mounts[str(grok_auth)] = f"{GROK_AUTH_CONTAINER_PATH}:ro"
 
     agents_home = Path.home() / ".agents"
     if agents_home.exists():
@@ -2032,12 +2046,15 @@ def launch_session(
         capabilities=capabilities,
         global_claude_md=global_claude_md,
         startup_script=startup_script,
-        claude_bundle=bool(creds and creds.get("type") == "bundle"),
+        claude_bundle=bool(creds and creds.get("type") == "vault"),
     )
     claude_bundle_target = None
+    grok_auth_target = None
     for _s in plan.specs():
         if _s.dest == CLAUDE_BUNDLE_CONTAINER_PATH:
             claude_bundle_target = str(_s.source)
+        elif _s.dest == GROK_AUTH_CONTAINER_PATH:
+            grok_auth_target = str(_s.source)
 
     # Resolve+validate the DECLARED plan into argv NOW — before any authority is
     # minted below (the session token, the materialized Codex credential). A
@@ -2077,17 +2094,28 @@ def launch_session(
             )
             return None
         codex_auth_copy = codex_auth_target  # str path, for post-exit cleanup
-    if creds is not None and creds.get("type") == "bundle":
+    if creds is not None and creds.get("type") == "vault":
         if claude_bundle_target is None or _materialize_claude_bundle(run_dir) is None:
             if claude_bundle_target is not None:
                 _delete_if_present(claude_bundle_target)
             print(
-                f"  ERROR: refusing to launch session '{name}': the imported "
-                "Claude sign-in was declared but failed to materialize",
+                f"  ERROR: refusing to launch session '{name}': the Claude "
+                "sign-in in the vault was declared but could not be opened",
                 file=sys.stderr,
             )
             return None
         creds["creds_copy"] = claude_bundle_target  # post-exit cleanup
+    grok_auth_copy = None
+    if grok_auth_target is not None:
+        if _materialize_grok_auth(run_dir) is None:
+            _delete_if_present(grok_auth_target)
+            print(
+                f"  ERROR: refusing to launch session '{name}': the Grok "
+                "sign-in in the vault was declared but could not be opened",
+                file=sys.stderr,
+            )
+            return None
+        grok_auth_copy = grok_auth_target
 
     # Preflight EVERY input the docker run depends on that could be missing —
     # the image, the runtime, and every mount source (host binds AND
@@ -2408,6 +2436,8 @@ def launch_session(
             _schedule_creds_cleanup(container_id, creds_copy)
         if codex_auth_copy:
             _schedule_creds_cleanup(container_id, codex_auth_copy)
+        if grok_auth_copy:
+            _schedule_creds_cleanup(container_id, grok_auth_copy)
 
         return container_id
 

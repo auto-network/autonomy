@@ -85,7 +85,7 @@ def id_token_exp_ms(id_token: str) -> int | None:
     """Return the id_token's ``exp`` claim in epoch milliseconds, or ``None``.
 
     The substrate stores ``expires_at_ms`` as ``exp * 1000`` (see
-    ``credential_import.build_codex_payload``); the refresh poller
+    ``credential_import.import_codex``); the refresh poller
     re-derives it identically from the freshly-minted id_token so a
     re-import and a poll converge on the same value.
     """

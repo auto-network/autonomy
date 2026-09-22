@@ -2351,88 +2351,106 @@ def test_beads_credential_env_args_follow_the_org_dir(tmp_path, monkeypatch):
     assert session_launcher._beads_credential_env_args(None) == []
 
 
-# ── Claude launch from the imported sign-in bundle (record v12 FR7a) ──
+# ── Claude and Grok launch from the vault (record v12 FR7a) ──────────
 
 
-def _bundle_row(key: str, *, expires_at_ms: int, **extra):
+def _vault(monkeypatch, values: dict):
+    """Stub the vault: every key in *values* is present and opens to it."""
     from types import SimpleNamespace
-    payload = {
-        "alias": "dev", "access_token": "at-b", "refresh_token": "rt-b",
-        "expires_at_ms": expires_at_ms, "scopes": ["user:inference"],
-    }
-    payload.update(extra)
-    return SimpleNamespace(key=key, payload=payload)
+    from tools.graph import harness_credentials as hv
+
+    class _Members:
+        members = [SimpleNamespace(key=k, payload={"value": v}, vault_error=None)
+                   for k, v in values.items()]
+    monkeypatch.setattr(hv.graph_ops, "read_set", lambda *a, **kw: _Members())
 
 
-def test_pick_claude_bundle_row_prefers_freshest_unexpired():
-    rows = [
-        _bundle_row("org-old", expires_at_ms=2_000),
-        _bundle_row("org-new", expires_at_ms=9_000),
-        _bundle_row("org-expired", expires_at_ms=500),
-        _bundle_row("org-broken", expires_at_ms=9_500, refresh_token=""),
-    ]
-    picked = session_launcher._pick_claude_bundle_row(rows, now_ms=1_000)
-    assert picked.key == "org-new"
-    assert session_launcher._pick_claude_bundle_row(rows, now_ms=10_000) is None
+def _claude_vault(monkeypatch, expires_at_ms: int):
+    from tools.graph import harness_credentials as hv
+    _vault(monkeypatch, {
+        hv.CLAUDE_ACCESS: "at-v", hv.CLAUDE_REFRESH: "rt-v",
+        hv.CLAUDE_EXPIRES: str(expires_at_ms), hv.CLAUDE_SCOPES: "user:inference",
+        hv.CLAUDE_ACCOUNT: "dev@example.com",
+    })
 
 
 def test_materialize_claude_bundle_writes_the_file_claude_reads(tmp_path, monkeypatch):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    far = int(time.time() * 1000) + 3_600_000
-    monkeypatch.setattr(
-        session_launcher, "_credentials_rows",
-        lambda: [_bundle_row("org-1", expires_at_ms=far)],
-    )
+    _claude_vault(monkeypatch, 9_000)
     out = session_launcher._materialize_claude_bundle(run_dir)
     assert out == run_dir / session_launcher.CLAUDE_BUNDLE_FILENAME
     doc = json.loads(Path(out).read_text())["claudeAiOauth"]
-    assert doc["accessToken"] == "at-b"
-    assert doc["refreshToken"] == "rt-b"
-    assert doc["expiresAt"] == far
+    assert doc["accessToken"] == "at-v"
+    assert doc["refreshToken"] == "rt-v"
+    assert doc["expiresAt"] == 9_000
     assert doc["scopes"] == ["user:inference"]
     assert (Path(out).stat().st_mode & 0o777) == 0o600
 
 
-def test_materialize_claude_bundle_without_row_returns_none(tmp_path, monkeypatch):
-    monkeypatch.setattr(session_launcher, "_credentials_rows", lambda: [])
+def test_materialize_claude_bundle_without_rows_returns_none(tmp_path, monkeypatch):
+    _vault(monkeypatch, {})
     assert session_launcher._materialize_claude_bundle(tmp_path) is None
     assert session_launcher._claude_bundle_target(tmp_path) is None
 
 
-def test_resolve_credentials_uses_the_bundle_before_any_browser(monkeypatch):
-    """No setup token and an imported bundle: the launch takes the bundle
-    and never runs `graph claude install`."""
-    far = int(time.time() * 1000) + 3_600_000
+def test_resolve_credentials_uses_the_vault_before_any_browser(monkeypatch):
+    """No setup token and a sealed sign-in: the launch takes the vault and
+    never runs `graph claude install`."""
     monkeypatch.setattr(session_launcher, "_setup_token_rows", lambda: [])
-    monkeypatch.setattr(
-        session_launcher, "_credentials_rows",
-        lambda: [_bundle_row("org-1", expires_at_ms=far)],
-    )
+    _claude_vault(monkeypatch, 9_000)
+
     def _no_install(*a, **kw):
-        raise AssertionError("graph claude install must not run when a bundle exists")
+        raise AssertionError("graph claude install must not run when the vault holds the sign-in")
     monkeypatch.setattr(session_launcher.subprocess, "run", _no_install)
     creds = session_launcher._resolve_credentials_via_substrate(prefer_alias=None)
-    assert creds == {"type": "bundle", "alias": "dev", "org_uuid": "org-1"}
+    assert creds == {"type": "vault"}
     assert session_launcher._setup_auth_docker_args(creds, Path("/tmp")) == []
 
 
-def test_optional_mounts_declare_the_bundle_only_when_asked(tmp_path, monkeypatch):
-    far = int(time.time() * 1000) + 3_600_000
-    monkeypatch.setattr(
-        session_launcher, "_credentials_rows",
-        lambda: [_bundle_row("org-1", expires_at_ms=far)],
-    )
+def test_optional_mounts_declare_the_vault_files_without_writing(tmp_path, monkeypatch):
+    from tools.graph import harness_credentials as hv
+    _vault(monkeypatch, {
+        hv.CLAUDE_ACCESS: "a", hv.CLAUDE_REFRESH: "r", hv.GROK_AUTH: '{"t": 1}',
+    })
     monkeypatch.setattr(session_launcher, "_codex_credential_rows", lambda: [])
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    without = session_launcher._resolve_optional_tool_mounts(
-        run_dir=run_dir, materialize_auth=False,
-    )
+    without = session_launcher._resolve_optional_tool_mounts(run_dir=run_dir, materialize_auth=False)
     assert not any(v.startswith(session_launcher.CLAUDE_BUNDLE_CONTAINER_PATH) for v in without.values())
+    grok_target = str(run_dir / session_launcher.GROK_AUTH_FILENAME)
+    assert without[grok_target] == session_launcher.GROK_AUTH_CONTAINER_PATH + ":ro"
     declared = session_launcher._resolve_optional_tool_mounts(
         run_dir=run_dir, materialize_auth=False, claude_bundle=True,
     )
     target = str(run_dir / session_launcher.CLAUDE_BUNDLE_FILENAME)
     assert declared[target] == session_launcher.CLAUDE_BUNDLE_CONTAINER_PATH + ":ro"
-    assert not Path(target).exists()  # declared, not written
+    assert not Path(target).exists() and not Path(grok_target).exists()
+
+
+def test_materialize_grok_auth_writes_the_stored_sign_in(tmp_path, monkeypatch):
+    from tools.graph import harness_credentials as hv
+    _vault(monkeypatch, {hv.GROK_AUTH: '{"access_token": "g"}'})
+    out = session_launcher._materialize_grok_auth(tmp_path)
+    assert Path(out).read_text() == '{"access_token": "g"}'
+    assert (Path(out).stat().st_mode & 0o777) == 0o600
+
+
+def test_materialize_codex_auth_prefers_the_vault(tmp_path, monkeypatch):
+    from tools.graph import harness_credentials as hv
+    _vault(monkeypatch, {
+        hv.CODEX_ID: "id-v", hv.CODEX_ACCESS: "at-v", hv.CODEX_REFRESH: "rt-v",
+        hv.CODEX_ACCOUNT: "acct-V", hv.CODEX_EXPIRES: "9000",
+    })
+    monkeypatch.setattr(session_launcher, "_codex_credential_rows",
+                        lambda: [_codex_row("acct-old", _fresh_codex_payload())])
+    doc = json.loads(Path(session_launcher._materialize_codex_auth_json(tmp_path)).read_text())
+    assert doc["tokens"]["account_id"] == "acct-V"
+    assert doc["tokens"]["access_token"] == "at-v"
+
+
+def test_launcher_source_never_reads_the_plaintext_claude_rows_for_a_launch():
+    """The vault is the source for the imported sign-in; the pre-vault Claude
+    rows are the install path's account labels, never a launch credential."""
+    source = Path(session_launcher.__file__).read_text()
+    assert "_pick_claude_bundle_row" not in source
