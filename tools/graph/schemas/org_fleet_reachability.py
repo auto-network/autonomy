@@ -23,7 +23,27 @@ from __future__ import annotations
 import re
 from typing import Any
 
+SYNOPSIS = {
+    "summary": (
+        "Where one member machine of an organization can be dialled for "
+        "org-scope sync. One row per machine, keyed by its public key, written "
+        "by that machine alone and only when its addresses change, never as a "
+        "heartbeat. The row is a hint, never admission: it carries the "
+        "persona's certificate to the machine key and that key's signature, "
+        "and the org hello decides who may connect."
+    ),
+    "nouns": [
+        "reachability", "machine", "address", "organization member",
+        "discovery hint", "org-scope sync",
+    ],
+    "related_set_ids": [
+        "autonomy.personal.fleet-reachability#1",
+        "autonomy.org.ledger-event#1",
+    ],
+}
+
 from .registry import (
+    keyed_per_entity,
     SettingSchema,
     SchemaValidationError,
     home,
@@ -42,6 +62,7 @@ _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 
 @publication_band(min="raw", max="published")
 @home("organization")
+@keyed_per_entity(key_strategy="machine_pub")
 class OrgFleetReachabilityV1(SettingSchema):
     """One member machine's direct sync addresses, self-certified."""
 

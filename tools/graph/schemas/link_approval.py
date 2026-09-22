@@ -196,20 +196,83 @@ class LinkApprovalIntentV1(SettingSchema):
     set_id = LINK_APPROVAL_INTENT_SET_ID
     schema_revision = LINK_APPROVAL_INTENT_REVISION
 
-    operation: str = field(required=True, enum=list(_OPERATIONS))
-    operation_id: str = field(required=True)
-    target: dict = field(required=True)
-    binding: dict = field(required=True)
-    review: dict = field(required=True)
-    registry_input: dict = field(required=True)
-    registry_input_digest: str = field(required=True)
-    local_intent: dict = field(required=True)
-    local_intent_digest: str = field(required=True)
-    origin_destination_id: str = field(required=True)
-    origin_proof_commitment: str = field(required=True)
-    operand_digest: str = field(required=False)
-    revoke_token: str = field(required=False)
-    invite_ref: str = field(required=False)
+    operation: str = field(
+        required=True, enum=list(_OPERATIONS),
+        description="Which Link operation this approval authorises: publish or revoke.")
+    operation_id: str = field(
+        required=True,
+        description=(
+            "64-hex identity of this operation, repeated inside registry_input "
+            "and required to match it, so the record and the wire name the "
+            "same act."))
+    target: dict = field(
+        required=True,
+        description=(
+            "What is being shared: target_uuid (canonical UUID) and "
+            "target_type from the registered vocabulary. A revoke whose "
+            "target cannot be resolved carries {\"resolved\": false} instead."))
+    binding: dict = field(
+        required=True,
+        description=(
+            "The organization binding the operation runs under; its org_uuid "
+            "is checked against the registry input for an org:join publish."))
+    review: dict = field(
+        required=True,
+        description=(
+            "What the operator was actually shown when they approved, frozen "
+            "so the decision stays auditable and a later target change "
+            "cannot be presented as the approved one."))
+    registry_input: dict = field(
+        required=True,
+        description=(
+            "Exactly the payload sent to the registry — restricted to the "
+            "allowed wire fields, so an organization-local fact cannot leave "
+            "by riding along."))
+    registry_input_digest: str = field(
+        required=True,
+        description=(
+            "64-hex digest over registry_input, recomputed and compared on "
+            "every validation: the wire payload cannot drift from the "
+            "approved one."))
+    local_intent: dict = field(
+        required=True,
+        description=(
+            "The requester's local intent, the part that never crosses to the "
+            "registry."))
+    local_intent_digest: str = field(
+        required=True,
+        description=(
+            "64-hex digest binding every organization-local fact — target, "
+            "binding, review, local_intent and origin_destination_id — "
+            "without disclosing any of them outside the organization."))
+    origin_destination_id: str = field(
+        required=True,
+        description=(
+            "64-hex identifier of the origin and destination this operation "
+            "runs between; it is folded into local_intent_digest, so the pair "
+            "is fixed at approval time."))
+    origin_proof_commitment: str = field(
+        required=True,
+        description=(
+            "64-hex commitment to the origin proof. The proof itself is "
+            "checked against this before a receipt is claimed, so a receipt "
+            "from another origin cannot be accepted."))
+    operand_digest: str = field(
+        required=False,
+        description=(
+            "Revoke only: 64-hex digest over revoke_token, compared in "
+            "constant time. A publish intent carrying it is refused."))
+    revoke_token: str = field(
+        required=False,
+        description=(
+            "Revoke only: the grant token being revoked. A publish intent "
+            "carrying it is refused."))
+    invite_ref: str = field(
+        required=False,
+        description=(
+            "org:join publish only: 64-hex reference to the invitation, and it "
+            "must equal the one frozen in registry_input. A revoke carrying "
+            "it is refused."))
 
     @classmethod
     def validate(cls, payload: Any) -> None:
@@ -373,19 +436,65 @@ class LinkApprovalResultV1(SettingSchema):
     set_id = LINK_APPROVAL_RESULT_SET_ID
     schema_revision = LINK_APPROVAL_RESULT_REVISION
 
-    operation: str = field(required=True, enum=list(_OPERATIONS))
-    state: str = field(required=True, enum=list(_RESULT_STATES))
-    completed_at: float = field(required=True)
-    operation_id: str = field(required=True)
-    error_code: str = field(required=False)
-    error_message: str = field(required=False)
-    token: str = field(required=False)
-    url: str = field(required=False)
-    serving: dict = field(required=False)
-    cache_removed: bool = field(required=False)
-    registry_status: int = field(required=False)
-    via: str = field(required=False, enum=list(_VIA))
-    revoked_at: float = field(required=False)
+    operation: str = field(
+        required=True, enum=list(_OPERATIONS),
+        description="Which Link operation this result reports: publish or revoke.")
+    state: str = field(
+        required=True, enum=list(_RESULT_STATES),
+        description=(
+            "How the operation ended. The durable verdict: a row exists only "
+            "once the operation reached one."))
+    completed_at: float = field(
+        required=True,
+        description="Unix seconds at which the operation reached its state.")
+    operation_id: str = field(
+        required=True,
+        description=(
+            "64-hex identity of the operation this result belongs to, matching "
+            "the intent record's."))
+    error_code: str = field(
+        required=False,
+        description=(
+            "Present on a failure: the machine-readable reason, safe to show "
+            "to the requester."))
+    error_message: str = field(
+        required=False,
+        description="Present on a failure: the human-readable reason.")
+    token: str = field(
+        required=False,
+        description="Present on a successful publish: the grant token the registry minted.")
+    url: str = field(
+        required=False,
+        description=(
+            "Present on a successful publish: the link URL as stored on the "
+            "grant, which is what the operator is given to share."))
+    serving: dict = field(
+        required=False,
+        description=(
+            "Present on a successful publish: what the serving probe observed "
+            "— whether the link actually served, and by which route."))
+    cache_removed: bool = field(
+        required=False,
+        description=(
+            "Present on a revoke: whether the local grant cache held the token "
+            "and dropped it. False means the token was not cached here, not "
+            "that the revoke failed."))
+    registry_status: int = field(
+        required=False,
+        description=(
+            "Present on a revoke that went over the registry HTTP path: the "
+            "status the registry returned."))
+    via: str = field(
+        required=False, enum=list(_VIA),
+        description=(
+            "Which path carried the revoke — the organization's serving tunnel "
+            "or the registry HTTP route. Required on a revoke success, so a "
+            "result always says how it happened, not only that it did."))
+    revoked_at: float = field(
+        required=False,
+        description=(
+            "Unix seconds the registry recorded for the revocation, as it "
+            "reported them. Required on a revoke success."))
 
     @classmethod
     def validate(cls, payload: Any) -> None:

@@ -242,6 +242,12 @@ _KEY_DUPLICATION_GRANDFATHERED = {
     # path for old rows. Operator ruling 2026-09-22 with the other two
     # repeaters migrated (voice-notes note_id, serving-connector org_uuid).
     ("autonomy.personal.fleet-reachability", 1, "machine_pub"),
+    # Same schema, organization side, and the same reason holds: verified
+    # 2026-09-22 that fleet_org_reachability._signing_input canonicalises
+    # every field except 'sig', so machine_pub is inside the signature, and
+    # verify_row binds the row to its key by comparing them. It surfaced only
+    # when the set finally declared its cardinality; it was always true.
+    ("autonomy.org.fleet-reachability", 1, "machine_pub"),
     # Landed revisions stay registered so their rows upconvert; revision 2 of
     # each dropped the field (2026-09-22).
     ("autonomy.machine.serving-connector", 1, "org_uuid"),

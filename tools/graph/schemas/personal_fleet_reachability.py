@@ -31,6 +31,21 @@ import re
 from typing import Any
 from urllib.parse import urlsplit
 
+SYNOPSIS = {
+    "summary": (
+        "Where one machine of the operator's own fleet currently listens. The "
+        "personal-fleet counterpart of the organization set: one row per "
+        "machine, keyed by its durable roster public key, self-signed so no "
+        "machine can publish another's location. A discovery hint only — the "
+        "durable personal roster decides membership, this row only says where."
+    ),
+    "nouns": [
+        "reachability", "machine", "address", "personal fleet",
+        "discovery hint", "roster",
+    ],
+    "related_set_ids": ["autonomy.org.fleet-reachability#1"],
+}
+
 from tools.graph.schemas.registry import (
     SettingSchema,
     SchemaValidationError,
