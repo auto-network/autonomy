@@ -2480,6 +2480,14 @@ def _open(
                 "is no default scope"
             )
     _assert_home(set_id, org)
+    if not for_read:
+        # A followed organization's mirror is read-only for every local writer
+        # (design of record graph://5f2f5a49-00d §10.4): a settings write into
+        # it refuses with the typed error, never a silent write into a cache
+        # the follow loop owns. Reads fall through untouched.
+        from .db import assert_org_writable
+
+        assert_org_writable(org)
     return GraphDB(_db_path(org), create=org in _CREATED_ON_DEMAND)
 
 
