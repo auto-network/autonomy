@@ -151,7 +151,17 @@ def set_caller_org(org: str | None):
 
     Callers MUST call ``reset(token)`` in a ``finally`` block to avoid
     leaking state between requests. Middleware does this automatically.
+
+    A session cannot be scoped to a *followed* organization's mirror: it is a
+    read-only cache of another org's public surface with no write path, so
+    adopting it as a working scope is refused with the typed error (design of
+    record graph://5f2f5a49-00d §10.4). Reading a followed org happens through
+    the cross-org peer path, not by scoping a caller to it.
     """
+    if org is not None:
+        from .db import assert_org_writable
+
+        assert_org_writable(org)
     return _caller_org_var.set(org)
 
 
@@ -217,7 +227,15 @@ def _open(org: str | None = None) -> GraphDB:
     lifetime pooling is available via :meth:`GraphDB.for_org` for the
     dashboard's server-side handlers that want to amortise connection
     cost across requests.
+
+    A *followed* organization's mirror is read-only for every local writer
+    (design of record graph://5f2f5a49-00d §10.4): a content write into it —
+    ``graph note --org <followed>`` — refuses with the typed error rather than
+    opening a writer against a cache the follow loop owns.
     """
+    from .db import assert_org_writable
+
+    assert_org_writable(_resolve_org(org))
     return GraphDB(_db_path(org))
 
 

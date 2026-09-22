@@ -162,7 +162,7 @@ DEFAULT_ORGS_DIR = DATA_ROOT / "orgs"
 _SQLITE_CONNECT_TIMEOUT_S = 5.0
 _RW_OPEN_BACKOFF_S = (0.05, 0.1, 0.2)
 
-VALID_ORG_TYPES = ("shared", "personal")
+VALID_ORG_TYPES = ("shared", "personal", "followed")
 
 
 def _fleet_sha256_text(value: object) -> str:
@@ -248,6 +248,83 @@ class GraphDBMissing(RuntimeError):
 
 class GraphDBNotReady(RuntimeError):
     """The database exists but cannot serve schema-backed reads yet."""
+
+
+class FollowedOrgReadOnly(RuntimeError):
+    """A local writer tried to mutate a *followed* organization's mirror.
+
+    A followed mirror (``orgs.type='followed'``) is a read-only cache of
+    another organization's public surface, filled only by the credential-free
+    follow loop (design of record graph://5f2f5a49-00d §10.4). Every operator
+    write path — ``graph note --org <followed>``, a settings write into the
+    mirror, session scoping to it — refuses with this typed error naming the
+    followed org so the refusal is unambiguous, never a silent misroute.
+    """
+
+    def __init__(self, slug: str):
+        self.slug = slug
+        super().__init__(
+            f"organization {slug!r} is a followed mirror (read-only): it holds "
+            f"another org's public surface, filled only by the follow loop. "
+            f"Writes into it are refused."
+        )
+
+
+#: Cache of ``data/orgs/<slug>.db`` → ``orgs.type``. A followed mirror's type
+#: never changes under a running process (a follow becomes a membership only by
+#: an explicit re-home, auto-30wm2), so the read-only gate can memoize it and
+#: avoid opening the store on every write. Keyed by resolved path string.
+_ORG_TYPE_CACHE: dict[str, str] = {}
+
+
+def _org_type_of(slug: str, *, root: Path | str | None = None) -> str | None:
+    """The ``orgs.type`` of local org *slug*, or ``None`` when there is no
+    such database (or it carries no bootstrap row). Cheap and memoized: the
+    read-only gate consults it on every write, so it opens the store at most
+    once per path and reads the single ``orgs`` row.
+    """
+    if slug in LOCAL_STORE_SLUGS or not is_org_slug(slug):
+        return None
+    try:
+        path = _org_db_path(slug, root)
+    except Exception:
+        return None
+    key = str(path)
+    cached = _ORG_TYPE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    if not path.exists():
+        return None
+    import sqlite3 as _sqlite3
+
+    try:
+        conn = _sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)
+        try:
+            row = conn.execute("SELECT type FROM orgs LIMIT 1").fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        return None
+    if row is None or not row[0]:
+        return None
+    _ORG_TYPE_CACHE[key] = str(row[0])
+    return str(row[0])
+
+
+def is_followed_org(slug: str | None, *, root: Path | str | None = None) -> bool:
+    """Whether local org *slug* is a read-only followed mirror."""
+    if not slug:
+        return False
+    return _org_type_of(slug, root=root) == "followed"
+
+
+def assert_org_writable(slug: str | None, *, root: Path | str | None = None) -> None:
+    """Raise :class:`FollowedOrgReadOnly` if *slug* is a followed mirror.
+
+    The one check every operator write entry point calls; a followed mirror
+    is never writable by a local caller (design of record §10.4)."""
+    if slug and is_followed_org(slug, root=root):
+        raise FollowedOrgReadOnly(slug)
 
 
 def _orgs_dir(root: Path | str | None = None) -> Path:
@@ -1459,7 +1536,7 @@ class GraphDB:
             "CREATE TABLE IF NOT EXISTS orgs ("
             " id TEXT PRIMARY KEY,"
             " slug TEXT NOT NULL,"
-            " type TEXT NOT NULL CHECK (type IN ('shared','personal')),"
+            " type TEXT NOT NULL CHECK (type IN ('shared','personal','followed')),"
             " created_at TEXT NOT NULL DEFAULT "
             "  (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))"
             ")"
@@ -1646,6 +1723,10 @@ class GraphDB:
             (oid, slug, type_, created),
         )
         db.conn.commit()
+        # Keep the read-only gate's type cache honest the moment a followed
+        # mirror comes into being, so a write attempted right after creation is
+        # refused without a store re-open.
+        _ORG_TYPE_CACHE[str(resolved)] = type_
         # Install schema-declared payload expression indexes on the freshly
         # created store before returning — this is the common creation
         # boundary for every organization store, including org_ops.create_org
@@ -1693,6 +1774,12 @@ class GraphDB:
         :class:`GraphDB` instance (same underlying connection). Calling
         ``close()`` on the returned instance evicts the slot.
         """
+        # A followed mirror is read-only for every local writer (design of
+        # record graph://5f2f5a49-00d §10.4): refuse a write-mode open with the
+        # typed error before a handle is cached. The follow loop itself writes
+        # through the fleet-sync store's own sqlite connection, never this pool.
+        if mode == "rw" and is_followed_org(slug, root=root):
+            raise FollowedOrgReadOnly(slug)
         key = (slug, mode)
         cached = _CONNECTION_POOL.get(key)
         if cached is not None:
