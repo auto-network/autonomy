@@ -18,7 +18,12 @@ import copy
 
 import pytest
 
-from tools.network.idkit.armor import RECOVERY_ARMOR_PURPOSE
+# f5f5b7f8 deleted v2 armor and with it armor.RECOVERY_ARMOR_PURPOSE.
+# The constant lives on as root_factor_policy._RECOVERY_ARMOR_PURPOSE,
+# whose own comment still points at the name that no longer exists.
+from tools.network.idkit.root_factor_policy import (
+    _RECOVERY_ARMOR_PURPOSE as RECOVERY_ARMOR_PURPOSE,
+)
 from tools.network.idkit.keys import KeyPair
 from tools.network.idkit.recovery import (
     derive_recovery_factors,
