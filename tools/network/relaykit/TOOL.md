@@ -6,7 +6,7 @@ the registry service (B1); the registry-side relay endpoints live in
 `tools/network/registry/relay.py` and are served by the same
 `python -m tools.network.registry` process.
 
-G1 (`auto-57hav`, spec `graph://eb245082-b76` §8) adds the network-fabric
+G1 (`auto-57hav`, spec `graph://eb245082-b76` §10) adds the network-fabric
 rungs above that floor: the peer relay, the direct path, and the fallback
 chain that walks them — see "G1: the connectivity fallback chain" below.
 
@@ -186,7 +186,7 @@ rather than a wired dashboard background task: launching it requires org
 key material that only exists after the C-track ceremonies (C2 session
 keys / C5 agent delegation) land. Echo mode is the reference handler.
 
-## G1: the connectivity fallback chain (spec §8)
+## G1: the connectivity fallback chain (spec §10)
 
 How two org endpoints get connected: **direct → org peer relay →
 auto.network floor.** The org absorbs load; the center provides the

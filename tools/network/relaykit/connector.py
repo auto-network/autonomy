@@ -1309,7 +1309,14 @@ class TunnelConnector:
             }
             if protocol == "public-link":
                 served = await serve_link_channel(authorization["key"], **common)
-            elif protocol == "fleet-enrollment":
+            elif protocol in ("fleet-enrollment", "org-peer"):
+                # Two protocols, one wire shape: a certificate-authenticated
+                # channel. They are named apart because the authorization
+                # contract is explicit by design (bf675747), and because a
+                # peer-relayed org channel is not a Fleet enrollment: its
+                # token is a dial session id, not an invitation, and calling
+                # it "fleet-enrollment" is what made the peer path look like
+                # Fleet machinery it has nothing to do with.
                 served = await serve_certificate_channel(
                     self._key, self._channel_cert, **common)
             else:
