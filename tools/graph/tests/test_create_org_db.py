@@ -217,8 +217,10 @@ def test_create_org_db_settings_table_ready(orgs_root):
 
 
 def test_create_org_db_valid_types_exposed():
-    """``VALID_ORG_TYPES`` is the canonical list the factory enforces."""
-    assert set(VALID_ORG_TYPES) == {"shared", "personal"}
+    """``VALID_ORG_TYPES`` is the canonical list the factory enforces. A
+    followed organization's read-only mirror is the third type (design of
+    record graph://5f2f5a49-00d §10.4, bead auto-3534i)."""
+    assert set(VALID_ORG_TYPES) == {"shared", "personal", "followed"}
 
 
 # ── open_org_db ──────────────────────────────────────────────
