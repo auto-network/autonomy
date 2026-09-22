@@ -319,21 +319,6 @@ def test_cmd_context_cross_org_canonical_prints_turn(orgs_root, capsys, monkeypa
     assert "canonical content" in out
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "PRODUCT DEFECT, reported 2026-09-22: a peer organization's RAW "
-        "content is readable cross-org. These three used to pass only "
-        "because they named the caller's org through GRAPH_ORG, which the "
-        "CLI stopped reading (cli.py: 'scope comes from the caller's "
-        "explicit --org or nothing'), so every one of them was really the "
-        "scopeless view and asserted nothing. With the caller named "
-        "explicitly they fail on the real rule this file states: peer "
-        "canonical and published are visible, peer raw and curated are "
-        "not. strict=True so whoever fixes the read path is told to "
-        "remove this marker."
-    ),
-)
 def test_cmd_context_cross_org_raw_not_found(orgs_root, capsys, monkeypatch):
     """`graph context` on a peer's raw UUID returns not-found, not a stack trace."""
     ids = _seed_anchore_and_autonomy(orgs_root)
@@ -468,21 +453,6 @@ def test_cmd_attachment_cross_org_canonical(orgs_root, capsys, monkeypatch):
     assert "autonomy" in out
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "PRODUCT DEFECT, reported 2026-09-22: a peer organization's RAW "
-        "content is readable cross-org. These three used to pass only "
-        "because they named the caller's org through GRAPH_ORG, which the "
-        "CLI stopped reading (cli.py: 'scope comes from the caller's "
-        "explicit --org or nothing'), so every one of them was really the "
-        "scopeless view and asserted nothing. With the caller named "
-        "explicitly they fail on the real rule this file states: peer "
-        "canonical and published are visible, peer raw and curated are "
-        "not. strict=True so whoever fixes the read path is told to "
-        "remove this marker."
-    ),
-)
 def test_cmd_attachment_cross_org_raw_parent_rejected(orgs_root, capsys, monkeypatch):
     """Peer attachment whose parent source is raw must not surface."""
     ids = _seed_anchore_and_autonomy(orgs_root)
