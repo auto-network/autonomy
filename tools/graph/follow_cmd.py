@@ -84,6 +84,32 @@ def _fetch_envelope(registry_base: str, token: str, *, timeout: float = 30.0) ->
         _fail("link envelope response was not JSON")
 
 
+def _local_org_id(slug: str) -> str | None:
+    """The ``orgs.id`` of the local database at ``data/orgs/<slug>.db``.
+
+    Read-only, best effort: returns ``None`` when the file is absent, holds no
+    ``orgs`` row, or cannot be opened. Used to detect a slug collision before
+    writing a follow row (D7)."""
+    import sqlite3
+
+    from tools.graph.db import _org_db_path
+
+    path = Path(_org_db_path(slug))
+    if not path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)
+    except Exception:
+        return None
+    try:
+        row = conn.execute("SELECT id FROM orgs LIMIT 1").fetchone()
+        return str(row[0]) if row and row[0] is not None else None
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
 def cmd_follow_add(args) -> None:
     """graph follow add <url>
 
@@ -111,6 +137,20 @@ def cmd_follow_add(args) -> None:
         _fail("link envelope carried no org uuid")
     if not slug or not isinstance(slug, str):
         _fail("link envelope carried no org slug (meta.org)")
+
+    # Slug collision guard (D7, graph://5f2f5a49-00d §10.4/§10.8): the mirror
+    # lives at data/orgs/<slug>.db. If a LOCAL organization of a DIFFERENT id
+    # already owns that slug, following would either clobber it or be refused
+    # downstream — refuse here, up front, naming BOTH ids so the operator can
+    # resolve the collision before any follow row is written.
+    local_id = _local_org_id(slug)
+    if local_id is not None and local_id != org_uuid:
+        _fail(
+            f"cannot follow {slug!r}: a local organization named {slug!r} "
+            f"already exists with a different id — local orgs.id {local_id}, "
+            f"but this follow names org_uuid {org_uuid}. Resolve the slug "
+            f"collision before following (graph://5f2f5a49-00d D7)."
+        )
 
     payload = {
         "org_uuid": org_uuid,

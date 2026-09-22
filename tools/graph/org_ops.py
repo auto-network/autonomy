@@ -1484,11 +1484,23 @@ _PERSONAL_SEED_PAYLOAD: dict[str, Any] = {
 FIRST_ORG_ENV = "AUTONOMY_FIRST_ORG"
 FIRST_ORG_NAME_ENV = "AUTONOMY_FIRST_ORG_NAME"
 
+# The slug a fresh node's first shared org takes when nothing names one
+# (design of record graph://5f2f5a49-00d D7 / §10.5). Deliberately NOT
+# "autonomy": every node follows Autonomy's public surface into a local
+# mirror ``data/orgs/autonomy.db``, so a locally founded org named
+# "autonomy" — with a different org id — would collide with that mirror
+# path. ``myorg`` is the same placeholder Compose documents
+# (``AUTONOMY_FIRST_ORG=myorg``), so the fallback matches the install docs.
+FALLBACK_FIRST_ORG_SLUG = "myorg"
+
 
 def resolve_first_org_slug(slug: str | None = None) -> str | None:
-    """First-org slug: explicit arg, else env, else None.
+    """First-org slug as *named*: explicit arg, else env, else None.
 
-    None means no shared org was named, and none is created.
+    None means nothing named a first org. It does NOT mean none is created:
+    on a fresh node :func:`ensure_bootstrap_orgs` then founds
+    :data:`FALLBACK_FIRST_ORG_SLUG` (``myorg``). This helper reports only what
+    was named, so callers can distinguish an explicit slug from the fallback.
     """
     return slug or os.environ.get(FIRST_ORG_ENV) or None
 
@@ -1519,17 +1531,19 @@ def ensure_bootstrap_orgs(
     arrives from the INVITING org's ledger rather than from a local
     creation.
 
-    A shared org is created only when one is named: pass ``first_org``, or
-    set ``AUTONOMY_FIRST_ORG`` (display name via ``AUTONOMY_FIRST_ORG_NAME``)
-    before first launch. Named none, none is created.
+    The first shared org is named by ``first_org`` or ``AUTONOMY_FIRST_ORG``
+    (display name via ``AUTONOMY_FIRST_ORG_NAME``). When neither names one and
+    no shared org exists yet, a fresh node founds ``FALLBACK_FIRST_ORG_SLUG``
+    (``myorg``) — never ``autonomy``, which is reserved for the followed
+    Autonomy mirror (graph://5f2f5a49-00d D7).
 
     Idempotent — runs at every dashboard startup; pre-existing DBs are
     left untouched. Identity Setting seed is best-effort (skipped when
     ``autonomy.org#1`` schema is unregistered; auto-S1 owns the schema).
 
-    Existing shared orgs are still reported when none is named: the return
-    value is this node's org inventory, and creating nothing must not also
-    hide what is there.
+    An existing shared org is honored when none is named: the fallback fires
+    only on a truly fresh node, so startup never manufactures a default org
+    next to one the operator already created.
 
     Returns the list of orgs after bootstrap.
     """
@@ -1540,9 +1554,18 @@ def ensure_bootstrap_orgs(
     slug = first_org or os.environ.get(FIRST_ORG_ENV) or None
     if slug is None:
         shared = [o for o in list_orgs(root=root) if o.type == "shared"]
-        return shared + [
-            _ensure_org("personal", "personal", _PERSONAL_SEED_PAYLOAD, root=root),
-        ]
+        if shared:
+            # An operator already named a first org (e.g. via ``python -m
+            # tools.init --org acme``): honor it, never manufacture a default
+            # next to it.
+            return shared + [
+                _ensure_org("personal", "personal", _PERSONAL_SEED_PAYLOAD, root=root),
+            ]
+        # No org named and none exists yet: a fresh node founds ``myorg``
+        # (graph://5f2f5a49-00d D7). Never ``autonomy`` — that slug is reserved
+        # for the followed Autonomy public-surface mirror and a locally founded
+        # org of a different id would collide with it.
+        slug = FALLBACK_FIRST_ORG_SLUG
     _validate_slug(slug)
     return [
         _ensure_org(slug, "shared", _first_org_seed(slug, first_org_name), root=root),
