@@ -88,6 +88,7 @@ CREDENTIALS_ORG = "personal"
 # so the whole flow is testable against a fixture home.
 CLAUDE_CREDENTIALS_RELPATH = ".claude/.credentials.json"
 CODEX_AUTH_RELPATH = ".codex/auth.json"
+GROK_AUTH_RELPATH = ".grok/auth.json"
 
 # Read-only authenticated no-op for a Claude consumer bundle. Returns the
 # org identity (uuid / name / account email) we need to key + populate the
@@ -783,19 +784,88 @@ def import_codex(
 # ── orchestration ────────────────────────────────────────────
 
 
+# ── Grok: detection ──────────────────────────────────────────
+#
+# Grok Build keeps its stored sign-in at ``~/.grok/auth.json`` (graph note
+# 7d172e94-4f3). Sessions launch Grok from the ``XAI_API_KEY`` workspace
+# binding or the operator's vault row ``grok.api-key``; the stored sign-in
+# is detected here so Getting Started knows the harness is in use, and is
+# not copied anywhere.
+
+
+def detect_grok(home: str) -> HarnessResult:
+    path = os.path.join(home, GROK_AUTH_RELPATH)
+    if not os.path.isfile(path):
+        return HarnessResult(
+            "grok", STATUS_NEEDS_SIGN_IN,
+            "no ~/.grok/auth.json — run `grok login` to sign in",
+        )
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError) as exc:
+        return HarnessResult(
+            "grok", STATUS_NEEDS_SIGN_IN,
+            f"~/.grok/auth.json is present but unreadable: {exc}",
+        )
+    if not isinstance(raw, dict) or not raw:
+        return HarnessResult(
+            "grok", STATUS_NEEDS_SIGN_IN, "~/.grok/auth.json holds no sign-in",
+        )
+    return HarnessResult(
+        "grok", STATUS_IN_PLACE,
+        "stored sign-in present; sessions launch Grok from XAI_API_KEY or "
+        "the vault row grok.api-key",
+    )
+
+
+HARNESSES = ("claude", "codex", "grok")
+
+
 def run_import(
     home: str,
     *,
     alias_override: str | None = None,
     dry_run: bool = False,
 ) -> ImportReport:
-    """Import both harnesses and collect a per-harness report."""
+    """Scan the three harnesses, import what can be imported, and report
+    per harness (design of record graph://5f2f5a49-00d v12 FR7a)."""
     report = ImportReport()
     report.add(import_claude(
         home, alias_override=alias_override, dry_run=dry_run,
     ))
     report.add(import_codex(home, dry_run=dry_run))
+    report.add(detect_grok(home))
     return report
+
+
+USABLE_STATUSES = frozenset({STATUS_IMPORTED, STATUS_UNCHANGED, STATUS_IN_PLACE})
+
+
+def report_to_dict(report: ImportReport) -> dict[str, Any]:
+    """The report as data: per-harness rows and the harnesses a session can
+    launch with, for the dashboard's Getting Started surfaces."""
+    rows = [
+        {
+            "harness": r.harness,
+            "status": r.status,
+            "detail": r.detail,
+            "account": r.account,
+            "usable": r.status in USABLE_STATUSES,
+        }
+        for r in report.results
+    ]
+    return {
+        "harnesses": rows,
+        "usable": [r["harness"] for r in rows if r["usable"]],
+    }
+
+
+def operator_home() -> str:
+    """The operator's home directory as this process sees it: on a Compose
+    node the host home is mounted at its own path and named by
+    AUTONOMY_HOST_HOME; elsewhere it is this process's home."""
+    return os.environ.get("AUTONOMY_HOST_HOME") or os.path.expanduser("~")
 
 
 # ── CLI ──────────────────────────────────────────────────────
@@ -816,7 +886,7 @@ def _format_report(report: ImportReport) -> str:
 
 
 def cmd_credentials_import(args: argparse.Namespace) -> None:
-    home = os.path.expanduser(args.home) if args.home else os.path.expanduser("~")
+    home = os.path.expanduser(args.home) if args.home else operator_home()
     report = run_import(
         home, alias_override=args.alias, dry_run=args.dry_run,
     )
@@ -855,7 +925,7 @@ def attach_credentials_subparser(sub: Any) -> None:
     p_import.add_argument(
         "--home",
         default=None,
-        help="Override the home directory scanned (default: $HOME).",
+        help="Override the home directory scanned (default: $AUTONOMY_HOST_HOME, else $HOME).",
     )
     p_import.add_argument(
         "--dry-run",

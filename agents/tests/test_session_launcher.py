@@ -9,6 +9,7 @@ the container is never actually started.
 from __future__ import annotations
 
 import json
+import time
 import os
 import subprocess
 from pathlib import Path
@@ -1476,9 +1477,13 @@ class TestSubstrateCredentialsPicker:
             return _R()
 
         monkeypatch.setattr(session_launcher, "_setup_token_rows", _fake_setup_tokens)
+        # A still-valid imported sign-in bundle launches the session by
+        # itself (record v12 FR7a); the install path is reached only when
+        # no usable bundle exists, so this one is expired.
+        expired = _credentials_row("org-A", "gmail")
+        expired.payload["expires_at_ms"] = 1
         monkeypatch.setattr(
-            session_launcher, "_credentials_rows",
-            lambda: [_credentials_row("org-A", "gmail")],
+            session_launcher, "_credentials_rows", lambda: [expired],
         )
         monkeypatch.setattr(session_launcher, "_claude_usage_rows", lambda: [])
         monkeypatch.setattr(session_launcher.subprocess, "run", _fake_run)
@@ -2336,3 +2341,90 @@ def test_beads_credential_env_args_follow_the_org_dir(tmp_path, monkeypatch):
     assert "BEADS_DOLT_SERVER_USER=beads_autonomy" in args
     (shared / "credentials.env").unlink()
     assert session_launcher._beads_credential_env_args(None) == []
+
+
+# ── Claude launch from the imported sign-in bundle (record v12 FR7a) ──
+
+
+def _bundle_row(key: str, *, expires_at_ms: int, **extra):
+    from types import SimpleNamespace
+    payload = {
+        "alias": "dev", "access_token": "at-b", "refresh_token": "rt-b",
+        "expires_at_ms": expires_at_ms, "scopes": ["user:inference"],
+    }
+    payload.update(extra)
+    return SimpleNamespace(key=key, payload=payload)
+
+
+def test_pick_claude_bundle_row_prefers_freshest_unexpired():
+    rows = [
+        _bundle_row("org-old", expires_at_ms=2_000),
+        _bundle_row("org-new", expires_at_ms=9_000),
+        _bundle_row("org-expired", expires_at_ms=500),
+        _bundle_row("org-broken", expires_at_ms=9_500, refresh_token=""),
+    ]
+    picked = session_launcher._pick_claude_bundle_row(rows, now_ms=1_000)
+    assert picked.key == "org-new"
+    assert session_launcher._pick_claude_bundle_row(rows, now_ms=10_000) is None
+
+
+def test_materialize_claude_bundle_writes_the_file_claude_reads(tmp_path, monkeypatch):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    far = int(time.time() * 1000) + 3_600_000
+    monkeypatch.setattr(
+        session_launcher, "_credentials_rows",
+        lambda: [_bundle_row("org-1", expires_at_ms=far)],
+    )
+    out = session_launcher._materialize_claude_bundle(run_dir)
+    assert out == run_dir / session_launcher.CLAUDE_BUNDLE_FILENAME
+    doc = json.loads(Path(out).read_text())["claudeAiOauth"]
+    assert doc["accessToken"] == "at-b"
+    assert doc["refreshToken"] == "rt-b"
+    assert doc["expiresAt"] == far
+    assert doc["scopes"] == ["user:inference"]
+    assert (Path(out).stat().st_mode & 0o777) == 0o600
+
+
+def test_materialize_claude_bundle_without_row_returns_none(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_launcher, "_credentials_rows", lambda: [])
+    assert session_launcher._materialize_claude_bundle(tmp_path) is None
+    assert session_launcher._claude_bundle_target(tmp_path) is None
+
+
+def test_resolve_credentials_uses_the_bundle_before_any_browser(monkeypatch):
+    """No setup token and an imported bundle: the launch takes the bundle
+    and never runs `graph claude install`."""
+    far = int(time.time() * 1000) + 3_600_000
+    monkeypatch.setattr(session_launcher, "_setup_token_rows", lambda: [])
+    monkeypatch.setattr(
+        session_launcher, "_credentials_rows",
+        lambda: [_bundle_row("org-1", expires_at_ms=far)],
+    )
+    def _no_install(*a, **kw):
+        raise AssertionError("graph claude install must not run when a bundle exists")
+    monkeypatch.setattr(session_launcher.subprocess, "run", _no_install)
+    creds = session_launcher._resolve_credentials_via_substrate(prefer_alias=None)
+    assert creds == {"type": "bundle", "alias": "dev", "org_uuid": "org-1"}
+    assert session_launcher._setup_auth_docker_args(creds, Path("/tmp")) == []
+
+
+def test_optional_mounts_declare_the_bundle_only_when_asked(tmp_path, monkeypatch):
+    far = int(time.time() * 1000) + 3_600_000
+    monkeypatch.setattr(
+        session_launcher, "_credentials_rows",
+        lambda: [_bundle_row("org-1", expires_at_ms=far)],
+    )
+    monkeypatch.setattr(session_launcher, "_codex_credential_rows", lambda: [])
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    without = session_launcher._resolve_optional_tool_mounts(
+        run_dir=run_dir, materialize_auth=False,
+    )
+    assert not any(v.startswith(session_launcher.CLAUDE_BUNDLE_CONTAINER_PATH) for v in without.values())
+    declared = session_launcher._resolve_optional_tool_mounts(
+        run_dir=run_dir, materialize_auth=False, claude_bundle=True,
+    )
+    target = str(run_dir / session_launcher.CLAUDE_BUNDLE_FILENAME)
+    assert declared[target] == session_launcher.CLAUDE_BUNDLE_CONTAINER_PATH + ":ro"
+    assert not Path(target).exists()  # declared, not written
