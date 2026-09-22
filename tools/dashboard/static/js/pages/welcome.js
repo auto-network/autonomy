@@ -70,7 +70,7 @@ function welcomeApp() {
           var id = e.identity_resolved || {};
           return { slug: id.slug || (e.org || {}).slug || '',
                    name: id.name || (e.org || {}).slug || '' };
-        }).filter(function (x) {
+        }).filter((x) => {
           // Same reserved-store list used by the server's onboarding gate.
           return x.slug && !this.localStoreSlugs.includes(x.slug);
         });
