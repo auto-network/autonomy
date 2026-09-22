@@ -496,6 +496,13 @@ class PeerParkConnector(TunnelConnector):
                  root_pub: str, **kwargs):
         super().__init__(relay_url, org, key, cert, handler, **kwargs)
         self._root_pub = root_pub
+        # A parked node serves exactly one kind of channel, so it names its
+        # own protocol rather than waiting to be told. Since bf675747 the
+        # connector refuses any channel whose authorization is absent, and
+        # nothing ever supplied one here, so every bridged channel was closed
+        # before its SERVER_HELLO. A caller may still override.
+        if self._channel_authorization_for is None:
+            self._channel_authorization_for = lambda *_args: {"protocol": "org-peer"}
         # Parking presents v2 like everything else. The park GATE does not
         # decide on the machine — it verifies tunnel:serve against a pinned
         # org root — but there is no reason for this path to be the last

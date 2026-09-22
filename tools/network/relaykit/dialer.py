@@ -1,6 +1,6 @@
 """The connectivity fallback chain — how two org endpoints get connected.
 
-Spec `graph://eb245082-b76` §8, bead G1: **direct → org peer relay →
+Spec `graph://eb245082-b76` §10, bead G1: **direct → org peer relay →
 auto.network floor.** The org absorbs load; the center provides the
 floor, not the ceiling.
 
@@ -40,7 +40,7 @@ from .channel import (
 )
 from .direct import direct_connect, new_session_id
 from .peer import NONCE_HEX_LEN, RELAY_HELLO_VERSION, verify_relay_hello
-from .viewer import ViewerChannel, read_viewer_record
+from .viewer import CertificateViewerChannel, ViewerChannel, read_viewer_record
 
 PATH_DIRECT = "direct"
 PATH_PEER_RELAY = "peer-relay"
@@ -230,10 +230,20 @@ async def dial_peer(
     if floor is not None:
         relay_url, token = floor
         try:
-            channel = await ViewerChannel.connect(
-                relay_url, token, link_pub=link_pub, org=org, now=now,
-                open_timeout=attempt_timeout,
-            )
+            # A link token dials the link channel; an org dial session has no
+            # link key and is certificate-authenticated, like the other two
+            # rungs. One chain, two viewer flavours, chosen by what the caller
+            # actually holds.
+            if link_pub is None:
+                channel = await CertificateViewerChannel.connect(
+                    relay_url, token, root_pub=root_pub, org=org, now=now,
+                    open_timeout=attempt_timeout,
+                )
+            else:
+                channel = await ViewerChannel.connect(
+                    relay_url, token, link_pub=link_pub, org=org, now=now,
+                    open_timeout=attempt_timeout,
+                )
             return DialResult(channel, PATH_FLOOR, relay_url, attempts)
         except HandshakeError:
             raise

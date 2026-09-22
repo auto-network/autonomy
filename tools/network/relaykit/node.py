@@ -115,6 +115,12 @@ class NodeServer:
                 floor_url, org, self._floor_key, self._floor_cert, handler,
                 channel_cert=self._floor_channel_cert,
                 machine_key=self._machine_key,
+                # This node serves certificate-authenticated org channels on
+                # every rung, the floor included. Since bf675747 a connector
+                # refuses a channel whose authorization is absent, and this
+                # one never supplied it, so the floor rung closed before its
+                # SERVER_HELLO exactly as the peer rung did.
+                channel_authorization_for=lambda *_a: {"protocol": "org-peer"},
                 min_backoff=min_backoff, max_backoff=max_backoff,
             ))
         for relay_url in peer_relay_urls:
