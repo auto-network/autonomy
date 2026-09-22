@@ -1,0 +1,40 @@
+
+   master <workspace>
+
+
+
+
+
+   ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+   │                                                                                                                │
+   │  ⠀⠀⠀⠀⠀⠀⣀⣀⡀⠀⠀⠀⢀⠄   Grok Build  1.0.40                                                                           │
+   │  ⠀⠀⠀⣠⣾⠿⠛⠛⠛⠛⢀⡴⠁⠀                                                                                                │
+   │  ⠀⠀⣼⡟⠁⠀⠀⠀⢀⡴⠻⣿⡀⠀   Changelog                                                                                    │
+   │  ⠀⠀⣿⡇⠀⠀⠀⠔⠁⠀⠀⣿⡇⠀                                                                                                │
+   │  ⠀⠀⢹⣷⠀⠀⠀⠀⠀⢀⣴⡿⠀⠀    • Miscellaneous bug fixes and updates.                                                      │
+   │  ⠀⢀⠞⠁⠠⢶⣶⣶⣶⠿⠋⠀⠀⠀    • Subagents can always use the parent model, with that choice locked in when the session…   │
+   │  ⠐⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀    • Local worktree capture no longer refuses repositories that contain uninitialized submo…   │
+   │                                                                                                                │
+   │                   New worktree                                                                         ctrl+w  │
+   │                   Resume session                                                                       ctrl+r  │
+   │                   Changelog                                                                                    │
+   │                   Quit                                                                                 ctrl+q  │
+   │                                                                                                                │
+   ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+
+
+
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                                                                │
+  ╰───────────────────────────────────────────────────────────────────────── Grok 4.6 (OpenRouter) · always-approve ─╯
+
+
+

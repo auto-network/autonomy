@@ -1,0 +1,40 @@
+
+  master <workspace>                                                                       14K / 500K │ [Dashboard]
+
+
+     ❯ Reply with the fruit word you were told, then wait.                                                   5:51 AM
+
+
+     MANGO KIWI                                                                                              5:51 AM
+
+     Worked for 6.7s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                                                                │
+  ╰───────────────────────────────────────────────────────────────────────── Grok 4.6 (OpenRouter) · always-approve ─╯
+
+  Shift+Tab:mode  │  Ctrl+x:shortcuts
+

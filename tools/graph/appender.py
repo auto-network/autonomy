@@ -56,6 +56,7 @@ from .db import GraphDB, resolve_caller_db_path
 from .ingest import (
     ClaudeTurnExtractor,
     CodexTurnExtractor,
+    GrokTurnExtractor,
     _dedup_new_turns,
     _derive_session_title,
     _ingest_persona,
@@ -65,6 +66,7 @@ from .ingest import (
 _EXTRACTORS = {
     "claude": ClaudeTurnExtractor,
     "codex": CodexTurnExtractor,
+    "grok": GrokTurnExtractor,
 }
 
 # Per-org locks guarding the DB-writing section of feed_lines(). Every live

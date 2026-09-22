@@ -3773,9 +3773,9 @@ async def api_workspace_local_create(request):
         return JSONResponse({"error": "id is required"}, status_code=400)
 
     harness = body.get("harness", "codex")
-    if harness not in {"claude", "codex"}:
+    if harness not in {"claude", "codex", "grok"}:
         return JSONResponse(
-            {"error": "harness must be 'claude' or 'codex'"}, status_code=400,
+            {"error": "harness must be 'claude', 'codex' or 'grok'"}, status_code=400,
         )
     mount = f"/workspace/{workspace_id}"
     try:
@@ -8294,11 +8294,10 @@ def _session_current_turn(jsonl_path: str | None) -> int | None:
         if not path.exists():
             return None
         fmt = graph_ingest.detect_session_format(path)
-        parser = (
-            graph_ingest.parse_codex_session
-            if fmt == "codex"
-            else graph_ingest.parse_claude_code_session
-        )
+        parser = {
+            "codex": graph_ingest.parse_codex_session,
+            "grok": graph_ingest.parse_grok_session,
+        }.get(fmt, graph_ingest.parse_claude_code_session)
         _meta, turns = parser(path)
         if turns:
             return int(turns[-1]["turn_number"])
@@ -10486,6 +10485,16 @@ def _build_host_resume_cmd(
             + model_flag
             + f"resume {shlex.quote(codex_uuid)}"
         )
+    if harness == "grok":
+        # session_uuid is the Grok session directory name (the session UUID).
+        from agents.session_launcher import grok_resume_id
+        model_flag = f"-m {shlex.quote(model)} " if model else ""
+        return (
+            env_prefix
+            + "grok --trust --always-approve --no-alt-screen "
+            + model_flag
+            + f"--resume {shlex.quote(grok_resume_id(session_uuid))}"
+        )
     resolved_model = model or _resolve_host_session_model()
     return (
         env_prefix
@@ -12406,7 +12415,7 @@ async def api_bootstrap_verify(request):
     slug = await _bootstrap_harness_arg(request)
     if not slug:
         return JSONResponse(
-            {"error": "harness must be 'claude' or 'codex'"}, status_code=400,
+            {"error": "harness must be one of 'claude', 'codex', 'grok'"}, status_code=400,
         )
     result = await asyncio.to_thread(_harness_bootstrap.verify_and_record, slug)
     return JSONResponse(result)
@@ -12422,7 +12431,7 @@ async def api_bootstrap_install(request):
     slug = await _bootstrap_harness_arg(request)
     if not slug:
         return JSONResponse(
-            {"error": "harness must be 'claude' or 'codex'"}, status_code=400,
+            {"error": "harness must be one of 'claude', 'codex', 'grok'"}, status_code=400,
         )
     spec = _harness_bootstrap.HARNESS_SPECS[slug]
     cmd = spec["install_cmd"].split()
@@ -15339,7 +15348,7 @@ def _collect_harness_usage() -> dict[str, list[dict[str, Any]]]:
             bucket["_updated_at"] = updated_at
 
     harnesses: list[dict[str, Any]] = []
-    order = {"claude": 0, "codex": 1}
+    order = {"claude": 0, "codex": 1, "grok": 2}
     for bucket in grouped.values():
         item = {
             "harness": bucket["harness"],

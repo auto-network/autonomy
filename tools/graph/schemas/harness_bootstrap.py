@@ -47,14 +47,14 @@ SCHEMA_REVISION = 1
 # Host-local operator fact — see rubric graph://4d88c2ad-625 § "one-line rule".
 HARNESS_BOOTSTRAP_ORG = "machine"
 
-VALID_HARNESSES = ("claude", "codex")
+VALID_HARNESSES = ("claude", "codex", "grok")
 VALID_AUTH = ("ok", "missing")
 
 
 SYNOPSIS = {
     "summary": (
         "Pre-agent harness bootstrap discovery record. One row per verified "
-        "coding harness (claude/codex) on this host: slug, resolved path, "
+        "coding harness (claude/codex/grok) on this host: slug, resolved path, "
         "version, an auth flag, and verification timestamp. Discovery results "
         "only — never tokens or credential material. Read by Layer-1 "
         "onboarding to decide a real session can launch."
@@ -64,6 +64,8 @@ SYNOPSIS = {
         "clean-room install",
         "claude code",
         "codex",
+        "grok",
+        "grok build",
         "harness discovery",
         "first launch",
     ],
@@ -80,7 +82,7 @@ SYNOPSIS = {
 class HarnessBootstrapV1(SettingSchema):
     """Per-harness clean-room bootstrap discovery row.
 
-    Keyed by harness slug (``claude`` / ``codex``). ``auth == "ok"`` means the
+    Keyed by harness slug (``claude`` / ``codex`` / ``grok``). ``auth == "ok"`` means the
     flow ran one authenticated no-op that exited 0; ``auth == "missing"`` means
     the CLI resolved and reported a version but the no-op failed (state
     ``installed-needs-sign-in``). The bootstrap gate treats only ``auth ==

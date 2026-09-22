@@ -1,6 +1,6 @@
 # Autonomy Agent Container
 # Bakes in all tools so agents start in <5s with zero downloads.
-# Includes bd, graph, claude, codex, agent-browser (headless Chrome), and tmux.
+# Includes bd, graph, claude, codex, grok (xAI Grok Build), agent-browser (headless Chrome), and tmux.
 #
 # Build:  docker build -t autonomy-session agents/
 # Run:    see agents/launch.sh
@@ -102,6 +102,7 @@ WORKDIR /workspace
 # Point bd at the mounted beads directory and codex at its container-local home.
 ENV BEADS_DIR=/data/.beads
 ENV CODEX_HOME=/home/agent/.codex
+ENV GROK_HOME=/home/agent/.grok
 
 # Capability command shims: the launcher bind-mounts per-session shims at this
 # path (session_launcher.CAPABILITY_BIN_DIR) — on PATH so enabled capability
@@ -117,7 +118,7 @@ RUN bd --help > /dev/null 2>&1 || echo "WARN: bd not functional (expected if cro
 
 # Agent runs as non-root
 RUN userdel -r ubuntu 2>/dev/null; useradd -m -s /bin/bash -u 1000 agent \
-    && mkdir -p /home/agent/.claude /home/agent/.codex /home/agent/.agents /home/agent/.local/bin \
+    && mkdir -p /home/agent/.claude /home/agent/.codex /home/agent/.grok /home/agent/.agents /home/agent/.local/bin \
     # claude is COPYed to /usr/local/bin (above), but .claude.json declares
     # installMethod=native, so Claude Code's startup self-check (/doctor) looks
     # for the binary at ~/.local/bin/claude and prints a "missing or broken"
@@ -128,7 +129,7 @@ RUN userdel -r ubuntu 2>/dev/null; useradd -m -s /bin/bash -u 1000 agent \
        > /home/agent/.claude.json \
     && echo '{"skipDangerousModePermissionPrompt":true,"effortLevel":"high","disableArtifact":true,"permissions":{"deny":["AskUserQuestion","ExitPlanMode","Artifact"]}}' \
        > /home/agent/.claude/settings.json \
-    && chown -R agent:agent /home/agent/.claude /home/agent/.codex /home/agent/.agents /home/agent/.claude.json /home/agent/.local
+    && chown -R agent:agent /home/agent/.claude /home/agent/.codex /home/agent/.grok /home/agent/.agents /home/agent/.claude.json /home/agent/.local
 
 # ── Codex CLI + agent-browser (needs node + agent user to exist) ──
 # Codex is an npm package plus platform-specific optional dependency, not a
@@ -145,16 +146,31 @@ RUN npm install -g "@openai/codex@${CODEX_VERSION}" agent-browser jsdom \
 # Resolve globally-installed node modules (jsdom) from standalone test scripts.
 ENV NODE_PATH=/usr/lib/node_modules
 
+# ── Grok Build (xAI) ──
+# The npm package is a thin wrapper: its postinstall decompresses the real
+# binary into $GROK_HOME/bin and the `grok` shim re-resolves it on every run.
+# Install with GROK_HOME pointed at /opt/grok so the ELF lives in the image,
+# then point /usr/bin/grok straight at it — the runtime GROK_HOME
+# (/home/agent/.grok, above) holds only session state, and a container never
+# re-extracts 165 MB at start. autonomy-grok-auth is the external auth
+# provider gateway sessions sign in through (agents/grok_auth_shim.sh).
+ARG GROK_VERSION=1.0.40
+RUN GROK_HOME=/opt/grok npm install -g "@xai-official/grok@${GROK_VERSION}" \
+    && test -x "/opt/grok/bin/grok-${GROK_VERSION}" \
+    && ln -sf "/opt/grok/bin/grok-${GROK_VERSION}" /usr/bin/grok
+COPY grok_auth_shim.sh /usr/local/bin/autonomy-grok-auth
+RUN chmod 0755 /usr/local/bin/autonomy-grok-auth
+
 # The harness versions this image was built with, recorded on the image
-# itself. CODEX_VERSION is the same variable that installed the binary two
-# lines above, so the label cannot disagree with what is installed.
+# itself. CODEX_VERSION / GROK_VERSION are the same variables that installed
+# the binaries above, so the labels cannot disagree with what is installed.
 # CLAUDE_VERSION is declared above the installer step (it pins what gets
 # installed) and re-declared here so the label sees it. The launcher reads
 # these with `docker image inspect` and stamps them into each session's
 # .session_meta.json, so a reader that starts mid-log never has to guess
 # which record format the session writes.
 ARG CLAUDE_VERSION
-LABEL codex.version=$CODEX_VERSION claude.version=$CLAUDE_VERSION
+LABEL codex.version=$CODEX_VERSION claude.version=$CLAUDE_VERSION grok.version=$GROK_VERSION
 
 # ── Pre-configure agent-browser for container use ──
 RUN mkdir -p /home/agent/.agent-browser \
@@ -175,6 +191,7 @@ COPY agent_browser_shim.sh /usr/local/bin/agent-browser
 RUN chmod 0755 /usr/local/bin/agent-browser
 
 RUN codex --version > /dev/null 2>&1 || echo "WARN: codex not functional" \
+    && grok --version > /dev/null 2>&1 || echo "WARN: grok not functional" \
     && agent-browser --version > /dev/null 2>&1 || echo "WARN: agent-browser not functional"
 
 COPY session-entrypoint.sh /usr/local/bin/autonomy-entrypoint.sh

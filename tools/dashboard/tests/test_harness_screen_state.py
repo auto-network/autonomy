@@ -19,7 +19,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from tools.dashboard.session_harness import CLAUDE_HARNESS, CODEX_HARNESS
+from tools.dashboard.session_harness import CLAUDE_HARNESS, CODEX_HARNESS, GROK_HARNESS
 
 
 # ── Pane snapshot fixtures loaded from disk
@@ -274,3 +274,58 @@ def test_tmux_send_keys_ignores_empty_value():
         ts._tmux_send_one_key("auto-x", {})
         ts._tmux_send_one_key("auto-x", {"kind": "key"})
     assert calls == []
+
+
+# ── Grok Build (xAI) ──────────────────────────────────────────────────
+#
+# Real captures from Grok Build v1.0.40 (2026-09-22) under tmux 120x40.
+
+PANE_GROK_TRUST_DIALOG = _load("grok_trust_dialog.txt")
+PANE_GROK_COMPOSER_READY = _load("grok_composer_ready.txt")
+PANE_GROK_BUSY = _load("grok_busy.txt")
+PANE_GROK_AFTER_REPLY = _load("grok_after_reply.txt")
+
+
+def test_grok_trust_dialog_is_answered_with_y_and_never_composer_ready():
+    state, keys = GROK_HARNESS.read_screen_state(PANE_GROK_TRUST_DIALOG, {})
+    assert state["confirming_trust_prompt"] is True
+    assert state["composer_ready"] is False
+    assert keys == [{"kind": "literal", "value": "y"}]
+
+
+def test_grok_trust_confirmation_is_sent_only_once_while_dialog_remains():
+    state, keys = GROK_HARNESS.read_screen_state(
+        PANE_GROK_TRUST_DIALOG, {"confirming_trust_prompt": True},
+    )
+    assert state["confirming_trust_prompt"] is True
+    assert keys == []
+
+
+def test_grok_composer_box_reports_ready_and_clears_trust():
+    state, keys = GROK_HARNESS.read_screen_state(
+        PANE_GROK_COMPOSER_READY, {"confirming_trust_prompt": True},
+    )
+    assert state["confirming_trust_prompt"] is False
+    assert state["composer_ready"] is True
+    assert state["blocking_modal"] is None
+    assert keys == []
+
+
+def test_grok_in_flight_turn_keeps_prompt_glyph_but_is_not_ready():
+    """The `│ ❯` line stays on screen while a turn runs; the spinner line
+    above the box is what says busy."""
+    state, keys = GROK_HARNESS.read_screen_state(PANE_GROK_BUSY, {})
+    assert state["composer_ready"] is False
+    assert keys == []
+
+
+def test_grok_idle_after_reply_is_ready_again():
+    state, _ = GROK_HARNESS.read_screen_state(PANE_GROK_AFTER_REPLY, {})
+    assert state["composer_ready"] is True
+
+
+def test_grok_auth_banner_blocks_readiness():
+    pane = PANE_GROK_COMPOSER_READY + "\nNot signed in. To authenticate without a browser, run:\n  grok login --device-code\n"
+    state, _ = GROK_HARNESS.read_screen_state(pane, {})
+    assert state["blocking_modal"] == "auth_required"
+    assert state["composer_ready"] is False

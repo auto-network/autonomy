@@ -185,10 +185,10 @@ Two independent levers decide *how* a bead runs. Both are set via **bead
 labels** — there is no per-bead flag on `graph dispatch approve` (see
 `graph dispatch approve --help`).
 
-- **Harness** (`claude` vs `codex`) — selected indirectly. A bead label that
-  matches a workspace's `dispatch_labels` routes the bead to that workspace,
-  and the workspace's declared `harness` is used. A bead matching no workspace
-  runs the rig default (`claude`).
+- **Harness** (`claude`, `codex` or `grok`) — selected indirectly. A bead label
+  that matches a workspace's `dispatch_labels` routes the bead to that
+  workspace, and the workspace's declared `harness` is used. A bead matching no
+  workspace runs the rig default (`claude`).
 
 - **Model** — selected with an optional `model:<name>` label so a simple bead
   can run cheap and a complex one expensive. Precedence, highest first:
@@ -199,7 +199,8 @@ labels** — there is no per-bead flag on `graph dispatch approve` (see
      everything.
   2. **workspace model** — the model declared on the bead's workspace.
   3. **built-in default** — `DEFAULT_OPUS_MODEL` for claude, resolved in
-     `agents/session_launcher.py`.
+     `agents/session_launcher.py`; codex and grok run their CLI's own default
+     when the workspace declares none.
 
   With no `model:` label a bead inherits its workspace's model, or the default
   when the workspace declares none. An **unknown `model:` value fails the
@@ -208,6 +209,24 @@ labels** — there is no per-bead flag on `graph dispatch approve` (see
   need a new one. The label is forwarded as `--model` through
   `start_agent` → `launch.sh` → `launch_session_cli`; see the Dispatch
   Lifecycle note `c706c9f3-5a8`.
+
+### Grok (xAI Grok Build) workspaces
+
+`harness: grok` runs xAI's Grok Build CLI (`grok`, npm `@xai-official/grok`)
+in the session container. It reads the same `~/.claude/CLAUDE.md` primer,
+`.claude/skills` and `.agents/skills` the other harnesses use, and the
+dashboard tails its ACP transcript (`~/.grok/sessions/<cwd>/<uuid>/updates.jsonl`)
+through the shared session viewer. Where its requests go is the workspace's
+`env`:
+
+| Mode | Workspace `env` | What the launcher does |
+|------|-----------------|------------------------|
+| first-party xAI | `XAI_API_KEY: credential:<key>` (or nothing, if the operator's audited vault holds `grok.api-key`) | passes the key; `model` is an xAI id such as `grok-4.6` |
+| OpenAI-compatible gateway | `GROK_GATEWAY_BASE_URL`, `GROK_GATEWAY_API_KEY: credential:<key>`, optional `GROK_GATEWAY_MODELS` (comma list) | writes a per-session `config.toml` catalog, signs Grok in through `autonomy-grok-auth`, passes `-m <catalog key>`; `model` is the gateway id such as `x-ai/grok-4.6` |
+
+Every launch runs `grok --trust --always-approve` (folder trust is what makes
+Grok load project instructions and skills). Design and verified CLI facts:
+graph note `7d172e94-4f3`.
 
 ### Key References
 

@@ -15,7 +15,7 @@ Usage:
         --image autonomy-session \
         --org <org-slug> \
         [--detach]
-        [--harness claude|codex]
+        [--harness claude|codex|grok]
 
 Prints to stdout (parseable by bash):
     CONTAINER_ID=<id>       (detach mode)
@@ -143,7 +143,7 @@ def main() -> int:
     parser.add_argument("--output-dir", default="", help="Pre-created output directory")
     parser.add_argument("--image", default=DEFAULT_IMAGE, help="Docker image")
     parser.add_argument("--model", default="", help="Optional model override")
-    parser.add_argument("--harness", default="claude", choices=["claude", "codex"],
+    parser.add_argument("--harness", default="claude", choices=["claude", "codex", "grok"],
                         help="Harness to launch inside the container")
     parser.add_argument("--detach", action="store_true", help="Run container in background")
     parser.add_argument("--org", default="",
@@ -298,7 +298,10 @@ def main() -> int:
         # launch_session, so both entry points share one mount path (auto-vm8qh).
         # The CLI's --worktree/--git-dir are its caller mounts; origins are
         # derived from source paths inside build_mount_plan.
-        from agents.session_launcher import build_mount_plan
+        from agents.session_launcher import (
+            build_mount_plan, _grok_launch_profile, _generate_grok_config,
+            _grok_env_with_default_key, grok_launch_script,
+        )
         from agents.mount_plan import (
             mount_args, discover_topology, SocketMountRefused, MountUnresolvable,
             VolumeSubpathUnsupported,
@@ -352,6 +355,7 @@ def main() -> int:
             *(["-e", f"BEADS_DOLT_SERVER_HOST={beads_dolt_host}"]
               if beads_dolt_host else []),
             "-e", "CODEX_HOME=/home/agent/.codex",
+            "-e", "GROK_HOME=/home/agent/.grok",
             *auth_args,
         ]
         if session_runtime == "privileged":
@@ -401,10 +405,24 @@ def main() -> int:
             DEFAULT_OPUS_MODEL if args.harness == "claude" else ""
         )
 
+        grok_profile = None
+        if args.harness == "grok":
+            # The CLI carries no workspace env, so Grok runs first-party here:
+            # XAI_API_KEY from the caller's environment or the vault default.
+            grok_profile = _grok_launch_profile({}, resolved_model or None)
+            _generate_grok_config(run_dir, grok_profile)
+            for k, v in _grok_env_with_default_key({}, grok_profile).items():
+                cmd.extend(["-e", f"{k}={v}"])
+
         if prompt is not None:
             prompt_in_output = run_dir / ".prompt.md"
             prompt_in_output.write_text(prompt)
-            if args.harness == "claude":
+            if args.harness == "grok":
+                cmd += [args.image, "sh", "-c", grok_launch_script(
+                    grok_profile, prompt_file="/workspace/output/.prompt.md",
+                    resume_uuid=None, session_id=None,
+                )]
+            elif args.harness == "claude":
                 shell_cmd = (
                     "cat /workspace/output/.prompt.md | "
                     f"claude --dangerously-skip-permissions --model "
@@ -424,7 +442,12 @@ def main() -> int:
                 shell_cmd = "cat /workspace/output/.prompt.md | " + shlex.join(codex_cmd)
                 cmd += [args.image, "sh", "-c", shell_cmd]
         else:
-            if args.harness == "claude":
+            if args.harness == "grok":
+                cmd += [args.image, "sh", "-c", grok_launch_script(
+                    grok_profile, prompt_file=None, resume_uuid=None,
+                    session_id=None,
+                )]
+            elif args.harness == "claude":
                 cmd += [
                     args.image,
                     "claude",

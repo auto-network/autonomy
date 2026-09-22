@@ -164,6 +164,13 @@ MODEL_SWITCH_DEFAULTS: list[dict] = [
     # confirm with "1"; the versioned name is rejected outright.
     {"key": "claude:fable", "harness": "claude", "label": "Fable", "argument": "fable",
      "model": "claude-fable-5-1", "confirm_key": "1", "order": 40},
+    # Grok Build: `/model <id>` switches within the session's catalog. These
+    # are xAI's first-party ids; a gateway workspace's catalog keys differ
+    # (e.g. `x-ai-grok-4-6`) and the operator adds those as Settings rows.
+    {"key": "grok:grok-4.6", "harness": "grok", "label": "Grok 4.6", "argument": "grok-4.6",
+     "model": "grok-4.6", "order": 10},
+    {"key": "grok:grok-4.5", "harness": "grok", "label": "Grok 4.5", "argument": "grok-4.5",
+     "model": "grok-4.5", "order": 20},
 ]
 
 

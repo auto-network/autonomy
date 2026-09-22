@@ -275,8 +275,8 @@ track "watch for admission," and overlap the rest of the setup.
 The moment worth designing for: the user watching their own agent work in
 a live session, in their browser, on their node. To get there: connect
 their most active repository as a workspace (dashboard → Workspaces), and
-provision session credentials — Autonomy sessions run Claude Code or Codex
-inside containers, and the node needs a working credential for that. Use
+provision session credentials — Autonomy sessions run Claude Code, Codex or
+Grok Build inside containers, and the node needs a working credential for that. Use
 the credential the user already has (you're running on it right now);
 the dashboard's credential settings accept a setup token. Consume the
 existing mechanism as-is; never invent a new secrets path.

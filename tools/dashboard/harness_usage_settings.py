@@ -156,7 +156,7 @@ SYNOPSIS = {
 }
 
 
-_VALID_HARNESSES = ("claude", "codex")
+_VALID_HARNESSES = ("claude", "codex", "grok")
 _VALID_STATUSES = ("ok", "unavailable")
 _VALID_SOURCES = ("oauth_usage", "transcript", "probe_headers")
 
