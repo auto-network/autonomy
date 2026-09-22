@@ -56,21 +56,30 @@ def test_claude_vault_sign_in_absent_is_skipped(monkeypatch):
     assert sealed == {}
 
 
-def test_codex_vault_sign_in_rotates_the_triple(monkeypatch):
-    now = 1_000_000
+def test_codex_rows_come_from_the_vault_and_go_back_sealed(monkeypatch):
     sealed = _vault(monkeypatch, {
-        hv.CODEX_REFRESH: "cr-old", hv.CODEX_EXPIRES: str(now + 60_000),
+        hv.CODEX_ID: "id-1", hv.CODEX_ACCESS: "at-1", hv.CODEX_REFRESH: "rt-1",
+        hv.CODEX_ACCOUNT: "acct-9", hv.CODEX_EXPIRES: "9000",
+        hv.CODEX_ERROR: hv.NONE,
     })
-    result = codex_refresh.RefreshResult(
-        kind="ok", access_token="ct-new", refresh_token="cr-new",
-        id_token="id-new", expires_at_ms=now + 7_200_000,
-    )
-    kind = codex_refresh.refresh_vault_sign_in(now_ms=now, refresh=lambda tok: result)
-    assert kind == "ok"
-    assert sealed[hv.CODEX_ID] == "id-new"
-    assert sealed[hv.CODEX_ACCESS] == "ct-new"
-    assert sealed[hv.CODEX_REFRESH] == "cr-new"
-    assert sealed[hv.CODEX_EXPIRES] == str(now + 7_200_000)
+    rows = codex_refresh._credential_rows()
+    assert len(rows) == 1 and rows[0].key == "acct-9"
+    assert rows[0].payload["refresh_token"] == "rt-1"
+    assert rows[0].payload["expires_at_ms"] == 9000
+    assert "last_refresh_error" not in rows[0].payload
+    codex_refresh._write_back("acct-9", {
+        "id_token": "id-2", "access_token": "at-2", "refresh_token": "rt-2",
+        "expires_at_ms": 12000, "last_refresh_at": "2026-09-22T00:00:00Z",
+    }, org="personal")
+    assert sealed[hv.CODEX_ID] == "id-2"
+    assert sealed[hv.CODEX_EXPIRES] == "12000"
+    assert sealed[hv.CODEX_REFRESHED_AT] == "2026-09-22T00:00:00Z"
+    assert sealed[hv.CODEX_ERROR] == hv.NONE
+
+
+def test_codex_rows_absent_when_the_vault_holds_no_sign_in(monkeypatch):
+    _vault(monkeypatch, {})
+    assert codex_refresh._credential_rows() == []
 
 
 def test_revoked_sign_in_is_reported_not_overwritten(monkeypatch):

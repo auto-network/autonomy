@@ -1824,80 +1824,67 @@ def test_beads_credential_key_is_masked(
 
 # ── Codex credential cutover (bead auto-l1h3f) ───────────────────────
 
-def _codex_row(key, payload):
+def _stub_vault(monkeypatch, values: dict):
+    """Stub the operator's vault: every key in *values* is present and opens to it."""
     from types import SimpleNamespace
-    return SimpleNamespace(key=key, payload=payload)
+    from tools.graph import harness_credentials as hv
+
+    class _Members:
+        members = [SimpleNamespace(key=k, payload={"value": v}, vault_error=None)
+                   for k, v in values.items()]
+    monkeypatch.setattr(hv.graph_ops, "read_set", lambda *a, **kw: _Members())
 
 
-def _fresh_codex_payload(**over):
-    p = {
-        "email": "codexuser@example.com",
-        "auth_mode": "chatgpt",
-        "access_token": "at-1",
-        "refresh_token": "rt-1",
-        "id_token": "id-1",
-        "expires_at_ms": 4102444800000,
-        "last_refresh_at": "2026-08-14T00:00:00Z",
+def _codex_vault(monkeypatch, **over):
+    from tools.graph import harness_credentials as hv
+    values = {
+        hv.CODEX_ID: "id-1", hv.CODEX_ACCESS: "at-1", hv.CODEX_REFRESH: "rt-1",
+        hv.CODEX_ACCOUNT: "acct-UUID", hv.CODEX_EXPIRES: "4102444800000",
     }
-    p.update(over)
-    return p
+    values.update(over)
+    _stub_vault(monkeypatch, values)
 
 
 def test_materialize_codex_auth_json_reconstructs_file(tmp_path, monkeypatch):
-    """The substrate row is rebuilt into the on-disk auth.json shape Codex expects."""
+    """The vault rows are rebuilt into the on-disk auth.json shape Codex expects."""
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    monkeypatch.setattr(
-        session_launcher, "_codex_credential_rows",
-        lambda: [_codex_row("acct-UUID", _fresh_codex_payload())],
-    )
+    _codex_vault(monkeypatch)
     out = session_launcher._materialize_codex_auth_json(run_dir)
     assert out is not None
     doc = json.loads(Path(out).read_text())
     assert doc["auth_mode"] == "chatgpt"
     assert doc["OPENAI_API_KEY"] is None
-    # account_id is the row KEY, not a payload field
     assert doc["tokens"]["account_id"] == "acct-UUID"
     assert doc["tokens"]["access_token"] == "at-1"
     assert doc["tokens"]["refresh_token"] == "rt-1"
     assert doc["tokens"]["id_token"] == "id-1"
-    assert doc["last_refresh"] == "2026-08-14T00:00:00Z"
-    # 0600 like the host file
     assert (Path(out).stat().st_mode & 0o777) == 0o600
 
 
-def test_materialize_codex_auth_json_missing_row_returns_none(tmp_path, monkeypatch):
-    """No usable substrate row → no file → Codex simply unavailable (truthful)."""
+def test_materialize_codex_auth_json_missing_rows_returns_none(tmp_path, monkeypatch):
+    """No Codex sign-in in the vault → no file → Codex simply unavailable (truthful)."""
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    monkeypatch.setattr(session_launcher, "_codex_credential_rows", lambda: [])
+    _stub_vault(monkeypatch, {})
     assert session_launcher._materialize_codex_auth_json(run_dir) is None
 
 
-def test_materialize_codex_auth_json_missing_row_warns_with_remedy(
+def test_materialize_codex_auth_json_missing_rows_warns_with_remedy(
     tmp_path, monkeypatch, caplog,
 ):
-    """A None return must WARN with the remedy — a missed migration is an
+    """A None return must WARN with the remedy — a missing sign-in is an
     operator-visible error, not a silent sign-in prompt at launch."""
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    monkeypatch.setattr(session_launcher, "_codex_credential_rows", lambda: [])
+    _stub_vault(monkeypatch, {})
     with caplog.at_level("INFO", logger=session_launcher.logger.name):
         assert session_launcher._materialize_codex_auth_json(run_dir) is None
     warns = [r for r in caplog.records if r.levelname == "WARNING"]
     assert len(warns) == 1
     msg = warns[0].getMessage()
-    assert "no usable Codex credential row" in msg
+    assert "no Codex sign-in in the vault" in msg
     assert "graph credentials import" in msg
-
-
-def test_pick_codex_credential_row_prefers_freshest(monkeypatch):
-    older = _codex_row("a", _fresh_codex_payload(expires_at_ms=1000))
-    newer = _codex_row("b", _fresh_codex_payload(expires_at_ms=9000))
-    incomplete = _codex_row("c", {"auth_mode": "chatgpt"})  # no tokens
-    assert session_launcher._pick_codex_credential_row(
-        [older, newer, incomplete]) is newer
-    assert session_launcher._pick_codex_credential_row([incomplete]) is None
 
 
 def test_optional_tool_mounts_uses_substrate_not_host_auth_json(
@@ -1906,10 +1893,7 @@ def test_optional_tool_mounts_uses_substrate_not_host_auth_json(
     """The credential mount is the materialized substrate file, never ~/.codex/auth.json."""
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    monkeypatch.setattr(
-        session_launcher, "_codex_credential_rows",
-        lambda: [_codex_row("acct-UUID", _fresh_codex_payload())],
-    )
+    _codex_vault(monkeypatch)
     mounts = session_launcher._resolve_optional_tool_mounts(run_dir=run_dir)
     # Exactly one mount targets the container auth.json path...
     auth_hosts = [
@@ -1924,10 +1908,10 @@ def test_optional_tool_mounts_uses_substrate_not_host_auth_json(
 
 
 def test_optional_tool_mounts_no_row_mounts_no_auth(tmp_path, monkeypatch):
-    """A missing substrate row leaves no auth.json mount at all."""
+    """No Codex sign-in in the vault leaves no auth.json mount at all."""
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    monkeypatch.setattr(session_launcher, "_codex_credential_rows", lambda: [])
+    _stub_vault(monkeypatch, {})
     mounts = session_launcher._resolve_optional_tool_mounts(run_dir=run_dir)
     assert not any(
         spec.split(":")[0] == "/home/agent/.codex/auth.json"
@@ -1955,10 +1939,7 @@ def test_codex_auth_copy_cleanup_is_scheduled(
     tmp_path, fake_crosstalk, captured_run, platform_snapshot, monkeypatch,
 ):
     """The materialized Codex auth.json (live tokens) is cleaned up post-exit."""
-    monkeypatch.setattr(
-        session_launcher, "_codex_credential_rows",
-        lambda: [_codex_row("acct-UUID", _fresh_codex_payload())],
-    )
+    _codex_vault(monkeypatch)
     scheduled: list[tuple[str, str]] = []
     monkeypatch.setattr(
         session_launcher, "_schedule_creds_cleanup",
@@ -2206,12 +2187,9 @@ def test_build_mount_plan_socket_via_startup_is_refused_at_emit(tmp_path, monkey
 
 
 def _stub_usable_codex_row(monkeypatch):
-    """Make a usable Codex credential row exist, so the auth mount is DECLARED —
+    """Make the vault hold a Codex sign-in, so the auth mount is DECLARED —
     without this the declare/materialize distinction has nothing to prove."""
-    import types
-    monkeypatch.setattr(session_launcher, "_pick_codex_credential_row",
-                        lambda rows: types.SimpleNamespace(key="acct", payload={}))
-    monkeypatch.setattr(session_launcher, "_codex_credential_rows", lambda: [object()])
+    _codex_vault(monkeypatch)
 
 
 def test_declare_mode_declares_but_does_not_materialize_credential(tmp_path, monkeypatch):
@@ -2413,7 +2391,6 @@ def test_optional_mounts_declare_the_vault_files_without_writing(tmp_path, monke
     _vault(monkeypatch, {
         hv.CLAUDE_ACCESS: "a", hv.CLAUDE_REFRESH: "r", hv.GROK_AUTH: '{"t": 1}',
     })
-    monkeypatch.setattr(session_launcher, "_codex_credential_rows", lambda: [])
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     without = session_launcher._resolve_optional_tool_mounts(run_dir=run_dir, materialize_auth=False)
@@ -2436,17 +2413,11 @@ def test_materialize_grok_auth_writes_the_stored_sign_in(tmp_path, monkeypatch):
     assert (Path(out).stat().st_mode & 0o777) == 0o600
 
 
-def test_materialize_codex_auth_prefers_the_vault(tmp_path, monkeypatch):
-    from tools.graph import harness_credentials as hv
-    _vault(monkeypatch, {
-        hv.CODEX_ID: "id-v", hv.CODEX_ACCESS: "at-v", hv.CODEX_REFRESH: "rt-v",
-        hv.CODEX_ACCOUNT: "acct-V", hv.CODEX_EXPIRES: "9000",
-    })
-    monkeypatch.setattr(session_launcher, "_codex_credential_rows",
-                        lambda: [_codex_row("acct-old", _fresh_codex_payload())])
-    doc = json.loads(Path(session_launcher._materialize_codex_auth_json(tmp_path)).read_text())
-    assert doc["tokens"]["account_id"] == "acct-V"
-    assert doc["tokens"]["access_token"] == "at-v"
+def test_launcher_source_has_no_plaintext_codex_read():
+    """The vault is the only Codex source: no pre-vault credential set is read."""
+    source = Path(session_launcher.__file__).read_text()
+    assert "CODEX_CREDENTIALS_SET_ID" not in source
+    assert "_codex_credential_rows" not in source
 
 
 def test_launcher_source_never_reads_the_plaintext_claude_rows_for_a_launch():
