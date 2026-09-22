@@ -31,6 +31,7 @@ from tools.graph.schemas.org_fleet_reachability import (
     ORG_FLEET_REACHABILITY_SET_ID as SET_ID,
     ROW_VERSION,
     OrgFleetReachabilityV1,
+    OrgFleetReachabilityV2,
 )
 from tools.network.idkit import DelegationCert, IdkitError, KeyPair, canonical_json
 from tools.network.idkit.keys import verify_signature
@@ -64,8 +65,12 @@ def build_row(
         "updated_at": int(time.time() if now is None else now),
     }
     body["sig"] = machine_key.sign_hex(_signing_input(body))
-    OrgFleetReachabilityV1.validate(body)
-    return body
+    # The signature covers machine_pub; the STORED row does not repeat it,
+    # because the row key is that same value. verify_row puts it back from
+    # the key before checking, so both shapes sign identical bytes.
+    row = {k: v for k, v in body.items() if k != "machine_pub"}
+    OrgFleetReachabilityV2.validate(row)
+    return row
 
 
 def verify_row(
@@ -85,11 +90,12 @@ def verify_row(
     stands as a hint, admission being the hello's).
     """
     try:
-        OrgFleetReachabilityV1.validate(payload)
+        OrgFleetReachabilityV2.validate(payload)
     except Exception:
         return None
-    if payload["machine_pub"] != key:
-        return None
+    # Reinstate the field the key carries, so the signed bytes are the ones
+    # the machine signed. A revision-1 row upconverts to the same shape.
+    payload = {**dict(payload), "machine_pub": key}
     try:
         cert = DelegationCert.from_dict(payload["persona_cert"])
     except (IdkitError, ValueError, TypeError, KeyError):
@@ -124,8 +130,12 @@ def read_rows(path: Path | str) -> dict[str, Any]:
     except sqlite3.Error:
         return {}
     try:
+        # Both revisions: this reader is raw SQL, so nothing upconverts for
+        # it. A revision-1 row differs only by repeating machine_pub, which
+        # is dropped below — the same thing the registered upconverter does.
         rows = conn.execute(
-            'SELECT "key",payload FROM settings WHERE set_id=? AND schema_revision=? '
+            'SELECT "key",payload,schema_revision FROM settings '
+            "WHERE set_id=? AND schema_revision IN (1,?) "
             "AND supersedes IS NULL AND excludes IS NULL AND deprecated=0 "
             "ORDER BY updated_at, created_at",
             (SET_ID, REVISION),
@@ -135,11 +145,14 @@ def read_rows(path: Path | str) -> dict[str, Any]:
     finally:
         conn.close()
     out: dict[str, Any] = {}
-    for key, payload in rows:
+    for key, payload, revision in rows:
         try:
-            out[str(key)] = json.loads(payload) if isinstance(payload, str) else payload
+            value = json.loads(payload) if isinstance(payload, str) else payload
         except (ValueError, TypeError):
             continue
+        if int(revision) < REVISION and isinstance(value, dict):
+            value = {k: v for k, v in value.items() if k != "machine_pub"}
+        out[str(key)] = value
     return out
 
 

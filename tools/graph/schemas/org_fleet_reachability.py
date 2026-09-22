@@ -43,6 +43,7 @@ SYNOPSIS = {
 }
 
 from .registry import (
+    register_upconverter,
     keyed_per_entity,
     SettingSchema,
     SchemaValidationError,
@@ -51,7 +52,7 @@ from .registry import (
 )
 
 ORG_FLEET_REACHABILITY_SET_ID = "autonomy.org.fleet-reachability"
-ORG_FLEET_REACHABILITY_REVISION = 1
+ORG_FLEET_REACHABILITY_REVISION = 2
 ROW_VERSION = 1
 #: fleet_direct_config.MAX_ADVERTISE_ADDRS — the personal announce's bound.
 MAX_ADDRESSES = 8
@@ -64,10 +65,14 @@ _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 @home("organization")
 @keyed_per_entity(key_strategy="machine_pub")
 class OrgFleetReachabilityV1(SettingSchema):
-    """One member machine's direct sync addresses, self-certified."""
+    """One member machine's direct sync addresses, self-certified.
+
+    Revision 1 kept ``machine_pub`` in the payload; revision 2 drops it. The
+    class stays registered so revision-1 rows upconvert on read.
+    """
 
     set_id = ORG_FLEET_REACHABILITY_SET_ID
-    schema_revision = ORG_FLEET_REACHABILITY_REVISION
+    schema_revision = 1
 
     _field_metadata: dict[str, dict] = {
         "v": {"type": "integer", "required": True, "description": "Row version (1)"},
@@ -144,3 +149,48 @@ class OrgFleetReachabilityV1(SettingSchema):
             raise SchemaValidationError(
                 f"{cls.__name__}: keys are machine public keys (64 lowercase hex), got {key!r}"
             )
+
+
+@publication_band(min="raw", max="published")
+@home("organization")
+@keyed_per_entity(key_strategy="machine_pub")
+class OrgFleetReachabilityV2(SettingSchema):
+    """One member machine's direct sync addresses, self-certified.
+
+    Revision 2 drops ``machine_pub`` from the payload: the row key already
+    carries it. The signature is unaffected — it is computed over the body
+    WITH ``machine_pub``, and a verifier reinserts it from the key before
+    checking, so a revision-1 row and a revision-2 row produce identical
+    signed bytes (``fleet_org_reachability._signing_input``).
+    """
+
+    set_id = ORG_FLEET_REACHABILITY_SET_ID
+    schema_revision = ORG_FLEET_REACHABILITY_REVISION
+
+    _field_metadata: dict[str, dict] = {
+        key: value
+        for key, value in OrgFleetReachabilityV1._field_metadata.items()
+        if key != "machine_pub"
+    }
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        if isinstance(payload, dict) and "machine_pub" in payload:
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'machine_pub' is the row key and must not be "
+                "repeated in the payload"
+            )
+        probe = dict(payload) if isinstance(payload, dict) else payload
+        if isinstance(probe, dict):
+            probe["machine_pub"] = "0" * 64
+        OrgFleetReachabilityV1.validate(probe)
+
+    @classmethod
+    def validate_member_key(cls, key: str) -> None:
+        OrgFleetReachabilityV1.validate_member_key(key)
+
+
+register_upconverter(
+    ORG_FLEET_REACHABILITY_SET_ID, 1, ORG_FLEET_REACHABILITY_REVISION,
+    lambda payload: {k: v for k, v in dict(payload).items() if k != "machine_pub"},
+)
