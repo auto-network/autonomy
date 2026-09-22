@@ -1686,7 +1686,11 @@ def cmd_context(args):
             print("'last:N' requires N >= 1", file=sys.stderr)
             return
 
-    source = client.get_source(args.source)
+    # The caller's org travels with the lookup, for the same reason it does
+    # in _resolve_source_cross_org: without it the resolver treats this as a
+    # scopeless caller and scans every org with no publication filter, so a
+    # peer's raw turns would render here.
+    source = client.get_source(args.source, org=getattr(args, "org", None))
     # W4 (auto-gah4g): no more host-only auto-ingest fallback on a lookup
     # miss — eager source creation (W2) means a session's source exists
     # from launch, so a genuine miss here means the session doesn't exist
@@ -5000,8 +5004,12 @@ def cmd_attachment(args):
     """Show metadata for a single attachment (cross-org aware)."""
     client = get_client()
 
+    # Same scoping rule: an attachment is visible across orgs only when its
+    # PARENT source is published or canonical, and the resolver can only
+    # apply that test if it knows who is asking.
+    caller_org = getattr(args, "org", None)
     if isinstance(client, HttpClient):
-        att = client.get_attachment(args.id)
+        att = client.get_attachment(args.id, org=caller_org)
     else:
         own_db = GraphDB(args.db)
         try:
@@ -5009,7 +5017,7 @@ def cmd_attachment(args):
         finally:
             own_db.close()
         if att is None:
-            att = client.get_attachment(args.id)
+            att = client.get_attachment(args.id, org=caller_org)
 
     if not att:
         print(f"No attachment found matching '{args.id}'", file=sys.stderr)
