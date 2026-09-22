@@ -21299,6 +21299,9 @@ async def api_plugins(request):
         principal = api_auth.principal_from_request(request)
         if principal.org_bound:
             effective_org = principal.org
+        if not p.manifest.has_page:
+            # Settings-only plugin: nothing for the shell to show.
+            continue
         out.append({
             "id": p.id,
             "label": p.nav_label,
@@ -21411,10 +21414,11 @@ def _build_plugin_routes() -> list:
             page_handler = _make_plugin_page_handler(p.id)
             out.append(Route(path, page_handler))
             out.append(Route(f"{path}/{{path:path}}", page_handler))
-        out.append(Route(
-            f"/pages/{p.id}",
-            _make_plugin_fragment_handler(p.id, f"plugins/{p.id}/{p.template}"),
-        ))
+        if p.manifest.has_page:
+            out.append(Route(
+                f"/pages/{p.id}",
+                _make_plugin_fragment_handler(p.id, f"plugins/{p.id}/{p.template}"),
+            ))
         if p.routes:
             # Plugin routes are authenticated by construction: the plugin
             # infrastructure wraps them, plugins never add auth themselves.
@@ -21443,11 +21447,11 @@ def _plugin_asset_rev(plugin) -> str:
     plugin manifest or any declared page asset changes on disk.
     """
     parts: list[str] = []
-    candidates = [
-        plugin.plugin_dir / "plugin.yaml",
-        plugin.plugin_dir / plugin.template,
-        plugin.plugin_dir / plugin.script,
-    ]
+    candidates = [plugin.plugin_dir / "plugin.yaml"]
+    if plugin.template:
+        candidates.append(plugin.plugin_dir / plugin.template)
+    if plugin.script:
+        candidates.append(plugin.plugin_dir / plugin.script)
     if plugin.style:
         candidates.append(plugin.plugin_dir / plugin.style)
     for path in candidates:

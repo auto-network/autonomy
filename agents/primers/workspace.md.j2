@@ -6,6 +6,20 @@ Autonomy Network dashboard.
 This is an interactive workspace session for {{ config.description }}.
 {% endif %}
 There is no bead, no task directive, and no `decision.json` to write.
+{% if onboarding %}
+
+## Onboarding
+
+{% if onboarding.branch == "founded" %}
+The operator finished onboarding by founding the organization `{{ onboarding.org }}`.
+{% elif onboarding.branch == "joined" %}
+The operator finished onboarding by joining the organization `{{ onboarding.org }}`.
+{% elif onboarding.branch == "none" %}
+The operator finished onboarding with no organization: this node holds only their personal store.
+{% else %}
+The operator holds the organization `{{ onboarding.org }}`; whether they founded or joined it is not recorded on this node.
+{% endif %}
+{% endif %}
 
 ## Workspace Repos
 {% if writable_repos or readonly_repos %}

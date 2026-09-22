@@ -310,7 +310,7 @@ def _plugin_skill_blocks(config: WorkspaceV1) -> list[dict]:
             continue
         blocks.append({
             "id": manifest.id,
-            "label": manifest.nav.label,
+            "label": manifest.nav.label if manifest.nav else manifest.id,
             "skill_text": skill_text,
         })
     blocks.sort(key=lambda b: b["id"])
@@ -444,6 +444,8 @@ def _overlay_markdown(
     set_id: str,
     revision: int,
     key: str,
+    *,
+    org: str | None = None,
 ) -> str:
     """Resolve one primer overlay layer from its Setting rows.
 
@@ -471,7 +473,7 @@ def _overlay_markdown(
     try:
         members = graph_ops.read_set(
             set_id,
-            org=config.graph_project,
+            org=org if org is not None else config.graph_project,
             peers=[],
             target_revision=revision,
         )
@@ -494,6 +496,52 @@ def _overlay_markdown(
 
     blocks.sort(key=lambda block: (block[0], block[1]))
     return "\n\n".join(body for _, _, body in blocks)
+
+
+GETTING_STARTED_WORKSPACE_ID = "getting-started"
+
+
+def _ledger_genesis_id(slug: str) -> str | None:
+    """The genesis id of the local organization *slug*'s ledger, or None."""
+    from tools.network.ledger import LedgerStore, org_ledger_db_path
+
+    try:
+        with LedgerStore(org_ledger_db_path(slug)) as store:
+            return store.ledger.genesis_id
+    except Exception:
+        return None
+
+
+def onboarding_branch() -> dict:
+    """Which branch the operator took through onboarding, from this node's
+    organization inventory and the ledger (graph://5f2f5a49-00d v11 §10.6).
+
+    ``{"branch": "founded" | "joined" | "none", "org": <slug> | None}``.
+    The persona row this node wrote at the founding ceremony or the join
+    claim records ``source`` as ``found`` or ``join``; it is keyed by the
+    ledger's genesis id. A shared organization with no such row is reported
+    as ``"held"``: the node holds it, and how is not recorded.
+    """
+    from tools.graph import org_ops
+
+    try:
+        shared = [ref for ref in org_ops.list_orgs() if ref.type == "shared"]
+    except Exception:
+        shared = []
+    if not shared:
+        return {"branch": "none", "org": None}
+    slug = shared[0].slug
+    source = None
+    genesis_id = _ledger_genesis_id(slug)
+    if genesis_id:
+        try:
+            member = org_ops._persona_member(genesis_id)
+        except Exception:
+            member = None
+        if member is not None:
+            source = member.payload.get("source")
+    branch = {"found": "founded", "join": "joined"}.get(source, "held")
+    return {"branch": branch, "org": slug}
 
 
 def render_workspace_primer(config: WorkspaceV1) -> str:
@@ -526,6 +574,24 @@ def render_workspace_primer(config: WorkspaceV1) -> str:
         ORG_PRIMER_REVISION,
         config.graph_project,
     )
+    org = config.graph_project
+    onboarding = None
+    if config.id == GETTING_STARTED_WORKSPACE_ID:
+        # The Getting Started primer states the branch the operator took,
+        # and the organization they founded or joined contributes its
+        # guidance through its own existing autonomy.org.primer#1 rows,
+        # read from that organization's database (v11 §10.6, FR8).
+        onboarding = onboarding_branch()
+        if onboarding["org"] and not org_primer:
+            org_primer = _overlay_markdown(
+                config,
+                ORG_PRIMER_SET_ID,
+                ORG_PRIMER_REVISION,
+                onboarding["org"],
+                org=onboarding["org"],
+            )
+            if org_primer:
+                org = onboarding["org"]
     capability_blocks = _capability_primer_blocks(config)
     plugin_blocks = _plugin_skill_blocks(config)
     turn_correction = _turn_correction_block(config)
@@ -546,7 +612,8 @@ def render_workspace_primer(config: WorkspaceV1) -> str:
         org_mounts=org_mounts,
         workspace_primer=workspace_primer,
         org_primer=org_primer,
-        org=config.graph_project,
+        org=org,
+        onboarding=onboarding,
         capability_blocks=capability_blocks,
         plugin_blocks=plugin_blocks,
         turn_correction=turn_correction,

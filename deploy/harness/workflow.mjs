@@ -20,6 +20,22 @@ createWorkflow({scope:onboardingOnly?'identity-and-organization-onboarding':'mem
   if(onboardingOnly){
     withStep('alice','finish onboarding',()=>action('alice','#create-org-finish',{},'[data-testid="welcome-open-workspace"]','#create-org-error'));
     withStep('alice','save onboarding-complete',()=>save('alice','onboarding-complete',browser('alice','snapshot','-i')));
+    // Step 3 starts the first session in Getting Started and lands on it
+    // (design of record graph://5f2f5a49-00d v11 §10.6).
+    withStep('alice','go to your workspace',()=>browser('alice','click','[data-testid="welcome-open-workspace"]'));
+    // The click navigates, which ends any in-page wait; poll the location
+    // from outside until the session page is open, then wait inside it.
+    withStep('alice','first session page',()=>{const started=Date.now();for(;;){
+      const path=js('alice','location.pathname');
+      if(path.startsWith('/session/'))break;
+      const error=js('alice',`(()=>{const e=document.querySelector('[data-testid="welcome-start-error"]');return e&&e.textContent.trim()||'';})()`);
+      if(error)throw new Error(error);
+      if(Date.now()-started>30000)throw new Error('UI timeout: the first session page did not open (still on '+path+')');
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,500);}
+      return waitFor('alice','[data-testid="session-header"]','.sv-error, [data-testid="session-error"]',20000);});
+    withStep('alice','save getting-started-session',()=>save('alice','getting-started-session',{
+      snapshot:browser('alice','snapshot','-i'),
+      session:js('alice',`(async()=>{const name=location.pathname.split('/').pop();const s=await (await fetch('/api/session/'+name)).json();return {path:location.pathname,tmux_name:name,project:s.project||s.session&&s.session.project||null,startup_state:s.startup_state||s.session&&s.session.startup_state||null,raw:JSON.stringify(s).slice(0,600)};})()`)}));
     evidence.status='passed';
   }else{
     withStep('alice','open settings panel',()=>browser('alice','click','#create-org-goto-settings'));

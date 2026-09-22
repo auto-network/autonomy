@@ -1,0 +1,32 @@
+id: getting_started
+api_version: 1
+org: personal
+default_enabled: true
+
+# Getting Started (design of record graph://5f2f5a49-00d v11 §10.6, FR7, FR8).
+# The committed starting state every node shares: two personal workspaces,
+# Getting Started and Idea Board, and their primer blocks. The plugin settings
+# reconciler installs the rows into personal.db at every dashboard startup.
+# There is no page: the onboarding app is its own design note.
+
+settings:
+  - set_id: autonomy.workspace
+    schema_revision: 2
+    key: getting-started
+    state: raw
+    payload_file: settings/workspace_getting_started.json
+  - set_id: autonomy.workspace
+    schema_revision: 2
+    key: idea-board
+    state: raw
+    payload_file: settings/workspace_idea_board.json
+  - set_id: autonomy.workspace.primer
+    schema_revision: 1
+    key: getting-started
+    state: raw
+    payload_file: settings/primer_getting_started.json
+  - set_id: autonomy.workspace.primer
+    schema_revision: 1
+    key: idea-board
+    state: raw
+    payload_file: settings/primer_idea_board.json

@@ -1348,3 +1348,81 @@ class TestOrganizationalMounts:
         out = render_workspace_primer(_cfg())
 
         assert "## Organizational Mounts" not in out
+
+
+# ── Getting Started: the onboarding branch and the org's guidance ────
+# (design of record graph://5f2f5a49-00d v11 §10.6, FR7, FR8)
+
+
+def _branch(monkeypatch, branch, org):
+    monkeypatch.setattr(
+        primer_renderer, "onboarding_branch",
+        lambda: {"branch": branch, "org": org},
+    )
+
+
+def test_getting_started_primer_states_founded_branch(_turn_correction_org_env, monkeypatch):
+    _branch(monkeypatch, "founded", "sample-org")
+    out = render_workspace_primer(_cfg(id="getting-started", graph_project="personal"))
+    assert "## Onboarding" in out
+    assert "by founding the organization `sample-org`" in out
+
+
+def test_getting_started_primer_states_joined_branch(_turn_correction_org_env, monkeypatch):
+    _branch(monkeypatch, "joined", "sample-org")
+    out = render_workspace_primer(_cfg(id="getting-started", graph_project="personal"))
+    assert "by joining the organization `sample-org`" in out
+
+
+def test_getting_started_primer_states_no_organization(_turn_correction_org_env, monkeypatch):
+    _branch(monkeypatch, "none", None)
+    out = render_workspace_primer(_cfg(id="getting-started", graph_project="personal"))
+    assert "with no organization" in out
+    assert "## Org Conventions" not in out
+
+
+def test_getting_started_primer_carries_the_orgs_own_primer(_turn_correction_org_env, monkeypatch):
+    """A joined organization contributes through its existing
+    autonomy.org.primer#1 rows, read from that organization's database."""
+    _write_overlay(
+        _ORG_PRIMER_SET_ID, _ORG_PRIMER_REV, "sample-org",
+        {"markdown": "### Welcome to sample-org\n\nRead the charter first."},
+    )
+    _write_overlay(
+        _ORG_PRIMER_SET_ID, _ORG_PRIMER_REV, "other-org",
+        {"markdown": "### Other org\n\nNot yours."},
+        org="other-org",
+    )
+    _branch(monkeypatch, "joined", "sample-org")
+    out = render_workspace_primer(_cfg(id="getting-started", graph_project="personal"))
+    assert "## Org Conventions (sample-org)" in out
+    assert "Read the charter first." in out
+    assert "Not yours." not in out
+
+
+def test_other_workspaces_have_no_onboarding_section(_turn_correction_org_env, monkeypatch):
+    _branch(monkeypatch, "founded", "sample-org")
+    out = render_workspace_primer(_cfg(id="sample", graph_project="sample-org"))
+    assert "## Onboarding" not in out
+
+
+def test_onboarding_branch_reads_inventory_and_persona_source(monkeypatch):
+    from types import SimpleNamespace
+    from tools.graph import org_ops
+
+    refs = [SimpleNamespace(slug="personal", type="personal"),
+            SimpleNamespace(slug="acme", type="shared")]
+    monkeypatch.setattr(org_ops, "list_orgs", lambda **kw: refs)
+    monkeypatch.setattr(primer_renderer, "_ledger_genesis_id", lambda slug: "g1")
+    monkeypatch.setattr(
+        org_ops, "_persona_member",
+        lambda genesis: SimpleNamespace(payload={"source": "join"}),
+    )
+    assert primer_renderer.onboarding_branch() == {"branch": "joined", "org": "acme"}
+    monkeypatch.setattr(
+        org_ops, "_persona_member",
+        lambda genesis: SimpleNamespace(payload={"source": "found"}),
+    )
+    assert primer_renderer.onboarding_branch() == {"branch": "founded", "org": "acme"}
+    monkeypatch.setattr(org_ops, "list_orgs", lambda **kw: refs[:1])
+    assert primer_renderer.onboarding_branch() == {"branch": "none", "org": None}

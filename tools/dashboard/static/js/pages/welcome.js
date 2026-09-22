@@ -148,9 +148,32 @@ function welcomeApp() {
     joinOrg() {
       location.assign('/network/join' + location.search + location.hash);
     },
-    // Step 3 → the session UI, where the first workspace is opened.
-    goToWorkspace() {
-      location.assign('/beads');
+    // Step 3 finishes onboarding: it starts the first session in the
+    // Getting Started workspace through the ordinary session-create path
+    // and lands on it (design of record graph://5f2f5a49-00d v11 §10.6).
+    // This step runs once, so nothing records that the session started.
+    startError: '',
+    startBusy: false,
+    async goToWorkspace() {
+      if (this.startBusy) return;
+      this.startBusy = true;
+      this.startError = '';
+      try {
+        var response = await fetch('/api/session/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({ project: 'getting-started' }),
+        });
+        var body = await response.json().catch(function () { return {}; });
+        if (!response.ok || !body.tmux_name) {
+          throw new Error(body.error || ('Could not start the Getting Started session (HTTP ' + response.status + ').'));
+        }
+        location.assign('/session/' + encodeURIComponent(body.tmux_name));
+      } catch (e) {
+        this.startError = e.message || 'Could not start the Getting Started session.';
+        this.startBusy = false;
+      }
     },
   };
 }

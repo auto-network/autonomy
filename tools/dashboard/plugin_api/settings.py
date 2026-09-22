@@ -23,6 +23,7 @@ from tools.dashboard.plugin_api.schema import (
 )
 from tools.graph import ops as graph_ops
 from tools.graph import schemas as graph_schemas
+from tools.graph import settings_ops as _settings_ops
 
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,14 @@ def resolve_setting_declarations(
     for decl in plugin.manifest.settings:
         payload, resource = _load_payload(plugin.plugin_dir, decl)
         graph_schemas.validate_payload(decl.set_id, decl.schema_revision, payload)
+        # Hash the payload as the store resolves it, with the schema's
+        # declared defaults filled: a reader sees those defaults on the
+        # installed row, so hashing the bare declaration would report every
+        # row of a schema with defaults as drifted on the next startup and
+        # never update it again.
+        payload = _settings_ops._apply_declared_defaults(
+            decl.set_id, int(decl.schema_revision), dict(payload),
+        )
         out.append(ResolvedPluginSetting(
             plugin_id=plugin.id,
             org=org,

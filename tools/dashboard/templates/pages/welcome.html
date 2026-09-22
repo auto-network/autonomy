@@ -168,7 +168,8 @@
         <h2 x-text="orgName || 'Your organization'"></h2><p>Your organization.</p></div></div>
       <div class="step done"><div class="n">&check;</div><div class="body">
         <h2>First workspace</h2><p>Open and waiting.</p></div></div>
-      <button style="margin-top:.6rem" data-testid="welcome-open-workspace" @click="goToWorkspace()">Go to your workspace</button>
+      <button style="margin-top:.6rem" data-testid="welcome-open-workspace" :disabled="startBusy" @click="goToWorkspace()" x-text="startBusy ? 'Starting your first session…' : 'Go to your workspace'"></button>
+      <p class="sub" x-show="startError" x-text="startError" data-testid="welcome-start-error" style="color:#fca5a5"></p>
     </div>
   </template>
 
