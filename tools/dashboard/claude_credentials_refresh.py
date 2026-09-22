@@ -330,6 +330,51 @@ def refresh_credential_row(
     return result
 
 
+def refresh_vault_sign_in(*, now_ms: int, refresh=None) -> str | None:
+    """Rotate the operator's Claude sign-in sealed in the vault.
+
+    The rows ``claude.oauth.access`` / ``.refresh`` / ``.expires``
+    (tools/graph/harness_credentials.py) are the sign-in the Getting Started
+    scan sealed and the launcher opens. Opened only while the operator is
+    unlocked; skipped (None) when absent, cold, or with plenty of life left.
+    Returns the refresh outcome kind otherwise. A revoked sign-in is logged
+    with the remedy; the rows are left as they are so the launcher's
+    presence check still reports what is sealed.
+    """
+    from tools.graph import harness_credentials as hv
+
+    values = hv.open_values((hv.CLAUDE_REFRESH, hv.CLAUDE_EXPIRES))
+    refresh_tok = values.get(hv.CLAUDE_REFRESH)
+    if not refresh_tok:
+        return None
+    expires = hv.expires_ms(values.get(hv.CLAUDE_EXPIRES))
+    if expires is not None and (expires - now_ms) > CREDENTIAL_FRESH_THRESHOLD_MS:
+        return None
+    logger.info("claude credentials refresh: rotating the vault sign-in")
+    result = (refresh or refresh_one)(refresh_tok)
+    if result.kind == "ok":
+        assert result.access_token and result.refresh_token and result.expires_in
+        hv.seal(hv.CLAUDE_ACCESS, result.access_token)
+        hv.seal(hv.CLAUDE_REFRESH, result.refresh_token)
+        hv.seal(hv.CLAUDE_EXPIRES, str(now_ms + result.expires_in * 1000))
+        logger.info(
+            "claude credentials refresh: vault sign-in OK (new expires_in=%s)",
+            result.expires_in,
+        )
+    elif result.kind == "revoked":
+        logger.warning(
+            "claude credentials refresh: the vault sign-in was revoked "
+            "(invalid_grant) — sign in to Claude on this machine again and "
+            "re-run `graph credentials import`",
+        )
+    else:
+        logger.warning(
+            "claude credentials refresh: transient failure for the vault "
+            "sign-in: %s", result.error,
+        )
+    return result.kind
+
+
 def refresh_all_credentials() -> dict[str, int]:
     """Iterate every ``dashboard.claude.credentials`` row and refresh as needed.
 
@@ -340,6 +385,12 @@ def refresh_all_credentials() -> dict[str, int]:
     counters: dict[str, int] = {
         "ok": 0, "revoked": 0, "transient": 0, "skipped": 0,
     }
+    try:
+        kind = refresh_vault_sign_in(now_ms=_now_ms())
+        if kind is not None:
+            counters[kind] = counters.get(kind, 0) + 1
+    except Exception:
+        logger.exception("claude credentials refresh: vault sign-in tick failed")
     try:
         members = graph_ops.read_set(
             CLAUDE_CREDENTIALS_SET_ID, org=org, peers=[],
