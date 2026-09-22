@@ -548,8 +548,17 @@ def _resolve_source_cross_org(args, source_arg, *, first=False, allow_title=True
         return own_title_matches, None, False
 
     # Step 2: cross-org peer scan (public-surface only).
+    #
+    # The caller's org has to travel with this call. Without it the resolver
+    # sees a scopeless caller and fans out across every org database with NO
+    # publication filter -- which is correct for the operator's own scopeless
+    # view and wrong for a caller that named an org, who is owed its own
+    # material plus peers' published and canonical, nothing else. Omitting it
+    # here is what let a scoped caller read a peer's raw note
+    # (test_cli_read_cross_org, operator ruling 2026-09-22).
     peer_result = _ops.resolve_source_strict(
         source_arg,
+        org=getattr(args, "org", None),
     )
 
     if peer_result is None:
