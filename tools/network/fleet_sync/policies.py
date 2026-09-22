@@ -284,7 +284,6 @@ LOCAL_SYNC_TABLES: Final[frozenset[str]] = frozenset({
 #: ledger rows (whose cross-machine merge is undecided).
 LEDGER_TABLES: Final[frozenset[str]] = frozenset({
     "ledger_events",
-    "ledger_heads",
     "ledger_meta",
     "ledger_parents",
     "ledger_pending_claims",

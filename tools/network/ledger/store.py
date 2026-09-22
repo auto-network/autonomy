@@ -139,9 +139,7 @@ CREATE TABLE IF NOT EXISTS ledger_parents (
     PRIMARY KEY (event_id, parent_id)
 );
 CREATE INDEX IF NOT EXISTS idx_ledger_parents_parent ON ledger_parents(parent_id);
-CREATE TABLE IF NOT EXISTS ledger_heads (
-    event_id TEXT PRIMARY KEY REFERENCES ledger_events(event_id)
-);
+
 CREATE TABLE IF NOT EXISTS ledger_projections (
     name        TEXT PRIMARY KEY,
     fingerprint TEXT NOT NULL,

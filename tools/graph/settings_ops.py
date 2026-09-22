@@ -124,14 +124,19 @@ _FOLD_VIEW_CACHE: dict[str, tuple[tuple, Any]] = {}
 _fold_builds = 0  # how many times a fold was actually constructed
 
 
-def _ledger_heads(slug: str) -> "tuple | None":
-    """The org ledger's current heads, without hydrating the ledger.
+def _ledger_event_ids(slug: str) -> "tuple | None":
+    """The ids of every event the org ledger holds, without hydrating it.
 
-    A cheap SQL probe of the ``ledger_heads`` table in the org's own DB —
-    this is the cache KEY read, performed per lookup; building the FOLD is
-    what the key exists to avoid. ``None`` means no ledger at all.
+    An event IS its Settings row (design graph://53b5bb04-bc0): the rows of
+    ``autonomy.org.ledger-event`` in the org's own DB are the whole ledger,
+    whether this node appended them or replication delivered a co-member's.
+    Their sorted ids are the cache KEY, read per lookup; building the FOLD is
+    what the key exists to avoid. Any event that lands changes the key, so
+    the fold is rebuilt exactly once per ledger advancement. ``None`` means
+    no ledger at all; an empty tuple means a store with no events.
     """
     from tools.network.ledger import org_ledger_db_path
+    from tools.network.ledger.settings_bridge import SET_ID as _LEDGER_EVENT_SET_ID
 
     path = org_ledger_db_path(slug)
     if not path.exists():
@@ -139,7 +144,10 @@ def _ledger_heads(slug: str) -> "tuple | None":
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
         return tuple(sorted(
-            r[0] for r in conn.execute("SELECT event_id FROM ledger_heads")
+            r[0] for r in conn.execute(
+                'SELECT "key" FROM settings WHERE set_id=?',
+                (_LEDGER_EVENT_SET_ID,),
+            )
         ))
     except sqlite3.Error:
         # No ledger tables, or a database that cannot be read at all (a
@@ -154,8 +162,8 @@ def _ledger_heads(slug: str) -> "tuple | None":
 def _org_fold_view(slug: "str | None"):
     """The current FoldState for org *slug*, or ``None``.
 
-    Built ONCE PER LEDGER ADVANCEMENT: the heads-keyed cache above serves
-    every call whose heads probe matches, so resolution cost does not scale
+    Built ONCE PER LEDGER ADVANCEMENT: the cache above, keyed by the ids of
+    the ledger's event rows, serves every call whose key matches, so resolution cost does not scale
     with reads and a per-row fold read cannot creep back in. Callers may
     read only the time-independent surface from the returned view —
     ``members``, ``persona_for_key``, ``key_revoked`` — never delegation
@@ -166,11 +174,11 @@ def _org_fold_view(slug: "str | None"):
     """
     if not slug:
         return None
-    heads = _ledger_heads(slug)
-    if heads is None or not heads:
+    event_ids = _ledger_event_ids(slug)
+    if event_ids is None or not event_ids:
         return None
     cached = _FOLD_VIEW_CACHE.get(slug)
-    if cached is not None and cached[0] == heads:
+    if cached is not None and cached[0] == event_ids:
         return cached[1]
     try:
         from tools.network.ledger import LedgerStore, org_ledger_db_path
@@ -190,7 +198,7 @@ def _org_fold_view(slug: "str | None"):
             "will not resolve", slug, exc_info=True,
         )
         return None
-    _FOLD_VIEW_CACHE[slug] = (heads, state)
+    _FOLD_VIEW_CACHE[slug] = (event_ids, state)
     return state
 
 

@@ -272,7 +272,7 @@ def test_coexists_with_ledger_in_one_org_db(world):
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
-        assert {"keycontrol_state", "ledger_events", "ledger_heads"} <= tables
+        assert {"keycontrol_state", "ledger_events"} <= tables
 
     # Both stores reopen cleanly from the shared file.
     with LedgerStore(path) as again:

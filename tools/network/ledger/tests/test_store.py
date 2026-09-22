@@ -282,9 +282,15 @@ class TestTamperDetection:
         with LedgerStore(db) as store:
             expected = set(store.ledger.heads())
         raw = sqlite3.connect(db)
-        with raw:
-            raw.execute("DELETE FROM ledger_heads")
-        raw.close()
+        try:
+            tables = {
+                r[0] for r in raw.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+        finally:
+            raw.close()
+        assert "ledger_heads" not in tables, "heads are computed, never stored"
         with LedgerStore(db) as store:
             assert set(store.ledger.heads()) == expected
 

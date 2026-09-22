@@ -4681,11 +4681,6 @@ class FleetSyncScheduler:
             bootstrap = resuming_sweep or not await asyncio.to_thread(
                 store.has_state
             )
-            from tools.network.fleet_sync.sync import founded_ledger_rows
-
-            founded_rows = await asyncio.to_thread(
-                founded_ledger_rows, self._scope_paths()[scope]
-            )
             # Gated: an incomplete bootstrap publishes nothing. One shared
             # store method owns the phase check and the catalog read.
             watermarks = await asyncio.to_thread(
