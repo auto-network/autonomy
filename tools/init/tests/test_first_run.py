@@ -93,11 +93,14 @@ def test_initialize_creates_empty_deployment(tmp_path):
         assert (data / filename).exists(), filename
         assert _tables(data / filename), f"{filename} has no tables"
 
-    # Everything except TLS (disabled) actually happened.
+    # Everything except TLS (disabled) and the org-follow seed (no published
+    # Autonomy follow link committed yet, §10.1) actually happened.
     actions = {s.name: s.action for s in report.steps}
     assert actions["tls"] == SKIPPED
+    assert actions["setting:org-follow"] == SKIPPED
+    skipped_by_design = {"tls", "setting:org-follow"}
     assert all(
-        a == CREATED for n, a in actions.items() if n != "tls"
+        a == CREATED for n, a in actions.items() if n not in skipped_by_design
     ), actions
     assert report.changed
 
@@ -184,8 +187,12 @@ def test_startup_bootstrap_respects_operator_named_org(tmp_path):
     assert not (tmp_path / "data" / "orgs" / "autonomy.db").exists()
 
 
-def test_no_first_org_named_creates_no_shared_org(tmp_path):
+def test_no_first_org_named_founds_myorg_not_autonomy(tmp_path):
+    # A fresh node with no AUTONOMY_FIRST_ORG founds ``myorg`` (D7,
+    # graph://5f2f5a49-00d §10.5), never ``autonomy`` — that slug is reserved
+    # for the followed Autonomy public-surface mirror.
     initialize(tmp_path, tls=False)
+    assert (tmp_path / "data" / "orgs" / "myorg.db").exists()
     assert not (tmp_path / "data" / "orgs" / "autonomy.db").exists()
     assert (tmp_path / "data" / "personal.db").exists()
 
@@ -195,6 +202,140 @@ def test_invalid_first_org_slug_rejected(tmp_path):
 
     with pytest.raises(OrgError):
         initialize(tmp_path, first_org="../evil", tls=False)
+
+
+# ── Follow-defaults seed (bead auto-krbtk, graph://5f2f5a49-00d §10.5) ──
+
+from tools.init import first_run  # noqa: E402
+
+_AUTONOMY_UUID = "2d4b90cb-1e89-452b-82cb-68ca44fd8e52"
+_FAKE_RENDEZVOUS = "https://relay.example/l/abc123token"
+_FAKE_LINK_PUB = "a" * 64
+_ORG_FOLLOW_SET_ID = "autonomy.org.follow"
+
+
+def _write_allowlist(path, *, org="autonomy", follow=None):
+    """Write a minimal-but-valid bootstrap allowlist YAML, with an optional
+    ``follow:`` block, so both allowlist and follow seeds have something to
+    read."""
+    lines = [
+        f"org: {org}",
+        "version: 1",
+        "canonical:",
+        "  - e2c81892-0fb  # a canonical prefix",
+        "published:",
+        "  - 497cdc20-d43  # a published prefix",
+    ]
+    if follow is not None:
+        lines.append("follow:")
+        for key, value in follow.items():
+            lines.append(f'  {key}: "{value}"')
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def _follow_rows(root):
+    conn = sqlite3.connect(str(root / "data" / "personal.db"))
+    try:
+        rows = conn.execute(
+            "SELECT key, payload FROM settings WHERE set_id = ?",
+            (_ORG_FOLLOW_SET_ID,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [(key, json.loads(payload)) for key, payload in rows]
+
+
+@pytest.fixture
+def full_follow_allowlist(tmp_path, monkeypatch):
+    """Point first-run at an allowlist whose follow: block is fully published
+    (rendezvous + link_pub present, org_uuid = Autonomy's)."""
+    path = _write_allowlist(
+        tmp_path / "allowlist_with_follow.yaml",
+        follow={
+            "org_uuid": _AUTONOMY_UUID,
+            "rendezvous": _FAKE_RENDEZVOUS,
+            "link_pub": _FAKE_LINK_PUB,
+        },
+    )
+    monkeypatch.setattr(first_run, "ALLOWLIST_YAML", path)
+    return path
+
+
+def test_follow_defaults_seeded_no_env(tmp_path, full_follow_allowlist):
+    # No AUTONOMY_FIRST_ORG: the node founds myorg (its own random id) and
+    # seeds the Autonomy follow row from the published follow: block.
+    initialize(tmp_path, tls=False)
+    assert (tmp_path / "data" / "orgs" / "myorg.db").exists()
+
+    rows = _follow_rows(tmp_path)
+    assert len(rows) == 1
+    key, payload = rows[0]
+    assert key == "autonomy"
+    assert payload["org_uuid"] == _AUTONOMY_UUID
+    assert payload["rendezvous"] == _FAKE_RENDEZVOUS
+    assert payload["link_pub"] == _FAKE_LINK_PUB
+    assert payload["enabled"] is True
+    assert payload["added_at"]
+
+    # Seeded payload validates against the follow schema.
+    from tools.graph import schemas
+    schemas.validate_payload(_ORG_FOLLOW_SET_ID, 1, payload)
+
+
+def test_follow_defaults_idempotent(tmp_path, full_follow_allowlist):
+    initialize(tmp_path, tls=False)
+    second = initialize(tmp_path, tls=False)
+
+    assert not second.changed
+    for step in second.steps:
+        assert step.action in (EXISTS, SKIPPED), (step.name, step.action)
+    # Exactly one follow row after two runs.
+    assert len(_follow_rows(tmp_path)) == 1
+    assert {s.action for s in second.steps if s.name == "setting:org-follow"} == {
+        EXISTS
+    }
+
+
+def test_follow_defaults_skipped_on_self_node(tmp_path, monkeypatch):
+    # First run founds myorg (real committed allowlist: follow link not yet
+    # published, so nothing is seeded). Capture myorg's id.
+    initialize(tmp_path, tls=False)
+    assert _follow_rows(tmp_path) == []
+    conn = sqlite3.connect(str(tmp_path / "data" / "orgs" / "myorg.db"))
+    try:
+        (myorg_id,) = conn.execute("SELECT id FROM orgs LIMIT 1").fetchone()
+    finally:
+        conn.close()
+
+    # Point the allowlist at a published follow: block whose org_uuid IS this
+    # node's own org — a node never follows itself.
+    path = _write_allowlist(
+        tmp_path / "self_follow.yaml",
+        follow={
+            "org_uuid": myorg_id,
+            "rendezvous": _FAKE_RENDEZVOUS,
+            "link_pub": _FAKE_LINK_PUB,
+        },
+    )
+    monkeypatch.setattr(first_run, "ALLOWLIST_YAML", path)
+
+    report = initialize(tmp_path, tls=False)
+    assert _follow_rows(tmp_path) == []
+    step = next(s for s in report.steps if s.name == "setting:org-follow")
+    assert step.action == SKIPPED
+    assert "self-follow" in step.detail
+
+
+def test_follow_defaults_skipped_when_link_unpublished(tmp_path):
+    # The real committed allowlist carries org_uuid but no rendezvous/link_pub
+    # yet (the operator has not published the org:follow link): first run seeds
+    # no follow row and reports why, never erroring.
+    report = initialize(tmp_path, tls=False)
+    assert _follow_rows(tmp_path) == []
+    step = next(s for s in report.steps if s.name == "setting:org-follow")
+    assert step.action == SKIPPED
+    assert "not yet published" in step.detail
 
 
 @pytest.mark.skipif(
