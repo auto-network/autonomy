@@ -163,6 +163,12 @@ def _make_args(*, org=None, **kwargs) -> argparse.Namespace:
     """
     from tools.graph.db import resolve_caller_db_path
     defaults = {
+        # Both, and for different steps: step one resolves the source in
+        # the caller's OWN database, step two (ops.resolve_source_strict)
+        # scans peers and needs the org to know who is asking. e68574a
+        # carries the org into that second step; without it the scan runs
+        # scopeless, which is entitled to see everything.
+        "org": org,
         "db": resolve_caller_db_path(org),
         "source": None,
         "first": False,
@@ -245,21 +251,6 @@ def test_cmd_read_cross_org_canonical_resolves_and_reads_body(orgs_root, capsys,
     assert "canonical content" in out
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "PRODUCT DEFECT, reported 2026-09-22: a peer organization's RAW "
-        "content is readable cross-org. These three used to pass only "
-        "because they named the caller's org through GRAPH_ORG, which the "
-        "CLI stopped reading (cli.py: 'scope comes from the caller's "
-        "explicit --org or nothing'), so every one of them was really the "
-        "scopeless view and asserted nothing. With the caller named "
-        "explicitly they fail on the real rule this file states: peer "
-        "canonical and published are visible, peer raw and curated are "
-        "not. strict=True so whoever fixes the read path is told to "
-        "remove this marker."
-    ),
-)
 def test_cmd_read_cross_org_raw_rejected(orgs_root, capsys, monkeypatch):
     """Raw content stays invisible across orgs — `not found` on a peer's raw UUID.
 
