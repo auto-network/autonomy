@@ -21,6 +21,22 @@ from __future__ import annotations
 import re
 from typing import Any
 
+SYNOPSIS = {
+    "summary": (
+        "One event of an organization's authority ledger, carried as a "
+        "settings row so the existing replication moves it. Append-only and "
+        "keyed by the event's own content hash. The row is the transport, "
+        "never the store: each receiving node feeds the wire bytes back "
+        "through the ledger parser, which re-verifies the hash and the "
+        "author's signature and rebuilds that node's own local indexes."
+    ),
+    "nouns": [
+        "ledger event", "authority ledger", "organization", "append-only log",
+        "event id", "replication",
+    ],
+    "related_set_ids": ["autonomy.org#1", "autonomy.org.member-profile#1"],
+}
+
 from .registry import (
     SettingSchema,
     SchemaValidationError,

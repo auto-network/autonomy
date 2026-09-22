@@ -18,7 +18,24 @@ from __future__ import annotations
 import re
 from typing import Any
 
+SYNOPSIS = {
+    "summary": (
+        "One machine of the operator's fleet and how to reach it to collect "
+        "diagnostics: an ssh destination and the command that runs Python in "
+        "the right place there. Keyed by the short machine name the operator "
+        "uses ('sjc-2'). Personal-homed so the set follows the operator across "
+        "the fleet rather than living on one computer, and it names a key path "
+        "rather than carrying a credential."
+    ),
+    "nouns": [
+        "diagnostic target", "machine", "ssh destination", "remote command",
+        "fleet doctor",
+    ],
+    "related_set_ids": ["autonomy.personal.fleet-reachability#1"],
+}
+
 from .registry import (
+    keyed_per_entity,
     SettingSchema,
     SchemaValidationError,
     home,
@@ -33,6 +50,7 @@ _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
 
 @publication_band(min="raw", max="curated")
 @home("personal")
+@keyed_per_entity(key_strategy="machine_name")
 class FleetDiagnosticTargetV1(SettingSchema):
     """One machine a diagnostic can be collected from."""
 
