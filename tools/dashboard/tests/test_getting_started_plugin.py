@@ -17,18 +17,13 @@ def client(monkeypatch, tmp_path):
     (home / ".grok" / "auth.json").write_text('{"access_token": "g"}')
     monkeypatch.setattr(ci, "operator_home", lambda: str(home))
     calls: list[bool] = []
+    real = ci.run_import
 
-    def fake_import(h, **kw):
+    def spy(h, **kw):
         calls.append(kw.get("dry_run"))
         assert h == str(home)
-        report = ci.ImportReport()
-        report.add(ci.HarnessResult("claude", ci.STATUS_NEEDS_SIGN_IN, "no file"))
-        report.add(ci.HarnessResult("codex", ci.STATUS_NEEDS_SIGN_IN, "no file"))
-        report.add(ci.HarnessResult(
-            "grok", ci.STATUS_WOULD_IMPORT if kw.get("dry_run") else ci.STATUS_IMPORTED, "sealed",
-        ))
-        return report
-    monkeypatch.setattr(ci, "run_import", fake_import)
+        return real(h, **kw)
+    monkeypatch.setattr(ci, "run_import", spy)
 
     def authenticate(request):
         if request.headers.get("authorization") == "Bearer op":
