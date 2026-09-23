@@ -30,6 +30,3 @@ settings:
     key: idea-board
     state: raw
     payload_file: settings/primer_idea_board.json
-
-entrypoints:
-  api: tools.dashboard.plugins.getting_started.entrypoints.api:routes

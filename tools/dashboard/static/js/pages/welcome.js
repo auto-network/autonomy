@@ -159,25 +159,11 @@ function welcomeApp() {
       this.startBusy = true;
       this.startError = '';
       try {
-        // The first step in Getting Started is the harness sign-in
-        // (record v12 FR7a): scan this machine's well-known locations,
-        // import what is there, and start with it. Nothing found means the
-        // session cannot run inference, so it is not started.
-        var scan = await fetch('/api/plugins/getting_started/harnesses/import', {
-          method: 'POST', credentials: 'same-origin',
-        });
-        var found = await scan.json().catch(function () { return {}; });
-        var usable = (found && found.usable) || [];
-        if (!scan.ok || !usable.length) {
-          throw new Error(scan.ok
-            ? 'No harness sign-in was found on this machine. Sign in to Claude, Codex or Grok here, or run graph claude install, then try again.'
-            : 'Could not check this machine for a harness sign-in (HTTP ' + scan.status + ').');
-        }
         var response = await fetch('/api/session/create', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'same-origin',
-          body: JSON.stringify({ project: 'getting-started', harness: usable[0] }),
+          body: JSON.stringify({ project: 'getting-started' }),
         });
         var body = await response.json().catch(function () { return {}; });
         if (!response.ok || !body.tmux_name) {
