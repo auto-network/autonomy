@@ -71,6 +71,11 @@ def active_grants(org: str | None, target_types: Iterable[str] = SHARE_TARGET_TY
         expires_at = _expires_at(payload)
         if expires_at is not None and expires_at <= int(now.timestamp()):
             continue
+        if not payload.get("url"):
+            # Written before a publish that then failed: no link was created,
+            # so it is not shareable. Indexing it raised KeyError and made
+            # share-state "unavailable" for the note from then on.
+            continue
         meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
         grants.append({
             "token": payload.get("token"),
