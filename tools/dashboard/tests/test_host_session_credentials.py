@@ -89,31 +89,32 @@ def test_an_operator_override_still_wins(monkeypatch):
     assert creds == {"type": "token", "token": "operator-override"}
 
 
-def test_a_host_session_carries_a_local_operator_token(monkeypatch, tmp_path):
-    """A host session reaches the dashboard over HTTP with no bearer and so was
-    refused by the authenticated-reader guards. Its launch command must now
-    carry a minted CROSSTALK_TOKEN whose auth_db row is org-less — a local
-    operator, full authority, no org scope."""
+def test_a_restarted_host_session_keeps_a_live_local_operator_token(tmp_path):
+    """A host session reaches the dashboard over HTTP and needs a bearer. The
+    token used to be minted into the resume command at request time; a restart
+    then ran its stop step, whose deregister revokes every token for the name,
+    and the relaunched session came up holding a token revoked 72 ms after it
+    was minted (host-0916-103518, 2026-09-23). The resume command must carry no
+    token, and the one the launch worker mints after the stop must stay live
+    and org-less (a local operator)."""
+    import hashlib
     import re as _re
 
     from tools.dashboard import server
     from tools.dashboard.dao import auth_db
 
     auth_db.init_db(tmp_path / "auth.db")
+    name = "host-0000-000000"
 
     cmd = server._build_host_resume_cmd(
-        tmux_name="host-0000-000000",
-        harness="claude",
-        model="opus",
-        session_uuid="feed",
+        tmux_name=name, harness="claude", model="opus", session_uuid="feed",
     )
-    m = _re.search(r"CROSSTALK_TOKEN=(\S+)", cmd)
-    assert m, f"host resume command carries no session token: {cmd}"
+    assert "CROSSTALK_TOKEN=" not in cmd, "request-time command must not mint"
 
-    raw = m.group(1)
-    import hashlib
+    auth_db.revoke_token(name)  # the restart's stop step (deregister)
+    prefix = server._mint_host_session_token(name)  # the launch worker
+    m = _re.search(r"CROSSTALK_TOKEN=(\S+)", prefix)
+    assert m, prefix
+    raw = m.group(1).strip("'")
     resolved = auth_db.resolve_token(hashlib.sha256(raw.encode()).hexdigest())
-    assert resolved is not None, "the minted token is not in auth_db"
-    session, org = resolved
-    assert session == "host-0000-000000"
-    assert org is None, "a host session token must be org-less (local operator)"
+    assert resolved == (name, None), "launch-minted token must be live and org-less"
