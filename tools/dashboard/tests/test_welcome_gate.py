@@ -293,13 +293,11 @@ def test_shell_carries_no_ceremony_code():
                    "publickeycredential", "/api/identity/personal",
                    "/api/identity/passkey", "deriveorgslug"):
         assert banned not in lowered, banned
-    # Three POSTs: one advances an already-persisted Fleet request, one runs
-    # the harness sign-in scan (graph://5f2f5a49-00d v12 FR7a), one starts
-    # the first session through the ordinary session-create path (v11
-    # §10.6). Identity, organization and signing ceremonies remain composed
-    # flows.
-    assert lowered.count("method: 'post'") == 3
-    assert "/api/plugins/getting_started/harnesses/import" in lowered
+    # Two POSTs: one advances an already-persisted Fleet request, one starts
+    # the first session through the ordinary session-create path
+    # (graph://5f2f5a49-00d v11 §10.6). Identity, organization and signing
+    # ceremonies remain composed flows.
+    assert lowered.count("method: 'post'") == 2
     assert "/api/session/create" in lowered
     assert "/api/fleet/enrollment/local-resume" in lowered
     assert '"post"' not in lowered
