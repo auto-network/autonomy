@@ -5320,6 +5320,12 @@ def _classify_crosstalk(text: str) -> dict | None:
     rejected.
     """
     stripped = text.strip()
+    pasted = re.fullmatch(
+        r'<pasted_content(?:\s+[\w-]+="[^"]*")*\s*>(.*?)</pasted_content>',
+        stripped, re.DOTALL,
+    )
+    if pasted:
+        stripped = pasted.group(1).strip()
     m = _CROSSTALK_RE.fullmatch(stripped)
     if not m:
         return None
