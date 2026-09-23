@@ -430,13 +430,18 @@ def run_graph(argv: list) -> tuple:
     the same way an agent container's CROSSTALK_TOKEN authenticates it."""
     org = getattr(_req_ctx, "org", None)
     token = getattr(_req_ctx, "token", None)
-    env = None
-    if org or token:
-        env = dict(os.environ)
-        if org:
-            env["GRAPH_ORG"] = org
-        if token:
-            env["CROSSTALK_TOKEN"] = token
+    env = dict(os.environ)
+    # The CLI defaults to https://localhost:8080, which inside the relay's own
+    # container is nothing (connection refused) — every ChatGPT graph call failed
+    # before reaching auth. The dashboard this relay already talks to is the one.
+    if DASHBOARD_URL and not env.get("GRAPH_API"):
+        env["GRAPH_API"] = DASHBOARD_URL
+    if org:
+        env["GRAPH_ORG"] = org
+    if token:
+        env["CROSSTALK_TOKEN"] = token
+    else:
+        env.pop("CROSSTALK_TOKEN", None)  # never run as an inherited identity
     try:
         proc = subprocess.run(
             [GRAPH_BIN] + argv,

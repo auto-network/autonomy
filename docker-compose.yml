@@ -490,6 +490,9 @@ services:
     command: sh /app/deploy/relay.sh
     environment:
       AUTONOMY_DATA_ROOT: /app/data   # real mount, never repo-relative (see dashboard note)
+      # No keycache mount (same as the dispatcher): without this every relay
+      # start spends ~60s failing ramfs mounts before relay.sh runs.
+      AUTONOMY_PROVISION_RAMFS: "0"
     # Shared image's HEALTHCHECK probes the dashboard's HTTP port; the relay
     # serves no HTTP. Same reasoning as the dispatcher's disable above.
     healthcheck:
