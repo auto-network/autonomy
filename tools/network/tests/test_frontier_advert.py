@@ -41,11 +41,11 @@ def test_the_loop_sends_on_a_wake_and_never_on_its_own(monkeypatch):
             return dict(self.frontier)
 
     store = _Store()
-    monkeypatch.setattr(frs, "_scoped_store", lambda scope, pub: store)
+    monkeypatch.setattr(frs, "_scoped_store", lambda scope: store)
 
     async def run():
         conn = _Conn()
-        task = asyncio.create_task(frs.advertise_frontiers_loop(conn, "org", "m" * 64, interval_s=0.05))
+        task = asyncio.create_task(frs.advertise_frontiers_loop(conn, "org", interval_s=0.05))
         await asyncio.sleep(0.2)
         assert conn.sent == []                       # no wake, no read, no send
         conn.connected.set(); conn.frontier_wake.set()   # the hello
@@ -62,3 +62,22 @@ def test_the_loop_sends_on_a_wake_and_never_on_its_own(monkeypatch):
         assert len(conn.sent) == 2
         task.cancel()
     asyncio.run(run())
+
+
+def test_the_advert_reads_a_real_store_activated_under_the_fleet_identity(tmp_path, monkeypatch):
+    """The org store is activated by the dashboard's scheduler under the fleet
+    machine key; the connector process only holds its serving key. Opening the
+    store to read frontiers must not re-activate writers under that other key.
+    It did, and raised "fleet-sync writer identity does not match activated
+    catalog" on every advert (2026-09-20..23), so nothing was ever advertised.
+    The loop test above stubs the store out; this one uses a real one."""
+    from tools.graph.db import GraphDB
+    from tools.network import fleet_relay_sync as frs
+
+    path = tmp_path / "org.db"
+    graph = GraphDB(path)
+    graph.activate_fleet_sync_writers("aa" * 32)      # the scheduler's fleet identity
+    graph.close()
+    monkeypatch.setattr(frs, "_scope_db_path", lambda scope: path)
+
+    assert frs._scoped_store("org").covered_persona_frontiers() == {}

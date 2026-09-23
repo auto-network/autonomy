@@ -2305,7 +2305,7 @@ async def _run_connector_with_control(connector, ctl_path: str | None,
         from tools.network.fleet_relay_sync import advertise_frontiers_loop
 
         tasks.append(asyncio.create_task(
-            advertise_frontiers_loop(connector, frontier_scope, machine_pub),
+            advertise_frontiers_loop(connector, frontier_scope),
             name="frontier-advert"))
     # The fleet direct listener (tailnet/LAN peers dial this process
     # directly, bypassing the relay) is bound and kept matched to the

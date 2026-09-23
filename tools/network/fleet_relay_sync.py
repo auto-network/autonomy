@@ -571,7 +571,6 @@ def _scope_db_path(scope: str) -> Path:
     return scopes[scope]
 
 
-_activated_scope_paths: set[Path] = set()
 
 #: How often the serving connector re-reads its org store's persona cuts
 #: and, when a value rose, advertises {persona: F} to the relay
@@ -593,7 +592,7 @@ def frontier_advert(previous: "dict[str, int]", current: "dict[str, int]") -> "d
     return merged if changed else None
 
 
-async def advertise_frontiers_loop(connector, scope: str, machine_pub: str,
+async def advertise_frontiers_loop(connector, scope: str,
                                    *, interval_s: float = FRONTIER_ADVERT_INTERVAL_S) -> None:
     """Send sync-frontier {org_uuid, frontiers} over the live tunnel once
     after each (re)connect and after each pull that moved a persona write
@@ -625,7 +624,7 @@ async def advertise_frontiers_loop(connector, scope: str, machine_pub: str,
             was_connected = True
         try:
             current = await asyncio.to_thread(
-                lambda: _scoped_store(scope, machine_pub).covered_persona_frontiers()
+                lambda: _scoped_store(scope).covered_persona_frontiers()
             )
         except Exception:
             logger.warning("frontier advert: could not read the %r store", scope, exc_info=True)
@@ -645,25 +644,18 @@ async def advertise_frontiers_loop(connector, scope: str, machine_pub: str,
             sent = advert
 
 
-def _scoped_store(scope: str, machine_pub: str) -> SQLiteFleetSyncStore:
-    """The scope's client store, with fleet writers activated once per path.
+def _scoped_store(scope: str) -> SQLiteFleetSyncStore:
+    """The scope's store, opened only to READ its advertisable frontiers.
 
-    Mirrors the direct scheduler's ``_store_for``: organization databases
-    share the graph schema, so the same policy audit applies and activation
-    fails closed on any unpoliced table. The personal database is prepared
-    by the production migration and is never activated here.
+    It must not activate fleet writers. Activation stamps the catalog's writer
+    identity, which is the fleet machine key the dashboard's scheduler uses;
+    this process only holds the connector's serving key. Activating with that
+    key raised "fleet-sync writer identity does not match activated catalog"
+    on every advert from 2026-09-20 to 2026-09-23, so no org connector ever
+    advertised a frontier and every link with a requirement was servable only
+    inside the relay's fresh-link pin window.
     """
-    path = _scope_db_path(scope)
-    if scope != "personal" and path not in _activated_scope_paths:
-        from tools.graph.db import GraphDB
-
-        graph = GraphDB(path)
-        try:
-            graph.activate_fleet_sync_writers(machine_pub)
-        finally:
-            graph.close()
-        _activated_scope_paths.add(path)
-    return SQLiteFleetSyncStore(path)
+    return SQLiteFleetSyncStore(_scope_db_path(scope))
 
 
 
