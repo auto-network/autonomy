@@ -9,6 +9,7 @@ import pytest
 
 from tools.dashboard.link_requirements import (
     LinkRequirementError, link_requirements, note_addresses, row_origins,
+    settings_addresses,
 )
 from tools.graph.db import GraphDB
 from tools.network.fleet_sync import write_floors
@@ -120,3 +121,26 @@ def test_a_row_never_replicated_is_skipped_not_attributed(tmp_path: Path) -> Non
     mine = MutationCatalog(own.conn, M1); mine.install()
     assert row_origins(own.conn, [encode_value(["sources", ["missing"]])]) == {}
     own.close()
+
+
+def test_settings_addresses_accept_plain_tuple_rows(tmp_path: Path) -> None:
+    # The publish path reads through a FleetSyncConnection, whose rows are plain
+    # tuples; dict(tuple) failed every note-link publish in an org with a
+    # persona ("dictionary update sequence element #0 has length 36").
+    import sqlite3
+    db = GraphDB(tmp_path / "org.db")
+    db.conn.execute(
+        "INSERT INTO settings(id,set_id,schema_revision,key,payload,publication_state)"
+        " VALUES(?,?,?,?,?,?)",
+        ("8811f592-84b7-423b-86bb-85433c1647cc", "autonomy.network.link-grant", 1,
+         "grant-1", "{}", "raw"),
+    )
+    db.conn.commit()
+    expected = settings_addresses(db.conn, "autonomy.network.link-grant", "grant-1")
+    plain = sqlite3.connect(str(tmp_path / "org.db"))  # default row factory: tuples
+    try:
+        assert settings_addresses(plain, "autonomy.network.link-grant", "grant-1") == expected
+    finally:
+        plain.close()
+    assert len(expected) == 1
+    db.close()

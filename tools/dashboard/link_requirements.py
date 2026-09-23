@@ -66,11 +66,16 @@ def settings_addresses(conn: sqlite3.Connection, set_id: str, key: str) -> list[
     """The catalog addresses of every settings row at (*set_id*, *key*),
     for the link's own grant row."""
     policy = TABLE_POLICIES["settings"]
+    cur = conn.execute(
+        "SELECT * FROM settings WHERE set_id=? AND key=?", (set_id, key)
+    )
+    # Name the columns from the cursor: a FleetSyncConnection yields plain
+    # tuples, and dict(tuple) failed every note-link publish in an org with a
+    # persona ("dictionary update sequence element #0 has length 36").
+    columns = [d[0] for d in cur.description]
     return [
-        encode_value(["settings", list(_logical_address(policy, dict(row)))])
-        for row in conn.execute(
-            "SELECT * FROM settings WHERE set_id=? AND key=?", (set_id, key)
-        )
+        encode_value(["settings", list(_logical_address(policy, dict(zip(columns, row))))])
+        for row in cur
     ]
 
 
