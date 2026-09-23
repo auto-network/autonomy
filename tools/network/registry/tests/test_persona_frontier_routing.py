@@ -187,3 +187,22 @@ def test_create_link_carries_the_grant_id_and_hands_it_to_the_member(app, client
         plain = _ctrl(ws, "create-link", {"target_uuid": TARGET, "target_type": "note"})
         assert app.state.store.get_link(plain["token"]).grant_id is None
         assert _ctrl(ws, "set-link-requires", {"token": made["token"], "requires": {P1: 1}})["ok"] is False
+
+
+def test_a_plain_create_link_pins_its_publisher_so_a_fresh_link_routes(app, client, clock, root):
+    """The dashboard publishes through the PLAIN create-link branch (no Central
+    receipt). That branch never recorded the fresh-link pin (2026-09-15 to
+    2026-09-23), so a just-published note whose requirement no advertised
+    frontier covers yet had no candidate and was refused 4431 at the
+    publisher's own probe. Drive the production entry point, not the pin."""
+    register(client, clock, root, org_uuid=ORG)
+    with _tunnel(client, clock, root, caps=()) as (ws, machine):
+        made = _ctrl(ws, "create-link", {
+            "target_uuid": TARGET, "target_type": "note", "requires": {P1: 10**18},
+        })
+        assert made["ok"] is True, made
+        hub, now = app.state.hub, float(app.state.now_fn())
+        assert hub.fresh_link_machine(made["token"], now) == machine
+        link = app.state.store.get_link(made["token"])
+        candidates = relay_mod._route_candidates(link, hub, made["token"], now)
+        assert [t.machine for t in candidates] == [machine]
