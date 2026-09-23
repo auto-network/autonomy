@@ -174,6 +174,29 @@ def test_run_graph_no_bearer_means_no_crosstalk_token(monkeypatch):
     assert captured["env"] is None or "CROSSTALK_TOKEN" not in captured["env"]
 
 
+def test_run_graph_targets_the_configured_dashboard(monkeypatch):
+    # The CLI's own default (localhost:8080) is the relay container itself.
+    captured = {}
+
+    def fake_run(argv, capture_output, text, timeout, env):
+        captured["env"] = env
+        class R:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(gateway_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(gateway_mod, "DASHBOARD_URL", "https://dashboard:8080")
+    monkeypatch.delenv("GRAPH_API", raising=False)
+    monkeypatch.setenv("CROSSTALK_TOKEN", "ambient-should-not-leak")
+    gateway_mod._req_ctx.org = None
+    gateway_mod._req_ctx.token = None
+    gateway_mod.run_graph(["search", "x"])
+    assert captured["env"]["GRAPH_API"] == "https://dashboard:8080"
+    assert "CROSSTALK_TOKEN" not in captured["env"]
+
+
 def test_hello_dashboard_pending_is_not_error():
     res = gateway_mod.hello_dashboard(_TRUSTED, {"intent": "help"},
                                       poster=_poster({"status": "pending"}))
