@@ -1,6 +1,7 @@
 """Unit tests for the mount_plan module (bead auto-vm8qh acceptance criteria).
 Criterion 1 (byte-identical golden argv) lives in test_session_launcher.py."""
 import os
+import sys
 import pytest
 from agents import mount_plan as mp
 
@@ -56,16 +57,38 @@ def test_socket_refused_over_full_plan():
 
 # ── criterion 4: resolve() never touches the filesystem for NODE-origin ──
 def test_resolve_node_origin_never_touches_filesystem(monkeypatch):
-    boom = lambda *a, **k: (_ for _ in ()).throw(AssertionError("resolve touched the fs"))
-    monkeypatch.setattr(os.path, "exists", boom)
-    monkeypatch.setattr(os, "stat", boom)
-    monkeypatch.setattr(os.path, "isdir", boom)
+    """A NODE-origin path names a volume, not a local file, so resolving one
+    on a machine where that path does not exist must still work.
+
+    The probes RECORD and delegate; they do not raise. ``os.stat`` and
+    ``os.path.exists`` are process-global, and in an xdist worker they are
+    called by machinery that is not this test -- pytest's own reporting, the
+    execnet channel, coverage. A raise from inside one of those killed the
+    worker outright: the item never reported and the whole run ended in
+    INTERNALERROR (`assert not crashitem`), which reads as a harness fault
+    rather than a test failure. Recording proves the same property and names
+    the caller when it fails.
+    """
+    touches = []
+
+    def _record(name, real):
+        def probe(*args, **kwargs):
+            caller = sys._getframe(1)
+            if caller.f_globals.get("__name__") == mp.__name__:
+                touches.append(f"{name}{args!r} from {mp.__name__}:{caller.f_lineno}")
+            return real(*args, **kwargs)
+        return probe
+
+    monkeypatch.setattr(os.path, "exists", _record("os.path.exists", os.path.exists))
+    monkeypatch.setattr(os, "stat", _record("os.stat", os.stat))
+    monkeypatch.setattr(os.path, "isdir", _record("os.path.isdir", os.path.isdir))
     topo = mp.NodeTopology(
         is_host_process=False,
         volumes=(mp.NodeVolume(name="autonomy-state", mount_point="/app/data"),),
     )
     r = mp.resolve(_spec("/app/data/.beads", "/data/.beads", origin=mp.Origin.NODE), topo)
     assert r.volume == "autonomy-state" and r.subpath == ".beads"
+    assert touches == [], "resolve touched the filesystem: " + "; ".join(touches)
 
 
 # ── deepest node root wins (/app/data before /app) ──

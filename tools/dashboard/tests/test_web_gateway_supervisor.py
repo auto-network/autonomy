@@ -214,7 +214,7 @@ async def test_worker_reconciles_hostname_before_certificate_gated_plan():
             order.append("leases")
 
     class Supervisor:
-        async def reconcile(self, plan):
+        async def reconcile(self, plan, force=False):
             order.append(("gateway", plan.reason))
             return {"state": "stopped"}
 
@@ -246,7 +246,7 @@ async def test_lease_failure_does_not_skip_gateway_fail_closed_plan():
             raise RuntimeError("settings unavailable")
 
     class Supervisor:
-        async def reconcile(self, plan):
+        async def reconcile(self, plan, force=False):
             observed.append(plan.reason)
             return {"state": "stopped"}
 
@@ -803,7 +803,7 @@ async def test_worker_reconciles_startup_and_relevant_events_only():
     observed = []
 
     class Supervisor:
-        async def reconcile(self, plan):
+        async def reconcile(self, plan, force=False):
             observed.append(plan)
             return {"state": "healthy"}
 
@@ -861,7 +861,7 @@ async def test_worker_watchdog_is_not_starved_by_unrelated_events(monkeypatch):
     observed = []
 
     class Supervisor:
-        async def reconcile(self, plan):
+        async def reconcile(self, plan, force=False):
             observed.append(plan)
             return {"state": "stopped"}
 
