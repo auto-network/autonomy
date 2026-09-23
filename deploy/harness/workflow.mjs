@@ -23,15 +23,15 @@ createWorkflow({scope:onboardingOnly?'identity-and-organization-onboarding':'mem
     // Step 3 starts the first session in Getting Started and lands on it
     // (design of record graph://5f2f5a49-00d v11 §10.6).
     withStep('alice','go to your workspace',()=>browser('alice','click','[data-testid="welcome-open-workspace"]'));
-    // The click navigates, which ends any in-page wait; poll the location
-    // from outside until the session page is open, then wait inside it.
-    withStep('alice','first session page',()=>{const started=Date.now();for(;;){
-      const path=js('alice','location.pathname');
-      if(path.startsWith('/session/'))break;
-      const error=js('alice',`(()=>{const e=document.querySelector('[data-testid="welcome-start-error"]');return e&&e.textContent.trim()||'';})()`);
-      if(error)throw new Error(error);
-      if(Date.now()-started>30000)throw new Error('UI timeout: the first session page did not open (still on '+path+')');
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,500);}
+    // The click navigates; the browser tool waits for the URL change itself
+    // (no in-page wait survives a navigation, and the harness record allows
+    // no polling loop). A refusal shows on the welcome page instead.
+    withStep('alice','first session page',()=>{
+      try{browser('alice','wait','--url','**/session/**');}
+      catch(error){
+        const refusal=js('alice',`(()=>{const e=document.querySelector('[data-testid="welcome-start-error"]');return e&&e.textContent.trim()||'';})()`);
+        throw new Error(refusal||String(error));
+      }
       return waitFor('alice','[data-testid="session-header"]','.sv-error, [data-testid="session-error"]',20000);});
     withStep('alice','save getting-started-session',()=>save('alice','getting-started-session',{
       snapshot:browser('alice','snapshot','-i'),
