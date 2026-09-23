@@ -423,15 +423,16 @@ def test_row_success_upserts_rotated_payload_preserving_identity():
     })
     captured: dict = {}
 
-    def fake_upsert(key, payload, *, org):
-        captured.update(key=key, payload=payload, org=org)
+    def fake_upsert(set_id, rev, key, payload, *, org):
+        captured.update(set_id=set_id, rev=rev, key=key,
+                        payload=payload, org=org)
 
     with patch.object(crr, "refresh_one",
                       return_value=crr.RefreshResult(
                           kind="ok", access_token="at-NEW",
                           refresh_token="rt-NEW", id_token="id-NEW",
                           expires_at_ms=now + 999_999)):
-        with patch.object(crr, "_write_back", fake_upsert):
+        with patch.object(crr.graph_ops, "upsert_by_key", fake_upsert):
             out = crr.refresh_credential_row(
                 row, org="personal", now_ms=now, now_iso="2026-08-14T00:00:00Z",
             )
@@ -460,13 +461,13 @@ def test_row_revoked_stamps_error_and_keeps_tokens():
     })
     captured: dict = {}
 
-    def fake_upsert(key, payload, *, org):
+    def fake_upsert(set_id, rev, key, payload, *, org):
         captured.update(payload=payload)
 
     with patch.object(crr, "refresh_one",
                       return_value=crr.RefreshResult(
                           kind="revoked", error="invalid_grant: revoked")):
-        with patch.object(crr, "_write_back", fake_upsert):
+        with patch.object(crr.graph_ops, "upsert_by_key", fake_upsert):
             out = crr.refresh_credential_row(
                 row, org="personal", now_ms=now, now_iso="now",
             )
@@ -489,7 +490,7 @@ def test_row_superseded_stamps_canary_and_alarms(caplog):
     })
     captured: dict = {}
 
-    def fake_upsert(key, payload, *, org):
+    def fake_upsert(set_id, rev, key, payload, *, org):
         captured.update(payload=payload)
 
     with caplog.at_level(logging.ERROR, logger=crr.logger.name):
@@ -497,7 +498,7 @@ def test_row_superseded_stamps_canary_and_alarms(caplog):
                           return_value=crr.RefreshResult(
                               kind="superseded",
                               error="superseded: refresh_token_reused")):
-            with patch.object(crr, "_write_back", fake_upsert):
+            with patch.object(crr.graph_ops, "upsert_by_key", fake_upsert):
                 out = crr.refresh_credential_row(
                     row, org="personal", now_ms=now, now_iso="now",
                 )
@@ -590,8 +591,8 @@ def test_refresh_all_counts_outcomes():
     def fake_upsert(*a, **k):
         pass
 
-    with patch.object(crr, "_credential_rows", lambda: rows):
-        with patch.object(crr, "_write_back", fake_upsert):
+    with patch.object(crr.graph_ops, "read_set", fake_read_set):
+        with patch.object(crr.graph_ops, "upsert_by_key", fake_upsert):
             with patch.object(crr, "refresh_one",
                               return_value=crr.RefreshResult(
                                   kind="ok", access_token="a",
@@ -607,8 +608,9 @@ def test_refresh_all_counts_superseded_outcome():
     rows = [_row("acct", {"refresh_token": "rt"})]  # never refreshed → refresh
     members = SimpleNamespace(members=rows)
 
-    with patch.object(crr, "_credential_rows", lambda: list(members.members)):
-        with patch.object(crr, "_write_back", lambda *a, **k: None):
+    with patch.object(crr.graph_ops, "read_set",
+                      return_value=members):
+        with patch.object(crr.graph_ops, "upsert_by_key", lambda *a, **k: None):
             with patch.object(crr, "refresh_one",
                               return_value=crr.RefreshResult(
                                   kind="superseded",
@@ -621,7 +623,7 @@ def test_refresh_all_read_set_failure_returns_zero_counters():
     def boom(*a, **k):
         raise RuntimeError("db down")
 
-    with patch.object(crr, "_credential_rows", boom):
+    with patch.object(crr.graph_ops, "read_set", boom):
         counters = crr.refresh_all_credentials()
     assert counters == {
         "ok": 0, "revoked": 0, "superseded": 0, "transient": 0, "skipped": 0,
@@ -632,7 +634,8 @@ def test_refresh_all_empty_set_warns_with_remedy(caplog):
     # A Codex-enabled fleet with zero credential rows is the exact outage
     # signature — it must WARN (not INFO) and name the remedy inline.
     with caplog.at_level("INFO", logger=crr.logger.name):
-        with patch.object(crr, "_credential_rows", lambda: []):
+        with patch.object(crr.graph_ops, "read_set",
+                          return_value=SimpleNamespace(members=[])):
             counters = crr.refresh_all_credentials()
     assert counters == {
         "ok": 0, "revoked": 0, "superseded": 0, "transient": 0, "skipped": 0,
@@ -651,7 +654,7 @@ def test_refresh_all_read_set_failure_does_not_warn_zero_rows(caplog):
         raise RuntimeError("db down")
 
     with caplog.at_level("INFO", logger=crr.logger.name):
-        with patch.object(crr, "_credential_rows", boom):
+        with patch.object(crr.graph_ops, "read_set", boom):
             crr.refresh_all_credentials()
     warns = [r for r in caplog.records if r.levelname == "WARNING"]
     assert not any("ZERO rows" in r.getMessage() for r in warns)
@@ -670,8 +673,9 @@ def test_refresh_all_tick_log_states_decision_basis(caplog):
     members = SimpleNamespace(members=rows)
 
     with caplog.at_level("INFO", logger=crr.logger.name):
-        with patch.object(crr, "_credential_rows", lambda: list(members.members)):
-            with patch.object(crr, "_write_back", lambda *a, **k: None):
+        with patch.object(crr.graph_ops, "read_set",
+                          return_value=members):
+            with patch.object(crr.graph_ops, "upsert_by_key", lambda *a, **k: None):
                 with patch.object(crr, "refresh_one",
                                   return_value=crr.RefreshResult(
                                       kind="ok", access_token="a",
@@ -700,7 +704,8 @@ def test_refresh_all_tick_log_reports_standing_failure_age(caplog):
     })
     members = SimpleNamespace(members=[failing])
     with caplog.at_level("INFO", logger=crr.logger.name):
-        with patch.object(crr, "_credential_rows", lambda: list(members.members)):
+        with patch.object(crr.graph_ops, "read_set",
+                          return_value=members):
             crr.refresh_all_credentials()
     tick = [r.getMessage() for r in caplog.records
             if "refresh tick:" in r.getMessage()]

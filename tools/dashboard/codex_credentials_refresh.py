@@ -91,6 +91,10 @@ from tools.graph.codex_oauth import (
     CODEX_USER_AGENT,
     id_token_exp_ms,
 )
+from tools.graph.schemas.codex_credentials import (
+    CODEX_CREDENTIALS_REVISION,
+    CODEX_CREDENTIALS_SET_ID,
+)
 from tools.network import fleet_tunnel_server
 
 
@@ -560,7 +564,13 @@ def refresh_credential_row(
     new_payload = _build_payload_after_refresh(
         base=payload, result=result, now_iso=now_iso,
     )
-    _write_back(row.key, new_payload, org=org)
+    graph_ops.upsert_by_key(
+        CODEX_CREDENTIALS_SET_ID,
+        CODEX_CREDENTIALS_REVISION,
+        row.key,
+        new_payload,
+        org=org,
+    )
     if result.kind == "superseded":
         # THE CANARY. Our stored refresh_token was rejected as already-used,
         # which the graceful-rotation assumption says can't happen. Log it as
@@ -594,58 +604,56 @@ def refresh_credential_row(
     return result
 
 
-def _credential_rows() -> list[Any]:
-    """The operator's Codex sign-in from the vault as one row, or ``[]``.
+VAULT_FRESH_THRESHOLD_MS = 4 * 60 * 60 * 1000
 
-    The rows ``codex.oauth.*`` (tools/graph/harness_credentials.py) are read
-    into the payload shape this poller has always decided on, with the
-    account id as the row key. Absent or cold (not openable) → ``[]``.
+
+def refresh_vault_sign_in(*, now_ms: int, refresh=None) -> str | None:
+    """Rotate the operator's Codex sign-in sealed in the vault.
+
+    The rows ``codex.oauth.*`` (tools/graph/harness_credentials.py) are the
+    sign-in the Getting Started scan sealed and the launcher opens. The
+    decision here is by the sealed id token's expiry, opened only while the
+    operator is unlocked; skipped (None) when absent, cold, or with plenty
+    of life left. Returns the refresh outcome kind otherwise.
     """
-    from types import SimpleNamespace
     from tools.graph import harness_credentials as hv
 
-    values = hv.open_values(hv.CODEX_STATE_KEYS)
-    if not all(k in values for k in hv.CODEX_REQUIRED):
-        return []
-    payload: dict[str, Any] = {
-        "auth_mode": "chatgpt",
-        "id_token": values[hv.CODEX_ID],
-        "access_token": values[hv.CODEX_ACCESS],
-        "refresh_token": values[hv.CODEX_REFRESH],
-    }
+    values = hv.open_values((hv.CODEX_REFRESH, hv.CODEX_EXPIRES))
+    refresh_tok = values.get(hv.CODEX_REFRESH)
+    if not refresh_tok:
+        return None
     expires = hv.expires_ms(values.get(hv.CODEX_EXPIRES))
-    if expires is not None:
-        payload["expires_at_ms"] = expires
-    for key, field_name in (
-        (hv.CODEX_EMAIL, "email"),
-        (hv.CODEX_REFRESHED_AT, "last_refresh_at"),
-        (hv.CODEX_ERROR, "last_refresh_error"),
-    ):
-        v = values.get(key)
-        if v and v != hv.NONE:
-            payload[field_name] = v
-    return [SimpleNamespace(key=values[hv.CODEX_ACCOUNT], payload=payload)]
-
-
-def _write_back(key: str, payload: dict[str, Any], *, org: str) -> None:
-    """Seal the rotated payload back into the vault rows."""
-    from tools.graph import harness_credentials as hv
-
-    hv.seal(hv.CODEX_ID, payload["id_token"])
-    hv.seal(hv.CODEX_ACCESS, payload["access_token"])
-    hv.seal(hv.CODEX_REFRESH, payload["refresh_token"])
-    hv.seal(hv.CODEX_ACCOUNT, key)
-    expires = payload.get("expires_at_ms")
-    if isinstance(expires, int):
-        hv.seal(hv.CODEX_EXPIRES, str(expires))
-    if payload.get("email"):
-        hv.seal(hv.CODEX_EMAIL, str(payload["email"]))
-    hv.seal(hv.CODEX_REFRESHED_AT, str(payload.get("last_refresh_at") or hv.NONE))
-    hv.seal(hv.CODEX_ERROR, str(payload.get("last_refresh_error") or hv.NONE))
+    if expires is not None and (expires - now_ms) > VAULT_FRESH_THRESHOLD_MS:
+        return None
+    logger.info("codex credentials refresh: rotating the vault sign-in")
+    result = (refresh or refresh_one)(refresh_tok)
+    if result.kind == "ok":
+        assert result.access_token and result.refresh_token and result.id_token
+        hv.seal(hv.CODEX_ID, result.id_token)
+        hv.seal(hv.CODEX_ACCESS, result.access_token)
+        hv.seal(hv.CODEX_REFRESH, result.refresh_token)
+        if result.expires_at_ms is not None:
+            hv.seal(hv.CODEX_EXPIRES, str(result.expires_at_ms))
+        logger.info(
+            "codex credentials refresh: vault sign-in OK (new expires_at_ms=%s)",
+            result.expires_at_ms,
+        )
+    elif result.kind in ("revoked", "superseded"):
+        logger.warning(
+            "codex credentials refresh: the vault sign-in is %s — run "
+            "`codex login` on this machine again and re-run "
+            "`graph credentials import`", result.kind,
+        )
+    else:
+        logger.warning(
+            "codex credentials refresh: transient failure for the vault "
+            "sign-in: %s", result.error,
+        )
+    return result.kind
 
 
 def refresh_all_credentials() -> dict[str, int]:
-    """Refresh the operator's Codex sign-in in the vault as needed.
+    """Iterate every ``dashboard.codex.credentials`` row and refresh as needed.
 
     Returns counters keyed by ``ok`` / ``revoked`` / ``superseded`` /
     ``transient`` / ``skipped``. Caller usually just logs the dict.
@@ -655,12 +663,21 @@ def refresh_all_credentials() -> dict[str, int]:
         "ok": 0, "revoked": 0, "superseded": 0, "transient": 0, "skipped": 0,
     }
     try:
-        rows = _credential_rows()
+        kind = refresh_vault_sign_in(now_ms=_now_ms())
+        if kind is not None:
+            counters[kind] = counters.get(kind, 0) + 1
+    except Exception:
+        logger.exception("codex credentials refresh: vault sign-in tick failed")
+    try:
+        members = graph_ops.read_set(
+            CODEX_CREDENTIALS_SET_ID, org=org, peers=[],
+        )
     except Exception:
         logger.exception(
-            "codex credentials refresh: vault read failed; tick aborted",
+            "codex credentials refresh: read_set failed; tick aborted",
         )
         return counters
+    rows = list(getattr(members, "members", []) or [])
     if not rows:
         # A Codex-enabled fleet whose credential surface is empty is NOT
         # healthy — every session falls back to an interactive sign-in with
