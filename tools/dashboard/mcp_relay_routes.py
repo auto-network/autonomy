@@ -23,11 +23,13 @@ import hashlib
 import hmac
 import os
 import time
+from pathlib import Path
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from tools.data_paths import resolve_data_root
 from tools.dashboard import crosstalk_delivery
 from tools.dashboard import mcp_peer_approvals as kinds
 from tools.dashboard import web_push
@@ -37,11 +39,35 @@ from tools.dashboard.dao import mcp_relay_db as db
 from tools.dashboard.event_bus import event_bus
 
 SERVICE_TOKEN_ENV = "MCP_RELAY_SERVICE_TOKEN"
+# The relay's own env file (deploy/relay.sh loads the same path). Under Compose the
+# dashboard container never received the token as an env var, so every relay call
+# answered 503 and the relay reported "dashboard unreachable" with no approval popup.
+# Reading the one canonical file keeps a single copy of the secret.
+RELAY_ENV_RELATIVE = Path("services") / "mcp-relay" / "relay.env"
+
+
+def _relay_env_file_token() -> str:
+    root = resolve_data_root()
+    if root is None:
+        return ""
+    try:
+        text = (root / RELAY_ENV_RELATIVE).read_text()
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        key, sep, value = line.strip().partition("=")
+        if sep and key.removeprefix("export ").strip() == SERVICE_TOKEN_ENV:
+            return value.strip().strip("'\"")
+    return ""
+
+
+def _expected_service_token() -> str:
+    return os.environ.get(SERVICE_TOKEN_ENV) or _relay_env_file_token()
 
 
 def _relay_auth(request: Request) -> JSONResponse | None:
     """Bearer service-token check. Fail-closed: no configured token → 503."""
-    expected = os.environ.get(SERVICE_TOKEN_ENV) or ""
+    expected = _expected_service_token()
     if not expected:
         return JSONResponse(
             {"error": "MCP relay service token not configured on the dashboard"},

@@ -66,11 +66,29 @@ def test_requires_service_token(client):
     assert r.status_code == 401
 
 
-def test_missing_token_env_is_fail_closed(client, monkeypatch):
+def test_missing_token_env_is_fail_closed(client, monkeypatch, tmp_path):
     monkeypatch.delenv(routes.SERVICE_TOKEN_ENV, raising=False)
+    monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))  # no relay.env here
     r = client.post("/api/mcp/session/resolve", headers=AUTH,
                     json={"openai_session": "v1/s"})
     assert r.status_code == 503
+
+
+def test_token_falls_back_to_relay_env_file(client, monkeypatch, tmp_path):
+    # Under Compose the dashboard has no env var; the relay's own env file is
+    # the single copy of the secret.
+    monkeypatch.delenv(routes.SERVICE_TOKEN_ENV, raising=False)
+    monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
+    env_file = tmp_path / routes.RELAY_ENV_RELATIVE
+    env_file.parent.mkdir(parents=True)
+    env_file.write_text(f"CONTROL_PLANE_API_KEY=x\n{routes.SERVICE_TOKEN_ENV}={TOKEN}\n")
+    ok = client.post("/api/mcp/session/resolve", headers=AUTH,
+                     json={"openai_session": "v1/s"})
+    assert ok.status_code == 200
+    bad = client.post("/api/mcp/session/resolve",
+                      headers={"Authorization": "Bearer wrong"},
+                      json={"openai_session": "v1/s"})
+    assert bad.status_code == 401
 
 
 def test_new_session_goes_pending_and_opens_one_approval(client):
