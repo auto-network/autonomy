@@ -1016,8 +1016,6 @@ def test_parse_codex_inbound_crosstalk_user_message():
         "sender_label": "Dashboard UI",
         "source_id": "5706c4cc-6570-4acd-a457-a8907bdb54f5",
         "turn": "1774",
-        "kind": "",
-        "href": "/session/host-0422-201533",
         "timestamp": TS,
     }
 
@@ -1047,8 +1045,6 @@ def test_parse_codex_inbound_crosstalk_allows_angle_bracket_code():
         "sender_label": "Dashboard UI",
         "source_id": "5706c4cc-6570-4acd-a457-a8907bdb54f5",
         "turn": "1774",
-        "kind": "",
-        "href": "/session/host-0422-201533",
         "timestamp": TS,
     }
 
