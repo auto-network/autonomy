@@ -71,7 +71,7 @@ SYNOPSIS = {
     ],
     "related_set_ids": [
         "dashboard.harness.usage#1",
-        "dashboard.claude.setup_tokens#1",
+        "autonomy.vault.audited#1",
     ],
 }
 

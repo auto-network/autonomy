@@ -1,4 +1,4 @@
-"""Host-side OAuth refresh poller for ``dashboard.claude.credentials`` rows.
+"""Host-side OAuth refresh poller for the Claude accounts in the vault (record v16 §10.9).
 
 Containers and the harness-usage poller can't refresh the consumer-scope
 OAuth bundle themselves — Anthropic rotates the refresh_token on every
@@ -39,10 +39,6 @@ from typing import Any
 
 from tools.graph import ops as graph_ops
 from tools.graph.claude_oauth import CLAUDE_USER_AGENT, CLIENT_ID, TOKEN_URL
-from tools.graph.schemas.claude_credentials import (
-    CLAUDE_CREDENTIALS_REVISION,
-    CLAUDE_CREDENTIALS_SET_ID,
-)
 from tools.network import fleet_tunnel_server
 
 
@@ -86,6 +82,49 @@ def _now_iso() -> str:
         .isoformat()
         .replace("+00:00", "Z")
     )
+
+
+def _credential_rows() -> list[Any]:
+    """Every Claude account holding an OAuth bundle, as rows this poller has
+    always decided on: key = account id, payload = the bundle and labels
+    (record v16 §10.9; tools/graph/harness_credentials.py)."""
+    from types import SimpleNamespace
+    from tools.graph import harness_credentials as hv
+
+    rows: list[Any] = []
+    for acct in hv.list_accounts("claude"):
+        if not acct.has("refresh"):
+            continue
+        payload: dict[str, Any] = {
+            "alias": acct.get("alias"),
+            "organization_name": acct.get("org_name"),
+            "account_email": acct.get("email"),
+            "access_token": acct.get("access"),
+            "refresh_token": acct.get("refresh"),
+            "scopes": hv.scopes_list(acct.get("scopes")),
+        }
+        expires = acct.expires_ms()
+        if expires is not None:
+            payload["expires_at_ms"] = expires
+        if acct.get("refreshed_at"):
+            payload["last_refresh_at"] = acct.get("refreshed_at")
+        if acct.get("error"):
+            payload["last_refresh_error"] = acct.get("error")
+        rows.append(SimpleNamespace(key=acct.id, payload=payload))
+    return rows
+
+
+def _write_back(key: str, payload: dict[str, Any], *, org: str) -> None:
+    """Seal the rotated bundle back into the account's rows."""
+    from tools.graph import harness_credentials as hv
+
+    hv.write_account("claude", key, {
+        "access": payload.get("access_token"),
+        "refresh": payload.get("refresh_token"),
+        "expires": str(payload["expires_at_ms"]) if isinstance(payload.get("expires_at_ms"), int) else None,
+        "refreshed_at": payload.get("last_refresh_at"),
+        "error": payload.get("last_refresh_error"),
+    })
 
 
 def _credentials_org() -> str:
@@ -302,13 +341,7 @@ def refresh_credential_row(
     new_payload = _build_payload_after_refresh(
         base=payload, result=result, now_ms=now_ms, now_iso=now_iso,
     )
-    graph_ops.upsert_by_key(
-        CLAUDE_CREDENTIALS_SET_ID,
-        CLAUDE_CREDENTIALS_REVISION,
-        row.key,
-        new_payload,
-        org=org,
-    )
+    _write_back(row.key, new_payload, org=org)
     if result.kind == "revoked":
         alias = payload.get("alias") or "?"
         org_name = payload.get("organization_name") or row.key
@@ -331,7 +364,7 @@ def refresh_credential_row(
 
 
 def refresh_all_credentials() -> dict[str, int]:
-    """Iterate every ``dashboard.claude.credentials`` row and refresh as needed.
+    """Refresh every Claude account's OAuth bundle in the vault as needed.
 
     Returns counters keyed by ``ok`` / ``revoked`` / ``transient`` /
     ``skipped``. Caller usually just logs the dict.
@@ -341,15 +374,12 @@ def refresh_all_credentials() -> dict[str, int]:
         "ok": 0, "revoked": 0, "transient": 0, "skipped": 0,
     }
     try:
-        members = graph_ops.read_set(
-            CLAUDE_CREDENTIALS_SET_ID, org=org, peers=[],
-        )
+        rows = _credential_rows()
     except Exception:
         logger.exception(
-            "claude credentials refresh: read_set failed; tick aborted",
+            "claude credentials refresh: vault read failed; tick aborted",
         )
         return counters
-    rows = list(getattr(members, "members", []) or [])
     if not rows:
         return counters
     now_ms = _now_ms()
@@ -403,7 +433,7 @@ async def credentials_refresh_poller() -> None:
     )
     while True:
         try:
-            # dashboard.claude.credentials is a synced personal Setting — every
+            # the Claude accounts are synced personal vault rows — every
             # Fleet machine (native, trial, SJC, ...) sees the same row. If each
             # one also refreshes it independently, they race: Anthropic rotates
             # the refresh_token on every exchange, so whichever machine loses

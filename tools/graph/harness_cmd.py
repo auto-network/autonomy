@@ -4,9 +4,9 @@ One screen answering the question you actually have when something stops
 working: which accounts exist, are any of them out of headroom, when does that
 change, and what is currently running against each.
 
-Harness-agnostic on purpose. Claude and Codex are what exist today; a third
-appears here the moment it writes ``dashboard.harness.usage`` rows, with no
-change to this command.
+Harness-agnostic on purpose: accounts are the vault records named in
+``tools/graph/harness_credentials.py`` (record v16 §10.9), and a harness
+appears here the moment it writes ``dashboard.harness.usage`` rows.
 
 Never prints a credential. The values it shows — alias, account, window usage,
 reset time, session counts — are the ones you need to diagnose a problem, and
@@ -24,10 +24,7 @@ from collections import Counter
 from typing import Any
 
 USAGE_SET_ID = "dashboard.harness.usage"
-CREDENTIAL_SETS = {
-    "claude": "dashboard.claude.credentials",
-    "codex": "dashboard.codex.credentials",
-}
+HARNESSES = ("claude", "codex", "grok")
 
 _LIVE_STATES = {"live", "running", "active"}
 _DEAD_ACTIVITY = {"dead", "ended"}
@@ -172,12 +169,15 @@ def cmd_harness_status(args) -> None:
     session_counts, dashboard_reachable = _live_session_counts()
 
     aliases: dict[str, dict] = {}
-    for harness, set_id in CREDENTIAL_SETS.items():
-        for member in _members(set_id, org):
-            payload = member.get("payload") or {}
-            alias = payload.get("alias")
+    from . import harness_credentials as hv
+    for harness in HARNESSES:
+        for acct in hv.list_accounts(harness):
+            alias = acct.get("alias")
             if alias:
-                aliases[(harness, alias)] = payload
+                aliases[(harness, alias)] = {
+                    "alias": alias, "account_email": acct.get("email"),
+                    "last_refresh_error": acct.get("error"),
+                }
 
     # account uuid -> operator-facing alias, for the LIVE column and --json.
     alias_by_account = {

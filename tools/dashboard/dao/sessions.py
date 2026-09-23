@@ -107,44 +107,22 @@ _ACTIVE_SESSION_TYPES = {"container", "host", "terminal", "chatwith"}
 
 
 def _claude_credentials_alias_map() -> dict[str, str]:
-    """Return ``{org_uuid: alias}`` from ``dashboard.claude.credentials``.
+    """Return ``{account_id: alias}`` from the Claude accounts in the vault.
 
     Used to resolve the friendly alias for a session's stored
-    ``harness_token`` (org UUID). Best-effort — failures collapse to
-    ``{}`` so the harness_token still surfaces as the bare UUID rather
-    than crashing the active-sessions endpoint.
+    ``harness_token`` (the account id). Best-effort — failures collapse to
+    ``{}`` so the harness_token still surfaces as the bare id rather than
+    crashing the active-sessions endpoint.
     """
     try:
-        from tools.graph import ops as graph_ops
-        from tools.graph.schemas.claude_credentials import (
-            CLAUDE_CREDENTIALS_SET_ID,
-        )
+        from tools.graph import harness_credentials as hv
+        return {
+            acct.id: acct.get("alias")
+            for acct in hv.list_accounts("claude")
+            if acct.get("alias")
+        }
     except Exception:
         return {}
-    try:
-        from tools.dashboard.claude_credentials_refresh import (
-            _credentials_org,
-        )
-        # Pinned to the set's home rather than the ambient caller org: the
-        # dashboard runs with GRAPH_ORG set, so CALLER_ORG resolved to that
-        # org's database, where credentials do not live. The read returned
-        # nothing and every session fell back to displaying a bare UUID.
-        # peers=[] because a credential set must never be read federated.
-        members = graph_ops.read_set(
-            CLAUDE_CREDENTIALS_SET_ID, org=_credentials_org(), peers=[],
-        )
-    except Exception:
-        return {}
-    out: dict[str, str] = {}
-    for m in getattr(members, "members", []) or []:
-        payload = getattr(m, "payload", None)
-        if not isinstance(payload, dict):
-            continue
-        alias = payload.get("alias")
-        key = getattr(m, "key", None)
-        if isinstance(alias, str) and alias and isinstance(key, str) and key:
-            out[key] = alias
-    return out
 
 
 def get_active_sessions(threshold: int = 600) -> list[dict]:

@@ -239,9 +239,8 @@ def test_an_organization_homed_set_still_reads_at_the_callers_org(homed_schemas,
 
 
 @pytest.mark.parametrize("set_id", [
-    "dashboard.claude.setup_tokens",
-    "dashboard.claude.credentials",
-    "dashboard.codex.credentials",
+    "autonomy.vault.audited",
+    "autonomy.vault.secured",
 ])
 def test_harness_credentials_declare_the_operators_store(set_id):
     """Every writer already named `personal` by a module constant, and the
@@ -257,8 +256,8 @@ def test_harness_credentials_declare_the_operators_store(set_id):
 
 
 @pytest.mark.parametrize("set_id", [
-    "dashboard.claude.setup_tokens",
-    "dashboard.claude.credentials",
+    "autonomy.vault.audited",
+    "autonomy.vault.secured",
 ])
 def test_they_also_cannot_be_published(set_id):
     """Home says which database; the band says who may read across one. A

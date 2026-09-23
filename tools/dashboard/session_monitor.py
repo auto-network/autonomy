@@ -155,10 +155,13 @@ except ImportError:
 
 
 def _codex_identity_for_row(row: dict[str, Any]) -> tuple[str, str]:
-    # Future-proof the key space for multiple Codex subscriptions. Launch-time
-    # auth-slot metadata is not available on session rows yet, so we fall back
-    # to the current singleton identity.
-    _ = row
+    """The Codex account this session launched with (its ``harness_token``,
+    the vault account id, record v16 §10.9), so its reading is keyed per
+    account; ``default`` for a session that recorded none."""
+    token = row.get("harness_token") if isinstance(row, dict) else None
+    if isinstance(token, str) and token.strip():
+        token = token.strip()
+        return (token, token[:12])
     return ("default", "default")
 
 

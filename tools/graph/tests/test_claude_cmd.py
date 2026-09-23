@@ -18,15 +18,13 @@ from unittest.mock import patch
 import pytest
 
 from tools.graph import cli, ops
+from tools.graph import harness_credentials as hv
+from tools.graph import settings_ops
+from tools.graph.db import GraphDB
+from tools.vault import key_holder
+from tools.vault.personal_object import derive_delegate_audited_recipient
+from tools.vault.store import VaultStore
 from tools.graph.claude_oauth import FlowResult, OAuthError, TokenResponse
-from tools.graph.schemas.claude_credentials import (
-    CLAUDE_CREDENTIALS_REVISION,
-    CLAUDE_CREDENTIALS_SET_ID,
-)
-from tools.graph.schemas.claude_setup_tokens import (
-    CLAUDE_SETUP_TOKENS_REVISION,
-    CLAUDE_SETUP_TOKENS_SET_ID,
-)
 
 
 # ── fixtures ─────────────────────────────────────────────────
@@ -34,19 +32,54 @@ from tools.graph.schemas.claude_setup_tokens import (
 
 @pytest.fixture
 def graph_db_env(tmp_path, monkeypatch):
-    # Agreement pin (the org-honest recipe for single-org modules, matching
-    # test_credential_import.py): ``graph claude`` reads and writes at
-    # explicit org='personal' like every other credential consumer, and a
-    # pin at an arbitrary tmp graph.db contradicts that org under the
-    # fail-loud resolver (OrgResolutionConflict). Point the pin AT the orgs
-    # tree's own personal.db so pin and org resolution agree.
-    orgs_dir = tmp_path / "orgs"
-    orgs_dir.mkdir()
-    db_path = orgs_dir.parent / "personal.db"
-    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
-    monkeypatch.setenv("GRAPH_DB", str(db_path))
+    """A personal store whose audited vault seals and opens: the accounts the
+    command writes are vault rows (record v16 §10.9)."""
+    monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_API", raising=False)
-    yield db_path
+    db = tmp_path / "personal.db"
+    monkeypatch.setattr(key_holder, "_scoped_db", lambda _set_id, _org: db)
+    GraphDB(db).close()
+    GraphDB.close_all_pooled()
+    private_hex, public_hex = derive_delegate_audited_recipient(bytes(range(32)))
+    with VaultStore(db) as store:
+        store.put_delegate_audited_recipient(public_hex)
+    settings_ops.set_vault_sealer(None)
+    settings_ops.set_vault_key_holder(None)
+    settings_ops.set_personal_delegate_audited_key(private_hex)
+    yield db
+    GraphDB.close_all_pooled()
+    settings_ops.set_personal_delegate_audited_key(None)
+
+
+class _View:
+    """An account seen the way the old rows were asserted on."""
+    def __init__(self, acct, payload):
+        self.id = acct.id
+        self.key = acct.id
+        self.payload = payload
+
+
+def _creds():
+    out = []
+    for acct in hv.list_accounts("claude"):
+        if not acct.has("refresh"):
+            continue
+        out.append(_View(acct, {
+            "alias": acct.get("alias"), "organization_name": acct.get("org_name"),
+            "account_email": acct.get("email"), "access_token": acct.get("access"),
+            "refresh_token": acct.get("refresh"), "scopes": hv.scopes_list(acct.get("scopes")),
+            "expires_at_ms": acct.expires_ms(),
+        }))
+    return out
+
+
+def _setups():
+    return [
+        _View(acct, {"raw_key": acct.get("setup")})
+        for acct in hv.list_accounts("claude") if acct.get("setup")
+    ]
 
 
 def _run_cli(argv: list[str]) -> tuple[int, str, str]:
@@ -95,7 +128,7 @@ def _make_flow(token: TokenResponse) -> FlowResult:
 # ── install: full flow ───────────────────────────────────────
 
 
-def test_install_writes_both_rows(graph_db_env):
+def test_install_seals_the_account(graph_db_env):
     consumer_token = _make_token(scope="user:profile user:inference")
     console_token = _make_token(scope="org:create_api_key user:profile")
     flows = iter([_make_flow(consumer_token), _make_flow(console_token)])
@@ -114,8 +147,8 @@ def test_install_writes_both_rows(graph_db_env):
     assert rc == 0, err
     assert "Installed Claude account" in out
 
-    creds = ops.read_set(CLAUDE_CREDENTIALS_SET_ID, org=ops.CALLER_ORG).members
-    setups = ops.read_set(CLAUDE_SETUP_TOKENS_SET_ID, org=ops.CALLER_ORG).members
+    creds = _creds()
+    setups = _setups()
     assert len(creds) == 1
     assert len(setups) == 1
     assert creds[0].key == "org-uuid-A"
@@ -150,12 +183,8 @@ def test_install_aborts_when_console_org_differs_from_consumer(graph_db_env):
     assert rc != 0
     assert "different accounts" in err
     mint.assert_not_called()
-    assert ops.read_set(
-        CLAUDE_CREDENTIALS_SET_ID, org=ops.CALLER_ORG,
-    ).members == []
-    assert ops.read_set(
-        CLAUDE_SETUP_TOKENS_SET_ID, org=ops.CALLER_ORG,
-    ).members == []
+    assert _creds() == []
+    assert _setups() == []
 
 
 def test_install_is_idempotent_for_same_alias_and_org(graph_db_env):
@@ -183,8 +212,8 @@ def test_install_is_idempotent_for_same_alias_and_org(graph_db_env):
         rc, _, err = _run_cli(["claude", "install", "--alias", "gmail-max"])
         assert rc == 0, err
 
-    creds = ops.read_set(CLAUDE_CREDENTIALS_SET_ID, org=ops.CALLER_ORG).members
-    setups = ops.read_set(CLAUDE_SETUP_TOKENS_SET_ID, org=ops.CALLER_ORG).members
+    creds = _creds()
+    setups = _setups()
     assert len(creds) == 1
     assert len(setups) == 1
     assert creds[0].payload["access_token"] == "at-A2"
@@ -222,7 +251,7 @@ def test_install_rejects_alias_collision_with_different_org(graph_db_env):
     assert rc != 0
     assert "different Anthropic org" in err
     mint.assert_not_called()
-    creds = ops.read_set(CLAUDE_CREDENTIALS_SET_ID, org=ops.CALLER_ORG).members
+    creds = _creds()
     assert len(creds) == 1
     assert creds[0].key == "org-uuid-A"
 
@@ -237,15 +266,13 @@ def test_install_surfaces_oauth_error_cleanly(graph_db_env):
         rc, _, err = _run_cli(["claude", "install", "--alias", "primary"])
     assert rc != 0
     assert "invalid_grant" in err
-    assert ops.read_set(
-        CLAUDE_CREDENTIALS_SET_ID, org=ops.CALLER_ORG,
-    ).members == []
+    assert _creds() == []
 
 
 # ── install --refresh-setup-token ────────────────────────────
 
 
-def test_refresh_setup_token_replaces_only_setup_token_row(graph_db_env):
+def test_refresh_setup_token_replaces_only_the_setup_token(graph_db_env):
     consumer = _make_token()
     console_install = _make_token()
     console_refresh = _make_token()
@@ -265,9 +292,7 @@ def test_refresh_setup_token_replaces_only_setup_token_row(graph_db_env):
         side_effect=lambda **_: next(raw_keys),
     ):
         _run_cli(["claude", "install", "--alias", "primary"])
-        creds_before = ops.read_set(
-            CLAUDE_CREDENTIALS_SET_ID, org=ops.CALLER_ORG,
-        ).members[0]
+        creds_before = _creds()[0]
 
         rc, out, err = _run_cli([
             "claude", "install", "--alias", "primary",
@@ -277,12 +302,8 @@ def test_refresh_setup_token_replaces_only_setup_token_row(graph_db_env):
     assert rc == 0, err
     assert "Refreshed setup token" in out
 
-    creds_after = ops.read_set(
-        CLAUDE_CREDENTIALS_SET_ID, org=ops.CALLER_ORG,
-    ).members[0]
-    setups = ops.read_set(
-        CLAUDE_SETUP_TOKENS_SET_ID, org=ops.CALLER_ORG,
-    ).members
+    creds_after = _creds()[0]
+    setups = _setups()
     # Credentials row was not rewritten — same id, same payload.
     assert creds_after.id == creds_before.id
     assert creds_after.payload == creds_before.payload
@@ -444,7 +465,7 @@ def test_usage_when_no_accounts(graph_db_env):
 # ── remove ───────────────────────────────────────────────────
 
 
-def test_remove_with_yes_drops_both_rows(graph_db_env):
+def test_remove_with_yes_drops_the_account(graph_db_env):
     consumer = _make_token(org_uuid="org-X")
     console = _make_token(org_uuid="org-X")
     flows = iter([_make_flow(consumer), _make_flow(console)])
@@ -460,12 +481,8 @@ def test_remove_with_yes_drops_both_rows(graph_db_env):
     rc, out, _ = _run_cli(["claude", "remove", "--alias", "primary", "--yes"])
     assert rc == 0
     assert "Removed Claude account" in out
-    assert ops.read_set(
-        CLAUDE_CREDENTIALS_SET_ID, org=ops.CALLER_ORG,
-    ).members == []
-    assert ops.read_set(
-        CLAUDE_SETUP_TOKENS_SET_ID, org=ops.CALLER_ORG,
-    ).members == []
+    assert _creds() == []
+    assert _setups() == []
 
 
 def test_remove_unknown_alias_reports_and_exits_clean(graph_db_env):
@@ -491,7 +508,7 @@ def test_remove_aborts_on_no_confirmation(graph_db_env):
         rc, out, _ = _run_cli(["claude", "remove", "--alias", "primary"])
     assert rc == 0
     assert "Aborted" in out
-    creds = ops.read_set(CLAUDE_CREDENTIALS_SET_ID, org=ops.CALLER_ORG).members
+    creds = _creds()
     assert len(creds) == 1
 
 

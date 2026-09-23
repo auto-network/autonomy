@@ -91,10 +91,6 @@ from tools.graph.codex_oauth import (
     CODEX_USER_AGENT,
     id_token_exp_ms,
 )
-from tools.graph.schemas.codex_credentials import (
-    CODEX_CREDENTIALS_REVISION,
-    CODEX_CREDENTIALS_SET_ID,
-)
 from tools.network import fleet_tunnel_server
 
 
@@ -564,13 +560,7 @@ def refresh_credential_row(
     new_payload = _build_payload_after_refresh(
         base=payload, result=result, now_iso=now_iso,
     )
-    graph_ops.upsert_by_key(
-        CODEX_CREDENTIALS_SET_ID,
-        CODEX_CREDENTIALS_REVISION,
-        row.key,
-        new_payload,
-        org=org,
-    )
+    _write_back(row.key, new_payload, org=org)
     if result.kind == "superseded":
         # THE CANARY. Our stored refresh_token was rejected as already-used,
         # which the graceful-rotation assumption says can't happen. Log it as
@@ -604,8 +594,53 @@ def refresh_credential_row(
     return result
 
 
+def _credential_rows() -> list[Any]:
+    """Every Codex account from the vault as rows this poller has always
+    decided on: key = account id, payload = the triple and its state
+    (record v16 §10.9; tools/graph/harness_credentials.py)."""
+    from types import SimpleNamespace
+    from tools.graph import harness_credentials as hv
+
+    rows: list[Any] = []
+    for acct in hv.list_accounts("codex"):
+        if not acct.has(*hv.CODEX_REQUIRED):
+            continue
+        payload: dict[str, Any] = {
+            "auth_mode": "chatgpt",
+            "id_token": acct.get("id"),
+            "access_token": acct.get("access"),
+            "refresh_token": acct.get("refresh"),
+        }
+        expires = acct.expires_ms()
+        if expires is not None:
+            payload["expires_at_ms"] = expires
+        if acct.get("email"):
+            payload["email"] = acct.get("email")
+        if acct.get("refreshed_at"):
+            payload["last_refresh_at"] = acct.get("refreshed_at")
+        if acct.get("error"):
+            payload["last_refresh_error"] = acct.get("error")
+        rows.append(SimpleNamespace(key=acct.id, payload=payload))
+    return rows
+
+
+def _write_back(key: str, payload: dict[str, Any], *, org: str) -> None:
+    """Seal the rotated triple back into the account's rows."""
+    from tools.graph import harness_credentials as hv
+
+    hv.write_account("codex", key, {
+        "id": payload.get("id_token"),
+        "access": payload.get("access_token"),
+        "refresh": payload.get("refresh_token"),
+        "expires": str(payload["expires_at_ms"]) if isinstance(payload.get("expires_at_ms"), int) else None,
+        "email": payload.get("email"),
+        "refreshed_at": payload.get("last_refresh_at"),
+        "error": payload.get("last_refresh_error"),
+    })
+
+
 def refresh_all_credentials() -> dict[str, int]:
-    """Iterate every ``dashboard.codex.credentials`` row and refresh as needed.
+    """Refresh every Codex account's triple in the vault as needed.
 
     Returns counters keyed by ``ok`` / ``revoked`` / ``superseded`` /
     ``transient`` / ``skipped``. Caller usually just logs the dict.
@@ -615,15 +650,12 @@ def refresh_all_credentials() -> dict[str, int]:
         "ok": 0, "revoked": 0, "superseded": 0, "transient": 0, "skipped": 0,
     }
     try:
-        members = graph_ops.read_set(
-            CODEX_CREDENTIALS_SET_ID, org=org, peers=[],
-        )
+        rows = _credential_rows()
     except Exception:
         logger.exception(
-            "codex credentials refresh: read_set failed; tick aborted",
+            "codex credentials refresh: vault read failed; tick aborted",
         )
         return counters
-    rows = list(getattr(members, "members", []) or [])
     if not rows:
         # A Codex-enabled fleet whose credential surface is empty is NOT
         # healthy — every session falls back to an interactive sign-in with

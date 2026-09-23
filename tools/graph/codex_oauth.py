@@ -8,7 +8,7 @@ POSTing the refresh_token to ``auth.openai.com`` and rewriting
 mounted read-only, so the in-container refresh can never land — the
 substrate refresh poller (``tools/dashboard/codex_credentials_refresh``)
 performs the refresh host-side instead and keeps the
-``dashboard.codex.credentials`` row ahead of expiry.
+Codex account's vault rows ahead of expiry.
 
 This module is the pure OAuth surface that poller uses: the token
 endpoint constant, the client_id, the refresh scope, and the JWT
