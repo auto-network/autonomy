@@ -185,7 +185,7 @@ def run_cache_gc(
     now = _now_iso()
 
     # Every settings-bearing store, not just organizations: cache schemas
-    # are homed in personal and machine too (claude_setup_tokens is
+    # are homed in personal and machine too (dashboard.harness.usage is
     # @home("personal") @cache), and a sweep that enumerated organizations
     # only would let their expired rows accumulate forever (auto-35kmy
     # review finding).

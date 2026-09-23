@@ -10,7 +10,7 @@ with missing-row-as-default-false semantics (registered via the plugin
 loader at ``tools/dashboard/plugin_api/loader.py``, not here).
 
 Schema *file-location and registration boilerplate* precedent:
-``tools/graph/schemas/claude_credentials.py``.
+``tools/graph/harness_credentials.py`` (the vault accounts).
 
 Spec: graph://40dd9d7a-23a.
 """

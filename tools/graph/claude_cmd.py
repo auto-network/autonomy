@@ -32,6 +32,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+from . import harness_credentials as hv
 from . import ops
 from .claude_oauth import (
     CONSOLE_SCOPES,
@@ -41,15 +42,6 @@ from .claude_oauth import (
     TokenResponse,
     mint_setup_token,
     run_oauth_flow,
-)
-from .schemas.claude_credentials import (
-    CLAUDE_CREDENTIALS_REVISION,
-    CLAUDE_CREDENTIALS_SET_ID,
-)
-from .schemas.claude_setup_tokens import (
-    CLAUDE_SETUP_TOKEN_TTL,
-    CLAUDE_SETUP_TOKENS_REVISION,
-    CLAUDE_SETUP_TOKENS_SET_ID,
 )
 
 
@@ -92,37 +84,24 @@ def _format_iso(value: str | None) -> str:
     return str(value)[:19].replace("T", " ").rstrip("Z").rstrip()
 
 
-def _setup_token_expires_at(setup_row: Any | None) -> str | None:
-    """Compute substrate ``expires_at`` for a setup-token row.
-
-    ``ResolvedSetting`` does not expose ``expires_at`` directly today, so
-    we derive it from ``created_at + CLAUDE_SETUP_TOKEN_TTL`` — the same
-    arithmetic the @cache decorator stamps at write time, so the answer
-    matches what the substrate row carries.
-    """
-    if setup_row is None:
+def _setup_token_expires_at(acct: hv.Account | None) -> str | None:
+    """When the account's setup token expires: minted-at plus one year."""
+    if acct is None or acct.get("setup") is None:
         return None
-    created_at = getattr(setup_row, "created_at", None)
-    if not created_at:
+    minted = hv.parse_iso(acct.get("setup_minted_at"))
+    if minted is None:
         return None
-    try:
-        dt = datetime.fromisoformat(
-            str(created_at).replace("Z", "+00:00")
-        )
-    except (TypeError, ValueError):
-        return None
-    return (dt + CLAUDE_SETUP_TOKEN_TTL).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return (minted + hv.SETUP_TOKEN_TTL).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _credentials_org() -> str:
     """The org that owns every row this module touches, for a DIRECT read.
 
-    All three sets here -- ``dashboard.claude.credentials``,
-    ``dashboard.claude.setup_tokens`` and ``dashboard.harness.usage`` -- are
-    operator-local: their correct value depends on *this* machine, they are
-    secrets or host telemetry, and they sync only across the operator's own
-    fleet. Their home is ``personal`` (org-scope rubric graph://4d88c2ad-625,
-    worked-examples table).
+    The accounts live in the operator's vault (record v16 §10.9) and the
+    usage rows in ``dashboard.harness.usage``; both are operator-local:
+    their correct value depends on *this* machine, and they sync only
+    across the operator's own fleet. Their home is ``personal`` (org-scope
+    rubric graph://4d88c2ad-625, worked-examples table).
 
     This names that home for the ``--force-host`` path, which bypasses the
     dashboard and reads the local database directly. Every other read goes
@@ -168,101 +147,73 @@ def _read_rows(set_id: str) -> list[Any]:
     return list(members.members)
 
 
-def _read_credentials_rows() -> list[Any]:
-    """Return the list of ``ResolvedSetting`` rows for installed credentials."""
-    return _read_rows(CLAUDE_CREDENTIALS_SET_ID)
+def _accounts() -> list[hv.Account]:
+    """Every installed Claude account, from the vault (record v16 §10.9)."""
+    return hv.list_accounts("claude")
 
 
-def _read_setup_token_rows() -> list[Any]:
-    return _read_rows(CLAUDE_SETUP_TOKENS_SET_ID)
-
-
-def _credentials_by_alias(alias: str) -> Any | None:
-    for m in _read_credentials_rows():
-        payload = m.payload if isinstance(m.payload, dict) else {}
-        if payload.get("alias") == alias:
-            return m
+def _account_by_alias(alias: str) -> hv.Account | None:
+    for acct in _accounts():
+        if acct.get("alias") == alias:
+            return acct
     return None
 
 
-def _credentials_by_org_uuid(org_uuid: str) -> Any | None:
-    for m in _read_credentials_rows():
-        if m.key == org_uuid:
-            return m
-    return None
-
-
-def _setup_token_by_org_uuid(org_uuid: str) -> Any | None:
-    for m in _read_setup_token_rows():
-        if m.key == org_uuid:
-            return m
-    return None
+def _account_by_org_uuid(org_uuid: str) -> hv.Account | None:
+    return hv.read_account("claude", org_uuid)
 
 
 # ── install ──────────────────────────────────────────────────
 
 
-def _build_credentials_payload(
-    *, alias: str, token: TokenResponse, last_refresh_at: str | None,
-) -> dict[str, Any]:
-    payload: dict[str, Any] = {
+def _bundle_parts(
+    *, alias: str, token: TokenResponse,
+) -> dict[str, str | None]:
+    """The account parts a fresh consumer bundle sets (record v16 §10.9)."""
+    return {
         "alias": alias,
-        "organization_name": token.organization_name,
-        "account_email": token.account_email,
-        "access_token": token.access_token,
-        "refresh_token": token.refresh_token,
-        "expires_at_ms": _now_ms() + (token.expires_in * 1000),
-        "scopes": [s for s in (token.scope or "").split(" ") if s],
+        "org_name": token.organization_name,
+        "email": token.account_email,
+        "access": token.access_token,
+        "refresh": token.refresh_token,
+        "expires": str(_now_ms() + (token.expires_in * 1000)),
+        "scopes": hv.scopes_text(
+            s for s in (token.scope or "").split(" ") if s
+        ),
+        "refreshed_at": None,
+        "error": None,
     }
-    if last_refresh_at is not None:
-        payload["last_refresh_at"] = last_refresh_at
-    return payload
 
 
-def _write_credentials_row(*, org_uuid: str, payload: dict[str, Any]) -> str:
-    """Idempotent write of the credentials row for ``org_uuid``.
+def _write_bundle(*, org_uuid: str, parts: dict[str, str | None]) -> None:
+    """Seal the bundle parts into the account keyed by *org_uuid*.
 
-    Re-running install with the same alias updates the row in place via
-    ``upsert_by_key`` — a key collision on the org UUID means we already
-    track this account, so we should rotate the bundle, not error.
+    Re-running install for the same account rotates the bundle in place: a
+    vault row is never rewritten, a change appends a revision.
     """
-    return ops.upsert_by_key(
-        CLAUDE_CREDENTIALS_SET_ID,
-        CLAUDE_CREDENTIALS_REVISION,
-        org_uuid,
-        payload,
-        org=_credentials_org(),
-    )
+    hv.write_account("claude", org_uuid, parts)
 
 
-def _write_setup_token_row(*, org_uuid: str, raw_key: str) -> str:
-    """Idempotent write of the setup-token row for ``org_uuid``.
-
-    Re-mint paths replace the existing row in place; substrate
-    ``expires_at`` is restamped to ``created_at + 1y`` on each
-    upsert (the @cache decorator's TTL drives that).
-    """
-    return ops.upsert_by_key(
-        CLAUDE_SETUP_TOKENS_SET_ID,
-        CLAUDE_SETUP_TOKENS_REVISION,
-        org_uuid,
-        {"raw_key": raw_key},
-        org=_credentials_org(),
-    )
+def _write_setup_token(*, org_uuid: str, raw_key: str) -> None:
+    """Seal a freshly minted setup token; minted-at is its year clock."""
+    hv.write_account("claude", org_uuid, {
+        "setup": raw_key,
+        "setup_minted_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    })
 
 
 def _alias_collision_check(alias: str, org_uuid: str) -> None:
     """Refuse to repurpose an alias that is already pointing at a different
     Anthropic org. Re-running with the same (alias, org_uuid) is fine.
     """
-    existing = _credentials_by_alias(alias)
+    existing = _account_by_alias(alias)
     if existing is None:
         return
-    if existing.key == org_uuid:
+    if existing.id == org_uuid:
         return
     print(
         f"Error: alias {alias!r} is already installed and points at a "
-        f"different Anthropic org ({existing.key}). To re-target the alias "
+        f"different Anthropic org ({existing.id}). To re-target the alias "
         f"to a new account, remove it first: "
         f"`graph claude remove --alias {alias}`.",
         file=sys.stderr,
@@ -347,13 +298,13 @@ def _do_install_full(args: argparse.Namespace) -> int:
         )
         return 1
 
-    payload = _build_credentials_payload(
-        alias=args.alias, token=consumer.token, last_refresh_at=None,
+    _write_bundle(
+        org_uuid=org_uuid,
+        parts=_bundle_parts(alias=args.alias, token=consumer.token),
     )
-    _write_credentials_row(org_uuid=org_uuid, payload=payload)
-    _write_setup_token_row(org_uuid=org_uuid, raw_key=raw_key)
+    _write_setup_token(org_uuid=org_uuid, raw_key=raw_key)
     logger.info(
-        "claude install: substrate writes OK alias=%r org=%s (credentials + setup_tokens)",
+        "claude install: vault writes OK alias=%r org=%s (bundle + setup token)",
         args.alias, org_uuid,
     )
 
@@ -371,10 +322,10 @@ def _do_install_refresh_setup_token(args: argparse.Namespace) -> int:
     expire or has been revoked.
     """
     logger.info("claude install: --refresh-setup-token alias=%r", args.alias)
-    existing = _credentials_by_alias(args.alias)
+    existing = _account_by_alias(args.alias)
     if existing is None:
         logger.error(
-            "claude install: --refresh-setup-token alias=%r — no existing credentials row",
+            "claude install: --refresh-setup-token alias=%r — no installed account",
             args.alias,
         )
         print(
@@ -384,7 +335,7 @@ def _do_install_refresh_setup_token(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    expected_org_uuid = existing.key
+    expected_org_uuid = existing.id
     try:
         console = _run_console_flow()
     except OAuthError as e:
@@ -429,9 +380,9 @@ def _do_install_refresh_setup_token(args: argparse.Namespace) -> int:
             "graph read 5ab13dd5-570", file=sys.stderr,
         )
         return 1
-    _write_setup_token_row(org_uuid=expected_org_uuid, raw_key=raw_key)
+    _write_setup_token(org_uuid=expected_org_uuid, raw_key=raw_key)
     logger.info(
-        "claude install: --refresh-setup-token alias=%r org=%s OK (setup_tokens row replaced)",
+        "claude install: --refresh-setup-token alias=%r org=%s OK (setup token replaced)",
         args.alias, expected_org_uuid,
     )
     print(
@@ -461,34 +412,19 @@ def cmd_claude_install(args: argparse.Namespace) -> None:
 
 
 def cmd_claude_list(args: argparse.Namespace) -> None:  # noqa: ARG001
-    creds = _read_credentials_rows()
-    setup_tokens = {m.key: m for m in _read_setup_token_rows()}
-    if not creds:
+    accounts = _accounts()
+    if not accounts:
         print("(no Claude accounts installed — run `graph claude install`)")
         return
     rows: list[dict[str, str]] = []
-    for m in creds:
-        payload = m.payload if isinstance(m.payload, dict) else {}
-        st = setup_tokens.get(m.key)
-        # ``updated_at`` on the credentials row tracks the last time the
-        # row was written — install or refresh. ``last_refresh_error``
-        # comes from the refresh poller (separate bead) and is empty
-        # until that lands.
-        bundle_refreshed = (
-            payload.get("last_refresh_at")
-            or getattr(m, "updated_at", None)
-        )
-        # The setup-token row's substrate ``expires_at`` is the year
-        # the row was minted + 1y; computed from ``created_at + 1y``
-        # to match what the @cache decorator stamps at write time.
-        token_expires_at = _setup_token_expires_at(st)
+    for acct in accounts:
         rows.append({
-            "alias": payload.get("alias", "-"),
-            "org": payload.get("organization_name", "-"),
-            "email": payload.get("account_email", "-"),
-            "bundle_refreshed": _format_iso(bundle_refreshed),
-            "token_expires": _format_iso(token_expires_at),
-            "last_error": payload.get("last_refresh_error", "") or "",
+            "alias": acct.get("alias") or "-",
+            "org": acct.get("org_name") or "-",
+            "email": acct.get("email") or "-",
+            "bundle_refreshed": _format_iso(acct.get("refreshed_at")),
+            "token_expires": _format_iso(_setup_token_expires_at(acct)),
+            "last_error": acct.get("error") or "",
         })
     _print_table(rows, [
         ("alias", "ALIAS", 14),
@@ -498,9 +434,6 @@ def cmd_claude_list(args: argparse.Namespace) -> None:  # noqa: ARG001
         ("token_expires", "SETUP-TOKEN EXP", 19),
         ("last_error", "LAST REFRESH ERROR", 30),
     ])
-
-
-# ── usage ────────────────────────────────────────────────────
 
 
 def _read_harness_usage_rows() -> list[Any]:
@@ -542,8 +475,8 @@ def _format_resets_at(short: dict[str, Any] | None) -> str:
 
 
 def cmd_claude_usage(args: argparse.Namespace) -> None:  # noqa: ARG001
-    creds_by_org = {m.key: m for m in _read_credentials_rows()}
-    if not creds_by_org:
+    accounts = _accounts()
+    if not accounts:
         print("(no Claude accounts installed — run `graph claude install`)")
         return
     usage_by_org: dict[str, dict[str, Any]] = {}
@@ -555,12 +488,11 @@ def cmd_claude_usage(args: argparse.Namespace) -> None:  # noqa: ARG001
         if isinstance(account_id, str) and account_id:
             usage_by_org[account_id] = payload
     rows: list[dict[str, str]] = []
-    for org_uuid, cred in creds_by_org.items():
-        cpayload = cred.payload if isinstance(cred.payload, dict) else {}
-        usage = usage_by_org.get(org_uuid) or {}
+    for acct in accounts:
+        usage = usage_by_org.get(acct.id) or {}
         windows = usage.get("windows") or {}
         rows.append({
-            "alias": cpayload.get("alias", "-"),
+            "alias": acct.get("alias") or "-",
             "five_h": _format_window_pct(windows.get("short")),
             "seven_d": _format_window_pct(windows.get("long")),
             "resets_at": _format_resets_at(windows.get("short")),
@@ -586,14 +518,12 @@ def cmd_claude_remove(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
     alias = args.alias.strip()
-    cred = _credentials_by_alias(alias)
-    if cred is None:
+    acct = _account_by_alias(alias)
+    if acct is None:
         print(f"No installed Claude account with alias {alias!r}.")
         return
-    org_uuid = cred.key
-    cpayload = cred.payload if isinstance(cred.payload, dict) else {}
-    org_name = cpayload.get("organization_name", "(unknown)")
-    account_email = cpayload.get("account_email", "(unknown)")
+    org_name = acct.get("org_name") or "(unknown)"
+    account_email = acct.get("email") or "(unknown)"
     if not args.yes:
         print(
             f"About to remove Claude account: alias={alias!r} "
@@ -606,28 +536,15 @@ def cmd_claude_remove(args: argparse.Namespace) -> None:
         if answer not in ("y", "yes"):
             print("Aborted.")
             return
-    logger.info("claude remove: deleting alias=%r org=%s", alias, org_uuid)
+    logger.info("claude remove: deleting alias=%r org=%s", alias, acct.id)
     try:
-        ops.remove_setting(cred.id, org=_credentials_org())
+        removed = hv.remove_account("claude", acct.id)
     except Exception as e:  # noqa: BLE001 — surface to operator
-        logger.error("claude remove: credentials row delete failed alias=%r org=%s: %s",
-                     alias, org_uuid, e)
-        print(f"Error removing credentials row: {e}", file=sys.stderr)
+        logger.error("claude remove: delete failed alias=%r org=%s: %s", alias, acct.id, e)
+        print(f"Error removing the account: {e}", file=sys.stderr)
         sys.exit(1)
-    setup = _setup_token_by_org_uuid(org_uuid)
-    if setup is not None:
-        try:
-            ops.remove_setting(setup.id, org=_credentials_org())
-        except Exception as e:  # noqa: BLE001
-            logger.error("claude remove: setup_token row delete failed alias=%r org=%s: %s",
-                         alias, org_uuid, e)
-            print(f"Error removing setup-token row: {e}", file=sys.stderr)
-            sys.exit(1)
-    logger.info("claude remove: alias=%r org=%s OK (both rows deleted)", alias, org_uuid)
+    logger.info("claude remove: alias=%r org=%s OK (%d rows deleted)", alias, acct.id, removed)
     print(f"Removed Claude account: alias={alias!r}.")
-
-
-# ── argparse wiring ──────────────────────────────────────────
 
 
 def attach_claude_subparser(sub: Any) -> None:

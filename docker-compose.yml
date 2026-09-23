@@ -198,6 +198,29 @@ services:
         read_only: true
         bind:
           create_host_path: true
+      # The operator's harness sign-ins, read-only at their own paths, so the
+      # Getting Started scan (graph credentials import, design of record
+      # graph://5f2f5a49-00d v12 FR7a) sees the well-known locations on a
+      # Compose node exactly as on a native one. The files are read, never
+      # written; what is imported lives in the personal Settings store.
+      - type: bind
+        source: ${AUTONOMY_HOST_HOME}/.claude
+        target: ${AUTONOMY_HOST_HOME}/.claude
+        read_only: true
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ${AUTONOMY_HOST_HOME}/.codex
+        target: ${AUTONOMY_HOST_HOME}/.codex
+        read_only: true
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ${AUTONOMY_HOST_HOME}/.grok
+        target: ${AUTONOMY_HOST_HOME}/.grok
+        read_only: true
+        bind:
+          create_host_path: true
       # Permissioned control plane for the optional local Service gateway.
       # Only dashboard + Caddy receive this volume; session containers never do.
       - service-gateway-control:/run/autonomy-service-gateway

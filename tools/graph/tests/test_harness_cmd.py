@@ -65,8 +65,6 @@ _TWO_CLAUDE_ACCOUNTS = {
         _usage_member(harness="claude", alias="gmail", account_id="org-G"),
         _usage_member(harness="claude", alias="auto-network", account_id="org-A"),
     ]},
-    "/api/graph/settings/dashboard.claude.credentials": {"members": []},
-    "/api/graph/settings/dashboard.codex.credentials": {"members": []},
     "/api/dao/session_status": {"rows": []},
 }
 
@@ -148,15 +146,17 @@ def test_json_names_an_unattributed_bucket_rather_than_null():
     assert json.loads(out)["live_sessions"] == {"claude:unattributed": 1}
 
 
-def test_refresh_error_prints_under_its_account():
-    responses = {
-        **_TWO_CLAUDE_ACCOUNTS,
-        "/api/graph/settings/dashboard.claude.credentials": {"members": [
-            {"payload": {"alias": "gmail",
-                         "last_refresh_error": "invalid_grant: Refresh token not found"}},
-        ]},
-    }
-    out, _ = _capture(argparse.Namespace(org=None, json=False), responses=responses)
+def test_refresh_error_prints_under_its_account(monkeypatch):
+    """The account's last refresh error is a part of its vault record
+    (tools/graph/harness_credentials.py), read beside the usage rows."""
+    from tools.graph import harness_credentials as hv
+    monkeypatch.setattr(
+        hv, "list_accounts",
+        lambda harness, **kw: [hv.Account("claude", "org-X", {
+            "alias": "gmail", "error": "invalid_grant: Refresh token not found",
+        })] if harness == "claude" else [],
+    )
+    out, _ = _capture(argparse.Namespace(org=None, json=False), responses=_TWO_CLAUDE_ACCOUNTS)
     assert "refresh error: invalid_grant" in out
 
 

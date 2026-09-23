@@ -53,7 +53,7 @@ is the machine-readable copy the property test enforces):
 - ``relaykit/connector._LIFECYCLE_LOG_WINDOW_S`` — diagnostic log
   bucketing; no adversary, nothing refused.
 - ``tools/graph`` metrics windows (``_STATS_*_WINDOW_SECONDS``) — operator
-  telemetry arithmetic; and ``CLAUDE_SETUP_TOKEN_TTL`` — a Setting-schema
+  telemetry arithmetic; and ``harness_credentials.SETUP_TOKEN_TTL`` — a vault-account
   payload default owned by its schema, expressed as a ``timedelta`` in the
   schema's own vocabulary. Graph-side ADVERSARIAL gates (the settings
   window and allowance) consume this module's helpers instead.

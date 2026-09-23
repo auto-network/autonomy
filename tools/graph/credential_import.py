@@ -1,55 +1,31 @@
-"""Layer-0 credential import — ``graph credentials import`` (bead auto-5bq85).
+"""``graph credentials import`` — the harness sign-ins found on this machine,
+sealed into the operator's vault.
 
-The **outer agent** (the user's own harness following ``/install``) runs
-this during Stage-1 install. It discovers the user's *existing* local
-Claude / Codex auth on this machine and copies the Claude bundle into the
-substrate credential Settings so inner workspace sessions authenticate
-without the user re-doing sign-in.
+Design of record graph://5f2f5a49-00d v12 FR7a and v16 §10.9: the first step
+in Getting Started is the harness sign-in. A deterministic scan of the
+well-known locations on the operator's machine finds each harness's token
+and brings it into the system, and a session starts with it; no browser
+when a token exists on the machine.
 
-Scope (locked by the bead's boundary decisions):
+The system's front door for a credential is the vault: a harness account is
+one record keyed by its account identity, held as sealed rows named in
+:mod:`tools.graph.harness_credentials` and nowhere else. This scan writes an
+imported sign-in into that record; the install command writes into the
+same record; the launcher, the pollers and the usage probe read it.
 
-* **Consume-only, never a transplant.** The user's original auth files
-  (``~/.claude/.credentials.json``, ``~/.codex/auth.json``) are READ-ONLY
-  inputs — never modified, moved, or deleted. We consume a *copy*;
-  ownership stays with the user's harness. Secure vaulting / ownership
-  transfer is vault C5, explicitly out of scope here.
-* **No interactive secret prompt, ever.** Absent file = harness not
-  authed = report ``needs-sign-in`` and skip. We never prompt for a
-  secret. (A structural test in ``tests/test_credential_import.py`` pins
-  this: the module contains no ``input()`` call.)
-* **Validate before import.** One authenticated no-op per discovered
-  credential; import only what passes, report what fails as
-  ``needs-sign-in``. For Claude the no-op is a read-only ``GET
-  /api/oauth/profile`` that both proves liveness and yields the org
-  identity we key the row by. For Codex the no-op is the id_token's own
-  signed expiry (a JWT ``exp`` in the future is a live-token proxy that
-  needs no network round-trip).
-* **Reuse the existing storage surface — no new storage, no schema
-  fork.** Claude rows land in ``dashboard.claude.credentials`` (personal
-  org, the org every consumer — launcher, refresh poller, usage poller —
-  reads; see ``agents/session_launcher._credentials_org``). The write is
-  an idempotent upsert keyed by the Anthropic org UUID: re-running
-  refreshes, never duplicates.
-* **Codex now has a substrate Setting too** (bead auto-kzws9, STEP 1 of
-  the Codex credential end-state). ``dashboard.codex.credentials`` mirrors
-  the Claude surface, keyed by the ChatGPT ``account_id``. A validated
-  ChatGPT-mode bundle is copied into it with the same idempotent
-  ``upsert_by_key`` + freshness rule Claude uses. This is TRANSITIONAL:
-  the launcher and the read-only host mount are UNTOUCHED here — the
-  cutover, the refresh poller, and mount retirement are the successor
-  bead's whole job, so the credential is written to the substrate *and*
-  still consumed in place via the mount until the successor lands.
-  API-key-mode Codex credentials are not stored on this surface — they
-  carry no ``account_id`` and no OAuth tokens — so they stay ``in-place``
-  with no write.
+Scanned, read-only, never modified:
 
-The only substrate writes this module performs are the Claude and Codex
-``upsert_by_key`` calls — nothing is written outside the Settings store.
+* Claude: ``~/.claude/.credentials.json`` → the account keyed by the
+  organization id the token validation returns
+* Codex: ``~/.codex/auth.json`` → the account keyed by the ChatGPT account
+  id (API-key mode stays in place: nothing to seal)
+* Grok: ``~/.grok/auth.json`` → the account the file names, else ``default``
 
-Spec: bead auto-5bq85 (Claude), bead auto-kzws9 (Codex step 1). Storage of
-record: ``graph://73c4e9ef-bbc``. Auth runbook: ``graph://ffa116fb-f85``.
+A personal audited row seals cold, so the scan runs from the command line
+or inside the dashboard alike; opening a row needs the operator unlocked.
+When the vault cannot be opened the freshness comparison is unavailable and
+the on-disk sign-in is sealed as found.
 """
-
 from __future__ import annotations
 
 import argparse
@@ -64,15 +40,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from . import ops
+from . import harness_credentials as hv
 from .claude_oauth import CLAUDE_USER_AGENT, CONSUMER_SCOPES
-from .schemas.claude_credentials import (
-    CLAUDE_CREDENTIALS_REVISION,
-    CLAUDE_CREDENTIALS_SET_ID,
-)
-from .schemas.codex_credentials import (
-    CODEX_CREDENTIALS_REVISION,
-    CODEX_CREDENTIALS_SET_ID,
-)
 
 
 logger = logging.getLogger(__name__)
@@ -88,6 +57,7 @@ CREDENTIALS_ORG = "personal"
 # so the whole flow is testable against a fixture home.
 CLAUDE_CREDENTIALS_RELPATH = ".claude/.credentials.json"
 CODEX_AUTH_RELPATH = ".codex/auth.json"
+GROK_AUTH_RELPATH = ".grok/auth.json"
 
 # Read-only authenticated no-op for a Claude consumer bundle. Returns the
 # org identity (uuid / name / account email) we need to key + populate the
@@ -338,115 +308,22 @@ def _http_fetch_claude_identity(access_token: str) -> ClaudeIdentity:
 # ── Claude: payload build + import ───────────────────────────
 
 
-def resolve_alias(
-    override: str | None,
-    identity: ClaudeIdentity,
-    existing_payload: dict[str, Any] | None,
-) -> str:
-    """Pick the operator-friendly alias for the credentials row.
-
-    Precedence: explicit ``--alias`` → the alias already on the existing
-    row (never clobber an operator's chosen name on re-import) → the
-    account email's local-part → an ``imported-<org8>`` fallback.
-    """
-    if override and override.strip():
-        return override.strip()
-    if existing_payload:
-        prior = existing_payload.get("alias")
-        if isinstance(prior, str) and prior.strip():
-            return prior.strip()
-    local = identity.account_email.split("@", 1)[0]
-    if local:
-        return local
-    return f"imported-{identity.org_uuid[:8]}"
-
-
-def build_claude_payload(
-    disc: ClaudeDiscovery,
-    identity: ClaudeIdentity,
-    *,
-    alias: str,
-) -> dict[str, Any]:
-    """Assemble the ``dashboard.claude.credentials`` payload for a row.
-
-    A write only ever happens with a *fresh* on-disk bundle (see
-    :func:`import_claude`'s freshness rule), so the payload is written
-    clean — exactly like the install path — carrying no ``last_refresh_*``
-    metadata. This is deliberate: preserving a stale
-    ``last_refresh_error`` (e.g. a prior ``invalid_grant``) onto a
-    newly-valid token would make the refresh poller skip the row as
-    revoked and let the fresh bundle go stale. The poller re-stamps
-    ``last_refresh_at`` on its next tick.
-    """
-    return {
-        "alias": alias,
-        "organization_name": identity.organization_name,
-        "account_email": identity.account_email,
-        "access_token": disc.access_token,
-        "refresh_token": disc.refresh_token,
-        "expires_at_ms": disc.expires_at_ms,
-        "scopes": list(disc.scopes),
-    }
-
-
-def _read_existing_claude_row(
-    org_uuid: str,
-    *,
-    read_set: Callable[..., Any] | None = None,
-) -> dict[str, Any] | None:
-    """Return the existing credentials payload for ``org_uuid`` or ``None``.
-
-    Reads from ``personal`` with ``peers=[]`` — exactly how the launcher
-    and pollers read — so the freshness comparison sees the same row the
-    consumers do.
-    """
-    reader = read_set or ops.read_set
-    try:
-        members = reader(
-            CLAUDE_CREDENTIALS_SET_ID, org=CREDENTIALS_ORG, peers=[],
-        )
-    except Exception:  # noqa: BLE001 — set may not exist yet on a fresh DB
-        return None
-    for member in getattr(members, "members", []) or []:
-        if member.key == org_uuid:
-            return member.payload if isinstance(member.payload, dict) else {}
-    return None
-
-
-def _write_claude_row(
-    org_uuid: str,
-    payload: dict[str, Any],
-    *,
-    upsert: Callable[..., Any] | None = None,
-) -> None:
-    writer = upsert or ops.upsert_by_key
-    writer(
-        CLAUDE_CREDENTIALS_SET_ID,
-        CLAUDE_CREDENTIALS_REVISION,
-        org_uuid,
-        payload,
-        org=CREDENTIALS_ORG,
-    )
-
-
 def import_claude(
     home: str,
     *,
     alias_override: str | None = None,
     dry_run: bool = False,
     fetch_identity: Callable[[str], ClaudeIdentity] = _http_fetch_claude_identity,
-    read_set: Callable[..., Any] | None = None,
-    upsert: Callable[..., Any] | None = None,
 ) -> HarnessResult:
-    """Discover → validate → import the local Claude consumer bundle.
-
-    Idempotency / freshness rule: the substrate row is keyed by the org
-    UUID (never duplicates). On re-import we only overwrite when the
-    on-disk bundle is *newer* than what the substrate holds
-    (``expires_at_ms`` comparison). This keeps a second run a no-op
-    (``unchanged``) while still letting a fresh local re-auth flow in, and
-    critically never regresses a bundle the refresh poller has already
-    rotated ahead of the on-disk copy.
+    """Discover → validate → seal the local Claude sign-in into the account
+    record keyed by the organization id the validation returns (record v16
+    §10.9). The bundle and labels are sealed; a setup token, if the account
+    has one from install, is left as it is. Freshness rule: a sealed bundle
+    the refresh poller has rotated ahead of the on-disk copy is never
+    regressed; when the vault cannot be opened (cold) the comparison is
+    unavailable and the on-disk bundle is sealed as found. The alias is set
+    only when the account has none (``alias_override``, else the email's
+    local part).
     """
     try:
         disc = discover_claude(home)
@@ -461,42 +338,42 @@ def import_claude(
         identity = fetch_identity(disc.access_token)
     except CredentialImportError as exc:
         return HarnessResult("claude", STATUS_NEEDS_SIGN_IN, str(exc))
-
-    existing = _read_existing_claude_row(identity.org_uuid, read_set=read_set)
-    if existing is not None:
-        existing_exp = existing.get("expires_at_ms")
-        if isinstance(existing_exp, int) and existing_exp >= disc.expires_at_ms:
-            return HarnessResult(
-                "claude", STATUS_UNCHANGED,
-                f"already current for {identity.account_email} "
-                f"(org {identity.organization_name})",
-                identity.account_email,
-            )
-    alias = resolve_alias(alias_override, identity, existing)
-    payload = build_claude_payload(disc, identity, alias=alias)
-    if dry_run:
-        verb = "would refresh" if existing is not None else "would import"
+    existing = hv.read_account("claude", identity.org_uuid)
+    sealed_exp = existing.expires_ms() if existing is not None else None
+    if sealed_exp is not None and sealed_exp >= disc.expires_at_ms:
         return HarnessResult(
-            "claude", STATUS_WOULD_IMPORT,
-            f"{verb} {identity.account_email} (org {identity.organization_name}, "
-            f"alias {alias!r})",
+            "claude", STATUS_UNCHANGED,
+            f"already sealed and current for {identity.account_email} "
+            f"(org {identity.organization_name})",
             identity.account_email,
         )
-    _write_claude_row(identity.org_uuid, payload, upsert=upsert)
-    verb = "refreshed" if existing is not None else "imported"
+    if dry_run:
+        return HarnessResult(
+            "claude", STATUS_WOULD_IMPORT,
+            f"would seal {identity.account_email} (org {identity.organization_name})",
+            identity.account_email,
+        )
+    parts: dict[str, str | None] = {
+        "access": disc.access_token,
+        "refresh": disc.refresh_token,
+        "expires": str(disc.expires_at_ms),
+        "scopes": hv.scopes_text(disc.scopes),
+        "email": identity.account_email,
+        "org_name": identity.organization_name,
+        "error": None,
+    }
+    if existing is None or existing.get("alias") is None:
+        parts["alias"] = alias_override or identity.account_email.split("@", 1)[0]
+    hv.write_account("claude", identity.org_uuid, parts)
     logger.info(
-        "credential import: claude %s org=%s alias=%r",
-        verb, identity.org_uuid, alias,
+        "credential import: claude sealed org=%s account=%s",
+        identity.org_uuid, identity.account_email,
     )
     return HarnessResult(
         "claude", STATUS_IMPORTED,
-        f"{verb} {identity.account_email} (org {identity.organization_name}, "
-        f"alias {alias!r})",
+        f"sealed {identity.account_email} (org {identity.organization_name})",
         identity.account_email,
     )
-
-
-# ── Codex: discovery + validation ────────────────────────────
 
 
 @dataclass
@@ -641,91 +518,16 @@ def _codex_row_is_writable(disc: CodexDiscovery) -> bool:
     )
 
 
-def build_codex_payload(disc: CodexDiscovery) -> dict[str, Any]:
-    """Assemble the ``dashboard.codex.credentials`` payload for a row.
-
-    Written clean — carrying no ``last_refresh_*`` metadata — for the same
-    reason the Claude path writes clean: a stale ``last_refresh_error``
-    preserved onto a freshly-imported bundle would make the successor
-    refresh poller treat the row as revoked. The poller stamps freshness
-    on its own ticks. ``auth_mode`` falls back to ``"chatgpt"`` because a
-    keyable OAuth bundle is by definition a ChatGPT-mode login even if the
-    file omitted the field.
-    """
-    return {
-        "email": disc.email,
-        "auth_mode": disc.auth_mode or "chatgpt",
-        "access_token": disc.access_token,
-        "refresh_token": disc.refresh_token,
-        "id_token": disc.id_token,
-        "expires_at_ms": disc.id_token_exp_ms,
-    }
-
-
-def _read_existing_codex_row(
-    account_id: str,
-    *,
-    read_set: Callable[..., Any] | None = None,
-) -> dict[str, Any] | None:
-    """Return the existing Codex credentials payload for ``account_id``.
-
-    Reads from ``personal`` with ``peers=[]`` — exactly how the launcher
-    and the successor poller will read — so the freshness comparison sees
-    the same row the consumers do.
-    """
-    reader = read_set or ops.read_set
-    try:
-        members = reader(
-            CODEX_CREDENTIALS_SET_ID, org=CREDENTIALS_ORG, peers=[],
-        )
-    except Exception:  # noqa: BLE001 — set may not exist yet on a fresh DB
-        return None
-    for member in getattr(members, "members", []) or []:
-        if member.key == account_id:
-            return member.payload if isinstance(member.payload, dict) else {}
-    return None
-
-
-def _write_codex_row(
-    account_id: str,
-    payload: dict[str, Any],
-    *,
-    upsert: Callable[..., Any] | None = None,
-) -> None:
-    writer = upsert or ops.upsert_by_key
-    writer(
-        CODEX_CREDENTIALS_SET_ID,
-        CODEX_CREDENTIALS_REVISION,
-        account_id,
-        payload,
-        org=CREDENTIALS_ORG,
-    )
-
-
 def import_codex(
     home: str,
     *,
     now_ms: int | None = None,
     dry_run: bool = False,
-    read_set: Callable[..., Any] | None = None,
-    upsert: Callable[..., Any] | None = None,
 ) -> HarnessResult:
-    """Discover → validate → import the local Codex credential.
-
-    STEP 1 of the Codex credential end-state (bead auto-kzws9): a validated
-    ChatGPT-mode bundle is copied into ``dashboard.codex.credentials``,
-    keyed by the ChatGPT ``account_id``, with the same idempotent
-    ``upsert_by_key`` + freshness rule the Claude path uses. On re-import we
-    only overwrite when the on-disk id_token is *newer* than what the
-    substrate holds (``expires_at_ms`` comparison), so a second run is a
-    no-op (``unchanged``) and never regresses a bundle a future poller has
-    rotated ahead of the on-disk copy.
-
-    TRANSITIONAL: the launcher and the read-only host mount are untouched —
-    the credential is written to the substrate *and* still consumed in
-    place via the mount until the successor bead cuts the launcher over.
-    API-key-mode credentials are not stored here (no ``account_id``, no
-    OAuth tokens); they validate and stay ``in_place`` with no write.
+    """Discover → validate → seal the local Codex sign-in into the account
+    record keyed by the ChatGPT account id (record v16 §10.9). Same
+    freshness rule as Claude. API-key-mode credentials are consumed in
+    place: no OAuth tokens, nothing to seal.
     """
     now = now_ms if now_ms is not None else int(time.time() * 1000)
     try:
@@ -741,46 +543,91 @@ def import_codex(
     account = disc.email or disc.account_id
     if not ok:
         return HarnessResult("codex", STATUS_NEEDS_SIGN_IN, detail, account)
-
-    # API-key mode (and any non-keyable bundle) has no account-keyed row to
-    # write — it is validated and consumed in place from the host mount.
     if not _codex_row_is_writable(disc):
         return HarnessResult(
             "codex", STATUS_IN_PLACE,
             f"{detail}; consumed in place from ~/.codex/auth.json",
             account,
         )
-
-    existing = _read_existing_codex_row(disc.account_id, read_set=read_set)
-    if existing is not None:
-        existing_exp = existing.get("expires_at_ms")
-        if isinstance(existing_exp, int) and existing_exp >= disc.id_token_exp_ms:
-            return HarnessResult(
-                "codex", STATUS_UNCHANGED,
-                f"already current for {account} (account {disc.account_id})",
-                account,
-            )
-    payload = build_codex_payload(disc)
-    if dry_run:
-        verb = "would refresh" if existing is not None else "would import"
+    existing = hv.read_account("codex", disc.account_id)
+    sealed_exp = existing.expires_ms() if existing is not None else None
+    if sealed_exp is not None and sealed_exp >= disc.id_token_exp_ms:
         return HarnessResult(
-            "codex", STATUS_WOULD_IMPORT,
-            f"{verb} {account} (account {disc.account_id})",
+            "codex", STATUS_UNCHANGED,
+            f"already sealed and current for {account} (account {disc.account_id})",
             account,
         )
-    _write_codex_row(disc.account_id, payload, upsert=upsert)
-    verb = "refreshed" if existing is not None else "imported"
-    logger.info(
-        "credential import: codex %s account=%s", verb, disc.account_id,
-    )
+    if dry_run:
+        return HarnessResult(
+            "codex", STATUS_WOULD_IMPORT,
+            f"would seal {account} (account {disc.account_id})", account,
+        )
+    hv.write_account("codex", disc.account_id, {
+        "id": disc.id_token,
+        "access": disc.access_token,
+        "refresh": disc.refresh_token,
+        "expires": str(disc.id_token_exp_ms),
+        "email": disc.email,
+        "error": None,
+    })
+    logger.info("credential import: codex sealed account=%s", disc.account_id)
     return HarnessResult(
         "codex", STATUS_IMPORTED,
-        f"{verb} {account} (account {disc.account_id})",
-        account,
+        f"sealed {account} (account {disc.account_id})", account,
     )
 
 
-# ── orchestration ────────────────────────────────────────────
+# ── Grok ─────────────────────────────────────────────────────
+#
+# Grok Build keeps its stored sign-in at ``~/.grok/auth.json`` (graph note
+# 7d172e94-4f3). The file is sealed verbatim as the account's ``auth`` part
+# and rebuilt per session. The account id is the first identifier the file
+# names; a file naming none is the machine's one account, ``default``.
+
+_GROK_ID_FIELDS = ("accountId", "account_id", "userId", "user_id", "sub", "email", "user")
+
+
+def grok_account_id(raw: dict[str, Any]) -> str:
+    for name in _GROK_ID_FIELDS:
+        v = raw.get(name)
+        if isinstance(v, str) and v.strip():
+            v = v.strip().replace(".", "_").replace(":", "_")
+            return v[:64]
+    return "default"
+
+
+def import_grok(home: str, *, dry_run: bool = False) -> HarnessResult:
+    path = os.path.join(home, GROK_AUTH_RELPATH)
+    if not os.path.isfile(path):
+        return HarnessResult(
+            "grok", STATUS_NEEDS_SIGN_IN,
+            "no ~/.grok/auth.json — run `grok login` to sign in",
+        )
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+        raw = json.loads(text)
+    except (OSError, ValueError) as exc:
+        return HarnessResult(
+            "grok", STATUS_NEEDS_SIGN_IN,
+            f"~/.grok/auth.json is present but unreadable: {exc}",
+        )
+    if not isinstance(raw, dict) or not raw:
+        return HarnessResult(
+            "grok", STATUS_NEEDS_SIGN_IN, "~/.grok/auth.json holds no sign-in",
+        )
+    account_id = grok_account_id(raw)
+    existing = hv.read_account("grok", account_id)
+    if existing is not None and existing.get("auth") == text:
+        return HarnessResult("grok", STATUS_UNCHANGED, f"already sealed and current ({account_id})", account_id)
+    if dry_run:
+        return HarnessResult("grok", STATUS_WOULD_IMPORT, f"would seal the stored sign-in ({account_id})", account_id)
+    hv.write_account("grok", account_id, {"auth": text})
+    logger.info("credential import: grok stored sign-in sealed account=%s", account_id)
+    return HarnessResult("grok", STATUS_IMPORTED, f"sealed the stored sign-in ({account_id})", account_id)
+
+
+HARNESSES = ("claude", "codex", "grok")
 
 
 def run_import(
@@ -789,13 +636,44 @@ def run_import(
     alias_override: str | None = None,
     dry_run: bool = False,
 ) -> ImportReport:
-    """Import both harnesses and collect a per-harness report."""
+    """Scan the three harnesses, seal what can be sealed, and report per
+    harness (record v16 §10.9)."""
     report = ImportReport()
     report.add(import_claude(
         home, alias_override=alias_override, dry_run=dry_run,
     ))
     report.add(import_codex(home, dry_run=dry_run))
+    report.add(import_grok(home, dry_run=dry_run))
     return report
+
+
+USABLE_STATUSES = frozenset({STATUS_IMPORTED, STATUS_UNCHANGED, STATUS_IN_PLACE, STATUS_WOULD_IMPORT})
+
+
+def report_to_dict(report: ImportReport) -> dict[str, Any]:
+    """The report as data: per-harness rows and the harnesses a session can
+    launch with, for the Getting Started surfaces."""
+    rows = [
+        {
+            "harness": r.harness,
+            "status": r.status,
+            "detail": r.detail,
+            "account": r.account,
+            "usable": r.status in USABLE_STATUSES,
+        }
+        for r in report.results
+    ]
+    return {
+        "harnesses": rows,
+        "usable": [r["harness"] for r in rows if r["usable"]],
+    }
+
+
+def operator_home() -> str:
+    """The operator's home directory as this process sees it: on a Compose
+    node the host home is mounted at its own path and named by
+    AUTONOMY_HOST_HOME; elsewhere it is this process's home."""
+    return os.environ.get("AUTONOMY_HOST_HOME") or os.path.expanduser("~")
 
 
 # ── CLI ──────────────────────────────────────────────────────
@@ -816,7 +694,7 @@ def _format_report(report: ImportReport) -> str:
 
 
 def cmd_credentials_import(args: argparse.Namespace) -> None:
-    home = os.path.expanduser(args.home) if args.home else os.path.expanduser("~")
+    home = os.path.expanduser(args.home) if args.home else operator_home()
     report = run_import(
         home, alias_override=args.alias, dry_run=args.dry_run,
     )
@@ -855,7 +733,7 @@ def attach_credentials_subparser(sub: Any) -> None:
     p_import.add_argument(
         "--home",
         default=None,
-        help="Override the home directory scanned (default: $HOME).",
+        help="Override the home directory scanned (default: $AUTONOMY_HOST_HOME, else $HOME).",
     )
     p_import.add_argument(
         "--dry-run",

@@ -666,34 +666,38 @@ _CLAUDE_USAGE_BODY = {
 }
 
 
+_ACCOUNTS: dict[str, "hv.Account"] = {}
+
+
+@pytest.fixture(autouse=True)
+def _accounts_in_the_vault(monkeypatch):
+    """The collector reads Claude accounts from the vault; these tests
+    describe them through the two install helpers below."""
+    from tools.graph import harness_credentials as hv
+    _ACCOUNTS.clear()
+    monkeypatch.setattr(
+        hv, "list_accounts",
+        lambda harness, **kw: [a for a in _ACCOUNTS.values() if a.harness == harness],
+    )
+    yield
+    _ACCOUNTS.clear()
+
+
+def _account(org_uuid: str):
+    from tools.graph import harness_credentials as hv
+    return _ACCOUNTS.setdefault(org_uuid, hv.Account("claude", org_uuid))
+
+
 def _install_credentials(graph_db_env, *, alias: str, org_uuid: str,
                          access_token: str = "fake-access") -> None:
-    """Install one ``dashboard.claude.credentials`` row directly via
-    ``ops.upsert_by_key`` so the substrate-backed collector can read it.
-
-    Mirrors what ``graph claude install`` writes after a real consumer
-    OAuth flow — the harness-usage poller doesn't care how the row got
-    there, only that it carries the rotating bundle.
-    """
-    from tools.graph.schemas.claude_credentials import (
-        CLAUDE_CREDENTIALS_REVISION,
-        CLAUDE_CREDENTIALS_SET_ID,
-    )
-    ops.upsert_by_key(
-        CLAUDE_CREDENTIALS_SET_ID,
-        CLAUDE_CREDENTIALS_REVISION,
-        org_uuid,
-        {
-            "alias": alias,
-            "organization_name": f"{alias}-org",
-            "account_email": f"{alias}@example.com",
-            "access_token": access_token,
-            "refresh_token": f"refresh-{alias}",
-            "expires_at_ms": 9999999999999,
-            "scopes": ["user:profile"],
-        },
-        org=ops.CALLER_ORG,
-    )
+    """One Claude account with an OAuth bundle and its labels — what the
+    install command and the Getting Started scan seal (record v16 §10.9)."""
+    acct = _account(org_uuid)
+    acct.parts.update({
+        "alias": alias, "org_name": f"{alias}-org", "email": f"{alias}@example.com",
+        "access": access_token, "refresh": f"refresh-{alias}",
+        "expires": "9999999999999", "scopes": "user:profile",
+    })
 
 
 def test_collect_claude_usage_writes_one_row_per_credential(graph_db_env, monkeypatch):
@@ -790,19 +794,11 @@ def test_collect_claude_usage_no_session_dependency(graph_db_env, monkeypatch):
 
 
 def _install_setup_token(graph_db_env, *, org_uuid: str, raw_key: str) -> None:
-    """Install one ``dashboard.claude.setup_tokens`` row (payload is only
-    ``raw_key``; the key is the org uuid) so the probe path can read it."""
-    from tools.graph.schemas.claude_setup_tokens import (
-        CLAUDE_SETUP_TOKENS_REVISION,
-        CLAUDE_SETUP_TOKENS_SET_ID,
-    )
-    ops.upsert_by_key(
-        CLAUDE_SETUP_TOKENS_SET_ID,
-        CLAUDE_SETUP_TOKENS_REVISION,
-        org_uuid,
-        {"raw_key": raw_key},
-        org=ops.CALLER_ORG,
-    )
+    """A freshly minted setup token on the account, so the probe path reads it."""
+    from datetime import datetime, timezone
+    acct = _account(org_uuid)
+    acct.parts["setup"] = raw_key
+    acct.parts["setup_minted_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 _PROBE_HEADERS_200 = {

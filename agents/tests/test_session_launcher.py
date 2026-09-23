@@ -1277,6 +1277,41 @@ def freeze_now(monkeypatch):
     return fixed
 
 
+def _account_from_rows(org_uuid, token_row, cred_row):
+    from tools.graph import harness_credentials as hv
+    parts = {}
+    if token_row is not None:
+        parts["setup"] = token_row.payload.get("raw_key")
+        if getattr(token_row, "created_at", None):
+            parts["setup_minted_at"] = token_row.created_at
+    if cred_row is not None:
+        p = cred_row.payload or {}
+        for part, name in (("alias", "alias"), ("access", "access_token"),
+                           ("refresh", "refresh_token"), ("email", "account_email"),
+                           ("org_name", "organization_name")):
+            if p.get(name):
+                parts[part] = p[name]
+        if isinstance(p.get("expires_at_ms"), int):
+            parts["expires"] = str(p["expires_at_ms"])
+    return hv.Account("claude", org_uuid, parts)
+
+
+@pytest.fixture
+def picker_seams(monkeypatch):
+    """The picker reads accounts from the vault; these tests describe them
+    as the setup-token rows and credential rows the record migrated."""
+    monkeypatch.setattr(session_launcher, "_setup_token_rows", lambda: [], raising=False)
+    monkeypatch.setattr(session_launcher, "_credentials_rows", lambda: [], raising=False)
+
+    def accounts():
+        tokens = {r.key: r for r in session_launcher._setup_token_rows()}
+        creds = {r.key: r for r in session_launcher._credentials_rows()}
+        out = [_account_from_rows(k, tokens.get(k), creds.get(k)) for k in sorted(set(tokens) | set(creds))]
+        return [a for a in out if a.launchable]
+    monkeypatch.setattr(session_launcher, "_claude_accounts", accounts)
+
+
+@pytest.mark.usefixtures("picker_seams")
 class TestSubstrateCredentialsPicker:
     """Acceptance criteria for ``_resolve_credentials_via_substrate``.
 
@@ -1476,10 +1511,12 @@ class TestSubstrateCredentialsPicker:
             return _R()
 
         monkeypatch.setattr(session_launcher, "_setup_token_rows", _fake_setup_tokens)
-        monkeypatch.setattr(
-            session_launcher, "_credentials_rows",
-            lambda: [_credentials_row("org-A", "gmail")],
-        )
+        # Labels only: an account holding an OAuth bundle would launch from
+        # the vault (record v16 §10.9), so the install path is reached only
+        # when no launchable account exists.
+        labels = _credentials_row("org-A", "gmail")
+        labels.payload.pop("access_token"); labels.payload.pop("refresh_token")
+        monkeypatch.setattr(session_launcher, "_credentials_rows", lambda: [labels])
         monkeypatch.setattr(session_launcher, "_claude_usage_rows", lambda: [])
         monkeypatch.setattr(session_launcher.subprocess, "run", _fake_run)
 
@@ -1563,52 +1600,38 @@ class TestSubstrateCredentialsPicker:
         assert result["harness_token"] == "org-A"
 
     def test_expired_setup_token_rows_filtered(self, monkeypatch, freeze_now):
-        """Setup-token rows past their @cache TTL (1y) are dropped before
-        the picker considers them."""
+        """An account whose setup token is past its year, with no OAuth
+        bundle to launch from, is not launchable and never reaches the picker
+        (tools/graph/harness_credentials.py SETUP_TOKEN_TTL)."""
         from datetime import timedelta
-        from tools.graph.schemas.claude_setup_tokens import (
-            CLAUDE_SETUP_TOKEN_TTL,
-        )
-        # One fresh row (created today) + one expired row (created 2y ago).
+        from tools.graph import harness_credentials as hv
         fresh = _FakeRow(
-            key="org-A",
-            payload={"raw_key": "raw-A"},
+            key="org-A", payload={"raw_key": "raw-A"},
             created_at=freeze_now.isoformat(),
         )
-        expired_at = freeze_now - CLAUDE_SETUP_TOKEN_TTL - timedelta(days=1)
+        expired_at = freeze_now - hv.SETUP_TOKEN_TTL - timedelta(days=1)
         old = _FakeRow(
-            key="org-B",
-            payload={"raw_key": "raw-B"},
+            key="org-B", payload={"raw_key": "raw-B"},
             created_at=expired_at.isoformat(),
         )
-
-        # Stand in for ops.read_set: return both rows; _setup_token_rows
-        # itself does the filtering, so let it run unmocked.
-        from types import SimpleNamespace
-
-        def _fake_read_set(set_id, org=None, peers=None):
-            return SimpleNamespace(members=[fresh, old])
-
-        import tools.graph.ops as _ops
-        monkeypatch.setattr(_ops, "read_set", _fake_read_set)
-        monkeypatch.setattr(
-            session_launcher, "_credentials_rows",
-            lambda: [_credentials_row("org-A", "gmail")],
-        )
+        monkeypatch.setattr(session_launcher, "_setup_token_rows", lambda: [fresh, old])
+        labels = _credentials_row("org-A", "gmail")
+        labels.payload.pop("access_token"); labels.payload.pop("refresh_token")
+        monkeypatch.setattr(session_launcher, "_credentials_rows", lambda: [labels])
         monkeypatch.setattr(session_launcher, "_claude_usage_rows", lambda: [])
 
         class _PinnedRng:
             def choice(self, seq):
-                # The picker should only see the fresh row, so seq[0] is org-A.
+                # The picker should only see the fresh account, so seq[0] is org-A.
                 assert len(seq) == 1
                 return seq[0]
-
         result = session_launcher._resolve_credentials_via_substrate(
             prefer_alias=None, rng=_PinnedRng(),
         )
         assert result["harness_token"] == "org-A"
 
 
+@pytest.mark.usefixtures("picker_seams")
 class TestResolveCredentials:
     def test_env_var_wins_and_emits_no_alias(self, tmp_path, monkeypatch):
         """Acceptance criterion: ``CLAUDE_CODE_OAUTH_TOKEN`` env-var
@@ -1819,80 +1842,85 @@ def test_beads_credential_key_is_masked(
 
 # ── Codex credential cutover (bead auto-l1h3f) ───────────────────────
 
-def _codex_row(key, payload):
-    from types import SimpleNamespace
-    return SimpleNamespace(key=key, payload=payload)
+def _stub_vault(monkeypatch, harness_accounts: dict):
+    """Stub the vault: ``{harness: [Account, ...]}``."""
+    from tools.graph import harness_credentials as hv
+    monkeypatch.setattr(
+        hv, "list_accounts",
+        lambda harness, **kw: list(harness_accounts.get(harness, [])),
+    )
+    monkeypatch.setattr(
+        hv, "read_account",
+        lambda harness, account_id, **kw: next(
+            (a for a in harness_accounts.get(harness, []) if a.id == account_id), None),
+    )
 
 
-def _fresh_codex_payload(**over):
-    p = {
-        "email": "codexuser@example.com",
-        "auth_mode": "chatgpt",
-        "access_token": "at-1",
-        "refresh_token": "rt-1",
-        "id_token": "id-1",
-        "expires_at_ms": 4102444800000,
-        "last_refresh_at": "2026-08-14T00:00:00Z",
-    }
-    p.update(over)
-    return p
+def _codex_vault(monkeypatch, account_id="acct-UUID", **over):
+    from tools.graph import harness_credentials as hv
+    parts = {"id": "id-1", "access": "at-1", "refresh": "rt-1", "expires": "4102444800000",
+             "email": "codexuser@example.com", "refreshed_at": "2026-08-14T00:00:00Z"}
+    parts.update(over)
+    _stub_vault(monkeypatch, {"codex": [hv.Account("codex", account_id, parts)]})
 
 
 def test_materialize_codex_auth_json_reconstructs_file(tmp_path, monkeypatch):
-    """The substrate row is rebuilt into the on-disk auth.json shape Codex expects."""
+    """The account's vault rows are rebuilt into the on-disk auth.json shape Codex expects."""
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    monkeypatch.setattr(
-        session_launcher, "_codex_credential_rows",
-        lambda: [_codex_row("acct-UUID", _fresh_codex_payload())],
-    )
+    _codex_vault(monkeypatch)
     out = session_launcher._materialize_codex_auth_json(run_dir)
     assert out is not None
     doc = json.loads(Path(out).read_text())
     assert doc["auth_mode"] == "chatgpt"
     assert doc["OPENAI_API_KEY"] is None
-    # account_id is the row KEY, not a payload field
     assert doc["tokens"]["account_id"] == "acct-UUID"
     assert doc["tokens"]["access_token"] == "at-1"
     assert doc["tokens"]["refresh_token"] == "rt-1"
     assert doc["tokens"]["id_token"] == "id-1"
     assert doc["last_refresh"] == "2026-08-14T00:00:00Z"
-    # 0600 like the host file
     assert (Path(out).stat().st_mode & 0o777) == 0o600
 
 
-def test_materialize_codex_auth_json_missing_row_returns_none(tmp_path, monkeypatch):
-    """No usable substrate row → no file → Codex simply unavailable (truthful)."""
+def test_materialize_codex_auth_json_missing_account_returns_none(tmp_path, monkeypatch):
+    """No Codex account in the vault → no file → Codex simply unavailable (truthful)."""
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    monkeypatch.setattr(session_launcher, "_codex_credential_rows", lambda: [])
+    _stub_vault(monkeypatch, {})
     assert session_launcher._materialize_codex_auth_json(run_dir) is None
 
 
-def test_materialize_codex_auth_json_missing_row_warns_with_remedy(
+def test_materialize_codex_auth_json_missing_account_warns_with_remedy(
     tmp_path, monkeypatch, caplog,
 ):
-    """A None return must WARN with the remedy — a missed migration is an
+    """A None return must WARN with the remedy — a missing sign-in is an
     operator-visible error, not a silent sign-in prompt at launch."""
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    monkeypatch.setattr(session_launcher, "_codex_credential_rows", lambda: [])
+    _stub_vault(monkeypatch, {})
     with caplog.at_level("INFO", logger=session_launcher.logger.name):
         assert session_launcher._materialize_codex_auth_json(run_dir) is None
     warns = [r for r in caplog.records if r.levelname == "WARNING"]
     assert len(warns) == 1
     msg = warns[0].getMessage()
-    assert "no usable Codex credential row" in msg
+    assert "no Codex account in the vault" in msg
     assert "graph credentials import" in msg
 
 
-def test_pick_codex_credential_row_prefers_freshest(monkeypatch):
-    older = _codex_row("a", _fresh_codex_payload(expires_at_ms=1000))
-    newer = _codex_row("b", _fresh_codex_payload(expires_at_ms=9000))
-    incomplete = _codex_row("c", {"auth_mode": "chatgpt"})  # no tokens
-    assert session_launcher._pick_codex_credential_row(
-        [older, newer, incomplete]) is newer
-    assert session_launcher._pick_codex_credential_row([incomplete]) is None
+def test_pick_account_is_the_only_one_or_a_random_one(monkeypatch):
+    from tools.graph import harness_credentials as hv
+    one = hv.Account("codex", "a", {"id": "i", "access": "a", "refresh": "r"})
+    two = hv.Account("codex", "b", {"id": "i", "access": "a", "refresh": "r"})
+    incomplete = hv.Account("codex", "c", {"id": "i"})
+    _stub_vault(monkeypatch, {"codex": [one, incomplete]})
+    assert session_launcher._pick_account("codex") is one
+    _stub_vault(monkeypatch, {"codex": [one, two]})
+    class _Rng:
+        def choice(self, seq):
+            return seq[-1]
+    assert session_launcher._pick_account("codex", rng=_Rng()) is two
+    _stub_vault(monkeypatch, {"codex": [incomplete]})
+    assert session_launcher._pick_account("codex") is None
 
 
 def test_optional_tool_mounts_uses_substrate_not_host_auth_json(
@@ -1901,10 +1929,7 @@ def test_optional_tool_mounts_uses_substrate_not_host_auth_json(
     """The credential mount is the materialized substrate file, never ~/.codex/auth.json."""
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    monkeypatch.setattr(
-        session_launcher, "_codex_credential_rows",
-        lambda: [_codex_row("acct-UUID", _fresh_codex_payload())],
-    )
+    _codex_vault(monkeypatch)
     mounts = session_launcher._resolve_optional_tool_mounts(run_dir=run_dir)
     # Exactly one mount targets the container auth.json path...
     auth_hosts = [
@@ -1919,10 +1944,10 @@ def test_optional_tool_mounts_uses_substrate_not_host_auth_json(
 
 
 def test_optional_tool_mounts_no_row_mounts_no_auth(tmp_path, monkeypatch):
-    """A missing substrate row leaves no auth.json mount at all."""
+    """No Codex account in the vault leaves no auth.json mount at all."""
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    monkeypatch.setattr(session_launcher, "_codex_credential_rows", lambda: [])
+    _stub_vault(monkeypatch, {})
     mounts = session_launcher._resolve_optional_tool_mounts(run_dir=run_dir)
     assert not any(
         spec.split(":")[0] == "/home/agent/.codex/auth.json"
@@ -1950,10 +1975,7 @@ def test_codex_auth_copy_cleanup_is_scheduled(
     tmp_path, fake_crosstalk, captured_run, platform_snapshot, monkeypatch,
 ):
     """The materialized Codex auth.json (live tokens) is cleaned up post-exit."""
-    monkeypatch.setattr(
-        session_launcher, "_codex_credential_rows",
-        lambda: [_codex_row("acct-UUID", _fresh_codex_payload())],
-    )
+    _codex_vault(monkeypatch)
     scheduled: list[tuple[str, str]] = []
     monkeypatch.setattr(
         session_launcher, "_schedule_creds_cleanup",
@@ -2201,12 +2223,9 @@ def test_build_mount_plan_socket_via_startup_is_refused_at_emit(tmp_path, monkey
 
 
 def _stub_usable_codex_row(monkeypatch):
-    """Make a usable Codex credential row exist, so the auth mount is DECLARED —
+    """Make the vault hold a Codex account, so the auth mount is DECLARED —
     without this the declare/materialize distinction has nothing to prove."""
-    import types
-    monkeypatch.setattr(session_launcher, "_pick_codex_credential_row",
-                        lambda rows: types.SimpleNamespace(key="acct", payload={}))
-    monkeypatch.setattr(session_launcher, "_codex_credential_rows", lambda: [object()])
+    _codex_vault(monkeypatch, account_id="acct")
 
 
 def test_declare_mode_declares_but_does_not_materialize_credential(tmp_path, monkeypatch):
@@ -2344,3 +2363,102 @@ def test_beads_credential_env_args_follow_the_org_dir(tmp_path, monkeypatch):
     assert "BEADS_DOLT_SERVER_USER=beads_autonomy" in args
     (shared / "credentials.env").unlink()
     assert session_launcher._beads_credential_env_args(None) == []
+
+
+# ── Claude and Grok launch from the vault accounts (record v16 §10.9) ──
+
+
+def _claude_vault(monkeypatch, *, setup=None, minted_at=None, bundle=True, account_id="org-1"):
+    from tools.graph import harness_credentials as hv
+    parts = {"alias": "dev"}
+    if setup:
+        parts["setup"] = setup
+        parts["setup_minted_at"] = minted_at or "2026-09-01T00:00:00Z"
+    if bundle:
+        parts.update({"access": "at-v", "refresh": "rt-v", "expires": "9000",
+                      "scopes": "user:inference"})
+    _stub_vault(monkeypatch, {"claude": [hv.Account("claude", account_id, parts)]})
+
+
+def test_materialize_claude_bundle_writes_the_file_claude_reads(tmp_path, monkeypatch):
+    _claude_vault(monkeypatch)
+    out = session_launcher._materialize_claude_bundle(tmp_path, "org-1")
+    doc = json.loads(Path(out).read_text())["claudeAiOauth"]
+    assert doc["accessToken"] == "at-v" and doc["refreshToken"] == "rt-v"
+    assert doc["expiresAt"] == 9000 and doc["scopes"] == ["user:inference"]
+    assert (Path(out).stat().st_mode & 0o777) == 0o600
+
+
+def test_materialize_claude_bundle_without_bundle_returns_none(tmp_path, monkeypatch):
+    _claude_vault(monkeypatch, setup="k", bundle=False)
+    assert session_launcher._materialize_claude_bundle(tmp_path, "org-1") is None
+
+
+def test_picker_takes_the_bundle_when_the_setup_token_is_stale(monkeypatch):
+    _claude_vault(monkeypatch, setup="k", minted_at="2020-01-01T00:00:00Z")
+    monkeypatch.setattr(session_launcher, "_claude_usage_rows", lambda: [])
+    creds = session_launcher._resolve_credentials_via_substrate(prefer_alias=None)
+    assert creds == {"harness_token": "org-1", "alias": "dev", "type": "vault"}
+    assert session_launcher._setup_auth_docker_args(creds, Path("/tmp")) == []
+
+
+def test_picker_takes_a_fresh_setup_token_first(monkeypatch):
+    _claude_vault(monkeypatch, setup="sk-1")
+    monkeypatch.setattr(session_launcher, "_claude_usage_rows", lambda: [])
+    creds = session_launcher._resolve_credentials_via_substrate(prefer_alias=None)
+    assert creds["type"] == "token" and creds["token"] == "sk-1"
+
+
+def test_optional_mounts_declare_the_vault_files_without_writing(tmp_path, monkeypatch):
+    from tools.graph import harness_credentials as hv
+    _stub_vault(monkeypatch, {
+        "claude": [hv.Account("claude", "org-1", {"access": "a", "refresh": "r"})],
+        "grok": [hv.Account("grok", "default", {"auth": '{"t": 1}'})],
+    })
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    without = session_launcher._resolve_optional_tool_mounts(run_dir=run_dir, materialize_auth=False)
+    assert not any(v.startswith(session_launcher.CLAUDE_BUNDLE_CONTAINER_PATH) for v in without.values())
+    grok_target = str(run_dir / session_launcher.GROK_AUTH_FILENAME)
+    assert without[grok_target] == session_launcher.GROK_AUTH_CONTAINER_PATH + ":ro"
+    declared = session_launcher._resolve_optional_tool_mounts(
+        run_dir=run_dir, materialize_auth=False, claude_account="org-1",
+    )
+    target = str(run_dir / session_launcher.CLAUDE_BUNDLE_FILENAME)
+    assert declared[target] == session_launcher.CLAUDE_BUNDLE_CONTAINER_PATH + ":ro"
+    assert not Path(target).exists() and not Path(grok_target).exists()
+
+
+def test_materialize_grok_auth_writes_the_stored_sign_in(tmp_path, monkeypatch):
+    from tools.graph import harness_credentials as hv
+    _stub_vault(monkeypatch, {"grok": [hv.Account("grok", "default", {"auth": '{"access_token": "g"}'})]})
+    out = session_launcher._materialize_grok_auth(tmp_path)
+    assert Path(out).read_text() == '{"access_token": "g"}'
+    assert (Path(out).stat().st_mode & 0o777) == 0o600
+
+
+def test_launcher_source_reads_no_plaintext_credential_set():
+    source = Path(session_launcher.__file__).read_text()
+    for name in ("CLAUDE_SETUP_TOKENS_SET_ID", "CLAUDE_CREDENTIALS_SET_ID",
+                 "CODEX_CREDENTIALS_SET_ID", "_setup_token_rows", "_credentials_rows"):
+        assert name not in source
+
+
+def test_accounts_migrate_pre_vault_rows_once_when_the_vault_is_empty(monkeypatch):
+    """A hot-reloaded dashboard has not run the startup migration; the first
+    launch migrates the plaintext rows itself rather than failing."""
+    from tools.graph import harness_credentials as hv
+    calls: list[str] = []
+    state = {"accounts": []}
+    monkeypatch.setattr(hv, "list_accounts", lambda harness, **kw: list(state["accounts"]))
+
+    def migrate():
+        calls.append("migrate")
+        state["accounts"] = [hv.Account("claude", "org-1", {"setup": "k"})]
+        return {"claude": 1, "setup_tokens": 1, "codex": 0, "deprecated": 2}
+    monkeypatch.setattr(hv, "migrate_plaintext_accounts", migrate)
+    assert [a.id for a in session_launcher._claude_accounts()] == ["org-1"]
+    assert calls == ["migrate"]
+    # With accounts present the migration is not consulted again.
+    assert [a.id for a in session_launcher._claude_accounts()] == ["org-1"]
+    assert calls == ["migrate"]

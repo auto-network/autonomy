@@ -293,8 +293,8 @@ def test_refresh_credential_row_skips_revoked_rows(monkeypatch):
     refresh_calls: list = []
 
     monkeypatch.setattr(
-        crr.graph_ops, "upsert_by_key",
-        lambda *a, **kw: upserts.append((a, kw)),
+        crr, "_write_back",
+        lambda *a, **kw: upserts.append((("set", 1) + a, kw)),
     )
     monkeypatch.setattr(
         crr, "refresh_one",
@@ -321,8 +321,8 @@ def test_refresh_credential_row_skips_fresh_rows(monkeypatch):
     upserts: list = []
     refresh_calls: list = []
     monkeypatch.setattr(
-        crr.graph_ops, "upsert_by_key",
-        lambda *a, **kw: upserts.append((a, kw)),
+        crr, "_write_back",
+        lambda *a, **kw: upserts.append((("set", 1) + a, kw)),
     )
     monkeypatch.setattr(
         crr, "refresh_one",
@@ -347,17 +347,11 @@ def test_refresh_credential_row_skips_fresh_rows(monkeypatch):
 def test_refresh_credential_row_writes_rotated_tokens_on_success(monkeypatch):
     upserts: list = []
 
-    def fake_upsert(set_id, schema_revision, key, payload, *, org, state="raw"):
-        upserts.append({
-            "set_id": set_id,
-            "schema_revision": schema_revision,
-            "key": key,
-            "payload": payload,
-            "org": org,
-        })
+    def fake_upsert(key, payload, *, org):
+        upserts.append({"key": key, "payload": payload, "org": org})
         return "sid-1"
 
-    monkeypatch.setattr(crr.graph_ops, "upsert_by_key", fake_upsert)
+    monkeypatch.setattr(crr, "_write_back", fake_upsert)
     monkeypatch.setattr(
         crr, "refresh_one",
         lambda tok: crr.RefreshResult(
@@ -378,8 +372,6 @@ def test_refresh_credential_row_writes_rotated_tokens_on_success(monkeypatch):
     assert result.kind == "ok"
     assert len(upserts) == 1
     upsert = upserts[0]
-    assert upsert["set_id"] == crr.CLAUDE_CREDENTIALS_SET_ID
-    assert upsert["schema_revision"] == crr.CLAUDE_CREDENTIALS_REVISION
     assert upsert["key"] == "org-1"
     assert upsert["org"] == "autonomy"
     assert upsert["payload"]["access_token"] == "at-NEW"
@@ -394,9 +386,8 @@ def test_refresh_credential_row_preserves_tokens_on_invalid_grant(
 ):
     upserts: list = []
     monkeypatch.setattr(
-        crr.graph_ops, "upsert_by_key",
-        lambda set_id, schema_revision, key, payload, *, org, state="raw":
-            upserts.append(payload),
+        crr, "_write_back",
+        lambda key, payload, *, org: upserts.append(payload),
     )
     monkeypatch.setattr(
         crr, "refresh_one",
@@ -435,9 +426,8 @@ def test_refresh_credential_row_preserves_tokens_on_invalid_grant(
 def test_refresh_credential_row_preserves_tokens_on_transient(monkeypatch):
     upserts: list = []
     monkeypatch.setattr(
-        crr.graph_ops, "upsert_by_key",
-        lambda set_id, schema_revision, key, payload, *, org, state="raw":
-            upserts.append(payload),
+        crr, "_write_back",
+        lambda key, payload, *, org: upserts.append(payload),
     )
     monkeypatch.setattr(
         crr, "refresh_one",
@@ -467,8 +457,8 @@ def test_refresh_credential_row_skips_row_without_refresh_token(monkeypatch):
     upserts: list = []
     refresh_calls: list = []
     monkeypatch.setattr(
-        crr.graph_ops, "upsert_by_key",
-        lambda *a, **kw: upserts.append((a, kw)),
+        crr, "_write_back",
+        lambda *a, **kw: upserts.append((("set", 1) + a, kw)),
     )
     monkeypatch.setattr(
         crr, "refresh_one",
@@ -494,10 +484,7 @@ def test_refresh_credential_row_skips_row_without_refresh_token(monkeypatch):
 
 
 def _stub_read_set(monkeypatch, rows):
-    monkeypatch.setattr(
-        crr.graph_ops, "read_set",
-        lambda *a, **kw: SimpleNamespace(members=rows),
-    )
+    monkeypatch.setattr(crr, "_credential_rows", lambda: list(rows))
 
 
 def test_refresh_all_credentials_counts_per_outcome(monkeypatch):
@@ -535,8 +522,8 @@ def test_refresh_all_credentials_counts_per_outcome(monkeypatch):
         fresh, revoked, stale_ok, stale_429, stale_dead,
     ])
     monkeypatch.setattr(
-        crr.graph_ops, "upsert_by_key",
-        lambda *a, **kw: upserts.append((a, kw)),
+        crr, "_write_back",
+        lambda *a, **kw: upserts.append((("set", 1) + a, kw)),
     )
     monkeypatch.setattr(crr, "_now_ms", lambda: 1_700_000_000_000)
     monkeypatch.setattr(crr, "_now_iso", lambda: "2026-05-06T01:00:00Z")
@@ -576,12 +563,12 @@ def test_refresh_all_credentials_swallows_read_set_failure(monkeypatch, caplog):
     def boom(*a, **kw):
         raise RuntimeError("graph DB locked")
 
-    monkeypatch.setattr(crr.graph_ops, "read_set", boom)
+    monkeypatch.setattr(crr, "_credential_rows", boom)
     with caplog.at_level(logging.ERROR, logger=crr.logger.name):
         counters = crr.refresh_all_credentials()
     assert counters == {"ok": 0, "revoked": 0, "transient": 0, "skipped": 0}
     assert any(
-        "read_set failed" in rec.getMessage() for rec in caplog.records
+        "vault read failed" in rec.getMessage() for rec in caplog.records
     )
 
 
@@ -593,7 +580,7 @@ def test_refresh_all_credentials_swallows_per_row_exception(monkeypatch):
     })]
     _stub_read_set(monkeypatch, rows)
     monkeypatch.setattr(
-        crr.graph_ops, "upsert_by_key",
+        crr, "_write_back",
         lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom")),
     )
     monkeypatch.setattr(
@@ -640,29 +627,6 @@ def test_threshold_is_four_hours():
 
 def test_poll_interval_is_one_hour():
     assert crr.CREDENTIAL_REFRESH_POLL_INTERVAL == 3600.0
-
-
-def test_payload_after_refresh_round_trips_through_schema():
-    """The upsert payload must satisfy the registered schema."""
-    from tools.graph.schemas.claude_credentials import ClaudeCredentialsV1
-
-    base = _base_payload()
-    success = crr.RefreshResult(
-        kind="ok", access_token="at-NEW", refresh_token="rt-NEW",
-        expires_in=28800,
-    )
-    payload = crr._build_payload_after_refresh(
-        base=base, result=success,
-        now_ms=1_700_000_000_000, now_iso="2026-05-06T01:00:00Z",
-    )
-    ClaudeCredentialsV1.validate(payload)
-
-    failure = crr.RefreshResult(kind="transient", error="HTTP 429: rl")
-    payload = crr._build_payload_after_refresh(
-        base=base, result=failure,
-        now_ms=1_700_000_000_000, now_iso="2026-05-06T01:00:00Z",
-    )
-    ClaudeCredentialsV1.validate(payload)
 
 
 def test_post_refresh_request_body_is_json(monkeypatch):

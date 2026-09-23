@@ -151,7 +151,7 @@ SYNOPSIS = {
         "auth identity",
     ],
     "related_set_ids": [
-        "dashboard.claude.credentials#1",
+        "autonomy.vault.audited#1",
     ],
 }
 
@@ -202,7 +202,7 @@ class DashboardHarnessUsageV1(SettingSchema):
         description=(
             "Operator-controlled friendly alias (e.g. 'primary'). For Claude "
             "this is the ``alias`` field on the matching "
-            "``dashboard.claude.credentials`` row; informational on this row "
+            "account record in the vault; informational on this row "
             "so the dashboard can render the friendly name without a join. "
             "None for non-token paths (transcript, env override)."
         ),
@@ -436,7 +436,7 @@ def normalize_claude_usage_payload(
     """Build a Claude harness-usage row payload.
 
     ``alias`` is the operator-facing friendly name from the matching
-    ``dashboard.claude.credentials`` row (the same field operators set
+    account's vault record (the same field operators set
     via ``graph claude install --alias <name>``). Stamped onto every
     row so the dashboard can render the friendly name without a join.
     """

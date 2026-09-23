@@ -172,8 +172,6 @@ SECRET_BEARING = (
     "autonomy.credential-file",
     "autonomy.vault.audited",
     "autonomy.vault.secured",
-    "dashboard.claude.credentials",
-    "dashboard.claude.setup_tokens",
 )
 
 

@@ -15621,7 +15621,17 @@ def _expire_cold_codex_usage_row(
         for row in rows
     ):
         return
-    key = _harness_usage_settings.make_harness_usage_key("codex", "default")
+    from tools.graph import harness_credentials as hv
+    try:
+        identities = [a.id for a in hv.list_accounts("codex")] or ["default"]
+    except Exception:
+        identities = ["default"]
+    for identity in identities:
+        _expire_one_cold_codex_usage_row(identity, updated_at=updated_at)
+
+
+def _expire_one_cold_codex_usage_row(identity: str, *, updated_at: str) -> None:
+    key = _harness_usage_settings.make_harness_usage_key("codex", identity)
     existing = _existing_usage_payload(key)
     if not isinstance(existing, dict) or existing.get("status") != "ok":
         return
@@ -15654,8 +15664,8 @@ def _expire_cold_codex_usage_row(
         key,
         _harness_usage_settings.make_unavailable_usage_payload(
             harness="codex",
-            identity_id="default",
-            identity_label="default",
+            identity_id=identity,
+            identity_label=identity[:12],
             source="transcript",
             note=note[:200],
             updated_at=updated_at,
@@ -15716,49 +15726,25 @@ def _collect_claude_usage_payloads(
     the stored reading is kept -- a capped account answers with 429 and
     that IS a reading, handled in :func:`_claude_usage_via_probe`.
     """
-    from tools.graph import ops as graph_ops_local
-    from tools.graph.schemas.claude_credentials import (
-        CLAUDE_CREDENTIALS_SET_ID,
-    )
-    from tools.graph.schemas.claude_setup_tokens import (
-        CLAUDE_SETUP_TOKENS_SET_ID,
-    )
-
-    org = _harness_usage_org()
+    from tools.graph import harness_credentials as hv
     try:
-        credential_members = graph_ops_local.read_set(
-            CLAUDE_CREDENTIALS_SET_ID, org=org, peers=[],
-        )
+        accounts = hv.list_accounts("claude")
     except Exception:
-        logger.exception(
-            "claude harness usage: read_set(%s) failed; tick aborted",
-            CLAUDE_CREDENTIALS_SET_ID,
-        )
+        logger.exception("claude harness usage: vault read failed; tick aborted")
         return []
-    try:
-        setup_members = graph_ops_local.read_set(
-            CLAUDE_SETUP_TOKENS_SET_ID, org=org, peers=[],
-        )
-    except Exception:
-        logger.exception(
-            "claude harness usage: read_set(%s) failed; using bundle path only",
-            CLAUDE_SETUP_TOKENS_SET_ID,
-        )
-        setup_members = None
-
     credentials_by_org: dict[str, dict[str, Any]] = {}
-    for member in list(getattr(credential_members, "members", []) or []):
-        payload = member.payload if isinstance(member.payload, dict) else {}
-        credentials_by_org[str(member.key)] = payload
     setup_tokens_by_org: dict[str, str] = {}
-    for member in _fresh_setup_token_members(
-        list(getattr(setup_members, "members", []) or []),
-    ):
-        payload = member.payload if isinstance(member.payload, dict) else {}
-        raw_key = payload.get("raw_key")
-        if isinstance(raw_key, str) and raw_key:
-            setup_tokens_by_org[str(member.key)] = raw_key
-
+    for acct in accounts:
+        if not acct.openable:
+            # Vault cold (no unlock since startup): keep the stored reading
+            # rather than writing "unavailable" over it.
+            continue
+        credentials_by_org[acct.id] = {
+            "alias": acct.get("alias"),
+            "access_token": acct.get("access"),
+        }
+        if acct.setup_token_fresh():
+            setup_tokens_by_org[acct.id] = acct.get("setup") or ""
     payloads: dict[str, dict[str, Any]] = {}
     for org_uuid in sorted(set(credentials_by_org) | set(setup_tokens_by_org)):
         credentials = credentials_by_org.get(org_uuid, {})
@@ -15799,34 +15785,6 @@ def _collect_claude_usage_payloads(
             payloads[row_key] = payload
 
     return sorted(payloads.items(), key=lambda item: item[0])
-
-
-def _fresh_setup_token_members(members: list[Any]) -> list[Any]:
-    """Drop setup-token rows past their year, the way the launcher's picker does.
-
-    Mirrors ``agents.session_launcher._setup_token_rows``: substrate
-    ``created_at`` plus :data:`CLAUDE_SETUP_TOKEN_TTL` is the expiry; a row
-    with no parseable ``created_at`` is assumed fresh.
-    """
-    from tools.graph.schemas.claude_setup_tokens import CLAUDE_SETUP_TOKEN_TTL
-
-    now = datetime.now(timezone.utc)
-    fresh: list[Any] = []
-    for member in members:
-        created_at = getattr(member, "created_at", None)
-        if not created_at:
-            fresh.append(member)
-            continue
-        try:
-            minted = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
-        except (TypeError, ValueError):
-            fresh.append(member)
-            continue
-        if minted.tzinfo is None:
-            minted = minted.replace(tzinfo=timezone.utc)
-        if minted + CLAUDE_SETUP_TOKEN_TTL > now:
-            fresh.append(member)
-    return fresh
 
 
 def _claude_usage_failure_payload(
@@ -22176,6 +22134,17 @@ async def _on_startup():
         except Exception:
             logger.exception("ensure_bootstrap_orgs() failed; continuing startup")
         _mark("org_ops.ensure_bootstrap_orgs")
+        # The harness accounts live in the vault (record v16 §10.9): any
+        # pre-vault credential row left on this node is sealed into its
+        # account and deprecated, so dispatch keeps working across the change.
+        try:
+            from tools.graph import harness_credentials as _hv
+            _migrated = await asyncio.to_thread(_hv.migrate_plaintext_accounts)
+            if _migrated.get("deprecated"):
+                logger.info("harness accounts: migrated pre-vault rows %s", _migrated)
+        except Exception:
+            logger.exception("harness accounts: pre-vault migration failed; continuing startup")
+        _mark("harness_credentials.migrate_plaintext_accounts")
         await web_push.start_worker()
         _mark("web_push.start_worker")
         await web_push_worker.start_worker()
