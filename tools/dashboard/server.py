@@ -9503,7 +9503,7 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
         launch_deadline = time.monotonic() + _LIFECYCLE_LAUNCHING_TIMEOUT_S
 
         if kind == "host":
-            cmd_str = cfg["host_cmd"]
+            cmd_str = _mint_host_session_token(tmux_name) + cfg["host_cmd"]
         elif kind == "project":
             meta: dict = {
                 "tmux_session": tmux_name,
@@ -9708,7 +9708,7 @@ def _run_simple_session_start(job: LifecycleJob, writer: SessionLifecycleStateWr
         launch_deadline = time.monotonic() + _LIFECYCLE_LAUNCHING_TIMEOUT_S
 
         if kind == "host":
-            cmd_str = cfg["host_cmd"]
+            cmd_str = _mint_host_session_token(tmux_name) + cfg["host_cmd"]
             sess_dir = None
         else:
             ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -10246,8 +10246,7 @@ async def api_session_create(request):
             harness_token=host_creds.get("harness_token"),
         )
         host_cmd = (
-            _mint_host_session_token(tmux_name)
-            + f"GRAPH_API={_own_dashboard_url()} "
+            f"GRAPH_API={_own_dashboard_url()} "
             + f"CLAUDE_CODE_OAUTH_TOKEN={shlex.quote(host_creds['token'])} "
             f"BD_ACTOR=terminal:{tmux_name} AUTONOMY_SESSION={tmux_name} "
             f"claude --dangerously-skip-permissions --model {model}"
@@ -10465,9 +10464,11 @@ def _build_host_resume_cmd(
     session_uuid: str,
 ) -> str:
     """Shell command that relaunches a host session's own harness CLI."""
+    # No CROSSTALK_TOKEN here: this command is built at request time, and a
+    # restart then runs its stop step, whose deregister revokes every token for
+    # the name — including one minted here. The launch worker mints it instead.
     env_prefix = (
-        _mint_host_session_token(tmux_name)
-        + f"GRAPH_API={_own_dashboard_url()} "
+        f"GRAPH_API={_own_dashboard_url()} "
         + f"BD_ACTOR=terminal:{tmux_name} AUTONOMY_SESSION={tmux_name} "
     )
     if harness == "codex":
