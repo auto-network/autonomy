@@ -706,6 +706,41 @@ class TestNoiseFiltering:
 class TestCrosstalkParsing:
     """CrossTalk message detection — inbound and outbound."""
 
+    @pytest.mark.parametrize("as_blocks", [False, True])
+    @pytest.mark.parametrize("closing", ['</pasted_content>', '</pasted_content id="81db">'])
+    def test_pasted_crosstalk_detected(self, as_blocks, closing):
+        envelope = FIXTURE_CROSSTALK_INBOUND["message"]["content"]
+        wrapped = f'<pasted_content id="81db">\n{envelope}\n{closing}'
+        content = [{"type": "text", "text": wrapped}] if as_blocks else wrapped
+        result = _parse_jsonl_entry(_line({
+            "type": "user", "timestamp": TS,
+            "message": {"role": "user", "content": content},
+        }))
+        assert result["type"] == "crosstalk"
+        assert result["sender"] == "auto-0323-022132"
+        assert result["content"] == "Please check that function"
+
+    @pytest.mark.parametrize("prefix,suffix", [
+        ("Please explain this: ", ""), ("", " Extra prose"),
+    ])
+    def test_quoted_pasted_crosstalk_remains_user(self, prefix, suffix):
+        envelope = FIXTURE_CROSSTALK_INBOUND["message"]["content"]
+        text = prefix + f'<pasted_content id="81db">\n{envelope}\n</pasted_content>' + suffix
+        result = _parse_jsonl_entry(_line({
+            "type": "user", "timestamp": TS,
+            "message": {"role": "user", "content": text},
+        }))
+        assert result["type"] == "user"
+
+    def test_archived_sender_uses_session_resolver(self, monkeypatch):
+        import time
+        from tools.dashboard import session_harness
+        monkeypatch.setattr(session_harness, "_SENDER_HREF_CACHE", {
+            "at": time.time(), "map": {},
+        })
+        assert session_harness._sender_href({"from": "host-old"}) == "/session/host-old"
+        assert session_harness._sender_href({"from": "host/a b"}) == "/session/host%2Fa%20b"
+
     def test_inbound_crosstalk_detected(self):
         result = _parse_jsonl_entry(_line(FIXTURE_CROSSTALK_INBOUND))
         assert result["type"] == "crosstalk"

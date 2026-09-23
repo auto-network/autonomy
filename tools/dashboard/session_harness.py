@@ -646,8 +646,8 @@ def _sender_href(ct: dict) -> str:
     conversation). Otherwise a sender that is a LIVE local session links to
     the session viewer — the room where they are — never the graph source
     viewer, which is the archive about them. A sender that is neither (a
-    dead session, or one running on another fleet machine) gets no href
-    here and the renderer falls back to the graph source when it has one.
+    dead session, or one running on another fleet machine) uses the
+    session-by-name resolver, which also knows archived sessions.
     """
     if ct.get("href"):
         return ct["href"]
@@ -671,11 +671,19 @@ def _sender_href(ct: dict) -> str:
             for r in rows if r.get("tmux_session")
         }
         _SENDER_HREF_CACHE["at"] = now
-    return _SENDER_HREF_CACHE["map"].get(tmux, "")
+    return _SENDER_HREF_CACHE["map"].get(tmux) or f"/session/{_q(tmux, safe='')}"
 
 
 def _classify_crosstalk(text: str) -> dict | None:
     stripped = text.strip()
+    # Claude may wrap terminal pastes. Only unwrap a complete container:
+    # prose quoting an envelope must remain an ordinary user message.
+    pasted = re.fullmatch(
+        r'<pasted_content(?:\s+[\w-]+="[^"]*")*\s*>(.*?)</pasted_content(?:\s+[\w-]+="[^"]*")*\s*>',
+        stripped, re.DOTALL,
+    )
+    if pasted:
+        stripped = pasted.group(1).strip()
     m = _CROSSTALK_RE.fullmatch(stripped)
     if not m:
         return None
@@ -2666,6 +2674,8 @@ def _codex_response_item_chat_entry(
             "sender_label": ct["label"],
             "source_id": ct["source"],
             "turn": ct["turn"],
+            "kind": ct.get("kind", ""),
+            "href": _sender_href(ct),
             "timestamp": timestamp,
         }
     sys_info = _classify_system_message(text)
