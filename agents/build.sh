@@ -79,6 +79,7 @@ cp "$SCRIPT_DIR/Dockerfile" context/
 cp "$SCRIPT_DIR/session-entrypoint.sh" context/
 cp "$SCRIPT_DIR/commit_sign_shim.sh" context/
 cp "$SCRIPT_DIR/grok_auth_shim.sh" context/
+cp "$SCRIPT_DIR/agent_browser_shim.sh" context/
 
 CLAUDE_VERSION=$(bin/claude --version 2>/dev/null | awk '{print $1}')
 docker build $NO_CACHE $PULL --build-arg CLAUDE_VERSION="${CLAUDE_VERSION:-unknown}" \
