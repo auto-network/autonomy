@@ -4269,7 +4269,8 @@ def _ensure_dispatcher_service_token() -> None:
     boundary"; the authenticated-API work then made every unadorned call
     401 and no credential was ever handed back — so the dispatcher's
     register/deregister silently failed on every dispatch. This mints a
-    scoped service token good for EXACTLY the two monitor routes, stores
+    scoped service token good for EXACTLY the monitor routes and the
+    vault-set read the launcher needs, stores
     only its hash (machine-local auth.db), and writes the secret to a
     0600 file under data/ that the host-side dispatcher reads per call.
     Re-minted on every dashboard start with a 7-day expiry, so restarts
@@ -4288,6 +4289,12 @@ def _ensure_dispatcher_service_token() -> None:
             # cannot reach the host tmux server from its own container, so it
             # POSTs the nag here and the dashboard delivers it.
             {"method": "POST", "path": "/api/monitor/dispatch-nag"},
+            # The harness accounts live in the vault (record graph://5f2f5a49-00d
+            # v16 §10.9) and open only where the delegate key is: here. The
+            # dispatcher's launcher reads them through this route with this
+            # token; the dashboard opens the rows and answers over the compose
+            # network. Without it every dispatched launch fails at credentials.
+            {"method": "GET", "path": "/api/graph/settings/autonomy.vault.audited"},
         ],
         application_scope="dispatcher-monitor",
         resource_audience="dashboard-local",

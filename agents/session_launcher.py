@@ -686,8 +686,7 @@ def _resolve_credentials_via_substrate(
     max-min headroom over the usage readings when every account has a
     fresh one, else a uniform random pick. Accounts whose reading says
     exhausted are skipped while any other remains. No launchable account
-    triggers ``graph claude install`` (the two browser logins) and one
-    re-read.
+    is a refusal with the remedy logged; nothing interactive runs here.
     """
     rng = rng or random
     accounts = _claude_accounts()
@@ -695,24 +694,22 @@ def _resolve_credentials_via_substrate(
         from tools.graph import harness_credentials as hv
         if any(not a.openable for a in hv.list_accounts("claude")):
             # Accounts exist but the vault is cold: the operator has not
-            # unlocked since the dashboard started. Nothing to install; the
-            # launch waits for the unlock (cold until unlock is the design).
+            # unlocked since the dashboard started. The launch waits for the
+            # unlock (cold until unlock is the design).
             logger.error(
                 "session_launcher: Claude accounts are in the vault but it is "
                 "not open; unlock the dashboard before launching",
             )
             return None
-        try:
-            subprocess.run(["graph", "claude", "install"], check=True, timeout=30)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            logger.exception(
-                "session_launcher: `graph claude install` failed; "
-                "no Claude account available",
-            )
-            return None
-        accounts = _claude_accounts()
-        if not accounts:
-            return None
+        # No account at all. The two ways in are the operator's own acts
+        # (graph claude install, or a sign-in on the machine found by the
+        # Getting Started scan); neither can run unattended from here.
+        logger.error(
+            "session_launcher: no Claude account in the vault; remedy: "
+            "`graph claude install --alias <name>`, or sign in to Claude on "
+            "this machine and run `graph credentials import`",
+        )
+        return None
 
     chosen = None
     if prefer_alias:

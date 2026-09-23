@@ -35,7 +35,11 @@ rows' declared home.
 """
 from __future__ import annotations
 
+import json
+import logging
 import os
+import ssl
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable
@@ -43,6 +47,17 @@ from typing import Any, Callable, Iterable
 from tools.graph.schemas.vault_credential import (
     VAULT_AUDITED_SET_ID,
     VAULT_CREDENTIAL_REVISION,
+)
+
+logger = logging.getLogger(__name__)
+
+#: The dispatcher's scoped bearer, minted by the dashboard at startup and
+#: written under the data root; read per call so a rotation takes effect
+#: without restarting the dispatcher (agents/dispatcher._monitor_service_token).
+DISPATCHER_TOKEN_RELPATH = ".dispatch_token"
+#: The repository's own data directory, the token's home when no data root is named.
+REPO_DATA_ROOT = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data",
 )
 
 HARNESSES = ("claude", "codex", "grok")
@@ -132,22 +147,69 @@ def _vault_open_here() -> bool:
     return getattr(settings_ops, "_personal_delegate_audited_key", None) is not None
 
 
+def _bearer() -> str | None:
+    """The bearer a process uses to ask the dashboard: the dispatcher's own
+    scoped token when this process has one under its data root, else the
+    session token in the environment. Never an inherited session token
+    when the scoped one exists: that one is revoked with its session."""
+    for root in (os.environ.get("AUTONOMY_DATA_ROOT"), REPO_DATA_ROOT):
+        if not root:
+            continue
+        try:
+            with open(os.path.join(root, DISPATCHER_TOKEN_RELPATH), "r", encoding="utf-8") as fh:
+                token = fh.read().strip()
+            if token:
+                return token
+        except OSError:
+            continue
+    return os.environ.get("CROSSTALK_TOKEN") or None
+
+
+def _read_via_dashboard() -> list[Any]:
+    """GET the audited set from the dashboard, which opens the rows."""
+    from tools.graph.client import _dict_to_resolved_setting
+
+    api = os.environ.get("GRAPH_API") or "https://localhost:8080"
+    headers = {"Accept": "application/json"}
+    token = _bearer()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    req = urllib.request.Request(
+        f"{api}/api/graph/settings/{VAULT_AUDITED_SET_ID}?peers=", headers=headers,
+    )
+    with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
+        body = json.load(resp)
+    return [_dict_to_resolved_setting(m) for m in body.get("members", [])]
+
+
 def _read_all(read_set: Callable[..., Any] | None = None) -> list[Any]:
     from tools.graph import ops as graph_ops
 
     if read_set is not None:
         members = read_set(VAULT_AUDITED_SET_ID, org=None, peers=[])
-    elif _vault_open_here():
+        return list(getattr(members, "members", []) or [])
+    if _vault_open_here():
         members = graph_ops.read_set(VAULT_AUDITED_SET_ID, org=None, peers=[])
-    else:
-        try:
-            from tools.graph.client import get_client
-            members = get_client().read_set(VAULT_AUDITED_SET_ID, org=None, peers=[])
-        except Exception:
-            if _in_container():
-                raise
-            members = graph_ops.read_set(VAULT_AUDITED_SET_ID, org=None, peers=[])
-    return list(getattr(members, "members", []) or [])
+        return list(getattr(members, "members", []) or [])
+    try:
+        return _read_via_dashboard()
+    except Exception as exc:
+        if _in_container():
+            logger.error(
+                "harness accounts: the dashboard refused or failed the vault read "
+                "(%s); this process holds no delegate key and no local store, so "
+                "no account is readable", exc,
+            )
+            raise
+        logger.warning(
+            "harness accounts: dashboard unreachable (%s); reading the local "
+            "store cold — rows will report as not openable", exc,
+        )
+        members = graph_ops.read_set(VAULT_AUDITED_SET_ID, org=None, peers=[])
+        return list(getattr(members, "members", []) or [])
 
 
 def _write(key: str, value: str, existing_id: str | None) -> str:
