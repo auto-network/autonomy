@@ -1,6 +1,5 @@
-"""Tests for ``graph credentials import`` — the harness sign-ins found on
-this machine, sealed into the operator's vault (bead auto-5bq85, then
-graph://5f2f5a49-00d v12 FR7a and the vault rubric).
+"""Tests for ``graph credentials import`` — Layer-0 credential import
+(bead auto-5bq85).
 
 Covers the bead's acceptance criteria directly:
 
@@ -32,12 +31,13 @@ import pytest
 
 from tools.graph import cli, ops
 from tools.graph import credential_import as ci
-from tools.graph import harness_credentials as hv
-from tools.graph import settings_ops
-from tools.graph.db import GraphDB
-from tools.vault import key_holder
-from tools.vault.personal_object import derive_delegate_audited_recipient
-from tools.vault.store import VaultStore
+from tools.graph.schemas.claude_credentials import (
+    CLAUDE_CREDENTIALS_REVISION,
+    CLAUDE_CREDENTIALS_SET_ID,
+)
+from tools.graph.schemas.codex_credentials import (
+    CODEX_CREDENTIALS_SET_ID,
+)
 
 
 # ── fixtures ─────────────────────────────────────────────────
@@ -140,84 +140,74 @@ def _run_cli(argv):
     return rc, out.getvalue(), err.getvalue()
 
 
-
-# ── the vault, warm ──────────────────────────────────────────
-
-
-@pytest.fixture
-def warm_vault(tmp_path, monkeypatch):
-    """A personal store whose audited vault can seal (delegate recipient
-    published, as first run and identity creation do) and open (delegate key
-    warm, as unlock does)."""
-    monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
-    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
-    monkeypatch.delenv("GRAPH_DB", raising=False)
-    monkeypatch.delenv("GRAPH_API", raising=False)
-    db = tmp_path / "personal.db"
-    monkeypatch.setattr(key_holder, "_scoped_db", lambda _set_id, _org: db)
-    GraphDB(db).close()
-    GraphDB.close_all_pooled()
-    private_hex, public_hex = derive_delegate_audited_recipient(bytes(range(32)))
-    with VaultStore(db) as store:
-        store.put_delegate_audited_recipient(public_hex)
-    settings_ops.set_vault_sealer(None)
-    settings_ops.set_vault_key_holder(None)
-    settings_ops.set_personal_delegate_audited_key(private_hex)
-    yield db
-    GraphDB.close_all_pooled()
-    settings_ops.set_personal_delegate_audited_key(None)
+def _read_rows():
+    members = ops.read_set(
+        CLAUDE_CREDENTIALS_SET_ID, org=ci.CREDENTIALS_ORG, peers=[],
+    )
+    return {m.key: m.payload for m in members.members}
 
 
-def _sealed(*keys):
-    return hv.open_values(keys)
+def _read_codex_rows():
+    members = ops.read_set(
+        CODEX_CREDENTIALS_SET_ID, org=ci.CREDENTIALS_ORG, peers=[],
+    )
+    return {m.key: m.payload for m in members.members}
 
 
-# ── acceptance: authed claude is sealed into the vault ───────
+# ── acceptance: authed claude imports a working copy ─────────
 
 
-def test_authed_claude_is_sealed_and_the_file_untouched(warm_vault, tmp_path):
+def test_authed_claude_imports_working_copy(graph_db_env, tmp_path):
     home = tmp_path / "home"
     src = _write_claude_file(home, access="at-live", refresh="rt-live")
     before = src.read_bytes()
+
     result = ci.import_claude(str(home), fetch_identity=_identity())
+
     assert result.status == ci.STATUS_IMPORTED
-    got = _sealed(*hv.CLAUDE_KEYS)
-    assert got[hv.CLAUDE_ACCESS] == "at-live"
-    assert got[hv.CLAUDE_REFRESH] == "rt-live"
-    assert got[hv.CLAUDE_ACCOUNT] == "dev@example.com"
-    assert got[hv.CLAUDE_SCOPES] == "user:profile,user:inference"
-    assert hv.expires_ms(got[hv.CLAUDE_EXPIRES]) > 0
+    rows = _read_rows()
+    assert "org-A" in rows
+    payload = rows["org-A"]
+    assert payload["access_token"] == "at-live"
+    assert payload["refresh_token"] == "rt-live"
+    assert payload["account_email"] == "dev@example.com"
+    assert payload["scopes"] == ["user:profile", "user:inference"]
+    # bead: the user's original file is byte-identical afterwards
     assert src.read_bytes() == before
 
 
-def test_sealed_rows_hold_no_plaintext(warm_vault, tmp_path):
-    """What the database file shows is the row's name and ciphertext."""
+def test_default_alias_is_email_local_part(graph_db_env, tmp_path):
     home = tmp_path / "home"
-    _write_claude_file(home, access="at-secret-value")
-    ci.import_claude(str(home), fetch_identity=_identity())
-    import sqlite3
-    conn = sqlite3.connect(str(warm_vault))
-    try:
-        blobs = " ".join(
-            str(r[0]) for r in conn.execute("SELECT payload FROM settings")
-        )
-    finally:
-        conn.close()
-    assert "at-secret-value" not in blobs
+    _write_claude_file(home)
+    ci.import_claude(
+        str(home), fetch_identity=_identity(email="jeremy@auto.network"),
+    )
+    assert _read_rows()["org-A"]["alias"] == "jeremy"
 
 
-def test_no_auth_reports_needs_sign_in_and_seals_nothing(warm_vault, tmp_path):
+def test_alias_override(graph_db_env, tmp_path):
+    home = tmp_path / "home"
+    _write_claude_file(home)
+    ci.import_claude(
+        str(home), alias_override="gmail-max", fetch_identity=_identity(),
+    )
+    assert _read_rows()["org-A"]["alias"] == "gmail-max"
+
+
+# ── acceptance: no auth → needs_sign_in, nothing written ─────
+
+
+def test_no_auth_reports_needs_sign_in_and_writes_nothing(graph_db_env, tmp_path):
     home = tmp_path / "home"
     home.mkdir()
     report = ci.run_import(str(home))
     by_harness = {r.harness: r for r in report.results}
     assert by_harness["claude"].status == ci.STATUS_NEEDS_SIGN_IN
     assert by_harness["codex"].status == ci.STATUS_NEEDS_SIGN_IN
-    assert by_harness["grok"].status == ci.STATUS_NEEDS_SIGN_IN
-    assert hv.rows() == {}
+    assert _read_rows() == {}
 
 
-def test_validation_failure_reports_needs_sign_in(warm_vault, tmp_path):
+def test_validation_failure_reports_needs_sign_in(graph_db_env, tmp_path):
     home = tmp_path / "home"
     _write_claude_file(home)
 
@@ -227,128 +217,159 @@ def test_validation_failure_reports_needs_sign_in(warm_vault, tmp_path):
     result = ci.import_claude(str(home), fetch_identity=_fail)
     assert result.status == ci.STATUS_NEEDS_SIGN_IN
     assert "401" in result.detail
-    assert hv.rows() == {}
+    assert _read_rows() == {}
 
 
-def test_keychain_backed_file_reports_needs_sign_in(warm_vault, tmp_path):
+def test_keychain_backed_file_reports_needs_sign_in(graph_db_env, tmp_path):
     home = tmp_path / "home"
     path = home / ".claude" / ".credentials.json"
     path.parent.mkdir(parents=True)
+    # A keychain-backed login: JSON present but no claudeAiOauth bundle.
     path.write_text(json.dumps({"keychain": True}))
     result = ci.import_claude(str(home), fetch_identity=_identity())
     assert result.status == ci.STATUS_NEEDS_SIGN_IN
     assert "keychain" in result.detail
-    assert hv.rows() == {}
+    assert _read_rows() == {}
 
 
 # ── acceptance: idempotency + freshness ──────────────────────
 
 
-def test_second_run_is_unchanged(warm_vault, tmp_path):
+def test_second_run_is_unchanged(graph_db_env, tmp_path):
     home = tmp_path / "home"
     exp = int(time.time() * 1000) + 8 * 3600 * 1000
     _write_claude_file(home, expires_at_ms=exp)
-    assert ci.import_claude(str(home), fetch_identity=_identity()).status == ci.STATUS_IMPORTED
-    assert ci.import_claude(str(home), fetch_identity=_identity()).status == ci.STATUS_UNCHANGED
-    assert set(hv.rows()) == set(hv.CLAUDE_KEYS)
+    first = ci.import_claude(str(home), fetch_identity=_identity())
+    assert first.status == ci.STATUS_IMPORTED
+    second = ci.import_claude(str(home), fetch_identity=_identity())
+    assert second.status == ci.STATUS_UNCHANGED
+    assert len(_read_rows()) == 1  # never duplicates
 
 
-def test_reimport_does_not_regress_a_rotated_sign_in(warm_vault, tmp_path):
+def test_reimport_does_not_regress_poller_rotated_bundle(graph_db_env, tmp_path):
     home = tmp_path / "home"
     old_exp = int(time.time() * 1000) + 3600 * 1000
     _write_claude_file(home, access="at-old", expires_at_ms=old_exp)
     ci.import_claude(str(home), fetch_identity=_identity())
-    # The refresh poller rotated the sealed sign-in ahead of the on-disk file.
-    hv.seal(hv.CLAUDE_ACCESS, "at-rotated")
-    hv.seal(hv.CLAUDE_EXPIRES, str(old_exp + 8 * 3600 * 1000))
+
+    # Simulate the refresh poller rotating the row ahead of the on-disk file.
+    ops.upsert_by_key(
+        CLAUDE_CREDENTIALS_SET_ID, CLAUDE_CREDENTIALS_REVISION, "org-A",
+        {
+            "alias": "dev", "organization_name": "Org A",
+            "account_email": "dev@example.com",
+            "access_token": "at-rotated", "refresh_token": "rt-rotated",
+            "expires_at_ms": old_exp + 8 * 3600 * 1000,
+            "scopes": ["user:profile", "user:inference"],
+            "last_refresh_at": "2026-08-13T00:00:00Z",
+        },
+        org=ci.CREDENTIALS_ORG,
+    )
     result = ci.import_claude(str(home), fetch_identity=_identity())
     assert result.status == ci.STATUS_UNCHANGED
-    assert _sealed(hv.CLAUDE_ACCESS)[hv.CLAUDE_ACCESS] == "at-rotated"
+    # poller's fresher tokens survive; stale on-disk copy did not overwrite
+    assert _read_rows()["org-A"]["access_token"] == "at-rotated"
 
 
-def test_fresh_local_reauth_reseals(warm_vault, tmp_path):
+def test_fresh_local_reauth_refreshes_row(graph_db_env, tmp_path):
     home = tmp_path / "home"
     old_exp = int(time.time() * 1000) + 3600 * 1000
     _write_claude_file(home, access="at-old", expires_at_ms=old_exp)
     ci.import_claude(str(home), fetch_identity=_identity())
+
+    # User re-authed locally: a newer bundle on disk.
     _write_claude_file(
         home, access="at-new", refresh="rt-new",
         expires_at_ms=old_exp + 8 * 3600 * 1000,
     )
     result = ci.import_claude(str(home), fetch_identity=_identity())
     assert result.status == ci.STATUS_IMPORTED
-    assert _sealed(hv.CLAUDE_ACCESS)[hv.CLAUDE_ACCESS] == "at-new"
+    assert _read_rows()["org-A"]["access_token"] == "at-new"
 
 
-def test_cold_vault_seals_as_found(warm_vault, tmp_path):
-    """Sealing needs no unlock; the freshness comparison does, and without it
-    the on-disk sign-in is sealed as found."""
-    settings_ops.set_personal_delegate_audited_key(None)
+def test_fresh_reauth_clears_stale_error_and_keeps_alias(graph_db_env, tmp_path):
     home = tmp_path / "home"
-    _write_claude_file(home, access="at-cold")
-    result = ci.import_claude(str(home), fetch_identity=_identity())
-    assert result.status == ci.STATUS_IMPORTED
-    assert hv.present(hv.CLAUDE_REQUIRED)
-    assert hv.open_value(hv.CLAUDE_ACCESS) is None  # cold: present, not openable
-
-
-def test_dry_run_seals_nothing(warm_vault, tmp_path):
-    home = tmp_path / "home"
-    _write_claude_file(home)
-    result = ci.import_claude(str(home), dry_run=True, fetch_identity=_identity())
-    assert result.status == ci.STATUS_WOULD_IMPORT
-    assert hv.rows() == {}
+    old_exp = int(time.time() * 1000) + 3600 * 1000
+    _write_claude_file(home, access="at-old", expires_at_ms=old_exp)
+    ci.import_claude(
+        str(home), alias_override="jeremy-auto", fetch_identity=_identity(),
+    )
+    # Poller marked the row revoked (its refresh_token had expired).
+    existing = _read_rows()["org-A"]
+    existing["last_refresh_error"] = "invalid_grant: Refresh token expired"
+    ops.upsert_by_key(
+        CLAUDE_CREDENTIALS_SET_ID, CLAUDE_CREDENTIALS_REVISION, "org-A",
+        existing, org=ci.CREDENTIALS_ORG,
+    )
+    # User re-authed locally → a newer on-disk bundle triggers a clean write.
+    _write_claude_file(
+        home, access="at-new", refresh="rt-new",
+        expires_at_ms=old_exp + 8 * 3600 * 1000,
+    )
+    ci.import_claude(str(home), fetch_identity=_identity())
+    row = _read_rows()["org-A"]
+    assert row["access_token"] == "at-new"
+    assert row["alias"] == "jeremy-auto"                 # operator alias kept
+    # Critical: stale revocation error cleared so the poller resumes refresh.
+    assert "last_refresh_error" not in row
 
 
 # ── codex ────────────────────────────────────────────────────
 
 
-def test_codex_valid_is_sealed(warm_vault, tmp_path):
+def test_codex_valid_imports_working_copy(graph_db_env, tmp_path):
+    # STEP 1 (auto-kzws9): a validated ChatGPT-mode bundle is copied into
+    # the substrate credential Setting, keyed by account_id.
     home = tmp_path / "home"
     src = _write_codex_file(
         home, email="dev@example.com", account_id="acct-9",
         access="ct-live", refresh="cr-live",
     )
     before = src.read_bytes()
+
     result = ci.import_codex(str(home))
+
     assert result.status == ci.STATUS_IMPORTED
-    got = _sealed(*hv.CODEX_KEYS)
-    assert got[hv.CODEX_ACCESS] == "ct-live"
-    assert got[hv.CODEX_REFRESH] == "cr-live"
-    assert got[hv.CODEX_ACCOUNT] == "acct-9"
-    assert got[hv.CODEX_ID]
-    assert hv.expires_ms(got[hv.CODEX_EXPIRES]) > 0
+    rows = _read_codex_rows()
+    assert "acct-9" in rows
+    payload = rows["acct-9"]
+    assert payload["access_token"] == "ct-live"
+    assert payload["refresh_token"] == "cr-live"
+    assert payload["email"] == "dev@example.com"
+    assert payload["auth_mode"] == "chatgpt"
+    assert payload["id_token"]  # the JWT is stored
+    assert isinstance(payload["expires_at_ms"], int)
+    # bead: the user's original file is byte-identical afterwards
     assert src.read_bytes() == before
 
 
-def test_codex_second_run_is_unchanged(warm_vault, tmp_path):
+def test_codex_second_run_is_unchanged(graph_db_env, tmp_path):
     home = tmp_path / "home"
-    _write_codex_file(home)
-    assert ci.import_codex(str(home)).status == ci.STATUS_IMPORTED
-    assert ci.import_codex(str(home)).status == ci.STATUS_UNCHANGED
+    _write_codex_file(home, account_id="acct-9")
+    first = ci.import_codex(str(home))
+    assert first.status == ci.STATUS_IMPORTED
+    second = ci.import_codex(str(home))
+    assert second.status == ci.STATUS_UNCHANGED
+    assert len(_read_codex_rows()) == 1  # never duplicates
 
 
-def test_codex_dry_run_seals_nothing(warm_vault, tmp_path):
+def test_codex_dry_run_writes_nothing(graph_db_env, tmp_path):
     home = tmp_path / "home"
-    _write_codex_file(home)
-    assert ci.import_codex(str(home), dry_run=True).status == ci.STATUS_WOULD_IMPORT
-    assert hv.rows() == {}
+    _write_codex_file(home, account_id="acct-9")
+    result = ci.import_codex(str(home), dry_run=True)
+    assert result.status == ci.STATUS_WOULD_IMPORT
+    assert _read_codex_rows() == {}
 
 
-def test_codex_expired_id_token_with_refresh_still_seals(warm_vault, tmp_path):
+def test_codex_expired_id_token_with_refresh_still_imports(graph_db_env, tmp_path):
+    # Codex self-refreshes on launch, so an expired id_token on an account
+    # that still has a refresh_token authenticates fine — and is still worth
+    # importing (the successor poller will rotate it on the substrate row).
     home = tmp_path / "home"
-    path = home / ".codex" / "auth.json"
-    path.parent.mkdir(parents=True)
-    path.write_text(json.dumps({
-        "auth_mode": "chatgpt", "OPENAI_API_KEY": None,
-        "tokens": {
-            "id_token": _make_codex_jwt(exp_epoch=int(time.time()) - 10),
-            "access_token": "ct-1", "refresh_token": "cr-1", "account_id": "acct-9",
-        },
-    }))
+    _write_codex_file(home, exp_epoch=int(time.time()) - 10, account_id="acct-9")
     result = ci.import_codex(str(home))
     assert result.status == ci.STATUS_IMPORTED
-    assert _sealed(hv.CODEX_REFRESH)[hv.CODEX_REFRESH] == "cr-1"
+    assert _read_codex_rows()["acct-9"]["refresh_token"] == "cr-1"
 
 
 def test_codex_expired_no_refresh_reports_needs_sign_in(tmp_path):
@@ -429,6 +450,19 @@ def test_codex_api_key_path_makes_no_substrate_write(graph_db_env, tmp_path, mon
     assert result.status == ci.STATUS_IN_PLACE
 
 
+def test_dry_run_writes_nothing(graph_db_env, tmp_path):
+    home = tmp_path / "home"
+    _write_claude_file(home)
+    result = ci.import_claude(
+        str(home), dry_run=True, fetch_identity=_identity(),
+    )
+    assert result.status == ci.STATUS_WOULD_IMPORT
+    assert _read_rows() == {}
+
+
+# ── identity parsing ─────────────────────────────────────────
+
+
 def test_parse_claude_identity_full():
     identity = ci.parse_claude_identity({
         "organization": {"uuid": "org-Z", "name": "Zeta"},
@@ -455,35 +489,44 @@ def test_parse_claude_identity_name_falls_back_to_domain():
 # ── CLI wiring ───────────────────────────────────────────────
 
 
-def test_operator_home_prefers_the_host_home(monkeypatch):
-    monkeypatch.setenv("AUTONOMY_HOST_HOME", "/hosthome/op")
-    assert ci.operator_home() == "/hosthome/op"
-    monkeypatch.delenv("AUTONOMY_HOST_HOME")
+def test_cli_import_reports_both_harnesses(graph_db_env, tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    _write_codex_file(home)  # codex authed, claude absent
+    monkeypatch.setattr(
+        ci, "_http_fetch_claude_identity", _identity(),
+    )
+    rc, out, err = _run_cli(["credentials", "import", "--home", str(home)])
+    assert rc == 0
+    assert "claude" in out
+    assert "codex" in out
+    assert ci.STATUS_NEEDS_SIGN_IN in out  # claude not authed
+    assert ci.STATUS_IMPORTED in out       # codex bundle imported to substrate
 
 
-# ── grok ─────────────────────────────────────────────────────
+# ── Grok detection and the report as data (record v12 FR7a) ────────
 
 
 def test_grok_absent_reports_needs_sign_in(tmp_path):
-    assert ci.import_grok(str(tmp_path / "home")).status == ci.STATUS_NEEDS_SIGN_IN
+    result = ci.detect_grok(str(tmp_path / "home"))
+    assert result.status == ci.STATUS_NEEDS_SIGN_IN
 
 
-def test_grok_stored_sign_in_is_sealed_verbatim(warm_vault, tmp_path):
+def test_grok_stored_sign_in_is_detected_and_not_copied(graph_db_env, tmp_path):
     home = tmp_path / "home"
     (home / ".grok").mkdir(parents=True)
     src = home / ".grok" / "auth.json"
     src.write_text(json.dumps({"access_token": "g-1", "user": "dev"}))
     before = src.read_bytes()
-    assert ci.import_grok(str(home)).status == ci.STATUS_IMPORTED
-    assert hv.open_value(hv.GROK_AUTH) == before.decode()
+    result = ci.detect_grok(str(home))
+    assert result.status == ci.STATUS_IN_PLACE
     assert src.read_bytes() == before
-    assert ci.import_grok(str(home)).status == ci.STATUS_UNCHANGED
 
 
-def test_run_import_reports_three_harnesses_and_usable_list(warm_vault, tmp_path):
+def test_run_import_reports_three_harnesses_and_usable_list(graph_db_env, tmp_path):
     home = tmp_path / "home"
     home.mkdir()
-    data = ci.report_to_dict(ci.run_import(str(home), dry_run=True))
+    report = ci.run_import(str(home), dry_run=True)
+    data = ci.report_to_dict(report)
     assert [r["harness"] for r in data["harnesses"]] == ["claude", "codex", "grok"]
     assert data["usable"] == []
     (home / ".grok").mkdir()
@@ -492,11 +535,8 @@ def test_run_import_reports_three_harnesses_and_usable_list(warm_vault, tmp_path
     assert data["usable"] == ["grok"]
 
 
-def test_cli_import_reports_three_harnesses(warm_vault, tmp_path):
-    home = tmp_path / "home"
-    home.mkdir()
-    rc, out, err = _run_cli(["credentials", "import", "--home", str(home)])
-    assert rc == 0, err
-    for harness in ("claude", "codex", "grok"):
-        assert harness in out
-    assert "needs_sign_in" in out
+def test_operator_home_prefers_the_host_home(monkeypatch):
+    monkeypatch.setenv("AUTONOMY_HOST_HOME", "/hosthome/op")
+    assert ci.operator_home() == "/hosthome/op"
+    monkeypatch.delenv("AUTONOMY_HOST_HOME")
+    assert ci.operator_home() == os.path.expanduser("~")
