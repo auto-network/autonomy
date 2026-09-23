@@ -1003,6 +1003,133 @@ def _generate_codex_config(base_config: Path, git_root: str, run_dir: Path) -> P
         return None
 
 
+def _codex_credentials_org() -> str:
+    """Return the substrate org for Codex credential rows: ``personal``.
+
+    Host-local, per-instance secrets — never shared cross-org. Mirror of
+    :func:`_credentials_org`, ``codex_credentials_refresh._credentials_org``,
+    and ``credential_import.CREDENTIALS_ORG`` so the launcher, the refresh
+    poller, and the importer all converge on the same ``personal.db`` rows.
+    """
+    return "personal"
+
+
+def _codex_credential_rows() -> list[Any]:
+    """Return ``dashboard.codex.credentials`` rows from substrate.
+
+    Best-effort: any failure (DB unavailable, set never created) collapses
+    to ``[]`` so a Codex launch degrades to "no auth mounted" rather than
+    crashing the launch path.
+    """
+    from tools.graph import ops as _ops
+    from tools.graph.schemas.codex_credentials import (
+        CODEX_CREDENTIALS_SET_ID,
+    )
+
+    try:
+        members = _ops.read_set(
+            CODEX_CREDENTIALS_SET_ID, org=_codex_credentials_org(), peers=[],
+        )
+    except Exception:
+        logger.exception("session_launcher: read_set(codex.credentials) failed")
+        return []
+    return list(getattr(members, "members", []) or [])
+
+
+def _pick_codex_credential_row(rows: list[Any]) -> Any | None:
+    """Pick the single active Codex credential row from ``rows`` or ``None``.
+
+    Codex authenticates one account at a time (not load-balanced), but the
+    surface is account-keyed and may in future hold several rows. Keep only
+    rows carrying the full OAuth triple and pick the one with the greatest
+    ``expires_at_ms`` (the freshest / most-alive), tie-broken by key so the
+    choice is deterministic.
+    """
+    def _exp(row: Any) -> int:
+        payload = getattr(row, "payload", None)
+        v = payload.get("expires_at_ms") if isinstance(payload, dict) else None
+        return v if isinstance(v, int) and not isinstance(v, bool) else -1
+
+    usable: list[Any] = []
+    for row in rows:
+        payload = getattr(row, "payload", None)
+        if not isinstance(payload, dict):
+            continue
+        if not all(
+            isinstance(payload.get(k), str) and payload.get(k)
+            for k in ("access_token", "refresh_token", "id_token")
+        ):
+            continue
+        usable.append(row)
+    if not usable:
+        return None
+    return max(usable, key=lambda r: (_exp(r), getattr(r, "key", "") or ""))
+
+
+def _materialize_codex_auth_json(run_dir: Path) -> Path | None:
+    """Reconstruct ``~/.codex/auth.json`` into ``run_dir`` for this session.
+
+    The source is the operator's vault: the rows ``codex.oauth.*`` sealed by
+    ``graph credentials import`` (tools/graph/harness_credentials.py), opened
+    at launch while the operator is unlocked. The pre-vault
+    ``dashboard.codex.credentials`` row is read only when the vault holds no
+    Codex sign-in, with the remedy logged, until nothing holds one. The host
+    ``~/.codex/auth.json`` is never read here (bead auto-l1h3f).
+
+    Returns the host path to the written file, or ``None`` when no usable
+    source exists; a None is WARNED with the remedy so a missing sign-in is
+    an operator-visible error rather than a silent prompt in the session.
+    """
+    from tools.graph import harness_credentials as hv
+    now_iso = (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    values = hv.open_values(hv.CODEX_KEYS)
+    if all(k in values for k in hv.CODEX_REQUIRED):
+        auth_doc = {
+            "auth_mode": "chatgpt",
+            "OPENAI_API_KEY": None,
+            "tokens": {
+                "id_token": values[hv.CODEX_ID],
+                "access_token": values[hv.CODEX_ACCESS],
+                "refresh_token": values[hv.CODEX_REFRESH],
+                "account_id": values[hv.CODEX_ACCOUNT],
+            },
+            "last_refresh": now_iso,
+        }
+    else:
+        row = _pick_codex_credential_row(_codex_credential_rows())
+        if row is None:
+            logger.warning(
+                "session_launcher: no Codex sign-in in the vault and no usable "
+                "Codex credential row — the session will launch WITHOUT mounted "
+                "Codex auth and will prompt for sign-in. Remedy: run "
+                "`graph credentials import`.",
+            )
+            return None
+        logger.warning(
+            "session_launcher: Codex launched from the pre-vault credential "
+            "row; run `graph credentials import` to seal it into the vault",
+        )
+        payload = row.payload
+        auth_doc = {
+            "auth_mode": payload.get("auth_mode") or "chatgpt",
+            "OPENAI_API_KEY": None,
+            "tokens": {
+                "id_token": payload["id_token"],
+                "access_token": payload["access_token"],
+                "refresh_token": payload["refresh_token"],
+                "account_id": row.key,
+            },
+            "last_refresh": payload.get("last_refresh_at") or now_iso,
+        }
+    out = Path(run_dir) / "codex-auth.json"
+    return _write_private_json(out, auth_doc, "Codex auth.json")
+
+
 CLAUDE_BUNDLE_FILENAME = "claude-credentials.json"
 CLAUDE_BUNDLE_CONTAINER_PATH = "/home/agent/.claude/.credentials.json"
 GROK_AUTH_FILENAME = "grok-auth.json"
@@ -1099,48 +1226,6 @@ def _write_private_json(out: Path, doc: dict, what: str) -> Path | None:
     return out
 
 
-def _materialize_codex_auth_json(run_dir: Path) -> Path | None:
-    """Reconstruct ``~/.codex/auth.json`` into ``run_dir`` for this session.
-
-    The source is the operator's vault: the rows ``codex.oauth.*`` sealed by
-    ``graph credentials import`` (tools/graph/harness_credentials.py), opened
-    at launch while the operator is unlocked. The host ``~/.codex/auth.json``
-    is never read here (bead auto-l1h3f), and no plaintext set is either.
-
-    Returns the host path to the written file, or ``None`` when the vault
-    holds no Codex sign-in; a None is WARNED with the remedy so a missing
-    sign-in is an operator-visible error rather than a silent prompt.
-    """
-    from tools.graph import harness_credentials as hv
-    values = hv.open_values(hv.CODEX_KEYS)
-    if not all(k in values for k in hv.CODEX_REQUIRED):
-        logger.warning(
-            "session_launcher: no Codex sign-in in the vault — the session "
-            "will launch WITHOUT mounted Codex auth and will prompt for "
-            "sign-in. Remedy: run `graph credentials import`.",
-        )
-        return None
-    now_iso = (
-        datetime.now(timezone.utc)
-        .replace(microsecond=0)
-        .isoformat()
-        .replace("+00:00", "Z")
-    )
-    auth_doc = {
-        "auth_mode": "chatgpt",
-        "OPENAI_API_KEY": None,
-        "tokens": {
-            "id_token": values[hv.CODEX_ID],
-            "access_token": values[hv.CODEX_ACCESS],
-            "refresh_token": values[hv.CODEX_REFRESH],
-            "account_id": values[hv.CODEX_ACCOUNT],
-        },
-        "last_refresh": now_iso,
-    }
-    out = Path(run_dir) / "codex-auth.json"
-    return _write_private_json(out, auth_doc, "Codex auth.json")
-
-
 def _codex_auth_target(run_dir) -> "Path | None":
     """The path _materialize_codex_auth_json WOULD write, iff a usable Codex
     credential row exists — a DECLARE with no write, so the plan can reference the
@@ -1149,7 +1234,8 @@ def _codex_auth_target(run_dir) -> "Path | None":
     if run_dir is None:
         return None
     from tools.graph import harness_credentials as hv
-    if not hv.present(hv.CODEX_REQUIRED):
+    if not hv.present(hv.CODEX_REQUIRED) and \
+            _pick_codex_credential_row(_codex_credential_rows()) is None:
         return None
     return Path(run_dir) / "codex-auth.json"
 

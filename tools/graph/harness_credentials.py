@@ -37,11 +37,6 @@ CODEX_ACCOUNT = "codex.oauth.account"          # the ChatGPT account id
 CODEX_EXPIRES = "codex.oauth.expires"          # epoch milliseconds, as text
 CODEX_KEYS = (CODEX_ID, CODEX_ACCESS, CODEX_REFRESH, CODEX_ACCOUNT, CODEX_EXPIRES)
 CODEX_REQUIRED = (CODEX_ID, CODEX_ACCESS, CODEX_REFRESH, CODEX_ACCOUNT)
-CODEX_EMAIL = "codex.oauth.email"              # the account email, when known
-CODEX_REFRESHED_AT = "codex.oauth.refreshed_at"  # ISO time of the last rotation
-CODEX_ERROR = "codex.oauth.error"              # last refresh error, or NONE
-CODEX_STATE_KEYS = CODEX_KEYS + (CODEX_EMAIL, CODEX_REFRESHED_AT, CODEX_ERROR)
-NONE = "-"                                     # a sealed "no value": rows cannot be empty
 
 GROK_AUTH = "grok.auth"                        # the stored sign-in file, verbatim
 
