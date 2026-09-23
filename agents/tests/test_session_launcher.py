@@ -1491,62 +1491,33 @@ class TestSubstrateCredentialsPicker:
         # not the (would-be-) max-min pick on the stale numbers.
         assert result["harness_token"] == "org-A"
 
-    def test_c_zero_tokens_calls_graph_claude_install(
-        self, monkeypatch, freeze_now,
-    ):
-        """No unexpired setup-token rows → call install, then re-read."""
-        # First call: empty. After install: one row appears.
-        states = [[], [_setup_token_row("org-A", "raw-A")]]
-
-        def _fake_setup_tokens():
-            return states.pop(0)
-
-        install_calls: list[list[str]] = []
-
-        def _fake_run(cmd, **kwargs):
-            install_calls.append(list(cmd))
-
-            class _R:
-                returncode = 0
-            return _R()
-
-        monkeypatch.setattr(session_launcher, "_setup_token_rows", _fake_setup_tokens)
-        # Labels only: an account holding an OAuth bundle would launch from
-        # the vault (record v16 §10.9), so the install path is reached only
-        # when no launchable account exists.
+    def test_c_no_account_refuses_and_runs_nothing(self, monkeypatch, freeze_now):
+        """No launchable account → None with the remedy logged; the
+        interactive install is never run from a launch."""
+        monkeypatch.setattr(session_launcher, "_setup_token_rows", lambda: [])
         labels = _credentials_row("org-A", "gmail")
         labels.payload.pop("access_token"); labels.payload.pop("refresh_token")
         monkeypatch.setattr(session_launcher, "_credentials_rows", lambda: [labels])
         monkeypatch.setattr(session_launcher, "_claude_usage_rows", lambda: [])
-        monkeypatch.setattr(session_launcher.subprocess, "run", _fake_run)
 
+        def _no_run(*a, **kw):
+            raise AssertionError("no subprocess may run from the picker")
+        monkeypatch.setattr(session_launcher.subprocess, "run", _no_run)
         result = session_launcher._resolve_credentials_via_substrate(
             prefer_alias=None,
         )
+        assert result is None
 
-        assert install_calls == [["graph", "claude", "install"]]
-        assert result is not None
-        assert result["harness_token"] == "org-A"
-        assert result["alias"] == "gmail"
+    def test_c_cold_vault_refuses_without_install(self, monkeypatch, freeze_now):
+        from tools.graph import harness_credentials as hv
+        cold = hv.Account("claude", "org-A", {}, openable=False)
+        monkeypatch.setattr(session_launcher, "_claude_accounts", lambda: [])
+        monkeypatch.setattr(hv, "list_accounts", lambda harness, **kw: [cold])
 
-    def test_c_install_failure_returns_none(self, monkeypatch, freeze_now):
-        """If install also yields nothing, return None so the launcher
-        surfaces "No Claude credentials found" the way it does today."""
-        import subprocess as _sp
-
-        monkeypatch.setattr(session_launcher, "_setup_token_rows", lambda: [])
-        monkeypatch.setattr(session_launcher, "_credentials_rows", lambda: [])
-        monkeypatch.setattr(session_launcher, "_claude_usage_rows", lambda: [])
-
-        def _fake_run(cmd, **kwargs):
-            raise _sp.CalledProcessError(1, cmd)
-
-        monkeypatch.setattr(session_launcher.subprocess, "run", _fake_run)
-
-        assert (
-            session_launcher._resolve_credentials_via_substrate(prefer_alias=None)
-            is None
-        )
+        def _no_run(*a, **kw):
+            raise AssertionError("no subprocess may run from the picker")
+        monkeypatch.setattr(session_launcher.subprocess, "run", _no_run)
+        assert session_launcher._resolve_credentials_via_substrate(prefer_alias=None) is None
 
     def test_prefer_alias_resolves_to_matching_org(
         self, monkeypatch, freeze_now,
@@ -2462,3 +2433,13 @@ def test_accounts_migrate_pre_vault_rows_once_when_the_vault_is_empty(monkeypatc
     # With accounts present the migration is not consulted again.
     assert [a.id for a in session_launcher._claude_accounts()] == ["org-1"]
     assert calls == ["migrate"]
+
+
+def test_dashboard_read_bearer_prefers_the_dispatcher_token_file(tmp_path, monkeypatch):
+    from tools.graph import harness_credentials as hv
+    monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
+    monkeypatch.setattr(hv, "REPO_DATA_ROOT", str(tmp_path / "nowhere"))
+    monkeypatch.setenv("CROSSTALK_TOKEN", "inherited-and-revoked")
+    assert hv._bearer() == "inherited-and-revoked"
+    (tmp_path / hv.DISPATCHER_TOKEN_RELPATH).write_text("scoped-token\n")
+    assert hv._bearer() == "scoped-token"
