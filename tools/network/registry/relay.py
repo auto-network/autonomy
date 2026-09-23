@@ -1845,9 +1845,7 @@ def _ctrl_create_link(tunnel: "Tunnel", args: dict, store: RegistryStore,
         )
         if status in ("binding_mismatch", "conflict", "inconsistent") or completed is None:
             raise _CtrlError("Central Link operation cannot execute")
-        hub = getattr(tunnel, "hub", None)
-        if hub is not None and serving_machine is None:
-            hub.pin_fresh_link(completed.result_token, tunnel.machine, float(now))
+        _pin_fresh_link(tunnel, completed.result_token, serving_machine, now)
         return {
             "token": completed.result_token,
             "url": f"{base_url}/l/{completed.result_token}",
@@ -1876,10 +1874,21 @@ def _ctrl_create_link(tunnel: "Tunnel", args: dict, store: RegistryStore,
             grant_id=grant_id,
         )
     )
+    _pin_fresh_link(tunnel, token, serving_machine, now)
     result = {"token": token, "url": f"{base_url}/l/{token}"}
     if absolute_expires_at is not None:
         result["expires_at"] = absolute_expires_at
     return result
+
+
+def _pin_fresh_link(tunnel: "Tunnel", token: str, serving_machine, now) -> None:
+    """Rank the publishing tunnel first for FRESH_LINK_PIN_S. Called by BOTH
+    create-link branches: from 2026-09-15 it lived only in the Central-receipt
+    branch, which no production publisher uses, so no dashboard-published
+    link was ever pinned and a fresh link with requirements was refused 4431."""
+    hub = getattr(tunnel, "hub", None)
+    if hub is not None and serving_machine is None:
+        hub.pin_fresh_link(token, tunnel.machine, float(now))
 
 
 def _ctrl_revoke_link(tunnel: "Tunnel", args: dict, store: RegistryStore,
