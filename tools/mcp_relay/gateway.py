@@ -937,7 +937,7 @@ def handle_message(state: RelayState, msg: dict, headers) -> dict | None:
         # (e.g. ChatGPT connector create) reject the whole server.
         return jsonrpc_result(msg_id, {
             "supportedVersions": PROTOCOL_VERSIONS,
-            "capabilities": {"tools": {"listChanged": False}},
+            "capabilities": {"tools": {"listChanged": True}},
             "cacheScope": "private",
             "ttlMs": 300000,
             "instructions": (
@@ -952,7 +952,7 @@ def handle_message(state: RelayState, msg: dict, headers) -> dict | None:
         version = client_version if client_version in PROTOCOL_VERSIONS else "2025-06-18"
         return jsonrpc_result(msg_id, {
             "protocolVersion": version,
-            "capabilities": {"tools": {"listChanged": False}},
+            "capabilities": {"tools": {"listChanged": True}},
             "serverInfo": SERVER_INFO,
         })
 
@@ -1165,10 +1165,21 @@ def cmd_stdio(args):
     global STDIO_TRANSPORT
     STDIO_TRANSPORT = True
     state = RelayState(Path(args.data_dir))
+    served_path = Path(args.data_dir) / "tools_served.sha256"
 
     def emit(obj):
         sys.stdout.write(json.dumps(obj) + "\n")
         sys.stdout.flush()
+
+    def tools_digest() -> str:
+        return hashlib.sha256(
+            json.dumps(_advertised_tools(), sort_keys=True).encode()).hexdigest()
+
+    def client_list_is_stale() -> bool:
+        try:
+            return served_path.read_text().strip() != tools_digest()
+        except OSError:
+            return True  # never recorded: the client may hold any older list
 
     for raw in sys.stdin.buffer:
         raw = raw.strip()
@@ -1184,8 +1195,19 @@ def cmd_stdio(args):
             continue
         # No HTTP headers over stdio — identity comes from params._meta only.
         response = handle_message(state, msg, {})
-        if response is not None:  # notifications (no id) get no reply
-            emit(response)
+        if response is None:  # notifications (no id) get no reply
+            continue
+        method = msg.get("method")
+        if method == "tools/list":
+            served_path.write_text(tools_digest())
+        elif method != "initialize" and client_list_is_stale():
+            # ChatGPT fetches tools/list only on a connector connect or refresh
+            # (relay logs, 2026-09-23: 75 of 76 requests in a day were tool
+            # calls), so a new tool stayed invisible. The tunnel relays a
+            # command's notifications ahead of its terminal response, so tell
+            # the client its list is stale until it re-fetches.
+            emit({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
+        emit(response)
 
 
 def cmd_peers(args):

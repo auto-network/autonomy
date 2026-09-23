@@ -597,3 +597,50 @@ def test_note_update_revises_through_the_real_call_path(relay):
         refused = call_tool(port, "note_update",
                             {"peer_token": token, "source_id": bad, "text": "x"})
         assert refused["result"]["isError"] is True, bad
+
+
+def test_stdio_tells_a_stale_client_to_refetch_until_it_does(tmp_path):
+    """ChatGPT fetches tools/list only on a connector connect/refresh, so a new
+    tool (note_update) stayed invisible to live chats. Over stdio — the
+    production transport — the relay emits notifications/tools/list_changed
+    ahead of each response while the client's last-fetched list differs, and
+    stops once the client re-fetches; the record survives a restart."""
+    data = tmp_path / "d"
+
+    def start():
+        return subprocess.Popen(
+            [sys.executable, str(GATEWAY), "--data-dir", str(data), "stdio"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env={"PATH": "/usr/bin:/bin", "MCP_RELAY_REQUIRE_TUNNEL_CERT": "0"})
+
+    def send(proc, msg_id, method):
+        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": msg_id, "method": method}) + "\n")
+        proc.stdin.flush()
+        lines = []
+        while True:
+            line = json.loads(proc.stdout.readline())
+            lines.append(line)
+            if line.get("id") == msg_id:
+                return lines
+
+    def stop(proc):
+        proc.stdin.close(); proc.terminate(); proc.wait(timeout=5)
+
+    changed = {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
+    proc = start()
+    try:
+        init = send(proc, 1, "initialize")
+        assert init[-1]["result"]["capabilities"]["tools"]["listChanged"] is True
+        assert init[:-1] == []                             # never ahead of initialize
+        assert send(proc, 2, "ping")[:-1] == [changed]     # never fetched: stale
+        assert send(proc, 3, "tools/list")[:-1] == []      # the re-fetch records it
+        assert send(proc, 4, "ping")[:-1] == []            # current: silent
+    finally:
+        stop(proc)
+    proc = start()
+    try:
+        assert send(proc, 5, "ping")[:-1] == []            # persisted across restarts
+        (data / "tools_served.sha256").write_text("an older tool list")
+        assert send(proc, 6, "ping")[:-1] == [changed]     # the list changed again
+    finally:
+        stop(proc)
