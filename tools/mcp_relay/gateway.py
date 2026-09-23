@@ -55,6 +55,7 @@ TOOL_SCOPES = {
     "sessions": "read",
     "crosstalk_log": "read",
     "note": "write",
+    "note_update": "write",
     "crosstalk_send": "send",
 }
 
@@ -422,7 +423,7 @@ class PeerRegistry:
 
 # ---------------------------------------------------------------- graph calls
 
-def run_graph(argv: list) -> tuple:
+def run_graph(argv: list, stdin: str | None = None) -> tuple:
     """Run a graph CLI command. Returns (ok, output). In dashboard mode the
     request's bound org and per-peer bearer (both threadlocal) are applied via
     GRAPH_ORG/CROSSTALK_TOKEN so every call is scoped to, and authenticated as,
@@ -443,9 +444,11 @@ def run_graph(argv: list) -> tuple:
     else:
         env.pop("CROSSTALK_TOKEN", None)  # never run as an inherited identity
     try:
+        extra = {"input": stdin} if stdin is not None else {}
         proc = subprocess.run(
             [GRAPH_BIN] + argv,
             capture_output=True, text=True, timeout=GRAPH_TIMEOUT, env=env,
+            **extra,
         )
     except FileNotFoundError:
         print(f"graph CLI not found ({GRAPH_BIN}) argv={argv} PATH={os.environ.get('PATH','')}", file=sys.stderr, flush=True)
@@ -586,6 +589,32 @@ def tool_note(registry, args, peer):
     return {"result": out.strip()}, out.strip() or "Note created."
 
 
+_NOTE_ID_RE = re.compile(r"^[0-9a-f]{8}(-[0-9a-f]{1,12}){0,4}$")
+
+
+def tool_note_update(registry, args, peer):
+    """Revise an existing note: the text REPLACES its body as a new version.
+    Earlier versions stay readable (read <id>@N), so a revision never loses
+    what it replaced. The body travels on stdin, never argv."""
+    source_id = str(args.get("source_id", "")).strip().lower()
+    if not _NOTE_ID_RE.match(source_id):
+        raise ToolError("source_id must be a note id as returned by note, search or read")
+    text = str(args.get("text", "")).strip()
+    if not text:
+        raise ToolError("text is required: the complete revised body")
+    if len(text) > MAX_NOTE_CHARS:
+        raise ToolError(f"note too long (max {MAX_NOTE_CHARS} chars)")
+    ok, out = run_graph(
+        ["note", "update", source_id, "-c", "-", "--author", f"chatgpt:{peer['name']}"],
+        stdin=text,
+    )
+    if not ok:
+        raise ToolError(out)
+    return {"source_id": source_id, "result": out.strip()}, (
+        out.strip() or f"Note {source_id} revised."
+    )
+
+
 def tool_crosstalk_send(registry, args, peer):
     session = str(args.get("session", "")).strip()
     message = str(args.get("message", "")).strip()
@@ -613,6 +642,7 @@ TOOL_HANDLERS = {
     "sessions": tool_sessions,
     "crosstalk_log": tool_crosstalk_log,
     "note": tool_note,
+    "note_update": tool_note_update,
     "crosstalk_send": tool_crosstalk_send,
 }
 
@@ -769,6 +799,27 @@ TOOL_DEFS = [
             "required": ["peer_token", "text"],
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": False},
+    },
+    {
+        "name": "note_update",
+        "description": (
+            "Revise an existing note in the Autonomy knowledge graph. 'text' is the "
+            "COMPLETE revised body and replaces the current one as a new version; "
+            "earlier versions stay readable with read '<source_id>@N'. Read the note "
+            "first, then send the whole revised text, not a diff."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_TOKEN_PROP,
+                "source_id": {"type": "string",
+                              "description": "the note id, e.g. from note, search or read"},
+                "text": {"type": "string", "description": "the complete revised body"},
+            },
+            "required": ["peer_token", "source_id", "text"],
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False,
+                        "idempotentHint": True},
     },
     {
         "name": "crosstalk_send",

@@ -386,7 +386,8 @@ case "$1" in
   sessions)  echo "TMUX  STATE  LABEL" ;;
   crosstalk)
     if [ "$2" = "send" ]; then echo "sent"; elif [ "$2" = "broadcast" ]; then echo "broadcast"; else echo "log line"; fi ;;
-  note)      echo "note created: deadbeef-123" ;;
+  note)
+    if [ "$2" = "update" ]; then echo "note updated: $3 author=$7 body=$(cat)"; else echo "note created: deadbeef-123"; fi ;;
   *)         echo "unknown stub command: $1" >&2; exit 1 ;;
 esac
 """
@@ -490,7 +491,7 @@ def test_tools_list(relay):
     result = resp["result"]
     names = [t["name"] for t in result["tools"]]
     assert names == ["hello", "search", "read", "tail", "sessions",
-                     "crosstalk_log", "note", "crosstalk_send"]
+                     "crosstalk_log", "note", "note_update", "crosstalk_send"]
     assert result["ttlMs"] > 0
     assert result["cacheScope"] == "private"
     for tool in result["tools"]:
@@ -566,3 +567,33 @@ def test_bad_session_ident_rejected(relay):
 def test_unknown_tool(relay):
     resp = call_tool(relay["port"], "does_not_exist", {})
     assert resp["error"]["code"] == -32602
+
+
+def test_note_update_revises_through_the_real_call_path(relay):
+    """ChatGPT could create notes but not revise one. note_update sends the
+    complete revised body on stdin to `graph note update <id> -c -` (a new
+    version; earlier ones stay readable), needs write scope, and refuses an id
+    that is not a note id (no argv flag injection)."""
+    port, data_dir = relay["port"], relay["data_dir"]
+    call_tool(port, "hello", {"peer_name": "reviser"})
+    gateway_cli(data_dir, "approve", "reviser", "--scopes", "read")
+    token = call_tool(port, "hello", {"peer_name": "reviser"})["result"]["structuredContent"]["peer_token"]
+
+    denied = call_tool(port, "note_update",
+                       {"peer_token": token, "source_id": "8811f592-84b", "text": "v2"})
+    assert denied["result"]["structuredContent"]["error"] == "scope_denied"
+
+    gateway_cli(data_dir, "approve", "reviser", "--scopes", "read,write")
+    ok = call_tool(port, "note_update", {
+        "peer_token": token, "source_id": "8811f592-84b",
+        "text": "Revised body\nwith a second line",
+    })
+    assert ok["result"]["isError"] is False, ok
+    out = ok["result"]["structuredContent"]["result"]
+    assert out.startswith("note updated: 8811f592-84b author=chatgpt:reviser")
+    assert "body=Revised body\nwith a second line" in out
+
+    for bad in ("--force", "../etc", "8811f592 --tags x", ""):
+        refused = call_tool(port, "note_update",
+                            {"peer_token": token, "source_id": bad, "text": "x"})
+        assert refused["result"]["isError"] is True, bad
