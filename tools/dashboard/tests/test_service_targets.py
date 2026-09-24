@@ -765,3 +765,31 @@ def test_host_network_container_refuses_unusable_compose_gateway(monkeypatch, co
         "compose_network_unavailable",
         503,
     )
+
+
+def test_a_grant_without_a_link_is_skipped_not_a_500(target_api, monkeypatch):
+    """A grant row is written BEFORE create-link and gains token+url only when
+    the registry accepts; a failed publish left one behind (anchore,
+    2026-09-23) and Published Links answered 500 on payload["url"]. It is a
+    publish in flight or a leftover, never a link: both surfaces skip it."""
+    from tools.dashboard import design_shares, link_approvals
+    from tools.network.idkit import KeyPair
+    from tools.graph.schemas.network_identity import NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION
+
+    client, *_ = target_api
+    common = {"target_type": "note", "target_uuid": "00000000-0000-4000-8000-000000000002",
+              "meta": {}, "subject": {"kind": "operator", "id": "op-1"},
+              "issued_at": "2026-09-23T18:35:08Z", "channel_pub": KeyPair.generate().public_hex}
+    grant_id = "f8" * 16                     # the production leftover's shape: no token, no url
+    settings_ops.add_setting(NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION, grant_id,
+                             {**common, "grant_id": grant_id}, org="acme")
+    token = "b2" * 16
+    settings_ops.add_setting(NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION, token,
+                             {**common, "token": token,
+                              "url": "https://relay.auto.network/l/" + token}, org="acme")
+    monkeypatch.setattr(link_approvals, "_resolve_target", lambda *args: {"title": "Note"})
+
+    response = client.get("/api/network/published-links", headers=_headers())
+    assert response.status_code == 200
+    assert [row["token"] for row in response.json()["shares"]] == [token]
+    assert [g["token"] for g in design_shares.active_grants("acme")] == [token]
