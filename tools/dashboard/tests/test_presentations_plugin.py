@@ -208,6 +208,31 @@ def test_presentations_api_reads_design_and_records_shown(tmp_path, monkeypatch)
     assert "latest_revision_id" not in persisted["_all"][0]["payload"]
 
 
+def test_present_activation_writes_within_the_deck_schema_band(tmp_path, monkeypatch):
+    """The real (non-mock) library write must use a state the schema permits.
+
+    The deck set is banded raw..curated (private, never federates). The
+    handler used to write ``published``, which the band gate refuses, so
+    every ``POST .../shown`` on a live dashboard returned 500 while the
+    mock-backed tests stayed green.
+    """
+    from tools.graph import ops as graph_ops, org_ops
+
+    monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
+    monkeypatch.delenv("GRAPH_API", raising=False)
+    # The hermetic per-worker org tree (conftest) is where explicit-org
+    # settings writes land; a named org's database must exist before a write.
+    org_ops.create_org("deckorg", identity_payload={"name": "Deck org"})
+
+    payload = {"design_id": "design-real", "name": "Banded deck"}
+    present_api._upsert_deck("design-real", payload, "deckorg")
+
+    members = graph_ops.read_set(PRESENTATION_DECK_SET_ID, org="deckorg", peers=[])
+    rows = [m.to_dict() for m in members]
+    assert [r["key"] for r in rows] == ["design-real"]
+    assert rows[0]["payload"]["name"] == "Banded deck"
+
+
 def test_present_activation_rejects_duplicate_name_unless_forced(tmp_path, monkeypatch):
     fixture_path = tmp_path / "fixture.json"
     fixture = {

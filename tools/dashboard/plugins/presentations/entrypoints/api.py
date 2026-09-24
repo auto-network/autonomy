@@ -156,13 +156,18 @@ def _upsert_deck(key: str, payload: dict, org: str) -> None:
         dao_mock.add_setting_member(PRESENTATION_DECK_SET_ID, key, payload, org=org)
         return
     from tools.graph import ops as graph_ops
+    # The deck schema is banded raw..curated: a library row is private
+    # operational content that never federates to peer organizations, so
+    # ``published`` is refused at write time. Library reads resolve every
+    # state within the org, so ``curated`` is fully visible to the Present
+    # page and the CLI.
     graph_ops.upsert_by_key(
         PRESENTATION_DECK_SET_ID,
         SCHEMA_REVISION,
         key,
         payload,
         org=org,
-        state="published",
+        state="curated",
     )
 
 
