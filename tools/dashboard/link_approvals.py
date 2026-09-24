@@ -1156,25 +1156,33 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
     except Exception as exc:
         await asyncio.to_thread(_drop_cached_grant, grant_id, org)
         return _fail(f"could not write the link's grant ({exc})")
-    if req["target_type"] == "note" and org not in (None, "personal"):
-        # R: the author personas of the rows this link serves, its grant row
-        # and its channel key row, so the relay dials only members that hold
-        # all of them (auto-xs9hz). Built AFTER those rows commit.
-        try:
-            requires = await asyncio.to_thread(
-                _link_requirements, org, req["target_uuid"], grant_id,
-            )
-        except LinkRequirementError as exc:
-            await asyncio.to_thread(_drop_cached_grant, grant_id, org)
-            return _fail(f"requires-attribution: {exc}")
-        if requires is not None:
-            args["requires"] = requires
-    args["grant_id"] = grant_id
+    # From here until the registry answers, the grant row exists without a
+    # link. EVERY failure must drop it, not only the anticipated ones: a
+    # ValueError from _link_requirements (2026-09-23) escaped the handler
+    # below and left a URL-less row that later 500'd Published Links.
     try:
-        reply = await asyncio.to_thread(_create_link_over_tunnel, org, args)
-    except TunnelUnavailable as exc:
+        if req["target_type"] == "note" and org not in (None, "personal"):
+            # R: the author personas of the rows this link serves, its grant
+            # row and its channel key row, so the relay dials only members
+            # that hold all of them (auto-xs9hz). Built AFTER those rows commit.
+            try:
+                requires = await asyncio.to_thread(
+                    _link_requirements, org, req["target_uuid"], grant_id,
+                )
+            except LinkRequirementError as exc:
+                await asyncio.to_thread(_drop_cached_grant, grant_id, org)
+                return _fail(f"requires-attribution: {exc}")
+            if requires is not None:
+                args["requires"] = requires
+        args["grant_id"] = grant_id
+        try:
+            reply = await asyncio.to_thread(_create_link_over_tunnel, org, args)
+        except TunnelUnavailable as exc:
+            await asyncio.to_thread(_drop_cached_grant, grant_id, org)
+            return _fail(f"the serving tunnel did not come up in time ({exc})")
+    except Exception as exc:
         await asyncio.to_thread(_drop_cached_grant, grant_id, org)
-        return _fail(f"the serving tunnel did not come up in time ({exc})")
+        return _fail(f"the publish failed before the registry created the link ({exc})")
     if not reply.get("ok"):
         await asyncio.to_thread(_drop_cached_grant, grant_id, org)
         return _fail(reply.get("error", "the registry refused the link"))
@@ -1473,6 +1481,20 @@ async def _execute_share_link_revoke_tunnel(row: dict, decision: dict) -> dict:
             "cache_removed": True}
 
 
+
+
+def is_published_grant(payload) -> bool:
+    """Whether a grant row is a published link. The row is written BEFORE
+    create-link (O-C) and gains its token and url only when the registry
+    accepts, so a row without them is a publish in flight, or one a failed
+    publish left behind. Listing, sharing and probing code must skip it: it
+    has no link to show or dial (reading payload["url"] off one was a 500 on
+    Published Links, 2026-09-23)."""
+    return (
+        isinstance(payload, dict)
+        and isinstance(payload.get("token"), str) and bool(payload["token"])
+        and isinstance(payload.get("url"), str) and bool(payload["url"])
+    )
 
 
 def _drop_cached_grant(token: str, org: str | None) -> dict:

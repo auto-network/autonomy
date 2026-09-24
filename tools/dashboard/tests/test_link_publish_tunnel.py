@@ -943,3 +943,32 @@ def test_present_publish_fails_closed_when_the_machine_is_unknown(
     assert "serving identity is unknown" in execution["error"]
     assert recorder.calls == []  # no create-link was ever sent
     assert _cached_grants() == {}
+
+
+def test_an_unexpected_failure_before_create_link_leaves_no_grant(
+    env, root, session_key, session_cert, monkeypatch,
+):
+    """The grant row is written before create-link. A ValueError from building
+    the link's requirement (2026-09-23) escaped the only handler there
+    (LinkRequirementError) and left a URL-less row that later 500'd Published
+    Links. Any failure in that window must drop the row and its channel key."""
+    recorder = _ControlRecorder()
+    _install_control(monkeypatch, recorder)
+
+    def boom(*_args, **_kwargs):
+        raise ValueError("dictionary update sequence element #0 has length 36; 2 is required")
+    monkeypatch.setattr(link_approvals, "_create_link_over_tunnel", boom)
+    dropped = []
+    monkeypatch.setattr(
+        link_channel_key, "drop_channel_key",
+        lambda token, org: dropped.append((token, org)) or True,
+    )
+
+    rid = _create_publish(env)
+    envelope = _tunnel_envelope(session_key, session_cert, "/control/create-link")
+    execution = _decide_and_wait(env, rid, envelope)["execution"]
+
+    assert execution["ok"] is False
+    assert "before the registry created the link" in execution["error"]
+    assert _cached_grants() == {}
+    assert len(dropped) == 1

@@ -82,10 +82,12 @@ def test_token_falls_back_to_relay_env_file(client, monkeypatch, tmp_path):
     env_file = tmp_path / routes.RELAY_ENV_RELATIVE
     env_file.parent.mkdir(parents=True)
     env_file.write_text(f"CONTROL_PLANE_API_KEY=x\n{routes.SERVICE_TOKEN_ENV}={TOKEN}\n")
-    ok = client.post("/api/mcp/session/resolve", headers=AUTH,
+    # status is the non-popping check: it proves the token is accepted
+    # without opening an approval (resolve would need an intent).
+    ok = client.post("/api/mcp/session/status", headers=AUTH,
                      json={"openai_session": "v1/s"})
-    assert ok.status_code == 200
-    bad = client.post("/api/mcp/session/resolve",
+    assert ok.status_code == 200 and ok.json()["status"] == "unknown"
+    bad = client.post("/api/mcp/session/status",
                       headers={"Authorization": "Bearer wrong"},
                       json={"openai_session": "v1/s"})
     assert bad.status_code == 401

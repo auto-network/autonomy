@@ -2163,7 +2163,10 @@ def _probe_candidates(scope: str, now: float) -> list[dict]:
         ).members
     except Exception:
         return out
+    from tools.dashboard.link_approvals import is_published_grant
     for member in members:
+        if not is_published_grant(member.payload):
+            continue  # no token to dial: in flight or a failed publish
         grant = link_serving._grant_valid(member.payload, member.key, now)
         if grant is not None and grant.get("channel_pub"):
             out.append(grant)

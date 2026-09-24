@@ -42,6 +42,7 @@ def active_grants(org: str | None, target_types: Iterable[str] = SHARE_TARGET_TY
                   *, now: datetime | None = None) -> list[dict]:
     """Every unexpired grant of the given types the org holds, newest first."""
     wanted = set(target_types)
+    from tools.dashboard import link_approvals
     from tools.dashboard.link_channel_key import fragment_url
     from tools.graph import settings_ops
     from tools.graph.schemas.network_identity import (
@@ -71,11 +72,8 @@ def active_grants(org: str | None, target_types: Iterable[str] = SHARE_TARGET_TY
         expires_at = _expires_at(payload)
         if expires_at is not None and expires_at <= int(now.timestamp()):
             continue
-        if not payload.get("url"):
-            # Written before a publish that then failed: no link was created,
-            # so it is not shareable. Indexing it raised KeyError and made
-            # share-state "unavailable" for the note from then on.
-            continue
+        if not link_approvals.is_published_grant(payload):
+            continue  # in flight, or left by a failed publish: no link yet
         meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
         grants.append({
             "token": payload.get("token"),

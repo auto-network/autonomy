@@ -3171,6 +3171,8 @@ async def get_published_links(request: Request) -> JSONResponse:
             "org:join", "fleet:join", "file",
         }:
             continue
+        if not link_approvals.is_published_grant(payload):
+            continue  # in flight, or left by a failed publish: no link yet
         resolved = link_approvals._resolve_target(
             payload.get("target_type", ""), payload.get("target_uuid", ""), org,
         )
