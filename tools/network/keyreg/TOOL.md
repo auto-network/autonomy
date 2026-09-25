@@ -33,6 +33,8 @@ python3 tools/network/keyreg/keyreg.py key persona_kem_private
 python3 tools/network/keyreg/keyreg.py class cold        # ids by custody class
 python3 tools/network/keyreg/keyreg.py edges             # derivation + seal edges
 python3 tools/network/keyreg/keyreg.py reachable recovery_code
+python3 tools/network/keyreg/keyreg.py plan org_sync_pull --from approval --rule admit_on_approval
+python3 tools/network/keyreg/keyreg.py explain-current org_sync_pull   # current order vs the minimum
 python3 tools/network/keyreg/lint.py                   # enumerable code/reference checks
 python3 tools/network/keyreg/gen.py                    # regenerate committed views
 agent-test run tools/network/keyreg/tests             # supported workspace test entry point
@@ -57,6 +59,23 @@ before the workflow) from one a workflow mutation must produce
 open question no goal requires (`open`). Designed mutations carry a `rule`.
 Validation checks every reference; lint resolves artifact anchors and TLA+
 proof references.
+
+## Planning
+
+`plan <goal> [--from <state>] [--rule <rule>]...` searches the AND/OR graph
+exhaustively (Dijkstra) for the schedule with the fewest human root
+windows, then the fewest steps. A root or persona step needs a window; one
+actor's consecutive window steps share it; another actor's window step
+closes it (a window never spans another party's ceremony). Delegate and
+none steps run on a machine. Designed mutations join the search only under
+their `--rule`. `explain-current` replays the goal's recorded
+`current_order` and classifies each root opening: needed, mergeable into
+the actor's previous window (naming what that window closed without), or
+replaceable by machine steps (naming what was absent). Lint 6 fails a
+consumer that precedes its producer in the current order unless the goal's
+`known_defects` names it; a stale known defect fails too. The graph is
+monotone, so freshness conditions (a ledger head present at adoption) are
+out of its reach; tools/network/TLA/OrgAdmission.tla models them.
 
 ## Where the data comes from
 

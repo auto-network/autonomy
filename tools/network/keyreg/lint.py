@@ -24,6 +24,13 @@ The checks:
    source symbol of a mutation entry or named as a helper in a mutation's
    notes ("Helpers: a, b, c"). A certificate cannot enter the code without
    a row that records it (2026-09-20: three sign-on certificates had none).
+6. workflow_current_order: for every goal and starting state, the recorded
+   current_order is replayed; a mutation whose required artifact has no
+   producer before it in that order is an error, and so is an order that
+   does not reach the goal. A defect recorded in the goal's known_defects is
+   reported by name instead of failing, and a known_defects entry that no
+   longer matches a finding is itself an error. (An artifact with no
+   producer at all is refused by validation unless its origin names it.)
 """
 
 from __future__ import annotations
@@ -259,12 +266,42 @@ def certificate_mints_anchored(registry: dict) -> list[str]:
     return sorted(set(errors))
 
 
+def workflow_current_order(registry: dict) -> list[str]:
+    import keyreg
+
+    errors = []
+    for goal_id, goal in (registry.get("goals") or {}).items():
+        if not goal.get("current_order"):
+            continue
+        findings: dict = {}
+        for state_id in goal["states"]:
+            run = keyreg.simulate_current(registry, goal_id, state_id)
+            for record in run.steps:
+                for mut_id, _new, missing in record.runs:
+                    for ref in missing:
+                        findings[(record.step, mut_id, ref)] = (
+                            f"goals.{goal_id}: current order step {record.step} runs "
+                            f"{mut_id}, which requires {ref}; no producer precedes it "
+                            f"(from {state_id})"
+                        )
+            if not run.reached:
+                errors.append(f"goals.{goal_id}: the current order from {state_id} does not reach the goal")
+        known = {(d["step"], d["mutation"], d["missing"]): d for d in goal.get("known_defects") or []}
+        errors.extend(text for key, text in findings.items() if key not in known)
+        for key, defect in known.items():
+            if key not in findings:
+                errors.append(f"goals.{goal_id}.known_defects: {key} ({defect['ref']}) "
+                              "matches no current finding; remove it")
+    return sorted(set(errors))
+
+
 ALL_CHECKS = (
     fold_handlers_match,
     purpose_labels_match,
     code_anchors_resolve,
     proof_refs_resolve,
     certificate_mints_anchored,
+    workflow_current_order,
 )
 
 
@@ -281,6 +318,10 @@ def main() -> int:
         for err in errors:
             print(f"       {err}")
         failed += bool(errors)
+    for goal_id, goal in (registry.get("goals") or {}).items():
+        for defect in goal.get("known_defects") or []:
+            print(f"[known] {goal_id}: {defect['step']} {defect['mutation']} lacks "
+                  f"{defect['missing']} — {defect['ref']}")
     for art_id, entry in sorted((registry.get("artifacts") or {}).items()):
         if entry.get("origin") == "defect":
             print(f"[defect] artifact {art_id}: no producer — {entry['defect']}")

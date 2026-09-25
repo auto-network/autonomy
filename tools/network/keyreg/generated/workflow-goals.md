@@ -154,3 +154,205 @@ Peer selection sources (fleet_sync_scheduler.py:_org_peer_candidates): reachabil
 
 - step J5 runs route.checkpoint_adopt without checkpoint_including_joiner — graph://cde6c8c6-041 §1 J5 (network_routes.py:945)
 - step J6 runs route.checkpoint_adopt without checkpoint_including_joiner — graph://cde6c8c6-041 §3 (J6 repeat)
+
+### Scenario from self_admit, built rules
+
+Recorded: current {'founder': 3, 'joiner': 3}, minimal {'founder': 2, 'joiner': 1}.
+
+```text
+goal org_sync_pull from self_admit (built rules)
+root openings: founder 2, joiner 1 (total 3); steps 14
+
+ 1. ceremony.org_invite_mint[founder]                window founder#1     -> invite_event
+ 2. approval.link_publish[founder]                   window founder#1     -> link_publish_approval
+ 3. route.link_publish[founder]                      machine (delegate)   -> join_link_grant
+ 4. route.invite_resolve[joiner]                     machine (none)       -> invite_ref_resolved
+ 5. route.join_context[founder]                      machine (none)       -> join_context
+ 6. ceremony.member_claim_mint[joiner]               window joiner#1      -> member_claim
+ 7. route.claim_submit_admit[founder]                machine (none)       -> member_admitted
+ 8. route.join_bootstrap[founder]                    machine (none)       -> bootstrap_snapshot
+ 9. route.join_install[joiner]                       machine (none)       -> ledger_heads@joiner, registry_binding@joiner
+10. ceremony.fleet_runtime_mint[joiner]              window joiner#1      -> persona_cert_fleet_sync@joiner
+11. ceremony.serve_cert_mint[joiner]                 window joiner#1      -> serve_cert@joiner
+12. route.relay_connect[joiner]                      machine (none)       -> relay_slot@joiner
+13. ceremony.checkpoint_publish[founder]             window founder#2     -> adopted_checkpoint@founder, checkpoint_including_joiner
+14. route.checkpoint_adopt[joiner]                   machine (none)       -> adopted_checkpoint@joiner
+
+goal org_sync_pull from self_admit: current order reaches the goal
+current root openings: founder 3, joiner 3
+minimal root openings: founder 2, joiner 1 (built rules)
+
+refused: J5 route.checkpoint_adopt lacks checkpoint_including_joiner
+refused: J6 route.checkpoint_adopt lacks checkpoint_including_joiner
+
+needed F1         founder  needed: first opening of founder
+EXTRA  F2         founder  mergeable into F1: F1 closed without: link_publish_approval (from approval.link_publish[founder])
+needed J3         joiner   needed: first opening of joiner
+EXTRA  J6         joiner   mergeable into J3: J3 closed without: ledger_heads@joiner (from route.join_install[joiner]), registry_binding@joiner (from route.join_install[joiner])
+needed F4         founder  needed: not obtainable in F2's window; it lacked: member_admitted
+EXTRA  J6.repeat  joiner   needs no window: machine steps route.checkpoint_adopt[joiner] produce it; absent when J6 closed: checkpoint_including_joiner
+```
+
+### Scenario from approval, built rules
+
+Recorded: current {'founder': 4, 'joiner': 4}, minimal {'founder': 3, 'joiner': 2}.
+
+```text
+goal org_sync_pull from approval (built rules)
+root openings: founder 3, joiner 2 (total 5); steps 17
+
+ 1. ceremony.org_invite_mint[founder]                window founder#1     -> invite_event
+ 2. approval.link_publish[founder]                   window founder#1     -> link_publish_approval
+ 3. route.link_publish[founder]                      machine (delegate)   -> join_link_grant
+ 4. route.invite_resolve[joiner]                     machine (none)       -> invite_ref_resolved
+ 5. route.join_context[founder]                      machine (none)       -> join_context
+ 6. ceremony.member_claim_mint[joiner]               window joiner#1      -> member_claim
+ 7. route.claim_submit_stage[founder]                machine (none)       -> claim_staged
+ 8. ceremony.claim_approval[founder]                 window founder#2     -> claim_approval
+ 9. ceremony.claim_finalize[joiner]                  window joiner#2      -> member_claim_final
+10. route.claim_submit_admit[founder]                machine (none)       -> member_admitted
+11. route.join_bootstrap[founder]                    machine (none)       -> bootstrap_snapshot
+12. route.join_install[joiner]                       machine (none)       -> ledger_heads@joiner, registry_binding@joiner
+13. ceremony.fleet_runtime_mint[joiner]              window joiner#2      -> persona_cert_fleet_sync@joiner
+14. ceremony.serve_cert_mint[joiner]                 window joiner#2      -> serve_cert@joiner
+15. route.relay_connect[joiner]                      machine (none)       -> relay_slot@joiner
+16. ceremony.checkpoint_publish[founder]             window founder#3     -> adopted_checkpoint@founder, checkpoint_including_joiner
+17. route.checkpoint_adopt[joiner]                   machine (none)       -> adopted_checkpoint@joiner
+
+goal org_sync_pull from approval: current order reaches the goal
+current root openings: founder 4, joiner 4
+minimal root openings: founder 3, joiner 2 (built rules)
+
+refused: J5 route.checkpoint_adopt lacks checkpoint_including_joiner
+refused: J6 route.checkpoint_adopt lacks checkpoint_including_joiner
+
+needed F1         founder  needed: first opening of founder
+EXTRA  F2         founder  mergeable into F1: F1 closed without: link_publish_approval (from approval.link_publish[founder])
+needed J3         joiner   needed: first opening of joiner
+needed F3         founder  needed: not obtainable in F2's window; it lacked: claim_staged
+needed J4         joiner   needed: not obtainable in J3's window; it lacked: claim_approval
+EXTRA  J6         joiner   mergeable into J4: J4 closed without: ledger_heads@joiner (from route.join_install[joiner]), registry_binding@joiner (from route.join_install[joiner])
+needed F4         founder  needed: not obtainable in F3's window; it lacked: member_admitted
+EXTRA  J6.repeat  joiner   needs no window: machine steps route.checkpoint_adopt[joiner] produce it; absent when J6 closed: checkpoint_including_joiner
+```
+
+### Scenario from approval, rules admit_on_approval
+
+Recorded: current {'founder': 4, 'joiner': 4}, minimal {'founder': 2, 'joiner': 2}.
+
+```text
+goal org_sync_pull from approval with rules admit_on_approval
+root openings: founder 2, joiner 2 (total 4); steps 15
+
+ 1. ceremony.org_invite_mint[founder]                window founder#1     -> invite_event
+ 2. approval.link_publish[founder]                   window founder#1     -> link_publish_approval
+ 3. route.link_publish[founder]                      machine (delegate)   -> join_link_grant
+ 4. route.invite_resolve[joiner]                     machine (none)       -> invite_ref_resolved
+ 5. route.join_context[founder]                      machine (none)       -> join_context
+ 6. ceremony.member_claim_mint[joiner]               window joiner#1      -> member_claim
+ 7. route.claim_submit_stage[founder]                machine (none)       -> claim_staged
+ 8. route.admit_on_approval[founder]                 window founder#2     -> claim_approval, member_admitted
+ 9. ceremony.checkpoint_publish[founder]             window founder#2     -> adopted_checkpoint@founder, checkpoint_including_joiner
+10. route.join_bootstrap[founder]                    machine (none)       -> bootstrap_snapshot
+11. route.join_install[joiner]                       machine (none)       -> ledger_heads@joiner, registry_binding@joiner
+12. route.checkpoint_adopt[joiner]                   machine (none)       -> adopted_checkpoint@joiner
+13. ceremony.fleet_runtime_mint[joiner]              window joiner#2      -> persona_cert_fleet_sync@joiner
+14. ceremony.serve_cert_mint[joiner]                 window joiner#2      -> serve_cert@joiner
+15. route.relay_connect[joiner]                      machine (none)       -> relay_slot@joiner
+
+goal org_sync_pull from approval: current order reaches the goal
+current root openings: founder 4, joiner 4
+minimal root openings: founder 2, joiner 2 (rules admit_on_approval)
+
+refused: J5 route.checkpoint_adopt lacks checkpoint_including_joiner
+refused: J6 route.checkpoint_adopt lacks checkpoint_including_joiner
+
+needed F1         founder  needed: first opening of founder
+EXTRA  F2         founder  mergeable into F1: F1 closed without: link_publish_approval (from approval.link_publish[founder])
+needed J3         joiner   needed: first opening of joiner
+needed F3         founder  needed: not obtainable in F2's window; it lacked: claim_staged
+needed J4         joiner   needed: not obtainable in J3's window; it lacked: claim_approval
+EXTRA  J6         joiner   mergeable into J4: J4 closed without: ledger_heads@joiner (from route.join_install[joiner]), registry_binding@joiner (from route.join_install[joiner])
+EXTRA  F4         founder  mergeable into F3: F3 closed without: member_admitted (from route.admit_on_approval[founder])
+EXTRA  J6.repeat  joiner   needs no window: machine steps route.checkpoint_adopt[joiner] produce it; absent when J6 closed: checkpoint_including_joiner
+```
+
+### Scenario from self_admit, rules delegate_checkpoint
+
+Recorded: current {'founder': 3, 'joiner': 3}, minimal {'founder': 1, 'joiner': 1}.
+
+```text
+goal org_sync_pull from self_admit with rules delegate_checkpoint
+root openings: founder 1, joiner 1 (total 2); steps 15
+
+ 1. ceremony.checkpoint_delegate_grant[founder]      window founder#1     -> checkpoint_delegate_grant
+ 2. ceremony.org_invite_mint[founder]                window founder#1     -> invite_event
+ 3. approval.link_publish[founder]                   window founder#1     -> link_publish_approval
+ 4. route.link_publish[founder]                      machine (delegate)   -> join_link_grant
+ 5. route.invite_resolve[joiner]                     machine (none)       -> invite_ref_resolved
+ 6. route.join_context[founder]                      machine (none)       -> join_context
+ 7. ceremony.member_claim_mint[joiner]               window joiner#1      -> member_claim
+ 8. route.claim_submit_admit[founder]                machine (none)       -> member_admitted
+ 9. delegate.checkpoint_publish[founder]             machine (delegate)   -> adopted_checkpoint@founder, checkpoint_including_joiner
+10. route.join_bootstrap[founder]                    machine (none)       -> bootstrap_snapshot
+11. route.join_install[joiner]                       machine (none)       -> ledger_heads@joiner, registry_binding@joiner
+12. ceremony.fleet_runtime_mint[joiner]              window joiner#1      -> persona_cert_fleet_sync@joiner
+13. ceremony.serve_cert_mint[joiner]                 window joiner#1      -> serve_cert@joiner
+14. route.checkpoint_adopt[joiner]                   machine (none)       -> adopted_checkpoint@joiner
+15. route.relay_connect[joiner]                      machine (none)       -> relay_slot@joiner
+
+goal org_sync_pull from self_admit: current order reaches the goal
+current root openings: founder 3, joiner 3
+minimal root openings: founder 1, joiner 1 (rules delegate_checkpoint)
+
+refused: J5 route.checkpoint_adopt lacks checkpoint_including_joiner
+refused: J6 route.checkpoint_adopt lacks checkpoint_including_joiner
+
+needed F1         founder  needed: first opening of founder
+EXTRA  F2         founder  mergeable into F1: F1 closed without: link_publish_approval (from approval.link_publish[founder])
+needed J3         joiner   needed: first opening of joiner
+EXTRA  J6         joiner   mergeable into J3: J3 closed without: ledger_heads@joiner (from route.join_install[joiner]), registry_binding@joiner (from route.join_install[joiner])
+EXTRA  F4         founder  needs no window: machine steps delegate.checkpoint_publish[founder] produce it; absent when F2 closed: checkpoint_delegate_grant (from ceremony.checkpoint_delegate_grant[founder]), member_admitted
+EXTRA  J6.repeat  joiner   needs no window: machine steps route.checkpoint_adopt[joiner] produce it; absent when J6 closed: checkpoint_including_joiner
+```
+
+### Scenario from approval, rules admit_on_approval, delegate_checkpoint
+
+Recorded: current {'founder': 4, 'joiner': 4}, minimal {'founder': 2, 'joiner': 2}.
+
+```text
+goal org_sync_pull from approval with rules admit_on_approval, delegate_checkpoint
+root openings: founder 2, joiner 2 (total 4); steps 15
+
+ 1. ceremony.org_invite_mint[founder]                window founder#1     -> invite_event
+ 2. approval.link_publish[founder]                   window founder#1     -> link_publish_approval
+ 3. route.link_publish[founder]                      machine (delegate)   -> join_link_grant
+ 4. route.invite_resolve[joiner]                     machine (none)       -> invite_ref_resolved
+ 5. route.join_context[founder]                      machine (none)       -> join_context
+ 6. ceremony.member_claim_mint[joiner]               window joiner#1      -> member_claim
+ 7. route.claim_submit_stage[founder]                machine (none)       -> claim_staged
+ 8. route.admit_on_approval[founder]                 window founder#2     -> claim_approval, member_admitted
+ 9. ceremony.checkpoint_publish[founder]             window founder#2     -> adopted_checkpoint@founder, checkpoint_including_joiner
+10. route.join_bootstrap[founder]                    machine (none)       -> bootstrap_snapshot
+11. route.join_install[joiner]                       machine (none)       -> ledger_heads@joiner, registry_binding@joiner
+12. route.checkpoint_adopt[joiner]                   machine (none)       -> adopted_checkpoint@joiner
+13. ceremony.fleet_runtime_mint[joiner]              window joiner#2      -> persona_cert_fleet_sync@joiner
+14. ceremony.serve_cert_mint[joiner]                 window joiner#2      -> serve_cert@joiner
+15. route.relay_connect[joiner]                      machine (none)       -> relay_slot@joiner
+
+goal org_sync_pull from approval: current order reaches the goal
+current root openings: founder 4, joiner 4
+minimal root openings: founder 2, joiner 2 (rules admit_on_approval, delegate_checkpoint)
+
+refused: J5 route.checkpoint_adopt lacks checkpoint_including_joiner
+refused: J6 route.checkpoint_adopt lacks checkpoint_including_joiner
+
+needed F1         founder  needed: first opening of founder
+EXTRA  F2         founder  mergeable into F1: F1 closed without: link_publish_approval (from approval.link_publish[founder])
+needed J3         joiner   needed: first opening of joiner
+needed F3         founder  needed: not obtainable in F2's window; it lacked: claim_staged
+needed J4         joiner   needed: not obtainable in J3's window; it lacked: claim_approval
+EXTRA  J6         joiner   mergeable into J4: J4 closed without: ledger_heads@joiner (from route.join_install[joiner]), registry_binding@joiner (from route.join_install[joiner])
+EXTRA  F4         founder  mergeable into F3: F3 closed without: member_admitted (from route.admit_on_approval[founder])
+EXTRA  J6.repeat  joiner   needs no window: machine steps route.checkpoint_adopt[joiner] produce it; absent when J6 closed: checkpoint_including_joiner
+```

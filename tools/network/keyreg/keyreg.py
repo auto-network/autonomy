@@ -12,12 +12,18 @@ Command line:
     python3 keyreg.py class <custody>     # ids of every key in a custody class
     python3 keyreg.py edges               # derivation + seal edges, one per line
     python3 keyreg.py reachable <id>      # keys transitively derivable from <id>
+    python3 keyreg.py plan <goal> [--from <state>] [--rule <rule>]...
+                                          # minimal schedule: fewest root openings, then steps
+    python3 keyreg.py explain-current <goal> [--from <state>] [--rule <rule>]...
+                                          # the recorded code order against that minimum
 """
 
 from __future__ import annotations
 
+import heapq
 import json
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -504,8 +510,402 @@ def reachable(data: dict, key_id: str) -> list[str]:
     return sorted(seen)
 
 
+# ── Workflow planning ───────────────────────────────────────────────────────
+#
+# The workflow mutations (those with opens/requires/produces) form an AND/OR
+# graph over artifacts. A per-actor artifact referenced bare inside a mutation
+# binds to the executing actor. A step whose opening is root or persona needs
+# a human root window; consecutive window steps of one actor share a window,
+# and a window step of another actor closes it (a window never spans another
+# party's ceremony). Steps opening delegate or none run on a machine and
+# neither open nor close a window. The graph is monotone: an artifact once
+# held stays held. Freshness conditions (a head present at adoption) are not
+# expressible here and are modeled in tools/network/TLA/OrgAdmission.tla.
+
+
+class PlanError(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class Instance:
+    """One workflow mutation executed by one actor, refs bound."""
+    mutation: str
+    actor: str
+    opens: str
+    requires: tuple
+    produces: frozenset
+
+    @property
+    def needs_window(self) -> bool:
+        return self.opens in WINDOW_OPENS
+
+    def label(self) -> str:
+        return f"{self.mutation}[{self.actor}]"
+
+
+def _bind(data: dict, ref: str, actor: str) -> str:
+    base, _, named = ref.partition("@")
+    if base in data["keys"] or named:
+        return ref
+    if (data.get("artifacts") or {}).get(base, {}).get("per_actor"):
+        return f"{base}@{actor}"
+    return ref
+
+
+def _bind_expr(data: dict, expr, actor: str):
+    if isinstance(expr, str):
+        return _bind(data, expr, actor)
+    op, subs = next(iter(expr.items()))
+    return (op, tuple(_bind_expr(data, sub, actor) for sub in subs))
+
+
+def _norm_expr(expr):
+    """Goal/state requirement (already explicit) in the bound tuple form."""
+    if isinstance(expr, str):
+        return expr
+    op, subs = next(iter(expr.items()))
+    return (op, tuple(_norm_expr(sub) for sub in subs))
+
+
+def _held(ref: str, held: frozenset, opens: str) -> bool:
+    return ref in held or ref in OPENS_KEYS.get(opens, set())
+
+
+def satisfied(expr, held: frozenset, opens: str = "none") -> bool:
+    if isinstance(expr, str):
+        return _held(expr, held, opens)
+    op, subs = expr
+    test = all if op == "all" else any
+    return test(satisfied(sub, held, opens) for sub in subs)
+
+
+def _all_satisfied(exprs, held, opens="none") -> bool:
+    return all(satisfied(expr, held, opens) for expr in exprs)
+
+
+def unmet(expr, held: frozenset, opens: str = "none") -> list[str]:
+    """Human-readable unmet requirements of *expr* (empty when satisfied)."""
+    if satisfied(expr, held, opens):
+        return []
+    if isinstance(expr, str):
+        return [expr]
+    op, subs = expr
+    if op == "all":
+        return [ref for sub in subs for ref in unmet(sub, held, opens)]
+    return ["any of (" + " | ".join(
+        " & ".join(unmet(sub, frozenset(), opens) or ["-"]) for sub in subs) + ")"]
+
+
+def _unmet_all(exprs, held, opens="none") -> list[str]:
+    return [ref for expr in exprs for ref in unmet(expr, held, opens)]
+
+
+def rule_names(data: dict) -> set[str]:
+    return {m["rule"] for m in data["mutations"].values() if m.get("rule")}
+
+
+def instances(data: dict, rules=()) -> list[Instance]:
+    """Every executable (mutation, actor) pair: built workflow mutations, and
+    designed ones whose rule is enabled."""
+    unknown = set(rules) - rule_names(data)
+    if unknown:
+        raise PlanError(f"unknown rule(s) {sorted(unknown)}; rules are {sorted(rule_names(data))}")
+    out = []
+    for mut_id, entry in sorted(data["mutations"].items()):
+        if "opens" not in entry:
+            continue
+        if entry.get("status", "built") != "built" and entry.get("rule") not in rules:
+            continue
+        for actor in entry["actors"]:
+            out.append(Instance(
+                mutation=mut_id, actor=actor, opens=entry["opens"],
+                requires=tuple(_bind_expr(data, e, actor) for e in entry["requires"]),
+                produces=frozenset(_bind(data, r, actor) for r in entry["produces"]),
+            ))
+    return out
+
+
+def _goal(data: dict, goal_id: str) -> dict:
+    goals = data.get("goals") or {}
+    if goal_id not in goals:
+        raise PlanError(f"'{goal_id}' is not a goal; goals are: {', '.join(sorted(goals))}")
+    return goals[goal_id]
+
+
+def _start(data: dict, goal_id: str, state_id: str | None) -> tuple[str, frozenset]:
+    states = _goal(data, goal_id)["states"]
+    state_id = state_id or next(iter(states))
+    if state_id not in states:
+        raise PlanError(f"'{state_id}' is not a state of {goal_id}; states are: {', '.join(states)}")
+    return state_id, frozenset(states[state_id]["holds"])
+
+
+@dataclass
+class Plan:
+    goal: str
+    state: str
+    rules: tuple
+    steps: list = field(default_factory=list)      # (Instance, window label | None, new artifacts)
+    openings: dict = field(default_factory=dict)   # actor -> root windows
+
+    @property
+    def total_openings(self) -> int:
+        return sum(self.openings.values())
+
+
+def plan(data: dict, goal_id: str, state_id: str | None = None, rules=()) -> Plan:
+    """Exhaustive search (Dijkstra) for the schedule reaching *goal_id* with
+    the fewest root windows, then the fewest steps. Ties break on instance
+    order, so the result is deterministic."""
+    goal = _goal(data, goal_id)
+    state_id, start = _start(data, goal_id, state_id)
+    target = tuple(_norm_expr(e) for e in goal["requires"])
+    insts = instances(data, rules)
+    counter = 0
+    frontier = [(0, 0, counter, start, None, ())]
+    best: dict = {}
+    while frontier:
+        opens, nsteps, _, held, window, path = heapq.heappop(frontier)
+        if _all_satisfied(target, held):
+            result = Plan(goal=goal_id, state=state_id, rules=tuple(rules),
+                          openings={a: 0 for a in data["actors"]})
+            current, seen, have = None, {}, start
+            for index in path:
+                inst = insts[index]
+                label = None
+                if inst.needs_window:
+                    if current != inst.actor:
+                        seen[inst.actor] = seen.get(inst.actor, 0) + 1
+                        result.openings[inst.actor] += 1
+                        current = inst.actor
+                    label = f"{inst.actor}#{seen[inst.actor]}"
+                result.steps.append((inst, label, sorted(inst.produces - have)))
+                have = have | inst.produces
+            return result
+        key = (held, window)
+        if key in best and best[key] <= (opens, nsteps):
+            continue
+        best[key] = (opens, nsteps)
+        for index, inst in enumerate(insts):
+            if inst.produces <= held or not _all_satisfied(inst.requires, held, inst.opens):
+                continue
+            if inst.needs_window:
+                cost, next_window = (0 if window == inst.actor else 1), inst.actor
+            else:
+                cost, next_window = 0, window
+            counter += 1
+            heapq.heappush(frontier, (opens + cost, nsteps + 1, counter,
+                                      held | inst.produces, next_window, path + (index,)))
+    raise PlanError(f"goal {goal_id} is unreachable from state {state_id} with rules {list(rules)}")
+
+
+# ── The recorded current order ──────────────────────────────────────────────
+
+@dataclass
+class StepRun:
+    step: str
+    actor: str
+    ceremony: bool
+    held_before: frozenset
+    held_after: frozenset
+    runs: list = field(default_factory=list)   # (mutation, new artifacts, unmet refs)
+
+    def new(self) -> list:
+        return [(m, new) for m, new, miss in self.runs if new]
+
+
+@dataclass
+class CurrentRun:
+    goal: str
+    state: str
+    steps: list
+    reached: bool
+    ceremonies: dict
+
+
+def simulate_current(data: dict, goal_id: str, state_id: str | None = None) -> CurrentRun:
+    """Replay the goal's recorded current_order from a state. A run whose
+    requirements are unmet produces nothing (the code path refuses)."""
+    goal = _goal(data, goal_id)
+    state_id, held = _start(data, goal_id, state_id)
+    steps, ceremonies = [], {a: 0 for a in data["actors"]}
+    for step in goal.get("current_order") or []:
+        if step.get("only_from") and state_id not in step["only_from"]:
+            continue
+        record = StepRun(step["step"], step["actor"], bool(step["ceremony"]), held, held)
+        for mut_id in step["runs"]:
+            entry = data["mutations"][mut_id]
+            inst = Instance(mut_id, step["actor"], entry["opens"],
+                            tuple(_bind_expr(data, e, step["actor"]) for e in entry["requires"]),
+                            frozenset(_bind(data, r, step["actor"]) for r in entry["produces"]))
+            missing = _unmet_all(inst.requires, held, inst.opens)
+            new = [] if missing else sorted(inst.produces - held)
+            if not missing:
+                held = held | inst.produces
+            record.runs.append((mut_id, new, missing))
+        record.held_after = held
+        if record.ceremony:
+            ceremonies[record.actor] += 1
+        steps.append(record)
+    target = tuple(_norm_expr(e) for e in goal["requires"])
+    return CurrentRun(goal_id, state_id, steps, _all_satisfied(target, held), ceremonies)
+
+
+def _closure(held: frozenset, insts, allow) -> tuple[frozenset, dict]:
+    """Fixpoint of *held* under the instances *allow* admits; returns the
+    closure and, per new artifact, the instance that first produced it."""
+    producer: dict = {}
+    changed = True
+    while changed:
+        changed = False
+        for inst in insts:
+            if not allow(inst) or inst.produces <= held:
+                continue
+            if _all_satisfied(inst.requires, held, inst.opens):
+                for ref in inst.produces - held:
+                    producer[ref] = inst
+                held = held | inst.produces
+                changed = True
+    return held, producer
+
+
+@dataclass
+class Opening:
+    step: str
+    actor: str
+    extra: bool
+    reason: str
+    missing: list          # (artifact, producer label or None)
+
+
+def explain_current(data: dict, goal_id: str, state_id: str | None = None, rules=()):
+    """Every root opening of the current order, classified against the
+    minimal schedule under *rules*:
+
+    - mergeable: every requirement of what the opening newly produced was
+      obtainable in the actor's previous window (its held set closed under
+      machine steps and the actor's own window steps); the artifacts listed
+      are the ones that window closed without.
+    - machine: what the opening newly produced is obtainable by machine
+      steps from what was held just before it (plus what the actor could have
+      produced in its previous window); the artifacts listed were absent when
+      that previous window closed.
+    - needed: neither holds; the artifacts listed come only from another
+      party's ceremony.
+    """
+    current = simulate_current(data, goal_id, state_id)
+    minimal = plan(data, goal_id, current.state, rules)
+    insts = instances(data, rules)
+    machine = lambda inst: not inst.needs_window  # noqa: E731
+    openings = []
+    previous: dict = {}
+    for record in current.steps:
+        if not record.ceremony:
+            continue
+        prior = previous.get(record.actor)
+        previous[record.actor] = record
+        new_runs = record.new()
+        if not new_runs:
+            openings.append(Opening(record.step, record.actor, True,
+                                    "produced nothing new", []))
+            continue
+        own = lambda inst, a=record.actor: machine(inst) or inst.actor == a  # noqa: E731
+        by_id = {(i.mutation, i.actor): i for i in insts}
+        run_insts = [by_id[(m, record.actor)] for m, _new in new_runs]
+        if prior is not None:
+            p_closure, p_producer = _closure(prior.held_after, insts, own)
+            if all(_all_satisfied(i.requires, p_closure, i.opens) for i in run_insts):
+                needed = sorted({ref for i in run_insts
+                                 for ref in _unmet_all(i.requires, prior.held_after, i.opens)})
+                openings.append(Opening(
+                    record.step, record.actor, True,
+                    f"mergeable into {prior.step}: {prior.step} closed without",
+                    [(ref, p_producer[ref].label() if ref in p_producer else None) for ref in needed]))
+                continue
+            actor_products = frozenset(
+                ref for ref, inst in p_producer.items()
+                if inst.actor == record.actor and inst.needs_window)
+        else:
+            actor_products = frozenset()
+        wanted = frozenset(ref for _m, new in new_runs for ref in new)
+        m_closure, m_producer = _closure(record.held_before | actor_products, insts, machine)
+        if wanted <= m_closure:
+            chain = {m_producer[ref] for ref in wanted if ref in m_producer}
+            base = prior.held_after if prior is not None else frozenset()
+            absent = sorted({ref for inst in chain
+                             for ref in _unmet_all(inst.requires, base, inst.opens)})
+            openings.append(Opening(
+                record.step, record.actor, True,
+                "needs no window: machine steps "
+                + ", ".join(sorted(i.label() for i in chain))
+                + (f" produce it; absent when {prior.step} closed" if prior else " produce it"),
+                [(ref, (p_producer[ref].label() if prior and ref in p_producer else None))
+                 for ref in absent]))
+            continue
+        if prior is None:
+            openings.append(Opening(record.step, record.actor, False,
+                                    f"needed: first opening of {record.actor}", []))
+            continue
+        missing = sorted({ref for i in run_insts
+                          for ref in _unmet_all(i.requires, prior.held_after, i.opens)})
+        openings.append(Opening(record.step, record.actor, False,
+                                f"needed: not obtainable in {prior.step}'s window; it lacked",
+                                [(ref, None) for ref in missing]))
+    return current, minimal, openings
+
+
+def _parse_plan_args(args: list[str]) -> tuple[str, str | None, list[str]]:
+    if not args:
+        raise PlanError("usage: plan|explain-current <goal> [--from <state>] [--rule <rule>]...")
+    goal_id, state_id, rules = args[0], None, []
+    rest = args[1:]
+    while rest:
+        flag = rest.pop(0)
+        if flag in ("--from", "--rule") and rest:
+            value = rest.pop(0)
+            if flag == "--from":
+                state_id = value
+            else:
+                rules.append(value)
+        else:
+            raise PlanError(f"unexpected argument '{flag}'")
+    return goal_id, state_id, rules
+
+
+def format_plan(result: Plan) -> str:
+    lines = [f"goal {result.goal} from {result.state}"
+             + (f" with rules {', '.join(result.rules)}" if result.rules else " (built rules)"),
+             "root openings: " + ", ".join(f"{a} {n}" for a, n in result.openings.items())
+             + f" (total {result.total_openings}); steps {len(result.steps)}", ""]
+    for n, (inst, window, new) in enumerate(result.steps, 1):
+        where = f"window {window}" if window else f"machine ({inst.opens})"
+        lines.append(f"{n:2}. {inst.label():48} {where:20} -> {', '.join(new) or '-'}")
+    return "\n".join(lines)
+
+
+def format_explain(current: CurrentRun, minimal: Plan, openings: list) -> str:
+    lines = [f"goal {current.goal} from {current.state}: current order "
+             + ("reaches" if current.reached else "DOES NOT reach") + " the goal",
+             "current root openings: " + ", ".join(f"{a} {n}" for a, n in current.ceremonies.items()),
+             "minimal root openings: " + ", ".join(f"{a} {n}" for a, n in minimal.openings.items())
+             + (f" (rules {', '.join(minimal.rules)})" if minimal.rules else " (built rules)"), ""]
+    for record in current.steps:
+        for mut_id, new, missing in record.runs:
+            if missing:
+                lines.append(f"refused: {record.step} {mut_id} lacks {', '.join(missing)}")
+    lines.append("")
+    for opening in openings:
+        tag = "EXTRA " if opening.extra else "needed"
+        detail = ", ".join(ref + (f" (from {src})" if src else "") for ref, src in opening.missing)
+        lines.append(f"{tag} {opening.step:10} {opening.actor:8} {opening.reason}"
+                     + (f": {detail}" if detail else ""))
+    return "\n".join(lines)
+
+
 def main(argv: list[str]) -> int:
-    if not argv or argv[0] not in {"validate", "key", "class", "edges", "reachable"}:
+    if not argv or argv[0] not in {"validate", "key", "class", "edges", "reachable",
+                                   "plan", "explain-current"}:
         print(__doc__, file=sys.stderr)
         return 2
     try:
@@ -532,6 +932,16 @@ def main(argv: list[str]) -> int:
             print(f"seal    {kid} -> {recipient}  [{purpose}]")
     elif command == "reachable":
         print("\n".join(reachable(data, argv[1])))
+    elif command in ("plan", "explain-current"):
+        try:
+            goal_id, state_id, rules = _parse_plan_args(argv[1:])
+            if command == "plan":
+                print(format_plan(plan(data, goal_id, state_id, rules)))
+            else:
+                print(format_explain(*explain_current(data, goal_id, state_id, rules)))
+        except PlanError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
     return 0
 
 

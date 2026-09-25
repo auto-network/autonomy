@@ -14,7 +14,9 @@ Reads registry.yaml and writes five artifacts into generated/:
 - workflow-goals.md — actors, artifacts with their producers and consumers,
                       the workflow mutations' opens/requires/produces, and
                       each goal: starting states, recorded current order,
-                      and known defects.
+                      known defects, and per scenario the minimal schedule
+                      against the current order (keyreg.py plan /
+                      explain-current).
 
 The generated files are committed; tests/test_gen.py regenerates them and
 fails if the committed copies differ, so the views cannot silently drift
@@ -344,7 +346,19 @@ def gen_workflow_goals(registry: dict) -> str:
 
 
 def _scenario_lines(registry: dict, goal_id: str, goal: dict) -> list[str]:
-    return []
+    """Per recorded scenario: the planner's minimal schedule and the current
+    order explained against it (keyreg.py plan / explain-current output)."""
+    lines = []
+    for scenario in goal.get("scenarios") or []:
+        rules = scenario["rules"]
+        title = f"from {scenario['from']}" + (f", rules {', '.join(rules)}" if rules else ", built rules")
+        minimal = keyreg.plan(registry, goal_id, scenario["from"], rules)
+        explained = keyreg.explain_current(registry, goal_id, scenario["from"], rules)
+        lines.extend(["", f"### Scenario {title}", "",
+                      f"Recorded: current {scenario['current']}, minimal {scenario['minimal']}.", "",
+                      "```text", keyreg.format_plan(minimal), "", keyreg.format_explain(*explained),
+                      "```"])
+    return lines
 
 
 def gen_coverage(registry: dict) -> str:
