@@ -66,6 +66,42 @@ ORG_FOLLOW_REVISION = 1
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 
 
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+
+
+def normalize_link_pub(value: str) -> str:
+    """The follow row's ``link_pub`` (64 lowercase hex) from either form a
+    published link key arrives in.
+
+    ``fragment_url`` (tools.dashboard.link_channel_key) writes the channel
+    public key into the shared URL as unpadded base64url (43 chars); the
+    follow row, the viewer handshake (``verify_link_server_hello``) and this
+    schema all want the 64-hex form. ``graph follow add`` and the first-run
+    seed pass whatever the URL or the allowlist carries through here.
+    Raises ``ValueError`` for anything that is neither a 64-hex key nor a
+    base64url encoding of exactly 32 bytes (a wrong-length key must never
+    be written and discovered only at dial time)."""
+    import base64
+
+    if not isinstance(value, str):
+        raise ValueError("link_pub must be a string")
+    text = value.strip()
+    if _HEX64.fullmatch(text.lower()):
+        return text.lower()
+    pad = "=" * (-len(text) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(text + pad)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(
+            "link_pub is neither 64 hex chars nor a base64url channel key"
+        ) from exc
+    if len(raw) != 32:
+        raise ValueError(
+            f"link_pub decodes to {len(raw)} bytes; a channel key is 32"
+        )
+    return raw.hex()
+
+
 @publication_band(min="raw", max="raw")
 @home("personal")
 @keyed_per_entity(key_strategy="org_slug")

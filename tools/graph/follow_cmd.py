@@ -46,12 +46,21 @@ def _split_link_url(url: str) -> tuple[str, str, str, str]:
     parts = urlsplit(url)
     if not parts.scheme or not parts.netloc:
         _fail(f"not a link URL: {url!r}")
-    link_pub = parts.fragment.strip()
-    if not link_pub:
+    fragment = parts.fragment.strip()
+    if not fragment:
         _fail(
             "the link URL carries no #fragment key — paste it exactly as "
             "published, bare, with nothing selected around it"
         )
+    # The published URL carries the key as unpadded base64url (43 chars);
+    # the follow row and the viewer handshake use 64 hex. One normalizer,
+    # shared with the first-run seed, so both forms are accepted.
+    from tools.graph.schemas.org_follow import normalize_link_pub
+
+    try:
+        link_pub = normalize_link_pub(fragment)
+    except ValueError as exc:
+        _fail(f"the link URL's #fragment is not a channel key ({exc})")
     path = parts.path.rstrip("/")
     token = path.rsplit("/", 1)[-1] if path else ""
     if not token:
@@ -135,8 +144,25 @@ def cmd_follow_add(args) -> None:
     slug = meta.get("org") if isinstance(meta, dict) else None
     if not org_uuid or not isinstance(org_uuid, str):
         _fail("link envelope carried no org uuid")
+    # The relay admits only ttl/label/require_auth in a link's meta, so a
+    # link published since 2026-09-25 carries no org slug in its envelope
+    # (the slug stays in the publisher's local grant, which serving reads).
+    # The follower names its mirror with --as until the envelope carries the
+    # slug again. The first-run seed never needs this: it names the mirror
+    # from the allowlist's own ``org:``.
     if not slug or not isinstance(slug, str):
-        _fail("link envelope carried no org slug (meta.org)")
+        slug = getattr(args, "as_slug", None)
+    if not slug or not isinstance(slug, str):
+        _fail(
+            "the link envelope names no org slug; pass --as <slug> to name "
+            "the local mirror (data/orgs/<slug>.db), e.g. --as autonomy"
+        )
+    from tools.graph import org_ops
+
+    try:
+        org_ops._validate_slug(slug)
+    except Exception as exc:  # noqa: BLE001
+        _fail(f"{slug!r} is not a valid org slug ({exc})")
 
     # Slug collision guard (D7, graph://5f2f5a49-00d §10.4/§10.8): the mirror
     # lives at data/orgs/<slug>.db. If a LOCAL organization of a DIFFERENT id

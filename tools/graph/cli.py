@@ -6172,6 +6172,9 @@ def main():
     p.add_argument("args_pos", nargs="*", metavar="ARGS",
                    help="publish | add <url> | list | status | remove <slug>")
     p.add_argument("--label", help="publish: human label carried on the grant")
+    p.add_argument("--as", dest="as_slug", metavar="SLUG",
+                   help="add: local slug for the mirror (data/orgs/<slug>.db) "
+                        "when the link envelope names no org slug")
     p.add_argument("--keep-mirror", dest="keep_mirror", action="store_true",
                    help="remove: keep the read-only mirror, only stop pulling")
     p.add_argument("--org", help="Org slug")

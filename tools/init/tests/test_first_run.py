@@ -93,11 +93,12 @@ def test_initialize_creates_empty_deployment(tmp_path):
         assert (data / filename).exists(), filename
         assert _tables(data / filename), f"{filename} has no tables"
 
-    # Everything except TLS (disabled) and the org-follow seed (no published
-    # Autonomy follow link committed yet, §10.1) actually happened.
+    # Everything except TLS (disabled) actually happened, the org-follow seed
+    # included: the committed allowlist carries Autonomy's published follow
+    # link (2026-09-25, §10.1), and acme is not Autonomy, so the row is seeded.
     actions = {s.name: s.action for s in report.steps}
     assert actions["tls"] == SKIPPED
-    assert actions["setting:org-follow"] == SKIPPED
+    assert actions["setting:org-follow"] == CREATED
     skipped_by_design = {"tls", "setting:org-follow"}
     assert all(
         a == CREATED for n, a in actions.items() if n not in skipped_by_design
@@ -297,8 +298,12 @@ def test_follow_defaults_idempotent(tmp_path, full_follow_allowlist):
 
 
 def test_follow_defaults_skipped_on_self_node(tmp_path, monkeypatch):
-    # First run founds the named org acme (real committed allowlist: follow
-    # link not yet published, so nothing is seeded). Capture acme's id.
+    # First run founds the named org acme against an unpublished follow block
+    # (nothing seeded). Capture acme's id.
+    unpublished = _write_allowlist(
+        tmp_path / "unpublished.yaml", follow={"org_uuid": _AUTONOMY_UUID},
+    )
+    monkeypatch.setattr(first_run, "ALLOWLIST_YAML", unpublished)
     initialize(tmp_path, first_org="acme", tls=False)
     assert _follow_rows(tmp_path) == []
     conn = sqlite3.connect(str(tmp_path / "data" / "orgs" / "acme.db"))
@@ -326,15 +331,81 @@ def test_follow_defaults_skipped_on_self_node(tmp_path, monkeypatch):
     assert "self-follow" in step.detail
 
 
-def test_follow_defaults_skipped_when_link_unpublished(tmp_path):
-    # The real committed allowlist carries org_uuid but no rendezvous/link_pub
-    # yet (the operator has not published the org:follow link): first run seeds
-    # no follow row and reports why, never erroring.
+def test_follow_defaults_skipped_when_link_unpublished(tmp_path, monkeypatch):
+    # A follow: block with org_uuid but no rendezvous/link_pub (the shape the
+    # committed allowlist had before the org:follow link was published on
+    # 2026-09-25): first run seeds no follow row and reports why, never
+    # erroring.
+    path = _write_allowlist(
+        tmp_path / "unpublished.yaml", follow={"org_uuid": _AUTONOMY_UUID},
+    )
+    monkeypatch.setattr(first_run, "ALLOWLIST_YAML", path)
     report = initialize(tmp_path, tls=False)
     assert _follow_rows(tmp_path) == []
     step = next(s for s in report.steps if s.name == "setting:org-follow")
     assert step.action == SKIPPED
     assert "not yet published" in step.detail
+
+
+def test_follow_defaults_seed_from_the_committed_allowlist(tmp_path):
+    # The real committed allowlist: the org:follow link published 2026-09-25.
+    # A fresh personal-only node seeds the Autonomy follow row from it, with
+    # the URL's base64url fragment normalized to the row's 64-hex link_pub.
+    from tools.graph.curation.allowlist import load
+    from tools.graph.schemas.org_follow import normalize_link_pub
+
+    committed = load(first_run.ALLOWLIST_YAML).follow
+    report = initialize(tmp_path, tls=False)
+    step = next(s for s in report.steps if s.name == "setting:org-follow")
+    assert step.action == CREATED, step.detail
+    rows = _follow_rows(tmp_path)
+    assert len(rows) == 1
+    key, payload = rows[0]
+    assert key == "autonomy"
+    assert payload["org_uuid"] == committed["org_uuid"] == _AUTONOMY_UUID
+    assert payload["rendezvous"] == committed["rendezvous"]
+    assert payload["rendezvous"].startswith("https://") and "/l/" in payload["rendezvous"]
+    assert payload["link_pub"] == normalize_link_pub(committed["link_pub"])
+    assert len(payload["link_pub"]) == 64
+    assert payload["registry_url"] == committed["registry_url"]
+
+
+def test_follow_defaults_accept_base64url_fragment(tmp_path, monkeypatch):
+    # The operator pastes the fragment as published (unpadded base64url);
+    # the seeded row carries the 64-hex form the handshake uses.
+    import base64
+
+    raw = bytes(range(32))
+    fragment = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    path = _write_allowlist(
+        tmp_path / "b64.yaml",
+        follow={
+            "org_uuid": _AUTONOMY_UUID,
+            "rendezvous": _FAKE_RENDEZVOUS,
+            "link_pub": fragment,
+        },
+    )
+    monkeypatch.setattr(first_run, "ALLOWLIST_YAML", path)
+    initialize(tmp_path, tls=False)
+    (_key, payload), = _follow_rows(tmp_path)
+    assert payload["link_pub"] == raw.hex()
+
+
+def test_follow_defaults_skip_a_wrong_length_key(tmp_path, monkeypatch):
+    path = _write_allowlist(
+        tmp_path / "short.yaml",
+        follow={
+            "org_uuid": _AUTONOMY_UUID,
+            "rendezvous": _FAKE_RENDEZVOUS,
+            "link_pub": "AAAA",
+        },
+    )
+    monkeypatch.setattr(first_run, "ALLOWLIST_YAML", path)
+    report = initialize(tmp_path, tls=False)
+    assert _follow_rows(tmp_path) == []
+    step = next(s for s in report.steps if s.name == "setting:org-follow")
+    assert step.action == SKIPPED
+    assert "not a channel key" in step.detail
 
 
 @pytest.mark.skipif(
