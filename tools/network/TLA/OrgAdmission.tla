@@ -73,6 +73,16 @@
 (*            a member receives a generation's grant only by a pull (K3)   *)
 (*  RootCheck: the members_root recomputation (FALSE: a calibration)      *)
 (*  MonotoneAdopt: a record at or below the adopted seq is refused         *)
+(*  JoinAdopt: "none" adoption is a separate step after install (today the *)
+(*            install route adopts the registry's current record in the    *)
+(*            same request, network_routes.py:943-945, but not atomically  *)
+(*            with the bootstrap snapshot taken earlier over the join      *)
+(*            channel); "bundle" the founder's current record rides the    *)
+(*            join bundle and is adopted by fold with the snapshot         *)
+(*  Downgrade: on a mutual hello a side may prove under the seq the OTHER  *)
+(*            side has adopted (read from the incoming rider's             *)
+(*            checkpoint_seq, relaykit/hello.py:76), from its retained      *)
+(*            records, subject to its own admission floor                  *)
 (*  GrantInBundle: the join bundle carries the new member's grant for the  *)
 (*            generation current at install (K3 allows the join bundle)    *)
 (*  "verifier_any_adm" E-any-adm: as "verifier_any", and the record is at  *)
@@ -106,7 +116,9 @@ CONSTANTS Joiners,              \* model values
           RootCheck,            \* D1/D2 members_root recomputation
           MonotoneAdopt,        \* adoption refuses a record at or below the adopted seq
           Adversarial,          \* the registry/peer may serve a wrong Δ or an old record
-          GrantInBundle         \* the join bundle carries the grant for the current generation
+          GrantInBundle,        \* the join bundle carries the grant for the current generation
+          JoinAdopt,            \* "none" | "bundle": see the header
+          Downgrade             \* prover-downgrade: see the header
 
 Nodes  == {F} \cup Joiners
 Actors == Nodes \cup {X}
@@ -256,11 +268,16 @@ Bootstrap(j) ==
     /\ j \notin installed
     /\ installed' = installed \cup {j}
     /\ jHas' = [jHas EXCEPT ![j] = Pos(Len(fLedger))]
+    /\ IF JoinAdopt = "bundle" /\ adopted[F] > adopted[j]
+         THEN /\ adopted' = [adopted EXCEPT ![j] = adopted[F]]
+              /\ prevAd' = [prevAd EXCEPT ![j] = adopted[j]]
+              /\ adoptedAt' = [adoptedAt EXCEPT ![j] = now]
+         ELSE UNCHANGED <<adopted, prevAd, adoptedAt>>
     /\ gens' = IF DeltaMode /\ GrantInBundle
                 THEN [gens EXCEPT ![j] = @ \cup
                         {Cardinality({i \in Pos(Len(fLedger)) : fLedger[i].kind = "remove"})}]
                 ELSE gens
-    /\ UNCHANGED <<fLedger, cps, adopted, prevAd, adoptedAt, now, pulls, forged,
+    /\ UNCHANGED <<fLedger, cps, now, pulls, forged,
                    claimed, approved, recon, badRecon>>
 
 \* C6/C8: the founder's sign-on publishes when the member set changed.
@@ -354,12 +371,22 @@ Accepts(v, other, s) ==
 \* The prover side, or anything at all for the outsider.
 CanProve(n, s) == IF n = X THEN s \in 1..Len(cps) ELSE s \in ProverSeqs(n)
 
+\* Prover-downgrade: n proves back under the seq the other side adopted,
+\* when n can fold that record, is in it, and it is not before n's own
+\* current admission.
+CanProveTo(n, o, s) ==
+    \/ CanProve(n, s)
+    \/ /\ Downgrade /\ n \in Nodes /\ o \in Nodes
+       /\ s = adopted[o] /\ s > 0 /\ cps[s].auth
+       /\ Knows(n, s) /\ n \in cps[s].members
+       /\ (n \in Joiners => cps[s].head >= AdmitPos(n))
+
 Pull(a, b) ==
     \E sa, sb \in 1..Len(cps) :
       /\ a # b
       /\ a \in Nodes \/ b \in Nodes
       /\ \A n \in {a, b} \cap Nodes : Ready(n)
-      /\ CanProve(a, sa) /\ CanProve(b, sb)
+      /\ CanProveTo(a, b, sa) /\ CanProveTo(b, a, sb)
       /\ b \in Nodes => Accepts(b, a, sa)
       /\ a \in Nodes => Accepts(a, b, sb)
       /\ LET fresh == /\ (b \in Nodes => a \in cps[adopted[b]].members)

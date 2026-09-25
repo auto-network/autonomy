@@ -46,6 +46,10 @@ GREEN = [
     # order is fixed (OrgAdmissionX3.tla), member actions are free.
     ("OrgAdmissionX3EAny.cfg", "OrgAdmissionX3"),
     ("OrgAdmissionX3EAnyAdm.cfg", "OrgAdmissionX3"),
+    # Prover-downgrade with fold-only adoption (no P1; the registry serves
+    # only its tuple) and the founder's record adopted from the join bundle.
+    ("OrgAdmissionTransitionEAnyAdmDowngrade.cfg", "OrgAdmission"),
+    ("OrgAdmissionX3EAnyAdmDowngrade.cfg", "OrgAdmissionX3"),
     # E-any against rekeyed and re-admitted personas (safety).
     ("OrgAdmissionLeavesEAnyRekey.cfg", "OrgAdmissionLeaves"),
     ("OrgAdmissionLeavesEAnyAdmission.cfg", "OrgAdmissionLeaves"),
@@ -103,6 +107,12 @@ CALIBRATION = [
     # E-any-adm with today's fold-only adoption (no P1): the lagging side
     # adopts nothing it could verify the up-to-date peer under.
     ("calibration/TransitionEAnyAdmFoldAdopt.cfg", "OrgAdmission", "EveryAdmittedMemberPulls"),
+    # Downgrade needs both halves: without it the lagging side cannot adopt
+    # the record the up-to-date side proves under; without the bundle adopt
+    # (install/registry race) the lagging side has adopted nothing.
+    ("calibration/TransitionDowngradeBundleOnly.cfg", "OrgAdmission", "EveryAdmittedMemberPulls"),
+    ("calibration/TransitionDowngradeNoJoinAdopt.cfg", "OrgAdmission", "EveryAdmittedMemberPulls"),
+    ("calibration/TransitionDowngradeReachesSync.cfg", "OrgAdmission", "NotAllJoinedInSync"),
 ]
 
 VIOLATION_MARKERS = (

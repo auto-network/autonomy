@@ -380,3 +380,41 @@ Traces:
   and removed before j1 adopts. The registry's current record is beyond
   j1's ledger, so j1 adopts nothing and cannot verify the founder in the
   mutual hello.
+
+### Prover-downgrade: removing P1's signed record and chain (u3)
+
+Two constants model the alternative to adopt-by-verification:
+- `Downgrade`: on a mutual hello a side may prove back under the seq the
+  OTHER side has adopted. The incoming rider already carries
+  `checkpoint_seq` (relaykit/hello.py:76), so this needs no format change.
+  The side proves from its retained records, subject to its own admission
+  floor.
+- `JoinAdopt = "bundle"`: the founder's current record rides the join
+  bundle and is adopted by fold together with the snapshot. Today the
+  install route adopts the registry's current record in the same request
+  (network_routes.py:943-945), but not atomically with the bootstrap
+  snapshot, which was fetched earlier over the join channel.
+
+These runs use adoption by local fold only: no P1, and the registry serves
+only today's tuple.
+
+| E-any-adm, fold-only adoption | Liveness |
+|---|---|
+| no downgrade, separate join adopt | violated (`TransitionEAnyAdmFoldAdopt`) |
+| no downgrade, bundle join adopt | violated: j1 adopted s2 at install, the founder is on s4 and proves only under s4, which j1 cannot fold without event 3 |
+| downgrade, separate join adopt | violated: j2 installs, the registry moves before j2's adopt, so j2 has adopted nothing to downgrade to |
+| downgrade + bundle join adopt | **clean** with two joiners (521 states) and x3 (11,478 states); full sync reachable |
+
+The downgrade + bundle configurations also check `NoPullWithoutInclusion`,
+`OutsiderNeverPulls`, `AdoptedIsAuthentic`, `AdmittedWereApproved`,
+`RemovedExcluded` and `ReconstructedIsCommitted`, all clean. Downgrade
+changes only which seq a prover proves under; acceptance stays E-any-adm,
+so the `OrgAdmissionLeaves.tla` results (`RekeyedOldKeyExcluded`,
+`ReAdmitAfterRemoval`) carry over unchanged.
+
+Consequence under these assumptions: E-any-adm + prover-downgrade + the
+founder's current record in the join bundle remove the need for P1. A
+member adopts by fold once events arrive, and the registry serves no
+signed record or chain beyond today's tuple (u3). The E-any liveness
+assumption stands without its P1 clause: a lagging member is eventually
+dialed by, or dials, a node holding every event up to the newest head.
