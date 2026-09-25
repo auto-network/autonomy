@@ -281,6 +281,9 @@ def main() -> int:
         for err in errors:
             print(f"       {err}")
         failed += bool(errors)
+    for art_id, entry in sorted((registry.get("artifacts") or {}).items()):
+        if entry.get("origin") == "defect":
+            print(f"[defect] artifact {art_id}: no producer — {entry['defect']}")
     return 1 if failed else 0
 
 

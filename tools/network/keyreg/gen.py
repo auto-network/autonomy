@@ -231,28 +231,32 @@ def format_requires(exprs) -> str:
     return " AND ".join(one(expr) for expr in exprs) if exprs else "nothing"
 
 
-def _producers_consumers(registry: dict):
-    """artifact id -> ([producer mutation ids], [consumer ids]), refs unbound
-    (a per-actor artifact collects every actor's producers)."""
-    producers: dict[str, list[str]] = {a: [] for a in registry.get("artifacts") or {}}
-    consumers: dict[str, list[str]] = {a: [] for a in registry.get("artifacts") or {}}
+def _consumers(registry: dict) -> dict[str, list[str]]:
+    """artifact copy -> the workflow mutations and goals requiring it (a bare
+    per-actor ref in a mutation binds to each executing actor)."""
+    artifacts = registry.get("artifacts") or {}
+    consumers: dict[str, list[str]] = {c: [] for c in keyreg.artifact_copies(registry)}
+
+    def note(ref, actor, who):
+        base, _, named = ref.partition("@")
+        if base not in artifacts:
+            return
+        copy = ref if named or not artifacts[base].get("per_actor") else f"{base}@{actor}"
+        if who not in consumers[copy]:
+            consumers[copy].append(who)
+
     for mut_id, entry in sorted(registry["mutations"].items()):
         if "opens" not in entry:
             continue
-        for ref in entry["produces"]:
-            producers.setdefault(ref.partition("@")[0], []).append(mut_id)
-        for expr in entry["requires"]:
-            for ref in keyreg._expr_refs(expr):
-                base = ref.partition("@")[0]
-                if base in consumers:
-                    consumers[base].append(mut_id)
+        for actor in entry["actors"]:
+            for expr in entry["requires"]:
+                for ref in keyreg._expr_refs(expr):
+                    note(ref, actor, mut_id)
     for goal_id, goal in sorted((registry.get("goals") or {}).items()):
         for expr in goal["requires"]:
             for ref in keyreg._expr_refs(expr):
-                base = ref.partition("@")[0]
-                if base in consumers and f"goal {goal_id}" not in consumers[base]:
-                    consumers[base].append(f"goal {goal_id}")
-    return producers, consumers
+                note(ref, None, f"goal {goal_id}")
+    return consumers
 
 
 def gen_workflow_goals(registry: dict) -> str:
@@ -269,16 +273,36 @@ def gen_workflow_goals(registry: dict) -> str:
     ]
     for actor_id, entry in (registry.get("actors") or {}).items():
         lines.append(f"- **{actor_id}** — {entry['description']}")
-    producers, consumers = _producers_consumers(registry)
+    producers = keyreg.workflow_producers(registry)
+    given = keyreg.given_copies(registry)
+    consumers = _consumers(registry)
+    artifacts = registry.get("artifacts") or {}
     lines.extend(["", "## Artifacts", "",
-                  "| Artifact | Per actor | Status | Store | Home | Produced by | Required by |",
-                  "|---|---|---|---|---|---|---|"])
-    for art_id, entry in sorted((registry.get("artifacts") or {}).items()):
-        lines.append(
-            f'| <a id="artifact-{art_id}"></a>{art_id} | {"yes" if entry.get("per_actor") else "no"} | '
-            f"{entry.get('status', 'built')} | {entry['store']} | {entry['home']} | "
-            f"{', '.join(producers.get(art_id) or []) or '**none**'} | "
-            f"{', '.join(consumers.get(art_id) or []) or '-'} |")
+                  "One row per copy: a per-actor artifact has one copy per actor. Origin",
+                  "given = held by a starting state, established before the workflow by",
+                  "the listed mutations; the planner never re-produces it.", "",
+                  "| Artifact copy | Status | Origin | Produced by (workflow) | Given by | Required by |",
+                  "|---|---|---|---|---|---|"])
+    for copy in keyreg.artifact_copies(registry):
+        base, _, actor = copy.partition("@")
+        entry = artifacts[base]
+        origin = entry.get("origin", "workflow")
+        if copy in given:
+            origin = "given"
+        elif origin == "given":
+            origin = "workflow"
+        given_by = [r for r in entry.get("given_by") or []
+                    if copy in given and (not actor or r.partition("@")[2] in ("", actor))]
+        if origin == "defect":
+            made = f"**none — defect:** {entry['defect']}"
+        elif origin == "open":
+            made = "**none — open question**"
+        else:
+            made = ", ".join(producers.get(copy) or []) or "-"
+        anchor = f'<a id="artifact-{base}"></a>' if not actor or actor == next(iter(registry["actors"])) else ""
+        lines.append(f"| {anchor}{copy} | {entry.get('status', 'built')} | {origin} | {made} | "
+                     f"{', '.join(r.partition('@')[0] for r in given_by) or '-'} | "
+                     f"{', '.join(consumers.get(copy) or []) or '-'} |")
     lines.extend(["", "Artifact details:", ""])
     for art_id, entry in sorted((registry.get("artifacts") or {}).items()):
         lines.append(f"- **{art_id}** — {entry['description'].strip()} Code: "

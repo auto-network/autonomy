@@ -15,35 +15,49 @@ See the [workflow register](workflows.md) and the [reading guide](../GUIDE.md).
 
 ## Artifacts
 
-| Artifact | Per actor | Status | Store | Home | Produced by | Required by |
-|---|---|---|---|---|---|---|
-| <a id="artifact-adopted_checkpoint"></a>adopted_checkpoint | yes | built | NETWORK_CHECKPOINT_CACHE_SET_ID row | the actor's machine | ceremony.checkpoint_publish, delegate.checkpoint_publish, route.checkpoint_adopt | goal org_sync_pull |
-| <a id="artifact-bootstrap_snapshot"></a>bootstrap_snapshot | no | built | joiner browser memory | joiner machine | route.join_bootstrap | route.join_install |
-| <a id="artifact-checkpoint_delegate_grant"></a>checkpoint_delegate_grant | no | designed | founder's org ledger and audited vault | founder machine | ceremony.checkpoint_delegate_grant | delegate.checkpoint_publish |
-| <a id="artifact-checkpoint_including_joiner"></a>checkpoint_including_joiner | no | built | registry /v1/orgs/{uuid}/membership-checkpoints | registry | ceremony.checkpoint_publish, delegate.checkpoint_publish | route.checkpoint_adopt |
-| <a id="artifact-checkpoint_seed"></a>checkpoint_seed | no | built | registry /v1/orgs/{uuid}/membership-checkpoints | registry | **none** | ceremony.checkpoint_publish, ceremony.serve_cert_mint, delegate.checkpoint_publish |
-| <a id="artifact-claim_approval"></a>claim_approval | no | built | founder's pending-claim store | founder machine | ceremony.claim_approval, route.admit_on_approval | ceremony.claim_finalize |
-| <a id="artifact-claim_staged"></a>claim_staged | no | built | founder's pending-claim store | founder machine | route.claim_submit_stage | ceremony.claim_approval, route.admit_on_approval |
-| <a id="artifact-delegate_grant"></a>delegate_grant | yes | built | the actor's org ledger and audited vault | the actor's machine | ceremony.organization_storage_delegate | - |
-| <a id="artifact-fleet_roster"></a>fleet_roster | yes | built | personal fleet roster | the actor's machine | **none** | ceremony.fleet_runtime_mint |
-| <a id="artifact-install_seed_addresses"></a>install_seed_addresses | no | built | joiner install seed | joiner machine | **none** | goal org_sync_pull |
-| <a id="artifact-invite_event"></a>invite_event | no | built | founder's org ledger | founder machine | ceremony.org_invite_mint | approval.link_publish, route.join_context |
-| <a id="artifact-invite_ref_resolved"></a>invite_ref_resolved | no | built | joiner browser memory | joiner machine | route.invite_resolve | route.join_context |
-| <a id="artifact-join_context"></a>join_context | no | built | joiner browser memory | joiner machine | route.join_context | ceremony.member_claim_mint |
-| <a id="artifact-join_link_grant"></a>join_link_grant | no | built | founder org Settings; relay | founder machine and relay | route.link_publish | route.invite_resolve |
-| <a id="artifact-ledger_heads"></a>ledger_heads | yes | built | autonomy.org.ledger-event#1 rows in the org DB | the actor's machine | route.join_install | ceremony.checkpoint_delegate_grant, ceremony.checkpoint_publish, ceremony.fleet_runtime_mint, ceremony.org_invite_mint, ceremony.organization_storage_delegate, delegate.checkpoint_publish, route.checkpoint_adopt, goal org_sync_pull |
-| <a id="artifact-link_publish_approval"></a>link_publish_approval | no | built | approvals table | founder machine | approval.link_publish | route.link_publish |
-| <a id="artifact-member_admitted"></a>member_admitted | no | built | founder's org ledger | founder machine | route.admit_on_approval, route.claim_submit_admit | ceremony.checkpoint_publish, delegate.checkpoint_publish, route.join_bootstrap |
-| <a id="artifact-member_claim"></a>member_claim | no | built | joiner browser memory until submitted | joiner machine | ceremony.member_claim_mint | route.claim_submit_admit, route.claim_submit_stage |
-| <a id="artifact-member_claim_final"></a>member_claim_final | no | built | joiner browser memory until submitted | joiner machine | ceremony.claim_finalize | route.claim_submit_admit |
-| <a id="artifact-persona_cert_fleet_sync"></a>persona_cert_fleet_sync | yes | built | memory and the machine vault | the actor's machine | ceremony.fleet_runtime_mint | module.org_reachability_publish, goal org_sync_pull |
-| <a id="artifact-policy_approval"></a>policy_approval | no | built | founder's org ledger (role definition) | founder machine | **none** | route.claim_submit_stage |
-| <a id="artifact-policy_self_admit"></a>policy_self_admit | no | built | founder's org ledger (role definition) | founder machine | **none** | route.claim_submit_admit |
-| <a id="artifact-reachability_row"></a>reachability_row | yes | built | org scope Settings, replicated by org sync | the actor's machine; co-members after a pull | module.org_reachability_publish | - |
-| <a id="artifact-registered_serving_key"></a>registered_serving_key | yes | built | registry store | registry | **none** | - |
-| <a id="artifact-registry_binding"></a>registry_binding | yes | built | NETWORK_BINDING_SET_ID Setting | the actor's machine | route.join_install | ceremony.serve_cert_mint |
-| <a id="artifact-relay_slot"></a>relay_slot | yes | built | relay memory | relay | route.relay_connect | goal org_sync_pull |
-| <a id="artifact-serve_cert"></a>serve_cert | yes | built | autonomy.machine.serve-cert row; serving key in autonomy.machine.vault.audited | the actor's machine | ceremony.serve_cert_mint | route.link_publish, route.relay_connect |
+One row per copy: a per-actor artifact has one copy per actor. Origin
+given = held by a starting state, established before the workflow by
+the listed mutations; the planner never re-produces it.
+
+| Artifact copy | Status | Origin | Produced by (workflow) | Given by | Required by |
+|---|---|---|---|---|---|
+| <a id="artifact-adopted_checkpoint"></a>adopted_checkpoint@founder | built | workflow | ceremony.checkpoint_publish, delegate.checkpoint_publish | - | goal org_sync_pull |
+| adopted_checkpoint@joiner | built | workflow | route.checkpoint_adopt | - | goal org_sync_pull |
+| <a id="artifact-bootstrap_snapshot"></a>bootstrap_snapshot | built | workflow | route.join_bootstrap | - | route.join_install |
+| <a id="artifact-checkpoint_delegate_grant"></a>checkpoint_delegate_grant | designed | workflow | ceremony.checkpoint_delegate_grant | - | delegate.checkpoint_publish |
+| <a id="artifact-checkpoint_including_joiner"></a>checkpoint_including_joiner | built | workflow | ceremony.checkpoint_publish, delegate.checkpoint_publish | - | route.checkpoint_adopt |
+| <a id="artifact-checkpoint_seed"></a>checkpoint_seed | built | given | - | ceremony.checkpoint_seed | ceremony.checkpoint_publish, ceremony.serve_cert_mint, delegate.checkpoint_publish |
+| <a id="artifact-claim_approval"></a>claim_approval | built | workflow | ceremony.claim_approval, route.admit_on_approval | - | ceremony.claim_finalize |
+| <a id="artifact-claim_staged"></a>claim_staged | built | workflow | route.claim_submit_stage | - | ceremony.claim_approval, route.admit_on_approval |
+| <a id="artifact-delegate_grant"></a>delegate_grant@founder | built | workflow | ceremony.organization_storage_delegate | - | - |
+| delegate_grant@joiner | built | workflow | ceremony.organization_storage_delegate | - | - |
+| <a id="artifact-fleet_roster"></a>fleet_roster@founder | built | given | - | fleet.enroll | ceremony.fleet_runtime_mint |
+| fleet_roster@joiner | built | given | - | fleet.enroll | ceremony.fleet_runtime_mint |
+| <a id="artifact-install_seed_addresses"></a>install_seed_addresses | built | defect | **none — defect:** graph://cde6c8c6-041 §5 J5 reachability seed: network-join.js:313-327 does not forward reachability_rows | - | goal org_sync_pull |
+| <a id="artifact-invite_event"></a>invite_event | built | workflow | ceremony.org_invite_mint | - | approval.link_publish, route.join_context |
+| <a id="artifact-invite_ref_resolved"></a>invite_ref_resolved | built | workflow | route.invite_resolve | - | route.join_context |
+| <a id="artifact-join_context"></a>join_context | built | workflow | route.join_context | - | ceremony.member_claim_mint |
+| <a id="artifact-join_link_grant"></a>join_link_grant | built | workflow | route.link_publish | - | route.invite_resolve |
+| <a id="artifact-ledger_heads"></a>ledger_heads@founder | built | given | - | fold.genesis | ceremony.checkpoint_delegate_grant, ceremony.checkpoint_publish, ceremony.fleet_runtime_mint, ceremony.org_invite_mint, ceremony.organization_storage_delegate, delegate.checkpoint_publish |
+| ledger_heads@joiner | built | workflow | route.join_install | - | ceremony.fleet_runtime_mint, ceremony.organization_storage_delegate, route.checkpoint_adopt, goal org_sync_pull |
+| <a id="artifact-link_publish_approval"></a>link_publish_approval | built | workflow | approval.link_publish | - | route.link_publish |
+| <a id="artifact-member_admitted"></a>member_admitted | built | workflow | route.admit_on_approval, route.claim_submit_admit | - | ceremony.checkpoint_publish, delegate.checkpoint_publish, route.join_bootstrap |
+| <a id="artifact-member_claim"></a>member_claim | built | workflow | ceremony.member_claim_mint | - | route.claim_submit_admit, route.claim_submit_stage |
+| <a id="artifact-member_claim_final"></a>member_claim_final | built | workflow | ceremony.claim_finalize | - | route.claim_submit_admit |
+| <a id="artifact-persona_cert_fleet_sync"></a>persona_cert_fleet_sync@founder | built | given | ceremony.fleet_runtime_mint | ceremony.fleet_runtime_mint | module.org_reachability_publish, goal org_sync_pull |
+| persona_cert_fleet_sync@joiner | built | workflow | ceremony.fleet_runtime_mint | - | module.org_reachability_publish, goal org_sync_pull |
+| <a id="artifact-policy_approval"></a>policy_approval | built | given | - | fold.role_define | route.claim_submit_stage |
+| <a id="artifact-policy_self_admit"></a>policy_self_admit | built | given | - | fold.role_define | route.claim_submit_admit |
+| <a id="artifact-reachability_row"></a>reachability_row@founder | built | workflow | module.org_reachability_publish | - | - |
+| reachability_row@joiner | built | workflow | module.org_reachability_publish | - | - |
+| <a id="artifact-registered_serving_key"></a>registered_serving_key@founder | built | open | **none — open question** | - | - |
+| registered_serving_key@joiner | built | open | **none — open question** | - | - |
+| <a id="artifact-registry_binding"></a>registry_binding@founder | built | given | - | ceremony.registration | ceremony.serve_cert_mint |
+| registry_binding@joiner | built | workflow | route.join_install | - | ceremony.serve_cert_mint |
+| <a id="artifact-relay_slot"></a>relay_slot@founder | built | given | route.relay_connect | route.relay_connect | goal org_sync_pull |
+| relay_slot@joiner | built | workflow | route.relay_connect | - | goal org_sync_pull |
+| <a id="artifact-serve_cert"></a>serve_cert@founder | built | given | ceremony.serve_cert_mint | ceremony.serve_cert_mint | route.link_publish, route.relay_connect |
+| serve_cert@joiner | built | workflow | ceremony.serve_cert_mint | - | route.relay_connect |
 
 Artifact details:
 
@@ -140,4 +154,3 @@ Peer selection sources (fleet_sync_scheduler.py:_org_peer_candidates): reachabil
 
 - step J5 runs route.checkpoint_adopt without checkpoint_including_joiner — graph://cde6c8c6-041 §1 J5 (network_routes.py:945)
 - step J6 runs route.checkpoint_adopt without checkpoint_including_joiner — graph://cde6c8c6-041 §3 (J6 repeat)
-- artifact install_seed_addresses has no built producer — graph://cde6c8c6-041 §5 J5 reachability seed (network-join.js:313-327)

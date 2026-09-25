@@ -32,6 +32,7 @@ KEY_STATUSES = {"built", "designed"}
 DESCRIPTOR_FIELDS = ("reaches", "snapshot", "live", "revoke", "bound")
 MUTATION_SOURCE_KINDS = {"fold", "ceremony", "module-op", "route"}
 PROOF_FRAMEWORKS = {"tamarin", "tla"}
+ARTIFACT_ORIGINS = ("workflow", "given", "defect", "open")
 OPENS = ("root", "persona", "delegate", "none")
 #: Openings that need a human root window: the persona key is derived from the
 #: personal root in the browser, so a persona signature is a root opening.
@@ -205,6 +206,77 @@ def _expr_shape_errors(errors, where, expr):
         _expr_shape_errors(errors, f"{where}[{i}]", sub)
 
 
+def artifact_copies(data: dict) -> list[str]:
+    """Every artifact copy: <id> for a shared artifact, <id>@<actor> for each
+    actor's copy of a per-actor one."""
+    copies = []
+    for art_id, entry in sorted((data.get("artifacts") or {}).items()):
+        if entry.get("per_actor"):
+            copies.extend(f"{art_id}@{actor}" for actor in data.get("actors") or {})
+        else:
+            copies.append(art_id)
+    return copies
+
+
+def given_copies(data: dict) -> set[str]:
+    """The copies an origin: given artifact declares established before the workflow."""
+    given = set()
+    for art_id, entry in (data.get("artifacts") or {}).items():
+        if entry.get("origin") != "given":
+            continue
+        for ref in entry.get("given_by") or []:
+            _mut, _, actor = ref.partition("@")
+            if not entry.get("per_actor"):
+                given.add(art_id)
+            elif actor:
+                given.add(f"{art_id}@{actor}")
+            else:
+                given.update(f"{art_id}@{a}" for a in data.get("actors") or {})
+    return given
+
+
+def workflow_producers(data: dict) -> dict[str, list[str]]:
+    """artifact copy -> the workflow mutations (built or designed) producing it."""
+    producers: dict[str, list[str]] = {}
+    artifacts = data.get("artifacts") or {}
+    for mut_id, entry in sorted(data["mutations"].items()):
+        if not isinstance(entry, dict) or "opens" not in entry:
+            continue
+        for actor in entry.get("actors") or []:
+            for ref in entry.get("produces") or []:
+                base, _, named = ref.partition("@")
+                copy = ref if named or not artifacts.get(base, {}).get("per_actor") else f"{base}@{actor}"
+                producers.setdefault(copy, [])
+                if mut_id not in producers[copy]:
+                    producers[copy].append(mut_id)
+    return producers
+
+
+def _validate_origins(errors, data):
+    """Every copy is given, produced by a workflow mutation, or a named
+    defect or open question; starting states hold given copies only."""
+    artifacts = data.get("artifacts") or {}
+    given = given_copies(data)
+    producers = workflow_producers(data)
+    for copy in artifact_copies(data):
+        base = copy.partition("@")[0]
+        origin = artifacts[base].get("origin", "workflow")
+        where = f"artifacts.{base}"
+        if origin in ("defect", "open"):
+            if producers.get(copy):
+                errors.append(f"{where}: origin {origin}, but {copy} is produced by "
+                              f"{', '.join(producers[copy])}; drop the origin")
+            continue
+        if copy not in given and not producers.get(copy):
+            errors.append(f"{where}: {copy} is neither given nor produced by any workflow mutation")
+    for goal_id, goal in (data.get("goals") or {}).items():
+        for state_id, state in ((goal or {}).get("states") or {}).items():
+            for ref in (state or {}).get("holds") or []:
+                if ref.partition("@")[0] in artifacts and ref not in given:
+                    errors.append(f"goals.{goal_id}.states.{state_id}.holds: '{ref}' is not "
+                                  "a given copy (origin given, given_by covering it)")
+
+
 def _validate_workflow(errors, data):
     actors = data.get("actors") or {}
     artifacts = data.get("artifacts") or {}
@@ -223,6 +295,20 @@ def _validate_workflow(errors, data):
             errors.append(f"{where}: missing field 'code' (at least one code anchor)")
         if entry.get("status", "built") not in KEY_STATUSES:
             errors.append(f"{where}.status: must be one of {sorted(KEY_STATUSES)}")
+        origin = entry.get("origin", "workflow")
+        if origin not in ARTIFACT_ORIGINS:
+            errors.append(f"{where}.origin: '{origin}' is not one of {list(ARTIFACT_ORIGINS)}")
+        if (origin == "given") != bool(entry.get("given_by")):
+            errors.append(f"{where}: origin given and given_by go together")
+        if (origin == "defect") != bool(str(entry.get("defect", "")).strip()):
+            errors.append(f"{where}: origin defect needs a 'defect' reason, and only it carries one")
+        for ref in entry.get("given_by") or []:
+            mut_id, _, actor = ref.partition("@")
+            if mut_id not in data["mutations"]:
+                errors.append(f"{where}.given_by: '{mut_id}' is not a mutation id")
+            if actor and (actor not in actors or not entry.get("per_actor")):
+                errors.append(f"{where}.given_by: '{ref}' names an actor, but {art_id} is not per_actor or the actor is unknown")
+    _validate_origins(errors, data)
     for mut_id, entry in data["mutations"].items():
         if not isinstance(entry, dict):
             continue

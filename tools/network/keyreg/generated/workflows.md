@@ -16,6 +16,7 @@ See the [reading guide](../GUIDE.md) and [key register](key-register.md).
 - [armor.set_recovery](#workflow-armor-set_recovery)
 - [ceremony.checkpoint_delegate_grant](#workflow-ceremony-checkpoint_delegate_grant)
 - [ceremony.checkpoint_publish](#workflow-ceremony-checkpoint_publish)
+- [ceremony.checkpoint_seed](#workflow-ceremony-checkpoint_seed)
 - [ceremony.claim_approval](#workflow-ceremony-claim_approval)
 - [ceremony.claim_finalize](#workflow-ceremony-claim_finalize)
 - [ceremony.fleet_runtime_mint](#workflow-ceremony-fleet_runtime_mint)
@@ -219,6 +220,27 @@ Not built: the storage delegate's scopes exclude checkpoint today (storagekit/de
 **Crib:** §8
 
 Step F4. Only callers: full sign-in (signon_preparation.py:125-133) and the scoped sign-on (network-signon.mjs:1560-1577). Nothing publishes at admission.
+
+<a id="workflow-ceremony-checkpoint_seed"></a>
+## ceremony.checkpoint_seed
+
+**Status:** built
+
+**Authority:** org_root_signing_key
+
+**Preconditions**
+
+- No adopted checkpoint is cached locally (membership_checkpoint.py:119-132).
+
+**Writes**
+
+- checkpoint seq 0 {v, org, seq 0, prev genesis_id, ledger_head, members_root, checkpointers_root, ts}, signed by the org root opened from its sealed armor (network-signon.mjs:812-826), at the registry; cached adopted
+
+**Source:** `tools/dashboard/static/js/network-signon.mjs:_publishMembershipCheckpoint` (ceremony)
+
+**Crib:** §8
+
+Step F0 (founder sign-on). The advancing form is ceremony.checkpoint_publish.
 
 <a id="workflow-ceremony-claim_approval"></a>
 ## ceremony.claim_approval

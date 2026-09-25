@@ -214,6 +214,16 @@
         "code": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/codeAnchor"}},
         "per_actor": {"type": "boolean", "default": false},
         "status": {"enum": ["built", "designed"], "default": "built"},
+        "origin": {
+          "enum": ["workflow", "given", "defect", "open"], "default": "workflow",
+          "description": "workflow: a workflow mutation produces every copy not given. given: the copies given_by names are held by starting states, established before the workflow; the planner never re-produces them. defect: no producer, for the recorded reason. open: required by no goal; an open question."
+        },
+        "given_by": {
+          "type": "array", "minItems": 1,
+          "items": {"type": "string", "pattern": "^[a-z][a-z0-9_.:-]*(@[a-z][a-z0-9_]*)?$"},
+          "description": "Mutation ids, optionally @actor for a per-actor artifact (bare: every actor's copy)."
+        },
+        "defect": {"type": "string", "minLength": 1},
         "notes": {"type": "string"}
       }
     },
@@ -232,13 +242,12 @@
     "defect": {
       "type": "object",
       "description": "A recorded current-code defect the order lints report; a stale entry is itself an error.",
-      "required": ["ref"],
+      "required": ["step", "mutation", "missing", "ref"],
       "additionalProperties": false,
       "properties": {
         "step": {"type": "string"},
         "mutation": {"type": "string"},
         "missing": {"$ref": "#/$defs/ref"},
-        "artifact": {"$ref": "#/$defs/ref"},
         "ref": {"type": "string", "minLength": 1}
       }
     },

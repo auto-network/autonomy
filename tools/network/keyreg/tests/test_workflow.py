@@ -164,13 +164,60 @@ def test_tla_proof_ref_is_resolved(registry):
 
 def test_workflow_goals_view_lists_artifacts_producers_goals(registry):
     view = gen.generate()["workflow-goals.md"]
-    producers, _consumers = gen._producers_consumers(registry)
+    producers = keyreg.workflow_producers(registry)
     for art_id in registry["artifacts"]:
         assert f'id="artifact-{art_id}"' in view, art_id
-        for producer in producers[art_id]:
+    for copy in keyreg.artifact_copies(registry):
+        assert f"{copy} |" in view, copy
+        for producer in producers.get(copy, []):
             assert producer in view
     for goal_id in registry["goals"]:
         assert f"## Goal {goal_id}" in view
     row = next(line for line in view.splitlines()
                if 'id="artifact-install_seed_addresses"' in line)
-    assert "| **none** |" in row  # the J5 defect: no built producer
+    assert "**none — defect:**" in row  # the J5 defect: no producer, named
+    founder_heads = next(line for line in view.splitlines() if "ledger_heads@founder |" in line)
+    assert "| given |" in founder_heads and "fold.genesis" in founder_heads
+
+
+def test_every_copy_is_given_produced_or_named(registry):
+    given = keyreg.given_copies(registry)
+    producers = keyreg.workflow_producers(registry)
+    for copy in keyreg.artifact_copies(registry):
+        origin = registry["artifacts"][copy.partition("@")[0]].get("origin", "workflow")
+        assert copy in given or producers.get(copy) or origin in ("defect", "open"), copy
+    assert "ledger_heads@founder" in given and "ledger_heads@joiner" not in given
+    assert producers["ledger_heads@joiner"] == ["route.join_install"]
+
+
+def test_goal_names_both_actors_copies(registry):
+    refs = {r for e in registry["goals"]["org_sync_pull"]["requires"]
+            for r in keyreg._expr_refs(e)}
+    for base in ("persona_cert_fleet_sync", "adopted_checkpoint"):
+        assert {f"{base}@founder", f"{base}@joiner"} <= refs
+
+
+def test_unproduced_copy_is_an_error(registry):
+    broken = copy.deepcopy(registry)
+    broken["artifacts"]["ledger_heads"]["given_by"] = ["fold.genesis@joiner"]
+    errors = _errors(broken)
+    assert any("ledger_heads@founder is neither given nor produced" in e for e in errors), errors
+
+
+def test_state_may_hold_only_given_copies(registry):
+    broken = copy.deepcopy(registry)
+    broken["goals"]["org_sync_pull"]["states"]["self_admit"]["holds"].append("member_admitted")
+    assert any("states.self_admit.holds" in e and "member_admitted" in e for e in _errors(broken))
+
+
+def test_defect_with_a_producer_is_stale(registry):
+    broken = copy.deepcopy(registry)
+    broken["mutations"]["route.join_install"]["produces"].append("install_seed_addresses")
+    assert any("artifacts.install_seed_addresses" in e and "origin defect" in e
+               for e in _errors(broken))
+
+
+def test_given_by_names_a_mutation(registry):
+    broken = copy.deepcopy(registry)
+    broken["artifacts"]["checkpoint_seed"]["given_by"] = ["ceremony.no_such"]
+    assert any("artifacts.checkpoint_seed.given_by" in e for e in _errors(broken))

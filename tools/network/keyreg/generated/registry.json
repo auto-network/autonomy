@@ -47,7 +47,11 @@
         "tools/dashboard/membership_checkpoint.py:checkpoint_due"
       ],
       "description": "Registry membership checkpoint seq 0, signed by the org root.",
+      "given_by": [
+        "ceremony.checkpoint_seed"
+      ],
       "home": "registry",
+      "origin": "given",
       "store": "registry /v1/orgs/{uuid}/membership-checkpoints"
     },
     "claim_approval": {
@@ -82,8 +86,12 @@
         "tools/dashboard/fleet_enrollment_routes.py:_runtime_context"
       ],
       "description": "A personal fleet roster entry for the actor's machine; required by the runtime mint (fleet_enrollment_routes.py:_runtime_context).",
+      "given_by": [
+        "fleet.enroll"
+      ],
       "home": "the actor's machine",
       "notes": "For a fresh joiner with no personal fleet, unverified (graph://cde6c8c6-041 \u00a71 J6).",
+      "origin": "given",
       "per_actor": true,
       "store": "personal fleet roster"
     },
@@ -91,9 +99,11 @@
       "code": [
         "tools/dashboard/org_install_seed.py:seed_reachability"
       ],
+      "defect": "graph://cde6c8c6-041 \u00a75 J5 reachability seed: network-join.js:313-327 does not forward reachability_rows",
       "description": "Co-member addresses in the joiner's install seed.",
       "home": "joiner machine",
       "notes": "No built producer; the join page does not forward reachability_rows (network-join.js:313-327).",
+      "origin": "defect",
       "store": "joiner install seed"
     },
     "invite_event": {
@@ -135,7 +145,11 @@
         "tools/network/ledger/ledger.py:heads"
       ],
       "description": "The actor's copy of the org ledger and its current heads (founder_heads, joiner_heads).",
+      "given_by": [
+        "fold.genesis@founder"
+      ],
       "home": "the actor's machine",
+      "origin": "given",
       "per_actor": true,
       "store": "autonomy.org.ledger-event#1 rows in the org DB"
     },
@@ -178,7 +192,11 @@
         "tools/network/fleet_org_channel.py:OrgFleetAuthenticator"
       ],
       "description": "The org sync certificate (persona -> serving machine key, scope fleet:sync) with its serving seed, installed as an OrgFleetAuthenticator.",
+      "given_by": [
+        "ceremony.fleet_runtime_mint@founder"
+      ],
       "home": "the actor's machine",
+      "origin": "given",
       "per_actor": true,
       "store": "memory and the machine vault"
     },
@@ -187,7 +205,11 @@
         "tools/dashboard/claim_service.py:R_APPROVAL_MISSING"
       ],
       "description": "The invite's role requires approvals before admission.",
+      "given_by": [
+        "fold.role_define"
+      ],
       "home": "founder machine",
+      "origin": "given",
       "store": "founder's org ledger (role definition)"
     },
     "policy_self_admit": {
@@ -195,7 +217,11 @@
         "tools/dashboard/claim_service.py:R_APPROVAL_MISSING"
       ],
       "description": "The invite's role admits a claim without approvals.",
+      "given_by": [
+        "fold.role_define"
+      ],
       "home": "founder machine",
+      "origin": "given",
       "store": "founder's org ledger (role definition)"
     },
     "reachability_row": {
@@ -214,6 +240,7 @@
       "description": "The actor's serving machine key in the registry's per-org serve_machine_keys allow-set.",
       "home": "registry",
       "notes": "Enforced only when the set is non-empty (relay.py:973-1000, store.py:1576-1583); the only writer in the tree is this backfill. Whether any live org's set is non-empty is an open question; the goal does not require it.",
+      "origin": "open",
       "per_actor": true,
       "store": "registry store"
     },
@@ -222,7 +249,11 @@
         "tools/graph/schemas/network_identity.py:NETWORK_BINDING_SET_ID"
       ],
       "description": "The org's registry binding {org_uuid, root key, registry_url}.",
+      "given_by": [
+        "ceremony.registration@founder"
+      ],
       "home": "the actor's machine",
+      "origin": "given",
       "per_actor": true,
       "store": "NETWORK_BINDING_SET_ID Setting"
     },
@@ -231,7 +262,11 @@
         "tools/dashboard/org_sync_channels.py:relay_slots_provider"
       ],
       "description": "A live serving slot of the actor's connector at the org's relay.",
+      "given_by": [
+        "route.relay_connect@founder"
+      ],
       "home": "relay",
+      "origin": "given",
       "per_actor": true,
       "store": "relay memory"
     },
@@ -240,7 +275,11 @@
         "tools/dashboard/network_routes.py:_post_serve_cert_v3"
       ],
       "description": "The actor's persona-signed serving certificate and key.",
+      "given_by": [
+        "ceremony.serve_cert_mint@founder"
+      ],
       "home": "the actor's machine",
+      "origin": "given",
       "per_actor": true,
       "store": "autonomy.machine.serve-cert row; serving key in autonomy.machine.vault.audited"
     }
@@ -413,10 +452,6 @@
           "mutation": "route.checkpoint_adopt",
           "ref": "graph://cde6c8c6-041 \u00a73 (J6 repeat)",
           "step": "J6"
-        },
-        {
-          "artifact": "install_seed_addresses",
-          "ref": "graph://cde6c8c6-041 \u00a75 J5 reachability seed (network-join.js:313-327)"
         }
       ],
       "notes": "Peer selection sources (fleet_sync_scheduler.py:_org_peer_candidates): reachability rows (need a prior pull), install seed, relay slots through the dialer's own connector, dialed-in peers. The founder-pulls-joiner direction riding the joiner's dial-in is taken from the record, not re-traced. The single-joiner AND/OR graph cannot express head presence at adoption; OrgAdmission.tla carries that.",
@@ -1768,6 +1803,28 @@
         "file": "tools/dashboard/membership_checkpoint.py",
         "kind": "ceremony",
         "symbol": "checkpoint_due"
+      }
+    },
+    "ceremony.checkpoint_seed": {
+      "authority": [
+        "org_root_signing_key"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "checkpoint seq 0 {v, org, seq 0, prev genesis_id, ledger_head, members_root, checkpointers_root, ts}, signed by the org root opened from its sealed armor (network-signon.mjs:812-826), at the registry; cached adopted"
+        ]
+      },
+      "notes": "Step F0 (founder sign-on). The advancing form is ceremony.checkpoint_publish.",
+      "preconditions": [
+        "No adopted checkpoint is cached locally (membership_checkpoint.py:119-132)."
+      ],
+      "source": {
+        "file": "tools/dashboard/static/js/network-signon.mjs",
+        "kind": "ceremony",
+        "symbol": "_publishMembershipCheckpoint"
       }
     },
     "ceremony.claim_approval": {

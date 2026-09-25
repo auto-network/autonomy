@@ -49,7 +49,12 @@ entries are descriptive, not executable policy expressions.
 `all:`/`any:` nest) and `produces`, record a workflow as a monotone AND/OR
 graph (first use: the org invite -> join -> admission -> sync workflow of
 graph://cde6c8c6-041, bead auto-qrmlg.5). A bare per-actor artifact in a
-mutation binds to the executing actor. Designed mutations carry a `rule`.
+mutation binds to the executing actor; a goal names every copy explicitly
+(`<artifact>@<actor>`). An artifact's `origin` separates a copy a starting
+state holds (`given`, with the `given_by` mutations that established it
+before the workflow) from one a workflow mutation must produce
+(`workflow`), one with no producer by a recorded defect (`defect`), and an
+open question no goal requires (`open`). Designed mutations carry a `rule`.
 Validation checks every reference; lint resolves artifact anchors and TLA+
 proof references.
 

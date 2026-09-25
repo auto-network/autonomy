@@ -1308,6 +1308,17 @@ mutations:
       - {framework: tamarin, theory: VaultWitnessAccountability, lemma: poll_yields_alert_or_fraud_proof}
 
 
+
+  ceremony.checkpoint_seed:
+    source: {kind: ceremony, file: tools/dashboard/static/js/network-signon.mjs, symbol: _publishMembershipCheckpoint}
+    authority: [org_root_signing_key]
+    preconditions:
+      - No adopted checkpoint is cached locally (membership_checkpoint.py:119-132).
+    effects:
+      writes:
+        - "checkpoint seq 0 {v, org, seq 0, prev genesis_id, ledger_head, members_root, checkpointers_root, ts}, signed by the org root opened from its sealed armor (network-signon.mjs:812-826), at the registry; cached adopted"
+    crib: ["§8"]
+    notes: Step F0 (founder sign-on). The advancing form is ceremony.checkpoint_publish.
   # ── Invite -> join -> admission -> sync (graph://cde6c8c6-041) ────────────
   # Every entry below carries the machine-evaluable workflow fields (actors,
   # opens, requires, produces) the planner reads: keyreg.py plan / explain-current.
@@ -1719,7 +1730,11 @@ purposes:
 # as an AND/OR graph over artifacts. keyreg.py plan / explain-current read it;
 # lint.py checks the recorded current order against it. A per-actor artifact
 # referenced bare in a mutation binds to the executing actor; elsewhere it is
-# written <artifact>@<actor>.
+# written <artifact>@<actor>. An artifact's origin says where a copy comes
+# from: workflow (default; a workflow mutation produces it), given (held by a
+# starting state, established before the workflow by the given_by mutations;
+# the planner never re-produces it), defect (no producer, for the recorded
+# reason; lint names it), open (not required by any goal; an open question).
 actors:
   founder:
     description: The org's founding member; sponsor of the invite and the only checkpointer in this workflow.
@@ -1732,35 +1747,47 @@ artifacts:
     description: The actor's copy of the org ledger and its current heads (founder_heads, joiner_heads).
     store: autonomy.org.ledger-event#1 rows in the org DB
     home: the actor's machine
+    origin: given
+    given_by: [fold.genesis@founder]
     code: [tools/network/ledger/settings_bridge.py, tools/network/ledger/ledger.py:heads]
   registry_binding:
     per_actor: true
     description: The org's registry binding {org_uuid, root key, registry_url}.
     store: NETWORK_BINDING_SET_ID Setting
     home: the actor's machine
+    origin: given
+    given_by: [ceremony.registration@founder]
     code: [tools/graph/schemas/network_identity.py:NETWORK_BINDING_SET_ID]
   checkpoint_seed:
     description: Registry membership checkpoint seq 0, signed by the org root.
     store: registry /v1/orgs/{uuid}/membership-checkpoints
     home: registry
+    origin: given
+    given_by: [ceremony.checkpoint_seed]
     code: [tools/dashboard/membership_checkpoint.py:checkpoint_due]
   serve_cert:
     per_actor: true
     description: The actor's persona-signed serving certificate and key.
     store: autonomy.machine.serve-cert row; serving key in autonomy.machine.vault.audited
     home: the actor's machine
+    origin: given
+    given_by: [ceremony.serve_cert_mint@founder]
     code: [tools/dashboard/network_routes.py:_post_serve_cert_v3]
   relay_slot:
     per_actor: true
     description: A live serving slot of the actor's connector at the org's relay.
     store: relay memory
     home: relay
+    origin: given
+    given_by: [route.relay_connect@founder]
     code: [tools/dashboard/org_sync_channels.py:relay_slots_provider]
   fleet_roster:
     per_actor: true
     description: A personal fleet roster entry for the actor's machine; required by the runtime mint (fleet_enrollment_routes.py:_runtime_context).
     store: personal fleet roster
     home: the actor's machine
+    origin: given
+    given_by: [fleet.enroll]
     code: [tools/dashboard/fleet_enrollment_routes.py:_runtime_context]
     notes: For a fresh joiner with no personal fleet, unverified (graph://cde6c8c6-041 §1 J6).
   persona_cert_fleet_sync:
@@ -1768,6 +1795,8 @@ artifacts:
     description: The org sync certificate (persona -> serving machine key, scope fleet:sync) with its serving seed, installed as an OrgFleetAuthenticator.
     store: memory and the machine vault
     home: the actor's machine
+    origin: given
+    given_by: [ceremony.fleet_runtime_mint@founder]
     code: [tools/dashboard/fleet_enrollment_routes.py:_activate_runtime, tools/network/fleet_org_channel.py:OrgFleetAuthenticator]
   delegate_grant:
     per_actor: true
@@ -1835,6 +1864,8 @@ artifacts:
     description: Co-member addresses in the joiner's install seed.
     store: joiner install seed
     home: joiner machine
+    origin: defect
+    defect: "graph://cde6c8c6-041 §5 J5 reachability seed: network-join.js:313-327 does not forward reachability_rows"
     code: [tools/dashboard/org_install_seed.py:seed_reachability]
     notes: No built producer; the join page does not forward reachability_rows (network-join.js:313-327).
   checkpoint_including_joiner:
@@ -1859,6 +1890,7 @@ artifacts:
     description: The actor's serving machine key in the registry's per-org serve_machine_keys allow-set.
     store: registry store
     home: registry
+    origin: open
     code: [tools/network/registry/backfill_serving_keys.py]
     notes: >-
       Enforced only when the set is non-empty (relay.py:973-1000,
@@ -1869,11 +1901,15 @@ artifacts:
     description: The invite's role admits a claim without approvals.
     store: founder's org ledger (role definition)
     home: founder machine
+    origin: given
+    given_by: [fold.role_define]
     code: [tools/dashboard/claim_service.py:R_APPROVAL_MISSING]
   policy_approval:
     description: The invite's role requires approvals before admission.
     store: founder's org ledger (role definition)
     home: founder machine
+    origin: given
+    given_by: [fold.role_define]
     code: [tools/dashboard/claim_service.py:R_APPROVAL_MISSING]
   checkpoint_delegate_grant:
     status: designed
@@ -1952,7 +1988,6 @@ goals:
     known_defects:
       - {step: J5, mutation: route.checkpoint_adopt, missing: checkpoint_including_joiner, ref: "graph://cde6c8c6-041 §1 J5 (network_routes.py:945)"}
       - {step: J6, mutation: route.checkpoint_adopt, missing: checkpoint_including_joiner, ref: "graph://cde6c8c6-041 §3 (J6 repeat)"}
-      - {artifact: install_seed_addresses, ref: "graph://cde6c8c6-041 §5 J5 reachability seed (network-join.js:313-327)"}
     scenarios:
       - {from: self_admit, rules: [], current: {founder: 3, joiner: 3}, minimal: {founder: 2, joiner: 1}}
       - {from: approval, rules: [], current: {founder: 4, joiner: 4}, minimal: {founder: 3, joiner: 2}}
