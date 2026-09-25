@@ -301,3 +301,69 @@ only extends acceptance of a seq the verifier has adopted); org channel
 certificates, addresses and relay slots are assumed present (the keyreg
 planner covers them); the joiner's own appends are omitted (adoption does
 not require the head to be a current head, only present).
+
+## Existing members across a checkpoint advance (bead auto-qrmlg.11)
+
+`OrgAdmission.tla` adds, behind constants that leave every auto-qrmlg.5
+configuration unchanged (`PathRule = "granted"`):
+
+- **Path construction (C9).** A prover folds its local ledger at its record's
+  head (org_sync_channels.py:173-179, 197-205): it needs every event up to
+  that head.
+- **Event and grant delivery.** Ledger events and generation grants reach a
+  joiner only on an admitted pull, its own append, or the join install (K3).
+- **Production acceptance.** A verifier accepts only its single newest adopted
+  seq (fleet_org_channel.py:286-292, org_sync_channels.py:189-193). The
+  reprove window has no production caller.
+- **Removals.** Each removal re-keys the storage generation.
+- **Modeled time.** Used by the bounded window.
+
+Constants: `PathRule`, `AllowRemoval`, `WindowTicks`/`MaxTime`, `DeltaKey`,
+`RootCheck`, `MonotoneAdopt`, `Adversarial`, `GrantInBundle`. All runs use
+P1 + P2 and two joiners. Pull history is kept as per-joiner sync flags,
+reset whenever the founder adopts a new record, plus sticky violation flags.
+
+Results (run_tlc.py):
+
+| Rule | Liveness `EveryAdmittedMemberPulls` | Safety |
+|---|---|---|
+| production (fold, newest only) | violated | — |
+| A path in record / B registry path (reference: violate K1) | clean | clean |
+| C bounded predecessor window | violated (window expires) | — |
+| C unbounded predecessor | clean | `RemovedExcluded` violated |
+| D1 registry Enc(Δ) journal, as specified | violated (no grant before first pull) | — |
+| D2 hello Enc(Δ) chain, as specified | violated (same) | — |
+| D1 / D2 + grant in the join bundle, Δ under the previous generation | clean | clean against wrong Δ and replayed records |
+| D1 / D2 + bundle, Δ under the post-rekey generation | violated | — |
+| D1 without the members_root recomputation | — | `ReconstructedIsCommitted` violated |
+| D1 without monotone adoption | — | `NoRegression` violated |
+| E verifier-side check, one predecessor | violated (member two records behind) | — |
+| E-any verifier-side check, any older authentic record | clean | clean |
+
+Executability holds for D1, D2 and E-any: full sync is reachable.
+
+Traces (`/workspace/output/tlc-*.txt` at the time of the run):
+
+- **production.** j1 is admitted and installs holding {1}. j2 is admitted,
+  and the P2 checkpoint moves to head 2. j1 adopts by verification without
+  event 2, so it cannot fold a rider. The founder accepts only its newest
+  record, so j1 is never pulled.
+- **C bounded.** j1 proves under s2, and the founder pulls from j1 inside the
+  window. Two ticks expire the window before j1 pulls from the founder, and
+  j1 never receives event 2.
+- **C unbounded.** j1 is admitted, installed and removed. The founder still
+  accepts j1's proof under the pre-removal record and pulls from it.
+- **D1 as specified.** j1 and j2 are admitted, and j1 installs holding
+  events 1-2. j2 is removed (s4), and j1 adopts s4. j1 holds no generation
+  grant, because a grant arrives only by pull and it has not pulled yet, so
+  it cannot open Δ4. The founder accepts only s4.
+- **D1 + bundle, post-rekey key.** j1 holds generation 0. The removal re-keys
+  to generation 1, and Δ4 is under generation 1, whose grant arrives only by
+  a pull that j1 cannot make.
+- **E.** j2 installs holding only its own claim, so it knows s2. j1 is
+  admitted (s3) and then removed (s4). The founder accepts s4 or its
+  predecessor s3; j2 can prove only under s2.
+
+Not completed: three-joiner runs of D1 + bundle and of E-any (two
+consecutive removal re-keys). The E-any run was stopped at 20 minutes
+without a verdict, and D1 was not started.

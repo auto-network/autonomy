@@ -30,6 +30,17 @@ GREEN = [
     ("OrgAdmissionProposedForge.cfg", "OrgAdmission"),
     ("OrgAdmissionCurrentForge.cfg", "OrgAdmission"),
     ("OrgAdmissionAdoptOnly.cfg", "OrgAdmission"),
+    # auto-qrmlg.11: existing members across a checkpoint advance. RefA/RefB
+    # are reference results only (they violate K1: the registry would hold
+    # per-member data); C unbounded is live but not removal-safe (below).
+    ("OrgAdmissionTransitionRefA.cfg", "OrgAdmission"),
+    ("OrgAdmissionTransitionRefB.cfg", "OrgAdmission"),
+    ("OrgAdmissionTransitionPredecessorC.cfg", "OrgAdmission"),
+    ("OrgAdmissionTransitionVerifierEAny.cfg", "OrgAdmission"),
+    ("OrgAdmissionTransitionD1.cfg", "OrgAdmission"),
+    ("OrgAdmissionTransitionD2.cfg", "OrgAdmission"),
+    ("OrgAdmissionTransitionD1Adversarial.cfg", "OrgAdmission"),
+    ("OrgAdmissionTransitionD2Adversarial.cfg", "OrgAdmission"),
 ]
 
 CALIBRATION = [
@@ -53,6 +64,24 @@ CALIBRATION = [
     ("calibration/ApprovalWithoutAdmitOnApproval.cfg", "OrgAdmission", "ApprovedIsAdmitted"),
     ("calibration/NoSignerCheck.cfg", "OrgAdmission", "NoPullWithoutInclusion"),
     ("calibration/ProposedApprovalReachesSync.cfg", "OrgAdmission", "NotAllJoinedInSync"),
+    # auto-qrmlg.11: production path construction locks an existing member
+    # out; C bounded expires; C unbounded keeps a removed member; D1/D2 with
+    # the post-rekey key, without the root check, or without monotone
+    # adoption each fail; D1/D2 reach full sync.
+    ("OrgAdmissionTransitionFold.cfg", "OrgAdmission", "EveryAdmittedMemberPulls"),
+    ("OrgAdmissionTransitionFoldApproval.cfg", "OrgAdmission", "EveryAdmittedMemberPulls"),
+    ("calibration/TransitionWindowC.cfg", "OrgAdmission", "EveryAdmittedMemberPulls"),
+    ("calibration/TransitionPredecessorCRemoval.cfg", "OrgAdmission", "RemovedExcluded"),
+    ("calibration/TransitionD1NoBundle.cfg", "OrgAdmission", "EveryAdmittedMemberPulls"),
+    ("calibration/TransitionD2NoBundle.cfg", "OrgAdmission", "EveryAdmittedMemberPulls"),
+    ("calibration/TransitionVerifierE.cfg", "OrgAdmission", "EveryAdmittedMemberPulls"),
+    ("calibration/TransitionEAnyReachesSync.cfg", "OrgAdmission", "NotAllJoinedInSync"),
+    ("calibration/TransitionD1NextKey.cfg", "OrgAdmission", "EveryAdmittedMemberPulls"),
+    ("calibration/TransitionD2NextKey.cfg", "OrgAdmission", "EveryAdmittedMemberPulls"),
+    ("calibration/TransitionD1NoRootCheck.cfg", "OrgAdmission", "ReconstructedIsCommitted"),
+    ("calibration/TransitionD1NoMonotone.cfg", "OrgAdmission", "NoRegression"),
+    ("calibration/TransitionD1ReachesSync.cfg", "OrgAdmission", "NotAllJoinedInSync"),
+    ("calibration/TransitionD2ReachesSync.cfg", "OrgAdmission", "NotAllJoinedInSync"),
 ]
 
 VIOLATION_MARKERS = (
@@ -112,7 +141,7 @@ def run_one(
     output = process.stdout + process.stderr
     if any(marker in output for marker in VIOLATION_MARKERS):
         match = re.search(
-            r"(?:Invariant|Temporal property|Property) (\w+) "
+            r"(?:Invariant|Temporal property|Action property|Property) (\w+) "
             r"(?:is|was) violated",
             output,
         )
