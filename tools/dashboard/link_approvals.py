@@ -1322,8 +1322,12 @@ def _compensate_failed_publish(org, token, stage, *, detail=None, probe=None,
 #: Grant meta the dashboard keeps to itself and never puts on the wire to
 #: the registry. The relay is untrusted (I5) and authorizes nothing with
 #: these — serving reads the LOCAL grant cache only — so shipping them
-#: would leak who a link is for while buying nothing.
-_LOCAL_ONLY_META = frozenset({"participant_id", "ice_policy"})
+#: would leak who a link is for while buying nothing. ``org`` and
+#: ``org_uuid`` are the org:follow grant's identity (prepare_create writes
+#: them so the served follow admission can name the scope); the relay
+#: admits only ttl/label/require_auth in meta and refused the first real
+#: follow publish with "meta carries unsupported fields" (2026-09-25).
+_LOCAL_ONLY_META = frozenset({"participant_id", "ice_policy", "org", "org_uuid"})
 
 
 def _tunnel_link_meta(req: dict, decision: dict) -> tuple[dict, str | None]:
