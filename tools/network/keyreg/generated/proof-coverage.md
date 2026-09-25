@@ -40,11 +40,18 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | serving_delegate_key | key | **GAP** |
 | serving_machine_signing_key | key | **GAP** |
 | vault_factor_recipient | key | **GAP** |
+| approval.link_publish | mutation | **GAP** |
 | armor.enroll_factor | mutation | **GAP** |
 | armor.replace_recovery_slot | mutation | **GAP** |
 | armor.revoke_factor | mutation | **GAP** |
 | armor.set_recovery | mutation | **GAP** |
+| ceremony.checkpoint_delegate_grant | mutation | **GAP** |
+| ceremony.checkpoint_publish | mutation | **GAP** |
+| ceremony.claim_approval | mutation | **GAP** |
+| ceremony.claim_finalize | mutation | **GAP** |
 | ceremony.fleet_runtime_mint | mutation | **GAP** |
+| ceremony.member_claim_mint | mutation | **GAP** |
+| ceremony.org_invite_mint | mutation | **GAP** |
 | ceremony.organization_grant_recovery | mutation | **GAP** |
 | ceremony.organization_storage_delegate | mutation | **GAP** |
 | ceremony.personal_serve_cert_mint | mutation | **GAP** |
@@ -52,6 +59,7 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | ceremony.registration | mutation | **GAP** |
 | ceremony.serve_cert_mint | mutation | **GAP** |
 | ceremony.vault_master_read | mutation | **GAP** |
+| delegate.checkpoint_publish | mutation | **GAP** |
 | fleet.distribute_kem | mutation | VaultFleetDist: machine_key_yields_nothing_undistributed |
 | fleet.enroll | mutation | **GAP** |
 | fleet.kick | mutation | VaultFleetDist: kicked_machine_excluded<br>VaultD006Window: halt_window_confidential |
@@ -68,11 +76,22 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | fold.role_grant | mutation | **GAP** |
 | fold.role_revoke | mutation | **GAP** |
 | link.mint_channel_key | mutation | **GAP** |
+| module.org_reachability_publish | mutation | **GAP** |
 | passkey.enroll | mutation | VaultOpenStore: no_key_to_forged_pk |
 | passkey.revoke | mutation | **GAP** |
 | recovery.succession | mutation | VaultRecoverySuccession: window_cannot_be_fast_forwarded<br>VaultRecoverySuccession: cancellation_blocks_completion<br>VaultRecoverySuccession: veto_blocks_completion<br>VaultWitnessAccountability: poll_yields_alert_or_fraud_proof |
 | rekey.frontier_marker | mutation | VaultRekeyMarker: exclusion_forward<br>VaultRekeyMarkerChain: exclusion_through_chain |
 | root.rotation | mutation | VaultRootRotation: thief_cannot_rotate<br>VaultRootRotation: owner_rotates_away_from_stolen_root |
+| route.admit_on_approval | mutation | **GAP** |
+| route.checkpoint_adopt | mutation | **GAP** |
+| route.claim_submit_admit | mutation | **GAP** |
+| route.claim_submit_stage | mutation | **GAP** |
+| route.invite_resolve | mutation | **GAP** |
+| route.join_bootstrap | mutation | **GAP** |
+| route.join_context | mutation | **GAP** |
+| route.join_install | mutation | **GAP** |
+| route.link_publish | mutation | **GAP** |
+| route.relay_connect | mutation | **GAP** |
 | storage.advance_state | mutation | **GAP** |
 | storage.issue_grant | mutation | VaultRekeyMarker: exclusion_forward |
 | storage.issue_receipt | mutation | **GAP** |
@@ -81,4 +100,4 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | vault.create_class | mutation | VaultPolicyClass: root_reaches_every_generation |
 | vault.revoke_class_factor | mutation | VaultPolicyClass: revoked_factor_excluded_forward<br>VaultPolicyClass: revoked_factor_keeps_old |
 
-26 of 70 entries carry at least one model reference; 44 gaps.
+26 of 89 entries carry at least one model reference; 63 gaps.

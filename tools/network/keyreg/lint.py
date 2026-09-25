@@ -36,6 +36,7 @@ HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[2]
 FOLD_PATH = REPO_ROOT / "tools/network/ledger/fold.py"
 TAMARIN_DIR = REPO_ROOT / "tools/network/storagekit/tamarin"
+TLA_DIR = REPO_ROOT / "tools/network/TLA"
 PURPOSE_SCAN_TREES = ("tools/network", "tools/vault")
 PURPOSE_RE = re.compile(r'"(autonomy[./][A-Za-z0-9._/-]*[/.]v\d+)"')
 
@@ -120,14 +121,33 @@ def code_anchors_resolve(registry: dict) -> list[str]:
         source = entry["source"]
         anchor = source["file"] + (":" + source["symbol"] if source.get("symbol") else "")
         errors.extend(_anchor_errors(f"mutations.{mut_id}", [anchor]))
+    for art_id, entry in (registry.get("artifacts") or {}).items():
+        errors.extend(_anchor_errors(f"artifacts.{art_id}", entry["code"]))
     return errors
+
+
+def _tla_proof_errors(owner_id: str, proof: dict) -> list[str]:
+    """A TLA+ reference names a module in tools/network/TLA and a property
+    (a definition in that module, e.g. an invariant or temporal formula)."""
+    path = TLA_DIR / f"{proof['theory']}.tla"
+    if not path.is_file():
+        return [f"{owner_id}: proof cites TLA+ module {proof['theory']}, but "
+                f"{path.relative_to(REPO_ROOT)} does not exist"]
+    if not re.search(rf"^{re.escape(proof['lemma'])}\b.*==", path.read_text(), re.M):
+        return [f"{owner_id}: proof cites property {proof['lemma']}, not defined in "
+                f"{path.relative_to(REPO_ROOT)}"]
+    return []
 
 
 def proof_refs_resolve(registry: dict) -> list[str]:
     errors = []
-    sections = list(registry["keys"].items()) + list(registry["mutations"].items())
+    sections = (list(registry["keys"].items()) + list(registry["mutations"].items())
+                + list((registry.get("goals") or {}).items()))
     for owner_id, entry in sections:
         for proof in entry.get("proofs") or []:
+            if proof["framework"] == "tla":
+                errors.extend(_tla_proof_errors(owner_id, proof))
+                continue
             if proof["framework"] != "tamarin":
                 continue
             theory_path = TAMARIN_DIR / f"{proof['theory']}.spthy"
@@ -249,6 +269,7 @@ ALL_CHECKS = (
 
 
 def main() -> int:
+    sys.path.insert(0, str(HERE))
     import keyreg
 
     registry = keyreg.load()

@@ -20,6 +20,7 @@ an illustration of those records, not a competing specification.
 | What changes during enrollment, removal, or recovery? | [Workflow register](generated/workflows.md) |
 | What derives from, or is sealed to, what? | [Relationship diagram](generated/key-graph.mmd) |
 | Which models discuss this key or operation? | [Model reference inventory](generated/proof-coverage.md) |
+| Which steps and ceremonies does a workflow need, minimally and today? | [Workflow goals](generated/workflow-goals.md) |
 | What should a machine consume? | [Registry YAML](registry.yaml) or [generated JSON](generated/registry.json) |
 | How do I query, correct, and regenerate it? | [Tool instructions](TOOL.md) |
 
@@ -102,6 +103,11 @@ recovery-slot implementation lives in `tools/network/idkit/root_factor_policy.py
 - **Authority** in a mutation is a list of participants or authority sources,
   not a machine-evaluated AND/OR expression. The source, preconditions and notes
   explain how those participants relate.
+- **Opens / requires / produces**, where present, are machine-evaluated: what a
+  workflow step opens (a root or persona step needs a human root window), the
+  AND/OR artifact prerequisites it needs, and the artifacts it yields. They
+  prove reachability and minimal ceremony counts over a monotone graph, not
+  safety; see [workflow goals](generated/workflow-goals.md).
 
 Solid diagram arrows run from derivation parent to child. Dashed arrows run
 from the material being sealed to its recipient. **A dashed arrow is not a

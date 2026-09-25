@@ -22,7 +22,8 @@ record is the crib sheet (graph note 1e005d5c-c11), whose section numbers the
   fixtures proving that errors are precise.
 - `gen.py` — deterministic documentation and JSON generation.
 - `generated/` — key register, workflow register, relationship diagram,
-  model reference inventory, and machine-readable JSON.
+  model reference inventory, workflow goals (artifacts, producers, goals,
+  minimal schedules), and machine-readable JSON.
 
 ## Usage
 
@@ -40,6 +41,17 @@ agent-test run tools/network/keyreg/tests             # supported workspace test
 `reachable` follows derivation edges only; it does not evaluate decryption
 of wraps or factor-policy AND/OR conditions. Authority lists in mutation
 entries are descriptive, not executable policy expressions.
+
+## Workflow prerequisites
+
+`actors`, `artifacts` and `goals`, plus the mutation fields `actors`,
+`opens` (root | persona | delegate | none), `requires` (artifact or key ids;
+`all:`/`any:` nest) and `produces`, record a workflow as a monotone AND/OR
+graph (first use: the org invite -> join -> admission -> sync workflow of
+graph://cde6c8c6-041, bead auto-qrmlg.5). A bare per-actor artifact in a
+mutation binds to the executing actor. Designed mutations carry a `rule`.
+Validation checks every reference; lint resolves artifact anchors and TLA+
+proof references.
 
 ## Where the data comes from
 

@@ -1,4 +1,544 @@
 {
+  "actors": {
+    "founder": {
+      "description": "The org's founding member; sponsor of the invite and the only checkpointer in this workflow."
+    },
+    "joiner": {
+      "description": "The invited member, on a machine with its own personal fleet."
+    }
+  },
+  "artifacts": {
+    "adopted_checkpoint": {
+      "code": [
+        "tools/dashboard/membership_checkpoint.py:record_adopted"
+      ],
+      "description": "The actor's adopted-checkpoint cache holds a checkpoint including the joiner (adopted_checkpoint_founder, adopted_checkpoint_joiner).",
+      "home": "the actor's machine",
+      "per_actor": true,
+      "store": "NETWORK_CHECKPOINT_CACHE_SET_ID row"
+    },
+    "bootstrap_snapshot": {
+      "code": [
+        "tools/dashboard/claim_service.py:bootstrap"
+      ],
+      "description": "The founder's ledger events, binding and profiles as of the bootstrap moment.",
+      "home": "joiner machine",
+      "store": "joiner browser memory"
+    },
+    "checkpoint_delegate_grant": {
+      "code": [
+        "tools/network/storagekit/delegate.py:storage_delegate_scopes"
+      ],
+      "description": "A hot delegate grant whose scope includes signing advancing checkpoints.",
+      "home": "founder machine",
+      "status": "designed",
+      "store": "founder's org ledger and audited vault"
+    },
+    "checkpoint_including_joiner": {
+      "code": [
+        "tools/dashboard/network_routes.py:post_membership_checkpoint"
+      ],
+      "description": "A registry checkpoint seq n+1 whose members_root includes the joiner (checkpoint_seq_n).",
+      "home": "registry",
+      "store": "registry /v1/orgs/{uuid}/membership-checkpoints"
+    },
+    "checkpoint_seed": {
+      "code": [
+        "tools/dashboard/membership_checkpoint.py:checkpoint_due"
+      ],
+      "description": "Registry membership checkpoint seq 0, signed by the org root.",
+      "home": "registry",
+      "store": "registry /v1/orgs/{uuid}/membership-checkpoints"
+    },
+    "claim_approval": {
+      "code": [
+        "tools/dashboard/static/js/ceremony/claim.js:signClaimApproval",
+        "tools/dashboard/claim_service.py:countersign"
+      ],
+      "description": "The founder's countersignature on a staged claim.",
+      "home": "founder machine",
+      "store": "founder's pending-claim store"
+    },
+    "claim_staged": {
+      "code": [
+        "tools/dashboard/claim_service.py:submit"
+      ],
+      "description": "A claim staged pending approvals.",
+      "home": "founder machine",
+      "store": "founder's pending-claim store"
+    },
+    "delegate_grant": {
+      "code": [
+        "tools/dashboard/org_storage_delegate.py:accept"
+      ],
+      "description": "The actor's storage delegate event, persona-signed, parents = local heads.",
+      "home": "the actor's machine",
+      "notes": "Not read by _sync_org_peers; whether a pull needs it is unproven.",
+      "per_actor": true,
+      "store": "the actor's org ledger and audited vault"
+    },
+    "fleet_roster": {
+      "code": [
+        "tools/dashboard/fleet_enrollment_routes.py:_runtime_context"
+      ],
+      "description": "A personal fleet roster entry for the actor's machine; required by the runtime mint (fleet_enrollment_routes.py:_runtime_context).",
+      "home": "the actor's machine",
+      "notes": "For a fresh joiner with no personal fleet, unverified (graph://cde6c8c6-041 \u00a71 J6).",
+      "per_actor": true,
+      "store": "personal fleet roster"
+    },
+    "install_seed_addresses": {
+      "code": [
+        "tools/dashboard/org_install_seed.py:seed_reachability"
+      ],
+      "description": "Co-member addresses in the joiner's install seed.",
+      "home": "joiner machine",
+      "notes": "No built producer; the join page does not forward reachability_rows (network-join.js:313-327).",
+      "store": "joiner install seed"
+    },
+    "invite_event": {
+      "code": [
+        "tools/network/ledger/events.py:_v_invite",
+        "tools/dashboard/static/js/ceremony/org-invite.js:mintOrgInvite"
+      ],
+      "description": "The persona-signed invite event.",
+      "home": "founder machine",
+      "store": "founder's org ledger"
+    },
+    "invite_ref_resolved": {
+      "code": [
+        "tools/dashboard/network_routes.py:post_invite_resolve"
+      ],
+      "description": "{org, invite_ref} resolved from the registry envelope of the link.",
+      "home": "joiner machine",
+      "store": "joiner browser memory"
+    },
+    "join_context": {
+      "code": [
+        "tools/dashboard/claim_service.py:context"
+      ],
+      "description": "The claim context served by the founder's connector (genesis_id, heads, granted_role, binding, sponsor).",
+      "home": "joiner machine",
+      "store": "joiner browser memory"
+    },
+    "join_link_grant": {
+      "code": [
+        "tools/dashboard/link_approvals.py:_execute_link_publish"
+      ],
+      "description": "The org:join grant row, the relay link and the stored invite bearer.",
+      "home": "founder machine and relay",
+      "store": "founder org Settings; relay"
+    },
+    "ledger_heads": {
+      "code": [
+        "tools/network/ledger/settings_bridge.py",
+        "tools/network/ledger/ledger.py:heads"
+      ],
+      "description": "The actor's copy of the org ledger and its current heads (founder_heads, joiner_heads).",
+      "home": "the actor's machine",
+      "per_actor": true,
+      "store": "autonomy.org.ledger-event#1 rows in the org DB"
+    },
+    "link_publish_approval": {
+      "code": [
+        "tools/dashboard/link_approvals.py:_org_join_request"
+      ],
+      "description": "The approved link_publish decision with its Gate 2 org-scoped sign-on.",
+      "home": "founder machine",
+      "store": "approvals table"
+    },
+    "member_admitted": {
+      "code": [
+        "tools/dashboard/claim_service.py:submit"
+      ],
+      "description": "The claim appended to the founder's ledger.",
+      "home": "founder machine",
+      "store": "founder's org ledger"
+    },
+    "member_claim": {
+      "code": [
+        "tools/dashboard/static/js/ceremony/claim.js:mintMemberClaim",
+        "tools/network/ledger/events.py:_v_member_claim"
+      ],
+      "description": "The persona-signed member.claim event.",
+      "home": "joiner machine",
+      "store": "joiner browser memory until submitted"
+    },
+    "member_claim_final": {
+      "code": [
+        "tools/dashboard/static/js/join/accept-controller.js:finalize"
+      ],
+      "description": "The claim re-minted at the pinned position carrying the approvals.",
+      "home": "joiner machine",
+      "store": "joiner browser memory until submitted"
+    },
+    "persona_cert_fleet_sync": {
+      "code": [
+        "tools/dashboard/fleet_enrollment_routes.py:_activate_runtime",
+        "tools/network/fleet_org_channel.py:OrgFleetAuthenticator"
+      ],
+      "description": "The org sync certificate (persona -> serving machine key, scope fleet:sync) with its serving seed, installed as an OrgFleetAuthenticator.",
+      "home": "the actor's machine",
+      "per_actor": true,
+      "store": "memory and the machine vault"
+    },
+    "policy_approval": {
+      "code": [
+        "tools/dashboard/claim_service.py:R_APPROVAL_MISSING"
+      ],
+      "description": "The invite's role requires approvals before admission.",
+      "home": "founder machine",
+      "store": "founder's org ledger (role definition)"
+    },
+    "policy_self_admit": {
+      "code": [
+        "tools/dashboard/claim_service.py:R_APPROVAL_MISSING"
+      ],
+      "description": "The invite's role admits a claim without approvals.",
+      "home": "founder machine",
+      "store": "founder's org ledger (role definition)"
+    },
+    "reachability_row": {
+      "code": [
+        "tools/network/fleet_sync_scheduler.py:_publish_org_reachability"
+      ],
+      "description": "The actor machine's signed reachability row in the org scope.",
+      "home": "the actor's machine; co-members after a pull",
+      "per_actor": true,
+      "store": "org scope Settings, replicated by org sync"
+    },
+    "registered_serving_key": {
+      "code": [
+        "tools/network/registry/backfill_serving_keys.py"
+      ],
+      "description": "The actor's serving machine key in the registry's per-org serve_machine_keys allow-set.",
+      "home": "registry",
+      "notes": "Enforced only when the set is non-empty (relay.py:973-1000, store.py:1576-1583); the only writer in the tree is this backfill. Whether any live org's set is non-empty is an open question; the goal does not require it.",
+      "per_actor": true,
+      "store": "registry store"
+    },
+    "registry_binding": {
+      "code": [
+        "tools/graph/schemas/network_identity.py:NETWORK_BINDING_SET_ID"
+      ],
+      "description": "The org's registry binding {org_uuid, root key, registry_url}.",
+      "home": "the actor's machine",
+      "per_actor": true,
+      "store": "NETWORK_BINDING_SET_ID Setting"
+    },
+    "relay_slot": {
+      "code": [
+        "tools/dashboard/org_sync_channels.py:relay_slots_provider"
+      ],
+      "description": "A live serving slot of the actor's connector at the org's relay.",
+      "home": "relay",
+      "per_actor": true,
+      "store": "relay memory"
+    },
+    "serve_cert": {
+      "code": [
+        "tools/dashboard/network_routes.py:_post_serve_cert_v3"
+      ],
+      "description": "The actor's persona-signed serving certificate and key.",
+      "home": "the actor's machine",
+      "per_actor": true,
+      "store": "autonomy.machine.serve-cert row; serving key in autonomy.machine.vault.audited"
+    }
+  },
+  "goals": {
+    "org_sync_pull": {
+      "current_order": [
+        {
+          "actor": "founder",
+          "ceremony": true,
+          "runs": [
+            "ceremony.org_invite_mint"
+          ],
+          "step": "F1"
+        },
+        {
+          "actor": "founder",
+          "ceremony": true,
+          "runs": [
+            "approval.link_publish",
+            "route.link_publish"
+          ],
+          "step": "F2"
+        },
+        {
+          "actor": "joiner",
+          "ceremony": false,
+          "runs": [
+            "route.invite_resolve"
+          ],
+          "step": "J1"
+        },
+        {
+          "actor": "founder",
+          "ceremony": false,
+          "runs": [
+            "route.join_context"
+          ],
+          "step": "J2"
+        },
+        {
+          "actor": "joiner",
+          "ceremony": true,
+          "runs": [
+            "ceremony.member_claim_mint"
+          ],
+          "step": "J3"
+        },
+        {
+          "actor": "founder",
+          "ceremony": false,
+          "only_from": [
+            "self_admit"
+          ],
+          "runs": [
+            "route.claim_submit_admit"
+          ],
+          "step": "J3.submit"
+        },
+        {
+          "actor": "founder",
+          "ceremony": false,
+          "only_from": [
+            "approval"
+          ],
+          "runs": [
+            "route.claim_submit_stage"
+          ],
+          "step": "J3.stage"
+        },
+        {
+          "actor": "founder",
+          "ceremony": true,
+          "only_from": [
+            "approval"
+          ],
+          "runs": [
+            "ceremony.claim_approval"
+          ],
+          "step": "F3"
+        },
+        {
+          "actor": "joiner",
+          "ceremony": true,
+          "only_from": [
+            "approval"
+          ],
+          "runs": [
+            "ceremony.claim_finalize"
+          ],
+          "step": "J4"
+        },
+        {
+          "actor": "founder",
+          "ceremony": false,
+          "only_from": [
+            "approval"
+          ],
+          "runs": [
+            "route.claim_submit_admit"
+          ],
+          "step": "J4.submit"
+        },
+        {
+          "actor": "founder",
+          "ceremony": false,
+          "runs": [
+            "route.join_bootstrap"
+          ],
+          "step": "J5.serve"
+        },
+        {
+          "actor": "joiner",
+          "ceremony": false,
+          "runs": [
+            "route.join_install",
+            "route.checkpoint_adopt"
+          ],
+          "step": "J5"
+        },
+        {
+          "actor": "joiner",
+          "ceremony": true,
+          "runs": [
+            "route.checkpoint_adopt",
+            "ceremony.organization_storage_delegate",
+            "ceremony.serve_cert_mint",
+            "ceremony.fleet_runtime_mint"
+          ],
+          "step": "J6"
+        },
+        {
+          "actor": "joiner",
+          "ceremony": false,
+          "runs": [
+            "route.relay_connect"
+          ],
+          "step": "J6.connect"
+        },
+        {
+          "actor": "founder",
+          "ceremony": true,
+          "runs": [
+            "ceremony.checkpoint_publish"
+          ],
+          "step": "F4"
+        },
+        {
+          "actor": "joiner",
+          "ceremony": true,
+          "runs": [
+            "route.checkpoint_adopt",
+            "ceremony.organization_storage_delegate",
+            "ceremony.serve_cert_mint",
+            "ceremony.fleet_runtime_mint"
+          ],
+          "step": "J6.repeat"
+        }
+      ],
+      "description": "Founder and joiner can each pull the other over org sync: both hold an org channel (sync certificate + serving seed), both have adopted a checkpoint whose members_root includes the joiner (the verifier admits a pull only under an adopted seq with inclusion, fleet_org_channel.py: 286-309), the joiner holds the org ledger, and the joiner has a route to the founder (the founder reaches the joiner through its dial-in).",
+      "known_defects": [
+        {
+          "missing": "checkpoint_including_joiner",
+          "mutation": "route.checkpoint_adopt",
+          "ref": "graph://cde6c8c6-041 \u00a71 J5 (network_routes.py:945)",
+          "step": "J5"
+        },
+        {
+          "missing": "checkpoint_including_joiner",
+          "mutation": "route.checkpoint_adopt",
+          "ref": "graph://cde6c8c6-041 \u00a73 (J6 repeat)",
+          "step": "J6"
+        },
+        {
+          "artifact": "install_seed_addresses",
+          "ref": "graph://cde6c8c6-041 \u00a75 J5 reachability seed (network-join.js:313-327)"
+        }
+      ],
+      "notes": "Peer selection sources (fleet_sync_scheduler.py:_org_peer_candidates): reachability rows (need a prior pull), install seed, relay slots through the dialer's own connector, dialed-in peers. The founder-pulls-joiner direction riding the joiner's dial-in is taken from the record, not re-traced. The single-joiner AND/OR graph cannot express head presence at adoption; OrgAdmission.tla carries that.",
+      "requires": [
+        "persona_cert_fleet_sync@founder",
+        "persona_cert_fleet_sync@joiner",
+        "adopted_checkpoint@founder",
+        "adopted_checkpoint@joiner",
+        "ledger_heads@joiner",
+        {
+          "any": [
+            "install_seed_addresses",
+            {
+              "all": [
+                "relay_slot@joiner",
+                "relay_slot@founder"
+              ]
+            }
+          ]
+        }
+      ],
+      "scenarios": [
+        {
+          "current": {
+            "founder": 3,
+            "joiner": 3
+          },
+          "from": "self_admit",
+          "minimal": {
+            "founder": 2,
+            "joiner": 1
+          },
+          "rules": []
+        },
+        {
+          "current": {
+            "founder": 4,
+            "joiner": 4
+          },
+          "from": "approval",
+          "minimal": {
+            "founder": 3,
+            "joiner": 2
+          },
+          "rules": []
+        },
+        {
+          "current": {
+            "founder": 4,
+            "joiner": 4
+          },
+          "from": "approval",
+          "minimal": {
+            "founder": 2,
+            "joiner": 2
+          },
+          "rules": [
+            "admit_on_approval"
+          ]
+        },
+        {
+          "current": {
+            "founder": 3,
+            "joiner": 3
+          },
+          "from": "self_admit",
+          "minimal": {
+            "founder": 1,
+            "joiner": 1
+          },
+          "rules": [
+            "delegate_checkpoint"
+          ]
+        },
+        {
+          "current": {
+            "founder": 4,
+            "joiner": 4
+          },
+          "from": "approval",
+          "minimal": {
+            "founder": 2,
+            "joiner": 2
+          },
+          "rules": [
+            "admit_on_approval",
+            "delegate_checkpoint"
+          ]
+        }
+      ],
+      "states": {
+        "approval": {
+          "description": "Founded org (F0 done), invite role requires the founder's approval.",
+          "holds": [
+            "ledger_heads@founder",
+            "registry_binding@founder",
+            "checkpoint_seed",
+            "serve_cert@founder",
+            "relay_slot@founder",
+            "persona_cert_fleet_sync@founder",
+            "fleet_roster@founder",
+            "fleet_roster@joiner",
+            "policy_approval"
+          ]
+        },
+        "self_admit": {
+          "description": "Founded org (F0 done), invite role self-admits.",
+          "holds": [
+            "ledger_heads@founder",
+            "registry_binding@founder",
+            "checkpoint_seed",
+            "serve_cert@founder",
+            "relay_slot@founder",
+            "persona_cert_fleet_sync@founder",
+            "fleet_roster@founder",
+            "fleet_roster@joiner",
+            "policy_self_admit"
+          ]
+        }
+      }
+    }
+  },
   "keys": {
     "agent_delegate_signing_key": {
       "code": [
@@ -1037,6 +1577,39 @@
     }
   },
   "mutations": {
+    "approval.link_publish": {
+      "actors": [
+        "founder"
+      ],
+      "authority": [
+        "personal_root_seed"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "approved link_publish decision; Gate 2 org-scoped sign-on"
+        ]
+      },
+      "notes": "Step F2 (Gate 2, worktrees.js:173-203, :267). The root is opened for the approval, not reused from F1.",
+      "opens": "root",
+      "preconditions": [
+        "A pending link_publish approval row {org, target_uuid, target_type org:join, invite_ref, expires_at, meta} (org-membership.js:1008-1030)."
+      ],
+      "produces": [
+        "link_publish_approval"
+      ],
+      "requires": [
+        "personal_root_seed",
+        "invite_event"
+      ],
+      "source": {
+        "file": "tools/dashboard/static/js/pages/worktrees.js",
+        "kind": "ceremony",
+        "symbol": "signOnWithRootSeed"
+      }
+    },
     "armor.enroll_factor": {
       "authority": [
         "personal_root_seed"
@@ -1127,7 +1700,141 @@
         "symbol": "set_recovery"
       }
     },
+    "ceremony.checkpoint_delegate_grant": {
+      "actors": [
+        "founder"
+      ],
+      "authority": [
+        "persona_signing_key"
+      ],
+      "crib": [
+        "\u00a78",
+        "\u00a711"
+      ],
+      "effects": {
+        "writes": [
+          "a hot delegate grant carrying a checkpoint scope"
+        ]
+      },
+      "notes": "Not built: the storage delegate's scopes exclude checkpoint today (storagekit/delegate.py:storage_delegate_scopes). Accepting this scope is an operator policy decision (graph://cde6c8c6-041 \u00a74).",
+      "opens": "persona",
+      "produces": [
+        "checkpoint_delegate_grant"
+      ],
+      "requires": [
+        "persona_signing_key",
+        "ledger_heads"
+      ],
+      "rule": "delegate_checkpoint",
+      "source": {
+        "file": "tools/network/storagekit/delegate.py",
+        "kind": "ceremony",
+        "symbol": "storage_delegate_scopes"
+      },
+      "status": "designed"
+    },
+    "ceremony.checkpoint_publish": {
+      "actors": [
+        "founder"
+      ],
+      "authority": [
+        "persona_signing_key"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "checkpoint {v, org, seq, prev, ledger_head, members_root, checkpointers_root, ts, signer, proof, proof_index} at the registry (network_routes.py:post_membership_checkpoint); the signer caches it adopted"
+        ]
+      },
+      "notes": "Step F4. Only callers: full sign-in (signon_preparation.py:125-133) and the scoped sign-on (network-signon.mjs:1560-1577). Nothing publishes at admission.",
+      "opens": "persona",
+      "preconditions": [
+        "The signer is in the checkpointers set of the previously adopted checkpoint (membership_checkpoint.py:139-149).",
+        "ledger_head is the signer's first sorted head at assembly (membership_checkpoint.py:106, _first_head)."
+      ],
+      "produces": [
+        "checkpoint_including_joiner",
+        "adopted_checkpoint"
+      ],
+      "requires": [
+        "persona_signing_key",
+        "member_admitted",
+        "ledger_heads",
+        "checkpoint_seed"
+      ],
+      "source": {
+        "file": "tools/dashboard/membership_checkpoint.py",
+        "kind": "ceremony",
+        "symbol": "checkpoint_due"
+      }
+    },
+    "ceremony.claim_approval": {
+      "actors": [
+        "founder"
+      ],
+      "authority": [
+        "persona_signing_key"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "approval stored against the staged claim (POST /api/network/ledger/claim/{key}/approval, network_routes.py:post_ledger_claim_approval); the claim becomes ready, not admitted"
+        ]
+      },
+      "notes": "Step F3. Root opened at org-membership.js:1082.",
+      "opens": "persona",
+      "produces": [
+        "claim_approval"
+      ],
+      "requires": [
+        "persona_signing_key",
+        "claim_staged"
+      ],
+      "source": {
+        "file": "tools/dashboard/static/js/ceremony/claim.js",
+        "kind": "ceremony",
+        "symbol": "signClaimApproval"
+      }
+    },
+    "ceremony.claim_finalize": {
+      "actors": [
+        "joiner"
+      ],
+      "authority": [
+        "persona_signing_key"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "member.claim re-minted at the pinned position carrying the approvals (accept-controller.js:270-319)"
+        ]
+      },
+      "notes": "Step J4.",
+      "opens": "persona",
+      "produces": [
+        "member_claim_final"
+      ],
+      "requires": [
+        "persona_signing_key",
+        "claim_approval"
+      ],
+      "source": {
+        "file": "tools/dashboard/static/js/join/accept-controller.js",
+        "kind": "ceremony",
+        "symbol": "finalize"
+      }
+    },
     "ceremony.fleet_runtime_mint": {
+      "actors": [
+        "founder",
+        "joiner"
+      ],
       "authority": [
         "personal_root_seed",
         "fleet_operating_signing_key",
@@ -1150,10 +1857,14 @@
         ]
       },
       "notes": "Helpers: mintRuntimeCredential, mintReachabilityCert, mintOrgSyncCerts. One mint, two call sites (sign-on and first publication) through fleetRuntimePost since b3e67994. The payload is POSTed to /api/fleet/runtime (fleet_enrollment_routes._activate_runtime), which verifies it, peels the serving seeds and org sync certificates, installs the org channels, arms every connector cache, and caches the whole payload in ramfs for replay after a restart; a reboot clears ramfs and fails closed to a sign-on. Recorded 2026-09-20 after the three certificates were found absent from this registry (keyreg-forensics.md, session auto-0919-212441).",
+      "opens": "root",
       "preconditions": [
         "The machine is an active roster member; the server re-checks machine_pub against the current roster (fleet_runtime.FleetRuntimeCredential.from_browser_payload).",
         "The operating seed and the reachability certificate are minted only when the personal organization holds a registry org_uuid.",
         "One serving seed and one org sync certificate per organization the machine is provisioned to serve and holds a persona in (serving_orgs, sync_orgs from /api/fleet/runtime)."
+      ],
+      "produces": [
+        "persona_cert_fleet_sync"
       ],
       "refusals": [
         "not-active-roster-machine",
@@ -1161,10 +1872,81 @@
         "machine-id-mismatch",
         "reachability-pair-incomplete"
       ],
+      "requires": [
+        "personal_root_seed",
+        "fleet_roster",
+        "ledger_heads"
+      ],
       "source": {
         "file": "tools/dashboard/static/js/ceremony/fleet-enrollment.js",
         "kind": "ceremony",
         "symbol": "mintFleetRuntimeCredential"
+      }
+    },
+    "ceremony.member_claim_mint": {
+      "actors": [
+        "joiner"
+      ],
+      "authority": [
+        "persona_signing_key"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "member.claim {invite_ref, persona_pub, profile, approvals, kem_credential, token?}"
+        ]
+      },
+      "notes": "Step J3.",
+      "opens": "persona",
+      "preconditions": [
+        "Parents are the context heads (claim.js:234-247); a submit whose parents are not the founder's current heads is refused stale-heads (claim_service.py:170-171)."
+      ],
+      "produces": [
+        "member_claim"
+      ],
+      "requires": [
+        "persona_signing_key",
+        "join_context"
+      ],
+      "source": {
+        "file": "tools/dashboard/static/js/ceremony/claim.js",
+        "kind": "ceremony",
+        "symbol": "mintMemberClaim"
+      }
+    },
+    "ceremony.org_invite_mint": {
+      "actors": [
+        "founder"
+      ],
+      "authority": [
+        "persona_signing_key"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "invite event {granted_role, expiry, sponsor, token_hash|invite_pub, max_uses?} appended through POST /api/network/ledger/invite"
+        ]
+      },
+      "notes": "Step F1. Root opened at tools/dashboard/static/js/org-membership.js:861; the seed is zeroed at :886 after the publish chain settles, and is not passed to publishMint (:1008), so F2 opens the root again.",
+      "opens": "persona",
+      "preconditions": [
+        "Parents are the founder's current heads (GET /api/network/ledger/heads)."
+      ],
+      "produces": [
+        "invite_event"
+      ],
+      "requires": [
+        "persona_signing_key",
+        "ledger_heads"
+      ],
+      "source": {
+        "file": "tools/dashboard/static/js/ceremony/org-invite.js",
+        "kind": "ceremony",
+        "symbol": "mintOrgInvite"
       }
     },
     "ceremony.organization_grant_recovery": {
@@ -1190,6 +1972,10 @@
       }
     },
     "ceremony.organization_storage_delegate": {
+      "actors": [
+        "founder",
+        "joiner"
+      ],
       "authority": [
         "persona_signing_key"
       ],
@@ -1206,6 +1992,14 @@
         ]
       },
       "notes": "A reuse sign-in adds no ledger event. Workflow graph://b437ecfb-e23.",
+      "opens": "persona",
+      "produces": [
+        "delegate_grant"
+      ],
+      "requires": [
+        "persona_signing_key",
+        "ledger_heads"
+      ],
       "source": {
         "file": "tools/dashboard/static/js/ceremony/org-storage-delegate.js",
         "kind": "ceremony",
@@ -1275,6 +2069,10 @@
       }
     },
     "ceremony.serve_cert_mint": {
+      "actors": [
+        "founder",
+        "joiner"
+      ],
       "authority": [
         "persona_signing_key"
       ],
@@ -1291,6 +2089,15 @@
         ]
       },
       "notes": "Organization branch; no content viewer certificate.",
+      "opens": "persona",
+      "produces": [
+        "serve_cert"
+      ],
+      "requires": [
+        "persona_signing_key",
+        "registry_binding",
+        "checkpoint_seed"
+      ],
       "source": {
         "file": "tools/dashboard/static/js/network-signon.mjs",
         "kind": "ceremony",
@@ -1316,6 +2123,44 @@
         "kind": "ceremony",
         "symbol": "open_generation_keys"
       }
+    },
+    "delegate.checkpoint_publish": {
+      "actors": [
+        "founder"
+      ],
+      "authority": [
+        "agent_delegate_signing_key"
+      ],
+      "crib": [
+        "\u00a78",
+        "\u00a711"
+      ],
+      "effects": {
+        "writes": [
+          "advancing checkpoint signed by the checkpoint-scoped delegate at admission",
+          "no ceremony"
+        ]
+      },
+      "notes": "Proposed rule Checkpoint-at-admission with a hot signer. Not built.",
+      "opens": "delegate",
+      "produces": [
+        "checkpoint_including_joiner",
+        "adopted_checkpoint"
+      ],
+      "requires": [
+        "agent_delegate_signing_key",
+        "checkpoint_delegate_grant",
+        "member_admitted",
+        "ledger_heads",
+        "checkpoint_seed"
+      ],
+      "rule": "delegate_checkpoint",
+      "source": {
+        "file": "tools/dashboard/membership_checkpoint.py",
+        "kind": "module-op",
+        "symbol": "checkpoint_due"
+      },
+      "status": "designed"
     },
     "fleet.distribute_kem": {
       "authority": [
@@ -1781,6 +2626,37 @@
         "symbol": "mint_channel_key"
       }
     },
+    "module.org_reachability_publish": {
+      "actors": [
+        "founder",
+        "joiner"
+      ],
+      "authority": [
+        "serving_machine_signing_key"
+      ],
+      "crib": [
+        "\u00a710"
+      ],
+      "effects": {
+        "writes": [
+          "the machine's reachability row in the org scope",
+          "replicated by org sync"
+        ]
+      },
+      "notes": "A co-member reads the row only after a pull, so it cannot seed a first contact.",
+      "opens": "none",
+      "produces": [
+        "reachability_row"
+      ],
+      "requires": [
+        "persona_cert_fleet_sync"
+      ],
+      "source": {
+        "file": "tools/network/fleet_sync_scheduler.py",
+        "kind": "module-op",
+        "symbol": "_publish_org_reachability"
+      }
+    },
     "passkey.enroll": {
       "authority": [
         "personal_root_seed"
@@ -1951,6 +2827,346 @@
         "file": "tools/network/idkit/root_rotation.py",
         "kind": "module-op",
         "symbol": "make_rotation"
+      }
+    },
+    "route.admit_on_approval": {
+      "actors": [
+        "founder"
+      ],
+      "authority": [
+        "persona_signing_key"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "the staged claim appended with the approval",
+          "in the approver's window"
+        ]
+      },
+      "notes": "Proposed consolidation F3+F4 (graph://cde6c8c6-041 \u00a75): admission at countersign, so the checkpoint can run in the same window. Not built.",
+      "opens": "persona",
+      "produces": [
+        "claim_approval",
+        "member_admitted"
+      ],
+      "requires": [
+        "persona_signing_key",
+        "claim_staged"
+      ],
+      "rule": "admit_on_approval",
+      "source": {
+        "file": "tools/dashboard/claim_service.py",
+        "kind": "route",
+        "symbol": "countersign"
+      },
+      "status": "designed"
+    },
+    "route.checkpoint_adopt": {
+      "actors": [
+        "joiner"
+      ],
+      "authority": [
+        "registry membership state; this node's own ledger"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "adopted checkpoint cache row (membership_checkpoint.py:record_adopted)"
+        ]
+      },
+      "notes": "Never signs (docstring, network_routes.py:724-733). Callers: join install (:945), sign-on preparation (signon_preparation.py:140), and the route POST /api/network/membership-checkpoint/adopt; no background caller. The head-presence precondition is not monotone and is not expressed in requires; OrgAdmission.tla models it.",
+      "opens": "none",
+      "preconditions": [
+        "Skip when the cached seq >= the registry seq (network_routes.py:756-758).",
+        "Fold the local ledger at the registry's ledger_head and require members_root equality; an id the local ledger lacks raises in ancestry/get and nothing is adopted (network_routes.py:759-768, fold.py:499-500, ledger.py:36-42, 66-77)."
+      ],
+      "produces": [
+        "adopted_checkpoint"
+      ],
+      "refusals": [
+        "no registry binding",
+        "registry unreachable",
+        "head absent from the local ledger",
+        "members_root mismatch"
+      ],
+      "requires": [
+        "checkpoint_including_joiner",
+        "ledger_heads"
+      ],
+      "source": {
+        "file": "tools/dashboard/network_routes.py",
+        "kind": "route",
+        "symbol": "_adopt_registry_checkpoint"
+      }
+    },
+    "route.claim_submit_admit": {
+      "actors": [
+        "founder"
+      ],
+      "authority": [
+        "invited persona key"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "member.claim appended to the founder's ledger (claim_service.py:172-175)"
+        ]
+      },
+      "notes": "Steps J3 and J4, submit half, on the founder's machine. No checkpoint code runs here (claim_service.py, link_serving.py).",
+      "opens": "none",
+      "produces": [
+        "member_admitted"
+      ],
+      "requires": [
+        {
+          "any": [
+            {
+              "all": [
+                "member_claim",
+                "policy_self_admit"
+              ]
+            },
+            "member_claim_final"
+          ]
+        }
+      ],
+      "source": {
+        "file": "tools/dashboard/claim_service.py",
+        "kind": "route",
+        "symbol": "submit"
+      }
+    },
+    "route.claim_submit_stage": {
+      "actors": [
+        "founder"
+      ],
+      "authority": [
+        "invited persona key"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "pending claim staged (claim_service.py:189-193); returns pending {have, need}"
+        ]
+      },
+      "notes": "Step J3 under a role whose policy requires approvals.",
+      "opens": "none",
+      "produces": [
+        "claim_staged"
+      ],
+      "requires": [
+        {
+          "all": [
+            "member_claim",
+            "policy_approval"
+          ]
+        }
+      ],
+      "source": {
+        "file": "tools/dashboard/claim_service.py",
+        "kind": "route",
+        "symbol": "submit"
+      }
+    },
+    "route.invite_resolve": {
+      "actors": [
+        "joiner"
+      ],
+      "authority": [
+        "bearer of the org:join link"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "nothing durable; returns {org, invite_ref} from the registry envelope"
+        ]
+      },
+      "notes": "Step J1.",
+      "opens": "none",
+      "produces": [
+        "invite_ref_resolved"
+      ],
+      "requires": [
+        "join_link_grant"
+      ],
+      "source": {
+        "file": "tools/dashboard/network_routes.py",
+        "kind": "route",
+        "symbol": "post_invite_resolve"
+      }
+    },
+    "route.join_bootstrap": {
+      "actors": [
+        "founder"
+      ],
+      "authority": [
+        "admitted persona"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "nothing durable; returns {events, more, binding, member_profiles, reachability_rows, brand} as of this moment (claim_service.py:233-235)"
+        ]
+      },
+      "notes": "Step J5, served half, on the founder's machine.",
+      "opens": "none",
+      "preconditions": [
+        "The fold must show the persona as a valid member; otherwise pending (claim_service.py:228-231)."
+      ],
+      "produces": [
+        "bootstrap_snapshot"
+      ],
+      "requires": [
+        "member_admitted"
+      ],
+      "source": {
+        "file": "tools/dashboard/claim_service.py",
+        "kind": "route",
+        "symbol": "bootstrap"
+      }
+    },
+    "route.join_context": {
+      "actors": [
+        "founder"
+      ],
+      "authority": [
+        "bearer of the org:join link"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "nothing durable; returns {genesis_id, heads, max_hlc, granted_role, binding, invite_expiry, sponsor_pub, brand, sponsor profile}"
+        ]
+      },
+      "notes": "Step J2. Executes on the founder's machine.",
+      "opens": "none",
+      "preconditions": [
+        "Served by the founder's connector over the link channel; the founder machine must be online (link_serving.py:1007-1033)."
+      ],
+      "produces": [
+        "join_context"
+      ],
+      "requires": [
+        "invite_ref_resolved",
+        "invite_event"
+      ],
+      "source": {
+        "file": "tools/dashboard/claim_service.py",
+        "kind": "route",
+        "symbol": "context"
+      }
+    },
+    "route.join_install": {
+      "actors": [
+        "joiner"
+      ],
+      "authority": [
+        "admitted persona"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "org DB",
+          "ledger re-folded from genesis",
+          "binding",
+          "persona row",
+          "directory row",
+          "install seed (profiles only)"
+        ]
+      },
+      "notes": "Step J5. Does not produce install_seed_addresses: network-join.js (installAdmitted, :313-327) does not forward reachability_rows although the route reads them (network_routes.py:938-943). Deferred here (:804-805): storage delegate, serve cert, fleet runtime, sync cert.",
+      "opens": "none",
+      "produces": [
+        "ledger_heads",
+        "registry_binding"
+      ],
+      "requires": [
+        "bootstrap_snapshot"
+      ],
+      "source": {
+        "file": "tools/dashboard/network_routes.py",
+        "kind": "route",
+        "symbol": "post_join_outcome"
+      }
+    },
+    "route.link_publish": {
+      "actors": [
+        "founder"
+      ],
+      "authority": [
+        "agent_delegate_signing_key"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "grant row {grant_id, target_uuid, target_type, meta, subject, issued_at, channel_pub, invite_ref}, relay create-link, invite bearer (POST ledger/invite/bearer)"
+        ]
+      },
+      "notes": "Step F2, executor half. The channel key is minted by link.mint_channel_key.",
+      "opens": "delegate",
+      "preconditions": [
+        "Serving must be startable for the org (link_approvals.py:_require_startable_serving)."
+      ],
+      "produces": [
+        "join_link_grant"
+      ],
+      "requires": [
+        "agent_delegate_signing_key",
+        "link_publish_approval",
+        "serve_cert"
+      ],
+      "source": {
+        "file": "tools/dashboard/link_approvals.py",
+        "kind": "route",
+        "symbol": "_execute_link_publish"
+      }
+    },
+    "route.relay_connect": {
+      "actors": [
+        "founder",
+        "joiner"
+      ],
+      "authority": [
+        "serving_delegate_key"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "a live serving slot at the org's relay"
+        ]
+      },
+      "notes": "Slots are read for peer selection through org_sync_channels.relay_slots_provider. Whether the relay's per-org serve_machine_keys allow-set admits a new member's machine is an open question (relay.py:973-1000, store.py:1576-1583); unproven.",
+      "opens": "none",
+      "produces": [
+        "relay_slot"
+      ],
+      "requires": [
+        "serve_cert"
+      ],
+      "source": {
+        "file": "tools/network/relaykit/connector.py",
+        "kind": "module-op",
+        "symbol": "TunnelConnector"
       }
     },
     "storage.advance_state": {

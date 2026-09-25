@@ -11,6 +11,10 @@ Reads registry.yaml and writes five artifacts into generated/:
 - registry.json     — the whole registry as sorted, stable JSON for
                       dashboard and Key Ceremony Atlas consumption.
 - workflows.md      — mutation authority, preconditions, effects and refusals.
+- workflow-goals.md — actors, artifacts with their producers and consumers,
+                      the workflow mutations' opens/requires/produces, and
+                      each goal: starting states, recorded current order,
+                      and known defects.
 
 The generated files are committed; tests/test_gen.py regenerates them and
 fails if the committed copies differ, so the views cannot silently drift
@@ -202,6 +206,12 @@ def gen_workflows(registry: dict) -> str:
                 lines.extend([f"**{title}**", ""])
                 lines.extend(f"- {value}" for value in values)
                 lines.append("")
+        if "opens" in entry:
+            lines.extend([
+                f"**Workflow:** actors {', '.join(entry['actors'])}; opens {entry['opens']}; "
+                f"requires {format_requires(entry['requires'])}; "
+                f"produces {', '.join(entry['produces'])}"
+                + (f"; rule {entry['rule']}" if entry.get("rule") else ""), ""])
         source = entry["source"]
         symbol = f":{source['symbol']}" if source.get("symbol") else ""
         lines.extend([f"**Source:** `{source['file']}{symbol}` ({source['kind']})",
@@ -209,6 +219,108 @@ def gen_workflows(registry: dict) -> str:
         if entry.get("notes"):
             lines.extend(["", entry["notes"].strip()])
     return "\n".join(lines) + "\n"
+
+
+def format_requires(exprs) -> str:
+    def one(expr):
+        if isinstance(expr, str):
+            return expr
+        op, subs = next(iter(expr.items()))
+        joiner = " AND " if op == "all" else " OR "
+        return "(" + joiner.join(one(sub) for sub in subs) + ")"
+    return " AND ".join(one(expr) for expr in exprs) if exprs else "nothing"
+
+
+def _producers_consumers(registry: dict):
+    """artifact id -> ([producer mutation ids], [consumer ids]), refs unbound
+    (a per-actor artifact collects every actor's producers)."""
+    producers: dict[str, list[str]] = {a: [] for a in registry.get("artifacts") or {}}
+    consumers: dict[str, list[str]] = {a: [] for a in registry.get("artifacts") or {}}
+    for mut_id, entry in sorted(registry["mutations"].items()):
+        if "opens" not in entry:
+            continue
+        for ref in entry["produces"]:
+            producers.setdefault(ref.partition("@")[0], []).append(mut_id)
+        for expr in entry["requires"]:
+            for ref in keyreg._expr_refs(expr):
+                base = ref.partition("@")[0]
+                if base in consumers:
+                    consumers[base].append(mut_id)
+    for goal_id, goal in sorted((registry.get("goals") or {}).items()):
+        for expr in goal["requires"]:
+            for ref in keyreg._expr_refs(expr):
+                base = ref.partition("@")[0]
+                if base in consumers and f"goal {goal_id}" not in consumers[base]:
+                    consumers[base].append(f"goal {goal_id}")
+    return producers, consumers
+
+
+def gen_workflow_goals(registry: dict) -> str:
+    lines = [
+        "# Workflow goals — generated from registry.yaml by gen.py; do not edit.", "",
+        "Artifacts are workflow prerequisites that are not keys. Workflow mutations",
+        "record what each step opens (root and persona need a human root window;",
+        "delegate and none run on a machine), what it requires (AND/OR) and what it",
+        "produces. A bare per-actor artifact inside a mutation binds to the executing",
+        "actor. The graph is monotone: freshness conditions such as a ledger head",
+        "being present at adoption are outside it and are modeled in TLA+.",
+        "See the [workflow register](workflows.md) and the [reading guide](../GUIDE.md).", "",
+        "## Actors", "",
+    ]
+    for actor_id, entry in (registry.get("actors") or {}).items():
+        lines.append(f"- **{actor_id}** — {entry['description']}")
+    producers, consumers = _producers_consumers(registry)
+    lines.extend(["", "## Artifacts", "",
+                  "| Artifact | Per actor | Status | Store | Home | Produced by | Required by |",
+                  "|---|---|---|---|---|---|---|"])
+    for art_id, entry in sorted((registry.get("artifacts") or {}).items()):
+        lines.append(
+            f'| <a id="artifact-{art_id}"></a>{art_id} | {"yes" if entry.get("per_actor") else "no"} | '
+            f"{entry.get('status', 'built')} | {entry['store']} | {entry['home']} | "
+            f"{', '.join(producers.get(art_id) or []) or '**none**'} | "
+            f"{', '.join(consumers.get(art_id) or []) or '-'} |")
+    lines.extend(["", "Artifact details:", ""])
+    for art_id, entry in sorted((registry.get("artifacts") or {}).items()):
+        lines.append(f"- **{art_id}** — {entry['description'].strip()} Code: "
+                     + " · ".join(f"`{a}`" for a in entry["code"])
+                     + (f". {entry['notes'].strip()}" if entry.get("notes") else ""))
+    lines.extend(["", "## Workflow mutations", "",
+                  "| Mutation | Status | Actors | Opens | Requires | Produces |",
+                  "|---|---|---|---|---|---|"])
+    for mut_id, entry in sorted(registry["mutations"].items()):
+        if "opens" not in entry:
+            continue
+        status = entry.get("status", "built") + (f" (rule {entry['rule']})" if entry.get("rule") else "")
+        lines.append(f"| {mut_id} | {status} | {', '.join(entry['actors'])} | {entry['opens']} | "
+                     f"{format_requires(entry['requires'])} | {', '.join(entry['produces'])} |")
+    for goal_id, goal in sorted((registry.get("goals") or {}).items()):
+        lines.extend(["", f"## Goal {goal_id}", "", goal["description"].strip(), "",
+                      f"**Requires:** {format_requires(goal['requires'])}", ""])
+        if goal.get("notes"):
+            lines.extend([goal["notes"].strip(), ""])
+        lines.extend(["### Starting states", ""])
+        for state_id, state in goal["states"].items():
+            lines.append(f"- **{state_id}** — {state['description']} Holds: {', '.join(state['holds'])}")
+        if goal.get("current_order"):
+            lines.extend(["", "### Recorded current order", "",
+                          "| Step | Actor | Root opening | Runs | Only from |", "|---|---|---|---|---|"])
+            for step in goal["current_order"]:
+                lines.append(f"| {step['step']} | {step['actor']} | {'yes' if step['ceremony'] else 'no'} | "
+                             f"{', '.join(step['runs'])} | {', '.join(step.get('only_from') or []) or 'all'} |")
+        if goal.get("known_defects"):
+            lines.extend(["", "### Known defects (named by lint.py, not failed)", ""])
+            for defect in goal["known_defects"]:
+                what = defect.get("artifact") and f"artifact {defect['artifact']} has no built producer" or (
+                    f"step {defect['step']} runs {defect['mutation']} without {defect['missing']}")
+                lines.append(f"- {what} — {defect['ref']}")
+        lines.extend(_scenario_lines(registry, goal_id, goal))
+        for proof in goal.get("proofs") or []:
+            lines.append(f"- proof: {proof['framework']} {proof['theory']}: {proof['lemma']}")
+    return "\n".join(lines) + "\n"
+
+
+def _scenario_lines(registry: dict, goal_id: str, goal: dict) -> list[str]:
+    return []
 
 
 def gen_coverage(registry: dict) -> str:
@@ -252,6 +364,7 @@ ARTIFACTS = {
     "workflows.md": gen_workflows,
     "proof-coverage.md": gen_coverage,
     "registry.json": gen_json,
+    "workflow-goals.md": gen_workflow_goals,
 }
 
 

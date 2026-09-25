@@ -148,7 +148,8 @@ def test_schema_json_parses():
 
     schema = json.loads((Path(keyreg.SCHEMA_PATH)).read_text())
     assert schema["$id"] == "autonomy:keyreg:v1"
-    assert set(schema["properties"]) == {"version", "keys", "mutations", "purposes"}
+    assert set(schema["properties"]) == {
+        "version", "keys", "mutations", "purposes", "actors", "artifacts", "goals"}
 
 
 def test_jsonschema_agrees_when_available(registry):

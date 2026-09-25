@@ -1063,6 +1063,10 @@ mutations:
       writes:
         - registry tunnel certificate and DNS01 certificate over the same child
         - the serving key as autonomy.machine.vault.audited row serving-key.<org_uuid>; the certificates as the autonomy.machine.serve-cert row keyed by org_uuid (graph://67d0aa5f-885 D4, D5)
+    actors: [founder, joiner]
+    opens: persona
+    requires: [persona_signing_key, registry_binding, checkpoint_seed]
+    produces: [serve_cert]
     crib: ["§8"]
     notes: Organization branch; no content viewer certificate.
 
@@ -1092,6 +1096,10 @@ mutations:
         - org sync certificate per organization (persona_signing_key -> serving_machine_signing_key, scope fleet:sync, org = genesis id)
         - the complete credential sealed into autonomy.machine.vault.audited row fleet-runtime (machine store, audited tier, opened unattended by the warm delegate; graph://67d0aa5f-885 D3)
     refusals: [not-active-roster-machine, delegation-chain-invalid, machine-id-mismatch, reachability-pair-incomplete]
+    actors: [founder, joiner]
+    opens: root
+    requires: [personal_root_seed, fleet_roster, ledger_heads]
+    produces: [persona_cert_fleet_sync]
     crib: ["§10", "§12"]
     notes: >-
       Helpers: mintRuntimeCredential, mintReachabilityCert, mintOrgSyncCerts.
@@ -1111,6 +1119,10 @@ mutations:
     effects:
       mints: [agent_delegate_signing_key when absent or below thirty days remaining]
       writes: [ninety-day signed delegate event and personal audited seed on re-mint only]
+    actors: [founder, joiner]
+    opens: persona
+    requires: [persona_signing_key, ledger_heads]
+    produces: [delegate_grant]
     crib: ["§7", "§11"]
     notes: A reuse sign-in adds no ledger event. Workflow graph://b437ecfb-e23.
 
@@ -1295,6 +1307,306 @@ mutations:
       - {framework: tamarin, theory: VaultRecoverySuccession, lemma: veto_blocks_completion}
       - {framework: tamarin, theory: VaultWitnessAccountability, lemma: poll_yields_alert_or_fraud_proof}
 
+
+  # ── Invite -> join -> admission -> sync (graph://cde6c8c6-041) ────────────
+  # Every entry below carries the machine-evaluable workflow fields (actors,
+  # opens, requires, produces) the planner reads: keyreg.py plan / explain-current.
+  # Step labels F0..J7 are the ceremony record's section 1.
+
+  ceremony.org_invite_mint:
+    source: {kind: ceremony, file: tools/dashboard/static/js/ceremony/org-invite.js, symbol: mintOrgInvite}
+    authority: [persona_signing_key]
+    preconditions:
+      - Parents are the founder's current heads (GET /api/network/ledger/heads).
+    effects:
+      writes:
+        - "invite event {granted_role, expiry, sponsor, token_hash|invite_pub, max_uses?} appended through POST /api/network/ledger/invite"
+    actors: [founder]
+    opens: persona
+    requires: [persona_signing_key, ledger_heads]
+    produces: [invite_event]
+    crib: ["§8"]
+    notes: >-
+      Step F1. Root opened at tools/dashboard/static/js/org-membership.js:861;
+      the seed is zeroed at :886 after the publish chain settles, and is not
+      passed to publishMint (:1008), so F2 opens the root again.
+
+  approval.link_publish:
+    source: {kind: ceremony, file: tools/dashboard/static/js/pages/worktrees.js, symbol: signOnWithRootSeed}
+    authority: [personal_root_seed]
+    preconditions:
+      - A pending link_publish approval row {org, target_uuid, target_type org:join, invite_ref, expires_at, meta} (org-membership.js:1008-1030).
+    effects:
+      writes: [approved link_publish decision; Gate 2 org-scoped sign-on]
+    actors: [founder]
+    opens: root
+    requires: [personal_root_seed, invite_event]
+    produces: [link_publish_approval]
+    crib: ["§8"]
+    notes: >-
+      Step F2 (Gate 2, worktrees.js:173-203, :267). The root is opened for the
+      approval, not reused from F1.
+
+  route.link_publish:
+    source: {kind: route, file: tools/dashboard/link_approvals.py, symbol: _execute_link_publish}
+    authority: [agent_delegate_signing_key]
+    preconditions:
+      - Serving must be startable for the org (link_approvals.py:_require_startable_serving).
+    effects:
+      writes:
+        - "grant row {grant_id, target_uuid, target_type, meta, subject, issued_at, channel_pub, invite_ref}, relay create-link, invite bearer (POST ledger/invite/bearer)"
+    actors: [founder]
+    opens: delegate
+    requires: [agent_delegate_signing_key, link_publish_approval, serve_cert]
+    produces: [join_link_grant]
+    crib: ["§8"]
+    notes: Step F2, executor half. The channel key is minted by link.mint_channel_key.
+
+  route.invite_resolve:
+    source: {kind: route, file: tools/dashboard/network_routes.py, symbol: post_invite_resolve}
+    authority: [bearer of the org:join link]
+    effects:
+      writes:
+        - "nothing durable; returns {org, invite_ref} from the registry envelope"
+    actors: [joiner]
+    opens: none
+    requires: [join_link_grant]
+    produces: [invite_ref_resolved]
+    crib: ["§8"]
+    notes: Step J1.
+
+  route.join_context:
+    source: {kind: route, file: tools/dashboard/claim_service.py, symbol: context}
+    authority: [bearer of the org:join link]
+    preconditions:
+      - Served by the founder's connector over the link channel; the founder machine must be online (link_serving.py:1007-1033).
+    effects:
+      writes:
+        - "nothing durable; returns {genesis_id, heads, max_hlc, granted_role, binding, invite_expiry, sponsor_pub, brand, sponsor profile}"
+    actors: [founder]
+    opens: none
+    requires: [invite_ref_resolved, invite_event]
+    produces: [join_context]
+    crib: ["§8"]
+    notes: Step J2. Executes on the founder's machine.
+
+  ceremony.member_claim_mint:
+    source: {kind: ceremony, file: tools/dashboard/static/js/ceremony/claim.js, symbol: mintMemberClaim}
+    authority: [persona_signing_key]
+    preconditions:
+      - Parents are the context heads (claim.js:234-247); a submit whose parents are not the founder's current heads is refused stale-heads (claim_service.py:170-171).
+    effects:
+      writes:
+        - "member.claim {invite_ref, persona_pub, profile, approvals, kem_credential, token?}"
+    actors: [joiner]
+    opens: persona
+    requires: [persona_signing_key, join_context]
+    produces: [member_claim]
+    crib: ["§8"]
+    notes: Step J3.
+
+  route.claim_submit_admit:
+    source: {kind: route, file: tools/dashboard/claim_service.py, symbol: submit}
+    authority: [invited persona key]
+    effects:
+      writes: [member.claim appended to the founder's ledger (claim_service.py:172-175)]
+    actors: [founder]
+    opens: none
+    requires:
+      - any:
+          - all: [member_claim, policy_self_admit]
+          - member_claim_final
+    produces: [member_admitted]
+    crib: ["§8"]
+    notes: >-
+      Steps J3 and J4, submit half, on the founder's machine. No checkpoint
+      code runs here (claim_service.py, link_serving.py).
+
+  route.claim_submit_stage:
+    source: {kind: route, file: tools/dashboard/claim_service.py, symbol: submit}
+    authority: [invited persona key]
+    effects:
+      writes:
+        - "pending claim staged (claim_service.py:189-193); returns pending {have, need}"
+    actors: [founder]
+    opens: none
+    requires:
+      - all: [member_claim, policy_approval]
+    produces: [claim_staged]
+    crib: ["§8"]
+    notes: Step J3 under a role whose policy requires approvals.
+
+  ceremony.claim_approval:
+    source: {kind: ceremony, file: tools/dashboard/static/js/ceremony/claim.js, symbol: signClaimApproval}
+    authority: [persona_signing_key]
+    effects:
+      writes:
+        - "approval stored against the staged claim (POST /api/network/ledger/claim/{key}/approval, network_routes.py:post_ledger_claim_approval); the claim becomes ready, not admitted"
+    actors: [founder]
+    opens: persona
+    requires: [persona_signing_key, claim_staged]
+    produces: [claim_approval]
+    crib: ["§8"]
+    notes: Step F3. Root opened at org-membership.js:1082.
+
+  ceremony.claim_finalize:
+    source: {kind: ceremony, file: tools/dashboard/static/js/join/accept-controller.js, symbol: finalize}
+    authority: [persona_signing_key]
+    effects:
+      writes: [member.claim re-minted at the pinned position carrying the approvals (accept-controller.js:270-319)]
+    actors: [joiner]
+    opens: persona
+    requires: [persona_signing_key, claim_approval]
+    produces: [member_claim_final]
+    crib: ["§8"]
+    notes: Step J4.
+
+  route.admit_on_approval:
+    status: designed
+    rule: admit_on_approval
+    source: {kind: route, file: tools/dashboard/claim_service.py, symbol: countersign}
+    authority: [persona_signing_key]
+    effects:
+      writes: [the staged claim appended with the approval, in the approver's window]
+    actors: [founder]
+    opens: persona
+    requires: [persona_signing_key, claim_staged]
+    produces: [claim_approval, member_admitted]
+    crib: ["§8"]
+    notes: >-
+      Proposed consolidation F3+F4 (graph://cde6c8c6-041 §5): admission at
+      countersign, so the checkpoint can run in the same window. Not built.
+
+  route.join_bootstrap:
+    source: {kind: route, file: tools/dashboard/claim_service.py, symbol: bootstrap}
+    authority: [admitted persona]
+    preconditions:
+      - The fold must show the persona as a valid member; otherwise pending (claim_service.py:228-231).
+    effects:
+      writes:
+        - "nothing durable; returns {events, more, binding, member_profiles, reachability_rows, brand} as of this moment (claim_service.py:233-235)"
+    actors: [founder]
+    opens: none
+    requires: [member_admitted]
+    produces: [bootstrap_snapshot]
+    crib: ["§8"]
+    notes: Step J5, served half, on the founder's machine.
+
+  route.join_install:
+    source: {kind: route, file: tools/dashboard/network_routes.py, symbol: post_join_outcome}
+    authority: [admitted persona]
+    effects:
+      writes: [org DB, ledger re-folded from genesis, binding, persona row, directory row, install seed (profiles only)]
+    actors: [joiner]
+    opens: none
+    requires: [bootstrap_snapshot]
+    produces: [ledger_heads, registry_binding]
+    crib: ["§8"]
+    notes: >-
+      Step J5. Does not produce install_seed_addresses: network-join.js
+      (installAdmitted, :313-327) does not forward reachability_rows although
+      the route reads them (network_routes.py:938-943). Deferred here
+      (:804-805): storage delegate, serve cert, fleet runtime, sync cert.
+
+  ceremony.checkpoint_publish:
+    source: {kind: ceremony, file: tools/dashboard/membership_checkpoint.py, symbol: checkpoint_due}
+    authority: [persona_signing_key]
+    preconditions:
+      - The signer is in the checkpointers set of the previously adopted checkpoint (membership_checkpoint.py:139-149).
+      - ledger_head is the signer's first sorted head at assembly (membership_checkpoint.py:106, _first_head).
+    effects:
+      writes:
+        - "checkpoint {v, org, seq, prev, ledger_head, members_root, checkpointers_root, ts, signer, proof, proof_index} at the registry (network_routes.py:post_membership_checkpoint); the signer caches it adopted"
+    actors: [founder]
+    opens: persona
+    requires: [persona_signing_key, member_admitted, ledger_heads, checkpoint_seed]
+    produces: [checkpoint_including_joiner, adopted_checkpoint]
+    crib: ["§8"]
+    notes: >-
+      Step F4. Only callers: full sign-in (signon_preparation.py:125-133) and
+      the scoped sign-on (network-signon.mjs:1560-1577). Nothing publishes at
+      admission.
+
+  ceremony.checkpoint_delegate_grant:
+    status: designed
+    rule: delegate_checkpoint
+    source: {kind: ceremony, file: tools/network/storagekit/delegate.py, symbol: storage_delegate_scopes}
+    authority: [persona_signing_key]
+    effects:
+      writes: [a hot delegate grant carrying a checkpoint scope]
+    actors: [founder]
+    opens: persona
+    requires: [persona_signing_key, ledger_heads]
+    produces: [checkpoint_delegate_grant]
+    crib: ["§8", "§11"]
+    notes: >-
+      Not built: the storage delegate's scopes exclude checkpoint today
+      (storagekit/delegate.py:storage_delegate_scopes). Accepting this scope
+      is an operator policy decision (graph://cde6c8c6-041 §4).
+
+  delegate.checkpoint_publish:
+    status: designed
+    rule: delegate_checkpoint
+    source: {kind: module-op, file: tools/dashboard/membership_checkpoint.py, symbol: checkpoint_due}
+    authority: [agent_delegate_signing_key]
+    effects:
+      writes: [advancing checkpoint signed by the checkpoint-scoped delegate at admission, no ceremony]
+    actors: [founder]
+    opens: delegate
+    requires: [agent_delegate_signing_key, checkpoint_delegate_grant, member_admitted, ledger_heads, checkpoint_seed]
+    produces: [checkpoint_including_joiner, adopted_checkpoint]
+    crib: ["§8", "§11"]
+    notes: Proposed rule Checkpoint-at-admission with a hot signer. Not built.
+
+  route.checkpoint_adopt:
+    source: {kind: route, file: tools/dashboard/network_routes.py, symbol: _adopt_registry_checkpoint}
+    authority: [registry membership state; this node's own ledger]
+    preconditions:
+      - Skip when the cached seq >= the registry seq (network_routes.py:756-758).
+      - Fold the local ledger at the registry's ledger_head and require members_root equality; an id the local ledger lacks raises in ancestry/get and nothing is adopted (network_routes.py:759-768, fold.py:499-500, ledger.py:36-42, 66-77).
+    effects:
+      writes: [adopted checkpoint cache row (membership_checkpoint.py:record_adopted)]
+    refusals: [no registry binding, registry unreachable, head absent from the local ledger, members_root mismatch]
+    actors: [joiner]
+    opens: none
+    requires: [checkpoint_including_joiner, ledger_heads]
+    produces: [adopted_checkpoint]
+    crib: ["§8"]
+    notes: >-
+      Never signs (docstring, network_routes.py:724-733). Callers: join
+      install (:945), sign-on preparation (signon_preparation.py:140), and the
+      route POST /api/network/membership-checkpoint/adopt; no background
+      caller. The head-presence precondition is not monotone and is not
+      expressed in requires; OrgAdmission.tla models it.
+
+  route.relay_connect:
+    source: {kind: module-op, file: tools/network/relaykit/connector.py, symbol: TunnelConnector}
+    authority: [serving_delegate_key]
+    effects:
+      writes: [a live serving slot at the org's relay]
+    actors: [founder, joiner]
+    opens: none
+    requires: [serve_cert]
+    produces: [relay_slot]
+    crib: ["§8"]
+    notes: >-
+      Slots are read for peer selection through
+      org_sync_channels.relay_slots_provider. Whether the relay's per-org
+      serve_machine_keys allow-set admits a new member's machine is an open
+      question (relay.py:973-1000, store.py:1576-1583); unproven.
+
+  module.org_reachability_publish:
+    source: {kind: module-op, file: tools/network/fleet_sync_scheduler.py, symbol: _publish_org_reachability}
+    authority: [serving_machine_signing_key]
+    effects:
+      writes: [the machine's reachability row in the org scope, replicated by org sync]
+    actors: [founder, joiner]
+    opens: none
+    requires: [persona_cert_fleet_sync]
+    produces: [reachability_row]
+    crib: ["§10"]
+    notes: A co-member reads the row only after a pull, so it cannot seed a first contact.
+
 purposes:
   autonomy/capability-grant/v1:
     description: Seals a generation secret to a PersonaKemCredential in a CapabilityGrant.
@@ -1401,3 +1713,249 @@ purposes:
   autonomy/personal-vault/revision-id/v1:
     description: Derives a personal vault object's revision identifier.
     used_by: [tools/vault/personal_object.py]
+
+# ── Workflow planning: actors, artifacts, goals ─────────────────────────────
+# The org invite -> join -> admission -> sync workflow of graph://cde6c8c6-041,
+# as an AND/OR graph over artifacts. keyreg.py plan / explain-current read it;
+# lint.py checks the recorded current order against it. A per-actor artifact
+# referenced bare in a mutation binds to the executing actor; elsewhere it is
+# written <artifact>@<actor>.
+actors:
+  founder:
+    description: The org's founding member; sponsor of the invite and the only checkpointer in this workflow.
+  joiner:
+    description: The invited member, on a machine with its own personal fleet.
+
+artifacts:
+  ledger_heads:
+    per_actor: true
+    description: The actor's copy of the org ledger and its current heads (founder_heads, joiner_heads).
+    store: autonomy.org.ledger-event#1 rows in the org DB
+    home: the actor's machine
+    code: [tools/network/ledger/settings_bridge.py, tools/network/ledger/ledger.py:heads]
+  registry_binding:
+    per_actor: true
+    description: The org's registry binding {org_uuid, root key, registry_url}.
+    store: NETWORK_BINDING_SET_ID Setting
+    home: the actor's machine
+    code: [tools/graph/schemas/network_identity.py:NETWORK_BINDING_SET_ID]
+  checkpoint_seed:
+    description: Registry membership checkpoint seq 0, signed by the org root.
+    store: registry /v1/orgs/{uuid}/membership-checkpoints
+    home: registry
+    code: [tools/dashboard/membership_checkpoint.py:checkpoint_due]
+  serve_cert:
+    per_actor: true
+    description: The actor's persona-signed serving certificate and key.
+    store: autonomy.machine.serve-cert row; serving key in autonomy.machine.vault.audited
+    home: the actor's machine
+    code: [tools/dashboard/network_routes.py:_post_serve_cert_v3]
+  relay_slot:
+    per_actor: true
+    description: A live serving slot of the actor's connector at the org's relay.
+    store: relay memory
+    home: relay
+    code: [tools/dashboard/org_sync_channels.py:relay_slots_provider]
+  fleet_roster:
+    per_actor: true
+    description: A personal fleet roster entry for the actor's machine; required by the runtime mint (fleet_enrollment_routes.py:_runtime_context).
+    store: personal fleet roster
+    home: the actor's machine
+    code: [tools/dashboard/fleet_enrollment_routes.py:_runtime_context]
+    notes: For a fresh joiner with no personal fleet, unverified (graph://cde6c8c6-041 §1 J6).
+  persona_cert_fleet_sync:
+    per_actor: true
+    description: The org sync certificate (persona -> serving machine key, scope fleet:sync) with its serving seed, installed as an OrgFleetAuthenticator.
+    store: memory and the machine vault
+    home: the actor's machine
+    code: [tools/dashboard/fleet_enrollment_routes.py:_activate_runtime, tools/network/fleet_org_channel.py:OrgFleetAuthenticator]
+  delegate_grant:
+    per_actor: true
+    description: The actor's storage delegate event, persona-signed, parents = local heads.
+    store: the actor's org ledger and audited vault
+    home: the actor's machine
+    code: [tools/dashboard/org_storage_delegate.py:accept]
+    notes: Not read by _sync_org_peers; whether a pull needs it is unproven.
+  invite_event:
+    description: The persona-signed invite event.
+    store: founder's org ledger
+    home: founder machine
+    code: [tools/network/ledger/events.py:_v_invite, tools/dashboard/static/js/ceremony/org-invite.js:mintOrgInvite]
+  link_publish_approval:
+    description: The approved link_publish decision with its Gate 2 org-scoped sign-on.
+    store: approvals table
+    home: founder machine
+    code: [tools/dashboard/link_approvals.py:_org_join_request]
+  join_link_grant:
+    description: The org:join grant row, the relay link and the stored invite bearer.
+    store: founder org Settings; relay
+    home: founder machine and relay
+    code: [tools/dashboard/link_approvals.py:_execute_link_publish]
+  invite_ref_resolved:
+    description: "{org, invite_ref} resolved from the registry envelope of the link."
+    store: joiner browser memory
+    home: joiner machine
+    code: [tools/dashboard/network_routes.py:post_invite_resolve]
+  join_context:
+    description: The claim context served by the founder's connector (genesis_id, heads, granted_role, binding, sponsor).
+    store: joiner browser memory
+    home: joiner machine
+    code: [tools/dashboard/claim_service.py:context]
+  member_claim:
+    description: The persona-signed member.claim event.
+    store: joiner browser memory until submitted
+    home: joiner machine
+    code: [tools/dashboard/static/js/ceremony/claim.js:mintMemberClaim, tools/network/ledger/events.py:_v_member_claim]
+  claim_staged:
+    description: A claim staged pending approvals.
+    store: founder's pending-claim store
+    home: founder machine
+    code: [tools/dashboard/claim_service.py:submit]
+  claim_approval:
+    description: The founder's countersignature on a staged claim.
+    store: founder's pending-claim store
+    home: founder machine
+    code: [tools/dashboard/static/js/ceremony/claim.js:signClaimApproval, tools/dashboard/claim_service.py:countersign]
+  member_claim_final:
+    description: The claim re-minted at the pinned position carrying the approvals.
+    store: joiner browser memory until submitted
+    home: joiner machine
+    code: [tools/dashboard/static/js/join/accept-controller.js:finalize]
+  member_admitted:
+    description: The claim appended to the founder's ledger.
+    store: founder's org ledger
+    home: founder machine
+    code: [tools/dashboard/claim_service.py:submit]
+  bootstrap_snapshot:
+    description: The founder's ledger events, binding and profiles as of the bootstrap moment.
+    store: joiner browser memory
+    home: joiner machine
+    code: [tools/dashboard/claim_service.py:bootstrap]
+  install_seed_addresses:
+    description: Co-member addresses in the joiner's install seed.
+    store: joiner install seed
+    home: joiner machine
+    code: [tools/dashboard/org_install_seed.py:seed_reachability]
+    notes: No built producer; the join page does not forward reachability_rows (network-join.js:313-327).
+  checkpoint_including_joiner:
+    description: A registry checkpoint seq n+1 whose members_root includes the joiner (checkpoint_seq_n).
+    store: registry /v1/orgs/{uuid}/membership-checkpoints
+    home: registry
+    code: [tools/dashboard/network_routes.py:post_membership_checkpoint]
+  adopted_checkpoint:
+    per_actor: true
+    description: The actor's adopted-checkpoint cache holds a checkpoint including the joiner (adopted_checkpoint_founder, adopted_checkpoint_joiner).
+    store: NETWORK_CHECKPOINT_CACHE_SET_ID row
+    home: the actor's machine
+    code: [tools/dashboard/membership_checkpoint.py:record_adopted]
+  reachability_row:
+    per_actor: true
+    description: The actor machine's signed reachability row in the org scope.
+    store: org scope Settings, replicated by org sync
+    home: the actor's machine; co-members after a pull
+    code: [tools/network/fleet_sync_scheduler.py:_publish_org_reachability]
+  registered_serving_key:
+    per_actor: true
+    description: The actor's serving machine key in the registry's per-org serve_machine_keys allow-set.
+    store: registry store
+    home: registry
+    code: [tools/network/registry/backfill_serving_keys.py]
+    notes: >-
+      Enforced only when the set is non-empty (relay.py:973-1000,
+      store.py:1576-1583); the only writer in the tree is this backfill.
+      Whether any live org's set is non-empty is an open question; the goal
+      does not require it.
+  policy_self_admit:
+    description: The invite's role admits a claim without approvals.
+    store: founder's org ledger (role definition)
+    home: founder machine
+    code: [tools/dashboard/claim_service.py:R_APPROVAL_MISSING]
+  policy_approval:
+    description: The invite's role requires approvals before admission.
+    store: founder's org ledger (role definition)
+    home: founder machine
+    code: [tools/dashboard/claim_service.py:R_APPROVAL_MISSING]
+  checkpoint_delegate_grant:
+    status: designed
+    description: A hot delegate grant whose scope includes signing advancing checkpoints.
+    store: founder's org ledger and audited vault
+    home: founder machine
+    code: [tools/network/storagekit/delegate.py:storage_delegate_scopes]
+
+goals:
+  org_sync_pull:
+    description: >-
+      Founder and joiner can each pull the other over org sync: both hold an
+      org channel (sync certificate + serving seed), both have adopted a
+      checkpoint whose members_root includes the joiner (the verifier admits
+      a pull only under an adopted seq with inclusion, fleet_org_channel.py:
+      286-309), the joiner holds the org ledger, and the joiner has a route to
+      the founder (the founder reaches the joiner through its dial-in).
+    requires:
+      - persona_cert_fleet_sync@founder
+      - persona_cert_fleet_sync@joiner
+      - adopted_checkpoint@founder
+      - adopted_checkpoint@joiner
+      - ledger_heads@joiner
+      - any:
+          - install_seed_addresses
+          - all: [relay_slot@joiner, relay_slot@founder]
+    notes: >-
+      Peer selection sources (fleet_sync_scheduler.py:_org_peer_candidates):
+      reachability rows (need a prior pull), install seed, relay slots through
+      the dialer's own connector, dialed-in peers. The founder-pulls-joiner
+      direction riding the joiner's dial-in is taken from the record, not
+      re-traced. The single-joiner AND/OR graph cannot express head presence
+      at adoption; OrgAdmission.tla carries that.
+    states:
+      self_admit:
+        description: Founded org (F0 done), invite role self-admits.
+        holds:
+          - ledger_heads@founder
+          - registry_binding@founder
+          - checkpoint_seed
+          - serve_cert@founder
+          - relay_slot@founder
+          - persona_cert_fleet_sync@founder
+          - fleet_roster@founder
+          - fleet_roster@joiner
+          - policy_self_admit
+      approval:
+        description: Founded org (F0 done), invite role requires the founder's approval.
+        holds:
+          - ledger_heads@founder
+          - registry_binding@founder
+          - checkpoint_seed
+          - serve_cert@founder
+          - relay_slot@founder
+          - persona_cert_fleet_sync@founder
+          - fleet_roster@founder
+          - fleet_roster@joiner
+          - policy_approval
+    current_order:
+      - {step: F1, actor: founder, ceremony: true, runs: [ceremony.org_invite_mint]}
+      - {step: F2, actor: founder, ceremony: true, runs: [approval.link_publish, route.link_publish]}
+      - {step: J1, actor: joiner, ceremony: false, runs: [route.invite_resolve]}
+      - {step: J2, actor: founder, ceremony: false, runs: [route.join_context]}
+      - {step: J3, actor: joiner, ceremony: true, runs: [ceremony.member_claim_mint]}
+      - {step: J3.submit, actor: founder, ceremony: false, runs: [route.claim_submit_admit], only_from: [self_admit]}
+      - {step: J3.stage, actor: founder, ceremony: false, runs: [route.claim_submit_stage], only_from: [approval]}
+      - {step: F3, actor: founder, ceremony: true, runs: [ceremony.claim_approval], only_from: [approval]}
+      - {step: J4, actor: joiner, ceremony: true, runs: [ceremony.claim_finalize], only_from: [approval]}
+      - {step: J4.submit, actor: founder, ceremony: false, runs: [route.claim_submit_admit], only_from: [approval]}
+      - {step: J5.serve, actor: founder, ceremony: false, runs: [route.join_bootstrap]}
+      - {step: J5, actor: joiner, ceremony: false, runs: [route.join_install, route.checkpoint_adopt]}
+      - {step: J6, actor: joiner, ceremony: true, runs: [route.checkpoint_adopt, ceremony.organization_storage_delegate, ceremony.serve_cert_mint, ceremony.fleet_runtime_mint]}
+      - {step: J6.connect, actor: joiner, ceremony: false, runs: [route.relay_connect]}
+      - {step: F4, actor: founder, ceremony: true, runs: [ceremony.checkpoint_publish]}
+      - {step: J6.repeat, actor: joiner, ceremony: true, runs: [route.checkpoint_adopt, ceremony.organization_storage_delegate, ceremony.serve_cert_mint, ceremony.fleet_runtime_mint]}
+    known_defects:
+      - {step: J5, mutation: route.checkpoint_adopt, missing: checkpoint_including_joiner, ref: "graph://cde6c8c6-041 §1 J5 (network_routes.py:945)"}
+      - {step: J6, mutation: route.checkpoint_adopt, missing: checkpoint_including_joiner, ref: "graph://cde6c8c6-041 §3 (J6 repeat)"}
+      - {artifact: install_seed_addresses, ref: "graph://cde6c8c6-041 §5 J5 reachability seed (network-join.js:313-327)"}
+    scenarios:
+      - {from: self_admit, rules: [], current: {founder: 3, joiner: 3}, minimal: {founder: 2, joiner: 1}}
+      - {from: approval, rules: [], current: {founder: 4, joiner: 4}, minimal: {founder: 3, joiner: 2}}
+      - {from: approval, rules: [admit_on_approval], current: {founder: 4, joiner: 4}, minimal: {founder: 2, joiner: 2}}
+      - {from: self_admit, rules: [delegate_checkpoint], current: {founder: 3, joiner: 3}, minimal: {founder: 1, joiner: 1}}
+      - {from: approval, rules: [admit_on_approval, delegate_checkpoint], current: {founder: 4, joiner: 4}, minimal: {founder: 2, joiner: 2}}

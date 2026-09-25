@@ -9,11 +9,18 @@ See the [reading guide](../GUIDE.md) and [key register](key-register.md).
 
 ## Find a workflow
 
+- [approval.link_publish](#workflow-approval-link_publish)
 - [armor.enroll_factor](#workflow-armor-enroll_factor)
 - [armor.replace_recovery_slot](#workflow-armor-replace_recovery_slot)
 - [armor.revoke_factor](#workflow-armor-revoke_factor)
 - [armor.set_recovery](#workflow-armor-set_recovery)
+- [ceremony.checkpoint_delegate_grant](#workflow-ceremony-checkpoint_delegate_grant)
+- [ceremony.checkpoint_publish](#workflow-ceremony-checkpoint_publish)
+- [ceremony.claim_approval](#workflow-ceremony-claim_approval)
+- [ceremony.claim_finalize](#workflow-ceremony-claim_finalize)
 - [ceremony.fleet_runtime_mint](#workflow-ceremony-fleet_runtime_mint)
+- [ceremony.member_claim_mint](#workflow-ceremony-member_claim_mint)
+- [ceremony.org_invite_mint](#workflow-ceremony-org_invite_mint)
 - [ceremony.organization_grant_recovery](#workflow-ceremony-organization_grant_recovery)
 - [ceremony.organization_storage_delegate](#workflow-ceremony-organization_storage_delegate)
 - [ceremony.personal_serve_cert_mint](#workflow-ceremony-personal_serve_cert_mint)
@@ -21,6 +28,7 @@ See the [reading guide](../GUIDE.md) and [key register](key-register.md).
 - [ceremony.registration](#workflow-ceremony-registration)
 - [ceremony.serve_cert_mint](#workflow-ceremony-serve_cert_mint)
 - [ceremony.vault_master_read](#workflow-ceremony-vault_master_read)
+- [delegate.checkpoint_publish](#workflow-delegate-checkpoint_publish)
 - [fleet.distribute_kem](#workflow-fleet-distribute_kem)
 - [fleet.enroll](#workflow-fleet-enroll)
 - [fleet.kick](#workflow-fleet-kick)
@@ -37,11 +45,22 @@ See the [reading guide](../GUIDE.md) and [key register](key-register.md).
 - [fold.role_grant](#workflow-fold-role_grant)
 - [fold.role_revoke](#workflow-fold-role_revoke)
 - [link.mint_channel_key](#workflow-link-mint_channel_key)
+- [module.org_reachability_publish](#workflow-module-org_reachability_publish)
 - [passkey.enroll](#workflow-passkey-enroll)
 - [passkey.revoke](#workflow-passkey-revoke)
 - [recovery.succession](#workflow-recovery-succession)
 - [rekey.frontier_marker](#workflow-rekey-frontier_marker)
 - [root.rotation](#workflow-root-rotation)
+- [route.admit_on_approval](#workflow-route-admit_on_approval)
+- [route.checkpoint_adopt](#workflow-route-checkpoint_adopt)
+- [route.claim_submit_admit](#workflow-route-claim_submit_admit)
+- [route.claim_submit_stage](#workflow-route-claim_submit_stage)
+- [route.invite_resolve](#workflow-route-invite_resolve)
+- [route.join_bootstrap](#workflow-route-join_bootstrap)
+- [route.join_context](#workflow-route-join_context)
+- [route.join_install](#workflow-route-join_install)
+- [route.link_publish](#workflow-route-link_publish)
+- [route.relay_connect](#workflow-route-relay_connect)
 - [storage.advance_state](#workflow-storage-advance_state)
 - [storage.issue_grant](#workflow-storage-issue_grant)
 - [storage.issue_receipt](#workflow-storage-issue_receipt)
@@ -49,6 +68,29 @@ See the [reading guide](../GUIDE.md) and [key register](key-register.md).
 - [storage.provision_missing](#workflow-storage-provision_missing)
 - [vault.create_class](#workflow-vault-create_class)
 - [vault.revoke_class_factor](#workflow-vault-revoke_class_factor)
+
+<a id="workflow-approval-link_publish"></a>
+## approval.link_publish
+
+**Status:** built
+
+**Authority:** personal_root_seed
+
+**Preconditions**
+
+- A pending link_publish approval row {org, target_uuid, target_type org:join, invite_ref, expires_at, meta} (org-membership.js:1008-1030).
+
+**Writes**
+
+- approved link_publish decision; Gate 2 org-scoped sign-on
+
+**Workflow:** actors founder; opens root; requires personal_root_seed AND invite_event; produces link_publish_approval
+
+**Source:** `tools/dashboard/static/js/pages/worktrees.js:signOnWithRootSeed` (ceremony)
+
+**Crib:** §8
+
+Step F2 (Gate 2, worktrees.js:173-203, :267). The root is opened for the approval, not reused from F1.
 
 <a id="workflow-armor-enroll_factor"></a>
 ## armor.enroll_factor
@@ -135,6 +177,87 @@ Built at the armor layer; exposed by no route or UI yet.
 
 **Crib:** §9
 
+<a id="workflow-ceremony-checkpoint_delegate_grant"></a>
+## ceremony.checkpoint_delegate_grant
+
+**Status:** designed
+
+**Authority:** persona_signing_key
+
+**Writes**
+
+- a hot delegate grant carrying a checkpoint scope
+
+**Workflow:** actors founder; opens persona; requires persona_signing_key AND ledger_heads; produces checkpoint_delegate_grant; rule delegate_checkpoint
+
+**Source:** `tools/network/storagekit/delegate.py:storage_delegate_scopes` (ceremony)
+
+**Crib:** §8, §11
+
+Not built: the storage delegate's scopes exclude checkpoint today (storagekit/delegate.py:storage_delegate_scopes). Accepting this scope is an operator policy decision (graph://cde6c8c6-041 §4).
+
+<a id="workflow-ceremony-checkpoint_publish"></a>
+## ceremony.checkpoint_publish
+
+**Status:** built
+
+**Authority:** persona_signing_key
+
+**Preconditions**
+
+- The signer is in the checkpointers set of the previously adopted checkpoint (membership_checkpoint.py:139-149).
+- ledger_head is the signer's first sorted head at assembly (membership_checkpoint.py:106, _first_head).
+
+**Writes**
+
+- checkpoint {v, org, seq, prev, ledger_head, members_root, checkpointers_root, ts, signer, proof, proof_index} at the registry (network_routes.py:post_membership_checkpoint); the signer caches it adopted
+
+**Workflow:** actors founder; opens persona; requires persona_signing_key AND member_admitted AND ledger_heads AND checkpoint_seed; produces checkpoint_including_joiner, adopted_checkpoint
+
+**Source:** `tools/dashboard/membership_checkpoint.py:checkpoint_due` (ceremony)
+
+**Crib:** §8
+
+Step F4. Only callers: full sign-in (signon_preparation.py:125-133) and the scoped sign-on (network-signon.mjs:1560-1577). Nothing publishes at admission.
+
+<a id="workflow-ceremony-claim_approval"></a>
+## ceremony.claim_approval
+
+**Status:** built
+
+**Authority:** persona_signing_key
+
+**Writes**
+
+- approval stored against the staged claim (POST /api/network/ledger/claim/{key}/approval, network_routes.py:post_ledger_claim_approval); the claim becomes ready, not admitted
+
+**Workflow:** actors founder; opens persona; requires persona_signing_key AND claim_staged; produces claim_approval
+
+**Source:** `tools/dashboard/static/js/ceremony/claim.js:signClaimApproval` (ceremony)
+
+**Crib:** §8
+
+Step F3. Root opened at org-membership.js:1082.
+
+<a id="workflow-ceremony-claim_finalize"></a>
+## ceremony.claim_finalize
+
+**Status:** built
+
+**Authority:** persona_signing_key
+
+**Writes**
+
+- member.claim re-minted at the pinned position carrying the approvals (accept-controller.js:270-319)
+
+**Workflow:** actors joiner; opens persona; requires persona_signing_key AND claim_approval; produces member_claim_final
+
+**Source:** `tools/dashboard/static/js/join/accept-controller.js:finalize` (ceremony)
+
+**Crib:** §8
+
+Step J4.
+
 <a id="workflow-ceremony-fleet_runtime_mint"></a>
 ## ceremony.fleet_runtime_mint
 
@@ -167,11 +290,59 @@ Built at the armor layer; exposed by no route or UI yet.
 - machine-id-mismatch
 - reachability-pair-incomplete
 
+**Workflow:** actors founder, joiner; opens root; requires personal_root_seed AND fleet_roster AND ledger_heads; produces persona_cert_fleet_sync
+
 **Source:** `tools/dashboard/static/js/ceremony/fleet-enrollment.js:mintFleetRuntimeCredential` (ceremony)
 
 **Crib:** §10, §12
 
 Helpers: mintRuntimeCredential, mintReachabilityCert, mintOrgSyncCerts. One mint, two call sites (sign-on and first publication) through fleetRuntimePost since b3e67994. The payload is POSTed to /api/fleet/runtime (fleet_enrollment_routes._activate_runtime), which verifies it, peels the serving seeds and org sync certificates, installs the org channels, arms every connector cache, and caches the whole payload in ramfs for replay after a restart; a reboot clears ramfs and fails closed to a sign-on. Recorded 2026-09-20 after the three certificates were found absent from this registry (keyreg-forensics.md, session auto-0919-212441).
+
+<a id="workflow-ceremony-member_claim_mint"></a>
+## ceremony.member_claim_mint
+
+**Status:** built
+
+**Authority:** persona_signing_key
+
+**Preconditions**
+
+- Parents are the context heads (claim.js:234-247); a submit whose parents are not the founder's current heads is refused stale-heads (claim_service.py:170-171).
+
+**Writes**
+
+- member.claim {invite_ref, persona_pub, profile, approvals, kem_credential, token?}
+
+**Workflow:** actors joiner; opens persona; requires persona_signing_key AND join_context; produces member_claim
+
+**Source:** `tools/dashboard/static/js/ceremony/claim.js:mintMemberClaim` (ceremony)
+
+**Crib:** §8
+
+Step J3.
+
+<a id="workflow-ceremony-org_invite_mint"></a>
+## ceremony.org_invite_mint
+
+**Status:** built
+
+**Authority:** persona_signing_key
+
+**Preconditions**
+
+- Parents are the founder's current heads (GET /api/network/ledger/heads).
+
+**Writes**
+
+- invite event {granted_role, expiry, sponsor, token_hash|invite_pub, max_uses?} appended through POST /api/network/ledger/invite
+
+**Workflow:** actors founder; opens persona; requires persona_signing_key AND ledger_heads; produces invite_event
+
+**Source:** `tools/dashboard/static/js/ceremony/org-invite.js:mintOrgInvite` (ceremony)
+
+**Crib:** §8
+
+Step F1. Root opened at tools/dashboard/static/js/org-membership.js:861; the seed is zeroed at :886 after the publish chain settles, and is not passed to publishMint (:1008), so F2 opens the root again.
 
 <a id="workflow-ceremony-organization_grant_recovery"></a>
 ## ceremony.organization_grant_recovery
@@ -204,6 +375,8 @@ graph://35308bf7-584. Organization sign-in validates scoped KEM keys against cur
 **Writes**
 
 - ninety-day signed delegate event and personal audited seed on re-mint only
+
+**Workflow:** actors founder, joiner; opens persona; requires persona_signing_key AND ledger_heads; produces delegate_grant
 
 **Source:** `tools/dashboard/static/js/ceremony/org-storage-delegate.js:prepareStorageDelegate` (ceremony)
 
@@ -280,6 +453,8 @@ Existing personal branch still emits viewer_cert; do not infer organization cont
 - registry tunnel certificate and DNS01 certificate over the same child
 - the serving key as autonomy.machine.vault.audited row serving-key.<org_uuid>; the certificates as the autonomy.machine.serve-cert row keyed by org_uuid (graph://67d0aa5f-885 D4, D5)
 
+**Workflow:** actors founder, joiner; opens persona; requires persona_signing_key AND registry_binding AND checkpoint_seed; produces serve_cert
+
 **Source:** `tools/dashboard/static/js/network-signon.mjs:_mintServeCredentialPersona` (ceremony)
 
 **Crib:** §8
@@ -302,6 +477,26 @@ Organization branch; no content viewer certificate.
 **Crib:** §8, §18
 
 Grant opening primitive, not a human-factor authorization or an audited-object release. Org integration remains pending.
+
+<a id="workflow-delegate-checkpoint_publish"></a>
+## delegate.checkpoint_publish
+
+**Status:** designed
+
+**Authority:** agent_delegate_signing_key
+
+**Writes**
+
+- advancing checkpoint signed by the checkpoint-scoped delegate at admission
+- no ceremony
+
+**Workflow:** actors founder; opens delegate; requires agent_delegate_signing_key AND checkpoint_delegate_grant AND member_admitted AND ledger_heads AND checkpoint_seed; produces checkpoint_including_joiner, adopted_checkpoint; rule delegate_checkpoint
+
+**Source:** `tools/dashboard/membership_checkpoint.py:checkpoint_due` (module-op)
+
+**Crib:** §8, §11
+
+Proposed rule Checkpoint-at-admission with a hot signer. Not built.
 
 <a id="workflow-fleet-distribute_kem"></a>
 ## fleet.distribute_kem
@@ -687,6 +882,26 @@ Checkpoint is decided-removed from the design vocabulary; the handler remains in
 
 **Crib:** §8
 
+<a id="workflow-module-org_reachability_publish"></a>
+## module.org_reachability_publish
+
+**Status:** built
+
+**Authority:** serving_machine_signing_key
+
+**Writes**
+
+- the machine's reachability row in the org scope
+- replicated by org sync
+
+**Workflow:** actors founder, joiner; opens none; requires persona_cert_fleet_sync; produces reachability_row
+
+**Source:** `tools/network/fleet_sync_scheduler.py:_publish_org_reachability` (module-op)
+
+**Crib:** §10
+
+A co-member reads the row only after a pull, so it cannot seed a first contact.
+
 <a id="workflow-passkey-enroll"></a>
 ## passkey.enroll
 
@@ -795,6 +1010,226 @@ Without the marker the re-key achieves nothing (the F-001 defect); the calibrati
 **Crib:** §9
 
 A local verification has no relying party (crib section 0: the owner rewriting their own store is a feature); the load-bearing checks are the registry rebind gate (tools/network/registry/app.py, which resolves the pinned recovery key server-side) and the fleet's root-signed RosterEntry acceptance (tools/network/fleet_roster.py).
+
+<a id="workflow-route-admit_on_approval"></a>
+## route.admit_on_approval
+
+**Status:** designed
+
+**Authority:** persona_signing_key
+
+**Writes**
+
+- the staged claim appended with the approval
+- in the approver's window
+
+**Workflow:** actors founder; opens persona; requires persona_signing_key AND claim_staged; produces claim_approval, member_admitted; rule admit_on_approval
+
+**Source:** `tools/dashboard/claim_service.py:countersign` (route)
+
+**Crib:** §8
+
+Proposed consolidation F3+F4 (graph://cde6c8c6-041 §5): admission at countersign, so the checkpoint can run in the same window. Not built.
+
+<a id="workflow-route-checkpoint_adopt"></a>
+## route.checkpoint_adopt
+
+**Status:** built
+
+**Authority:** registry membership state; this node's own ledger
+
+**Preconditions**
+
+- Skip when the cached seq >= the registry seq (network_routes.py:756-758).
+- Fold the local ledger at the registry's ledger_head and require members_root equality; an id the local ledger lacks raises in ancestry/get and nothing is adopted (network_routes.py:759-768, fold.py:499-500, ledger.py:36-42, 66-77).
+
+**Writes**
+
+- adopted checkpoint cache row (membership_checkpoint.py:record_adopted)
+
+**Refusals**
+
+- no registry binding
+- registry unreachable
+- head absent from the local ledger
+- members_root mismatch
+
+**Workflow:** actors joiner; opens none; requires checkpoint_including_joiner AND ledger_heads; produces adopted_checkpoint
+
+**Source:** `tools/dashboard/network_routes.py:_adopt_registry_checkpoint` (route)
+
+**Crib:** §8
+
+Never signs (docstring, network_routes.py:724-733). Callers: join install (:945), sign-on preparation (signon_preparation.py:140), and the route POST /api/network/membership-checkpoint/adopt; no background caller. The head-presence precondition is not monotone and is not expressed in requires; OrgAdmission.tla models it.
+
+<a id="workflow-route-claim_submit_admit"></a>
+## route.claim_submit_admit
+
+**Status:** built
+
+**Authority:** invited persona key
+
+**Writes**
+
+- member.claim appended to the founder's ledger (claim_service.py:172-175)
+
+**Workflow:** actors founder; opens none; requires ((member_claim AND policy_self_admit) OR member_claim_final); produces member_admitted
+
+**Source:** `tools/dashboard/claim_service.py:submit` (route)
+
+**Crib:** §8
+
+Steps J3 and J4, submit half, on the founder's machine. No checkpoint code runs here (claim_service.py, link_serving.py).
+
+<a id="workflow-route-claim_submit_stage"></a>
+## route.claim_submit_stage
+
+**Status:** built
+
+**Authority:** invited persona key
+
+**Writes**
+
+- pending claim staged (claim_service.py:189-193); returns pending {have, need}
+
+**Workflow:** actors founder; opens none; requires (member_claim AND policy_approval); produces claim_staged
+
+**Source:** `tools/dashboard/claim_service.py:submit` (route)
+
+**Crib:** §8
+
+Step J3 under a role whose policy requires approvals.
+
+<a id="workflow-route-invite_resolve"></a>
+## route.invite_resolve
+
+**Status:** built
+
+**Authority:** bearer of the org:join link
+
+**Writes**
+
+- nothing durable; returns {org, invite_ref} from the registry envelope
+
+**Workflow:** actors joiner; opens none; requires join_link_grant; produces invite_ref_resolved
+
+**Source:** `tools/dashboard/network_routes.py:post_invite_resolve` (route)
+
+**Crib:** §8
+
+Step J1.
+
+<a id="workflow-route-join_bootstrap"></a>
+## route.join_bootstrap
+
+**Status:** built
+
+**Authority:** admitted persona
+
+**Preconditions**
+
+- The fold must show the persona as a valid member; otherwise pending (claim_service.py:228-231).
+
+**Writes**
+
+- nothing durable; returns {events, more, binding, member_profiles, reachability_rows, brand} as of this moment (claim_service.py:233-235)
+
+**Workflow:** actors founder; opens none; requires member_admitted; produces bootstrap_snapshot
+
+**Source:** `tools/dashboard/claim_service.py:bootstrap` (route)
+
+**Crib:** §8
+
+Step J5, served half, on the founder's machine.
+
+<a id="workflow-route-join_context"></a>
+## route.join_context
+
+**Status:** built
+
+**Authority:** bearer of the org:join link
+
+**Preconditions**
+
+- Served by the founder's connector over the link channel; the founder machine must be online (link_serving.py:1007-1033).
+
+**Writes**
+
+- nothing durable; returns {genesis_id, heads, max_hlc, granted_role, binding, invite_expiry, sponsor_pub, brand, sponsor profile}
+
+**Workflow:** actors founder; opens none; requires invite_ref_resolved AND invite_event; produces join_context
+
+**Source:** `tools/dashboard/claim_service.py:context` (route)
+
+**Crib:** §8
+
+Step J2. Executes on the founder's machine.
+
+<a id="workflow-route-join_install"></a>
+## route.join_install
+
+**Status:** built
+
+**Authority:** admitted persona
+
+**Writes**
+
+- org DB
+- ledger re-folded from genesis
+- binding
+- persona row
+- directory row
+- install seed (profiles only)
+
+**Workflow:** actors joiner; opens none; requires bootstrap_snapshot; produces ledger_heads, registry_binding
+
+**Source:** `tools/dashboard/network_routes.py:post_join_outcome` (route)
+
+**Crib:** §8
+
+Step J5. Does not produce install_seed_addresses: network-join.js (installAdmitted, :313-327) does not forward reachability_rows although the route reads them (network_routes.py:938-943). Deferred here (:804-805): storage delegate, serve cert, fleet runtime, sync cert.
+
+<a id="workflow-route-link_publish"></a>
+## route.link_publish
+
+**Status:** built
+
+**Authority:** agent_delegate_signing_key
+
+**Preconditions**
+
+- Serving must be startable for the org (link_approvals.py:_require_startable_serving).
+
+**Writes**
+
+- grant row {grant_id, target_uuid, target_type, meta, subject, issued_at, channel_pub, invite_ref}, relay create-link, invite bearer (POST ledger/invite/bearer)
+
+**Workflow:** actors founder; opens delegate; requires agent_delegate_signing_key AND link_publish_approval AND serve_cert; produces join_link_grant
+
+**Source:** `tools/dashboard/link_approvals.py:_execute_link_publish` (route)
+
+**Crib:** §8
+
+Step F2, executor half. The channel key is minted by link.mint_channel_key.
+
+<a id="workflow-route-relay_connect"></a>
+## route.relay_connect
+
+**Status:** built
+
+**Authority:** serving_delegate_key
+
+**Writes**
+
+- a live serving slot at the org's relay
+
+**Workflow:** actors founder, joiner; opens none; requires serve_cert; produces relay_slot
+
+**Source:** `tools/network/relaykit/connector.py:TunnelConnector` (module-op)
+
+**Crib:** §8
+
+Slots are read for peer selection through org_sync_channels.relay_slots_provider. Whether the relay's per-org serve_machine_keys allow-set admits a new member's machine is an open question (relay.py:973-1000, store.py:1576-1583); unproven.
 
 <a id="workflow-storage-advance_state"></a>
 ## storage.advance_state

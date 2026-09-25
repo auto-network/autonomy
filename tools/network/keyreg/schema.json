@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "autonomy:keyreg:v1",
   "title": "Key registry",
-  "description": "Machine-readable inventory of every key and mutation in the vault + storage system. Design: graph note 879ccc1e-b49. keyreg.py implements these constraints natively for environments without a jsonschema library; this file is the canonical contract.",
+  "description": "Machine-readable inventory of every key and mutation in the vault + storage system. Design: graph note 879ccc1e-b49. keyreg.py implements these constraints natively for environments without a jsonschema library; this file is the canonical contract. The optional actors/artifacts/goals sections and the mutation fields actors/opens/requires/produces/rule record workflow prerequisites as an AND/OR graph for keyreg.py plan.",
   "type": "object",
   "required": ["version", "keys", "mutations", "purposes"],
   "additionalProperties": false,
@@ -22,6 +22,21 @@
     "purposes": {
       "type": "object",
       "additionalProperties": {"$ref": "#/$defs/purpose"}
+    },
+    "actors": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_]*$"},
+      "additionalProperties": {"$ref": "#/$defs/actor"}
+    },
+    "artifacts": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_]*$"},
+      "additionalProperties": {"$ref": "#/$defs/artifact"}
+    },
+    "goals": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_]*$"},
+      "additionalProperties": {"$ref": "#/$defs/goal"}
     }
   },
   "$defs": {
@@ -138,6 +153,132 @@
         },
         "refusals": {"type": "array", "items": {"type": "string"}},
         "crib": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "proofs": {"type": "array", "items": {"$ref": "#/$defs/proofRef"}},
+        "notes": {"type": "string"},
+        "actors": {
+          "type": "array", "minItems": 1, "items": {"type": "string"},
+          "description": "Actor ids that execute this mutation in a planned workflow."
+        },
+        "opens": {
+          "enum": ["root", "persona", "delegate", "none"],
+          "description": "root and persona need a human root-opening window (the persona is derived from the root in the browser); delegate uses a hot delegate key; none uses no key."
+        },
+        "requires": {
+          "type": "array", "items": {"$ref": "#/$defs/reqExpr"},
+          "description": "Implicit AND of artifact or key requirements; any/all nest."
+        },
+        "produces": {"type": "array", "items": {"$ref": "#/$defs/ref"}},
+        "rule": {
+          "type": "string", "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "For a designed mutation: the proposed rule that keyreg.py plan --rule enables."
+        }
+      },
+      "dependentRequired": {
+        "opens": ["actors", "requires", "produces"],
+        "actors": ["opens"], "requires": ["opens"], "produces": ["opens"]
+      }
+    },
+    "ref": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*(@[a-z][a-z0-9_]*)?$",
+      "description": "An artifact id, optionally suffixed @actor, or a key id."
+    },
+    "reqExpr": {
+      "oneOf": [
+        {"$ref": "#/$defs/ref"},
+        {
+          "type": "object", "required": ["all"], "additionalProperties": false,
+          "properties": {"all": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/reqExpr"}}}
+        },
+        {
+          "type": "object", "required": ["any"], "additionalProperties": false,
+          "properties": {"any": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/reqExpr"}}}
+        }
+      ]
+    },
+    "actor": {
+      "type": "object",
+      "required": ["description"],
+      "additionalProperties": false,
+      "properties": {"description": {"type": "string", "minLength": 1}}
+    },
+    "artifact": {
+      "type": "object",
+      "description": "A workflow prerequisite that is not a key: an event, row, certificate or registry state.",
+      "required": ["description", "store", "home", "code"],
+      "additionalProperties": false,
+      "properties": {
+        "description": {"type": "string", "minLength": 1},
+        "store": {"type": "string", "minLength": 1},
+        "home": {"type": "string", "minLength": 1},
+        "code": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/codeAnchor"}},
+        "per_actor": {"type": "boolean", "default": false},
+        "status": {"enum": ["built", "designed"], "default": "built"},
+        "notes": {"type": "string"}
+      }
+    },
+    "step": {
+      "type": "object",
+      "required": ["step", "actor", "ceremony", "runs"],
+      "additionalProperties": false,
+      "properties": {
+        "step": {"type": "string", "minLength": 1},
+        "actor": {"type": "string"},
+        "ceremony": {"type": "boolean", "description": "true: this step is one human root opening."},
+        "runs": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "only_from": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "defect": {
+      "type": "object",
+      "description": "A recorded current-code defect the order lints report; a stale entry is itself an error.",
+      "required": ["ref"],
+      "additionalProperties": false,
+      "properties": {
+        "step": {"type": "string"},
+        "mutation": {"type": "string"},
+        "missing": {"$ref": "#/$defs/ref"},
+        "artifact": {"$ref": "#/$defs/ref"},
+        "ref": {"type": "string", "minLength": 1}
+      }
+    },
+    "counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+    "goal": {
+      "type": "object",
+      "required": ["description", "requires", "states"],
+      "additionalProperties": false,
+      "properties": {
+        "description": {"type": "string", "minLength": 1},
+        "requires": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/reqExpr"}},
+        "states": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "object",
+            "required": ["description", "holds"],
+            "additionalProperties": false,
+            "properties": {
+              "description": {"type": "string", "minLength": 1},
+              "holds": {"type": "array", "items": {"$ref": "#/$defs/ref"}}
+            }
+          }
+        },
+        "current_order": {"type": "array", "items": {"$ref": "#/$defs/step"}},
+        "known_defects": {"type": "array", "items": {"$ref": "#/$defs/defect"}},
+        "scenarios": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["from", "rules", "current", "minimal"],
+            "additionalProperties": false,
+            "properties": {
+              "from": {"type": "string"},
+              "rules": {"type": "array", "items": {"type": "string"}},
+              "current": {"$ref": "#/$defs/counts"},
+              "minimal": {"$ref": "#/$defs/counts"}
+            }
+          }
+        },
         "proofs": {"type": "array", "items": {"$ref": "#/$defs/proofRef"}},
         "notes": {"type": "string"}
       }
