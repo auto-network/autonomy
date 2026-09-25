@@ -396,8 +396,17 @@ class ConnectorFleetRuntime:
         # arm — the process is armed in memory regardless; it just will not
         # survive a restart here.
         if self._warm_cache is not None:
+            # Store what was DELIVERED, certificates included. configure()
+            # peeled org_sync_certs off its working copy above; caching that
+            # copy made every re-arm (every hot reload restarts the
+            # connectors) come back with no org sync certificate, so the org
+            # connector had no org channel and refused every follow with
+            # FollowNoFrontier (2026-09-24).
+            cached = dict(payload)
+            if org_sync_certs:
+                cached["org_sync_certs"] = org_sync_certs
             try:
-                self._warm_cache.store(payload)
+                self._warm_cache.store(cached)
             except Exception:
                 logger.warning(
                     "fleet runtime warm-cache write failed; connector is armed "

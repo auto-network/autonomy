@@ -210,3 +210,27 @@ def test_no_cache_attached_is_a_silent_no_op(tmp_path, monkeypatch):
     assert runtime.configure(payload) == {"ok": True, "machine_id": machine_id}
     assert runtime.rearm_from_cache() is False
     assert not (tmp_path / "fleet-connector-runtime.org-a.json").exists()
+
+
+def test_org_sync_certificates_survive_every_rearm(tmp_path, monkeypatch):
+    """configure() peels org_sync_certs off its working copy; it cached that
+    stripped copy, so the first restart after an unlock came back with no org
+    sync certificate: no org channel, and every follow of the org refused with
+    FollowNoFrontier (autonomy connector, 2026-09-24). Arm, then restart twice
+    through the real re-arm path: the certificate must hold each time."""
+    from tools.dashboard import org_sync_channels
+
+    payload, _ = _valid_payload(tmp_path, monkeypatch)
+    certs = {"autonomy": {"child_pub": "aa" * 32, "sig": "00"}}
+    armed = fleet_relay_sync.ConnectorFleetRuntime()
+    armed.attach_warm_cache(fleet_relay_sync.FleetRuntimeWarmCache("org-a"))
+    armed.configure({**payload, "org_sync_certs": certs})
+
+    cache_file = tmp_path / "fleet-connector-runtime.org-a.json"
+    for restart in (1, 2):
+        assert json.loads(cache_file.read_text()).get("org_sync_certs") == certs, restart
+        org_sync_channels.install({}, {})            # a fresh process holds nothing
+        restarted = fleet_relay_sync.ConnectorFleetRuntime()
+        restarted.attach_warm_cache(fleet_relay_sync.FleetRuntimeWarmCache("org-a"))
+        assert restarted.rearm_from_cache() is True
+        assert "autonomy" in org_sync_channels._certs, restart
