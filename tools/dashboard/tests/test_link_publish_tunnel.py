@@ -786,6 +786,52 @@ def test_org_join_publish_over_tunnel_caches_invite_grant(
     assert grants[token]["channel_pub"] == "ce" * 32
 
 
+def test_org_follow_publish_keeps_org_identity_off_the_wire(
+    env, session_key, session_cert, monkeypatch,
+):
+    """An org:follow publish tells the relay only what it needs to mint the
+    token: the target and an optional label. The org slug and uuid that
+    prepare_create writes into meta (the served follow admission names the
+    scope by them) stay in the LOCAL grant. The relay admits only
+    ttl/label/require_auth in meta, and the first real follow publish was
+    refused with "meta carries unsupported fields" (2026-09-25) because both
+    identity keys rode along."""
+    _serving_ok(monkeypatch)
+    _channel_key_ok(monkeypatch)
+    token = "f0110000" * 4
+    recorder = _ControlRecorder(reply={
+        "ok": True, "token": token,
+        "url": f"{PUBLIC_LINK_URL}/l/{token}", "expires_at": None,
+    })
+    _install_control(monkeypatch, recorder)
+
+    r = env.post("/api/approvals", json={
+        "kind": "link_publish", "session": SESSION,
+        "request": {"org": ORG, "target_type": "org:follow",
+                    "meta": {"label": "Follow us"}},
+    })
+    assert r.status_code == 200, r.text
+    envelope = _tunnel_envelope(
+        session_key, session_cert, "/control/create-link",
+        payload={"target_uuid": ORG_UUID, "target_type": "org:follow"})
+    execution = _decide_and_wait(env, r.json()["id"], envelope)["execution"]
+
+    assert execution["ok"] is True, execution
+    org, op, args = recorder.calls[0]
+    assert (org, op) == (ORG, "create-link")
+    assert args["target_type"] == "org:follow"
+    assert args["target_uuid"] == ORG_UUID
+    # Only the label crosses; never ttl (indefinite), never the identity.
+    assert args.get("meta") == {"label": "Follow us"}
+    assert "expires_at" not in args
+    grants = _cached_grants()
+    assert grants[token]["target_type"] == "org:follow"
+    assert grants[token]["meta"] == {
+        "org": ORG, "org_uuid": ORG_UUID, "label": "Follow us"}
+    assert grants[token]["channel_pub"] == "ce" * 32
+
+
+
 def test_org_join_publish_refused_on_expiry_mismatch(
     env, founder_persona, session_key, session_cert, monkeypatch,
 ):
