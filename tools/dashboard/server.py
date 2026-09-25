@@ -20379,17 +20379,27 @@ def _enrich_org_identity(detail: dict) -> dict:
     return detail
 
 
-def _collect_orgs_list() -> list[dict]:
+def _collect_orgs_list(*, include_followed: bool = False) -> list[dict]:
     """Enumerate orgs with bootstrap row + cascade identity (off-loop body).
 
     list_orgs + one show_org per org each open and close an org store; run
     on the loop this hung every request ~20 s on the first RW open after a
     schema bump (auto-gwdqq). show_org now opens ro, and the whole fold runs
     in a worker thread.
+
+    A followed org (``orgs.type='followed'``, design of record
+    graph://5f2f5a49-00d §10.4) is a read-only mirror of another
+    organization's public surface, not an organization the operator belongs
+    to: it has no members, no settings screen and no workspaces here. The
+    org switcher, the profile panel, bead and worktree scoping all read this
+    route, and none of them should offer a mirror (operator, 2026-09-25), so
+    mirrors are left out unless the caller asks with ``include_followed``.
     """
     from tools.graph import org_ops
     entries = []
     for ref in org_ops.list_orgs():
+        if not include_followed and getattr(ref, "type", None) == "followed":
+            continue
         detail = org_ops.show_org(ref.slug)
         if detail is None:
             continue
@@ -20398,8 +20408,13 @@ def _collect_orgs_list() -> list[dict]:
 
 
 async def api_orgs_list(request):
-    """GET /api/orgs — enumerate orgs with bootstrap row + cascade identity."""
-    entries = await asyncio.to_thread(_collect_orgs_list)
+    """GET /api/orgs[?include=followed] — enumerate orgs with bootstrap row
+    + cascade identity. Followed mirrors only with ``include=followed``."""
+    include = request.query_params.get("include", "")
+    include_followed = "followed" in {p.strip() for p in include.split(",")}
+    entries = await asyncio.to_thread(
+        _collect_orgs_list, include_followed=include_followed
+    )
     return JSONResponse({"orgs": entries})
 
 
