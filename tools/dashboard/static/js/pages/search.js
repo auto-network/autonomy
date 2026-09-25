@@ -181,7 +181,9 @@
         this._syncGlobalInput();
         // Populate identities for the shared picker; an empty inventory leaves
         // the trigger disabled instead of inventing a selectable organization.
-        fetch('/api/orgs')
+        // Search may scope to a followed mirror (that is what following is
+        // for); the switcher and profile panel never list one.
+        fetch('/api/orgs?include=followed')
           .then(r => r.ok ? r.json() : { orgs: [] })
           .then(d => { this.orgList = this._normalizeOrgs(d && d.orgs || []); })
           .catch(() => { this.orgList = []; });

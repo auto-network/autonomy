@@ -41,6 +41,40 @@ def test_api_orgs_returns_known_slugs(shipped_settings_orgs, test_app):
         assert set(ident) >= {"slug", "name", "color", "initial", "favicon"}
 
 
+def test_api_orgs_leaves_out_followed_mirrors_unless_asked(
+    shipped_settings_orgs, test_app,
+):
+    """A followed org (orgs.type='followed') is a read-only mirror of another
+    organization's public surface, not one the operator belongs to. The org
+    switcher, the profile panel and the bead/worktree pickers all read
+    /api/orgs, so a mirror is left out by default; search, whose whole point
+    includes the mirror, asks for it with ?include=followed (operator ruling
+    2026-09-25, first real follow)."""
+    import os
+    from pathlib import Path
+    from tools.graph.db import GraphDB
+
+    orgs_dir = Path(os.environ["AUTONOMY_ORGS_DIR"])
+    GraphDB.create_org_db(
+        "followed-mirror", type_="followed", org_id="followed-org-id",
+        root=orgs_dir,
+    ).close()
+
+    with TestClient(test_app) as client:
+        default = client.get("/api/orgs")
+        assert default.status_code == 200
+        included = client.get("/api/orgs?include=followed")
+        assert included.status_code == 200
+
+    default_slugs = {e["org"]["slug"] for e in default.json()["orgs"]}
+    assert "followed-mirror" not in default_slugs
+    assert {"autonomy", "anchore"} <= default_slugs
+
+    by_slug = {e["org"]["slug"]: e for e in included.json()["orgs"]}
+    assert "followed-mirror" in by_slug
+    assert by_slug["followed-mirror"]["org"]["type"] == "followed"
+
+
 def test_search_with_only_org_pin(test_app):
     """``?only_org=anchore`` must reach :func:`ops.search` verbatim — that's
     how the org chip pins the result set to a single org's DB."""
