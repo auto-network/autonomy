@@ -70,10 +70,37 @@ def source_row_is_public(row: Mapping[str, object]) -> bool:
     return row.get("publication_state") in PEER_VISIBLE_STATES
 
 
+#: The settings sets a follower may receive. Publication state alone is not
+#: the public surface: members replicate the org ledger, member profiles and
+#: fleet reachability at ``published`` so that MEMBERS get them, and the
+#: first real follow (2026-09-25, Boatlore <- Autonomy) carried all of it —
+#: 21 ledger events that built the members and roles on the follower, two
+#: machines' serving keys and addresses, the coordinator action registry.
+#: A set crosses a follow only when named here, whatever its rows' state.
+#: The org identity row (name, byline, color) is what lets the follower show
+#: the org it follows; the primers and capability contracts are what the
+#: bootstrap package resolves from the public surface (design of record
+#: graph://5f2f5a49-00d FR2, D5). Add a set here deliberately, with the
+#: operator's ruling, never by promoting its rows.
+FOLLOW_VISIBLE_SET_IDS: frozenset[str] = frozenset({
+    "autonomy.org",
+    "autonomy.org.primer",
+    "autonomy.org.capability.primer",
+    "autonomy.capability.contract",
+})
+
+#: ``FOLLOW_VISIBLE_SET_IDS`` as a SQL value list.
+FOLLOW_VISIBLE_SET_IDS_SQL = ", ".join(
+    f"'{set_id}'" for set_id in sorted(FOLLOW_VISIBLE_SET_IDS)
+)
+
+
 def settings_row_is_public(row: Mapping[str, object]) -> bool:
-    """A ``settings`` row is admitted iff peer-visible and not deprecated."""
+    """A ``settings`` row is admitted iff its set is follower-visible, it is
+    peer-visible and it is not deprecated."""
     return (
-        row.get("publication_state") in PEER_VISIBLE_STATES
+        row.get("set_id") in FOLLOW_VISIBLE_SET_IDS
+        and row.get("publication_state") in PEER_VISIBLE_STATES
         and not row.get("deprecated")
     )
 
@@ -89,7 +116,10 @@ def public_predicate_sql(table: str) -> str | None:
     if table == "sources":
         return f"publication_state IN ({PUBLIC_STATES_SQL})"
     if table == "settings":
-        return f"publication_state IN ({PUBLIC_STATES_SQL}) AND deprecated = 0"
+        return (
+            f"set_id IN ({FOLLOW_VISIBLE_SET_IDS_SQL}) AND "
+            f"publication_state IN ({PUBLIC_STATES_SQL}) AND deprecated = 0"
+        )
     if table in SOURCE_LINKED_SATELLITE_TABLES:
         return (
             f"source_id IN (SELECT id FROM sources "
