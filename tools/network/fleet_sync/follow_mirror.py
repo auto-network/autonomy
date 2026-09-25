@@ -186,6 +186,19 @@ def prune_to_generation(
                 f"DELETE FROM {table} WHERE source_id IS NOT NULL "
                 f"AND source_id NOT IN (SELECT id FROM sources)"
             )
+        # Settings the projection no longer admits. A mirror filled before
+        # the follower-visible set allowlist existed (2026-09-25) holds the
+        # org's ledger events, member profiles and fleet reachability; a
+        # completed sweep is the moment the mirror is brought back to exactly
+        # the public surface, so those rows leave here too.
+        if _table_present(conn, "settings"):
+            from .projection import FOLLOW_VISIBLE_SET_IDS
+
+            allowed = sorted(FOLLOW_VISIBLE_SET_IDS)
+            marks = ",".join("?" for _ in allowed)
+            conn.execute(
+                f"DELETE FROM settings WHERE set_id NOT IN ({marks})", allowed
+            )
         conn.commit()
         return pruned
     finally:

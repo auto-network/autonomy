@@ -120,12 +120,23 @@ def _seed_mixed(catalog: MutationCatalog) -> None:
         _insert_tag(conn, "topic")
         _insert_note_comment(conn, "nc1", "s_pub")
         _insert_capture(conn, "cap1")
-        _insert_setting(conn, identity="set_pub", set_id="dashboard.public",
+        _insert_setting(conn, identity="set_pub", set_id="autonomy.org",
                         key="k", state="published")
-        _insert_setting(conn, identity="set_dep", set_id="dashboard.dep",
+        _insert_setting(conn, identity="set_dep", set_id="autonomy.org.primer",
                         key="k", state="published", deprecated=1)
         _insert_setting(conn, identity="set_id_raw",
                         set_id="autonomy.identity.machine", key="k", state="raw")
+        # Published for MEMBERS, never for followers: what the first real
+        # follow leaked (2026-09-25) until the set allowlist.
+        _insert_setting(conn, identity="set_ledger",
+                        set_id="autonomy.org.ledger-event", key="e1",
+                        state="published")
+        _insert_setting(conn, identity="set_reach",
+                        set_id="autonomy.org.fleet-reachability", key="m1",
+                        state="published")
+        _insert_setting(conn, identity="set_deck",
+                        set_id="dashboard.presentation.deck", key="d1",
+                        state="canonical")
 
 
 def _public_tables(items) -> set[str]:
@@ -140,13 +151,38 @@ def test_predicates_reuse_peer_visible_states() -> None:
     for state in ("published", "canonical"):
         assert source_row_is_public({"publication_state": state})
         assert settings_row_is_public(
-            {"publication_state": state, "deprecated": 0}
+            {"set_id": "autonomy.org", "publication_state": state, "deprecated": 0}
         )
     for state in ("raw", "curated"):
         assert not source_row_is_public({"publication_state": state})
     # A deprecated but peer-visible setting is not public.
     assert not settings_row_is_public(
-        {"publication_state": "published", "deprecated": 1}
+        {"set_id": "autonomy.org", "publication_state": "published", "deprecated": 1}
+    )
+
+
+def test_settings_cross_a_follow_only_from_follower_visible_sets() -> None:
+    """Members replicate the ledger, member profiles and fleet reachability at
+    'published'; that state means members, not the public. Only a set named
+    in FOLLOW_VISIBLE_SET_IDS crosses, and every leaked set is outside it."""
+    from tools.network.fleet_sync.projection import FOLLOW_VISIBLE_SET_IDS
+
+    for set_id in (
+        "autonomy.org.ledger-event", "autonomy.org.fleet-reachability",
+        "autonomy.org.member-profile", "dashboard.action-registry-state",
+        "dashboard.action-registry-cursor", "dashboard.presentation.deck",
+        "autonomy.workspace", "dashboard.feature_flags",
+    ):
+        assert set_id not in FOLLOW_VISIBLE_SET_IDS
+        assert not settings_row_is_public(
+            {"set_id": set_id, "publication_state": "published", "deprecated": 0}
+        )
+    assert {"autonomy.org", "autonomy.org.primer",
+            "autonomy.org.capability.primer",
+            "autonomy.capability.contract"} <= FOLLOW_VISIBLE_SET_IDS
+    # A row with no set_id at all is never public.
+    assert not settings_row_is_public(
+        {"publication_state": "published", "deprecated": 0}
     )
 
 
@@ -157,6 +193,8 @@ def test_public_predicate_sql_excludes_and_shapes() -> None:
     assert "publication_state IN ('published', 'canonical')" in \
         public_predicate_sql("sources")
     assert "deprecated = 0" in public_predicate_sql("settings")
+    assert "set_id IN ('autonomy.capability.contract', 'autonomy.org'" in \
+        public_predicate_sql("settings")
     assert public_predicate_sql("thoughts").startswith("source_id IN")
 
 
@@ -182,9 +220,10 @@ def test_public_base_walk_filters(tmp_path: Path) -> None:
         assert {m.address[0] for m in public if m.table == "thoughts"} == {"t_pub"}
         assert {m.address[0] for m in public if m.table == "derivations"} == {"d_pub"}
         assert {m.address[0] for m in public if m.table == "attachments"} == {"a_pub"}
-        # Settings: published non-deprecated only; identity + deprecated gone.
+        # Settings: follower-visible sets, published, non-deprecated only;
+        # identity, deprecated, ledger, reachability and decks gone.
         setting_keys = {m.address[0] for m in public if m.table == "settings"}
-        assert setting_keys == {"dashboard.public"}
+        assert setting_keys == {"autonomy.org"}
     finally:
         db.close()
 
@@ -410,3 +449,33 @@ def test_too_old_refusal_wire_roundtrip() -> None:
     other = encode_schema_refusal(digest="ab" * 32)
     assert not is_follow_too_old_refusal(other)
     assert not is_follow_too_old_refusal(b"not a refusal")
+
+
+# ── Follower prune: settings outside the allowlist leave the mirror ───────
+def test_prune_to_generation_drops_settings_outside_the_allowlist(
+    tmp_path: Path,
+) -> None:
+    """A mirror filled before the follower-visible set allowlist holds the
+    org's ledger events and fleet reachability. The completed-sweep prune
+    brings the mirror back to the public surface: those settings rows leave,
+    the org identity row stays, and the source prune is unchanged."""
+    from tools.network.fleet_sync import follow_mirror
+
+    db = GraphDB(tmp_path / "mirror.db")
+    try:
+        catalog = _catalog(db)
+        _seed_mixed(catalog)
+        conn = db.conn
+        # The follower prunes on its applying connection, where capture is
+        # off: mirror rows are never journaled as this node's own writes.
+        conn.create_function("fleet_sync_capture_enabled", 0, lambda: 0)
+        before = {r[0] for r in conn.execute("SELECT set_id FROM settings")}
+        assert {"autonomy.org.ledger-event", "autonomy.org.fleet-reachability",
+                "dashboard.presentation.deck", "autonomy.org"} <= before
+        pruned = follow_mirror.prune_to_generation(conn, {"s_pub", "s_canon"})
+        assert pruned == 0  # both public sources were carried
+        after = {r[0] for r in conn.execute("SELECT set_id FROM settings")}
+        assert after == {"autonomy.org", "autonomy.org.primer"}
+        assert {r[0] for r in conn.execute("SELECT id FROM sources")} >= {"s_pub", "s_canon"}
+    finally:
+        db.close()
