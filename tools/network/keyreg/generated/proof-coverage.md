@@ -46,7 +46,7 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | armor.revoke_factor | mutation | **GAP** |
 | armor.set_recovery | mutation | **GAP** |
 | ceremony.checkpoint_delegate_grant | mutation | **GAP** |
-| ceremony.checkpoint_publish | mutation | **GAP** |
+| ceremony.checkpoint_publish | mutation | OrgAdmission: EveryAdmittedMemberPulls |
 | ceremony.checkpoint_seed | mutation | **GAP** |
 | ceremony.claim_approval | mutation | **GAP** |
 | ceremony.claim_finalize | mutation | **GAP** |
@@ -60,7 +60,7 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | ceremony.registration | mutation | **GAP** |
 | ceremony.serve_cert_mint | mutation | **GAP** |
 | ceremony.vault_master_read | mutation | **GAP** |
-| delegate.checkpoint_publish | mutation | **GAP** |
+| delegate.checkpoint_publish | mutation | OrgAdmission: EveryAdmittedMemberPulls |
 | fleet.distribute_kem | mutation | VaultFleetDist: machine_key_yields_nothing_undistributed |
 | fleet.enroll | mutation | **GAP** |
 | fleet.kick | mutation | VaultFleetDist: kicked_machine_excluded<br>VaultD006Window: halt_window_confidential |
@@ -83,8 +83,8 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | recovery.succession | mutation | VaultRecoverySuccession: window_cannot_be_fast_forwarded<br>VaultRecoverySuccession: cancellation_blocks_completion<br>VaultRecoverySuccession: veto_blocks_completion<br>VaultWitnessAccountability: poll_yields_alert_or_fraud_proof |
 | rekey.frontier_marker | mutation | VaultRekeyMarker: exclusion_forward<br>VaultRekeyMarkerChain: exclusion_through_chain |
 | root.rotation | mutation | VaultRootRotation: thief_cannot_rotate<br>VaultRootRotation: owner_rotates_away_from_stolen_root |
-| route.admit_on_approval | mutation | **GAP** |
-| route.checkpoint_adopt | mutation | **GAP** |
+| route.admit_on_approval | mutation | OrgAdmission: ApprovedIsAdmitted<br>OrgAdmission: AdmittedWereApproved |
+| route.checkpoint_adopt | mutation | OrgAdmission: EveryAdmittedMemberPulls<br>OrgAdmission: NoPullWithoutInclusion<br>OrgAdmission: AdoptedIsAuthentic |
 | route.claim_submit_admit | mutation | **GAP** |
 | route.claim_submit_stage | mutation | **GAP** |
 | route.invite_resolve | mutation | **GAP** |
@@ -101,4 +101,4 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | vault.create_class | mutation | VaultPolicyClass: root_reaches_every_generation |
 | vault.revoke_class_factor | mutation | VaultPolicyClass: revoked_factor_excluded_forward<br>VaultPolicyClass: revoked_factor_keeps_old |
 
-26 of 90 entries carry at least one model reference; 64 gaps.
+30 of 90 entries carry at least one model reference; 60 gaps.

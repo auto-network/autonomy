@@ -455,6 +455,23 @@
         }
       ],
       "notes": "Peer selection sources (fleet_sync_scheduler.py:_org_peer_candidates): reachability rows (need a prior pull), install seed, relay slots through the dialer's own connector, dialed-in peers. The founder-pulls-joiner direction riding the joiner's dial-in is taken from the record, not re-traced. The single-joiner AND/OR graph cannot express head presence at adoption; OrgAdmission.tla carries that.",
+      "proofs": [
+        {
+          "framework": "tla",
+          "lemma": "EveryAdmittedMemberPulls",
+          "theory": "OrgAdmission"
+        },
+        {
+          "framework": "tla",
+          "lemma": "NoPullWithoutInclusion",
+          "theory": "OrgAdmission"
+        },
+        {
+          "framework": "tla",
+          "lemma": "ApprovedIsAdmitted",
+          "theory": "OrgAdmission"
+        }
+      ],
       "requires": [
         "persona_cert_fleet_sync@founder",
         "persona_cert_fleet_sync@joiner",
@@ -1793,6 +1810,13 @@
         "checkpoint_including_joiner",
         "adopted_checkpoint"
       ],
+      "proofs": [
+        {
+          "framework": "tla",
+          "lemma": "EveryAdmittedMemberPulls",
+          "theory": "OrgAdmission"
+        }
+      ],
       "requires": [
         "persona_signing_key",
         "member_admitted",
@@ -2204,6 +2228,13 @@
         "checkpoint_including_joiner",
         "adopted_checkpoint"
       ],
+      "proofs": [
+        {
+          "framework": "tla",
+          "lemma": "EveryAdmittedMemberPulls",
+          "theory": "OrgAdmission"
+        }
+      ],
       "requires": [
         "agent_delegate_signing_key",
         "checkpoint_delegate_grant",
@@ -2213,9 +2244,9 @@
       ],
       "rule": "delegate_checkpoint",
       "source": {
-        "file": "tools/dashboard/membership_checkpoint.py",
+        "file": "tools/network/TLA/OrgAdmission.tla",
         "kind": "module-op",
-        "symbol": "checkpoint_due"
+        "symbol": "AdmitStep"
       },
       "status": "designed"
     },
@@ -2908,15 +2939,27 @@
         "claim_approval",
         "member_admitted"
       ],
+      "proofs": [
+        {
+          "framework": "tla",
+          "lemma": "ApprovedIsAdmitted",
+          "theory": "OrgAdmission"
+        },
+        {
+          "framework": "tla",
+          "lemma": "AdmittedWereApproved",
+          "theory": "OrgAdmission"
+        }
+      ],
       "requires": [
         "persona_signing_key",
         "claim_staged"
       ],
       "rule": "admit_on_approval",
       "source": {
-        "file": "tools/dashboard/claim_service.py",
+        "file": "tools/network/TLA/OrgAdmission.tla",
         "kind": "route",
-        "symbol": "countersign"
+        "symbol": "Approve"
       },
       "status": "designed"
     },
@@ -2935,7 +2978,7 @@
           "adopted checkpoint cache row (membership_checkpoint.py:record_adopted)"
         ]
       },
-      "notes": "Never signs (docstring, network_routes.py:724-733). Callers: join install (:945), sign-on preparation (signon_preparation.py:140), and the route POST /api/network/membership-checkpoint/adopt; no background caller. The head-presence precondition is not monotone and is not expressed in requires; OrgAdmission.tla models it.",
+      "notes": "Never signs (docstring, network_routes.py:724-733). Callers: join install (:945), sign-on preparation (signon_preparation.py:140), and the route POST /api/network/membership-checkpoint/adopt; no background caller. The head-presence precondition is not monotone and is not expressed in requires; OrgAdmission.tla models it: under these rules a member bootstrapped before a later admission that the next checkpoint covers can never adopt it, and no pull is admitted (OrgAdmissionCurrent.cfg, EveryAdmittedMemberPulls violated). The proposed adopt-by-verification rule (signer in the previous checkpointers root, prev chain, no local head) with checkpoint-at-admission removes the deadlock (OrgAdmissionProposed.cfg). Under that rule the prover's own inclusion path cannot come from a local fold at the head (org_sync_channels.py:173-179, 197-205); it must arrive with the checkpoint.",
       "opens": "none",
       "preconditions": [
         "Skip when the cached seq >= the registry seq (network_routes.py:756-758).",
@@ -2943,6 +2986,23 @@
       ],
       "produces": [
         "adopted_checkpoint"
+      ],
+      "proofs": [
+        {
+          "framework": "tla",
+          "lemma": "EveryAdmittedMemberPulls",
+          "theory": "OrgAdmission"
+        },
+        {
+          "framework": "tla",
+          "lemma": "NoPullWithoutInclusion",
+          "theory": "OrgAdmission"
+        },
+        {
+          "framework": "tla",
+          "lemma": "AdoptedIsAuthentic",
+          "theory": "OrgAdmission"
+        }
       ],
       "refusals": [
         "no registry binding",

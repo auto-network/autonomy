@@ -51,3 +51,22 @@ java -cp ~/tools/tla2tools.jar tlc2.TLC \
 The model records the intended algorithm and calibrates it against the current
 defect. It does not implement the production change or choose a distributed
 directory.
+
+## Org admission (`OrgAdmission.tla`, bead auto-qrmlg.5)
+
+Admission -> checkpoint -> adoption -> org sync pull, with two joiners, the
+founder as the only checkpointer, and an untrusted registry. See MODEL.md.
+
+- `OrgAdmissionCurrent.cfg` — the built rules; must fail
+  `EveryAdmittedMemberPulls` with the adoption deadlock.
+- `OrgAdmissionProposed.cfg`, `OrgAdmissionProposedApproval.cfg` —
+  adopt-by-verification + checkpoint-at-admission (+ admit-on-approval);
+  clean, with no later founder or joiner ceremony assumed.
+- `OrgAdmissionProposedForge.cfg`, `OrgAdmissionCurrentForge.cfg` — a
+  forging registry; safety holds under both rule sets.
+- `OrgAdmissionAdoptOnly.cfg` — adopt-by-verification alone, founder signs
+  on again; clean.
+- `calibration/CheckpointAtAdmissionOnly.cfg`, `AdoptOnlyNoSignOn.cfg`,
+  `ApprovalWithoutAdmitOnApproval.cfg`, `NoSignerCheck.cfg` — each deletes
+  one element and must fail its named property;
+  `ProposedApprovalReachesSync.cfg` must reach full sync (executability).

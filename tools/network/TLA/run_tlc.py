@@ -23,6 +23,13 @@ GREEN = [
     ("AckFloorGreen.cfg", "AckFloor"),
     ("FleetSyncWriteFloorsCorrected.cfg", "FleetSyncWriteFloors"),
     ("FleetSyncWriteFloorsWide.cfg", "FleetSyncWriteFloors"),
+    # auto-qrmlg.5: adopt-by-verification + checkpoint-at-admission (+ admit-
+    # on-approval) give every admitted member a pull, safely.
+    ("OrgAdmissionProposed.cfg", "OrgAdmission"),
+    ("OrgAdmissionProposedApproval.cfg", "OrgAdmission"),
+    ("OrgAdmissionProposedForge.cfg", "OrgAdmission"),
+    ("OrgAdmissionCurrentForge.cfg", "OrgAdmission"),
+    ("OrgAdmissionAdoptOnly.cfg", "OrgAdmission"),
 ]
 
 CALIBRATION = [
@@ -38,6 +45,14 @@ CALIBRATION = [
     # constitution's principle 1: a floor read after the transaction pages is
     # claimed as a cursor without the rows below it.
     ("FleetSyncWriteFloorsRecord.cfg", "FleetSyncWriteFloors", "CursorHoldsData"),
+    # auto-qrmlg.5: the built rules deadlock a member admitted before a later
+    # admission the checkpoint covers; each proposed rule is load-bearing.
+    ("OrgAdmissionCurrent.cfg", "OrgAdmission", "EveryAdmittedMemberPulls"),
+    ("calibration/CheckpointAtAdmissionOnly.cfg", "OrgAdmission", "EveryAdmittedMemberPulls"),
+    ("calibration/AdoptOnlyNoSignOn.cfg", "OrgAdmission", "EveryAdmittedMemberPulls"),
+    ("calibration/ApprovalWithoutAdmitOnApproval.cfg", "OrgAdmission", "ApprovedIsAdmitted"),
+    ("calibration/NoSignerCheck.cfg", "OrgAdmission", "NoPullWithoutInclusion"),
+    ("calibration/ProposedApprovalReachesSync.cfg", "OrgAdmission", "NotAllJoinedInSync"),
 ]
 
 VIOLATION_MARKERS = (

@@ -1475,7 +1475,7 @@ mutations:
   route.admit_on_approval:
     status: designed
     rule: admit_on_approval
-    source: {kind: route, file: tools/dashboard/claim_service.py, symbol: countersign}
+    source: {kind: route, file: tools/network/TLA/OrgAdmission.tla, symbol: Approve}
     authority: [persona_signing_key]
     effects:
       writes: [the staged claim appended with the approval, in the approver's window]
@@ -1484,6 +1484,9 @@ mutations:
     requires: [persona_signing_key, claim_staged]
     produces: [claim_approval, member_admitted]
     crib: ["§8"]
+    proofs:
+      - {framework: tla, theory: OrgAdmission, lemma: ApprovedIsAdmitted}
+      - {framework: tla, theory: OrgAdmission, lemma: AdmittedWereApproved}
     notes: >-
       Proposed consolidation F3+F4 (graph://cde6c8c6-041 §5): admission at
       countersign, so the checkpoint can run in the same window. Not built.
@@ -1533,6 +1536,8 @@ mutations:
     requires: [persona_signing_key, member_admitted, ledger_heads, checkpoint_seed]
     produces: [checkpoint_including_joiner, adopted_checkpoint]
     crib: ["§8"]
+    proofs:
+      - {framework: tla, theory: OrgAdmission, lemma: EveryAdmittedMemberPulls}
     notes: >-
       Step F4. Only callers: full sign-in (signon_preparation.py:125-133) and
       the scoped sign-on (network-signon.mjs:1560-1577). Nothing publishes at
@@ -1558,7 +1563,7 @@ mutations:
   delegate.checkpoint_publish:
     status: designed
     rule: delegate_checkpoint
-    source: {kind: module-op, file: tools/dashboard/membership_checkpoint.py, symbol: checkpoint_due}
+    source: {kind: module-op, file: tools/network/TLA/OrgAdmission.tla, symbol: AdmitStep}
     authority: [agent_delegate_signing_key]
     effects:
       writes: [advancing checkpoint signed by the checkpoint-scoped delegate at admission, no ceremony]
@@ -1567,6 +1572,8 @@ mutations:
     requires: [agent_delegate_signing_key, checkpoint_delegate_grant, member_admitted, ledger_heads, checkpoint_seed]
     produces: [checkpoint_including_joiner, adopted_checkpoint]
     crib: ["§8", "§11"]
+    proofs:
+      - {framework: tla, theory: OrgAdmission, lemma: EveryAdmittedMemberPulls}
     notes: Proposed rule Checkpoint-at-admission with a hot signer. Not built.
 
   route.checkpoint_adopt:
@@ -1583,12 +1590,26 @@ mutations:
     requires: [checkpoint_including_joiner, ledger_heads]
     produces: [adopted_checkpoint]
     crib: ["§8"]
+    proofs:
+      - {framework: tla, theory: OrgAdmission, lemma: EveryAdmittedMemberPulls}
+      - {framework: tla, theory: OrgAdmission, lemma: NoPullWithoutInclusion}
+      - {framework: tla, theory: OrgAdmission, lemma: AdoptedIsAuthentic}
     notes: >-
       Never signs (docstring, network_routes.py:724-733). Callers: join
       install (:945), sign-on preparation (signon_preparation.py:140), and the
       route POST /api/network/membership-checkpoint/adopt; no background
       caller. The head-presence precondition is not monotone and is not
-      expressed in requires; OrgAdmission.tla models it.
+      expressed in requires; OrgAdmission.tla models it: under these rules
+      a member bootstrapped before a later admission that the next
+      checkpoint covers can never adopt it, and no pull is admitted
+      (OrgAdmissionCurrent.cfg, EveryAdmittedMemberPulls violated). The
+      proposed adopt-by-verification rule (signer in the previous
+      checkpointers root, prev chain, no local head) with
+      checkpoint-at-admission removes the deadlock
+      (OrgAdmissionProposed.cfg). Under that rule the prover's own
+      inclusion path cannot come from a local fold at the head
+      (org_sync_channels.py:173-179, 197-205); it must arrive with the
+      checkpoint.
 
   route.relay_connect:
     source: {kind: module-op, file: tools/network/relaykit/connector.py, symbol: TunnelConnector}
@@ -1988,6 +2009,10 @@ goals:
     known_defects:
       - {step: J5, mutation: route.checkpoint_adopt, missing: checkpoint_including_joiner, ref: "graph://cde6c8c6-041 §1 J5 (network_routes.py:945)"}
       - {step: J6, mutation: route.checkpoint_adopt, missing: checkpoint_including_joiner, ref: "graph://cde6c8c6-041 §3 (J6 repeat)"}
+    proofs:
+      - {framework: tla, theory: OrgAdmission, lemma: EveryAdmittedMemberPulls}
+      - {framework: tla, theory: OrgAdmission, lemma: NoPullWithoutInclusion}
+      - {framework: tla, theory: OrgAdmission, lemma: ApprovedIsAdmitted}
     scenarios:
       - {from: self_admit, rules: [], current: {founder: 3, joiner: 3}, minimal: {founder: 2, joiner: 1}}
       - {from: approval, rules: [], current: {founder: 4, joiner: 4}, minimal: {founder: 3, joiner: 2}}

@@ -356,3 +356,6 @@ EXTRA  J6         joiner   mergeable into J4: J4 closed without: ledger_heads@jo
 EXTRA  F4         founder  mergeable into F3: F3 closed without: member_admitted (from route.admit_on_approval[founder])
 EXTRA  J6.repeat  joiner   needs no window: machine steps route.checkpoint_adopt[joiner] produce it; absent when J6 closed: checkpoint_including_joiner
 ```
+- proof: tla OrgAdmission: EveryAdmittedMemberPulls
+- proof: tla OrgAdmission: NoPullWithoutInclusion
+- proof: tla OrgAdmission: ApprovedIsAdmitted

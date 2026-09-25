@@ -258,3 +258,46 @@ Deliberate abstractions: rows apply in one step; one reply in flight at a
 time, so pulls take strong fairness (each pair keeps pulling, as the
 scheduler's rounds do); one origin writes at most one row and seals twice,
 which reaches every ordering that matters.
+
+## Org admission and checkpoint adoption (`OrgAdmission.tla`)
+
+Bead auto-qrmlg.5; ceremony record graph://cde6c8c6-041. The founder's
+ledger is linear (a claim on stale heads is refused, claim_service.py:
+170-171), so an event is named by the joiner it admits and members at a
+head are a prefix. Each current rule C1-C8 in the module header cites the
+code it abstracts.
+
+Checked results:
+
+1. **The built rules deadlock.** TLC's trace (`OrgAdmissionCurrent.cfg`):
+   j1 admitted, j1 bootstraps holding {g, j1}; j2 admitted; the founder
+   checkpoints at head j2; j1 cannot fold at j2 so adopts nothing, and no
+   pull is admitted without an adopted checkpoint including it. Nothing
+   later delivers j2 to j1: a pull needs the adoption first. This holds
+   even when the founder signs on again infinitely often (fair checkpoint).
+2. **Adopt-by-verification and checkpoint-at-admission restore liveness**
+   without assuming any later human ceremony (`OrgAdmissionProposed.cfg`),
+   and with admit-on-approval also under an approval role
+   (`OrgAdmissionProposedApproval.cfg`, the planner's founder 2 / joiner 2
+   schedule). Executability is checked: full sync is reachable.
+3. **Safety** (`NoPullWithoutInclusion`, `OutsiderNeverPulls`,
+   `AdoptedIsAuthentic`, `AdmittedWereApproved`) holds under both rule sets
+   against a registry that serves one forged roster naming an outsider.
+4. **Each proposed element is load-bearing.** Checkpoint-at-admission
+   without adopt-by-verification strands an earlier member at the older
+   seq (the verifier holds one adopted record, org_sync_channels.py:189-193);
+   adopt-by-verification without checkpoint-at-admission depends on a later
+   founder sign-on; without admit-on-approval admission waits on the
+   joiner's finalize ceremony; adopt-by-verification without the signer
+   check admits the outsider's pull.
+
+Deliberate abstractions: signatures are the `auth` bit (the signer-in-
+previous-checkpointers-root check and the prev chain are one predicate);
+the prover's inclusion path under adopt-by-verification is granted to any
+member (today it is folded locally at the head, org_sync_channels.py:
+173-179, 197-205, so the implementation must deliver it with the
+checkpoint: unproven which carrier); the reprove window is omitted (it
+only extends acceptance of a seq the verifier has adopted); org channel
+certificates, addresses and relay slots are assumed present (the keyreg
+planner covers them); the joiner's own appends are omitted (adoption does
+not require the head to be a current head, only present).

@@ -514,7 +514,7 @@ Grant opening primitive, not a human-factor authorization or an audited-object r
 
 **Workflow:** actors founder; opens delegate; requires agent_delegate_signing_key AND checkpoint_delegate_grant AND member_admitted AND ledger_heads AND checkpoint_seed; produces checkpoint_including_joiner, adopted_checkpoint; rule delegate_checkpoint
 
-**Source:** `tools/dashboard/membership_checkpoint.py:checkpoint_due` (module-op)
+**Source:** `tools/network/TLA/OrgAdmission.tla:AdmitStep` (module-op)
 
 **Crib:** §8, §11
 
@@ -1047,7 +1047,7 @@ A local verification has no relying party (crib section 0: the owner rewriting t
 
 **Workflow:** actors founder; opens persona; requires persona_signing_key AND claim_staged; produces claim_approval, member_admitted; rule admit_on_approval
 
-**Source:** `tools/dashboard/claim_service.py:countersign` (route)
+**Source:** `tools/network/TLA/OrgAdmission.tla:Approve` (route)
 
 **Crib:** §8
 
@@ -1082,7 +1082,7 @@ Proposed consolidation F3+F4 (graph://cde6c8c6-041 §5): admission at countersig
 
 **Crib:** §8
 
-Never signs (docstring, network_routes.py:724-733). Callers: join install (:945), sign-on preparation (signon_preparation.py:140), and the route POST /api/network/membership-checkpoint/adopt; no background caller. The head-presence precondition is not monotone and is not expressed in requires; OrgAdmission.tla models it.
+Never signs (docstring, network_routes.py:724-733). Callers: join install (:945), sign-on preparation (signon_preparation.py:140), and the route POST /api/network/membership-checkpoint/adopt; no background caller. The head-presence precondition is not monotone and is not expressed in requires; OrgAdmission.tla models it: under these rules a member bootstrapped before a later admission that the next checkpoint covers can never adopt it, and no pull is admitted (OrgAdmissionCurrent.cfg, EveryAdmittedMemberPulls violated). The proposed adopt-by-verification rule (signer in the previous checkpointers root, prev chain, no local head) with checkpoint-at-admission removes the deadlock (OrgAdmissionProposed.cfg). Under that rule the prover's own inclusion path cannot come from a local fold at the head (org_sync_channels.py:173-179, 197-205); it must arrive with the checkpoint.
 
 <a id="workflow-route-claim_submit_admit"></a>
 ## route.claim_submit_admit
