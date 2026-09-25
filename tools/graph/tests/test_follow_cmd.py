@@ -98,3 +98,64 @@ def test_follow_add_allows_matching_id_past_the_collision_guard(
 
     follow_cmd.cmd_follow_add(args)  # no SystemExit
     assert "written" in calls
+
+
+def test_split_link_url_normalizes_the_base64url_fragment():
+    """A published link carries its channel key as an unpadded base64url
+    fragment (fragment_url); the follow row wants 64 hex. Both forms split
+    to the same link_pub, and a wrong-length fragment is refused up front."""
+    import base64
+
+    raw = bytes(range(32))
+    fragment = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    base, rendezvous, token, link_pub = follow_cmd._split_link_url(
+        f"https://relay.example/l/tok123#{fragment}"
+    )
+    assert (base, rendezvous, token) == (
+        "https://relay.example", "https://relay.example/l/tok123", "tok123",
+    )
+    assert link_pub == raw.hex()
+    assert follow_cmd._split_link_url("https://relay.example/l/tok123#" + raw.hex())[3] == raw.hex()
+    with pytest.raises(SystemExit):
+        follow_cmd._split_link_url("https://relay.example/l/tok123#AAAA")
+
+
+def test_follow_add_names_the_mirror_with_as_when_the_envelope_has_no_slug(
+    orgs_env, monkeypatch, capsys
+):
+    """A link published since 2026-09-25 carries no meta.org in its envelope
+    (the relay admits only ttl/label/require_auth). Without --as the command
+    refuses and says so; with --as it proceeds past the slug resolution and
+    the collision guard under that name."""
+    remote_uuid = "99999999-8888-7777-6666-555555555555"
+    monkeypatch.setattr(
+        follow_cmd, "_fetch_envelope",
+        lambda base, token, **kw: {"target_type": "org:follow",
+                                   "org": remote_uuid, "meta": {}},
+    )
+    url = "https://relay.example/l/tok123#" + "b" * 64
+
+    with pytest.raises(SystemExit):
+        follow_cmd.cmd_follow_add(argparse.Namespace(target=url))
+    assert "--as" in capsys.readouterr().err
+
+    # Stop right after the guard by refusing the row write.
+    written = {}
+
+    def stop(set_id, rev, key, payload, org=None):
+        written.update({"key": key, "payload": payload})
+        raise RuntimeError("stop here")
+
+    from tools.graph import settings_ops
+    monkeypatch.setattr(settings_ops, "add_setting", stop)
+    with pytest.raises(SystemExit):
+        follow_cmd.cmd_follow_add(
+            argparse.Namespace(target=url, as_slug="autonomy"))
+    assert written["key"] == "autonomy"
+    assert written["payload"]["org_uuid"] == remote_uuid
+    assert written["payload"]["link_pub"] == "b" * 64
+
+    with pytest.raises(SystemExit):
+        follow_cmd.cmd_follow_add(
+            argparse.Namespace(target=url, as_slug="Not A Slug"))
+    assert "not a valid org slug" in capsys.readouterr().err

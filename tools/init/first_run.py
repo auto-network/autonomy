@@ -816,6 +816,15 @@ def _seed_follow_defaults(data: Path, report: InitReport) -> None:
         return
 
     slug = allow.org
+    # The allowlist carries the key as the operator pasted it from the
+    # published URL (unpadded base64url fragment); the row wants 64 hex.
+    from tools.graph.schemas.org_follow import normalize_link_pub
+
+    try:
+        link_pub = normalize_link_pub(link_pub)
+    except ValueError as exc:
+        report.add(name, SKIPPED, f"follow block link_pub is not a channel key: {exc}")
+        return
     payload = {
         "org_uuid": org_uuid,
         "rendezvous": rendezvous,
