@@ -179,6 +179,8 @@ class LedgerStore:
             self.db.execute("PRAGMA journal_mode = WAL")
         with self.db:
             self.db.executescript(_SCHEMA)
+            # Retired 2026-09-22: heads are computed from the events.
+            self.db.execute("DROP TABLE IF EXISTS ledger_heads")
             self.db.execute(
                 "INSERT OR IGNORE INTO ledger_meta(key, value) VALUES ('schema_version', ?)",
                 (str(LEDGER_SCHEMA_VERSION),),

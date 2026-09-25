@@ -357,3 +357,30 @@ class TestCheckpointColdJoin:
         delegate_id = next(e.event_id for e in store.events() if e.type == "delegate")
         with pytest.raises(StoreError):
             store.verify_checkpoint(delegate_id)
+
+
+def test_a_store_still_carrying_the_retired_heads_table_is_audited_and_cleaned(tmp_path):
+    """21e6fae1bb retired ledger_heads (heads are computed) but dropped it from
+    no existing database, and removed its classification: audit_schema then
+    raised "unclassified personal graph tables: ledger_heads" on every org
+    store that had it, refusing every org follow (autonomy, 2026-09-24).
+    A store in that state must audit cleanly, and opening the ledger drops it."""
+    import sqlite3
+    from tools.graph.db import GraphDB
+    from tools.network.fleet_sync.policies import audit_schema
+    from tools.network.ledger.store import LedgerStore
+
+    path = tmp_path / "org.db"
+    GraphDB(path).close()
+    legacy = sqlite3.connect(path)       # the table as the previous schema made it
+    legacy.execute("CREATE TABLE ledger_heads (event_id TEXT PRIMARY KEY)")
+    legacy.commit()
+    assert "ledger_heads" in audit_schema(legacy)     # classified, not refused
+    legacy.close()
+
+    LedgerStore(path).db.close()
+    conn = sqlite3.connect(path)
+    assert conn.execute(
+        "SELECT count(*) FROM sqlite_master WHERE name='ledger_heads'").fetchone()[0] == 0
+    audit_schema(conn)
+    conn.close()
