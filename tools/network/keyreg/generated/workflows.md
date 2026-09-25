@@ -191,11 +191,11 @@ Built at the armor layer; exposed by no route or UI yet.
 
 **Workflow:** actors founder; opens persona; requires persona_signing_key AND ledger_heads; produces checkpoint_delegate_grant; rule delegate_checkpoint
 
-**Source:** `tools/network/storagekit/delegate.py:storage_delegate_scopes` (ceremony)
+**Source:** `tools/network/storagekit/tamarin/DelegateCheckpoint.spthy:Grant_Checkpoint_Delegate` (ceremony)
 
 **Crib:** §8, §11
 
-Not built: the storage delegate's scopes exclude checkpoint today (storagekit/delegate.py:storage_delegate_scopes). Accepting this scope is an operator policy decision (graph://cde6c8c6-041 §4).
+Not built: the storage delegate's scopes exclude checkpoint today (storagekit/delegate.py:storage_delegate_scopes). Operator ruling 1 (2026-09-25) accepts a checkpoint scope on the hot delegate; the grant keeps the built proof-of-possession form (fold.py:_h_delegate), which DelegateCheckpointNoPoP shows is load-bearing for attribution.
 
 <a id="workflow-ceremony-checkpoint_publish"></a>
 ## ceremony.checkpoint_publish
@@ -518,7 +518,7 @@ Grant opening primitive, not a human-factor authorization or an audited-object r
 
 **Crib:** §8, §11
 
-Proposed rule Checkpoint-at-admission with a hot signer. Not built.
+Proposed rule Checkpoint-at-admission with a hot signer (operator ruling 1, 2026-09-25). Not built.
 
 <a id="workflow-fleet-distribute_kem"></a>
 ## fleet.distribute_kem

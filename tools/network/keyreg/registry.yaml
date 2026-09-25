@@ -1546,7 +1546,7 @@ mutations:
   ceremony.checkpoint_delegate_grant:
     status: designed
     rule: delegate_checkpoint
-    source: {kind: ceremony, file: tools/network/storagekit/delegate.py, symbol: storage_delegate_scopes}
+    source: {kind: ceremony, file: tools/network/storagekit/tamarin/DelegateCheckpoint.spthy, symbol: Grant_Checkpoint_Delegate}
     authority: [persona_signing_key]
     effects:
       writes: [a hot delegate grant carrying a checkpoint scope]
@@ -1555,10 +1555,15 @@ mutations:
     requires: [persona_signing_key, ledger_heads]
     produces: [checkpoint_delegate_grant]
     crib: ["§8", "§11"]
+    proofs:
+      - {framework: tamarin, theory: DelegateCheckpoint, lemma: checkpoint_attributable}
+      - {framework: tamarin, theory: DelegateCheckpoint, lemma: no_attribution_without_grant}
     notes: >-
       Not built: the storage delegate's scopes exclude checkpoint today
-      (storagekit/delegate.py:storage_delegate_scopes). Accepting this scope
-      is an operator policy decision (graph://cde6c8c6-041 §4).
+      (storagekit/delegate.py:storage_delegate_scopes). Operator ruling 1
+      (2026-09-25) accepts a checkpoint scope on the hot delegate; the
+      grant keeps the built proof-of-possession form (fold.py:_h_delegate),
+      which DelegateCheckpointNoPoP shows is load-bearing for attribution.
 
   delegate.checkpoint_publish:
     status: designed
@@ -1574,7 +1579,10 @@ mutations:
     crib: ["§8", "§11"]
     proofs:
       - {framework: tla, theory: OrgAdmission, lemma: EveryAdmittedMemberPulls}
-    notes: Proposed rule Checkpoint-at-admission with a hot signer. Not built.
+      - {framework: tamarin, theory: DelegateCheckpoint, lemma: checkpoint_unforgeable}
+      - {framework: tamarin, theory: DelegateCheckpoint, lemma: checkpoint_attributable}
+      - {framework: tamarin, theory: DelegateCheckpoint, lemma: signer_in_previous_checkpointers}
+    notes: Proposed rule Checkpoint-at-admission with a hot signer (operator ruling 1, 2026-09-25). Not built.
 
   route.checkpoint_adopt:
     source: {kind: route, file: tools/dashboard/network_routes.py, symbol: _adopt_registry_checkpoint}
@@ -1937,7 +1945,7 @@ artifacts:
     description: A hot delegate grant whose scope includes signing advancing checkpoints.
     store: founder's org ledger and audited vault
     home: founder machine
-    code: [tools/network/storagekit/delegate.py:storage_delegate_scopes]
+    code: [tools/network/storagekit/delegate.py:storage_delegate_scopes, tools/network/storagekit/tamarin/DelegateCheckpoint.spthy:Grant_Checkpoint_Delegate]
 
 goals:
   org_sync_pull:

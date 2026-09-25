@@ -46,6 +46,8 @@ against.
 | `RecoveryUnlinkNoContext.spthy` | privacy pair A calibration: **genesis context deleted from the derivation** | equivalence falsified |
 | `VaultDeniability.spthy` | privacy pair B green (diff mode): sealed-store dump deniability (bead auto-u8pcx) | equivalence verified |
 | `VaultDeniabilityPlainAddr.spthy` | privacy pair B calibration: **deterministic plaintext row addresses** | equivalence falsified |
+| `DelegateCheckpoint.spthy` | model 13 green: delegate-signed advancing checkpoint, attributed through the grant (bead auto-qrmlg.5) | all lemmas verified |
+| `DelegateCheckpointNoPoP.spthy` | model 13 calibration: **grant proof of possession deleted from verification** | `checkpoint_attributable` falsified, rest verified |
 | `run_tamarin.py` | harness enforcing every expectation above | exit 0 iff all hold |
 
 The pairing is the point: a green proof is only trusted because the
@@ -1023,3 +1025,35 @@ pilot). Remaining:
    spike (auto-pdvu6) found tamarin's built-in diff mode sufficient,
    and the privacy pairs landed in-suite (auto-u8pcx); ProVerif/
    DeepSec export remains the escalation route.
+
+## Model 13 — delegate-signed checkpoint (`DelegateCheckpoint.spthy`)
+
+Bead auto-qrmlg.5; operator ruling 1 (2026-09-25) accepts a checkpoint
+scope on the hot delegate; design graph://25d07566-32c. Proposed, not
+built: a hot delegate with the checkpoint scope signs the advancing
+checkpoint at admission; a verifier resolves the delegate key to its
+grant (persona-signed, with the child's proof of possession over
+genesis, issuer, child, scope and nonce — the built grant form,
+ledger/fold.py:_h_delegate) and requires the granting persona in the
+previous checkpointers root.
+
+Proved: `checkpoint_unforgeable` (an accepted checkpoint was signed by
+its delegate, unless that delegate or the attributed persona was
+compromised first); `checkpoint_attributable` (a checkpoint an honest
+delegate signed is attributed only to the persona it was minted for,
+unless the delegate key was stolen); `no_attribution_without_grant`;
+`signer_in_previous_checkpointers` (restriction contract, the model-10
+encoding). Vacuity guards: `executable`, `stolen_delegate_witness`,
+`compromised_checkpointer_witness`.
+
+Calibration `DelegateCheckpointNoPoP.spthy` deletes the proof-of-
+possession check: a compromised checkpointer publishes a grant over an
+honest checkpointer's delegate public key and is attributed that
+delegate's checkpoint (9-step trace).
+
+Abstractions: the record's content (seq, prev, roots, ledger_head) is one
+fresh term; the previous checkpointers root is a restriction-certified
+read; TTL, revocation and the single-use nonce's replay role are out of
+scope (model 10 covers delegate liveness); the record does not name its
+grant — a record binding its grant's hash would move part of the
+attribution defence into the record, which is unbuilt and not assumed.

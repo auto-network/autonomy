@@ -27,7 +27,8 @@
     },
     "checkpoint_delegate_grant": {
       "code": [
-        "tools/network/storagekit/delegate.py:storage_delegate_scopes"
+        "tools/network/storagekit/delegate.py:storage_delegate_scopes",
+        "tools/network/storagekit/tamarin/DelegateCheckpoint.spthy:Grant_Checkpoint_Delegate"
       ],
       "description": "A hot delegate grant whose scope includes signing advancing checkpoints.",
       "home": "founder machine",
@@ -1768,10 +1769,22 @@
           "a hot delegate grant carrying a checkpoint scope"
         ]
       },
-      "notes": "Not built: the storage delegate's scopes exclude checkpoint today (storagekit/delegate.py:storage_delegate_scopes). Accepting this scope is an operator policy decision (graph://cde6c8c6-041 \u00a74).",
+      "notes": "Not built: the storage delegate's scopes exclude checkpoint today (storagekit/delegate.py:storage_delegate_scopes). Operator ruling 1 (2026-09-25) accepts a checkpoint scope on the hot delegate; the grant keeps the built proof-of-possession form (fold.py:_h_delegate), which DelegateCheckpointNoPoP shows is load-bearing for attribution.",
       "opens": "persona",
       "produces": [
         "checkpoint_delegate_grant"
+      ],
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "checkpoint_attributable",
+          "theory": "DelegateCheckpoint"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "no_attribution_without_grant",
+          "theory": "DelegateCheckpoint"
+        }
       ],
       "requires": [
         "persona_signing_key",
@@ -1779,9 +1792,9 @@
       ],
       "rule": "delegate_checkpoint",
       "source": {
-        "file": "tools/network/storagekit/delegate.py",
+        "file": "tools/network/storagekit/tamarin/DelegateCheckpoint.spthy",
         "kind": "ceremony",
-        "symbol": "storage_delegate_scopes"
+        "symbol": "Grant_Checkpoint_Delegate"
       },
       "status": "designed"
     },
@@ -2222,7 +2235,7 @@
           "no ceremony"
         ]
       },
-      "notes": "Proposed rule Checkpoint-at-admission with a hot signer. Not built.",
+      "notes": "Proposed rule Checkpoint-at-admission with a hot signer (operator ruling 1, 2026-09-25). Not built.",
       "opens": "delegate",
       "produces": [
         "checkpoint_including_joiner",
@@ -2233,6 +2246,21 @@
           "framework": "tla",
           "lemma": "EveryAdmittedMemberPulls",
           "theory": "OrgAdmission"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "checkpoint_unforgeable",
+          "theory": "DelegateCheckpoint"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "checkpoint_attributable",
+          "theory": "DelegateCheckpoint"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "signer_in_previous_checkpointers",
+          "theory": "DelegateCheckpoint"
         }
       ],
       "requires": [

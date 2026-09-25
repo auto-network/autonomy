@@ -63,7 +63,7 @@ Artifact details:
 
 - **adopted_checkpoint** — The actor's adopted-checkpoint cache holds a checkpoint including the joiner (adopted_checkpoint_founder, adopted_checkpoint_joiner). Code: `tools/dashboard/membership_checkpoint.py:record_adopted`
 - **bootstrap_snapshot** — The founder's ledger events, binding and profiles as of the bootstrap moment. Code: `tools/dashboard/claim_service.py:bootstrap`
-- **checkpoint_delegate_grant** — A hot delegate grant whose scope includes signing advancing checkpoints. Code: `tools/network/storagekit/delegate.py:storage_delegate_scopes`
+- **checkpoint_delegate_grant** — A hot delegate grant whose scope includes signing advancing checkpoints. Code: `tools/network/storagekit/delegate.py:storage_delegate_scopes` · `tools/network/storagekit/tamarin/DelegateCheckpoint.spthy:Grant_Checkpoint_Delegate`
 - **checkpoint_including_joiner** — A registry checkpoint seq n+1 whose members_root includes the joiner (checkpoint_seq_n). Code: `tools/dashboard/network_routes.py:post_membership_checkpoint`
 - **checkpoint_seed** — Registry membership checkpoint seq 0, signed by the org root. Code: `tools/dashboard/membership_checkpoint.py:checkpoint_due`
 - **claim_approval** — The founder's countersignature on a staged claim. Code: `tools/dashboard/static/js/ceremony/claim.js:signClaimApproval` · `tools/dashboard/claim_service.py:countersign`

@@ -1,0 +1,193 @@
+/*
+  DelegateCheckpoint — model 13: an advancing membership checkpoint
+  signed by a hot delegate holding the checkpoint scope (bead
+  auto-qrmlg.5; operator ruling 1, 2026-09-25: a checkpoint scope on the
+  hot delegate is accepted). Design: graph://25d07566-32c §4 P2, §5.
+
+  What is built and what is proposed. Built: the delegate grant is a
+  ledger event {child_pub, scope, can_redelegate, ttl, grant_nonce,
+  proof}, persona-signed, and the fold verifies the child's proof of
+  possession over (genesis, issuer key, child key, full terms, nonce)
+  (ledger/fold.py:_h_delegate, events.py:delegate_proof_input). Built:
+  an advancing checkpoint is persona-signed and embeds the signer's
+  inclusion under the PREVIOUS checkpointers_root
+  (membership_commitment.py:validate_checkpoint). Proposed, modeled
+  here: the advancing checkpoint is signed by the delegate instead, and
+  a verifier attributes it through the delegate's grant to the granting
+  persona, which must be in the previous checkpointers root. The storage
+  delegate's scopes exclude checkpoint today
+  (storagekit/delegate.py:storage_delegate_scopes).
+
+  ENCODING (the model-10 convention): the verifier's state read "the
+  attributed persona is in the previous checkpointers root" is a
+  restriction on acceptance (checkpointer_read), because it is a read of
+  the previous record's commitment, not a cryptographic step. The
+  DERIVED content is the signature chain: persona -> grant -> delegate
+  -> checkpoint, with the delegate's consent (proof of possession) on
+  the grant.
+
+  The checkpoint record deliberately does NOT name its grant: the
+  verifier resolves the delegate key to a grant in the ledger. That is
+  the setting in which the proof of possession is load-bearing (the
+  fold's own rationale, fold.py:600-610: without possession any member
+  with delegation authority could publish a grant over a key it merely
+  observed and take attribution for what that key signs). A record that
+  bound its grant's hash would move part of that defence into the
+  record; unbuilt, so not assumed.
+
+  Adversary: Dolev-Yao network; may reveal any persona (a compromised
+  checkpointer) and any delegate key (the delegate is hot, disk/audited
+  custody). Revealing does not revoke.
+
+  Calibration (DelegateCheckpointNoPoP.spthy): the verifier checks the
+  grant's persona signature but not the child's proof of possession ->
+  checkpoint_attributable falsified: a compromised checkpointer grants
+  itself an honest persona's delegate key and is attributed that
+  delegate's checkpoints.
+*/
+
+theory DelegateCheckpoint
+begin
+
+builtins: signing
+
+/* A persona joins the checkpointers set of some adopted record. */
+rule Enroll_Checkpointer:
+  [ Fr(~p) ]
+  --[ Checkpointer(pk(~p)) ]->
+  [ !Persona(~p), !CheckpointerPub(pk(~p)), Out(pk(~p)) ]
+
+/* A later checkpoint drops it from the checkpointers root. */
+rule Remove_Checkpointer:
+  [ !CheckpointerPub(ppub) ]
+  --[ CheckpointerRemoved(ppub) ]->
+  [ ]
+
+/* Compromise of a checkpointer persona (its key reaches the adversary). */
+rule Reveal_Persona:
+  [ !Persona(~p) ]
+  --[ PersonaRevealed(pk(~p)) ]->
+  [ Out(~p) ]
+
+/* The persona mints a checkpoint-scoped delegate: a fresh child key that
+   consents to exactly these terms (proof of possession), and the
+   persona-signed grant carrying that proof. Public, as a ledger event. */
+rule Grant_Checkpoint_Delegate:
+  let ppub  = pk(~p)
+      dpub  = pk(~d)
+      terms = <'genesis', ppub, dpub, 'checkpoint', ~n>
+  in
+  [ !Persona(~p), Fr(~d), Fr(~n) ]
+  --[ DelegateMinted(ppub, dpub), Granted(ppub, dpub) ]->
+  [ !DelegateKey(~d, ppub)
+  , Out(dpub)
+  , Out(< 'grant', ppub, dpub, 'checkpoint', ~n
+        , sign(<'grant', terms>, ~p)
+        , sign(<'pop', terms>, ~d) >)
+  ]
+
+/* At admission the hot delegate signs an advancing checkpoint (the
+   record's content — seq, prev, roots, ledger_head — is ~c). */
+rule Delegate_Sign_Checkpoint:
+  [ !DelegateKey(~d, ppub), Fr(~c) ]
+  --[ CheckpointSigned(pk(~d), ~c) ]->
+  [ Out(< 'cp', ~c, sign(<'cp', ~c>, ~d) >) ]
+
+/* The delegate is hot: its key can be stolen. */
+rule Reveal_Delegate:
+  [ !DelegateKey(~d, ppub) ]
+  --[ DelegateRevealed(pk(~d)) ]->
+  [ Out(~d) ]
+
+/* The verifier (a member adopting by verification, or the registry):
+   resolves the checkpoint's delegate key to a grant, checks the grant's
+   persona signature, the child's proof of possession over the same
+   terms, and the checkpoint signature; then reads the previous
+   checkpointers root for the granting persona. Only the checkpoint
+   scope is accepted (the rule matches the literal). */
+rule Accept_Checkpoint:
+  let terms = <'genesis', ppub, dpub, 'checkpoint', n>
+  in
+  [ In(< 'grant', ppub, dpub, 'checkpoint', n, gsig, proof >)
+  , In(< 'cp', c, csig >)
+  ]
+  --[ Eq(verify(gsig, <'grant', terms>, ppub), true)
+    , Eq(verify(proof, <'pop', terms>, dpub), true)
+    , Eq(verify(csig, <'cp', c>, dpub), true)
+    , CheckpointerRead(ppub)
+    , CheckpointAccepted(ppub, dpub, c)
+    ]->
+  [ ]
+
+restriction equality:
+  "All x y #i. Eq(x, y)@i ==> x = y"
+
+/* The previous checkpointers root includes the attributed persona. */
+restriction checkpointer_read:
+  "All p #i. CheckpointerRead(p)@i ==>
+      (Ex #e. Checkpointer(p)@e & #e < #i)
+    & not(Ex #r. CheckpointerRemoved(p)@r & #r < #i)"
+
+/* ═══ Lemmas ═══ */
+
+/* The honest flow: a checkpointer's delegate signs a checkpoint that is
+   accepted and attributed to that checkpointer. */
+lemma executable:
+  exists-trace
+  "Ex p d c #g #s #i.
+      DelegateMinted(p, d)@g & CheckpointSigned(d, c)@s
+    & CheckpointAccepted(p, d, c)@i
+    & not(Ex #r. PersonaRevealed(p)@r)
+    & not(Ex #r. DelegateRevealed(d)@r)"
+
+/* Unforgeable: an accepted checkpoint was signed by its honest
+   delegate, or that delegate's key was stolen first, or the attributed
+   persona itself was compromised (a compromised checkpointer holds real
+   authority until a checkpoint removes it; that is not a forgery). */
+lemma checkpoint_unforgeable:
+  "All p d c #i. CheckpointAccepted(p, d, c)@i ==>
+      (Ex #s. CheckpointSigned(d, c)@s & #s < #i)
+    | (Ex #r. DelegateRevealed(d)@r & #r < #i)
+    | (Ex #r. PersonaRevealed(p)@r & #r < #i)"
+
+/* MAIN — attributable: a checkpoint an honest delegate key signed is
+   attributed only to the persona that delegate was minted for (whose
+   consent the proof of possession carries), unless that delegate key
+   was stolen. A compromised checkpointer cannot take attribution for
+   another checkpointer's delegate. */
+lemma checkpoint_attributable:
+  "All p d c #i #s.
+      CheckpointAccepted(p, d, c)@i & CheckpointSigned(d, c)@s
+      ==> (Ex #g. DelegateMinted(p, d)@g & #g < #i)
+        | (Ex #r. DelegateRevealed(d)@r & #r < #i)"
+
+/* No persona is attributed a checkpoint through a grant it did not
+   sign, unless its own key was compromised. */
+lemma no_attribution_without_grant:
+  "All p d c #i. CheckpointAccepted(p, d, c)@i ==>
+      (Ex #g. Granted(p, d)@g & #g < #i)
+    | (Ex #r. PersonaRevealed(p)@r & #r < #i)"
+
+/* The attributed persona is in the previous checkpointers root
+   (contract consistency over the checkpointer read). */
+lemma signer_in_previous_checkpointers:
+  "All p d c #i. CheckpointAccepted(p, d, c)@i ==>
+      (Ex #e. Checkpointer(p)@e & #e < #i)
+    & not(Ex #r. CheckpointerRemoved(p)@r & #r < #i)"
+
+/* Vacuity guard: a stolen delegate key genuinely yields an accepted
+   checkpoint with adversary content, attributed to the granting persona
+   (theft is not a no-op; removal from the checkpointers root ends it). */
+lemma stolen_delegate_witness:
+  exists-trace
+  "Ex p d #r #i.
+      DelegateRevealed(d)@r & CheckpointAccepted(p, d, 'forged')@i & #r < #i"
+
+/* Vacuity guard: a compromised checkpointer's own delegate is accepted
+   (the adversary capability the calibration relies on is live here). */
+lemma compromised_checkpointer_witness:
+  exists-trace
+  "Ex p d c #r #i.
+      PersonaRevealed(p)@r & CheckpointAccepted(p, d, c)@i & #r < #i"
+
+end

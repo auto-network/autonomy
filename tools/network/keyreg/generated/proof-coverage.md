@@ -45,7 +45,7 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | armor.replace_recovery_slot | mutation | **GAP** |
 | armor.revoke_factor | mutation | **GAP** |
 | armor.set_recovery | mutation | **GAP** |
-| ceremony.checkpoint_delegate_grant | mutation | **GAP** |
+| ceremony.checkpoint_delegate_grant | mutation | DelegateCheckpoint: checkpoint_attributable<br>DelegateCheckpoint: no_attribution_without_grant |
 | ceremony.checkpoint_publish | mutation | OrgAdmission: EveryAdmittedMemberPulls |
 | ceremony.checkpoint_seed | mutation | **GAP** |
 | ceremony.claim_approval | mutation | **GAP** |
@@ -60,7 +60,7 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | ceremony.registration | mutation | **GAP** |
 | ceremony.serve_cert_mint | mutation | **GAP** |
 | ceremony.vault_master_read | mutation | **GAP** |
-| delegate.checkpoint_publish | mutation | OrgAdmission: EveryAdmittedMemberPulls |
+| delegate.checkpoint_publish | mutation | OrgAdmission: EveryAdmittedMemberPulls<br>DelegateCheckpoint: checkpoint_unforgeable<br>DelegateCheckpoint: checkpoint_attributable<br>DelegateCheckpoint: signer_in_previous_checkpointers |
 | fleet.distribute_kem | mutation | VaultFleetDist: machine_key_yields_nothing_undistributed |
 | fleet.enroll | mutation | **GAP** |
 | fleet.kick | mutation | VaultFleetDist: kicked_machine_excluded<br>VaultD006Window: halt_window_confidential |
@@ -101,4 +101,4 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | vault.create_class | mutation | VaultPolicyClass: root_reaches_every_generation |
 | vault.revoke_class_factor | mutation | VaultPolicyClass: revoked_factor_excluded_forward<br>VaultPolicyClass: revoked_factor_keeps_old |
 
-30 of 90 entries carry at least one model reference; 60 gaps.
+31 of 90 entries carry at least one model reference; 59 gaps.
