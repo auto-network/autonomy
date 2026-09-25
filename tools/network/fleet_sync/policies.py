@@ -284,6 +284,11 @@ LOCAL_SYNC_TABLES: Final[frozenset[str]] = frozenset({
 #: ledger rows (whose cross-machine merge is undecided).
 LEDGER_TABLES: Final[frozenset[str]] = frozenset({
     "ledger_events",
+    # Retired 2026-09-22 (21e6fae1bb: heads are computed from the events).
+    # Still classified so audit_schema never fails on a store not yet opened
+    # by the ledger code that drops it; unclassified, it refused every org
+    # follow with "unclassified personal graph tables: ledger_heads".
+    "ledger_heads",
     "ledger_meta",
     "ledger_parents",
     "ledger_pending_claims",
