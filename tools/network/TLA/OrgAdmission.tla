@@ -75,6 +75,9 @@
 (*  MonotoneAdopt: a record at or below the adopted seq is refused         *)
 (*  GrantInBundle: the join bundle carries the new member's grant for the  *)
 (*            generation current at install (K3 allows the join bundle)    *)
+(*  "verifier_any_adm" E-any-adm: as "verifier_any", and the record is at  *)
+(*                or after the prover's current admission (see             *)
+(*                OrgAdmissionLeaves.tla: re-admission)                    *)
 (*  "verifier_any" E-any (model-suggested): as "verifier", accepting a     *)
 (*                proof under ANY authentic record at or below the         *)
 (*                verifier's newest, not only its predecessor              *)
@@ -142,6 +145,18 @@ CurJoiners == Current \ {F}
 
 Has(n) == IF n = F THEN Pos(Len(fLedger)) ELSE jHas[n]
 
+\* Ledger position of the joiner's latest claim (its current admission).
+AdmitPos(j) ==
+    LET cl == {i \in Pos(Len(fLedger)) : fLedger[i].kind = "claim" /\ fLedger[i].who = j}
+    IN IF cl = {} THEN 0 ELSE CHOOSE i \in cl : \A x \in cl : x <= i
+
+\* An optional fixed order of the founder's events (claims and removals),
+\* overridden by a model module to bound the state space; << >> = free.
+Script == << >>
+Scripted(ev) ==
+    \/ Script = << >>
+    \/ Len(fLedger) < Len(Script) /\ Script[Len(fLedger) + 1] = ev
+
 \* C9: the prover can fold at record s's head.
 Foldable(n, s) == s > 0 /\ Pos(cps[s].head) \subseteq Has(n)
 
@@ -205,6 +220,7 @@ AdmitStep(j) == AppendEvent([kind |-> "claim", who |-> j])
 \* J3: the joiner's claim; a self-admitting role is appended at submit.
 Claim(j) ==
     /\ j \notin claimed
+    /\ Approval \/ Scripted([kind |-> "claim", who |-> j])
     /\ claimed' = claimed \cup {j}
     /\ IF Approval THEN UNCHANGED <<fLedger, cps, adopted, prevAd, adoptedAt, pulls>>
                    ELSE AdmitStep(j)
@@ -230,6 +246,7 @@ Finalize(j) ==
 Remove(j) ==
     /\ AllowRemoval
     /\ j \in CurJoiners
+    /\ Scripted([kind |-> "remove", who |-> j])
     /\ AppendEvent([kind |-> "remove", who |-> j])
     /\ UNCHANGED <<jHas, installed, now, forged, claimed, approved, recon, badRecon, gens>>
 
@@ -326,10 +343,13 @@ Accepts(v, other, s) ==
                [] PathRule = "verifier"    -> /\ Foldable(v, adopted[v])
                                               /\ other \in MembersAt(cps[adopted[v]].head)
                [] OTHER -> FALSE
-       \/ /\ PathRule = "verifier_any"
+       \/ /\ PathRule \in {"verifier_any", "verifier_any_adm"}
           /\ s > 0 /\ s < adopted[v] /\ cps[s].auth
           /\ Foldable(v, adopted[v])
           /\ other \in MembersAt(cps[adopted[v]].head)
+          \* "verifier_any_adm": not before the prover's current admission
+          /\ (PathRule = "verifier_any_adm" /\ other \in Joiners) =>
+                cps[s].head >= AdmitPos(other)
 
 \* The prover side, or anything at all for the outsider.
 CanProve(n, s) == IF n = X THEN s \in 1..Len(cps) ELSE s \in ProverSeqs(n)

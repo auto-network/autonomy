@@ -41,6 +41,15 @@ GREEN = [
     ("OrgAdmissionTransitionD2.cfg", "OrgAdmission"),
     ("OrgAdmissionTransitionD1Adversarial.cfg", "OrgAdmission"),
     ("OrgAdmissionTransitionD2Adversarial.cfg", "OrgAdmission"),
+    ("OrgAdmissionTransitionVerifierEAnyAdm.cfg", "OrgAdmission"),
+    # Three joiners, two consecutive removal re-keys; the founder's event
+    # order is fixed (OrgAdmissionX3.tla), member actions are free.
+    ("OrgAdmissionX3EAny.cfg", "OrgAdmissionX3"),
+    ("OrgAdmissionX3EAnyAdm.cfg", "OrgAdmissionX3"),
+    # E-any against rekeyed and re-admitted personas (safety).
+    ("OrgAdmissionLeavesEAnyRekey.cfg", "OrgAdmissionLeaves"),
+    ("OrgAdmissionLeavesEAnyAdmission.cfg", "OrgAdmissionLeaves"),
+    ("OrgAdmissionLeavesNewest.cfg", "OrgAdmissionLeaves"),
 ]
 
 CALIBRATION = [
@@ -82,6 +91,18 @@ CALIBRATION = [
     ("calibration/TransitionD1NoMonotone.cfg", "OrgAdmission", "NoRegression"),
     ("calibration/TransitionD1ReachesSync.cfg", "OrgAdmission", "NotAllJoinedInSync"),
     ("calibration/TransitionD2ReachesSync.cfg", "OrgAdmission", "NotAllJoinedInSync"),
+    # D1/D2 + bundle grant fail at the second consecutive re-key: the new
+    # generation's grant reaches a member only by a pull (custody chain).
+    ("calibration/X3D1Prev.cfg", "OrgAdmissionX3", "EveryAdmittedMemberPulls"),
+    ("calibration/X3D2Prev.cfg", "OrgAdmissionX3", "EveryAdmittedMemberPulls"),
+    # E-any without the admission bound admits a re-admitted persona under
+    # a pre-removal record; C unbounded admits a rekeyed-away old key.
+    ("calibration/LeavesEAnyReAdmit.cfg", "OrgAdmissionLeaves", "ReAdmitAfterRemoval"),
+    ("calibration/LeavesPredecessorOldKey.cfg", "OrgAdmissionLeaves", "RekeyedOldKeyExcluded"),
+    ("calibration/LeavesEAnyAdmitsStale.cfg", "OrgAdmissionLeaves", "NoStaleAdmission"),
+    # E-any-adm with today's fold-only adoption (no P1): the lagging side
+    # adopts nothing it could verify the up-to-date peer under.
+    ("calibration/TransitionEAnyAdmFoldAdopt.cfg", "OrgAdmission", "EveryAdmittedMemberPulls"),
 ]
 
 VIOLATION_MARKERS = (

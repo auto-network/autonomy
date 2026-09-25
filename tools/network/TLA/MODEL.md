@@ -305,65 +305,78 @@ not require the head to be a current head, only present).
 ## Existing members across a checkpoint advance (bead auto-qrmlg.11)
 
 `OrgAdmission.tla` adds, behind constants that leave every auto-qrmlg.5
-configuration unchanged (`PathRule = "granted"`):
+configuration's verdict unchanged (`PathRule = "granted"`):
+- **Path construction (C9).** The prover folds its local ledger at the
+  record's head (org_sync_channels.py:173-179, 197-205), so it needs every
+  event up to that head.
+- **Delivery (K3).** Events and generation grants reach a joiner only by an
+  admitted pull, its own append, or the join install.
+- **Production acceptance.** The verifier accepts its single newest adopted
+  seq only (fleet_org_channel.py:286-292, org_sync_channels.py:189-193).
+  The reprove window has no production caller.
+- **Removals and time.** Each removal re-keys the storage generation. Time
+  is modeled for the bounded window.
+- **Event order.** An optional fixed order of the founder's events bounds
+  the three-joiner runs (`OrgAdmissionX3.tla`: admit j1, j2, j3, then
+  remove j2, then j3). Member actions stay free, so j1 can lag across both
+  removals.
 
-- **Path construction (C9).** A prover folds its local ledger at its record's
-  head (org_sync_channels.py:173-179, 197-205): it needs every event up to
-  that head.
-- **Event and grant delivery.** Ledger events and generation grants reach a
-  joiner only on an admitted pull, its own append, or the join install (K3).
-- **Production acceptance.** A verifier accepts only its single newest adopted
-  seq (fleet_org_channel.py:286-292, org_sync_channels.py:189-193). The
-  reprove window has no production caller.
-- **Removals.** Each removal re-keys the storage generation.
-- **Modeled time.** Used by the bounded window.
+Pull history is kept as per-joiner sync flags, reset whenever the founder
+adopts, plus sticky violation flags. `OrgAdmissionLeaves.tla` checks the
+acceptance rule alone (safety) against rekeyed leaves and re-admitted
+personas. Leaves are current persona keys (membership_commitment.py:185-190).
+A persona key derives from root + genesis, so a re-admitted persona that did
+not rekey returns with the same leaf.
 
-Constants: `PathRule`, `AllowRemoval`, `WindowTicks`/`MaxTime`, `DeltaKey`,
-`RootCheck`, `MonotoneAdopt`, `Adversarial`, `GrantInBundle`. All runs use
-P1 + P2 and two joiners. Pull history is kept as per-joiner sync flags,
-reset whenever the founder adopts a new record, plus sticky violation flags.
+Results, P1 + P2 (run_tlc.py). Liveness is `EveryAdmittedMemberPulls`; "x3"
+means three joiners and two consecutive removal re-keys.
 
-Results (run_tlc.py):
-
-| Rule | Liveness `EveryAdmittedMemberPulls` | Safety |
+| Rule | Liveness | Safety |
 |---|---|---|
 | production (fold, newest only) | violated | — |
-| A path in record / B registry path (reference: violate K1) | clean | clean |
+| A path in record / B registry path (reference only: violate K1) | clean | clean |
 | C bounded predecessor window | violated (window expires) | — |
-| C unbounded predecessor | clean | `RemovedExcluded` violated |
-| D1 registry Enc(Δ) journal, as specified | violated (no grant before first pull) | — |
-| D2 hello Enc(Δ) chain, as specified | violated (same) | — |
-| D1 / D2 + grant in the join bundle, Δ under the previous generation | clean | clean against wrong Δ and replayed records |
+| C unbounded predecessor | clean | `RemovedExcluded` violated; `RekeyedOldKeyExcluded` violated |
+| D1 / D2 as specified | violated (no grant before the first pull) | — |
+| D1 / D2 + grant in join bundle, Δ under previous generation | clean with two joiners; **violated x3** | clean against wrong Δ and replayed records |
 | D1 / D2 + bundle, Δ under the post-rekey generation | violated | — |
-| D1 without the members_root recomputation | — | `ReconstructedIsCommitted` violated |
-| D1 without monotone adoption | — | `NoRegression` violated |
-| E verifier-side check, one predecessor | violated (member two records behind) | — |
-| E-any verifier-side check, any older authentic record | clean | clean |
+| E, one predecessor | violated (member two records behind) | — |
+| E-any, any older authentic record, prover in verifier's newest set | clean, clean x3 | `RekeyedOldKeyExcluded` holds; `ReAdmitAfterRemoval` **violated** |
+| **E-any-adm**: E-any, and the record is at or after the prover's current admission | clean, clean x3 | `RekeyedOldKeyExcluded` and `ReAdmitAfterRemoval` hold; non-vacuous (an older-record proof is admitted) |
+| E-any-adm with today's fold-only adoption (no P1) | violated | — |
 
-Executability holds for D1, D2 and E-any: full sync is reachable.
+D1 without the members_root recomputation violates
+`ReconstructedIsCommitted`. D1 without monotone adoption violates
+`NoRegression`. Executability holds for D1, D2, E-any and E-any-adm.
 
-Traces (`/workspace/output/tlc-*.txt` at the time of the run):
+Liveness assumption of E-any / E-any-adm (from the fairness in `Spec`): a
+lagging member is eventually dialed by, or dials, a node that holds every
+event up to the newest head (the founder in these runs). Its pulls from
+that node are weakly fair. It has adopted, by verification (P1), a record
+under which it can verify that node's proof.
 
+Traces:
 - **production.** j1 is admitted and installs holding {1}. j2 is admitted,
-  and the P2 checkpoint moves to head 2. j1 adopts by verification without
-  event 2, so it cannot fold a rider. The founder accepts only its newest
-  record, so j1 is never pulled.
-- **C bounded.** j1 proves under s2, and the founder pulls from j1 inside the
-  window. Two ticks expire the window before j1 pulls from the founder, and
-  j1 never receives event 2.
+  and the P2 checkpoint is at head 2. j1 adopts by verification without
+  event 2, cannot fold its rider, and the founder accepts only its newest
+  record.
+- **C bounded.** The founder pulls from j1 under s2 inside the window. Two
+  ticks expire the window before j1 pulls from the founder.
 - **C unbounded.** j1 is admitted, installed and removed. The founder still
-  accepts j1's proof under the pre-removal record and pulls from it.
-- **D1 as specified.** j1 and j2 are admitted, and j1 installs holding
-  events 1-2. j2 is removed (s4), and j1 adopts s4. j1 holds no generation
-  grant, because a grant arrives only by pull and it has not pulled yet, so
-  it cannot open Δ4. The founder accepts only s4.
-- **D1 + bundle, post-rekey key.** j1 holds generation 0. The removal re-keys
-  to generation 1, and Δ4 is under generation 1, whose grant arrives only by
-  a pull that j1 cannot make.
-- **E.** j2 installs holding only its own claim, so it knows s2. j1 is
-  admitted (s3) and then removed (s4). The founder accepts s4 or its
-  predecessor s3; j2 can prove only under s2.
-
-Not completed: three-joiner runs of D1 + bundle and of E-any (two
-consecutive removal re-keys). The E-any run was stopped at 20 minutes
-without a verdict, and D1 was not started.
+  accepts j1's proof under the pre-removal record.
+- **D1 as specified.** j1 installs holding events 1-2 and j2 is removed (s4).
+  j1 holds no generation grant, so it cannot open Δ4.
+- **D1/D2 + bundle, x3.** j1 rebuilds through record 5 (j2 removed) with
+  generation 0. Δ6 (j3 removed) is under generation 1. That generation's
+  grant reaches j1 only by a pull from a node on record 6, which j1 cannot
+  make: the generation-grant custody chain.
+- **post-rekey key.** j1 holds generation 0; Δ4 is under generation 1.
+- **E.** j2 knows only s2. j1 is admitted (s3) and removed (s4). The
+  founder accepts s4 or s3 only.
+- **E-any, re-admission.** p1 is admitted (record 2), removed (record 3) and
+  re-admitted (record 4). Its unchanged leaf proves under the pre-removal
+  record 2, and it is admitted.
+- **E-any-adm, fold-only adoption.** j1 installs holding {1}. j2 is admitted
+  and removed before j1 adopts. The registry's current record is beyond
+  j1's ledger, so j1 adopts nothing and cannot verify the founder in the
+  mutual hello.
