@@ -392,6 +392,29 @@ class FleetSyncRuntimeConfig:
     follow_status_recorder: Callable[[str, Mapping], None] | None = None
 
 
+def _store_carries_capture(path: Path) -> bool:
+    """True when *path* exists and its fleet-sync capture triggers are
+    installed -- the fact ``_store_for``'s activation cache stands for."""
+    import sqlite3
+
+    if not Path(path).exists():
+        return False
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5.0)
+    except sqlite3.Error:
+        return False
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' "
+            "AND name LIKE 'fleet_sync_%'"
+        ).fetchone()
+        return bool(row and row[0])
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
 #: File stems in data/orgs/ that are never an organization scope. "personal"
 #: and "machine" are the operator's local stores, which live beside the
 #: directory; the rest are artefacts of a path resolver that creates what it
@@ -1244,7 +1267,9 @@ class SQLiteFleetSyncStore:
         catalog = attach_active_production_catalog(conn)
         if catalog is None:
             conn.close()
-            raise WatermarkError("personal database fleet writers are not active")
+            raise WatermarkError(
+                f"fleet writers are not active for the store at {self.path}"
+            )
         # Remote batches carrying attachment rows realize from bytes this
         # machine already holds; a digest no local file satisfies defers to
         # quarantine instead of failing the batch.
@@ -2401,6 +2426,14 @@ class FleetSyncScheduler:
         path = paths[scope]
         if scope == "personal":
             return self.store
+        # The cache is by path, and a path can be a NEW file: `graph follow
+        # remove` then `add` deletes and recreates a followed mirror under the
+        # same name (Windows signed-release node, 2026-09-26: every follow
+        # round then failed with "fleet writers are not active"). A cached
+        # path counts as activated only while the file still carries the
+        # capture triggers.
+        if path in self._activated_scopes and not _store_carries_capture(path):
+            self._activated_scopes.discard(path)
         if path not in self._activated_scopes:
             from tools.graph.db import GraphDB
 
