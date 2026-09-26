@@ -292,20 +292,54 @@ async def post_state(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "state": item["state"]})
 
 
+def _coordinator_of(org: str | None, mission_id: str,
+                    pillar_id: str) -> str:
+    pillars = compose.load_pillars(org, mission_id)
+    me = next((x for x in pillars if x["pillar_id"] == pillar_id), None)
+    return (me or {}).get("coordinator_session") or ""
+
+
 async def _relay_to_coordinator(org: str | None, mission_id: str,
                                 pillar_id: str, by: str,
                                 note: str) -> bool:
     """Best-effort CrossTalk to the pillar's coordinator (storage always
     precedes delivery; a failed relay never loses the write)."""
     try:
-        pillars = compose.load_pillars(org, mission_id)
-        me = next((x for x in pillars
-                   if x["pillar_id"] == pillar_id), None)
-        target = (me or {}).get("coordinator_session")
+        target = _coordinator_of(org, mission_id, pillar_id)
         if not target or target == by:
             return False
         from tools.dashboard.crosstalk_delivery import deliver_from_chat
         out = await deliver_from_chat(by, target, note)
+        return bool(out.get("delivered"))
+    except Exception:                             # noqa: BLE001
+        return False
+
+
+async def _relay_to_asker(org: str | None, mission_id: str,
+                          pillar_id: str, item: dict | None, by: str,
+                          note: str) -> bool:
+    """Best-effort CrossTalk to the session that asked a question.
+
+    Questions are often asked by a session other than the pillar's
+    coordinator (a reviewer, a builder); without this, a reply or answer
+    reached the coordinator and never the asker. Only a known session is
+    messaged: a member's ``asked_by`` is a persona key, not an address.
+    The coordinator is skipped here because the coordinator relay already
+    delivered to it.
+    """
+    try:
+        if (item or {}).get("kind") != "question":
+            return False
+        asker = (item or {}).get("asked_by") or ""
+        if not asker or asker == by:
+            return False
+        if asker == _coordinator_of(org, mission_id, pillar_id):
+            return False
+        from tools.dashboard.dao import dashboard_db
+        if not await asyncio.to_thread(dashboard_db.session_exists, asker):
+            return False
+        from tools.dashboard.crosstalk_delivery import deliver_from_chat
+        out = await deliver_from_chat(by, asker, note)
         return bool(out.get("delivered"))
     except Exception:                             # noqa: BLE001
         return False
@@ -320,8 +354,8 @@ def _entry_route(fn, what: str = "entry", **fixed):
             return JSONResponse({"error": "text required"}, status_code=400)
         by = _identity(request, org)
         try:
-            fn(org, pp["mission_id"], pp["pillar_id"], pp["item_id"],
-               text=text, by=by, **fixed)
+            item = fn(org, pp["mission_id"], pp["pillar_id"], pp["item_id"],
+                      text=text, by=by, **fixed)
         except Exception as exc:                  # noqa: BLE001
             return _refused(exc)
         # The chat route always relayed; item entries silently did not —
@@ -332,7 +366,15 @@ def _entry_route(fn, what: str = "entry", **fixed):
             f"[mission {what} \u00b7 {pp['pillar_id']}] "
             f"on item {pp['item_id']}: {text}\n"
             f"View: /mission/{pp['mission_id']}")
-        return JSONResponse({"ok": True, "relayed": relayed})
+        asker_notified = await _relay_to_asker(
+            org, pp["mission_id"], pp["pillar_id"], item, by,
+            f"[mission {what} \u00b7 {pp['pillar_id']}] "
+            f"on your question {pp['item_id']}: {text}\n"
+            f"Reply with: graph mission reply {pp['mission_id']} "
+            f"{pp['pillar_id']} {pp['item_id']} \"...\"\n"
+            f"View: /mission/{pp['mission_id']}")
+        return JSONResponse({"ok": True, "relayed": relayed,
+                             "asker_notified": asker_notified})
     return handler
 
 
