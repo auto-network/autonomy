@@ -1559,7 +1559,7 @@ def _host_terminal_profile() -> tuple[dict, list[str]]:
     RuntimeError, before anything is written or minted, when the socket or
     AUTONOMY_HOST_HOME is missing.
     """
-    from agents.mount_plan import BindRefuseMissing, PrivateBind
+    from agents.mount_plan import PrivateBind
 
     try:
         socket_gid = os.stat(HOST_DOCKER_SOCKET).st_gid
@@ -1580,16 +1580,15 @@ def _host_terminal_profile() -> tuple[dict, list[str]]:
         HOST_DOCKER_SOCKET: HOST_DOCKER_SOCKET,
         host_home: PrivateBind(f"{HOST_HOME_MOUNT}:ro"),
         # Full /mnt writable so the host terminal sees whatever the node's
-        # daemon-host mounts there — on a WSL2 node that is the Windows drives
-        # (/mnt/c, /mnt/d as 9p/drvfs), the WSLg X11/Pulse sockets (/mnt/wslg),
-        # and any NAS automounts. A BindRefuseMissing spec emits
-        # `--mount type=bind,...,bind-propagation=rslave`, which is what we want:
-        # the bind is recursive (the drvfs/autofs submounts under /mnt come
-        # through) and rslave means a drive mounted/unmounted host-side after
-        # launch propagates INTO the container (receive-only — nothing this
-        # container mounts leaks back out). On a non-WSL node /mnt is just an
-        # ordinary (usually empty) dir, so this is a harmless no-op there.
-        "/mnt": BindRefuseMissing("/mnt"),
+        # daemon-host mounts there — on a WSL2 node the Windows drives (/mnt/c,
+        # /mnt/d as 9p/drvfs), the WSLg sockets (/mnt/wslg), NAS automounts.
+        # A plain (private-propagation) bind: docker binds recursively, so the
+        # submounts present at launch come through; rslave would also pass
+        # later mounts in, but docker refuses it where the host's / is a private
+        # mount (WSL2 Ubuntu), and then no host terminal starts at all. A drive
+        # mounted after launch appears on the terminal's next start (operator
+        # decision 2026-09-26: "plain mount is fine, keep it simple").
+        "/mnt": PrivateBind("/mnt"),
     }
     args = [
         "--group-add", str(socket_gid),

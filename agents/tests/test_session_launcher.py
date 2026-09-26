@@ -2508,11 +2508,11 @@ def test_host_terminal_mounts_the_node_socket_and_home(
     # home under a private / (WSL2) is not; docker refused the launch.
     assert "--mount type=bind,src=/home/operator,dst=/host-home,readonly" in joined
     assert "dst=/host-home,bind-propagation" not in joined
-    # Full /mnt, writable, rslave: the daemon-host's Windows drives / WSLg / NAS
-    # automounts propagate in. rw, so NOT readonly (unlike /host-home).
-    assert "--mount type=bind,src=/mnt,dst=/mnt,bind-propagation=rslave" in joined
-    mnt_idx = joined.index("src=/mnt,dst=/mnt,bind-propagation=rslave")
-    assert not joined[mnt_idx:].split(" ", 1)[0].endswith("readonly")
+    # Full /mnt, writable, plain (private) propagation: rslave is refused
+    # where the host's / is private. Writable, so NOT readonly.
+    assert "--mount type=bind,src=/mnt,dst=/mnt" in joined
+    mnt_arg = next(a for a in cmd if a.startswith("type=bind,src=/mnt,dst=/mnt"))
+    assert "bind-propagation" not in mnt_arg and "readonly" not in mnt_arg
     assert cmd[cmd.index("--group-add") + 1] == str(containerized_node.stat().st_gid)
     assert "AUTONOMY_DATA_ROOT=/workspace/repo/data" in cmd
     assert cmd[cmd.index("-w") + 1] == "/workspace/repo"
