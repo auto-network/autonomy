@@ -129,13 +129,13 @@ else
     echo "entrypoint: ramfs keycache provisioning skipped (AUTONOMY_PROVISION_RAMFS=0; role has no keycache mount)" >&2
 fi
 
-# Host terminals: when the host's /tmp is mounted (docker-compose.yml,
-# dashboard service), every tmux invocation from this container must reach
-# the HOST tmux server — its socket dir lives under the host's /tmp and
-# tmux derives the tmux-<uid> subdir from the calling uid by itself.
-# Detection, not configuration: the mount's presence IS the signal.
-if [ -d /host-tmp ]; then
-    export TMUX_TMPDIR=/host-tmp
+# The node's tmux socket directory (docker-compose.yml, autonomy-tmux volume):
+# the `tmux` sidecar serves on it and the dashboard is its client. Detection,
+# not configuration: the mount's presence IS the signal. A fresh named volume
+# mounts root-owned; tmux (uid 1000) must be able to create tmux-1000 in it.
+if [ -d /run/autonomy-tmux ]; then
+    chown autonomy:autonomy /run/autonomy-tmux 2>/dev/null || true
+    export TMUX_TMPDIR=/run/autonomy-tmux
 fi
 
 # Path identity for session records: this container's repo is always /app;

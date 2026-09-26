@@ -114,6 +114,11 @@ services:
       VOICE_PUBLIC_PORT: ${VOICE_PUBLIC_PORT:-8443}
       VOICE_COMPOSE_MODE: "true"
       COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
+    # Without the sidecar a dashboard tmux call would fork its own server
+    # inside this container, and a dashboard restart would end every session.
+    depends_on:
+      tmux:
+        condition: service_healthy
     logging:
       driver: json-file
       options: { max-size: "20m", max-file: "5" }
@@ -175,16 +180,11 @@ services:
         bind:
           propagation: rslave
           create_host_path: true
-      # The host's /tmp, so tmux calls from this container reach the HOST
-      # tmux server (whose socket dir lives under /tmp, per tmux default).
-      # Host terminals are a required node capability: sessions the operator
-      # opens against the machine itself run as host processes, forked by the
-      # host tmux server — this mount is the entire transport. The entrypoint
-      # detects it and exports TMUX_TMPDIR; nothing is configured. /tmp always
-      # exists, so Docker never has to create the source (no boot race, no
-      # ownership repair). Proven live 2026-08-31: a containerized tmux client
-      # listed and captured every session of the host server through it.
-      - /tmp:/host-tmp
+      # The node's tmux socket directory, shared with the `tmux` sidecar that
+      # owns every session pane (graph://89d3c8df-544 §1). Every tmux verb
+      # the dashboard runs is a client call over this socket; the entrypoint
+      # exports TMUX_TMPDIR when the directory exists.
+      - autonomy-tmux:/run/autonomy-tmux
       # Host-session transcripts. Host terminals write their JSONL under the
       # OPERATOR's home (~/.claude/projects), not under the data volume, and
       # the session viewer reads transcripts from the file named by the DB's
@@ -321,6 +321,57 @@ services:
         read_only: true
         bind:
           create_host_path: false
+
+  # The node's tmux server: owns every session pane, host terminal and
+  # container session alike (graph://89d3c8df-544 §1). The dashboard is a
+  # tmux client over the shared autonomy-tmux socket volume, so a dashboard
+  # restart leaves every pane, and the `docker run` client inside it, alive.
+  # A pane's command is forked HERE, so the docker CLI that runs each session
+  # is this container's, against the host socket. Same image and entrypoint
+  # as the dispatcher; the entrypoint drops to uid 1000, so the socket dir is
+  # tmux-1000 in both containers. `tmux -D` keeps the server in the
+  # foreground and turns exit-empty off, so an idle server stays up.
+  tmux:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      args:
+        BASE_IMAGE: ${AUTONOMY_BASE_IMAGE:-python:3.12-slim}
+        TAILWIND_URL: ${AUTONOMY_TAILWIND_URL:-}
+    image: ${AUTONOMY_IMAGE:-autonomy-node:local}
+    restart: unless-stopped
+    init: true
+    command: ["tmux", "-D"]
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /run/autonomy-tmux/tmux-1000/default"]
+      interval: 10s
+      start_interval: 1s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    environment:
+      TMUX_TMPDIR: /run/autonomy-tmux
+      TERM: xterm-256color
+      # The dashboard's AUTONOMY_* set: a pane inherits this server's
+      # environment, not the calling client's.
+      AUTONOMY_FIRST_ORG: ${AUTONOMY_FIRST_ORG:-}
+      AUTONOMY_FIRST_ORG_NAME: ${AUTONOMY_FIRST_ORG_NAME:-}
+      AUTONOMY_FLEET_INVITE: ${AUTONOMY_FLEET_INVITE:-}
+      AUTONOMY_HOST_DATA_ROOT: ${AUTONOMY_HOST_DATA_ROOT:-}
+      AUTONOMY_HOST_HOME: ${AUTONOMY_HOST_HOME}
+      AUTONOMY_DATA_ROOT: /app/data
+      TZ: ${TZ:-UTC}
+      # No keycache mount; skip the entrypoint's ramfs provisioning.
+      AUTONOMY_PROVISION_RAMFS: "0"
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+    volumes:
+      - autonomy-code:/app
+      - autonomy-data:/app/data
+      - autonomy-orgs:/app/orgs
+      - /var/run/docker.sock:/var/run/docker.sock
+      - autonomy-tmux:/run/autonomy-tmux
 
   # Polls for approved beads and launches session containers for them
   # (agents/dispatcher.py). Was host-only prior to this (agents/start-dispatcher.sh,
@@ -533,6 +584,8 @@ volumes:
     name: autonomy-data
   autonomy-orgs:
     name: autonomy-orgs
+  autonomy-tmux:
+    name: autonomy-tmux
   service-gateway-control:
     name: autonomy-service-gateway-control
   dolt-data:
