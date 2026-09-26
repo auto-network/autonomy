@@ -1579,6 +1579,17 @@ def _host_terminal_profile() -> tuple[dict, list[str]]:
         str(REPO_ROOT / "orgs"): "/workspace/repo/orgs",
         HOST_DOCKER_SOCKET: HOST_DOCKER_SOCKET,
         host_home: BindRefuseMissing(f"{HOST_HOME_MOUNT}:ro"),
+        # Full /mnt writable so the host terminal sees whatever the node's
+        # daemon-host mounts there — on a WSL2 node that is the Windows drives
+        # (/mnt/c, /mnt/d as 9p/drvfs), the WSLg X11/Pulse sockets (/mnt/wslg),
+        # and any NAS automounts. A BindRefuseMissing spec emits
+        # `--mount type=bind,...,bind-propagation=rslave`, which is what we want:
+        # the bind is recursive (the drvfs/autofs submounts under /mnt come
+        # through) and rslave means a drive mounted/unmounted host-side after
+        # launch propagates INTO the container (receive-only — nothing this
+        # container mounts leaks back out). On a non-WSL node /mnt is just an
+        # ordinary (usually empty) dir, so this is a harmless no-op there.
+        "/mnt": BindRefuseMissing("/mnt"),
     }
     args = [
         "--group-add", str(socket_gid),

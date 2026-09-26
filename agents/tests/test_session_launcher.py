@@ -2506,6 +2506,11 @@ def test_host_terminal_mounts_the_node_socket_and_home(
     assert joined.count(f"{socket}:{socket}") == 1
     assert ("--mount type=bind,src=/home/operator,dst=/host-home,"
             "bind-propagation=rslave,readonly") in joined
+    # Full /mnt, writable, rslave: the daemon-host's Windows drives / WSLg / NAS
+    # automounts propagate in. rw, so NOT readonly (unlike /host-home).
+    assert "--mount type=bind,src=/mnt,dst=/mnt,bind-propagation=rslave" in joined
+    mnt_idx = joined.index("src=/mnt,dst=/mnt,bind-propagation=rslave")
+    assert not joined[mnt_idx:].split(" ", 1)[0].endswith("readonly")
     assert cmd[cmd.index("--group-add") + 1] == str(containerized_node.stat().st_gid)
     assert "AUTONOMY_DATA_ROOT=/workspace/repo/data" in cmd
     assert cmd[cmd.index("-w") + 1] == "/workspace/repo"
