@@ -447,6 +447,10 @@ def test_resume_start_handler_host_kind_runs_to_running(monkeypatch, tmp_path):
         lambda **kwargs: calls["inject"].append(kwargs),
     )
 
+    monkeypatch.setattr(
+        server, "_mint_host_session_token", lambda name: f"CROSSTALK_TOKEN=tok-{name} ",
+    )
+
     server._run_session_resume_start(
         LifecycleJob("start", "host-life", {
             "resume": True,
@@ -466,7 +470,8 @@ def test_resume_start_handler_host_kind_runs_to_running(monkeypatch, tmp_path):
     spawn_cmd = calls["tmux"][0][0]
     assert spawn_cmd[:2] == ["tmux", "new-session"]
     assert "-c" in spawn_cmd and str(tmp_path) in spawn_cmd
-    assert spawn_cmd[-1] == "claude --resume abc"
+    # The launch worker mints the host bearer and prefixes it to the harness command.
+    assert "CROSSTALK_TOKEN=tok-host-life claude --resume abc" in spawn_cmd[-1]
     assert calls["inject"] and calls["inject"][0]["message"] == "resumed orientation"
 
 
@@ -698,3 +703,76 @@ def test_wait_for_setup_fails_when_container_dies_mid_setup(monkeypatch, tmp_pat
             deadline=server.time.monotonic() + 60,
         )
     assert "died during setup" in str(exc.value)
+
+
+def _start_until_waiting_ready_timeout(monkeypatch, tmp_path, server, capture):
+    _init_db(tmp_path)
+    dashboard_db.insert_session(
+        tmux_name="auto-life",
+        session_type="container",
+        project="blindhash-operations",
+        harness="claude",
+    )
+    monkeypatch.setenv("DASHBOARD_LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setattr(server, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(server.workspace_settings, "get_workspace", lambda _project_id: _project())
+    monkeypatch.setattr(
+        server.workspace_settings, "materialize_startup_script",
+        lambda _proj, _run_dir: None,
+    )
+    monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
+    monkeypatch.setattr(server, "render_workspace_primer", lambda _proj: "primer")
+    monkeypatch.setattr(server, "prepare_session_mounts", lambda *_a, **_kw: {})
+    monkeypatch.setattr(server, "launch_session", lambda **_kw: "echo launched")
+    monkeypatch.setattr(
+        server.subprocess, "run",
+        lambda cmd, **kw: SimpleNamespace(returncode=0, stderr=b""),
+    )
+    monkeypatch.setattr(server, "_wait_for_setup_complete", lambda **_kwargs: None)
+
+    def hung(**_kwargs):
+        raise TimeoutError("waiting_ready timed out after 60.0s")
+
+    monkeypatch.setattr(server, "_wait_for_prompt", hung)
+    monkeypatch.setattr(server, "_run_tmux_capture", capture)
+    saved_at_cleanup = []
+    monkeypatch.setattr(
+        server,
+        "_cleanup_after_lifecycle_failure",
+        lambda **kwargs: saved_at_cleanup.append(
+            sorted((tmp_path / "logs" / "startup-failures").glob("auto-life-*.txt"))
+        ) or [],
+    )
+    server._run_project_session_start(
+        LifecycleJob("start", "auto-life", {"project_id": "blindhash-operations"}),
+        SessionLifecycleStateWriter(),
+    )
+    return saved_at_cleanup
+
+
+def test_waiting_ready_timeout_saves_pane_before_cleanup_kills_it(monkeypatch, tmp_path):
+    from tools.dashboard import server
+
+    saved_at_cleanup = _start_until_waiting_ready_timeout(
+        monkeypatch, tmp_path, server,
+        lambda tmux_name, **_kw: "Welcome to Claude Code\nDo you trust the files in this folder?\n",
+    )
+
+    assert len(saved_at_cleanup) == 1 and len(saved_at_cleanup[0]) == 1
+    text = saved_at_cleanup[0][0].read_text()
+    assert "tmux: auto-life" in text
+    assert "reason: waiting_ready timed out after 60.0s" in text
+    assert "Do you trust the files in this folder?" in text
+    assert dashboard_db.get_session("auto-life")["state"] == "FAILED"
+
+
+def test_capture_failure_does_not_stop_cleanup(monkeypatch, tmp_path):
+    from tools.dashboard import server
+
+    def gone(tmux_name, **_kw):
+        raise RuntimeError("can't find session: auto-life")
+
+    saved_at_cleanup = _start_until_waiting_ready_timeout(monkeypatch, tmp_path, server, gone)
+
+    assert saved_at_cleanup == [[]]
+    assert dashboard_db.get_session("auto-life")["state"] == "FAILED"

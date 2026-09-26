@@ -9031,6 +9031,52 @@ def _cleanup_after_lifecycle_failure(
     return errors
 
 
+_STARTUP_FAILURE_LOG_TAIL_LINES = 15
+
+
+def _capture_startup_failure_screen(tmux_name: str, *, phase: str, reason: str) -> Path | None:
+    """Keep what the pane showed when a start was declared failed.
+
+    Cleanup kills the tmux session and the container, which took the only
+    evidence of WHY the harness never came up with it (auto-0926-124727:
+    "waiting_ready timed out after 60.0s", and nothing left to look at). The
+    last 200 pane lines, the phase, the reason and the poller's harness_state
+    go to ``<log dir>/startup-failures/<session>-<UTC>.txt``, and the last
+    lines also go into dashboard.log. Best effort: never raises, so a capture
+    problem can never stop the cleanup that follows."""
+    try:
+        screen = _run_tmux_capture(tmux_name, timeout=5)
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not block cleanup
+        logger.warning(
+            "startup failure screen NOT captured tmux=%s phase=%s: %s", tmux_name, phase, exc)
+        return None
+    path = None
+    try:
+        from tools.dashboard import log_channels
+        try:
+            harness_state = _read_harness_state(tmux_name)
+        except Exception:  # noqa: BLE001
+            harness_state = {}
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        out_dir = log_channels.log_dir() / "startup-failures"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"{tmux_name}-{stamp}.txt"
+        path.write_text(
+            f"tmux: {tmux_name}\nphase: {phase}\nreason: {reason}\ncaptured_at: {stamp}\n"
+            f"harness_state: {json.dumps(harness_state, sort_keys=True, default=str)}\n"
+            "--- pane (last 200 lines, wrapped lines joined) ---\n"
+            f"{screen}"
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("startup failure screen could not be saved tmux=%s", tmux_name, exc_info=True)
+    tail = screen.rstrip().splitlines()[-_STARTUP_FAILURE_LOG_TAIL_LINES:]
+    logger.warning(
+        "startup failure screen tmux=%s phase=%s reason=%s saved=%s; last %d pane lines:\n%s",
+        tmux_name, phase, reason, path, len(tail), "\n".join("  | " + line for line in tail),
+    )
+    return path
+
+
 def _fail_lifecycle_start_with_cleanup(
     *,
     writer: SessionLifecycleStateWriter,
@@ -9041,6 +9087,9 @@ def _fail_lifecycle_start_with_cleanup(
     loop: asyncio.AbstractEventLoop | None,
     cleanup_worktrees: bool = True,
 ) -> None:
+    # Before anything tears the session down: the pane is the only record of
+    # what the harness was showing when we decided it had failed.
+    _capture_startup_failure_screen(tmux_name, phase=phase, reason=reason)
     writer.fail(tmux_name, phase=phase, reason=reason, attempt=attempt)
     writer.set_state(
         tmux_name,
