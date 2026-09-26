@@ -10007,6 +10007,11 @@ async def api_session_create(request):
         from agents.session_launcher import _resolve_credentials
         host_creds = _resolve_credentials(prefer_alias=alias)
         if host_creds is None:
+            refusal = _host_credential_refusal()
+            if refusal is not None:
+                return JSONResponse({"error": refusal}, status_code=503)
+            # No Claude account exists at all: the one case the operator's own
+            # sign-in under /host-home is imported for.
             host_creds = await asyncio.to_thread(_bootstrap_host_credentials, alias)
         if host_creds is None:
             return JSONResponse(
@@ -10190,6 +10195,23 @@ def _own_dashboard_url() -> str:
             logger.exception("_own_dashboard_url: self-inspect failed; using default")
         _OWN_DASHBOARD_URL = url
     return _OWN_DASHBOARD_URL
+
+
+def _host_credential_refusal() -> str | None:
+    """Why no Claude account could be picked, when accounts exist; None when
+    the vault holds no Claude account at all (the only case the first-launch
+    import runs for)."""
+    from tools.graph import harness_credentials as hv
+
+    accounts = hv.list_accounts("claude")
+    if not accounts:
+        return None
+    if any(not a.openable for a in accounts):
+        return ("Claude accounts are installed but the vault is locked; "
+                "unlock the dashboard, then start the host terminal again")
+    return ("Claude accounts are installed but none can launch a session "
+            "(no fresh setup token or complete sign-in); sign in again or "
+            "run `graph claude install`")
 
 
 def _bootstrap_host_credentials(alias: str | None) -> dict | None:

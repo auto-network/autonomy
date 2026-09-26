@@ -63,8 +63,10 @@ def host_create(monkeypatch):
     from tools.dashboard import server
     from tools.graph import credential_import
 
+    from tools.graph import harness_credentials as hv
+
     calls = {"resolve": [], "import": [], "pending": [], "jobs": []}
-    state = {"rows": []}
+    state = {"rows": [], "accounts": []}
 
     def fake_resolve(*, prefer_alias=None):
         calls["resolve"].append(prefer_alias)
@@ -79,6 +81,7 @@ def host_create(monkeypatch):
 
     monkeypatch.setattr(session_launcher, "_resolve_credentials", fake_resolve)
     monkeypatch.setattr(credential_import, "run_import", fake_import)
+    monkeypatch.setattr(hv, "list_accounts", lambda harness, **kw: list(state["accounts"]))
     monkeypatch.setattr(server.dashboard_db, "session_exists", lambda _name: False)
     monkeypatch.setattr(server.session_trace, "trace", lambda *a, **kw: None)
     monkeypatch.setattr(server.session_monitor, "register_pending", fake_pending)
@@ -136,6 +139,43 @@ async def test_host_create_with_no_credential_anywhere_names_the_file(host_creat
     assert resp.status_code == 503
     assert b"/host-home/.claude/.credentials.json" in resp.body
     assert calls["import"] == ["/host-home"]
+    assert calls["jobs"] == []
+
+
+@pytest.mark.asyncio
+async def test_host_create_with_a_locked_vault_says_unlock_and_imports_nothing(host_create):
+    """Accounts exist but cannot be opened: the remedy is an unlock, not the
+    operator's credentials file, and nothing is imported."""
+    from tools.graph import harness_credentials as hv
+
+    server, calls, state = host_create
+    state["rows"] = []
+    state["accounts"] = [hv.Account("claude", "acct-1", openable=False)]
+
+    resp = await server.api_session_create(_Request({"type": "host"}))
+
+    assert resp.status_code == 503
+    assert b"vault is locked" in resp.body
+    assert b"unlock" in resp.body
+    assert calls["import"] == []
+    assert calls["jobs"] == []
+
+
+@pytest.mark.asyncio
+async def test_host_create_with_unlaunchable_accounts_imports_nothing(host_create):
+    """Accounts exist and open but none can launch: import runs only when no
+    Claude account exists at all."""
+    from tools.graph import harness_credentials as hv
+
+    server, calls, state = host_create
+    state["rows"] = []
+    state["accounts"] = [hv.Account("claude", "acct-1", openable=True)]
+
+    resp = await server.api_session_create(_Request({"type": "host"}))
+
+    assert resp.status_code == 503
+    assert b"none can launch" in resp.body
+    assert calls["import"] == []
     assert calls["jobs"] == []
 
 
