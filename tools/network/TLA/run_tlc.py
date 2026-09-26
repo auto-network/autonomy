@@ -57,6 +57,15 @@ GREEN = [
     ("OrgAdmissionEventNoRedeemedCheck.cfg", "OrgAdmissionEvent"),
     ("OrgAdmissionFinalApproval.cfg", "OrgAdmission"),
     ("OrgAdmissionFinalSelfAdmit.cfg", "OrgAdmission"),
+    # auto-qrmlg.3 review: bundle_adopt with the registry bound, adversarial
+    # sponsor (OrgAdmissionBundleBound.tla).
+    ("OrgAdmissionBundleBoundHonest.cfg", "OrgAdmissionBundleBound"),
+    ("OrgAdmissionBundleBoundHonestLag.cfg", "OrgAdmissionBundleBound"),
+    ("OrgAdmissionBundleBoundRebundleAdversary.cfg", "OrgAdmissionBundleBound"),
+    ("OrgAdmissionBundleBoundRebundleAdoptable.cfg", "OrgAdmissionBundleBound"),
+    ("OrgAdmissionBundleBoundRebundleLag.cfg", "OrgAdmissionBundleBound"),
+    ("OrgAdmissionBundleExactAdversary.cfg", "OrgAdmissionBundleBound"),
+    ("OrgAdmissionBundleExactHonest.cfg", "OrgAdmissionBundleBound"),
     # E-any against rekeyed and re-admitted personas (safety).
     ("OrgAdmissionLeavesEAnyRekey.cfg", "OrgAdmissionLeaves"),
     ("OrgAdmissionLeavesEAnyAdmission.cfg", "OrgAdmissionLeaves"),
@@ -120,6 +129,14 @@ CALIBRATION = [
     ("calibration/TransitionDowngradeBundleOnly.cfg", "OrgAdmission", "EveryAdmittedMemberPulls"),
     ("calibration/TransitionDowngradeNoJoinAdopt.cfg", "OrgAdmission", "EveryAdmittedMemberPulls"),
     ("calibration/TransitionDowngradeReachesSync.cfg", "OrgAdmission", "NotAllJoinedInSync"),
+    # The bound alone adopts a planted mis-keyed root when the registry
+    # advances between bundle and install; no bound admits an inflated seq;
+    # exact matching strands an honest lagging sponsor; a withholding
+    # adversary defeats every rule (inherent).
+    ("calibration/BundleBoundPlanted.cfg", "OrgAdmissionBundleBound", "EventuallyHealed"),
+    ("calibration/BundleNoBound.cfg", "OrgAdmissionBundleBound", "NotAboveRegistry"),
+    ("calibration/BundleExactHonestLag.cfg", "OrgAdmissionBundleBound", "EventuallyHealed"),
+    ("calibration/BundleRebundleWithholding.cfg", "OrgAdmissionBundleBound", "EventuallyHealed"),
     # auto-qrmlg.12: each admission-event check is load-bearing.
     ("calibration/EventNoSigCheck.cfg", "OrgAdmissionEvent", "ApproverCannotForgeClaim"),
     ("calibration/EventNoThreshold.cfg", "OrgAdmissionEvent", "AdmissionHasThreshold"),
