@@ -573,10 +573,9 @@ async def serve_fleet_transport(
 
     The adapter owns connection lifetime, including failure/cancellation
     cleanup, just as DirectChannelServer does. ``close(code=, reason=)``
-    is the transport's close, used to end an
-    org-admitted connection whose membership proof went stale past the
-    re-prove deadline with CLOSE_MEMBERSHIP_STALE (4417), the code the
-    registry uses for the same condition."""
+    is the transport's close, used to end an org-admitted connection whose
+    persona left the newest adopted member set with CLOSE_MEMBERSHIP_STALE
+    (4417), the code the registry uses for the same condition."""
     raw = await recv()
     if raw is None:
         return

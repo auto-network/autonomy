@@ -111,26 +111,32 @@ class Member:
             membership_proof_for=self._rider,
             adopted_checkpoint_for=lambda s: self.adopted.get(int(s)),
             newest_adopted_seq=lambda: max(self.adopted),
+            retained_checkpoints=lambda: list(self.adopted.values()),
             adopted_members_for=lambda s: self.members_at.get(int(s)),
             advertised_addresses=lambda: list(self.advertised),
         )
 
-    def _rider(self) -> dict:
+    def _rider(self, under=None, root=None) -> dict:
+        seq, label = self.seq, self.seq
+        if root is not None:
+            for k, record in self.adopted.items():
+                if record["members_root"] == root:
+                    seq, label = k, (int(under) if under is not None else k)
+        members = self.members_at[seq]
         try:
-            index, path = mc.inclusion_proof(self.members, self.persona.public_hex)
+            index, path = mc.inclusion_proof(members, self.persona.public_hex)
         except mc.MembershipCommitmentError:
             index, path = 0, []
-        return {"v": 1, "checkpoint_seq": self.seq, "index": index, "path": path}
+        return {"v": 1, "checkpoint_seq": label, "index": index, "path": path}
 
-    def adopt(self, seq: int, members: list[str], *, deadline_s: float = 5.0) -> None:
-        """This machine adopts membership checkpoint *seq*; its own hello
-        proves under it from now on. ``deadline_s`` is the re-prove grace
-        for peers admitted under an older seq (5 s in production)."""
+    def adopt(self, seq: int, members: list[str]) -> None:
+        """This machine adopts and retains membership checkpoint *seq*; its
+        own hello proves under it from now on, and *members* is the newest
+        set removal is judged against."""
         self.members = list(members)
         self.adopted[seq] = {"seq": seq, "members_root": mc.compute_root(members)}
         self.members_at[seq] = list(members)
         self.seq = seq
-        self.channel.note_adoption(seq, deadline_s=deadline_s)
 
     def rekey(self, persona: KeyPair) -> None:
         """The member's persona is rekeyed: this machine gets a certificate
@@ -337,11 +343,9 @@ def test_a_removing_checkpoint_closes_the_removed_member_with_4417(tmp_path: Pat
                 addr, authenticator=b.channel,
                 expected_machine_pub=a.machine.public_hex, session=new_session_id(),
             )
-            # A adopts a checkpoint that removes B's persona. Inside the
-            # re-prove window the held connection still serves; after it,
-            # the next message closes it with 4417.
-            a.adopt(1, [pa.public_hex], deadline_s=0.3)
-            await asyncio.sleep(0.5)
+            # A adopts a checkpoint that removes B's persona: the next
+            # message on the held connection closes it with 4417.
+            a.adopt(1, [pa.public_hex])
             async with held:
                 epoch = org_epoch(ORG, 0)
                 store = server._store_for("alpha")
@@ -354,8 +358,8 @@ def test_a_removing_checkpoint_closes_the_removed_member_with_4417(tmp_path: Pat
                 except Exception:
                     pass
                 assert held._ws.close_code == 4417, held._ws.close_code
-            # A fresh hello from B proves under seq 0, which A no longer
-            # accepts outside the window: refused at the hello, typed.
+            # A fresh hello from B proves under seq 0, still retained by A,
+            # but B is not in A's newest member set: refused at the hello.
             with pytest.raises(Exception):
                 await fleet_direct_connect(
                     addr, authenticator=b.channel,

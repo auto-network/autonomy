@@ -721,13 +721,45 @@ def _slug_for_joined_org(name: str, org_uuid: str) -> str:
     raise ValueError("could not derive a free local slug for the organization")
 
 
-def _adopt_state_by_fold(slug: str, state: object, *, source: str) -> dict:
+def _registry_membership_state(binding: dict) -> tuple[dict | None, str | None]:
+    """One registry read of the org's current membership checkpoint tuple
+    ({seq, members_root, checkpointers_root, ledger_head}); (state, None) or
+    (None, why)."""
+    import httpx
+
+    org_uuid, registry_url = binding.get("org_uuid"), binding.get("registry_url")
+    if not isinstance(org_uuid, str) or not isinstance(registry_url, str):
+        return None, "binding names no registry"
+    try:
+        with httpx.Client(base_url=registry_url, verify=True, timeout=8.0) as client:
+            probe = client.get(f"/v1/orgs/{org_uuid}/membership")
+    except Exception as exc:
+        return None, f"registry unreachable: {exc}"
+    if probe.status_code != 200:
+        return None, f"registry has no membership state ({probe.status_code})"
+    state = probe.json()
+    if not isinstance(state, dict):
+        return None, "registry membership state is malformed"
+    return state, None
+
+
+def _adopt_state_by_fold(
+    slug: str, state: object, *, source: str, bound: dict | None = None,
+) -> dict:
     """Adopt a membership checkpoint *state* ({seq, members_root,
     checkpointers_root, ledger_head}) for *slug* when this node's own ledger
     reproduces it: fold at the state's ledger_head and require members_root
     equality (OrgAdmission.tla rule bundle_adopt; lemma AdoptedIsAuthentic
     holds because the root is recomputed, never trusted). *source* names where
-    the state came from for the error text. Pure local; never signs."""
+    the state came from for the error text. Pure local; never signs.
+
+    *bound* is the registry's current tuple, given when *state* comes from a
+    party that is not the seq authority (a sponsor's bundle). The registry
+    assigns seqs, so no genuine record has a seq above the registry's, and
+    the record AT the registry's seq is the registry's: a sponsor cannot
+    plant a seq that later genuine records would fail to exceed, nor a
+    different roster under the registry's own seq.
+    """
     from tools.dashboard import membership_checkpoint as cp
     from tools.network.ledger import membership_commitment as mc
 
@@ -744,16 +776,32 @@ def _adopt_state_by_fold(slug: str, state: object, *, source: str) -> dict:
         ledger_head = str(state["ledger_head"])
     except (KeyError, TypeError, ValueError):
         return {"ok": False, "error": f"{source} membership checkpoint is malformed"}
+    if "org" in state and state["org"] != org_uuid:
+        return {"ok": False, "error": f"{source} membership checkpoint is for another organization"}
+    if bound is not None:
+        try:
+            bound_seq = int(bound["seq"])
+        except (KeyError, TypeError, ValueError):
+            return {"ok": False, "error": "registry membership state is malformed"}
+        if seq > bound_seq:
+            return {"ok": False, "error": (
+                f"{source} membership checkpoint claims seq {seq}; the registry is at {bound_seq}"
+            )}
+        if seq == bound_seq and (
+            bound.get("members_root") != members_root or bound.get("ledger_head") != ledger_head
+        ):
+            return {"ok": False, "error": (
+                f"{source} membership checkpoint at seq {seq} is not the registry's record"
+            )}
     # A record that claims the org root's signature is verified as such before
     # anything else: the joiner's binding names the root, so a sponsor cannot
-    # pass off a fabricated seq under the root's name (reviewer deviation D3
-    # on b01b938e). A member-signed record needs its prev; until the bundle
-    # carries the sponsor's retained chain (adopted-record retention, the
-    # E-any-adm commit), only its members_root is authenticated here, by the
-    # fold below. Adoption stays monotone in every case (NoRegression): a
-    # replayed or rolled-back older record never regresses the cache.
+    # pass off a fabricated record under the root's name. A member-signed
+    # record needs its prev chain, which no source here supplies, so only its
+    # members_root is authenticated, by the fold below, and only the state
+    # tuple is retained: a retained signed form is always a verified one.
     signer = state.get("signer")
-    if isinstance(signer, str) and signer == binding.get("root_pub"):
+    root_signed = isinstance(signer, str) and signer == binding.get("root_pub")
+    if root_signed:
         try:
             mc.validate_checkpoint(state, root_pub=str(binding["root_pub"]))
         except mc.MembershipCommitmentError as exc:
@@ -769,13 +817,10 @@ def _adopt_state_by_fold(slug: str, state: object, *, source: str) -> dict:
         return {"ok": False, "error": (
             f"the {source} members_root does not match this node's ledger at that head"
         )}
-    record = {"org": org_uuid, "seq": seq, "members_root": members_root,
-              "checkpointers_root": checkpointers_root, "ledger_head": ledger_head}
-    if isinstance(state.get("sig"), str) and isinstance(signer, str):
-        # Retain the signed form: it is what a later peer or joiner can verify
-        # by signature, and what E-any-adm serves back at that seq.
-        record = dict(state)
-        record["org"] = org_uuid
+    record = dict(state) if root_signed else {
+        "org": org_uuid, "seq": seq, "members_root": members_root,
+        "checkpointers_root": checkpointers_root, "ledger_head": ledger_head,
+    }
     cp.record_adopted(slug, record)
     return {"ok": True, "action": "adopted", "seq": seq}
 
@@ -785,24 +830,34 @@ def _adopt_registry_checkpoint(slug: str) -> dict:
     agrees with this node's own ledger: one registry read, then
     :func:`_adopt_state_by_fold`. Used by sign-on preparation and the adopt
     route; the join install adopts the checkpoint carried in its bundle
-    instead (post_join_outcome)."""
-    import httpx
-
+    instead, bounded by the same read (post_join_outcome)."""
     binding_member = _first_member(NETWORK_BINDING_SET_ID, slug)
     binding = binding_member.payload if binding_member is not None else None
     if not isinstance(binding, dict):
         return {"ok": False, "error": "no registry binding"}
-    org_uuid, registry_url = binding.get("org_uuid"), binding.get("registry_url")
-    if not isinstance(org_uuid, str) or not isinstance(registry_url, str):
-        return {"ok": False, "error": "binding names no registry"}
-    try:
-        with httpx.Client(base_url=registry_url, verify=True, timeout=8.0) as client:
-            probe = client.get(f"/v1/orgs/{org_uuid}/membership")
-    except Exception as exc:
-        return {"ok": False, "error": f"registry unreachable: {exc}"}
-    if probe.status_code != 200:
-        return {"ok": False, "error": f"registry has no membership state ({probe.status_code})"}
-    return _adopt_state_by_fold(slug, probe.json(), source="registry's")
+    state, why = _registry_membership_state(binding)
+    if state is None:
+        return {"ok": False, "error": why}
+    return _adopt_state_by_fold(slug, state, source="registry's")
+
+
+def _adopt_bundle_checkpoint(slug: str, state: object) -> dict:
+    """Join install: adopt the sponsor's bundled checkpoint by fold, bounded
+    by the registry's current record (OrgAdmission.tla rule bundle_adopt).
+    The registry's own record is retained too when this ledger holds its
+    head; when it does not (a later admission this joiner has not pulled),
+    the bundle's record still admits this joiner under E-any-adm."""
+    binding_member = _first_member(NETWORK_BINDING_SET_ID, slug)
+    binding = binding_member.payload if binding_member is not None else None
+    if not isinstance(binding, dict):
+        return {"ok": False, "error": "no registry binding"}
+    bound, why = _registry_membership_state(binding)
+    if bound is None:
+        return {"ok": False, "error": f"cannot bound the bundle's checkpoint: {why}"}
+    result = _adopt_state_by_fold(slug, state, source="join bundle's", bound=bound)
+    if result.get("ok"):
+        result["registry"] = _adopt_state_by_fold(slug, bound, source="registry's")
+    return result
 
 
 async def post_membership_checkpoint_adopt(request: Request) -> JSONResponse:
@@ -976,12 +1031,12 @@ async def post_join_outcome(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": f"installing the organization failed: {exc}"},
                             status_code=500)
     # Adopt the checkpoint the sponsor served with the bundle, by folding the
-    # just-installed ledger at its head (OrgAdmission.tla rule bundle_adopt).
-    # The registry is not consulted here: its current checkpoint can predate
-    # this admission, and adopting it left every earlier joiner unable to
-    # prove membership (calibration TransitionDowngradeNoJoinAdopt).
-    adoption = await asyncio.to_thread(
-        _adopt_state_by_fold, slug, body.get("checkpoint"), source="join bundle's")
+    # just-installed ledger at its head (OrgAdmission.tla rule bundle_adopt),
+    # bounded by the registry's seq. The registry's record is not what this
+    # joiner proves under: it can predate this admission, and adopting only
+    # it left every earlier joiner unable to prove membership (calibration
+    # TransitionDowngradeNoJoinAdopt).
+    adoption = await asyncio.to_thread(_adopt_bundle_checkpoint, slug, body.get("checkpoint"))
     return JSONResponse({"ok": True, "org": slug, "org_id": stable_id,
                          "org_uuid": org_uuid, "genesis_id": genesis_id,
                          "events": len(events), "checkpoint": adoption})

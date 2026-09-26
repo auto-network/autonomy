@@ -98,12 +98,21 @@ def _sponsor_reachability_row(sim, sponsor_persona: KeyPair) -> dict:
     return {"key": machine.public_hex, **build_row(machine, cert, ["ws://10.0.0.7:8477"], now=now)}
 
 
+def _registry_says(monkeypatch, state, error=None):
+    """The one registry read the install makes, to bound the bundle's seq."""
+    from tools.dashboard import network_routes
+    monkeypatch.setattr(network_routes, "_registry_membership_state",
+                        lambda binding: (state, error))
+
+
 def test_install_adopts_the_bundled_checkpoint_by_fold(monkeypatch):
     sim, _founder, persona, invite_id = _joined_org()
+    _registry_says(monkeypatch, _state_of(sim, 1))
     r = _client().post("/api/network/join/outcome", json=_body(sim, persona, invite_id, checkpoint=_state_of(sim, 1)))
     assert r.status_code == 200, r.text
     out = r.json()
-    assert out["ok"] is True and out["checkpoint"] == {"ok": True, "action": "adopted", "seq": 1}
+    assert out["ok"] is True and out["checkpoint"]["action"] == "adopted" and out["checkpoint"]["seq"] == 1
+    assert out["checkpoint"]["registry"]["action"] == "up-to-date"
     from tools.dashboard import membership_checkpoint as cp
     adopted = cp._cached_adopted(out["org"])
     assert adopted["seq"] == 1 and adopted["members_root"] == mc.members_root(sim.fold())
@@ -112,8 +121,9 @@ def test_install_adopts_the_bundled_checkpoint_by_fold(monkeypatch):
     assert persona.public_hex in members
 
 
-def test_install_refuses_a_bundled_root_the_ledger_does_not_produce():
+def test_install_refuses_a_bundled_root_the_ledger_does_not_produce(monkeypatch):
     sim, _founder, persona, invite_id = _joined_org()
+    _registry_says(monkeypatch, _state_of(sim, 2))  # below the bound: the fold decides
     forged = dict(_state_of(sim, 1), members_root="f" * 64)
     r = _client().post("/api/network/join/outcome", json=_body(sim, persona, invite_id, checkpoint=forged))
     assert r.status_code == 200, r.text
@@ -124,8 +134,9 @@ def test_install_refuses_a_bundled_root_the_ledger_does_not_produce():
     assert cp._cached_adopted(out["org"]) is None
 
 
-def test_install_without_a_bundled_checkpoint_reports_it():
+def test_install_without_a_bundled_checkpoint_reports_it(monkeypatch):
     sim, _founder, persona, invite_id = _joined_org()
+    _registry_says(monkeypatch, _state_of(sim, 1))
     r = _client().post("/api/network/join/outcome", json=_body(sim, persona, invite_id, checkpoint=None))
     out = r.json()
     assert out["ok"] is True
@@ -142,3 +153,38 @@ def test_install_seeds_the_sponsor_addresses_it_was_sent():
     from tools.dashboard.org_install_seed import seed_reachability
     seeded = seed_reachability(slug, org=sim.genesis_id)
     assert seeded == {row["key"]: ["ws://10.0.0.7:8477"]}
+
+
+def test_install_bounds_the_bundled_seq_by_the_registry(monkeypatch):
+    """A sponsor cannot plant a seq above the registry's (which later genuine
+    records could never exceed) nor a different record at the registry's seq."""
+    sim, _founder, persona, invite_id = _joined_org()
+    _registry_says(monkeypatch, _state_of(sim, 1))
+    r = _client().post("/api/network/join/outcome", json=_body(sim, persona, invite_id, checkpoint=_state_of(sim, 9)))
+    out = r.json()
+    assert out["ok"] is True
+    assert out["checkpoint"]["ok"] is False and "the registry is at 1" in out["checkpoint"]["error"]
+    from tools.dashboard import membership_checkpoint as cp
+    assert cp._cached_adopted(out["org"]) is None
+
+
+def test_install_retains_the_registry_record_beside_an_older_bundle(monkeypatch):
+    """The registry has advanced past the sponsor's adopted record and this
+    ledger holds its head: both are retained; the newest is the registry's."""
+    sim, _founder, persona, invite_id = _joined_org()
+    _registry_says(monkeypatch, _state_of(sim, 2))
+    r = _client().post("/api/network/join/outcome", json=_body(sim, persona, invite_id, checkpoint=_state_of(sim, 1)))
+    out = r.json()
+    assert out["checkpoint"]["action"] == "adopted" and out["checkpoint"]["registry"]["action"] == "adopted"
+    from tools.dashboard import membership_checkpoint as cp
+    assert sorted(cp.adopted_history(out["org"])) == [1, 2]
+    assert cp._cached_adopted(out["org"])["seq"] == 2
+
+
+def test_install_without_the_registry_adopts_nothing_and_says_why(monkeypatch):
+    sim, _founder, persona, invite_id = _joined_org()
+    _registry_says(monkeypatch, None, "registry unreachable: refused")
+    r = _client().post("/api/network/join/outcome", json=_body(sim, persona, invite_id, checkpoint=_state_of(sim, 1)))
+    out = r.json()
+    assert out["ok"] is True
+    assert out["checkpoint"]["ok"] is False and "cannot bound" in out["checkpoint"]["error"]

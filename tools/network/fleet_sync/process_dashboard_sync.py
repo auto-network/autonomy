@@ -66,11 +66,12 @@ class _OrgChannels:
     updating a node's adopted checkpoint (a removal, a rekey, a join).
 
     Per scope: ``{"org", "persona_cert", "adopted": {seq: [persona pubs]},
-    "seq"}``. The rider is computed from the member list of ``seq`` with
+    "seq"}``. The rider is computed from the member list of ``seq`` (or of
+    the seq a peer proved under, when retained) with
     membership_commitment.inclusion_proof; the adopted checkpoint record
-    carries the members_root of that list; a newer ``seq`` on reload calls
-    note_adoption with the 5 s production deadline; a changed persona
-    certificate (a rekey) rebuilds that scope's authenticator.
+    carries the members_root of that list; the newest list is the member
+    set removal is judged against; a changed persona certificate (a rekey)
+    rebuilds that scope's authenticator.
     """
 
     def __init__(self, config_path: Path, payload: dict, addresses, machine_key) -> None:
@@ -94,13 +95,19 @@ class _OrgChannels:
         cert = DelegationCert.from_dict(spec["persona_cert"])
         persona = str(cert.subject.id)
 
-        def rider():
-            members = state["adopted"][state["seq"]]
+        def rider(under=None, root=None):
+            seq = state["seq"]
+            if root is not None:
+                for k, members in state["adopted"].items():
+                    if mc.compute_root(members) == root:
+                        seq = int(k)
+            members = state["adopted"][seq]
+            label = int(under) if under is not None and root is not None else seq
             try:
                 index, path = mc.inclusion_proof(members, persona)
             except mc.MembershipCommitmentError:
                 index, path = 0, []
-            return {"v": 1, "checkpoint_seq": state["seq"], "index": index, "path": path}
+            return {"v": 1, "checkpoint_seq": label, "index": index, "path": path}
 
         def adopted_for(seq):
             members = state["adopted"].get(int(seq))
@@ -112,6 +119,7 @@ class _OrgChannels:
             machine_key, org=str(spec["org"]), persona_cert=cert,
             membership_proof_for=rider, adopted_checkpoint_for=adopted_for,
             newest_adopted_seq=lambda: max(state["adopted"]),
+            retained_checkpoints=lambda: [adopted_for(k) for k in state["adopted"]],
             adopted_members_for=lambda seq: state["adopted"].get(int(seq)),
             advertised_addresses=self._addresses,
         )
@@ -126,12 +134,8 @@ class _OrgChannels:
                 self._channels[scope] = self._build(scope, spec, machine_key)
             else:
                 channel, state = self._channels[scope]
-                newest_before = max(state["adopted"])
                 state["adopted"] = {int(k): list(v) for k, v in spec["adopted"].items()}
                 state["seq"] = int(spec["seq"])
-                newest = max(state["adopted"])
-                if newest > newest_before:
-                    channel.note_adoption(newest)
             self._specs[scope] = dict(spec)
         for scope in list(self._channels):
             if scope not in specs:

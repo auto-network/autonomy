@@ -1207,13 +1207,13 @@ Step J2. Executes on the founder's machine.
 - directory row
 - install seed (profiles only)
 
-**Workflow:** actors joiner; opens none; requires bootstrap_snapshot; produces ledger_heads, registry_binding
+**Workflow:** actors joiner; opens none; requires bootstrap_snapshot; produces ledger_heads, registry_binding, install_seed_addresses
 
 **Source:** `tools/dashboard/network_routes.py:post_join_outcome` (route)
 
 **Crib:** §8
 
-Step J5. Does not produce install_seed_addresses: network-join.js (installAdmitted, :313-327) does not forward reachability_rows although the route reads them (network_routes.py:938-943). Deferred here (:804-805): storage delegate, serve cert, fleet runtime, sync cert.
+Step J5. The page forwards the bootstrap's reachability_rows in the outcome body (network-join.js installAdmitted) and the route seeds them (org_install_seed.seed_reachability). Deferred here: storage delegate, serve cert, fleet runtime, sync cert.
 
 <a id="workflow-route-join_install_bundle_adopt"></a>
 ## route.join_install_bundle_adopt

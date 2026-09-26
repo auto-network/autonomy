@@ -170,6 +170,12 @@ def _adopted(slug: str) -> dict | None:
     return record if isinstance(record, dict) and "seq" in record else None
 
 
+def _history(slug: str) -> dict[int, dict]:
+    from tools.dashboard import membership_checkpoint as cp
+
+    return {seq: rec for seq, rec in cp.adopted_history(slug).items() if "seq" in rec}
+
+
 def _members_at(slug: str, record: dict) -> tuple[str, ...]:
     from tools.dashboard import membership_checkpoint as cp
     from tools.network.ledger import membership_commitment as mc
@@ -179,39 +185,101 @@ def _members_at(slug: str, record: dict) -> tuple[str, ...]:
     return tuple(mc.member_pubs(state))
 
 
+def _claim_id_at(slug: str, record: dict | None, persona_pub: str) -> str | None:
+    """The claim event that admits the member whose CURRENT key is
+    *persona_pub* in the fold at *record*'s ledger_head (None: not a member
+    there, or that head is not held). The newest fold (record None) gives
+    the persona's current admission; a persona re-admitted after a removal
+    carries a new claim id, and a rekey keeps its claim id."""
+    from tools.dashboard import membership_checkpoint as cp
+
+    try:
+        if record is None:
+            state = cp._fold_state(slug)[0]
+        else:
+            head = record.get("ledger_head")
+            state = cp._fold_at(slug, [head]) if cp._is_head(head) else cp._fold_state(slug)[0]
+    except Exception:
+        return None
+    for member in state.members.values():
+        if member.current_key == persona_pub:
+            return str(member.claim_id)
+    return None
+
+
 def _callables(slug: str, persona_pub: str) -> dict[str, Callable]:
     from tools.network.ledger import membership_commitment as mc
 
     def newest_adopted_seq():
-        record = _adopted(slug)
-        return int(record["seq"]) if record is not None else None
+        history = _history(slug)
+        return max(history) if history else None
 
     def adopted_checkpoint_for(seq):
-        record = _adopted(slug)
-        if record is None or int(record["seq"]) != int(seq):
-            return None
-        return record
+        return _history(slug).get(int(seq))
 
     def adopted_members_for(seq):
         record = adopted_checkpoint_for(seq)
         return _members_at(slug, record) if record is not None else None
 
-    def membership_proof_for():
-        record = _adopted(slug)
-        if record is None:
+    def retained_checkpoints():
+        return list(_history(slug).values())
+
+    def membership_proof_for(under=None, root=None):
+        """This machine's rider. Under the retained record whose root is
+        *root*, labelled *under* (prover-downgrade: prove back at the peer's
+        level, in the peer's own labelling); else under the newest retained
+        record whose head this node's fold reaches and whose set includes
+        this persona (a node that adopted a checkpoint before pulling its
+        events still proves under the newest one it can; OrgAdmission.tla)."""
+        history = _history(slug)
+        if not history:
             return {"v": 1, "checkpoint_seq": 0, "index": 0, "path": []}
-        members = _members_at(slug, record)
-        try:
-            index, path = mc.inclusion_proof(members, persona_pub)
-        except mc.MembershipCommitmentError:
-            index, path = 0, []  # not in the adopted set yet; the peer refuses
-        return {"v": 1, "checkpoint_seq": int(record["seq"]), "index": index, "path": path}
+        if root is not None:
+            for record in history.values():
+                if record.get("members_root") != root:
+                    continue
+                try:
+                    index, path = mc.inclusion_proof(_members_at(slug, record), persona_pub)
+                except Exception:
+                    break
+                label = int(under) if under is not None else int(record["seq"])
+                return {"v": 1, "checkpoint_seq": label, "index": index, "path": path}
+        for record in (history[k] for k in sorted(history, reverse=True)):
+            try:
+                members = _members_at(slug, record)
+                index, path = mc.inclusion_proof(members, persona_pub)
+            except Exception:
+                # Head not held yet, or this persona is not in that set (a
+                # checkpoint published before its admission): an older
+                # retained record may still include it.
+                continue
+            return {"v": 1, "checkpoint_seq": int(record["seq"]), "index": index, "path": path}
+        newest = history[max(history)]
+        return {"v": 1, "checkpoint_seq": int(newest["seq"]), "index": 0, "path": []}
+
+    def admission_ok_for(seq, peer_persona):
+        """E-any-adm's floor: the record *seq* is at or after *peer_persona*'s
+        current admission, i.e. the persona's claim in the fold at that
+        record's head is the same claim that admits it in the newest fold.
+        None when this node cannot tell (head not held, no record)."""
+        record = _history(slug).get(int(seq))
+        if record is None:
+            return None
+        at_record = _claim_id_at(slug, record, peer_persona)
+        if at_record is None:
+            return False
+        current = _claim_id_at(slug, None, peer_persona)
+        if current is None:
+            return False
+        return at_record == current
 
     return {
         "newest_adopted_seq": newest_adopted_seq,
         "adopted_checkpoint_for": adopted_checkpoint_for,
         "adopted_members_for": adopted_members_for,
+        "retained_checkpoints": retained_checkpoints,
         "membership_proof_for": membership_proof_for,
+        "admission_ok_for": admission_ok_for,
     }
 
 

@@ -68,20 +68,49 @@ def _fold_at(org: str, heads):
         store.close()
 
 
-def _cached_adopted(org: str) -> Optional[dict]:
-    # A missing cache for ANY reason — no row, or a store not yet initialized
-    # on a fresh node — reads as "no adopted checkpoint known", which is the
-    # seed case. Correctness never rests on the cache (the registry's seq+1
-    # rule is the gate), so failing to None here is safe.
+def _cached_payload(org: str) -> Optional[dict]:
+    """The checkpoint cache row's payload at the current revision (a
+    revision-1 row upgrades on read), or None. A missing cache for ANY reason
+    reads as "no adopted checkpoint known", the seed case; correctness never
+    rests on the cache (the registry's seq+1 rule is the gate)."""
     try:
-        row = settings_ops.read_set_key(
-            NETWORK_CHECKPOINT_CACHE_SET_ID, "default", org=org)
+        members = settings_ops.read_set(
+            NETWORK_CHECKPOINT_CACHE_SET_ID, org=org, peers=[],
+            target_revision=NETWORK_CHECKPOINT_CACHE_REVISION, key_equals="default")
     except Exception:
         return None
-    if row is None:
-        return None
-    payload = row.get("payload") or {}
-    return payload.get("record")
+    for member in members:
+        if member.key == "default" and isinstance(member.payload, dict):
+            return member.payload
+    return None
+
+
+def _cached_adopted(org: str) -> Optional[dict]:
+    """The newest adopted checkpoint record, or None."""
+    payload = _cached_payload(org)
+    return payload.get("record") if payload is not None else None
+
+
+def adopted_history(org: str) -> dict[int, dict]:
+    """Every retained adopted record by seq (OrgAdmission.tla E-any-adm:
+    the verifier accepts a proof under any of these at or after the prover's
+    admission, and proves back under the peer's seq from them)."""
+    payload = _cached_payload(org)
+    if payload is None:
+        return {}
+    history = payload.get("history")
+    if not isinstance(history, dict):
+        record = payload.get("record")
+        return {int(payload["seq"]): record} if isinstance(record, dict) else {}
+    out: dict[int, dict] = {}
+    for key, record in history.items():
+        if isinstance(key, str) and key.isdigit() and isinstance(record, dict):
+            out[int(key)] = record
+    return out
+
+
+def adopted_record_for(org: str, seq: int) -> Optional[dict]:
+    return adopted_history(org).get(int(seq))
 
 
 def checkpoint_due(org: str, persona_pub: str, *, ts: int,
@@ -199,11 +228,25 @@ def checkpoint_status(org: str) -> dict:
 
 
 def record_adopted(org: str, signed_record: dict) -> None:
-    """Cache a checkpoint the registry has adopted (called after a successful
-    POST, or a one-time registry read that discovers a newer state)."""
+    """Retain an adopted checkpoint (after a successful publish, a fold
+    adoption of a registry or bundle state, or a verified peer record). The
+    newest retained record is the row's ``record``; the history keeps the
+    newest NETWORK_CHECKPOINT_HISTORY_LIMIT records by seq. Recording a seq
+    already retained replaces that entry (a signed form may replace a state
+    tuple); recording an older seq never changes which record is newest
+    (NoRegression)."""
+    from tools.graph.schemas.network_identity import NETWORK_CHECKPOINT_HISTORY_LIMIT
+
+    seq = int(signed_record["seq"])
+    history = adopted_history(org)
+    history[seq] = dict(signed_record)
+    kept = sorted(history, reverse=True)[:NETWORK_CHECKPOINT_HISTORY_LIMIT]
+    newest = kept[0]
     settings_ops.upsert_by_key(
         NETWORK_CHECKPOINT_CACHE_SET_ID, NETWORK_CHECKPOINT_CACHE_REVISION,
-        "default", {"seq": signed_record["seq"], "record": signed_record},
+        "default",
+        {"seq": newest, "record": history[newest],
+         "history": {str(k): history[k] for k in kept}},
         org=org,
     )
 

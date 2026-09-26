@@ -1,7 +1,10 @@
 """Org-scope admission (auto-coea3, design graph://c2baad48-0a3): the org
 hello admits a member's machine by persona certificate plus the registry's
-membership-proof rider, verified against the ADOPTED checkpoint; every
-refusal is typed; removal is the re-prove deadline after an adoption."""
+membership-proof rider, verified against a RETAINED adopted checkpoint at or
+after the peer's admission (OrgAdmission.tla E-any-adm); the server proves
+back under the client's checkpoint (prover-downgrade); every refusal is
+typed; removal is judged against the newest adopted member set, per message.
+"""
 
 from __future__ import annotations
 
@@ -35,37 +38,53 @@ def _cert(persona: KeyPair, machine: KeyPair, org: str = ORG):
 
 class Node:
     """One member machine: its persona, machine key, and its own view of
-    the adopted checkpoints (a dict seq -> record)."""
+    the retained adopted checkpoints (a dict seq -> record). ``admitted_at``
+    optionally maps persona -> the seq of its current admission, for the
+    E-any-adm floor (None: the node models no admissions)."""
 
     def __init__(self, persona: KeyPair, members: list[str], *, seq: int = 0,
-                 org: str = ORG, now=None, monotonic=None):
+                 org: str = ORG, now=None, admitted_at: dict[str, int] | None = None):
         self.persona = persona
         self.machine = KeyPair.generate()
         self.adopted = {seq: {"seq": seq, "members_root": mc.compute_root(members)}}
         self.members_at = {seq: list(members)}
         self.rider_seq = seq
+        self.admitted_at = admitted_at
         self.auth = OrgFleetAuthenticator(
             self.machine, org=org, persona_cert=_cert(persona, self.machine, org),
             membership_proof_for=self.rider,
             adopted_checkpoint_for=lambda s: self.adopted.get(int(s)),
             newest_adopted_seq=lambda: max(self.adopted),
-            now=now or time.time, monotonic=monotonic or time.monotonic,
+            retained_checkpoints=lambda: list(self.adopted.values()),
+            adopted_members_for=lambda s: self.members_at.get(int(s)),
+            admission_ok_for=self.admission_ok,
+            now=now or time.time,
         )
 
-    def rider(self) -> dict:
-        members = self.members_at[self.rider_seq]
+    def rider(self, under: int | None = None, root: str | None = None) -> dict:
+        seq, label = self.rider_seq, self.rider_seq
+        if root is not None:
+            for k, record in self.adopted.items():
+                if record["members_root"] == root:
+                    seq, label = k, (int(under) if under is not None else k)
+        members = self.members_at[seq]
         try:
             index, path = mc.inclusion_proof(members, self.persona.public_hex)
         except mc.MembershipCommitmentError:
             index, path = 0, []  # an outsider fabricates a proof of itself
-        return {"v": 1, "checkpoint_seq": self.rider_seq, "index": index, "path": path}
+        return {"v": 1, "checkpoint_seq": label, "index": index, "path": path}
+
+    def admission_ok(self, seq: int, persona: str) -> bool | None:
+        if self.admitted_at is None or persona not in self.admitted_at:
+            return None
+        return int(seq) >= self.admitted_at[persona]
 
     def adopt(self, seq: int, members: list[str]) -> None:
+        """This node adopts and retains checkpoint *seq*; its own hello
+        proves under it from now on, and *members* is the newest set."""
         self.adopted[seq] = {"seq": seq, "members_root": mc.compute_root(members)}
         self.members_at[seq] = list(members)
-        # A node's own hello proves its persona under what it has adopted.
         self.rider_seq = seq
-        self.auth.note_adoption(seq)
 
 
 def _handshake(client: Node, server: Node, session: str = "s1"):
@@ -108,12 +127,16 @@ def test_refusals_are_typed_and_name_the_check(org):
     with pytest.raises(HandshakeError, match="not in the adopted member set"):
         _handshake(outsider, bob)
 
-    # A member proving under a checkpoint the server has not adopted.
+    # A member proving under a checkpoint the server has not adopted, whose
+    # root the server retains under no seq either (the label alone is never
+    # what is checked: the same root under another label admits).
     alice = Node(org.founder, members)
     alice.rider_seq = 1
-    alice.members_at[1] = members
-    with pytest.raises(HandshakeError, match="has not adopted"):
+    alice.members_at[1] = sorted(members + [KeyPair.generate().public_hex])
+    with pytest.raises(HandshakeError, match="nor in any other retained one"):
         _handshake(alice, bob)
+    alice.members_at[1] = members
+    _handshake(alice, bob)
 
     # A member's cert for ANOTHER organization presented on this one.
     alice_other = Node(org.founder, members, org="genesis-" + "cd" * 28)
@@ -152,65 +175,104 @@ def test_refusals_are_typed_and_name_the_check(org):
     assert bob.auth.admitted(outsider.machine.public_hex) is None
 
 
-def test_adopting_a_removing_checkpoint_closes_the_removed_member_after_the_deadline(org):
+def test_adopting_a_removing_checkpoint_refuses_the_removed_member_at_once(org):
+    """Removal is judged against the newest adopted member set, per served
+    message: no grace window, nothing to re-prove (OrgAdmission.tla)."""
     members = list(org.member_pubs())
-    clock = [1000.0]
     alice = Node(org.founder, members)
-    bob = Node(org.personas["bob"], members, monotonic=lambda: clock[0])
+    bob = Node(org.personas["bob"], members)
     _handshake(alice, bob)
     bob.auth.authorize(alice.machine.public_hex)
 
-    # Bob adopts seq 1: alice removed. Inside the deadline alice is still served.
+    # Bob adopts seq 1: alice removed. Her next message is refused, typed.
     without_alice = [m for m in members if m != org.founder.public_hex]
     bob.adopt(1, without_alice)
-    bob.auth.authorize(alice.machine.public_hex)
-    assert [p.persona_pub for p in bob.auth.stale_peers()] == [org.founder.public_hex]
-    # Alice cannot re-prove under the new root.
+    with pytest.raises(MembershipStaleError, match="removed") as caught:
+        bob.auth.authorize(alice.machine.public_hex)
+    assert caught.value.close_code == CLOSE_MEMBERSHIP_STALE == 4417
+    # Her old proof still verifies under the retained seq 0, but she is not
+    # in the newest set: a NEW connection is refused too.
+    fresh_alice = Node(org.founder, members)
+    with pytest.raises(MembershipStaleError, match="removed"):
+        _handshake(fresh_alice, bob)
+    # And she cannot prove under seq 1 at all.
     alice.members_at[1] = without_alice
     alice.rider_seq = 1
     with pytest.raises(HandshakeError, match="not in the adopted member set"):
-        bob.auth.reprove(alice.machine.public_hex, alice.rider())
-    # After the deadline, every served message is refused.
-    clock[0] += 5.1
-    with pytest.raises(HandshakeError, match="re-prove required"):
-        bob.auth.authorize(alice.machine.public_hex)
-    # And a NEW connection under the old checkpoint is refused too.
-    fresh_alice = Node(org.founder, members)
-    with pytest.raises(HandshakeError, match="re-prove required"):
-        _handshake(fresh_alice, bob)
+        _handshake(alice, bob)
+    # Bob's other peers are unaffected by the adoption.
+    bob.auth.authorize  # (bob admits nobody else here; see the join test)
 
 
-def test_a_join_or_rekey_checkpoint_keeps_honest_members_who_reprove(org):
+def test_any_retained_checkpoint_admits_and_the_server_proves_back_under_it(org):
+    """E-any-adm and prover-downgrade: a peer proving under an OLDER
+    retained checkpoint is admitted, keeps being served after this node
+    adopts newer ones, and receives a server hello it can verify."""
     members = list(org.member_pubs())
-    clock = [1000.0]
     alice = Node(org.founder, members)
-    bob = Node(org.personas["bob"], members, monotonic=lambda: clock[0])
+    bob = Node(org.personas["bob"], members)
     _handshake(alice, bob)
 
-    # A third member joins; bob adopts seq 1 with the larger set.
+    # A third member joins; bob adopts seq 1 with the larger set. Alice,
+    # admitted under seq 0, is still a member of the newest set: served.
     carol = KeyPair.generate()
     larger = sorted(members + [carol.public_hex])
     bob.adopt(1, larger)
-    assert bob.auth.stale_peers()
-    # Alice re-proves under seq 1 and survives, before and after the deadline.
-    alice.members_at[1] = larger
-    alice.rider_seq = 1
-    bob.auth.reprove(alice.machine.public_hex, alice.rider())
-    assert bob.auth.stale_peers() == []
-    clock[0] += 60
     bob.auth.authorize(alice.machine.public_hex)
+    # A fresh connection from alice still proves under seq 0 (she has not
+    # adopted 1): admitted, and bob's server hello proves back under 0,
+    # which is what alice can verify.
+    fresh_alice = Node(org.founder, members)
+    _priv, hello = fresh_alice.auth.build_client_hello("s9")
+    _peer, _spriv, server_hello, _t = bob.auth.accept_client(hello, session="s9")
+    assert json.loads(server_hello)["membership_proof"]["checkpoint_seq"] == 0
+    fresh_alice.auth.verify_server(
+        server_hello, session="s9", client_eph=json.loads(hello)["eph_pub"],
+        expected_machine_pub=bob.machine.public_hex,
+    )
+    assert bob.auth.admitted(fresh_alice.machine.public_hex).checkpoint_seq == 0
+    # Carol, who adopted seq 1, is admitted under it; bob proves back under 1.
+    carol_node = Node(carol, larger, seq=1)
+    _priv, hello = carol_node.auth.build_client_hello("s10")
+    _peer, _spriv, server_hello, _t = bob.auth.accept_client(hello, session="s10")
+    assert json.loads(server_hello)["membership_proof"]["checkpoint_seq"] == 1
+    # Bob dialling alice proves under HIS newest (1), which alice has not
+    # retained: alice refuses, typed; the pair still syncs in the other
+    # direction, which is what the model's liveness rests on.
+    with pytest.raises(HandshakeError, match="nor in any other retained one"):
+        _handshake(bob, fresh_alice)
 
     # A rekey: alice's persona key changes; her new leaf is in the set and
-    # she re-proves under it with a cert from the NEW persona.
+    # she proves under it with a cert from the NEW persona; the old persona
+    # is no longer in the newest set.
     alice_new = KeyPair.generate()
     rekeyed = sorted([m for m in larger if m != org.founder.public_hex] + [alice_new.public_hex])
     bob.adopt(2, rekeyed)
     alice2 = Node(alice_new, rekeyed, seq=2)
     _handshake(alice2, bob)
     bob.auth.authorize(alice2.machine.public_hex)
+    with pytest.raises(MembershipStaleError, match="removed"):
+        bob.auth.authorize(fresh_alice.machine.public_hex)
 
 
-def test_a_replayed_client_hello_is_refused_and_staleness_is_typed() -> None:
+def test_a_checkpoint_before_the_peers_admission_does_not_admit_it(org):
+    """E-any-adm's floor: a retained checkpoint older than the peer's current
+    admission never admits it, even when a proof verifies under it (a
+    re-admitted persona proving under a record from its first membership)."""
+    members = list(org.member_pubs())
+    alice = Node(org.founder, members)
+    # Bob retains seq 0 and 1 with alice in both, but records her CURRENT
+    # admission at seq 1 (removed and re-admitted in between).
+    bob = Node(org.personas["bob"], members, admitted_at={org.founder.public_hex: 1})
+    bob.adopt(1, members)
+    with pytest.raises(HandshakeError, match="predates this persona's current admission"):
+        _handshake(alice, bob)
+    alice.adopt(1, members)
+    _handshake(alice, bob)
+    bob.auth.authorize(alice.machine.public_hex)
+
+
+def test_a_replayed_client_hello_is_refused_and_removal_is_typed() -> None:
     pa, pb = KeyPair.generate(), KeyPair.generate()
     members = [pa.public_hex, pb.public_hex]
     a, b = Node(pa, members), Node(pb, members)
@@ -224,12 +286,44 @@ def test_a_replayed_client_hello_is_refused_and_staleness_is_typed() -> None:
     # A fresh hello from the same machine is fine.
     _priv, fresh = b.auth.build_client_hello("s3")
     a.auth.accept_client(fresh, session="s3")
-    # Staleness past the deadline is the typed close, code 4417.
+    # A adopting a newer checkpoint that keeps b changes nothing for b.
     a.adopt(1, members)
-    a.auth.note_adoption(1, deadline_s=0.0)
+    a.auth.authorize(b.machine.public_hex)
+    # A adopting one that drops b: the typed close, code 4417, on the next
+    # message and on a new hello alike.
+    a.adopt(2, [pa.public_hex])
     with pytest.raises(MembershipStaleError) as caught:
         a.auth.authorize(b.machine.public_hex)
     assert caught.value.close_code == CLOSE_MEMBERSHIP_STALE == 4417
     with pytest.raises(MembershipStaleError):
-        _priv, stale = b.auth.build_client_hello("s4")  # b still proves under seq 0
-        a.auth.accept_client(stale, session="s4")
+        _priv, gone = b.auth.build_client_hello("s4")  # b still proves under seq 0
+        a.auth.accept_client(gone, session="s4")
+
+
+def test_a_genuine_root_under_the_wrong_label_still_admits_and_is_answered_in_kind(org):
+    """OrgAdmissionBundleBound.tla BundleBoundPlanted: a sponsor bundled the
+    seq-2 root labelled seq 1. The joiner's proof recomputes that root; the
+    founder retains it (at seq 2) and admits; the founder proves back under
+    that root labelled 1, which the joiner verifies against its own record.
+    The pair syncs, so the joiner can pull the events that heal its cache."""
+    members = list(org.member_pubs())
+    carol = KeyPair.generate()
+    larger = sorted(members + [carol.public_hex])
+    founder = Node(org.founder, members)          # seq 0: {F, bob}
+    founder.adopt(1, members)                     # seq 1: {F, bob} again
+    founder.adopt(2, larger)                      # seq 2: {F, bob, carol}
+    planted = Node(carol, larger, seq=1)          # carol's record 1 carries seq 2's root
+    _priv, hello = planted.auth.build_client_hello("p1")
+    _peer, _spriv, server_hello, _t = founder.auth.accept_client(hello, session="p1")
+    reply = json.loads(server_hello)["membership_proof"]
+    assert reply["checkpoint_seq"] == 1
+    mc.verify_inclusion(mc.compute_root(larger), org.founder.public_hex, reply["index"], reply["path"])
+    planted.auth.verify_server(
+        server_hello, session="p1", client_eph=json.loads(hello)["eph_pub"],
+        expected_machine_pub=founder.machine.public_hex,
+    )
+    founder.auth.authorize(planted.machine.public_hex)
+    # A root nobody retains is still refused, naming both failures.
+    outsider_root = Node(carol, sorted(members + [carol.public_hex, KeyPair.generate().public_hex]), seq=1)
+    with pytest.raises(HandshakeError, match="nor in any other retained one"):
+        _handshake(outsider_root, founder)

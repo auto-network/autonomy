@@ -200,3 +200,16 @@ def test_install_outcome_forwards_seed_rows_and_the_bundled_checkpoint():
     body = js[start:js.index("}).then", start)]
     assert "reachability_rows: material.reachability_rows" in body
     assert "checkpoint: material.checkpoint" in body
+
+
+def test_recovery_adoption_fires_only_when_install_did_not_adopt_and_once():
+    """The one recovery call to /api/network/membership-checkpoint/adopt is
+    guarded by installed.checkpoint.ok === false, appears exactly once, and
+    its failure is swallowed (the model's liveness does not rest on it)."""
+    from pathlib import Path
+    js = (Path(__file__).resolve().parents[1] / "static/js/network-join.js").read_text()
+    assert js.count('fetch("/api/network/membership-checkpoint/adopt"') == 1
+    call = js.index('fetch("/api/network/membership-checkpoint/adopt"')
+    guard = js.rindex("if (", 0, call)
+    assert "installed.checkpoint.ok === false" in js[guard:call]
+    assert ".catch(function () { return null; })" in js[call:call + 400]

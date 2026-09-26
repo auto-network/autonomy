@@ -325,3 +325,98 @@ def test_adoption_never_regresses_from_any_source(monkeypatch):
         assert network_routes._adopt_state_by_fold(ORG, _state_of(sim, 2), source=source) == {
             "ok": True, "action": "up-to-date", "seq": 3}
     assert cp._cached_adopted(ORG)["seq"] == 3
+
+
+# ── Retention (auto-qrmlg.3: checkpoint cache revision 2) ────────────────
+def _tuple_record(seq, head="cc" * 32):
+    return {"seq": seq, "members_root": "aa" * 32, "checkpointers_root": "bb" * 32,
+            "ledger_head": head, "org": ORG}
+
+
+def test_record_adopted_retains_every_record_and_never_regresses_the_newest():
+    """E-any-adm needs every adopted record by seq; the newest is the row's
+    record; recording an older seq retains it without changing the newest;
+    re-recording a seq replaces that entry."""
+    sim, _founder = org_with_owner()
+    _install_org(sim)
+    cp.record_adopted(ORG, _tuple_record(2))
+    cp.record_adopted(ORG, _tuple_record(4))
+    cp.record_adopted(ORG, _tuple_record(3))
+    assert cp._cached_adopted(ORG)["seq"] == 4
+    assert sorted(cp.adopted_history(ORG)) == [2, 3, 4]
+    assert cp.adopted_record_for(ORG, 3) == _tuple_record(3)
+    assert cp.adopted_record_for(ORG, 9) is None
+    cp.record_adopted(ORG, _tuple_record(3, head="dd" * 32))
+    assert cp.adopted_record_for(ORG, 3)["ledger_head"] == "dd" * 32
+    assert cp._cached_adopted(ORG)["seq"] == 4
+
+
+def test_retention_is_bounded_newest_kept():
+    from tools.graph.schemas.network_identity import NETWORK_CHECKPOINT_HISTORY_LIMIT as LIMIT
+    sim, _founder = org_with_owner()
+    _install_org(sim)
+    for seq in range(LIMIT + 5):
+        cp.record_adopted(ORG, _tuple_record(seq))
+    history = cp.adopted_history(ORG)
+    assert len(history) == LIMIT and min(history) == 5 and max(history) == LIMIT + 4
+
+
+def test_a_revision_one_cache_row_reads_as_a_one_record_history():
+    from tools.graph.schemas.network_identity import NETWORK_CHECKPOINT_CACHE_SET_ID
+    sim, _founder = org_with_owner()
+    _install_org(sim)
+    settings_ops.upsert_by_key(NETWORK_CHECKPOINT_CACHE_SET_ID, 1, "default",
+                               {"seq": 7, "record": _tuple_record(7)}, org=ORG)
+    assert cp._cached_adopted(ORG) == _tuple_record(7)
+    assert cp.adopted_history(ORG) == {7: _tuple_record(7)}
+    cp.record_adopted(ORG, _tuple_record(8))
+    assert sorted(cp.adopted_history(ORG)) == [7, 8]
+
+
+def test_adopt_by_fold_retains_a_member_signed_record_as_its_state_tuple(monkeypatch):
+    """D3a: a signed form is retained only when its signature was verified.
+    A member-signed record cannot be (no prev chain here), so the tuple is
+    what is retained, never an unverified signature to be served onward."""
+    from tools.dashboard import network_routes
+    sim, founder = org_with_owner()
+    _install_org(sim)
+    org_uuid = _binding_row(monkeypatch)
+    state = _state_of(sim, 1)
+    signed = dict(state, org=org_uuid, v=1, prev="dd" * 32, ts=TS,
+                  signer=founder.public_hex, sig="ef" * 64, proof=[], proof_index=0)
+    assert network_routes._adopt_state_by_fold(ORG, signed, source="join bundle's")["action"] == "adopted"
+    retained = cp._cached_adopted(ORG)
+    assert "sig" not in retained and "signer" not in retained
+    assert retained == {"org": org_uuid, **state}
+
+
+def test_adopt_by_fold_refuses_a_record_for_another_organization(monkeypatch):
+    """D3b: a state naming another org is refused, not re-stamped."""
+    from tools.dashboard import network_routes
+    sim, _founder = org_with_owner()
+    _install_org(sim)
+    _binding_row(monkeypatch)
+    state = dict(_state_of(sim, 1), org="22222222-2222-4222-8222-222222222222")
+    result = network_routes._adopt_state_by_fold(ORG, state, source="join bundle's")
+    assert result["ok"] is False and "another organization" in result["error"]
+    assert cp._cached_adopted(ORG) is None
+
+
+def test_adopt_by_fold_bounds_a_bundle_seq_by_the_registry(monkeypatch):
+    """The registry assigns seqs: a bundle record above the registry's seq
+    is refused, one AT the registry's seq must be the registry's record, and
+    one below is adopted by fold (its seq is the sponsor's word, bounded)."""
+    from tools.dashboard import network_routes
+    sim, _founder = org_with_owner()
+    _install_org(sim)
+    _binding_row(monkeypatch)
+    registry = _state_of(sim, 3)
+    above = network_routes._adopt_state_by_fold(ORG, _state_of(sim, 4), source="join bundle's", bound=registry)
+    assert above["ok"] is False and "the registry is at 3" in above["error"]
+    other_at_3 = dict(_state_of(sim, 3), ledger_head="a" * 64)
+    at = network_routes._adopt_state_by_fold(ORG, other_at_3, source="join bundle's", bound=registry)
+    assert at["ok"] is False and "not the registry's record" in at["error"]
+    assert cp._cached_adopted(ORG) is None
+    assert network_routes._adopt_state_by_fold(ORG, _state_of(sim, 2), source="join bundle's", bound=registry)["action"] == "adopted"
+    assert network_routes._adopt_state_by_fold(ORG, _state_of(sim, 3), source="join bundle's", bound=registry)["action"] == "adopted"
+    assert cp._cached_adopted(ORG)["seq"] == 3

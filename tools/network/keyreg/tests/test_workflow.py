@@ -175,7 +175,7 @@ def test_workflow_goals_view_lists_artifacts_producers_goals(registry):
         assert f"## Goal {goal_id}" in view
     row = next(line for line in view.splitlines()
                if 'id="artifact-install_seed_addresses"' in line)
-    assert "**none — defect:**" in row  # the J5 defect: no producer, named
+    assert "route.join_install" in row  # the J5 defect, fixed: its producer is named
     founder_heads = next(line for line in view.splitlines() if "ledger_heads@founder |" in line)
     assert "| given |" in founder_heads and "fold.genesis" in founder_heads
 
@@ -211,10 +211,20 @@ def test_state_may_hold_only_given_copies(registry):
 
 
 def test_defect_with_a_producer_is_stale(registry):
+    """An artifact recorded as a defect (no built producer) that a mutation
+    nonetheless produces is a stale record: the lint says drop the origin.
+    install_seed_addresses was exactly that until b01b938e built its producer."""
     broken = copy.deepcopy(registry)
-    broken["mutations"]["route.join_install"]["produces"].append("install_seed_addresses")
+    broken["artifacts"]["install_seed_addresses"]["origin"] = "defect"
+    broken["artifacts"]["install_seed_addresses"]["defect"] = "graph://cde6c8c6-041 §5 J5 (fixed)"
     assert any("artifacts.install_seed_addresses" in e and "origin defect" in e
                for e in _errors(broken))
+
+
+def test_install_seed_addresses_has_a_workflow_producer(registry):
+    entry = registry["artifacts"]["install_seed_addresses"]
+    assert entry.get("origin", "workflow") == "workflow"
+    assert "install_seed_addresses" in registry["mutations"]["route.join_install"]["produces"]
 
 
 def test_given_by_names_a_mutation(registry):

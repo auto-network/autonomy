@@ -76,10 +76,14 @@ def test_minimal_schedule_is_valid_and_reaches_goal(registry):
 
 
 def test_minimal_joiner_window_holds_claim_install_and_certificates(registry):
+    """One joiner root opening covers the claim and the fleet:sync
+    certificate. The serve certificate is no longer forced into it: the
+    install seed's addresses (produced by route.join_install since b01b938e)
+    satisfy peer selection without a relay slot."""
     result = keyreg.plan(registry, GOAL, "self_admit")
     joiner_window = [inst.mutation for inst, window, _ in result.steps if window == "joiner#1"]
-    assert {"ceremony.member_claim_mint", "ceremony.fleet_runtime_mint",
-            "ceremony.serve_cert_mint"} <= set(joiner_window)
+    assert {"ceremony.member_claim_mint", "ceremony.fleet_runtime_mint"} <= set(joiner_window)
+    assert "ceremony.serve_cert_mint" not in joiner_window
     adopt = [w for inst, w, _ in result.steps if inst.mutation == "route.checkpoint_adopt"]
     assert adopt == [None]  # adoption is a machine step, re-polled without a ceremony
 

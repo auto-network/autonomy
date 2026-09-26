@@ -1037,23 +1037,62 @@ _register_upconverter(
 
 
 NETWORK_CHECKPOINT_CACHE_SET_ID = "autonomy.network.membership-checkpoint"
-NETWORK_CHECKPOINT_CACHE_REVISION = 1
+NETWORK_CHECKPOINT_CACHE_REVISION = 2
+#: Adopted records retained per org, newest first. A verifier accepts a
+#: proof under any retained record at or after the prover's admission
+#: (OrgAdmission.tla rule E-any-adm), so the retained span bounds how far
+#: behind a peer may be and still be admitted without catching up first.
+NETWORK_CHECKPOINT_HISTORY_LIMIT = 64
+
+
+def _validate_checkpoint_record(cls_name: str, seq: object, record: object, where: str) -> None:
+    if type(seq) is not int or seq < 0:
+        raise SchemaValidationError(f"{cls_name}: {where} seq must be a non-negative integer")
+    if not isinstance(record, dict) or record.get("seq") != seq:
+        raise SchemaValidationError(
+            f"{cls_name}: {where} must be the checkpoint object whose seq matches")
 
 
 @home("organization")
 @publication_band(min="raw", max="raw")
 @singleton(key="default")
 class NetworkMembershipCheckpointV1(SettingSchema):
-    """The last membership checkpoint this node knows the registry adopted.
+    """Revision 1 of the adopted-checkpoint cache: the newest adopted record
+    only. Registered so stored rows reshape to revision 2 on read (their one
+    record becomes the whole history)."""
 
-    A local optimization cache (auto-tmers, graph://da0dd9fb-e75): sign-on
-    decides whether a fresh checkpoint is due by comparing the current fold's
-    roots to THIS row, never by calling the registry. Written when a POST
-    succeeds; a stale row costs at most one refused POST (the registry's
-    seq+1 rule is the real gate, so correctness never depends on this being
-    current). Holds the full signed record so the next checkpoint can
-    hash-link ``prev`` to it and prove the signer under its
-    ``checkpointers_root``.
+    set_id = NETWORK_CHECKPOINT_CACHE_SET_ID
+    schema_revision = 1
+
+    seq: int = field(required=True, description="Sequence number of the adopted checkpoint.")
+    record: dict = field(required=True, description="The adopted checkpoint record.")
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        super().validate(payload)
+        if isinstance(payload, dict):
+            _validate_checkpoint_record(cls.__name__, payload.get("seq"), payload.get("record"), "'record'")
+
+
+@home("organization")
+@publication_band(min="raw", max="raw")
+@singleton(key="default")
+class NetworkMembershipCheckpointV2(SettingSchema):
+    """The membership checkpoints this node has adopted: the newest, and a
+    bounded history of earlier ones.
+
+    ``seq``/``record`` are the newest adopted checkpoint (auto-tmers,
+    graph://da0dd9fb-e75): sign-on decides whether a fresh checkpoint is due
+    by comparing the current fold's roots to it, never by calling the
+    registry, and the next checkpoint hash-links ``prev`` to it. ``history``
+    keeps every adopted record by seq (as a string key, JSON) up to
+    NETWORK_CHECKPOINT_HISTORY_LIMIT, newest kept: the org hello verifier
+    accepts a peer's proof under any retained record at or after that
+    peer's admission and proves back under the peer's seq (OrgAdmission.tla
+    rules E-any-adm and prover-downgrade, auto-qrmlg.11), so a member that
+    adopted a newer checkpoint before pulling its events still syncs with
+    one that has not. Revision 2 adds ``history``; a revision-1 row upgrades
+    with its one record as the whole history.
     """
 
     set_id = NETWORK_CHECKPOINT_CACHE_SET_ID
@@ -1061,13 +1100,22 @@ class NetworkMembershipCheckpointV1(SettingSchema):
 
     seq: int = field(
         required=True,
-        description="Sequence number of the adopted checkpoint this row caches.",
+        description="Sequence number of the newest adopted checkpoint.",
     )
     record: dict = field(
         required=True,
         description=(
-            "The full signed checkpoint record (the membership_commitment "
-            "checkpoint schema), from which seq/roots/ledger_head/prev derive."
+            "The newest adopted checkpoint record (the membership_commitment "
+            "checkpoint schema; signed when this node published or verified it, "
+            "else the {org, seq, members_root, checkpointers_root, ledger_head} "
+            "state it adopted by fold)."
+        ),
+    )
+    history: dict = field(
+        required=False,
+        description=(
+            "Adopted records by seq (string keys), the newest "
+            "NETWORK_CHECKPOINT_HISTORY_LIMIT of them; always contains the newest."
         ),
     )
 
@@ -1076,14 +1124,27 @@ class NetworkMembershipCheckpointV1(SettingSchema):
         super().validate(payload)
         if not isinstance(payload, dict):
             return
-        if type(payload.get("seq")) is not int or payload["seq"] < 0:
+        _validate_checkpoint_record(cls.__name__, payload.get("seq"), payload.get("record"), "'record'")
+        history = payload.get("history")
+        if history is None:
+            return
+        if not isinstance(history, dict):
+            raise SchemaValidationError(f"{cls.__name__}: 'history' must be an object keyed by seq")
+        if len(history) > NETWORK_CHECKPOINT_HISTORY_LIMIT:
             raise SchemaValidationError(
-                f"{cls.__name__}: 'seq' must be a non-negative integer")
-        record = payload.get("record")
-        if not isinstance(record, dict) or record.get("seq") != payload["seq"]:
-            raise SchemaValidationError(
-                f"{cls.__name__}: 'record' must be the checkpoint object whose "
-                "seq matches this row")
+                f"{cls.__name__}: 'history' holds at most {NETWORK_CHECKPOINT_HISTORY_LIMIT} records")
+        for key, record in history.items():
+            if not isinstance(key, str) or not key.isdigit():
+                raise SchemaValidationError(f"{cls.__name__}: 'history' keys are decimal seq strings")
+            _validate_checkpoint_record(cls.__name__, int(key), record, f"'history[{key}]'")
+        if str(payload["seq"]) not in history:
+            raise SchemaValidationError(f"{cls.__name__}: 'history' must contain the newest record")
+
+
+_register_upconverter(
+    NETWORK_CHECKPOINT_CACHE_SET_ID, 1, NETWORK_CHECKPOINT_CACHE_REVISION,
+    lambda payload: {**dict(payload), "history": {str(payload["seq"]): payload["record"]}},
+)
 
 
 # ── autonomy.network.serve-cert ───────────────────────────────

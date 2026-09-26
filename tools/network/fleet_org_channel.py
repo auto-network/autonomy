@@ -19,7 +19,7 @@ defined here instead:
   membership_commitment.verify_inclusion against the members_root of the
   checkpoint this node has ADOPTED under that seq -- never against the raw
   ledger fold, which advances the moment a claim folds while a checkpoint
-  is adopted only at the operator's root ceremony.
+  is adopted only when published or verified (OrgAdmission.tla).
 - ``ts`` gives ±clock.MAX_CLOCK_SKEW freshness (the registry's rule); the
   ephemeral key binds the channel to the party that produced the hello.
 - ``sig`` is the machine key's signature over the domain-separated payload.
@@ -28,11 +28,26 @@ Admission is mutual: the server answers with the same fields for its own
 persona plus ``client_machine_pub``. Every check fails with a typed
 HandshakeError naming the check.
 
-Removal: when this node adopts a newer checkpoint it calls
-``note_adoption``; peers admitted under an older seq have
-REPROVE_DEADLINE_S to ``reprove`` under the new root, after which
-``authorize`` (called per served message, as the personal path does)
-refuses them. A removed member cannot produce a proof under the new root.
+Which checkpoint a peer may prove under (OrgAdmission.tla, auto-qrmlg.11,
+rules E-any-adm and prover-downgrade; proven live and safe there):
+
+- A proof is accepted under ANY checkpoint this node has adopted and
+  retained, provided that checkpoint is at or after the peer's CURRENT
+  admission: the peer's claim in the fold at that checkpoint's head is the
+  claim that admits it in this node's newest fold. Two members that adopted
+  different checkpoints therefore still sync, and a member that adopted a
+  newer checkpoint before pulling the events behind it is not shut out.
+  The match is by the ROOT the proof recomputes, against every retained
+  record; the rider's ``checkpoint_seq`` is the peer's own label for that
+  record, tried first and trusted for nothing (a sponsor that bundled a
+  genuine root under the wrong seq cannot lock its joiner out).
+- Removal is judged against the NEWEST adopted member set, per served
+  message (``authorize``, as the personal path does): a removed member's
+  old proof stops working the moment this node adopts the checkpoint that
+  drops it, with no grace window and nothing to re-prove.
+- The server proves back under the root the client proved under, labelled
+  with the client's seq (prover-downgrade), so the older side of a pair
+  never has to hold the newer side's checkpoint to be admitted by it.
 """
 
 from __future__ import annotations
@@ -58,11 +73,8 @@ from tools.network import clock
 ORG_HANDSHAKE_VERSION = 1
 ORG_HANDSHAKE_DOMAIN = b"autonomy.network.fleet-org-channel.handshake.v1\n"
 ORG_SYNC_SCOPE = "fleet:sync"
-#: Grace for a peer admitted under an older adopted checkpoint to re-prove
-#: under the newer one (the registry's MEMBERSHIP_REPROVE_DEADLINE_S).
-REPROVE_DEADLINE_S = 5.0
-#: Close code for a peer whose membership proof is stale past the re-prove
-#: deadline (the registry's CLOSE_MEMBERSHIP_STALE, tools/network/registry/relay.py).
+#: Close code for a peer whose persona is not in the newest adopted member
+#: set (the registry's CLOSE_MEMBERSHIP_STALE, tools/network/registry/relay.py).
 CLOSE_MEMBERSHIP_STALE = 4417
 #: A client hello's ephemeral key is remembered this long: a captured hello
 #: replayed inside the ts freshness window is refused by it, and one that
@@ -179,10 +191,10 @@ def _transcript(*, org: str, session: str, client_machine_pub: str,
 
 
 class MembershipStaleError(HandshakeError):
-    """The peer's membership proof is under an older checkpoint than this
-    node has adopted and the re-prove deadline has passed: the connection
-    closes with CLOSE_MEMBERSHIP_STALE. A removed member cannot produce a
-    proof under the new root, so this is how removal takes effect."""
+    """The peer's persona is not in the newest member set this node has
+    adopted: the connection closes with CLOSE_MEMBERSHIP_STALE. Its proof
+    may verify under an older retained checkpoint; removal is judged against
+    the newest set, so this is how removal takes effect."""
 
     close_code = CLOSE_MEMBERSHIP_STALE
 
@@ -206,10 +218,19 @@ class OrgFleetAuthenticator:
     checkpoints this node has adopted.
 
     ``adopted_checkpoint_for(seq)`` returns the adopted checkpoint record
-    for *seq* (a mapping with ``members_root``) or None when this node has
-    not adopted that seq; ``newest_adopted_seq()`` returns the newest seq
-    adopted (None before the seed). ``membership_proof_for()`` returns this
-    machine's own rider for its persona under the newest adopted seq.
+    for *seq* (a mapping with ``seq`` and ``members_root``) or None when this
+    node has not retained that seq; ``retained_checkpoints()`` returns every
+    retained record; ``newest_adopted_seq()`` returns the newest seq adopted
+    (None before the seed). ``membership_proof_for(under, root)`` returns
+    this machine's own rider for its persona: under the retained record
+    whose members_root is *root*, labelled *under* (the server proving back
+    at the client's level), else under the newest retained checkpoint that
+    includes the persona.
+    ``adopted_members_for(seq)`` gives the persona set behind a retained
+    checkpoint; the newest set is what removal is judged against.
+    ``admission_ok_for(seq, persona)`` says whether retained checkpoint
+    *seq* is at or after *persona*'s current admission (None: cannot tell,
+    accepted; the test harnesses model no admissions).
     """
 
     def __init__(
@@ -218,12 +239,13 @@ class OrgFleetAuthenticator:
         *,
         org: str,
         persona_cert: DelegationCert,
-        membership_proof_for: Callable[[], dict],
+        membership_proof_for: Callable[[int | None, str | None], dict],
         adopted_checkpoint_for: Callable[[int], dict | None],
         newest_adopted_seq: Callable[[], int | None],
+        retained_checkpoints: Callable[[], Iterable[dict]] | None = None,
         now: Callable[[], float] = time.time,
-        monotonic: Callable[[], float] = time.monotonic,
         adopted_members_for: Callable[[int], Iterable[str] | None] | None = None,
+        admission_ok_for: Callable[[int, str], bool | None] | None = None,
         advertised_addresses: Callable[[], Sequence[str]] | None = None,
     ) -> None:
         if not isinstance(org, str) or not org:
@@ -236,18 +258,19 @@ class OrgFleetAuthenticator:
         self._proof_for = membership_proof_for
         self._adopted_for = adopted_checkpoint_for
         self._newest_seq = newest_adopted_seq
+        self._retained = retained_checkpoints
         #: Optional: the persona set of an adopted checkpoint (the members
         #: behind its members_root), for readers that filter hints such as
         #: reachability rows by membership. None: unknown to this node.
         self._members_for = adopted_members_for
+        #: Optional: whether a retained checkpoint is at or after a persona's
+        #: current admission (OrgAdmission.tla E-any-adm's floor).
+        self._admission_ok = admission_ok_for
         #: This machine's dialable addresses, introduced in its client hello.
         self._advertised = advertised_addresses
         self._now = now
-        self._monotonic = monotonic
         #: machine_pub -> AdmittedPeer for peers this endpoint admitted.
         self._admitted: dict[str, AdmittedPeer] = {}
-        #: (newest seq, monotonic deadline) after note_adoption().
-        self._reprove_window: tuple[int, float] | None = None
         #: client eph_pub -> wall-clock expiry, for replay refusal.
         self._seen_client_eph: dict[str, float] = {}
 
@@ -284,29 +307,61 @@ class OrgFleetAuthenticator:
         except HelloError as exc:
             raise HandshakeError(f"{what} membership_proof is malformed: {exc}") from exc
         seq = int(rider["checkpoint_seq"])
-        adopted = self._adopted_for(seq)
-        if adopted is None:
+        matched = self._match_retained(seq, persona_pub, rider["index"], rider["path"], what)
+        # E-any-adm: any retained checkpoint admits, at or after the peer's
+        # current admission; removal is judged against the newest set.
+        self._require_current_member(persona_pub, what)
+        matched_seq = int(matched["seq"])
+        if self._admission_ok is not None and self._admission_ok(matched_seq, persona_pub) is False:
+            raise HandshakeError(
+                f"{what} membership_proof is under checkpoint {matched_seq}, which "
+                "predates this persona's current admission"
+            )
+        return persona_pub, str(matched["members_root"])
+
+    def _candidates(self, seq: int) -> list[dict]:
+        """Retained records to try a proof against: the one the peer named
+        first, then every other, newest first."""
+        named = self._adopted_for(seq)
+        out: list[dict] = [named] if named is not None else []
+        if self._retained is not None:
+            others = [r for r in self._retained() if isinstance(r, dict) and "members_root" in r]
+            others.sort(key=lambda r: int(r.get("seq", -1)), reverse=True)
+            for record in others:
+                if named is None or record.get("members_root") != named.get("members_root"):
+                    out.append(record)
+        return out
+
+    def _match_retained(
+        self, seq: int, persona_pub: str, index: object, path: object, what: str,
+    ) -> dict:
+        """The retained record the proof verifies under: the root a proof
+        recomputes is what is checked, so a record the peer labelled with a
+        seq this node keeps under another seq still admits it."""
+        candidates = self._candidates(seq)
+        if not candidates:
             raise HandshakeError(
                 f"{what} membership_proof names checkpoint {seq}, which this "
                 "node has not adopted"
             )
-        newest = self._newest_seq()
-        if newest is not None and seq != newest and not self._within_reprove_window(seq):
+        last = "no retained checkpoint"
+        for record in candidates:
+            try:
+                mc.verify_inclusion(str(record["members_root"]), persona_pub, index, path)
+                return record
+            except (mc.MembershipCommitmentError, KeyError, TypeError) as exc:
+                last = str(exc)
+        raise HandshakeError(
+            f"{what} persona is not in the adopted member set at checkpoint "
+            f"{seq}, nor in any other retained one: {last}"
+        )
+
+    def _require_current_member(self, persona_pub: str, what: str) -> None:
+        if self.is_member(persona_pub) is False:
             raise MembershipStaleError(
-                f"{what} membership_proof is for checkpoint {seq}; this node "
-                f"has adopted {newest}: re-prove required"
+                f"{what} persona is not in the newest adopted member set "
+                f"(checkpoint {self._newest_seq()}): removed"
             )
-        try:
-            mc.verify_inclusion(
-                str(adopted["members_root"]), persona_pub,
-                rider["index"], rider["path"],
-            )
-        except (mc.MembershipCommitmentError, KeyError, TypeError) as exc:
-            raise HandshakeError(
-                f"{what} persona is not in the adopted member set at "
-                f"checkpoint {seq}: {exc}"
-            ) from exc
-        return persona_pub
 
     def _refuse_replay(self, client_eph: str) -> None:
         """A client hello carries a fresh ephemeral key by construction; one
@@ -321,17 +376,14 @@ class OrgFleetAuthenticator:
             raise HandshakeError("ORG_CLIENT_HELLO is a replayed capture (eph_pub seen before)")
         self._seen_client_eph[client_eph] = now + HELLO_REPLAY_MEMORY_S
 
-    def _within_reprove_window(self, seq: int) -> bool:
-        window = self._reprove_window
-        return (
-            window is not None and seq < window[0]
-            and self._monotonic() < window[1]
-        )
-
-    def _own_fields(self) -> dict[str, Any]:
+    def _own_fields(self, *, under: int | None = None, root: str | None = None) -> dict[str, Any]:
+        """This machine's hello fields. *under*/*root* are the seq the peer
+        labelled its proof with and the root that proof verified under: the
+        server proves back under that root with that label (prover-downgrade),
+        so the peer can verify the reply against its own record."""
         return {
             "persona_cert": self.persona_cert.to_dict(),
-            "membership_proof": dict(self._proof_for()),
+            "membership_proof": dict(self._proof_for(under, root)),
             "ts": int(self._now()),
         }
 
@@ -364,7 +416,7 @@ class OrgFleetAuthenticator:
         data = _parse(raw, ORG_CLIENT_FIELDS, "ORG_CLIENT_HELLO")
         client_pub = data["machine_pub"]
         self._refuse_replay(data["eph_pub"])
-        persona_pub = self._verify_peer(data, "ORG_CLIENT_HELLO")
+        persona_pub, matched_root = self._verify_peer(data, "ORG_CLIENT_HELLO")
         try:
             verify_signature(client_pub, data["sig"], _payload(
                 "client", org=self.org, session=session, machine_pub=client_pub,
@@ -380,7 +432,8 @@ class OrgFleetAuthenticator:
         )
         private_key = X25519PrivateKey.generate()
         server_eph = _eph_pub(private_key)
-        own = self._own_fields()
+        own = self._own_fields(
+            under=int(data["membership_proof"]["checkpoint_seq"]), root=matched_root)
         body = {
             "v": ORG_HANDSHAKE_VERSION, "org": self.org,
             "machine_pub": self.machine_pub, "eph_pub": server_eph,
@@ -406,7 +459,7 @@ class OrgFleetAuthenticator:
             raise HandshakeError("server hello names another client machine")
         if data["machine_pub"] != expected_machine_pub:
             raise HandshakeError("server hello is from an unexpected machine")
-        persona_pub = self._verify_peer(data, "ORG_SERVER_HELLO")
+        persona_pub, _root = self._verify_peer(data, "ORG_SERVER_HELLO")
         try:
             verify_signature(data["machine_pub"], data["sig"], _payload(
                 "server", org=self.org, session=session,
@@ -456,57 +509,18 @@ class OrgFleetAuthenticator:
 
     def authorize(self, machine_pub: str) -> None:
         """Called per served message: the peer must be admitted, and its
-        proof must be under the newest adopted checkpoint or inside the
-        re-prove window that follows an adoption."""
+        persona must still be in the newest adopted member set. Adopting a
+        checkpoint that removes a member refuses that member's next message
+        (MembershipStaleError, close 4417) with no grace and nothing to
+        re-prove; every other admitted peer is unaffected."""
         peer = self._admitted.get(machine_pub)
         if peer is None:
             raise HandshakeError("machine is not admitted to this organization's scope")
-        newest = self._newest_seq()
-        if newest is not None and peer.checkpoint_seq != newest \
-                and not self._within_reprove_window(peer.checkpoint_seq):
-            raise MembershipStaleError(
-                f"membership proof is for checkpoint {peer.checkpoint_seq}; this "
-                f"node has adopted {newest}: re-prove required"
-            )
-
-    def note_adoption(self, seq: int, *, deadline_s: float = REPROVE_DEADLINE_S) -> None:
-        """This node adopted checkpoint *seq*: peers proven under an older
-        seq have *deadline_s* to re-prove before authorize() refuses them."""
-        self._reprove_window = (int(seq), self._monotonic() + float(deadline_s))
-
-    def reprove(self, machine_pub: str, rider: object) -> AdmittedPeer:
-        """Re-stamp an admitted peer under a newer adopted checkpoint from a
-        fresh rider it sent; raises when the rider does not verify."""
-        peer = self._admitted.get(machine_pub)
-        if peer is None:
-            raise HandshakeError("machine is not admitted to this organization's scope")
-        try:
-            proof = validate_membership_proof(rider)
-        except HelloError as exc:
-            raise HandshakeError(f"re-prove rider is malformed: {exc}") from exc
-        seq = int(proof["checkpoint_seq"])
-        adopted = self._adopted_for(seq)
-        if adopted is None:
-            raise HandshakeError(f"re-prove names checkpoint {seq}, not adopted here")
-        newest = self._newest_seq()
-        if newest is not None and seq != newest:
-            raise HandshakeError(f"re-prove must be under checkpoint {newest}, got {seq}")
-        try:
-            mc.verify_inclusion(
-                str(adopted["members_root"]), peer.persona_pub,
-                proof["index"], proof["path"],
-            )
-        except (mc.MembershipCommitmentError, KeyError, TypeError) as exc:
-            raise HandshakeError(
-                f"persona is not in the adopted member set at checkpoint {seq}: {exc}"
-            ) from exc
-        updated = AdmittedPeer(machine_pub, peer.persona_pub, seq, peer.addresses)
-        self._admitted[machine_pub] = updated
-        return updated
+        self._require_current_member(peer.persona_pub, "admitted peer's")
 
     def admitted_addresses(self) -> dict[str, tuple[str, ...]]:
         """machine_pub -> addresses for every admitted peer that introduced
-        any and is still current (not stale past the re-prove window)."""
+        any and is still a member of the newest adopted set."""
         out: dict[str, tuple[str, ...]] = {}
         for peer in self._admitted.values():
             if not peer.addresses:
@@ -517,10 +531,3 @@ class OrgFleetAuthenticator:
                 continue
             out[peer.machine_pub] = peer.addresses
         return out
-
-    def stale_peers(self) -> list[AdmittedPeer]:
-        """Peers whose proof is older than the newest adopted checkpoint."""
-        newest = self._newest_seq()
-        if newest is None:
-            return []
-        return [p for p in self._admitted.values() if p.checkpoint_seq != newest]
