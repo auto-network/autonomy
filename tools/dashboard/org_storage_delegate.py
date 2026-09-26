@@ -156,8 +156,16 @@ def accept(item: dict) -> None:
     event = Event.from_json(item["event"])
     event.verify_sig()
     p = event.payload
+    # Either defined shape is a storage delegate: the two storage scopes, or
+    # those plus the checkpoint scope for a checkpointer. Which one the
+    # persona may mint is the FOLD's call below (bounded self-delegation
+    # refuses a scope the granter does not hold), not a comparison against a
+    # scope list computed at another moment: founding mints before the
+    # founder's claim exists, and prepare() reads the fold after it.
+    domain_id = organization_content_domain_id(context["genesis_id"])
+    shapes = (storage_delegate_scopes(domain_id), storage_delegate_scopes(domain_id, checkpointer=True))
     if (event.type != "delegate" or p["child_pub"] != key.public_hex
-            or p["scope"] != context["scope"] or p["can_redelegate"]
+            or sorted(p["scope"]) not in shapes or p["can_redelegate"]
             or p.get("ttl") != TTL_MS):
         raise ValueError("organization storage grant has incorrect key or terms")
     with LedgerStore(org_ledger_db_path(org)) as store:

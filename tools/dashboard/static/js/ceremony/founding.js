@@ -516,7 +516,10 @@ async function foundExistingOrganizationShell({
     preparedVault.keys.organization_delegates = [await prepareStorageDelegate(
       opened.seed, { ...storageDelegatePolicy, organization: org,
         genesis_id: batch.genesisId, parents: [batch.eventIds[3]],
-        scope: ['storage:capability:grant:' + domain, 'storage:state:advance:' + domain],
+        // The founder holds the owner role's `*`, so it is a checkpointer:
+        // its delegate also carries the checkpoint scope and can publish the
+        // checkpoint at every admission (OrgAdmission.tla P2).
+        scope: ['membership:checkpoint', 'storage:capability:grant:' + domain, 'storage:state:advance:' + domain],
         delegate_metadata: {} }, Math.max(Date.now(), batch.events.at(-1).hlc[0] + 1))];
   } finally {
     opened.seed?.fill?.(0);

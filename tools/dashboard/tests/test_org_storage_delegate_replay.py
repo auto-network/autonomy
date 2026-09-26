@@ -51,11 +51,11 @@ def handoff(tmp_path, monkeypatch):
     monkeypatch.setattr(osd.settings_ops, "override_setting", override)
     monkeypatch.setattr(osd.settings_ops, "upsert_by_key", upsert)
 
-    def mint():
+    def mint(scope=None):
         context = osd.prepare("org")
         key = KeyPair.generate()
         nonce = mint_grant_nonce()
-        scope = context["scope"]
+        scope = sorted(scope) if scope is not None else context["scope"]
         with LedgerStore(path) as store:
             ts = max(int(time.time() * 1000), max(e.hlc.ts for e in store.events()) + 1)
         event = make_event(persona, {
@@ -124,3 +124,23 @@ def test_unaccepted_sibling_still_requires_current_heads(handoff):
     osd.accept(first)
     with pytest.raises(ValueError, match="current heads"):
         osd.accept(sibling)
+
+
+def test_either_defined_grant_shape_is_accepted_by_the_folds_judgment(handoff):
+    """Regression found by the compose simulation (sim-onboarding-01): the
+    founding ceremony mints the delegate BEFORE the founder's claim exists,
+    so prepare() at acceptance time (founder now a checkpointer) offered the
+    three-scope shape and the two-scope grant was refused as 'incorrect key
+    or terms'. Both defined shapes are accepted; whether this persona may
+    hold the checkpoint scope is the fold's decision."""
+    from tools.network.ledger.projections import organization_content_domain_id
+    from tools.network.storagekit.delegate import storage_delegate_scopes
+    domain = organization_content_domain_id(handoff.genesis)
+    two = storage_delegate_scopes(domain)
+    three = storage_delegate_scopes(domain, checkpointer=True)
+    osd.accept(handoff.mint(scope=two))                  # founding's two-scope grant
+    assert osd.signing_key("org") is not None
+    osd.accept(handoff.mint(scope=three))                # the checkpointer's re-mint (owner holds `*`)
+    assert osd.signing_key("org") is not None
+    with pytest.raises(ValueError, match="incorrect key or terms"):
+        osd.accept(handoff.mint(scope=two + ["link:publish"]))
