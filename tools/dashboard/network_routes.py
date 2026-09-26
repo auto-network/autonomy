@@ -744,6 +744,20 @@ def _adopt_state_by_fold(slug: str, state: object, *, source: str) -> dict:
         ledger_head = str(state["ledger_head"])
     except (KeyError, TypeError, ValueError):
         return {"ok": False, "error": f"{source} membership checkpoint is malformed"}
+    # A record that claims the org root's signature is verified as such before
+    # anything else: the joiner's binding names the root, so a sponsor cannot
+    # pass off a fabricated seq under the root's name (reviewer deviation D3
+    # on b01b938e). A member-signed record needs its prev; until the bundle
+    # carries the sponsor's retained chain (adopted-record retention, the
+    # E-any-adm commit), only its members_root is authenticated here, by the
+    # fold below. Adoption stays monotone in every case (NoRegression): a
+    # replayed or rolled-back older record never regresses the cache.
+    signer = state.get("signer")
+    if isinstance(signer, str) and signer == binding.get("root_pub"):
+        try:
+            mc.validate_checkpoint(state, root_pub=str(binding["root_pub"]))
+        except mc.MembershipCommitmentError as exc:
+            return {"ok": False, "error": f"{source} root-signed checkpoint does not verify: {exc}"}
     cached = cp._cached_adopted(slug)
     if isinstance(cached, dict) and int(cached.get("seq", -1)) >= seq:
         return {"ok": True, "action": "up-to-date", "seq": int(cached["seq"])}
@@ -757,6 +771,11 @@ def _adopt_state_by_fold(slug: str, state: object, *, source: str) -> dict:
         )}
     record = {"org": org_uuid, "seq": seq, "members_root": members_root,
               "checkpointers_root": checkpointers_root, "ledger_head": ledger_head}
+    if isinstance(state.get("sig"), str) and isinstance(signer, str):
+        # Retain the signed form: it is what a later peer or joiner can verify
+        # by signature, and what E-any-adm serves back at that seq.
+        record = dict(state)
+        record["org"] = org_uuid
     cp.record_adopted(slug, record)
     return {"ok": True, "action": "adopted", "seq": seq}
 

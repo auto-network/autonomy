@@ -144,3 +144,27 @@ def test_bootstrap_carries_the_sponsor_current_checkpoint(monkeypatch):
     assert reply["checkpoint"] == record
     monkeypatch.setattr(cp, "_cached_adopted", lambda org: None)
     assert claim_service.bootstrap("acme", "e" * 64, "f" * 64)["checkpoint"] is None
+
+
+def test_bootstrap_reads_the_checkpoint_before_the_events(monkeypatch):
+    """The served record's ledger_head must be inside the served events. The
+    sponsor's ledger is append-only, so reading the adopted record BEFORE the
+    events guarantees it; reading after could name a head adopted mid-page
+    (reviewer deviation D1 on b01b938e)."""
+    from tools.dashboard import membership_checkpoint as cp
+    order = []
+    _admitted_bootstrap(monkeypatch, 2)
+    real_open = claim_service._open
+
+    def opening(org):
+        order.append("events")
+        return real_open(org)
+
+    def cached(org):
+        order.append("checkpoint")
+        return {"seq": 1, "members_root": "m" * 64, "checkpointers_root": "c" * 64,
+                "ledger_head": "h" * 64}
+    monkeypatch.setattr(claim_service, "_open", opening)
+    monkeypatch.setattr(cp, "_cached_adopted", cached)
+    claim_service.bootstrap("acme", "e" * 64, "f" * 64)
+    assert order == ["checkpoint", "events"]

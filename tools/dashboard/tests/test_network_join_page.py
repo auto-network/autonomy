@@ -85,15 +85,17 @@ class TestI1Constraints:
             assert forbidden not in lowered, forbidden
 
     def test_page_resolves_public_routing_on_own_origin(self):
-        # Exactly three same-origin calls: the routing envelope for a pasted
+        # Exactly four same-origin calls: the routing envelope for a pasted
         # link, this person's own Personal profile for the Joining-as tile,
-        # and the install of the organization on THIS machine once the org's
-        # ledger has admitted it. Nothing else leaves the page over HTTP.
+        # the install of the organization on THIS machine once the org's
+        # ledger has admitted it, and the one-shot registry re-adoption when
+        # the bundle's record did not fold. Nothing else leaves the page.
         lowered = PAGE_JS.lower()
-        assert lowered.count("fetch(") == 3
+        assert lowered.count("fetch(") == 4
         assert 'fetch("/api/network/invite/resolve"' in lowered
         assert 'fetch("/api/identity/profile"' in lowered
         assert 'fetch("/api/network/join/outcome"' in lowered
+        assert 'fetch("/api/network/membership-checkpoint/adopt"' in lowered
         assert "/envelope" not in lowered
         assert "root_pub" not in lowered
         for forbidden in ("xmlhttprequest", "websocket",

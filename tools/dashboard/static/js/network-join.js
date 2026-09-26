@@ -345,6 +345,18 @@
       if (installed && installed.org) {
         window.dispatchEvent(new CustomEvent("autonomy:orgs-changed"));
       }
+      // Installed but not adopted (the bundle's record did not fold, or
+      // carried none): one recovery from the registry's current record by
+      // the same fold-adoption, so the member is not left waiting for a
+      // sign-on. Under checkpoint-at-admission that record's head is this
+      // member's own claim, which the install just wrote.
+      if (installed && installed.org && installed.checkpoint && installed.checkpoint.ok === false) {
+        return fetch("/api/network/membership-checkpoint/adopt", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ org: installed.org }),
+        }).catch(function () { return null; }).then(function () { return null; });
+      }
       return null;
     }).catch(function (error) {
       showAdmitted(orgName, role);

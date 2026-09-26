@@ -313,3 +313,37 @@ console.log('accept-controller: all assertions passed');
   assert.equal(material.binding.org_uuid, ORG);
   assert.deepEqual(channel.sent.map((m) => m.after), [0, 2]);
 }
+
+// bootstrap() keeps the FIRST page's checkpoint: the sponsor reads its
+// adopted record before serving events, so every later page's events
+// contain that record's head; a record adopted mid-paging could name a
+// head that was not served.
+{
+  const session = new JoinSession({ inputs: INPUTS });
+  session.context = {};
+  session.personaPub = PERSONA;
+  const first = { seq: 1, ledger_head: 'h1' };
+  const later = { seq: 2, ledger_head: 'h2' };
+  const channel = new ScriptedChannel((req) => {
+    if (req.after === 0) return { v: 1, status: 'ok', events: ['e0'], more: true, binding: { org_uuid: ORG }, checkpoint: first };
+    if (req.after === 1) return { v: 1, status: 'ok', events: ['e1'], more: false, binding: { org_uuid: ORG }, checkpoint: later };
+    throw new Error(`unexpected page after=${req.after}`);
+  });
+  channel.calls.bootstrap = 0;
+  session.channel = channel;
+  const material = await session.bootstrap();
+  assert.deepEqual(material.events, ['e0', 'e1']);
+  assert.deepEqual(material.checkpoint, first);
+}
+
+// A sponsor that adopted nothing serves checkpoint null; bootstrap() reports
+// null, never undefined, so the install body carries an explicit absence.
+{
+  const session = new JoinSession({ inputs: INPUTS });
+  session.context = {};
+  session.personaPub = PERSONA;
+  const channel = new ScriptedChannel(() => ({ v: 1, status: 'ok', events: ['e0'], more: false, binding: { org_uuid: ORG } }));
+  channel.calls.bootstrap = 0;
+  session.channel = channel;
+  assert.equal((await session.bootstrap()).checkpoint, null);
+}

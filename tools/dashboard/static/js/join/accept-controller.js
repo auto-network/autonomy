@@ -181,6 +181,7 @@ export class JoinSession {
     // again with `after` while the reply says there is more.
     let reply;
     let events = [];
+    let checkpoint;
     do {
       reply = await sendOp(this.channel, {
         v: 1, op: 'bootstrap', persona_pub: this.personaPub, after: events.length,
@@ -188,9 +189,13 @@ export class JoinSession {
       if (!reply || reply.status !== 'ok' || !Array.isArray(reply.events)) {
         throw new Error('the organization did not release its install material');
       }
+      // The first page's checkpoint is the one whose ledger_head every
+      // later page's events contain (the sponsor reads it before serving
+      // events); a record adopted mid-paging could name a head not served.
+      if (checkpoint === undefined) checkpoint = reply.checkpoint === undefined ? null : reply.checkpoint;
       events = events.concat(reply.events);
     } while (reply.more === true && reply.events.length > 0);
-    return { ...reply, events };
+    return { ...reply, events, checkpoint };
   }
 
   // Rungs 2/3 — HELD. Mint the claim in the browser via the injected seam,

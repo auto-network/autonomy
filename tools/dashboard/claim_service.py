@@ -224,6 +224,12 @@ def bootstrap(org: str, invite_ref: str, persona_pub: str, after: int = 0) -> di
     """
     _require_hex(invite_ref, "invite_ref")
     _require_hex(persona_pub, "persona_pub")
+    # The sponsor's adopted record is read BEFORE the events: its ledger_head
+    # is an event of this sponsor's append-only ledger, so every event set
+    # served after this read contains it, and the joiner's fold at that head
+    # succeeds (OrgAdmission.tla: Bootstrap adopts atomically with the
+    # snapshot; reviewer deviation D1 on b01b938e).
+    checkpoint = _current_checkpoint(org)
     with _open(org) as store:
         state = store.fold(now=int(time.time() * 1000))
         member = state.members.get(persona_pub)
@@ -248,7 +254,7 @@ def bootstrap(org: str, invite_ref: str, persona_pub: str, after: int = 0) -> di
     return {"status": "ok", "events": events, "more": more, "binding": binding,
             "member_profiles": _member_profiles(org, reachability, own_persona),
             "reachability_rows": reachability,
-            "checkpoint": _current_checkpoint(org)}
+            "checkpoint": checkpoint}
 
 
 def _current_checkpoint(org: str):

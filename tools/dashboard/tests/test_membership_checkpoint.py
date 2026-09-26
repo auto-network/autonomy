@@ -280,3 +280,48 @@ def test_adopt_by_fold_is_monotone_and_names_its_source(monkeypatch):
     assert none["ok"] is False and none["error"] == "join bundle's carried no membership checkpoint"
     bad = network_routes._adopt_state_by_fold(ORG, {"seq": "x"}, source="join bundle's")
     assert bad["ok"] is False and "malformed" in bad["error"]
+
+
+def _root_signed_state(sim, seq):
+    state = sim.fold()
+    head = sorted(state.heads)[0] if state.heads else sim.genesis_id
+    return mc.build_root_checkpoint(
+        org="11111111-1111-4111-8111-111111111111", seq=seq, genesis_id=sim.genesis_id,
+        ledger_head=head, members_root_hex=mc.members_root(state),
+        checkpointers_root_hex=mc.checkpointers_root(state), ts=TS, root=sim.root)
+
+
+def test_adopt_by_fold_verifies_a_record_that_claims_the_root_signature(monkeypatch):
+    """A bundle record naming the org root as signer is verified by signature
+    against the binding's root_pub before the fold (deviation D3): a forged
+    root-signed record is refused; a genuine one is adopted and retained in
+    its signed form."""
+    from tools.dashboard import network_routes
+    sim, _founder = org_with_owner()
+    _install_org(sim)
+    monkeypatch.setattr(network_routes, "_first_member", lambda set_id, org: __import__("types").SimpleNamespace(
+        payload={"org_uuid": "11111111-1111-4111-8111-111111111111",
+                 "root_pub": sim.root.public_hex, "registry_url": "https://registry.test"}))
+    forged = _root_signed_state(sim, 2)
+    forged["sig"] = "0" * 128
+    result = network_routes._adopt_state_by_fold(ORG, forged, source="join bundle's")
+    assert result["ok"] is False and "does not verify" in result["error"]
+    assert cp._cached_adopted(ORG) is None
+    genuine = _root_signed_state(sim, 2)
+    assert network_routes._adopt_state_by_fold(ORG, genuine, source="join bundle's")["action"] == "adopted"
+    retained = cp._cached_adopted(ORG)
+    assert retained["sig"] == genuine["sig"] and retained["signer"] == sim.root.public_hex
+
+
+def test_adoption_never_regresses_from_any_source(monkeypatch):
+    """NoRegression (OrgAdmission.tla): a replayed or rolled-back older record,
+    from the registry or a bundle, never replaces a newer adopted one."""
+    from tools.dashboard import network_routes
+    sim, _founder = org_with_owner()
+    _install_org(sim)
+    _binding_row(monkeypatch)
+    assert network_routes._adopt_state_by_fold(ORG, _state_of(sim, 3), source="join bundle's")["action"] == "adopted"
+    for source in ("registry's", "join bundle's"):
+        assert network_routes._adopt_state_by_fold(ORG, _state_of(sim, 2), source=source) == {
+            "ok": True, "action": "up-to-date", "seq": 3}
+    assert cp._cached_adopted(ORG)["seq"] == 3
