@@ -200,7 +200,7 @@ function lockAndUnlock(person,password){
   if(js(person,`!!document.querySelector('[data-testid="orgset-close"]')`)){
     browser(person,'click','[data-testid="orgset-close"]');
   }
-  waitFor(person,'[data-testid="identity-trigger"]','#onboarding-error, .mem-error');
+  waitFor(person,'[data-testid="identity-trigger"]:not([disabled]):not([data-state="loading"])','#onboarding-error, .mem-error');
   browser(person,'click','[data-testid="identity-trigger"]');
   waitFor(person,'[data-testid="identity-action-lock"]','.mem-error');
   browser(person,'click','[data-testid="identity-action-lock"]');
@@ -259,7 +259,10 @@ function failureContext(person){
 function openOrganizationSettings(person,organization='simulation-organization'){
   // Follow the visible organization-selection workflow. Do not inject the
   // organization slug through the URL or call the settings controller.
-  waitFor(person,'[data-testid=\"identity-trigger\"]','#onboarding-error, .mem-error');
+  // The identity indicator renders a disabled "loading" trigger first and
+  // replaces it once /api/identity/status answers; clicking before that
+  // lands on a node the re-render discards. Wait for the settled trigger.
+  waitFor(person,'[data-testid=\"identity-trigger\"]:not([disabled]):not([data-state=\"loading\"])','#onboarding-error, .mem-error');
   browser(person,'click','[data-testid=\"identity-trigger\"]');
   waitFor(person,`[data-testid=\"identity-org-${organization}\"]`,'#onboarding-error, .mem-error');
   browser(person,'click',`[data-testid=\"identity-org-${organization}\"]`);

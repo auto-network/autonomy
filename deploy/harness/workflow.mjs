@@ -23,7 +23,8 @@ createWorkflow({scope:onboardingOnly?'identity-and-organization-onboarding':'mem
   // here with the product's own reason, never later in a publish step.
   withStep('alice','observe registration on the success screen',()=>waitFor('alice','[data-testid="create-org-registered"]','[data-testid="create-org-unregistered"]',30000));
   withStep('alice','registry holds the founding checkpoint',()=>{
-    const orgId=js('alice',"fetch('/api/orgs').then(r=>r.json()).then(j=>((Array.isArray(j)?j:(j.orgs||[])).find(o=>o.slug==='simulation-organization')||{}).id)");
+    // /api/orgs lists {org: {slug, id, …}, identity_resolved} entries.
+    const orgId=js('alice',"fetch('/api/orgs').then(r=>r.json()).then(j=>{const list=Array.isArray(j)?j:(j.orgs||[]);const hit=list.map(o=>o.org||o).find(o=>o.slug==='simulation-organization');return hit?hit.id:null})");
     if(!orgId)throw new Error('the dashboard lists no organization with slug simulation-organization');
     const probe=spawnSync('curl',['-sk','-w','\n%{http_code}',relayOrigin+'/v1/orgs/'+orgId+'/membership'],{encoding:'utf8',timeout:20000});
     const lines=(probe.stdout||'').trim().split('\n');const status=lines.pop();const body=lines.join('\n');
