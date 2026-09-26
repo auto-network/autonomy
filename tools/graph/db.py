@@ -1747,6 +1747,61 @@ class GraphDB:
             raise FileExistsError(f"org DB already exists: {resolved}")
         resolved.parent.mkdir(parents=True, exist_ok=True)
         db = cls(resolved)  # runs full schema init on the empty file
+        cls._seed_org_row(db, slug, type_, org_id, created_at)
+        return db
+
+    @classmethod
+    def adopt_org_db(
+        cls,
+        slug: str,
+        *,
+        type_: str,
+        org_id: str,
+        path: Path | str,
+    ) -> "GraphDB":
+        """Make an existing database at *path* that carries NO ``orgs`` row
+        into org *slug* of *type_* with id *org_id*.
+
+        Such a file is a stub a path resolver minted (GraphDB creates what it
+        is asked to open) before the real creation ran -- the first-run follow
+        seeding found ``orgs/autonomy.db`` already there, untyped, and left it
+        untouched forever (Windows signed-release node, 2026-09-26), so the
+        scheduler treated the mirror as a member organization and the follow
+        path never saw it. A file that already holds an ``orgs`` row is not a
+        stub and is refused: that is a slug collision for the caller to name.
+        """
+        if type_ not in VALID_ORG_TYPES:
+            raise ValueError(
+                f"invalid org type {type_!r}; valid: {VALID_ORG_TYPES}"
+            )
+        resolved = Path(path)
+        if not resolved.exists():
+            raise FileNotFoundError(f"org DB not found: {resolved}")
+        db = cls(resolved)
+        existing = db.conn.execute("SELECT id, type FROM orgs LIMIT 1").fetchone()
+        if existing is not None:
+            db.close()
+            raise FileExistsError(
+                f"org DB at {resolved} already belongs to org {existing[0]} "
+                f"({existing[1]}); not a stub"
+            )
+        # A stub is EMPTY: content with no orgs row is somebody's data, and
+        # adopting it as a read-only mirror would land remote rows on it.
+        counts = {
+            table: int(db.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            for table in ("sources", "thoughts", "edges", "captures")
+        }
+        if any(counts.values()):
+            db.close()
+            raise FileExistsError(
+                f"org DB at {resolved} has no orgs row but holds content "
+                f"({', '.join(f'{k}={v}' for k, v in counts.items() if v)}); not a stub"
+            )
+        cls._seed_org_row(db, slug, type_, org_id, None)
+        return db
+
+    @classmethod
+    def _seed_org_row(cls, db, slug, type_, org_id, created_at) -> None:
         oid = org_id or _uuid7()
         created = created_at or _now_iso()
         db.conn.execute(
@@ -1757,7 +1812,7 @@ class GraphDB:
         # Keep the read-only gate's type cache honest the moment a followed
         # mirror comes into being, so a write attempted right after creation is
         # refused without a store re-open.
-        _ORG_TYPE_CACHE[str(resolved)] = type_
+        _ORG_TYPE_CACHE[str(db.db_path)] = type_
         # Install schema-declared payload expression indexes on the freshly
         # created store before returning — this is the common creation
         # boundary for every organization store, including org_ops.create_org
@@ -1769,7 +1824,6 @@ class GraphDB:
         if slug != "machine":
             from .schemas.registry import reconcile_payload_indexes
             reconcile_payload_indexes(db)
-        return db
 
     @classmethod
     def open_org_db(

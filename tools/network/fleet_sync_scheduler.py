@@ -588,6 +588,27 @@ def materialize_follow_scopes() -> list[str]:
                     "(design of record graph://5f2f5a49-00d D7).",
                     slug, path, existing_id, org_uuid,
                 )
+                continue
+            if existing_id is None:
+                # A stub with no orgs row: a path resolver minted the file
+                # before this seeding ran (first run reads the org's settings
+                # through GraphDB, which creates what it is asked to open).
+                # Left alone it stays an untyped member scope forever and the
+                # follow path never sees it. Adopt it as the mirror.
+                try:
+                    GraphDB.adopt_org_db(
+                        slug, type_="followed", org_id=org_uuid, path=path,
+                    ).close()
+                    logger.warning(
+                        "follow: adopted the untyped stub at %s as the "
+                        "followed mirror of %r (%s)", path, slug, org_uuid,
+                    )
+                    created.append(slug)
+                except Exception:
+                    logger.warning(
+                        "follow: could not adopt the stub at %s for %r",
+                        path, slug, exc_info=True,
+                    )
             continue
         try:
             GraphDB.create_org_db(
