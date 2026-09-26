@@ -712,6 +712,7 @@
       lightboxFileState: 'idle',
       lightboxFileError: '',
       _lightboxFileRequest: 0,
+      _lightboxShareRequest: 0,
       // Markdown source when lightboxKind === 'markdown'. Browsers have
       // no native text/markdown renderer, so we fetch the raw bytes and render
       // client-side with marked + DOMPurify rather than dropping the file into
@@ -747,28 +748,38 @@
         if (mime === 'application/pdf' || mime === 'application/json' || mime.indexOf('text/') === 0) return 'iframe';
         return 'download';
       },
-      _prepareShortcutFile(src, name) {
-        var request = ++this._lightboxFileRequest;
+      _lightboxDefaultName(src) {
+        var name = String(src || '').split('/').pop().split(/[?#]/)[0] || 'file';
+        try { name = decodeURIComponent(name); } catch (_) {}
+        return name;
+      },
+      // Every attachment is prefetched as a File when the overlay opens, so a
+      // tap on Save / Share can call navigator.share() synchronously inside
+      // the tap's user activation (iOS refuses a share started after an await).
+      _prepareLightboxFile(src, name) {
+        var request = ++this._lightboxShareRequest;
         this.lightboxFile = null;
         this.lightboxFileState = 'loading';
         this.lightboxFileError = '';
         fetch(src, { credentials: 'same-origin' })
           .then((r) => (r.ok ? r.blob() : Promise.reject(new Error('status ' + r.status))))
           .then((blob) => {
-            if (request !== this._lightboxFileRequest || this.lightboxSrc !== src) return;
+            if (request !== this._lightboxShareRequest || this.lightboxSrc !== src) return;
             if (typeof File !== 'function') throw new Error('file sharing is unavailable');
             this.lightboxFile = new File(
               [blob],
-              name || 'Autonomy Capture.shortcut',
+              name || this._lightboxDefaultName(src),
               { type: blob.type || 'application/octet-stream' },
             );
             this.lightboxFileState = 'ready';
           })
           .catch((err) => {
-            if (request !== this._lightboxFileRequest || this.lightboxSrc !== src) return;
+            if (request !== this._lightboxShareRequest || this.lightboxSrc !== src) return;
             this.lightboxFileState = 'error';
-            this.lightboxFileError = 'The signed file could not be prepared for sharing.';
-            console.warn('Shortcut attachment preparation failed', err);
+            this.lightboxFileError = this.lightboxKind === 'shortcut'
+              ? 'The signed file could not be prepared for sharing.'
+              : 'This file could not be prepared for sharing.';
+            console.warn('Attachment preparation failed', err);
           });
       },
       canShareLightboxFile() {
@@ -824,18 +835,40 @@
             this.lightboxFileError = 'Could not open the iOS share sheet.';
           });
       },
+      // Save / Share for every attachment kind: the native share sheet (where
+      // iOS offers Save to Files) when the browser can share files, otherwise
+      // the file in a new context, whose viewer has its own share control.
+      saveLightboxFile() {
+        if (this.lightboxFileState === 'loading') return;
+        if (!this.canShareLightboxFile()) {
+          this.openLightboxInNewContext();
+          return;
+        }
+        var result;
+        try {
+          result = navigator.share({ files: [this.lightboxFile], title: this.lightboxName || 'file' });
+        } catch (err) {
+          this.lightboxFileError = 'Could not open the share sheet.';
+          return;
+        }
+        Promise.resolve(result).catch((err) => {
+          if (err && err.name === 'AbortError') return;
+          this.lightboxFileError = 'Could not open the share sheet.';
+        });
+      },
       openLightbox(src, alt, opts) {
         if (!src) return;
         opts = opts || {};
         this.lightboxSrc = src;
         this.lightboxAlt = alt || '';
         this.lightboxKind = opts.kind || 'image';
-        this.lightboxName = opts.name || '';
+        this.lightboxName = opts.name ||
+          (this.lightboxKind === 'shortcut' ? 'Autonomy Capture.shortcut' : this._lightboxDefaultName(src));
         this.lightboxFile = null;
         this.lightboxFileState = 'idle';
         this.lightboxFileError = '';
-        if (this.lightboxKind === 'shortcut') {
-          this._prepareShortcutFile(src, this.lightboxName);
+        if (!opts.loading) {
+          this._prepareLightboxFile(src, this.lightboxName);
         }
         if (this.lightboxKind === 'markdown' && !opts.loading) {
           const request = ++this._lightboxFileRequest;
@@ -867,6 +900,7 @@
       },
       closeLightbox() {
         this._lightboxFileRequest += 1;
+        this._lightboxShareRequest += 1;
         this.lightboxSrc = '';
         this.lightboxAlt = '';
         this.lightboxKind = 'image';

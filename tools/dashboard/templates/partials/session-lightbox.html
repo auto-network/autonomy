@@ -10,6 +10,26 @@
              @keydown.escape.window="closeLightbox()"
              tabindex="-1"
              x-init="$el.focus()">
+          <!-- Every attachment can leave the overlay as a file: Save / Share
+               opens the native share sheet (iOS offers Save to Files there).
+               Shortcuts carry their own install sheet below. -->
+          <template x-if="lightboxKind !== 'shortcut'">
+            <div @click.stop class="sc-va-lightbox-actions" data-testid="lightbox-actions"
+                 style="position:fixed;top:max(12px,env(safe-area-inset-top));right:12px;z-index:2;display:flex;gap:8px;align-items:center">
+              <span x-show="lightboxFileError" x-text="lightboxFileError"
+                    style="color:#fca5a5;font-size:12px;max-width:40vw"></span>
+              <button type="button" data-testid="lightbox-save-share"
+                      :disabled="lightboxFileState === 'loading'"
+                      @click="saveLightboxFile()"
+                      style="padding:8px 14px;background:#5638f3;color:#fff;border:none;border-radius:8px;font-weight:600;font-size:14px">
+                <span x-show="lightboxFileState === 'loading'">Preparing&hellip;</span>
+                <span x-show="lightboxFileState !== 'loading'">Save / Share</span>
+              </button>
+              <button type="button" data-testid="lightbox-close" aria-label="Close"
+                      @click="closeLightbox()"
+                      style="width:36px;height:36px;background:#172232;color:#cbd5e1;border:1px solid #25364c;border-radius:8px;font-size:20px;line-height:1">&times;</button>
+            </div>
+          </template>
           <template x-if="lightboxKind === 'image'">
             <img :src="lightboxSrc" :alt="lightboxAlt" class="sc-va-lightbox-img">
           </template>
