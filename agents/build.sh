@@ -65,7 +65,8 @@ docker images autonomy-session --format "  Size: {{.Size}}"
 # no-op; otherwise it's one thin pip-install layer on top of the base.
 echo ""
 echo "==> Building dashboard variant (Python deps layered on base)..."
-docker build $NO_CACHE $PULL -f "$SCRIPT_DIR/Dockerfile.platform" -t autonomy-session-platform context/
+# No --pull: these variants build FROM the local autonomy-session just built.
+docker build $NO_CACHE -f "$SCRIPT_DIR/Dockerfile.platform" -t autonomy-session-platform context/
 echo "==> Done. Image: autonomy-session-platform"
 docker images autonomy-session-platform --format "  Size: {{.Size}}"
 
@@ -74,7 +75,7 @@ docker images autonomy-session-platform --format "  Size: {{.Size}}"
 # that need Docker-in-Docker (enterprise, widgets-ng) extend this.
 echo ""
 echo "==> Building dind variant (Docker CE + entrypoint wrapper)..."
-docker build $NO_CACHE $PULL -f "$SCRIPT_DIR/Dockerfile.dind" -t autonomy-session-dind context/
+docker build $NO_CACHE -f "$SCRIPT_DIR/Dockerfile.dind" -t autonomy-session-dind context/
 echo "==> Done. Image: autonomy-session-dind"
 docker images autonomy-session-dind --format "  Size: {{.Size}}"
 
@@ -100,7 +101,7 @@ elif [[ -d "$PROJECTS_DIR" ]]; then
         image_tag="session-$project_name"
         echo ""
         echo "==> Building $image_tag (from $dockerfile)..."
-        docker build $NO_CACHE $PULL \
+        docker build $NO_CACHE \
             -f "context/projects/$project_name/Dockerfile" \
             -t "$image_tag" \
             context/

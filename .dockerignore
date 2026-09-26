@@ -18,7 +18,6 @@ node_modules
 **/*.pyc
 .pytest_cache
 .dockerignore
-docker-compose.yml
 
 # Host-local binaries (gitignored anyway; agent images copy these, the
 # home-base image does not)
