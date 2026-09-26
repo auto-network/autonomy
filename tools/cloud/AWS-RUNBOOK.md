@@ -88,18 +88,55 @@ the console. Nothing else in the account depends on it.
  {"Sid":"Budgets","Effect":"Allow","Action":["budgets:ViewBudget","budgets:ModifyBudget"],"Resource":"*"}]}
 ```
 
-## Windows install test (being built)
+## Windows install test
 
-Target loop, recorded here as each step is proven:
+### Baseline image (built and proven 2026-09-26)
 
-1. Launch Windows Server 2025 (license included) on `m7i.xlarge` with nested
-   virtualization enabled and the `autonomy-test-ssm` instance profile.
-2. Through Run Command: enable WSL, reboot, confirm `wsl --status`.
-3. Stop and snapshot to a baseline AMI (`autonomy-win-baseline-<date>`).
-4. Each run: launch from the baseline, run the published installer
-   (`deploy/install-published.sh` inside WSL) against a signed image lock,
-   record per-step timings and the dashboard's first answer, capture logs,
-   terminate.
+`autonomy-win-baseline-2026-09-26`: Windows Server 2025 Datacenter (license
+included) + WSL 2.7.14 from Microsoft's signed MSI, the Virtual Machine
+Platform and WSL features, `hypervisorlaunchtype auto`, and a local
+administrator `tester` (password in the vault, audited, `aws-win-tester`). No
+Linux distribution, so each run starts as a Windows user with WSL enabled.
+A launch from it is SSM-online in about 110 s; `wsl --install -d
+Ubuntu-24.04` then has Ubuntu running (systemd PID 1, `/dev/kvm` present) in
+about 95 s.
+
+How it was built, and the traps on the way:
+
+1. Launch the AWS Windows Server 2025 image on `m7i.xlarge` with
+   `--cpu-options NestedVirtualization=enabled`, the `autonomy-test-ssm`
+   instance profile, the `autonomy-test-noinbound` security group, a 100 GB gp3
+   root volume and `HttpTokens=required`.
+2. **SSM runs as LocalSystem, and WSL refuses it**
+   (`Wsl/WSL_E_LOCAL_SYSTEM_NOT_SUPPORTED`); `wsl --install --no-distribution`
+   as SYSTEM just prints "not installed". So: enable the features with
+   `Enable-WindowsOptionalFeature` (Microsoft-Windows-Subsystem-Linux and
+   VirtualMachinePlatform), install `wsl.<ver>.x64.msi` from the WSL GitHub
+   release after checking its Authenticode signature, and run every WSL
+   command as a real user. `tools/cloud/win-run-user` does that through a
+   one-shot scheduled task running as `tester`.
+3. **Reboots:** a `shutdown /r` started from an SSM command does not reliably
+   happen. Exit the script with code 3010, and the SSM agent reboots the
+   machine; the command then reports TimedOut, which is expected. Check
+   `LastBootUpTime` and the CBS `RebootPending` key rather than trusting the
+   SSM ping, which stays Online across a pending reboot.
+4. **Two reboots were needed:** the first after enabling the features, the
+   second (after `bcdedit /set hypervisorlaunchtype auto`) before
+   `wsl --status` stopped reporting "virtualization is not enabled".
+5. Unregister any distribution, delete `C:\autonomy-test\job-*`, then
+   `create-image` (it reboots the instance; about 10–15 minutes to available),
+   and terminate the build instance.
+
+Tools: `tools/cloud/win-run <instance> <ps1|->` runs as SYSTEM through SSM;
+`tools/cloud/win-run-user` runs as `tester`. Both print the script output and
+the final status.
+
+### Each run (next)
+
+Launch from the baseline, install Ubuntu, run `deploy/install-published.sh`
+inside WSL against a signed image lock, record per-step timings and the
+dashboard's first `/api/ping` 200, capture logs, terminate. Blocked until the
+images are published to a public registry.
 
 Windows Server is not Windows 11. WSL2, Docker in WSL and the browser behave
 the same for the installer; the consumer first-run layer does not. Confirm on
