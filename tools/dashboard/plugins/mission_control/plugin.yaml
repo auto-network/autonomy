@@ -2,6 +2,9 @@ id: mission_control
 api_version: 1
 org: autonomy
 
+# Superseded by the mission plugin; retained for historical freeform records.
+default_enabled: false
+
 paths:
   - /mission-control
 
