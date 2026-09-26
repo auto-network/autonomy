@@ -19,7 +19,8 @@ def _exe(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
-def _lock(tmp_path: Path, node_digest: str = GOOD, node_ref: str | None = None) -> Path:
+def _lock(tmp_path: Path, node_digest: str = GOOD, node_ref: str | None = None,
+          host_terminal: bool = True) -> Path:
     node = node_ref or f"ghcr.io/example/autonomy-node@sha256:{node_digest}"
     lock = tmp_path / "image-lock.env"
     lock.write_text(
@@ -29,7 +30,8 @@ def _lock(tmp_path: Path, node_digest: str = GOOD, node_ref: str | None = None) 
         f"AUTONOMY_SESSION_IMAGE=ghcr.io/example/autonomy-session@sha256:{GOOD}\n"
         f"AUTONOMY_SESSION_PLATFORM_IMAGE=ghcr.io/example/autonomy-session-platform@sha256:{GOOD}\n"
         f"AUTONOMY_SESSION_DIND_IMAGE=ghcr.io/example/autonomy-session-dind@sha256:{GOOD}\n"
-        f"AUTONOMY_HOST_TERMINAL_IMAGE=ghcr.io/example/autonomy-host-terminal@sha256:{GOOD}\n",
+        + (f"AUTONOMY_HOST_TERMINAL_IMAGE=ghcr.io/example/autonomy-host-terminal@sha256:{GOOD}\n"
+           if host_terminal else ""),
         encoding="utf-8",
     )
     return lock
@@ -90,3 +92,13 @@ def test_every_image_is_verified_with_the_embedded_key(tmp_path):
     # The launcher starts the host terminal from this local name.
     assert any(line.startswith("docker tag ") and line.endswith(" autonomy-host-terminal")
                for line in lines)
+
+
+def test_a_release_lock_without_the_host_terminal_image_still_installs(tmp_path):
+    """deploy/releases/2026.09.26-0d46057.env pins four images; its node
+    predates the in-node host terminal and needs no host-terminal image."""
+    result, calls = _run(tmp_path, _lock(tmp_path, host_terminal=False))
+    assert result.returncode == 5, result.stderr  # fakes never answer /api/ping
+    verifies = [line for line in calls.splitlines() if line.startswith("cosign verify")]
+    assert len(verifies) == 4
+    assert not any(line.endswith(" autonomy-host-terminal") for line in calls.splitlines())

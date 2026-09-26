@@ -118,7 +118,7 @@ while IFS='=' read -r name value; do
             IMG[$name]="$value" ;;
     esac
 done <"$TOOLS/image-lock.env"
-for need in AUTONOMY_NODE_IMAGE AUTONOMY_SESSION_IMAGE AUTONOMY_SESSION_PLATFORM_IMAGE AUTONOMY_SESSION_DIND_IMAGE AUTONOMY_HOST_TERMINAL_IMAGE; do
+for need in AUTONOMY_NODE_IMAGE AUTONOMY_SESSION_IMAGE AUTONOMY_SESSION_PLATFORM_IMAGE AUTONOMY_SESSION_DIND_IMAGE; do
     [[ -n "${IMG[$need]:-}" ]] || { echo "lock is missing $need" >&2; exit 2; }
 done
 step "release ${RELEASE_TAG:-?}"
@@ -142,7 +142,11 @@ done
 docker tag "${IMG[AUTONOMY_SESSION_IMAGE]}" autonomy-session
 docker tag "${IMG[AUTONOMY_SESSION_PLATFORM_IMAGE]}" autonomy-session-platform
 docker tag "${IMG[AUTONOMY_SESSION_DIND_IMAGE]}" autonomy-session-dind
-docker tag "${IMG[AUTONOMY_HOST_TERMINAL_IMAGE]}" autonomy-host-terminal
+# Releases cut after the in-node host terminal (deploy/publish-images.sh)
+# carry its image; a release whose node predates it has none and needs none.
+if [[ -n "${IMG[AUTONOMY_HOST_TERMINAL_IMAGE]:-}" ]]; then
+    docker tag "${IMG[AUTONOMY_HOST_TERMINAL_IMAGE]}" autonomy-host-terminal
+fi
 
 # ── 5. Compose file from the verified node image ─────────────────────────────
 mkdir -p "$DIR"
