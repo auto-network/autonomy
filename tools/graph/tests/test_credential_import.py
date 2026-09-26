@@ -490,3 +490,59 @@ def test_parse_claude_identity_name_falls_back_to_domain():
 
 
 # ── CLI wiring ───────────────────────────────────────────────
+
+
+# ── a setup token dropped at ~/.claude/.setup-token ────────────
+
+_SETUP = "sk-ant-oat01-" + "x" * 60
+
+
+def _write_setup_token(home, token=_SETUP):
+    d = home / ".claude"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / ".setup-token").write_text(token + "\n")
+
+
+def test_setup_token_without_profile_is_sealed_under_a_hash_key(warm_vault, tmp_path):
+    home = tmp_path / "home"
+    _write_setup_token(home)
+
+    def _inference_only(_tok):
+        raise ci.CredentialImportError("profile endpoint returned HTTP 403")
+
+    result = ci.import_claude(str(home), fetch_identity=_inference_only)
+    assert result.status == ci.STATUS_IMPORTED
+    accounts = hv.list_accounts("claude")
+    assert len(accounts) == 1 and accounts[0].id.startswith("setup-")
+    assert accounts[0].get("setup") == _SETUP
+    assert accounts[0].setup_token_fresh()
+    assert accounts[0].get("alias") == "setup-token"
+    assert result.status in ci.USABLE_STATUSES
+    # A second scan finds it already sealed.
+    assert ci.import_claude(str(home), fetch_identity=_inference_only).status == ci.STATUS_UNCHANGED
+
+
+def test_setup_token_with_profile_is_keyed_by_organization(warm_vault, tmp_path):
+    home = tmp_path / "home"
+    _write_setup_token(home)
+    assert ci.import_claude(str(home), fetch_identity=_identity()).status == ci.STATUS_IMPORTED
+    acct = hv.read_account("claude", "org-A")
+    assert acct.get("setup") == _SETUP and acct.get("alias") == "dev"
+
+
+def test_a_real_sign_in_file_wins_over_a_setup_token(warm_vault, tmp_path):
+    home = tmp_path / "home"
+    _write_claude_file(home, access="at-live", refresh="rt-live")
+    _write_setup_token(home)
+    ci.import_claude(str(home), fetch_identity=_identity())
+    acct = hv.read_account("claude", "org-A")
+    assert acct.get("access") == "at-live" and acct.get("setup") is None
+
+
+def test_setup_token_dry_run_and_junk_file(warm_vault, tmp_path):
+    home = tmp_path / "home"
+    _write_setup_token(home)
+    assert ci.import_claude(str(home), dry_run=True, fetch_identity=_identity()).status == ci.STATUS_WOULD_IMPORT
+    assert hv.list_accounts("claude") == []
+    _write_setup_token(home, token="not a token")
+    assert ci.import_claude(str(home), fetch_identity=_identity()).status == ci.STATUS_NEEDS_SIGN_IN

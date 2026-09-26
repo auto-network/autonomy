@@ -308,6 +308,86 @@ def _http_fetch_claude_identity(access_token: str) -> ClaudeIdentity:
 # ── Claude: payload build + import ───────────────────────────
 
 
+CLAUDE_SETUP_TOKEN_RELPATH = ".claude/.setup-token"
+
+
+def read_claude_setup_token(home: str) -> str | None:
+    """The long-lived Claude setup token at ``~/.claude/.setup-token``, or None.
+
+    ``deploy/quickstart.sh --claude-token-file`` installs it there, and an
+    operator can drop one there by hand (``claude setup-token`` prints it).
+    Only an ``sk-ant-oat`` token is accepted; anything else is ignored.
+    """
+    path = os.path.join(home, CLAUDE_SETUP_TOKEN_RELPATH)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            token = fh.read().strip()
+    except OSError:
+        return None
+    if not token.startswith("sk-ant-oat") or len(token) < 40 or any(c.isspace() for c in token):
+        return None
+    return token
+
+
+def _import_claude_setup_token(
+    home: str,
+    token: str,
+    *,
+    alias_override: str | None,
+    dry_run: bool,
+    fetch_identity: Callable[[str], ClaudeIdentity],
+) -> HarnessResult:
+    """Seal a setup token found on disk into a Claude account record.
+
+    The record is keyed by the Anthropic organization when the profile call
+    accepts the token; a setup token may be inference-only, so otherwise the
+    key is a hash of the token (stable, reveals nothing). The launcher's
+    picker starts sessions from a fresh ``setup`` part on its own.
+    """
+    import hashlib
+    from datetime import datetime, timezone
+
+    try:
+        identity: ClaudeIdentity | None = fetch_identity(token)
+    except CredentialImportError:
+        identity = None
+    if identity is not None:
+        account_id = identity.org_uuid
+        label = identity.account_email
+    else:
+        account_id = "setup-" + hashlib.sha256(token.encode()).hexdigest()[:16]
+        label = "setup token"
+    existing = hv.read_account("claude", account_id)
+    if existing is not None and existing.get("setup") == token:
+        return HarnessResult(
+            "claude", STATUS_UNCHANGED, f"setup token already sealed ({label})", label,
+        )
+    if dry_run:
+        return HarnessResult(
+            "claude", STATUS_WOULD_IMPORT, f"would seal the setup token ({label})", label,
+        )
+    try:
+        mtime = os.stat(os.path.join(home, CLAUDE_SETUP_TOKEN_RELPATH)).st_mtime
+    except OSError:
+        mtime = time.time()
+    parts: dict[str, str | None] = {
+        "setup": token,
+        # The token's year is counted from when it landed on disk: never
+        # later than its real minting, so freshness errs toward re-minting.
+        "setup_minted_at": datetime.fromtimestamp(mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    if identity is not None:
+        parts["email"] = identity.account_email
+        parts["org_name"] = identity.organization_name
+    if existing is None or existing.get("alias") is None:
+        parts["alias"] = alias_override or (
+            identity.account_email.split("@", 1)[0] if identity is not None else "setup-token"
+        )
+    hv.write_account("claude", account_id, parts)
+    logger.info("credential import: claude setup token sealed account=%s", account_id)
+    return HarnessResult("claude", STATUS_IMPORTED, f"sealed the setup token ({label})", label)
+
+
 def import_claude(
     home: str,
     *,
@@ -330,9 +410,16 @@ def import_claude(
     except CredentialImportError as exc:
         return HarnessResult("claude", STATUS_NEEDS_SIGN_IN, str(exc))
     if disc is None:
+        token = read_claude_setup_token(home)
+        if token is not None:
+            return _import_claude_setup_token(
+                home, token, alias_override=alias_override,
+                dry_run=dry_run, fetch_identity=fetch_identity,
+            )
         return HarnessResult(
             "claude", STATUS_NEEDS_SIGN_IN,
-            "no ~/.claude/.credentials.json — run `claude` to sign in",
+            "no ~/.claude/.credentials.json or ~/.claude/.setup-token — "
+            "run `claude` to sign in",
         )
     try:
         identity = fetch_identity(disc.access_token)
