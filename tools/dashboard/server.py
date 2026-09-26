@@ -5319,13 +5319,9 @@ def _classify_crosstalk(text: str) -> dict | None:
     brackets; only a literal closing envelope tag inside the body is
     rejected.
     """
-    stripped = text.strip()
-    pasted = re.fullmatch(
-        r'<pasted_content(?:\s+[\w-]+="[^"]*")*\s*>(.*?)</pasted_content(?:\s+[\w-]+="[^"]*")*\s*>',
-        stripped, re.DOTALL,
-    )
-    if pasted:
-        stripped = pasted.group(1).strip()
+    from tools.dashboard.session_harness import _unwrap_pasted_content
+
+    stripped = _unwrap_pasted_content(text).strip()
     m = _CROSSTALK_RE.fullmatch(stripped)
     if not m:
         return None

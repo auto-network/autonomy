@@ -674,16 +674,21 @@ def _sender_href(ct: dict) -> str:
     return _SENDER_HREF_CACHE["map"].get(tmux) or f"/session/{_q(tmux, safe='')}"
 
 
-def _classify_crosstalk(text: str) -> dict | None:
-    stripped = text.strip()
-    # Claude may wrap terminal pastes. Only unwrap a complete container:
-    # prose quoting an envelope must remain an ordinary user message.
+def _unwrap_pasted_content(text: str) -> str:
+    """Remove a whole-message transport wrapper, never quoted/embedded XML."""
     pasted = re.fullmatch(
         r'<pasted_content(?:\s+[\w-]+="[^"]*")*\s*>(.*?)</pasted_content(?:\s+[\w-]+="[^"]*")*\s*>',
-        stripped, re.DOTALL,
+        text.strip(), re.DOTALL,
     )
     if pasted:
-        stripped = pasted.group(1).strip()
+        body = pasted.group(1)
+        # Remove only the transport's boundary newlines; retain indentation.
+        return body.removeprefix("\n").removesuffix("\n")
+    return text
+
+
+def _classify_crosstalk(text: str) -> dict | None:
+    stripped = _unwrap_pasted_content(text).strip()
     m = _CROSSTALK_RE.fullmatch(stripped)
     if not m:
         return None
@@ -1085,7 +1090,10 @@ def parse_claude_log_line(line: str) -> dict | list[dict] | None:
 
     if entry_type == "queue-operation":
         op = raw.get("operation")
-        content = raw.get("content", "")
+        raw_content = raw.get("content", "")
+        if op != "enqueue" or not isinstance(raw_content, str):
+            return None
+        content = _unwrap_pasted_content(raw_content)
         if op == "enqueue" and content and not content.startswith("<task-notification"):
             ct = _classify_crosstalk(content)
             if ct:
@@ -1102,7 +1110,7 @@ def parse_claude_log_line(line: str) -> dict | list[dict] | None:
                     "timestamp": timestamp,
                     "queued": True,
                 }
-            message_id = claude_queue_message_id(raw, content, timestamp)
+            message_id = claude_queue_message_id(raw, raw_content, timestamp)
             return {
                 "type": "user",
                 "content": content,
@@ -1163,6 +1171,7 @@ def parse_claude_log_line(line: str) -> dict | list[dict] | None:
                         _enrich_semantic_tile(sem)
                         tool_results.append(sem)
         entries: list[dict] = []
+        text = _unwrap_pasted_content(text)
         if text:
             ct = _classify_crosstalk(text)
             if ct:
@@ -2664,6 +2673,7 @@ def _codex_response_item_chat_entry(
         return None
 
     identity = _codex_event_message_identity(payload, "user", text)
+    text = _unwrap_pasted_content(text)
     ct = _classify_crosstalk(text)
     if ct:
         return {
@@ -3506,7 +3516,7 @@ def parse_grok_log_line(line: str, ctx: dict | None = None) -> dict | list[dict]
     timestamp = _grok_iso(raw, meta)
 
     if kind == "user_message_chunk":
-        text = _grok_content_text(update.get("content"))
+        text = _unwrap_pasted_content(_grok_content_text(update.get("content")))
         if not text:
             return None
         ct = _classify_crosstalk(text)

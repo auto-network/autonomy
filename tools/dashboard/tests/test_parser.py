@@ -703,6 +703,59 @@ class TestNoiseFiltering:
 
 # ── TestCrosstalkParsing ─────────────────────────────────────────────
 
+class TestPastedContent:
+    @pytest.mark.parametrize("closing", ['</pasted_content>', '</pasted_content id="ac23">'])
+    @pytest.mark.parametrize("shape", ["string", "blocks", "queue", "codex"])
+    def test_long_user_message_renders_without_wrapper(self, closing, shape):
+        from tools.dashboard.session_harness import claude_queue_message_id
+        body = "  Keep indentation\n\n" + "A long ordinary message. " * 200
+        text = f'<pasted_content id="ac23">\n{body}\n{closing}'
+        if shape == "queue":
+            raw = {"type": "queue-operation", "operation": "enqueue", "content": text, "timestamp": TS}
+            entry = _parse_jsonl_entry(_line(raw))
+            assert entry["message_id"] == claude_queue_message_id(raw, text, TS)
+        elif shape == "codex":
+            entry = _parse_codex_line(_line({
+                "type": "response_item", "timestamp": TS,
+                "payload": {"type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": text},
+                ]},
+            }))
+        else:
+            content = text if shape == "string" else [{"type": "text", "text": text}]
+            entry = _parse_jsonl_entry(_line({
+                "type": "user", "timestamp": TS, "uuid": "original-id",
+                "message": {"role": "user", "content": content},
+            }))
+            assert entry["message_id"] == "original-id"
+        assert entry["type"] == "user"
+        assert entry["content"] == body
+
+    def test_wrapped_notification_classifies_and_queue_does_not_leak_xml(self):
+        text = ('<pasted_content id="ac23">\n<task-notification>\n'
+                '<id>agent-test:at-0926-211254-23bc</id>\n<kind>agent-test</kind>\n'
+                '<summary>22 passed in 7.6s.</summary>\n<status>passed</status>\n'
+                '</task-notification>\n</pasted_content id="ac23">')
+        entry = _parse_jsonl_entry(_line({
+            "type": "user", "timestamp": TS,
+            "message": {"role": "user", "content": text},
+        }))
+        assert entry["type"] == "system"
+        assert entry["content"] == "22 passed in 7.6s."
+        assert _parse_jsonl_entry(_line({
+            "type": "queue-operation", "operation": "enqueue", "content": text,
+        })) is None
+
+    @pytest.mark.parametrize("text", [
+        'Explain <pasted_content id="x">quoted</pasted_content id="x"> please',
+        '<pasted_content id="x">unclosed',
+        '  ordinary message\n',
+    ])
+    def test_quoted_incomplete_and_unwrapped_text_is_unchanged(self, text):
+        from tools.dashboard.session_harness import _unwrap_pasted_content
+        assert _unwrap_pasted_content(text) == text
+
+
 class TestCrosstalkParsing:
     """CrossTalk message detection — inbound and outbound."""
 

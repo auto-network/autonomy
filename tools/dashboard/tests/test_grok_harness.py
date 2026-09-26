@@ -225,6 +225,13 @@ def test_inbound_crosstalk_user_message_is_a_crosstalk_tile():
     assert entry["content"] == "please review the diff"
 
 
+def test_pasted_user_message_renders_without_transport_wrapper():
+    text = '<pasted_content id="ac23">\nHello there\n</pasted_content id="ac23">'
+    entry = parse_grok_log_line(_update("user_message_chunk", content={"type": "text", "text": text}))
+    assert entry["type"] == "user"
+    assert entry["content"] == "Hello there"
+
+
 def test_non_update_lines_are_ignored():
     assert parse_grok_log_line(json.dumps({"method": "session/other", "params": {}})) is None
     assert parse_grok_log_line("not json") is None
