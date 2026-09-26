@@ -689,3 +689,37 @@ def test_checkpoint_due_asks_for_the_registry_record_before_chaining(monkeypatch
     _install_org(sim)
     d = cp.checkpoint_due(ORG, founder.public_hex, ts=TS, genesis_id=sim.genesis_id)
     assert d.action == "chain-missing" and "signed bytes" in d.reason
+
+
+def test_a_chainless_tuple_at_the_registrys_seq_gets_its_chain_attached_in_place(monkeypatch):
+    """G1 (reviewer, 1c68b9dd): a cache holding the tuple at the registry's
+    current seq without its signed bytes (adopted before the registry served
+    them) is not stuck: the registry read attaches the chain in place, and
+    both the admission publish and the sign-on decision proceed."""
+    from tools.dashboard import network_routes
+    sim, founder, child, grant = _org_with_delegate()
+    org_uuid = _binding_row(monkeypatch)
+    seed = _seed_for(sim, org_uuid)
+    registry = _Registry(sim.root.public_hex, now=TS)
+    registry.records.append(seed)
+    _install_org(sim)
+    cp.record_adopted(ORG, {k: seed[k] for k in ("org", "seq", "members_root", "checkpointers_root", "ledger_head")})
+    assert mc.chain_record_for(cp._cached_adopted(ORG)) is None
+    registry.serve(monkeypatch)
+    assert network_routes._adopt_registry_checkpoint(ORG) == {"ok": True, "action": "chain-attached", "seq": 0}
+    assert mc.chain_record_for(cp._cached_adopted(ORG)) == seed
+    assert network_routes._adopt_registry_checkpoint(ORG)["action"] == "up-to-date"
+    member = add_member(sim)
+    _install_org(sim)
+    out = cp.publish_after_membership_change(ORG, signer=(child, grant), post=registry.post, now=TS)
+    assert out["action"] == "published" and out["seq"] == 1
+    # And the same situation at the sign-on decision: chain-less again at seq 1.
+    cp.record_adopted(ORG, {k: registry.records[-1][k] for k in ("org", "seq", "members_root", "checkpointers_root", "ledger_head")})
+    assert cp.checkpoint_due(ORG, founder.public_hex, ts=TS, genesis_id=sim.genesis_id, org_uuid=org_uuid).action == "up-to-date"
+    add_member(sim)
+    _install_org(sim)
+    assert cp.checkpoint_due(ORG, founder.public_hex, ts=TS, genesis_id=sim.genesis_id, org_uuid=org_uuid).action == "chain-missing"
+    assert network_routes._adopt_registry_checkpoint(ORG)["action"] == "chain-attached"
+    d = cp.checkpoint_due(ORG, founder.public_hex, ts=TS, genesis_id=sim.genesis_id, org_uuid=org_uuid)
+    assert d.action == "assemble" and d.record["prev"] == mc.checkpoint_hash(registry.records[-1])
+    assert member.public_hex

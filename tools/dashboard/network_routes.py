@@ -808,6 +808,18 @@ def _adopt_state_by_fold(
             return {"ok": False, "error": f"{source} root-signed checkpoint does not verify: {exc}"}
     cached = cp._cached_adopted(slug)
     if isinstance(cached, dict) and int(cached.get("seq", -1)) >= seq:
+        if (int(cached["seq"]) == seq and mc.chain_record_for(cached) is None
+                and cached.get("members_root") == members_root
+                and cached.get("checkpointers_root") == checkpointers_root
+                and cached.get("ledger_head") == ledger_head):
+            # Same record, retained before its signed bytes were available
+            # (a cache from before the registry served them, or a bundle
+            # from such a sponsor): attach the chain in place. Same seq,
+            # same roots, so nothing regresses (reviewer G1 on 1c68b9dd).
+            chain = _chain_record_of(state, seq, members_root, checkpointers_root, ledger_head)
+            if chain is not None:
+                cp.record_adopted(slug, {**cached, "chain_record": chain})
+                return {"ok": True, "action": "chain-attached", "seq": seq}
         return {"ok": True, "action": "up-to-date", "seq": int(cached["seq"])}
     try:
         folded = cp._fold_at(slug, [ledger_head]) if cp._is_head(ledger_head) else None
