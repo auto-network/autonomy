@@ -235,3 +235,54 @@ class TestReplay:
         rebuilt = store.rebuild_membership_state(ORG, root.public_hex)
         assert rebuilt == store.get_membership_state(ORG).checkpoint
         assert rebuilt["seq"] == 8
+
+
+class TestDelegateSignedAdvance:
+    """The delegate-signed form at the registry (DelegateCheckpoint.spthy;
+    OrgAdmission.tla P2): attributed through the carried grant to a persona
+    in the stored checkpointers root, judged by the REGISTRY's clock."""
+
+    def _org(self):
+        from tools.network.ledger.tests.conftest import Sim
+        from tools.network.storagekit.delegate import storage_delegate_scopes
+        sim = Sim()
+        sim.role_define(sim.root, "owner", ["*"], requires="self")
+        founder, ik = KeyPair.generate(), KeyPair.generate()
+        sim.claim(sim.invite(sim.root, "owner", invite_key=ik), ik, founder)
+        child = KeyPair.generate()
+        gid = sim.delegate(founder, child, storage_delegate_scopes("dd" * 32, checkpointer=True),
+                           ttl=3_600_000)
+        assert sim.fold().valid[gid]
+        return sim, founder, child, sim.ledger.get(gid)
+
+    def _record(self, sim, seed, child, grant, *, ts, seq=1):
+        state = sim.fold()
+        return mc.build_delegate_checkpoint(
+            org=ORG, seq=seq, prev=mc.checkpoint_hash(seed), ledger_head="bb" * 32,
+            members_root_hex=mc.members_root(state), checkpointers_root_hex=mc.checkpointers_root(state),
+            ts=ts, delegate=child, grant_wire=grant.to_json().decode("utf-8"),
+            genesis_id=sim.genesis_id, prev_checkpointer_pubs=mc.checkpointer_pubs(state))
+
+    def test_delegate_signed_advance_is_adopted(self, client, clock, root):
+        sim, founder, child, grant = self._org()
+        clock.now = grant.hlc.ts // 1000 + 10   # the registry's clock, just after the grant
+        register(client, clock, root)
+        seed = seed_record(root, [founder.public_hex], ts=clock.now)
+        assert client.post(PATH, json=seed).status_code == 201
+        r = client.post(PATH, json=self._record(sim, seed, child, grant, ts=clock.now))
+        assert r.status_code == 201, r.text
+        state = client.get(f"/v1/orgs/{ORG}/membership").json()
+        assert state["seq"] == 1 and state["members_root"] == mc.members_root(sim.fold())
+
+    def test_backdated_or_expired_delegate_records_are_refused_by_the_registry_clock(self, client, clock, root):
+        sim, founder, child, grant = self._org()
+        clock.now = grant.hlc.ts // 1000 + 10
+        register(client, clock, root)
+        seed = seed_record(root, [founder.public_hex], ts=clock.now)
+        assert client.post(PATH, json=seed).status_code == 201
+        r = client.post(PATH, json=self._record(sim, seed, child, grant, ts=clock.now - 3_600))
+        assert r.status_code == 403 and "verifier" in r.text
+        clock.advance(2 * 3_600)  # past the grant's ttl by the registry's clock
+        r = client.post(PATH, json=self._record(sim, seed, child, grant, ts=clock.now))
+        assert r.status_code == 403 and "expired" in r.text
+        assert client.get(f"/v1/orgs/{ORG}/membership").json()["seq"] == 0

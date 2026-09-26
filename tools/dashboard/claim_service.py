@@ -182,9 +182,13 @@ def submit(org: str, event_wire) -> dict:
                 )
             except Exception:
                 pass  # the admission stands; the directory row is presentation only
+            # The step that admits publishes the checkpoint that includes the
+            # member (OrgAdmission.tla P2), signed by this node's hot delegate.
+            from tools.dashboard import membership_checkpoint as cp
             return {
                 "status": "admitted",
                 "kem_credential": event.payload.get("kem_credential"),
+                "checkpoint": cp.publish_after_membership_change(org),
             }
         if reason == R_APPROVAL_MISSING:
             # Replaying the exact staged position without enough approvals

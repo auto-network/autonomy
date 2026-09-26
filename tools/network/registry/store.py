@@ -463,7 +463,7 @@ class MembershipState:
 
 
 def validate_membership_advance(
-    stored_record: Optional[dict], record: object, root_pub: str
+    stored_record: Optional[dict], record: object, root_pub: str, *, now: Optional[int] = None,
 ) -> None:
     """The one adoption rule, shared by the submission route and replay.
 
@@ -475,6 +475,10 @@ def validate_membership_advance(
     from, and a ROOT-SIGNED record must strictly advance the stored seq —
     "valid at any seq" (graph://da0dd9fb-e75) means seed-and-reset, not
     replaying an old captured reset to roll membership back.
+
+    *now* is this verifier's clock (unix seconds) for the delegate-signed
+    form's ts and ttl checks; a submission passes it, history replay does
+    not (structure and signatures only).
 
     Raises ``MembershipCommitmentError`` naming the failed rule.
     """
@@ -497,7 +501,7 @@ def validate_membership_advance(
             raise MembershipCommitmentError(
                 "no membership state for this org — a root-signed seed "
                 "checkpoint must be adopted first")
-        validate_checkpoint(record, root_pub=root_pub, prev_record=stored_record)
+        validate_checkpoint(record, root_pub=root_pub, prev_record=stored_record, now=now)
 
 
 @dataclass(frozen=True)

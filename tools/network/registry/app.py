@@ -1092,7 +1092,7 @@ def create_app(
         try:
             validate_membership_advance(
                 stored.checkpoint if stored is not None else None,
-                record, binding.root_pub,
+                record, binding.root_pub, now=int(t),
             )
         except MembershipCommitmentError as exc:
             raise _forbidden(str(exc))

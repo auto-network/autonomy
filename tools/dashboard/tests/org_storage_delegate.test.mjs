@@ -38,3 +38,19 @@ test('less than 30 days or absent storage creates a fresh 90-day grant locally',
   assert.notEqual(results[0], results[1]);
   root.fill(0);
 });
+
+test('a checkpointer whose grant predates the checkpoint scope mints anew despite a fresh key', async () => {
+  // Node lacks the WebCrypto Ed25519 pieces derivePersona needs; reaching
+  // past the reuse gate is the behaviour under test, and it shows as the
+  // derivation being attempted rather than the stored reference returned.
+  let reachedMint = false;
+  try {
+    await prepareStorageDelegate(null, { ...context, remint_required: true,
+      scope: [...context.scope, 'membership:checkpoint'],
+      delegate_metadata: { key_exists: true, expires_at: now + 80 * day, key_reference: 'existing' },
+    }, now);
+  } catch (error) {
+    reachedMint = true;
+  }
+  assert.equal(reachedMint, true);
+});

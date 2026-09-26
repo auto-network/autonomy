@@ -442,3 +442,186 @@ def test_adopt_after_membership_events_reads_the_registry_only_when_the_fold_mov
     _install_org(sim)  # the new claim arrives by sync
     out = cp.adopt_after_membership_events([ORG], adopt=adopt)
     assert calls == [ORG] and out[ORG]["action"] == "adopted"
+
+
+# ── Checkpoint at admission (OrgAdmission.tla P2; DelegateCheckpoint.spthy) ──
+def _org_with_delegate(checkpointer=True):
+    """A founded org whose founder minted a hot delegate; returns
+    (sim, founder, delegate key, grant wire)."""
+    from tools.network.storagekit.delegate import storage_delegate_scopes
+    sim, founder = org_with_owner()
+    child = KeyPair.generate()
+    gid = sim.delegate(founder, child, storage_delegate_scopes("dd" * 32, checkpointer=checkpointer),
+                       ttl=90 * 86_400_000)
+    assert sim.fold().valid[gid], sim.fold().reasons.get(gid)
+    return sim, founder, child, sim.ledger.get(gid).to_json().decode("utf-8")
+
+
+def _seed_for(sim, org_uuid):
+    state = sim.fold()
+    return mc.build_root_checkpoint(
+        org=org_uuid, seq=0, genesis_id=sim.genesis_id, ledger_head=cp._first_head(state),
+        members_root_hex=mc.members_root(state), checkpointers_root_hex=mc.checkpointers_root(state),
+        ts=TS, root=sim.root)
+
+
+class _Registry:
+    """A registry stand-in: adopts by the real rule, judged at *now*."""
+
+    def __init__(self, root_pub, now):
+        self.root_pub, self.now, self.records = root_pub, now, []
+
+    def post(self, binding, record):
+        from tools.network.registry.store import validate_membership_advance
+        try:
+            validate_membership_advance(self.records[-1] if self.records else None, record,
+                                        self.root_pub, now=self.now)
+        except mc.MembershipCommitmentError as exc:
+            return 403, str(exc)
+        self.records.append(record)
+        return 201, "{}"
+
+    def current(self):
+        r = self.records[-1]
+        return {k: r[k] for k in ("seq", "members_root", "checkpointers_root", "ledger_head")}
+
+
+def test_admission_publishes_a_delegate_signed_checkpoint_that_includes_the_member(monkeypatch):
+    sim, founder, child, grant = _org_with_delegate()
+    org_uuid = _binding_row(monkeypatch)
+    monkeypatch.setattr("tools.dashboard.network_routes._first_member",
+                        lambda set_id, org: __import__("types").SimpleNamespace(
+                            payload={"org_uuid": org_uuid, "root_pub": sim.root.public_hex,
+                                     "registry_url": "https://registry.test"}))
+    seed = _seed_for(sim, org_uuid)
+    registry = _Registry(sim.root.public_hex, now=TS)
+    registry.records.append(seed)
+    _install_org(sim)
+    cp.record_adopted(ORG, seed)
+    # Nothing to publish while the fold matches the newest retained record.
+    assert cp.publish_after_membership_change(ORG, signer=(child, grant), post=registry.post, now=TS) == {
+        "action": "up-to-date", "seq": 0}
+    member = add_member(sim)          # the admission
+    _install_org(sim)
+    out = cp.publish_after_membership_change(ORG, signer=(child, grant), post=registry.post, now=TS)
+    assert out == {"action": "published", "seq": 1, "sign_with": "delegate"}
+    adopted = cp._cached_adopted(ORG)
+    assert adopted["seq"] == 1 and adopted["signer"] == child.public_hex and "grant" in adopted
+    assert mc.checkpoint_signer_persona(adopted) == founder.public_hex
+    # The published set includes the member: it can prove under it.
+    mc.verify_inclusion(adopted["members_root"], member.public_hex,
+                        *mc.inclusion_proof(mc.member_pubs(sim.fold()), member.public_hex))
+    assert registry.current()["seq"] == 1
+
+
+def test_publication_race_re_assembles_on_the_registrys_newer_record(monkeypatch):
+    """F3: the registry moved past our prev (another checkpointer published);
+    on the seq/prev refusal we adopt its record and re-assemble, bounded."""
+    sim, founder, child, grant = _org_with_delegate()
+    org_uuid = _binding_row(monkeypatch)
+    seed = _seed_for(sim, org_uuid)
+    registry = _Registry(sim.root.public_hex, now=TS)
+    registry.records.append(seed)
+    _install_org(sim)
+    cp.record_adopted(ORG, seed)
+    add_member(sim)
+    _install_org(sim)
+    # Another checkpointer already published seq 1 on the seed (persona-signed).
+    state = sim.fold()
+    other = mc.build_checkpoint(
+        org=org_uuid, seq=1, prev=mc.checkpoint_hash(seed), ledger_head=sorted(state.heads)[0],
+        members_root_hex=mc.members_root(state), checkpointers_root_hex=mc.checkpointers_root(state),
+        ts=TS, signer=founder, prev_checkpointer_pubs=mc.checkpointer_pubs(state))
+    assert registry.post({}, other)[0] == 201
+    add_member(sim)                   # and now a second admission on this node
+    _install_org(sim)
+    adopted_from_registry = []
+
+    def adopt_registry(org):
+        adopted_from_registry.append(org)
+        cp.record_adopted(org, other)
+        return {"ok": True}
+
+    out = cp.publish_after_membership_change(
+        ORG, signer=(child, grant), post=registry.post, adopt_registry=adopt_registry, now=TS)
+    assert out["action"] == "published" and out["seq"] == 2
+    assert adopted_from_registry == [ORG]
+    assert cp._cached_adopted(ORG)["prev"] == mc.checkpoint_hash(other)
+
+
+def test_publication_is_skipped_or_refused_with_the_reason_named(monkeypatch):
+    sim, founder, child, grant = _org_with_delegate()
+    org_uuid = _binding_row(monkeypatch)
+    seed = _seed_for(sim, org_uuid)
+    _install_org(sim)
+    add_member(sim)
+    _install_org(sim)
+    # No adopted record yet: the seed is the operator's (root) ceremony.
+    out = cp.publish_after_membership_change(ORG, signer=(child, grant), post=lambda b, r: (201, ""), now=TS)
+    assert out["action"] == "skipped" and "seed" in out["reason"]
+    cp.record_adopted(ORG, seed)
+    # A registry that does not know the form: unpublished, reported, no retry loop.
+    posts = []
+
+    def old_registry(binding, record):
+        posts.append(record)
+        return 403, "checkpoint fields do not match its form (unknown ['genesis_id', 'grant'])"
+
+    out = cp.publish_after_membership_change(ORG, signer=(child, grant), post=old_registry, now=TS)
+    assert out["action"] == "refused" and "form" in out["reason"] and len(posts) == 1
+    assert cp._cached_adopted(ORG)["seq"] == 0
+    # A delegate whose persona became a checkpointer AFTER the adopted record:
+    # not in the previous checkpointers root, so an existing checkpointer
+    # must publish the record that first includes it.
+    from tools.network.storagekit.delegate import storage_delegate_scopes
+    steward = add_member(sim, role="steward", scopes=("*",))
+    steward_child = KeyPair.generate()
+    gid = sim.delegate(steward, steward_child, storage_delegate_scopes("dd" * 32, checkpointer=True),
+                       ttl=90 * 86_400_000)
+    assert sim.fold().valid[gid]
+    _install_org(sim)
+    steward_grant = sim.ledger.get(gid).to_json().decode("utf-8")
+    out = cp.publish_after_membership_change(
+        ORG, signer=(steward_child, steward_grant), post=lambda b, r: (201, ""), now=TS)
+    assert out["action"] == "skipped" and "previous checkpointers" in out["reason"]
+
+
+def test_without_a_checkpoint_scoped_delegate_nothing_is_published(monkeypatch):
+    sim, founder, child, grant = _org_with_delegate(checkpointer=False)
+    org_uuid = _binding_row(monkeypatch)
+    seed = _seed_for(sim, org_uuid)
+    _install_org(sim)
+    cp.record_adopted(ORG, seed)
+    add_member(sim)
+    _install_org(sim)
+    posts = []
+    out = cp.publish_after_membership_change(ORG, post=lambda b, r: posts.append(r) or (201, ""), now=TS)
+    assert out["action"] == "skipped" and posts == []
+
+
+def test_prepare_marks_a_checkpointer_delegate_for_remint_until_it_carries_the_scope(monkeypatch):
+    """org_storage_delegate.prepare: the scope list offered to the browser
+    carries membership:checkpoint for a checkpointer, and an existing grant
+    without it is due for a re-mint at this sign-on (a member who is not a
+    checkpointer gets the two-scope shape and no re-mint)."""
+    from tools.dashboard import org_storage_delegate as osd
+    from tools.graph.schemas.network_identity import NETWORK_STORAGE_DELEGATE_SET_ID
+    from tools.network.storagekit.delegate import storage_delegate_scopes
+    sim, founder = org_with_owner()
+    child = KeyPair.generate()
+    old = sim.delegate(founder, child, storage_delegate_scopes("dd" * 32), ttl=90 * 86_400_000)
+    member = add_member(sim)
+    _install_org(sim)
+    monkeypatch.setattr("tools.graph.org_ops.persona_pub_for_org", lambda genesis: founder.public_hex)
+    prepared = osd.prepare(ORG)
+    assert prepared["checkpointer"] is True and prepared["remint_required"] is False  # no grant recorded yet
+    assert mc.CHECKPOINT_SCOPE in prepared["scope"] and len(prepared["scope"]) == 3
+    settings_ops.upsert_by_key(NETWORK_STORAGE_DELEGATE_SET_ID, 1, sim.genesis_id, {
+        "organization": ORG, "persona_pub": founder.public_hex, "public_key": child.public_hex,
+        "key_reference": "storage-delegate.x", "expires_at": TS * 1000 + 10 ** 9, "grant_event_id": old,
+    }, org=None)
+    assert osd.prepare(ORG)["remint_required"] is True
+    monkeypatch.setattr("tools.graph.org_ops.persona_pub_for_org", lambda genesis: member.public_hex)
+    prepared = osd.prepare(ORG)
+    assert prepared["checkpointer"] is False and prepared["remint_required"] is False
+    assert len(prepared["scope"]) == 2

@@ -90,14 +90,21 @@ def _key_hex(value) -> str:
     return value.public_hex if isinstance(value, KeyPair) else value
 
 
-def storage_delegate_scopes(domain_id: str) -> list:
-    """The EXACTLY-two execution scopes a storage agent delegate may carry.
+def storage_delegate_scopes(domain_id: str, *, checkpointer: bool = False) -> list:
+    """The execution scopes a storage agent delegate may carry: EXACTLY the
+    two storage scopes, plus ``membership:checkpoint`` when the granting
+    persona is a checkpointer (``checkpointer=True``), so the hot delegate
+    can sign the checkpoint published at admission (OrgAdmission.tla P2).
 
     Sorted, so the ledger ``delegate`` event's ``scope`` list is canonical.
-    This is the whole of the delegate's reach: never ``checkpoint``, never
-    an intent scope, never ``*`` (§8, §9).
+    This is the whole of the delegate's reach: never an intent scope, never
+    ``*`` (§8, §9); the checkpoint scope only for a persona that holds it.
     """
-    return sorted([scope_storage_advance(domain_id), scope_storage_grant(domain_id)])
+    scopes = [scope_storage_advance(domain_id), scope_storage_grant(domain_id)]
+    if checkpointer:
+        from tools.network.ledger.scopes import SELF_DELEGABLE_CHECKPOINT_SCOPE
+        scopes.append(SELF_DELEGABLE_CHECKPOINT_SCOPE)
+    return sorted(scopes)
 
 
 @dataclass(frozen=True)

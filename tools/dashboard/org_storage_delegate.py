@@ -19,6 +19,29 @@ TTL_MS = 90 * 24 * 60 * 60 * 1000
 REMINT_BELOW_MS = 30 * 24 * 60 * 60 * 1000
 
 
+def _grant_carries_checkpoint(store, grant_event_id) -> bool:
+    from tools.network.ledger import membership_commitment as mc
+
+    if not grant_event_id:
+        return False
+    try:
+        grant = store.get(grant_event_id)
+        return mc.CHECKPOINT_SCOPE in list(grant.payload.get("scope") or [])
+    except Exception:
+        return False
+
+
+def _is_checkpointer(store, genesis: str) -> bool:
+    from tools.graph import org_ops
+    from tools.network.ledger import membership_commitment as mc
+
+    try:
+        persona = org_ops.persona_pub_for_org(genesis)
+        return bool(persona) and persona in mc.checkpointer_pubs(store.fold())
+    except Exception:
+        return False
+
+
 def prepare(org: str) -> dict:
     """Read signing inputs and cold-readable metadata; do not create a ledger."""
     path = org_ledger_db_path(org)
@@ -27,8 +50,18 @@ def prepare(org: str) -> dict:
     with LedgerStore(path) as store:
         genesis = store.ledger.genesis_id
         parents = list(store.heads())
-    row = settings_ops.read_set_key(NETWORK_STORAGE_DELEGATE_SET_ID, genesis, org=None)
-    metadata = dict((row or {}).get("payload") or {})
+        # The signing persona's delegate carries the checkpoint scope only
+        # when that persona is a checkpointer now: the fold's bounded
+        # self-delegation admits no scope the granter does not hold.
+        checkpointer = _is_checkpointer(store, genesis)
+        row = settings_ops.read_set_key(NETWORK_STORAGE_DELEGATE_SET_ID, genesis, org=None)
+        metadata = dict((row or {}).get("payload") or {})
+        # A checkpointer whose RECORDED grant predates the checkpoint scope
+        # re-mints at this sign-on, so the admission step can publish (with
+        # no grant recorded the browser mints anyway).
+        remint_required = bool(
+            checkpointer and metadata.get("grant_event_id")
+            and not _grant_carries_checkpoint(store, metadata.get("grant_event_id")))
     # The reference is public; inspecting presence must not open the secret.
     if metadata:
         metadata["key_exists"] = settings_ops.chain_setting(
@@ -36,7 +69,10 @@ def prepare(org: str) -> dict:
         ) is not None
     return {
         "organization": org, "genesis_id": genesis, "parents": parents,
-        "scope": storage_delegate_scopes(organization_content_domain_id(genesis)),
+        "scope": storage_delegate_scopes(organization_content_domain_id(genesis),
+                                         checkpointer=checkpointer),
+        "checkpointer": checkpointer,
+        "remint_required": remint_required,
         "ttl_ms": TTL_MS, "remint_below_ms": REMINT_BELOW_MS,
         "delegate_metadata": metadata,
     }

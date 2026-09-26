@@ -167,9 +167,7 @@ def checkpoint_due(org: str, persona_pub: str, *, ts: int,
     # Advancing checkpoint: prove this persona under the PREVIOUS
     # checkpointers_root, reconstructed by re-folding at the cached record's
     # ledger_head — the checkpointer set as of the adopted checkpoint.
-    prev_state = _fold_at(org, [cached["ledger_head"]]) \
-        if _is_head(cached.get("ledger_head")) else state
-    prev_checkpointers = mc.checkpointer_pubs(prev_state)
+    prev_checkpointers = previous_checkpointers(org, cached, state)
     if persona_pub not in prev_checkpointers:
         return CheckpointDecision(
             "not-eligible",
@@ -192,6 +190,16 @@ def checkpoint_due(org: str, persona_pub: str, *, ts: int,
     }
     return CheckpointDecision("assemble", record=record,
                               sign_with=SIGN_WITH_PERSONA)
+
+
+def previous_checkpointers(org: str, cached: dict, state=None):
+    """The checkpointer set as of the adopted record *cached*: the fold at
+    its ledger_head (the current fold when that head is not a head)."""
+    if _is_head(cached.get("ledger_head")):
+        prev_state = _fold_at(org, [cached["ledger_head"]])
+    else:
+        prev_state = state if state is not None else _fold_state(org)[0]
+    return mc.checkpointer_pubs(prev_state)
 
 
 def checkpoint_status(org: str) -> dict:
@@ -286,3 +294,123 @@ def adopt_after_membership_events(slugs=None, *, adopt=None) -> dict[str, dict]:
         except Exception as exc:  # noqa: BLE001
             out[slug] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     return out
+
+
+# ── Checkpoint at admission (OrgAdmission.tla P2) ─────────────────────────
+#: Bounded retry when the registry moved between our read and our POST
+#: (two checkpointers, or two admissions close together, on one prev).
+PUBLISH_RETRIES = 3
+
+
+def _post_checkpoint_to_registry(binding: dict, record: dict) -> tuple[int, str]:
+    """POST one record to the org's registry; (status, text). Seam."""
+    import httpx
+
+    with httpx.Client(base_url=str(binding["registry_url"]), verify=True, timeout=15.0) as client:
+        resp = client.post(f"/v1/orgs/{binding['org_uuid']}/membership-checkpoints", json=record)
+    return resp.status_code, resp.text
+
+
+def _delegate_signer(org: str):
+    """(delegate KeyPair, grant event wire) for this node's hot delegate in
+    *org* when it carries the checkpoint scope; else (None, why)."""
+    from tools.dashboard import org_storage_delegate
+
+    key = org_storage_delegate.signing_key(org)
+    if key is None:
+        return None, "no organization delegate on this node"
+    metadata = org_storage_delegate.prepare(org)["delegate_metadata"]
+    grant_id = metadata.get("grant_event_id")
+    if not grant_id:
+        return None, "the delegate's grant is not recorded"
+    store = LedgerStore(org_ledger_db_path(org))
+    try:
+        grant = store.get(grant_id)
+    except KeyError:
+        return None, "the delegate's grant is not in the ledger"
+    finally:
+        store.close()
+    if mc.CHECKPOINT_SCOPE not in list(grant.payload.get("scope") or []):
+        return None, "the delegate does not carry the checkpoint scope"
+    return (key, grant.to_json().decode("utf-8")), None
+
+
+def publish_after_membership_change(
+    org: str, *, signer=None, post=None, adopt_registry=None, now: Optional[int] = None,
+) -> dict:
+    """The step that admits (or removes) also publishes the checkpoint that
+    reflects it, with no persona present: signed by this node's hot delegate
+    when it carries the checkpoint scope and its granting persona is in the
+    previous checkpointers root. Fires after any append; when the current
+    fold's roots still match the newest retained record there is nothing to
+    publish and nothing is read.
+
+    *signer* is (delegate KeyPair, grant wire) (default: this node's
+    delegate); *post* posts a record to the registry (default: HTTP);
+    *adopt_registry* re-reads and fold-adopts the registry's record on a
+    seq/prev refusal (default: network_routes._adopt_registry_checkpoint).
+    Returns {"action": "published"|"up-to-date"|"skipped"|"refused",
+    ...}. Never raises."""
+    import time as _time
+
+    from tools.dashboard.network_routes import NETWORK_BINDING_SET_ID, _first_member
+
+    try:
+        status = checkpoint_status(org)
+        if not status.get("needed"):
+            return {"action": "up-to-date", "seq": status.get("adopted_seq")}
+        cached = _cached_adopted(org)
+        if cached is None:
+            return {"action": "skipped", "reason": "no adopted checkpoint to advance (seed pending)"}
+        binding_member = _first_member(NETWORK_BINDING_SET_ID, org)
+        binding = binding_member.payload if binding_member is not None else None
+        if not isinstance(binding, dict) or not isinstance(binding.get("org_uuid"), str):
+            return {"action": "skipped", "reason": "no registry binding"}
+        if signer is None:
+            signer, why = _delegate_signer(org)
+            if signer is None:
+                return {"action": "skipped", "reason": why}
+        key, grant_wire = signer
+        persona = mc.checkpoint_signer_persona({"grant": grant_wire})
+        post = post or _post_checkpoint_to_registry
+        if adopt_registry is None:
+            from tools.dashboard.network_routes import _adopt_registry_checkpoint as adopt_registry
+        store = LedgerStore(org_ledger_db_path(org))
+        try:
+            genesis_id = store.ledger.genesis_id
+        finally:
+            store.close()
+        last = "no attempt"
+        for _attempt in range(PUBLISH_RETRIES):
+            state, _heads = _fold_state(org)
+            prev_checkpointers = previous_checkpointers(org, cached, state)
+            if persona not in prev_checkpointers:
+                return {"action": "skipped", "reason": (
+                    "the delegate's persona is not in the previous checkpointers root")}
+            record = mc.build_delegate_checkpoint(
+                org=binding["org_uuid"], seq=int(cached["seq"]) + 1,
+                prev=mc.checkpoint_hash(cached), ledger_head=_first_head(state),
+                members_root_hex=mc.members_root(state),
+                checkpointers_root_hex=mc.checkpointers_root(state),
+                ts=int(now if now is not None else _time.time()), delegate=key,
+                grant_wire=grant_wire, genesis_id=genesis_id,
+                prev_checkpointer_pubs=prev_checkpointers,
+            )
+            code, text = post(binding, record)
+            if code == 201:
+                record_adopted(org, record)
+                return {"action": "published", "seq": record["seq"], "sign_with": "delegate"}
+            last = f"registry refused ({code}): {text[:200]}"
+            if code == 403 and ("seq" in text or "prev" in text) and "form" not in text:
+                # The registry moved past our prev: adopt its record and
+                # re-assemble on it (F3), still including every member so far.
+                adopt_registry(org)
+                newer = _cached_adopted(org)
+                if newer is None or newer.get("seq") == cached.get("seq"):
+                    break
+                cached = newer
+                continue
+            break
+        return {"action": "refused", "reason": last}
+    except Exception as exc:  # noqa: BLE001 — the admission stands regardless
+        return {"action": "refused", "reason": f"{type(exc).__name__}: {exc}"}

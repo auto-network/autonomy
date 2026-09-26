@@ -817,6 +817,10 @@ def _adopt_state_by_fold(
         return {"ok": False, "error": (
             f"the {source} members_root does not match this node's ledger at that head"
         )}
+    if mc.checkpointers_root(folded) != checkpointers_root:
+        return {"ok": False, "error": (
+            f"the {source} checkpointers_root does not match this node's ledger at that head"
+        )}
     record = dict(state) if root_signed else {
         "org": org_uuid, "seq": seq, "members_root": members_root,
         "checkpointers_root": checkpointers_root, "ledger_head": ledger_head,
@@ -1567,7 +1571,9 @@ async def post_ledger_revoke(request: Request) -> JSONResponse:
             {"ok": False, "error": f"could not append revocation: {exc}"},
             status_code=400,
         )
-    return JSONResponse({"ok": True, "revoke_id": revoke_id})
+    from tools.dashboard import membership_checkpoint as cp
+    checkpoint = await asyncio.to_thread(cp.publish_after_membership_change, requested_org)
+    return JSONResponse({"ok": True, "revoke_id": revoke_id, "checkpoint": checkpoint})
 
 
 
@@ -1708,7 +1714,11 @@ async def _append_role_event(request: Request, kind: str) -> JSONResponse:
             {"ok": False, "error": f"could not append role {noun}: {exc}"},
             status_code=400,
         )
-    return JSONResponse({"ok": True, "event_id": event_id})
+    # A role change can change the checkpointer set (P2 triggers on either
+    # root differing from the newest retained record).
+    from tools.dashboard import membership_checkpoint as cp
+    checkpoint = await asyncio.to_thread(cp.publish_after_membership_change, requested_org)
+    return JSONResponse({"ok": True, "event_id": event_id, "checkpoint": checkpoint})
 
 
 async def post_ledger_invite_bearer(request: Request) -> JSONResponse:

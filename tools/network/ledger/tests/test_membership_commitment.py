@@ -241,3 +241,136 @@ class TestCheckpoints:
             mc.validate_checkpoint(
                 dict(cp1, prev=mc.checkpoint_hash(bogus_prev)),
                 root_pub=root_pub, prev_record=bogus_prev)
+
+
+# ── Delegate-signed checkpoints (DelegateCheckpoint.spthy; OrgAdmission P2) ──
+from tools.network.storagekit.delegate import storage_delegate_scopes as _sds
+
+DOMAIN = "dd" * 32
+
+
+def _grant(sim, persona, child, *, ttl=90 * 86_400_000, checkpointer=True, ts=None):
+    scopes = _sds(DOMAIN, checkpointer=checkpointer)
+    gid = sim.delegate(persona, child, scopes, ttl=ttl, ts=ts)
+    assert sim.fold().valid[gid], sim.fold().reasons.get(gid)
+    return sim.ledger.get(gid)
+
+
+def _seed(sim, checkpointers=None, ts=1_800_000_000):
+    state = sim.fold()
+    return mc.build_root_checkpoint(
+        org="org-1", seq=0, genesis_id=sim.genesis_id, ledger_head=sim.genesis_id,
+        members_root_hex=mc.members_root(state),
+        checkpointers_root_hex=mc.compute_root(checkpointers) if checkpointers
+        else mc.checkpointers_root(state),
+        ts=ts, root=sim.root)
+
+
+def _delegate_record(sim, seed, child, grant, *, ts, genesis=None, prev_checkpointers=None):
+    state = sim.fold()
+    return mc.build_delegate_checkpoint(
+        org="org-1", seq=seed["seq"] + 1, prev=mc.checkpoint_hash(seed),
+        ledger_head=sorted(state.heads)[0], members_root_hex=mc.members_root(state),
+        checkpointers_root_hex=mc.checkpointers_root(state), ts=ts, delegate=child,
+        grant_wire=grant.to_json().decode("utf-8"),
+        genesis_id=genesis or sim.genesis_id,
+        prev_checkpointer_pubs=prev_checkpointers or mc.checkpointer_pubs(state))
+
+
+class TestDelegateCheckpoints:
+    def test_delegate_signed_advance_is_attributed_to_the_granting_persona(self):
+        sim, founder = org_with_owner()
+        child = KeyPair.generate()
+        grant = _grant(sim, founder, child)
+        seed = _seed(sim)
+        now = grant.hlc.ts // 1000 + 10
+        record = _delegate_record(sim, seed, child, grant, ts=now)
+        assert record["signer"] == child.public_hex
+        mc.validate_checkpoint(record, root_pub=sim.root.public_hex, prev_record=seed, now=now)
+        assert mc.checkpoint_signer_persona(record) == founder.public_hex
+        # The chain continues from it: a persona-signed record hash-links to it.
+        state = sim.fold()
+        nxt = mc.build_checkpoint(
+            org="org-1", seq=2, prev=mc.checkpoint_hash(record),
+            ledger_head=sorted(state.heads)[0], members_root_hex=mc.members_root(state),
+            checkpointers_root_hex=mc.checkpointers_root(state), ts=now + 1,
+            signer=founder, prev_checkpointer_pubs=mc.checkpointer_pubs(state))
+        mc.validate_checkpoint(nxt, root_pub=sim.root.public_hex, prev_record=record, now=now + 1)
+
+    def test_the_verifiers_clock_judges_ts_and_ttl(self):
+        """F1: a stolen delegate cannot backdate its way inside the TTL."""
+        sim, founder = org_with_owner()
+        child = KeyPair.generate()
+        grant = _grant(sim, founder, child, ttl=3_600_000)
+        seed = _seed(sim)
+        now = grant.hlc.ts // 1000 + 10
+        backdated = _delegate_record(sim, seed, child, grant, ts=now - 400)
+        with pytest.raises(mc.MembershipCommitmentError, match="outside the verifier"):
+            mc.validate_checkpoint(backdated, root_pub=sim.root.public_hex, prev_record=seed, now=now)
+        later = now + 7_200
+        expired = _delegate_record(sim, seed, child, grant, ts=later)
+        with pytest.raises(mc.MembershipCommitmentError, match="expired"):
+            mc.validate_checkpoint(expired, root_pub=sim.root.public_hex, prev_record=seed, now=later)
+        # History replay (now=None) checks structure and signatures only.
+        mc.validate_checkpoint(expired, root_pub=sim.root.public_hex, prev_record=seed, now=None)
+
+    def test_every_attribution_check_is_named(self):
+        sim, founder = org_with_owner()
+        child = KeyPair.generate()
+        grant = _grant(sim, founder, child)
+        seed = _seed(sim)
+        now = grant.hlc.ts // 1000 + 10
+        # A grant proof made over another organization's genesis.
+        wrong_genesis = _delegate_record(sim, seed, child, grant, ts=now, genesis="ee" * 32)
+        with pytest.raises(mc.MembershipCommitmentError, match="proof of possession"):
+            mc.validate_checkpoint(wrong_genesis, root_pub=sim.root.public_hex, prev_record=seed, now=now)
+        # A storage-only grant (no checkpoint scope) attributes nothing.
+        other = KeyPair.generate()
+        storage_only = _grant(sim, founder, other, checkpointer=False)
+        with pytest.raises(mc.MembershipCommitmentError, match="checkpoint scope"):
+            mc.validate_checkpoint(
+                _delegate_record(sim, seed, other, storage_only, ts=now),
+                root_pub=sim.root.public_hex, prev_record=seed, now=now)
+        # A grant for another key than the signer.
+        mismatched = dict(_delegate_record(sim, seed, child, grant, ts=now))
+        mismatched["grant"] = storage_only.to_json().decode("utf-8")
+        with pytest.raises(mc.MembershipCommitmentError, match="does not name the signer|does not verify"):
+            mc.validate_checkpoint(mismatched, root_pub=sim.root.public_hex, prev_record=seed, now=now)
+        # The granting persona is not in the previous checkpointers root.
+        stranger_seed = _seed(sim, checkpointers=[KeyPair.generate().public_hex])
+        outside = _delegate_record(sim, stranger_seed, child, grant, ts=now,
+                                   prev_checkpointers=[founder.public_hex])
+        with pytest.raises(mc.MembershipCommitmentError):
+            mc.validate_checkpoint(outside, root_pub=sim.root.public_hex, prev_record=stranger_seed, now=now)
+        # A tampered record fails the delegate's signature.
+        tampered = dict(_delegate_record(sim, seed, child, grant, ts=now))
+        tampered["members_root"] = "f" * 64
+        with pytest.raises(mc.MembershipCommitmentError, match="signature"):
+            mc.validate_checkpoint(tampered, root_pub=sim.root.public_hex, prev_record=seed, now=now)
+
+
+class TestMemberSetEventTypes:
+    def test_types_outside_the_set_never_change_members_root(self):
+        """MEMBER_SET_EVENT_TYPES is the own-fold candidate walk's set: a fold
+        at any other event as head reproduces the root of its nearest
+        member-set ancestor, so those events are never folded for candidates."""
+        sim, founder = org_with_owner()
+        member = add_member(sim)
+        before = mc.members_root(sim.fold())
+        sim.role_define(sim.root, "extra", ["link:publish"], requires="self")
+        sim.role_grant(sim.root, member.public_hex, "extra")
+        sim.invite(sim.root, "member", invite_key=KeyPair.generate())
+        _grant(sim, founder, KeyPair.generate(), checkpointer=False)
+        checked = 0
+        for event in sim.ledger.events():
+            if event.type in mc.MEMBER_SET_EVENT_TYPES or event.type == "genesis":
+                continue
+            # The event as head against its own parents as heads: the same set.
+            with_event = mc.members_root(sim.fold(heads=[event.event_id]))
+            without = mc.members_root(sim.fold(heads=list(event.parents)))
+            assert with_event == without, event.type
+            checked += 1
+        assert checked >= 4  # role.define, role.grant, invite, delegate
+        assert mc.members_root(sim.fold()) == before
+        assert set(mc.MEMBER_SET_EVENT_TYPES) == {
+            "member.claim", "member.rekey", "revoke", "role.revoke", "key.rotate"}

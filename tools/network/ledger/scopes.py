@@ -90,15 +90,25 @@ _SELF_DELEGABLE_GRANT_PREFIX = "storage:capability:grant:"
 _SELF_DELEGABLE_ADVANCE_PREFIX = "storage:state:advance:"
 
 
+#: The one scope a checkpointer may add to its storage delegate: a hot
+#: delegate that signs the checkpoint published at admission (OrgAdmission
+#: P2; DelegateCheckpoint.spthy; operator ruling 1, 2026-09-25). Its
+#: acceptance also re-derives authority at use time: the verifier places the
+#: GRANTING persona under the previous checkpointers root, never the key.
+SELF_DELEGABLE_CHECKPOINT_SCOPE = "membership:checkpoint"
+
+
 def self_delegable_exact(scopes) -> bool:
     """EXACTLY the storage delegate's scope shape: one grant scope and one
-    advance scope, over ONE shared domain. An exact predicate, not pattern
-    coverage — coverage would admit a singleton (an instrument the design
-    does not define), a mixed-domain pair (a single delegate spanning two
-    domains), and the pair plus a third (reach beyond the defined shape).
-    The storage delegate is defined as exactly two scopes (§8, §9) and
-    that definition is enforced here, at admission."""
-    scopes = frozenset(scopes)
+    advance scope, over ONE shared domain, optionally plus the membership
+    checkpoint scope. An exact predicate, not pattern coverage — coverage
+    would admit a singleton (an instrument the design does not define), a
+    mixed-domain pair (a single delegate spanning two domains), and the
+    pair plus any other third (reach beyond the defined shapes). The
+    storage delegate is defined as exactly two scopes (§8, §9), the
+    checkpointer's as those two plus the checkpoint scope, and those
+    definitions are enforced here, at admission."""
+    scopes = frozenset(scopes) - {SELF_DELEGABLE_CHECKPOINT_SCOPE}
     if len(scopes) != 2:
         return False
     domains = {"grant": None, "advance": None}

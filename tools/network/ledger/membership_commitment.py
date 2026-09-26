@@ -50,6 +50,20 @@ CHECKPOINT_DOMAIN = b"autonomy.network.membership.checkpoint.v1\n"
 #: ``*`` covers it (scopes.set_covers), so the founder is sole member and
 #: sole checkpointer at genesis with no special casing.
 CHECKPOINT_SCOPE = "membership:checkpoint"
+#: The ledger event types a fold's member set (and so members_root and
+#: checkpointers_root) can depend on: claims and rekeys (leaves), revokes
+#: (kills, and inviter-demotion races through delegate revocation),
+#: role.revoke (inviter-demotion races) and key.rotate (root-rotation races
+#: for root-issued invites) -- fold.py:_claim_alive, _concurrent_revocations,
+#: _rotation_race. Appending any other type never changes either root
+#: (property test in the ledger suite). This ONE set is both where a
+#: checkpoint is published at admission (OrgAdmission.tla P2) and where a
+#: prover folds its own ledger for candidate roots
+#: (OrgAdmissionBundleBound.tla ProveOwnFold), so every checkpointed root is
+#: a candidate (reviewer condition on 13284c4c).
+MEMBER_SET_EVENT_TYPES = frozenset(
+    {"member.claim", "member.rekey", "revoke", "role.revoke", "key.rotate"}
+)
 
 #: Padding leaf for the perfect tree. Its preimage is domain plus a tag,
 #: never 32 key bytes, so it cannot collide with any real leaf.
@@ -71,6 +85,12 @@ _COMMON_FIELDS = frozenset(
      "checkpointers_root", "ts", "signer", "sig"}
 )
 _MEMBER_FIELDS = _COMMON_FIELDS | {"proof", "proof_index"}
+#: The delegate-signed form (DelegateCheckpoint.spthy; OrgAdmission.tla P2):
+#: ``signer`` is a hot delegate key, ``grant`` is the persona-signed ledger
+#: ``delegate`` event (with the child's proof of possession) that attributes
+#: it, ``genesis_id`` is what that proof was made over, and ``proof`` places
+#: the GRANTING persona under the previous checkpointers root.
+_DELEGATE_FIELDS = _MEMBER_FIELDS | {"grant", "genesis_id"}
 CHECKPOINT_VERSION = 1
 
 
@@ -272,6 +292,104 @@ def build_checkpoint(*, org: str, seq: int, prev: str, ledger_head: str,
     return record
 
 
+def build_delegate_checkpoint(*, org: str, seq: int, prev: str, ledger_head: str,
+                              members_root_hex: str, checkpointers_root_hex: str,
+                              ts: int, delegate: KeyPair, grant_wire: str,
+                              genesis_id: str,
+                              prev_checkpointer_pubs: Iterable[str]) -> Dict:
+    """A checkpoint signed by a hot delegate holding CHECKPOINT_SCOPE
+    (the checkpoint published at admission with no persona present). The
+    record carries the delegate's persona-signed grant so a verifier without
+    the ledger attributes it: the GRANTING persona must be in
+    *prev_checkpointer_pubs*, and the proof places that persona."""
+    from tools.network.ledger.events import Event
+
+    grant = Event.from_json(grant_wire)
+    if grant.type != "delegate" or grant.payload.get("child_pub") != delegate.public_hex:
+        raise MembershipCommitmentError("grant does not delegate to this signing key")
+    record = _base_record(
+        org=org, seq=seq, prev=prev, ledger_head=ledger_head,
+        members_root_hex=members_root_hex,
+        checkpointers_root_hex=checkpointers_root_hex,
+        ts=ts, signer_pub=delegate.public_hex,
+    )
+    if seq < 1:
+        raise MembershipCommitmentError(
+            "delegate-signed checkpoints start at seq 1; seq 0 is the root-signed seed")
+    index, path = inclusion_proof(prev_checkpointer_pubs, grant.author_key)
+    record["proof"] = path
+    record["proof_index"] = index
+    record["grant"] = grant_wire if isinstance(grant_wire, str) else grant_wire.decode("utf-8")
+    record["genesis_id"] = _require_hex64(genesis_id, "genesis_id")
+    record["sig"] = delegate.sign_hex(_signing_input(record))
+    return record
+
+
+def _require_hex64(value: object, what: str) -> str:
+    if not isinstance(value, str) or _HEX64_RE.match(value) is None:
+        raise MembershipCommitmentError(f"{what} must be 64 lowercase hex chars")
+    return value
+
+
+def checkpoint_signer_persona(record: Dict) -> str:
+    """The persona a signed record is attributed to: the signer for the root
+    and member forms; the grant's author for the delegate form."""
+    if "grant" in record:
+        from tools.network.ledger.events import Event
+        return str(Event.from_json(record["grant"]).author_key)
+    return str(record["signer"])
+
+
+def _attribute_delegate(record: Dict, *, now: Optional[int]) -> str:
+    """Verify the delegate form's attribution chain (persona -> grant ->
+    delegate, with the delegate's proof of possession; DelegateCheckpoint.spthy
+    Accept_Checkpoint) and its validity against the VERIFIER's clock; return
+    the attributed persona. *now* is unix seconds; None skips the clock
+    checks (history replay), never an acceptance."""
+    from tools.network import clock
+    from tools.network.idkit.errors import IdkitError as _IdkitError
+    from tools.network.ledger.events import Event, delegate_proof_input
+
+    try:
+        grant = Event.from_json(record["grant"])
+        grant.verify_sig()
+    except Exception as exc:  # malformed or unsigned grant: one refusal channel
+        raise MembershipCommitmentError(f"checkpoint grant does not verify: {exc}") from exc
+    p = grant.payload
+    if grant.type != "delegate":
+        raise MembershipCommitmentError("checkpoint grant is not a delegate event")
+    if p.get("child_pub") != record["signer"]:
+        raise MembershipCommitmentError("checkpoint grant does not name the signer")
+    scope = p.get("scope")
+    if not isinstance(scope, list) or CHECKPOINT_SCOPE not in scope:
+        raise MembershipCommitmentError("checkpoint grant does not carry the checkpoint scope")
+    if p.get("can_redelegate") is not False:
+        raise MembershipCommitmentError("checkpoint grant must not be redelegable")
+    ttl = p.get("ttl")
+    if type(ttl) is not int or ttl <= 0:
+        raise MembershipCommitmentError("checkpoint grant must carry a positive ttl")
+    try:
+        verify_signature(
+            p["child_pub"], p["proof"],
+            delegate_proof_input(
+                record["genesis_id"], grant.author_key, p["child_pub"], scope,
+                can_redelegate=False, ttl=ttl, grant_nonce=p["grant_nonce"],
+            ),
+        )
+    except (_IdkitError, KeyError, TypeError) as exc:
+        raise MembershipCommitmentError(
+            f"checkpoint grant proof of possession does not verify: {exc}") from exc
+    if now is not None:
+        # The record's ts is the delegate's own word; judge by our clock.
+        if abs(int(record["ts"]) - int(now)) > clock.MAX_CLOCK_SKEW:
+            raise MembershipCommitmentError(
+                f"delegate-signed checkpoint ts is outside the verifier's "
+                f"±{clock.MAX_CLOCK_SKEW}s window")
+        if int(now) * 1000 >= int(grant.hlc.ts) + ttl:
+            raise MembershipCommitmentError("checkpoint grant has expired at the verifier")
+    return str(grant.author_key)
+
+
 def build_root_checkpoint(*, org: str, seq: int, genesis_id: str,
                           ledger_head: str, members_root_hex: str,
                           checkpointers_root_hex: str, ts: int,
@@ -289,7 +407,8 @@ def build_root_checkpoint(*, org: str, seq: int, genesis_id: str,
 
 
 def validate_checkpoint(record: object, *, root_pub: str,
-                        prev_record: Optional[Dict] = None) -> None:
+                        prev_record: Optional[Dict] = None,
+                        now: Optional[int] = None) -> None:
     """Validate one received checkpoint record.
 
     ROOT-SIGNED (``signer == root_pub``): no proof fields allowed; the
@@ -299,6 +418,14 @@ def validate_checkpoint(record: object, *, root_pub: str,
     ``prev.seq + 1``, ``prev`` must hash-link to it, ``org`` must match,
     and the embedded proof must place the signer under the previous
     record's ``checkpointers_root``.
+
+    DELEGATE-SIGNED (the record carries ``grant``): as member-signed, with
+    the signer a hot delegate attributed through its carried, persona-signed
+    grant (signature, proof of possession, checkpoint scope) to the GRANTING
+    persona, which the proof must place under the previous checkpointers
+    root; the record's ts and the grant's ttl are judged by *now*, the
+    verifier's own clock (unix seconds), which a submission-time verifier
+    MUST pass (None only for history replay).
 
     Raises :class:`MembershipCommitmentError` naming the first failed rule;
     returns None on success. Signature verification failures surface as
@@ -311,7 +438,9 @@ def validate_checkpoint(record: object, *, root_pub: str,
     signer = record.get("signer")
     _require_pub(signer, "signer")
     root_signed = signer == root_pub
-    expected = _COMMON_FIELDS if root_signed else _MEMBER_FIELDS
+    delegate_signed = not root_signed and "grant" in record
+    expected = _COMMON_FIELDS if root_signed else (
+        _DELEGATE_FIELDS if delegate_signed else _MEMBER_FIELDS)
     if set(record) != expected:
         missing = sorted(expected - set(record))
         unknown = sorted(set(record) - expected)
@@ -344,7 +473,13 @@ def validate_checkpoint(record: object, *, root_pub: str,
         if record["prev"] != checkpoint_hash(prev_record):
             raise MembershipCommitmentError(
                 "checkpoint prev does not hash-link to the previous record")
-        verify_inclusion(prev_record["checkpointers_root"], signer,
+        attributed = signer
+        if delegate_signed:
+            _require_hex64(record.get("genesis_id"), "genesis_id")
+            if not isinstance(record.get("grant"), str):
+                raise MembershipCommitmentError("checkpoint grant must be the event wire")
+            attributed = _attribute_delegate(record, now=now)
+        verify_inclusion(prev_record["checkpointers_root"], attributed,
                          record["proof_index"], record["proof"])
 
     unsigned = {k: v for k, v in record.items() if k != "sig"}

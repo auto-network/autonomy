@@ -4,7 +4,10 @@ import { derivePersona, buildEvent, signEvent } from './ledger-event.js';
 
 export async function prepareStorageDelegate(rootSeed, context, now = Date.now()) {
   const metadata = context.delegate_metadata || {};
-  if (metadata.key_exists && metadata.expires_at - now >= context.remint_below_ms) {
+  // A checkpointer whose grant predates the checkpoint scope re-mints now
+  // (context.remint_required), so admissions can publish their checkpoint.
+  if (metadata.key_exists && metadata.expires_at - now >= context.remint_below_ms
+      && !context.remint_required) {
     return { action: 'reuse', organization: context.organization,
       key_reference: metadata.key_reference };
   }

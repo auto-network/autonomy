@@ -274,3 +274,29 @@ def test_the_exactness_predicate_rejects_pattern_shaped_scopes():
     assert not self_delegable_exact(
         ["storage:capability:grant:", "storage:state:advance:"]
     )
+
+
+def test_a_checkpointer_may_add_the_checkpoint_scope_and_nobody_else_may():
+    """OrgAdmission.tla P2 / DelegateCheckpoint.spthy: the storage delegate of
+    a persona that holds membership:checkpoint may carry that scope too (the
+    hot delegate signs the checkpoint published at admission); the same
+    three-scope grant from a member without the scope is an escalation, and
+    any other third scope is still refused."""
+    from tools.network.ledger.membership_commitment import CHECKPOINT_SCOPE
+    d = "aa" * 32
+    two = storage_delegate_scopes(d)
+    three = storage_delegate_scopes(d, checkpointer=True)
+    assert three == sorted(two + [CHECKPOINT_SCOPE])
+    sim = Sim()
+    sim.role_define(sim.root, "steward", requires="self", scope_set=sorted(two + [CHECKPOINT_SCOPE]))
+    sim.role_define(sim.root, "member", requires="self", scope_set=two)
+    steward, member = KeyPair.generate(), KeyPair.generate()
+    sim.claim(sim.invite(sim.root, "steward", invite_key=steward), steward, steward)
+    sim.claim(sim.invite(sim.root, "member", invite_key=member), member, member)
+    ok = sim.delegate(steward, KeyPair.generate(), three, ttl=60_000)
+    escalation = sim.delegate(member, KeyPair.generate(), three, ttl=60_000)
+    other_third = sim.delegate(steward, KeyPair.generate(), sorted(two + ["link:publish"]), ttl=60_000)
+    state = sim.fold()
+    assert state.valid[ok] is True, state.reasons.get(ok)
+    assert state.valid[escalation] is False and state.reasons[escalation] == R_SCOPE_ESCALATION
+    assert state.valid[other_third] is False

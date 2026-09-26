@@ -185,9 +185,11 @@ def _members_at(slug: str, record: dict) -> tuple[str, ...]:
     return tuple(mc.member_pubs(state))
 
 
-#: Event types that can change the member leaf set; a fold at any other
-#: event as head reproduces the root of the nearest such ancestor.
-_LEAF_CHANGING = frozenset({"member.claim", "member.rekey", "revoke"})
+#: Event types that can change the member set; a fold at any other event
+#: as head reproduces the root of the nearest such ancestor. The same set
+#: triggers a checkpoint at admission, so every checkpointed root is a
+#: candidate here.
+from tools.network.ledger.membership_commitment import MEMBER_SET_EVENT_TYPES as _LEAF_CHANGING
 
 #: (slug, persona, heads) -> own-fold candidates. The list changes only
 #: when events arrive (the heads change), so a hello never re-folds.
@@ -200,11 +202,11 @@ def _own_fold_roots(slug: str, persona_pub: str) -> list[tuple[str, tuple[str, .
     each LEAF-CHANGING event as a head in reverse HLC order, back to and
     including this persona's admission claim (OrgAdmissionBundleBound.tla
     ProveOwnFold / Rotate, master ac114f59: a prover with no usable retained
-    record still reaches a checkpointed root, since every leaf-changing
-    event is checkpointed and the claim's head is the floor). Other events
-    cannot change the root, so they are not folded (reviewer (b)/(c) on
-    3d82dd60). Only folds whose set includes this persona are candidates.
-    Memoized per head set."""
+    record still reaches a checkpointed root, since every member-set event
+    is checkpointed and the claim's head is the floor). Other events cannot
+    change the root (membership_commitment.MEMBER_SET_EVENT_TYPES), so they
+    are not folded. Only folds whose set includes this persona are
+    candidates. Memoized per head set."""
     from tools.network.ledger import membership_commitment as mc
     from tools.network.ledger.store import LedgerStore, org_ledger_db_path
 

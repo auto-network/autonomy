@@ -303,10 +303,13 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
     }
 
     # Key binding + self policy admits immediately.
-    assert result["keySubmit"] == {
+    assert {k: v for k, v in result["keySubmit"].items() if k != "checkpoint"} == {
         "status": "admitted",
         "kem_credential": result["keyClaim"]["kemCredential"],
     }
+    # The admission step publishes the checkpoint that includes the member
+    # (OrgAdmission.tla P2); with no hot delegate here it reports why not.
+    assert result["keySubmit"]["checkpoint"]["action"] in {"published", "skipped", "refused", "up-to-date"}
     assert result["keyStatus"] == {"status": "admitted"}
 
     # Bearer safety holds pending; approval traffic changes no ledger heads.
@@ -398,10 +401,11 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
     assert result["mismatchedSubmitPositionRejected"] is True
 
     # Only the invitee's re-signed final submit appends and clears staging.
-    assert result["admitted"] == {
+    assert {k: v for k, v in result["admitted"].items() if k != "checkpoint"} == {
         "status": "admitted",
         "kem_credential": result["initial"]["kemCredential"],
     }
+    assert "action" in result["admitted"]["checkpoint"]
     assert result["admittedStatus"] == {"status": "admitted"}
     assert result["expiredStaleSubmit"] == result["expiredSubmit"]
     assert result["wrongToken"] == {
