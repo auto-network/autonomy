@@ -213,7 +213,20 @@ def _register_fleet_sync_sql_functions(
             _refuse_uncaptured_migration_write,
         )
     else:
-        conn.create_function("fleet_sync_capture_enabled", 0, lambda: 0)
+        # No triggers exist at open, so nothing can call this -- unless the
+        # database is activated later by another connection. Then the
+        # attached ActivationWatch (attach_active_production_catalog) attaches
+        # the catalog before the write; a call that still reaches this stub
+        # is an uncaptured write on an activated store and fails loudly
+        # instead of committing rows that never replicate.
+        def _activated_after_open():
+            raise sqlite3.IntegrityError(
+                "fleet-sync capture was activated on this database after this "
+                "connection opened without a catalog attached; reopen"
+            )
+        conn.create_function(
+            "fleet_sync_capture_enabled", 0, _activated_after_open,
+        )
 
     def _capture_is_inactive(*_args):
         raise sqlite3.IntegrityError(
@@ -803,6 +816,24 @@ class GraphDB:
             )
             self._fleet_catalog = attach_active_production_catalog(self.conn)
         self._run_data_phase_migrations()
+
+    @property
+    def _fleet_catalog(self):
+        """The catalog attached to this handle's connection: set at open or
+        activation, or attached later by the connection's ActivationWatch
+        (a capturing hook is the catalog)."""
+        explicit = self.__dict__.get("_fleet_catalog_explicit")
+        if explicit is not None:
+            return explicit
+        conn = self._conn
+        hook = conn._hook() if hasattr(conn, "_hook") else None
+        if hook is not None and getattr(hook, "captures", True):
+            return hook
+        return None
+
+    @_fleet_catalog.setter
+    def _fleet_catalog(self, value) -> None:
+        self.__dict__["_fleet_catalog_explicit"] = value
 
     def _discard_failed_connection(self) -> None:
         conn = getattr(self, "conn", None)

@@ -135,6 +135,9 @@ class _SchemaScratch:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
 _table_columns: dict[str, tuple[str, ...]] = {}
+#: Only a write-intent BEGIN is taken: a plain or DEFERRED BEGIN is a
+#: consistent read on this connection and must not take the write lock.
+_WRITE_BEGIN = re.compile(r"^\s*BEGIN\s+(?:IMMEDIATE|EXCLUSIVE)\b", re.IGNORECASE)
 _MUTATING_TABLE = re.compile(
     r'^\s*(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|'
     r'UPDATE(?:\s+OR\s+\w+)?|DELETE\s+FROM)\s+["`\[]?([A-Za-z_]\w*)',
@@ -573,6 +576,10 @@ class MutationCatalog:
             for table in TABLE_POLICIES
         }
         self._register_functions()
+        # The connection's capture functions are this catalog's from here on,
+        # whether or not it is installed as the connection's hook: explicit
+        # ``transaction()`` contexts write through the same connection.
+        conn._fleet_sync_functions_owner = self
 
     def _register_functions(self) -> None:
         self.conn.create_function(
@@ -590,6 +597,9 @@ class MutationCatalog:
             "fleet_sync_capture_enabled", 0,
             self._capture_enabled,
         )
+
+    def take_statement(self, sql: object) -> bool:
+        return False
 
     def before_statement(self, sql: object) -> bool:
         """Enter one automatic originated context at the first replicated DML.
@@ -3121,19 +3131,19 @@ def attach_active_production_catalog(
 ) -> MutationCatalog | None:
     """Attach authorship to a newly opened connection when triggers are live.
 
-    A prepared-but-not-activated database returns ``None``.  Any partial
-    trigger set fails the open instead of leaving one writer able to bypass or
-    mis-execute the capture contract.
+    A prepared-but-not-activated database returns ``None`` and leaves an
+    :class:`ActivationWatch` on the connection, so an activation that lands
+    later is attached before the connection's next replicated write; owners
+    that keep a reference read it back from the connection's hook.
+    Any partial trigger set fails the open instead of leaving one writer able
+    to bypass or mis-execute the capture contract.
     """
     from tools.network.fleet_sync_connection import FleetSyncConnection
 
     if not isinstance(conn, FleetSyncConnection):
         raise TypeError("fleet-sync production stores require FleetSyncConnection")
-    trigger_count = int(conn.execute(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' "
-        "AND name LIKE 'fleet_sync_%'"
-    ).fetchone()[0])
-    if not trigger_count:
+    if not _capture_triggers_installed(conn):
+        conn.install_fleet_sync_hook(ActivationWatch(conn))
         return None
     row = conn.execute(
         "SELECT origin_incarnation FROM fleet_sync_state WHERE singleton=1"
@@ -3185,3 +3195,105 @@ def attach_active_production_catalog(
             )
     conn.install_fleet_sync_hook(catalog)
     return catalog
+
+def _capture_triggers_installed(conn: sqlite3.Connection) -> bool:
+    return bool(conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' "
+        "AND name LIKE 'fleet_sync_%'"
+    ).fetchone()[0])
+
+
+class ActivationWatch:
+    """The hook a connection carries while its database is not yet activated.
+
+    A store opened on a database without capture triggers has no catalog.
+    Activation is another connection's ``BEGIN IMMEDIATE`` (the serving
+    runtime's, the sync scheduler's, enrollment's) and can commit at any
+    later moment; the next replicated write on this connection would then
+    fire the new triggers with no capture functions (loud: "no such
+    function" -- the invite's channel-key seal, compose simulation
+    2026-09-26) or, on a GraphDB carrying the pre-attach stub, commit
+    uncaptured rows that never replicate (silent). This hook removes both
+    outcomes: before a replicated statement it re-checks for triggers under
+    the write lock -- activation cannot commit underneath ``BEGIN IMMEDIATE``
+    and triggers are never uninstalled -- and attaches the catalog first.
+
+    Inside a transaction the caller already owns, attaching is impossible
+    (it needs an idle connection); an activation seen there is refused
+    loudly rather than written around.
+    """
+
+    #: This hook captures nothing itself; ``executescript`` stays allowed and
+    #: a real catalog may replace it.
+    captures = False
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    def _owned_by_a_catalog(self) -> bool:
+        return getattr(self.conn, "_fleet_sync_functions_owner", None) is not None
+
+    def take_statement(self, sql: object) -> bool:
+        """A caller's own write-intent BEGIN (IMMEDIATE or EXCLUSIVE) is
+        issued here, in the caller's own words, so the activation re-check
+        happens under the write lock the caller wanted anyway
+        (VaultStore.put_class, settings_ops' explicit transactions). Without
+        this, a writer that opened its transaction after activation landed
+        would reach before_statement inside that transaction, where attaching
+        is impossible and the write could only be refused. A plain or
+        DEFERRED BEGIN is a read and runs untouched: a replicated write
+        inside it after an activation meets the in-transaction refusal."""
+        if not isinstance(sql, str) or _WRITE_BEGIN.match(sql) is None:
+            return False
+        if self.conn.in_transaction or self._owned_by_a_catalog():
+            return False
+        raw = sqlite3.Connection.execute
+        raw(self.conn, sql)
+        if not _capture_triggers_installed(self.conn):
+            return True
+        sqlite3.Connection.rollback(self.conn)
+        catalog = attach_active_production_catalog(self.conn)
+        if catalog is None:
+            raise WatermarkError("fleet-sync catalog attach found no triggers after seeing them")
+        raw(self.conn, sql)
+        return True
+
+    def before_statement(self, sql: object) -> bool:
+        if not isinstance(sql, str):
+            return False
+        if self._owned_by_a_catalog():
+            # A catalog already owns this connection's capture functions
+            # (built on it, authoring through its explicit transaction API).
+            return False
+        match = _MUTATING_TABLE.match(sql)
+        if match is None:
+            return False
+        policy = TABLE_POLICIES.get(match.group(1).lower())
+        if policy is None or policy.kind in {PolicyKind.LOCAL, PolicyKind.DERIVED}:
+            return False
+        if self.conn.in_transaction:
+            if _capture_triggers_installed(self.conn):
+                raise sqlite3.IntegrityError(
+                    "fleet-sync capture was activated on this database after "
+                    "this connection opened; the open transaction cannot be "
+                    "captured -- roll back and retry on a fresh transaction"
+                )
+            return False
+        # Idle: open the transaction the way a caller's BEGIN is opened,
+        # attaching first if activation landed. Afterwards the connection's
+        # hook is either still this watch (inactive database: the write is
+        # legitimately uncaptured) or the attached catalog, which enters its
+        # context for this statement inside the transaction just opened.
+        # Either way this hook opened the transaction, so an error rolls it
+        # back through the connection and clears any context.
+        self.take_statement("BEGIN IMMEDIATE")
+        hook = self.conn._hook()
+        if hook is not self:
+            hook.before_statement(sql)
+        return True
+
+    def before_commit(self) -> None:
+        return None
+
+    def after_transaction(self) -> None:
+        return None

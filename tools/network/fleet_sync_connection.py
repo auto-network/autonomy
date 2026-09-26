@@ -20,6 +20,13 @@ from typing import Protocol
 
 
 class AuthoredTransactionHook(Protocol):
+    def take_statement(self, sql: object) -> bool:
+        """Run *sql* in the hook's own way instead of the caller's, or return
+        False to let it run normally. Only a write-intent BEGIN (IMMEDIATE or
+        EXCLUSIVE) is ever taken: an ActivationWatch issues the caller's own
+        statement so it can re-check for activation under the write lock the
+        caller asked for; a plain BEGIN is a read and runs untouched."""
+
     def before_statement(self, sql: object) -> bool:
         """Enter authorship when needed; return whether an error owns rollback."""
 
@@ -36,6 +43,9 @@ class FleetSyncCursor(sqlite3.Cursor):
     def execute(self, sql, parameters=(), /):
         connection = self.connection
         hook = connection._hook()
+        take = getattr(hook, "take_statement", None)
+        if take is not None and take(sql):
+            return self
         rollback_on_error = hook.before_statement(sql) if hook is not None else False
         try:
             return super().execute(sql, parameters)
@@ -63,7 +73,10 @@ class FleetSyncConnection(sqlite3.Connection):
 
     def install_fleet_sync_hook(self, hook: AuthoredTransactionHook) -> None:
         current = getattr(self, "_fleet_sync_hook", None)
-        if current is not None and current is not hook:
+        if (
+            current is not None and current is not hook
+            and getattr(current, "captures", True)
+        ):
             raise sqlite3.IntegrityError(
                 "fleet-sync connection already has an authored-write hook"
             )
@@ -77,6 +90,9 @@ class FleetSyncConnection(sqlite3.Connection):
 
     def execute(self, sql, parameters=(), /):
         hook = self._hook()
+        take = getattr(hook, "take_statement", None)
+        if take is not None and take(sql):
+            return self.cursor()
         rollback_on_error = hook.before_statement(sql) if hook is not None else False
         try:
             return super().execute(sql, parameters)
@@ -98,7 +114,7 @@ class FleetSyncConnection(sqlite3.Connection):
             raise
 
     def executescript(self, sql_script, /):
-        if self._hook() is not None:
+        if getattr(self._hook(), "captures", self._hook() is not None):
             # sqlite3_exec commits a pending transaction before parsing the
             # script, bypassing the authored commit hook. Schema upgrades on
             # an activated store therefore need an explicit coordinated path.
