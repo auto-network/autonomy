@@ -44,6 +44,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from tools.dashboard import tmux_route
+
 from tools.dashboard.dao.dashboard_db import (
     get_live_sessions,
     update_disk_usage,
@@ -631,8 +633,8 @@ class ResourceMonitor:
         else:
             try:
                 out = subprocess.run(
-                    ["tmux", "display-message", "-p", "-t", name,
-                     "#{pane_pid}"],
+                    tmux_route.argv(name, "display-message", "-p", "-t", name,
+                                    "#{pane_pid}"),
                     capture_output=True, text=True, timeout=5)
                 if out.returncode == 0 and out.stdout.strip().isdigit():
                     state.kind = "host"

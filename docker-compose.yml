@@ -185,6 +185,16 @@ services:
       # the dashboard runs is a client call over this socket; the entrypoint
       # exports TMUX_TMPDIR when the directory exists.
       - autonomy-tmux:/run/autonomy-tmux
+      # BRIDGE, read-and-drive only: the host's /tmp, so panes that were
+      # already running on the HOST tmux server when this node moved to the
+      # sidecar stay visible and drivable until the operator restarts or
+      # closes them (operator direction 2026-09-26). New sessions are never
+      # created there: tools/dashboard/tmux_route.py routes each session to
+      # the server its tmux_sessions.tmux_socket names, and the entrypoint
+      # still points the default server at the sidecar. With no host tmux
+      # server (every fresh node) the bridge is inert. Delete this bind and
+      # the legacy branch of tmux_route once no row names the host socket.
+      - /tmp:/host-tmp
       # The operator's home, read-only at /host-home (graph://89d3c8df-544 §3):
       # the Getting Started sign-in scan and the host terminal's credential
       # bootstrap read the harness sign-ins here (graph credentials import),

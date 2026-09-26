@@ -61,6 +61,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from tools.data_paths import DATA_ROOT, HOST_HOME_MOUNT
+from tools.dashboard import tmux_route
 
 from starlette.applications import Starlette
 from starlette.background import BackgroundTask
@@ -4029,7 +4030,7 @@ async def api_terminal_kill(request):
     # Non-dashboard tmux session, or queue-full fallback: direct kill of
     # both halves — the tmux session and any same-named container (each a
     # no-op when absent, including for host terminals).
-    subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
+    subprocess.run(tmux_route.argv(name, "kill-session", "-t", name), capture_output=True)
     subprocess.run(["docker", "rm", "-f", name], capture_output=True)
     await session_monitor.deregister(name)
     await asyncio.to_thread(auth_db.revoke_token, name)
@@ -5196,9 +5197,7 @@ async def api_chatwith_sessions(request):
     Returns {sessions: [session_name, ...]} for all tmux sessions prefixed 'chatwith-'.
     """
     result = await asyncio.to_thread(
-        subprocess.run,
-        ["tmux", "list-sessions", "-F", "#{session_name}"],
-        capture_output=True, text=True,
+        tmux_route.list_sessions_result,
     )
     if result.returncode != 0:
         return JSONResponse({"sessions": []})
@@ -7227,7 +7226,7 @@ async def api_session_interrupt(request):
             status_code=404,
         )
     subprocess.run(
-        ["tmux", "send-keys", "-t", tmux_name, "Escape"],
+        tmux_route.argv(tmux_name, "send-keys", "-t", tmux_name, "Escape"),
         capture_output=True,
     )
     logger.warning("[session-interrupt] tmux=%r", tmux_name)
@@ -7257,7 +7256,7 @@ async def api_session_background(request):
             status_code=404,
         )
     subprocess.run(
-        ["tmux", "send-keys", "-t", tmux_name, "C-b"],
+        tmux_route.argv(tmux_name, "send-keys", "-t", tmux_name, "C-b"),
         capture_output=True,
     )
     logger.warning("[session-background] tmux=%r", tmux_name)
@@ -8343,7 +8342,7 @@ def _remaining_step_timeout(deadline: float, phase: str) -> int:
 
 def _run_tmux_capture(tmux_name: str, *, timeout: float | None = None) -> str:
     result = subprocess.run(
-        ["tmux", "capture-pane", "-pJ", "-S", "-200", "-t", tmux_name],
+        tmux_route.argv(tmux_name, "capture-pane", "-pJ", "-S", "-200", "-t", tmux_name),
         capture_output=True,
         text=True,
         timeout=timeout or _LIFECYCLE_TMUX_OP_TIMEOUT_S,
@@ -8690,7 +8689,7 @@ def _teardown_stop_container_and_tmux(tmux_name: str) -> None:
         timeout=_LIFECYCLE_STOP_TIMEOUT_S,
     )
     subprocess.run(
-        ["tmux", "kill-session", "-t", tmux_name],
+        tmux_route.argv(tmux_name, "kill-session", "-t", tmux_name),
         capture_output=True,
         text=True,
         timeout=_LIFECYCLE_STOP_TIMEOUT_S,
@@ -9093,13 +9092,14 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
         if result.returncode != 0:
             stderr = result.stderr.decode().strip()
             raise RuntimeError(f"tmux creation failed: {stderr}")
+        tmux_route.record_created(tmux_name)
         for opt, val in (
             ("set-clipboard", "on"),
             ("mouse", "on"),
             ("allow-passthrough", "on"),
         ):
             subprocess.run(
-                ["tmux", "set-option", "-t", tmux_name, opt, val],
+                tmux_route.argv(tmux_name, "set-option", "-t", tmux_name, opt, val),
                 capture_output=True,
                 timeout=_remaining_step_timeout(launch_deadline, "launching"),
             )
@@ -9421,13 +9421,14 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
         if result.returncode != 0:
             stderr = result.stderr.decode().strip()
             raise RuntimeError(f"tmux creation failed: {stderr}")
+        tmux_route.record_created(tmux_name)
         for opt, val in (
             ("set-clipboard", "on"),
             ("mouse", "on"),
             ("allow-passthrough", "on"),
         ):
             subprocess.run(
-                ["tmux", "set-option", "-t", tmux_name, opt, val],
+                tmux_route.argv(tmux_name, "set-option", "-t", tmux_name, opt, val),
                 capture_output=True,
                 timeout=_remaining_step_timeout(launch_deadline, "launching"),
             )
@@ -9556,13 +9557,14 @@ def _run_simple_session_start(job: LifecycleJob, writer: SessionLifecycleStateWr
         if result.returncode != 0:
             stderr = result.stderr.decode().strip()
             raise RuntimeError(f"tmux creation failed: {stderr}")
+        tmux_route.record_created(tmux_name)
         for opt, val in (
             ("set-clipboard", "on"),
             ("mouse", "on"),
             ("allow-passthrough", "on"),
         ):
             subprocess.run(
-                ["tmux", "set-option", "-t", tmux_name, opt, val],
+                tmux_route.argv(tmux_name, "set-option", "-t", tmux_name, opt, val),
                 capture_output=True,
                 timeout=_remaining_step_timeout(launch_deadline, "launching"),
             )
@@ -11001,7 +11003,7 @@ async def api_upload(request):
 # ── WebSocket Terminal ─────────────────────────────────────────
 
 def _tmux_session_exists(name: str) -> bool:
-    return subprocess.run(["tmux", "has-session", "-t", name],
+    return subprocess.run(tmux_route.argv(name, "has-session", "-t", name),
                           capture_output=True).returncode == 0
 
 
@@ -11019,8 +11021,7 @@ def _live_session_names_or_none() -> "set[str] | None":
     "cannot see sessions"; the cost of skipping orphan cleanup for a tick
     is a lingering empty directory, never a destroyed live secret.
     """
-    tmux = subprocess.run(["tmux", "list-sessions", "-F", "#{session_name}"],
-                          capture_output=True, text=True)
+    tmux = tmux_route.list_sessions_result()
     if tmux.returncode != 0:
         return None
     # Container sessions are docker containers named for their session; on a
@@ -11048,8 +11049,7 @@ def _list_dashboard_tmux() -> list[str]:
     api_terminals) MUST treat [] as ambiguous, not authoritative — a silent
     tmux failure was the mass-session-deactivation root cause on 2026-04-20.
     """
-    result = subprocess.run(["tmux", "list-sessions", "-F", "#{session_name}"],
-                            capture_output=True, text=True)
+    result = tmux_route.list_sessions_result()
     if result.returncode != 0:
         stderr = (result.stderr or "").strip()
         # "no server" (the socket doesn't exist) just means no sessions have been
@@ -11087,8 +11087,8 @@ def _detect_terminal_type(tmux_name: str) -> dict:
     else:
         # Host session -- check tmux pane for claude
         pr = subprocess.run(
-            ["tmux", "display-message", "-t", tmux_name, "-p",
-             "#{pane_start_command} #{pane_current_command}"],
+            tmux_route.argv(tmux_name, "display-message", "-t", tmux_name, "-p",
+             "#{pane_start_command} #{pane_current_command}"),
             capture_output=True, text=True,
         )
         pane_info = pr.stdout.strip().lower() if pr.returncode == 0 else ""
@@ -11132,11 +11132,11 @@ async def ws_terminal(websocket: WebSocket):
     # Ensure tmux mouse mode is on for reattached sessions so scroll
     # wheel triggers tmux copy-mode (scrollback lives in tmux, not xterm.js).
     # Users hold Shift to select text at the browser level.
-    subprocess.run(["tmux", "set-option", "-t", tmux_name, "mouse", "on"],
+    subprocess.run(tmux_route.argv(tmux_name, "set-option", "-t", tmux_name, "mouse", "on"),
                     capture_output=True)
-    subprocess.run(["tmux", "set-option", "-t", tmux_name, "set-clipboard", "on"],
+    subprocess.run(tmux_route.argv(tmux_name, "set-option", "-t", tmux_name, "set-clipboard", "on"),
                     capture_output=True)
-    subprocess.run(["tmux", "set-option", "-t", tmux_name, "allow-passthrough", "on"],
+    subprocess.run(tmux_route.argv(tmux_name, "set-option", "-t", tmux_name, "allow-passthrough", "on"),
                     capture_output=True)
 
     # Ensure session is tracked in DB for sessions not yet registered
@@ -11159,7 +11159,7 @@ async def ws_terminal(websocket: WebSocket):
     fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
 
     proc = subprocess.Popen(
-        ["tmux", "attach-session", "-t", tmux_name],
+        tmux_route.argv(tmux_name, "attach-session", "-t", tmux_name),
         stdin=slave_fd,
         stdout=slave_fd,
         stderr=slave_fd,

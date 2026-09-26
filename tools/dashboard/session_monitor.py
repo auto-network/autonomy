@@ -36,6 +36,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+from tools.dashboard import tmux_route
 from typing import Any, Literal
 
 from tools.dashboard.session_lifecycle_worker import (
@@ -113,8 +115,9 @@ def _local_agent_runs_path(stored: str | Path | None) -> str | None:
     that path does not exist, so the monitor could never watch those
     sessions. Re-rooting by the stable ``/agent-runs/`` anchor onto the
     local agent-runs directory recovers them. A stored path that exists is
-    kept as is; a path without the anchor (host ``.claude`` transcripts) and
-    a re-rooted path that does not exist either pass through unchanged.
+    kept as is; a native host transcript under the operator's home is read
+    through /host-home (:func:`_local_host_home_path`); anything else, and a
+    re-rooted path that does not exist, passes through unchanged.
     """
     if stored is None:
         return None
@@ -124,8 +127,26 @@ def _local_agent_runs_path(stored: str | Path | None) -> str | None:
     anchor = "/agent-runs/"
     i = text.find(anchor)
     if i == -1:
-        return text
+        return _local_host_home_path(text)
     candidate = str(_agent_runs_root()).rstrip("/") + text[i + len("/agent-runs"):]
+    return candidate if os.path.exists(candidate) else text
+
+
+def _local_host_home_path(text: str) -> str:
+    """A native host session's transcript, recorded under the operator's
+    host home (AUTONOMY_HOST_HOME), read through the read-only home mount.
+
+    Native host sessions still running on the host tmux server when a node
+    moves to the sidecar stay visible until the operator restarts them
+    (tools/dashboard/tmux_route.py); their transcripts live in the
+    operator's ~/.claude/projects, which this container sees only under
+    /host-home. Passes through unchanged when not applicable."""
+    from tools.data_paths import HOST_HOME_MOUNT
+
+    host_home = (os.environ.get("AUTONOMY_HOST_HOME") or "").rstrip("/")
+    if not host_home or not text.startswith(host_home + "/"):
+        return text
+    candidate = str(HOST_HOME_MOUNT) + text[len(host_home):]
     return candidate if os.path.exists(candidate) else text
 
 # inotify — optional, falls back to polling if unavailable
@@ -4140,7 +4161,7 @@ class SessionMonitor:
                     try:
                         result = await asyncio.to_thread(
                             _subprocess.run,
-                            ["tmux", "capture-pane", "-p", "-t", tmux_name],
+                            tmux_route.argv(tmux_name, "capture-pane", "-p", "-t", tmux_name),
                             capture_output=True, text=True, timeout=5,
                         )
                     except Exception:
@@ -5203,7 +5224,7 @@ class SessionMonitor:
         """
         try:
             return subprocess.run(
-                ["tmux", "has-session", "-t", name],
+                tmux_route.argv(name, "has-session", "-t", name),
                 capture_output=True,
             ).returncode == 0
         except (FileNotFoundError, OSError):
@@ -5231,10 +5252,7 @@ class SessionMonitor:
 
         # Get live tmux sessions
         try:
-            result = subprocess.run(
-                ["tmux", "list-sessions", "-F", "#{session_name}"],
-                capture_output=True, text=True,
-            )
+            result = tmux_route.list_sessions_result()
             live_tmux = set(result.stdout.strip().split("\n")) if result.returncode == 0 else set()
         except (FileNotFoundError, OSError):
             live_tmux = set()

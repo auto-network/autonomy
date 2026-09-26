@@ -83,10 +83,13 @@ def test_dashboard_is_a_client_of_the_sidecar_socket():
     assert dashboard["depends_on"]["tmux"]["condition"] == "service_healthy"
 
 
-def test_no_host_tmp_mount_anywhere():
-    config = _compose_config()
-    assert "/host-tmp" not in json.dumps(config)
-    assert "host-tmp" not in COMPOSE.read_text()
+def test_host_tmp_is_only_the_dashboards_legacy_bridge():
+    """The dashboard reads the host's /tmp only to keep panes that predate the
+    sidecar visible (tools/dashboard/tmux_route.py); the sidecar never sees it
+    and the entrypoint never makes it the default server."""
+    services = _compose_config()["services"]
+    assert _mounts(services["dashboard"])["/host-tmp"] == "/tmp"
+    assert "/host-tmp" not in _mounts(services["tmux"])
     assert "host-tmp" not in ENTRYPOINT.read_text()
 
 

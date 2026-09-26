@@ -529,7 +529,31 @@ def init_db(db_path: Path | None = None) -> None:
     except sqlite3.OperationalError:
         _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN usage_flushed TEXT")
         _conn.commit()
+    # Migrate: the tmux server socket a session's pane lives on
+    # (tools.dashboard.tmux_route). NULL = not yet known; resolved by probing.
+    try:
+        _conn.execute("SELECT tmux_socket FROM tmux_sessions LIMIT 0")
+    except sqlite3.OperationalError:
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN tmux_socket TEXT")
+        _conn.commit()
     logger.info("dashboard_db: initialised at %s", path)
+
+
+def get_tmux_socket(tmux_name: str) -> str | None:
+    """The tmux server socket recorded for *tmux_name*, or None."""
+    row = get_conn().execute(
+        "SELECT tmux_socket FROM tmux_sessions WHERE tmux_name = ?", (tmux_name,),
+    ).fetchone()
+    return row[0] if row and row[0] else None
+
+
+def set_tmux_socket(tmux_name: str, tmux_socket: str) -> None:
+    conn = get_conn()
+    conn.execute(
+        "UPDATE tmux_sessions SET tmux_socket = ? WHERE tmux_name = ?",
+        (tmux_socket, tmux_name),
+    )
+    conn.commit()
 
 
 def reset_conn() -> None:

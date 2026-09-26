@@ -21,10 +21,11 @@ import time
 
 from tools.dashboard.dao import auth_db
 from tools.dashboard.tmux_send import tmux_send
+from tools.dashboard import tmux_route
 
 
 def _tmux_session_exists(name: str) -> bool:
-    return subprocess.run(["tmux", "has-session", "-t", name],
+    return subprocess.run(tmux_route.argv(name, "has-session", "-t", name),
                           capture_output=True).returncode == 0
 
 

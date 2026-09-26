@@ -22,6 +22,8 @@ import subprocess
 import tempfile
 import time
 
+from tools.dashboard import tmux_route
+
 _session_locks: dict[str, asyncio.Lock] = {}
 
 
@@ -141,14 +143,14 @@ def _tmux_paste(target: str, text: str) -> None:
         tmp_path = f.name
     try:
         subprocess.run(
-            ["tmux", "load-buffer", "-b", buf, tmp_path], capture_output=True
+            tmux_route.argv(target, "load-buffer", "-b", buf, tmp_path), capture_output=True
         )
         subprocess.run(
-            ["tmux", "paste-buffer", "-p", "-b", buf, "-t", target],
+            tmux_route.argv(target, "paste-buffer", "-p", "-b", buf, "-t", target),
             capture_output=True,
         )
         subprocess.run(
-            ["tmux", "delete-buffer", "-b", buf], capture_output=True
+            tmux_route.argv(target, "delete-buffer", "-b", buf), capture_output=True
         )
     finally:
         os.unlink(tmp_path)
@@ -158,7 +160,7 @@ def _tmux_enter(target: str) -> None:
     """Fire an Enter to the tmux target. Subprocess outcome dropped
     — see :func:`_tmux_paste`'s docstring."""
     subprocess.run(
-        ["tmux", "send-keys", "-t", target, "\r"], capture_output=True
+        tmux_route.argv(target, "send-keys", "-t", target, "\r"), capture_output=True
     )
 
 
@@ -195,14 +197,14 @@ def _tmux_paste_checked(target: str, text: str) -> None:
         _check_subprocess(
             "load-buffer",
             subprocess.run(
-                ["tmux", "load-buffer", "-b", buf, tmp_path],
+                tmux_route.argv(target, "load-buffer", "-b", buf, tmp_path),
                 capture_output=True,
             ),
         )
         _check_subprocess(
             "paste-buffer",
             subprocess.run(
-                ["tmux", "paste-buffer", "-p", "-b", buf, "-t", target],
+                tmux_route.argv(target, "paste-buffer", "-p", "-b", buf, "-t", target),
                 capture_output=True,
             ),
         )
@@ -210,7 +212,7 @@ def _tmux_paste_checked(target: str, text: str) -> None:
         # already discarded the buffer in some race cases. Don't
         # raise on its failure — the paste already landed.
         subprocess.run(
-            ["tmux", "delete-buffer", "-b", buf], capture_output=True
+            tmux_route.argv(target, "delete-buffer", "-b", buf), capture_output=True
         )
     finally:
         os.unlink(tmp_path)
@@ -233,7 +235,7 @@ def tmux_paste_checked_sync(target: str, text: str, *, timeout: float = 5.0) -> 
         _check_subprocess(
             "load-buffer",
             subprocess.run(
-                ["tmux", "load-buffer", "-b", buf, tmp_path],
+                tmux_route.argv(target, "load-buffer", "-b", buf, tmp_path),
                 capture_output=True,
                 timeout=timeout,
             ),
@@ -241,13 +243,13 @@ def tmux_paste_checked_sync(target: str, text: str, *, timeout: float = 5.0) -> 
         _check_subprocess(
             "paste-buffer",
             subprocess.run(
-                ["tmux", "paste-buffer", "-p", "-b", buf, "-t", target],
+                tmux_route.argv(target, "paste-buffer", "-p", "-b", buf, "-t", target),
                 capture_output=True,
                 timeout=timeout,
             ),
         )
         subprocess.run(
-            ["tmux", "delete-buffer", "-b", buf],
+            tmux_route.argv(target, "delete-buffer", "-b", buf),
             capture_output=True,
             timeout=timeout,
         )
@@ -261,7 +263,7 @@ def _tmux_enter_checked(target: str) -> None:
     _check_subprocess(
         "send-keys",
         subprocess.run(
-            ["tmux", "send-keys", "-t", target, "\r"],
+            tmux_route.argv(target, "send-keys", "-t", target, "\r"),
             capture_output=True,
         ),
     )
@@ -272,7 +274,7 @@ def tmux_enter_checked_sync(target: str, *, timeout: float = 5.0) -> None:
     _check_subprocess(
         "send-keys",
         subprocess.run(
-            ["tmux", "send-keys", "-t", target, "\r"],
+            tmux_route.argv(target, "send-keys", "-t", target, "\r"),
             capture_output=True,
             timeout=timeout,
         ),
@@ -320,13 +322,13 @@ def _tmux_send_one_key(target: str, keystroke: dict) -> None:
         return
     if kind == "literal":
         subprocess.run(
-            ["tmux", "send-keys", "-t", target, "-l", value],
+            tmux_route.argv(target, "send-keys", "-t", target, "-l", value),
             capture_output=True,
         )
     else:
         # Default to non-literal — tmux's standard key syntax (C-m,
         # Down, Escape, etc.). Includes the explicit "key" kind.
         subprocess.run(
-            ["tmux", "send-keys", "-t", target, value],
+            tmux_route.argv(target, "send-keys", "-t", target, value),
             capture_output=True,
         )
