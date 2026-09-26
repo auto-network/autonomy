@@ -85,6 +85,11 @@ def _host_helper_script(path: str) -> str:
     return (
         f'set -e; mkdir -p "{path}"; '
         f'mountpoint -q "{path}" || mount -t ramfs ramfs "{path}"; '
+        # The dashboard binds this path with rslave propagation, which Docker
+        # refuses unless the source is a shared or slave mount. A systemd
+        # host's mounts are shared by default; a host whose root is private
+        # (WSL without systemd, nested Docker) is not, and the next start fails.
+        f'mount --make-shared "{path}"; '
         f'chmod 0700 "{path}"; '
         f'm=$(stat -f -c %t "{path}"); '
         f'case "$m" in '
