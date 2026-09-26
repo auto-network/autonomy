@@ -9,7 +9,7 @@ HERE="$(dirname "$0")"
 F=/run/secrets/aws-win-tester
 [[ -s $F ]] || F="$(graph vault read aws-win-tester --org autonomy | tail -1)"
 PW="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["password"])' "$F")"
-B64="$(iconv -t UTF-16LE <(cat "$SRC") | base64 -w0)"
+B64="$(iconv -f UTF-8 -t UTF-16LE <(cat "$SRC") | base64 -w0)"
 "$HERE/win-run" "$IID" - "$TIMEOUT" <<PS
 \$ErrorActionPreference = 'Stop'
 \$d = 'C:\\autonomy-test'; New-Item -ItemType Directory -Force \$d | Out-Null
