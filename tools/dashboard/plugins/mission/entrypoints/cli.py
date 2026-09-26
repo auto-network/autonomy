@@ -213,14 +213,25 @@ def _payload_from_flags(args) -> dict:
     return payload
 
 
+def _print_link(out) -> None:
+    """Print the server-built deep link: give the operator this, verbatim."""
+    url = (out or {}).get("url") if isinstance(out, dict) else None
+    if url and url.startswith("/"):
+        print(f"    link: {url}  (path only: this node has no Tailnet name "
+              "configured; set DASHBOARD_DOMAIN on the dashboard)")
+    elif url:
+        print(f"    link: {url}")
+
+
 def cmd_add(args):
     call = _api()
     m = _resolve_mission(call, args.mission)
     payload = _payload_from_flags(args)
-    call("PUT", f"/api/mission/item/{m['mission_id']}/{args.pillar}/"
-                f"{args.item_id}", payload)
+    out = call("PUT", f"/api/mission/item/{m['mission_id']}/{args.pillar}/"
+                      f"{args.item_id}", payload)
     print(f"  ✓ {args.pillar}:{args.item_id}"
           f"  [{payload.get('kind', '?')}] {payload.get('title', '')}")
+    _print_link(out)
 
 
 def cmd_retire(args):
@@ -273,9 +284,10 @@ def cmd_update(args):
     if getattr(args, "evidence", None):
         payload["evidence"] = (current.get("evidence") or []) + [
             {"text": e} for e in args.evidence]
-    call("PUT", f"/api/mission/item/{m['mission_id']}/{args.pillar}/"
-                f"{args.item_id}", payload)
+    out = call("PUT", f"/api/mission/item/{m['mission_id']}/{args.pillar}/"
+                      f"{args.item_id}", payload)
     print(f"  ✓ {args.pillar}:{args.item_id} updated")
+    _print_link(out)
 
 
 def _entry_verb(route: str, done: str):
@@ -283,9 +295,10 @@ def _entry_verb(route: str, done: str):
         call = _api()
         m = _resolve_mission(call, args.mission)
         text = _stdin(args.text)
-        call("POST", f"/api/mission/item/{m['mission_id']}/{args.pillar}/"
-                     f"{args.item_id}/{route}", {"text": text})
+        out = call("POST", f"/api/mission/item/{m['mission_id']}/{args.pillar}/"
+                           f"{args.item_id}/{route}", {"text": text})
         print(f"  ✓ {args.pillar}:{args.item_id} {done}")
+        _print_link(out)
     return run
 
 
@@ -295,9 +308,10 @@ def cmd_state(args):
     body: dict = {"state": args.state}
     if args.turn:
         body["turn"] = args.turn
-    call("POST", f"/api/mission/item/{m['mission_id']}/{args.pillar}/"
-                 f"{args.item_id}/state", body)
+    out = call("POST", f"/api/mission/item/{m['mission_id']}/{args.pillar}/"
+                       f"{args.item_id}/state", body)
     print(f"  ✓ {args.pillar}:{args.item_id} → {args.state}")
+    _print_link(out)
 
 
 def cmd_chat(args):

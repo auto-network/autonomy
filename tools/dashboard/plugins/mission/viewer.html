@@ -2873,6 +2873,25 @@
   } catch (e) {}
   show(initialView);
 
+  // A NAMED ITEM is the one exception: /mission/<uuid>#item=<pillar>:<id>
+  // (the key `graph mission items` prints) is a place someone chose to
+  // send the reader, e.g. an agent asking the operator a question. It
+  // lands on the item's pillar with the card flashed, and a question or
+  // decision opens its full page.
+  try {
+    var wantItem = new URLSearchParams(
+      (initialHash || "").replace(/^#/, "")).get("item");
+    var named = wantItem && liveItems.filter(function (it) {
+      return it.key === wantItem; })[0];
+    if (named){
+      // The flash-and-scroll is garnish; the item's page must open even
+      // if it fails.
+      try { gotoItem(named); } catch (e) {}
+      if (named.kind === "question") openQuestion([named], 0);
+      else if (named.kind === "decision") openDecision([named], 0);
+    }
+  } catch (e) { console.error("mission deep link:", e); }
+
   // ── load diagnostics — visible, so a slow open can be read off the
   //    screen instead of guessed at. All times are ms since navigation
   //    start (the moment the link was tapped, srcdoc paths excepted). ──

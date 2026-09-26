@@ -259,6 +259,25 @@ async def mission_screen(request: Request):
     return HTMLResponse(doc)
 
 
+def _item_link(mission_id: str, pillar_id: str, item_id: str) -> str:
+    """The operator-facing deep link to one item.
+
+    ``/mission/<uuid>#item=<pillar>:<item-id>`` opens that item (a
+    question or decision on its own page). The Tailnet base comes from the
+    same resolver the session primer uses, so an agent never has to build
+    the link itself; without a resolvable base the path alone is returned.
+    """
+    from urllib.parse import quote
+    path = (f"/mission/{quote(mission_id)}#item="
+            f"{quote(pillar_id + ':' + item_id, safe=':')}")
+    try:
+        from agents.primer_renderer import _operator_dashboard_url
+        base = _operator_dashboard_url() or ""
+    except Exception:                             # noqa: BLE001
+        base = ""
+    return base + path
+
+
 async def put_item(request: Request) -> JSONResponse:
     """Create or fully rewrite one item; the schema is the gate."""
     pp = request.path_params
@@ -272,7 +291,8 @@ async def put_item(request: Request) -> JSONResponse:
                            pp["item_id"], payload)
     except Exception as exc:                      # noqa: BLE001
         return _refused(exc)
-    return JSONResponse({"ok": True})
+    return JSONResponse({"ok": True, "url": _item_link(
+        pp["mission_id"], pp["pillar_id"], pp["item_id"])})
 
 
 async def post_state(request: Request) -> JSONResponse:
@@ -289,7 +309,9 @@ async def post_state(request: Request) -> JSONResponse:
             turn=(body or {}).get("turn"))
     except Exception as exc:                      # noqa: BLE001
         return _refused(exc)
-    return JSONResponse({"ok": True, "state": item["state"]})
+    return JSONResponse({"ok": True, "state": item["state"],
+                         "url": _item_link(pp["mission_id"], pp["pillar_id"],
+                                           pp["item_id"])})
 
 
 def _coordinator_of(org: str | None, mission_id: str,
@@ -361,20 +383,21 @@ def _entry_route(fn, what: str = "entry", **fixed):
         # The chat route always relayed; item entries silently did not —
         # a question reply reached the record but never the coordinator
         # (found live by the operator on the first cross-org mission).
+        link = _item_link(pp["mission_id"], pp["pillar_id"], pp["item_id"])
         relayed = await _relay_to_coordinator(
             org, pp["mission_id"], pp["pillar_id"], by,
             f"[mission {what} \u00b7 {pp['pillar_id']}] "
             f"on item {pp['item_id']}: {text}\n"
-            f"View: /mission/{pp['mission_id']}")
+            f"View: {link}")
         asker_notified = await _relay_to_asker(
             org, pp["mission_id"], pp["pillar_id"], item, by,
             f"[mission {what} \u00b7 {pp['pillar_id']}] "
             f"on your question {pp['item_id']}: {text}\n"
             f"Reply with: graph mission reply {pp['mission_id']} "
             f"{pp['pillar_id']} {pp['item_id']} \"...\"\n"
-            f"View: /mission/{pp['mission_id']}")
+            f"View: {link}")
         return JSONResponse({"ok": True, "relayed": relayed,
-                             "asker_notified": asker_notified})
+                             "asker_notified": asker_notified, "url": link})
     return handler
 
 

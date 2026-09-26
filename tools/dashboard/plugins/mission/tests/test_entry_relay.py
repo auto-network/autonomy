@@ -55,6 +55,8 @@ def test_reply_reaches_coordinator_and_asking_session(monkeypatch):
     assert [to for _, to, _ in sent] == ["auto-coord", "auto-asker"]
     assert "on your question q1: use B" in sent[1][2]
     assert "graph mission reply m1 platform q1" in sent[1][2]
+    assert body["url"].endswith("/mission/m1#item=platform:q1")
+    assert body["url"] in sent[0][2] and body["url"] in sent[1][2]
 
 
 @pytest.mark.parametrize("asked_by, by", [

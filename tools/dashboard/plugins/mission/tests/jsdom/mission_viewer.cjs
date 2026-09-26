@@ -28,7 +28,8 @@ function texts(root, sel) {
 const html = fs.readFileSync(docPath, "utf8");
 const dom = new JSDOM(html, {
   runScripts: "dangerously",
-  url: "https://localhost:8080/api/mission/screen/test",
+  // MISSION_HASH lets a scenario arrive through a deep link.
+  url: "https://localhost:8080/api/mission/screen/test" + (process.env.MISSION_HASH || ""),
   pretendToBeVisual: true,
 });
 const { window } = dom;
@@ -323,6 +324,21 @@ const SCENARIOS = {
     document.getElementById("tab-feed").click();
     check("feed empty message", document.querySelector(".mc-view.on")
       .textContent.includes("Nothing has happened yet"));
+  },
+  // Arrived at /mission/<uuid>#item=relay:q-provision: the question's
+  // own page is open over its pillar, not the overview.
+  deeplink: async () => {
+    await tick();
+    const page = document.getElementById("mc-critpage");
+    check("deep link opens the question page", !!page);
+    check("the named question, not another",
+      page && page.textContent.includes("Who provisions the runtime?"));
+    const on = document.querySelector(".mc-view.on");
+    check("its pillar is the view underneath", on && on.id === "view-relay");
+  },
+  deeplink_unknown: async () => {
+    await tick();
+    check("an unknown item opens no page", !document.getElementById("mc-critpage"));
   },
 };
 

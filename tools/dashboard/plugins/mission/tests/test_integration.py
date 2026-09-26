@@ -13,6 +13,7 @@ tools/dashboard/tests/test_jsdom_smoke.py.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -25,7 +26,7 @@ _HARNESS = Path(__file__).parent / "jsdom" / "mission_viewer.cjs"
 
 
 def _run_scenario(monkeypatch, tmp_path, name: str, store,
-                  detail: dict | None = None) -> None:
+                  detail: dict | None = None, hash_: str = "") -> None:
     node = shutil.which("node")
     if node is None:
         pytest.skip("node not available")
@@ -37,7 +38,9 @@ def _run_scenario(monkeypatch, tmp_path, name: str, store,
         dpath = tmp_path / f"{name}.detail.json"
         dpath.write_text(json.dumps(detail), encoding="utf-8")
         argv.append(str(dpath))
-    proc = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+    env = {**os.environ, "MISSION_HASH": hash_}
+    proc = subprocess.run(argv, capture_output=True, text=True, timeout=120,
+                          env=env)
     combined = (proc.stdout or "") + (proc.stderr or "")
     if "MODULE_NOT_FOUND" in combined or "Cannot find module 'jsdom'" in combined:
         pytest.skip("jsdom not resolvable")
@@ -70,3 +73,13 @@ def test_full_mission_renders_every_screen(monkeypatch, tmp_path):
 
 def test_empty_mission_degrades_gracefully(monkeypatch, tmp_path):
     _run_scenario(monkeypatch, tmp_path, "empty", scenarios.empty())
+
+
+def test_item_deep_link_opens_the_question(monkeypatch, tmp_path):
+    _run_scenario(monkeypatch, tmp_path, "deeplink", scenarios.full(),
+                  hash_="#item=relay:q-provision")
+
+
+def test_unknown_item_deep_link_lands_on_the_overview(monkeypatch, tmp_path):
+    _run_scenario(monkeypatch, tmp_path, "deeplink_unknown", scenarios.full(),
+                  hash_="#item=relay:no-such-item")

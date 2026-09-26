@@ -246,6 +246,24 @@ def test_operator_dashboard_url_derives_magicdns_name(monkeypatch):
     ) == "https://desktop-example.tailabcd.ts.net:8080"
 
 
+def test_operator_dashboard_url_refuses_a_docker_container_hostname(monkeypatch):
+    """A compose container's hostname is its Docker id; the derived name
+    (aa302e2998c1.<tailnet>.ts.net, seen live) resolves nowhere."""
+    from agents import primer_renderer
+
+    monkeypatch.delenv("DASHBOARD_DOMAIN", raising=False)
+    assert primer_renderer._operator_dashboard_url(
+        configured_domain="",
+        hostname="aa302e2998c1",
+        resolv_text="search tailabcd.ts.net\n",
+    ) is None
+    assert primer_renderer._operator_dashboard_url(
+        configured_domain="node.tailabcd.ts.net",
+        hostname="aa302e2998c1",
+        resolv_text="search tailabcd.ts.net\n",
+    ) == "https://node.tailabcd.ts.net:8080"
+
+
 def test_the_network_section_is_identical_under_both_flag_values():
     """The old two-branch section is gone, so the flag changes nothing here."""
     enabled = render_workspace_primer(_cfg(network_host=True))
@@ -629,8 +647,9 @@ def test_writable_session_branch_uses_session_prefix():
     assert "agent/<session>" not in out
 
 
-def test_graph_api_guidance_and_operator_link_rule_render_on_separate_lines():
+def test_graph_api_guidance_and_operator_link_rule_render_on_separate_lines(monkeypatch):
     """Jinja trimming must not join the network section to the link rule."""
+    monkeypatch.setenv("DASHBOARD_DOMAIN", "dash.tail1234.ts.net")
     for network_host in (True, False):
         out = render_workspace_primer(_cfg(
             repos=(RepoMount(host="example.com", repo="o/r",

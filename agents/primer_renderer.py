@@ -72,6 +72,9 @@ _DNS_NAME_RE = re.compile(
 )
 
 
+_DOCKER_ID_HOSTNAME_RE = re.compile(r"[0-9a-f]{12}")
+
+
 def _operator_dashboard_url(
     *,
     configured_domain: str | None = None,
@@ -108,7 +111,12 @@ def _operator_dashboard_url(
             ),
             "",
         )
-        if host and suffix:
+        # A bridge/compose container's hostname is its Docker id (twelve
+        # hex digits), not the machine's Tailnet name: joined to the suffix
+        # it produced a link that resolves nowhere (seen live on a Compose
+        # node as aa302e2998c1.<tailnet>.ts.net). Only DASHBOARD_DOMAIN can
+        # name the node there.
+        if host and suffix and not _DOCKER_ID_HOSTNAME_RE.fullmatch(host):
             domain = f"{host}.{suffix}"
     if not domain or not _DNS_NAME_RE.fullmatch(domain):
         return None
