@@ -552,13 +552,43 @@ def onboarding_branch() -> dict:
     return {"branch": branch, "org": slug}
 
 
-def render_workspace_primer(config: WorkspaceV1) -> str:
+#: The host terminal's synthetic workspace id: the key its
+#: ``autonomy.workspace.primer#1`` overlay rows use in the personal org.
+HOST_TERMINAL_WORKSPACE_ID = "host"
+
+
+def host_terminal_workspace() -> WorkspaceV1:
+    """The synthetic workspace the host terminal renders through.
+
+    The host terminal is a built-in session kind, never a workspace row
+    (graph://89d3c8df-544 §4, decision D1); this shape exists only so the
+    primer pipeline and its personal-org overlays apply to it.
+    """
+    return WorkspaceV1(
+        id=HOST_TERMINAL_WORKSPACE_ID,
+        name="Host Terminal",
+        description="the operator's host terminal on this node",
+        image="autonomy-host-terminal",
+        graph_project="personal",
+        working_dir="/workspace/repo",
+    )
+
+
+def render_host_terminal_primer() -> str:
+    """Render the host terminal's ``~/.claude/CLAUDE.md``."""
+    return render_workspace_primer(host_terminal_workspace(), host_terminal=True)
+
+
+def render_workspace_primer(config: WorkspaceV1, *, host_terminal: bool = False) -> str:
     """Render the workspace runtime primer for a given project config.
 
     Args:
         config: The workspace's launch shape, resolved entirely from
             graph Settings by ``agents.workspace_settings``. There is no
             ``agents/projects.yaml``; it was removed.
+        host_terminal: Render the host terminal's block
+            (``primers/host-terminal.md.j2``) in place of the repo and
+            editing sections. Only ``render_host_terminal_primer`` sets it.
 
     Returns:
         The rendered markdown primer as a string.
@@ -614,6 +644,7 @@ def render_workspace_primer(config: WorkspaceV1) -> str:
         has_startup = False
     return template.render(
         config=config,
+        host_terminal=host_terminal,
         has_startup=has_startup,
         writable_repos=writable_repos,
         readonly_repos=readonly_repos,

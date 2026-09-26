@@ -1445,3 +1445,43 @@ def test_onboarding_branch_reads_inventory_and_persona_source(monkeypatch):
     assert primer_renderer.onboarding_branch() == {"branch": "founded", "org": "acme"}
     monkeypatch.setattr(org_ops, "list_orgs", lambda **kw: refs[:1])
     assert primer_renderer.onboarding_branch() == {"branch": "none", "org": None}
+
+
+# ── Host terminal (auto-yk9dx, graph://89d3c8df-544 §4) ───────────────
+
+def test_host_terminal_primer_carries_the_in_node_brief():
+    out = primer_renderer.render_host_terminal_primer()
+    for needle in ("/host-home", "/workspace/repo/data", "hot-reload", "docker compose",
+                   "autonomy-host-terminal", "graph credentials import --home /host-home"):
+        assert needle in out, needle
+    for stale in ("systemctl", "nvm", "start-dashboard.sh"):
+        assert stale not in out, stale
+    # The workspace repo/limits sections describe a sandbox the host terminal
+    # is not; its own block replaces them.
+    assert "## Workspace Repos" not in out
+    assert "No Docker socket to the host" not in out
+
+
+def test_host_terminal_is_a_synthetic_personal_workspace():
+    ws = primer_renderer.host_terminal_workspace()
+    assert (ws.id, ws.graph_project, ws.image, ws.working_dir, ws.repos) == (
+        "host", "personal", "autonomy-host-terminal", "/workspace/repo", ())
+    assert not ws.capabilities
+
+
+def test_host_terminal_overlay_block_renders(_turn_correction_org_env):
+    from tools.graph.db import GraphDB as _GraphDB
+    _GraphDB.create_org_db("personal").close()
+    _write_overlay(
+        _WS_PRIMER_SET_ID, _WS_PRIMER_REV, "host:nas",
+        {"markdown": "## This Machine\n\nThe NAS is mounted at /mnt/nas on the host."},
+        org="personal",
+    )
+    out = primer_renderer.render_host_terminal_primer()
+    assert "The NAS is mounted at /mnt/nas on the host." in out
+
+
+def test_workspace_primer_does_not_render_the_host_block():
+    out = render_workspace_primer(_cfg())
+    assert "## Host Terminal" not in out
+    assert "/host-home" not in out

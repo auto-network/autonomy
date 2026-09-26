@@ -10,7 +10,9 @@ launch.
 * ``GET /api/primers/workspace/{workspace_id}`` — render the named
   workspace's primer via ``agents.primer_renderer.render_workspace_primer``
   and return the markdown plus a rough token estimate
-  (``len(markdown) // 4``).
+  (``len(markdown) // 4``). The id ``host`` renders the built-in host
+  terminal's primer (``render_host_terminal_primer``) for unscoped or
+  personal callers.
 
 Both routes honour ``X-Graph-Org``: when the header carries a slug the
 response is filtered to workspaces owned by that org. Without the
@@ -94,10 +96,34 @@ async def render_workspace(request: Request) -> JSONResponse:
     returns ``{markdown, token_estimate, workspace}``. Unknown workspace
     ids return 404; render errors return 500 with a generic message.
     """
-    from agents.primer_renderer import render_workspace_primer
+    from agents.primer_renderer import (
+        HOST_TERMINAL_WORKSPACE_ID,
+        host_terminal_workspace,
+        render_host_terminal_primer,
+        render_workspace_primer,
+    )
     from agents.workspace_settings import load_workspaces
 
     workspace_id = request.path_params["workspace_id"]
+
+    if workspace_id == HOST_TERMINAL_WORKSPACE_ID:
+        # The host terminal is a built-in personal-org session kind, never a
+        # workspace row; an organization-scoped caller does not see it.
+        if api_auth.organization_scope_from_request(request) not in (None, "personal"):
+            return JSONResponse(
+                {"error": f"unknown workspace: {workspace_id!r}"},
+                status_code=404,
+            )
+        try:
+            markdown = render_host_terminal_primer()
+        except Exception:
+            logger.exception("[primers] render_host_terminal_primer raised")
+            return JSONResponse({"error": "rendering failed"}, status_code=500)
+        return JSONResponse({
+            "markdown": markdown,
+            "token_estimate": len(markdown) // 4,
+            "workspace": _workspace_metadata(host_terminal_workspace()),
+        })
 
     try:
         workspaces = load_workspaces()

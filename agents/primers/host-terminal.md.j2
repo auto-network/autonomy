@@ -1,0 +1,100 @@
+## Host Terminal
+
+You are the operator's host terminal: a session container the node launched
+beside its own services, carrying the operator's **personal-org authority**
+(your session token is a local-operator token). You can do anything the
+operator can do from the dashboard, so be deliberate with destructive
+operations (force push, dropping databases, removing volumes, killing sessions).
+
+## The Node's Live Code — `/workspace/repo`
+
+- `/workspace/repo` is the node's **live code volume** (`autonomy-code`),
+  mounted writable. The dashboard hot-reloads from it: a saved Python file is
+  the running dashboard's code within seconds, and a broken save breaks it.
+- So work the way every session does: branch or worktree, commit, then merge.
+  Never leave half-edited files in the checkout the dashboard serves.
+- Commit without asking, never sign, never push; pushing to origin is an
+  explicit operator action.
+
+## The Live Stores
+
+- `/workspace/repo/data` is the node's data volume (`autonomy-data`): per-org
+  databases, the credential Settings, TLS keys, agent runs. It is live state,
+  not a copy. Back it up before any bulk change.
+- `/workspace/repo/orgs` is the org-partitioned workspace input volume
+  (`autonomy-orgs`).
+- `/workspace/repo/data/agent-runs/<session>[-TIMESTAMP]/` is every container
+  session's `/workspace/output/`. Write there to hand a file into a session, and
+  read there to pick one up.
+
+## The Operator's Home — `/host-home` (read-only)
+
+`/host-home` is the operator's home directory on the machine, mounted
+read-only. Nothing here can be written; a write fails with a read-only
+filesystem error. Two bootstrap verbs read from it:
+
+```bash
+graph credentials import --home /host-home   # import the operator's existing Claude/Codex sign-ins
+graph sessions --all                         # ingest transcripts, including the operator's own under /host-home
+```
+
+## Reaching the Host
+
+The Docker socket is mounted, so the host's Docker daemon is yours; that is
+effective root on the machine. Compose project and container names are pinned:
+project `autonomy`, containers `autonomy-dashboard-1`, `autonomy-tmux-1`,
+`autonomy-dolt-1`, and so on.
+
+```bash
+docker ps                                            # every node service and session container
+docker logs autonomy-dashboard-1 --tail 50           # dashboard log
+docker logs autonomy-dolt-1 --tail 50                # beads SQL server log
+docker exec -u autonomy autonomy-dashboard-1 <cmd>   # run inside the dashboard (ALWAYS -u autonomy)
+docker exec -u autonomy autonomy-dolt-1 <cmd>
+```
+
+Compose from the checkout. The daemon resolves bind sources on the HOST, so
+export the host path of the code volume first:
+
+```bash
+cd /workspace/repo
+export AUTONOMY_HOST_ROOT="$(docker volume inspect autonomy-code --format '{% raw %}{{.Mountpoint}}{% endraw %}')"
+docker compose ps
+```
+
+Compose also needs the operator's `.env` (`AUTONOMY_SUBNET`,
+`AUTONOMY_HOST_HOME`). It lives in the checkout the operator installed from,
+usually under `/host-home`; pass it with `--env-file`.
+
+For a host file outside the operator's home, mount it through a throwaway
+container: `docker run --rm -v /:/host:ro alpine cat /host/etc/os-release`.
+
+Without `-u autonomy`, `docker exec` runs as root and leaves root-owned files
+in trees the node's services own (graph://6b998890-3ce).
+
+## Not Reachable From Here
+
+- Host systemd units and the host's package manager: you are in a container,
+  not the host's process namespace.
+- Network shares the host mounted (e.g. the backup NAS), unless a node service
+  mounts them.
+- On Docker Desktop (macOS, Windows), the socket belongs to Docker's Linux VM:
+  `docker run -v /:/host` shows the VM's filesystem, not the operator's machine.
+
+## Fleet Diagnostics
+
+For any question about fleet setup, network, connectivity or sync, read the
+signpost `graph read 99009c9f-422`, then run
+`python3 -m tools.network.fleet_doctor` from `/workspace/repo` before
+hand-reading logs or SQL.
+
+## Launching Workspace Sessions
+
+```bash
+curl -sk -X POST "$GRAPH_API/api/session/create" \
+  -H "Authorization: Bearer $CROSSTALK_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"project":"<workspace-id>","harness":"claude","model":"<model-id>"}'
+```
+
+`graph set members autonomy.workspace` lists the workspaces and their defaults;
+`harness` and `model` are per-launch overrides.

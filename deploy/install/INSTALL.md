@@ -79,6 +79,9 @@ that persists. That's the honest pitch, and §5 is how you check the rest.
 
 - Platform and resources: Linux, macOS, or WSL2; Docker present
   (`docker --version`, `docker compose version`); a few GB of disk.
+  Docker with Compose is the only host prerequisite: tmux, Claude Code and
+  every other session tool run inside the node's containers, including the
+  operator's host terminal.
 - **Already installed?** Probe `https://localhost:8080` (accept a
   self-signed cert). A responding Autonomy dashboard means your job is
   handoff, not installation — tell the user. Do not send an invitation or a
@@ -167,7 +170,10 @@ for consent before the mutating steps unless `--yes` is given.
 ```bash
 # You cloned in §2 to run the preflight; reuse that checkout. (git clone
 # <source you chose> autonomy && cd autonomy — if you have not yet.)
-# .env already carries the AUTONOMY_SUBNET the preflight chose.
+# .env already carries the AUTONOMY_SUBNET the preflight chose. Record the
+# operator's home: it is mounted read-only at /host-home so the node can
+# import existing Claude/Codex sign-ins and transcripts; nothing is written.
+grep -q '^AUTONOMY_HOST_HOME=' .env || echo "AUTONOMY_HOST_HOME=$HOME" >> .env
 docker compose --profile service-gateway build service-gateway
 AUTONOMY_FIRST_ORG=myorg docker compose up -d
 # → https://localhost:8080  (self-signed cert; accept once)

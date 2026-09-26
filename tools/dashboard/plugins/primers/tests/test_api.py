@@ -215,3 +215,38 @@ def test_routes_export_is_a_list_of_two_routes():
         "/api/primers/workspaces",
         "/api/primers/workspace/{workspace_id}",
     }
+
+
+# ── Host terminal (auto-yk9dx) ───────────────────────────────────────────
+
+
+def test_render_host_terminal_primer_for_an_unscoped_caller():
+    """``host`` is the built-in host terminal, not a workspace row: it
+    renders through ``render_host_terminal_primer`` without consulting
+    ``load_workspaces``."""
+    def _no_workspaces():
+        raise AssertionError("host must not read workspace rows")
+
+    with patch("agents.workspace_settings.load_workspaces",
+               _no_workspaces, create=True), \
+         patch("agents.primer_renderer.render_host_terminal_primer",
+               lambda: "# Host Terminal primer", create=True):
+        resp = _client().get("/api/primers/workspace/host")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["markdown"] == "# Host Terminal primer"
+    assert body["workspace"]["id"] == "host"
+    assert body["workspace"]["org"] == "personal"
+    assert body["workspace"]["image"] == "autonomy-host-terminal"
+
+
+def test_render_host_terminal_primer_hidden_from_an_org_scoped_caller():
+    """Caller scope comes from the identity middleware, which the bare test
+    app does not run; stub the helper the route reads."""
+    with patch("agents.primer_renderer.render_host_terminal_primer",
+               lambda: "# Host Terminal primer", create=True), \
+         patch.object(primers_api.api_auth, "organization_scope_from_request",
+                      lambda request: "autonomy"):
+        resp = _client().get("/api/primers/workspace/host")
+    assert resp.status_code == 404
