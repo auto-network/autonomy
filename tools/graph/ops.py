@@ -2490,6 +2490,14 @@ def move_source(
     ``from_org`` and ``to_org`` are authoritative. This primitive does not
     auto-discover the origin org from ``source_id`` because the CLI contract
     is explicit about both ends of the transfer.
+
+    Each org's rows are written through that org's own ``GraphDB``
+    connection, so a fleet-synced org captures the write under its own
+    catalog (auto-rfets). The copy into the target commits first; the
+    origin's deletes and its ``moved_to_org`` stub commit second. A move
+    interrupted between the two is completed by re-running it: the target
+    copy is recognized and only the missing rows and the origin side are
+    written. Ids are preserved throughout, so existing links keep resolving.
     """
     if not from_org:
         raise ValueError("from_org required")
@@ -2506,15 +2514,11 @@ def move_source(
         raise ValueError(f"target org not found: {to_org!r}")
 
     origin_db = GraphDB(origin_path)
-    attached = False
+    target_db: GraphDB | None = None
     try:
-        conn = origin_db.conn
-        conn.execute("ATTACH DATABASE ? AS target", (str(target_path),))
-        attached = True
-
-        row = conn.execute(
-            "SELECT * FROM main.sources WHERE id = ?",
-            (source_id,),
+        o = origin_db.conn
+        row = o.execute(
+            "SELECT * FROM sources WHERE id = ?", (source_id,),
         ).fetchone()
         if row is None:
             raise LookupError(
@@ -2525,15 +2529,26 @@ def move_source(
                 f"source {source_id!r} is already a moved stub to "
                 f"{row['moved_to_org']!r}"
             )
-        if conn.execute(
-            "SELECT 1 FROM target.sources WHERE id = ?",
+
+        target_db = GraphDB(target_path)
+        t = target_db.conn
+
+        existing = t.execute(
+            "SELECT created_at, file_path FROM sources WHERE id = ?",
             (source_id,),
-        ).fetchone() is not None:
+        ).fetchone()
+        # An interrupted earlier move left the committed copy in the target
+        # and the origin still live: same id, same identity fields.
+        resuming = existing is not None and (
+            existing["created_at"] == row["created_at"]
+            and existing["file_path"] == row["file_path"]
+        )
+        if existing is not None and not resuming:
             raise ValueError(
                 f"target org {to_org!r} already has source {source_id!r}"
             )
-        if row["file_path"] and conn.execute(
-            "SELECT 1 FROM target.sources WHERE file_path = ?",
+        if not resuming and row["file_path"] and t.execute(
+            "SELECT 1 FROM sources WHERE file_path = ?",
             (row["file_path"],),
         ).fetchone() is not None:
             raise ValueError(
@@ -2541,7 +2556,51 @@ def move_source(
                 f"{row['file_path']!r}"
             )
 
-        now = conn.execute(
+        def _rows(sql: str, *params) -> list[dict]:
+            return [dict(r) for r in o.execute(sql, params).fetchall()]
+
+        like = f"{source_id}@%"
+        children = {
+            "thoughts": _rows(
+                "SELECT * FROM thoughts WHERE source_id = ?", source_id),
+            "derivations": _rows(
+                "SELECT * FROM derivations WHERE source_id = ?", source_id),
+            "note_comments": _rows(
+                "SELECT * FROM note_comments WHERE source_id = ?", source_id),
+            # note_versions.id is a local autoincrement; the version key is
+            # (source_id, version).
+            "note_versions": [
+                {k: v for k, v in r.items() if k != "id"}
+                for r in _rows(
+                    "SELECT * FROM note_versions WHERE source_id = ?",
+                    source_id)
+            ],
+            "note_reads": _rows(
+                "SELECT * FROM note_reads WHERE source_id = ?", source_id),
+            "attachments": _rows(
+                "SELECT * FROM attachments WHERE source_id = ? OR source_id LIKE ?",
+                source_id, like),
+            "captures": _rows(
+                "SELECT * FROM captures WHERE source_id = ?", source_id),
+            "edges": _rows(
+                "SELECT * FROM edges WHERE source_id = ?", source_id),
+            "claims": _rows(
+                "SELECT * FROM claims WHERE source_id = ?", source_id),
+        }
+
+        if not resuming:
+            for a in children["attachments"]:
+                if t.execute(
+                    "SELECT 1 FROM attachments WHERE file_path = ?",
+                    (a["file_path"],),
+                ).fetchone() is not None:
+                    raise ValueError(
+                        "target org already has an attachment row for one of "
+                        "this source's blob paths; cannot preserve attachment "
+                        "UUIDs safely"
+                    )
+
+        now = o.execute(
             "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
         ).fetchone()[0]
 
@@ -2566,107 +2625,62 @@ def move_source(
             moved_meta["reason"] = reason
         origin_meta["moved"] = moved_meta
 
-        target_attach_conflict = conn.execute(
-            "SELECT 1 FROM target.attachments "
-            "WHERE (source_id = ? OR source_id LIKE ?) "
-            "  AND file_path IN ("
-            "    SELECT file_path FROM main.attachments "
-            "    WHERE source_id = ? OR source_id LIKE ?"
-            "  ) LIMIT 1",
-            (source_id, f"{source_id}@%", source_id, f"{source_id}@%"),
-        ).fetchone()
-        if target_attach_conflict is not None:
-            raise ValueError(
-                "target org already has an attachment row for one of this "
-                "source's blob paths; cannot preserve attachment UUIDs safely"
+        def _insert(table: str, record: dict, verb: str) -> None:
+            cols = list(record)
+            t.execute(
+                f"{verb} INTO {table}({', '.join(cols)}) "
+                f"VALUES ({', '.join('?' for _ in cols)})",
+                tuple(record[c] for c in cols),
             )
 
-        conn.execute("BEGIN IMMEDIATE")
+        # Phase 1: the copy, authored by the target store.
+        t.execute("BEGIN IMMEDIATE")
+        try:
+            if not resuming:
+                _insert("sources", {
+                    "id": row["id"], "type": row["type"],
+                    "platform": row["platform"], "title": row["title"],
+                    "url": row["url"], "file_path": row["file_path"],
+                    "metadata": json.dumps(target_meta),
+                    "created_at": row["created_at"],
+                    "ingested_at": row["ingested_at"],
+                    "last_activity_at": row["last_activity_at"],
+                    "publication_state": row["publication_state"],
+                    "deprecated": row["deprecated"],
+                    "successor_id": row["successor_id"],
+                    "moved_to_org": None,
+                }, "INSERT")
+            verb = "INSERT OR IGNORE" if resuming else "INSERT"
+            for table, records in children.items():
+                for record in records:
+                    _insert(table, record, verb)
+            t.commit()
+        except Exception:
+            t.rollback()
+            raise
 
-        conn.execute(
-            "INSERT INTO target.sources("
-            "id, type, platform, title, url, file_path, metadata, "
-            "created_at, ingested_at, last_activity_at, publication_state, "
-            "deprecated, successor_id, moved_to_org"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
-            (
-                row["id"], row["type"], row["platform"],
-                row["title"], row["url"], row["file_path"],
-                json.dumps(target_meta), row["created_at"], row["ingested_at"],
-                row["last_activity_at"], row["publication_state"],
-                row["deprecated"], row["successor_id"],
-            ),
-        )
-
-        for table in ("thoughts", "derivations", "note_comments"):
-            conn.execute(
-                f"INSERT INTO target.{table} SELECT * FROM main.{table} WHERE source_id = ?",
-                (source_id,),
+        # Phase 2: the origin's deletes and stub, authored by the origin store.
+        o.execute("BEGIN IMMEDIATE")
+        try:
+            o.execute("DELETE FROM claims WHERE source_id = ?", (source_id,))
+            o.execute("DELETE FROM edges WHERE source_id = ?", (source_id,))
+            o.execute("DELETE FROM captures WHERE source_id = ?", (source_id,))
+            o.execute(
+                "DELETE FROM attachments WHERE source_id = ? OR source_id LIKE ?",
+                (source_id, like),
             )
-        conn.execute(
-            "INSERT INTO target.note_versions(source_id, version, content, created_at) "
-            "SELECT source_id, version, content, created_at "
-            "FROM main.note_versions WHERE source_id = ?",
-            (source_id,),
-        )
-        conn.execute(
-            "INSERT INTO target.note_reads(source_id, actor, ts) "
-            "SELECT source_id, actor, ts FROM main.note_reads WHERE source_id = ?",
-            (source_id,),
-        )
-
-        conn.execute(
-            "INSERT INTO target.attachments "
-            "SELECT * FROM main.attachments WHERE source_id = ? OR source_id LIKE ?",
-            (source_id, f"{source_id}@%"),
-        )
-        conn.execute(
-            "INSERT INTO target.captures "
-            "SELECT * FROM main.captures WHERE source_id = ?",
-            (source_id,),
-        )
-        conn.execute(
-            "INSERT INTO target.edges "
-            "SELECT * FROM main.edges WHERE source_id = ?",
-            (source_id,),
-        )
-
-        claim_rows = conn.execute(
-            "SELECT * FROM main.claims WHERE source_id = ?",
-            (source_id,),
-        ).fetchall()
-        for claim in claim_rows:
-            subj = claim["subject_id"]
-            obj = claim["object_id"]
-            conn.execute(
-                "INSERT INTO target.claims("
-                "id, subject_id, predicate, object_id, object_val, source_id, "
-                "asserted_by, confidence, status, evidence, metadata, created_at"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    claim["id"], subj, claim["predicate"], obj,
-                    claim["object_val"], claim["source_id"], claim["asserted_by"],
-                    claim["confidence"], claim["status"], claim["evidence"],
-                    claim["metadata"], claim["created_at"],
-                ),
+            for table in ("note_reads", "note_versions", "note_comments",
+                          "derivations", "thoughts"):
+                o.execute(f"DELETE FROM {table} WHERE source_id = ?", (source_id,))
+            o.execute(
+                "UPDATE sources SET deprecated = 1, moved_to_org = ?, "
+                "metadata = ?, ingested_at = ? WHERE id = ?",
+                (to_org, json.dumps(origin_meta), now, source_id),
             )
-
-        conn.execute("DELETE FROM main.claims WHERE source_id = ?", (source_id,))
-        conn.execute("DELETE FROM main.edges WHERE source_id = ?", (source_id,))
-        conn.execute("DELETE FROM main.captures WHERE source_id = ?", (source_id,))
-        conn.execute(
-            "DELETE FROM main.attachments WHERE source_id = ? OR source_id LIKE ?",
-            (source_id, f"{source_id}@%"),
-        )
-        for table in ("note_reads", "note_versions", "note_comments", "derivations", "thoughts"):
-            conn.execute(f"DELETE FROM main.{table} WHERE source_id = ?", (source_id,))
-
-        conn.execute(
-            "UPDATE main.sources SET deprecated = 1, moved_to_org = ?, metadata = ?, ingested_at = ? "
-            "WHERE id = ?",
-            (to_org, json.dumps(origin_meta), now, source_id),
-        )
-        conn.commit()
+            o.commit()
+        except Exception:
+            o.rollback()
+            raise
         return {
             "source_id": source_id,
             "title": row["title"] or "",
@@ -2675,18 +2689,9 @@ def move_source(
             "moved_at": now,
             "reason": reason,
         }
-    except Exception:
-        try:
-            origin_db.conn.rollback()
-        except Exception:
-            pass
-        raise
     finally:
-        if attached:
-            try:
-                origin_db.conn.execute("DETACH DATABASE target")
-            except Exception:
-                pass
+        if target_db is not None:
+            target_db.close()
         origin_db.close()
 
 
