@@ -942,13 +942,15 @@ def _encode_project_cwd(path: str) -> str:
 # Claude Code project-dir → org slug. Host sessions live at
 # ``~/.claude/projects/-<encoded-cwd>/<uuid>.jsonl`` and carry no
 # ``.session_meta.json``, so the only routing signal is the encoded cwd.
-# Keys derive from the operator's home (``Path.home()``) so the table stays
+# Keys derive from the operator's home (``AUTONOMY_HOST_HOME``, else
+# ``Path.home()``) so the table stays
 # correct regardless of the host user; set AUTONOMY_HOST_PROJECT_ORGS to a JSON
 # ``{"<abs-cwd>": "<org>"}`` object to override/extend it on other deployments
 # (see DEPLOY.md). Add repos below when a new on-host project starts producing
 # sessions.
 def _build_host_project_to_org() -> dict[str, str]:
-    home = str(Path.home())
+    # The OPERATOR's home: a containerized observer's own home is not it.
+    home = os.environ.get("AUTONOMY_HOST_HOME") or str(Path.home())
     by_cwd = {
         f"{home}/workspace/widgets-ng": "anchore",
         f"{home}/workspace/widgets": "anchore",
@@ -999,6 +1001,26 @@ def _org_from_host_project_path(file_path: Path) -> str | None:
     return _HOST_PROJECT_TO_ORG.get(parent_name)
 
 
+#: The operator's home, mounted read-only in the dashboard and the host
+#: terminal (graph://89d3c8df-544 §5). Its transcripts are the operator's own
+#: pre-existing history; they are scanned when the mount exists and recorded
+#: under the host-canonical home (``AUTONOMY_HOST_HOME``).
+HOST_HOME_MOUNT = Path("/host-home")
+
+
+def _host_home_mount() -> Path | None:
+    """The operator-home mount when present and distinct from this
+    process's own home (natively the two roots are the same tree)."""
+    try:
+        if not HOST_HOME_MOUNT.is_dir():
+            return None
+        if HOST_HOME_MOUNT.resolve() == Path.home().resolve():
+            return None
+    except OSError:
+        return None
+    return HOST_HOME_MOUNT
+
+
 def session_target_org(file_path: Path | str, default: str | None = None) -> str | None:
     """Return the org slug a session file should land in, or ``None``.
 
@@ -1010,7 +1032,10 @@ def session_target_org(file_path: Path | str, default: str | None = None) -> str
     2. Claude-Code host project dir lookup
        (:data:`_HOST_PROJECT_TO_ORG`) — for bare host ``.jsonl`` files
        that have no meta alongside them.
-    3. *default*.
+    3. ``personal`` for any other transcript under the operator-home mount
+       (:data:`HOST_HOME_MOUNT`): the operator's own history, filed where
+       only they read it.
+    4. *default*.
 
     The default is ``None`` so callers fail-closed (skip ingest) for
     sessions without org context, rather than silently routing to
@@ -1026,6 +1051,9 @@ def session_target_org(file_path: Path | str, default: str | None = None) -> str
     from_host = _org_from_host_project_path(file_path)
     if from_host:
         return from_host
+    mount = _host_home_mount()
+    if mount is not None and file_path.is_relative_to(mount):
+        return "personal"
     return default
 
 
@@ -1195,6 +1223,7 @@ def _session_path_rewrites() -> list[tuple[str, str]]:
     return [
         (_slash(container_home), _slash(host_home)),
         (_slash(container_root), _slash(host_root)),
+        (_slash(str(HOST_HOME_MOUNT)), _slash(host_home)),
     ]
 
 
@@ -1920,7 +1949,9 @@ def _scan_session_files() -> list[Path]:
     """Every session JSONL across both known roots, as a flat list.
 
     1. ~/.claude/projects/ — user sessions, chatwith, terminal containers
-    2. data/agent-runs/*/sessions/ — dispatch and librarian agent sessions
+    2. data/agent-runs/*/sessions/ — every node-launched session
+    3. /host-home/.claude/projects/ and /host-home/.codex/sessions/ — the
+       operator's own transcripts, when the home mount exists
 
     Shared by :func:`ingest_all_claude_code` (legacy full-reparse sweep)
     and :func:`catch_up_sweep` (W4 manifest-driven sweep) so both agree
@@ -1944,6 +1975,18 @@ def _scan_session_files() -> list[Path]:
             if not sessions_dir.is_dir():
                 continue
             files.extend(sorted(sessions_dir.rglob("*.jsonl")))
+
+    host_home = _host_home_mount()
+    if host_home is not None:
+        host_projects = host_home / ".claude" / "projects"
+        if host_projects.is_dir():
+            for project_dir in sorted(host_projects.iterdir()):
+                if not project_dir.is_dir():
+                    continue
+                files.extend(sorted(project_dir.glob("*.jsonl")))
+        codex_sessions = host_home / ".codex" / "sessions"
+        if codex_sessions.is_dir():
+            files.extend(sorted(codex_sessions.rglob("*.jsonl")))
 
     return files
 
