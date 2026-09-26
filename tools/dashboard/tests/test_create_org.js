@@ -51,6 +51,11 @@ describe('create-org success screen registration outcome (auto-2vseu)', () => {
     assert.match(html, /Registered on auto\.network/);
     assert.doesNotMatch(html, /create-org-register"/);
   });
+  it('says registered-but-incomplete when only set-up failed', () => {
+    const html = org.renderSetupStatus({ ready: false, failed: [{ org: 'acme', step: 'serve-cert', error: 'refused' }] });
+    assert.match(html, /Registered on auto\.network, but set-up is incomplete: serve-cert \(refused\)/);
+    assert.match(html, /id="create-org-register"/);
+  });
   it('names the failed steps and offers Register now otherwise', () => {
     const html = org.renderSetupStatus({ ready: false, failed: [{ org: 'acme', step: 'registration', error: 'registry <down>' }] });
     assert.match(html, /data-testid="create-org-unregistered"/);

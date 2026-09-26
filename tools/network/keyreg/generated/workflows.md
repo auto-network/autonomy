@@ -249,7 +249,7 @@ The persona-signed form: a full sign-in (signon_preparation.py), the scoped sign
 
 **Crib:** §8
 
-The founder's first sign-on after registration, not founding itself: the server assembles the record only for a committed organization (bound and founded, network_routes.py:_org_unlock_plan), and the browser signs it with the org root unsealed from sealed_org_root (network-signon.mjs:prepareRootMaintenance, rootKeyFor). The advancing form is ceremony.checkpoint_publish.
+Signed in the founding window right after registration (the org-scoped sign-on phases founding.js:finishFoundedOrganization runs with the held seed), and again by any later sign-on: the server assembles the record only for a committed organization (bound and founded, network_routes.py:_org_unlock_plan), and the browser signs it with the org root unsealed from sealed_org_root (network-signon.mjs:prepareRootMaintenance, rootKeyFor). The advancing form is ceremony.checkpoint_publish.
 
 <a id="workflow-ceremony-claim_approval"></a>
 ## ceremony.claim_approval
@@ -356,7 +356,7 @@ Step J3.
 
 **Crib:** §7, §8
 
-One personal-root opening ("Set up organization authority"). The org root is minted in memory and signs the genesis; the finally block zeroes the seed and drops the org root before any POST, so nothing after the batch can sign in this window as built (auto-2vseu).
+One personal-root opening ("Set up organization authority"). The org root is minted in memory and signs the genesis; the seed and the org root stay in memory past the founding batch so the same window signs the registration (org root) and drives the checkpoint seed and serve-cert phases (held seed); both are zeroed afterwards (founding.js:foundExistingOrganizationShell, auto-2vseu).
 
 <a id="workflow-ceremony-org_invite_mint"></a>
 ## ceremony.org_invite_mint

@@ -88,10 +88,15 @@ async function finishFoundedOrganization({
   const mod = phases || await import('./signon-phases.js');
   const fetchImpl = transport.fetch.bind(transport);
   const encrypted = await mod.fetchPreparation(fetchImpl, { org });
-  const prepared = await mod.prepareSignon(new Uint8Array(personalRootSeed), encrypted, session);
+  // The seed itself goes to the phases; the caller's finally zeroes it.
+  const prepared = await mod.prepareSignon(personalRootSeed, encrypted, session);
   const report = await mod.submitSignon(prepared, fetchImpl);
   const failed = (report.failed || []).filter(f => f.org === org);
-  return { ready: failed.length === 0 && (report.ready || []).includes(org), failed, report };
+  // A just-registered organization always needs its first serve certificate,
+  // so the phases report it under `repaired` (minted now), not `ready`
+  // (nothing to do); both mean the organization is set up.
+  const settled = (report.ready || []).includes(org) || (report.repaired || []).includes(org);
+  return { ready: failed.length === 0 && settled, failed, report };
 }
 
 /**

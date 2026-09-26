@@ -78,15 +78,25 @@ test('finishing runs the organization-scoped phases with the held seed and repor
   const seen = [];
   const phases = {
     fetchPreparation: async (fetchImpl, { org }) => { seen.push(['fetch', org]); return { enc: org }; },
-    prepareSignon: async (seed, encrypted, session) => { seen.push(['prepare', seed.length, encrypted.enc, session]); return { posts: [] }; },
+    prepareSignon: async (seed, encrypted, session) => { seen.push(['prepare', seed === seedRef, encrypted.enc, session]); return { posts: [] }; },
     submitSignon: async () => ({ ready: ['acme'], failed: [{ org: 'personal', step: 'serve-cert', error: 'x' }], bindings: [] }),
   };
   const transport = transportRecording(async () => new Response('{}'));
   const seed = new Uint8Array(32).fill(7);
+  const seedRef = seed;
   const setup = await finishFoundedOrganization({ org: 'acme', personalRootSeed: seed, transport, session: 'S', phases });
   assert.equal(setup.ready, true);
   assert.deepEqual(setup.failed, []);
-  assert.deepEqual(seen, [['fetch', 'acme'], ['prepare', 32, 'acme', 'S']]);
+  // The seed itself reaches the phases (no unzeroed copy); the caller zeroes it.
+  assert.deepEqual(seen, [['fetch', 'acme'], ['prepare', true, 'acme', 'S']]);
+  // A just-registered organization's first serve certificate is minted now,
+  // so the real submitSignon lists it under repaired, never ready.
+  const repaired = { ...phases, submitSignon: async () => ({ ready: [], repaired: ['acme'], failed: [] }) };
+  const minted = await finishFoundedOrganization({ org: 'acme', personalRootSeed: seed, transport, session: 'S', phases: repaired });
+  assert.equal(minted.ready, true);
+  const untouched = { ...phases, submitSignon: async () => ({ ready: [], repaired: [], failed: [] }) };
+  const nothing = await finishFoundedOrganization({ org: 'acme', personalRootSeed: seed, transport, session: 'S', phases: untouched });
+  assert.equal(nothing.ready, false);
   const failing = { ...phases, submitSignon: async () => ({ ready: [], failed: [{ org: 'acme', step: 'organization-delegate', error: 'nope' }] }) };
   const bad = await finishFoundedOrganization({ org: 'acme', personalRootSeed: seed, transport, session: 'S', phases: failing });
   assert.equal(bad.ready, false);

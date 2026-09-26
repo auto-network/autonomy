@@ -179,8 +179,12 @@
     var steps = (setup.failed || []).map(function (f) {
       return _esc(f.step) + ' (' + _esc(f.error || 'failed') + ')';
     }).join('; ');
+    var bound = setup.failed && setup.failed.length &&
+      setup.failed.every(function (f) { return f.step !== 'registration'; });
     return '<div class="mt-4 text-sm" data-testid="create-org-unregistered">' +
-      '<p class="text-amber-300">Created here, but not yet registered on auto.network' +
+      '<p class="text-amber-300">' +
+      (bound ? 'Registered on auto.network, but set-up is incomplete'
+             : 'Created here, but not yet registered on auto.network') +
       (steps ? ': ' + steps : '') + '.</p>' +
       '<button type="button" id="create-org-register" data-testid="create-org-register" ' +
       'class="mt-2 px-4 py-2 rounded-lg text-sm bg-indigo-600 text-white">Register now</button></div>';
