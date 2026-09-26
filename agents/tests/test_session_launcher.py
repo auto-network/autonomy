@@ -2504,8 +2504,10 @@ def test_host_terminal_mounts_the_node_socket_and_home(
         idx = joined.index(mount)
         assert not joined[idx:].split(" ", 1)[0].endswith("readonly")
     assert joined.count(f"{socket}:{socket}") == 1
-    assert ("--mount type=bind,src=/home/operator,dst=/host-home,"
-            "bind-propagation=rslave,readonly") in joined
+    # Private propagation: rslave needs a shared/slave source mount, which a
+    # home under a private / (WSL2) is not; docker refused the launch.
+    assert "--mount type=bind,src=/home/operator,dst=/host-home,readonly" in joined
+    assert "dst=/host-home,bind-propagation" not in joined
     # Full /mnt, writable, rslave: the daemon-host's Windows drives / WSLg / NAS
     # automounts propagate in. rw, so NOT readonly (unlike /host-home).
     assert "--mount type=bind,src=/mnt,dst=/mnt,bind-propagation=rslave" in joined

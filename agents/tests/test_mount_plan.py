@@ -313,3 +313,18 @@ def test_carve_out_is_code_only():
         fields = set(schema._required) | set(schema._optional_types)
         assert "image" in fields
         assert not fields & {"host_terminal", "allow_docker_socket"}
+
+
+
+def test_private_bind_emits_no_propagation_workspace_bind_keeps_rslave():
+    """rslave needs a shared/slave source mount; under a private / (WSL2
+    Ubuntu) docker refuses it. The host terminal's read-only home is a
+    PrivateBind; workspace binds keep rslave for NFS remount propagation."""
+    topo = mp.NodeTopology(is_host_process=False)
+    plan = mp.MountPlan()
+    plan.set(mp.mount_spec("/root", mp.PrivateBind("/host-home:ro")))
+    plan.set(mp.mount_spec("/srv/ws", mp.BindRefuseMissing("/workspace/ws")))
+    assert mp.mount_args(plan, topo) == [
+        "--mount", "type=bind,src=/root,dst=/host-home,readonly",
+        "--mount", "type=bind,src=/srv/ws,dst=/workspace/ws,bind-propagation=rslave",
+    ]

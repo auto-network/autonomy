@@ -1559,7 +1559,7 @@ def _host_terminal_profile() -> tuple[dict, list[str]]:
     RuntimeError, before anything is written or minted, when the socket or
     AUTONOMY_HOST_HOME is missing.
     """
-    from agents.mount_plan import BindRefuseMissing
+    from agents.mount_plan import BindRefuseMissing, PrivateBind
 
     try:
         socket_gid = os.stat(HOST_DOCKER_SOCKET).st_gid
@@ -1578,7 +1578,7 @@ def _host_terminal_profile() -> tuple[dict, list[str]]:
         str(DATA_ROOT): "/workspace/repo/data",
         str(REPO_ROOT / "orgs"): "/workspace/repo/orgs",
         HOST_DOCKER_SOCKET: HOST_DOCKER_SOCKET,
-        host_home: BindRefuseMissing(f"{HOST_HOME_MOUNT}:ro"),
+        host_home: PrivateBind(f"{HOST_HOME_MOUNT}:ro"),
         # Full /mnt writable so the host terminal sees whatever the node's
         # daemon-host mounts there — on a WSL2 node that is the Windows drives
         # (/mnt/c, /mnt/d as 9p/drvfs), the WSLg X11/Pulse sockets (/mnt/wslg),

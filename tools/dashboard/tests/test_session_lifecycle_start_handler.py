@@ -490,7 +490,13 @@ def test_resume_start_handler_host_kind_runs_to_running(monkeypatch, tmp_path):
     assert spawn_cmd == [
         "tmux", "new-session", "-d", "-s", "host-life", "-x", "120", "-y", "40",
         "docker run host-terminal",
+        # Keep the pane if docker run dies at once, so its error is captured.
+        ";", "set-option", "-t", "host-life", "remain-on-exit", "on",
     ]
+    # Released once the container is verified: a harness exit ends the session.
+    assert any(
+        cmd[-4:] == ["-t", "host-life", "remain-on-exit", "off"] for cmd, _ in calls["tmux"]
+    )
     assert calls["verify"], "a host terminal is a container and is verified"
     assert calls["inject"] and calls["inject"][0]["message"] == "resumed orientation"
 
@@ -873,3 +879,33 @@ def test_capture_failure_does_not_stop_cleanup(monkeypatch, tmp_path):
 
     assert saved_at_cleanup == [[]]
     assert dashboard_db.get_session("auto-life")["state"] == "FAILED"
+
+
+
+def test_terminals_poll_never_kills_a_launching_session(monkeypatch, tmp_path):
+    """/terminal polls /api/terminals. A LAUNCHING row has no tmux session
+    until its launch creates one; the poll must not mark it dead (it did, at
+    +170 ms, for a host terminal on a fresh published install, 2026-09-26),
+    while an ACTIVE row whose tmux is gone is still marked dead."""
+    import asyncio
+    import json
+
+    from tools.dashboard import server
+
+    _init_db(tmp_path)
+    dashboard_db.insert_session(
+        tmux_name="host-launching", session_type="host", project="host",
+        harness="claude", state="LAUNCHING",
+    )
+    dashboard_db.insert_session(
+        tmux_name="auto-gone", session_type="container", project="p", harness="claude",
+    )
+    monkeypatch.setattr(server, "_list_dashboard_tmux", lambda: [])
+    killed = []
+    monkeypatch.setattr(server.dashboard_db, "mark_dead", lambda name: killed.append(name))
+
+    resp = asyncio.run(server.api_terminals(SimpleNamespace(query_params={})))
+
+    assert json.loads(resp.body) == [] or isinstance(json.loads(resp.body), list)
+    assert "host-launching" not in killed
+    assert "auto-gone" in killed

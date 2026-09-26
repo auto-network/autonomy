@@ -83,6 +83,9 @@ class MountSpec:
     #: (refuse-missing), never `-v`. Set by build_mount_plan from a
     #: BindRefuseMissing container_spec — never inferred from the source path.
     bind_refuse_missing: bool = False
+    #: Propagation of a strict bind: "rslave" (workspace binds) or None
+    #: (docker's default, private). Carried from the container_spec.
+    bind_propagation: "str | None" = "rslave"
 
     @property
     def dest(self) -> str:
@@ -104,7 +107,8 @@ def mount_spec(source, container_spec: str, required: bool = True,
     translation."""
     refuse = bind_refuse_missing or getattr(container_spec, "bind_refuse_missing", False)
     origin = Origin.HOST if refuse else classify_origin(source)
-    return MountSpec(str(source), container_spec, origin, required, refuse)
+    propagation = getattr(container_spec, "bind_propagation", "rslave")
+    return MountSpec(str(source), container_spec, origin, required, refuse, propagation)
 
 
 class MountPlan:
@@ -265,6 +269,19 @@ class BindRefuseMissing(str):
     node/daemon-host frame boundary (a host-frame Source is not a node-frame path
     and must not be filesystem-resolved in the node namespace)."""
     bind_refuse_missing = True
+    bind_propagation: "str | None" = "rslave"
+
+
+class PrivateBind(BindRefuseMissing):
+    """A strict bind with docker's default (private) propagation.
+
+    ``rslave`` needs the source's mount to be shared or slave; docker refuses
+    it otherwise ("path X is mounted on / but it is not a shared or slave
+    mount"), which is the case for any path under a private ``/`` — WSL2
+    Ubuntu's root, for one. The operator's home, mounted read-only into the
+    host terminal, needs no propagation (fresh published install on WSL2,
+    2026-09-26)."""
+    bind_propagation = None
 
 
 @dataclass(frozen=True)
@@ -275,6 +292,7 @@ class ResolvedMount:
     subpath: Optional[str] = None
     #: A workspace bind: emit `--mount type=bind` (refuse-missing), never `-v`.
     bind_refuse_missing: bool = False
+    bind_propagation: "str | None" = "rslave"
 
 
 def _deeper(a, b):
@@ -301,6 +319,7 @@ def resolve(spec: MountSpec, topo: NodeTopology) -> "Optional[ResolvedMount]":
         return ResolvedMount(
             container_spec=spec.container_spec, host_source=spec.source,
             bind_refuse_missing=spec.bind_refuse_missing,
+            bind_propagation=spec.bind_propagation,
         )
 
     # NODE origin on a containerized node: map the source to the deepest node
@@ -403,8 +422,9 @@ def emit(r: ResolvedMount, topo: NodeTopology) -> list:
         # behavior is byte-identical to today. Never `shared` here: `slave` is
         # one-directional (host -> container only), so nothing this container
         # mounts can propagate back out to the host or to a sibling container.
-        parts = ["type=bind", f"src={r.host_source}", f"dst={dest}",
-                 "bind-propagation=rslave"]
+        parts = ["type=bind", f"src={r.host_source}", f"dst={dest}"]
+        if r.bind_propagation:
+            parts.append(f"bind-propagation={r.bind_propagation}")
         if readonly:
             parts.append("readonly")
         return ["--mount", ",".join(parts)]

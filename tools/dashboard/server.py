@@ -3982,8 +3982,14 @@ async def api_terminals(request):
         name = row["tmux_name"]
         alive = name in live_tmux
         if not alive:
-            # Mark dead in DB if tmux is gone
-            dashboard_db.mark_dead(name)
+            # Mark dead in DB if tmux is gone — only for an ACTIVE session. A
+            # LAUNCHING row has no tmux session until its launch creates one
+            # (a host terminal resolves credentials and builds its docker run
+            # first), and a STOPPING row is the lifecycle worker's; marking
+            # either dead from this poll turned a launch into ENDED before it
+            # started, so its later FAILED was refused and never surfaced.
+            if derive_lifecycle_state(row) == "ACTIVE":
+                dashboard_db.mark_dead(name)
             continue
         result.append({
             "id": name,
@@ -8379,6 +8385,24 @@ def _pane_tail(tmux_name: str, lines: int = 15) -> str:
     return "\n".join(stripped[-lines:])
 
 
+def _launch_keep_pane(tmux_name: str) -> list[str]:
+    """Chained after ``new-session`` in the same tmux invocation: keep the
+    pane if its command exits, so a ``docker run`` that fails in the first
+    instant leaves its error on screen for the failure capture and
+    ``_verify_container_started``'s pane tail. Applied before the server
+    handles the child's exit; released by :func:`_release_launch_pane`."""
+    return [";", "set-option", "-t", tmux_name, "remain-on-exit", "on"]
+
+
+def _release_launch_pane(tmux_name: str) -> None:
+    """The container is up: from here a harness exit ends the tmux session
+    as it always has."""
+    subprocess.run(
+        tmux_route.argv(tmux_name, "set-option", "-t", tmux_name, "remain-on-exit", "off"),
+        capture_output=True, timeout=5,
+    )
+
+
 def _verify_container_started(*, tmux_name: str, deadline: float) -> None:
     """Fail fast when ``docker run`` produced no container.
 
@@ -9081,7 +9105,7 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
 
         tmux_cmd = [
             "tmux", "new-session", "-d", "-s", tmux_name, "-x", "120",
-            "-y", "40", cmd_str,
+            "-y", "40", cmd_str, *_launch_keep_pane(tmux_name),
         ]
         result = subprocess.run(
             tmux_cmd,
@@ -9110,6 +9134,7 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
             tmux_name=tmux_name,
             deadline=time.monotonic() + 20,
         )
+        _release_launch_pane(tmux_name)
 
         phase = "setup"
         writer.set_state(tmux_name, "setup")
@@ -9410,7 +9435,7 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
 
         tmux_cmd = [
             "tmux", "new-session", "-d", "-s", tmux_name, "-x", "120", "-y", "40",
-            cmd_str,
+            cmd_str, *_launch_keep_pane(tmux_name),
         ]
         result = subprocess.run(
             tmux_cmd,
@@ -9438,6 +9463,7 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
             tmux_name=tmux_name,
             deadline=time.monotonic() + 20,
         )
+        _release_launch_pane(tmux_name)
 
         phase = "setup"
         writer.set_state(tmux_name, "setup")
@@ -9546,7 +9572,7 @@ def _run_simple_session_start(job: LifecycleJob, writer: SessionLifecycleStateWr
 
         tmux_cmd = [
             "tmux", "new-session", "-d", "-s", tmux_name, "-x", "120", "-y", "40",
-            cmd_str,
+            cmd_str, *_launch_keep_pane(tmux_name),
         ]
         result = subprocess.run(
             tmux_cmd,
@@ -9574,6 +9600,7 @@ def _run_simple_session_start(job: LifecycleJob, writer: SessionLifecycleStateWr
             tmux_name=tmux_name,
             deadline=time.monotonic() + 20,
         )
+        _release_launch_pane(tmux_name)
 
         if loop is not None and loop.is_running():
             coro = session_monitor.register(
