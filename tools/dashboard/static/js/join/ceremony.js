@@ -35,13 +35,7 @@ export function makeCeremony({
   mintMemberClaim = realMint,
   deriveKemSeed = realDeriveKemSeed,
 } = {}) {
-  // ``approvals`` and ``position`` are supplied only by finalize(): the
-  // second submit must re-mint at the staged claim's pinned causal position
-  // carrying the countersignatures already gathered, or the ledger sees a
-  // fresh unapproved claim and the signatures are lost.
-  return async function runCeremony({
-    context, inputs, passphrase, approvals = [], position = null,
-  }) {
+  return async function runCeremony({ context, inputs, passphrase }) {
     if (typeof passphrase !== 'string' || !passphrase) {
       throw new Error('a passphrase is required to accept');
     }
@@ -65,8 +59,6 @@ export function makeCeremony({
         inviteRef: inputs.inviteRef,
         token: inputs.bearer || null,
         kemSeed,
-        approvals,
-        position,
       });
       return {
         event: minted.event,
@@ -107,9 +99,7 @@ export function makeRootCeremony({
   if (typeof openRoot !== 'function') {
     throw new Error('makeRootCeremony needs the openRoot control');
   }
-  return async function runCeremony({
-    context, inputs, profile = {}, approvals = [], position = null, title, detail,
-  }) {
+  return async function runCeremony({ context, inputs, profile = {}, title, detail }) {
     const opened = await openRoot({
       title: title || 'Ask to join',
       detail: detail || 'Unlock your identity to sign your request to join.',
@@ -127,8 +117,6 @@ export function makeRootCeremony({
         token: inputs.bearer || null,
         profile,
         kemSeed,
-        approvals,
-        position,
       });
       return {
         event: minted.event,

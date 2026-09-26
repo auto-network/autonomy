@@ -464,6 +464,21 @@ def _v_member_claim(p: dict) -> None:
         _v_member_recovery(p["recovery"], p["persona_pub"])
 
 
+#: Room for the carried claim inside an admission event, leaving the
+#: envelope and approvals under MAX_EVENT_BYTES.
+MAX_CARRIED_CLAIM_BYTES = 12_000
+
+
+def _v_member_admission(p: dict) -> None:
+    """An approver-authored admission (OrgAdmission.tla admission event,
+    operator ruling 2026-09-25): the invitee's signed member.claim, carried
+    unchanged as its wire, plus the approvals gathered for it. The fold
+    verifies the carried claim and admits on it."""
+    _require_fields(p, "member.admission", frozenset({"claim", "approvals"}))
+    _require_str(p["claim"], "member.admission.claim", max_len=MAX_CARRIED_CLAIM_BYTES)
+    _require_approvals(p["approvals"], "member.admission.approvals")
+
+
 def _v_member_rekey(p: dict) -> None:
     _require_fields(
         p, "member.rekey",
@@ -557,6 +572,7 @@ EVENT_TYPES = {
     "role.revoke": _v_role_revoke,
     "invite": _v_invite,
     "member.claim": _v_member_claim,
+    "member.admission": _v_member_admission,
     "member.rekey": _v_member_rekey,
     "key.rotate": _v_key_rotate,
     "key.epoch": _v_key_epoch,

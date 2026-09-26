@@ -69,21 +69,6 @@ function normalizeHlc(hlc, name = 'hlc') {
   return [hlc[0], hlc[1]];
 }
 
-function normalizePosition(position) {
-  if (
-    !position
-    || typeof position !== 'object'
-    || Array.isArray(position)
-    || Object.keys(position).sort().join(',') !== 'hlc,parents'
-  ) {
-    throw new Error('position must be exactly {parents, hlc}');
-  }
-  return {
-    parents: normalizeHeads(position.parents, 'position.parents'),
-    hlc: normalizeHlc(position.hlc, 'position.hlc'),
-  };
-}
-
 function normalizeApprovals(approvals) {
   if (!Array.isArray(approvals)) {
     throw new Error('approvals must be an array');
@@ -169,11 +154,9 @@ async function mintMemberClaim({
   inviteRef,
   token = null,
   profile = {},
-  approvals = [],
   kemSeed,
   nowMs = Date.now(),
   credentialHlc = null,
-  position = null,
 }) {
   const resolved = requireContext(context);
   requireHash(inviteRef, 'inviteRef');
@@ -184,23 +167,17 @@ async function mintMemberClaim({
     throw new Error('profile must be an object');
   }
   canonicalJson(profile);
-  const eventPosition = position === null
-    ? {
-      parents: resolved.heads,
-      hlc: tickHlc(resolved.maxHlc, nowMs),
-    }
-    : normalizePosition(position);
+  // The invitee signs its claim ONCE, at the current heads. Under an approval
+  // role an approver later admits it with an admission event that carries
+  // this signed claim unchanged; the invitee never re-mints.
+  const eventPosition = {
+    parents: resolved.heads,
+    hlc: tickHlc(resolved.maxHlc, nowMs),
+  };
   const eventHlc = eventPosition.hlc;
-  const requestedCredentialHlc = credentialHlc === null
+  const createdHlc = credentialHlc === null
     ? eventHlc
     : normalizeHlc(credentialHlc, 'credentialHlc');
-  if (
-    position !== null
-    && JSON.stringify(requestedCredentialHlc) !== JSON.stringify(eventHlc)
-  ) {
-    throw new Error('credentialHlc must equal position.hlc when finalizing');
-  }
-  const createdHlc = position === null ? requestedCredentialHlc : eventHlc;
   const seed = new Uint8Array(personalRootSeed);
   const encapsulationSeed = new Uint8Array(kemSeed);
   if (seed.length !== 32 || encapsulationSeed.length !== 32) {
@@ -236,7 +213,7 @@ async function mintMemberClaim({
     invite_ref: inviteRef,
     persona_pub: persona.publicHex,
     profile: { ...profile },
-    approvals: normalizeApprovals(approvals),
+    approvals: [],
     kem_credential: credential,
   };
   if (token !== null) payload.token = token;
@@ -280,6 +257,58 @@ async function buildClaimApproval({
     ),
   );
   return { key: approverPub, sig: bytesToHex(sig) };
+}
+
+// The approver's admission event (OrgAdmission.tla admission event): the
+// invitee's signed claim wire UNCHANGED plus the counted approvals, authored
+// by this approver at the heads the server named. `admission` is exactly
+// what the countersign route returned as `ready.admission`.
+async function signAdmission({
+  context,
+  personalRootSeed,
+  admission,
+  nowMs = Date.now(),
+}) {
+  const resolved = requireContext(context);
+  if (!admission || typeof admission !== 'object'
+      || typeof admission.claim !== 'string' || !admission.claim) {
+    throw new Error('admission.claim must be the invitee-signed claim wire');
+  }
+  const seed = new Uint8Array(personalRootSeed);
+  if (seed.length !== 32) {
+    throw new Error('personalRootSeed must be exactly 32 raw bytes');
+  }
+  try {
+    const persona = await derivePersona(seed, resolved.genesisId);
+    const payload = {
+      type: 'member.admission',
+      claim: admission.claim,
+      approvals: normalizeApprovals(admission.approvals || []),
+    };
+    const event = await signEvent(buildEvent({
+      authorKey: persona.publicHex,
+      parents: normalizeHeads(admission.parents, 'admission.parents'),
+      hlc: [nowMs, 0],
+      payload,
+    }), persona.signingKey);
+    return { event, wire: canonicalJson(event), personaPub: persona.publicHex };
+  } finally {
+    seed.fill(0);
+  }
+}
+
+async function submitAdmission({ context, wire }) {
+  const resolved = requireContext(context);
+  return fetchJson(
+    resolved,
+    '/api/network/ledger/admission',
+    {
+      method: 'POST',
+      headers: requestHeaders(resolved, true),
+      body: JSON.stringify({ org: resolved.orgSlug, event: wire }),
+    },
+    'admission submit',
+  );
 }
 
 async function signClaimApproval({
@@ -386,27 +415,14 @@ function requestHeaders(context, json = false) {
   return headers;
 }
 
-async function submitClaim({ context, event, position = null }) {
+async function submitClaim({ context, event }) {
   const resolved = requireContext(context);
-  const expected = position === null
-    ? { parents: resolved.heads, hlc: null }
-    : normalizePosition(position);
   if (
     !event
     || typeof event !== 'object'
-    || JSON.stringify(event.parents) !== JSON.stringify(expected.parents)
+    || JSON.stringify(event.parents) !== JSON.stringify(resolved.heads)
   ) {
-    throw new Error(
-      position === null
-        ? 'claim event parents must equal context.heads'
-        : 'claim event parents must equal position.parents',
-    );
-  }
-  if (
-    expected.hlc !== null
-    && JSON.stringify(event.hlc) !== JSON.stringify(expected.hlc)
-  ) {
-    throw new Error('claim event hlc must equal position.hlc');
+    throw new Error('claim event parents must equal context.heads');
   }
   return fetchJson(
     resolved,
@@ -497,7 +513,9 @@ export {
   getClaimContext,
   getClaimStatus,
   mintMemberClaim,
+  signAdmission,
   signClaimApproval,
+  submitAdmission,
   submitClaim,
   submitClaimApproval,
   tickHlc,

@@ -69,14 +69,6 @@ def _terminal_pending(readiness: dict) -> dict | None:
     return None
 
 
-def _event_matches_position(event: Event, position: dict | None) -> bool:
-    return (
-        isinstance(position, dict)
-        and event.parents == tuple(position.get("parents", ()))
-        and event.hlc.to_list() == position.get("hlc")
-    )
-
-
 def context(org: str, invite_ref: str) -> dict:
     """Minting context for one invitation."""
     _require_hex(invite_ref, "invite_ref")
@@ -120,7 +112,11 @@ def context(org: str, invite_ref: str) -> dict:
 
 
 def submit(org: str, event_wire) -> dict:
-    """Initial or final invitee-signed submit; the only claim append path."""
+    """The invitee's one submit: appended when the fold admits it now (a
+    key-bound self-admitting role), staged for approval otherwise. Under an
+    approval role the APPROVER admits it later with an admission event
+    (:func:`admit`) that carries this signed claim unchanged; the invitee
+    never signs again (OrgAdmission.tla admission event, auto-qrmlg.12)."""
     event = Event.from_json(event_wire)
     if event.type != "member.claim":
         raise ValueError("event type must be member.claim")
@@ -129,29 +125,6 @@ def submit(org: str, event_wire) -> dict:
             event.payload["invite_ref"],
             event.payload["persona_pub"],
         )
-        pending = store.get_pending_claim(claim_key)
-        readiness = None
-        pinned_finalize = False
-        if pending is not None:
-            stored_position = (
-                {
-                    "parents": pending["parents"],
-                    "hlc": [pending["hlc_ts"], pending["hlc_count"]],
-                }
-                if pending["parents"] is not None
-                and pending["hlc_count"] is not None
-                else None
-            )
-            pinned_finalize = _event_matches_position(
-                event,
-                stored_position,
-            )
-            if pinned_finalize:
-                readiness = store.evaluate_pending_claim(claim_key)
-                terminal = _terminal_pending(readiness)
-                if terminal is not None:
-                    return terminal
-
         try:
             invite = store.get(event.payload["invite_ref"])
         except KeyError:
@@ -160,28 +133,18 @@ def submit(org: str, event_wire) -> dict:
             return {"status": "rejected", "reason": "invite-not-in-ancestry"}
 
         # Primary TTL enforcement is the org node's online wall clock and
-        # deliberately precedes the deterministic event-HLC trial fold for
-        # every INITIAL submit. A FINALIZE is the one exact staged position:
-        # its initial submit already passed this clock gate, and the pinned
-        # causal position is the ledger-visible redemption record.
-        if not pinned_finalize:
-            if int(time.time() * 1000) > invite.payload["expiry"]:
-                return {"status": "rejected", "reason": "invite-expired"}
-            if event.parents != store.heads():
-                return {"status": "rejected", "reason": "stale-heads"}
+        # deliberately precedes the deterministic event-HLC trial fold.
+        if int(time.time() * 1000) > invite.payload["expiry"]:
+            return {"status": "rejected", "reason": "invite-expired"}
+        if event.parents != store.heads():
+            return {"status": "rejected", "reason": "stale-heads"}
 
         reason = store.evaluate_claim(event)
         if reason is None:
             store.append(event)
             store.drop_pending_claim(claim_key)
             store.refresh_projections()
-            try:
-                from tools.dashboard import member_directory
-                member_directory.project_claim(
-                    org, event.payload["persona_pub"], event.payload.get("profile"),
-                )
-            except Exception:
-                pass  # the admission stands; the directory row is presentation only
+            _project_member(org, event.payload)
             # The step that admits publishes the checkpoint that includes the
             # member (OrgAdmission.tla P2), signed by this node's hot delegate.
             from tools.dashboard import membership_checkpoint as cp
@@ -191,13 +154,8 @@ def submit(org: str, event_wire) -> dict:
                 "checkpoint": cp.publish_after_membership_change(org),
             }
         if reason == R_APPROVAL_MISSING:
-            # Replaying the exact staged position without enough approvals
-            # must not reset the server-wall-clock staging TTL.
-            if not pinned_finalize:
-                store.stage_pending_claim(event)
-                readiness = store.evaluate_pending_claim(claim_key)
-            if readiness is None:
-                raise RuntimeError("pending claim readiness was not computed")
+            store.stage_pending_claim(event)
+            readiness = store.evaluate_pending_claim(claim_key)
             terminal = _terminal_pending(readiness)
             if terminal is not None:
                 return terminal
@@ -207,6 +165,71 @@ def submit(org: str, event_wire) -> dict:
                 "need": readiness["need"],
             }
         return {"status": "rejected", "reason": reason}
+
+
+def _project_member(org: str, claim_payload: dict) -> None:
+    try:
+        from tools.dashboard import member_directory
+        member_directory.project_claim(
+            org, claim_payload["persona_pub"], claim_payload.get("profile"),
+        )
+    except Exception:
+        pass  # the admission stands; the directory row is presentation only
+
+
+def _admission_material(store, pending: dict, readiness: dict, author_key: str) -> dict:
+    """What the approver's browser signs into a ``member.admission`` event:
+    the invitee's signed claim wire, unchanged; the need-sized admitting
+    subset of the gathered approvals plus the authoring approver's own (the
+    fold requires the author to be a carried approver); and the current
+    heads as parents."""
+    carried = set(readiness.get("admitting") or []) | {author_key}
+    return {
+        "claim": pending["wire"],
+        "approvals": [e for e in pending["approvals"] if e["key"] in carried],
+        "parents": list(store.heads()),
+        "genesis_id": store.ledger.genesis_id,
+    }
+
+
+def admit(org: str, event_wire) -> dict:
+    """The approver's admission: append a ``member.admission`` event that
+    carries the staged claim, let the fold admit it, then publish the
+    checkpoint that includes the member (P2). Refusals are the fold's,
+    named; a staged row for that claim is dropped on success."""
+    event = Event.from_json(event_wire)
+    if event.type != "member.admission":
+        raise ValueError("event type must be member.admission")
+    claim = Event.from_json(event.payload["claim"])
+    with _open(org) as store:
+        if event.parents != store.heads():
+            return {"status": "rejected", "reason": "stale-heads"}
+        # The staging window is the org node's policy, not the fold's: an
+        # expired or pre-wire staged row is terminal here, never admitted.
+        claim_key = store.claim_key(claim.payload["invite_ref"], claim.payload["persona_pub"])
+        if store.get_pending_claim(claim_key) is not None:
+            terminal = _terminal_pending(store.evaluate_pending_claim(claim_key))
+            if terminal is not None:
+                return terminal
+        from tools.network.ledger import Ledger
+        from tools.network.ledger.fold import fold as _fold
+        scratch = Ledger()
+        scratch.ingest(store.ledger.events())
+        scratch.add(event)
+        verdict = _fold(scratch)
+        if not verdict.valid.get(event.event_id, False):
+            return {"status": "rejected", "reason": verdict.reasons.get(event.event_id, "invalid")}
+        store.append(event)
+        store.drop_pending_claim(claim_key)
+        store.refresh_projections()
+        _project_member(org, claim.payload)
+        from tools.dashboard import membership_checkpoint as cp
+        return {
+            "status": "admitted",
+            "persona_pub": claim.payload["persona_pub"],
+            "kem_credential": claim.payload.get("kem_credential"),
+            "checkpoint": cp.publish_after_membership_change(org),
+        }
 
 
 #: Ledger events per bootstrap page (~600 B each: ~2.5 MB a page, well under
@@ -379,20 +402,16 @@ def status(org: str, invite_ref: str, persona_pub: str) -> dict:
             invite = store.get(invite_ref)
             return {
                 "status": "pending",
-                # Resume bootstrap. These are derived from the staged claim
-                # and its ledger, not accepted from the client. A restart can
-                # therefore finalize after wall expiry without weakening the
-                # fresh-join context() TTL gate.
+                # Derived from the staged claim and its ledger, never
+                # accepted from the client.
                 "genesis_id": store.ledger.genesis_id,
                 "granted_role": invite.payload["granted_role"],
                 "have": readiness["have"],
                 "need": readiness["need"],
                 "approvals": pending["approvals"],
-                # The verdict-computed, need-sized subset. Resume clients
-                # finalize with exactly these keys rather than reimplementing
-                # the fold's authority decision after a restart.
+                # The verdict-computed, need-sized subset the approver's
+                # admission event will carry.
                 "admitting": readiness["admitting"],
-                "position": readiness["position"],
             }
         member = store.fold().members.get(persona_pub)
         if member is not None and member.invite_id == invite_ref:
@@ -463,17 +482,21 @@ def countersign(
         if terminal is not None:
             return terminal
         if readiness["ready"]:
+            # This approver completes the threshold: hand back what its
+            # browser signs into the admission event (the invitee's claim
+            # unchanged plus the counted approvals), re-read so the row's
+            # merged approvals are what is carried.
+            pending = store.get_pending_claim(claim_key)
             return {
                 "status": "ready",
                 "have": readiness["have"],
                 "need": readiness["need"],
                 "kem_credential": pending["body"].get("kem_credential"),
                 "admitting": readiness["admitting"],
-                "position": readiness["position"],
+                "admission": _admission_material(store, pending, readiness, approval["key"]),
             }
         return {
             "status": "pending",
             "have": readiness["have"],
             "need": readiness["need"],
-            "position": readiness["position"],
         }

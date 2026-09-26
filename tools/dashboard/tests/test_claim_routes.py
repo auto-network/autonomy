@@ -30,7 +30,7 @@ from tools.network.ledger import (
     sign_approval,
     StoreError,
 )
-from tools.network.ledger.claims import mint_member_claim
+from tools.network.ledger.claims import make_admission, mint_member_claim
 from tools.network.ledger.found import found_org_ledger
 from tools.network.storagekit.credentials import build as build_credential
 
@@ -276,15 +276,6 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
     }
     assert result["expiredStatus"] == {"status": "absent"}
 
-    token_self_position = {
-        "parents": result["tokenSelfClaim"]["event"]["parents"],
-        "hlc": result["tokenSelfClaim"]["event"]["hlc"],
-    }
-    initial_position = {
-        "parents": result["initial"]["event"]["parents"],
-        "hlc": result["initial"]["event"]["hlc"],
-    }
-
     # Bearer safety overrides a role's otherwise self-admitting policy.
     assert result["tokenSelfSubmit"] == {
         "status": "pending",
@@ -299,7 +290,6 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
         "need": 1,
         "approvals": [],
         "admitting": [],
-        "position": token_self_position,
     }
 
     # Key binding + self policy admits immediately.
@@ -322,7 +312,6 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
         "need": 2,
         "approvals": [],
         "admitting": [],
-        "position": initial_position,
     }
     assert result["headsAfterPending"] == result["bearerHeads"]
     assert result["badSignatureApproval"] == {
@@ -344,7 +333,6 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
         "status": "pending",
         "have": 1,
         "need": 2,
-        "position": initial_position,
     }
     assert result["headsAfterFirstApproval"] == result["bearerHeads"]
     assert result["secondApproval"] == {
@@ -355,9 +343,14 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
         "admitting": sorted(
             [founder.public_hex, root.public_hex]
         ),
-        "position": initial_position,
+        "admission": result["secondApproval"]["admission"],
     }
-    assert result["readyApproval"] == {
+    # Ready hands the approver what its browser signs into the admission
+    # event: the invitee's claim wire UNCHANGED, the counted approvals, and
+    # the current heads as parents.
+    assert result["secondApproval"]["admission"]["claim"] == result["initial"]["wire"]
+    assert result["secondApproval"]["admission"]["parents"] == result["bearerHeads"]
+    assert {k: v for k, v in result["readyApproval"].items() if k != "admission"} == {
         "status": "ready",
         "have": 3,
         "need": 2,
@@ -369,8 +362,11 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
                 extra_approver.public_hex,
             ]
         )[:2],
-        "position": initial_position,
     }
+    # The carried approvals are the counted subset plus the countersigner's
+    # own: the fold requires the admission's author to be a carried approver.
+    assert sorted(e["key"] for e in result["readyApproval"]["admission"]["approvals"]) \
+        == sorted(set(result["readyApproval"]["admitting"]) | {extra_approver.public_hex})
     assert "admitted" not in result["firstApproval"]
     assert "admitted" not in result["secondApproval"]
     assert "admitted" not in result["readyApproval"]
@@ -383,26 +379,18 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
         for entry in result["readyStatus"]["approvals"]
         if entry["key"] in result["readyApproval"]["admitting"]
     ]
-    assert (
-        result["shiftedFinalizeHeads"]
-        != result["readyApproval"]["position"]["parents"]
-    )
-    assert result["finalClaim"]["event"]["parents"] == initial_position["parents"]
-    assert result["finalClaim"]["event"]["hlc"] == initial_position["hlc"]
-    assert (
-        result["finalClaim"]["kemCredential"]["authority_heads"]
-        == initial_position["parents"]
-    )
-    assert (
-        result["finalClaim"]["kemCredential"]["created_hlc"]
-        == initial_position["hlc"]
-    )
-    assert result["mismatchedCredentialHlcRejected"] is True
-    assert result["mismatchedSubmitPositionRejected"] is True
+    # The approver's admission event carries the invitee's claim unchanged:
+    # no second invitee ceremony (OrgAdmission.tla admission event).
+    assert result["admissionEvent"]["payload"]["type"] == "member.admission"
+    assert result["admissionEvent"]["payload"]["claim"] == result["initial"]["wire"]
+    assert result["admissionEvent"]["author_key"] == extra_approver.public_hex
+    assert result["invalidAdmissionRejected"] is True
+    assert result["strangerAdmissionRejected"] is True
 
-    # Only the invitee's re-signed final submit appends and clears staging.
+    # The admission appends and clears staging; the member is the invitee.
     assert {k: v for k, v in result["admitted"].items() if k != "checkpoint"} == {
         "status": "admitted",
+        "persona_pub": result["initial"]["personaPub"],
         "kem_credential": result["initial"]["kemCredential"],
     }
     assert "action" in result["admitted"]["checkpoint"]
@@ -460,12 +448,15 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
         token_self_id = Event.from_dict(
             result["tokenSelfClaim"]["event"]
         ).event_id
-        final_id = Event.from_dict(result["finalClaim"]["event"]).event_id
+        admission_id = Event.from_dict(result["admissionEvent"]).event_id
         expired_id = Event.from_dict(result["expired"]["event"]).event_id
         wrong_id = Event.from_dict(result["wrong"]["event"]).event_id
+        # The invitee's claim itself is never an event: the approver's
+        # admission event carrying it is what the ledger holds.
         assert initial_id not in store
         assert token_self_id not in store
-        assert final_id in store
+        assert admission_id in store
+        assert store.fold().members[persona.public_hex].claim_id == admission_id
         assert expired_id not in store
         assert wrong_id not in store
         state = store.fold(now=wall_now)
@@ -548,28 +539,27 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
         "need": 1,
         "approvals": [],
         "admitting": [],
-        "position": {
-            "parents": list(sponsor_claim.parents),
-            "hlc": sponsor_claim.hlc.to_list(),
-        },
     }
     founder_entry = sign_approval(founder, "member.claim", claim_payload)
-    assert claim_service.countersign(
+    ready = claim_service.countersign(
         slug,
         invite_event.event_id,
         sponsor_persona.public_hex,
         founder_entry,
-    ) == {
+    )
+    assert {k: v for k, v in ready.items() if k != "admission"} == {
         "status": "ready",
         "have": 1,
         "need": 1,
         "kem_credential": None,
         "admitting": [founder.public_hex],
-        "position": {
-            "parents": list(sponsor_claim.parents),
-            "hlc": sponsor_claim.hlc.to_list(),
-        },
     }
+    # The admission material carries the invitee's signed claim unchanged
+    # and the founder's own approval, at the current heads.
+    assert ready["admission"]["claim"] == sponsor_claim.to_json().decode("utf-8")
+    assert ready["admission"]["approvals"] == [founder_entry]
+    with LedgerStore(path) as store:
+        assert ready["admission"]["parents"] == list(store.heads())
 
     # Staging TTL and pre-migration rows are terminal service outcomes, not
     # retryable pending states and not countersignature merge targets.
@@ -589,7 +579,7 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
                 (sponsor_key,),
             )
             store.db.execute(
-                "UPDATE ledger_pending_claims SET parents = NULL "
+                "UPDATE ledger_pending_claims SET wire = NULL "
                 "WHERE claim_key = ?",
                 (legacy_key,),
             )
@@ -598,16 +588,13 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
         invite_event.event_id,
         sponsor_persona.public_hex,
     ) == {"status": "rejected", "reason": "claim-expired"}
-    sponsor_final, _ = mint_member_claim(
-        sponsor_seed,
-        founded.genesis_id,
-        invite_ref=invite_event.event_id,
-        heads=sponsor_claim.parents,
-        hlc=sponsor_claim.hlc,
-        token=sponsor_token,
-        approvals=[founder_entry],
-    )
-    assert claim_service.submit(slug, sponsor_final.to_json()) == {
+    # The approver's admission of an expired staging is refused the same
+    # way: the staging window is the node's policy, judged before the fold.
+    with LedgerStore(path) as store:
+        expired_admission = make_admission(
+            founder, dict(ready["admission"], parents=list(store.heads())),
+            max(store.get(h).hlc for h in store.heads()).tick(wall_now + 5_000))
+    assert claim_service.admit(slug, expired_admission.to_json()) == {
         "status": "rejected",
         "reason": "claim-expired",
     }
@@ -625,7 +612,7 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
 
     # cz4fb: a claim staged before invite expiry can finalize after both the
     # wall clock and current DAG frontier pass expiry, but only at its exact
-    # server-stored position. A current-frontier event keeps both gates.
+    # approver's admission carrying it. A current-frontier event keeps both gates.
     delayed_token = "f6" * 32
     delayed_seed = bytes(range(1, 33))
     delayed_expiry = wall_now + 60_000
@@ -686,10 +673,7 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
         delayed_approval,
     )
     assert delayed_ready["status"] == "ready"
-    assert delayed_ready["position"] == {
-        "parents": list(delayed_claim.parents),
-        "hlc": delayed_claim.hlc.to_list(),
-    }
+    assert delayed_ready["admission"]["claim"] == delayed_claim.to_json().decode("utf-8")
 
     with LedgerStore(path) as store:
         filler = KeyPair.generate()
@@ -718,16 +702,15 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
             token=delayed_token,
             approvals=[delayed_approval],
         )
-    position = delayed_ready["position"]
-    pinned, _ = mint_member_claim(
-        delayed_seed,
-        founded.genesis_id,
-        invite_ref=delayed_invite.event_id,
-        heads=position["parents"],
-        hlc=HLC.from_value(position["hlc"]),
-        token=delayed_token,
-        approvals=[delayed_approval],
-    )
+        # The approver admits at the CURRENT heads, past the invite's expiry
+        # and past the drift: the carried claim keeps its own pre-expiry
+        # timestamp, so the fold's expiry rule judges the claim, not the
+        # admission (auto-cz4fb, now realized by the admission event).
+        admission = make_admission(
+            founder,
+            dict(delayed_ready["admission"], parents=list(store.heads())),
+            HLC(delayed_expiry + 3_000),
+        )
     monkeypatch.setattr(
         claim_service.time,
         "time",
@@ -737,7 +720,7 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
         "status": "rejected",
         "reason": "invite-expired",
     }
-    assert claim_service.submit(slug, pinned.to_json())["status"] == "admitted"
+    assert claim_service.admit(slug, admission.to_json())["status"] == "admitted"
     with LedgerStore(path) as store:
         assert delayed_persona.public_hex in store.fold().members
 

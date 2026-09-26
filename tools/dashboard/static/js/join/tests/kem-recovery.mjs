@@ -22,10 +22,10 @@ laterSeed.fill(0);
 assert.equal(first.kemCredential.kem_public_key, later.publicKeyHex,
   'invitation credential must match independent root-based sign-in derivation');
 assert.equal(first.kemPrivateKey, later.privateKeyHex);
-// A new ceremony, including the finalize path, must preserve the key identity.
-const finalized = await run({ ...args, position: { parents: [genesis], hlc: [2, 0] } });
-assert.equal(finalized.kemCredential.kem_public_key, first.kemCredential.kem_public_key);
-assert.equal(finalized.kemPrivateKey, first.kemPrivateKey);
+// A second ceremony (the invitee accepting again) preserves the key identity.
+const again = await run(args);
+assert.equal(again.kemCredential.kem_public_key, first.kemCredential.kem_public_key);
+assert.equal(again.kemPrivateKey, first.kemPrivateKey);
 assert.ok(opened.every(seed => seed.every(byte => byte === 0)));
 root.fill(0);
 // Private TEST material is captured on a pipe for Python's real grant-open test.

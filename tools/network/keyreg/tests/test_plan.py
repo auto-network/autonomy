@@ -6,7 +6,7 @@ current founder 3-4 root openings, joiner 2-3 plus a repeat; minimal
 founder 2 (1 with a checkpoint-scoped delegate), joiner 1 (self-admit) or
 2 (approval). Under built rules alone an approval role costs the founder 3:
 the countersign stages the claim and the checkpoint needs it appended, so
-founder 2 needs the proposed admit_on_approval rule."""
+founder 2 follows from the built admission event."""
 
 import copy
 import sys
@@ -34,14 +34,17 @@ def test_recorded_scenarios_match_the_record(registry):
     table = {(s["from"], tuple(s["rules"])): (s["current"], s["minimal"])
              for s in _scenarios(registry)}
     assert table[("self_admit", ())] == ({"founder": 3, "joiner": 3}, {"founder": 2, "joiner": 1})
-    assert table[("approval", ())] == ({"founder": 4, "joiner": 4}, {"founder": 3, "joiner": 2})
-    assert table[("approval", ("admit_on_approval",))][1] == {"founder": 2, "joiner": 2}
+    # The admission event is built (auto-qrmlg.3 C5): under an approval role
+    # the approver admits in its own window and the joiner's second ceremony
+    # is gone, so the built current order costs the joiner 3 openings (claim,
+    # install-time mints, the repeat) and the minimum is founder 2 / joiner 2.
+    assert table[("approval", ())] == ({"founder": 4, "joiner": 3}, {"founder": 2, "joiner": 2})
     assert table[("self_admit", ("delegate_checkpoint",))][1] == {"founder": 1, "joiner": 1}
-    # auto-qrmlg.12 final rules: the admission event realizes admit_on_approval,
-    # bundle_adopt moves the joiner's adoption into install; counts unchanged.
+    # auto-qrmlg.12 final rules: bundle_adopt moves the joiner's adoption
+    # into install; counts unchanged.
     assert table[("self_admit", ("delegate_checkpoint", "bundle_adopt"))][1] == {"founder": 1, "joiner": 1}
-    assert table[("approval", ("admit_on_approval", "bundle_adopt"))][1] == {"founder": 2, "joiner": 2}
-    assert table[("approval", ("admit_on_approval", "bundle_adopt", "delegate_checkpoint"))][1] == {
+    assert table[("approval", ("bundle_adopt",))][1] == {"founder": 2, "joiner": 2}
+    assert table[("approval", ("bundle_adopt", "delegate_checkpoint"))][1] == {
         "founder": 2, "joiner": 2}
 
 
@@ -51,7 +54,7 @@ def test_final_rules_adopt_at_install(registry):
     assert adopt == ["route.join_install_bundle_adopt"]
 
 
-@pytest.mark.parametrize("index", range(8))
+@pytest.mark.parametrize("index", range(7))
 def test_planner_and_current_order_reproduce_each_scenario(registry, index):
     scenario = _scenarios(registry)[index]
     current, minimal, openings = keyreg.explain_current(
@@ -115,7 +118,7 @@ def test_unreachable_goal_is_reported(registry):
 
 
 def test_cli_plan_and_explain(capsys, registry):
-    assert keyreg.main(["plan", GOAL, "--from", "approval", "--rule", "admit_on_approval"]) == 0
+    assert keyreg.main(["plan", GOAL, "--from", "approval", "--rule", "bundle_adopt"]) == 0
     out = capsys.readouterr().out
     assert "root openings: founder 2, joiner 2" in out
     assert keyreg.main(["explain-current", GOAL]) == 0

@@ -1124,6 +1124,33 @@ async def post_ledger_claim(request: Request) -> JSONResponse:
         return _claim_http_fault(exc)
 
 
+async def post_ledger_admission(request: Request) -> JSONResponse:
+    """The approver's admission event (OrgAdmission.tla admission event):
+    ``{org, event}`` where event is the approver-signed member.admission
+    wire carrying the invitee's staged claim and the approvals."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "body must be JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+    requested_org = body.get("org")
+    if not isinstance(requested_org, str) or not requested_org:
+        return JSONResponse({"error": "body must carry the local org slug"}, status_code=400)
+    _org, refused = resolve_scoped_org(requested_org, request=request)
+    if refused is not None:
+        return refused
+    wire = body.get("event")
+    if not isinstance(wire, str):
+        return JSONResponse({"error": "body must carry an event canonical wire string"},
+                            status_code=400)
+    from tools.dashboard import claim_service
+    try:
+        return _claim_http_response(await asyncio.to_thread(claim_service.admit, requested_org, wire))
+    except Exception as exc:
+        return _claim_http_fault(exc)
+
+
 async def get_ledger_claim_context(request: Request) -> JSONResponse:
     """Thin HTTP adapter for public invite/authority minting context."""
     if _mock_mode():
@@ -3572,6 +3599,7 @@ ROUTES = [
     Route("/api/network/ledger/role-grant", post_ledger_role_grant, methods=["POST"]),
     Route("/api/network/ledger/role-revoke", post_ledger_role_revoke, methods=["POST"]),
     Route("/api/network/ledger/claim", post_ledger_claim, methods=["POST"]),
+    Route("/api/network/ledger/admission", post_ledger_admission, methods=["POST"]),
     Route("/api/network/join/outcome", post_join_outcome, methods=["POST"]),
     Route("/api/network/membership-checkpoint/adopt", post_membership_checkpoint_adopt, methods=["POST"]),
     Route(

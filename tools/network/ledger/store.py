@@ -217,6 +217,9 @@ class LedgerStore:
                 ("parents", "BLOB"),
                 ("hlc_count", "INTEGER"),
                 ("staged_at", "INTEGER"),
+                # The invitee-signed wire, carried UNCHANGED by the approver's
+                # admission event (OrgAdmission.tla admission event).
+                ("wire", "BLOB"),
             ):
                 if column not in existing:
                     self.db.execute(
@@ -360,9 +363,18 @@ class LedgerStore:
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
             existing = self.db.execute(
-                "SELECT approvals FROM ledger_pending_claims WHERE claim_key = ?",
+                "SELECT approvals, wire, staged_at FROM ledger_pending_claims "
+                "WHERE claim_key = ?",
                 (key,),
             ).fetchone()
+            if (
+                existing is not None
+                and existing[1] is not None
+                and bytes(existing[1]) == event.to_json()
+            ):
+                # The same signed claim again: the staging window is not
+                # reset by a replay.
+                staged_at = existing[2] if existing[2] is not None else staged_at
             if (
                 existing is not None
                 and not incoming_approvals
@@ -377,8 +389,10 @@ class LedgerStore:
                     "(would erase gathered approvals)"
                 )
             self.db.execute(
-                "INSERT OR REPLACE INTO ledger_pending_claims VALUES "
-                "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR REPLACE INTO ledger_pending_claims "
+                "(claim_key, invite_ref, persona_pub, body, approvals, author_key, "
+                "hlc_ts, parents, hlc_count, staged_at, wire) VALUES "
+                "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     key,
                     p["invite_ref"],
@@ -387,10 +401,11 @@ class LedgerStore:
                     canonical_json(incoming_approvals),
                     event.author_key,
                     event.hlc.ts,
-                    # The fixed causal position finalization re-mints at.
+                    # The claim's causal position, in the ledger's own terms.
                     canonical_json(list(event.parents)),
                     event.hlc.count,
                     staged_at,
+                    event.to_json(),
                 ),
             )
         return key
@@ -398,7 +413,7 @@ class LedgerStore:
     def get_pending_claim(self, claim_key: str) -> Optional[dict]:
         row = self.db.execute(
             "SELECT invite_ref, persona_pub, body, approvals, author_key, hlc_ts, "
-            "parents, hlc_count, staged_at "
+            "parents, hlc_count, staged_at, wire "
             "FROM ledger_pending_claims WHERE claim_key = ?",
             (claim_key,),
         ).fetchone()
@@ -419,6 +434,10 @@ class LedgerStore:
             "parents": json.loads(bytes(row[6])) if row[6] is not None else None,
             "hlc_count": row[7],
             "staged_at": row[8],
+            # The invitee-signed event wire the admission event carries; None
+            # on a row staged before the column existed (the invitee submits
+            # again and the fresh row carries it).
+            "wire": bytes(row[9]).decode("utf-8") if row[9] is not None else None,
         }
 
     def list_pending_claims(self) -> list:
@@ -507,7 +526,7 @@ class LedgerStore:
         if view is None:
             return {
                 "ready": False, "have": 0, "need": 0,
-                "reason": R_ROLE_UNDEFINED, "admitting": [], "position": None,
+                "reason": R_ROLE_UNDEFINED, "admitting": [],
             }
         have, need = claim_requirement_status(
             requires=view.claim_requires,
@@ -530,13 +549,13 @@ class LedgerStore:
             return {
                 "ready": False, "have": have, "need": need,
                 "reason": "claim-expired", "admitting": [],
-                "position": None,
             }
-        if record["parents"] is None:
-            # Pre-migration staging row: no causal position to re-mint at.
+        if record["wire"] is None:
+            # Staged before the signed wire was kept: nothing an admission
+            # event could carry unchanged, so the invitee submits again.
             return {
                 "ready": False, "have": have, "need": need,
-                "reason": "legacy-staging", "admitting": [], "position": None,
+                "reason": "legacy-staging", "admitting": [],
             }
         ready = have >= need
         # ``admitting``: a deterministic NEED-sized subset of the approvers
@@ -561,13 +580,6 @@ class LedgerStore:
             "need": need,
             "reason": None if ready else R_APPROVAL_MISSING,
             "admitting": admitting,
-            # Where finalization must re-mint (auto-cz4fb): the claim's
-            # ORIGINAL causal position, so a pre-expiry claim stays
-            # admittable however long approval took.
-            "position": {
-                "parents": list(record["parents"]),
-                "hlc": [record["hlc_ts"], record["hlc_count"]],
-            },
         }
 
     # -- read side --------------------------------------------------------------------

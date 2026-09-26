@@ -415,7 +415,6 @@
           if (result === null) { button.disabled = false; return null; }
           if (result.state === "pending") { showWaiting(brandName); return poll(brandName, role); }
           if (result.state === "admitted") { return installAdmitted(brandName, role); }
-          if (result.state === "already-approved") { return finalize(brandName, role); }
           reportTerminal(result);
           return null;
         })
@@ -426,27 +425,18 @@
     });
   }
 
-  // Approval is somebody else's action, so this waits rather than asking the
-  // user to. Admission needs a second submit carrying the countersignature,
-  // which finalize() does; accept() would discard it.
+  // Approval and admission are somebody else's actions (the approver's
+  // admission event carries this signed claim), so this waits rather than
+  // asking the user to do anything more.
   function poll(brandName, role) {
     return session.pollUntilTerminal({
       onProgress: function () {},
     }).then(function (result) {
       if (!result) return null;
-      if (result.state === "already-approved") return finalize(brandName, role);
       if (result.state === "admitted") { return installAdmitted(brandName, role); }
       if (result.state === "pending" || result.state === "pending-timeout") return null;
       reportTerminal(result);
       return null;
-    });
-  }
-
-  function finalize(brandName, role) {
-    return session.finalize().then(function (result) {
-      if (result && result.state === "admitted") { return installAdmitted(brandName, role); }
-      showWaiting(brandName);
-      return poll(brandName, role);
     });
   }
 

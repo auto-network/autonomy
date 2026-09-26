@@ -49,6 +49,7 @@ from tools.network.idkit import canonical_json, verify_signature
 from tools.network.idkit.errors import IdkitError
 
 from .events import (
+    Event,
     KEM_CREDENTIAL_DOMAIN,
     approval_signing_input,
     delegate_proof_input,
@@ -93,6 +94,10 @@ R_CLAIM_BAD_CREDENTIAL = "claim-bad-credential"
 R_PERSONA_EXISTS = "persona-exists"
 R_APPROVAL_BAD = "bad-approval"
 R_APPROVAL_MISSING = "approval-missing"
+R_ADMISSION_BAD_CLAIM = "admission-bad-claim"
+R_ADMISSION_POSITION = "admission-claim-position"
+R_ADMISSION_UNAUTHORIZED = "admission-unauthorized"
+R_ADMISSION_AFTER_REMOVAL = "admission-after-removal"
 R_UNKNOWN_PERSONA = "unknown-persona"
 R_REKEY_WRONG_KEY = "rekey-wrong-key"
 R_REKEY_UNAUTHORIZED = "rekey-unauthorized"
@@ -711,7 +716,9 @@ class _Folder:
                 or author == rg.persona
                 or self._upstream(author, rg.author, ctx)
             )
-        elif target.type == "member.claim":
+        elif target.type in ("member.claim", "member.admission"):
+            # A member admitted by an admission event is recorded under
+            # that event's id; revoking it removes the member the same way.
             claim = self.claims[target_id]
             sponsor = self.invites[claim.invite_ref].author
             allowed = (
@@ -815,6 +822,53 @@ class _Folder:
         return None
 
     def _h_member_claim(self, event, ctx) -> Optional[str]:
+        return self._admit_claim(
+            event, ctx, approvals=event.payload["approvals"], record_id=event.event_id,
+        )
+
+    def _h_member_admission(self, event, ctx) -> Optional[str]:
+        """An approver admits a staged claim (OrgAdmission.tla admission
+        event; auto-qrmlg.12): the carried member.claim must verify under
+        the invitee's key at its staged position (its parents are in this
+        event's ancestry), the author must be one of the carried approvers
+        (or the root), the persona's latest removal must precede the claim,
+        and then every claim rule applies with the CARRIED approvals in
+        place of the claim's own. The member record takes this event's id,
+        so revocation and the admission floor address the admission."""
+        p = event.payload
+        try:
+            claim = Event.from_json(p["claim"])
+            claim.verify_sig()
+        except Exception:
+            return R_ADMISSION_BAD_CLAIM
+        if claim.type != "member.claim":
+            return R_ADMISSION_BAD_CLAIM
+        if any(parent not in ctx for parent in claim.parents):
+            return R_ADMISSION_POSITION
+        if claim.hlc.ts > event.hlc.ts:
+            return R_ADMISSION_POSITION
+        author = event.author_key
+        if author != self.root_at(ctx) and author not in {a["key"] for a in p["approvals"]}:
+            return R_ADMISSION_UNAUTHORIZED
+        persona = claim.payload["persona_pub"]
+        for kill in self._kills(ctx):
+            target = kill.target_event
+            removed = (
+                (target is not None and target in self.claims
+                 and self.claims[target].persona_pub == persona)
+                or kill.target_key == persona
+            )
+            if removed and self.ledger.get(kill.id).hlc.ts >= claim.hlc.ts:
+                return R_ADMISSION_AFTER_REMOVAL
+        return self._admit_claim(
+            claim, ctx, approvals=p["approvals"], record_id=event.event_id,
+        )
+
+    def _admit_claim(self, event, ctx, *, approvals, record_id) -> Optional[str]:
+        """The claim rules, for a claim appended by its invitee (approvals in
+        its payload) or carried by an admission event (approvals beside
+        it). *event* is the member.claim; *record_id* is the ledger id the
+        member record takes."""
         p = event.payload
         invite_id = p["invite_ref"]
         if invite_id not in ctx or invite_id not in self.invites:
@@ -886,7 +940,7 @@ class _Folder:
             if credential["genesis_id"] != self.genesis_id:
                 return R_CLAIM_BAD_CREDENTIAL
 
-        reason = self._check_approvals(event, ctx, invite)
+        reason = self._check_approvals(event, ctx, invite, approvals)
         if reason is not None:
             return reason
 
@@ -901,8 +955,8 @@ class _Folder:
             if recovery_pub == self.root_at(ctx):
                 return R_RECOVERY_EQUALS_ROOT
 
-        self.claims[event.event_id] = _Claim(
-            id=event.event_id,
+        self.claims[record_id] = _Claim(
+            id=record_id,
             invite_ref=invite_id,
             persona_pub=p["persona_pub"],
             hlc_ts=event.hlc.ts,
@@ -911,9 +965,9 @@ class _Folder:
         )
         return None
 
-    def _check_approvals(self, event, ctx, invite: _Invite) -> Optional[str]:
+    def _check_approvals(self, event, ctx, invite: _Invite, approvals) -> Optional[str]:
         p = event.payload
-        for entry in p["approvals"]:
+        for entry in approvals:
             try:
                 verify_signature(
                     entry["key"], entry["sig"], approval_signing_input("member.claim", p)
@@ -939,7 +993,7 @@ class _Folder:
         have, need = claim_requirement_status(
             requires=role_def.claim_requires,
             key_bound=invite.invite_pub is not None,
-            approver_keys=[entry["key"] for entry in p["approvals"]],
+            approver_keys=[entry["key"] for entry in approvals],
             threshold=role_def.approver_threshold,
             root=self.root_at(ctx),
             sponsor=invite.author,

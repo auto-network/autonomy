@@ -1111,6 +1111,25 @@
         }),
       });
     }).then(function (result) {
+      // This approval completed the threshold: the same open persona admits
+      // the member now, with an admission event carrying the invitee's
+      // signed claim unchanged (no second ceremony on either side).
+      if (!(result && result.status === 'ready' && result.admission && opened)) return result;
+      return import('/static/js/ceremony/claim.js').then(function (claimModule) {
+        var context = {
+          transport: { fetch: window.fetch.bind(window) },
+          orgSlug: self.slug,
+          genesisId: self.view.genesis_id,
+          heads: result.admission.parents,
+          maxHlc: [Date.now(), 0],
+        };
+        return claimModule.signAdmission({
+          context: context, personalRootSeed: opened.seed, admission: result.admission,
+        }).then(function (signed) {
+          return claimModule.submitAdmission({ context: context, wire: signed.wire });
+        });
+      });
+    }).then(function (result) {
       self.busy = null;
       if (result && (result.status === 'ready' || result.status === 'admitted')) {
         self.readyClaims[claim.claim_key] = true;

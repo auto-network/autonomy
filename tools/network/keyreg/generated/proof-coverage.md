@@ -50,7 +50,6 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | ceremony.checkpoint_publish | mutation | OrgAdmission: EveryAdmittedMemberPulls |
 | ceremony.checkpoint_seed | mutation | **GAP** |
 | ceremony.claim_approval | mutation | **GAP** |
-| ceremony.claim_finalize | mutation | **GAP** |
 | ceremony.fleet_runtime_mint | mutation | **GAP** |
 | ceremony.member_claim_mint | mutation | **GAP** |
 | ceremony.org_invite_mint | mutation | **GAP** |
@@ -71,6 +70,7 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | fold.invite | mutation | **GAP** |
 | fold.key_epoch | mutation | **GAP** |
 | fold.key_rotate | mutation | **GAP** |
+| fold.member_admission | mutation | **GAP** |
 | fold.member_claim | mutation | **GAP** |
 | fold.member_rekey | mutation | VaultRecoveryRace: recovery_beats_thief<br>VaultRecoveryRace: recovery_key_secret |
 | fold.revoke | mutation | VaultDelegateChain: write_requires_live_delegate |
@@ -85,6 +85,7 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | rekey.frontier_marker | mutation | VaultRekeyMarker: exclusion_forward<br>VaultRekeyMarkerChain: exclusion_through_chain |
 | root.rotation | mutation | VaultRootRotation: thief_cannot_rotate<br>VaultRootRotation: owner_rotates_away_from_stolen_root |
 | route.checkpoint_adopt | mutation | OrgAdmission: EveryAdmittedMemberPulls<br>OrgAdmission: NoPullWithoutInclusion<br>OrgAdmission: AdoptedIsAuthentic |
+| route.claim_admission | mutation | **GAP** |
 | route.claim_submit_admit | mutation | **GAP** |
 | route.claim_submit_stage | mutation | **GAP** |
 | route.invite_resolve | mutation | **GAP** |
@@ -102,4 +103,4 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | vault.create_class | mutation | VaultPolicyClass: root_reaches_every_generation |
 | vault.revoke_class_factor | mutation | VaultPolicyClass: revoked_factor_excluded_forward<br>VaultPolicyClass: revoked_factor_keeps_old |
 
-32 of 91 entries carry at least one model reference; 59 gaps.
+32 of 92 entries carry at least one model reference; 60 gaps.

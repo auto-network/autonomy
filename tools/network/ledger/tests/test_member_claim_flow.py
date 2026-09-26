@@ -441,9 +441,7 @@ def test_readiness_tracks_the_fold_verdict():
     assert (status["ready"], status["have"], status["need"]) == (True, 2, 2)
     assert status["reason"] is None
     assert status["admitting"] == sorted([org.admin.public_hex, admin2.public_hex])
-    # The fixed causal position finalization must re-mint at (auto-cz4fb).
-    assert status["position"]["parents"] == sorted(bare.parents)
-    assert status["position"]["hlc"] == [bare.hlc.ts, bare.hlc.count]
+    assert "position" not in status  # the approver's admission event carries the staged claim
 
     # The readiness verdict matches the fold's: finalize and admit.
     final, _ = mint_member_claim(
@@ -590,16 +588,17 @@ def test_finalize_survives_approval_outlasting_the_invite():
     )
     assert org.store.evaluate_claim(stale) == R_INVITE_EXPIRED
 
-    # Finalizing at the STORED position admits.
-    position = status["position"]
-    pinned, _ = mint_member_claim(
-        org.seed, org.genesis_id, invite_ref=org.invite_id,
-        heads=position["parents"], hlc=HLC(*position["hlc"]),
-        token=org.token, approvals=merged,
-    )
-    assert org.store.evaluate_claim(pinned) is None
-    org.store.append(pinned)
-    assert org.persona.public_hex in org.store.fold().members
+    # The approver's admission event, carrying the STAGED claim unchanged,
+    # admits at the current heads: the fold judges the carried claim's own
+    # timestamp against the invite's expiry.
+    from tools.network.ledger.claims import make_admission
+    admission = make_admission(org.admin, {
+        "claim": record["wire"], "approvals": merged, "parents": list(org.store.heads()),
+    }, org.next_hlc())
+    org.store.append(admission)
+    state = org.store.fold()
+    assert state.valid[admission.event_id] is True, state.reasons.get(admission.event_id)
+    assert org.persona.public_hex in state.members
 
 
 def test_a_first_submission_after_expiry_is_still_refused():
@@ -627,22 +626,23 @@ def test_pending_claim_ttl_is_a_distinct_terminal_state():
         claim_key, now=staged_at + PENDING_CLAIM_TTL_MS + 1
     )
     assert (beyond["ready"], beyond["reason"]) == (False, "claim-expired")
-    assert beyond["position"] is None  # nothing to finalize at
+    assert beyond["admitting"] == []  # nothing an admission could carry
 
 
 def test_legacy_staging_row_reports_itself():
-    """A row staged before the migration has no causal position; it must
-    say so rather than let a client finalize at the wrong one."""
+    """A row staged before the signed wire was kept holds nothing an
+    admission event could carry unchanged; it says so, and the invitee
+    submits again rather than being admitted from a reconstructed claim."""
     org = Org(requires="admin-ack", token=True)
     claim_key = org.store.stage_pending_claim(org.mint_claim())
     with org.store.db:
         org.store.db.execute(
-            "UPDATE ledger_pending_claims SET parents = NULL WHERE claim_key = ?",
+            "UPDATE ledger_pending_claims SET wire = NULL WHERE claim_key = ?",
             (claim_key,),
         )
     verdict = org.store.evaluate_pending_claim(claim_key)
     assert (verdict["ready"], verdict["reason"]) == (False, "legacy-staging")
-    assert verdict["position"] is None
+    assert verdict["admitting"] == []
 
 
 def test_position_survives_reopen(tmp_path):

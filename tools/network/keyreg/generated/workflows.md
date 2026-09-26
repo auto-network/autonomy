@@ -19,7 +19,6 @@ See the [reading guide](../GUIDE.md) and [key register](key-register.md).
 - [ceremony.checkpoint_publish](#workflow-ceremony-checkpoint_publish)
 - [ceremony.checkpoint_seed](#workflow-ceremony-checkpoint_seed)
 - [ceremony.claim_approval](#workflow-ceremony-claim_approval)
-- [ceremony.claim_finalize](#workflow-ceremony-claim_finalize)
 - [ceremony.fleet_runtime_mint](#workflow-ceremony-fleet_runtime_mint)
 - [ceremony.member_claim_mint](#workflow-ceremony-member_claim_mint)
 - [ceremony.org_invite_mint](#workflow-ceremony-org_invite_mint)
@@ -40,6 +39,7 @@ See the [reading guide](../GUIDE.md) and [key register](key-register.md).
 - [fold.invite](#workflow-fold-invite)
 - [fold.key_epoch](#workflow-fold-key_epoch)
 - [fold.key_rotate](#workflow-fold-key_rotate)
+- [fold.member_admission](#workflow-fold-member_admission)
 - [fold.member_claim](#workflow-fold-member_claim)
 - [fold.member_rekey](#workflow-fold-member_rekey)
 - [fold.revoke](#workflow-fold-revoke)
@@ -54,6 +54,7 @@ See the [reading guide](../GUIDE.md) and [key register](key-register.md).
 - [rekey.frontier_marker](#workflow-rekey-frontier_marker)
 - [root.rotation](#workflow-root-rotation)
 - [route.checkpoint_adopt](#workflow-route-checkpoint_adopt)
+- [route.claim_admission](#workflow-route-claim_admission)
 - [route.claim_submit_admit](#workflow-route-claim_submit_admit)
 - [route.claim_submit_stage](#workflow-route-claim_submit_stage)
 - [route.invite_resolve](#workflow-route-invite_resolve)
@@ -182,7 +183,7 @@ Built at the armor layer; exposed by no route or UI yet.
 <a id="workflow-ceremony-admission_event"></a>
 ## ceremony.admission_event
 
-**Status:** designed
+**Status:** built
 
 **Authority:** persona_signing_key
 
@@ -194,13 +195,13 @@ Built at the armor layer; exposed by no route or UI yet.
 
 - an approver-authored admission event carrying the invitee's unchanged signed member.claim plus the approvals (operator ruling 2026-09-25); in the same window the founder publishes the checkpoint reflecting it (P2)
 
-**Workflow:** actors founder; opens persona; requires persona_signing_key AND claim_staged; produces claim_approval, member_admitted; rule admit_on_approval
+**Workflow:** actors founder; opens persona; requires persona_signing_key AND claim_staged; produces claim_approval, admission_event
 
-**Source:** `tools/network/TLA/OrgAdmissionEvent.tla:Approve` (ceremony)
+**Source:** `tools/dashboard/static/js/ceremony/claim.js:signAdmission` (ceremony)
 
 **Crib:** §8
 
-Realizes P3 without re-signing the claim: a claim's author signature covers its whole payload including approvals and parents (events.py:618-619), and an approval covers only (kind, invite_ref, persona) (events.py:737-744). Requires a new fold handler (lint check 1 then requires its registry row). Not built.
+Realizes P3 without re-signing the claim: a claim's author signature covers its whole payload including approvals and parents (events.py:618-619), and an approval covers only (kind, invite_ref, persona) (events.py:737-744). Built (auto-qrmlg.3 C5): the fold handler is fold.member_admission; the approver's browser signs the event right after the countersign that completed the threshold (org-membership.js approve), with no second invitee ceremony.
 
 <a id="workflow-ceremony-checkpoint_delegate_grant"></a>
 ## ceremony.checkpoint_delegate_grant
@@ -284,25 +285,6 @@ Step F0 (founder sign-on). The advancing form is ceremony.checkpoint_publish.
 **Crib:** §8
 
 Step F3. Root opened at org-membership.js:1082.
-
-<a id="workflow-ceremony-claim_finalize"></a>
-## ceremony.claim_finalize
-
-**Status:** built
-
-**Authority:** persona_signing_key
-
-**Writes**
-
-- member.claim re-minted at the pinned position carrying the approvals (accept-controller.js:270-319)
-
-**Workflow:** actors joiner; opens persona; requires persona_signing_key AND claim_approval; produces member_claim_final
-
-**Source:** `tools/dashboard/static/js/join/accept-controller.js:finalize` (ceremony)
-
-**Crib:** §8
-
-Step J4.
 
 <a id="workflow-ceremony-fleet_runtime_mint"></a>
 ## ceremony.fleet_runtime_mint
@@ -751,6 +733,44 @@ Checkpoint is decided-removed from the design vocabulary; the handler remains in
 
 **Crib:** §8, §9
 
+<a id="workflow-fold-member_admission"></a>
+## fold.member_admission
+
+**Status:** built
+
+**Authority:** approver persona key, org_root_signing_key
+
+**Preconditions**
+
+- The carried member.claim verifies under the invitee's key and its parents are in this event's ancestry (its staged position).
+- The author is one of the carried approvers, or the root.
+- No removal of the persona at or after the claim's timestamp.
+- Every member.claim rule, with the carried approvals in place of the claim's own.
+
+**Writes**
+
+- member claim (record keyed by the admission event id)
+- member recovery_pub enrollment
+
+**Refusals**
+
+- admission-bad-claim
+- admission-claim-position
+- admission-unauthorized
+- admission-after-removal
+- claim-wrong-key
+- claim-bad-token
+- claim-bad-credential
+- invite-already-claimed
+- persona-exists
+- approval-missing
+
+**Source:** `tools/network/ledger/fold.py:_h_member_admission` (fold)
+
+**Crib:** §8, §9
+
+OrgAdmission.tla admission event (auto-qrmlg.12; operator ruling 2026-09-25): the approver admits without a second invitee ceremony.
+
 <a id="workflow-fold-member_claim"></a>
 ## fold.member_claim
 
@@ -1088,6 +1108,25 @@ A local verification has no relying party (crib section 0: the owner rewriting t
 
 Never signs (docstring, network_routes.py:724-733). Callers: join install (:945), sign-on preparation (signon_preparation.py:140), and the route POST /api/network/membership-checkpoint/adopt; no background caller. The head-presence precondition is not monotone and is not expressed in requires; OrgAdmission.tla models it: under these rules a member bootstrapped before a later admission that the next checkpoint covers can never adopt it, and no pull is admitted (OrgAdmissionCurrent.cfg, EveryAdmittedMemberPulls violated). The proposed adopt-by-verification rule (signer in the previous checkpointers root, prev chain, no local head) with checkpoint-at-admission removes the deadlock (OrgAdmissionProposed.cfg). Under that rule the prover's own inclusion path cannot come from a local fold at the head (org_sync_channels.py:173-179, 197-205); it must arrive with the checkpoint.
 
+<a id="workflow-route-claim_admission"></a>
+## route.claim_admission
+
+**Status:** built
+
+**Authority:** approver persona key
+
+**Writes**
+
+- member.admission appended to the founder's ledger; the staged claim dropped; the checkpoint reflecting the member published (P2)
+
+**Workflow:** actors founder; opens none; requires admission_event; produces member_admitted
+
+**Source:** `tools/dashboard/claim_service.py:admit` (route)
+
+**Crib:** §8
+
+Step F3, admit half, on the founder's machine (POST /api/network/ledger/admission).
+
 <a id="workflow-route-claim_submit_admit"></a>
 ## route.claim_submit_admit
 
@@ -1099,13 +1138,13 @@ Never signs (docstring, network_routes.py:724-733). Callers: join install (:945)
 
 - member.claim appended to the founder's ledger (claim_service.py:172-175)
 
-**Workflow:** actors founder; opens none; requires ((member_claim AND policy_self_admit) OR member_claim_final); produces member_admitted
+**Workflow:** actors founder; opens none; requires member_claim AND policy_self_admit; produces member_admitted
 
 **Source:** `tools/dashboard/claim_service.py:submit` (route)
 
 **Crib:** §8
 
-Steps J3 and J4, submit half, on the founder's machine. No checkpoint code runs here (claim_service.py, link_serving.py).
+Step J3, submit half, on the founder's machine: the fold admits a key-bound self-admitting claim at once. Under an approval role the claim is staged (route.claim_submit_stage) and route.claim_admission admits it. The admitting append publishes the checkpoint (P2).
 
 <a id="workflow-route-claim_submit_stage"></a>
 ## route.claim_submit_stage

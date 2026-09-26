@@ -79,3 +79,18 @@ def mint_member_claim(
     )
     event = make_event(persona, payload, sorted(heads), hlc)
     return event, persona
+
+
+def make_admission(approver, admission: dict, hlc: HLC) -> "Event":
+    """The approver-authored ``member.admission`` event (OrgAdmission.tla
+    admission event): *admission* is what the countersign path returned as
+    ``ready["admission"]`` ({claim wire, approvals, parents, genesis_id}).
+    Carries the invitee's signed claim unchanged; signed by *approver*."""
+    from tools.network.ledger.events import make_event
+
+    payload = {
+        "type": "member.admission",
+        "claim": admission["claim"],
+        "approvals": sorted(admission.get("approvals") or [], key=lambda e: e["key"]),
+    }
+    return make_event(approver, payload, list(admission["parents"]), hlc)

@@ -8,6 +8,15 @@
     }
   },
   "artifacts": {
+    "admission_event": {
+      "code": [
+        "tools/dashboard/static/js/ceremony/claim.js:signAdmission",
+        "tools/network/ledger/claims.py:make_admission"
+      ],
+      "description": "The approver-signed member.admission event carrying the invitee's unchanged claim and the approvals.",
+      "home": "founder machine",
+      "store": "approver browser memory until submitted"
+    },
     "adopted_checkpoint": {
       "code": [
         "tools/dashboard/membership_checkpoint.py:record_adopted"
@@ -174,14 +183,6 @@
         "tools/network/ledger/events.py:_v_member_claim"
       ],
       "description": "The persona-signed member.claim event.",
-      "home": "joiner machine",
-      "store": "joiner browser memory until submitted"
-    },
-    "member_claim_final": {
-      "code": [
-        "tools/dashboard/static/js/join/accept-controller.js:finalize"
-      ],
-      "description": "The claim re-minted at the pinned position carrying the approvals.",
       "home": "joiner machine",
       "store": "joiner browser memory until submitted"
     },
@@ -356,20 +357,10 @@
             "approval"
           ],
           "runs": [
-            "ceremony.claim_approval"
+            "ceremony.claim_approval",
+            "ceremony.admission_event"
           ],
           "step": "F3"
-        },
-        {
-          "actor": "joiner",
-          "ceremony": true,
-          "only_from": [
-            "approval"
-          ],
-          "runs": [
-            "ceremony.claim_finalize"
-          ],
-          "step": "J4"
         },
         {
           "actor": "founder",
@@ -378,9 +369,9 @@
             "approval"
           ],
           "runs": [
-            "route.claim_submit_admit"
+            "route.claim_admission"
           ],
-          "step": "J4.submit"
+          "step": "F3.admit"
         },
         {
           "actor": "founder",
@@ -523,7 +514,7 @@
         {
           "current": {
             "founder": 4,
-            "joiner": 4
+            "joiner": 3
           },
           "from": "approval",
           "minimal": {
@@ -531,14 +522,13 @@
             "joiner": 2
           },
           "rules": [
-            "admit_on_approval",
             "bundle_adopt"
           ]
         },
         {
           "current": {
             "founder": 4,
-            "joiner": 4
+            "joiner": 3
           },
           "from": "approval",
           "minimal": {
@@ -546,7 +536,6 @@
             "joiner": 2
           },
           "rules": [
-            "admit_on_approval",
             "bundle_adopt",
             "delegate_checkpoint"
           ]
@@ -566,28 +555,14 @@
         {
           "current": {
             "founder": 4,
-            "joiner": 4
-          },
-          "from": "approval",
-          "minimal": {
-            "founder": 3,
-            "joiner": 2
-          },
-          "rules": []
-        },
-        {
-          "current": {
-            "founder": 4,
-            "joiner": 4
+            "joiner": 3
           },
           "from": "approval",
           "minimal": {
             "founder": 2,
             "joiner": 2
           },
-          "rules": [
-            "admit_on_approval"
-          ]
+          "rules": []
         },
         {
           "current": {
@@ -606,7 +581,7 @@
         {
           "current": {
             "founder": 4,
-            "joiner": 4
+            "joiner": 3
           },
           "from": "approval",
           "minimal": {
@@ -614,7 +589,6 @@
             "joiner": 2
           },
           "rules": [
-            "admit_on_approval",
             "delegate_checkpoint"
           ]
         }
@@ -1827,14 +1801,14 @@
           "an approver-authored admission event carrying the invitee's unchanged signed member.claim plus the approvals (operator ruling 2026-09-25); in the same window the founder publishes the checkpoint reflecting it (P2)"
         ]
       },
-      "notes": "Realizes P3 without re-signing the claim: a claim's author signature covers its whole payload including approvals and parents (events.py:618-619), and an approval covers only (kind, invite_ref, persona) (events.py:737-744). Requires a new fold handler (lint check 1 then requires its registry row). Not built.",
+      "notes": "Realizes P3 without re-signing the claim: a claim's author signature covers its whole payload including approvals and parents (events.py:618-619), and an approval covers only (kind, invite_ref, persona) (events.py:737-744). Built (auto-qrmlg.3 C5): the fold handler is fold.member_admission; the approver's browser signs the event right after the countersign that completed the threshold (org-membership.js approve), with no second invitee ceremony.",
       "opens": "persona",
       "preconditions": [
         "The fold admits on the event only when: the carried claim verifies under the invitee's key and is the invitee's own claim at its staged position; at least the role's threshold of distinct authorized approvals; the invite is not already redeemed; the claim's position is after the persona's latest removal; the persona is not a member."
       ],
       "produces": [
         "claim_approval",
-        "member_admitted"
+        "admission_event"
       ],
       "proofs": [
         {
@@ -1872,13 +1846,11 @@
         "persona_signing_key",
         "claim_staged"
       ],
-      "rule": "admit_on_approval",
       "source": {
-        "file": "tools/network/TLA/OrgAdmissionEvent.tla",
+        "file": "tools/dashboard/static/js/ceremony/claim.js",
         "kind": "ceremony",
-        "symbol": "Approve"
-      },
-      "status": "designed"
+        "symbol": "signAdmission"
+      }
     },
     "ceremony.checkpoint_delegate_grant": {
       "actors": [
@@ -2019,36 +1991,6 @@
         "file": "tools/dashboard/static/js/ceremony/claim.js",
         "kind": "ceremony",
         "symbol": "signClaimApproval"
-      }
-    },
-    "ceremony.claim_finalize": {
-      "actors": [
-        "joiner"
-      ],
-      "authority": [
-        "persona_signing_key"
-      ],
-      "crib": [
-        "\u00a78"
-      ],
-      "effects": {
-        "writes": [
-          "member.claim re-minted at the pinned position carrying the approvals (accept-controller.js:270-319)"
-        ]
-      },
-      "notes": "Step J4.",
-      "opens": "persona",
-      "produces": [
-        "member_claim_final"
-      ],
-      "requires": [
-        "persona_signing_key",
-        "claim_approval"
-      ],
-      "source": {
-        "file": "tools/dashboard/static/js/join/accept-controller.js",
-        "kind": "ceremony",
-        "symbol": "finalize"
       }
     },
     "ceremony.fleet_runtime_mint": {
@@ -2659,6 +2601,46 @@
         "symbol": "_h_key_rotate"
       }
     },
+    "fold.member_admission": {
+      "authority": [
+        "approver persona key",
+        "org_root_signing_key"
+      ],
+      "crib": [
+        "\u00a78",
+        "\u00a79"
+      ],
+      "effects": {
+        "writes": [
+          "member claim (record keyed by the admission event id)",
+          "member recovery_pub enrollment"
+        ]
+      },
+      "notes": "OrgAdmission.tla admission event (auto-qrmlg.12; operator ruling 2026-09-25): the approver admits without a second invitee ceremony.",
+      "preconditions": [
+        "The carried member.claim verifies under the invitee's key and its parents are in this event's ancestry (its staged position).",
+        "The author is one of the carried approvers, or the root.",
+        "No removal of the persona at or after the claim's timestamp.",
+        "Every member.claim rule, with the carried approvals in place of the claim's own."
+      ],
+      "refusals": [
+        "admission-bad-claim",
+        "admission-claim-position",
+        "admission-unauthorized",
+        "admission-after-removal",
+        "claim-wrong-key",
+        "claim-bad-token",
+        "claim-bad-credential",
+        "invite-already-claimed",
+        "persona-exists",
+        "approval-missing"
+      ],
+      "source": {
+        "file": "tools/network/ledger/fold.py",
+        "kind": "fold",
+        "symbol": "_h_member_admission"
+      }
+    },
     "fold.member_claim": {
       "authority": [
         "invited persona key"
@@ -3129,6 +3111,35 @@
         "symbol": "_adopt_registry_checkpoint"
       }
     },
+    "route.claim_admission": {
+      "actors": [
+        "founder"
+      ],
+      "authority": [
+        "approver persona key"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "member.admission appended to the founder's ledger; the staged claim dropped; the checkpoint reflecting the member published (P2)"
+        ]
+      },
+      "notes": "Step F3, admit half, on the founder's machine (POST /api/network/ledger/admission).",
+      "opens": "none",
+      "produces": [
+        "member_admitted"
+      ],
+      "requires": [
+        "admission_event"
+      ],
+      "source": {
+        "file": "tools/dashboard/claim_service.py",
+        "kind": "route",
+        "symbol": "admit"
+      }
+    },
     "route.claim_submit_admit": {
       "actors": [
         "founder"
@@ -3144,23 +3155,14 @@
           "member.claim appended to the founder's ledger (claim_service.py:172-175)"
         ]
       },
-      "notes": "Steps J3 and J4, submit half, on the founder's machine. No checkpoint code runs here (claim_service.py, link_serving.py).",
+      "notes": "Step J3, submit half, on the founder's machine: the fold admits a key-bound self-admitting claim at once. Under an approval role the claim is staged (route.claim_submit_stage) and route.claim_admission admits it. The admitting append publishes the checkpoint (P2).",
       "opens": "none",
       "produces": [
         "member_admitted"
       ],
       "requires": [
-        {
-          "any": [
-            {
-              "all": [
-                "member_claim",
-                "policy_self_admit"
-              ]
-            },
-            "member_claim_final"
-          ]
-        }
+        "member_claim",
+        "policy_self_admit"
       ],
       "source": {
         "file": "tools/dashboard/claim_service.py",

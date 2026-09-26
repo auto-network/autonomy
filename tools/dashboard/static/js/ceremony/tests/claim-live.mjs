@@ -6,7 +6,9 @@ import {
   getClaimContext,
   getClaimStatus,
   mintMemberClaim,
+  signAdmission,
   signClaimApproval,
+  submitAdmission,
   submitClaim,
   submitClaimApproval,
 } from '../claim.js';
@@ -230,65 +232,44 @@ const finalApprovals = admittingApprovals(
   readyStatus.approvals,
   readyApproval.admitting,
 );
-// Simulate a freshly-discovered current frontier that moved while approval
-// was pending. The server-supplied position must override it for both the
-// event and its KEM credential.
+// The approver that completed the threshold admits with an admission event
+// carrying the invitee's signed claim UNCHANGED plus the counted approvals
+// (OrgAdmission.tla admission event): no second invitee ceremony, and the
+// frontier having moved while approval was pending changes nothing for the
+// invitee. The server named the admission's parents and the approvals.
 const shiftedFinalizeContext = {
   ...bearerContext,
   heads: [fixture.wrong_invite_ref],
-  maxHlc: [readyApproval.position.hlc[0] + 1_000_000, 0],
+  maxHlc: [readyApproval.admission.parents.length ? 1 : 0, 0],
 };
-const finalClaim = await mintMemberClaim({
-  context: shiftedFinalizeContext,
-  personalRootSeed: hexToBytes(fixture.personal_seed_hex),
-  inviteRef: fixture.invite_ref,
-  token: fixture.token,
-  profile: fixture.profile,
-  approvals: finalApprovals,
-  kemSeed: hexToBytes(fixture.kem_seed_hex),
-  nowMs: fixture.lagging_now_ms,
-  position: readyApproval.position,
-});
-let mismatchedCredentialHlcRejected = false;
+let invalidAdmissionRejected = false;
 try {
-  await mintMemberClaim({
-    context: shiftedFinalizeContext,
-    personalRootSeed: hexToBytes(fixture.personal_seed_hex),
-    inviteRef: fixture.invite_ref,
-    token: fixture.token,
-    profile: fixture.profile,
-    approvals: finalApprovals,
-    kemSeed: hexToBytes(fixture.kem_seed_hex),
-    position: readyApproval.position,
-    credentialHlc: [
-      readyApproval.position.hlc[0],
-      readyApproval.position.hlc[1] + 1,
-    ],
+  await signAdmission({
+    context: bearerContext,
+    personalRootSeed: hexToBytes(fixture.extra_approver_personal_seed_hex),
+    admission: { ...readyApproval.admission, claim: '' },
   });
 } catch {
-  mismatchedCredentialHlcRejected = true;
+  invalidAdmissionRejected = true;
 }
-let mismatchedSubmitPositionRejected = false;
-try {
-  await submitClaim({
-    context: shiftedFinalizeContext,
-    event: finalClaim.event,
-    position: {
-      parents: readyApproval.position.parents,
-      hlc: [
-        readyApproval.position.hlc[0],
-        readyApproval.position.hlc[1] + 1,
-      ],
-    },
-  });
-} catch {
-  mismatchedSubmitPositionRejected = true;
-}
-const admitted = await submitClaim({
-  context: shiftedFinalizeContext,
-  event: finalClaim.event,
-  position: readyApproval.position,
+const admissionEvent = await signAdmission({
+  context: bearerContext,
+  personalRootSeed: hexToBytes(fixture.extra_approver_personal_seed_hex),
+  admission: readyApproval.admission,
 });
+// A stranger authoring the same admission is refused by the fold.
+let strangerAdmissionRejected = false;
+try {
+  const stranger = await signAdmission({
+    context: bearerContext,
+    personalRootSeed: hexToBytes(fixture.outsider_personal_seed_hex),
+    admission: readyApproval.admission,
+  });
+  await submitAdmission({ context: bearerContext, wire: stranger.wire });
+} catch {
+  strangerAdmissionRejected = true;
+}
+const admitted = await submitAdmission({ context: bearerContext, wire: admissionEvent.wire });
 const admittedStatus = await getClaimStatus({
   context: bearerContext,
   claimKey: initial.claimKey,
@@ -362,9 +343,9 @@ process.stdout.write(JSON.stringify({
   headsAfterReadyApproval,
   readyStatus,
   shiftedFinalizeHeads: shiftedFinalizeContext.heads,
-  finalClaim,
-  mismatchedCredentialHlcRejected,
-  mismatchedSubmitPositionRejected,
+  admissionEvent: admissionEvent.event,
+  invalidAdmissionRejected,
+  strangerAdmissionRejected,
   admitted,
   admittedStatus,
   expiredStaleSubmit,

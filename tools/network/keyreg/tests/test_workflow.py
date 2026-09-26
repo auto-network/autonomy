@@ -17,7 +17,7 @@ import lint  # noqa: E402
 # registry's ids (per-actor artifacts cover the founder_/joiner_ pairs).
 REQUIRED_ARTIFACTS = [
     "invite_event", "link_publish_approval", "join_link_grant", "member_claim",
-    "claim_staged", "claim_approval", "member_claim_final", "member_admitted",
+    "claim_staged", "claim_approval", "admission_event", "member_admitted",
     "bootstrap_snapshot", "ledger_heads", "registry_binding", "checkpoint_seed",
     "checkpoint_including_joiner", "adopted_checkpoint", "persona_cert_fleet_sync",
     "delegate_grant", "serve_cert", "registered_serving_key", "reachability_row",
@@ -116,13 +116,13 @@ def test_malformed_and_or(registry):
 
 def test_designed_mutation_needs_rule(registry):
     broken = copy.deepcopy(registry)
-    del broken["mutations"]["ceremony.admission_event"]["rule"]
-    assert any("mutations.ceremony.admission_event" in e and "rule" in e for e in _errors(broken))
+    del broken["mutations"]["delegate.checkpoint_publish"]["rule"]
+    assert any("mutations.delegate.checkpoint_publish" in e and "rule" in e for e in _errors(broken))
 
 
 def test_current_order_runs_built_code_only(registry):
     broken = copy.deepcopy(registry)
-    broken["goals"]["org_sync_pull"]["current_order"][0]["runs"].append("ceremony.admission_event")
+    broken["goals"]["org_sync_pull"]["current_order"][0]["runs"].append("delegate.checkpoint_publish")
     assert any("current_order[0].runs" in e and "designed" in e for e in _errors(broken))
 
 

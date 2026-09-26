@@ -33,7 +33,7 @@ from tools.graph.schemas.network_identity import (
 )
 from tools.network.idkit import KeyPair, derive_persona, generate_token
 from tools.network.ledger import HLC, LedgerStore, make_event, org_ledger_db_path, sign_approval, sign_delegate_proof
-from tools.network.ledger.claims import mint_member_claim
+from tools.network.ledger.claims import make_admission, mint_member_claim
 from tools.network.ledger.found import found_org_ledger
 
 ORG = "claimorg"
@@ -175,15 +175,11 @@ class World:
             return raw
         return json.loads(raw.split(b"\n", 1)[0])
 
-    def mint(self, context: dict, approvals=(), position=None):
-        """Mint as claim.js does, optionally at the staged fixed position."""
-        if position is None:
-            heads = context["heads"]
-            ts, count = context["max_hlc"]
-            hlc = HLC(ts + 1_000, 0) if count is not None else HLC(ts + 1_000)
-        else:
-            heads = position["parents"]
-            hlc = HLC.from_value(position["hlc"])
+    def mint(self, context: dict, approvals=()):
+        """Mint as claim.js does: once, at the current heads."""
+        heads = context["heads"]
+        ts, count = context["max_hlc"]
+        hlc = HLC(ts + 1_000, 0) if count is not None else HLC(ts + 1_000)
         event, _ = mint_member_claim(
             self.invitee_seed, context["genesis_id"],
             invite_ref=self.invite_ref, heads=heads, hlc=hlc,
@@ -281,32 +277,27 @@ def test_full_claim_flow_over_the_join_channel(world):
     assert ready["admitting"] == [world.admin.public_hex]
 
     # Approval latency advances the org beyond the invite's causal expiry.
-    # A current-frontier re-mint remains rejected; the server-supplied
-    # position is the only valid finalize position.
+    # A current-frontier re-mint remains rejected; only the approver's
+    # admission event, carrying the staged claim, admits.
     world.advance_heads_past_invite_expiry()
     current_context = world.channel({"v": 1, "op": "context"})
 
-    # 5. finalize — re-mint with EXACTLY the admitting subset at the
-    # server-supplied staging position, then submit again.
-    with LedgerStore(org_ledger_db_path(ORG)) as store:
-        approvals = [
-            e for e in store.get_pending_claim(claim_key)["approvals"]
-            if e["key"] in ready["admitting"]
-        ]
-    current_frontier = world.mint(current_context, approvals=approvals)
+    # 5. the APPROVER admits with an admission event carrying the staged
+    # claim unchanged plus the counted approvals (OrgAdmission.tla admission
+    # event); the invitee never submits again. A fresh invitee submit at the
+    # current frontier is still refused: the invite expired.
+    current_frontier = world.mint(current_context)
     assert world.channel({
         "v": 1, "op": "submit",
         "event": current_frontier.to_json().decode("utf-8"),
     }) == {"v": 1, "status": "rejected", "reason": "invite-expired"}
-
-    final = world.mint(
-        current_context,
-        approvals=approvals,
-        position=ready["position"],
-    )
-    admitted = world.channel({
-        "v": 1, "op": "submit", "event": final.to_json().decode("utf-8"),
-    })
+    assert ready["admission"]["claim"] == claim.to_json().decode("utf-8")
+    with LedgerStore(org_ledger_db_path(ORG)) as store:
+        heads = list(store.heads())
+        max_ts = max(store.get(h).hlc.ts for h in heads)
+    admission = make_admission(
+        world.admin, dict(ready["admission"], parents=heads), HLC(max_ts + 1_000))
+    admitted = claim_service.admit(ORG, admission.to_json())
     assert admitted["status"] == "admitted"
 
     # 6. the member is real, and the staging row is gone.
@@ -446,14 +437,14 @@ def test_finalize_after_the_invite_expires(tmp_path, monkeypatch):
     with LedgerStore(org_ledger_db_path(ORG)) as store:
         claim_key = store.claim_key(world.invite_ref, world.persona.public_hex)
         body = store.get_pending_claim(claim_key)["body"]
-    assert claim_service.countersign(
+    ready = claim_service.countersign(
         ORG, world.invite_ref, world.persona.public_hex,
         sign_approval(world.admin, "member.claim", body),
-    )["status"] == "ready"
+    )
+    assert ready["status"] == "ready"
 
     # Approval took an hour: the frontier drifts AND the invite expires.
     with LedgerStore(org_ledger_db_path(ORG)) as store:
-        position = store.evaluate_pending_claim(claim_key)["position"]
         store.append(make_event(
             world.root,
             (lambda k: {"type": "delegate", "child_pub": k.public_hex,
@@ -470,7 +461,7 @@ def test_finalize_after_the_invite_expires(tmp_path, monkeypatch):
         claim_service.time, "time", lambda: (real_now + 3_600_000) / 1000
     )
 
-    # A NON-pinned finalize is refused — both gates are genuinely armed.
+    # A fresh invitee submit is refused — both gates are genuinely armed.
     with LedgerStore(org_ledger_db_path(ORG)) as store:
         current_heads = sorted(store.heads())
     stale, _ = mint_member_claim(
@@ -482,15 +473,12 @@ def test_finalize_after_the_invite_expires(tmp_path, monkeypatch):
         "v": 1, "op": "submit", "event": stale.to_json().decode("utf-8"),
     })["status"] == "rejected"
 
-    # The PINNED finalize admits, past expiry and past the drift.
-    final, _ = mint_member_claim(
-        world.invitee_seed, world.founded.genesis_id,
-        invite_ref=world.invite_ref, heads=position["parents"],
-        hlc=HLC(*position["hlc"]), token=world.token, approvals=approvals,
-    )
-    verdict = world.channel({
-        "v": 1, "op": "submit", "event": final.to_json().decode("utf-8"),
-    })
+    # The approver's admission event admits, past expiry and past the
+    # drift: the carried claim keeps its pre-expiry timestamp.
+    admission = make_admission(
+        world.admin, dict(ready["admission"], parents=current_heads),
+        HLC(real_now + 3_660_000))
+    verdict = claim_service.admit(ORG, admission.to_json())
     assert verdict["status"] == "admitted", verdict
     member = world.members()[world.persona.public_hex]
     assert member.roles == ("member",)

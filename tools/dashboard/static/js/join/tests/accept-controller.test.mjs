@@ -24,18 +24,17 @@ const INPUTS = {
   channelToken: 'd'.repeat(32), bearer: 'b'.repeat(64),
 };
 
-// Ledger approval readiness must leave the polling loop for finalization.
+// An approved-but-not-yet-admitted claim keeps waiting: the approver's
+// admission event carries the signed claim, and the invitee never re-mints.
 {
   const session = new JoinSession({ inputs: INPUTS });
   const approved = { status: 'pending', have: 1, need: 1,
-    approvals: [{ signer: 'owner' }], admitting: ['owner'],
-    position: { parents: HEADS, hlc: MAXHLC } };
-  session.pollOnce = async () => session._fromLedger(approved);
-  assert.equal((await session.pollUntilTerminal({ maxPolls: 1,
-    delay: async () => { throw new Error('Approved claim must finalize, not keep polling'); },
-  })).state, 'already-approved');
-  assert.equal(session._fromLedger({ ...approved, have: 0 }).state, 'pending');
-  assert.equal(session._fromLedger({ ...approved, position: null }).state, 'pending');
+    approvals: [{ signer: 'owner' }], admitting: ['owner'] };
+  const state = session._fromLedger(approved);
+  assert.equal(state.state, 'pending');
+  assert.deepEqual([state.have, state.need], [1, 1]);
+  assert.equal(typeof session.finalize, 'undefined');
+  assert.equal(session._fromLedger({ status: 'admitted' }).state, 'admitted');
 }
 
 // A SecureChannel-shaped stub whose replies are scripted per op and per Nth

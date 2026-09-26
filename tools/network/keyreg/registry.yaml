@@ -933,6 +933,22 @@ mutations:
     refusals: [claim-wrong-key, claim-bad-token, claim-bad-credential, invite-already-claimed, persona-exists]
     crib: ["§8", "§9"]
 
+  fold.member_admission:
+    source: {kind: fold, file: tools/network/ledger/fold.py, symbol: _h_member_admission}
+    authority: [approver persona key, org_root_signing_key]
+    preconditions:
+      - The carried member.claim verifies under the invitee's key and its parents are in this event's ancestry (its staged position).
+      - The author is one of the carried approvers, or the root.
+      - No removal of the persona at or after the claim's timestamp.
+      - Every member.claim rule, with the carried approvals in place of the claim's own.
+    effects:
+      writes: [member claim (record keyed by the admission event id), member recovery_pub enrollment]
+    refusals: [admission-bad-claim, admission-claim-position, admission-unauthorized, admission-after-removal, claim-wrong-key, claim-bad-token, claim-bad-credential, invite-already-claimed, persona-exists, approval-missing]
+    crib: ["§8", "§9"]
+    notes: >-
+      OrgAdmission.tla admission event (auto-qrmlg.12; operator ruling
+      2026-09-25): the approver admits without a second invitee ceremony.
+
   fold.member_rekey:
     source: {kind: fold, file: tools/network/ledger/fold.py, symbol: _h_member_rekey}
     authority: [persona_signing_key, org_root_signing_key, member_recovery_key]
@@ -1423,15 +1439,14 @@ mutations:
       writes: [member.claim appended to the founder's ledger (claim_service.py:172-175)]
     actors: [founder]
     opens: none
-    requires:
-      - any:
-          - all: [member_claim, policy_self_admit]
-          - member_claim_final
+    requires: [member_claim, policy_self_admit]
     produces: [member_admitted]
     crib: ["§8"]
     notes: >-
-      Steps J3 and J4, submit half, on the founder's machine. No checkpoint
-      code runs here (claim_service.py, link_serving.py).
+      Step J3, submit half, on the founder's machine: the fold admits a
+      key-bound self-admitting claim at once. Under an approval role the
+      claim is staged (route.claim_submit_stage) and route.claim_admission
+      admits it. The admitting append publishes the checkpoint (P2).
 
   route.claim_submit_stage:
     source: {kind: route, file: tools/dashboard/claim_service.py, symbol: submit}
@@ -1460,22 +1475,8 @@ mutations:
     crib: ["§8"]
     notes: Step F3. Root opened at org-membership.js:1082.
 
-  ceremony.claim_finalize:
-    source: {kind: ceremony, file: tools/dashboard/static/js/join/accept-controller.js, symbol: finalize}
-    authority: [persona_signing_key]
-    effects:
-      writes: [member.claim re-minted at the pinned position carrying the approvals (accept-controller.js:270-319)]
-    actors: [joiner]
-    opens: persona
-    requires: [persona_signing_key, claim_approval]
-    produces: [member_claim_final]
-    crib: ["§8"]
-    notes: Step J4.
-
   ceremony.admission_event:
-    status: designed
-    rule: admit_on_approval
-    source: {kind: ceremony, file: tools/network/TLA/OrgAdmissionEvent.tla, symbol: Approve}
+    source: {kind: ceremony, file: tools/dashboard/static/js/ceremony/claim.js, symbol: signAdmission}
     authority: [persona_signing_key]
     preconditions:
       - "The fold admits on the event only when: the carried claim verifies under the invitee's key and is the invitee's own claim at its staged position; at least the role's threshold of distinct authorized approvals; the invite is not already redeemed; the claim's position is after the persona's latest removal; the persona is not a member."
@@ -1485,7 +1486,7 @@ mutations:
     actors: [founder]
     opens: persona
     requires: [persona_signing_key, claim_staged]
-    produces: [claim_approval, member_admitted]
+    produces: [claim_approval, admission_event]
     crib: ["§8"]
     proofs:
       - {framework: tla, theory: OrgAdmissionEvent, lemma: ApproverCannotForgeClaim}
@@ -1498,8 +1499,22 @@ mutations:
       Realizes P3 without re-signing the claim: a claim's author signature
       covers its whole payload including approvals and parents
       (events.py:618-619), and an approval covers only (kind, invite_ref,
-      persona) (events.py:737-744). Requires a new fold handler (lint check
-      1 then requires its registry row). Not built.
+      persona) (events.py:737-744). Built (auto-qrmlg.3 C5): the fold
+      handler is fold.member_admission; the approver's browser signs the
+      event right after the countersign that completed the threshold
+      (org-membership.js approve), with no second invitee ceremony.
+
+  route.claim_admission:
+    source: {kind: route, file: tools/dashboard/claim_service.py, symbol: admit}
+    authority: [approver persona key]
+    effects:
+      writes: [member.admission appended to the founder's ledger; the staged claim dropped; the checkpoint reflecting the member published (P2)]
+    actors: [founder]
+    opens: none
+    requires: [admission_event]
+    produces: [member_admitted]
+    crib: ["§8"]
+    notes: Step F3, admit half, on the founder's machine (POST /api/network/ledger/admission).
 
   route.join_install_bundle_adopt:
     status: designed
@@ -1908,11 +1923,11 @@ artifacts:
     store: founder's pending-claim store
     home: founder machine
     code: [tools/dashboard/static/js/ceremony/claim.js:signClaimApproval, tools/dashboard/claim_service.py:countersign]
-  member_claim_final:
-    description: The claim re-minted at the pinned position carrying the approvals.
-    store: joiner browser memory until submitted
-    home: joiner machine
-    code: [tools/dashboard/static/js/join/accept-controller.js:finalize]
+  admission_event:
+    description: The approver-signed member.admission event carrying the invitee's unchanged claim and the approvals.
+    store: approver browser memory until submitted
+    home: founder machine
+    code: [tools/dashboard/static/js/ceremony/claim.js:signAdmission, tools/network/ledger/claims.py:make_admission]
   member_admitted:
     description: The claim appended to the founder's ledger.
     store: founder's org ledger
@@ -2048,9 +2063,8 @@ goals:
       - {step: J3, actor: joiner, ceremony: true, runs: [ceremony.member_claim_mint]}
       - {step: J3.submit, actor: founder, ceremony: false, runs: [route.claim_submit_admit], only_from: [self_admit]}
       - {step: J3.stage, actor: founder, ceremony: false, runs: [route.claim_submit_stage], only_from: [approval]}
-      - {step: F3, actor: founder, ceremony: true, runs: [ceremony.claim_approval], only_from: [approval]}
-      - {step: J4, actor: joiner, ceremony: true, runs: [ceremony.claim_finalize], only_from: [approval]}
-      - {step: J4.submit, actor: founder, ceremony: false, runs: [route.claim_submit_admit], only_from: [approval]}
+      - {step: F3, actor: founder, ceremony: true, runs: [ceremony.claim_approval, ceremony.admission_event], only_from: [approval]}
+      - {step: F3.admit, actor: founder, ceremony: false, runs: [route.claim_admission], only_from: [approval]}
       - {step: J5.serve, actor: founder, ceremony: false, runs: [route.join_bootstrap]}
       - {step: J5, actor: joiner, ceremony: false, runs: [route.join_install, route.checkpoint_adopt]}
       - {step: J6, actor: joiner, ceremony: true, runs: [route.checkpoint_adopt, ceremony.organization_storage_delegate, ceremony.serve_cert_mint, ceremony.fleet_runtime_mint]}
@@ -2069,10 +2083,9 @@ goals:
       - {framework: tla, theory: OrgAdmissionLeaves, lemma: ReAdmitAfterRemoval}
     scenarios:
       - {from: self_admit, rules: [delegate_checkpoint, bundle_adopt], current: {founder: 3, joiner: 3}, minimal: {founder: 1, joiner: 1}}
-      - {from: approval, rules: [admit_on_approval, bundle_adopt], current: {founder: 4, joiner: 4}, minimal: {founder: 2, joiner: 2}}
-      - {from: approval, rules: [admit_on_approval, bundle_adopt, delegate_checkpoint], current: {founder: 4, joiner: 4}, minimal: {founder: 2, joiner: 2}}
+      - {from: approval, rules: [bundle_adopt], current: {founder: 4, joiner: 3}, minimal: {founder: 2, joiner: 2}}
+      - {from: approval, rules: [bundle_adopt, delegate_checkpoint], current: {founder: 4, joiner: 3}, minimal: {founder: 2, joiner: 2}}
       - {from: self_admit, rules: [], current: {founder: 3, joiner: 3}, minimal: {founder: 2, joiner: 1}}
-      - {from: approval, rules: [], current: {founder: 4, joiner: 4}, minimal: {founder: 3, joiner: 2}}
-      - {from: approval, rules: [admit_on_approval], current: {founder: 4, joiner: 4}, minimal: {founder: 2, joiner: 2}}
+      - {from: approval, rules: [], current: {founder: 4, joiner: 3}, minimal: {founder: 2, joiner: 2}}
       - {from: self_admit, rules: [delegate_checkpoint], current: {founder: 3, joiner: 3}, minimal: {founder: 1, joiner: 1}}
-      - {from: approval, rules: [admit_on_approval, delegate_checkpoint], current: {founder: 4, joiner: 4}, minimal: {founder: 2, joiner: 2}}
+      - {from: approval, rules: [delegate_checkpoint], current: {founder: 4, joiner: 3}, minimal: {founder: 2, joiner: 2}}

@@ -62,7 +62,7 @@ CHECKPOINT_SCOPE = "membership:checkpoint"
 #: (OrgAdmissionBundleBound.tla ProveOwnFold), so every checkpointed root is
 #: a candidate (reviewer condition on 13284c4c).
 MEMBER_SET_EVENT_TYPES = frozenset(
-    {"member.claim", "member.rekey", "revoke", "role.revoke", "key.rotate"}
+    {"member.claim", "member.admission", "member.rekey", "revoke", "role.revoke", "key.rotate"}
 )
 
 #: Padding leaf for the perfect tree. Its preimage is domain plus a tag,

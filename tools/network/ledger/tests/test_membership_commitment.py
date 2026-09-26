@@ -373,4 +373,4 @@ class TestMemberSetEventTypes:
         assert checked >= 4  # role.define, role.grant, invite, delegate
         assert mc.members_root(sim.fold()) == before
         assert set(mc.MEMBER_SET_EVENT_TYPES) == {
-            "member.claim", "member.rekey", "revoke", "role.revoke", "key.rotate"}
+            "member.claim", "member.admission", "member.rekey", "revoke", "role.revoke", "key.rotate"}

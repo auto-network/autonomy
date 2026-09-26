@@ -177,11 +177,12 @@ class TestI1Constraints:
         assert org_step.lower().count("<button") == 1
         assert 'id="accept"' in org_step
         # The control's function: a session is connected, the action is
-        # bound, and admission finalizes with the countersignature rather
-        # than re-accepting (which would discard it).
+        # bound, and the invitee signs ONCE; under an approval role the
+        # approver's admission event carries that signed claim, so there is
+        # no second submit on this page.
         assert "connectSession(" in PAGE_JS
         assert 'button.addEventListener("click"' in PAGE_JS
-        assert "session.finalize()" in PAGE_JS
+        assert "finalize" not in PAGE_JS
         # The control appears only once the organization has answered.
         assert 'show("accept-block", true)' in PAGE_JS
         for leaked in ("under review", "still being finished", "ceremony",
