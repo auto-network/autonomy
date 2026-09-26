@@ -167,6 +167,25 @@
       '<span class="block text-xs text-gray-500 mt-0.5">' + detail + '</span></span></button>';
   }
 
+  // The registration outcome on the success screen (auto-2vseu). A founded
+  // organization that is not registered on auto.network cannot publish links
+  // or sync, so the screen says so and offers the one action that fixes it.
+  function renderSetupStatus(setup) {
+    if (!setup) return '';
+    if (setup.ready) {
+      return '<p class="mt-4 text-sm text-emerald-300" data-testid="create-org-registered">' +
+        'Registered on auto.network: this organization can publish links and sync.</p>';
+    }
+    var steps = (setup.failed || []).map(function (f) {
+      return _esc(f.step) + ' (' + _esc(f.error || 'failed') + ')';
+    }).join('; ');
+    return '<div class="mt-4 text-sm" data-testid="create-org-unregistered">' +
+      '<p class="text-amber-300">Created here, but not yet registered on auto.network' +
+      (steps ? ': ' + steps : '') + '.</p>' +
+      '<button type="button" id="create-org-register" data-testid="create-org-register" ' +
+      'class="mt-2 px-4 py-2 rounded-lg text-sm bg-indigo-600 text-white">Register now</button></div>';
+  }
+
   function _doneHtml() {
     var markInner = S.icon
       ? '<img src="' + _esc(S.icon) + '" class="w-full h-full object-cover" alt="">'
@@ -176,6 +195,7 @@
       '<span class="w-14 h-14 rounded-xl flex items-center justify-center font-bold text-xl flex-shrink-0 text-white overflow-hidden"' +
       (S.icon ? '' : ' style="background:' + S.color + '"') + ' aria-hidden="true">' + markInner + '</span>' +
       '<h1 class="text-xl font-semibold">' + _esc(S.name) + ' has been created</h1></div>' +
+      renderSetupStatus(S.setup) +
       '<div class="mt-7 space-y-3" data-testid="create-org-next-steps">' +
       _actionRow('create-org-goto-settings', _ICON_GEAR, 'Go to Settings',
         'Organization structure, sharing policies, administration') +
@@ -309,14 +329,17 @@
           import('./ceremony/founding.js'),
           import('./ceremony/open-root.js'),
         ]);
-        await ceremony[0].foundExistingOrganizationShell({
+        var founded = await ceremony[0].foundExistingOrganizationShell({
           org: slug,
           orgId: shell.org.id,
           storageDelegatePolicy: shell.storage_delegate_policy,
           openRoot: ceremony[1].openRoot,
           transport: { fetch: function (route, options) { return fetch(route, options); } },
         });
+        S.setup = founded && founded.setup ? founded.setup : null;
       }
+      S.slug = slug;
+      S.orgId = shell.org.id;
       S.busy = false;
       S.phase = 'done';
       window.dispatchEvent(new Event('autonomy:orgs-changed'));
@@ -328,6 +351,25 @@
         ? 'That name is already in use here — organization names need to be unique.'
         : (e.message || 'Could not create the organization.'));
     }
+  }
+
+  async function _retryRegistration() {
+    var button = document.getElementById('create-org-register');
+    if (button) { button.disabled = true; button.textContent = 'Registering\u2026'; }
+    try {
+      var ceremony = await Promise.all([
+        import('./ceremony/founding.js'),
+        import('./ceremony/open-root.js'),
+      ]);
+      var result = await ceremony[0].registerFoundedOrganizationLater({
+        org: S.slug, orgId: S.orgId, openRoot: ceremony[1].openRoot,
+        transport: { fetch: function (route, options) { return fetch(route, options); } },
+      });
+      S.setup = result.setup;
+    } catch (e) {
+      S.setup = { ready: false, failed: [{ org: S.slug, step: 'registration', error: e.message || String(e) }] };
+    }
+    _render();
   }
 
   function _dismiss() {
@@ -366,6 +408,7 @@
     on('create-org-dismiss', _dismiss);
     on('create-org-submit', _submit);
     on('create-org-finish', _finish);
+    on('create-org-register', _retryRegistration);
     on('create-org-goto-settings', function () { window.location.assign('/settings'); });
     on('create-org-create-workspace', function () {
       var row = overlay.querySelector('[data-testid=create-org-create-workspace] .text-gray-500');
@@ -421,6 +464,7 @@
         deriveOrgSlug: deriveOrgSlug,
         deriveOrgInitial: deriveOrgInitial,
         deriveOrgColor: deriveOrgColor,
+        renderSetupStatus: renderSetupStatus,
         state: function () { return S; },
       },
     };
@@ -429,6 +473,7 @@
   if (typeof module === 'object' && module.exports) {
     module.exports = { deriveOrgSlug: deriveOrgSlug,
                       deriveOrgInitial: deriveOrgInitial,
-                      deriveOrgColor: deriveOrgColor };
+                      deriveOrgColor: deriveOrgColor,
+                      renderSetupStatus: renderSetupStatus };
   }
 })();

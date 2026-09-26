@@ -11,6 +11,7 @@ import {
   bytesToHex,
   canonicalJson,
   domainBytes,
+  importEd25519RootSigningKey,
 } from './primitives.js';
 import {
   buildEvent,
@@ -20,8 +21,114 @@ import {
 } from './ledger-event.js';
 import {
   deriveEncapsulationKeypair,
+  openSealedArmor,
   sealToEncapsulationKey,
 } from './sealing.js';
+
+// Registry requests are root-direct: the organization root signs
+// {v, method, path, ts, signer, payload} under this domain (the same bytes
+// network-signon.mjs and network-identity.js sign for renew, reclaim and
+// the identity wizard's registration).
+const REQUEST_DOMAIN = 'autonomy.network.registry.request.v1\n';
+const REGISTRATION_PATH = '/v1/orgs';
+
+async function signRootRequest(signingKey, rootPubHex, method, path, payload, nowS) {
+  const ts = nowS == null ? Math.floor(Date.now() / 1000) : nowS;
+  const signingInput = domainBytes(REQUEST_DOMAIN, canonicalJson({
+    v: 1, method, path, ts, signer: rootPubHex, payload,
+  }));
+  const sig = bytesToHex(await crypto.subtle.sign('Ed25519', signingKey, signingInput));
+  return { v: 1, signer: rootPubHex, ts, payload, sig };
+}
+
+async function responseJson(response) {
+  try { return await response.json(); } catch { return {}; }
+}
+
+/**
+ * Register a founded organization at the registry inside the founding's own
+ * opening: the envelope is signed by the organization root the ceremony holds
+ * in memory, with the uuid the genesis batch bound (auto-2vseu). Returns the
+ * binding the dashboard stored. Throws on refusal; the caller decides how the
+ * founded-but-unregistered state is shown.
+ */
+async function registerFoundedOrganization({
+  org, orgId, rootSigningKey, rootPub, transport, recoveryPolicy = 'none', nowS,
+}) {
+  if (!rootSigningKey) throw new Error('the organization root is no longer in memory');
+  const payload = { org_uuid: orgId, root_pub: rootPub, recovery_policy: recoveryPolicy };
+  const envelope = await signRootRequest(rootSigningKey, rootPub, 'POST', REGISTRATION_PATH, payload, nowS);
+  const response = await transport.fetch('/api/network/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Graph-Org': org },
+    body: JSON.stringify({ org, envelope }),
+  });
+  const result = await responseJson(response);
+  if (!response.ok || result.ok === false) {
+    throw new Error(result.error || `registration failed with ${response.status}`);
+  }
+  const binding = result.binding || null;
+  if (binding && binding.org_uuid && binding.org_uuid !== orgId) {
+    throw new Error(`registry bound ${binding.org_uuid}, the ledger genesis binds ${orgId}`);
+  }
+  return { binding };
+}
+
+/**
+ * Finish a founded organization's set-up in the same opening: the sign-on
+ * phases scoped to that organization mint its founding checkpoint (seq 0,
+ * signed with the stored sealed organization root the held seed unseals),
+ * its persona serve certificate and confirm the storage delegate, exactly as
+ * the next sign-on would. Returns {ready, failed, report}; failed carries
+ * only this organization's steps.
+ */
+async function finishFoundedOrganization({
+  org, personalRootSeed, transport, session = globalThis.AutonomyNetworkSession, phases,
+}) {
+  const mod = phases || await import('./signon-phases.js');
+  const fetchImpl = transport.fetch.bind(transport);
+  const encrypted = await mod.fetchPreparation(fetchImpl, { org });
+  const prepared = await mod.prepareSignon(new Uint8Array(personalRootSeed), encrypted, session);
+  const report = await mod.submitSignon(prepared, fetchImpl);
+  const failed = (report.failed || []).filter(f => f.org === org);
+  return { ready: failed.length === 0 && (report.ready || []).includes(org), failed, report };
+}
+
+/**
+ * Register and finish a founded organization later, from a fresh root
+ * opening (the success screen's "Register now"): the organization root is
+ * unsealed from the sealed key the dashboard holds, used for the
+ * registration envelope, then dropped.
+ */
+async function registerFoundedOrganizationLater({ org, orgId, openRoot, transport, session }) {
+  const opened = await openRoot({
+    title: 'Register this organization on auto.network',
+    detail: 'Unlock your personal root to sign the registration.',
+  });
+  if (!opened) throw new Error('Registration was cancelled.');
+  let rootSeed = null;
+  let rootSigningKey = null;
+  try {
+    const response = await transport.fetch('/api/network/org-key?org=' + encodeURIComponent(org), {
+      headers: { 'X-Graph-Org': org, Accept: 'application/json' },
+    });
+    const orgKey = await responseJson(response);
+    if (!response.ok || !orgKey.sealed_root_key) throw new Error('this organization has no sealed signing key');
+    rootSeed = await openSealedArmor(orgKey, opened.seed);
+    rootSigningKey = await importEd25519RootSigningKey(rootSeed);
+    const { binding } = await registerFoundedOrganization({
+      org, orgId, rootSigningKey, rootPub: orgKey.root_pub, transport,
+    });
+    rootSigningKey = null;
+    const setup = await finishFoundedOrganization({ org, personalRootSeed: opened.seed, transport, session });
+    return { binding, setup };
+  } finally {
+    rootSeed?.fill?.(0);
+    rootSigningKey = null;
+    opened.seed?.fill?.(0);
+    opened.signingKey = null;
+  }
+}
 
 // The one purpose an organization root seal is ever minted for; the server
 // refuses any other value, and the seal's own info binds it, so material
@@ -521,14 +628,20 @@ async function foundExistingOrganizationShell({
         // checkpoint at every admission (OrgAdmission.tla P2).
         scope: ['membership:checkpoint', 'storage:capability:grant:' + domain, 'storage:state:advance:' + domain],
         delegate_metadata: {} }, Math.max(Date.now(), batch.events.at(-1).hlc[0] + 1))];
-  } finally {
+  } catch (error) {
     opened.seed?.fill?.(0);
     opened.signingKey = null;
-    if (kemSeed) kemSeed.fill(0);
     if (generated) generated.rootSigningKey = null;
+    throw error;
+  } finally {
+    if (kemSeed) kemSeed.fill(0);
     if (batch) batch.kemPrivateKey = null;
   }
 
+  // The personal seed and the organization root stay in memory until the
+  // organization is registered and set up (auto-2vseu): registration is
+  // signed by the organization root; the founding checkpoint and the serve
+  // certificate by the phases the seed drives. Both are zeroed below.
   try {
     const sealedResponse = await transport.fetch(
       '/api/network/org-key/sealed',
@@ -552,14 +665,36 @@ async function foundExistingOrganizationShell({
       handoff.organization_delegates?.[org]]) {
       if (!outcome?.ok) throw new Error(outcome?.error || 'Organization vault setup did not complete.');
     }
+    // Founded. Registration and set-up may still fail (registry unreachable,
+    // certificate refused); the organization exists either way, so those
+    // outcomes are reported, never thrown.
+    let binding = null;
+    let setup;
+    try {
+      const timestamp = now == null ? Date.now() : now;
+      ({ binding } = await registerFoundedOrganization({
+        org, orgId, rootSigningKey: generated.rootSigningKey, rootPub: generated.rootPub,
+        transport, nowS: Math.floor(timestamp / 1000),
+      }));
+      generated.rootSigningKey = null;
+      setup = await finishFoundedOrganization({ org, personalRootSeed: opened.seed, transport });
+    } catch (error) {
+      setup = { ready: false, failed: [{ org, step: binding ? 'organization-setup' : 'registration',
+        error: (error && error.message) || String(error) }], report: null };
+    }
     return {
       ...founded,
       rootPub: generated.rootPub,
       sealedOrgKey: generated.sealedOrgKey,
       sealedServer: sealedResult,
+      binding,
+      setup,
     };
   } finally {
     preparedVault.keys = null;
+    opened.seed?.fill?.(0);
+    opened.signingKey = null;
+    generated.rootSigningKey = null;
   }
 }
 
@@ -567,8 +702,12 @@ export {
   buildFoundingBatch,
   buildPersonaKemCredential,
   deriveKemSeed,
+  finishFoundedOrganization,
   foundExistingOrganizationShell,
   foundOrganization,
   generateSealedOrgRoot,
   ORG_ROOT_ARMOR_PURPOSE,
+  registerFoundedOrganization,
+  registerFoundedOrganizationLater,
+  signRootRequest,
 };

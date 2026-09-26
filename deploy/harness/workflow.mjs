@@ -1,8 +1,9 @@
 // Organization invitation scenario; shared environment and UI driver in ui-harness.mjs.
 import {randomBytes} from 'node:crypto';
+import {spawnSync} from 'node:child_process';
 import {createWorkflow} from './ui-harness.mjs';
 const onboardingOnly=process.argv.includes('--onboarding-only');
-createWorkflow({scope:onboardingOnly?'identity-and-organization-onboarding':'membership',output:process.argv.slice(2).find(arg=>!arg.startsWith('--'))}).runScenario(({browser,js,action,waitFor,waitValue,lockAndUnlock,memberRows,click,textOf,setPersonalProfile,openOrganizationSettings,save,withStep,evidence,directory,run,output,alicePort,bobPort})=>{
+createWorkflow({scope:onboardingOnly?'identity-and-organization-onboarding':'membership',output:process.argv.slice(2).find(arg=>!arg.startsWith('--'))}).runScenario(({browser,js,action,waitFor,waitValue,lockAndUnlock,memberRows,click,textOf,setPersonalProfile,openOrganizationSettings,save,withStep,evidence,directory,run,output,alicePort,bobPort,relayOrigin})=>{
   withStep('alice','open alice home',()=>{browser('alice','open','https://localhost:'+alicePort+'/');browser('alice','set','viewport','1280','900');});
   withStep('alice','save fresh start',()=>save('alice','fresh-start',browser('alice','snapshot','-i')));
   withStep('alice','begin alice onboarding',()=>action('alice','[data-testid="welcome-begin"]',{},'#onboarding-name'));
@@ -16,6 +17,20 @@ createWorkflow({scope:onboardingOnly?'identity-and-organization-onboarding':'mem
   withStep('alice','start org create',()=>action('alice','[data-testid="welcome-create"]',{},'#create-org-name'));
   withStep('alice','submit org name',()=>action('alice','#create-org-submit',{'#create-org-name':'Simulation Organization'},'.or-in-bare','#create-org-error'));
   withStep('alice','confirm org creation',()=>action('alice','.or-ok',{'.or-in-bare':alicePassword},'[data-testid="create-org-success"]','#create-org-error'));
+  // Founding registers the organization on the registry in the same ceremony
+  // (auto-2vseu). The success screen states it, and the registry must hold the
+  // founding checkpoint BEFORE any invite step: an unregistered outcome fails
+  // here with the product's own reason, never later in a publish step.
+  withStep('alice','observe registration on the success screen',()=>waitFor('alice','[data-testid="create-org-registered"]','[data-testid="create-org-unregistered"]',30000));
+  withStep('alice','registry holds the founding checkpoint',()=>{
+    const orgId=js('alice',"fetch('/api/orgs').then(r=>r.json()).then(j=>((Array.isArray(j)?j:(j.orgs||[])).find(o=>o.slug==='simulation-organization')||{}).id)");
+    if(!orgId)throw new Error('the dashboard lists no organization with slug simulation-organization');
+    const probe=spawnSync('curl',['-sk','-w','\n%{http_code}',relayOrigin+'/v1/orgs/'+orgId+'/membership'],{encoding:'utf8',timeout:20000});
+    const lines=(probe.stdout||'').trim().split('\n');const status=lines.pop();const body=lines.join('\n');
+    let record=null;try{record=JSON.parse(body);}catch(e){}
+    if(status!=='200'||!record||!record.checkpoint)throw new Error('registry membership for '+orgId+' is '+status+' '+body.slice(0,200));
+    evidence.foundingCheckpointSeq=record.checkpoint.seq;
+  });
   withStep('alice','save organization-created-and-founded',()=>save('alice','organization-created-and-founded',browser('alice','snapshot','-i')));
   if(onboardingOnly){
     withStep('alice','finish onboarding',()=>action('alice','#create-org-finish',{},'[data-testid="welcome-open-workspace"]','#create-org-error'));

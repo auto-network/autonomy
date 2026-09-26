@@ -40,3 +40,21 @@ describe('create-org derivations', () => {
     assert.ok(colors.size > 1);
   });
 });
+
+describe('create-org success screen registration outcome (auto-2vseu)', () => {
+  it('renders nothing when there was no ceremony', () => {
+    assert.equal(org.renderSetupStatus(null), '');
+  });
+  it('states the registration when the organization is ready', () => {
+    const html = org.renderSetupStatus({ ready: true, failed: [] });
+    assert.match(html, /data-testid="create-org-registered"/);
+    assert.match(html, /Registered on auto\.network/);
+    assert.doesNotMatch(html, /create-org-register"/);
+  });
+  it('names the failed steps and offers Register now otherwise', () => {
+    const html = org.renderSetupStatus({ ready: false, failed: [{ org: 'acme', step: 'registration', error: 'registry <down>' }] });
+    assert.match(html, /data-testid="create-org-unregistered"/);
+    assert.match(html, /registration \(registry &lt;down&gt;\)/);
+    assert.match(html, /id="create-org-register"/);
+  });
+});
