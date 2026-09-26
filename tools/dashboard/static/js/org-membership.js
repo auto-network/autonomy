@@ -1127,6 +1127,22 @@
           context: context, personalRootSeed: opened.seed, admission: result.admission,
         }).then(function (signed) {
           return claimModule.submitAdmission({ context: context, wire: signed.wire });
+        }).then(function (admitted) {
+          // No checkpoint-scoped delegate on this node: publish the
+          // checkpoint that includes the member with the persona that is
+          // open right now (P2 in the approver's window).
+          if (!(admitted && admitted.checkpoint_work && admitted.checkpoint_work.record)) return admitted;
+          return claimModule.signCheckpointRecord({
+            context: context, personalRootSeed: opened.seed, record: admitted.checkpoint_work.record,
+          }).then(function (record) {
+            return claimModule.submitCheckpoint({ context: context, record: record });
+          }).then(function (published) {
+            admitted.checkpoint = { action: 'published', sign_with: 'persona', seq: published && published.seq };
+            return admitted;
+          }).catch(function (error) {
+            admitted.checkpoint = { action: 'refused', reason: (error && error.message) || String(error) };
+            return admitted;
+          });
         });
       });
     }).then(function (result) {

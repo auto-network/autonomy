@@ -137,3 +137,29 @@ def test_a_removal_after_the_staged_claim_blocks_its_admission():
     # A claim staged AFTER the removal admits again.
     fresh = _admission(sim, steward, _staged_claim(sim, second_invite, ik), [steward])
     assert sim.fold().valid[fresh] is True, sim.fold().reasons.get(fresh)
+
+
+def test_the_removal_floor_is_causal_not_by_timestamp():
+    """Reviewer A1 on 8038f999: the claim's timestamp is the invitee's word.
+    A claim FUTURE-DATED past a later removal, but signed without that
+    removal in its ancestry, is still refused; only a claim whose ancestry
+    contains the removal admits."""
+    sim, steward = _org()
+    ik = KeyPair.generate()
+    first_invite = sim.invite(steward, "member", invite_key=ik)
+    first = _admission(sim, steward, _staged_claim(sim, first_invite, ik), [steward])
+    assert sim.fold().valid[first] is True
+    second_invite = sim.invite(steward, "member", invite_key=ik)
+    # Staged with a timestamp ahead of the removal's (still inside the
+    # invite's expiry), signed BEFORE the removal exists.
+    future_ts = sim._ts + 500_000
+    future = _staged_claim(sim, second_invite, ik, ts=future_ts)
+    sim.revoke_event(steward, first)
+    assert key(ik) not in sim.fold().members
+    late = _admission(sim, steward, future, [steward], ts=future_ts + 1_000)
+    sim._ts = future_ts + 1_000   # the sim clock follows the event it just emitted
+    assert sim.fold().reasons[late] == R_ADMISSION_AFTER_REMOVAL
+    # A claim signed after the removal (the removal in its ancestry) admits;
+    # the invite's own expiry still bounds the claim's timestamp.
+    fresh = _admission(sim, steward, _staged_claim(sim, second_invite, ik), [steward])
+    assert sim.fold().valid[fresh] is True, sim.fold().reasons.get(fresh)

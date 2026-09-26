@@ -850,7 +850,12 @@ class _Folder:
         author = event.author_key
         if author != self.root_at(ctx) and author not in {a["key"] for a in p["approvals"]}:
             return R_ADMISSION_UNAUTHORIZED
+        # AdmissionRespectsRemoval, CAUSALLY: every removal of this persona
+        # in this admission's ancestry must be in the carried claim's own
+        # ancestry, i.e. the invitee signed the claim after seeing it. A
+        # timestamp would be the invitee's word (reviewer A1 on 8038f999).
         persona = claim.payload["persona_pub"]
+        claim_view = self.ledger.ancestry(claim.parents)
         for kill in self._kills(ctx):
             target = kill.target_event
             removed = (
@@ -858,7 +863,7 @@ class _Folder:
                  and self.claims[target].persona_pub == persona)
                 or kill.target_key == persona
             )
-            if removed and self.ledger.get(kill.id).hlc.ts >= claim.hlc.ts:
+            if removed and kill.id not in claim_view:
                 return R_ADMISSION_AFTER_REMOVAL
         return self._admit_claim(
             claim, ctx, approvals=p["approvals"], record_id=event.event_id,

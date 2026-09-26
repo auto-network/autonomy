@@ -223,13 +223,42 @@ def admit(org: str, event_wire) -> dict:
         store.drop_pending_claim(claim_key)
         store.refresh_projections()
         _project_member(org, claim.payload)
-        from tools.dashboard import membership_checkpoint as cp
-        return {
-            "status": "admitted",
-            "persona_pub": claim.payload["persona_pub"],
-            "kem_credential": claim.payload.get("kem_credential"),
-            "checkpoint": cp.publish_after_membership_change(org),
-        }
+        genesis_id = store.ledger.genesis_id
+    from tools.dashboard import membership_checkpoint as cp
+    checkpoint = cp.publish_after_membership_change(org)
+    out = {
+        "status": "admitted",
+        "persona_pub": claim.payload["persona_pub"],
+        "kem_credential": claim.payload.get("kem_credential"),
+        "checkpoint": checkpoint,
+    }
+    if checkpoint.get("action") == "skipped":
+        # No checkpoint-scoped delegate here: the approver's persona is open
+        # in this very window, so hand its browser the persona-form record
+        # to sign and post (OrgAdmissionEvent.tla ApprovalPublishesCheckpoint;
+        # reviewer A2(a) on 8038f999).
+        work = _persona_checkpoint_work(org, event.author_key, genesis_id)
+        if work is not None:
+            out["checkpoint_work"] = work
+    return out
+
+
+def _persona_checkpoint_work(org: str, persona_pub: str, genesis_id: str) -> dict | None:
+    """The advancing checkpoint record for *persona_pub* to sign in the
+    browser, when it is an eligible checkpointer; None otherwise."""
+    from tools.dashboard import membership_checkpoint as cp
+    from tools.dashboard.network_routes import NETWORK_BINDING_SET_ID, _first_member
+
+    try:
+        binding_member = _first_member(NETWORK_BINDING_SET_ID, org)
+        org_uuid = binding_member.payload.get("org_uuid") if binding_member else None
+        decision = cp.checkpoint_due(org, persona_pub, ts=int(time.time()),
+                                     genesis_id=genesis_id, org_uuid=org_uuid)
+    except Exception:
+        return None
+    if decision.action != "assemble" or decision.sign_with != cp.SIGN_WITH_PERSONA:
+        return None
+    return {"record": decision.record, "sign_with": decision.sign_with}
 
 
 #: Ledger events per bootstrap page (~600 B each: ~2.5 MB a page, well under

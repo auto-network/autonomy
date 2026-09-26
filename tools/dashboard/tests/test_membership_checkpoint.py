@@ -723,3 +723,25 @@ def test_a_chainless_tuple_at_the_registrys_seq_gets_its_chain_attached_in_place
     d = cp.checkpoint_due(ORG, founder.public_hex, ts=TS, genesis_id=sim.genesis_id, org_uuid=org_uuid)
     assert d.action == "assemble" and d.record["prev"] == mc.checkpoint_hash(registry.records[-1])
     assert member.public_hex
+
+
+def test_admission_offers_the_persona_form_checkpoint_when_no_delegate_can_publish(monkeypatch):
+    """Reviewer A2(a) on 8038f999: with no checkpoint-scoped delegate on the
+    admitting node, the approver's window still publishes: the admit
+    response carries the persona-form record for the open persona to sign
+    (prev = the registry's record), and nothing when the persona is not an
+    eligible checkpointer."""
+    from tools.dashboard import claim_service
+    sim, founder = org_with_owner()
+    org_uuid = _binding_row(monkeypatch)
+    seed = _seed_for(sim, org_uuid)
+    _install_org(sim)
+    cp.record_adopted(ORG, seed)
+    member = add_member(sim)
+    _install_org(sim)
+    work = claim_service._persona_checkpoint_work(ORG, founder.public_hex, sim.genesis_id)
+    assert work["sign_with"] == "persona"
+    assert work["record"]["seq"] == 1 and work["record"]["prev"] == mc.checkpoint_hash(seed)
+    assert work["record"]["signer"] == founder.public_hex
+    assert work["record"]["members_root"] == mc.members_root(sim.fold())
+    assert claim_service._persona_checkpoint_work(ORG, member.public_hex, sim.genesis_id) is None

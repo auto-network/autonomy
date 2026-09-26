@@ -297,6 +297,50 @@ async function signAdmission({
   }
 }
 
+const CHECKPOINT_DOMAIN = 'autonomy.network.membership.checkpoint.v1\n';
+
+// The persona-signed advancing checkpoint (membership_checkpoint.checkpoint_due,
+// sign_with persona), signed here when the admitting node holds no
+// checkpoint-scoped delegate: the approver's persona is open in this window
+// (OrgAdmissionEvent.tla ApprovalPublishesCheckpoint).
+async function signCheckpointRecord({ context, personalRootSeed, record }) {
+  const resolved = requireContext(context);
+  if (!record || typeof record !== 'object' || Array.isArray(record)) {
+    throw new Error('record must be the assembled checkpoint object');
+  }
+  const seed = new Uint8Array(personalRootSeed);
+  if (seed.length !== 32) {
+    throw new Error('personalRootSeed must be exactly 32 raw bytes');
+  }
+  try {
+    const persona = await derivePersona(seed, resolved.genesisId);
+    if (record.signer !== persona.publicHex) {
+      throw new Error('checkpoint record names another signer');
+    }
+    const unsigned = { ...record };
+    delete unsigned.sig;
+    const sig = await webCrypto.subtle.sign('Ed25519', persona.signingKey,
+      domainBytes(CHECKPOINT_DOMAIN, canonicalJson(unsigned)));
+    return { ...unsigned, sig: bytesToHex(sig) };
+  } finally {
+    seed.fill(0);
+  }
+}
+
+async function submitCheckpoint({ context, record }) {
+  const resolved = requireContext(context);
+  return fetchJson(
+    resolved,
+    '/api/network/membership-checkpoint',
+    {
+      method: 'POST',
+      headers: requestHeaders(resolved, true),
+      body: JSON.stringify({ org: resolved.orgSlug, record }),
+    },
+    'checkpoint publish',
+  );
+}
+
 async function submitAdmission({ context, wire }) {
   const resolved = requireContext(context);
   return fetchJson(
@@ -514,8 +558,10 @@ export {
   getClaimStatus,
   mintMemberClaim,
   signAdmission,
+  signCheckpointRecord,
   signClaimApproval,
   submitAdmission,
+  submitCheckpoint,
   submitClaim,
   submitClaimApproval,
   tickHlc,
