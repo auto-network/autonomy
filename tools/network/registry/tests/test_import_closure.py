@@ -89,3 +89,23 @@ def test_real_registry_entries_resolve():
     repo_root = Path(__file__).resolve().parents[4]
     r = _run(repo_root)  # default entries
     assert r.returncode == 0, f"stdout={r.stdout} stderr={r.stderr}"
+
+
+def test_admin_and_graph_schema_do_not_import_server_dependencies():
+    repo_root = Path(__file__).resolve().parents[4]
+    result = subprocess.run([sys.executable, "-c", textwrap.dedent("""
+        import sys
+        sys.modules['fastapi'] = None
+        sys.modules['uvicorn'] = None
+        from tools.network.registry import admin
+        from tools.graph.schemas.serve_zone import validate_zone_value
+        assert validate_zone_value('anchore.serve.auto.network') == 'anchore.serve.auto.network'
+        admin.main(['--help'])
+    """)], cwd=repo_root, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_create_app_public_export_is_preserved():
+    from tools.network.registry import create_app
+    from tools.network.registry.app import create_app as implementation
+    assert create_app is implementation

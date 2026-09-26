@@ -8,7 +8,6 @@ binding's root key — the registry holds no permission tables (I4).
 Bead: ``auto-4p7bg`` (B1). Depends on idkit (``tools.network.idkit``, A1).
 """
 
-from .app import create_app
 from .listings import (
     ATTESTATION_DOMAIN,
     LISTING_DOMAIN,
@@ -22,6 +21,15 @@ from .listings import (
     sign_listing,
 )
 from .signing import REQUEST_DOMAIN, sign_request
+
+
+def __getattr__(name):
+    # Domain validation and the administrator CLI also run in host terminals,
+    # which do not install the registry server's FastAPI dependencies.
+    if name == "create_app":
+        from .app import create_app
+        return create_app
+    raise AttributeError(name)
 
 __all__ = [
     "create_app",
