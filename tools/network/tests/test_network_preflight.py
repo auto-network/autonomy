@@ -253,3 +253,11 @@ def test_without_ip_the_chooser_does_not_hand_out_the_hosts_own_network(monkeypa
     assert {"iface": "eth0", "cidr": "172.16.0.0/24", "docker": False} in report["interfaces"]
     assert report["chosen_subnet"] is not None
     assert report["chosen_subnet"] != "172.16.0.0/24"
+
+
+def test_env_refuses_to_choose_blind(monkeypatch, capsys):
+    monkeypatch.setattr(np, "read_host_cidrs", lambda: ([], []))
+    monkeypatch.setattr(np, "read_docker_networks", lambda: None)
+    monkeypatch.setattr(np, "read_docker_pools", lambda: (None, False))
+    assert np.main(["--env"]) == 1
+    assert "refusing to choose a subnet blind" in capsys.readouterr().err

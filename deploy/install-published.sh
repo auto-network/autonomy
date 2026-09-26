@@ -156,8 +156,16 @@ set_env AUTONOMY_HOST_HOME "$HOME"
 set_env DASHBOARD_PORT "$PORT"
 if ! grep -q '^AUTONOMY_SUBNET=' .env; then
     step "network preflight (choosing a free subnet)"
-    docker run --rm --network host --entrypoint python3 "${IMG[AUTONOMY_NODE_IMAGE]}" \
-        -m tools.network.network_preflight --env >>.env
+    # Host network namespace for the host's routes; the Docker socket so the
+    # networks Docker already holds are avoided too.
+    subnet_line="$(docker run --rm --network host \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        --entrypoint python3 "${IMG[AUTONOMY_NODE_IMAGE]}" \
+        -m tools.network.network_preflight --env)" || {
+        echo "network preflight could not choose a safe subnet; set AUTONOMY_SUBNET in $DIR/.env" >&2
+        exit 6
+    }
+    echo "$subnet_line" >>.env
 fi
 
 # ── 6. Start and wait for a real answer ──────────────────────────────────────

@@ -553,6 +553,13 @@ def main(argv: list[str] | None = None) -> int:
     _QUIET = args.json or args.env or args.print_subnet
     report = build_report()
 
+    if (args.print_subnet or args.env) and not report["host_routes"]:
+        # Every real host has at least its own connected network. An empty
+        # table means the routes could not be read, and a subnet chosen now
+        # would be a guess that can land on the operator's LAN.
+        print("cannot read this host's routes; refusing to choose a subnet blind",
+              file=sys.stderr)
+        return 1
     if args.print_subnet:
         if not report["chosen_subnet"]:
             print("no free subnet found", file=sys.stderr)
