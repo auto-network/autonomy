@@ -53,6 +53,19 @@ container on the `autonomy-host-terminal` image with the node's volumes, the
 Docker socket, and the operator home read-only at `/host-home`. No tmux,
 Claude Code or other session tool is installed on the host.
 
+**First host terminal imports your existing sign-in.** When you open a host
+terminal and the node holds no Claude account yet, the dashboard runs
+`graph credentials import --home /host-home` once, with no prompt: it reads
+`~/.claude/.credentials.json`, `~/.codex/auth.json` and the Grok sign-in from
+your home (read-only; the files are never modified) and seals what it finds
+into your personal credential store, so the terminal and every later session
+can run inference immediately (decision graph://89d3c8df-544, S3). Nothing is
+imported while an account is already installed. With nothing to import, the
+request fails with a message naming `/host-home/.claude/.credentials.json`.
+To keep your home's sign-ins out of the node, leave `AUTONOMY_HOST_HOME`
+pointing at a directory without them and install accounts from the
+dashboard instead.
+
 **Sovereign means:** the image builds from this checkout
 (`deploy/Dockerfile`); no account, token, or login to any registry is
 required; there is no license check and no phone-home. The only external

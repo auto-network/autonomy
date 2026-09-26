@@ -1843,9 +1843,9 @@ class SessionMonitor:
     async def _recover_unresolved_sessions(self) -> None:
         """On startup, recreate TailState for live sessions with NULL jsonl_path.
 
-        For container sessions: derive resolution_dir from agent-runs, set needs_resolution.
-        For host sessions: attempt .session_meta.json scan; if that fails, add dir watch.
-        For all unresolved sessions with resolution_dir: add IN_CREATE dir watch.
+        Every session, the host terminal included, derives its resolution_dir
+        from its agent-runs run dir and gets needs_resolution plus an
+        IN_CREATE dir watch.
         """
         sessions = await asyncio.to_thread(get_live_sessions)
         agent_runs = _agent_runs_root()
@@ -4385,23 +4385,17 @@ class SessionMonitor:
         if not sessions:
             return
 
-        # Determine session types sharing this directory
-        # Container sessions and host terminals have isolated dirs (one
-        # session per run dir); other kinds may share a directory.
+        # Every session the node launches, the host terminal included, owns
+        # its run dir's sessions/ (one session per directory), so every
+        # CREATE goes through the one observation path.
         for tmux_name in list(sessions):
             row = get_session(tmux_name)
             if not row:
                 continue
-            session_type = row.get("type", "container")
-            if session_type in ("container", "host"):
-                await self._handle_container_create(tmux_name, row, new_file)
-            else:
-                await self._handle_host_create(tmux_name, row, new_file, dir_path)
+            await self._handle_container_create(tmux_name, row, new_file)
 
-        # Compaction recovery — same path, new inode. If the type-specific
-        # dispatch above didn't end up reattaching the watch (e.g.
-        # _handle_host_create returns early when parentUuid is null, which is
-        # exactly the shape of a compacted JSONL's first line), fall back to
+        # Compaction recovery — same path, new inode. If the observation
+        # above didn't end up reattaching the watch, fall back to
         # re-registering the IN_MODIFY watch on the new inode at the tracked
         # path so the session is no longer blind to writes after compaction.
         for tmux_name in list(sessions):
@@ -4523,131 +4517,6 @@ class SessionMonitor:
         self.observe_rollout(
             tmux_name, new_file, source="IN_CREATE", create_event=True,
         )
-
-    async def _handle_host_create(
-        self, tmux_name: str, row: dict, new_file: Path, dir_path: str,
-    ) -> None:
-        """Handle IN_CREATE in a shared host project directory.
-
-        Must read parentUuid to determine if this is a rollover for an existing
-        session or a brand-new session. NEVER use mtime for host resolution.
-        """
-        # Read parentUuid from first line
-        parent_uuid = await asyncio.to_thread(self._read_parent_uuid, new_file)
-
-        if parent_uuid is None:
-            # New session, not a rollover. Ignore — wait for .session_meta.json
-            # or linking handshake.
-            return
-
-        # parentUuid is non-null → rollover. Find predecessor.
-        predecessor_uuid = await asyncio.to_thread(
-            self._find_predecessor_by_parentuuid,
-            parent_uuid, new_file, dir_path,
-        )
-
-        if predecessor_uuid is None:
-            logger.warning(
-                "session_monitor: unexpected rollover — no predecessor found. "
-                "file=%s parentUuid=%s dir=%s",
-                new_file.name, parent_uuid, dir_path,
-            )
-            return
-
-        # Look up which session owns the predecessor UUID
-        owner = self._find_session_by_uuid(predecessor_uuid)
-        if not owner:
-            logger.warning(
-                "session_monitor: unexpected rollover — predecessor UUID not in DB. "
-                "file=%s parentUuid=%s predecessor=%s dir=%s",
-                new_file.name, parent_uuid, predecessor_uuid, dir_path,
-            )
-            return
-
-        new_uuid = new_file.stem
-        from tools.dashboard.dao.dashboard_db import (
-            link_and_enrich,
-            next_link_seq,
-        )
-        # B6 atomicity: generation + reset cursor land in the SAME UPDATE
-        # as the link — no window where the link points at the new file
-        # while generation/cursor still describe the old one.
-        generation = None
-        try:
-            st = new_file.stat()
-            seq = next_link_seq(owner)
-            generation = f"{st.st_dev}:{st.st_ino}:{seq}"
-        except OSError:
-            st = None
-        link_and_enrich(
-            owner,
-            session_uuid=new_uuid,
-            jsonl_path=str(new_file),
-            project=new_file.parent.name,
-            generation=generation,
-            file_offset=0,
-        )
-        logger.info(
-            "session_monitor: IN_CREATE host rollover %s → %s (predecessor %s)",
-            owner, new_file.name, predecessor_uuid,
-        )
-
-        # Swap IN_MODIFY watch to new file
-        self._add_file_watch(owner, str(new_file))
-
-        if st is not None:
-            track = self._get_track(owner, str(new_file))
-            track.generation = (st.st_dev, st.st_ino)
-            track.state = TRACK_STREAMING
-
-        # Reset ephemeral tail state, preserving resolution_dir
-        ts = self._tail_states.get(owner)
-        old_resolution_dir = ts.resolution_dir if ts else None
-        self._tail_states[owner] = _TailState(resolution_dir=old_resolution_dir)
-
-        # Catch up any bytes already present in the new file (the attach-
-        # without-catch-up gap is CalStartupStall's second leg).
-        self.request_drain(owner)
-
-    @staticmethod
-    def _read_parent_uuid(jsonl_path: Path) -> str | None:
-        """Read parentUuid from the first line of a JSONL file.
-
-        Returns None if the file is empty, unreadable, or parentUuid is null.
-        """
-        try:
-            with open(jsonl_path) as f:
-                first_line = f.readline().strip()
-                if not first_line:
-                    return None
-                entry = json.loads(first_line)
-                parent = entry.get("parentUuid")
-                return parent if parent else None
-        except (OSError, json.JSONDecodeError):
-            return None
-
-    @staticmethod
-    def _find_predecessor_by_parentuuid(
-        parent_uuid: str, new_file: Path, dir_path: str,
-    ) -> str | None:
-        """Find which JSONL file contains the entry with uuid == parentUuid.
-
-        Uses grep -rl to find the predecessor file, then returns its filename stem (UUID).
-        """
-        try:
-            result = subprocess.run(
-                ["grep", "-rl", "--include=*.jsonl",
-                 f"--exclude={new_file.name}",
-                 parent_uuid, dir_path],
-                capture_output=True, text=True, timeout=10,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                # May return multiple files; take the first match
-                match_path = Path(result.stdout.strip().split("\n")[0])
-                return match_path.stem
-        except (subprocess.TimeoutExpired, OSError):
-            pass
-        return None
 
     @staticmethod
     def _find_session_by_uuid(uuid: str) -> str | None:
@@ -5414,6 +5283,7 @@ class SessionMonitor:
                     session_type=stype,
                     project=str(meta.get("project") or jsonl.parent.name),
                     harness=str(meta.get("harness") or "claude"),
+                    harness_token=meta.get("harness_token"),
                     bead_id=meta.get("bead_id"),
                     jsonl_path=str(jsonl),
                     session_uuid=transcript_session_uuid(jsonl),

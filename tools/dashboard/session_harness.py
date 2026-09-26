@@ -499,7 +499,6 @@ class CodexSessionHarness:
         row: dict | None = None,
         jsonl_path: Path | None = None,
     ) -> dict | None:
-        _ = row
         if jsonl_path is None:
             return None
         return _link_session_file(

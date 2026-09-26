@@ -2,7 +2,6 @@
 
 Covers:
   - Container rollover: session_uuids growth, curr_jsonl_file update, offset reset
-  - Host rollover via parentUuid: predecessor matching, null parentUuid, no-match warning
   - Host mtime prohibition: mtime must NOT be used for cross-session resolution
 
 Uses tmp_path with real file writes. Mocks tmux. No real sessions.
@@ -114,21 +113,6 @@ def container_rollover(container_session):
         {"type": "user", "message": {"content": "continued"}, "uuid": "msg-003", "parentUuid": last_uuid},
     ], mtime_offset=1)
     return {**container_session, "uuid2": uuid2, "jsonl2": jsonl2}
-
-
-@pytest.fixture
-def host_shared_dir(tmp_path):
-    """Host project dir with multiple sessions' files mixed together."""
-    project_dir = tmp_path / "projects" / "-workspace-repo"
-    project_dir.mkdir(parents=True)
-    a_jsonl = _make_jsonl(project_dir, "aaaa-1111", [
-        {"type": "user", "message": {"content": "session A"}, "uuid": "a-001", "parentUuid": None},
-        {"type": "assistant", "message": {"content": [{"type": "text", "text": "reply A"}]}, "uuid": "a-002"},
-    ])
-    b_jsonl = _make_jsonl(project_dir, "cccc-3333", [
-        {"type": "user", "message": {"content": "session B"}, "uuid": "b-001", "parentUuid": None},
-    ], mtime_offset=2)
-    return {"project_dir": project_dir, "session_a": a_jsonl, "session_b": b_jsonl}
 
 
 @pytest.fixture
@@ -334,141 +318,23 @@ class TestContainerRollover:
             mock_link.assert_not_called()
 
 
-# ── TestHostRolloverViaParentUuid ─────────────────────────────────────────
-
-class TestHostRolloverViaParentUuid:
-    """Host rollover detection via parentUuid chain matching.
-
-    In host mode, multiple sessions share a directory. Rollover cannot use mtime
-    (newest file might belong to a different session). Instead, the first entry's
-    parentUuid must match the last entry's uuid of an existing file.
-    """
-
-    def test_parentuuid_matches_predecessor(self, host_shared_dir):
-        """New file with parentUuid matching last entry of existing file → predecessor found.
-
-        Tests _read_parent_uuid + _find_predecessor_by_parentuuid together.
-        """
-        project_dir = host_shared_dir["project_dir"]
-
-        # Create a continuation file whose parentUuid matches session A's last uuid
-        continuation = _make_jsonl(project_dir, "dddd-4444", [
-            {"type": "user", "message": {"content": "continued A"}, "uuid": "a-003", "parentUuid": "a-002"},
-        ], mtime_offset=5)
-
-        # Read parentUuid from the new file
-        parent_uuid = SessionMonitor._read_parent_uuid(continuation)
-        assert parent_uuid == "a-002"
-
-        # Find the predecessor file containing "a-002"
-        predecessor_uuid = SessionMonitor._find_predecessor_by_parentuuid(
-            parent_uuid, continuation, str(project_dir),
-        )
-        assert predecessor_uuid == "aaaa-1111", (
-            f"Should find aaaa-1111 as predecessor, got {predecessor_uuid}"
-        )
-
-    def test_parentuuid_null_is_new_session(self, host_shared_dir):
-        """New file with parentUuid=null → _read_parent_uuid returns None (not a rollover)."""
-        project_dir = host_shared_dir["project_dir"]
-
-        new_session = _make_jsonl(project_dir, "eeee-5555", [
-            {"type": "user", "message": {"content": "brand new"}, "uuid": "e-001", "parentUuid": None},
-        ], mtime_offset=5)
-
-        parent_uuid = SessionMonitor._read_parent_uuid(new_session)
-        assert parent_uuid is None, "Null parentUuid should return None (new session, not rollover)"
-
-    def test_no_predecessor_logs_warning(self, host_shared_dir, caplog):
-        """parentUuid non-null but no file contains matching uuid → None returned."""
-        project_dir = host_shared_dir["project_dir"]
-
-        orphan = _make_jsonl(project_dir, "ffff-6666", [
-            {"type": "user", "message": {"content": "orphan"}, "uuid": "f-001", "parentUuid": "nonexistent-uuid"},
-        ], mtime_offset=5)
-
-        parent_uuid = SessionMonitor._read_parent_uuid(orphan)
-        assert parent_uuid == "nonexistent-uuid"
-
-        predecessor = SessionMonitor._find_predecessor_by_parentuuid(
-            parent_uuid, orphan, str(project_dir),
-        )
-        assert predecessor is None, "No predecessor with uuid 'nonexistent-uuid' should exist"
-
-    def test_grep_excludes_self(self, host_shared_dir):
-        """When searching for parentUuid match, the new file itself must be excluded.
-
-        The new file contains "a-002" as a parentUuid value — grep must exclude it
-        to avoid matching the file against itself.
-        """
-        project_dir = host_shared_dir["project_dir"]
-
-        # File whose first entry parentUuid = "a-002"
-        # If we naively grep all files for "a-002", this file itself would match
-        continuation = _make_jsonl(project_dir, "gggg-7777", [
-            {"type": "user", "message": {"content": "cont"}, "uuid": "g-001", "parentUuid": "a-002"},
-        ], mtime_offset=5)
-
-        predecessor_uuid = SessionMonitor._find_predecessor_by_parentuuid(
-            "a-002", continuation, str(project_dir),
-        )
-        # Should find aaaa-1111 (session A), NOT gggg-7777 (self)
-        assert predecessor_uuid == "aaaa-1111", (
-            f"Should find aaaa-1111 as predecessor (not self), got {predecessor_uuid}"
-        )
-
-    def test_correct_session_identified(self, host_shared_dir):
-        """In shared dir with 3 sessions' files, grep finds the right predecessor."""
-        project_dir = host_shared_dir["project_dir"]
-
-        # Add a third session's file
-        c_jsonl = _make_jsonl(project_dir, "hhhh-8888", [
-            {"type": "user", "message": {"content": "session C"}, "uuid": "c-001", "parentUuid": None},
-        ], mtime_offset=1)
-
-        # Continuation of session A (parentUuid matches a-002 from session_a)
-        continuation = _make_jsonl(project_dir, "iiii-9999", [
-            {"type": "user", "message": {"content": "continued A"}, "uuid": "a-003", "parentUuid": "a-002"},
-        ], mtime_offset=5)
-
-        predecessor_uuid = SessionMonitor._find_predecessor_by_parentuuid(
-            "a-002", continuation, str(project_dir),
-        )
-        # Should find session A's file (aaaa-1111), not B (cccc-3333) or C (hhhh-8888)
-        assert predecessor_uuid == "aaaa-1111", (
-            f"Should identify session A as predecessor, got {predecessor_uuid}"
-        )
-
-
 # ── TestHostMtimeProhibition ──────────────────────────────────────────────
 
 class TestHostMtimeProhibition:
-    """Host sessions must NEVER use mtime to match files across sessions.
+    """Sessions never resolve a transcript by mtime across sessions.
 
     The mtime-based _resolve_jsonl_in_dir has been removed entirely (auto-uhnw).
-    Host resolution uses only: meta.json match, handshake, or parentUuid chain.
+    Every session, the host terminal included, owns its run dir, so an
+    IN_CREATE there goes through the one observation path; the shared-dir
+    parentUuid handler went with the native host transport.
     """
 
     def test_mtime_resolution_method_removed(self):
-        """_resolve_jsonl_in_dir no longer exists — mtime scanning is gone.
-
-        Expected: GREEN — the method was removed as dead code.
-        """
         assert not hasattr(SessionMonitor, "_resolve_jsonl_in_dir"), (
             "_resolve_jsonl_in_dir should have been removed — "
-            "mtime-based resolution is not valid for host sessions in shared dirs."
+            "mtime-based resolution is not valid across sessions."
         )
 
-    def test_only_valid_resolution_paths(self, host_shared_dir):
-        """Host session resolves ONLY via: meta.json match, handshake, or parentUuid chain.
-
-        Expected: GREEN — _resolve_jsonl_in_dir is gone, only valid paths remain.
-        """
-        # Valid path: IN_CREATE + parentUuid chain — _handle_host_create
-        monitor = SessionMonitor()
-        assert hasattr(monitor, "_handle_host_create")
-
-        # Invalid path: mtime-based resolution — removed
-        assert not hasattr(SessionMonitor, "_resolve_jsonl_in_dir"), (
-            "mtime-based resolution must not exist"
-        )
+    def test_shared_dir_host_handler_is_gone(self):
+        assert not hasattr(SessionMonitor, "_handle_host_create")
+        assert not hasattr(SessionMonitor, "_find_predecessor_by_parentuuid")

@@ -144,7 +144,10 @@ Template:
 > will: clone the source to `<path>`, build (or pull and verify) the node
 > image (~2 GB), and start one container serving `https://localhost:8080`.
 > It creates no account and sends no telemetry — I'll verify both claims on
-> this machine and show you. By default that volume lives in Docker's own
+> this machine and show you. Your home directory is mounted into the node
+> read-only; the first time you open a host terminal it imports your
+> existing Claude/Codex sign-ins into your personal store so sessions run
+> without signing in again. By default that volume lives in Docker's own
 > storage, not a path you'd see directly — if you'd rather it sit at a
 > specific directory (a separate disk, somewhere you back up yourself), say
 > so now and I'll use that instead. Shall I proceed?
@@ -173,6 +176,10 @@ for consent before the mutating steps unless `--yes` is given.
 # .env already carries the AUTONOMY_SUBNET the preflight chose. Record the
 # operator's home: it is mounted read-only at /host-home so the node can
 # import existing Claude/Codex sign-ins and transcripts; nothing is written.
+# The first host terminal opened while the node holds no Claude account
+# imports those sign-ins into the personal store without a prompt
+# (DEPLOY.md, "First host terminal imports your existing sign-in") — tell
+# the user this in the consent briefing.
 grep -q '^AUTONOMY_HOST_HOME=' .env || echo "AUTONOMY_HOST_HOME=$HOME" >> .env
 docker compose --profile service-gateway build service-gateway
 AUTONOMY_FIRST_ORG=myorg docker compose up -d
