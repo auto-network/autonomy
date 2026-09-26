@@ -54,6 +54,7 @@ LEDGER_EVENT_TYPES = (
     "invite",
     "key.epoch",
     "key.rotate",
+    "member.admission",
     "member.claim",
     "member.rekey",
     "revoke",
