@@ -75,7 +75,7 @@ docker images autonomy-session-platform --format "  Size: {{.Size}}"
 # against the host socket (graph://89d3c8df-544 §2).
 echo ""
 echo "==> Building host-terminal variant (docker CLI + compose plugin)..."
-docker build $NO_CACHE $PULL -f "$SCRIPT_DIR/Dockerfile.host-terminal" -t autonomy-host-terminal context/
+docker build $NO_CACHE -f "$SCRIPT_DIR/Dockerfile.host-terminal" -t autonomy-host-terminal context/
 echo "==> Done. Image: autonomy-host-terminal"
 docker images autonomy-host-terminal --format "  Size: {{.Size}}"
 
