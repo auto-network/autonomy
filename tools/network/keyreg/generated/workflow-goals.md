@@ -25,10 +25,10 @@ the listed mutations; the planner never re-produces it.
 | <a id="artifact-adopted_checkpoint"></a>adopted_checkpoint@founder | built | workflow | ceremony.checkpoint_publish, delegate.checkpoint_publish | - | goal org_sync_pull |
 | adopted_checkpoint@joiner | built | workflow | route.checkpoint_adopt, route.join_install | - | goal org_sync_pull |
 | <a id="artifact-bootstrap_snapshot"></a>bootstrap_snapshot | built | workflow | route.join_bootstrap | - | route.join_install |
-| <a id="artifact-checkpoint_delegate_grant"></a>checkpoint_delegate_grant@founder | built | given | ceremony.organization_storage_delegate | ceremony.organization_storage_delegate | delegate.checkpoint_publish |
+| <a id="artifact-checkpoint_delegate_grant"></a>checkpoint_delegate_grant@founder | built | given | ceremony.org_found, ceremony.organization_storage_delegate | ceremony.organization_storage_delegate | delegate.checkpoint_publish, goal org_founded |
 | checkpoint_delegate_grant@joiner | built | workflow | ceremony.organization_storage_delegate | - | - |
 | <a id="artifact-checkpoint_including_joiner"></a>checkpoint_including_joiner | built | workflow | ceremony.checkpoint_publish, delegate.checkpoint_publish | - | route.checkpoint_adopt, route.join_install |
-| <a id="artifact-checkpoint_seed"></a>checkpoint_seed | built | given | - | ceremony.checkpoint_seed | ceremony.checkpoint_publish, ceremony.serve_cert_mint, delegate.checkpoint_publish |
+| <a id="artifact-checkpoint_seed"></a>checkpoint_seed | built | given | ceremony.checkpoint_seed | ceremony.checkpoint_seed | ceremony.checkpoint_publish, ceremony.serve_cert_mint, delegate.checkpoint_publish, goal org_founded |
 | <a id="artifact-claim_approval"></a>claim_approval | built | workflow | ceremony.admission_event, ceremony.claim_approval | - | - |
 | <a id="artifact-claim_staged"></a>claim_staged | built | workflow | route.claim_submit_stage | - | ceremony.admission_event, ceremony.claim_approval |
 | <a id="artifact-delegate_grant"></a>delegate_grant@founder | built | workflow | ceremony.organization_storage_delegate | - | - |
@@ -40,24 +40,28 @@ the listed mutations; the planner never re-produces it.
 | <a id="artifact-invite_ref_resolved"></a>invite_ref_resolved | built | workflow | route.invite_resolve | - | route.join_context |
 | <a id="artifact-join_context"></a>join_context | built | workflow | route.join_context | - | ceremony.member_claim_mint |
 | <a id="artifact-join_link_grant"></a>join_link_grant | built | workflow | route.link_publish | - | route.invite_resolve |
-| <a id="artifact-ledger_heads"></a>ledger_heads@founder | built | given | - | fold.genesis | ceremony.checkpoint_publish, ceremony.fleet_runtime_mint, ceremony.org_invite_mint, ceremony.organization_storage_delegate, delegate.checkpoint_publish |
+| <a id="artifact-ledger_heads"></a>ledger_heads@founder | built | given | ceremony.org_found | fold.genesis | ceremony.checkpoint_publish, ceremony.checkpoint_seed, ceremony.fleet_runtime_mint, ceremony.org_invite_mint, ceremony.organization_storage_delegate, ceremony.registration, delegate.checkpoint_publish, goal org_founded |
 | ledger_heads@joiner | built | workflow | route.join_install | - | ceremony.fleet_runtime_mint, ceremony.organization_storage_delegate, route.checkpoint_adopt, goal org_sync_pull |
 | <a id="artifact-link_publish_approval"></a>link_publish_approval | built | workflow | approval.link_publish | - | route.link_publish |
 | <a id="artifact-member_admitted"></a>member_admitted | built | workflow | route.claim_admission, route.claim_submit_admit | - | ceremony.checkpoint_publish, delegate.checkpoint_publish, route.join_bootstrap |
 | <a id="artifact-member_claim"></a>member_claim | built | workflow | ceremony.member_claim_mint | - | route.claim_submit_admit, route.claim_submit_stage |
+| <a id="artifact-org_shell"></a>org_shell | built | workflow | route.org_shell_create | - | ceremony.org_found |
 | <a id="artifact-persona_cert_fleet_sync"></a>persona_cert_fleet_sync@founder | built | given | ceremony.fleet_runtime_mint | ceremony.fleet_runtime_mint | module.org_reachability_publish, goal org_sync_pull |
 | persona_cert_fleet_sync@joiner | built | workflow | ceremony.fleet_runtime_mint | - | module.org_reachability_publish, goal org_sync_pull |
+| <a id="artifact-personal_identity"></a>personal_identity@founder | built | given | ceremony.personal_identity_create | ceremony.personal_identity_create | route.org_shell_create |
+| personal_identity@joiner | built | given | ceremony.personal_identity_create | ceremony.personal_identity_create | - |
 | <a id="artifact-policy_approval"></a>policy_approval | built | given | - | fold.role_define | route.claim_submit_stage |
 | <a id="artifact-policy_self_admit"></a>policy_self_admit | built | given | - | fold.role_define | route.claim_submit_admit |
 | <a id="artifact-reachability_row"></a>reachability_row@founder | built | workflow | module.org_reachability_publish | - | - |
 | reachability_row@joiner | built | workflow | module.org_reachability_publish | - | - |
 | <a id="artifact-registered_serving_key"></a>registered_serving_key@founder | built | open | **none — open question** | - | - |
 | registered_serving_key@joiner | built | open | **none — open question** | - | - |
-| <a id="artifact-registry_binding"></a>registry_binding@founder | built | given | - | ceremony.registration | ceremony.serve_cert_mint |
+| <a id="artifact-registry_binding"></a>registry_binding@founder | built | given | ceremony.registration | ceremony.registration | ceremony.checkpoint_seed, ceremony.serve_cert_mint, goal org_founded |
 | registry_binding@joiner | built | workflow | route.join_install | - | ceremony.serve_cert_mint |
 | <a id="artifact-relay_slot"></a>relay_slot@founder | built | given | route.relay_connect | route.relay_connect | goal org_sync_pull |
 | relay_slot@joiner | built | workflow | route.relay_connect | - | goal org_sync_pull |
-| <a id="artifact-serve_cert"></a>serve_cert@founder | built | given | ceremony.serve_cert_mint | ceremony.serve_cert_mint | route.link_publish, route.relay_connect |
+| <a id="artifact-sealed_org_root"></a>sealed_org_root | built | workflow | ceremony.org_found | - | ceremony.checkpoint_seed, ceremony.registration, goal org_founded |
+| <a id="artifact-serve_cert"></a>serve_cert@founder | built | given | ceremony.serve_cert_mint | ceremony.serve_cert_mint | route.link_publish, route.relay_connect, goal org_founded |
 | serve_cert@joiner | built | workflow | ceremony.serve_cert_mint | - | route.relay_connect |
 
 Artifact details:
@@ -81,13 +85,16 @@ Artifact details:
 - **link_publish_approval** — The approved link_publish decision with its Gate 2 org-scoped sign-on. Code: `tools/dashboard/link_approvals.py:_org_join_request`
 - **member_admitted** — The claim appended to the founder's ledger. Code: `tools/dashboard/claim_service.py:submit`
 - **member_claim** — The persona-signed member.claim event. Code: `tools/dashboard/static/js/ceremony/claim.js:mintMemberClaim` · `tools/network/ledger/events.py:_v_member_claim`
+- **org_shell** — The founder's local organization shell (slug, identity), not yet founded. Code: `tools/dashboard/server.py:api_orgs_create`
 - **persona_cert_fleet_sync** — The org sync certificate (persona -> serving machine key, scope fleet:sync) with its serving seed, installed as an OrgFleetAuthenticator. Code: `tools/dashboard/fleet_enrollment_routes.py:_activate_runtime` · `tools/network/fleet_org_channel.py:OrgFleetAuthenticator`
+- **personal_identity** — The actor's personal identity - the armored personal root and its root_pub. Code: `tools/dashboard/identity_routes.py:post_personal`
 - **policy_approval** — The invite's role requires approvals before admission. Code: `tools/dashboard/claim_service.py:R_APPROVAL_MISSING`
 - **policy_self_admit** — The invite's role admits a claim without approvals. Code: `tools/dashboard/claim_service.py:R_APPROVAL_MISSING`
 - **reachability_row** — The actor machine's signed reachability row in the org scope. Code: `tools/network/fleet_sync_scheduler.py:_publish_org_reachability`
 - **registered_serving_key** — The actor's serving machine key in the registry's per-org serve_machine_keys allow-set. Code: `tools/network/registry/backfill_serving_keys.py`. Enforced only when the set is non-empty (relay.py:973-1000, store.py:1576-1583); the only writer in the tree is this backfill. Whether any live org's set is non-empty is an open question; the goal does not require it.
 - **registry_binding** — The org's registry binding {org_uuid, root key, registry_url}. Code: `tools/graph/schemas/network_identity.py:NETWORK_BINDING_SET_ID`
 - **relay_slot** — A live serving slot of the actor's connector at the org's relay. Code: `tools/dashboard/org_sync_channels.py:relay_slots_provider`
+- **sealed_org_root** — The org root sealed to the founder's personal-root KEM key; any founder personal-root window unseals it (openSealedArmor). The row does not replicate, so a joiner never holds it. Code: `tools/dashboard/network_routes.py:post_sealed_org_key`
 - **serve_cert** — The actor's persona-signed serving certificate and key. Code: `tools/dashboard/network_routes.py:_post_serve_cert_v3`
 
 ## Workflow mutations
@@ -97,11 +104,15 @@ Artifact details:
 | approval.link_publish | built | founder | root | personal_root_seed AND invite_event | link_publish_approval |
 | ceremony.admission_event | built | founder | persona | persona_signing_key AND claim_staged | claim_approval, admission_event |
 | ceremony.checkpoint_publish | built | founder | persona | persona_signing_key AND member_admitted AND ledger_heads AND checkpoint_seed | checkpoint_including_joiner, adopted_checkpoint |
+| ceremony.checkpoint_seed | built | founder | root | sealed_org_root AND registry_binding AND ledger_heads | checkpoint_seed |
 | ceremony.claim_approval | built | founder | persona | persona_signing_key AND claim_staged | claim_approval |
 | ceremony.fleet_runtime_mint | built | founder, joiner | root | personal_root_seed AND fleet_roster AND ledger_heads | persona_cert_fleet_sync |
 | ceremony.member_claim_mint | built | joiner | persona | persona_signing_key AND join_context | member_claim |
+| ceremony.org_found | built | founder | root | org_shell | sealed_org_root, ledger_heads, checkpoint_delegate_grant |
 | ceremony.org_invite_mint | built | founder | persona | persona_signing_key AND ledger_heads | invite_event |
 | ceremony.organization_storage_delegate | built | founder, joiner | persona | persona_signing_key AND ledger_heads | delegate_grant, checkpoint_delegate_grant |
+| ceremony.personal_identity_create | built | founder, joiner | root | nothing | personal_identity |
+| ceremony.registration | built | founder | root | sealed_org_root AND ledger_heads | registry_binding |
 | ceremony.serve_cert_mint | built | founder, joiner | persona | persona_signing_key AND registry_binding AND checkpoint_seed | serve_cert |
 | delegate.checkpoint_publish | built | founder | delegate | agent_delegate_signing_key AND checkpoint_delegate_grant AND member_admitted AND ledger_heads AND checkpoint_seed | checkpoint_including_joiner, adopted_checkpoint |
 | module.org_reachability_publish | built | founder, joiner | none | persona_cert_fleet_sync | reachability_row |
@@ -114,7 +125,81 @@ Artifact details:
 | route.join_context | built | founder | none | invite_ref_resolved AND invite_event | join_context |
 | route.join_install | built | joiner | none | bootstrap_snapshot AND checkpoint_including_joiner | ledger_heads, registry_binding, install_seed_addresses, adopted_checkpoint |
 | route.link_publish | built | founder | delegate | agent_delegate_signing_key AND link_publish_approval AND serve_cert | join_link_grant |
+| route.org_shell_create | built | founder | none | personal_identity | org_shell |
 | route.relay_connect | built | founder, joiner | none | serve_cert | relay_slot |
+
+## Goal org_founded
+
+The founder has founded an organization and it is live on the network: the founder holds the org ledger and its sealed org root, its storage delegate carries the checkpoint scope, the registry binds the org, the registry holds the seq-0 membership checkpoint, and the founder holds a persona serve certificate. Everything org_sync_pull's starting states assume as "F0 done" that founding itself must produce.
+
+**Requires:** ledger_heads@founder AND sealed_org_root AND checkpoint_delegate_grant@founder AND registry_binding@founder AND checkpoint_seed AND serve_cert@founder
+
+Built order (bead auto-2vseu, Windows signed-release walk of auto-0925-231713 and the compose sim sim-org-05): founding (founding.js:foundExistingOrganizationShell) registers nothing and ends on the success screen. The first registration is the link-publish approval's register-before-freeze (worktrees.js:_registerOrgInline), so an organization whose founder never publishes an invite link is never registered; sign-on maintenance skips an unregistered org (signon_preparation.organization_plans needs committed_membership_org). The checkpoint seed and the serve certificate follow in the next sign-on (network-signon.mjs:prepareRootMaintenance). Every phase after the founding batch can sign in the founding window: the org root is in memory there, and the persona derives from the held seed.
+
+### Starting states
+
+- **fresh** — No identity yet (first run). Holds: 
+- **identity_held** — The founder has a personal identity and creates an organization from the dashboard. Holds: personal_identity@founder
+
+### Recorded current order
+
+| Step | Actor | Root opening | Runs | Only from |
+|---|---|---|---|---|
+| I1 | founder | yes | ceremony.personal_identity_create | fresh |
+| F0.shell | founder | no | route.org_shell_create | all |
+| F0 | founder | yes | ceremony.org_found | all |
+| P | founder | yes | ceremony.registration | all |
+| S | founder | yes | ceremony.checkpoint_seed, ceremony.serve_cert_mint | all |
+
+### Scenario from fresh, built rules
+
+Recorded: current {'founder': 4, 'joiner': 0}, minimal {'founder': 1, 'joiner': 0}.
+
+```text
+goal org_founded from fresh (built rules)
+root openings: founder 1, joiner 0 (total 1); steps 6
+
+ 1. ceremony.personal_identity_create[founder]       window founder#1     -> personal_identity@founder
+ 2. route.org_shell_create[founder]                  machine (none)       -> org_shell
+ 3. ceremony.org_found[founder]                      window founder#1     -> checkpoint_delegate_grant@founder, ledger_heads@founder, sealed_org_root
+ 4. ceremony.registration[founder]                   window founder#1     -> registry_binding@founder
+ 5. ceremony.checkpoint_seed[founder]                window founder#1     -> checkpoint_seed
+ 6. ceremony.serve_cert_mint[founder]                window founder#1     -> serve_cert@founder
+
+goal org_founded from fresh: current order reaches the goal
+current root openings: founder 4, joiner 0
+minimal root openings: founder 1, joiner 0 (built rules)
+
+
+needed I1         founder  needed: first opening of founder
+EXTRA  F0         founder  mergeable into I1: I1 closed without: org_shell (from route.org_shell_create[founder])
+EXTRA  P          founder  mergeable into F0: F0 closed without
+EXTRA  S          founder  mergeable into P: P closed without: checkpoint_seed (from ceremony.checkpoint_seed[founder])
+```
+
+### Scenario from identity_held, built rules
+
+Recorded: current {'founder': 3, 'joiner': 0}, minimal {'founder': 1, 'joiner': 0}.
+
+```text
+goal org_founded from identity_held (built rules)
+root openings: founder 1, joiner 0 (total 1); steps 5
+
+ 1. route.org_shell_create[founder]                  machine (none)       -> org_shell
+ 2. ceremony.org_found[founder]                      window founder#1     -> checkpoint_delegate_grant@founder, ledger_heads@founder, sealed_org_root
+ 3. ceremony.registration[founder]                   window founder#1     -> registry_binding@founder
+ 4. ceremony.checkpoint_seed[founder]                window founder#1     -> checkpoint_seed
+ 5. ceremony.serve_cert_mint[founder]                window founder#1     -> serve_cert@founder
+
+goal org_founded from identity_held: current order reaches the goal
+current root openings: founder 3, joiner 0
+minimal root openings: founder 1, joiner 0 (built rules)
+
+
+needed F0         founder  needed: first opening of founder
+EXTRA  P          founder  mergeable into F0: F0 closed without
+EXTRA  S          founder  mergeable into P: P closed without: checkpoint_seed (from ceremony.checkpoint_seed[founder])
+```
 
 ## Goal org_sync_pull
 

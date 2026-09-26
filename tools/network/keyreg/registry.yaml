@@ -1177,10 +1177,25 @@ mutations:
 
   ceremony.registration:
     source: {kind: route, file: tools/network/registry/app.py}
-    authority: [personal_root_seed]
+    authority: [org_root_signing_key, personal_root_seed]
     effects:
       writes: [registry binding, including the recovery policy declaration when pinned]
+    actors: [founder]
+    opens: root
+    requires: [sealed_org_root, ledger_heads]
+    produces: [registry_binding]
     crib: ["§8", "§9"]
+    notes: >-
+      A root-direct POST /v1/orgs {org_uuid, root_pub, recovery_policy}. An
+      organization's registration is signed by its ORG root
+      (network-signon.mjs:_signRootRequest, network-identity.js:signRegistration),
+      reached in a personal-root window by unsealing sealed_org_root with the
+      personal seed (openSealedArmor) or, inside founding, by the root the
+      founding just minted; only the personal org's registration is signed by
+      the personal root (provisionPersonalNetworkIdentity). The workflow fields
+      model the organization form. A first registration never runs in sign-on
+      maintenance: signon_preparation.organization_plans and _maintainBinding
+      skip an organization with no binding (they renew or reclaim only).
 
   ceremony.vault_master_read:
     source: {kind: ceremony, file: tools/vault/unlock.py, symbol: open_generation_keys}
@@ -1342,8 +1357,66 @@ mutations:
     effects:
       writes:
         - "checkpoint seq 0 {v, org, seq 0, prev genesis_id, ledger_head, members_root, checkpointers_root, ts}, signed by the org root opened from its sealed armor (network-signon.mjs:812-826), at the registry; cached adopted"
+    actors: [founder]
+    opens: root
+    requires: [sealed_org_root, registry_binding, ledger_heads]
+    produces: [checkpoint_seed]
     crib: ["§8"]
-    notes: Step F0 (founder sign-on). The advancing form is ceremony.checkpoint_publish.
+    notes: >-
+      The founder's first sign-on after registration, not founding itself: the
+      server assembles the record only for a committed organization (bound and
+      founded, network_routes.py:_org_unlock_plan), and the browser signs it
+      with the org root unsealed from sealed_org_root
+      (network-signon.mjs:prepareRootMaintenance, rootKeyFor). The advancing
+      form is ceremony.checkpoint_publish.
+  # ── Identity and founding (bead auto-2vseu; coordinator auto-0924-200146) ──
+  # The org_founded goal's own mutations. Registration, the checkpoint seed and
+  # the serve certificate (above) join it through their workflow fields.
+
+  ceremony.personal_identity_create:
+    source: {kind: ceremony, file: tools/dashboard/static/js/network-onboarding.js, symbol: _createIdentity}
+    authority: [personal_root_seed]
+    effects:
+      mints: [personal_root_seed]
+      writes: [the armored personal root and its root_pub (POST /api/identity/personal, identity_routes.py:post_personal)]
+    actors: [founder, joiner]
+    opens: root
+    requires: []
+    produces: [personal_identity]
+    crib: ["§2"]
+    notes: The seed is generated and armored in this window; opens root models the human ceremony that creates it.
+
+  route.org_shell_create:
+    source: {kind: route, file: tools/dashboard/server.py, symbol: api_orgs_create}
+    authority: [the operator's authenticated dashboard session]
+    effects:
+      writes: [the local organization shell (slug, identity) with founded false]
+    actors: [founder]
+    opens: none
+    requires: [personal_identity]
+    produces: [org_shell]
+    crib: ["§7"]
+
+  ceremony.org_found:
+    source: {kind: ceremony, file: tools/dashboard/static/js/ceremony/founding.js, symbol: foundExistingOrganizationShell}
+    authority: [personal_root_seed, org_root_signing_key, persona_signing_key]
+    effects:
+      mints: [org_root_signing_key]
+      writes:
+        - the org root sealed to the personal root's KEM key (POST /api/network/org-key/sealed, network_routes.py:post_sealed_org_key)
+        - the founding batch genesis, role.define, invite, member.claim (POST /api/network/ledger/found, network_routes.py:post_ledger_found)
+        - the organization KEM key and the storage delegate with the membership:checkpoint scope (vault-unlock.js submitVault)
+    actors: [founder]
+    opens: root
+    requires: [org_shell]
+    produces: [sealed_org_root, ledger_heads, checkpoint_delegate_grant]
+    crib: ["§7", "§8"]
+    notes: >-
+      One personal-root opening ("Set up organization authority"). The org root
+      is minted in memory and signs the genesis; the finally block zeroes the
+      seed and drops the org root before any POST, so nothing after the batch
+      can sign in this window as built (auto-2vseu).
+
   # ── Invite -> join -> admission -> sync (graph://cde6c8c6-041) ────────────
   # Every entry below carries the machine-evaluable workflow fields (actors,
   # opens, requires, produces) the planner reads: keyreg.py plan / explain-current.
@@ -1811,6 +1884,24 @@ artifacts:
     origin: given
     given_by: [ceremony.registration@founder]
     code: [tools/graph/schemas/network_identity.py:NETWORK_BINDING_SET_ID]
+  personal_identity:
+    per_actor: true
+    description: The actor's personal identity - the armored personal root and its root_pub.
+    store: the personal identity Setting (GET/POST /api/identity/personal)
+    home: the actor's machine
+    origin: given
+    given_by: [ceremony.personal_identity_create]
+    code: [tools/dashboard/identity_routes.py:post_personal]
+  org_shell:
+    description: The founder's local organization shell (slug, identity), not yet founded.
+    store: the org list and the org's own database
+    home: the actor's machine
+    code: [tools/dashboard/server.py:api_orgs_create]
+  sealed_org_root:
+    description: The org root sealed to the founder's personal-root KEM key; any founder personal-root window unseals it (openSealedArmor). The row does not replicate, so a joiner never holds it.
+    store: NETWORK_ORG_KEY_SET_ID Setting (not replicated)
+    home: the actor's machine
+    code: [tools/dashboard/network_routes.py:post_sealed_org_key]
   checkpoint_seed:
     description: Registry membership checkpoint seq 0, signed by the org root.
     store: registry /v1/orgs/{uuid}/membership-checkpoints
@@ -1975,6 +2066,66 @@ artifacts:
     code: [tools/network/storagekit/delegate.py:storage_delegate_scopes, tools/dashboard/org_storage_delegate.py:prepare, tools/network/ledger/scopes.py:self_delegable_exact]
 
 goals:
+  org_founded:
+    description: >-
+      The founder has founded an organization and it is live on the network:
+      the founder holds the org ledger and its sealed org root, its storage
+      delegate carries the checkpoint scope, the registry binds the org, the
+      registry holds the seq-0 membership checkpoint, and the founder holds a
+      persona serve certificate. Everything org_sync_pull's starting states
+      assume as "F0 done" that founding itself must produce.
+    requires:
+      - ledger_heads@founder
+      - sealed_org_root
+      - checkpoint_delegate_grant@founder
+      - registry_binding@founder
+      - checkpoint_seed
+      - serve_cert@founder
+    notes: >-
+      Built order (bead auto-2vseu, Windows signed-release walk of
+      auto-0925-231713 and the compose sim sim-org-05): founding
+      (founding.js:foundExistingOrganizationShell) registers nothing and ends
+      on the success screen. The first registration is the link-publish
+      approval's register-before-freeze (worktrees.js:_registerOrgInline),
+      so an organization whose founder never publishes an invite link is
+      never registered; sign-on maintenance skips an unregistered org
+      (signon_preparation.organization_plans needs committed_membership_org).
+      The checkpoint seed and the serve certificate follow in the next
+      sign-on (network-signon.mjs:prepareRootMaintenance). Every phase after
+      the founding batch can sign in the founding window: the org root is in
+      memory there, and the persona derives from the held seed.
+    states:
+      fresh:
+        description: No identity yet (first run).
+        holds: []
+      identity_held:
+        description: The founder has a personal identity and creates an organization from the dashboard.
+        holds: [personal_identity@founder]
+    current_order:
+      - step: I1
+        actor: founder
+        ceremony: true
+        only_from: [fresh]
+        runs: [ceremony.personal_identity_create]
+      - step: F0.shell
+        actor: founder
+        ceremony: false
+        runs: [route.org_shell_create]
+      - step: F0
+        actor: founder
+        ceremony: true
+        runs: [ceremony.org_found]
+      - step: P
+        actor: founder
+        ceremony: true
+        runs: [ceremony.registration]
+      - step: S
+        actor: founder
+        ceremony: true
+        runs: [ceremony.checkpoint_seed, ceremony.serve_cert_mint]
+    scenarios:
+      - {from: fresh, rules: [], current: {founder: 4, joiner: 0}, minimal: {founder: 1, joiner: 0}}
+      - {from: identity_held, rules: [], current: {founder: 3, joiner: 0}, minimal: {founder: 1, joiner: 0}}
   org_sync_pull:
     description: >-
       Founder and joiner can each pull the other over org sync: both hold an

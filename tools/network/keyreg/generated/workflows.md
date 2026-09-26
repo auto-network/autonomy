@@ -20,9 +20,11 @@ See the [reading guide](../GUIDE.md) and [key register](key-register.md).
 - [ceremony.claim_approval](#workflow-ceremony-claim_approval)
 - [ceremony.fleet_runtime_mint](#workflow-ceremony-fleet_runtime_mint)
 - [ceremony.member_claim_mint](#workflow-ceremony-member_claim_mint)
+- [ceremony.org_found](#workflow-ceremony-org_found)
 - [ceremony.org_invite_mint](#workflow-ceremony-org_invite_mint)
 - [ceremony.organization_grant_recovery](#workflow-ceremony-organization_grant_recovery)
 - [ceremony.organization_storage_delegate](#workflow-ceremony-organization_storage_delegate)
+- [ceremony.personal_identity_create](#workflow-ceremony-personal_identity_create)
 - [ceremony.personal_serve_cert_mint](#workflow-ceremony-personal_serve_cert_mint)
 - [ceremony.recovery_policy_change](#workflow-ceremony-recovery_policy_change)
 - [ceremony.registration](#workflow-ceremony-registration)
@@ -61,6 +63,7 @@ See the [reading guide](../GUIDE.md) and [key register](key-register.md).
 - [route.join_context](#workflow-route-join_context)
 - [route.join_install](#workflow-route-join_install)
 - [route.link_publish](#workflow-route-link_publish)
+- [route.org_shell_create](#workflow-route-org_shell_create)
 - [route.relay_connect](#workflow-route-relay_connect)
 - [storage.advance_state](#workflow-storage-advance_state)
 - [storage.issue_grant](#workflow-storage-issue_grant)
@@ -240,11 +243,13 @@ The persona-signed form: a full sign-in (signon_preparation.py), the scoped sign
 
 - checkpoint seq 0 {v, org, seq 0, prev genesis_id, ledger_head, members_root, checkpointers_root, ts}, signed by the org root opened from its sealed armor (network-signon.mjs:812-826), at the registry; cached adopted
 
+**Workflow:** actors founder; opens root; requires sealed_org_root AND registry_binding AND ledger_heads; produces checkpoint_seed
+
 **Source:** `tools/dashboard/static/js/network-signon.mjs:_publishMembershipCheckpoint` (ceremony)
 
 **Crib:** §8
 
-Step F0 (founder sign-on). The advancing form is ceremony.checkpoint_publish.
+The founder's first sign-on after registration, not founding itself: the server assembles the record only for a committed organization (bound and founded, network_routes.py:_org_unlock_plan), and the browser signs it with the org root unsealed from sealed_org_root (network-signon.mjs:prepareRootMaintenance, rootKeyFor). The advancing form is ceremony.checkpoint_publish.
 
 <a id="workflow-ceremony-claim_approval"></a>
 ## ceremony.claim_approval
@@ -328,6 +333,31 @@ Helpers: mintRuntimeCredential, mintReachabilityCert, mintOrgSyncCerts. One mint
 
 Step J3.
 
+<a id="workflow-ceremony-org_found"></a>
+## ceremony.org_found
+
+**Status:** built
+
+**Authority:** personal_root_seed, org_root_signing_key, persona_signing_key
+
+**Mints**
+
+- org_root_signing_key
+
+**Writes**
+
+- the org root sealed to the personal root's KEM key (POST /api/network/org-key/sealed, network_routes.py:post_sealed_org_key)
+- the founding batch genesis, role.define, invite, member.claim (POST /api/network/ledger/found, network_routes.py:post_ledger_found)
+- the organization KEM key and the storage delegate with the membership:checkpoint scope (vault-unlock.js submitVault)
+
+**Workflow:** actors founder; opens root; requires org_shell; produces sealed_org_root, ledger_heads, checkpoint_delegate_grant
+
+**Source:** `tools/dashboard/static/js/ceremony/founding.js:foundExistingOrganizationShell` (ceremony)
+
+**Crib:** §7, §8
+
+One personal-root opening ("Set up organization authority"). The org root is minted in memory and signs the genesis; the finally block zeroes the seed and drops the org root before any POST, so nothing after the batch can sign in this window as built (auto-2vseu).
+
 <a id="workflow-ceremony-org_invite_mint"></a>
 ## ceremony.org_invite_mint
 
@@ -391,6 +421,30 @@ graph://35308bf7-584. Organization sign-in validates scoped KEM keys against cur
 
 A reuse sign-in adds no ledger event. Workflow graph://b437ecfb-e23. For a checkpointer the grant also carries membership:checkpoint (storage_delegate_scopes(checkpointer=True); operator ruling 1, 2026-09-25; built c7d6992a), and a recorded grant without it is re-minted at the next sign-on (org_storage_delegate.prepare remint_required). The proof-of-possession form is unchanged.
 
+<a id="workflow-ceremony-personal_identity_create"></a>
+## ceremony.personal_identity_create
+
+**Status:** built
+
+**Authority:** personal_root_seed
+
+**Mints**
+
+- personal_root_seed
+
+**Writes**
+
+- the armored personal root and its root_pub (POST /api/identity/personal
+- identity_routes.py:post_personal)
+
+**Workflow:** actors founder, joiner; opens root; requires nothing; produces personal_identity
+
+**Source:** `tools/dashboard/static/js/network-onboarding.js:_createIdentity` (ceremony)
+
+**Crib:** §2
+
+The seed is generated and armored in this window; opens root models the human ceremony that creates it.
+
 <a id="workflow-ceremony-personal_serve_cert_mint"></a>
 ## ceremony.personal_serve_cert_mint
 
@@ -433,16 +487,20 @@ Existing personal branch still emits viewer_cert; do not infer organization cont
 
 **Status:** built
 
-**Authority:** personal_root_seed
+**Authority:** org_root_signing_key, personal_root_seed
 
 **Writes**
 
 - registry binding
 - including the recovery policy declaration when pinned
 
+**Workflow:** actors founder; opens root; requires sealed_org_root AND ledger_heads; produces registry_binding
+
 **Source:** `tools/network/registry/app.py` (route)
 
 **Crib:** §8, §9
+
+A root-direct POST /v1/orgs {org_uuid, root_pub, recovery_policy}. An organization's registration is signed by its ORG root (network-signon.mjs:_signRootRequest, network-identity.js:signRegistration), reached in a personal-root window by unsealing sealed_org_root with the personal seed (openSealedArmor) or, inside founding, by the root the founding just minted; only the personal org's registration is signed by the personal root (provisionPersonalNetworkIdentity). The workflow fields model the organization form. A first registration never runs in sign-on maintenance: signon_preparation.organization_plans and _maintainBinding skip an organization with no binding (they renew or reclaim only).
 
 <a id="workflow-ceremony-serve_cert_mint"></a>
 ## ceremony.serve_cert_mint
@@ -1251,6 +1309,24 @@ Step J5 (built 6d6f04ec..3f15ea10). The page forwards the bootstrap's reachabili
 **Crib:** §8
 
 Step F2, executor half. The channel key is minted by link.mint_channel_key.
+
+<a id="workflow-route-org_shell_create"></a>
+## route.org_shell_create
+
+**Status:** built
+
+**Authority:** the operator's authenticated dashboard session
+
+**Writes**
+
+- the local organization shell (slug
+- identity) with founded false
+
+**Workflow:** actors founder; opens none; requires personal_identity; produces org_shell
+
+**Source:** `tools/dashboard/server.py:api_orgs_create` (route)
+
+**Crib:** §7
 
 <a id="workflow-route-relay_connect"></a>
 ## route.relay_connect

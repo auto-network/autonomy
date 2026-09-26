@@ -51,9 +51,11 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | ceremony.claim_approval | mutation | **GAP** |
 | ceremony.fleet_runtime_mint | mutation | **GAP** |
 | ceremony.member_claim_mint | mutation | **GAP** |
+| ceremony.org_found | mutation | **GAP** |
 | ceremony.org_invite_mint | mutation | **GAP** |
 | ceremony.organization_grant_recovery | mutation | **GAP** |
 | ceremony.organization_storage_delegate | mutation | DelegateCheckpoint: checkpoint_attributable<br>DelegateCheckpoint: no_attribution_without_grant |
+| ceremony.personal_identity_create | mutation | **GAP** |
 | ceremony.personal_serve_cert_mint | mutation | **GAP** |
 | ceremony.recovery_policy_change | mutation | **GAP** |
 | ceremony.registration | mutation | **GAP** |
@@ -92,6 +94,7 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | route.join_context | mutation | **GAP** |
 | route.join_install | mutation | OrgAdmission: EveryAdmittedMemberPulls<br>OrgAdmissionBundleBound: NotAboveRegistry |
 | route.link_publish | mutation | **GAP** |
+| route.org_shell_create | mutation | **GAP** |
 | route.relay_connect | mutation | **GAP** |
 | storage.advance_state | mutation | **GAP** |
 | storage.issue_grant | mutation | VaultRekeyMarker: exclusion_forward |
@@ -101,4 +104,4 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | vault.create_class | mutation | VaultPolicyClass: root_reaches_every_generation |
 | vault.revoke_class_factor | mutation | VaultPolicyClass: revoked_factor_excluded_forward<br>VaultPolicyClass: revoked_factor_keeps_old |
 
-32 of 90 entries carry at least one model reference; 58 gaps.
+32 of 93 entries carry at least one model reference; 61 gaps.

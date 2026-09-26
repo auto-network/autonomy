@@ -229,9 +229,11 @@ def test_goal_names_both_actors_copies(registry):
 
 def test_unproduced_copy_is_an_error(registry):
     broken = copy.deepcopy(registry)
-    broken["artifacts"]["ledger_heads"]["given_by"] = ["fold.genesis@joiner"]
+    # fleet_roster has no workflow producer; ledger_heads@founder no longer
+    # serves as the example, since ceremony.org_found produces it.
+    broken["artifacts"]["fleet_roster"]["given_by"] = ["fleet.enroll@joiner"]
     errors = _errors(broken)
-    assert any("ledger_heads@founder is neither given nor produced" in e for e in errors), errors
+    assert any("fleet_roster@founder is neither given nor produced" in e for e in errors), errors
 
 
 def test_state_may_hold_only_given_copies(registry):
