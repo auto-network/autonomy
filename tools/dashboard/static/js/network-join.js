@@ -324,6 +324,13 @@
           events: material.events,
           binding: material.binding,
           member_profiles: material.member_profiles || [],
+          // The sponsor's reachability rows seed this machine's first
+          // contact addresses (install seed, never the org sets), and the
+          // sponsor's current membership checkpoint is what install adopts
+          // by folding the bundled events at its head: the joiner never
+          // asks the registry for a checkpoint that cannot include it yet.
+          reachability_rows: material.reachability_rows || [],
+          checkpoint: material.checkpoint || null,
         }),
       }).then(function (response) {
         return response.json().catch(function () { return {}; }).then(function (body) {

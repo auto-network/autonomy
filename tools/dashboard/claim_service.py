@@ -247,7 +247,24 @@ def bootstrap(org: str, invite_ref: str, persona_pub: str, after: int = 0) -> di
     reachability = _reachability_rows(org, own_persona)
     return {"status": "ok", "events": events, "more": more, "binding": binding,
             "member_profiles": _member_profiles(org, reachability, own_persona),
-            "reachability_rows": reachability}
+            "reachability_rows": reachability,
+            "checkpoint": _current_checkpoint(org)}
+
+
+def _current_checkpoint(org: str):
+    """The sponsor's currently adopted membership checkpoint record, served
+    with the bundle so the joiner adopts it by folding the bundled events at
+    its ledger_head (OrgAdmission.tla, rule bundle_adopt). The record is a
+    hint the joiner recomputes, never trusted: a record whose members_root the
+    joiner's own fold does not reproduce is refused at install. None when this
+    sponsor has adopted nothing yet (the joiner then installs without a
+    checkpoint and reports it)."""
+    try:
+        from tools.dashboard import membership_checkpoint as cp
+        record = cp._cached_adopted(org)
+    except Exception:
+        return None
+    return dict(record) if isinstance(record, dict) else None
 
 
 #: Bound on the rows a bootstrap reply seeds a joiner with. The reply is one

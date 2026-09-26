@@ -721,16 +721,53 @@ def _slug_for_joined_org(name: str, org_uuid: str) -> str:
     raise ValueError("could not derive a free local slug for the organization")
 
 
-def _adopt_registry_checkpoint(slug: str) -> dict:
-    """Adopt the registry's current membership checkpoint for *slug* when it
-    agrees with this node's own ledger (design comment 30969266-a55, (b)):
-    the registry is the only source a node adopts from, and the members_root
-    it names must equal a re-fold of THIS node's ledger at that ledger_head,
-    so a registry cannot hand this node a roster its own ledger does not
-    produce. Pure local check plus one registry read; never signs."""
-    import httpx
+def _adopt_state_by_fold(slug: str, state: object, *, source: str) -> dict:
+    """Adopt a membership checkpoint *state* ({seq, members_root,
+    checkpointers_root, ledger_head}) for *slug* when this node's own ledger
+    reproduces it: fold at the state's ledger_head and require members_root
+    equality (OrgAdmission.tla rule bundle_adopt; lemma AdoptedIsAuthentic
+    holds because the root is recomputed, never trusted). *source* names where
+    the state came from for the error text. Pure local; never signs."""
     from tools.dashboard import membership_checkpoint as cp
     from tools.network.ledger import membership_commitment as mc
+
+    binding_member = _first_member(NETWORK_BINDING_SET_ID, slug)
+    binding = binding_member.payload if binding_member is not None else None
+    if not isinstance(binding, dict) or not isinstance(binding.get("org_uuid"), str):
+        return {"ok": False, "error": "no registry binding"}
+    org_uuid = binding["org_uuid"]
+    if not isinstance(state, dict):
+        return {"ok": False, "error": f"{source} carried no membership checkpoint"}
+    try:
+        seq = int(state["seq"])
+        members_root, checkpointers_root = str(state["members_root"]), str(state["checkpointers_root"])
+        ledger_head = str(state["ledger_head"])
+    except (KeyError, TypeError, ValueError):
+        return {"ok": False, "error": f"{source} membership checkpoint is malformed"}
+    cached = cp._cached_adopted(slug)
+    if isinstance(cached, dict) and int(cached.get("seq", -1)) >= seq:
+        return {"ok": True, "action": "up-to-date", "seq": int(cached["seq"])}
+    try:
+        folded = cp._fold_at(slug, [ledger_head]) if cp._is_head(ledger_head) else None
+    except Exception as exc:
+        return {"ok": False, "error": f"this node's ledger has no head {ledger_head[:12]}: {exc}"}
+    if folded is None or mc.members_root(folded) != members_root:
+        return {"ok": False, "error": (
+            f"the {source} members_root does not match this node's ledger at that head"
+        )}
+    record = {"org": org_uuid, "seq": seq, "members_root": members_root,
+              "checkpointers_root": checkpointers_root, "ledger_head": ledger_head}
+    cp.record_adopted(slug, record)
+    return {"ok": True, "action": "adopted", "seq": seq}
+
+
+def _adopt_registry_checkpoint(slug: str) -> dict:
+    """Adopt the registry's current membership checkpoint for *slug* when it
+    agrees with this node's own ledger: one registry read, then
+    :func:`_adopt_state_by_fold`. Used by sign-on preparation and the adopt
+    route; the join install adopts the checkpoint carried in its bundle
+    instead (post_join_outcome)."""
+    import httpx
 
     binding_member = _first_member(NETWORK_BINDING_SET_ID, slug)
     binding = binding_member.payload if binding_member is not None else None
@@ -746,28 +783,7 @@ def _adopt_registry_checkpoint(slug: str) -> dict:
         return {"ok": False, "error": f"registry unreachable: {exc}"}
     if probe.status_code != 200:
         return {"ok": False, "error": f"registry has no membership state ({probe.status_code})"}
-    state = probe.json()
-    try:
-        seq = int(state["seq"])
-        members_root, checkpointers_root = str(state["members_root"]), str(state["checkpointers_root"])
-        ledger_head = str(state["ledger_head"])
-    except (KeyError, TypeError, ValueError):
-        return {"ok": False, "error": "registry membership state is malformed"}
-    cached = cp._cached_adopted(slug)
-    if isinstance(cached, dict) and int(cached.get("seq", -1)) >= seq:
-        return {"ok": True, "action": "up-to-date", "seq": int(cached["seq"])}
-    try:
-        folded = cp._fold_at(slug, [ledger_head]) if cp._is_head(ledger_head) else None
-    except Exception as exc:
-        return {"ok": False, "error": f"this node's ledger has no head {ledger_head[:12]}: {exc}"}
-    if folded is None or mc.members_root(folded) != members_root:
-        return {"ok": False, "error": (
-            "the registry's members_root does not match this node's ledger at that head"
-        )}
-    record = {"org": org_uuid, "seq": seq, "members_root": members_root,
-              "checkpointers_root": checkpointers_root, "ledger_head": ledger_head}
-    cp.record_adopted(slug, record)
-    return {"ok": True, "action": "adopted", "seq": seq}
+    return _adopt_state_by_fold(slug, probe.json(), source="registry's")
 
 
 async def post_membership_checkpoint_adopt(request: Request) -> JSONResponse:
@@ -940,9 +956,13 @@ async def post_join_outcome(request: Request) -> JSONResponse:
     except Exception as exc:  # a store fault must not masquerade as success
         return JSONResponse({"ok": False, "error": f"installing the organization failed: {exc}"},
                             status_code=500)
-    # Adopt the registry's current membership checkpoint now (it may predate
-    # this admission; the next one is adopted at sign-on).
-    adoption = await asyncio.to_thread(_adopt_registry_checkpoint, slug)
+    # Adopt the checkpoint the sponsor served with the bundle, by folding the
+    # just-installed ledger at its head (OrgAdmission.tla rule bundle_adopt).
+    # The registry is not consulted here: its current checkpoint can predate
+    # this admission, and adopting it left every earlier joiner unable to
+    # prove membership (calibration TransitionDowngradeNoJoinAdopt).
+    adoption = await asyncio.to_thread(
+        _adopt_state_by_fold, slug, body.get("checkpoint"), source="join bundle's")
     return JSONResponse({"ok": True, "org": slug, "org_id": stable_id,
                          "org_uuid": org_uuid, "genesis_id": genesis_id,
                          "events": len(events), "checkpoint": adoption})

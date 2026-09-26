@@ -185,3 +185,16 @@ class TestI1Constraints:
         for leaked in ("under review", "still being finished", "ceremony",
                        "passphrase", "held", "pending ruling"):
             assert leaked not in TEMPLATE.lower(), leaked
+
+
+def test_install_outcome_forwards_seed_rows_and_the_bundled_checkpoint():
+    """network-join.js installAdmitted POSTs /api/network/join/outcome with the
+    sponsor's reachability_rows (the install seed's addresses; keyreg defect
+    install_seed_addresses) and the bundled checkpoint (rule bundle_adopt).
+    The first real join (2026-09-25) forwarded neither."""
+    from pathlib import Path
+    js = (Path(__file__).resolve().parents[1] / "static/js/network-join.js").read_text()
+    start = js.index('fetch("/api/network/join/outcome"')
+    body = js[start:js.index("}).then", start)]
+    assert "reachability_rows: material.reachability_rows" in body
+    assert "checkpoint: material.checkpoint" in body

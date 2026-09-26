@@ -128,3 +128,19 @@ def test_bootstrap_small_ledger_is_one_page(monkeypatch):
     _admitted_bootstrap(monkeypatch, 4)
     reply = claim_service.bootstrap("acme", "e" * 64, "f" * 64)
     assert len(reply["events"]) == 4 and reply["more"] is False
+
+
+def test_bootstrap_carries_the_sponsor_current_checkpoint(monkeypatch):
+    """The joiner adopts by folding the bundled events at the served
+    checkpoint's head (OrgAdmission.tla rule bundle_adopt), so the bundle
+    must carry the sponsor's currently adopted record; None when the sponsor
+    has adopted nothing yet."""
+    from tools.dashboard import membership_checkpoint as cp
+    _admitted_bootstrap(monkeypatch, 3)
+    record = {"org": "u" * 36, "seq": 4, "members_root": "m" * 64,
+              "checkpointers_root": "c" * 64, "ledger_head": "h" * 64}
+    monkeypatch.setattr(cp, "_cached_adopted", lambda org: record)
+    reply = claim_service.bootstrap("acme", "e" * 64, "f" * 64)
+    assert reply["checkpoint"] == record
+    monkeypatch.setattr(cp, "_cached_adopted", lambda org: None)
+    assert claim_service.bootstrap("acme", "e" * 64, "f" * 64)["checkpoint"] is None

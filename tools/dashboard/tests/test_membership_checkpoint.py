@@ -199,3 +199,84 @@ def test_record_adopted_round_trips():
            "proof": [], "proof_index": 0}
     cp.record_adopted(ORG, rec)
     assert cp._cached_adopted(ORG) == rec
+
+
+# ── Adoption by fold (OrgAdmission.tla rule bundle_adopt) ─────────────────
+def _binding_row(monkeypatch, org_uuid="11111111-1111-4111-8111-111111111111"):
+    """network_routes._adopt_state_by_fold reads the org's binding for the uuid
+    it stamps on the adopted record; give it one without a registry."""
+    from tools.dashboard import network_routes
+    from types import SimpleNamespace
+    payload = {"org_uuid": org_uuid, "root_pub": "r" * 64,
+               "registry_url": "https://registry.test"}
+
+    def first_member(set_id, org):
+        return SimpleNamespace(payload=payload)
+    monkeypatch.setattr(network_routes, "_first_member", first_member)
+    return org_uuid
+
+
+def _state_of(sim, seq):
+    state = sim.fold()
+    head = sorted(state.heads)[0] if state.heads else sim.genesis_id
+    return {"seq": seq, "members_root": mc.members_root(state),
+            "checkpointers_root": mc.checkpointers_root(state),
+            "ledger_head": head}
+
+
+def test_adopt_by_fold_accepts_a_state_the_ledger_reproduces(monkeypatch):
+    from tools.dashboard import network_routes
+    sim, _founder = org_with_owner()
+    add_member(sim)
+    _install_org(sim)
+    org_uuid = _binding_row(monkeypatch)
+    state = _state_of(sim, 1)
+    result = network_routes._adopt_state_by_fold(ORG, state, source="join bundle's")
+    assert result == {"ok": True, "action": "adopted", "seq": 1}
+    adopted = cp._cached_adopted(ORG)
+    assert adopted["seq"] == 1 and adopted["org"] == org_uuid
+    assert adopted["members_root"] == state["members_root"]
+    assert adopted["ledger_head"] == state["ledger_head"]
+
+
+def test_adopt_by_fold_refuses_a_root_the_ledger_does_not_produce(monkeypatch):
+    from tools.dashboard import network_routes
+    sim, _founder = org_with_owner()
+    _install_org(sim)
+    _binding_row(monkeypatch)
+    state = _state_of(sim, 1)
+    state["members_root"] = "f" * 64  # a roster this ledger never folded
+    result = network_routes._adopt_state_by_fold(ORG, state, source="join bundle's")
+    assert result["ok"] is False and "does not match" in result["error"]
+    assert cp._cached_adopted(ORG) is None
+
+
+def test_adopt_by_fold_refuses_a_head_the_ledger_lacks(monkeypatch):
+    from tools.dashboard import network_routes
+    sim, _founder = org_with_owner()
+    _install_org(sim)
+    _binding_row(monkeypatch)
+    state = _state_of(sim, 1)
+    state["ledger_head"] = "a" * 64
+    result = network_routes._adopt_state_by_fold(ORG, state, source="join bundle's")
+    assert result["ok"] is False and "no head" in result["error"]
+    assert cp._cached_adopted(ORG) is None
+
+
+def test_adopt_by_fold_is_monotone_and_names_its_source(monkeypatch):
+    """NoRegression: an older or equal seq never replaces the cache; an
+    absent or malformed state is refused naming where it came from."""
+    from tools.dashboard import network_routes
+    sim, _founder = org_with_owner()
+    _install_org(sim)
+    _binding_row(monkeypatch)
+    state = _state_of(sim, 3)
+    assert network_routes._adopt_state_by_fold(ORG, state, source="registry's")["action"] == "adopted"
+    older = dict(state, seq=2)
+    assert network_routes._adopt_state_by_fold(ORG, older, source="registry's") == {
+        "ok": True, "action": "up-to-date", "seq": 3}
+    assert cp._cached_adopted(ORG)["seq"] == 3
+    none = network_routes._adopt_state_by_fold(ORG, None, source="join bundle's")
+    assert none["ok"] is False and none["error"] == "join bundle's carried no membership checkpoint"
+    bad = network_routes._adopt_state_by_fold(ORG, {"seq": "x"}, source="join bundle's")
+    assert bad["ok"] is False and "malformed" in bad["error"]
