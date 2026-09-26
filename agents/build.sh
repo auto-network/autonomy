@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the autonomy-session container images (base + dashboard).
-# Stages tool binaries into a temp dir, then builds.
+# Assembles a small build context, then builds; nothing comes from this host.
 #
 # Usage: ./agents/build.sh [--no-cache] [--pull] [--core-only] [--from-settings]
 #
@@ -33,46 +33,16 @@ for arg in "$@"; do
     esac
 done
 
-echo "==> Staging binaries..."
+# The Dockerfiles fetch bd, dolt and Claude themselves, checksum-pinned, so
+# nothing is staged from this host (auto-2v6ay.5). The image's Claude version
+# comes from CLAUDE_VERSION, else the host's claude if one exists, else latest.
 rm -rf "$BUILD_DIR"
-mkdir -p "$BUILD_DIR/bin"
-
-# bd — Go binary
-BD_BIN="$HOME/go/bin/bd"
-if [[ ! -f "$BD_BIN" ]]; then
-    echo "ERROR: bd binary not found at $BD_BIN"
-    exit 1
-fi
-cp "$BD_BIN" "$BUILD_DIR/bin/bd"
-
-# dolt — required by bd for database access
-DOLT_BIN="$HOME/go/bin/dolt"
-if [[ ! -f "$DOLT_BIN" ]]; then
-    echo "ERROR: dolt binary not found at $DOLT_BIN"
-    echo "Install with: go install github.com/dolthub/dolt/go/cmd/dolt@latest"
-    exit 1
-fi
-cp "$DOLT_BIN" "$BUILD_DIR/bin/dolt"
-
-# claude — ELF binary
-CLAUDE_BIN="$(readlink -f "$HOME/.local/bin/claude")"
-if [[ ! -f "$CLAUDE_BIN" ]]; then
-    echo "ERROR: claude binary not found"
-    exit 1
-fi
-cp "$CLAUDE_BIN" "$BUILD_DIR/bin/claude"
-
-# graph — no longer baked into the image; it resolves at runtime from the
-# /workspace/repo bind mount (see agents/Dockerfile and graph://af0deb88-d86).
+mkdir -p "$BUILD_DIR"
 
 echo "==> Building docker image..."
 cd "$BUILD_DIR"
 
-# Create build context with flat structure
-mkdir -p context/bin
-cp bin/bd context/bin/
-cp bin/dolt context/bin/
-cp bin/claude context/bin/
+mkdir -p context
 
 # Copy Dockerfiles and any sibling files they COPY (e.g. session-entrypoint.sh).
 cp "$SCRIPT_DIR/Dockerfile" context/
@@ -81,8 +51,10 @@ cp "$SCRIPT_DIR/commit_sign_shim.sh" context/
 cp "$SCRIPT_DIR/grok_auth_shim.sh" context/
 cp "$SCRIPT_DIR/agent_browser_shim.sh" context/
 
-CLAUDE_VERSION=$(bin/claude --version 2>/dev/null | awk '{print $1}')
-docker build $NO_CACHE $PULL --build-arg CLAUDE_VERSION="${CLAUDE_VERSION:-unknown}" \
+if [[ -z "${CLAUDE_VERSION:-}" ]] && command -v claude >/dev/null 2>&1; then
+    CLAUDE_VERSION=$(claude --version 2>/dev/null | awk '{print $1}')
+fi
+docker build $NO_CACHE $PULL --build-arg CLAUDE_VERSION="${CLAUDE_VERSION:-latest}" \
     -t autonomy-session context/
 echo "==> Done. Image: autonomy-session"
 docker images autonomy-session --format "  Size: {{.Size}}"

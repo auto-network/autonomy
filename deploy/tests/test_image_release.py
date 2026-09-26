@@ -147,7 +147,7 @@ def test_operator_signing_requires_confirmation_and_signs_exact_digests(release_
     for line in signed + verified:
         assert f"@sha256:{DIGEST}" in line
         assert ":v1.2.3" not in line
-    assert all("--tlog-upload=false" in line for line in signed)
+    assert all("--signing-config" in line for line in signed)
     assert all("--insecure-ignore-tlog" in line for line in verified)
     for sign_line in signed:
         digest_ref = sign_line.split()[-1]
@@ -268,13 +268,19 @@ def test_real_cosign_ephemeral_key_rejects_tampered_blob(tmp_path):
         check=True,
     )
     payload = tmp_path / "payload"
-    signature = tmp_path / "payload.sig"
+    bundle = tmp_path / "payload.sigstore.json"
+    signing_config = tmp_path / "signing-config.json"
+    signing_config.write_text(
+        '{"mediaType":"application/vnd.dev.sigstore.signingconfig.v0.2+json"}\n',
+        encoding="utf-8",
+    )
     payload.write_bytes(b"exact release artifact")
     subprocess.run(
         [
-            "cosign", "sign-blob", "--yes", "--tlog-upload=false",
+            "cosign", "sign-blob", "--yes",
+            "--signing-config", str(signing_config),
             "--key", str(prefix) + ".key",
-            "--output-signature", str(signature),
+            "--bundle", str(bundle),
             str(payload),
         ],
         env=env,
@@ -284,7 +290,7 @@ def test_real_cosign_ephemeral_key_rejects_tampered_blob(tmp_path):
         "cosign", "verify-blob",
         "--insecure-ignore-tlog",
         "--key", str(prefix) + ".pub",
-        "--signature", str(signature),
+        "--bundle", str(bundle),
         str(payload),
     ]
     subprocess.run(verify, env=env, check=True)

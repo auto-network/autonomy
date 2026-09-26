@@ -196,19 +196,21 @@ the project-controlled cosign key and the immutable digest.
 Production signing-key provisioning is intentionally outside the repository
 and outside CI:
 
-1. The project operator generates a cosign keypair on a controlled machine.
-2. The password-armored `cosign.key` stays with the operator. It is never
-   committed, copied to a runner, or stored as a CI secret.
-3. Only the public key is committed as `deploy/cosign.pub`. Until that public
-   key is provisioned, operator signing and downstream verification fail
-   closed; no placeholder or worker-generated production key is accepted.
+1. The project signing key is a cosign key pair. Its private key is sealed in
+   the **secured** tier of the Autonomy organization's vault as
+   `cosign-release-key` (provisioned 2026-09-26). A secured secret is released
+   only when the operator approves the request, so that approval is the human
+   act that authorizes every signing. The key carries no passphrase of its own.
+2. The private key is never committed, copied to a runner, or stored as a CI
+   secret; a released copy lives only in the requesting session's private
+   ramfs for the duration of one signing run.
+3. Only the public key is committed, as `deploy/cosign.pub`. Downstream
+   verification fails closed against it; no placeholder key is accepted.
 4. Registry credentials are stored as `AUTONOMY_REGISTRY_USERNAME` and
    `AUTONOMY_REGISTRY_PASSWORD`.
 
-On that controlled machine, the provisioning command is
-`cosign generate-key-pair --output-key-prefix cosign`; move only
-`cosign.pub` into `deploy/`. `deploy/cosign.key` is gitignored as a final
-tripwire, but the recommended location is outside the checkout.
+The release tooling uses cosign v3. Signing passes a signing config that names
+no services, so nothing contacts Rekor or Fulcio.
 
 The manual **Build and publish Autonomy images** workflow takes a registry host,
 namespace, and release label. Its self-hosted `autonomy-release` runner uses
@@ -230,15 +232,18 @@ After inspecting that lock, the operator performs the release-signing act on
 their controlled machine:
 
 ```bash
-AUTONOMY_COSIGN_PRIVATE_KEY=/secure/path/cosign.key \
+AUTONOMY_COSIGN_VAULT_KEY=cosign-release-key \
   ./deploy/sign-image-lock.sh image-lock.env
 ```
 
-The command displays every exact digest and requires an explicit release-tag
-confirmation before cosign prompts to unlock the armored key. It refuses
-environment-backed keys and `COSIGN_PASSWORD`, signs only `image@sha256`
-references, disables transparency-log upload, and verifies every published
-signature immediately against `deploy/cosign.pub`. Thus Fulcio, Rekor, GitHub
+The command displays every exact digest, then requests release of the secured
+vault key; the operator's approval authorizes the signing, and the released
+key is deleted when the run ends. A local password-armored key file remains
+supported through `AUTONOMY_COSIGN_PRIVATE_KEY`, with a typed release-tag
+confirmation before cosign prompts for its passphrase. Either way the script
+refuses environment-backed keys and a preset `COSIGN_PASSWORD`, signs only
+`image@sha256` references, uploads nothing to a transparency log, and verifies
+every published signature immediately against `deploy/cosign.pub`. Thus Fulcio, Rekor, GitHub
 OIDC, and a hot CI signing secret are not part of the trust path.
 
 Before installing or swapping an image, verify the exact lock entry:
@@ -256,6 +261,16 @@ authorization to follow a mutable tag. After verification, use the same
 digest in Compose. The explicit `--insecure-ignore-tlog` means “the tracked
 project key is the trust root; do not require Rekor,” not “skip signature or
 digest validation.”
+
+To start a node from a signed release without a checkout or any build, use
+`deploy/install-published.sh`. It is a single self-contained file that embeds
+the project public key. It verifies every digest in the lock before pulling
+anything, takes the Compose file out of the verified node image, tags the
+session images under the names the launcher uses, and waits for `/api/ping`:
+
+```bash
+bash install-published.sh --lock <image-lock.env URL or path> --install-docker --yes
+```
 
 The signed digest is also what the product workflow simulation builds from;
 see `deploy/harness/README.md`.

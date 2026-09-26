@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# Start an Autonomy node from signed, published images: nothing is built here.
+#
+#   curl -fsSLO <this file>; bash install-published.sh --lock <image-lock.env URL or path>
+#
+# Options:
+#   --lock URL|PATH      the release's image lock (required): image@sha256 digests
+#   --dir PATH           working directory for compose files and .env (default ~/autonomy)
+#   --port N             dashboard port (default 8080)
+#   --install-docker     install Docker Engine + Compose from docker.com when absent
+#                        (apt; runs as root when invoked as root, else through sudo)
+#   --yes                do not pause for confirmation before mutating steps
+#
+# AUTONOMY_COSIGN_BIN=/path/to/cosign uses an existing cosign instead of the
+# pinned download (air-gapped hosts, tests); the embedded key is used either way.
+#
+# Trust: every image digest in the lock is verified with cosign against the
+# project public key embedded below (a copy of deploy/cosign.pub) BEFORE it is
+# pulled into use. The lock itself needs no trust: it only names digests, and
+# an unsigned digest is refused. The compose file comes out of the verified
+# node image, so this script is the only file fetched outside the registry.
+set -euo pipefail
+
+PROJECT_PUBLIC_KEY='-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE/hvkp7eAFQTMIW0NIn99LiAehHvC
+FhD37yhGPNRtFYRUsfPaUTKgMHcy6dfwP4p7yprBRlpXj3EbONR3Ra9u+w==
+-----END PUBLIC KEY-----'
+COSIGN_VERSION=v3.1.3
+COSIGN_SHA256_AMD64=4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71
+COSIGN_SHA256_ARM64=c5d324e091826b0d7a78eb16fef316450b4eb9aaec045611c08ba06f5e73220a
+
+LOCK="" DIR="$HOME/autonomy" PORT=8080 INSTALL_DOCKER=0 YES=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --lock) LOCK="$2"; shift 2 ;;
+        --dir) DIR="$2"; shift 2 ;;
+        --port) PORT="$2"; shift 2 ;;
+        --install-docker) INSTALL_DOCKER=1; shift ;;
+        --yes) YES=1; shift ;;
+        -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+[[ -n "$LOCK" ]] || { echo "--lock is required" >&2; exit 2; }
+
+T0=$(date +%s)
+step() { printf '==> [%4ss] %s\n' "$(( $(date +%s) - T0 ))" "$*"; }
+confirm() {
+    [[ $YES -eq 1 ]] && return 0
+    read -r -p "$1 [y/N] " answer
+    [[ "$answer" == y || "$answer" == Y ]]
+}
+as_root() { if [[ $(id -u) -eq 0 ]]; then "$@"; else sudo "$@"; fi; }
+
+# ── 1. Docker ────────────────────────────────────────────────────────────────
+if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
+    [[ $INSTALL_DOCKER -eq 1 ]] || {
+        echo "Docker Engine + Compose are required (re-run with --install-docker on Ubuntu/Debian)." >&2
+        exit 1
+    }
+    confirm "Install Docker Engine + Compose from docker.com?" || exit 1
+    step "installing Docker Engine"
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    as_root apt-get update -y -qq
+    as_root apt-get install -y -qq ca-certificates curl gnupg >/dev/null
+    as_root install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL "https://download.docker.com/linux/${ID}/gpg" | as_root gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
+    as_root chmod a+r /etc/apt/keyrings/docker.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${ID} ${VERSION_CODENAME} stable" \
+        | as_root tee /etc/apt/sources.list.d/docker.list >/dev/null
+    as_root apt-get update -y -qq
+    as_root apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin >/dev/null
+    as_root systemctl enable --now docker >/dev/null 2>&1 || as_root service docker start
+    if [[ $(id -u) -ne 0 ]]; then
+        as_root usermod -aG docker "$USER"
+        if ! docker ps >/dev/null 2>&1; then
+            echo "Docker is installed. Open a new shell (docker group membership) and re-run this same command." >&2
+            exit 3
+        fi
+    fi
+fi
+docker ps >/dev/null || { echo "docker is installed but not usable by $(id -un)" >&2; exit 1; }
+
+# ── 2. cosign, pinned by checksum ────────────────────────────────────────────
+TOOLS="$(mktemp -d)"
+trap 'rm -rf "$TOOLS"' EXIT
+case "$(uname -m)" in
+    x86_64|amd64) ARCH=amd64; COSIGN_SHA256=$COSIGN_SHA256_AMD64 ;;
+    aarch64|arm64) ARCH=arm64; COSIGN_SHA256=$COSIGN_SHA256_ARM64 ;;
+    *) echo "unsupported architecture $(uname -m)" >&2; exit 1 ;;
+esac
+if [[ -n "${AUTONOMY_COSIGN_BIN:-}" ]]; then
+    cp "$AUTONOMY_COSIGN_BIN" "$TOOLS/cosign"
+else
+    step "fetching cosign $COSIGN_VERSION"
+    curl -fsSL -o "$TOOLS/cosign" \
+        "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-${ARCH}"
+    echo "${COSIGN_SHA256}  $TOOLS/cosign" | sha256sum -c --quiet -
+fi
+chmod +x "$TOOLS/cosign"
+printf '%s\n' "$PROJECT_PUBLIC_KEY" >"$TOOLS/cosign.pub"
+
+# ── 3. Lock ──────────────────────────────────────────────────────────────────
+if [[ "$LOCK" == http://* || "$LOCK" == https://* ]]; then
+    curl -fsSL -o "$TOOLS/image-lock.env" "$LOCK"
+else
+    cp "$LOCK" "$TOOLS/image-lock.env"
+fi
+declare -A IMG=()
+RELEASE_TAG=""
+while IFS='=' read -r name value; do
+    case "$name" in
+        AUTONOMY_RELEASE_TAG) RELEASE_TAG="$value" ;;
+        AUTONOMY_*_IMAGE)
+            [[ "$value" =~ ^[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}$ ]] || {
+                echo "refusing non-digest lock entry: $name=$value" >&2; exit 2; }
+            IMG[$name]="$value" ;;
+    esac
+done <"$TOOLS/image-lock.env"
+for need in AUTONOMY_NODE_IMAGE AUTONOMY_SESSION_IMAGE AUTONOMY_SESSION_PLATFORM_IMAGE AUTONOMY_SESSION_DIND_IMAGE; do
+    [[ -n "${IMG[$need]:-}" ]] || { echo "lock is missing $need" >&2; exit 2; }
+done
+step "release ${RELEASE_TAG:-?}"
+
+# ── 4. Verify every signature, then pull ─────────────────────────────────────
+for name in "${!IMG[@]}"; do
+    ref="${IMG[$name]}"
+    "$TOOLS/cosign" verify --insecure-ignore-tlog --key "$TOOLS/cosign.pub" "$ref" >/dev/null 2>"$TOOLS/verify.err" || {
+        echo "SIGNATURE CHECK FAILED for $ref — refusing to install" >&2
+        sed 's/^/    /' "$TOOLS/verify.err" >&2
+        exit 4
+    }
+    step "signature verified: $ref"
+done
+confirm "Pull the verified images and start Autonomy in $DIR?" || exit 1
+for name in "${!IMG[@]}"; do
+    step "pulling ${IMG[$name]}"
+    docker pull -q "${IMG[$name]}" >/dev/null
+done
+# The session launcher starts sessions from these local names.
+docker tag "${IMG[AUTONOMY_SESSION_IMAGE]}" autonomy-session
+docker tag "${IMG[AUTONOMY_SESSION_PLATFORM_IMAGE]}" autonomy-session-platform
+docker tag "${IMG[AUTONOMY_SESSION_DIND_IMAGE]}" autonomy-session-dind
+
+# ── 5. Compose file from the verified node image ─────────────────────────────
+mkdir -p "$DIR"
+cid="$(docker create "${IMG[AUTONOMY_NODE_IMAGE]}")"
+docker cp "$cid:/app/docker-compose.yml" "$DIR/docker-compose.yml"
+docker rm "$cid" >/dev/null
+cd "$DIR"
+touch .env
+set_env() { grep -q "^$1=" .env && sed -i "s|^$1=.*|$1=$2|" .env || echo "$1=$2" >>.env; }
+set_env AUTONOMY_IMAGE "${IMG[AUTONOMY_NODE_IMAGE]}"
+set_env AUTONOMY_HOST_HOME "$HOME"
+set_env DASHBOARD_PORT "$PORT"
+if ! grep -q '^AUTONOMY_SUBNET=' .env; then
+    step "network preflight (choosing a free subnet)"
+    docker run --rm --network host --entrypoint python3 "${IMG[AUTONOMY_NODE_IMAGE]}" \
+        -m tools.network.network_preflight --env >>.env
+fi
+
+# ── 6. Start and wait for a real answer ──────────────────────────────────────
+step "starting the node"
+docker compose up -d --no-build --quiet-pull
+for _ in $(seq 1 "${AUTONOMY_READY_TIMEOUT:-180}"); do
+    code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 3 "https://localhost:${PORT}/api/ping" || true)"
+    [[ "$code" == 200 ]] && break
+    sleep 1
+done
+[[ "${code:-}" == 200 ]] || { echo "the dashboard did not answer /api/ping with 200 (last: $code)" >&2; docker compose ps >&2; exit 5; }
+step "dashboard is up"
+echo
+echo "Autonomy ${RELEASE_TAG} is running: open https://localhost:${PORT}/"
+echo "Total time: $(( $(date +%s) - T0 )) s"
