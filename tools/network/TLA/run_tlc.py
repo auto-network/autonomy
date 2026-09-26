@@ -66,6 +66,15 @@ GREEN = [
     ("OrgAdmissionBundleBoundRebundleLag.cfg", "OrgAdmissionBundleBound"),
     ("OrgAdmissionBundleExactAdversary.cfg", "OrgAdmissionBundleBound"),
     ("OrgAdmissionBundleExactHonest.cfg", "OrgAdmissionBundleBound"),
+    # Root-matched hello (the verifier recomputes the root from the proof and
+    # accepts any retained record with that root at or after admission).
+    ("OrgAdmissionBundleRootHonest.cfg", "OrgAdmissionBundleBound"),
+    ("OrgAdmissionBundleRootHonestLag.cfg", "OrgAdmissionBundleBound"),
+    # ... and the prover proves under the root of its own fold at a held head.
+    ("OrgAdmissionBundleOwnFoldHonestLag.cfg", "OrgAdmissionBundleBound"),
+    ("OrgAdmissionBundleOwnFoldAdversary.cfg", "OrgAdmissionBundleBound"),
+    ("OrgAdmissionBundleOwnFoldAdversaryUncheckedRekey.cfg", "OrgAdmissionBundleBound"),
+    ("OrgAdmissionBundleOwnFoldWithholding.cfg", "OrgAdmissionBundleBound"),
     # E-any against rekeyed and re-admitted personas (safety).
     ("OrgAdmissionLeavesEAnyRekey.cfg", "OrgAdmissionLeaves"),
     ("OrgAdmissionLeavesEAnyAdmission.cfg", "OrgAdmissionLeaves"),
@@ -137,6 +146,8 @@ CALIBRATION = [
     ("calibration/BundleNoBound.cfg", "OrgAdmissionBundleBound", "NotAboveRegistry"),
     ("calibration/BundleExactHonestLag.cfg", "OrgAdmissionBundleBound", "EventuallyHealed"),
     ("calibration/BundleRebundleWithholding.cfg", "OrgAdmissionBundleBound", "EventuallyHealed"),
+    ("calibration/BundleRootNoOwnFold.cfg", "OrgAdmissionBundleBound", "EventuallyHealed"),
+    ("calibration/BundleRootWithholding.cfg", "OrgAdmissionBundleBound", "EventuallyHealed"),
     # auto-qrmlg.12: each admission-event check is load-bearing.
     ("calibration/EventNoSigCheck.cfg", "OrgAdmissionEvent", "ApproverCannotForgeClaim"),
     ("calibration/EventNoThreshold.cfg", "OrgAdmissionEvent", "AdmissionHasThreshold"),
