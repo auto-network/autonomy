@@ -95,7 +95,7 @@ class _OrgChannels:
         cert = DelegationCert.from_dict(spec["persona_cert"])
         persona = str(cert.subject.id)
 
-        def rider(under=None, root=None):
+        def rider(under=None, root=None, attempt=0):
             seq = state["seq"]
             if root is not None:
                 for k, members in state["adopted"].items():

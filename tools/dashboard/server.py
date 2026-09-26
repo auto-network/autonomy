@@ -22221,12 +22221,43 @@ async def _on_startup():
     # worker's thread. Scoped: it only schedules work when a materialized
     # address is in the fleet-crosstalk set, so no other set pays any cost.
     _materialization_loop = asyncio.get_running_loop()
+    # Membership events that arrive by sync may complete the head of a
+    # registry checkpoint this node could not adopt yet (OrgAdmissionBundleBound
+    # AutoAdopt): one coalesced pass per burst, local fold check first, a
+    # registry read only for an org whose fold moved.
+    _adopt_pending = {"handle": None}
+
+    def _adopt_after_membership_events() -> None:
+        _adopt_pending["handle"] = None
+        from tools.dashboard import membership_checkpoint as cp
+        try:
+            results = cp.adopt_after_membership_events()
+        except Exception:
+            logger.warning("checkpoint adoption after membership events failed", exc_info=True)
+            return
+        for slug, result in results.items():
+            if result.get("ok") is False:
+                logger.info("checkpoint adoption for %s after membership events: %s",
+                            slug, result.get("error"))
+
+    def _schedule_adopt_after_membership_events() -> None:
+        if _adopt_pending["handle"] is not None:
+            return
+        _adopt_pending["handle"] = _materialization_loop.call_later(
+            2.0, lambda: _materialization_loop.run_in_executor(None, _adopt_after_membership_events),
+        )
 
     def _settings_sync_materialized(addresses=(), gap=False):
         try:
             attention_routes.emit_personal_sync_change(addresses=addresses, gap=gap)
         except Exception:
             logger.warning("personal-sync approval hint failed", exc_info=True)
+        try:
+            from tools.network.fleet_sync.materialize import LEDGER_EVENT_SET_ID
+            if gap or any(getattr(a, "set_id", None) == LEDGER_EVENT_SET_ID for a in addresses):
+                _materialization_loop.call_soon_threadsafe(_schedule_adopt_after_membership_events)
+        except Exception:
+            logger.warning("checkpoint adoption scheduling failed", exc_info=True)
         try:
             from tools.dashboard.fleet_crosstalk import (
                 FLEET_CROSSTALK_SET_ID,

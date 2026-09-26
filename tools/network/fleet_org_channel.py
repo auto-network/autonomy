@@ -203,7 +203,11 @@ class MembershipStaleError(HandshakeError):
 class AdmittedPeer:
     machine_pub: str
     persona_pub: str
+    #: The seq the peer labelled its proof with (its own record's label).
     checkpoint_seq: int
+    #: The seq of the retained record the proof verified under here; the
+    #: admission floor is re-checked on it per served message.
+    matched_seq: int = -1
     #: Addresses the peer introduced itself at in its client hello (signed
     #: by its machine key), or () for a server-side peer. Sync is pull-only,
     #: so this is how the machine that is dialled first learns where to
@@ -221,11 +225,15 @@ class OrgFleetAuthenticator:
     for *seq* (a mapping with ``seq`` and ``members_root``) or None when this
     node has not retained that seq; ``retained_checkpoints()`` returns every
     retained record; ``newest_adopted_seq()`` returns the newest seq adopted
-    (None before the seed). ``membership_proof_for(under, root)`` returns
-    this machine's own rider for its persona: under the retained record
-    whose members_root is *root*, labelled *under* (the server proving back
-    at the client's level), else under the newest retained checkpoint that
-    includes the persona.
+    (None before the seed). ``membership_proof_for(under=, root=, attempt=)``
+    returns this machine's own rider for its persona: under the retained
+    record whose members_root is *root*, labelled *under* (the server proving
+    back at the client's level), else the prover's *attempt*-th candidate
+    root (OrgAdmissionBundleBound.tla ProveOwnFold: retained records first,
+    then this node's own fold at heads it holds, newest first). *attempt*
+    counts refusals since the last completed hello, so a peer that retains
+    any candidate root is reached within as many hellos as there are
+    candidates, whichever side dials.
     ``adopted_members_for(seq)`` gives the persona set behind a retained
     checkpoint; the newest set is what removal is judged against.
     ``admission_ok_for(seq, persona)`` says whether retained checkpoint
@@ -239,7 +247,7 @@ class OrgFleetAuthenticator:
         *,
         org: str,
         persona_cert: DelegationCert,
-        membership_proof_for: Callable[[int | None, str | None], dict],
+        membership_proof_for: Callable[..., dict],
         adopted_checkpoint_for: Callable[[int], dict | None],
         newest_adopted_seq: Callable[[], int | None],
         retained_checkpoints: Callable[[], Iterable[dict]] | None = None,
@@ -271,6 +279,13 @@ class OrgFleetAuthenticator:
         self._now = now
         #: machine_pub -> AdmittedPeer for peers this endpoint admitted.
         self._admitted: dict[str, AdmittedPeer] = {}
+        #: Refusals of this machine's own hello since its last completed
+        #: one; selects the prover's candidate root (see membership_proof_for).
+        self._attempt = 0
+        #: Observability (auto-qrmlg.2): the last completed hello and the
+        #: last refusal, for the org sync report.
+        self._last_completed: dict[str, Any] | None = None
+        self._last_refused: dict[str, Any] | None = None
         #: client eph_pub -> wall-clock expiry, for replay refusal.
         self._seen_client_eph: dict[str, float] = {}
 
@@ -317,7 +332,7 @@ class OrgFleetAuthenticator:
                 f"{what} membership_proof is under checkpoint {matched_seq}, which "
                 "predates this persona's current admission"
             )
-        return persona_pub, str(matched["members_root"])
+        return persona_pub, str(matched["members_root"]), matched_seq
 
     def _candidates(self, seq: int) -> list[dict]:
         """Retained records to try a proof against: the one the peer named
@@ -380,11 +395,47 @@ class OrgFleetAuthenticator:
         """This machine's hello fields. *under*/*root* are the seq the peer
         labelled its proof with and the root that proof verified under: the
         server proves back under that root with that label (prover-downgrade),
-        so the peer can verify the reply against its own record."""
+        so the peer can verify the reply against its own record. A client
+        hello (no root) proves under this node's attempt-th candidate."""
+        rider = self._proof_for(under=under, root=root, attempt=self._attempt)
         return {
             "persona_cert": self.persona_cert.to_dict(),
-            "membership_proof": dict(self._proof_for(under, root)),
+            "membership_proof": dict(rider),
             "ts": int(self._now()),
+        }
+
+    def _completed(self, peer_machine: str, seq: int, root: str) -> None:
+        self._attempt = 0
+        self._last_completed = {
+            "peer": peer_machine, "checkpoint_seq": int(seq), "members_root": root,
+            "at": int(self._now()),
+        }
+
+    def note_refusal(self, peer_machine: str, error: object) -> None:
+        """This machine's own hello to *peer_machine* did not complete (the
+        dial failed or the peer refused it). Counts toward the prover's
+        candidate rotation and is reported; a completed hello resets it."""
+        self._attempt += 1
+        self._last_refused = {
+            "peer": peer_machine, "error": str(error)[:200], "at": int(self._now()),
+            "attempt": self._attempt,
+        }
+
+    def hello_state(self) -> dict[str, Any]:
+        """For the org sync report: what this node proves under, the last
+        hello that completed, the last refusal, and whether refusals have
+        followed the last completion (OrgAdmissionBundleBound.tla ~HelloOK:
+        the newest candidate cannot complete a hello)."""
+        completed, refused = self._last_completed, self._last_refused
+        stuck = refused is not None and self._attempt > 0 and (
+            completed is None or refused["at"] >= completed["at"]
+        )
+        return {
+            "newest_adopted_seq": self._newest_seq(),
+            "last_completed": dict(completed) if completed else None,
+            "last_refused": dict(refused) if refused else None,
+            "attempts_since_completed": self._attempt,
+            "stuck": stuck,
         }
 
     # -- handshake ------------------------------------------------------
@@ -416,7 +467,7 @@ class OrgFleetAuthenticator:
         data = _parse(raw, ORG_CLIENT_FIELDS, "ORG_CLIENT_HELLO")
         client_pub = data["machine_pub"]
         self._refuse_replay(data["eph_pub"])
-        persona_pub, matched_root = self._verify_peer(data, "ORG_CLIENT_HELLO")
+        persona_pub, matched_root, matched_seq = self._verify_peer(data, "ORG_CLIENT_HELLO")
         try:
             verify_signature(client_pub, data["sig"], _payload(
                 "client", org=self.org, session=session, machine_pub=client_pub,
@@ -428,8 +479,9 @@ class OrgFleetAuthenticator:
             raise HandshakeError(f"client machine proof failed: {exc}") from exc
         self._admitted[client_pub] = AdmittedPeer(
             client_pub, persona_pub, int(data["membership_proof"]["checkpoint_seq"]),
-            tuple(data["addresses"]),
+            matched_seq, tuple(data["addresses"]),
         )
+        self._completed(client_pub, int(data["membership_proof"]["checkpoint_seq"]), matched_root)
         private_key = X25519PrivateKey.generate()
         server_eph = _eph_pub(private_key)
         own = self._own_fields(
@@ -459,7 +511,7 @@ class OrgFleetAuthenticator:
             raise HandshakeError("server hello names another client machine")
         if data["machine_pub"] != expected_machine_pub:
             raise HandshakeError("server hello is from an unexpected machine")
-        persona_pub, _root = self._verify_peer(data, "ORG_SERVER_HELLO")
+        persona_pub, server_root, server_matched_seq = self._verify_peer(data, "ORG_SERVER_HELLO")
         try:
             verify_signature(data["machine_pub"], data["sig"], _payload(
                 "server", org=self.org, session=session,
@@ -475,9 +527,10 @@ class OrgFleetAuthenticator:
         known = self._admitted.get(data["machine_pub"])
         self._admitted[data["machine_pub"]] = AdmittedPeer(
             data["machine_pub"], persona_pub,
-            int(data["membership_proof"]["checkpoint_seq"]),
+            int(data["membership_proof"]["checkpoint_seq"]), server_matched_seq,
             known.addresses if known is not None else (),
         )
+        self._completed(data["machine_pub"], int(data["membership_proof"]["checkpoint_seq"]), server_root)
         return data["eph_pub"], _transcript(
             org=self.org, session=session, client_machine_pub=self.machine_pub,
             client_eph=client_eph, server_machine_pub=data["machine_pub"],
@@ -508,8 +561,12 @@ class OrgFleetAuthenticator:
         return self._admitted.get(machine_pub)
 
     def authorize(self, machine_pub: str) -> None:
-        """Called per served message: the peer must be admitted, and its
-        persona must still be in the newest adopted member set. Adopting a
+        """Called per served message: the peer must be admitted, its persona
+        must still be in the newest adopted member set, and the record its
+        proof verified under must still be at or after its current admission
+        (a removal and a re-admission adopted while the connection was idle
+        leave the old proof before the new claim: refused, it must hello
+        again; OrgAdmissionLeaves.tla ReAdmitAfterRemoval). Adopting a
         checkpoint that removes a member refuses that member's next message
         (MembershipStaleError, close 4417) with no grace and nothing to
         re-prove; every other admitted peer is unaffected."""
@@ -517,6 +574,12 @@ class OrgFleetAuthenticator:
         if peer is None:
             raise HandshakeError("machine is not admitted to this organization's scope")
         self._require_current_member(peer.persona_pub, "admitted peer's")
+        if peer.matched_seq >= 0 and self._admission_ok is not None \
+                and self._admission_ok(peer.matched_seq, peer.persona_pub) is False:
+            raise MembershipStaleError(
+                f"admitted peer's proof is under checkpoint {peer.matched_seq}, which "
+                "predates its current admission: it must hello again"
+            )
 
     def admitted_addresses(self) -> dict[str, tuple[str, ...]]:
         """machine_pub -> addresses for every admitted peer that introduced

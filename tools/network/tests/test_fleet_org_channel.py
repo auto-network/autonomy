@@ -50,6 +50,10 @@ class Node:
         self.members_at = {seq: list(members)}
         self.rider_seq = seq
         self.admitted_at = admitted_at
+        #: Optional rotation list of seqs this node may prove under, indexed
+        #: by the authenticator's attempt counter (a stand-in for the
+        #: production prover's candidate roots).
+        self.candidates: list[int] = []
         self.auth = OrgFleetAuthenticator(
             self.machine, org=org, persona_cert=_cert(persona, self.machine, org),
             membership_proof_for=self.rider,
@@ -61,8 +65,10 @@ class Node:
             now=now or time.time,
         )
 
-    def rider(self, under: int | None = None, root: str | None = None) -> dict:
+    def rider(self, under: int | None = None, root: str | None = None, attempt: int = 0) -> dict:
         seq, label = self.rider_seq, self.rider_seq
+        if root is None and attempt and self.candidates:
+            seq = label = self.candidates[attempt % len(self.candidates)]
         if root is not None:
             for k, record in self.adopted.items():
                 if record["members_root"] == root:
@@ -327,3 +333,77 @@ def test_a_genuine_root_under_the_wrong_label_still_admits_and_is_answered_in_ki
     outsider_root = Node(carol, sorted(members + [carol.public_hex, KeyPair.generate().public_hex]), seq=1)
     with pytest.raises(HandshakeError, match="nor in any other retained one"):
         _handshake(outsider_root, founder)
+
+
+def test_refusals_rotate_the_candidate_and_a_completed_hello_resets(org):
+    """OrgAdmissionBundleBound.tla Rotate (master ac114f59): an up-to-date
+    client dialling a lagging server proves under its newest root, is
+    refused, and on the next attempt proves under an older candidate the
+    server retains; the completed hello resets the counter. hello_state
+    reports the stuck state in between."""
+    members = list(org.member_pubs())
+    carol = KeyPair.generate()
+    larger = sorted(members + [carol.public_hex])
+    lagging = Node(org.personas["bob"], members)          # retains seq 0 only
+    client = Node(org.founder, members)
+    client.adopt(1, larger)                                # newest: seq 1
+    client.candidates = [1, 0]
+    assert client.auth.hello_state()["stuck"] is False
+    with pytest.raises(HandshakeError, match="nor in any other retained one"):
+        _handshake(client, lagging)
+    client.auth.note_refusal(lagging.machine.public_hex, "refused")
+    state = client.auth.hello_state()
+    assert state["stuck"] is True and state["attempts_since_completed"] == 1
+    assert state["last_refused"]["peer"] == lagging.machine.public_hex
+    _handshake(client, lagging)                            # attempt 1 -> seq 0
+    state = client.auth.hello_state()
+    assert state["stuck"] is False and state["attempts_since_completed"] == 0
+    assert state["last_completed"]["checkpoint_seq"] == 0
+    assert state["last_completed"]["members_root"] == mc.compute_root(members)
+
+
+def test_an_idle_connection_is_refused_after_removal_and_re_admission(org):
+    """OrgAdmissionLeaves.tla ReAdmitAfterRemoval at connection level: a
+    connection admitted under a record from before a removal does not
+    survive the removal plus a re-admission adopted with no message served
+    in between; the floor is re-checked per message."""
+    members = list(org.member_pubs())
+    alice = Node(org.founder, members)
+    bob = Node(org.personas["bob"], members, admitted_at={org.founder.public_hex: 0})
+    _handshake(alice, bob)
+    bob.auth.authorize(alice.machine.public_hex)
+    without_alice = [m for m in members if m != org.founder.public_hex]
+    bob.adopt(1, without_alice)                 # removal
+    bob.adopt(2, members)                       # re-admission: a new claim
+    bob.admitted_at[org.founder.public_hex] = 2
+    with pytest.raises(MembershipStaleError, match="must hello again"):
+        bob.auth.authorize(alice.machine.public_hex)
+    alice.adopt(2, members)
+    _handshake(alice, bob)
+    bob.auth.authorize(alice.machine.public_hex)
+
+
+def test_a_rekeyed_old_key_is_refused_even_under_a_retained_pre_rekey_root(org):
+    """OrgAdmissionLeaves.tla RekeyedOldKeyExcluded: the old leaf is in a
+    retained root, but not in the newest set."""
+    members = list(org.member_pubs())
+    bob = Node(org.personas["bob"], members)
+    alice_new = KeyPair.generate()
+    rekeyed = sorted([m for m in members if m != org.founder.public_hex] + [alice_new.public_hex])
+    bob.adopt(1, rekeyed)
+    old_alice = Node(org.founder, members)      # proves under seq 0, old leaf
+    with pytest.raises(MembershipStaleError, match="removed"):
+        _handshake(old_alice, bob)
+
+
+def test_a_root_that_fell_out_of_retention_is_refused(org):
+    """The retention cap is an assumption of the proof (lag <= 64 records,
+    or an own-fold root still retained): a proof under an evicted root is
+    refused."""
+    members = list(org.member_pubs())
+    bob = Node(org.personas["bob"], members)
+    del bob.adopted[0]; del bob.members_at[0]
+    bob.adopt(70, members + [KeyPair.generate().public_hex])
+    alice = Node(org.founder, members)
+    with pytest.raises(HandshakeError, match="nor in any other retained one"):
+        _handshake(alice, bob)

@@ -261,3 +261,28 @@ def _first_head(state) -> str:
 
 def _is_head(value) -> bool:
     return isinstance(value, str) and len(value) == 64
+
+
+def adopt_after_membership_events(slugs=None, *, adopt=None) -> dict[str, dict]:
+    """The AutoAdopt machine step (OrgAdmissionBundleBound.tla): after a pull
+    materialized ledger events, for every org this node syncs whose current
+    fold no longer matches its newest retained record, read the registry
+    once and adopt its record by fold. An org whose fold still matches costs
+    nothing (no registry read): a checkpoint newer than the fold cannot
+    exist. Returns slug -> {"skipped": reason} | the adoption result."""
+    if slugs is None:
+        from tools.dashboard import org_sync_channels
+        slugs = sorted(org_sync_channels.report())
+    if adopt is None:
+        from tools.dashboard.network_routes import _adopt_registry_checkpoint as adopt
+    out: dict[str, dict] = {}
+    for slug in slugs:
+        status = checkpoint_status(slug)
+        if not status.get("needed"):
+            out[slug] = {"skipped": "fold matches the newest retained record"}
+            continue
+        try:
+            out[slug] = adopt(slug)
+        except Exception as exc:  # noqa: BLE001
+            out[slug] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    return out

@@ -116,7 +116,7 @@ class Member:
             advertised_addresses=lambda: list(self.advertised),
         )
 
-    def _rider(self, under=None, root=None) -> dict:
+    def _rider(self, under=None, root=None, attempt=0) -> dict:
         seq, label = self.seq, self.seq
         if root is not None:
             for k, record in self.adopted.items():

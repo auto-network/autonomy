@@ -91,3 +91,61 @@ def test_no_retained_record_gives_the_seed_rider():
     assert calls["newest_adopted_seq"]() is None
     assert calls["membership_proof_for"](None) == {"v": 1, "checkpoint_seq": 0, "index": 0, "path": []}
     assert calls["admission_ok_for"](0, founder.public_hex) is None
+
+
+def test_with_nothing_retained_the_prover_uses_its_own_fold_and_rotates_back_to_its_claim():
+    """OrgAdmissionBundleBound.tla ProveOwnFold + Rotate (master ac114f59):
+    no usable retained record, so the rider is under the current fold's
+    root; each refusal rotates to the fold at an earlier held head, back to
+    this persona's admission claim, never past it."""
+    sim, founder = org_with_owner()
+    root_founder_only = mc.members_root(sim.fold())
+    member = add_member(sim)
+    root_two = mc.members_root(sim.fold())
+    third = add_member(sim)
+    root_three = mc.members_root(sim.fold())
+    _install_org(sim)
+    calls = osc._callables(ORG, member.public_hex)
+    riders = [calls["membership_proof_for"](attempt=a) for a in range(4)]
+    roots = []
+    for rider in riders:
+        # Recover the root each rider proves under by trying the known ones.
+        for root in (root_three, root_two, root_founder_only):
+            try:
+                mc.verify_inclusion(root, member.public_hex, rider["index"], rider["path"])
+                roots.append(root)
+                break
+            except mc.MembershipCommitmentError:
+                continue
+    # Newest first, then back to the member's own admission (root_two), then
+    # around again; the founder-only root predates the member and is never
+    # a candidate for it.
+    assert roots == [root_three, root_two, root_three, root_two]
+    assert all(r["checkpoint_seq"] == 0 for r in riders)  # label: no retained seq
+    founder_calls = osc._callables(ORG, founder.public_hex)
+    founder_roots = []
+    for a in range(3):
+        rider = founder_calls["membership_proof_for"](attempt=a)
+        for root in (root_three, root_two, root_founder_only):
+            try:
+                mc.verify_inclusion(root, founder.public_hex, rider["index"], rider["path"])
+                founder_roots.append(root)
+                break
+            except mc.MembershipCommitmentError:
+                continue
+    assert founder_roots == [root_three, root_two, root_founder_only]
+    assert third.public_hex  # the third member's admission is the newest head
+
+
+def test_retained_records_come_before_own_fold_candidates():
+    sim, founder = org_with_owner()
+    first = _record(sim, 0)
+    add_member(sim)
+    _install_org(sim)
+    cp.record_adopted(ORG, first)
+    calls = osc._callables(ORG, founder.public_hex)
+    r0 = calls["membership_proof_for"](attempt=0)
+    mc.verify_inclusion(first["members_root"], founder.public_hex, r0["index"], r0["path"])
+    assert r0["checkpoint_seq"] == 0
+    r1 = calls["membership_proof_for"](attempt=1)
+    mc.verify_inclusion(mc.members_root(sim.fold()), founder.public_hex, r1["index"], r1["path"])

@@ -420,3 +420,25 @@ def test_adopt_by_fold_bounds_a_bundle_seq_by_the_registry(monkeypatch):
     assert network_routes._adopt_state_by_fold(ORG, _state_of(sim, 2), source="join bundle's", bound=registry)["action"] == "adopted"
     assert network_routes._adopt_state_by_fold(ORG, _state_of(sim, 3), source="join bundle's", bound=registry)["action"] == "adopted"
     assert cp._cached_adopted(ORG)["seq"] == 3
+
+
+# ── AutoAdopt after membership events (OrgAdmissionBundleBound.tla) ─────────
+def test_adopt_after_membership_events_reads_the_registry_only_when_the_fold_moved():
+    sim, _founder = org_with_owner()
+    _install_org(sim)
+    state = sim.fold()
+    cp.record_adopted(ORG, {"seq": 0, "members_root": mc.members_root(state),
+                            "checkpointers_root": mc.checkpointers_root(state),
+                            "ledger_head": sim.genesis_id, "org": ORG})
+    calls: list[str] = []
+
+    def adopt(slug):
+        calls.append(slug)
+        return {"ok": True, "action": "adopted", "seq": 1}
+
+    out = cp.adopt_after_membership_events([ORG], adopt=adopt)
+    assert calls == [] and "skipped" in out[ORG]
+    add_member(sim)
+    _install_org(sim)  # the new claim arrives by sync
+    out = cp.adopt_after_membership_events([ORG], adopt=adopt)
+    assert calls == [ORG] and out[ORG]["action"] == "adopted"

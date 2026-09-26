@@ -185,6 +185,46 @@ def _members_at(slug: str, record: dict) -> tuple[str, ...]:
     return tuple(mc.member_pubs(state))
 
 
+def _own_fold_roots(slug: str, persona_pub: str) -> list[tuple[str, tuple[str, ...]]]:
+    """(members_root, members) of this node's OWN fold at heads it holds,
+    newest first and distinct by root: the current fold, then the fold at
+    each event as a head in reverse HLC order, back to and including this
+    persona's admission claim (OrgAdmissionBundleBound.tla ProveOwnFold /
+    Rotate, master ac114f59: a prover with no usable retained record still
+    reaches a checkpointed root, since every leaf-changing event is
+    checkpointed and the claim's head is the floor). Only folds whose set
+    includes this persona are candidates."""
+    from tools.network.ledger import membership_commitment as mc
+    from tools.network.ledger.store import LedgerStore, org_ledger_db_path
+
+    out: list[tuple[str, tuple[str, ...]]] = []
+    seen: set[str] = set()
+    store = LedgerStore(org_ledger_db_path(slug))
+    try:
+        current = store.fold()
+        claim_id = None
+        for member in current.members.values():
+            if member.current_key == persona_pub:
+                claim_id = str(member.claim_id)
+        events = sorted(store.events(), key=lambda e: (e.hlc.ts, e.hlc.count), reverse=True)
+        head_sets: list[list[str]] = [list(store.heads())] + [[e.event_id] for e in events]
+        for heads in head_sets:
+            try:
+                state = current if heads == head_sets[0] else store.fold(heads=heads)
+                members = tuple(mc.member_pubs(state))
+            except Exception:
+                continue
+            root = mc.compute_root(members)
+            if root not in seen and persona_pub in members:
+                seen.add(root)
+                out.append((root, members))
+            if claim_id is not None and heads and heads[0] == claim_id:
+                break
+    finally:
+        store.close()
+    return out
+
+
 def _claim_id_at(slug: str, record: dict | None, persona_pub: str) -> str | None:
     """The claim event that admits the member whose CURRENT key is
     *persona_pub* in the fold at *record*'s ledger_head (None: not a member
@@ -224,38 +264,61 @@ def _callables(slug: str, persona_pub: str) -> dict[str, Callable]:
     def retained_checkpoints():
         return list(_history(slug).values())
 
-    def membership_proof_for(under=None, root=None):
-        """This machine's rider. Under the retained record whose root is
-        *root*, labelled *under* (prover-downgrade: prove back at the peer's
-        level, in the peer's own labelling); else under the newest retained
-        record whose head this node's fold reaches and whose set includes
-        this persona (a node that adopted a checkpoint before pulling its
-        events still proves under the newest one it can; OrgAdmission.tla)."""
+    member_sets: dict[tuple[int, str], tuple[str, ...]] = {}
+
+    def members_for(record):
+        key = (int(record["seq"]), str(record.get("ledger_head")))
+        if key not in member_sets:
+            member_sets[key] = _members_at(slug, record)
+        return member_sets[key]
+
+    def rider_under(label, members):
+        index, path = mc.inclusion_proof(members, persona_pub)
+        return {"v": 1, "checkpoint_seq": int(label), "index": index, "path": path}
+
+    def membership_proof_for(under=None, root=None, attempt=0):
+        """This machine's rider.
+
+        *root* given (the server proving back at a client's level): under the
+        retained record whose root that is, labelled *under*.
+
+        Else the *attempt*-th candidate root, recomputed per call and
+        rotated modulo the list (OrgAdmissionBundleBound.tla Rotate, master
+        ac114f59): retained records whose head is held and whose set
+        includes this persona, newest first; then this node's own fold at
+        heads it holds, newest first, back to its admission claim. The
+        label of an own-fold candidate is the newest retained seq, or 0; the
+        verifier matches by root and reads the label as a hint only.
+        Never raises: with nothing to prove under, the rider is empty and
+        the peer refuses it."""
         history = _history(slug)
-        if not history:
-            return {"v": 1, "checkpoint_seq": 0, "index": 0, "path": []}
         if root is not None:
             for record in history.values():
                 if record.get("members_root") != root:
                     continue
                 try:
-                    index, path = mc.inclusion_proof(_members_at(slug, record), persona_pub)
+                    return rider_under(under if under is not None else record["seq"], members_for(record))
                 except Exception:
                     break
-                label = int(under) if under is not None else int(record["seq"])
-                return {"v": 1, "checkpoint_seq": label, "index": index, "path": path}
+        candidates: list[tuple[int, tuple[str, ...]]] = []
         for record in (history[k] for k in sorted(history, reverse=True)):
             try:
-                members = _members_at(slug, record)
-                index, path = mc.inclusion_proof(members, persona_pub)
+                members = members_for(record)
             except Exception:
-                # Head not held yet, or this persona is not in that set (a
-                # checkpoint published before its admission): an older
-                # retained record may still include it.
-                continue
-            return {"v": 1, "checkpoint_seq": int(record["seq"]), "index": index, "path": path}
-        newest = history[max(history)]
-        return {"v": 1, "checkpoint_seq": int(newest["seq"]), "index": 0, "path": []}
+                continue  # head not held yet
+            if persona_pub in members:
+                candidates.append((int(record["seq"]), members))
+        newest_label = max(history) if history else 0
+        retained_roots = {mc.compute_root(m) for _s, m in candidates}
+        try:
+            own = _own_fold_roots(slug, persona_pub)
+        except Exception:
+            own = []
+        candidates += [(newest_label, m) for r, m in own if r not in retained_roots]
+        if not candidates:
+            return {"v": 1, "checkpoint_seq": int(newest_label), "index": 0, "path": []}
+        label, members = candidates[int(attempt) % len(candidates)]
+        return rider_under(label, members)
 
     def admission_ok_for(seq, peer_persona):
         """E-any-adm's floor: the record *seq* is at or after *peer_persona*'s
@@ -325,6 +388,12 @@ def report() -> dict[str, dict]:
                 "key_held": slug in _keys,
                 "channel": slug in _channels,
             }
+            channel = _channels.get(slug)
+            if channel is not None:
+                try:
+                    entry["hello"] = channel.hello_state()
+                except Exception:  # noqa: BLE001
+                    entry["hello"] = None
             if isinstance(cert, dict):
                 subject = cert.get("subject") if isinstance(cert.get("subject"), dict) else {}
                 entry["certificate"] = {

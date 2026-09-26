@@ -4590,6 +4590,11 @@ class FleetSyncScheduler:
                     candidate_failures.append(
                         (address, f"{type(exc).__name__}: {exc}"[:160])
                     )
+                    if org_channel is not None:
+                        # The org hello did not complete: rotate this node's
+                        # own candidate root for the next attempt and report
+                        # it (OrgAdmissionBundleBound.tla Rotate).
+                        org_channel.note_refusal(machine_pub, exc)
             if channel is None:
                 if last_error is None:
                     # NO DIRECT ADDRESS AT ALL (auto-e38g4). Until a peer could

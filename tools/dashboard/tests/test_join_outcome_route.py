@@ -188,3 +188,23 @@ def test_install_without_the_registry_adopts_nothing_and_says_why(monkeypatch):
     out = r.json()
     assert out["ok"] is True
     assert out["checkpoint"]["ok"] is False and "cannot bound" in out["checkpoint"]["error"]
+
+
+def test_an_unusable_bundle_record_and_an_advanced_registry_still_leave_a_provable_joiner(monkeypatch):
+    """OrgAdmissionBundleBound.tla BundleRootNoOwnFold, closed by
+    ProveOwnFold: the sponsor's record is refused by the bound, the
+    registry's head is not held, nothing is retained, and the joiner's first
+    hello still proves under its own fold's root, which an honest peer that
+    checkpointed the joiner's admission retains."""
+    sim, founder, persona, invite_id = _joined_org()
+    registry = dict(_state_of(sim, 3), ledger_head="e" * 64)  # advanced past this snapshot
+    _registry_says(monkeypatch, registry)
+    r = _client().post("/api/network/join/outcome", json=_body(sim, persona, invite_id, checkpoint=_state_of(sim, 3)))
+    out = r.json()
+    assert out["checkpoint"]["ok"] is False and "not the registry's record" in out["checkpoint"]["error"]
+    from tools.dashboard import membership_checkpoint as cp
+    from tools.dashboard import org_sync_channels as osc
+    assert cp._cached_adopted(out["org"]) is None
+    rider = osc._callables(out["org"], persona.public_hex)["membership_proof_for"]()
+    assert rider["path"], "the joiner proves under its own fold, not an empty rider"
+    mc.verify_inclusion(mc.members_root(sim.fold()), persona.public_hex, rider["index"], rider["path"])
