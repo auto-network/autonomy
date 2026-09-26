@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Run the AWS CLI as autonomy-test-agent. Credentials come from the audited
+# vault release in this session's ramfs; nothing is written to ~/.aws.
+set -euo pipefail
+F=/run/secrets/aws-ec2-test
+[[ -s $F ]] || F="$(graph vault read aws-ec2-test --org autonomy | tail -1)"
+eval "$(python3 - "$F" <<'PY'
+import json, shlex, sys
+d = json.load(open(sys.argv[1]))
+print("export AWS_ACCESS_KEY_ID=%s AWS_SECRET_ACCESS_KEY=%s AWS_DEFAULT_REGION=%s" % (
+    shlex.quote(d["aws_access_key_id"]), shlex.quote(d["aws_secret_access_key"]), shlex.quote(d["region"])))
+PY
+)"
+exec "$HOME/.local/bin/aws" "$@"
