@@ -33,6 +33,7 @@ node_ref="$base/autonomy-node:$RELEASE_TAG"
 session_ref="$base/autonomy-session:$RELEASE_TAG"
 platform_ref="$base/autonomy-session-platform:$RELEASE_TAG"
 dind_ref="$base/autonomy-session-dind:$RELEASE_TAG"
+host_terminal_ref="$base/autonomy-host-terminal:$RELEASE_TAG"
 
 echo "==> Building node image from deploy/Dockerfile"
 # Build from a throwaway clean clone. deploy/Dockerfile self-stamps /app/VERSION
@@ -61,13 +62,15 @@ echo "==> Building existing session image family"
 docker tag autonomy-session "$session_ref"
 docker tag autonomy-session-platform "$platform_ref"
 docker tag autonomy-session-dind "$dind_ref"
+docker tag autonomy-host-terminal "$host_terminal_ref"
 
-refs=("$node_ref" "$session_ref" "$platform_ref" "$dind_ref")
+refs=("$node_ref" "$session_ref" "$platform_ref" "$dind_ref" "$host_terminal_ref")
 names=(
     AUTONOMY_NODE_IMAGE
     AUTONOMY_SESSION_IMAGE
     AUTONOMY_SESSION_PLATFORM_IMAGE
     AUTONOMY_SESSION_DIND_IMAGE
+    AUTONOMY_HOST_TERMINAL_IMAGE
 )
 
 tmp_lock="$(mktemp "${LOCK_FILE}.tmp.XXXXXX")"

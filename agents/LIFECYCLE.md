@@ -61,6 +61,7 @@ The dispatcher queries `status=open AND label=readiness:approved` — a single c
 
 - `autonomy-session` — base image for research/refinement
 - `autonomy-session-platform` — adds starlette, uvicorn for dashboard work
+- `autonomy-host-terminal` — adds the docker CLI and compose plugin; launched only as the operator's in-node host terminal (`launch_session(host_terminal=True)`), never routed by labels
 - More project images as needed
 
 **Prompt:** Generated dynamically from the graph by `agents/compose.py`:

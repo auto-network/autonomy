@@ -215,7 +215,7 @@ no services, so nothing contacts Rekor or Fulcio.
 The manual **Build and publish Autonomy images** workflow takes a registry host,
 namespace, and release label. Its self-hosted `autonomy-release` runner uses
 the existing source builds (`deploy/Dockerfile` and `agents/build.sh`) to
-publish the node plus base/dashboard/DinD session images. Every pushed tag is
+publish the node plus base/dashboard/DinD/host-terminal session images. Every pushed tag is
 resolved to `image@sha256:...`. The workflow has no signing key and cannot
 authorize a release; it emits an **unsigned** `image-lock.env` artifact:
 
@@ -226,6 +226,7 @@ AUTONOMY_NODE_IMAGE=registry.example/autonomy/autonomy-node@sha256:...
 AUTONOMY_SESSION_IMAGE=registry.example/autonomy/autonomy-session@sha256:...
 AUTONOMY_SESSION_PLATFORM_IMAGE=registry.example/autonomy/autonomy-session-platform@sha256:...
 AUTONOMY_SESSION_DIND_IMAGE=registry.example/autonomy/autonomy-session-dind@sha256:...
+AUTONOMY_HOST_TERMINAL_IMAGE=registry.example/autonomy/autonomy-host-terminal@sha256:...
 ```
 
 After inspecting that lock, the operator performs the release-signing act on

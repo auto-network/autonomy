@@ -70,6 +70,15 @@ docker build $NO_CACHE -f "$SCRIPT_DIR/Dockerfile.platform" -t autonomy-session-
 echo "==> Done. Image: autonomy-session-platform"
 docker images autonomy-session-platform --format "  Size: {{.Size}}"
 
+# ── Host terminal variant ─────────────────────────────────────────
+# The operator's in-node host terminal: base + docker CLI and compose plugin
+# against the host socket (graph://89d3c8df-544 §2).
+echo ""
+echo "==> Building host-terminal variant (docker CLI + compose plugin)..."
+docker build $NO_CACHE $PULL -f "$SCRIPT_DIR/Dockerfile.host-terminal" -t autonomy-host-terminal context/
+echo "==> Done. Image: autonomy-host-terminal"
+docker images autonomy-host-terminal --format "  Size: {{.Size}}"
+
 # ── DinD intermediate variant ─────────────────────────────────────
 # Adds Docker CE + the shared startup-wrapper entrypoint. Project images
 # that need Docker-in-Docker (enterprise, widgets-ng) extend this.

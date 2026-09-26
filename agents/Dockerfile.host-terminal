@@ -1,0 +1,39 @@
+# Autonomy host terminal image (graph://89d3c8df-544 §2).
+# The session image plus the docker CLI and the compose plugin: the operator's
+# host terminal runs inside the node as a sibling session container and reaches
+# the host through the bind-mounted Docker socket. Client only — no dockerd, no
+# sudo, no DOCKER_HOST; the socket and the --group-add for its gid come from the
+# launcher's host-terminal profile at run time (agents/session_launcher.py).
+#
+# Build:  docker build -f agents/Dockerfile.host-terminal -t autonomy-host-terminal agents/
+# Run:    launch_session(host_terminal=True) only.
+
+FROM autonomy-session
+
+# The base's claude.version / codex.version / grok.version labels are inherited
+# unchanged: this image adds no harness.
+
+USER root
+
+# Pins, URLs and checksum copied verbatim from deploy/Dockerfile so the node and
+# the host terminal run the same client against the same daemon.
+ARG DOCKER_CLI_VERSION=29.7.2
+ARG DOCKER_CLI_URL=https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz
+RUN curl -fsSL "$DOCKER_CLI_URL" -o /tmp/docker.tgz \
+    && tar -xzf /tmp/docker.tgz --strip-components=1 -C /usr/local/bin docker/docker \
+    && rm -f /tmp/docker.tgz \
+    && docker --version
+
+ARG DOCKER_COMPOSE_VERSION=5.5.0
+ARG DOCKER_COMPOSE_SHA256=c57ab918abd5b05ca7e7d0f275875dd1330a695074f309dc9eab1b49efafcd4b
+ARG DOCKER_COMPOSE_URL=https://github.com/docker/compose/releases/download/v${DOCKER_COMPOSE_VERSION}/docker-compose-linux-x86_64
+RUN install -d -m 0755 /usr/local/lib/docker/cli-plugins \
+    && curl -fsSL "$DOCKER_COMPOSE_URL" -o /tmp/docker-compose \
+    && echo "$DOCKER_COMPOSE_SHA256  /tmp/docker-compose" | sha256sum -c - \
+    && install -m 0755 /tmp/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose \
+    && rm -f /tmp/docker-compose \
+    && docker compose version | grep -F "v${DOCKER_COMPOSE_VERSION}"
+
+USER agent
+
+RUN docker --version && docker compose version
