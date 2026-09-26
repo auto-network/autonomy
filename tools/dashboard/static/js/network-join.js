@@ -381,14 +381,22 @@
   // self-admitting role; OrgAdmission.tla final rules). Zeroed the moment
   // the claim goes pending, and after the set-up either way.
   var heldSeed = null;
+  var heldTimer = null;
   var openRootControl = null;
+  // The window has a length: a stalled install must not keep the root in
+  // page memory; past this, the set-up asks for the root again.
+  var HELD_SEED_MS = 120000;
   function zeroHeld() {
+    if (heldTimer) { clearTimeout(heldTimer); heldTimer = null; }
     if (heldSeed) { heldSeed.fill(0); heldSeed = null; }
   }
   function openRootHeld(options) {
     return openRootControl(options).then(function (opened) {
       zeroHeld();
-      if (opened && opened.seed) heldSeed = new Uint8Array(opened.seed);
+      if (opened && opened.seed) {
+        heldSeed = new Uint8Array(opened.seed);
+        heldTimer = setTimeout(zeroHeld, HELD_SEED_MS);
+      }
       return opened;
     });
   }
@@ -436,7 +444,9 @@
       if (opened.seed !== heldSeed) opened.seed.fill(0);
       zeroHeld();
       return import("/static/js/ceremony/signon-phases.js").then(function (phases) {
-        return phases.fetchPreparation(window.fetch.bind(window)).then(function (encrypted) {
+        // Scoped to the joined organization: no other organization's
+        // maintenance runs, or is reported, on this page.
+        return phases.fetchPreparation(window.fetch.bind(window), { org: orgSlug }).then(function (encrypted) {
           return phases.prepareSignon(seed, encrypted, window.AutonomyNetworkSession);
         }).then(function (prepared) {
           seed.fill(0);

@@ -74,7 +74,12 @@ def organization_encryption_recovery(org):
     return result
 
 
-def collect():
+def collect(only_org: str | None = None):
+    """The sign-in's preparation. *only_org* restricts the organization
+    maintenance to that one slug (the join page setting up the organization
+    it just installed, in the same opening): the personal inputs (vault,
+    fleet runtime, personal serve certificate) are unchanged, and no other
+    organization's checkpoint, delegate or binding is touched or reported."""
     from tools.dashboard import (fleet_enrollment_routes as fleet, identity_routes,
                                  membership_checkpoint, network_routes, unlock_routes,
                                  vault_routes, org_storage_delegate)
@@ -110,6 +115,8 @@ def collect():
     organizations = []
     for entry, persona_pub in organization_plans():
         org = entry["slug"]
+        if only_org is not None and org != only_org:
+            continue
         if entry.get("error"):
             organizations.append(entry)
             continue
@@ -170,7 +177,8 @@ async def get_preparation(request):
                     raise
                 return JSONResponse({"error": "recipient_missing"}, status_code=409,
                                     headers={"Cache-Control": "no-store"})
-        payload = json.dumps(collect(), separators=(",", ":")).encode()
+        only_org = request.query_params.get("org") or None
+        payload = json.dumps(collect(only_org=only_org), separators=(",", ":")).encode()
         return JSONResponse({"sealed": sealing.seal(payload, public, PURPOSE).hex()},
                             headers={"Cache-Control": "no-store"})
     except Exception:

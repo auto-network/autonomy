@@ -210,3 +210,14 @@ def test_other_unavailable_inputs_remain_explicit_failures(healthy, monkeypatch,
     result = signon_preparation.collect()
     assert result[key]["error"]
     assert _prepared_slugs(result) == ["good", "bad"]
+
+
+def test_the_join_window_prepares_only_the_joined_organization(healthy):
+    """C6 scope (reviewer on d1c8f293): the join page runs the sign-in's
+    phases for the organization it just installed only; every other
+    organization's maintenance is neither run nor reported there."""
+    result = signon_preparation.collect(only_org="good")
+    assert [o["slug"] for o in result["organizations"]] == ["good"]
+    assert result["vault"]["recovery"] == "ok"          # personal inputs unchanged
+    everything = signon_preparation.collect()
+    assert sorted(o["slug"] for o in everything["organizations"]) == ["bad", "good"]

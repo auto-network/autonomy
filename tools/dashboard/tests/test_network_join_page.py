@@ -214,6 +214,9 @@ def test_install_finishes_the_machine_set_up_in_the_same_opening():
     assert 'import("/static/js/ceremony/signon-phases.js")' in js
     for call in ("phases.fetchPreparation(", "phases.prepareSignon(", "phases.submitSignon("):
         assert call in js, call
+    # Scoped to the joined organization only.
+    assert "phases.fetchPreparation(window.fetch.bind(window), { org: orgSlug })" in js
+    assert "HELD_SEED_MS" in js and "setTimeout(zeroHeld, HELD_SEED_MS)" in js
     assert "heldSeed = new Uint8Array(opened.seed)" in js
     assert js.count("zeroHeld()") >= 5
     pending = js.index('if (result.state === "pending")')

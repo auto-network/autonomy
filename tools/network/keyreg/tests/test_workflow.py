@@ -136,6 +136,26 @@ def test_current_order_runs_built_code_only(registry):
     assert any("current_order[0].runs" in e and "designed" in e for e in _errors(broken))
 
 
+def test_a_continued_opening_cannot_span_another_partys_ceremony(registry):
+    """K2 (reviewer on d1c8f293): another party's window step closes the
+    window. Continuing J3's opening at J5 is valid from self_admit (only
+    founder machine steps between them) and refused from approval, where
+    F3 (the founder's approval ceremony) lies between."""
+    broken = copy.deepcopy(registry)
+    order = broken["goals"]["org_sync_pull"]["current_order"]
+    continued = next(s for s in order if s["step"] == "J5" and s.get("continues_window"))
+    continued["only_from"] = ["approval"]
+    errors = _errors(broken)
+    assert any("continues_window" in e and "from approval" in e and "F3 (founder)" in e for e in errors), errors
+    # The same continuation named at a step of another actor, or at a
+    # non-ceremony step, is refused by name too.
+    broken = copy.deepcopy(registry)
+    order = broken["goals"]["org_sync_pull"]["current_order"]
+    continued = next(s for s in order if s["step"] == "J5" and s.get("continues_window"))
+    continued["continues_window"] = "F1"
+    assert any("same actor" in e for e in _errors(broken))
+
+
 def test_window_step_must_be_a_ceremony(registry):
     broken = copy.deepcopy(registry)
     order = broken["goals"]["org_sync_pull"]["current_order"]

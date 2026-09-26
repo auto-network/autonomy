@@ -236,7 +236,8 @@
         "actor": {"type": "string"},
         "ceremony": {"type": "boolean", "description": "true: this step is one human root opening."},
         "runs": {"type": "array", "minItems": 1, "items": {"type": "string"}},
-        "only_from": {"type": "array", "items": {"type": "string"}}
+        "only_from": {"type": "array", "items": {"type": "string"}},
+        "continues_window": {"type": "string", "description": "This ceremony runs inside the named earlier ceremony step's opening (same actor, no other party's ceremony between): not another opening."}
       }
     },
     "defect": {

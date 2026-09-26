@@ -399,11 +399,28 @@ def _validate_workflow(errors, data):
                 if mut.get("status", "built") != "built":
                     errors.append(f"{swhere}.runs: '{mut_id}' is designed; the current order runs built code only")
                 if step.get("continues_window") is not None:
-                    prior = [s for s in (goal.get("current_order") or [])[:i] if s.get("step") == step["continues_window"]]
+                    order_steps = goal.get("current_order") or []
+                    prior = [(j, s) for j, s in enumerate(order_steps[:i]) if s.get("step") == step["continues_window"]]
                     if not step.get("ceremony"):
                         errors.append(f"{swhere}.continues_window: only a ceremony step continues an opening")
-                    elif not prior or prior[-1].get("actor") != step.get("actor"):
+                    elif not prior or prior[-1][1].get("actor") != step.get("actor") or not prior[-1][1].get("ceremony"):
                         errors.append(f"{swhere}.continues_window: must name an earlier ceremony step of the same actor")
+                    else:
+                        # Another party's ceremony closes the window: in every
+                        # starting state this step applies to, no other actor's
+                        # ceremony step may lie between the two.
+                        applies_to = step.get("only_from") or list((goal.get("states") or {}).keys())
+                        for state_id in applies_to:
+                            between = [
+                                s for s in order_steps[prior[-1][0] + 1:i]
+                                if s.get("ceremony") and s.get("actor") != step.get("actor")
+                                and (not s.get("only_from") or state_id in s["only_from"])
+                            ]
+                            if between:
+                                errors.append(
+                                    f"{swhere}.continues_window: from {state_id}, "
+                                    f"{between[0].get('step')} ({between[0].get('actor')}) opens a window "
+                                    f"between {step['continues_window']} and {step['step']}")
                 if mut.get("opens") in WINDOW_OPENS and not step.get("ceremony"):
                     errors.append(f"{swhere}.runs: '{mut_id}' opens {mut.get('opens')}, so step {step.get('step')} must be a ceremony")
         for i, scenario in enumerate(goal.get("scenarios") or []):

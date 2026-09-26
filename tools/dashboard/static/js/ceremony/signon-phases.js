@@ -8,8 +8,12 @@ import { reportStepOutcome } from './step-report.js';
 
 const PURPOSE = 'autonomy/identity/sign-in-preparation/v1';
 
-export async function fetchPreparation(fetchImpl = fetch) {
-  const response = await fetchImpl('/api/identity/unlock/preparation', { cache: 'no-store' });
+// `org` scopes the organization maintenance to one slug (the join page
+// finishing the organization it just installed); personal inputs are unchanged.
+export async function fetchPreparation(fetchImpl = fetch, { org = null } = {}) {
+  const route = '/api/identity/unlock/preparation'
+    + (org ? '?org=' + encodeURIComponent(org) : '');
+  const response = await fetchImpl(route, { cache: 'no-store' });
   const body = await response.json();
   if (response.status === 409 && body.error === 'recipient_missing') {
     throw new Error('Sign-in is blocked because this dashboard is missing part of your identity’s encryption setup.');
