@@ -12,5 +12,9 @@ services:
     networks: [alice-net, bob-net]
   alice:
     networks: [alice-net]
+  alice-tmux:
+    networks: [alice-net]
   bob:
+    networks: [bob-net]
+  bob-tmux:
     networks: [bob-net]

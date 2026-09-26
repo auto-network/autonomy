@@ -117,3 +117,50 @@ def test_entrypoint_exports_tmux_tmpdir_when_the_socket_dir_exists(tmp_path):
 
 def test_entrypoint_leaves_tmux_tmpdir_unset_without_the_socket_dir(tmp_path):
     assert _run_block(tmp_path / "absent") == "unset"
+
+
+# ── The product-workflow simulation node matches the real node ───────────
+
+HARNESS = REPO_ROOT / "deploy/harness"
+
+
+def _harness_config(isolated: bool) -> dict:
+    if not shutil.which("docker"):
+        pytest.skip("docker compose CLI not available")
+    files = ["-f", str(HARNESS / "onboarding.compose.yaml")]
+    if isolated:
+        files += ["-f", str(HARNESS / "onboarding.isolated.compose.yaml")]
+    env = dict(os.environ, SIM_SOURCE_DIR="/src", SIM_TLS_DIR="/tls",
+               SIM_RELAY_HOST="172.17.0.1", SIM_ALICE_HOME="/homes/alice",
+               SIM_BOB_HOME="/homes/bob")
+    result = subprocess.run(
+        ["docker", "compose", *files, "config", "--format", "json"],
+        capture_output=True, text=True, env=env, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize("isolated", [False, True])
+def test_each_simulated_machine_has_its_own_sidecar_and_home(isolated):
+    services = _harness_config(isolated)["services"]
+    for person in ("alice", "bob"):
+        dashboard, sidecar = services[person], services[f"{person}-tmux"]
+        assert _mounts(dashboard)[TMUX_DIR] == f"{person}-tmux"
+        assert _mounts(sidecar)[TMUX_DIR] == f"{person}-tmux"
+        assert _mounts(sidecar)["/app/data"] == person
+        assert sidecar["command"] == ["tmux", "-D"]
+        assert sidecar["environment"]["TMUX_TMPDIR"] == TMUX_DIR
+        assert dashboard["depends_on"][f"{person}-tmux"]["condition"] == "service_healthy"
+        home = next(v for v in dashboard["volumes"] if v["target"] == "/host-home")
+        assert home["source"] == f"/homes/{person}"
+        assert home["read_only"] is True
+        assert dashboard["environment"]["AUTONOMY_HOST_HOME"] == f"/homes/{person}"
+        if isolated:
+            assert list(sidecar["networks"]) == [f"{person}-net"]
+
+
+def test_harness_creates_each_machine_home():
+    text = (HARNESS / "ui-harness.mjs").read_text()
+    assert "process.env.SIM_ALICE_HOME=mkdtempSync(" in text
+    assert "process.env.SIM_BOB_HOME=mkdtempSync(" in text

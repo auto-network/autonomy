@@ -35,6 +35,11 @@ output ||= '/workspace/output/'+run;
 // Environment-only TLS: one directly trusted server certificate, no CA or
 // certificate-error bypass. The private key stays in local temporary storage.
 const tlsDirectory=mkdtempSync(tmpdir()+'/invitation-tls-');
+// Each simulated machine's operator home, mounted read-only at /host-home
+// (docker-compose.yml): empty, like a fresh machine with no prior sign-ins
+// or transcripts. Exported for every compose invocation below.
+process.env.SIM_ALICE_HOME=mkdtempSync(tmpdir()+'/'+run+'-alice-home-');
+process.env.SIM_BOB_HOME=mkdtempSync(tmpdir()+'/'+run+'-bob-home-');
 const nssDirectory=homedir()+(existsSync(homedir()+'/.pki/nssdb')?'/.pki/nssdb':'/.local/share/pki/nssdb');
 process.env.AGENT_BROWSER_IGNORE_HTTPS_ERRORS='false';
 mkdirSync(output,{recursive:true});

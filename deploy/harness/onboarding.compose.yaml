@@ -24,6 +24,19 @@ x-dashboard: &dashboard
     timeout: 2s
     retries: 60
 
+# Each machine's tmux sidecar owns its session panes, as on a real node
+# (docker-compose.yml service `tmux`): same image and entrypoint, `tmux -D`,
+# the socket shared with that machine's dashboard through its own volume.
+x-tmux: &tmux
+  image: autonomy-node:onboarding
+  init: true
+  command: [tmux, -D]
+  healthcheck:
+    test: [CMD-SHELL, 'test -S /run/autonomy-tmux/tmux-1000/default']
+    interval: 500ms
+    timeout: 2s
+    retries: 60
+
 services:
   relay:
     image: autonomy-node:onboarding
@@ -39,11 +52,30 @@ services:
       interval: 500ms
       timeout: 2s
       retries: 60
+  alice-tmux:
+    <<: *tmux
+    environment:
+      AUTONOMY_DATA_ROOT: /app/data
+      AUTONOMY_HOST_HOME: ${SIM_ALICE_HOME:?Run workflow.mjs}
+      AUTONOMY_PROVISION_RAMFS: '0'
+      TMUX_TMPDIR: /run/autonomy-tmux
+      TERM: xterm-256color
+    volumes:
+      - ${SIM_SOURCE_DIR}:/app:ro
+      - alice:/app/data
+      - alice-orgs:/app/orgs
+      - alice-tmux:/run/autonomy-tmux
   alice:
     <<: *dashboard
     ports: ['127.0.0.1:${SIM_ALICE_PORT:-19880}:8080']
+    depends_on:
+      relay:
+        condition: service_started
+      alice-tmux:
+        condition: service_healthy
     environment:
       <<: *dashboard-env
+      AUTONOMY_HOST_HOME: ${SIM_ALICE_HOME:?Run workflow.mjs}
       AUTONOMY_FLEET_DIRECT_LISTEN: 0.0.0.0:9410
       AUTONOMY_FLEET_ADVERTISE_ADDRS: ws://alice:9410
     volumes:
@@ -52,13 +84,34 @@ services:
       - alice-attachments:/app/attachments
       - alice-orgs:/app/orgs
       - alice-keys:/run/autonomy-keycache
+      - alice-tmux:/run/autonomy-tmux
+      - ${SIM_ALICE_HOME}:/host-home:ro
       - ${SIM_TLS_DIR}/server.crt:/simulation-tls/server.crt:ro
       - ${SIM_TLS_DIR}/server.key:/simulation-tls/server.key:ro
+  bob-tmux:
+    <<: *tmux
+    environment:
+      AUTONOMY_DATA_ROOT: /app/data
+      AUTONOMY_HOST_HOME: ${SIM_BOB_HOME:?Run workflow.mjs}
+      AUTONOMY_PROVISION_RAMFS: '0'
+      TMUX_TMPDIR: /run/autonomy-tmux
+      TERM: xterm-256color
+    volumes:
+      - ${SIM_SOURCE_DIR}:/app:ro
+      - bob:/app/data
+      - bob-orgs:/app/orgs
+      - bob-tmux:/run/autonomy-tmux
   bob:
     <<: *dashboard
     ports: ['127.0.0.1:${SIM_BOB_PORT:-19881}:8080']
+    depends_on:
+      relay:
+        condition: service_started
+      bob-tmux:
+        condition: service_healthy
     environment:
       <<: *dashboard-env
+      AUTONOMY_HOST_HOME: ${SIM_BOB_HOME:?Run workflow.mjs}
       AUTONOMY_FLEET_INVITE: ${SIM_FLEET_INVITE:-}
       AUTONOMY_FLEET_DIRECT_LISTEN: 0.0.0.0:9410
       AUTONOMY_FLEET_ADVERTISE_ADDRS: ws://bob:9410
@@ -68,6 +121,8 @@ services:
       - bob-attachments:/app/attachments
       - bob-orgs:/app/orgs
       - bob-keys:/run/autonomy-keycache
+      - bob-tmux:/run/autonomy-tmux
+      - ${SIM_BOB_HOME}:/host-home:ro
       - ${SIM_TLS_DIR}/server.crt:/simulation-tls/server.crt:ro
       - ${SIM_TLS_DIR}/server.key:/simulation-tls/server.key:ro
 
@@ -79,6 +134,8 @@ volumes:
   bob-attachments: {}
   alice-orgs: {}
   bob-orgs: {}
+  alice-tmux: {}
+  bob-tmux: {}
   alice-keys:
     driver_opts: {type: ramfs, device: ramfs, o: 'mode=0700'}
   bob-keys:
