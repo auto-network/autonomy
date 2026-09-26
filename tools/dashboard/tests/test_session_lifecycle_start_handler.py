@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -418,26 +419,39 @@ def test_wait_for_prompt_times_out_without_signal(monkeypatch, tmp_path):
 
 
 def test_resume_start_handler_host_kind_runs_to_running(monkeypatch, tmp_path):
-    """Host resume through the worker: host_cmd prebuilt by the API handler,
-    tmux spawned with -c REPO_ROOT, composer signal waited, resume message
-    injected, row lands running."""
+    """Host resume through the worker: the host terminal is relaunched as a
+    node session container through the launcher's host-terminal profile,
+    resuming its own transcript from its run dir; tmux gets no -c and no
+    login shell; the container is verified; the resume message is injected
+    and the row lands running."""
+    from agents import primer_renderer
     from tools.dashboard import server
 
     _init_db(tmp_path)
     dashboard_db.insert_session(
         tmux_name="host-life",
         session_type="host",
-        project="host-proj",
+        project="host",
         harness="claude",
     )
-    calls = {"tmux": [], "inject": []}
+    run_dir = tmp_path / "agent-runs" / "host-life-20260926-000000"
+    calls = {"tmux": [], "inject": [], "launch": [], "verify": []}
 
     def fake_subprocess_run(cmd, **kwargs):
         calls["tmux"].append((cmd, kwargs))
         return SimpleNamespace(returncode=0, stderr=b"")
 
-    monkeypatch.setattr(server, "_REPO_ROOT", tmp_path)
+    def fake_launch_session(**kwargs):
+        calls["launch"].append(kwargs)
+        return "docker run host-terminal"
+
+    monkeypatch.setattr(primer_renderer, "render_host_terminal_primer", lambda: "host primer")
+    monkeypatch.setattr(server, "launch_session", fake_launch_session)
     monkeypatch.setattr(server.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(
+        server, "_verify_container_started",
+        lambda **kwargs: calls["verify"].append(kwargs),
+    )
     monkeypatch.setattr(server, "_wait_for_prompt", lambda **_kwargs: None)
     monkeypatch.setattr(
         server, "_render_resume_message", lambda **_kwargs: "resumed orientation",
@@ -447,16 +461,12 @@ def test_resume_start_handler_host_kind_runs_to_running(monkeypatch, tmp_path):
         lambda **kwargs: calls["inject"].append(kwargs),
     )
 
-    monkeypatch.setattr(
-        server, "_mint_host_session_token", lambda name: f"CROSSTALK_TOKEN=tok-{name} ",
-    )
-
     server._run_session_resume_start(
         LifecycleJob("start", "host-life", {
             "resume": True,
             "kind": "host",
-            "host_cmd": "claude --resume abc",
-            "jsonl_path": str(tmp_path / "x.jsonl"),
+            "output_dir": str(run_dir),
+            "jsonl_path": str(run_dir / "sessions" / "-workspace-repo" / "abc.jsonl"),
             "resume_uuid": "abc",
             "harness": "claude",
             "revived": True,
@@ -467,12 +477,99 @@ def test_resume_start_handler_host_kind_runs_to_running(monkeypatch, tmp_path):
     row = dashboard_db.get_session("host-life")
     assert row["startup_state"] is None
     assert row["state"] == "ACTIVE"
+    launch = calls["launch"][0]
+    assert launch["host_terminal"] is True
+    assert launch["resume_uuid"] == "abc"
+    assert launch["output_dir"] == str(run_dir)
+    assert launch["metadata"] == {
+        "tmux_session": "host-life", "org": "personal", "type": "host",
+    }
+    assert (run_dir / ".claude_md").read_text() == "host primer"
+    assert str(launch["global_claude_md"]) == str(run_dir / ".claude_md")
     spawn_cmd = calls["tmux"][0][0]
-    assert spawn_cmd[:2] == ["tmux", "new-session"]
-    assert "-c" in spawn_cmd and str(tmp_path) in spawn_cmd
-    # The launch worker mints the host bearer and prefixes it to the harness command.
-    assert "CROSSTALK_TOKEN=tok-host-life claude --resume abc" in spawn_cmd[-1]
+    assert spawn_cmd == [
+        "tmux", "new-session", "-d", "-s", "host-life", "-x", "120", "-y", "40",
+        "docker run host-terminal",
+    ]
+    assert calls["verify"], "a host terminal is a container and is verified"
     assert calls["inject"] and calls["inject"][0]["message"] == "resumed orientation"
+
+
+def test_simple_start_handler_host_kind_launches_a_node_container(monkeypatch, tmp_path):
+    """A fresh host terminal: launch_session(host_terminal=True) into a new
+    run dir, registered as a host row whose transcript dir is that run dir's
+    sessions/ — the same place every container session writes."""
+    from agents import primer_renderer
+    from tools.dashboard import server
+
+    _init_db(tmp_path)
+    dashboard_db.insert_session(
+        tmux_name="host-new", session_type="host", project="host", harness="claude",
+    )
+    calls = {"launch": [], "register": [], "verify": [], "inject": []}
+
+    def fake_launch_session(**kwargs):
+        calls["launch"].append(kwargs)
+        return "docker run host-terminal"
+
+    async def fake_register(**kwargs):
+        calls["register"].append(kwargs)
+
+    monkeypatch.setattr(server, "DATA_ROOT", tmp_path)
+    monkeypatch.setattr(primer_renderer, "render_host_terminal_primer", lambda: "host primer")
+    monkeypatch.setattr(server, "launch_session", fake_launch_session)
+    monkeypatch.setattr(
+        server.subprocess, "run",
+        lambda cmd, **kw: SimpleNamespace(returncode=0, stderr=b""),
+    )
+    monkeypatch.setattr(
+        server, "_verify_container_started",
+        lambda **kwargs: calls["verify"].append(kwargs),
+    )
+    monkeypatch.setattr(server.session_monitor, "register", fake_register)
+    monkeypatch.setattr(server, "_wait_for_prompt", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        server, "_inject_echo_verified",
+        lambda **kwargs: calls["inject"].append(kwargs),
+    )
+
+    import asyncio
+    import threading
+
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        server._run_simple_session_start(
+            LifecycleJob("start", "host-new", {
+                "kind": "host",
+                "harness": "claude",
+                "model": "claude-opus-5-5",
+                "claude_alias": "work",
+                "register_project": "host",
+                "first_message": "welcome",
+                "event_loop": loop,
+            }),
+            SessionLifecycleStateWriter(),
+        )
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)
+        loop.close()
+
+    launch = calls["launch"][0]
+    assert launch["host_terminal"] is True
+    assert launch["claude_alias"] == "work"
+    assert launch["model"] == "claude-opus-5-5"
+    run_dir = Path(launch["output_dir"])
+    assert run_dir.parent == tmp_path / "agent-runs"
+    assert run_dir.name.startswith("host-new-")
+    register = calls["register"][0]
+    assert register["session_type"] == "host"
+    assert register["project"] == "host"
+    assert register["jsonl_path"] == run_dir / "sessions"
+    assert calls["verify"]
+    assert calls["inject"][0]["message"] == "welcome"
 
 
 def test_resume_start_handler_failure_preserves_worktrees(monkeypatch, tmp_path):

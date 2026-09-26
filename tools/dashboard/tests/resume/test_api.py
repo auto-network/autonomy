@@ -39,14 +39,25 @@ class TestResumeWithSourceId:
         assert data["type"] == "container"
         assert "label" in data
 
-    def test_valid_host_source_returns_200(self, test_client, resume_env):
+    def test_valid_host_terminal_source_returns_200(self, test_client, resume_env):
         resp = test_client.post(
             "/api/session/resume",
-            json={"source_id": resume_env["host_source_id"]},
+            json={"source_id": resume_env["host_terminal_source_id"]},
         )
         assert resp.status_code == 202
         data = resp.json()
         assert data["type"] == "host"
+        assert data["tmux_name"] == "host-0925-120000"
+
+    def test_native_host_source_is_refused(self, test_client, resume_env):
+        """A pre-cutover native host transcript lives in the operator's home,
+        outside every node volume; the in-node host terminal cannot resume it."""
+        resp = test_client.post(
+            "/api/session/resume",
+            json={"source_id": resume_env["host_source_id"]},
+        )
+        assert resp.status_code == 409
+        assert "outside the node" in resp.json()["error"]
 
     def test_missing_jsonl_returns_404(self, test_client, resume_env):
         resp = test_client.post(
@@ -392,17 +403,32 @@ class TestHistoryBackfill:
         assert str(call["jsonl_path"]) == resume_env["jsonl_file"]
         assert call["session_uuid"] == "abc123-def456"
 
-    def test_host_session_passes_jsonl_to_register(self, test_client, resume_env):
-        """Host sessions also pass JSONL path for backfill."""
+    def test_host_terminal_passes_jsonl_to_register(self, test_client, resume_env, monkeypatch):
+        """A host terminal resumes as a node container from its own run dir
+        and passes its JSONL path for backfill."""
+        from agents import primer_renderer
+        from tools.dashboard import server
+
+        launches = []
+
+        def fake_launch_session(**kwargs):
+            launches.append(kwargs)
+            return "docker run host-terminal"
+
+        monkeypatch.setattr(primer_renderer, "render_host_terminal_primer", lambda: "primer")
+        monkeypatch.setattr(server, "launch_session", fake_launch_session)
         resp = test_client.post(
             "/api/session/resume",
-            json={"source_id": resume_env["host_source_id"]},
+            json={"source_id": resume_env["host_terminal_source_id"]},
         )
         assert resp.status_code == 202
         test_client.run_lifecycle_jobs()
         assert len(test_client._monitor_calls["register"]) == 1
         call = test_client._monitor_calls["register"][0]
-        assert str(call["jsonl_path"]) == resume_env["host_jsonl"]
+        assert str(call["jsonl_path"]) == resume_env["host_terminal_jsonl"]
+        assert launches[0]["host_terminal"] is True
+        assert launches[0]["resume_uuid"] == "host-uuid-777"
+        assert launches[0]["output_dir"].endswith("host-0925-120000-20260925-120000")
 
 
 class TestReResumeAfterDeath:

@@ -1871,35 +1871,6 @@ class SessionMonitor:
                     source="startup_recovery",
                 )
                 continue
-            if row.get("type") == "host":
-                harness = resolve_harness_for_session_row(row)
-                linked = harness.resolve_session(tmux_name=tmux_name, row=row)
-                if linked:
-                    harness.attach_live_monitoring(
-                        monitor=self,
-                        tmux_name=tmux_name,
-                        jsonl_path=linked["jsonl_path"],
-                        resolution_dir=Path(row["resolution_dir"]) if row.get("resolution_dir") else linked["resolution_dir"],
-                    )
-                    recovered += 1
-                    logger.info(
-                        "session_monitor: recovered host %s → %s",
-                        tmux_name, linked["jsonl_path"].name,
-                    )
-                else:
-                    # Unresolved host — add dir watch on resolution_dir if known
-                    res_dir = row.get("resolution_dir")
-                    if res_dir:
-                        if tmux_name not in self._tail_states:
-                            self._tail_states[tmux_name] = _TailState(
-                                needs_resolution=True,
-                                resolution_dir=Path(res_dir),
-                            )
-                        if self._use_inotify:
-                            self._add_dir_watch(tmux_name, res_dir)
-                        recovered += 1
-                        logger.info("session_monitor: RECOVERED unresolved host %s → watch %s", tmux_name, res_dir)
-                continue
             if tmux_name in self._tail_states:
                 continue  # already has a tail state
             # Derive resolution_dir from agent-runs/{tmux_name}-*/sessions/
@@ -1921,12 +1892,6 @@ class SessionMonitor:
                     logger.info("session_monitor: RECOVERED unresolved %s → %s", tmux_name, sess_dir)
         if recovered:
             logger.info("session_monitor: recovered %d unresolved sessions on startup", recovered)
-
-    def _resolve_host_jsonl(self, tmux_name: str) -> Path | None:
-        """Compatibility shim for tests; host resolution now lives in the harness."""
-        from tools.dashboard.session_harness import _resolve_claude_host_jsonl
-
-        return _resolve_claude_host_jsonl(tmux_name)
 
     async def _broadcast_registry(self) -> None:
         """Push session registry to SSE subscribers."""
@@ -2451,19 +2416,6 @@ class SessionMonitor:
             )
         row = get_session(tmux_name)
         if row is None:
-            return False
-        # B1: ambient (non-create) observation of a file in a HOST row's
-        # SHARED directory has no ownership evidence — the file is very
-        # likely another session's transcript. Host first-resolution goes
-        # through positive-ownership channels only (launch watcher, meta
-        # files, handshake, parentUuid rollover); the row's own linked
-        # path still re-attaches below. Skip EARLY, before any track or
-        # stat churn — a shared project dir can hold years of history.
-        if (
-            row.get("type") == "host"
-            and not create_event
-            and row.get("jsonl_path") != str(path)
-        ):
             return False
         if track is None:
             try:
@@ -4434,14 +4386,14 @@ class SessionMonitor:
             return
 
         # Determine session types sharing this directory
-        # Container sessions have isolated dirs (one session per dir)
-        # Host sessions share dirs (multiple sessions per dir)
+        # Container sessions and host terminals have isolated dirs (one
+        # session per run dir); other kinds may share a directory.
         for tmux_name in list(sessions):
             row = get_session(tmux_name)
             if not row:
                 continue
             session_type = row.get("type", "container")
-            if session_type == "container":
+            if session_type in ("container", "host"):
                 await self._handle_container_create(tmux_name, row, new_file)
             else:
                 await self._handle_host_create(tmux_name, row, new_file, dir_path)
@@ -5474,51 +5426,6 @@ class SessionMonitor:
                     is_live=True,
                 )
                 logger.info("session_monitor: seeded container %s  uuid=%s  project=%s", tmux_name, jsonl.stem[:12], jsonl.parent.name)
-                dashboard_tmux.discard(tmux_name)
-                seeded += 1
-
-        # Host sessions: ~/.claude/projects/**/*.meta.json — the OPERATOR's
-        # home (AUTONOMY_HOST_HOME when containerized), not this process's.
-        home_projects = (
-            Path(os.environ.get("AUTONOMY_HOST_HOME") or Path.home())
-            / ".claude" / "projects"
-        )
-        if home_projects.exists():
-            for meta_path in home_projects.rglob("*.meta.json"):
-                try:
-                    data = json.loads(meta_path.read_text())
-                except (json.JSONDecodeError, OSError):
-                    continue
-
-                tmux_name = data.get("tmux_session")
-                if not tmux_name or tmux_name not in dashboard_tmux:
-                    continue
-
-                jsonl = meta_path.parent / (meta_path.stem.removesuffix(".meta") + ".jsonl")
-                if not jsonl.exists():
-                    continue
-
-                seed_msg = _read_latest_msg_from_tail(jsonl)
-                st = jsonl.stat()
-
-                stype = "chatwith" if tmux_name.startswith("chatwith-") or tmux_name.startswith("chat-") else "host"
-                from tools.dashboard.dao.dashboard_db import upsert_session
-                upsert_session(
-                    tmux_name=tmux_name,
-                    session_type=stype,
-                    project=jsonl.parent.name,
-                    harness="claude",
-                    jsonl_path=str(jsonl),
-                    session_uuid=transcript_session_uuid(jsonl),
-                    resolution_dir=str(jsonl.parent),
-                    session_uuids=json.dumps([jsonl.stem]),
-                    curr_jsonl_file=str(jsonl),
-                    created_at=st.st_mtime - 60,
-                    file_offset=st.st_size,
-                    last_message=seed_msg,
-                    is_live=True,
-                )
-                logger.info("session_monitor: seeded host %s  uuid=%s  project=%s", tmux_name, jsonl.stem[:12], jsonl.parent.name)
                 dashboard_tmux.discard(tmux_name)
                 seeded += 1
 

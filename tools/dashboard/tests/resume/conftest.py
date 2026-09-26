@@ -101,7 +101,15 @@ def resume_env(tmp_path):
     jsonl_file = jsonl_dir / "abc123-def456.jsonl"
     jsonl_file.write_text(json.dumps({"type": "human", "message": {"role": "user"}}) + "\n")
 
-    # A host session JSONL (not under agent-runs)
+    # An in-node host terminal's JSONL: in its own run dir, like any session
+    ht_dir = (tmp_path / "data" / "agent-runs" / "host-0925-120000-20260925-120000"
+              / "sessions" / "-workspace-repo")
+    ht_dir.mkdir(parents=True)
+    host_terminal_jsonl = ht_dir / "host-uuid-777.jsonl"
+    host_terminal_jsonl.write_text(json.dumps({"type": "human", "message": {"role": "user"}}) + "\n")
+
+    # A pre-cutover native host session JSONL (the operator's own home, not
+    # under agent-runs): no longer resumable inside the node
     host_jsonl_dir = tmp_path / "claude" / "projects" / "test-proj"
     host_jsonl_dir.mkdir(parents=True)
     host_jsonl = host_jsonl_dir / "host-uuid-999.jsonl"
@@ -124,6 +132,15 @@ def resume_env(tmp_path):
             "title": "Host session beta",
             "file_path": str(host_jsonl),
             "metadata": {"session_uuid": "host-uuid-999"},
+        },
+        {
+            "id": "src-host-terminal",
+            "type": "session",
+            "project": "personal",
+            "title": "Host terminal gamma",
+            "file_path": str(host_terminal_jsonl),
+            "metadata": {"session_uuid": "host-uuid-777",
+                         "container_name": "host-0925-120000"},
         },
         {
             "id": "src-missing-jsonl",
@@ -151,6 +168,8 @@ def resume_env(tmp_path):
         "host_jsonl": str(host_jsonl),
         "container_source_id": "src-container-session",
         "host_source_id": "src-host-session",
+        "host_terminal_source_id": "src-host-terminal",
+        "host_terminal_jsonl": str(host_terminal_jsonl),
         "missing_source_id": "src-missing-jsonl",
         "non_session_source_id": "src-not-a-session",
         "sources_by_id": {source["id"]: source for source in sources},
@@ -167,6 +186,8 @@ def cross_org_resume_client(mock_fixture, resume_env, tmp_path, monkeypatch):
     monkeypatch.setenv("GRAPH_ORG", "autonomy")
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_API", raising=False)
+    import tools.data_paths as data_paths_mod
+    monkeypatch.setattr(data_paths_mod, "DATA_ROOT", resume_env["tmp_path"] / "data")
 
     from tools.graph.db import GraphDB
     from tools.graph.models import Source
@@ -316,6 +337,12 @@ def test_client(mock_fixture, resume_env, monkeypatch):
 
     monkeypatch.setattr(sp, "run", selective_subprocess_run)
 
+    # Stored transcript paths are re-rooted onto DATA_ROOT by their
+    # /agent-runs/ anchor (tools.data_paths.local_session_path); the fixture's
+    # run dirs live under tmp_path/data, so that is this suite's data root.
+    import tools.data_paths as data_paths_mod
+    monkeypatch.setattr(data_paths_mod, "DATA_ROOT", resume_env["tmp_path"] / "data")
+
     # Patch launch_session to return a mock docker command
     from agents import session_launcher
 
@@ -400,6 +427,7 @@ def test_client(mock_fixture, resume_env, monkeypatch):
     source_types = {
         resume_env["container_source_id"]: "session",
         resume_env["host_source_id"]: "session",
+        resume_env["host_terminal_source_id"]: "session",
         resume_env["missing_source_id"]: "session",
         resume_env["non_session_source_id"]: "conversation",
     }

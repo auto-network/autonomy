@@ -2,7 +2,7 @@
 
 Covers the path from newly registered session to first JSONL resolution:
   - Container: IN_CREATE detects first JSONL in resolution_dir
-  - Host: _resolve_host_jsonl matches via .meta.json tmux_session field
+  - Host terminals resolve the same way: their transcript is in their run dir
 
 Uses tmp_path with real filesystem. Mocks tmux. No real sessions.
 """
@@ -42,14 +42,6 @@ def container_dir(tmp_path):
     d = tmp_path / "sessions" / "-workspace-repo"
     d.mkdir(parents=True)
     return d
-
-
-@pytest.fixture
-def host_projects_dir(tmp_path):
-    """Simulated ~/.claude/projects/ tree for host resolution."""
-    projects = tmp_path / ".claude" / "projects"
-    projects.mkdir(parents=True)
-    return projects
 
 
 # ── TestContainerResolution ───────────────────────────────────────────────
@@ -111,87 +103,3 @@ class TestContainerResolution:
         primaries = _find_primary_jsonls(container_dir)
         assert len(primaries) == 2, "Should find both JSONL files"
         assert set(primaries) == {old, new}
-
-
-# ── TestHostResolution ────────────────────────────────────────────────────
-
-class TestHostResolution:
-    """Host sessions discover their JSONL via .meta.json tmux_session matching."""
-
-    def test_meta_json_matches_tmux(self, host_projects_dir):
-        """meta.json with tmux_session matching → resolved.
-
-        Expected: GREEN — _resolve_host_jsonl scans .meta.json files for match.
-        """
-        project_dir = host_projects_dir / "-workspace-repo"
-        project_dir.mkdir()
-
-        # Create JSONL and its .meta.json
-        jsonl = _make_jsonl(project_dir, "aaaa-1111")
-        meta = project_dir / "aaaa-1111.meta.json"
-        meta.write_text(json.dumps({"tmux_session": "host-test-001"}))
-
-        monitor = SessionMonitor()
-        # Path.home() / ".claude" / "projects" must resolve to host_projects_dir
-        # host_projects_dir = tmp_path / ".claude" / "projects"
-        # So Path.home() should return tmp_path
-        fake_home = host_projects_dir.parent.parent  # tmp_path
-        with patch("pathlib.Path.home", return_value=fake_home):
-            resolved = monitor._resolve_host_jsonl("host-test-001")
-
-        assert resolved is not None, "Should find JSONL via .meta.json match"
-        assert resolved.stem == "aaaa-1111"
-
-    def test_meta_json_wrong_tmux_ignored(self, host_projects_dir):
-        """meta.json with different tmux → not resolved.
-
-        Expected: GREEN — _resolve_host_jsonl only matches exact tmux_session.
-        """
-        project_dir = host_projects_dir / "-workspace-repo"
-        project_dir.mkdir()
-
-        jsonl = _make_jsonl(project_dir, "bbbb-2222")
-        meta = project_dir / "bbbb-2222.meta.json"
-        meta.write_text(json.dumps({"tmux_session": "host-OTHER-session"}))
-
-        monitor = SessionMonitor()
-        with patch("pathlib.Path.home", return_value=host_projects_dir.parent.parent):
-            resolved = monitor._resolve_host_jsonl("host-test-002")
-
-        assert resolved is None, "Should not match different tmux_session"
-
-    def test_meta_json_no_jsonl_ignored(self, host_projects_dir):
-        """.meta.json exists but .jsonl missing → not resolved.
-
-        Expected: GREEN — _resolve_host_jsonl checks jsonl.exists() before returning.
-        """
-        project_dir = host_projects_dir / "-workspace-repo"
-        project_dir.mkdir()
-
-        # Only create .meta.json, no .jsonl
-        meta = project_dir / "cccc-3333.meta.json"
-        meta.write_text(json.dumps({"tmux_session": "host-test-003"}))
-        # Don't create cccc-3333.jsonl
-
-        monitor = SessionMonitor()
-        with patch("pathlib.Path.home", return_value=host_projects_dir.parent.parent):
-            resolved = monitor._resolve_host_jsonl("host-test-003")
-
-        assert resolved is None, "Should not resolve when .jsonl is missing"
-
-    def test_no_meta_stays_unresolved(self, host_projects_dir):
-        """No .meta.json → session stays unresolved.
-
-        Expected: GREEN — _resolve_host_jsonl returns None when no meta files match.
-        """
-        project_dir = host_projects_dir / "-workspace-repo"
-        project_dir.mkdir()
-
-        # Create a JSONL but no .meta.json
-        _make_jsonl(project_dir, "dddd-4444")
-
-        monitor = SessionMonitor()
-        with patch("pathlib.Path.home", return_value=host_projects_dir.parent.parent):
-            resolved = monitor._resolve_host_jsonl("host-test-004")
-
-        assert resolved is None, "Should stay unresolved without .meta.json"

@@ -185,19 +185,18 @@ services:
       # the dashboard runs is a client call over this socket; the entrypoint
       # exports TMUX_TMPDIR when the directory exists.
       - autonomy-tmux:/run/autonomy-tmux
-      # Host-session transcripts. Host terminals write their JSONL under the
-      # OPERATOR's home (~/.claude/projects), not under the data volume, and
-      # the session viewer reads transcripts from the file named by the DB's
-      # jsonl_path. Mounted read-only at the IDENTICAL path so stored host
-      # paths resolve verbatim in here. AUTONOMY_HOST_HOME is required (see
-      # .env): a node without it cannot serve host terminals, which are not
-      # optional (operator ruling 2026-08-31).
+      # The operator's home, read-only at /host-home (graph://89d3c8df-544 §3):
+      # the host terminal's credential bootstrap reads its Claude sign-in here,
+      # and transcript ingest reads its pre-existing transcripts. Never a
+      # transcript path for a live session — the host terminal writes into its
+      # own run dir like every session. AUTONOMY_HOST_HOME is required (.env;
+      # deploy/quickstart.sh writes it).
       - type: bind
-        source: ${AUTONOMY_HOST_HOME:?set AUTONOMY_HOST_HOME to the operator home dir (host terminals require it)}/.claude/projects
-        target: ${AUTONOMY_HOST_HOME}/.claude/projects
+        source: ${AUTONOMY_HOST_HOME:?set AUTONOMY_HOST_HOME to the operator home dir (the host terminal requires it)}
+        target: /host-home
         read_only: true
         bind:
-          create_host_path: true
+          create_host_path: false
       # The operator's harness sign-ins, read-only at their own paths, so the
       # Getting Started scan (graph credentials import, design of record
       # graph://5f2f5a49-00d v12 FR7a) sees the well-known locations on a

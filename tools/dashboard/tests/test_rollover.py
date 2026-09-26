@@ -464,11 +464,8 @@ class TestHostMtimeProhibition:
 
         Expected: GREEN — _resolve_jsonl_in_dir is gone, only valid paths remain.
         """
-        # Valid path 1: .meta.json match — _resolve_host_jsonl
+        # Valid path: IN_CREATE + parentUuid chain — _handle_host_create
         monitor = SessionMonitor()
-        assert hasattr(monitor, "_resolve_host_jsonl")
-
-        # Valid path 2: IN_CREATE + parentUuid chain — _handle_host_create
         assert hasattr(monitor, "_handle_host_create")
 
         # Invalid path: mtime-based resolution — removed

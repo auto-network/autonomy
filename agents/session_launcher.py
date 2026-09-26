@@ -1610,6 +1610,7 @@ def launch_session(
     network_host: bool = True,
     capabilities: tuple = (),
     host_terminal: bool = False,
+    claude_alias: str | None = None,
 ) -> str | None:
     """Launch an agent container session.
 
@@ -1682,6 +1683,8 @@ def launch_session(
                     local-operator session token (org None). Raises
                     RuntimeError when the socket or AUTONOMY_HOST_HOME is
                     missing.
+        claude_alias: Prefer this Claude account (by alias) when resolving
+                    credentials; the usual pick otherwise.
 
     Returns:
         detach=True:  container_id string on success, None on failure.
@@ -1758,7 +1761,8 @@ def launch_session(
     auth_args: list[str] = []
     creds: dict | None = None
     if harness == "claude":
-        creds = _resolve_credentials()
+        creds = (_resolve_credentials(prefer_alias=claude_alias) if claude_alias
+                 else _resolve_credentials())
         _lap("resolve_credentials")
         if creds is None:
             print(

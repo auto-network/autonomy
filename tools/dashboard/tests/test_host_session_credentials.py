@@ -1,46 +1,13 @@
-"""A host terminal picks an account, the same way a container session does.
-
-Its command used to set two environment variables and run ``claude``, with no
-credential resolved at all — so the binary fell back to whatever sat in
-``~/.claude``. That is one account, permanently. When it reaches its weekly
-ceiling the host terminal cannot start, while other installed accounts sit
-unused and the picker that would have chosen one is never consulted.
-"""
+"""The host terminal's account: picked like a container session's, and
+bootstrapped once from the operator's own sign-in under /host-home
+(graph://89d3c8df-544 §3, driver S3; auto-87rmr)."""
 from __future__ import annotations
 
-import re
+from types import SimpleNamespace
 
 import pytest
 
 from agents import session_launcher
-
-
-HOST_CMD_TEMPLATE = (
-    "CLAUDE_CODE_OAUTH_TOKEN={token} "
-    "BD_ACTOR=terminal:{tmux} AUTONOMY_SESSION={tmux} "
-    "claude --dangerously-skip-permissions --model {model}"
-)
-
-
-def _host_cmd(token: str, tmux: str = "host-0101-000000", model: str = "opus") -> str:
-    """The command the handler builds, kept in one place for the assertions."""
-    import shlex
-    return HOST_CMD_TEMPLATE.format(
-        token=shlex.quote(token), tmux=tmux, model=model)
-
-
-def test_the_command_carries_the_resolved_account(monkeypatch):
-    monkeypatch.setattr(
-        session_launcher, "_resolve_credentials_via_substrate",
-        lambda **kw: {"type": "token", "token": "tok-from-pool", "alias": "gmail"},
-    )
-    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-
-    creds = session_launcher._resolve_credentials(prefer_alias=None)
-    cmd = _host_cmd(creds["token"])
-
-    assert "CLAUDE_CODE_OAUTH_TOKEN=tok-from-pool" in cmd
-    assert cmd.index("CLAUDE_CODE_OAUTH_TOKEN") < cmd.index("claude ")
 
 
 def test_an_alias_steers_the_choice(monkeypatch):
@@ -59,18 +26,7 @@ def test_an_alias_steers_the_choice(monkeypatch):
     assert seen["alias"] == "auto-network"
 
 
-def test_a_token_needing_quoting_survives_the_shell():
-    """The command is a shell string, so the value has to be quoted."""
-    cmd = _host_cmd("tok with space;rm -rf /")
-
-    assert "; rm" not in cmd and ";rm -rf /" not in cmd.split("BD_ACTOR")[0].replace(
-        "'tok with space;rm -rf /'", "")
-    assert re.search(r"CLAUDE_CODE_OAUTH_TOKEN='[^']*'", cmd)
-
-
-def test_no_installed_account_is_a_refusal_not_a_silent_start(monkeypatch):
-    """Starting a terminal that cannot authenticate wastes the operator's
-    time twice: once waiting, once diagnosing."""
+def test_no_installed_account_resolves_to_none(monkeypatch):
     monkeypatch.setattr(
         session_launcher, "_resolve_credentials_via_substrate",
         lambda **kw: None,
@@ -89,32 +45,143 @@ def test_an_operator_override_still_wins(monkeypatch):
     assert creds == {"type": "token", "token": "operator-override"}
 
 
-def test_a_restarted_host_session_keeps_a_live_local_operator_token(tmp_path):
-    """A host session reaches the dashboard over HTTP and needs a bearer. The
-    token used to be minted into the resume command at request time; a restart
-    then ran its stop step, whose deregister revokes every token for the name,
-    and the relaunched session came up holding a token revoked 72 ms after it
-    was minted (host-0916-103518, 2026-09-23). The resume command must carry no
-    token, and the one the launch worker mints after the stop must stay live
-    and org-less (a local operator)."""
-    import hashlib
-    import re as _re
+# ── api_session_create, type host ─────────────────────────────────────────
+
+
+class _Request:
+    def __init__(self, body):
+        self._body = body
+
+    async def json(self):
+        return self._body
+
+
+@pytest.fixture
+def host_create(monkeypatch):
+    """Drive api_session_create's host branch with every side effect stubbed;
+    returns the recorded calls."""
+    from tools.dashboard import server
+    from tools.graph import credential_import
+
+    calls = {"resolve": [], "import": [], "pending": [], "jobs": []}
+    state = {"rows": []}
+
+    def fake_resolve(*, prefer_alias=None):
+        calls["resolve"].append(prefer_alias)
+        return state["rows"].pop(0) if state["rows"] else None
+
+    def fake_import(home, **kwargs):
+        calls["import"].append(home)
+        return credential_import.ImportReport()
+
+    async def fake_pending(tmux_name, **kwargs):
+        calls["pending"].append((tmux_name, kwargs))
+
+    monkeypatch.setattr(session_launcher, "_resolve_credentials", fake_resolve)
+    monkeypatch.setattr(credential_import, "run_import", fake_import)
+    monkeypatch.setattr(server.dashboard_db, "session_exists", lambda _name: False)
+    monkeypatch.setattr(server.session_trace, "trace", lambda *a, **kw: None)
+    monkeypatch.setattr(server.session_monitor, "register_pending", fake_pending)
+    monkeypatch.setattr(server, "_resolve_host_session_model", lambda: "claude-opus-5-5")
+    monkeypatch.setattr(server, "_render_host_orientation", lambda **kw: "welcome")
+    monkeypatch.setattr(
+        server, "_SESSION_LIFECYCLE_WORKER",
+        SimpleNamespace(try_enqueue=lambda job: calls["jobs"].append(job) or True),
+    )
+    return server, calls, state
+
+
+@pytest.mark.asyncio
+async def test_host_create_bootstraps_from_the_operator_home_once(host_create):
+    server, calls, state = host_create
+    # No row before the import; one vault account after it.
+    state["rows"] = [None, {"type": "vault", "harness_token": "acct-1", "alias": "me"}]
+
+    resp = await server.api_session_create(_Request({"type": "host"}))
+
+    assert resp.status_code == 202
+    assert calls["import"] == ["/host-home"]
+    tmux_name, pending = calls["pending"][0]
+    assert tmux_name.startswith("host-")
+    assert pending["session_type"] == "host"
+    assert pending["project"] == "host"
+    assert pending["harness_token"] == "acct-1"
+    job = calls["jobs"][0]
+    assert job.config["kind"] == "host"
+    assert job.config["first_message"] == "welcome"
+    assert job.config["register_project"] == "host"
+    assert "host_cmd" not in job.config
+
+
+@pytest.mark.asyncio
+async def test_host_create_accepts_a_vault_account_without_import(host_create):
+    server, calls, state = host_create
+    state["rows"] = [{"type": "vault", "harness_token": "acct-2", "alias": "work"}]
+
+    resp = await server.api_session_create(_Request({"type": "host", "alias": "work"}))
+
+    assert resp.status_code == 202
+    assert calls["import"] == []
+    assert calls["resolve"] == ["work"]
+    assert calls["jobs"][0].config["claude_alias"] == "work"
+
+
+@pytest.mark.asyncio
+async def test_host_create_with_no_credential_anywhere_names_the_file(host_create):
+    server, calls, state = host_create
+    state["rows"] = []
+
+    resp = await server.api_session_create(_Request({"type": "host"}))
+
+    assert resp.status_code == 503
+    assert b"/host-home/.claude/.credentials.json" in resp.body
+    assert calls["import"] == ["/host-home"]
+    assert calls["jobs"] == []
+
+
+def test_host_relaunch_config_carries_no_command_or_token(tmp_path):
+    """Retry and restart rebuild a host terminal from its row: the worker
+    launches it through the launcher, which mints the token after the
+    restart's stop step revoked the old one (host-0916-103518)."""
+    import asyncio
 
     from tools.dashboard import server
-    from tools.dashboard.dao import auth_db
 
-    auth_db.init_db(tmp_path / "auth.db")
-    name = "host-0000-000000"
+    transcript = tmp_path / "agent-runs" / "host-1-20260926" / "sessions" / "-workspace-repo" / "u.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text("{}\n")
+    loop = asyncio.new_event_loop()
+    try:
+        config, error = server._build_session_relaunch_config(
+            {"tmux_name": "host-1", "type": "host", "harness": "claude",
+             "session_uuid": "u", "jsonl_path": str(transcript), "project": "host"},
+            attempt=2, event_loop=loop,
+        )
+    finally:
+        loop.close()
+    assert error is None
+    assert config["kind"] == "host"
+    assert config["output_dir"] == str(transcript.parents[2])
+    assert "host_cmd" not in config
+    assert "CROSSTALK" not in repr(config)
 
-    cmd = server._build_host_resume_cmd(
-        tmux_name=name, harness="claude", model="opus", session_uuid="feed",
-    )
-    assert "CROSSTALK_TOKEN=" not in cmd, "request-time command must not mint"
 
-    auth_db.revoke_token(name)  # the restart's stop step (deregister)
-    prefix = server._mint_host_session_token(name)  # the launch worker
-    m = _re.search(r"CROSSTALK_TOKEN=(\S+)", prefix)
-    assert m, prefix
-    raw = m.group(1).strip("'")
-    resolved = auth_db.resolve_token(hashlib.sha256(raw.encode()).hexdigest())
-    assert resolved == (name, None), "launch-minted token must be live and org-less"
+def test_native_host_row_is_not_resumed_inside_the_node(tmp_path):
+    import asyncio
+
+    from tools.dashboard import server
+
+    transcript = tmp_path / ".claude" / "projects" / "-opt-autonomy-code" / "u.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text("{}\n")
+    loop = asyncio.new_event_loop()
+    try:
+        config, error = server._build_session_relaunch_config(
+            {"tmux_name": "host-old", "type": "host", "harness": "claude",
+             "session_uuid": "u", "jsonl_path": str(transcript)},
+            attempt=2, event_loop=loop,
+        )
+    finally:
+        loop.close()
+    assert config is None
+    assert "outside the node" in error

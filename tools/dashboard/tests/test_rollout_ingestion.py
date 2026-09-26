@@ -697,36 +697,6 @@ async def test_composer_ready_survives_concurrent_poller_write(env):
 
 
 @pytest.mark.asyncio
-async def test_b1_host_row_never_adopts_shared_dir_file(env):
-    """B1: ambient observation of a HOST row's shared directory has no
-    ownership evidence — an unlinked host row must NOT first-resolve onto
-    a sibling file, and no track may even be created for it (per-tick
-    churn over years of project history)."""
-    shared = env.tmp_path / "projects" / "-workspace-repo"
-    shared.mkdir(parents=True)
-    foreign = shared / "11111111-2222-3333-4444-555555555555.jsonl"
-    foreign.write_text(json.dumps({
-        "type": "assistant",
-        "message": {"content": [{"type": "text", "text": "someone else's session"}]},
-        "uuid": "m1", "parentUuid": None,
-    }) + "\n")
-    env.db.insert_session(
-        tmux_name="host-victim", session_type="host", project="-workspace-repo",
-        harness="claude", resolution_dir=str(shared),
-    )
-    mon = env.make_monitor()
-    await mon.reconciliation_tick()
-    await _settle(mon)
-
-    row = _db_row(env.db_path, "host-victim")
-    assert row["jsonl_path"] is None, "host row adopted a foreign file"
-    assert ("host-victim", str(foreign)) not in mon._tracks, (
-        "no track may be created for a non-owned shared-dir file"
-    )
-    assert env.bus.message_texts("host-victim") == []
-
-
-@pytest.mark.asyncio
 async def test_b2_inode_watch_shared_by_two_tracks_survives_single_release(env):
     """B2/D3: two tracks on one inode subscribe to ONE watch entry;
     releasing one subscriber never drops the other's watch, and the last
@@ -909,51 +879,6 @@ async def test_b5_teardown_purges_tracks_gates_and_watches(env):
     if gate is not None:
         mon.request_drain(name)
         assert not gate.busy and not gate.needs_drain
-
-
-@pytest.mark.asyncio
-async def test_b6_quiet_host_burst_becomes_visible_without_further_write(env):
-    """B6: the host launch watcher activates through the unified machine —
-    a burst already on disk persists offset/count/last_message with NO
-    further write, the generation is stamped atomically with the link,
-    and no linked-but-zero registry broadcast precedes the drain."""
-    name = "host-quiet"
-    projects = env.tmp_path / "projects" / "-workspace-repo"
-    projects.mkdir(parents=True)
-    env.db.insert_session(
-        tmux_name=name, session_type="host", project="-workspace-repo",
-        harness="claude", resolution_dir=str(projects),
-    )
-    mon = env.make_monitor()
-    from tools.dashboard import session_harness as sh
-    watcher = asyncio.create_task(
-        sh._watch_for_claude_host_jsonl(mon, projects, name, timeout=5.0),
-    )
-    await asyncio.sleep(0.6)   # watcher snapshots the (empty) dir
-    burst = projects / "99999999-8888-7777-6666-555555555555.jsonl"
-    burst.write_text(
-        json.dumps({"type": "user", "uuid": "u1", "parentUuid": None,
-                    "message": {"role": "user", "content": "host question"}}) + "\n"
-        + json.dumps({"type": "assistant", "uuid": "a1",
-                      "message": {"role": "assistant", "content": [
-                          {"type": "text", "text": "host burst answer text"}]}}) + "\n"
-    )
-    await watcher
-    await _settle(mon, rounds=20)
-
-    row = _db_row(env.db_path, name)
-    assert row["jsonl_path"] == str(burst)
-    assert row["jsonl_generation"], "generation must be stamped with the link"
-    assert row["file_offset"] == burst.stat().st_size, (
-        "the burst must persist with no further write"
-    )
-    assert row["entry_count"] == 2
-    assert "host burst answer" in (row["last_message"] or "")
-    # No linked-but-zero registry broadcast before the burst published.
-    # (Round 2: the original loop keyed rows by 'tmux_name'/'jsonl_path'
-    # — keys registry rows don't have — and was vacuous; both reviewers
-    # found it. Rewritten against session_id/resolved/entry_count.)
-    _assert_registry_publishes_after_drain(env.bus, name)
 
 
 @pytest.mark.asyncio
@@ -1268,58 +1193,6 @@ def _assert_registry_publishes_after_drain(bus, name) -> None:
         f"expected exactly one post-drain resolved registry row, "
         f"got {len(post_drain)}"
     )
-
-
-@pytest.mark.asyncio
-async def test_r3_active_server_host_watcher_quiet_burst(env, monkeypatch):
-    """R3 (the discriminating host-activation pin): the ACTIVE
-    fingerprint-matching server._watch_for_host_session_jsonl links with a
-    derived generation, drains the burst already on disk with NO further
-    write, and never broadcasts a resolved-with-zero-entries registry row."""
-    from tools.dashboard import server as server_mod
-
-    name = "host-server-quiet"
-    projects = env.tmp_path / "projects" / "-workspace-repo"
-    projects.mkdir(parents=True)
-    env.db.insert_session(
-        tmux_name=name, session_type="host", project="-workspace-repo",
-        harness="claude", resolution_dir=str(projects),
-    )
-    mon = env.make_monitor()
-    monkeypatch.setattr(server_mod, "session_monitor", mon)
-    import subprocess as _sp
-    monkeypatch.setattr(
-        _sp, "run",
-        lambda *a, **kw: type("R", (), {"returncode": 1, "stdout": "", "stderr": ""})(),
-    )
-
-    watcher = asyncio.create_task(
-        server_mod._watch_for_host_session_jsonl(projects, name, timeout=5.0),
-    )
-    await asyncio.sleep(0.6)
-    burst = projects / "99999999-8888-7777-6666-555555555555.jsonl"
-    burst.write_text(
-        json.dumps({"type": "user", "uuid": "u1", "parentUuid": None,
-                    "message": {"role": "user",
-                                "content": f"orientation for {name}"}}) + "\n"
-        + json.dumps({"type": "assistant", "uuid": "a1",
-                      "message": {"role": "assistant", "content": [
-                          {"type": "text",
-                           "text": "server watcher burst answer"}]}}) + "\n"
-    )
-    await watcher
-    await _settle(mon, rounds=20)
-
-    row = _db_row(env.db_path, name)
-    st = burst.stat()
-    assert row["jsonl_path"] == str(burst)
-    assert row["jsonl_generation"].startswith(f"{st.st_dev}:{st.st_ino}:")
-    assert row["file_offset"] == st.st_size, (
-        "burst must persist with no further write"
-    )
-    assert row["entry_count"] == 2
-    assert "server watcher burst" in (row["last_message"] or "")
-    _assert_registry_publishes_after_drain(env.bus, name)
 
 
 @pytest.mark.asyncio

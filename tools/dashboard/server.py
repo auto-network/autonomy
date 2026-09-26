@@ -4065,24 +4065,6 @@ async def api_terminals(request):
             result.append({"id": name, "alive": True, **info})
     return JSONResponse(result)
 
-def _host_form(s: str) -> str:
-    """Render a string containing this process's paths in HOST paths.
-
-    A containerized node sees the repo at /app and its home at
-    /home/autonomy; the host tmux server that forks host sessions sees
-    neither. The entrypoint exports AUTONOMY_HOST_ROOT (=<data root>/code)
-    and AUTONOMY_HOST_HOME for exactly this translation — the launch-side
-    twin of tools/graph/ingest.py's ingest-side rewrites. Native runs have
-    neither var set and this is the identity function.
-    """
-    for env_key, src in (("AUTONOMY_HOST_ROOT", str(_REPO_ROOT)),
-                         ("AUTONOMY_HOST_HOME", str(Path.home()))):
-        dst = os.environ.get(env_key)
-        if dst and dst != src:
-            s = s.replace(src, dst)
-    return s
-
-
 async def api_terminal_kill(request):
     """Stop a terminal session via the lifecycle worker.
 
@@ -6919,12 +6901,9 @@ async def api_session_tail(request):
         )
 
     file_size = session_file.stat().st_size
-    # Determine session type from resolved path
-    home_projects = (
-        Path(os.environ.get("AUTONOMY_HOST_HOME") or Path.home())
-        / ".claude" / "projects"
-    )
-    session_type = "host" if session_file.is_relative_to(home_projects) else "container"
+    # The row says what kind of session this is; a host terminal's
+    # transcript lives in its run dir like every container session's.
+    session_type = "host" if (db_row or {}).get("type") == "host" else "container"
 
     # Liveness from DB — the one state column decides
     is_live = (
@@ -7663,11 +7642,11 @@ async def api_session_output(request):
     if _session_hidden_cross_org(request, dashboard_db.get_session(tmux_name)):
         return JSONResponse({"error": "session run dir not found"}, status_code=404)
 
-    # Candidate base dirs, newest-first. Container sessions resolve under
-    # their data/agent-runs/<name>-<ts>/ run dir(s); host (terminal) sessions
-    # have no run dir, so their uploads live under data/host-uploads/<name>/.
-    # Both are searched the same way (resolve + re-check containment) so the
-    # viewer tile serves identically regardless of session kind.
+    # Candidate base dirs, newest-first. Every session resolves under its
+    # data/agent-runs/<name>-<ts>/ run dir(s). Pre-cutover native host
+    # sessions had no run dir; their uploads stay readable under
+    # data/host-uploads/<name>/, searched the same way (resolve + re-check
+    # containment) so their historical tiles still serve.
     base_dirs = []
     if AGENT_RUNS_DIR.exists():
         base_dirs.extend(sorted(
@@ -9460,7 +9439,7 @@ def _register_resumed_session_from_worker(
 def _render_host_orientation(
     *, tmux_name: str, resumed: bool = False,
 ) -> str | None:
-    """Render the personal Settings-backed welcome for a native host session."""
+    """Render the personal Settings-backed welcome for the host terminal."""
     from tools.dashboard.session_orientation import render_orientation
 
     return render_orientation(
@@ -9561,7 +9540,13 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
         launch_deadline = time.monotonic() + _LIFECYCLE_LAUNCHING_TIMEOUT_S
 
         if kind == "host":
-            cmd_str = _mint_host_session_token(tmux_name) + cfg["host_cmd"]
+            cmd_str = _host_terminal_command(
+                tmux_name=tmux_name,
+                run_dir=run_dir,
+                harness=cfg.get("harness"),
+                model=cfg.get("model"),
+                resume_uuid=cfg["resume_uuid"],
+            )
         elif kind == "project":
             meta: dict = {
                 "tmux_session": tmux_name,
@@ -9638,25 +9623,8 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
 
         tmux_cmd = [
             "tmux", "new-session", "-d", "-s", tmux_name, "-x", "120", "-y", "40",
+            cmd_str,
         ]
-        if kind == "host":
-            # Host sessions are forked by the HOST tmux server, so every
-            # path in the command must be a HOST path. A containerized
-            # dashboard builds them from its own view (/app…) — proven
-            # fatal 2026-08-31: the host has no /app, the command dies
-            # instantly and the launch times out. _host_form() is the
-            # identity when running natively.
-            tmux_cmd += ["-c", _host_form(str(_REPO_ROOT))]
-            cmd_str = _host_form(cmd_str)
-            # tmux seeds a new session's environment from the CLIENT. From
-            # a containerized dashboard that's the container's env, whose
-            # bare PATH has no claude — proven 2026-08-31 (trial probe:
-            # NO-CLAUDE, PATH=/usr/local/bin:…). A login shell rebuilds the
-            # operator's real environment from the HOST's own profile, so
-            # the host environment always comes from the host, never from
-            # whichever client asked for the session.
-            cmd_str = "bash -lc " + shlex.quote(cmd_str)
-        tmux_cmd.append(cmd_str)
         result = subprocess.run(
             tmux_cmd,
             env={**os.environ, "TERM": "xterm-256color"},
@@ -9676,13 +9644,12 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
                 capture_output=True,
                 timeout=_remaining_step_timeout(launch_deadline, "launching"),
             )
-        if kind != "host":
-            # Fail fast if docker produced no container (bad mount / OCI init
-            # error): the tmux spawn alone proves nothing.
-            _verify_container_started(
-                tmux_name=tmux_name,
-                deadline=time.monotonic() + 20,
-            )
+        # Fail fast if docker produced no container (bad mount / OCI init
+        # error): the tmux spawn alone proves nothing.
+        _verify_container_started(
+            tmux_name=tmux_name,
+            deadline=time.monotonic() + 20,
+        )
 
         phase = "setup"
         writer.set_state(tmux_name, "setup")
@@ -9743,13 +9710,11 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
 
 def _run_simple_session_start(job: LifecycleJob, writer: SessionLifecycleStateWriter) -> None:
     """Worker-thread launch for the non-workspace creates: generic
-    ``autonomy-session-platform`` containers and host sessions.
+    ``autonomy-session-platform`` containers and host terminals.
 
     No worktree prep and no startup script — the step list is launching →
-    register → waiting_ready → injecting → running. The host first message
-    is also the fingerprint _watch_for_host_session_jsonl (spawned by the
-    API handler) matches to link the JSONL, so injection stays
-    echo-verified here like every other kind.
+    register → waiting_ready → injecting → running. A host terminal is a
+    container like the rest; only its launch profile differs.
     """
     tmux_name = job.tmux_name
     cfg = job.config
@@ -9765,14 +9730,18 @@ def _run_simple_session_start(job: LifecycleJob, writer: SessionLifecycleStateWr
         writer.set_state(tmux_name, "launching")
         launch_deadline = time.monotonic() + _LIFECYCLE_LAUNCHING_TIMEOUT_S
 
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        run_dir = DATA_ROOT / "agent-runs" / f"{tmux_name}-{ts}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        sess_dir = run_dir / "sessions"
         if kind == "host":
-            cmd_str = _mint_host_session_token(tmux_name) + cfg["host_cmd"]
-            sess_dir = None
+            cmd_str = _host_terminal_command(
+                tmux_name=tmux_name,
+                run_dir=run_dir,
+                model=cfg.get("model"),
+                claude_alias=cfg.get("claude_alias"),
+            )
         else:
-            ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-            run_dir = DATA_ROOT / "agent-runs" / f"{tmux_name}-{ts}"
-            run_dir.mkdir(parents=True, exist_ok=True)
-            sess_dir = run_dir / "sessions"
             cmd_str = launch_session(
                 session_type="terminal",
                 name=tmux_name,
@@ -9789,25 +9758,8 @@ def _run_simple_session_start(job: LifecycleJob, writer: SessionLifecycleStateWr
 
         tmux_cmd = [
             "tmux", "new-session", "-d", "-s", tmux_name, "-x", "120", "-y", "40",
+            cmd_str,
         ]
-        if kind == "host":
-            # Host sessions are forked by the HOST tmux server, so every
-            # path in the command must be a HOST path. A containerized
-            # dashboard builds them from its own view (/app…) — proven
-            # fatal 2026-08-31: the host has no /app, the command dies
-            # instantly and the launch times out. _host_form() is the
-            # identity when running natively.
-            tmux_cmd += ["-c", _host_form(str(_REPO_ROOT))]
-            cmd_str = _host_form(cmd_str)
-            # tmux seeds a new session's environment from the CLIENT. From
-            # a containerized dashboard that's the container's env, whose
-            # bare PATH has no claude — proven 2026-08-31 (trial probe:
-            # NO-CLAUDE, PATH=/usr/local/bin:…). A login shell rebuilds the
-            # operator's real environment from the HOST's own profile, so
-            # the host environment always comes from the host, never from
-            # whichever client asked for the session.
-            cmd_str = "bash -lc " + shlex.quote(cmd_str)
-        tmux_cmd.append(cmd_str)
         result = subprocess.run(
             tmux_cmd,
             env={**os.environ, "TERM": "xterm-256color"},
@@ -9827,29 +9779,21 @@ def _run_simple_session_start(job: LifecycleJob, writer: SessionLifecycleStateWr
                 capture_output=True,
                 timeout=_remaining_step_timeout(launch_deadline, "launching"),
             )
-        if kind != "host":
-            # Fail fast if docker produced no container (bad mount / OCI init
-            # error): the tmux spawn alone proves nothing.
-            _verify_container_started(
-                tmux_name=tmux_name,
-                deadline=time.monotonic() + 20,
-            )
+        # Fail fast if docker produced no container (bad mount / OCI init
+        # error): the tmux spawn alone proves nothing.
+        _verify_container_started(
+            tmux_name=tmux_name,
+            deadline=time.monotonic() + 20,
+        )
 
         if loop is not None and loop.is_running():
-            if kind == "host":
-                coro = session_monitor.register(
-                    tmux_name=tmux_name,
-                    session_type="host",
-                    project=cfg.get("register_project") or "",
-                )
-            else:
-                coro = session_monitor.register(
-                    tmux_name=tmux_name,
-                    session_type="container",
-                    project=cfg.get("register_project") or "autonomy",
-                    jsonl_path=sess_dir,
-                    seed_message="Starting..." if not cfg.get("first_message_is_primer") else "",
-                )
+            coro = session_monitor.register(
+                tmux_name=tmux_name,
+                session_type="host" if kind == "host" else "container",
+                project=cfg.get("register_project") or "autonomy",
+                jsonl_path=sess_dir,
+                seed_message="Starting..." if not cfg.get("first_message_is_primer") else "",
+            )
             fut = asyncio.run_coroutine_threadsafe(coro, loop)
             fut.result(timeout=_LIFECYCLE_REGISTER_TIMEOUT_S)
 
@@ -10120,15 +10064,14 @@ async def api_session_create(request):
     Semantics:
       • `project` set → validate config, register a requested row, and enqueue
         the provisioning/container lifecycle worker job.
-      • `type == "host"` → start `claude --dangerously-skip-permissions` on
-        the host, then watch for its JSONL to appear.
+      • `type == "host"` → the operator's host terminal, a node session
+        container on the autonomy-host-terminal image.
       • neither → default `autonomy-session-platform` container session.
 
     Workspace project sessions return immediately after the lifecycle job is
     registered; progress is delivered via startup_state/SSE.  Non-workspace
     container sessions still wait for monitor tracking on the legacy path.
-    Host sessions return immediately — their JSONL is discovered
-    asynchronously by `_watch_for_host_session_jsonl`.
+    Host sessions return immediately, like workspace sessions.
     """
     body = {}
     try:
@@ -10177,7 +10120,6 @@ async def api_session_create(request):
 
     # ── Build the command to run inside tmux ───────────────────
     proj = None
-    host_project_folder: str | None = None
     if project_name:
         try:
             proj = workspace_settings.get_workspace(project_name)
@@ -10268,62 +10210,40 @@ async def api_session_create(request):
             "pending": True,
         }, status_code=202)
     elif session_type == "host":
+        # The host terminal is a node session container on the
+        # autonomy-host-terminal image (graph://89d3c8df-544 §3). Any
+        # launchable account will do — a vault account is written into the
+        # container like every other session's. With none, bootstrap once
+        # from the operator's own sign-in under the read-only /host-home.
         model = _resolve_host_session_model()
-
-        # Pick an account the same way a container session does. Without
-        # this the command inherits whatever the dashboard process happens
-        # to have, which in practice is the one credential sitting in
-        # ~/.claude -- so the host terminal uses a single account forever
-        # and dies with it when that account reaches its weekly ceiling,
-        # while other installed accounts sit unused.
+        alias = body.get("alias")
         from agents.session_launcher import _resolve_credentials
-        host_creds = _resolve_credentials(prefer_alias=body.get("alias"))
-        if host_creds is None or host_creds.get("type") != "token":
+        host_creds = _resolve_credentials(prefer_alias=alias)
+        if host_creds is None:
+            host_creds = await asyncio.to_thread(_bootstrap_host_credentials, alias)
+        if host_creds is None:
             return JSONResponse(
                 {"error": "no Claude account is installed to start a host "
-                          "terminal with — run `graph claude install`"},
+                          "terminal with, and none was found at "
+                          f"{HOST_HOME_MOUNT}/.claude/.credentials.json"},
                 status_code=503,
             )
 
-        # HOST form, not this process's view: the session runs on the host
-        # and Claude derives the transcript dir from the HOST cwd. A
-        # containerized dashboard's _REPO_ROOT is /app, which slugged to
-        # "-app" and made the JSONL watcher stare at a directory no host
-        # session ever writes (proven 2026-08-31: transcript landed in
-        # -opt-autonomy-code, auto-link never fired).
-        host_project_folder = _host_form(str(_REPO_ROOT)).replace("/", "-")
         await session_monitor.register_pending(
             tmux_name,
             session_type="host",
-            project=host_project_folder,
+            project="host",
             harness="claude",
-            # Which account this terminal is burning. A container session
-            # records this; a host one did not, so host sessions could never
-            # be attributed to an account — and the account that ran out was
-            # the one nothing could account for.
             harness_token=host_creds.get("harness_token"),
         )
-        host_cmd = (
-            f"GRAPH_API={_own_dashboard_url()} "
-            + f"CLAUDE_CODE_OAUTH_TOKEN={shlex.quote(host_creds['token'])} "
-            f"BD_ACTOR=terminal:{tmux_name} AUTONOMY_SESSION={tmux_name} "
-            f"claude --dangerously-skip-permissions --model {model}"
-        )
-        # The orientation message is both the agent's first turn AND the
-        # unique fingerprint _watch_for_host_session_jsonl matches to link
-        # the JSONL (a host Claude writes no JSONL until it gets input).
-        # render returning None means the operator disabled orientation —
-        # no injection, manual "Link Terminal" fallback covers it. Only a
-        # render CRASH falls back to a unique fingerprint line.
         try:
             first_message = _render_host_orientation(tmux_name=tmux_name)
         except Exception:
             logger.warning(
-                "api_session_create: host orientation render failed for %s; "
-                "falling back to a unique fingerprint line",
+                "api_session_create: host orientation render failed for %s",
                 tmux_name, exc_info=True,
             )
-            first_message = f"Session {tmux_name} started."
+            first_message = None
 
         job = LifecycleJob(
             "start",
@@ -10331,9 +10251,10 @@ async def api_session_create(request):
             {
                 "kind": "host",
                 "attempt": 1,
-                "host_cmd": host_cmd,
                 "harness": "claude",
-                "register_project": host_project_folder,
+                "model": model,
+                "claude_alias": alias,
+                "register_project": "host",
                 "first_message": first_message,
                 "event_loop": asyncio.get_running_loop(),
             },
@@ -10347,16 +10268,6 @@ async def api_session_create(request):
                 {"error": reason, "tmux_name": tmux_name, "retryable": True},
                 status_code=503,
             )
-        # HOST home, not this process's: host transcripts live under the
-        # operator's ~/.claude/projects (mounted read-only at the identical
-        # path in a containerized dashboard — see docker-compose.yml).
-        projects_dir = (
-            Path(_host_form(str(Path.home())))
-            / ".claude" / "projects" / host_project_folder
-        )
-        asyncio.create_task(
-            _watch_for_host_session_jsonl(projects_dir, tmux_name, timeout=120.0),
-        )
         _trace("queued", kind="host")
         logger.info("phase-trace: response-ready  tmux=%s  dt_from_post_ms=%d  queued=1",
                     tmux_name, int((time.monotonic() - _phase_t0) * 1000))
@@ -10494,72 +10405,88 @@ def _own_dashboard_url() -> str:
     return _OWN_DASHBOARD_URL
 
 
-def _mint_host_session_token(tmux_name: str) -> str:
-    """Mint an org-less local-operator session token for a host session and
-    return the ``CROSSTALK_TOKEN=...`` shell prefix that delivers it.
-
-    A host session IS a local operator — its session row is type ``host``, so
-    :func:`_is_local_caller` classifies its token as ``LOCAL_SESSION`` with
-    full authority — but it reaches the dashboard over HTTP with no bearer, so
-    the authenticated-reader guards refuse it. Minting a bearer (org ``None``,
-    the deliberate local value :func:`authenticate_session_request` requires
-    for a host session) lets the host CLI authenticate exactly as a container
-    does, granting it no org's scope in the process.
-    """
-    import secrets
-
-    raw_token = secrets.token_urlsafe(32)
-    token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
-    auth_db.insert_token(token_hash, tmux_name, None)
-    return f"CROSSTALK_TOKEN={shlex.quote(raw_token)} "
+#: Where the operator's home is mounted read-only in the dashboard and the
+#: host terminal (docker-compose.yml; graph://89d3c8df-544 §3).
+HOST_HOME_MOUNT = "/host-home"
 
 
-def _build_host_resume_cmd(
+def _bootstrap_host_credentials(alias: str | None) -> dict | None:
+    """Import the operator's own Claude sign-in from the read-only home mount,
+    once, and resolve again. None when the home holds no usable credential."""
+    from agents.session_launcher import _resolve_credentials
+    from tools.graph import credential_import
+
+    try:
+        report = credential_import.run_import(home=HOST_HOME_MOUNT)
+        logger.info(
+            "host terminal: credential bootstrap from %s: %s",
+            HOST_HOME_MOUNT, credential_import.report_to_dict(report),
+        )
+    except Exception:
+        logger.warning(
+            "host terminal: credential bootstrap from %s failed",
+            HOST_HOME_MOUNT, exc_info=True,
+        )
+        return None
+    return _resolve_credentials(prefer_alias=alias)
+
+
+def _host_terminal_command(
     *,
     tmux_name: str,
-    harness: str,
-    model: str | None,
-    session_uuid: str,
-) -> str:
-    """Shell command that relaunches a host session's own harness CLI."""
-    # No CROSSTALK_TOKEN here: this command is built at request time, and a
-    # restart then runs its stop step, whose deregister revokes every token for
-    # the name — including one minted here. The launch worker mints it instead.
-    env_prefix = (
-        f"GRAPH_API={_own_dashboard_url()} "
-        + f"BD_ACTOR=terminal:{tmux_name} AUTONOMY_SESSION={tmux_name} "
+    run_dir: Path,
+    harness: str | None = None,
+    model: str | None = None,
+    claude_alias: str | None = None,
+    resume_uuid: str | None = None,
+) -> str | None:
+    """The docker command for the operator's host terminal: a node session
+    container launched through the launcher's host-terminal profile, primed
+    by the rendered host primer (graph://89d3c8df-544 §3-4)."""
+    from agents.primer_renderer import render_host_terminal_primer
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    primer_path = run_dir / ".claude_md"
+    primer_path.write_text(render_host_terminal_primer())
+    return launch_session(
+        session_type="terminal",
+        name=tmux_name,
+        prompt=None,
+        detach=False,
+        host_terminal=True,
+        # type "host" in .session_meta.json keeps a reseeded row a host row
+        # (session_monitor seeds the row type from it), and with it the
+        # local-operator authority.
+        metadata={"tmux_session": tmux_name, "org": "personal", "type": "host"},
+        harness=harness or "claude",
+        model=model,
+        output_dir=str(run_dir),
+        global_claude_md=primer_path,
+        resume_uuid=resume_uuid,
+        claude_alias=claude_alias,
     )
-    if harness == "codex":
-        # session_uuid is the rollout filename stem; codex resume needs
-        # the canonical UUID tail (same extraction the launcher uses).
-        m = re.search(
-            r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
-            session_uuid,
-        )
-        codex_uuid = m.group(1) if m else session_uuid
-        model_flag = f"--model {shlex.quote(model)} " if model else ""
-        return (
-            env_prefix
-            + "codex --no-alt-screen --dangerously-bypass-approvals-and-sandbox "
-            + model_flag
-            + f"resume {shlex.quote(codex_uuid)}"
-        )
-    if harness == "grok":
-        # session_uuid is the Grok session directory name (the session UUID).
-        from agents.session_launcher import grok_resume_id
-        model_flag = f"-m {shlex.quote(model)} " if model else ""
-        return (
-            env_prefix
-            + "grok --trust --always-approve --no-alt-screen "
-            + model_flag
-            + f"--resume {shlex.quote(grok_resume_id(session_uuid))}"
-        )
-    resolved_model = model or _resolve_host_session_model()
-    return (
-        env_prefix
-        + "claude --dangerously-skip-permissions "
-        + f"--model {shlex.quote(resolved_model)} --resume {shlex.quote(session_uuid)}"
-    )
+
+
+#: A host terminal resumes only from a transcript the node holds: one under a
+#: run directory's ``sessions/``. A pre-cutover native host transcript lives
+#: in the operator's own ~/.claude/projects, outside every node volume.
+_NATIVE_HOST_RESUME_REFUSAL = (
+    "session '{tmux_name}' is a native host session whose transcript is "
+    "outside the node; host terminals now run inside the node and cannot "
+    "resume it — start a new host terminal"
+)
+
+
+def _session_output_root(jsonl_path: Path) -> Path | None:
+    """The ``sessions`` directory a session transcript lives under, or None.
+
+    Claude: ``<run>/sessions/<project>/<uuid>.jsonl``; Codex:
+    ``<run>/sessions/YYYY/MM/DD/<file>.jsonl``.
+    """
+    root = jsonl_path
+    while root.parent != root and root.name != "sessions":
+        root = root.parent
+    return root if root.name == "sessions" else None
 
 
 def _build_session_relaunch_config(
@@ -10599,17 +10526,13 @@ def _build_session_relaunch_config(
 
     if session_uuid and jsonl_path:
         if session_type == "host":
+            sessions_root = _session_output_root(Path(jsonl_path))
+            if sessions_root is None:
+                return None, _NATIVE_HOST_RESUME_REFUSAL.format(tmux_name=tmux_name)
             kind = "host"
-            output_dir = None
-            host_cmd = _build_host_resume_cmd(
-                tmux_name=tmux_name,
-                harness=harness,
-                model=model,
-                session_uuid=session_uuid,
-            )
+            output_dir = str(sessions_root.parent)
         else:
             kind = "project" if proj is not None else "container"
-            host_cmd = None
             output_root = Path(jsonl_path)
             while output_root.parent != output_root and output_root.name != "sessions":
                 output_root = output_root.parent
@@ -10627,7 +10550,6 @@ def _build_session_relaunch_config(
             "harness": harness,
             "model": model,
             "revived": True,
-            "host_cmd": host_cmd,
             "session_type": session_type,
             "register_project": project or "autonomy",
             "event_loop": event_loop,
@@ -10645,17 +10567,12 @@ def _build_session_relaunch_config(
         }, None
 
     if session_type == "host":
-        env_prefix = f"BD_ACTOR=terminal:{tmux_name} AUTONOMY_SESSION={tmux_name} "
         return {
             "kind": "host",
             "attempt": attempt,
-            "host_cmd": (
-                env_prefix
-                + "claude --dangerously-skip-permissions "
-                + f"--model {_resolve_host_session_model()}"
-            ),
             "harness": "claude",
-            "register_project": project or str(_REPO_ROOT).replace("/", "-"),
+            "model": _resolve_host_session_model(),
+            "register_project": "host",
             "first_message": _render_host_orientation(tmux_name=tmux_name),
             "event_loop": event_loop,
             "session_type": session_type,
@@ -10826,7 +10743,6 @@ async def api_session_resume(request):
     source_id = body.get("source_id")
     session_uuid = body.get("session_uuid")
     file_path = body.get("file_path")
-    session_type = None  # "container" or "host"
 
     # ── Resolve from graph source metadata if source_id provided ──
     if source_id:
@@ -10914,13 +10830,18 @@ async def api_session_resume(request):
             status_code=404,
         )
 
-    # ── Determine session type ──
+    # ── Only a transcript the node holds can be resumed ──
+    # Every session, the host terminal included, writes under a run
+    # directory's sessions/. A transcript elsewhere is a pre-cutover native
+    # host session in the operator's own home, which no node container sees.
     agent_runs_dir = str(DATA_ROOT / "agent-runs")
-    if session_type is None:
-        if file_path.startswith(agent_runs_dir) or "/agent-runs/" in file_path:
-            session_type = "container"
-        else:
-            session_type = "host"
+    if not (file_path.startswith(agent_runs_dir) or "/agent-runs/" in file_path):
+        return JSONResponse(
+            {"error": "this transcript is outside the node (a native host "
+                      "session); host terminals now run inside the node and "
+                      "cannot resume it — start a new host terminal"},
+            status_code=409,
+        )
 
     # ── Guard: reject if session is already active ──
     live_session = dashboard_db.find_live_session(
@@ -10980,6 +10901,14 @@ async def api_session_resume(request):
     resume_harness_recorded = bool(resume_harness)
     resume_harness = resume_harness or "claude"
 
+    # The host terminal keeps its identity across resume: the dead row says
+    # so, or the name it was launched under (the `host-` prefix) does.
+    session_type = (
+        "host"
+        if (dead_session or {}).get("type") == "host" or tmux_name.startswith("host-")
+        else "container"
+    )
+
     # Keep the session's own model. Only a Claude session falls back to the
     # host default — never hand Codex a Claude model id (which is exactly
     # what _resolve_host_session_model() would have returned).
@@ -10995,14 +10924,15 @@ async def api_session_resume(request):
     if not model and resume_harness == "claude":
         model = _resolve_host_session_model()
 
+    # Derive output_dir (the run dir) by walking up to the "sessions" parent.
+    # Claude:  <run>/sessions/<uuid>/<file>.jsonl
+    # Codex:   <run>/sessions/YYYY/MM/DD/<file>.jsonl
+    _od = jsonl_path
+    while _od.parent != _od and _od.name != "sessions":
+        _od = _od.parent
+    output_dir = str(_od.parent)
+
     if session_type == "container":
-        # Derive output_dir (the run dir) by walking up to the "sessions" parent.
-        # Claude:  <run>/sessions/<uuid>/<file>.jsonl
-        # Codex:   <run>/sessions/YYYY/MM/DD/<file>.jsonl
-        _od = jsonl_path
-        while _od.parent != _od and _od.name != "sessions":
-            _od = _od.parent
-        output_dir = str(_od.parent)
 
         # If this was a workspace (project-scoped) session, resume with the
         # same image, mounts, and env.  dashboard.db.project stores the
@@ -11051,19 +10981,8 @@ async def api_session_resume(request):
         # Everything blocking (git worktree prep, credential resolution,
         # docker command build, tmux spawn) runs on the lifecycle worker.
         kind = "project" if proj_for_resume is not None else "container"
-        host_cmd = None
     else:
-        # Host session: relaunch the SAME harness CLI on the host. Hardcoding
-        # ``claude`` here meant resuming a host Codex session ran the wrong
-        # CLI against a codex rollout it can't read.
         kind = "host"
-        host_cmd = _build_host_resume_cmd(
-            tmux_name=tmux_name,
-            harness=resume_harness,
-            model=model,
-            session_uuid=session_uuid,
-        )
-        output_dir = None
 
     # ── Revive/seed the row, arm the FSM, enqueue the relaunch ──
     # Everything blocking (worktree prep, credential resolution, docker
@@ -11078,7 +10997,7 @@ async def api_session_resume(request):
     register_project = (
         proj_for_resume.id if (session_type == "container" and proj_for_resume is not None)
         else ((dead_session or {}).get("project")
-              or (str(_REPO_ROOT).replace("/", "-") if session_type == "host" else "autonomy"))
+              or ("host" if session_type == "host" else "autonomy"))
     )
     await session_monitor.register_pending(
         tmux_name,
@@ -11103,7 +11022,6 @@ async def api_session_resume(request):
             "harness": resume_harness,
             "model": model,
             "revived": bool(dead_session),
-            "host_cmd": host_cmd,
             "session_type": session_type,
             "register_project": register_project,
             "event_loop": asyncio.get_running_loop(),
@@ -11221,23 +11139,10 @@ async def api_upload(request):
         if run_dirs:
             target_dir = run_dirs[0] / ".uploads"
         else:
-            # Host (terminal) sessions run on the host filesystem, not in a
-            # container, so they never have a data/agent-runs/<name>-* run
-            # dir — uploading to one used to 404 ("no run dir"). Save to a
-            # per-session dir under data/host-uploads/ instead; the host
-            # agent reads it directly via the returned host_path (no docker
-            # cp needed, and the cp block below no-ops because there's no
-            # container), and api_session_output serves it back to the tile.
-            # A CONTAINER session with no run dir genuinely can't receive the
-            # file, so it still 404s.
-            _sess = dashboard_db.get_session(tmux_session)
-            if _sess and _sess.get("type") == "host":
-                target_dir = HOST_UPLOADS_DIR / tmux_session
-            else:
-                return JSONResponse(
-                    {"error": f"no run dir for session {tmux_session!r}"},
-                    status_code=404,
-                )
+            return JSONResponse(
+                {"error": f"no run dir for session {tmux_session!r}"},
+                status_code=404,
+            )
     else:
         target_dir = DATA_ROOT / "uploads"
 
@@ -11268,13 +11173,6 @@ async def api_upload(request):
             rel_path_parts = dest.relative_to(_REPO_ROOT).parts
             if len(rel_path_parts) > 3:
                 rel_path = "/".join(rel_path_parts[3:])
-        elif tmux_session and HOST_UPLOADS_DIR in dest.parents:
-            # Host session: rel_path is the file path under the session's
-            # data/host-uploads/<session>/ dir. The viewer tile renders via
-            # /api/session/<session>/output/<rel_path>, which api_session_output
-            # resolves back to this file — the same rel_path contract the
-            # container path uses, so the tile converts identically.
-            rel_path = dest.relative_to(HOST_UPLOADS_DIR / tmux_session).as_posix()
 
         results.append({
             "path": agent_path,
@@ -11297,87 +11195,6 @@ async def api_upload(request):
 
 
 # ── WebSocket Terminal ─────────────────────────────────────────
-
-# Per-project locks to serialise host session JSONL watchers
-async def _watch_for_host_session_jsonl(
-    projects_dir: Path, tmux_name: str, timeout: float = 30.0
-) -> None:
-    """Watch for this host session's JSONL to appear and link it by content.
-
-    A host Claude writes no JSONL until it receives input. ``api_session_create``
-    injects the orientation message — which contains ``tmux_name`` — right after
-    launch; this watcher waits for the JSONL that message creates and links it.
-
-    Matching is by **content** (the JSONL whose text contains ``tmux_name``), not
-    by mtime. The orientation line is unique per session, so concurrent host
-    launches in the same project dir each link their own file with no race — which
-    is why no per-dir lock is needed. This is the ONLY code that sets jsonl_path
-    for host sessions. Polls every 500ms for up to ``timeout`` seconds.
-
-    Timeout is generous to absorb a slow Claude boot: injection may wait up to
-    60s for a real composer prompt, then Claude must flush its first turn to
-    disk.
-    """
-    existing = set(projects_dir.glob("*.jsonl")) if projects_dir.exists() else set()
-    logger.info("JSONL watcher started  tmux=%s  existing=%d", tmux_name, len(existing))
-    deadline = asyncio.get_event_loop().time() + timeout
-    while asyncio.get_event_loop().time() < deadline:
-        await asyncio.sleep(0.5)
-        if not projects_dir.exists():
-            continue
-        current = set(projects_dir.glob("*.jsonl"))
-        new_files = current - existing
-        # Link the new file whose contents carry this session's tmux_name (the
-        # orientation message injected at launch). Content match — not mtime —
-        # so concurrent host launches never cross-link. Keep polling until a
-        # file actually matches; a new but unrelated JSONL is left alone.
-        new_jsonl = None
-        for jf in new_files:
-            try:
-                if tmux_name in jf.read_text(encoding="utf-8", errors="replace"):
-                    new_jsonl = jf
-                    break
-            except OSError:
-                continue
-        if new_jsonl is None:
-            continue
-        logger.info("JSONL watcher found new session  uuid=%s  tmux=%s", new_jsonl.stem, tmux_name)
-        # LINK + ENRICH: set session_uuid, jsonl_path, and graph_source_id
-        dashboard_db.link_and_enrich(
-            tmux_name,
-            session_uuid=new_jsonl.stem,
-            jsonl_path=str(new_jsonl),
-            project=projects_dir.name,
-        )
-
-        # Set up tail state with resolution_dir FIRST — _add_file_watch
-        # constructs a default _TailState (no resolution_dir) on first
-        # call, so the prior "if not in _tail_states" guard was always
-        # false here and resolution_dir never got assigned.
-        from tools.dashboard.session_monitor import _TailState
-        ts = session_monitor._tail_states.get(tmux_name)
-        if ts is None:
-            session_monitor._tail_states[tmux_name] = _TailState(
-                resolution_dir=projects_dir)
-        else:
-            ts.resolution_dir = projects_dir
-
-        # Now add the inotify watches
-        session_monitor._add_file_watch(tmux_name, str(new_jsonl))
-        session_monitor._add_dir_watch(tmux_name, str(projects_dir))
-
-        # auto-suvcp R3: activation goes through the unified machine — the
-        # persisted re-attach requests a catch-up drain (the orientation
-        # burst already on disk becomes visible with no further write) and
-        # the registry publishes AFTER that drain (invariant 9). A direct
-        # broadcast here would durably show resolved=true with zero
-        # entries — the CalStartupStall broadcast leg, host edition.
-        session_monitor.observe_rollout(
-            tmux_name, new_jsonl, source="host_watch",
-        )
-        return
-    logger.warning("JSONL watcher timed out after %.0fs  tmux=%s", timeout, tmux_name)
-
 
 def _tmux_session_exists(name: str) -> bool:
     return subprocess.run(["tmux", "has-session", "-t", name],

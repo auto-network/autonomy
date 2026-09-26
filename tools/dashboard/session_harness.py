@@ -298,20 +298,6 @@ class ClaudeSessionHarness:
         resolution_dir: Path | None = None,
         bead_id: str | None = None,
     ) -> None:
-        if session_type == "host":
-            projects_dir = Path.home() / ".claude" / "projects" / project
-            await monitor.register(
-                tmux_name=tmux_name,
-                session_type="host",
-                project=project,
-                harness=self.name,
-                resolution_dir=projects_dir,
-            )
-            asyncio.create_task(
-                _watch_for_claude_host_jsonl(monitor, projects_dir, tmux_name),
-            )
-            return
-
         sess_dir = resolution_dir
         if sess_dir is None:
             if run_dir is not None:
@@ -342,14 +328,7 @@ class ClaudeSessionHarness:
             return _resolve_claude_handshake_link(tmux_name, handshake_text)
 
         if jsonl_path is not None:
-            if row and row.get("type") == "host":
-                return None
             return _link_session_file(tmux_name, jsonl_path, project=(row or {}).get("project"))
-
-        if row and row.get("type") == "host":
-            found = _resolve_claude_host_jsonl(tmux_name)
-            if found is not None:
-                return _link_session_file(tmux_name, found)
         return None
 
     def attach_live_monitoring(
@@ -3917,7 +3896,6 @@ HARNESSES: dict[str, SessionHarness] = {
     "grok": GROK_HARNESS,
 }
 
-_HOST_LAUNCH_LOCKS: dict[str, asyncio.Lock] = {}
 
 
 def get_session_harness(name: str | None) -> SessionHarness:
@@ -4040,10 +4018,6 @@ def resolve_harness_for_session_row(row: dict | None) -> SessionHarness:
     return CLAUDE_HARNESS
 
 
-def _get_host_launch_lock(project_folder: str) -> asyncio.Lock:
-    return _HOST_LAUNCH_LOCKS.setdefault(project_folder, asyncio.Lock())
-
-
 def _link_session_file(
     tmux_name: str,
     jsonl_path: Path,
@@ -4091,27 +4065,6 @@ def _link_session_file(
         "jsonl_path": jsonl_path,
         "resolution_dir": jsonl_path.parent,
     }
-
-
-def _resolve_claude_host_jsonl(tmux_name: str) -> Path | None:
-    claude_projects = Path.home() / ".claude" / "projects"
-    if not claude_projects.exists():
-        return None
-    for meta_path in sorted(
-        claude_projects.rglob("*.meta.json"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    ):
-        try:
-            data = json.loads(meta_path.read_text())
-        except (json.JSONDecodeError, OSError):
-            continue
-        if data.get("tmux_session") != tmux_name:
-            continue
-        jsonl = meta_path.parent / (meta_path.stem.removesuffix(".meta") + ".jsonl")
-        if jsonl.exists():
-            return jsonl
-    return None
 
 
 def _resolve_claude_handshake_link(tmux_name: str, handshake_text: str) -> dict | None:
@@ -4175,46 +4128,3 @@ def _attach_live_monitoring(
     request_drain = getattr(monitor, "request_drain", None)
     if callable(request_drain):
         request_drain(tmux_name)
-
-
-async def _watch_for_claude_host_jsonl(
-    monitor: Any,
-    projects_dir: Path,
-    tmux_name: str,
-    timeout: float = 10.0,
-) -> None:
-    lock = _get_host_launch_lock(projects_dir.name)
-    async with lock:
-        existing = set(projects_dir.glob("*.jsonl")) if projects_dir.exists() else set()
-        deadline = asyncio.get_event_loop().time() + timeout
-        while asyncio.get_event_loop().time() < deadline:
-            await asyncio.sleep(0.5)
-            if not projects_dir.exists():
-                continue
-            current = set(projects_dir.glob("*.jsonl"))
-            new_files = current - existing
-            if not new_files:
-                continue
-            new_jsonl = min(new_files, key=lambda p: p.stat().st_mtime)
-            linked = _link_session_file(tmux_name, new_jsonl)
-            if linked is None:
-                return
-            CLAUDE_HARNESS.attach_live_monitoring(
-                monitor=monitor,
-                tmux_name=tmux_name,
-                jsonl_path=new_jsonl,
-                resolution_dir=projects_dir,
-            )
-            # auto-suvcp B6: activation goes through the unified machine —
-            # the persisted re-attach requests the catch-up drain (a burst
-            # already on disk becomes visible with no further write) and
-            # the registry publishes AFTER that drain (invariant 9), never
-            # here at link time (a durable linked-but-zero card is the
-            # CalStartupStall broadcast leg, host edition).
-            observe = getattr(monitor, "observe_rollout", None)
-            if callable(observe):
-                observe(tmux_name, new_jsonl, source="host_watch")
-            else:
-                await monitor._broadcast_registry()
-            return
-        logger.warning("JSONL watcher timed out after %.0fs  tmux=%s", timeout, tmux_name)
