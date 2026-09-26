@@ -134,7 +134,7 @@ The founder has founded an organization and it is live on the network: the found
 
 **Requires:** ledger_heads@founder AND sealed_org_root AND checkpoint_delegate_grant@founder AND registry_binding@founder AND checkpoint_seed AND serve_cert@founder
 
-Built order (bead auto-2vseu, Windows signed-release walk of auto-0925-231713 and the compose sim sim-org-05): founding (founding.js:foundExistingOrganizationShell) registers nothing and ends on the success screen. The first registration is the link-publish approval's register-before-freeze (worktrees.js:_registerOrgInline), so an organization whose founder never publishes an invite link is never registered; sign-on maintenance skips an unregistered org (signon_preparation.organization_plans needs committed_membership_org). The checkpoint seed and the serve certificate follow in the next sign-on (network-signon.mjs:prepareRootMaintenance). Every phase after the founding batch can sign in the founding window: the org root is in memory there, and the persona derives from the held seed.
+Built order (bead auto-2vseu): founding (founding.js:foundExistingOrganizationShell) keeps the in-memory org root and the held personal seed past the founding batch, signs the registration with the org root (founding.js:registerFoundedOrganization), then runs the org-scoped sign-on phases with the seed (founding.js:finishFoundedOrganization → signon-phases.js), which mint the checkpoint seed and the serve certificate; both keys are zeroed afterwards. A refused registration is reported on the success screen with a "Register now" action that repeats the same steps from a fresh opening (founding.js:registerFoundedOrganizationLater). The compose simulation asserts the registry holds the founding checkpoint before any invite step.
 
 ### Starting states
 
@@ -147,13 +147,11 @@ Built order (bead auto-2vseu, Windows signed-release walk of auto-0925-231713 an
 |---|---|---|---|---|
 | I1 | founder | yes | ceremony.personal_identity_create | fresh |
 | F0.shell | founder | no | route.org_shell_create | all |
-| F0 | founder | yes | ceremony.org_found | all |
-| P | founder | yes | ceremony.registration | all |
-| S | founder | yes | ceremony.checkpoint_seed, ceremony.serve_cert_mint | all |
+| F0 | founder | yes | ceremony.org_found, ceremony.registration, ceremony.checkpoint_seed, ceremony.serve_cert_mint | all |
 
 ### Scenario from fresh, built rules
 
-Recorded: current {'founder': 4, 'joiner': 0}, minimal {'founder': 1, 'joiner': 0}.
+Recorded: current {'founder': 2, 'joiner': 0}, minimal {'founder': 1, 'joiner': 0}.
 
 ```text
 goal org_founded from fresh (built rules)
@@ -167,19 +165,17 @@ root openings: founder 1, joiner 0 (total 1); steps 6
  6. ceremony.serve_cert_mint[founder]                window founder#1     -> serve_cert@founder
 
 goal org_founded from fresh: current order reaches the goal
-current root openings: founder 4, joiner 0
+current root openings: founder 2, joiner 0
 minimal root openings: founder 1, joiner 0 (built rules)
 
 
 needed I1         founder  needed: first opening of founder
-EXTRA  F0         founder  mergeable into I1: I1 closed without: org_shell (from route.org_shell_create[founder])
-EXTRA  P          founder  mergeable into F0: F0 closed without
-EXTRA  S          founder  mergeable into P: P closed without: checkpoint_seed (from ceremony.checkpoint_seed[founder])
+EXTRA  F0         founder  mergeable into I1: I1 closed without: checkpoint_seed (from ceremony.checkpoint_seed[founder]), ledger_heads@founder (from ceremony.org_found[founder]), org_shell (from route.org_shell_create[founder]), registry_binding@founder (from ceremony.registration[founder]), sealed_org_root (from ceremony.org_found[founder])
 ```
 
 ### Scenario from identity_held, built rules
 
-Recorded: current {'founder': 3, 'joiner': 0}, minimal {'founder': 1, 'joiner': 0}.
+Recorded: current {'founder': 1, 'joiner': 0}, minimal {'founder': 1, 'joiner': 0}.
 
 ```text
 goal org_founded from identity_held (built rules)
@@ -192,13 +188,11 @@ root openings: founder 1, joiner 0 (total 1); steps 5
  5. ceremony.serve_cert_mint[founder]                window founder#1     -> serve_cert@founder
 
 goal org_founded from identity_held: current order reaches the goal
-current root openings: founder 3, joiner 0
+current root openings: founder 1, joiner 0
 minimal root openings: founder 1, joiner 0 (built rules)
 
 
 needed F0         founder  needed: first opening of founder
-EXTRA  P          founder  mergeable into F0: F0 closed without
-EXTRA  S          founder  mergeable into P: P closed without: checkpoint_seed (from ceremony.checkpoint_seed[founder])
 ```
 
 ## Goal org_sync_pull

@@ -49,12 +49,12 @@ def test_every_recorded_scenario_reproduces(registry):
 
 
 def test_founding_recorded_counts(registry):
-    """Built: founding, the link-publish approval's registration, the next
-    sign-on. Minimal: everything in the founding window."""
+    """Built and minimal: everything in the founding window; from a fresh
+    machine the identity opening stays its own."""
     table = {s["from"]: (s["current"], s["minimal"])
              for s in registry["goals"][GOAL]["scenarios"]}
-    assert table["identity_held"] == ({"founder": 3, "joiner": 0}, {"founder": 1, "joiner": 0})
-    assert table["fresh"] == ({"founder": 4, "joiner": 0}, {"founder": 1, "joiner": 0})
+    assert table["identity_held"] == ({"founder": 1, "joiner": 0}, {"founder": 1, "joiner": 0})
+    assert table["fresh"] == ({"founder": 2, "joiner": 0}, {"founder": 1, "joiner": 0})
 
 
 def _with_order(registry, order):
