@@ -390,21 +390,32 @@
         },
         {
           "actor": "joiner",
-          "ceremony": false,
+          "ceremony": true,
+          "continues_window": "J3",
+          "only_from": [
+            "self_admit"
+          ],
           "runs": [
-            "route.join_install"
+            "route.join_install",
+            "ceremony.organization_storage_delegate",
+            "ceremony.serve_cert_mint",
+            "ceremony.fleet_runtime_mint"
           ],
           "step": "J5"
         },
         {
           "actor": "joiner",
           "ceremony": true,
+          "only_from": [
+            "approval"
+          ],
           "runs": [
+            "route.join_install",
             "ceremony.organization_storage_delegate",
             "ceremony.serve_cert_mint",
             "ceremony.fleet_runtime_mint"
           ],
-          "step": "J6"
+          "step": "J5"
         },
         {
           "actor": "joiner",
@@ -412,7 +423,7 @@
           "runs": [
             "route.relay_connect"
           ],
-          "step": "J6.connect"
+          "step": "J5.connect"
         }
       ],
       "description": "Founder and joiner can each pull the other over org sync: both hold an org channel (sync certificate + serving seed), both have adopted a checkpoint whose members_root includes the joiner (the verifier admits a pull only under an adopted seq with inclusion, fleet_org_channel.py: 286-309), the joiner holds the org ledger, and the joiner has a route to the founder (the founder reaches the joiner through its dial-in).",
@@ -472,7 +483,7 @@
         {
           "current": {
             "founder": 2,
-            "joiner": 2
+            "joiner": 1
           },
           "from": "self_admit",
           "minimal": {
@@ -496,7 +507,7 @@
       ],
       "states": {
         "approval": {
-          "description": "Founded org (F0 done), invite role requires the founder's approval.",
+          "description": "Founded org (F0 done), invite role requires the founder's approval. As for self_admit, F0 includes a sign-on on checkpoint-at-admission code; without it F3.admit publishes the persona form in the approver's window instead (same count).",
           "holds": [
             "checkpoint_delegate_grant@founder",
             "ledger_heads@founder",
@@ -511,7 +522,7 @@
           ]
         },
         "self_admit": {
-          "description": "Founded org (F0 done), invite role self-admits.",
+          "description": "Founded org (F0 done), invite role self-admits. F0 includes the founder's sign-on on checkpoint-at-admission code, which gives its storage delegate the checkpoint scope; an org founded earlier holds that only after its founder's next sign-on, until which J3.submit publishes nothing and the founder's next sign-on does (founder 3).",
           "holds": [
             "checkpoint_delegate_grant@founder",
             "ledger_heads@founder",

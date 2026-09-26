@@ -126,8 +126,8 @@ Peer selection sources (fleet_sync_scheduler.py:_org_peer_candidates): reachabil
 
 ### Starting states
 
-- **self_admit** — Founded org (F0 done), invite role self-admits. Holds: checkpoint_delegate_grant@founder, ledger_heads@founder, registry_binding@founder, checkpoint_seed, serve_cert@founder, relay_slot@founder, persona_cert_fleet_sync@founder, fleet_roster@founder, fleet_roster@joiner, policy_self_admit
-- **approval** — Founded org (F0 done), invite role requires the founder's approval. Holds: checkpoint_delegate_grant@founder, ledger_heads@founder, registry_binding@founder, checkpoint_seed, serve_cert@founder, relay_slot@founder, persona_cert_fleet_sync@founder, fleet_roster@founder, fleet_roster@joiner, policy_approval
+- **self_admit** — Founded org (F0 done), invite role self-admits. F0 includes the founder's sign-on on checkpoint-at-admission code, which gives its storage delegate the checkpoint scope; an org founded earlier holds that only after its founder's next sign-on, until which J3.submit publishes nothing and the founder's next sign-on does (founder 3). Holds: checkpoint_delegate_grant@founder, ledger_heads@founder, registry_binding@founder, checkpoint_seed, serve_cert@founder, relay_slot@founder, persona_cert_fleet_sync@founder, fleet_roster@founder, fleet_roster@joiner, policy_self_admit
+- **approval** — Founded org (F0 done), invite role requires the founder's approval. As for self_admit, F0 includes a sign-on on checkpoint-at-admission code; without it F3.admit publishes the persona form in the approver's window instead (same count). Holds: checkpoint_delegate_grant@founder, ledger_heads@founder, registry_binding@founder, checkpoint_seed, serve_cert@founder, relay_slot@founder, persona_cert_fleet_sync@founder, fleet_roster@founder, fleet_roster@joiner, policy_approval
 
 ### Recorded current order
 
@@ -143,13 +143,13 @@ Peer selection sources (fleet_sync_scheduler.py:_org_peer_candidates): reachabil
 | F3 | founder | yes | ceremony.claim_approval, ceremony.admission_event | approval |
 | F3.admit | founder | no | route.claim_admission, delegate.checkpoint_publish | approval |
 | J5.serve | founder | no | route.join_bootstrap | all |
-| J5 | joiner | no | route.join_install | all |
-| J6 | joiner | yes | ceremony.organization_storage_delegate, ceremony.serve_cert_mint, ceremony.fleet_runtime_mint | all |
-| J6.connect | joiner | no | route.relay_connect | all |
+| J5 | joiner | yes | route.join_install, ceremony.organization_storage_delegate, ceremony.serve_cert_mint, ceremony.fleet_runtime_mint | self_admit |
+| J5 | joiner | yes | route.join_install, ceremony.organization_storage_delegate, ceremony.serve_cert_mint, ceremony.fleet_runtime_mint | approval |
+| J5.connect | joiner | no | route.relay_connect | all |
 
 ### Scenario from self_admit, built rules
 
-Recorded: current {'founder': 2, 'joiner': 2}, minimal {'founder': 1, 'joiner': 1}.
+Recorded: current {'founder': 2, 'joiner': 1}, minimal {'founder': 1, 'joiner': 1}.
 
 ```text
 goal org_sync_pull from self_admit (built rules)
@@ -168,14 +168,13 @@ root openings: founder 1, joiner 1 (total 2); steps 11
 11. ceremony.fleet_runtime_mint[joiner]              window joiner#1      -> persona_cert_fleet_sync@joiner
 
 goal org_sync_pull from self_admit: current order reaches the goal
-current root openings: founder 2, joiner 2
+current root openings: founder 2, joiner 1
 minimal root openings: founder 1, joiner 1 (built rules)
 
 
 needed F1         founder  needed: first opening of founder
 EXTRA  F2         founder  mergeable into F1: F1 closed without: link_publish_approval (from approval.link_publish[founder])
 needed J3         joiner   needed: first opening of joiner
-EXTRA  J6         joiner   mergeable into J3: J3 closed without: ledger_heads@joiner (from route.join_install[joiner]), registry_binding@joiner (from route.join_install[joiner])
 ```
 
 ### Scenario from approval, built rules
@@ -209,7 +208,7 @@ needed F1         founder  needed: first opening of founder
 EXTRA  F2         founder  mergeable into F1: F1 closed without: link_publish_approval (from approval.link_publish[founder])
 needed J3         joiner   needed: first opening of joiner
 needed F3         founder  needed: not obtainable in F2's window; it lacked: claim_staged
-needed J6         joiner   needed: not obtainable in J3's window; it lacked: ledger_heads@joiner, registry_binding@joiner
+needed J5         joiner   needed: not obtainable in J3's window; it lacked: bootstrap_snapshot, checkpoint_including_joiner, ledger_heads@joiner, registry_binding@joiner
 ```
 - proof: tla OrgAdmission: EveryAdmittedMemberPulls
 - proof: tla OrgAdmission: NoPullWithoutInclusion

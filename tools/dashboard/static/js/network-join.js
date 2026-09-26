@@ -350,15 +350,20 @@
       // the same fold-adoption, so the member is not left waiting for a
       // sign-on. Under checkpoint-at-admission that record's head is this
       // member's own claim, which the install just wrote.
-      if (installed && installed.org && installed.checkpoint && installed.checkpoint.ok === false) {
-        return fetch("/api/network/membership-checkpoint/adopt", {
+      var recovered = (installed && installed.org && installed.checkpoint && installed.checkpoint.ok === false)
+        ? fetch("/api/network/membership-checkpoint/adopt", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ org: installed.org }),
-        }).catch(function () { return null; }).then(function () { return null; });
-      }
-      return null;
+        }).catch(function () { return null; })
+        : Promise.resolve(null);
+      // The organization exists here now; mint what this machine needs for
+      // it in the same opening (or one more, after a delayed admission).
+      return recovered.then(function () {
+        return installed && installed.org ? finishSetup(installed.org, orgName) : null;
+      });
     }).catch(function (error) {
+      zeroHeld();
       showAdmitted(orgName, role);
       say("done-line", "You joined " + (orgName || "the organization")
         + ", but this machine could not set it up: "
@@ -370,6 +375,24 @@
   // One live join session over the org's own channel. Every module is
   // imported here rather than at load: this page is a classic script, and
   // nothing below is needed until someone actually accepts.
+  // The root opened for the claim, held by THIS page only while an
+  // immediate admission's install is in flight, so the same opening also
+  // sets the organization up on this machine (one joiner window under a
+  // self-admitting role; OrgAdmission.tla final rules). Zeroed the moment
+  // the claim goes pending, and after the set-up either way.
+  var heldSeed = null;
+  var openRootControl = null;
+  function zeroHeld() {
+    if (heldSeed) { heldSeed.fill(0); heldSeed = null; }
+  }
+  function openRootHeld(options) {
+    return openRootControl(options).then(function (opened) {
+      zeroHeld();
+      if (opened && opened.seed) heldSeed = new Uint8Array(opened.seed);
+      return opened;
+    });
+  }
+
   function connectSession(inputs) {
     return Promise.all([
       import("/static/js/join/accept-controller.js"),
@@ -380,13 +403,66 @@
       var JoinSession = mods[0].JoinSession;
       var openChannel = mods[1].openChannel;
       var makeRootCeremony = mods[2].makeRootCeremony;
-      var openRoot = mods[3].openRoot;
+      openRootControl = mods[3].openRoot;
       session = new JoinSession({
         inputs: inputs,
         openChannel: openChannel,
-        runCeremony: makeRootCeremony({ openRoot: openRoot }),
+        runCeremony: makeRootCeremony({ openRoot: openRootHeld }),
       });
       return session.connect();
+    });
+  }
+
+  // Set the organization up on this machine in the same opening: the
+  // sign-in's own three phases, scoped by the server to what this machine
+  // lacks (the org's storage delegate, its serve certificate, the fleet
+  // runtime with the org's sync certificate). Uses the seed held from the
+  // claim when the admission was immediate; otherwise opens the root once
+  // more, which is the joiner's second window under an approval role.
+  function finishSetup(orgSlug, orgName) {
+    var opening = heldSeed
+      ? Promise.resolve({ seed: heldSeed })
+      : openRootControl({
+        title: "Finish setting up " + (orgName || "the organization") + " on this machine",
+        detail: "Unlock your identity once more to mint this machine's keys for the organization.",
+      });
+    return opening.then(function (opened) {
+      if (!opened || !opened.seed) {
+        say("setup-line", "This machine will be set up for " + (orgName || "the organization")
+          + " at your next sign-in.");
+        return null;
+      }
+      var seed = new Uint8Array(opened.seed);
+      if (opened.seed !== heldSeed) opened.seed.fill(0);
+      zeroHeld();
+      return import("/static/js/ceremony/signon-phases.js").then(function (phases) {
+        return phases.fetchPreparation(window.fetch.bind(window)).then(function (encrypted) {
+          return phases.prepareSignon(seed, encrypted, window.AutonomyNetworkSession);
+        }).then(function (prepared) {
+          seed.fill(0);
+          return phases.submitSignon(prepared, window.fetch.bind(window));
+        });
+      }).then(function (report) {
+        var failed = (report && report.failed || []).filter(function (f) { return f.org === orgSlug; });
+        if (failed.length) {
+          say("setup-line", "This machine is not fully set up for " + (orgName || "the organization")
+            + " yet: " + failed.map(function (f) { return f.step + " (" + f.error + ")"; }).join("; ")
+            + ". Sign in again to finish.");
+        } else {
+          say("setup-line", "This machine is set up for " + (orgName || "the organization")
+            + ": it can sync with the organization now.");
+        }
+        return report;
+      }).catch(function (error) {
+        seed.fill(0);
+        say("setup-line", "This machine could not be set up for " + (orgName || "the organization")
+          + ": " + ((error && error.message) || String(error)) + ". Sign in again to finish.");
+        return null;
+      });
+    }).catch(function (error) {
+      zeroHeld();
+      say("setup-line", "Set-up was not completed: " + ((error && error.message) || String(error)));
+      return null;
     });
   }
 
@@ -412,13 +488,15 @@
       session.accept()
         .then(function (result) {
           // Cancelled ceremony: nothing was signed and nothing was sent.
-          if (result === null) { button.disabled = false; return null; }
-          if (result.state === "pending") { showWaiting(brandName); return poll(brandName, role); }
+          if (result === null) { zeroHeld(); button.disabled = false; return null; }
+          if (result.state === "pending") { zeroHeld(); showWaiting(brandName); return poll(brandName, role); }
           if (result.state === "admitted") { return installAdmitted(brandName, role); }
+          zeroHeld();
           reportTerminal(result);
           return null;
         })
         .catch(function (error) {
+          zeroHeld();
           button.disabled = false;
           say("accept-hint", (error && error.message) || String(error));
         });

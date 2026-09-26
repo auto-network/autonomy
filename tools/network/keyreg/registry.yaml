@@ -2009,7 +2009,12 @@ goals:
       OrgAdmissionFinalApproval.cfg, OrgAdmissionFinalSelfAdmit.cfg.
     states:
       self_admit:
-        description: Founded org (F0 done), invite role self-admits.
+        description: >-
+          Founded org (F0 done), invite role self-admits. F0 includes the
+          founder's sign-on on checkpoint-at-admission code, which gives its
+          storage delegate the checkpoint scope; an org founded earlier holds
+          that only after its founder's next sign-on, until which J3.submit
+          publishes nothing and the founder's next sign-on does (founder 3).
         holds:
           - checkpoint_delegate_grant@founder
           - ledger_heads@founder
@@ -2022,7 +2027,11 @@ goals:
           - fleet_roster@joiner
           - policy_self_admit
       approval:
-        description: Founded org (F0 done), invite role requires the founder's approval.
+        description: >-
+          Founded org (F0 done), invite role requires the founder's approval.
+          As for self_admit, F0 includes a sign-on on checkpoint-at-admission
+          code; without it F3.admit publishes the persona form in the
+          approver's window instead (same count).
         holds:
           - checkpoint_delegate_grant@founder
           - ledger_heads@founder
@@ -2045,9 +2054,9 @@ goals:
       - {step: F3, actor: founder, ceremony: true, runs: [ceremony.claim_approval, ceremony.admission_event], only_from: [approval]}
       - {step: F3.admit, actor: founder, ceremony: false, runs: [route.claim_admission, delegate.checkpoint_publish], only_from: [approval]}
       - {step: J5.serve, actor: founder, ceremony: false, runs: [route.join_bootstrap]}
-      - {step: J5, actor: joiner, ceremony: false, runs: [route.join_install]}
-      - {step: J6, actor: joiner, ceremony: true, runs: [ceremony.organization_storage_delegate, ceremony.serve_cert_mint, ceremony.fleet_runtime_mint]}
-      - {step: J6.connect, actor: joiner, ceremony: false, runs: [route.relay_connect]}
+      - {step: J5, actor: joiner, ceremony: true, continues_window: J3, only_from: [self_admit], runs: [route.join_install, ceremony.organization_storage_delegate, ceremony.serve_cert_mint, ceremony.fleet_runtime_mint]}
+      - {step: J5, actor: joiner, ceremony: true, only_from: [approval], runs: [route.join_install, ceremony.organization_storage_delegate, ceremony.serve_cert_mint, ceremony.fleet_runtime_mint]}
+      - {step: J5.connect, actor: joiner, ceremony: false, runs: [route.relay_connect]}
     known_defects: []
     proofs:
       - {framework: tla, theory: OrgAdmission, lemma: EveryAdmittedMemberPulls}
@@ -2057,5 +2066,5 @@ goals:
       - {framework: tla, theory: OrgAdmissionLeaves, lemma: RekeyedOldKeyExcluded}
       - {framework: tla, theory: OrgAdmissionLeaves, lemma: ReAdmitAfterRemoval}
     scenarios:
-      - {from: self_admit, rules: [], current: {founder: 2, joiner: 2}, minimal: {founder: 1, joiner: 1}}
+      - {from: self_admit, rules: [], current: {founder: 2, joiner: 1}, minimal: {founder: 1, joiner: 1}}
       - {from: approval, rules: [], current: {founder: 3, joiner: 2}, minimal: {founder: 2, joiner: 2}}

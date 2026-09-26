@@ -398,6 +398,12 @@ def _validate_workflow(errors, data):
                     errors.append(f"{swhere}.runs: actor '{step.get('actor')}' does not execute '{mut_id}'")
                 if mut.get("status", "built") != "built":
                     errors.append(f"{swhere}.runs: '{mut_id}' is designed; the current order runs built code only")
+                if step.get("continues_window") is not None:
+                    prior = [s for s in (goal.get("current_order") or [])[:i] if s.get("step") == step["continues_window"]]
+                    if not step.get("ceremony"):
+                        errors.append(f"{swhere}.continues_window: only a ceremony step continues an opening")
+                    elif not prior or prior[-1].get("actor") != step.get("actor"):
+                        errors.append(f"{swhere}.continues_window: must name an earlier ceremony step of the same actor")
                 if mut.get("opens") in WINDOW_OPENS and not step.get("ceremony"):
                     errors.append(f"{swhere}.runs: '{mut_id}' opens {mut.get('opens')}, so step {step.get('step')} must be a ceremony")
         for i, scenario in enumerate(goal.get("scenarios") or []):
@@ -733,7 +739,11 @@ def simulate_current(data: dict, goal_id: str, state_id: str | None = None) -> C
     for step in goal.get("current_order") or []:
         if step.get("only_from") and state_id not in step["only_from"]:
             continue
-        record = StepRun(step["step"], step["actor"], bool(step["ceremony"]), held, held)
+        # continues_window: this ceremony runs inside the actor's previous
+        # opening (the same root prompt), so it is not another opening, for
+        # the count and for explain-current alike.
+        continues = bool(step.get("continues_window"))
+        record = StepRun(step["step"], step["actor"], bool(step["ceremony"]) and not continues, held, held)
         for mut_id in step["runs"]:
             entry = data["mutations"][mut_id]
             inst = Instance(mut_id, step["actor"], entry["opens"],

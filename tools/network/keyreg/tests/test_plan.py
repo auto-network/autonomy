@@ -39,7 +39,7 @@ def test_recorded_scenarios_match_the_record(registry):
     the final-rules table of auto-qrmlg.12."""
     table = {(s["from"], tuple(s["rules"])): (s["current"], s["minimal"])
              for s in _scenarios(registry)}
-    assert table[("self_admit", ())] == ({"founder": 2, "joiner": 2}, {"founder": 1, "joiner": 1})
+    assert table[("self_admit", ())] == ({"founder": 2, "joiner": 1}, {"founder": 1, "joiner": 1})
     assert table[("approval", ())] == ({"founder": 3, "joiner": 2}, {"founder": 2, "joiner": 2})
 
 
@@ -93,12 +93,10 @@ def test_explain_names_the_forcing_artifacts(registry):
     by_step = {o.step: o for o in openings}
     assert by_step["F2"].extra and ("link_publish_approval", "approval.link_publish[founder]") \
         in by_step["F2"].missing
-    # The joiner's install-time mints (J6) are the one remaining extra
-    # opening: the claim window closed before the install produced the
-    # ledger and binding they need (C6 folds them into the join).
-    assert by_step["J6"].extra and {r for r, _ in by_step["J6"].missing} == {
-        "ledger_heads@joiner", "registry_binding@joiner"}
-    assert "F4" not in by_step and "J6.repeat" not in by_step
+    # The joiner's install-time mints run inside the claim's opening (J5
+    # continues J3), so the founder's F2 is the only extra opening left.
+    assert "J6" not in by_step and "F4" not in by_step and "J6.repeat" not in by_step
+    assert [o.step for o in openings if o.extra] == ["F2"]
 
 
 def test_unknown_rule_is_refused(registry):
@@ -121,8 +119,8 @@ def test_cli_plan_and_explain(capsys, registry):
     assert "root openings: founder 2, joiner 2" in out
     assert keyreg.main(["explain-current", GOAL]) == 0
     out = capsys.readouterr().out
-    assert "current root openings: founder 2, joiner 2" in out
-    assert "EXTRA  J6" in out and "J6.repeat" not in out
+    assert "current root openings: founder 2, joiner 1" in out
+    assert "EXTRA  F2" in out and "J6" not in out
 
 
 # ── The current-order lints ──────────────────────────────────────────────────
@@ -167,9 +165,9 @@ def test_stale_known_defect_is_an_error(registry):
 
 def test_order_not_reaching_goal_is_an_error(registry):
     broken = copy.deepcopy(registry)
-    # Without the joiner's install-time mints (J6) nothing produces the
-    # joiner's fleet:sync certificate, which the goal requires.
+    # Without the joiner's install step nothing produces the joiner's
+    # ledger, binding or fleet:sync certificate, which the goal requires.
     broken["goals"][GOAL]["current_order"] = [
-        s for s in broken["goals"][GOAL]["current_order"] if s["step"] != "J6"]
+        s for s in broken["goals"][GOAL]["current_order"] if s["step"] != "J5"]
     errors = lint.workflow_current_order(broken)
     assert any("does not reach the goal" in e for e in errors), errors

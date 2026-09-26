@@ -208,3 +208,25 @@ def test_an_unusable_bundle_record_and_an_advanced_registry_still_leave_a_provab
     rider = osc._callables(out["org"], persona.public_hex)["membership_proof_for"]()
     assert rider["path"], "the joiner proves under its own fold, not an empty rider"
     mc.verify_inclusion(mc.members_root(sim.fold()), persona.public_hex, rider["index"], rider["path"])
+
+
+def test_the_installed_org_is_planned_by_the_sign_on_phases_at_once(monkeypatch):
+    """C6: right after install, the sign-in's preparation plans the new org
+    (its storage delegate context, serve-certificate requirement and
+    persona), so the join page can run the sign-in's own three phases in the
+    same opening and mint what this machine lacks for the organization."""
+    sim, _founder, persona, invite_id = _joined_org()
+    _registry_says(monkeypatch, _state_of(sim, 1))
+    r = _client().post("/api/network/join/outcome", json=_body(sim, persona, invite_id, checkpoint=_state_of(sim, 1)))
+    out = r.json()
+    assert out["ok"] is True
+    from tools.dashboard import signon_preparation
+    planned = {entry["slug"]: (entry, pub) for entry, pub in signon_preparation.organization_plans()}
+    assert out["org"] in planned, planned.keys()
+    entry, pub = planned[out["org"]]
+    assert pub == persona.public_hex
+    assert entry["committed_membership_org"] and entry["genesis_id"] == sim.genesis_id
+    from tools.dashboard import org_storage_delegate
+    context = org_storage_delegate.prepare(out["org"])
+    assert context["genesis_id"] == sim.genesis_id and len(context["scope"]) == 2  # not a checkpointer
+    assert context["delegate_metadata"] == {} or not context["delegate_metadata"].get("key_exists")

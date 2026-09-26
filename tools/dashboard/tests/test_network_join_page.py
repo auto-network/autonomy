@@ -203,6 +203,25 @@ def test_install_outcome_forwards_seed_rows_and_the_bundled_checkpoint():
     assert "checkpoint: material.checkpoint" in body
 
 
+def test_install_finishes_the_machine_set_up_in_the_same_opening():
+    """C6: after the install, the page runs the sign-in's own three phases
+    (fetchPreparation, prepareSignon, submitSignon) with the root it held
+    from the claim, or opens the root once more after a delayed admission;
+    the held seed is zeroed the moment the claim goes pending and after the
+    set-up either way; the outcome is said on its own line."""
+    from pathlib import Path
+    js = (Path(__file__).resolve().parents[1] / "static/js/network-join.js").read_text()
+    assert 'import("/static/js/ceremony/signon-phases.js")' in js
+    for call in ("phases.fetchPreparation(", "phases.prepareSignon(", "phases.submitSignon("):
+        assert call in js, call
+    assert "heldSeed = new Uint8Array(opened.seed)" in js
+    assert js.count("zeroHeld()") >= 5
+    pending = js.index('if (result.state === "pending")')
+    assert "zeroHeld()" in js[pending:pending + 60]
+    assert 'say("setup-line"' in js
+    assert 'id="setup-line"' in TEMPLATE
+
+
 def test_recovery_adoption_fires_only_when_install_did_not_adopt_and_once():
     """The one recovery call to /api/network/membership-checkpoint/adopt is
     guarded by installed.checkpoint.ok === false, appears exactly once, and
