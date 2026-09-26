@@ -35,6 +35,13 @@ chmod -R +x /tmp/awscli/aws && /tmp/awscli/aws/install -i ~/.local/aws-cli -b ~/
 
 ## Rules for every run
 
+**0. No machine runs unless it is in active use.** Terminate an instance the
+moment the step that needs it is done — never keep one "for evidence" or
+"in case it is needed". Evidence is the saved logs, screenshots and video;
+a new machine from the baseline is about two minutes away. Before reporting
+anything, list running instances and terminate every one not in use (operator
+rule, 2026-09-26).
+
 1. Tag everything created: `autonomy:purpose=install-test`, `autonomy:session=<tmux name>`.
 2. Tear down what a run created before the run is reported (instances, volumes,
    snapshots that are not a named baseline, security groups, key pairs).
