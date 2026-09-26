@@ -186,3 +186,8 @@ dolt-server.pid
 # Third-party skill (external Remotion framework) — operator-local, not autonomy source
 .agents/skills/remotion/
 .claude/skills/remotion
+
+# The autonomy-orgs NFS volume mount point (org-partitioned workspace input).
+# It only exists inside a node / host-terminal checkout as a mount target, not
+# in a plain dev clone — a mount point, never autonomy source.
+/orgs/
