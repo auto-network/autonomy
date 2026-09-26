@@ -119,7 +119,11 @@ function withStep(person,step,fn){
   }
 }
 function browser(person,...args){
-  const invocation=spawnSync('agent-browser',['--session',run+'-'+person,'--json',...args],{encoding:'utf8',timeout:180000});
+  // agent-browser 0.27 refuses to open a second named session while another
+  // runs unless told it is on purpose (--new). Every person here is a
+  // separate browser by design (Alice, Bob, the third-party viewer).
+  const argv=args[0]==='open'&&!args.includes('--new')?['open','--new',...args.slice(1)]:args;
+  const invocation=spawnSync('agent-browser',['--session',run+'-'+person,'--json',...argv],{encoding:'utf8',timeout:180000});
   let r;
   try { r=JSON.parse(invocation.stdout); }
   catch { throw new Error('Browser '+args[0]+' failed without a JSON response (exit '+invocation.status+')'); }
