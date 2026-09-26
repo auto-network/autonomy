@@ -75,6 +75,11 @@ GREEN = [
     ("OrgAdmissionBundleOwnFoldAdversary.cfg", "OrgAdmissionBundleBound"),
     ("OrgAdmissionBundleOwnFoldAdversaryUncheckedRekey.cfg", "OrgAdmissionBundleBound"),
     ("OrgAdmissionBundleOwnFoldWithholding.cfg", "OrgAdmissionBundleBound"),
+    # ... with the prover rotating one candidate root per hello attempt.
+    ("OrgAdmissionBundleRotateHonestLag.cfg", "OrgAdmissionBundleBound"),
+    ("OrgAdmissionBundleRotateAdversary.cfg", "OrgAdmissionBundleBound"),
+    ("OrgAdmissionBundleRotateAdversaryUncheckedRekey.cfg", "OrgAdmissionBundleBound"),
+    ("OrgAdmissionBundleRotateWithholding.cfg", "OrgAdmissionBundleBound"),
     # E-any against rekeyed and re-admitted personas (safety).
     ("OrgAdmissionLeavesEAnyRekey.cfg", "OrgAdmissionLeaves"),
     ("OrgAdmissionLeavesEAnyAdmission.cfg", "OrgAdmissionLeaves"),

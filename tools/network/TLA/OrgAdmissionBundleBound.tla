@@ -50,7 +50,8 @@ EXTENDS Integers, FiniteSets, Sequences
 
 CONSTANTS AdversarialSponsor, Withhold, AutoAdopt, Bound, AdoptableOnly,
           Exact, Rebundle, RootMatch, RekeyCheckpointed,
-          ProveOwnFold   \* with RootMatch: J proves under the root of its own fold at any head it holds
+          ProveOwnFold,  \* with RootMatch: J proves under the root of its own fold at any head it holds
+          Rotate         \* with ProveOwnFold: one candidate root per hello attempt, rotating
 
 MaxEv == 4
 \* Leaves after the first k events.
@@ -70,9 +71,9 @@ HeadOf(s) == CHOOSE h \in 0..MaxEv : Checkpointed(h) /\ Cardinality(CkHeads(h)) 
 MaxSeq == RegSeq(MaxEv)
 AdmitSeq == 1                        \* J's admission record (head 1)
 
-VARIABLES fLen, bundle, jLen, ret, recovered, synced, tried
+VARIABLES fLen, bundle, jLen, ret, recovered, synced, tried, rtried
 
-vars == <<fLen, bundle, jLen, ret, recovered, synced, tried>>
+vars == <<fLen, bundle, jLen, ret, recovered, synced, tried, rtried>>
 
 None == [k |-> -1, seq |-> -1, head |-> -1]
 RS == RegSeq(fLen)
@@ -85,13 +86,13 @@ Keep(r) == r.seq > NewestSeq
 
 Init ==
     /\ fLen = 0 /\ bundle = None /\ jLen = -1 /\ ret = {}
-    /\ recovered = FALSE /\ synced = FALSE /\ tried = FALSE
+    /\ recovered = FALSE /\ synced = FALSE /\ tried = FALSE /\ rtried = {}
 
 FounderEvent ==
     /\ fLen < MaxEv
     /\ fLen' = fLen + 1
     /\ synced' = FALSE
-    /\ UNCHANGED <<bundle, jLen, ret, recovered, tried>>
+    /\ UNCHANGED <<bundle, jLen, ret, recovered, tried, rtried>>
 
 Serve(k, s, h) ==
     /\ bundle = None /\ fLen >= 1
@@ -101,7 +102,7 @@ Serve(k, s, h) ==
               /\ AdoptableOnly => (s <= RS /\ (s = RS => h = RH) /\ s >= 1)
          ELSE /\ s = RegSeq(k) /\ h = HeadOf(RegSeq(k))   \* its newest record, genuine
     /\ bundle' = [k |-> k, seq |-> s, head |-> h]
-    /\ UNCHANGED <<fLen, jLen, ret, recovered, synced, tried>>
+    /\ UNCHANGED <<fLen, jLen, ret, recovered, synced, tried, rtried>>
 
 Install ==
     /\ bundle # None /\ ~tried /\ (jLen = -1 \/ (Exact /\ ret = {}) \/ Rebundle)
@@ -116,13 +117,13 @@ Install ==
        IN /\ jLen' = IF k > jLen THEN k ELSE jLen
           /\ ret' = ret \cup (IF bOK /\ Keep(b) THEN {b} ELSE {}) \cup
                     (IF rOK /\ Keep(r) THEN {r} ELSE {})
-    /\ UNCHANGED <<fLen, bundle, recovered, synced>>
+    /\ UNCHANGED <<fLen, bundle, recovered, synced, rtried>>
 
 RegAdopt ==
     /\ jLen >= 0 /\ RH <= jLen
     /\ Keep([seq |-> RS, root |-> Root(RH)])
     /\ ret' = ret \cup {[seq |-> RS, root |-> Root(RH)]}
-    /\ UNCHANGED <<fLen, bundle, jLen, recovered, synced, tried>>
+    /\ UNCHANGED <<fLen, bundle, jLen, recovered, synced, tried, rtried>>
 
 Recover ==
     /\ jLen >= 0 /\ ~recovered
@@ -130,7 +131,7 @@ Recover ==
     /\ IF RH <= jLen /\ Keep([seq |-> RS, root |-> Root(RH)])
          THEN ret' = ret \cup {[seq |-> RS, root |-> Root(RH)]}
          ELSE UNCHANGED ret
-    /\ UNCHANGED <<fLen, bundle, jLen, synced, tried>>
+    /\ UNCHANGED <<fLen, bundle, jLen, synced, tried, rtried>>
 
 \* The prover's record: the newest retained record that includes J.
 ProverRec ==
@@ -139,6 +140,12 @@ ProverRec ==
        ELSE CHOOSE r \in inc : \A q \in inc : q.seq <= r.seq
 
 \* The founder retains every genuine record up to the registry's seq.
+\* The prover's candidate roots: retained records including J, and the roots
+\* of its own fold at every held head that includes J.
+CandRoots == {r.root : r \in {q \in ret : HasJ(q.root)}}
+             \cup {Root(h) : h \in {x \in 1..(IF jLen < 1 THEN 0 ELSE jLen) : HasJ(Root(x))}}
+Matches(root) == \E s \in AdmitSeq..RS : Root(HeadOf(s)) = root
+
 OwnFoldOK ==
     \E h \in 1..jLen : HasJ(Root(h)) /\ \E s \in AdmitSeq..RS : Root(HeadOf(s)) = Root(h)
 
@@ -153,26 +160,41 @@ HelloOK ==
          ELSE /\ r.seq >= AdmitSeq /\ r.seq <= RS
               /\ r.root = Root(HeadOf(r.seq))
 
+\* Rotate: one hello attempt proves under ONE untried candidate root; a
+\* refusal marks it tried; a full round without success starts over.
+Attempt(c) ==
+    /\ Rotate /\ jLen >= 0 /\ HasJ(Leaves(fLen))
+    /\ c \in CandRoots \ rtried
+    /\ IF Matches(c)
+         THEN /\ (jLen < fLen \/ ~synced)
+              /\ jLen' = fLen /\ synced' = TRUE /\ rtried' = {}
+         ELSE /\ rtried' = IF rtried \cup {c} = CandRoots THEN {} ELSE rtried \cup {c}
+              /\ UNCHANGED <<jLen, synced>>
+    /\ UNCHANGED <<fLen, bundle, ret, recovered, tried>>
+
 Pull ==
+    /\ ~Rotate
     /\ jLen >= 0 /\ HelloOK
     /\ (jLen < fLen \/ ~synced)
     /\ jLen' = fLen
     /\ synced' = TRUE
-    /\ UNCHANGED <<fLen, bundle, ret, recovered, tried>>
+    /\ UNCHANGED <<fLen, bundle, ret, recovered, tried, rtried>>
 
 Retry ==
     /\ jLen >= 0 /\ bundle # None /\ tried
     /\ \/ Exact /\ ret = {}
        \/ Rebundle /\ ~HelloOK
     /\ bundle' = None /\ tried' = FALSE
-    /\ UNCHANGED <<fLen, jLen, ret, recovered, synced>>
+    /\ UNCHANGED <<fLen, jLen, ret, recovered, synced, rtried>>
 
 Next == FounderEvent \/ (\E k, h \in 0..MaxEv, s \in 0..MaxSeq : Serve(k, s, h))
         \/ Install \/ Retry \/ Recover \/ Pull \/ (AutoAdopt /\ RegAdopt)
+        \/ \E c \in SUBSET Leaves(MaxEv) : Attempt(c)
 
 Spec == Init /\ [][Next]_vars
         /\ WF_vars(Install) /\ WF_vars(Recover) /\ WF_vars(Pull) /\ WF_vars(Retry)
         /\ (AutoAdopt => WF_vars(RegAdopt))
+        /\ WF_vars(\E c \in SUBSET Leaves(MaxEv) : Attempt(c))
         /\ WF_vars(\E k, h \in 0..MaxEv, s \in 0..MaxSeq : Serve(k, s, h))
 
 (* Liveness: eventually, for good, J holds the registry's newest record    *)
