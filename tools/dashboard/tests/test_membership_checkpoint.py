@@ -387,7 +387,10 @@ def test_adopt_by_fold_retains_a_member_signed_record_as_its_state_tuple(monkeyp
     assert network_routes._adopt_state_by_fold(ORG, signed, source="join bundle's")["action"] == "adopted"
     retained = cp._cached_adopted(ORG)
     assert "sig" not in retained and "signer" not in retained
-    assert retained == {"org": org_uuid, **state}
+    # The authenticated tuple is the record; the signed bytes ride beside it
+    # for chaining only (B1), never as the trusted form.
+    assert {k: v for k, v in retained.items() if k != "chain_record"} == {"org": org_uuid, **state}
+    assert retained["chain_record"] == signed
 
 
 def test_adopt_by_fold_refuses_a_record_for_another_organization(monkeypatch):
@@ -483,7 +486,14 @@ class _Registry:
 
     def current(self):
         r = self.records[-1]
-        return {k: r[k] for k in ("seq", "members_root", "checkpointers_root", "ledger_head")}
+        state = {k: r[k] for k in ("seq", "members_root", "checkpointers_root", "ledger_head")}
+        state["checkpoint"] = dict(r)   # the registry GET serves its signed record too
+        return state
+
+    def serve(self, monkeypatch):
+        """Point network_routes' registry read at this stand-in."""
+        monkeypatch.setattr("tools.dashboard.network_routes._registry_membership_state",
+                            lambda binding: (self.current(), None))
 
 
 def test_admission_publishes_a_delegate_signed_checkpoint_that_includes_the_member(monkeypatch):
@@ -535,18 +545,11 @@ def test_publication_race_re_assembles_on_the_registrys_newer_record(monkeypatch
     assert registry.post({}, other)[0] == 201
     add_member(sim)                   # and now a second admission on this node
     _install_org(sim)
-    adopted_from_registry = []
-
-    def adopt_registry(org):
-        adopted_from_registry.append(org)
-        cp.record_adopted(org, other)
-        return {"ok": True}
-
-    out = cp.publish_after_membership_change(
-        ORG, signer=(child, grant), post=registry.post, adopt_registry=adopt_registry, now=TS)
+    registry.serve(monkeypatch)       # the REAL adoption path reads this registry
+    out = cp.publish_after_membership_change(ORG, signer=(child, grant), post=registry.post, now=TS)
     assert out["action"] == "published" and out["seq"] == 2
-    assert adopted_from_registry == [ORG]
     assert cp._cached_adopted(ORG)["prev"] == mc.checkpoint_hash(other)
+    assert sorted(cp.adopted_history(ORG)) == [0, 1, 2]
 
 
 def test_publication_is_skipped_or_refused_with_the_reason_named(monkeypatch):
@@ -625,3 +628,64 @@ def test_prepare_marks_a_checkpointer_delegate_for_remint_until_it_carries_the_s
     prepared = osd.prepare(ORG)
     assert prepared["checkpointer"] is False and prepared["remint_required"] is False
     assert len(prepared["scope"]) == 2
+
+
+def test_a_node_that_adopted_by_fold_can_still_publish_the_next_checkpoint(monkeypatch):
+    """B1 (reviewer, c7d6992a): the next record's prev is the hash of the
+    registry's STORED signed record. A node whose newest record came from a
+    fold adoption holds only the authenticated tuple, so the registry serves
+    its signed bytes with the tuple and the adoption keeps them for chaining
+    (never for trust). Publishing after an admission then chains correctly."""
+    from tools.dashboard import network_routes
+    sim, founder, child, grant = _org_with_delegate()
+    org_uuid = _binding_row(monkeypatch)
+    registry = _Registry(sim.root.public_hex, now=TS)
+    registry.records.append(_seed_for(sim, org_uuid))
+    _install_org(sim)
+    registry.serve(monkeypatch)
+    # Adopt the seed from the registry by fold: the retained entry is the
+    # tuple plus the chain bytes; the tuple is what is trusted.
+    assert network_routes._adopt_registry_checkpoint(ORG)["action"] == "adopted"
+    retained = cp._cached_adopted(ORG)
+    assert "sig" not in retained or retained["signer"] == sim.root.public_hex
+    assert mc.chain_record_for(retained) == registry.records[-1]
+    member = add_member(sim)
+    _install_org(sim)
+    out = cp.publish_after_membership_change(ORG, signer=(child, grant), post=registry.post, now=TS)
+    assert out == {"action": "published", "seq": 1, "sign_with": "delegate"}
+    assert registry.current()["seq"] == 1
+    mc.verify_inclusion(registry.current()["members_root"], member.public_hex,
+                        *mc.inclusion_proof(mc.member_pubs(sim.fold()), member.public_hex))
+
+
+def test_a_member_signed_bundle_record_is_kept_for_chaining_but_not_trusted(monkeypatch):
+    """D3a and B1 together: an unverifiable member-signed record from a bundle
+    is retained as the authenticated tuple with its bytes beside it as the
+    chain source; a signed record that does not describe the tuple is not."""
+    from tools.dashboard import network_routes
+    sim, founder = org_with_owner()
+    _install_org(sim)
+    org_uuid = _binding_row(monkeypatch)
+    state = sim.fold()
+    signed = mc.build_checkpoint(
+        org=org_uuid, seq=1, prev="dd" * 32, ledger_head=cp._first_head(state),
+        members_root_hex=mc.members_root(state), checkpointers_root_hex=mc.checkpointers_root(state),
+        ts=TS, signer=founder, prev_checkpointer_pubs=[founder.public_hex])
+    assert network_routes._adopt_state_by_fold(ORG, signed, source="join bundle's")["action"] == "adopted"
+    retained = cp._cached_adopted(ORG)
+    assert "sig" not in retained and retained["chain_record"] == signed
+    assert mc.chain_record_for(retained) == signed
+    # A tuple whose carried record describes another state keeps no chain.
+    other = dict(_state_of(sim, 2), checkpoint=dict(signed, seq=7))
+    assert network_routes._adopt_state_by_fold(ORG, other, source="registry's")["action"] == "adopted"
+    assert mc.chain_record_for(cp._cached_adopted(ORG)) is None
+
+
+def test_checkpoint_due_asks_for_the_registry_record_before_chaining(monkeypatch):
+    sim, founder = org_with_owner()
+    _install_org(sim)
+    cp.record_adopted(ORG, _tuple_record(0, head=cp._first_head(sim.fold())))
+    add_member(sim)
+    _install_org(sim)
+    d = cp.checkpoint_due(ORG, founder.public_hex, ts=TS, genesis_id=sim.genesis_id)
+    assert d.action == "chain-missing" and "signed bytes" in d.reason

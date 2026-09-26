@@ -825,8 +825,39 @@ def _adopt_state_by_fold(
         "org": org_uuid, "seq": seq, "members_root": members_root,
         "checkpointers_root": checkpointers_root, "ledger_head": ledger_head,
     }
+    if not root_signed:
+        # Keep the signed bytes this state came with, for CHAINING only: the
+        # next checkpoint's prev is the hash of the registry's stored record,
+        # which a node that adopted by fold otherwise never holds. Trust
+        # still comes from the fold above, never from these bytes.
+        chain = _chain_record_of(state, seq, members_root, checkpointers_root, ledger_head)
+        if chain is not None:
+            record["chain_record"] = chain
     cp.record_adopted(slug, record)
     return {"ok": True, "action": "adopted", "seq": seq}
+
+
+def _chain_record_of(state: dict, seq: int, members_root: str,
+                     checkpointers_root: str, ledger_head: str) -> dict | None:
+    """The signed record carried by *state* (itself when signed, else its
+    ``checkpoint`` from the registry or ``chain_record`` from a bundle),
+    when it describes exactly this state."""
+    candidates = [state, state.get("checkpoint"), state.get("chain_record")]
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or not isinstance(candidate.get("sig"), str):
+            continue
+        if not isinstance(candidate.get("signer"), str):
+            continue
+        try:
+            same = (int(candidate["seq"]) == seq
+                    and candidate["members_root"] == members_root
+                    and candidate["checkpointers_root"] == checkpointers_root
+                    and candidate["ledger_head"] == ledger_head)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if same:
+            return {k: v for k, v in candidate.items() if k != "chain_record"}
+    return None
 
 
 def _adopt_registry_checkpoint(slug: str) -> dict:
@@ -2644,6 +2675,13 @@ async def get_membership_checkpoint_decision(request: Request) -> JSONResponse:
         decision = cp.checkpoint_due(
             org, persona_pub, ts=int(time.time()), genesis_id=genesis_id,
             org_uuid=org_uuid)
+        if decision.action == "chain-missing":
+            # Adopted by fold without the signed bytes: the registry serves
+            # its record with the tuple; one read, then decide again.
+            await asyncio.to_thread(_adopt_registry_checkpoint, org)
+            decision = cp.checkpoint_due(
+                org, persona_pub, ts=int(time.time()), genesis_id=genesis_id,
+                org_uuid=org_uuid)
     except Exception as e:
         return JSONResponse({"ok": False, "error": f"checkpoint check failed: {e}"},
                             status_code=500)

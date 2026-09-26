@@ -92,6 +92,12 @@ _MEMBER_FIELDS = _COMMON_FIELDS | {"proof", "proof_index"}
 #: the GRANTING persona under the previous checkpointers root.
 _DELEGATE_FIELDS = _MEMBER_FIELDS | {"grant", "genesis_id"}
 CHECKPOINT_VERSION = 1
+#: The two refusals that mean "the verifier's stored record is not the one
+#: this record chains from": a publisher that sees one re-reads the
+#: registry and re-assembles on its record (membership_checkpoint F3).
+REFUSAL_SEQ = "checkpoint seq must advance the previous record by exactly one"
+REFUSAL_PREV = "checkpoint prev does not hash-link to the previous record"
+CHAIN_REFUSALS = (REFUSAL_SEQ, REFUSAL_PREV)
 
 
 class MembershipCommitmentError(Exception):
@@ -331,6 +337,23 @@ def _require_hex64(value: object, what: str) -> str:
     return value
 
 
+def chain_record_for(retained: Dict) -> Optional[Dict]:
+    """The SIGNED record whose hash the next checkpoint's ``prev`` must
+    carry, for a retained entry: the entry itself when it is a signed
+    record (published here, or root-signed and verified), else the
+    ``chain_record`` a fold adoption kept beside the authenticated tuple
+    (the registry's or a bundle's signed bytes, used for chaining only and
+    never for trust). None when the entry holds no signed bytes."""
+    if not isinstance(retained, dict):
+        return None
+    if isinstance(retained.get("sig"), str) and isinstance(retained.get("signer"), str):
+        return retained
+    chain = retained.get("chain_record")
+    if isinstance(chain, dict) and isinstance(chain.get("sig"), str):
+        return chain
+    return None
+
+
 def checkpoint_signer_persona(record: Dict) -> str:
     """The persona a signed record is attributed to: the signer for the root
     and member forms; the grant's author for the delegate form."""
@@ -465,14 +488,12 @@ def validate_checkpoint(record: object, *, root_pub: str,
             raise MembershipCommitmentError(
                 "member-signed checkpoint requires the previous record")
         if record["seq"] != prev_record["seq"] + 1:
-            raise MembershipCommitmentError(
-                "checkpoint seq must advance the previous record by exactly one")
+            raise MembershipCommitmentError(REFUSAL_SEQ)
         if record["org"] != prev_record["org"]:
             raise MembershipCommitmentError(
                 "checkpoint org does not match the previous record")
         if record["prev"] != checkpoint_hash(prev_record):
-            raise MembershipCommitmentError(
-                "checkpoint prev does not hash-link to the previous record")
+            raise MembershipCommitmentError(REFUSAL_PREV)
         attributed = signer
         if delegate_signed:
             _require_hex64(record.get("genesis_id"), "genesis_id")

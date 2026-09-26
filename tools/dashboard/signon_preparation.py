@@ -126,6 +126,12 @@ def collect():
             if entry["checkpoint"]["needed"]:
                 decision = membership_checkpoint.checkpoint_due(org, persona_pub,
                     ts=int(time.time()), genesis_id=entry["genesis_id"], org_uuid=entry["org_uuid"])
+                if decision.action == "chain-missing":
+                    # Adopted by fold without the signed bytes: the registry
+                    # serves its record with the tuple; one read, then decide.
+                    entry["checkpoint_adoption"] = network_routes._adopt_registry_checkpoint(org)
+                    decision = membership_checkpoint.checkpoint_due(org, persona_pub,
+                        ts=int(time.time()), genesis_id=entry["genesis_id"], org_uuid=entry["org_uuid"])
                 if decision.action == "assemble" and not (
                     decision.sign_with == membership_checkpoint.SIGN_WITH_ROOT
                     and entry["org_key"] is None

@@ -286,3 +286,26 @@ class TestDelegateSignedAdvance:
         r = client.post(PATH, json=self._record(sim, seed, child, grant, ts=clock.now))
         assert r.status_code == 403 and "expired" in r.text
         assert client.get(f"/v1/orgs/{ORG}/membership").json()["seq"] == 0
+
+    def test_state_serves_the_stored_record_and_a_bad_pop_is_refused(self, client, clock, root):
+        """B1: the tuple comes with the registry's signed record so a member
+        that adopts by fold can chain its next checkpoint. DelegateCheckpointNoPoP:
+        a grant whose proof of possession does not verify attributes nothing."""
+        sim, founder, child, grant = self._org()
+        clock.now = grant.hlc.ts // 1000 + 10
+        register(client, clock, root)
+        seed = seed_record(root, [founder.public_hex], ts=clock.now)
+        assert client.post(PATH, json=seed).status_code == 201
+        state = client.get(f"/v1/orgs/{ORG}/membership").json()
+        assert state["checkpoint"] == seed
+        record = self._record(sim, seed, child, grant, ts=clock.now)
+        import json as _json
+        forged = _json.loads(grant.to_json()); forged["payload"]["proof"] = "0" * 128
+        # Re-sign the grant as the persona would if it merely observed the key:
+        # the persona signature verifies, the child's consent does not.
+        from tools.network.ledger.events import make_event, HLC
+        grant_wire = make_event(founder, forged["payload"], list(grant.parents), grant.hlc).to_json().decode()
+        bad = dict(record); bad["grant"] = grant_wire
+        bad["sig"] = child.sign_hex(mc._signing_input({k: v for k, v in bad.items() if k != "sig"}))
+        r = client.post(PATH, json=bad)
+        assert r.status_code == 403 and "proof of possession" in r.text

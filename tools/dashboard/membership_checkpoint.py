@@ -167,6 +167,12 @@ def checkpoint_due(org: str, persona_pub: str, *, ts: int,
     # Advancing checkpoint: prove this persona under the PREVIOUS
     # checkpointers_root, reconstructed by re-folding at the cached record's
     # ledger_head — the checkpointer set as of the adopted checkpoint.
+    chain = mc.chain_record_for(cached)
+    if chain is None:
+        return CheckpointDecision(
+            "chain-missing",
+            reason=("the newest adopted checkpoint was adopted by fold without its "
+                    "signed bytes; read the registry's record first"))
     prev_checkpointers = previous_checkpointers(org, cached, state)
     if persona_pub not in prev_checkpointers:
         return CheckpointDecision(
@@ -179,7 +185,7 @@ def checkpoint_due(org: str, persona_pub: str, *, ts: int,
         "v": mc.CHECKPOINT_VERSION,
         "org": record_org,
         "seq": cached["seq"] + 1,
-        "prev": mc.checkpoint_hash(cached),
+        "prev": mc.checkpoint_hash(chain),
         "ledger_head": ledger_head,
         "members_root": members_root,
         "checkpointers_root": checkpointers_root,
@@ -382,6 +388,16 @@ def publish_after_membership_change(
             store.close()
         last = "no attempt"
         for _attempt in range(PUBLISH_RETRIES):
+            chain = mc.chain_record_for(cached)
+            if chain is None:
+                # Adopted by fold without the signed bytes (B1): the registry
+                # serves its stored record with the tuple; one read.
+                adopt_registry(org)
+                cached = _cached_adopted(org)
+                chain = mc.chain_record_for(cached) if cached is not None else None
+                if chain is None:
+                    return {"action": "skipped", "reason": (
+                        "the newest adopted checkpoint has no signed bytes to chain from")}
             state, _heads = _fold_state(org)
             prev_checkpointers = previous_checkpointers(org, cached, state)
             if persona not in prev_checkpointers:
@@ -389,7 +405,7 @@ def publish_after_membership_change(
                     "the delegate's persona is not in the previous checkpointers root")}
             record = mc.build_delegate_checkpoint(
                 org=binding["org_uuid"], seq=int(cached["seq"]) + 1,
-                prev=mc.checkpoint_hash(cached), ledger_head=_first_head(state),
+                prev=mc.checkpoint_hash(chain), ledger_head=_first_head(state),
                 members_root_hex=mc.members_root(state),
                 checkpointers_root_hex=mc.checkpointers_root(state),
                 ts=int(now if now is not None else _time.time()), delegate=key,
@@ -401,7 +417,7 @@ def publish_after_membership_change(
                 record_adopted(org, record)
                 return {"action": "published", "seq": record["seq"], "sign_with": "delegate"}
             last = f"registry refused ({code}): {text[:200]}"
-            if code == 403 and ("seq" in text or "prev" in text) and "form" not in text:
+            if code == 403 and any(marker in text for marker in mc.CHAIN_REFUSALS):
                 # The registry moved past our prev: adopt its record and
                 # re-assemble on it (F3), still including every member so far.
                 adopt_registry(org)

@@ -1133,6 +1133,10 @@ def create_app(
             "checkpointers_root": state.checkpointers_root,
             "ledger_head": state.ledger_head,
             "verified_at": state.verified_at,
+            # The stored signed record: roots and signatures only. A member
+            # that adopted this state by fold needs its exact bytes to chain
+            # the next checkpoint's ``prev`` (membership_checkpoint B1).
+            "checkpoint": state.checkpoint,
         }
 
     # -- §4.4 links ------------------------------------------------------------
