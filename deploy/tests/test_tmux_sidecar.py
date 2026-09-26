@@ -149,6 +149,8 @@ def test_each_simulated_machine_has_its_own_sidecar_and_home(isolated):
         assert _mounts(dashboard)[TMUX_DIR] == f"{person}-tmux"
         assert _mounts(sidecar)[TMUX_DIR] == f"{person}-tmux"
         assert _mounts(sidecar)["/app/data"] == person
+        for service in (dashboard, sidecar):
+            assert _mounts(service)["/var/run/docker.sock"] == "/var/run/docker.sock"
         assert sidecar["command"] == ["tmux", "-D"]
         assert sidecar["environment"]["TMUX_TMPDIR"] == TMUX_DIR
         assert dashboard["depends_on"][f"{person}-tmux"]["condition"] == "service_healthy"

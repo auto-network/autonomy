@@ -27,6 +27,8 @@ x-dashboard: &dashboard
 # Each machine's tmux sidecar owns its session panes, as on a real node
 # (docker-compose.yml service `tmux`): same image and entrypoint, `tmux -D`,
 # the socket shared with that machine's dashboard through its own volume.
+# Dashboards and sidecars mount the Docker socket exactly as a node does, so
+# the simulated product can launch its own session containers.
 x-tmux: &tmux
   image: autonomy-node:onboarding
   init: true
@@ -65,6 +67,7 @@ services:
       - alice:/app/data
       - alice-orgs:/app/orgs
       - alice-tmux:/run/autonomy-tmux
+      - /var/run/docker.sock:/var/run/docker.sock
   alice:
     <<: *dashboard
     ports: ['127.0.0.1:${SIM_ALICE_PORT:-19880}:8080']
@@ -85,6 +88,7 @@ services:
       - alice-orgs:/app/orgs
       - alice-keys:/run/autonomy-keycache
       - alice-tmux:/run/autonomy-tmux
+      - /var/run/docker.sock:/var/run/docker.sock
       - ${SIM_ALICE_HOME}:/host-home:ro
       - ${SIM_TLS_DIR}/server.crt:/simulation-tls/server.crt:ro
       - ${SIM_TLS_DIR}/server.key:/simulation-tls/server.key:ro
@@ -101,6 +105,7 @@ services:
       - bob:/app/data
       - bob-orgs:/app/orgs
       - bob-tmux:/run/autonomy-tmux
+      - /var/run/docker.sock:/var/run/docker.sock
   bob:
     <<: *dashboard
     ports: ['127.0.0.1:${SIM_BOB_PORT:-19881}:8080']
@@ -122,6 +127,7 @@ services:
       - bob-orgs:/app/orgs
       - bob-keys:/run/autonomy-keycache
       - bob-tmux:/run/autonomy-tmux
+      - /var/run/docker.sock:/var/run/docker.sock
       - ${SIM_BOB_HOME}:/host-home:ro
       - ${SIM_TLS_DIR}/server.crt:/simulation-tls/server.crt:ro
       - ${SIM_TLS_DIR}/server.key:/simulation-tls/server.key:ro
