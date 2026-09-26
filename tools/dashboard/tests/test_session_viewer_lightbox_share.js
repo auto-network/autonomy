@@ -125,3 +125,10 @@ describe('viewer attachment video', () => {
     assert.match(html, /x-if="lightboxKind === 'video'"[\s\S]*<video[^>]*controls[^>]*playsinline/);
   });
 });
+
+describe('viewer attachment video overlay', () => {
+  it('a backdrop tap does not close a video; other kinds still close on tap', () => {
+    const html = fs.readFileSync(LIGHTBOX_HTML, 'utf8');
+    assert.match(html, /@click="lightboxKind !== 'video' && closeLightbox\(\)"/);
+  });
+});

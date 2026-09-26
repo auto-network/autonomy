@@ -6,10 +6,12 @@
         <template x-teleport="body">
         <div class="sc-va-lightbox"
              data-testid="viewer-attachment-lightbox"
-             @click="closeLightbox()"
+             @click="lightboxKind !== 'video' && closeLightbox()"
              @keydown.escape.window="closeLightbox()"
              tabindex="-1"
              x-init="$el.focus()">
+          <!-- A video never closes on a backdrop tap: a missed tap on the
+               player's own controls must not dismiss it. The × closes it. -->
           <!-- Every attachment can leave the overlay as a file: Save / Share
                opens the native share sheet (iOS offers Save to Files there).
                Shortcuts carry their own install sheet below. -->
