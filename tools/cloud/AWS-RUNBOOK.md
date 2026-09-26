@@ -131,12 +131,36 @@ Tools: `tools/cloud/win-run <instance> <ps1|->` runs as SYSTEM through SSM;
 `tools/cloud/win-run-user` runs as `tester`. Both print the script output and
 the final status.
 
-### Each run (next)
+### Each run
 
-Launch from the baseline, install Ubuntu, run `deploy/install-published.sh`
-inside WSL against a signed image lock, record per-step timings and the
-dashboard's first `/api/ping` 200, capture logs, terminate. Blocked until the
-images are published to a public registry.
+Launch from the baseline, then as `tester` (`win-run-user`): install Ubuntu
+24.04 under WSL, copy `deploy/install-published.sh` and a signed lock onto the
+machine, and run the installer as root inside WSL with `--install-docker
+--yes`. Check `/api/ping` from the Windows side with `curl.exe`, take Edge
+headless screenshots, pull them back in 20,000-character base64 slices (SSM
+returns at most about 24,000 characters of output per command), terminate.
+
+**Run 1, 2026-09-26, release `2026.09.26-0d46057` (deploy/releases/):**
+
+| Step | Time |
+|---|---|
+| Launch from baseline to SSM online | 99 s |
+| Ubuntu 24.04 installed under WSL | 43 s |
+| Docker Engine installed (apt from docker.com) | 43 s |
+| cosign fetched, four signatures verified | 6 s |
+| Four images pulled (about 15 GB unpacked) | 82 s |
+| Subnet preflight, compose up, first 200 from `/api/ping` | 30 s |
+| **Installer total** | **161 s** |
+
+Windows side: `https://localhost:8080/api/ping` 200 and `/` 307 to `/welcome`.
+Edge shows "Your connection isn't private" (self-signed certificate) before
+the Welcome page.
+
+Finding: once the last WSL process on Windows exits, WSL stops the Ubuntu
+instance a few minutes later and the node goes down with it (Edge: connection
+refused). Waking the distribution brings Docker and the node back by itself
+(first 200 after about 25 s). A shipped Windows install needs something that
+keeps the distribution running (a sign-in task or tray process).
 
 Windows Server is not Windows 11. WSL2, Docker in WSL and the browser behave
 the same for the installer; the consumer first-run layer does not. Confirm on
