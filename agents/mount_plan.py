@@ -121,8 +121,12 @@ class MountPlan:
     and a global sort would reorder unrelated defaults.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, allow_docker_socket: bool = False) -> None:
         self._by_dest: "dict[str, MountSpec]" = {}
+        #: The code-only docker-socket carve-out (graph://89d3c8df-544 §3, S4).
+        #: Only ``launch_session(host_terminal=True)`` constructs a plan with it;
+        #: no Setting field reaches it, so every workspace plan still refuses.
+        self.allow_docker_socket = allow_docker_socket
 
     def set(self, spec: MountSpec, *, replace: bool = True) -> None:
         """The one mutator; the four copy-pasted dedup sites collapse to it.
@@ -414,8 +418,11 @@ _DOCKER_SOCKET = "/var/run/docker.sock"
 def mount_args(plan: MountPlan, topo: NodeTopology) -> list:
     """The one emission path both entry points call. Refuses the docker socket
     over the WHOLE plan (closing the bypass where startup_script/global_claude_md
-    skipped the check), then resolves+emits each spec in insertion order."""
+    skipped the check) unless the plan carries the host-terminal carve-out, then
+    resolves+emits each spec in insertion order."""
     for spec in plan.specs():
+        if plan.allow_docker_socket:
+            break
         if spec.source.rstrip("/") == _DOCKER_SOCKET or spec.dest.rstrip("/") == _DOCKER_SOCKET:
             raise SocketMountRefused(
                 f"refusing docker socket mount ({spec.source} -> {spec.dest})"

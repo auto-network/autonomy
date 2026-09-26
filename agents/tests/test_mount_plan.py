@@ -269,3 +269,47 @@ def test_workspace_marker_forces_host_bind_despite_node_root_collision(monkeypat
                     f"type=bind,src={src},dst=/opt/x,bind-propagation=rslave,readonly"]
     assert "type=volume" not in joined and "autonomy-data" not in joined
     assert "-v" not in args
+
+
+# ── host-terminal carve-out (auto-wmsp9, graph://89d3c8df-544 S4) ──
+def test_socket_carve_out_is_off_by_default():
+    assert mp.MountPlan().allow_docker_socket is False
+
+
+def test_plan_with_carve_out_emits_the_socket_bind_once():
+    topo = mp.NodeTopology(is_host_process=False, network="autonomy_default")
+    plan = mp.MountPlan(allow_docker_socket=True)
+    plan.set(mp.mount_spec("/var/run/docker.sock", "/var/run/docker.sock"))
+    argv = mp.mount_args(plan, topo)
+    assert argv == ["-v", "/var/run/docker.sock:/var/run/docker.sock"]
+
+
+def test_carve_out_is_code_only():
+    """No Setting can reach the carve-out: the only non-test source line that
+    enables it is the launcher's host_terminal keyword, and no Settings schema
+    declares a field of either name."""
+    import pathlib
+    import re
+
+    root = pathlib.Path(mp._REPO_ROOT)
+    setters = []
+    for sub in ("agents", "tools"):
+        for path in (root / sub).rglob("*.py"):
+            if "tests" in path.parts or path.name.startswith("test_"):
+                continue
+            for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if re.search(r"allow_docker_socket\s*=(?!=)", line) and "def " not in line:
+                    setters.append((str(path.relative_to(root)), line.strip()))
+    assert sorted(setters) == sorted([
+        ("agents/mount_plan.py", "self.allow_docker_socket = allow_docker_socket"),
+        ("agents/session_launcher.py", "plan = MountPlan(allow_docker_socket=allow_docker_socket)"),
+        ("agents/session_launcher.py", "allow_docker_socket=host_terminal,"),
+    ]), setters
+
+    # The workspace Setting schemas refuse unknown fields, so a replicated
+    # autonomy.workspace row cannot carry either name.
+    from tools.graph.schemas.workspace import WorkspaceV1, WorkspaceV2
+    for schema in (WorkspaceV1, WorkspaceV2):
+        fields = set(schema._required) | set(schema._optional_types)
+        assert "image" in fields
+        assert not fields & {"host_terminal", "allow_docker_socket"}

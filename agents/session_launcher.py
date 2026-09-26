@@ -42,6 +42,9 @@ from tools.data_paths import DATA_ROOT
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_IMAGE = "autonomy-session-platform"
+#: The operator's in-node host terminal (graph://89d3c8df-544 §2-3).
+HOST_TERMINAL_IMAGE = "autonomy-host-terminal"
+HOST_DOCKER_SOCKET = "/var/run/docker.sock"
 
 DEFAULT_OPUS_MODEL = "claude-opus-4-8[1m]"
 
@@ -1397,6 +1400,7 @@ def build_mount_plan(
     global_claude_md=None,
     startup_script=None,
     claude_account: str | None = None,
+    allow_docker_socket: bool = False,
 ):
     """The one dest-keyed MountPlan both entry points build and emit (auto-vm8qh).
 
@@ -1408,7 +1412,8 @@ def build_mount_plan(
 
     include_capabilities gates the capability/shim/skill block (launch_session
     only; the CLI does not mount capabilities). global_claude_md/startup_script
-    are present only for launch_session.
+    are present only for launch_session. allow_docker_socket is the host-terminal
+    carve-out; only launch_session(host_terminal=True) passes it.
     """
     from agents.mount_plan import MountPlan, mount_spec
 
@@ -1416,7 +1421,7 @@ def build_mount_plan(
         "codex": "/home/agent/.codex/sessions",
         "grok": f"{GROK_HOME}/sessions",
     }.get(harness, "/home/agent/.claude/projects")
-    plan = MountPlan()
+    plan = MountPlan(allow_docker_socket=allow_docker_socket)
     # Beads state comes from the STATE volume, not the code volume. It is
     # Dolt-backed accumulated state — the same category as worktrees and
     # agent-runs — and the code volume has no .beads on a fresh node, because
@@ -1496,6 +1501,7 @@ def build_mount_plan(
     uploads_target = "/workspace/repo/data/uploads"
     if (repo_mount_host is not None
             and (Path(repo_mount_host) / "data" / "uploads").is_dir()
+            and not plan.has_dest("/workspace/repo/data")
             and not plan.has_dest(uploads_target)):
         plan.set(mount_spec(DATA_ROOT / "uploads", f"{uploads_target}:ro"), replace=False)
 
@@ -1543,6 +1549,44 @@ def build_mount_plan(
     return plan, shim_env, codex_auth_target
 
 
+def _host_terminal_profile() -> tuple[dict, list[str]]:
+    """Mounts and docker args of the host-terminal profile (graph://89d3c8df-544 §3).
+
+    The node's own code, data and org trees writable at /workspace/repo (NODE
+    origin, so a containerized node resolves them to the autonomy-code,
+    autonomy-data and autonomy-orgs volumes), the host Docker socket, and the
+    operator home read-only at /host-home as a strict host bind. Raises
+    RuntimeError, before anything is written or minted, when the socket or
+    AUTONOMY_HOST_HOME is missing.
+    """
+    from agents.mount_plan import BindRefuseMissing
+
+    try:
+        socket_gid = os.stat(HOST_DOCKER_SOCKET).st_gid
+    except OSError as exc:
+        raise RuntimeError(
+            f"host terminal needs the Docker socket at {HOST_DOCKER_SOCKET}: {exc}"
+        ) from exc
+    host_home = os.environ.get("AUTONOMY_HOST_HOME", "").strip()
+    if not host_home:
+        raise RuntimeError(
+            "host terminal needs AUTONOMY_HOST_HOME (the operator home, mounted "
+            "read-only at /host-home); set it in .env"
+        )
+    mounts = {
+        str(REPO_ROOT): "/workspace/repo",
+        str(DATA_ROOT): "/workspace/repo/data",
+        str(REPO_ROOT / "orgs"): "/workspace/repo/orgs",
+        HOST_DOCKER_SOCKET: HOST_DOCKER_SOCKET,
+        host_home: BindRefuseMissing("/host-home:ro"),
+    }
+    args = [
+        "--group-add", str(socket_gid),
+        "-e", "AUTONOMY_DATA_ROOT=/workspace/repo/data",
+    ]
+    return mounts, args
+
+
 # ── Main Launch Function ──────────────────────────────────────────────────────
 
 def launch_session(
@@ -1565,6 +1609,7 @@ def launch_session(
     startup_script: str | Path | None = None,
     network_host: bool = True,
     capabilities: tuple = (),
+    host_terminal: bool = False,
 ) -> str | None:
     """Launch an agent container session.
 
@@ -1629,6 +1674,14 @@ def launch_session(
                     secret-file mounts, and non-secret env bindings.
                     Disabled / not-installed capabilities never reach
                     the launcher because the resolver filters them out.
+        host_terminal: The operator's in-node host terminal, a code-only
+                    profile no Setting can select (graph://89d3c8df-544 §3):
+                    image autonomy-host-terminal, working dir /workspace/repo,
+                    the node's code/data/orgs writable, the Docker socket,
+                    the operator home read-only at /host-home, and a
+                    local-operator session token (org None). Raises
+                    RuntimeError when the socket or AUTONOMY_HOST_HOME is
+                    missing.
 
     Returns:
         detach=True:  container_id string on success, None on failure.
@@ -1640,6 +1693,12 @@ def launch_session(
             file=sys.stderr,
         )
         return None
+    host_terminal_args: list[str] = []
+    if host_terminal:
+        profile_mounts, host_terminal_args = _host_terminal_profile()
+        mounts = {**(mounts or {}), **profile_mounts}
+        image = HOST_TERMINAL_IMAGE
+        working_dir = "/workspace/repo"
     resolved_runtime = runtime or (
         "privileged" if needs_nested_docker else "standard"
     )
@@ -1843,6 +1902,7 @@ def launch_session(
         claude_account=(
             creds.get("harness_token") if creds and creds.get("type") == "vault" else None
         ),
+        allow_docker_socket=host_terminal,
     )
     claude_bundle_target = None
     grok_auth_target = None
@@ -1954,14 +2014,19 @@ def launch_session(
     # (which the caller-org guard would refuse anyway). No backfill exists, so
     # this is the only thing keeping every live container token org-stamped.
     token_org = (metadata or {}).get("org")
-    if not isinstance(token_org, str) or not token_org.strip():
+    if host_terminal:
+        # The host terminal is a local operator: its token carries org None,
+        # the value authenticate_session_request requires for a host session.
+        token_org = None
+    elif not isinstance(token_org, str) or not token_org.strip():
         print(
             f"  ERROR: refusing to launch session '{name}' without a canonical "
             "metadata['org'] to stamp on its session token",
             file=sys.stderr,
         )
         return None
-    token_org = token_org.strip()
+    else:
+        token_org = token_org.strip()
     raw_token = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
     auth_db.insert_token(token_hash, name, token_org)
@@ -2038,6 +2103,7 @@ def launch_session(
         "-e", "CODEX_HOME=/home/agent/.codex",
         "-e", f"GROK_HOME={GROK_HOME}",
         *auth_args,
+        *host_terminal_args,
     ]
 
     # GRAPH_TAGS — soft tags auto-applied to notes. The container carries

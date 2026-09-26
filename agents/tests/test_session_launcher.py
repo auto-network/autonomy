@@ -2443,3 +2443,123 @@ def test_dashboard_read_bearer_prefers_the_dispatcher_token_file(tmp_path, monke
     assert hv._bearer() == "inherited-and-revoked"
     (tmp_path / hv.DISPATCHER_TOKEN_RELPATH).write_text("scoped-token\n")
     assert hv._bearer() == "scoped-token"
+
+
+# ── host-terminal profile (auto-wmsp9, graph://89d3c8df-544 §3) ──────
+
+@pytest.fixture
+def containerized_node(monkeypatch, tmp_path):
+    """A Compose node: the node's code, data and orgs trees are the
+    autonomy-code / autonomy-data / autonomy-orgs volumes, a Docker socket
+    exists, and the operator home is set."""
+    from agents import mount_plan as mp
+
+    repo = str(session_launcher.REPO_ROOT)
+    topo = mp.NodeTopology(
+        is_host_process=False,
+        volumes=(
+            mp.NodeVolume("autonomy-code", repo),
+            mp.NodeVolume("autonomy-data", str(session_launcher.DATA_ROOT)),
+            mp.NodeVolume("autonomy-orgs", os.path.join(repo, "orgs")),
+        ),
+        network="autonomy_default",
+    )
+    monkeypatch.setattr(mp, "discover_topology", lambda: topo)
+    # Tool mounts come from the node user's home, which this fake topology
+    # does not carry; they are not what these tests are about.
+    monkeypatch.setattr(
+        session_launcher, "_resolve_optional_tool_mounts", lambda **kw: {},
+    )
+    socket = tmp_path / "docker.sock"
+    socket.write_text("")
+    monkeypatch.setattr(session_launcher, "HOST_DOCKER_SOCKET", str(socket))
+    monkeypatch.setenv("AUTONOMY_HOST_HOME", "/home/operator")
+    return socket
+
+
+def _run_host_terminal(tmp_path, **kw):
+    return _run(
+        session_type="terminal",
+        name="host-0926-000000",
+        detach=False,
+        host_terminal=True,
+        metadata={"tmux_session": "host-0926-000000", "org": "personal"},
+        output_dir=str(tmp_path / "run"),
+        **kw,
+    )
+
+
+def test_host_terminal_mounts_the_node_socket_and_home(
+    tmp_path, fake_creds, fake_crosstalk, containerized_node, platform_snapshot,
+):
+    cmd = _run_host_terminal(tmp_path).split()
+    joined = " ".join(cmd)
+    socket = str(containerized_node)
+
+    assert "--mount type=volume,src=autonomy-code,dst=/workspace/repo" in joined
+    assert "--mount type=volume,src=autonomy-data,dst=/workspace/repo/data" in joined
+    assert "--mount type=volume,src=autonomy-orgs,dst=/workspace/repo/orgs" in joined
+    for mount in ("autonomy-code,dst=/workspace/repo", "autonomy-data,dst=/workspace/repo/data",
+                  "autonomy-orgs,dst=/workspace/repo/orgs"):
+        idx = joined.index(mount)
+        assert not joined[idx:].split(" ", 1)[0].endswith("readonly")
+    assert joined.count(f"{socket}:{socket}") == 1
+    assert ("--mount type=bind,src=/home/operator,dst=/host-home,"
+            "bind-propagation=rslave,readonly") in joined
+    assert cmd[cmd.index("--group-add") + 1] == str(containerized_node.stat().st_gid)
+    assert "AUTONOMY_DATA_ROOT=/workspace/repo/data" in cmd
+    assert cmd[cmd.index("-w") + 1] == "/workspace/repo"
+    assert session_launcher.HOST_TERMINAL_IMAGE in cmd
+    # The node's live code replaces the read-only snapshot and its uploads view.
+    assert platform_snapshot.calls == []
+    assert "/workspace/repo:ro" not in joined
+    assert "/workspace/repo/data/uploads" not in joined
+
+
+def test_host_terminal_token_is_a_local_operator_token(
+    tmp_path, fake_creds, containerized_node, monkeypatch,
+):
+    import sys
+    import types
+    minted = []
+    fake = types.SimpleNamespace(insert_token=lambda *a: minted.append(a))
+    monkeypatch.setitem(sys.modules, "tools.dashboard.dao",
+                        types.SimpleNamespace(auth_db=fake))
+    _run_host_terminal(tmp_path)
+    assert [(name, org) for _, name, org in minted] == [("host-0926-000000", None)]
+
+
+def test_host_terminal_without_socket_raises_before_minting(
+    tmp_path, fake_creds, containerized_node, monkeypatch, captured_run,
+):
+    import sys
+    import types
+    minted = []
+    fake = types.SimpleNamespace(insert_token=lambda *a: minted.append(a))
+    monkeypatch.setitem(sys.modules, "tools.dashboard.dao",
+                        types.SimpleNamespace(auth_db=fake))
+    containerized_node.unlink()
+    with pytest.raises(RuntimeError, match="Docker socket"):
+        _run_host_terminal(tmp_path)
+    assert minted == []
+    assert not (tmp_path / "run").exists()
+
+
+def test_host_terminal_without_operator_home_raises(
+    tmp_path, fake_creds, fake_crosstalk, containerized_node, monkeypatch,
+):
+    monkeypatch.delenv("AUTONOMY_HOST_HOME")
+    with pytest.raises(RuntimeError, match="AUTONOMY_HOST_HOME"):
+        _run_host_terminal(tmp_path)
+
+
+def test_workspace_socket_mount_is_still_refused_on_a_containerized_node(
+    tmp_path, fake_creds, fake_crosstalk, containerized_node, captured_run,
+):
+    result = _run(
+        session_type="terminal",
+        mounts={"/var/run/docker.sock": "/var/run/docker.sock"},
+        output_dir=str(tmp_path / "run"),
+    )
+    assert result is None
+    assert captured_run == []
