@@ -1512,7 +1512,7 @@ mutations:
     actors: [joiner]
     opens: none
     requires: [bootstrap_snapshot, checkpoint_including_joiner]
-    produces: [ledger_heads, registry_binding, adopted_checkpoint]
+    produces: [ledger_heads, registry_binding, adopted_checkpoint, install_seed_addresses]
     crib: ["§8"]
     proofs:
       - {framework: tla, theory: OrgAdmission, lemma: EveryAdmittedMemberPulls}

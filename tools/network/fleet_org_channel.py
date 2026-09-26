@@ -279,13 +279,16 @@ class OrgFleetAuthenticator:
         self._now = now
         #: machine_pub -> AdmittedPeer for peers this endpoint admitted.
         self._admitted: dict[str, AdmittedPeer] = {}
-        #: Refusals of this machine's own hello since its last completed
-        #: one; selects the prover's candidate root (see membership_proof_for).
-        self._attempt = 0
-        #: Observability (auto-qrmlg.2): the last completed hello and the
-        #: last refusal, for the org sync report.
-        self._last_completed: dict[str, Any] | None = None
-        self._last_refused: dict[str, Any] | None = None
+        #: Per peer machine: refusals of this machine's own hello to that
+        #: peer since the last one that completed with it. Selects the
+        #: prover's candidate root for that peer (Rotate is per prover-verifier
+        #: pair: completing hellos with other peers must not reset it).
+        self._attempts: dict[str, int] = {}
+        #: Observability (auto-qrmlg.2): per peer, the last completed hello
+        #: and the last refusal; plus the last failed dial (not a refusal).
+        self._last_completed: dict[str, dict[str, Any]] = {}
+        self._last_refused: dict[str, dict[str, Any]] = {}
+        self._last_dial_error: dict[str, Any] | None = None
         #: client eph_pub -> wall-clock expiry, for replay refusal.
         self._seen_client_eph: dict[str, float] = {}
 
@@ -391,13 +394,17 @@ class OrgFleetAuthenticator:
             raise HandshakeError("ORG_CLIENT_HELLO is a replayed capture (eph_pub seen before)")
         self._seen_client_eph[client_eph] = now + HELLO_REPLAY_MEMORY_S
 
-    def _own_fields(self, *, under: int | None = None, root: str | None = None) -> dict[str, Any]:
+    def _own_fields(
+        self, *, under: int | None = None, root: str | None = None, peer: str | None = None,
+    ) -> dict[str, Any]:
         """This machine's hello fields. *under*/*root* are the seq the peer
         labelled its proof with and the root that proof verified under: the
         server proves back under that root with that label (prover-downgrade),
         so the peer can verify the reply against its own record. A client
-        hello (no root) proves under this node's attempt-th candidate."""
-        rider = self._proof_for(under=under, root=root, attempt=self._attempt)
+        hello (no root) proves under this node's attempt-th candidate for
+        *peer*."""
+        attempt = self._attempts.get(peer, 0) if peer is not None else 0
+        rider = self._proof_for(under=under, root=root, attempt=attempt)
         return {
             "persona_cert": self.persona_cert.to_dict(),
             "membership_proof": dict(rider),
@@ -405,45 +412,67 @@ class OrgFleetAuthenticator:
         }
 
     def _completed(self, peer_machine: str, seq: int, root: str) -> None:
-        self._attempt = 0
-        self._last_completed = {
+        self._attempts.pop(peer_machine, None)
+        self._last_completed[peer_machine] = {
             "peer": peer_machine, "checkpoint_seq": int(seq), "members_root": root,
             "at": int(self._now()),
         }
 
     def note_refusal(self, peer_machine: str, error: object) -> None:
-        """This machine's own hello to *peer_machine* did not complete (the
-        dial failed or the peer refused it). Counts toward the prover's
-        candidate rotation and is reported; a completed hello resets it."""
-        self._attempt += 1
-        self._last_refused = {
-            "peer": peer_machine, "error": str(error)[:200], "at": int(self._now()),
-            "attempt": self._attempt,
-        }
+        """This machine's own hello to *peer_machine* did not complete. A
+        typed refusal (HandshakeError: the peer answered and refused) rotates
+        the candidate root for that peer and is reported; a failed dial
+        tested nothing, so it is reported without advancing the rotation. A
+        completed hello with that peer resets it."""
+        if isinstance(error, HandshakeError):
+            attempt = self._attempts.get(peer_machine, 0) + 1
+            self._attempts[peer_machine] = attempt
+            self._last_refused[peer_machine] = {
+                "peer": peer_machine, "error": str(error)[:200], "at": int(self._now()),
+                "attempt": attempt,
+            }
+        else:
+            self._last_dial_error = {
+                "peer": peer_machine, "error": f"{type(error).__name__}: {error}"[:200],
+                "at": int(self._now()),
+            }
 
     def hello_state(self) -> dict[str, Any]:
-        """For the org sync report: what this node proves under, the last
-        hello that completed, the last refusal, and whether refusals have
-        followed the last completion (OrgAdmissionBundleBound.tla ~HelloOK:
-        the newest candidate cannot complete a hello)."""
-        completed, refused = self._last_completed, self._last_refused
-        stuck = refused is not None and self._attempt > 0 and (
-            completed is None or refused["at"] >= completed["at"]
-        )
+        """For the org sync report: what this node proves under, per peer
+        the last hello that completed and the last refusal with the attempt
+        count, and whether any peer is refusing this node's hellos after the
+        last completion with it (OrgAdmissionBundleBound.tla ~HelloOK: the
+        newest candidate cannot complete a hello there)."""
+        peers: dict[str, dict[str, Any]] = {}
+        for machine in set(self._last_completed) | set(self._last_refused):
+            completed = self._last_completed.get(machine)
+            refused = self._last_refused.get(machine)
+            attempts = self._attempts.get(machine, 0)
+            peers[machine] = {
+                "last_completed": dict(completed) if completed else None,
+                "last_refused": dict(refused) if refused else None,
+                "attempts_since_completed": attempts,
+                "stuck": refused is not None and attempts > 0 and (
+                    completed is None or refused["at"] >= completed["at"]
+                ),
+            }
         return {
             "newest_adopted_seq": self._newest_seq(),
-            "last_completed": dict(completed) if completed else None,
-            "last_refused": dict(refused) if refused else None,
-            "attempts_since_completed": self._attempt,
-            "stuck": stuck,
+            "peers": peers,
+            "stuck": any(entry["stuck"] for entry in peers.values()),
+            "last_dial_error": dict(self._last_dial_error) if self._last_dial_error else None,
         }
 
     # -- handshake ------------------------------------------------------
 
-    def build_client_hello(self, session: str) -> tuple[X25519PrivateKey, bytes]:
+    def build_client_hello(
+        self, session: str, *, peer: str | None = None,
+    ) -> tuple[X25519PrivateKey, bytes]:
+        """*peer* is the machine being dialled: its own rotation counter
+        picks which candidate root this hello proves under."""
         private_key = X25519PrivateKey.generate()
         eph_pub = _eph_pub(private_key)
-        own = self._own_fields()
+        own = self._own_fields(peer=peer)
         addresses: list[str] = []
         if self._advertised is not None:
             try:
@@ -574,12 +603,21 @@ class OrgFleetAuthenticator:
         if peer is None:
             raise HandshakeError("machine is not admitted to this organization's scope")
         self._require_current_member(peer.persona_pub, "admitted peer's")
-        if peer.matched_seq >= 0 and self._admission_ok is not None \
-                and self._admission_ok(peer.matched_seq, peer.persona_pub) is False:
-            raise MembershipStaleError(
-                f"admitted peer's proof is under checkpoint {peer.matched_seq}, which "
-                "predates its current admission: it must hello again"
-            )
+        if peer.matched_seq >= 0:
+            # The record the proof verified under must still be retained (an
+            # evicted record can no longer be placed against the persona's
+            # current admission) and still at or after that admission.
+            if self._adopted_for(peer.matched_seq) is None:
+                raise MembershipStaleError(
+                    f"admitted peer's proof is under checkpoint {peer.matched_seq}, "
+                    "which this node no longer retains: it must hello again"
+                )
+            if self._admission_ok is not None \
+                    and self._admission_ok(peer.matched_seq, peer.persona_pub) is False:
+                raise MembershipStaleError(
+                    f"admitted peer's proof is under checkpoint {peer.matched_seq}, which "
+                    "predates its current admission: it must hello again"
+                )
 
     def admitted_addresses(self) -> dict[str, tuple[str, ...]]:
         """machine_pub -> addresses for every admitted peer that introduced

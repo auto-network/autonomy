@@ -291,7 +291,11 @@ class FleetAuthenticator:
                 f"fleet runtime delegation failed: {exc}"
             ) from exc
 
-    def build_client_hello(self, session: str) -> tuple[X25519PrivateKey, bytes]:
+    def build_client_hello(
+        self, session: str, *, peer: str | None = None,
+    ) -> tuple[X25519PrivateKey, bytes]:
+        """*peer* (the machine being dialled) is the org authenticator's
+        concern; the personal hello is the same for every fleet machine."""
         delegate = self._delegate_dict()
         self._authorize_local_signer(delegate)
         private_key = X25519PrivateKey.generate()
@@ -637,7 +641,7 @@ async def authenticate_fleet_transport(
     closes the supplied transport before propagating.
     """
     try:
-        private_key, hello = authenticator.build_client_hello(session)
+        private_key, hello = authenticator.build_client_hello(session, peer=expected_machine_pub)
         client_eph = json.loads(hello)["eph_pub"]
         await transport.send(hello)
         server_hello = await transport.recv()

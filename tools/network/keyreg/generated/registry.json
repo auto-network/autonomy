@@ -3352,7 +3352,8 @@
       "produces": [
         "ledger_heads",
         "registry_binding",
-        "adopted_checkpoint"
+        "adopted_checkpoint",
+        "install_seed_addresses"
       ],
       "proofs": [
         {

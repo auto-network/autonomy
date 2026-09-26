@@ -33,7 +33,7 @@ the listed mutations; the planner never re-produces it.
 | delegate_grant@joiner | built | workflow | ceremony.organization_storage_delegate | - | - |
 | <a id="artifact-fleet_roster"></a>fleet_roster@founder | built | given | - | fleet.enroll | ceremony.fleet_runtime_mint |
 | fleet_roster@joiner | built | given | - | fleet.enroll | ceremony.fleet_runtime_mint |
-| <a id="artifact-install_seed_addresses"></a>install_seed_addresses | built | workflow | route.join_install | - | goal org_sync_pull |
+| <a id="artifact-install_seed_addresses"></a>install_seed_addresses | built | workflow | route.join_install, route.join_install_bundle_adopt | - | goal org_sync_pull |
 | <a id="artifact-invite_event"></a>invite_event | built | workflow | ceremony.org_invite_mint | - | approval.link_publish, route.join_context |
 | <a id="artifact-invite_ref_resolved"></a>invite_ref_resolved | built | workflow | route.invite_resolve | - | route.join_context |
 | <a id="artifact-join_context"></a>join_context | built | workflow | route.join_context | - | ceremony.member_claim_mint |
@@ -113,7 +113,7 @@ Artifact details:
 | route.join_bootstrap | built | founder | none | member_admitted | bootstrap_snapshot |
 | route.join_context | built | founder | none | invite_ref_resolved AND invite_event | join_context |
 | route.join_install | built | joiner | none | bootstrap_snapshot | ledger_heads, registry_binding, install_seed_addresses |
-| route.join_install_bundle_adopt | designed (rule bundle_adopt) | joiner | none | bootstrap_snapshot AND checkpoint_including_joiner | ledger_heads, registry_binding, adopted_checkpoint |
+| route.join_install_bundle_adopt | designed (rule bundle_adopt) | joiner | none | bootstrap_snapshot AND checkpoint_including_joiner | ledger_heads, registry_binding, adopted_checkpoint, install_seed_addresses |
 | route.link_publish | built | founder | delegate | agent_delegate_signing_key AND link_publish_approval AND serve_cert | join_link_grant |
 | route.relay_connect | built | founder, joiner | none | serve_cert | relay_slot |
 
@@ -162,7 +162,7 @@ Recorded: current {'founder': 3, 'joiner': 3}, minimal {'founder': 1, 'joiner': 
 
 ```text
 goal org_sync_pull from self_admit with rules delegate_checkpoint, bundle_adopt
-root openings: founder 1, joiner 1 (total 2); steps 13
+root openings: founder 1, joiner 1 (total 2); steps 12
 
  1. ceremony.checkpoint_delegate_grant[founder]      window founder#1     -> checkpoint_delegate_grant
  2. ceremony.org_invite_mint[founder]                window founder#1     -> invite_event
@@ -174,9 +174,8 @@ root openings: founder 1, joiner 1 (total 2); steps 13
  8. route.claim_submit_admit[founder]                machine (none)       -> member_admitted
  9. delegate.checkpoint_publish[founder]             machine (delegate)   -> adopted_checkpoint@founder, checkpoint_including_joiner
 10. route.join_bootstrap[founder]                    machine (none)       -> bootstrap_snapshot
-11. route.join_install[joiner]                       machine (none)       -> install_seed_addresses, ledger_heads@joiner, registry_binding@joiner
+11. route.join_install_bundle_adopt[joiner]          machine (none)       -> adopted_checkpoint@joiner, install_seed_addresses, ledger_heads@joiner, registry_binding@joiner
 12. ceremony.fleet_runtime_mint[joiner]              window joiner#1      -> persona_cert_fleet_sync@joiner
-13. route.checkpoint_adopt[joiner]                   machine (none)       -> adopted_checkpoint@joiner
 
 goal org_sync_pull from self_admit: current order reaches the goal
 current root openings: founder 3, joiner 3
@@ -199,7 +198,7 @@ Recorded: current {'founder': 4, 'joiner': 4}, minimal {'founder': 2, 'joiner': 
 
 ```text
 goal org_sync_pull from approval with rules admit_on_approval, bundle_adopt
-root openings: founder 2, joiner 2 (total 4); steps 13
+root openings: founder 2, joiner 2 (total 4); steps 12
 
  1. ceremony.org_invite_mint[founder]                window founder#1     -> invite_event
  2. approval.link_publish[founder]                   window founder#1     -> link_publish_approval
@@ -211,9 +210,8 @@ root openings: founder 2, joiner 2 (total 4); steps 13
  8. ceremony.admission_event[founder]                window founder#2     -> claim_approval, member_admitted
  9. ceremony.checkpoint_publish[founder]             window founder#2     -> adopted_checkpoint@founder, checkpoint_including_joiner
 10. route.join_bootstrap[founder]                    machine (none)       -> bootstrap_snapshot
-11. route.join_install[joiner]                       machine (none)       -> install_seed_addresses, ledger_heads@joiner, registry_binding@joiner
-12. route.checkpoint_adopt[joiner]                   machine (none)       -> adopted_checkpoint@joiner
-13. ceremony.fleet_runtime_mint[joiner]              window joiner#2      -> persona_cert_fleet_sync@joiner
+11. route.join_install_bundle_adopt[joiner]          machine (none)       -> adopted_checkpoint@joiner, install_seed_addresses, ledger_heads@joiner, registry_binding@joiner
+12. ceremony.fleet_runtime_mint[joiner]              window joiner#2      -> persona_cert_fleet_sync@joiner
 
 goal org_sync_pull from approval: current order reaches the goal
 current root openings: founder 4, joiner 4
@@ -238,7 +236,7 @@ Recorded: current {'founder': 4, 'joiner': 4}, minimal {'founder': 2, 'joiner': 
 
 ```text
 goal org_sync_pull from approval with rules admit_on_approval, bundle_adopt, delegate_checkpoint
-root openings: founder 2, joiner 2 (total 4); steps 13
+root openings: founder 2, joiner 2 (total 4); steps 12
 
  1. ceremony.org_invite_mint[founder]                window founder#1     -> invite_event
  2. approval.link_publish[founder]                   window founder#1     -> link_publish_approval
@@ -250,9 +248,8 @@ root openings: founder 2, joiner 2 (total 4); steps 13
  8. ceremony.admission_event[founder]                window founder#2     -> claim_approval, member_admitted
  9. ceremony.checkpoint_publish[founder]             window founder#2     -> adopted_checkpoint@founder, checkpoint_including_joiner
 10. route.join_bootstrap[founder]                    machine (none)       -> bootstrap_snapshot
-11. route.join_install[joiner]                       machine (none)       -> install_seed_addresses, ledger_heads@joiner, registry_binding@joiner
-12. route.checkpoint_adopt[joiner]                   machine (none)       -> adopted_checkpoint@joiner
-13. ceremony.fleet_runtime_mint[joiner]              window joiner#2      -> persona_cert_fleet_sync@joiner
+11. route.join_install_bundle_adopt[joiner]          machine (none)       -> adopted_checkpoint@joiner, install_seed_addresses, ledger_heads@joiner, registry_binding@joiner
+12. ceremony.fleet_runtime_mint[joiner]              window joiner#2      -> persona_cert_fleet_sync@joiner
 
 goal org_sync_pull from approval: current order reaches the goal
 current root openings: founder 4, joiner 4

@@ -1226,7 +1226,7 @@ Step J5. The page forwards the bootstrap's reachability_rows in the outcome body
 
 - the join install as route.join_install, and adoption BY FOLD of the founder's current signed checkpoint record carried in the join bundle, atomically with the snapshot
 
-**Workflow:** actors joiner; opens none; requires bootstrap_snapshot AND checkpoint_including_joiner; produces ledger_heads, registry_binding, adopted_checkpoint; rule bundle_adopt
+**Workflow:** actors joiner; opens none; requires bootstrap_snapshot AND checkpoint_including_joiner; produces ledger_heads, registry_binding, adopted_checkpoint, install_seed_addresses; rule bundle_adopt
 
 **Source:** `tools/network/TLA/OrgAdmission.tla:Bootstrap` (route)
 

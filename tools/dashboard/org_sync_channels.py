@@ -185,32 +185,51 @@ def _members_at(slug: str, record: dict) -> tuple[str, ...]:
     return tuple(mc.member_pubs(state))
 
 
+#: Event types that can change the member leaf set; a fold at any other
+#: event as head reproduces the root of the nearest such ancestor.
+_LEAF_CHANGING = frozenset({"member.claim", "member.rekey", "revoke"})
+
+#: (slug, persona, heads) -> own-fold candidates. The list changes only
+#: when events arrive (the heads change), so a hello never re-folds.
+_own_fold_cache: dict[tuple[str, str, tuple[str, ...]], list] = {}
+
+
 def _own_fold_roots(slug: str, persona_pub: str) -> list[tuple[str, tuple[str, ...]]]:
     """(members_root, members) of this node's OWN fold at heads it holds,
     newest first and distinct by root: the current fold, then the fold at
-    each event as a head in reverse HLC order, back to and including this
-    persona's admission claim (OrgAdmissionBundleBound.tla ProveOwnFold /
-    Rotate, master ac114f59: a prover with no usable retained record still
-    reaches a checkpointed root, since every leaf-changing event is
-    checkpointed and the claim's head is the floor). Only folds whose set
-    includes this persona are candidates."""
+    each LEAF-CHANGING event as a head in reverse HLC order, back to and
+    including this persona's admission claim (OrgAdmissionBundleBound.tla
+    ProveOwnFold / Rotate, master ac114f59: a prover with no usable retained
+    record still reaches a checkpointed root, since every leaf-changing
+    event is checkpointed and the claim's head is the floor). Other events
+    cannot change the root, so they are not folded (reviewer (b)/(c) on
+    3d82dd60). Only folds whose set includes this persona are candidates.
+    Memoized per head set."""
     from tools.network.ledger import membership_commitment as mc
     from tools.network.ledger.store import LedgerStore, org_ledger_db_path
 
-    out: list[tuple[str, tuple[str, ...]]] = []
-    seen: set[str] = set()
     store = LedgerStore(org_ledger_db_path(slug))
     try:
+        heads = tuple(store.heads())
+        key = (slug, persona_pub, heads)
+        cached = _own_fold_cache.get(key)
+        if cached is not None:
+            return list(cached)
+        out: list[tuple[str, tuple[str, ...]]] = []
+        seen: set[str] = set()
         current = store.fold()
         claim_id = None
         for member in current.members.values():
             if member.current_key == persona_pub:
                 claim_id = str(member.claim_id)
-        events = sorted(store.events(), key=lambda e: (e.hlc.ts, e.hlc.count), reverse=True)
-        head_sets: list[list[str]] = [list(store.heads())] + [[e.event_id] for e in events]
-        for heads in head_sets:
+        events = sorted(
+            (e for e in store.events() if e.type in _LEAF_CHANGING),
+            key=lambda e: (e.hlc.ts, e.hlc.count), reverse=True,
+        )
+        head_sets: list[list[str]] = [list(heads)] + [[e.event_id] for e in events]
+        for index, hs in enumerate(head_sets):
             try:
-                state = current if heads == head_sets[0] else store.fold(heads=heads)
+                state = current if index == 0 else store.fold(heads=hs)
                 members = tuple(mc.member_pubs(state))
             except Exception:
                 continue
@@ -218,11 +237,14 @@ def _own_fold_roots(slug: str, persona_pub: str) -> list[tuple[str, tuple[str, .
             if root not in seen and persona_pub in members:
                 seen.add(root)
                 out.append((root, members))
-            if claim_id is not None and heads and heads[0] == claim_id:
+            if claim_id is not None and hs and hs[0] == claim_id:
                 break
+        if len(_own_fold_cache) > 256:
+            _own_fold_cache.clear()
+        _own_fold_cache[key] = list(out)
+        return out
     finally:
         store.close()
-    return out
 
 
 def _claim_id_at(slug: str, record: dict | None, persona_pub: str) -> str | None:

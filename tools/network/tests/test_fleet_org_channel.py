@@ -94,7 +94,7 @@ class Node:
 
 
 def _handshake(client: Node, server: Node, session: str = "s1"):
-    priv, hello = client.auth.build_client_hello(session)
+    priv, hello = client.auth.build_client_hello(session, peer=server.machine.public_hex)
     peer, _spriv, server_hello, t_server = server.auth.accept_client(hello, session=session)
     assert peer == client.machine.public_hex
     client_eph = json.loads(hello)["eph_pub"]
@@ -335,31 +335,45 @@ def test_a_genuine_root_under_the_wrong_label_still_admits_and_is_answered_in_ki
         _handshake(outsider_root, founder)
 
 
-def test_refusals_rotate_the_candidate_and_a_completed_hello_resets(org):
-    """OrgAdmissionBundleBound.tla Rotate (master ac114f59): an up-to-date
-    client dialling a lagging server proves under its newest root, is
-    refused, and on the next attempt proves under an older candidate the
-    server retains; the completed hello resets the counter. hello_state
-    reports the stuck state in between."""
+def test_refusals_rotate_the_candidate_per_peer_and_a_completed_hello_resets(org):
+    """OrgAdmissionBundleBound.tla Rotate (master ac114f59), per
+    prover-verifier pair: an up-to-date client dialling a lagging server
+    proves under its newest root, is refused, and on its next attempt TO
+    THAT PEER proves under an older candidate the server retains. Completing
+    hellos with another, up-to-date peer in between does not reset that
+    peer's counter (reviewer deviation R1 on 3d82dd60). A failed dial is
+    reported but tests no candidate, so it does not rotate."""
     members = list(org.member_pubs())
     carol = KeyPair.generate()
     larger = sorted(members + [carol.public_hex])
     lagging = Node(org.personas["bob"], members)          # retains seq 0 only
+    current = Node(carol, larger, seq=1)                  # retains seq 1 only
     client = Node(org.founder, members)
     client.adopt(1, larger)                                # newest: seq 1
     client.candidates = [1, 0]
     assert client.auth.hello_state()["stuck"] is False
-    with pytest.raises(HandshakeError, match="nor in any other retained one"):
+    with pytest.raises(HandshakeError, match="nor in any other retained one") as refusal:
         _handshake(client, lagging)
-    client.auth.note_refusal(lagging.machine.public_hex, "refused")
+    client.auth.note_refusal(lagging.machine.public_hex, ConnectionError("dial failed"))
+    assert client.auth.hello_state()["peers"] == {}          # a dial failure rotates nothing
+    assert client.auth.hello_state()["last_dial_error"]["peer"] == lagging.machine.public_hex
+    client.auth.note_refusal(lagging.machine.public_hex, refusal.value)
     state = client.auth.hello_state()
-    assert state["stuck"] is True and state["attempts_since_completed"] == 1
-    assert state["last_refused"]["peer"] == lagging.machine.public_hex
+    assert state["stuck"] is True
+    assert state["peers"][lagging.machine.public_hex]["attempts_since_completed"] == 1
+    # A completed hello with the up-to-date peer in between: its own counter
+    # only; the lagging peer's rotation is untouched.
+    _handshake(client, current)
+    state = client.auth.hello_state()
+    assert state["peers"][current.machine.public_hex]["attempts_since_completed"] == 0
+    assert state["peers"][lagging.machine.public_hex]["attempts_since_completed"] == 1
+    assert state["stuck"] is True
     _handshake(client, lagging)                            # attempt 1 -> seq 0
     state = client.auth.hello_state()
-    assert state["stuck"] is False and state["attempts_since_completed"] == 0
-    assert state["last_completed"]["checkpoint_seq"] == 0
-    assert state["last_completed"]["members_root"] == mc.compute_root(members)
+    entry = state["peers"][lagging.machine.public_hex]
+    assert state["stuck"] is False and entry["attempts_since_completed"] == 0
+    assert entry["last_completed"]["checkpoint_seq"] == 0
+    assert entry["last_completed"]["members_root"] == mc.compute_root(members)
 
 
 def test_an_idle_connection_is_refused_after_removal_and_re_admission(org):
@@ -407,3 +421,19 @@ def test_a_root_that_fell_out_of_retention_is_refused(org):
     alice = Node(org.founder, members)
     with pytest.raises(HandshakeError, match="nor in any other retained one"):
         _handshake(alice, bob)
+
+
+def test_an_idle_connection_whose_matched_record_was_evicted_must_hello_again(org):
+    """ReAdmitAfterRemoval when the floor can no longer be evaluated: the
+    matched record left retention while the connection was idle; None is
+    not a pass (reviewer (a) on 3d82dd60)."""
+    members = list(org.member_pubs())
+    alice = Node(org.founder, members)
+    bob = Node(org.personas["bob"], members, admitted_at={org.founder.public_hex: 0})
+    _handshake(alice, bob)
+    bob.auth.authorize(alice.machine.public_hex)
+    del bob.adopted[0]; del bob.members_at[0]           # evicted
+    bob.adopt(1, members)
+    bob.admitted_at = None                               # the node cannot tell any more
+    with pytest.raises(MembershipStaleError, match="must hello again"):
+        bob.auth.authorize(alice.machine.public_hex)

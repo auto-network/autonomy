@@ -149,3 +149,35 @@ def test_retained_records_come_before_own_fold_candidates():
     assert r0["checkpoint_seq"] == 0
     r1 = calls["membership_proof_for"](attempt=1)
     mc.verify_inclusion(mc.members_root(sim.fold()), founder.public_hex, r1["index"], r1["path"])
+
+
+def test_own_fold_candidates_fold_only_at_leaf_changing_events_and_are_memoized(monkeypatch):
+    """Reviewer (b)/(c) on 3d82dd60: a hello never re-folds; the candidate
+    walk folds once per leaf-changing event back to the admission claim, so
+    intervening non-membership events cost nothing."""
+    from tools.network.ledger import store as ledger_store
+    sim, founder = org_with_owner()
+    member = add_member(sim)
+    for _ in range(3):
+        add_member(sim)                        # three leaf-changing events after
+    # Non-leaf-changing events after the last claim: role definitions.
+    for i in range(4):
+        sim.role_define(sim.root, f"role{i}", ["link:publish"], requires="self")
+    _install_org(sim)
+    osc._own_fold_cache.clear()
+    folds = []
+    original = ledger_store.LedgerStore.fold
+
+    def counting_fold(self, heads=None, now=None):
+        folds.append(tuple(heads) if heads else ())
+        return original(self, heads=heads, now=now)
+
+    monkeypatch.setattr(ledger_store.LedgerStore, "fold", counting_fold)
+    calls = osc._callables(ORG, member.public_hex)
+    calls["membership_proof_for"](attempt=1)
+    # Current fold + one per leaf-changing event back to the member's claim
+    # (its own claim, three later claims), never the four role definitions.
+    assert len(folds) == 1 + 4, folds
+    folds.clear()
+    calls["membership_proof_for"](attempt=2)
+    assert folds == []  # memoized: same heads, no fold
