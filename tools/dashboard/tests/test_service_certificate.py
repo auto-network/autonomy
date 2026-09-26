@@ -184,7 +184,7 @@ def test_failed_certbot_run_surfaces_real_cause_and_preserves_attempt(monkeypatc
     monkeypatch.setattr(certs, "_restore_acme_bundle", lambda: None)
     monkeypatch.setattr(certs, "_compose_environment", lambda: {})
     monkeypatch.setattr(certs, "_certbot_command", lambda *a, **k: ["certbot"])
-    monkeypatch.setattr(certs, "_dns01_preflight", lambda client, apex, wait=None: None)
+    monkeypatch.setattr(certs, "_dns01_preflight", lambda client, apex, **kwargs: None)
 
     class _Server:
         def __init__(self, *a, **k):

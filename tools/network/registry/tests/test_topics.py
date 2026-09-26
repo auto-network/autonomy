@@ -223,10 +223,8 @@ def test_topic_name_is_validated(client, clock, root, bound_org):
     publish(client, clock, root, [H1], topic="abc%0Adef", expect=400)
 
 
-def test_org_reclaim_wipes_topic_state(client, clock, bound_org_none):
-    """When an expired binding is reclaimed by a new key, the previous
-    org's hint stream and encrypted mailbox must not survive into the
-    new org's topics (their seq counters must reset too)."""
+def test_other_root_cannot_reclaim_expired_org_or_read_topics(app, client, clock, bound_org_none):
+    """Expiry never hands the original organization's mailbox to another root."""
     from tools.network.idkit import KeyPair
 
     from .conftest import ORG_NONE, register
@@ -238,17 +236,15 @@ def test_org_reclaim_wipes_topic_state(client, clock, bound_org_none):
 
     clock.advance(31 * 86_400)  # binding expires
     new_root = KeyPair.generate()
-    assert register(client, clock, new_root, org_uuid=ORG_NONE).status_code == 201
+    assert register(client, clock, new_root, org_uuid=ORG_NONE).status_code == 409
+    assert app.state.store.get_org(ORG_NONE).root_pub == old_root.public_hex
 
-    body = signed(client, "POST", topic_path(TOPIC, "heads/poll", ORG_NONE),
-                  new_root, {"since": 0}, clock, expect=200).json()
-    assert body["hints"] == [] and body["latest"] is None
-    body = signed(client, "POST", topic_path(TOPIC, "bundles/fetch", ORG_NONE),
-                  new_root, {}, clock, expect=200).json()
-    assert body["bundles"] == []
-    # and the new org's first rows start at seq 1, not after the old org's
-    assert signed(client, "POST", topic_path(TOPIC, "heads", ORG_NONE), new_root,
-                  {"heads": [H2]}, clock, expect=201).json()["seq"] == 1
+    signed(client, "POST", topic_path(TOPIC, "heads/poll", ORG_NONE),
+           new_root, {"since": 0}, clock, expect=410)
+    signed(client, "POST", topic_path(TOPIC, "bundles/fetch", ORG_NONE),
+           new_root, {}, clock, expect=410)
+    signed(client, "POST", topic_path(TOPIC, "heads", ORG_NONE), new_root,
+           {"heads": [H2]}, clock, expect=410)
 
 
 def test_protocol_caps_are_cross_pinned():

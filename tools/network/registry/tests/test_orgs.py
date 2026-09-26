@@ -47,13 +47,12 @@ class TestRegister:
         other = KeyPair.generate()
         assert register(client, clock, other).status_code == 409
 
-    def test_expired_binding_is_reclaimable(self, client, clock, root):
+    def test_expired_binding_cannot_be_claimed_by_another_root(self, client, clock, root):
         register(client, clock, root, ttl=HOUR)
         clock.advance(HOUR + 1)
         other = KeyPair.generate()
         response = register(client, clock, other)
-        assert response.status_code == 201
-        assert response.json()["root_pub"] == other.public_hex
+        assert response.status_code == 409
 
     def test_registration_must_be_signed_by_bound_root(self, client, clock, root):
         imposter = KeyPair.generate()

@@ -871,11 +871,15 @@ class RegistryStore:
         existence check (the register_org get-then-create TOCTOU). Returns
         ``"already_bound_self"`` (the SAME root re-registering its own live
         binding — idempotent, liveness refreshed, no rebind),
-        ``"conflict_live"`` (a DIFFERENT key wants a live binding — no
+        ``"conflict_live"`` (a DIFFERENT key wants an existing binding — no
         write), ``"reclaimed_expired"`` (an expired binding was atomically
-        replaced), or ``"claimed"`` (fresh). The RLock is held across the
+        replaced by the SAME root), or ``"claimed"`` (fresh). The RLock is held across the
         whole body, so get_org/create_org here are one atomic transaction."""
         existing = self.get_org(org_uuid)
+        # Expiration does not transfer ownership of an organization UUID.
+        # A different root must use the authorized recovery path, not register.
+        if existing is not None and existing.root_pub != root_pub:
+            return "conflict_live"
         if existing is not None and existing.expires_at >= now:
             if existing.root_pub == root_pub:
                 # Idempotent re-registration by the root that already holds
@@ -1510,6 +1514,42 @@ class RegistryStore:
 
     # -- organization-owned delegated zones (custom domains) ---------------
     @_locked
+    def reserve_managed_zone(self, zone: str, *, org: str, now: int) -> dict:
+        """Administrator-only allocation, serialized across DB connections.
+
+        Never transfer a row. Ordinary org control operations
+        must not call this method. The domain library validates its inputs.
+        """
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            binding = self.get_org(org)
+            if binding is None:
+                raise ValueError("organization must be registered")
+            if self.get_serving_label_owner(zone.split(".")[0]) is not None:
+                raise ValueError("domain is already assigned to a member")
+            current = self.get_serve_zone(zone)
+            if current is not None:
+                if current["org_uuid"] != org or current["binding_kind"] != "registry":
+                    raise ValueError("domain is already reserved; refusing to overwrite")
+                if current["state"] != "active":
+                    self._conn.execute(
+                        "UPDATE serve_zones SET state = 'active', verified_at = ?, updated_at = ?"
+                        " WHERE zone = ?", (now, now, zone),
+                    )
+            else:
+                self._conn.execute(
+                    "INSERT INTO serve_zones (zone, org_uuid, binding_kind, binding_value,"
+                    " state, verified_at, created_at, updated_at) VALUES (?, ?, 'registry', ?,"
+                    " 'active', ?, ?, ?)", (zone, org, org, now, now, now),
+                )
+            result = self.get_serve_zone(zone)
+            self._conn.commit()
+            return result
+        except Exception:
+            self._conn.rollback()
+            raise
+
+    @_locked
     def get_serve_zone(self, zone: str) -> Optional[dict]:
         row = self._conn.execute(
             "SELECT zone, org_uuid, binding_kind, binding_value, state,"
@@ -1568,6 +1608,11 @@ class RegistryStore:
             sql += " WHERE org_uuid = ?"
             params = (org,)
         return [dict(r) for r in self._conn.execute(sql + " ORDER BY zone", params).fetchall()]
+
+    @_locked
+    def get_serving_label_owner(self, label: str) -> Optional[str]:
+        row = self._conn.execute("SELECT persona_pub FROM serve_labels WHERE label = ?", (label,)).fetchone()
+        return row["persona_pub"] if row is not None else None
 
     @_locked
     def get_persona_label(self, persona_pub: str) -> Optional[str]:

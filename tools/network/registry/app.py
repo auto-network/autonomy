@@ -843,8 +843,8 @@ def create_app(
 
         # Atomic first-claim (F1): the existence check and the INSERT happen
         # under one held lock, so two concurrent registrations cannot both
-        # pass the check. A live binding on the UUID → 409; an expired one is
-        # atomically reclaimed. Names are not authority (§4.1).
+        # pass the check. A different root always gets 409, even after expiry.
+        # Expiration never makes an organization UUID available to another root.
         outcome = store.claim_org(
             org_uuid,
             root_pub,

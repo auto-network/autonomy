@@ -46,7 +46,7 @@ Two anchors sit outside the chain rule by construction:
 
 | Endpoint | Auth | Notes |
 |---|---|---|
-| `POST /v1/orgs` | self-signed by `root_pub` | first-key-claims-UUID; live collision → 409; expired bindings are reclaimable; TTL clamped to [1h, 30d], default 30d |
+| `POST /v1/orgs` | self-signed by `root_pub` | first-key-claims-UUID; different-root collision → 409 even after expiry; the same root may re-register; TTL clamped to [1h, 30d], default 30d |
 | `POST /v1/orgs/{org}/renew` | root-direct or any valid chain | heartbeat; weakest mutation by design — it only extends existing authority |
 | `POST /v1/orgs/{org}/rebind` | recovery key, direct signature only | policy `none` → 403 for ANY payload (I3); can rotate or burn the recovery key |
 | `POST /v1/links` | chain with `link:publish` | token = 128-bit CSPRNG hex (I2); `meta.require_auth` → `501 rung-2`; grant records cert subject (I6) |

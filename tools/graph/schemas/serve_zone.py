@@ -13,6 +13,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from tools.network.registry.domains import is_managed_domain
+
 from .registry import (
     SchemaValidationError,
     SettingSchema,
@@ -26,7 +28,7 @@ from .registry import (
 SERVE_ZONE_SET_ID = "autonomy.network.serve-zone"
 SERVE_ZONE_REVISION = 1
 SERVE_BASE_DOMAIN = "serve.auto.network"
-ZONE_BINDING_KINDS = ("parent-txt", "ns-token")
+ZONE_BINDING_KINDS = ("parent-txt", "ns-token", "registry")
 ZONE_STATES = ("active", "revoked")
 
 _ZONE_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
@@ -35,7 +37,8 @@ _ZONE_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 def validate_zone_value(value: Any) -> str:
     """Normalize and bound an organization zone exactly as the registry does:
     lowercase FQDN without a trailing dot, at least three labels, never the
-    base zone and never anything under ``auto.network``."""
+    base zone. Platform names must match the administrator-assigned grammar;
+    syntax acceptance does not grant ownership (the relay checks that)."""
     if not isinstance(value, str):
         raise SchemaValidationError("zone must be a string")
     zone = value.strip().rstrip(".").lower()
@@ -46,7 +49,7 @@ def validate_zone_value(value: Any) -> str:
         raise SchemaValidationError("a delegated zone needs at least three labels")
     if any(_ZONE_LABEL_RE.fullmatch(label) is None for label in labels):
         raise SchemaValidationError("zone carries a malformed label")
-    if zone == "auto.network" or zone.endswith(".auto.network"):
+    if (zone == "auto.network" or zone.endswith(".auto.network")) and not is_managed_domain(zone):
         raise SchemaValidationError("zone must be outside auto.network")
     return zone
 
@@ -75,7 +78,7 @@ class ServeZoneV1(SettingSchema):
         enum=list(ZONE_BINDING_KINDS),
         description=(
             "How the parent zone binds the delegation to this organization: "
-            "a TXT at _autonomy.<parent>, or an NS at <org-uuid>.ns.auto.network."
+            "a TXT at _autonomy.<parent>, an org-token NS, or a registry administrator assignment."
         ),
     )
     state: str = field(

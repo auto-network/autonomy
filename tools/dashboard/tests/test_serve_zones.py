@@ -35,11 +35,41 @@ PERSONA = "persona-77827e972ba4c37d4215"
 
 def test_zone_value_is_normalized_and_bounded_like_the_registry():
     assert sz.validate_zone_value(" Autonomy.TapLink.net. ") == ZONE
-    for bad in ("taplink.net", "x.serve.auto.network", "y.auto.network", "a..b.c", "-a.b.c", 7):
+    assert sz.validate_zone_value("anchore.serve.auto.network") == "anchore.serve.auto.network"
+    assert relay.validate_org_zone("anchore.serve.auto.network", allow_managed=True) == "anchore.serve.auto.network"
+    for bad in ("taplink.net", "x.y.serve.auto.network", "y.auto.network", "a..b.c", "-a.b.c", 7):
         with pytest.raises(SchemaValidationError):
             sz.validate_zone_value(bad)
         with pytest.raises(relay.ZoneValidationError):
             relay.validate_org_zone(bad)
+
+
+def test_managed_assignment_import_and_release_keep_registry_authority(monkeypatch):
+    zone = "anchore.serve.auto.network"
+    writes = []
+    monkeypatch.setattr(sp, "_zone_members", lambda org: [])
+    monkeypatch.setattr(sp.settings_ops, "upsert_by_key", lambda *args, **kw: writes.append(args))
+    refused = lambda *args: {"ok": False, "error": "not-authorized"}
+    with pytest.raises(sp.ServicePublicationError):
+        sp.claim_zone("anchore", zone, "registry", control=refused)
+    assert writes == []
+    row, created = sp.claim_zone("anchore", zone, "registry", control=lambda org, op, args:
+        {"ok": True, "zone": zone, "state": "active", "verified_at": 100})
+    assert created and row["binding_kind"] == "registry"
+    sz.ServeZoneV1.validate_member_key(zone)
+    sz.ServeZoneV1.validate(writes[0][3])
+    from types import SimpleNamespace
+    monkeypatch.setattr(sp, "_zone_members", lambda org:
+                        [SimpleNamespace(key=zone, payload=writes[0][3])])
+    monkeypatch.setattr(sp, "_reservation_members", lambda org: [])
+    with pytest.raises(sp.ServicePublicationError) as error:
+        sp.release_zone("anchore", zone, control=refused)
+    assert error.value.status_code == 403
+    assert len(writes) == 1 and writes[0][3]["state"] == "active"
+    assert certs.apex_for_identity(zone) == zone
+    assert certs._zone_kwargs_for_apex(zone, organization_zone=True) == {"zone": zone}
+    assert service_gateway._valid_service_hostname("hello." + zone)
+    assert sp.zone_reservation_key(zone, "hello") == relay.zone_reservation_id(zone, "hello")
 
 
 def test_reservation_schema_accepts_zone_rows_without_persona_label():
@@ -291,7 +321,8 @@ def test_dns01_client_signs_the_zone_into_present_and_cleanup(monkeypatch):
     assert "zone" not in [args for op, args in sent if op == "serve.dns01.present"][-1]
 
 
-def test_preflight_presents_the_canary_at_the_zone(monkeypatch):
+@pytest.mark.parametrize("ZONE", [ZONE, "anchore.serve.auto.network"])
+def test_preflight_presents_the_canary_at_the_zone(monkeypatch, ZONE):
     seen = {}
 
     class _Client:
@@ -301,17 +332,18 @@ def test_preflight_presents_the_canary_at_the_zone(monkeypatch):
 
         def cleanup(self, order, value, **kw):
             seen["cleanup"] = kw
-    certs._dns01_preflight(_Client(), ZONE, wait=lambda name, value: None)
+    certs._dns01_preflight(_Client(), ZONE, wait=lambda name, value: None, organization_zone=True)
     assert seen["present"]["zone"] == ZONE and seen["cleanup"] == {"zone": ZONE}
 
     class _Wrong(_Client):
         def present(self, order, value, **kw):
             return {"name": f"_acme-challenge.{PERSONA}.serve.auto.network", "expires_at": 1}
     with pytest.raises(certs.ServiceCertificateError, match="No ACME order was placed"):
-        certs._dns01_preflight(_Wrong(), ZONE, wait=lambda name, value: None)
+        certs._dns01_preflight(_Wrong(), ZONE, wait=lambda name, value: None, organization_zone=True)
 
 
-def test_hook_server_forwards_its_bound_zone_to_the_client(tmp_path):
+@pytest.mark.parametrize("ZONE", [ZONE, "anchore.serve.auto.network"])
+def test_hook_server_forwards_its_bound_zone_to_the_client(tmp_path, ZONE):
     seen = []
 
     class _Client:
@@ -324,7 +356,8 @@ def test_hook_server_forwards_its_bound_zone_to_the_client(tmp_path):
 
     async def run():
         path = tmp_path / "hook.sock"
-        async with Dns01HookServer(_Client(), "order", path, wait_ready=lambda n, v: None, zone=ZONE):
+        async with Dns01HookServer(_Client(), "order", path, wait_ready=lambda n, v: None,
+                                  **certs._zone_kwargs_for_apex(ZONE, organization_zone=True)):
             for action in ("present", "cleanup"):
                 reader, writer = await asyncio.open_unix_connection(str(path))
                 writer.write((json.dumps({"action": action, "value": "v"}) + "\n").encode())

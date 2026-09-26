@@ -269,22 +269,22 @@ def test_expiry_reclaimer_cannot_touch_the_old_chain(client, clock, root):
 
     clock.advance(2 * DAY)  # binding expires
     hijacker = KeyPair.generate()
-    register(client, clock, hijacker, ttl=DAY)  # reclaims the UUID
+    assert register(client, clock, hijacker, ttl=DAY).status_code == 409
 
-    # The reclaimer IS the bound root now — but has no rebind edge to the
-    # root that accepted v1, so the chain is out of reach: no update...
+    # The UUID remains owned by the original root. Its expired binding
+    # cannot authorize the rejected registrant for any operation.
     fake = make_claim(hijacker, version="1.0.1", prev=v1["listing_id"],
                       ts=clock.now)
-    publish(client, clock, hijacker, fake, expect=403)
+    publish(client, clock, hijacker, fake, expect=410)
     # ...no fresh shadow listing under the occupied name...
     publish(client, clock, hijacker, make_claim(hijacker, ts=clock.now + 1),
-            expect=403)
+            expect=410)
     # ...and no delisting of the old continuity's card.
     signed(client, "DELETE", f"/v1/listings/{ORG}/studio", hijacker, {},
-           clock, expect=403)
-    # A different name is untouched territory.
+           clock, expect=410)
+    # A different listing name grants no organization authority either.
     publish(client, clock, hijacker,
-            make_claim(hijacker, name="fresh", ts=clock.now + 2), expect=201)
+            make_claim(hijacker, name="fresh", ts=clock.now + 2), expect=410)
 
 
 def test_reclaimer_cannot_restart_a_revoked_chain(client, clock, root):
@@ -297,9 +297,9 @@ def test_reclaimer_cannot_restart_a_revoked_chain(client, clock, root):
 
     clock.advance(2 * DAY)
     hijacker = KeyPair.generate()
-    register(client, clock, hijacker, ttl=DAY)
+    assert register(client, clock, hijacker, ttl=DAY).status_code == 409
     publish(client, clock, hijacker, make_claim(hijacker, ts=clock.now),
-            expect=403)
+            expect=410)
 
 
 def test_owner_republishes_after_revoke(client, clock, root, bound_org):

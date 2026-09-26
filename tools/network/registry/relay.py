@@ -1110,13 +1110,17 @@ class ZoneValidationError(Exception):
     """A zone claim that fails closed."""
 
 
-def validate_org_zone(zone: str) -> str:
+def validate_org_zone(zone: str, *, allow_managed: bool = False) -> str:
     """Normalize and bound an org zone name: lowercase FQDN without a
     trailing dot, at least three labels, never the base zone, never under
     auto.network at all (those are ours)."""
     if not isinstance(zone, str):
         raise ZoneValidationError("zone must be a string")
     zone = zone.strip().rstrip(".").lower()
+    if allow_managed:
+        from .domains import is_managed_domain
+        if is_managed_domain(zone):
+            return zone
     if not zone or len(zone) > 253:
         raise ZoneValidationError("zone is not a valid FQDN")
     labels = zone.split(".")
@@ -1187,9 +1191,20 @@ def _ctrl_zone_op(tunnel: "Tunnel", op: str, args: dict,
     if not isinstance(args, dict) or set(args) != _ZONE_OP_ARGS[op]:
         raise _CtrlError("bad-request")
     try:
-        zone = validate_org_zone(args["zone"])
+        zone = validate_org_zone(args["zone"], allow_managed=True)
     except ZoneValidationError as exc:
         raise _CtrlError(f"zone-invalid: {exc}") from exc
+    from .domains import is_managed_domain
+    if is_managed_domain(zone) and op == "serve.zone.claim":
+        # Import a preassigned domain only. DNS delegation can never mint an
+        # allocation in the platform's namespace.
+        if args.get("binding_kind") != "registry":
+            raise _CtrlError("not-authorized")
+        row = store.get_serve_zone(zone)
+        if (row is None or row["org_uuid"] != tunnel.org
+                or row["binding_kind"] != "registry" or row["state"] != "active"):
+            raise _CtrlError("not-authorized")
+        return {"zone": zone, "state": "active", "verified_at": row["verified_at"]}
     if op == "serve.zone.release":
         row = store.get_serve_zone(zone)
         if row is None or row["org_uuid"] != tunnel.org:
@@ -2114,7 +2129,7 @@ def _ctrl_dns01(tunnel: "Tunnel", op: str, args: dict,
             # An org-owned zone: the challenge sits DIRECTLY at the zone
             # (one wildcard per zone), and only the owning org may write it.
             try:
-                zone = validate_org_zone(args["zone"])
+                zone = validate_org_zone(args["zone"], allow_managed=True)
             except ZoneValidationError as exc:
                 raise _CtrlError("zone-invalid") from exc
             if store.active_serve_zones().get(zone) != tunnel.org:

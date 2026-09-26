@@ -690,7 +690,7 @@ def active_gateway_pair(org: str, identity: object) -> tuple[str, str] | None:
     return gateway_pair_paths(metadata)
 
 
-def _dns01_preflight(client, apex: str, *, wait=None) -> None:
+def _dns01_preflight(client, apex: str, *, wait=None, organization_zone=False) -> None:
     """Prove, against our OWN authoritative name servers, that a challenge for
     this apex will land where ACME looks — before any ACME order exists.
 
@@ -705,7 +705,7 @@ def _dns01_preflight(client, apex: str, *, wait=None) -> None:
     expected = f"_acme-challenge.{apex}"
     order = f"preflight-{uuid.uuid4().hex}"
     canary = "preflight-" + uuid.uuid4().hex
-    zone_kwargs = _zone_kwargs_for_apex(apex)
+    zone_kwargs = _zone_kwargs_for_apex(apex, organization_zone=organization_zone)
     result = client.present(order, canary, ttl=30, lifetime=120, **zone_kwargs)
     try:
         published = str(result.get("name", ""))
@@ -729,9 +729,11 @@ def _dns01_preflight(client, apex: str, *, wait=None) -> None:
             client.cleanup(order, canary, **zone_kwargs)
 
 
-def _zone_kwargs_for_apex(apex: str) -> dict:
+def _zone_kwargs_for_apex(apex: str, *, organization_zone=False) -> dict:
     """An organization zone is its own apex; a persona apex is under the base
     zone and the relay derives its challenge name from the bound label."""
+    if organization_zone:
+        return {"zone": apex}
     return {} if apex.endswith(".serve.auto.network") else {"zone": apex}
 
 
@@ -747,7 +749,7 @@ async def obtain(
     persona_label = identity
     client = load_dns01_client(org)
     order = f"service-{uuid.uuid4().hex}"
-    await asyncio.to_thread(_dns01_preflight, client, apex)
+    await asyncio.to_thread(_dns01_preflight, client, apex, organization_zone="." in identity)
     cert_name = order if staging else certificate_name(org, identity)
     socket_path = ACME_ROOT / "dns01.sock"
     ACME_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -764,7 +766,7 @@ async def obtain(
             and (ACME_ROOT / "config" / "renewal" / f"{cert_name}.conf").is_file()
         )
         async with Dns01HookServer(
-            client, order, socket_path, **_zone_kwargs_for_apex(apex)
+            client, order, socket_path, **_zone_kwargs_for_apex(apex, organization_zone="." in identity)
         ):
             proc = await asyncio.create_subprocess_exec(
                 *_certbot_command(
