@@ -33,6 +33,11 @@
           <template x-if="lightboxKind === 'image'">
             <img :src="lightboxSrc" :alt="lightboxAlt" class="sc-va-lightbox-img">
           </template>
+          <template x-if="lightboxKind === 'video'">
+            <video :src="lightboxSrc" controls playsinline preload="metadata" @click.stop
+                   data-testid="lightbox-video"
+                   style="max-width:94vw;max-height:84vh;border-radius:8px;background:#000"></video>
+          </template>
           <template x-if="lightboxKind === 'iframe'">
             <iframe sandbox="allow-scripts" :src="lightboxSrc" :title="lightboxAlt" @click.stop
                     style="width:92vw;height:88vh;border:none;border-radius:8px;background:#fff"></iframe>

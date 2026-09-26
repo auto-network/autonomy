@@ -106,3 +106,22 @@ describe('viewer attachment Save / Share', () => {
     assert.match(html, /x-if="lightboxKind !== 'shortcut'"[\s\S]*data-testid="lightbox-save-share"[\s\S]*saveLightboxFile\(\)/);
   });
 });
+
+describe('viewer attachment video', () => {
+  it('video/* opens the inline player and is not prefetched', async () => {
+    const { viewer, anchors } = load();
+    assert.equal(viewer.lightboxKindForMime('video/mp4', 'walk.mp4'), 'video');
+    viewer.openLightbox('/api/session/auto-x/output/walk.mp4', 'walk', { kind: 'video', name: 'walk.mp4' });
+    await flush(); await flush();
+    assert.equal(viewer.lightboxFile, null);
+    assert.notEqual(viewer.lightboxFileState, 'loading');
+    viewer.saveLightboxFile();
+    assert.equal(anchors.length, 1);
+    assert.equal(anchors[0].href, '/api/session/auto-x/output/walk.mp4');
+  });
+
+  it('the template renders an inline, inline-playing video element', () => {
+    const html = fs.readFileSync(LIGHTBOX_HTML, 'utf8');
+    assert.match(html, /x-if="lightboxKind === 'video'"[\s\S]*<video[^>]*controls[^>]*playsinline/);
+  });
+});

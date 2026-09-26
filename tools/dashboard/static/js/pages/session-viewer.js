@@ -701,7 +701,7 @@
       // a multi-touch gesture that doesn't fire click, so it stays.
       lightboxSrc: '',
       lightboxAlt: '',
-      // 'image' (default — tap-to-close img) | 'iframe' (PDF/text/viewable) |
+      // 'image' (default — tap-to-close img) | 'video' (inline player) | 'iframe' (PDF/text/viewable) |
       // 'shortcut' (signed Apple Shortcut installer) | 'download' (binary).
       // File attachments open HERE as an in-page overlay
       // instead of navigating via <a target=_blank>, which on an iOS PWA kicks
@@ -744,6 +744,7 @@
         if (typeof name === 'string' && /\.shortcut$/i.test(name)) return 'shortcut';
         if (typeof mime !== 'string' || !mime) return 'download';
         if (mime.indexOf('image/') === 0) return 'image';
+        if (mime.indexOf('video/') === 0) return 'video';
         if (mime === 'text/markdown' || mime === 'text/x-markdown') return 'markdown';
         if (mime === 'application/pdf' || mime === 'application/json' || mime.indexOf('text/') === 0) return 'iframe';
         return 'download';
@@ -867,7 +868,11 @@
         this.lightboxFile = null;
         this.lightboxFileState = 'idle';
         this.lightboxFileError = '';
-        if (!opts.loading) {
+        // Videos stream through the player (the output route answers Range
+        // requests); prefetching the whole file would cost a phone the full
+        // download before anything plays. Save / Share on a video therefore
+        // opens it in a new context, where iOS offers its own share control.
+        if (!opts.loading && this.lightboxKind !== 'video') {
           this._prepareLightboxFile(src, this.lightboxName);
         }
         if (this.lightboxKind === 'markdown' && !opts.loading) {
