@@ -78,9 +78,19 @@ createWorkflow({scope:onboardingOnly?'identity-and-organization-onboarding':'mem
     // The approval prompt itself: the root-unlock dialog, captured before any
     // factor is entered so no secret can appear in the evidence.
     withStep('alice','save approval-prompt',()=>save('alice','approval-prompt',browser('alice','snapshot','-i')));
-    withStep('alice','confirm claim with password',()=>action('alice','.or-ok',{'.or-in-bare':alicePassword},'.mem-word.good','.mem-error'));
+    // Approval admits Bob in the same ceremony (auto-qrmlg.3): the approver
+    // signs the admission event and publishes the membership checkpoint, so
+    // the join request leaves the list and the member count becomes two.
+    withStep('alice','confirm claim with password',()=>action('alice','.or-ok',{'.or-in-bare':alicePassword},'button[data-tab="members"]','.mem-error'));
+    withStep('alice','observe bob admitted',()=>waitValue('alice','button[data-tab="members"] sup','2','textContent',20000));
     withStep('alice','save join-request-approved',()=>save('alice','join-request-approved',browser('alice','snapshot','-i')));
+    // Bob's join page learns of the admission, and (the approval having come
+    // after the held root expired) asks for the root once more to finish
+    // setting this machine up for the organization: the sign-in phases scoped
+    // to the joined organization mint its org keys here, not at a later
+    // sign-in. The set-up line reports the product's own verdict.
     withStep('bob','done screen',()=>action('bob','.or-ok',{'.or-in-bare':bobPassword},'#done-block:not(.hidden)','#accept-hint'));
+    withStep('bob','wait machine set up',()=>waitValue('bob','#setup-line','This machine is set up for Simulation Organization: it can sync with the organization now.','textContent',30000));
     withStep('bob','save invitation-complete',()=>save('bob','invitation-complete',browser('bob','snapshot','-i')));
 
     // ---- After admission (punch list 34–35): Bob's organization must be usable
@@ -100,21 +110,18 @@ createWorkflow({scope:onboardingOnly?'identity-and-organization-onboarding':'mem
     withStep('alice','wait member directory',()=>waitFor('alice','[data-member]','.mem-error'));
     evidence.aliceMembers=memberRows('alice');
     withStep('alice','save alice-member-directory',()=>save('alice','alice-member-directory',browser('alice','snapshot','-i')));
-    // Both members sign on again: Alice's ceremony publishes the membership
-    // checkpoint that includes Bob and mints her org sync credential; Bob's
-    // adopts that checkpoint from the registry and mints his.
-    withStep('alice','lock and unlock',()=>lockAndUnlock('alice',alicePassword));
-    withStep('alice','save alice-signed-on-again',()=>save('alice','alice-signed-on-again',browser('alice','snapshot','-i')));
-    withStep('bob','lock and unlock',()=>lockAndUnlock('bob',bobPassword));
-    withStep('bob','save bob-signed-on-again',()=>save('bob','bob-signed-on-again',browser('bob','snapshot','-i')));
+    // No further sign-on: Alice's approval published the checkpoint that
+    // includes Bob, and Bob's join window minted his org keys. If the change
+    // below does not reach Bob, that is the finding.
     // One organization change on Alice, observed on Bob through the same screen.
-    withStep('alice','reopen organization settings',()=>openOrganizationSettings('alice'));
+    // Alice is still in the organization settings dialog (the member
+    // directory); the charter is the next rail in the same dialog.
     withStep('alice','open charter',()=>action('alice','[data-testid="orgset-rail-charter"]',{},'#ch-byline','.mem-error'));
     withStep('alice','save charter byline',()=>action('alice','[data-action="save"]',{'#ch-byline':'Synced from Alice'},'#ch-byline','.mem-error'));
     withStep('alice','wait charter saved',()=>waitValue('alice','[data-action="save"]','Saved'));
     withStep('alice','save alice-charter-saved',()=>save('alice','alice-charter-saved',browser('alice','snapshot','-i')));
     const syncStarted=Date.now();
-    withStep('bob','reopen organization settings',()=>openOrganizationSettings('bob'));
+    // Bob is still in his organization settings dialog as well.
     // Convergence is observed by re-opening the charter screen (which reads
     // the organization's current row) a bounded number of times; each look
     // is a product action plus an observer, never a sleep.
