@@ -31,30 +31,25 @@ def _scenarios(registry):
 
 
 def test_recorded_scenarios_match_the_record(registry):
+    """Every proposed rule is built (auto-qrmlg.3 C3..C5): the bundle adopt,
+    the delegate checkpoint at admission and the admission event. The
+    founder's checkpoint-scoped delegate is minted at its own sign-on (F0),
+    so both starting states hold it. Self-admitting role: founder 2 / joiner
+    2 in the built order, minimal 1 / 1; approval role: 3 / 2 and 2 / 2,
+    the final-rules table of auto-qrmlg.12."""
     table = {(s["from"], tuple(s["rules"])): (s["current"], s["minimal"])
              for s in _scenarios(registry)}
-    assert table[("self_admit", ())] == ({"founder": 3, "joiner": 3}, {"founder": 2, "joiner": 1})
-    # The admission event is built (auto-qrmlg.3 C5): under an approval role
-    # the approver admits in its own window and the joiner's second ceremony
-    # is gone, so the built current order costs the joiner 3 openings (claim,
-    # install-time mints, the repeat) and the minimum is founder 2 / joiner 2.
-    assert table[("approval", ())] == ({"founder": 4, "joiner": 3}, {"founder": 2, "joiner": 2})
-    assert table[("self_admit", ("delegate_checkpoint",))][1] == {"founder": 1, "joiner": 1}
-    # auto-qrmlg.12 final rules: bundle_adopt moves the joiner's adoption
-    # into install; counts unchanged.
-    assert table[("self_admit", ("delegate_checkpoint", "bundle_adopt"))][1] == {"founder": 1, "joiner": 1}
-    assert table[("approval", ("bundle_adopt",))][1] == {"founder": 2, "joiner": 2}
-    assert table[("approval", ("bundle_adopt", "delegate_checkpoint"))][1] == {
-        "founder": 2, "joiner": 2}
+    assert table[("self_admit", ())] == ({"founder": 2, "joiner": 2}, {"founder": 1, "joiner": 1})
+    assert table[("approval", ())] == ({"founder": 3, "joiner": 2}, {"founder": 2, "joiner": 2})
 
 
 def test_final_rules_adopt_at_install(registry):
-    result = keyreg.plan(registry, GOAL, "self_admit", ["delegate_checkpoint", "bundle_adopt"])
+    result = keyreg.plan(registry, GOAL, "self_admit")
     adopt = [inst.mutation for inst, _w, new in result.steps if "adopted_checkpoint@joiner" in new]
-    assert adopt == ["route.join_install_bundle_adopt"]
+    assert adopt == ["route.join_install"]
 
 
-@pytest.mark.parametrize("index", range(7))
+@pytest.mark.parametrize("index", range(2))
 def test_planner_and_current_order_reproduce_each_scenario(registry, index):
     scenario = _scenarios(registry)[index]
     current, minimal, openings = keyreg.explain_current(
@@ -87,8 +82,10 @@ def test_minimal_joiner_window_holds_claim_install_and_certificates(registry):
     joiner_window = [inst.mutation for inst, window, _ in result.steps if window == "joiner#1"]
     assert {"ceremony.member_claim_mint", "ceremony.fleet_runtime_mint"} <= set(joiner_window)
     assert "ceremony.serve_cert_mint" not in joiner_window
+    # The joiner adopts at install (a machine step inside the join), so no
+    # separate adoption step remains in the minimal schedule.
     adopt = [w for inst, w, _ in result.steps if inst.mutation == "route.checkpoint_adopt"]
-    assert adopt == [None]  # adoption is a machine step, re-polled without a ceremony
+    assert adopt == []
 
 
 def test_explain_names_the_forcing_artifacts(registry):
@@ -96,11 +93,12 @@ def test_explain_names_the_forcing_artifacts(registry):
     by_step = {o.step: o for o in openings}
     assert by_step["F2"].extra and ("link_publish_approval", "approval.link_publish[founder]") \
         in by_step["F2"].missing
+    # The joiner's install-time mints (J6) are the one remaining extra
+    # opening: the claim window closed before the install produced the
+    # ledger and binding they need (C6 folds them into the join).
     assert by_step["J6"].extra and {r for r, _ in by_step["J6"].missing} == {
         "ledger_heads@joiner", "registry_binding@joiner"}
-    assert by_step["J6.repeat"].extra and [r for r, _ in by_step["J6.repeat"].missing] == [
-        "checkpoint_including_joiner"]
-    assert not by_step["F4"].extra and [r for r, _ in by_step["F4"].missing] == ["member_admitted"]
+    assert "F4" not in by_step and "J6.repeat" not in by_step
 
 
 def test_unknown_rule_is_refused(registry):
@@ -118,13 +116,13 @@ def test_unreachable_goal_is_reported(registry):
 
 
 def test_cli_plan_and_explain(capsys, registry):
-    assert keyreg.main(["plan", GOAL, "--from", "approval", "--rule", "bundle_adopt"]) == 0
+    assert keyreg.main(["plan", GOAL, "--from", "approval"]) == 0
     out = capsys.readouterr().out
     assert "root openings: founder 2, joiner 2" in out
     assert keyreg.main(["explain-current", GOAL]) == 0
     out = capsys.readouterr().out
-    assert "current root openings: founder 3, joiner 3" in out
-    assert "EXTRA  J6.repeat" in out
+    assert "current root openings: founder 2, joiner 2" in out
+    assert "EXTRA  J6" in out and "J6.repeat" not in out
 
 
 # ── The current-order lints ──────────────────────────────────────────────────
@@ -133,10 +131,16 @@ def test_order_lints_pass_on_the_real_registry(registry):
     assert lint.workflow_current_order(registry) == []
 
 
-def test_removing_a_known_defect_surfaces_it_by_name(registry):
+def test_an_unrecorded_defect_surfaces_by_name(registry):
+    """No defects remain in the built order; a step that consumes before its
+    producer, with no defect recorded for it, is named by the lint."""
     broken = copy.deepcopy(registry)
-    broken["goals"][GOAL]["known_defects"] = [
-        d for d in broken["goals"][GOAL]["known_defects"] if d.get("step") != "J5"]
+    order = broken["goals"][GOAL]["current_order"]
+    j5 = next(s for s in order if s["step"] == "J5")
+    j5["runs"] = ["route.checkpoint_adopt"]   # needs a checkpoint nothing before it publishes
+    for s in order:
+        if s["step"] in ("J3.submit", "F3.admit"):
+            s["runs"] = [m for m in s["runs"] if m != "delegate.checkpoint_publish"]
     errors = lint.workflow_current_order(broken)
     assert any("step J5 runs route.checkpoint_adopt, which requires "
                "checkpoint_including_joiner; no producer precedes it" in e for e in errors), errors
@@ -145,11 +149,11 @@ def test_removing_a_known_defect_surfaces_it_by_name(registry):
 def test_consumer_before_producer_is_an_error(registry):
     broken = copy.deepcopy(registry)
     order = broken["goals"][GOAL]["current_order"]
-    f4 = next(i for i, s in enumerate(order) if s["step"] == "F4")
+    serve = next(i for i, s in enumerate(order) if s["step"] == "J5.serve")
     j3 = next(i for i, s in enumerate(order) if s["step"] == "J3")
-    order.insert(j3, order.pop(f4))  # checkpoint before the claim exists
+    order.insert(j3, order.pop(serve))  # the bootstrap before the claim exists
     errors = lint.workflow_current_order(broken)
-    assert any("step F4 runs ceremony.checkpoint_publish, which requires member_admitted" in e
+    assert any("step J5.serve runs route.join_bootstrap, which requires member_admitted" in e
                for e in errors), errors
 
 
@@ -163,9 +167,9 @@ def test_stale_known_defect_is_an_error(registry):
 
 def test_order_not_reaching_goal_is_an_error(registry):
     broken = copy.deepcopy(registry)
+    # Without the joiner's install-time mints (J6) nothing produces the
+    # joiner's fleet:sync certificate, which the goal requires.
     broken["goals"][GOAL]["current_order"] = [
-        s for s in broken["goals"][GOAL]["current_order"] if s["step"] != "J6.repeat"]
-    broken["goals"][GOAL]["known_defects"] = [
-        d for d in broken["goals"][GOAL]["known_defects"] if d.get("step") != "J6"]
+        s for s in broken["goals"][GOAL]["current_order"] if s["step"] != "J6"]
     errors = lint.workflow_current_order(broken)
     assert any("does not reach the goal" in e for e in errors), errors

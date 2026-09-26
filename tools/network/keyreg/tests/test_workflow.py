@@ -114,24 +114,34 @@ def test_malformed_and_or(registry):
     assert any("mutations.route.claim_submit_admit.requires[0]" in e for e in _errors(broken))
 
 
+def _designed(registry, rule=None):
+    """A synthetic designed mutation (every proposed rule is built now)."""
+    entry = copy.deepcopy(registry["mutations"]["route.join_bootstrap"])
+    entry["status"] = "designed"
+    if rule:
+        entry["rule"] = rule
+    return entry
+
+
 def test_designed_mutation_needs_rule(registry):
     broken = copy.deepcopy(registry)
-    del broken["mutations"]["delegate.checkpoint_publish"]["rule"]
-    assert any("mutations.delegate.checkpoint_publish" in e and "rule" in e for e in _errors(broken))
+    broken["mutations"]["route.proposed"] = _designed(registry)
+    assert any("mutations.route.proposed" in e and "rule" in e for e in _errors(broken))
 
 
 def test_current_order_runs_built_code_only(registry):
     broken = copy.deepcopy(registry)
-    broken["goals"]["org_sync_pull"]["current_order"][0]["runs"].append("delegate.checkpoint_publish")
+    broken["mutations"]["route.proposed"] = _designed(registry, rule="proposed")
+    broken["goals"]["org_sync_pull"]["current_order"][0]["runs"].append("route.proposed")
     assert any("current_order[0].runs" in e and "designed" in e for e in _errors(broken))
 
 
 def test_window_step_must_be_a_ceremony(registry):
     broken = copy.deepcopy(registry)
     order = broken["goals"]["org_sync_pull"]["current_order"]
-    step = next(s for s in order if s["step"] == "F4")
+    step = next(s for s in order if s["step"] == "F3")
     step["ceremony"] = False
-    assert any("step F4 must be a ceremony" in e for e in _errors(broken))
+    assert any("step F3 must be a ceremony" in e for e in _errors(broken))
 
 
 def test_artifact_missing_store(registry):
@@ -187,7 +197,7 @@ def test_every_copy_is_given_produced_or_named(registry):
         origin = registry["artifacts"][copy.partition("@")[0]].get("origin", "workflow")
         assert copy in given or producers.get(copy) or origin in ("defect", "open"), copy
     assert "ledger_heads@founder" in given and "ledger_heads@joiner" not in given
-    assert producers["ledger_heads@joiner"] == ["route.join_install", "route.join_install_bundle_adopt"]
+    assert producers["ledger_heads@joiner"] == ["route.join_install"]
 
 
 def test_goal_names_both_actors_copies(registry):

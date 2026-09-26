@@ -23,10 +23,11 @@ the listed mutations; the planner never re-produces it.
 |---|---|---|---|---|---|
 | <a id="artifact-admission_event"></a>admission_event | built | workflow | ceremony.admission_event | - | route.claim_admission |
 | <a id="artifact-adopted_checkpoint"></a>adopted_checkpoint@founder | built | workflow | ceremony.checkpoint_publish, delegate.checkpoint_publish | - | goal org_sync_pull |
-| adopted_checkpoint@joiner | built | workflow | route.checkpoint_adopt, route.join_install_bundle_adopt | - | goal org_sync_pull |
-| <a id="artifact-bootstrap_snapshot"></a>bootstrap_snapshot | built | workflow | route.join_bootstrap | - | route.join_install, route.join_install_bundle_adopt |
-| <a id="artifact-checkpoint_delegate_grant"></a>checkpoint_delegate_grant | designed | workflow | ceremony.checkpoint_delegate_grant | - | delegate.checkpoint_publish |
-| <a id="artifact-checkpoint_including_joiner"></a>checkpoint_including_joiner | built | workflow | ceremony.checkpoint_publish, delegate.checkpoint_publish | - | route.checkpoint_adopt, route.join_install_bundle_adopt |
+| adopted_checkpoint@joiner | built | workflow | route.checkpoint_adopt, route.join_install | - | goal org_sync_pull |
+| <a id="artifact-bootstrap_snapshot"></a>bootstrap_snapshot | built | workflow | route.join_bootstrap | - | route.join_install |
+| <a id="artifact-checkpoint_delegate_grant"></a>checkpoint_delegate_grant@founder | built | given | ceremony.organization_storage_delegate | ceremony.organization_storage_delegate | delegate.checkpoint_publish |
+| checkpoint_delegate_grant@joiner | built | workflow | ceremony.organization_storage_delegate | - | - |
+| <a id="artifact-checkpoint_including_joiner"></a>checkpoint_including_joiner | built | workflow | ceremony.checkpoint_publish, delegate.checkpoint_publish | - | route.checkpoint_adopt, route.join_install |
 | <a id="artifact-checkpoint_seed"></a>checkpoint_seed | built | given | - | ceremony.checkpoint_seed | ceremony.checkpoint_publish, ceremony.serve_cert_mint, delegate.checkpoint_publish |
 | <a id="artifact-claim_approval"></a>claim_approval | built | workflow | ceremony.admission_event, ceremony.claim_approval | - | - |
 | <a id="artifact-claim_staged"></a>claim_staged | built | workflow | route.claim_submit_stage | - | ceremony.admission_event, ceremony.claim_approval |
@@ -34,13 +35,13 @@ the listed mutations; the planner never re-produces it.
 | delegate_grant@joiner | built | workflow | ceremony.organization_storage_delegate | - | - |
 | <a id="artifact-fleet_roster"></a>fleet_roster@founder | built | given | - | fleet.enroll | ceremony.fleet_runtime_mint |
 | fleet_roster@joiner | built | given | - | fleet.enroll | ceremony.fleet_runtime_mint |
-| <a id="artifact-install_seed_addresses"></a>install_seed_addresses | built | workflow | route.join_install, route.join_install_bundle_adopt | - | goal org_sync_pull |
+| <a id="artifact-install_seed_addresses"></a>install_seed_addresses | built | workflow | route.join_install | - | goal org_sync_pull |
 | <a id="artifact-invite_event"></a>invite_event | built | workflow | ceremony.org_invite_mint | - | approval.link_publish, route.join_context |
 | <a id="artifact-invite_ref_resolved"></a>invite_ref_resolved | built | workflow | route.invite_resolve | - | route.join_context |
 | <a id="artifact-join_context"></a>join_context | built | workflow | route.join_context | - | ceremony.member_claim_mint |
 | <a id="artifact-join_link_grant"></a>join_link_grant | built | workflow | route.link_publish | - | route.invite_resolve |
-| <a id="artifact-ledger_heads"></a>ledger_heads@founder | built | given | - | fold.genesis | ceremony.checkpoint_delegate_grant, ceremony.checkpoint_publish, ceremony.fleet_runtime_mint, ceremony.org_invite_mint, ceremony.organization_storage_delegate, delegate.checkpoint_publish |
-| ledger_heads@joiner | built | workflow | route.join_install, route.join_install_bundle_adopt | - | ceremony.fleet_runtime_mint, ceremony.organization_storage_delegate, route.checkpoint_adopt, goal org_sync_pull |
+| <a id="artifact-ledger_heads"></a>ledger_heads@founder | built | given | - | fold.genesis | ceremony.checkpoint_publish, ceremony.fleet_runtime_mint, ceremony.org_invite_mint, ceremony.organization_storage_delegate, delegate.checkpoint_publish |
+| ledger_heads@joiner | built | workflow | route.join_install | - | ceremony.fleet_runtime_mint, ceremony.organization_storage_delegate, route.checkpoint_adopt, goal org_sync_pull |
 | <a id="artifact-link_publish_approval"></a>link_publish_approval | built | workflow | approval.link_publish | - | route.link_publish |
 | <a id="artifact-member_admitted"></a>member_admitted | built | workflow | route.claim_admission, route.claim_submit_admit | - | ceremony.checkpoint_publish, delegate.checkpoint_publish, route.join_bootstrap |
 | <a id="artifact-member_claim"></a>member_claim | built | workflow | ceremony.member_claim_mint | - | route.claim_submit_admit, route.claim_submit_stage |
@@ -53,7 +54,7 @@ the listed mutations; the planner never re-produces it.
 | <a id="artifact-registered_serving_key"></a>registered_serving_key@founder | built | open | **none — open question** | - | - |
 | registered_serving_key@joiner | built | open | **none — open question** | - | - |
 | <a id="artifact-registry_binding"></a>registry_binding@founder | built | given | - | ceremony.registration | ceremony.serve_cert_mint |
-| registry_binding@joiner | built | workflow | route.join_install, route.join_install_bundle_adopt | - | ceremony.serve_cert_mint |
+| registry_binding@joiner | built | workflow | route.join_install | - | ceremony.serve_cert_mint |
 | <a id="artifact-relay_slot"></a>relay_slot@founder | built | given | route.relay_connect | route.relay_connect | goal org_sync_pull |
 | relay_slot@joiner | built | workflow | route.relay_connect | - | goal org_sync_pull |
 | <a id="artifact-serve_cert"></a>serve_cert@founder | built | given | ceremony.serve_cert_mint | ceremony.serve_cert_mint | route.link_publish, route.relay_connect |
@@ -64,7 +65,7 @@ Artifact details:
 - **admission_event** — The approver-signed member.admission event carrying the invitee's unchanged claim and the approvals. Code: `tools/dashboard/static/js/ceremony/claim.js:signAdmission` · `tools/network/ledger/claims.py:make_admission`
 - **adopted_checkpoint** — The actor's adopted-checkpoint cache holds a checkpoint including the joiner (adopted_checkpoint_founder, adopted_checkpoint_joiner). Code: `tools/dashboard/membership_checkpoint.py:record_adopted`
 - **bootstrap_snapshot** — The founder's ledger events, binding and profiles as of the bootstrap moment. Code: `tools/dashboard/claim_service.py:bootstrap`
-- **checkpoint_delegate_grant** — A hot delegate grant whose scope includes signing advancing checkpoints. Code: `tools/network/storagekit/delegate.py:storage_delegate_scopes` · `tools/network/storagekit/tamarin/DelegateCheckpoint.spthy:Grant_Checkpoint_Delegate`
+- **checkpoint_delegate_grant** — A hot delegate grant whose scope includes signing advancing checkpoints (a checkpointer's storage delegate). The founder's is minted at its sign-on before any join (F0). Code: `tools/network/storagekit/delegate.py:storage_delegate_scopes` · `tools/dashboard/org_storage_delegate.py:prepare` · `tools/network/ledger/scopes.py:self_delegable_exact`
 - **checkpoint_including_joiner** — A registry checkpoint seq n+1 whose members_root includes the joiner (checkpoint_seq_n). Code: `tools/dashboard/network_routes.py:post_membership_checkpoint`
 - **checkpoint_seed** — Registry membership checkpoint seq 0, signed by the org root. Code: `tools/dashboard/membership_checkpoint.py:checkpoint_due`
 - **claim_approval** — The founder's countersignature on a staged claim. Code: `tools/dashboard/static/js/ceremony/claim.js:signClaimApproval` · `tools/dashboard/claim_service.py:countersign`
@@ -95,15 +96,14 @@ Artifact details:
 |---|---|---|---|---|---|
 | approval.link_publish | built | founder | root | personal_root_seed AND invite_event | link_publish_approval |
 | ceremony.admission_event | built | founder | persona | persona_signing_key AND claim_staged | claim_approval, admission_event |
-| ceremony.checkpoint_delegate_grant | designed (rule delegate_checkpoint) | founder | persona | persona_signing_key AND ledger_heads | checkpoint_delegate_grant |
 | ceremony.checkpoint_publish | built | founder | persona | persona_signing_key AND member_admitted AND ledger_heads AND checkpoint_seed | checkpoint_including_joiner, adopted_checkpoint |
 | ceremony.claim_approval | built | founder | persona | persona_signing_key AND claim_staged | claim_approval |
 | ceremony.fleet_runtime_mint | built | founder, joiner | root | personal_root_seed AND fleet_roster AND ledger_heads | persona_cert_fleet_sync |
 | ceremony.member_claim_mint | built | joiner | persona | persona_signing_key AND join_context | member_claim |
 | ceremony.org_invite_mint | built | founder | persona | persona_signing_key AND ledger_heads | invite_event |
-| ceremony.organization_storage_delegate | built | founder, joiner | persona | persona_signing_key AND ledger_heads | delegate_grant |
+| ceremony.organization_storage_delegate | built | founder, joiner | persona | persona_signing_key AND ledger_heads | delegate_grant, checkpoint_delegate_grant |
 | ceremony.serve_cert_mint | built | founder, joiner | persona | persona_signing_key AND registry_binding AND checkpoint_seed | serve_cert |
-| delegate.checkpoint_publish | designed (rule delegate_checkpoint) | founder | delegate | agent_delegate_signing_key AND checkpoint_delegate_grant AND member_admitted AND ledger_heads AND checkpoint_seed | checkpoint_including_joiner, adopted_checkpoint |
+| delegate.checkpoint_publish | built | founder | delegate | agent_delegate_signing_key AND checkpoint_delegate_grant AND member_admitted AND ledger_heads AND checkpoint_seed | checkpoint_including_joiner, adopted_checkpoint |
 | module.org_reachability_publish | built | founder, joiner | none | persona_cert_fleet_sync | reachability_row |
 | route.checkpoint_adopt | built | joiner | none | checkpoint_including_joiner AND ledger_heads | adopted_checkpoint |
 | route.claim_admission | built | founder | none | admission_event | member_admitted |
@@ -112,8 +112,7 @@ Artifact details:
 | route.invite_resolve | built | joiner | none | join_link_grant | invite_ref_resolved |
 | route.join_bootstrap | built | founder | none | member_admitted | bootstrap_snapshot |
 | route.join_context | built | founder | none | invite_ref_resolved AND invite_event | join_context |
-| route.join_install | built | joiner | none | bootstrap_snapshot | ledger_heads, registry_binding, install_seed_addresses |
-| route.join_install_bundle_adopt | designed (rule bundle_adopt) | joiner | none | bootstrap_snapshot AND checkpoint_including_joiner | ledger_heads, registry_binding, adopted_checkpoint, install_seed_addresses |
+| route.join_install | built | joiner | none | bootstrap_snapshot AND checkpoint_including_joiner | ledger_heads, registry_binding, install_seed_addresses, adopted_checkpoint |
 | route.link_publish | built | founder | delegate | agent_delegate_signing_key AND link_publish_approval AND serve_cert | join_link_grant |
 | route.relay_connect | built | founder, joiner | none | serve_cert | relay_slot |
 
@@ -127,8 +126,8 @@ Peer selection sources (fleet_sync_scheduler.py:_org_peer_candidates): reachabil
 
 ### Starting states
 
-- **self_admit** — Founded org (F0 done), invite role self-admits. Holds: ledger_heads@founder, registry_binding@founder, checkpoint_seed, serve_cert@founder, relay_slot@founder, persona_cert_fleet_sync@founder, fleet_roster@founder, fleet_roster@joiner, policy_self_admit
-- **approval** — Founded org (F0 done), invite role requires the founder's approval. Holds: ledger_heads@founder, registry_binding@founder, checkpoint_seed, serve_cert@founder, relay_slot@founder, persona_cert_fleet_sync@founder, fleet_roster@founder, fleet_roster@joiner, policy_approval
+- **self_admit** — Founded org (F0 done), invite role self-admits. Holds: checkpoint_delegate_grant@founder, ledger_heads@founder, registry_binding@founder, checkpoint_seed, serve_cert@founder, relay_slot@founder, persona_cert_fleet_sync@founder, fleet_roster@founder, fleet_roster@joiner, policy_self_admit
+- **approval** — Founded org (F0 done), invite role requires the founder's approval. Holds: checkpoint_delegate_grant@founder, ledger_heads@founder, registry_binding@founder, checkpoint_seed, serve_cert@founder, relay_slot@founder, persona_cert_fleet_sync@founder, fleet_roster@founder, fleet_roster@joiner, policy_approval
 
 ### Recorded current order
 
@@ -139,141 +138,22 @@ Peer selection sources (fleet_sync_scheduler.py:_org_peer_candidates): reachabil
 | J1 | joiner | no | route.invite_resolve | all |
 | J2 | founder | no | route.join_context | all |
 | J3 | joiner | yes | ceremony.member_claim_mint | all |
-| J3.submit | founder | no | route.claim_submit_admit | self_admit |
+| J3.submit | founder | no | route.claim_submit_admit, delegate.checkpoint_publish | self_admit |
 | J3.stage | founder | no | route.claim_submit_stage | approval |
 | F3 | founder | yes | ceremony.claim_approval, ceremony.admission_event | approval |
-| F3.admit | founder | no | route.claim_admission | approval |
+| F3.admit | founder | no | route.claim_admission, delegate.checkpoint_publish | approval |
 | J5.serve | founder | no | route.join_bootstrap | all |
-| J5 | joiner | no | route.join_install, route.checkpoint_adopt | all |
-| J6 | joiner | yes | route.checkpoint_adopt, ceremony.organization_storage_delegate, ceremony.serve_cert_mint, ceremony.fleet_runtime_mint | all |
+| J5 | joiner | no | route.join_install | all |
+| J6 | joiner | yes | ceremony.organization_storage_delegate, ceremony.serve_cert_mint, ceremony.fleet_runtime_mint | all |
 | J6.connect | joiner | no | route.relay_connect | all |
-| F4 | founder | yes | ceremony.checkpoint_publish | all |
-| J6.repeat | joiner | yes | route.checkpoint_adopt, ceremony.organization_storage_delegate, ceremony.serve_cert_mint, ceremony.fleet_runtime_mint | all |
-
-### Known defects (named by lint.py, not failed)
-
-- step J5 runs route.checkpoint_adopt without checkpoint_including_joiner — graph://cde6c8c6-041 §1 J5 (network_routes.py:945)
-- step J6 runs route.checkpoint_adopt without checkpoint_including_joiner — graph://cde6c8c6-041 §3 (J6 repeat)
-
-### Scenario from self_admit, rules delegate_checkpoint, bundle_adopt
-
-Recorded: current {'founder': 3, 'joiner': 3}, minimal {'founder': 1, 'joiner': 1}.
-
-```text
-goal org_sync_pull from self_admit with rules delegate_checkpoint, bundle_adopt
-root openings: founder 1, joiner 1 (total 2); steps 12
-
- 1. ceremony.checkpoint_delegate_grant[founder]      window founder#1     -> checkpoint_delegate_grant
- 2. ceremony.org_invite_mint[founder]                window founder#1     -> invite_event
- 3. approval.link_publish[founder]                   window founder#1     -> link_publish_approval
- 4. route.link_publish[founder]                      machine (delegate)   -> join_link_grant
- 5. route.invite_resolve[joiner]                     machine (none)       -> invite_ref_resolved
- 6. route.join_context[founder]                      machine (none)       -> join_context
- 7. ceremony.member_claim_mint[joiner]               window joiner#1      -> member_claim
- 8. route.claim_submit_admit[founder]                machine (none)       -> member_admitted
- 9. delegate.checkpoint_publish[founder]             machine (delegate)   -> adopted_checkpoint@founder, checkpoint_including_joiner
-10. route.join_bootstrap[founder]                    machine (none)       -> bootstrap_snapshot
-11. route.join_install_bundle_adopt[joiner]          machine (none)       -> adopted_checkpoint@joiner, install_seed_addresses, ledger_heads@joiner, registry_binding@joiner
-12. ceremony.fleet_runtime_mint[joiner]              window joiner#1      -> persona_cert_fleet_sync@joiner
-
-goal org_sync_pull from self_admit: current order reaches the goal
-current root openings: founder 3, joiner 3
-minimal root openings: founder 1, joiner 1 (rules delegate_checkpoint, bundle_adopt)
-
-refused: J5 route.checkpoint_adopt lacks checkpoint_including_joiner
-refused: J6 route.checkpoint_adopt lacks checkpoint_including_joiner
-
-needed F1         founder  needed: first opening of founder
-EXTRA  F2         founder  mergeable into F1: F1 closed without: link_publish_approval (from approval.link_publish[founder])
-needed J3         joiner   needed: first opening of joiner
-EXTRA  J6         joiner   mergeable into J3: J3 closed without: ledger_heads@joiner (from route.join_install[joiner]), registry_binding@joiner (from route.join_install[joiner])
-EXTRA  F4         founder  needs no window: machine steps delegate.checkpoint_publish[founder] produce it; absent when F2 closed: checkpoint_delegate_grant (from ceremony.checkpoint_delegate_grant[founder]), member_admitted
-EXTRA  J6.repeat  joiner   needs no window: machine steps route.checkpoint_adopt[joiner] produce it; absent when J6 closed: checkpoint_including_joiner
-```
-
-### Scenario from approval, rules bundle_adopt
-
-Recorded: current {'founder': 4, 'joiner': 3}, minimal {'founder': 2, 'joiner': 2}.
-
-```text
-goal org_sync_pull from approval with rules bundle_adopt
-root openings: founder 2, joiner 2 (total 4); steps 13
-
- 1. ceremony.org_invite_mint[founder]                window founder#1     -> invite_event
- 2. approval.link_publish[founder]                   window founder#1     -> link_publish_approval
- 3. route.link_publish[founder]                      machine (delegate)   -> join_link_grant
- 4. route.invite_resolve[joiner]                     machine (none)       -> invite_ref_resolved
- 5. route.join_context[founder]                      machine (none)       -> join_context
- 6. ceremony.member_claim_mint[joiner]               window joiner#1      -> member_claim
- 7. route.claim_submit_stage[founder]                machine (none)       -> claim_staged
- 8. ceremony.admission_event[founder]                window founder#2     -> admission_event, claim_approval
- 9. route.claim_admission[founder]                   machine (none)       -> member_admitted
-10. ceremony.checkpoint_publish[founder]             window founder#2     -> adopted_checkpoint@founder, checkpoint_including_joiner
-11. route.join_bootstrap[founder]                    machine (none)       -> bootstrap_snapshot
-12. route.join_install_bundle_adopt[joiner]          machine (none)       -> adopted_checkpoint@joiner, install_seed_addresses, ledger_heads@joiner, registry_binding@joiner
-13. ceremony.fleet_runtime_mint[joiner]              window joiner#2      -> persona_cert_fleet_sync@joiner
-
-goal org_sync_pull from approval: current order reaches the goal
-current root openings: founder 4, joiner 3
-minimal root openings: founder 2, joiner 2 (rules bundle_adopt)
-
-refused: J5 route.checkpoint_adopt lacks checkpoint_including_joiner
-refused: J6 route.checkpoint_adopt lacks checkpoint_including_joiner
-
-needed F1         founder  needed: first opening of founder
-EXTRA  F2         founder  mergeable into F1: F1 closed without: link_publish_approval (from approval.link_publish[founder])
-needed J3         joiner   needed: first opening of joiner
-needed F3         founder  needed: not obtainable in F2's window; it lacked: claim_staged
-needed J6         joiner   needed: not obtainable in J3's window; it lacked: ledger_heads@joiner, registry_binding@joiner
-EXTRA  F4         founder  mergeable into F3: F3 closed without: member_admitted (from route.claim_admission[founder])
-EXTRA  J6.repeat  joiner   needs no window: machine steps route.checkpoint_adopt[joiner] produce it; absent when J6 closed: checkpoint_including_joiner
-```
-
-### Scenario from approval, rules bundle_adopt, delegate_checkpoint
-
-Recorded: current {'founder': 4, 'joiner': 3}, minimal {'founder': 2, 'joiner': 2}.
-
-```text
-goal org_sync_pull from approval with rules bundle_adopt, delegate_checkpoint
-root openings: founder 2, joiner 2 (total 4); steps 13
-
- 1. ceremony.org_invite_mint[founder]                window founder#1     -> invite_event
- 2. approval.link_publish[founder]                   window founder#1     -> link_publish_approval
- 3. route.link_publish[founder]                      machine (delegate)   -> join_link_grant
- 4. route.invite_resolve[joiner]                     machine (none)       -> invite_ref_resolved
- 5. route.join_context[founder]                      machine (none)       -> join_context
- 6. ceremony.member_claim_mint[joiner]               window joiner#1      -> member_claim
- 7. route.claim_submit_stage[founder]                machine (none)       -> claim_staged
- 8. ceremony.admission_event[founder]                window founder#2     -> admission_event, claim_approval
- 9. route.claim_admission[founder]                   machine (none)       -> member_admitted
-10. ceremony.checkpoint_publish[founder]             window founder#2     -> adopted_checkpoint@founder, checkpoint_including_joiner
-11. route.join_bootstrap[founder]                    machine (none)       -> bootstrap_snapshot
-12. route.join_install_bundle_adopt[joiner]          machine (none)       -> adopted_checkpoint@joiner, install_seed_addresses, ledger_heads@joiner, registry_binding@joiner
-13. ceremony.fleet_runtime_mint[joiner]              window joiner#2      -> persona_cert_fleet_sync@joiner
-
-goal org_sync_pull from approval: current order reaches the goal
-current root openings: founder 4, joiner 3
-minimal root openings: founder 2, joiner 2 (rules bundle_adopt, delegate_checkpoint)
-
-refused: J5 route.checkpoint_adopt lacks checkpoint_including_joiner
-refused: J6 route.checkpoint_adopt lacks checkpoint_including_joiner
-
-needed F1         founder  needed: first opening of founder
-EXTRA  F2         founder  mergeable into F1: F1 closed without: link_publish_approval (from approval.link_publish[founder])
-needed J3         joiner   needed: first opening of joiner
-needed F3         founder  needed: not obtainable in F2's window; it lacked: claim_staged
-needed J6         joiner   needed: not obtainable in J3's window; it lacked: ledger_heads@joiner, registry_binding@joiner
-EXTRA  F4         founder  mergeable into F3: F3 closed without: member_admitted (from route.claim_admission[founder])
-EXTRA  J6.repeat  joiner   needs no window: machine steps route.checkpoint_adopt[joiner] produce it; absent when J6 closed: checkpoint_including_joiner
-```
 
 ### Scenario from self_admit, built rules
 
-Recorded: current {'founder': 3, 'joiner': 3}, minimal {'founder': 2, 'joiner': 1}.
+Recorded: current {'founder': 2, 'joiner': 2}, minimal {'founder': 1, 'joiner': 1}.
 
 ```text
 goal org_sync_pull from self_admit (built rules)
-root openings: founder 2, joiner 1 (total 3); steps 12
+root openings: founder 1, joiner 1 (total 2); steps 11
 
  1. ceremony.org_invite_mint[founder]                window founder#1     -> invite_event
  2. approval.link_publish[founder]                   window founder#1     -> link_publish_approval
@@ -282,34 +162,29 @@ root openings: founder 2, joiner 1 (total 3); steps 12
  5. route.join_context[founder]                      machine (none)       -> join_context
  6. ceremony.member_claim_mint[joiner]               window joiner#1      -> member_claim
  7. route.claim_submit_admit[founder]                machine (none)       -> member_admitted
- 8. route.join_bootstrap[founder]                    machine (none)       -> bootstrap_snapshot
- 9. route.join_install[joiner]                       machine (none)       -> install_seed_addresses, ledger_heads@joiner, registry_binding@joiner
-10. ceremony.fleet_runtime_mint[joiner]              window joiner#1      -> persona_cert_fleet_sync@joiner
-11. ceremony.checkpoint_publish[founder]             window founder#2     -> adopted_checkpoint@founder, checkpoint_including_joiner
-12. route.checkpoint_adopt[joiner]                   machine (none)       -> adopted_checkpoint@joiner
+ 8. delegate.checkpoint_publish[founder]             machine (delegate)   -> adopted_checkpoint@founder, checkpoint_including_joiner
+ 9. route.join_bootstrap[founder]                    machine (none)       -> bootstrap_snapshot
+10. route.join_install[joiner]                       machine (none)       -> adopted_checkpoint@joiner, install_seed_addresses, ledger_heads@joiner, registry_binding@joiner
+11. ceremony.fleet_runtime_mint[joiner]              window joiner#1      -> persona_cert_fleet_sync@joiner
 
 goal org_sync_pull from self_admit: current order reaches the goal
-current root openings: founder 3, joiner 3
-minimal root openings: founder 2, joiner 1 (built rules)
+current root openings: founder 2, joiner 2
+minimal root openings: founder 1, joiner 1 (built rules)
 
-refused: J5 route.checkpoint_adopt lacks checkpoint_including_joiner
-refused: J6 route.checkpoint_adopt lacks checkpoint_including_joiner
 
 needed F1         founder  needed: first opening of founder
 EXTRA  F2         founder  mergeable into F1: F1 closed without: link_publish_approval (from approval.link_publish[founder])
 needed J3         joiner   needed: first opening of joiner
 EXTRA  J6         joiner   mergeable into J3: J3 closed without: ledger_heads@joiner (from route.join_install[joiner]), registry_binding@joiner (from route.join_install[joiner])
-needed F4         founder  needed: not obtainable in F2's window; it lacked: member_admitted
-EXTRA  J6.repeat  joiner   needs no window: machine steps route.checkpoint_adopt[joiner] produce it; absent when J6 closed: checkpoint_including_joiner
 ```
 
 ### Scenario from approval, built rules
 
-Recorded: current {'founder': 4, 'joiner': 3}, minimal {'founder': 2, 'joiner': 2}.
+Recorded: current {'founder': 3, 'joiner': 2}, minimal {'founder': 2, 'joiner': 2}.
 
 ```text
 goal org_sync_pull from approval (built rules)
-root openings: founder 2, joiner 2 (total 4); steps 14
+root openings: founder 2, joiner 2 (total 4); steps 13
 
  1. ceremony.org_invite_mint[founder]                window founder#1     -> invite_event
  2. approval.link_publish[founder]                   window founder#1     -> link_publish_approval
@@ -322,100 +197,19 @@ root openings: founder 2, joiner 2 (total 4); steps 14
  9. route.claim_admission[founder]                   machine (none)       -> member_admitted
 10. ceremony.checkpoint_publish[founder]             window founder#2     -> adopted_checkpoint@founder, checkpoint_including_joiner
 11. route.join_bootstrap[founder]                    machine (none)       -> bootstrap_snapshot
-12. route.join_install[joiner]                       machine (none)       -> install_seed_addresses, ledger_heads@joiner, registry_binding@joiner
-13. route.checkpoint_adopt[joiner]                   machine (none)       -> adopted_checkpoint@joiner
-14. ceremony.fleet_runtime_mint[joiner]              window joiner#2      -> persona_cert_fleet_sync@joiner
+12. route.join_install[joiner]                       machine (none)       -> adopted_checkpoint@joiner, install_seed_addresses, ledger_heads@joiner, registry_binding@joiner
+13. ceremony.fleet_runtime_mint[joiner]              window joiner#2      -> persona_cert_fleet_sync@joiner
 
 goal org_sync_pull from approval: current order reaches the goal
-current root openings: founder 4, joiner 3
+current root openings: founder 3, joiner 2
 minimal root openings: founder 2, joiner 2 (built rules)
 
-refused: J5 route.checkpoint_adopt lacks checkpoint_including_joiner
-refused: J6 route.checkpoint_adopt lacks checkpoint_including_joiner
 
 needed F1         founder  needed: first opening of founder
 EXTRA  F2         founder  mergeable into F1: F1 closed without: link_publish_approval (from approval.link_publish[founder])
 needed J3         joiner   needed: first opening of joiner
 needed F3         founder  needed: not obtainable in F2's window; it lacked: claim_staged
 needed J6         joiner   needed: not obtainable in J3's window; it lacked: ledger_heads@joiner, registry_binding@joiner
-EXTRA  F4         founder  mergeable into F3: F3 closed without: member_admitted (from route.claim_admission[founder])
-EXTRA  J6.repeat  joiner   needs no window: machine steps route.checkpoint_adopt[joiner] produce it; absent when J6 closed: checkpoint_including_joiner
-```
-
-### Scenario from self_admit, rules delegate_checkpoint
-
-Recorded: current {'founder': 3, 'joiner': 3}, minimal {'founder': 1, 'joiner': 1}.
-
-```text
-goal org_sync_pull from self_admit with rules delegate_checkpoint
-root openings: founder 1, joiner 1 (total 2); steps 13
-
- 1. ceremony.checkpoint_delegate_grant[founder]      window founder#1     -> checkpoint_delegate_grant
- 2. ceremony.org_invite_mint[founder]                window founder#1     -> invite_event
- 3. approval.link_publish[founder]                   window founder#1     -> link_publish_approval
- 4. route.link_publish[founder]                      machine (delegate)   -> join_link_grant
- 5. route.invite_resolve[joiner]                     machine (none)       -> invite_ref_resolved
- 6. route.join_context[founder]                      machine (none)       -> join_context
- 7. ceremony.member_claim_mint[joiner]               window joiner#1      -> member_claim
- 8. route.claim_submit_admit[founder]                machine (none)       -> member_admitted
- 9. delegate.checkpoint_publish[founder]             machine (delegate)   -> adopted_checkpoint@founder, checkpoint_including_joiner
-10. route.join_bootstrap[founder]                    machine (none)       -> bootstrap_snapshot
-11. route.join_install[joiner]                       machine (none)       -> install_seed_addresses, ledger_heads@joiner, registry_binding@joiner
-12. ceremony.fleet_runtime_mint[joiner]              window joiner#1      -> persona_cert_fleet_sync@joiner
-13. route.checkpoint_adopt[joiner]                   machine (none)       -> adopted_checkpoint@joiner
-
-goal org_sync_pull from self_admit: current order reaches the goal
-current root openings: founder 3, joiner 3
-minimal root openings: founder 1, joiner 1 (rules delegate_checkpoint)
-
-refused: J5 route.checkpoint_adopt lacks checkpoint_including_joiner
-refused: J6 route.checkpoint_adopt lacks checkpoint_including_joiner
-
-needed F1         founder  needed: first opening of founder
-EXTRA  F2         founder  mergeable into F1: F1 closed without: link_publish_approval (from approval.link_publish[founder])
-needed J3         joiner   needed: first opening of joiner
-EXTRA  J6         joiner   mergeable into J3: J3 closed without: ledger_heads@joiner (from route.join_install[joiner]), registry_binding@joiner (from route.join_install[joiner])
-EXTRA  F4         founder  needs no window: machine steps delegate.checkpoint_publish[founder] produce it; absent when F2 closed: checkpoint_delegate_grant (from ceremony.checkpoint_delegate_grant[founder]), member_admitted
-EXTRA  J6.repeat  joiner   needs no window: machine steps route.checkpoint_adopt[joiner] produce it; absent when J6 closed: checkpoint_including_joiner
-```
-
-### Scenario from approval, rules delegate_checkpoint
-
-Recorded: current {'founder': 4, 'joiner': 3}, minimal {'founder': 2, 'joiner': 2}.
-
-```text
-goal org_sync_pull from approval with rules delegate_checkpoint
-root openings: founder 2, joiner 2 (total 4); steps 14
-
- 1. ceremony.org_invite_mint[founder]                window founder#1     -> invite_event
- 2. approval.link_publish[founder]                   window founder#1     -> link_publish_approval
- 3. route.link_publish[founder]                      machine (delegate)   -> join_link_grant
- 4. route.invite_resolve[joiner]                     machine (none)       -> invite_ref_resolved
- 5. route.join_context[founder]                      machine (none)       -> join_context
- 6. ceremony.member_claim_mint[joiner]               window joiner#1      -> member_claim
- 7. route.claim_submit_stage[founder]                machine (none)       -> claim_staged
- 8. ceremony.admission_event[founder]                window founder#2     -> admission_event, claim_approval
- 9. route.claim_admission[founder]                   machine (none)       -> member_admitted
-10. ceremony.checkpoint_publish[founder]             window founder#2     -> adopted_checkpoint@founder, checkpoint_including_joiner
-11. route.join_bootstrap[founder]                    machine (none)       -> bootstrap_snapshot
-12. route.join_install[joiner]                       machine (none)       -> install_seed_addresses, ledger_heads@joiner, registry_binding@joiner
-13. route.checkpoint_adopt[joiner]                   machine (none)       -> adopted_checkpoint@joiner
-14. ceremony.fleet_runtime_mint[joiner]              window joiner#2      -> persona_cert_fleet_sync@joiner
-
-goal org_sync_pull from approval: current order reaches the goal
-current root openings: founder 4, joiner 3
-minimal root openings: founder 2, joiner 2 (rules delegate_checkpoint)
-
-refused: J5 route.checkpoint_adopt lacks checkpoint_including_joiner
-refused: J6 route.checkpoint_adopt lacks checkpoint_including_joiner
-
-needed F1         founder  needed: first opening of founder
-EXTRA  F2         founder  mergeable into F1: F1 closed without: link_publish_approval (from approval.link_publish[founder])
-needed J3         joiner   needed: first opening of joiner
-needed F3         founder  needed: not obtainable in F2's window; it lacked: claim_staged
-needed J6         joiner   needed: not obtainable in J3's window; it lacked: ledger_heads@joiner, registry_binding@joiner
-EXTRA  F4         founder  mergeable into F3: F3 closed without: member_admitted (from route.claim_admission[founder])
-EXTRA  J6.repeat  joiner   needs no window: machine steps route.checkpoint_adopt[joiner] produce it; absent when J6 closed: checkpoint_including_joiner
 ```
 - proof: tla OrgAdmission: EveryAdmittedMemberPulls
 - proof: tla OrgAdmission: NoPullWithoutInclusion

@@ -46,7 +46,6 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | armor.revoke_factor | mutation | **GAP** |
 | armor.set_recovery | mutation | **GAP** |
 | ceremony.admission_event | mutation | OrgAdmissionEvent: ApproverCannotForgeClaim<br>OrgAdmissionEvent: NoDoubleAdmission<br>OrgAdmissionEvent: AdmissionRespectsRemoval<br>OrgAdmissionEvent: AdmissionHasThreshold<br>OrgAdmissionEvent: ApprovalPublishesCheckpoint<br>OrgAdmission: ApprovedIsAdmitted |
-| ceremony.checkpoint_delegate_grant | mutation | DelegateCheckpoint: checkpoint_attributable<br>DelegateCheckpoint: no_attribution_without_grant |
 | ceremony.checkpoint_publish | mutation | OrgAdmission: EveryAdmittedMemberPulls |
 | ceremony.checkpoint_seed | mutation | **GAP** |
 | ceremony.claim_approval | mutation | **GAP** |
@@ -54,7 +53,7 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | ceremony.member_claim_mint | mutation | **GAP** |
 | ceremony.org_invite_mint | mutation | **GAP** |
 | ceremony.organization_grant_recovery | mutation | **GAP** |
-| ceremony.organization_storage_delegate | mutation | **GAP** |
+| ceremony.organization_storage_delegate | mutation | DelegateCheckpoint: checkpoint_attributable<br>DelegateCheckpoint: no_attribution_without_grant |
 | ceremony.personal_serve_cert_mint | mutation | **GAP** |
 | ceremony.recovery_policy_change | mutation | **GAP** |
 | ceremony.registration | mutation | **GAP** |
@@ -91,8 +90,7 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | route.invite_resolve | mutation | **GAP** |
 | route.join_bootstrap | mutation | **GAP** |
 | route.join_context | mutation | **GAP** |
-| route.join_install | mutation | **GAP** |
-| route.join_install_bundle_adopt | mutation | OrgAdmission: EveryAdmittedMemberPulls |
+| route.join_install | mutation | OrgAdmission: EveryAdmittedMemberPulls<br>OrgAdmissionBundleBound: NotAboveRegistry |
 | route.link_publish | mutation | **GAP** |
 | route.relay_connect | mutation | **GAP** |
 | storage.advance_state | mutation | **GAP** |
@@ -103,4 +101,4 @@ counts, not a percentage of system security proved. See [MODEL.md](../../storage
 | vault.create_class | mutation | VaultPolicyClass: root_reaches_every_generation |
 | vault.revoke_class_factor | mutation | VaultPolicyClass: revoked_factor_excluded_forward<br>VaultPolicyClass: revoked_factor_keeps_old |
 
-32 of 92 entries carry at least one model reference; 60 gaps.
+32 of 90 entries carry at least one model reference; 58 gaps.

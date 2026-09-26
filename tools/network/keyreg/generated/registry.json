@@ -37,12 +37,17 @@
     "checkpoint_delegate_grant": {
       "code": [
         "tools/network/storagekit/delegate.py:storage_delegate_scopes",
-        "tools/network/storagekit/tamarin/DelegateCheckpoint.spthy:Grant_Checkpoint_Delegate"
+        "tools/dashboard/org_storage_delegate.py:prepare",
+        "tools/network/ledger/scopes.py:self_delegable_exact"
       ],
-      "description": "A hot delegate grant whose scope includes signing advancing checkpoints.",
-      "home": "founder machine",
-      "status": "designed",
-      "store": "founder's org ledger and audited vault"
+      "description": "A hot delegate grant whose scope includes signing advancing checkpoints (a checkpointer's storage delegate). The founder's is minted at its sign-on before any join (F0).",
+      "given_by": [
+        "ceremony.organization_storage_delegate@founder"
+      ],
+      "home": "the actor's machine",
+      "origin": "given",
+      "per_actor": true,
+      "store": "the actor's org ledger and audited vault"
     },
     "checkpoint_including_joiner": {
       "code": [
@@ -335,7 +340,8 @@
             "self_admit"
           ],
           "runs": [
-            "route.claim_submit_admit"
+            "route.claim_submit_admit",
+            "delegate.checkpoint_publish"
           ],
           "step": "J3.submit"
         },
@@ -369,7 +375,8 @@
             "approval"
           ],
           "runs": [
-            "route.claim_admission"
+            "route.claim_admission",
+            "delegate.checkpoint_publish"
           ],
           "step": "F3.admit"
         },
@@ -385,8 +392,7 @@
           "actor": "joiner",
           "ceremony": false,
           "runs": [
-            "route.join_install",
-            "route.checkpoint_adopt"
+            "route.join_install"
           ],
           "step": "J5"
         },
@@ -394,7 +400,6 @@
           "actor": "joiner",
           "ceremony": true,
           "runs": [
-            "route.checkpoint_adopt",
             "ceremony.organization_storage_delegate",
             "ceremony.serve_cert_mint",
             "ceremony.fleet_runtime_mint"
@@ -408,42 +413,10 @@
             "route.relay_connect"
           ],
           "step": "J6.connect"
-        },
-        {
-          "actor": "founder",
-          "ceremony": true,
-          "runs": [
-            "ceremony.checkpoint_publish"
-          ],
-          "step": "F4"
-        },
-        {
-          "actor": "joiner",
-          "ceremony": true,
-          "runs": [
-            "route.checkpoint_adopt",
-            "ceremony.organization_storage_delegate",
-            "ceremony.serve_cert_mint",
-            "ceremony.fleet_runtime_mint"
-          ],
-          "step": "J6.repeat"
         }
       ],
       "description": "Founder and joiner can each pull the other over org sync: both hold an org channel (sync certificate + serving seed), both have adopted a checkpoint whose members_root includes the joiner (the verifier admits a pull only under an adopted seq with inclusion, fleet_org_channel.py: 286-309), the joiner holds the org ledger, and the joiner has a route to the founder (the founder reaches the joiner through its dial-in).",
-      "known_defects": [
-        {
-          "missing": "checkpoint_including_joiner",
-          "mutation": "route.checkpoint_adopt",
-          "ref": "graph://cde6c8c6-041 \u00a71 J5 (network_routes.py:945)",
-          "step": "J5"
-        },
-        {
-          "missing": "checkpoint_including_joiner",
-          "mutation": "route.checkpoint_adopt",
-          "ref": "graph://cde6c8c6-041 \u00a73 (J6 repeat)",
-          "step": "J6"
-        }
-      ],
+      "known_defects": [],
       "notes": "Peer selection sources (fleet_sync_scheduler.py:_org_peer_candidates): reachability rows (need a prior pull), install seed, relay slots through the dialer's own connector, dialed-in peers. The founder-pulls-joiner direction riding the joiner's dial-in is taken from the record, not re-traced. The single-joiner AND/OR graph cannot express head presence at adoption; OrgAdmission.tla carries that. Final rules (auto-qrmlg.12): the org hello accepts E-any-adm (a proof under an older authentic record when the prover is in the verifier's newest member set and the record is at or after its current admission) and prover-downgrade (a side proves back under the seq the other side adopted, from the rider's checkpoint_seq); both change which pulls are admitted, not which artifacts exist, so they leave this requirement set and the counts unchanged. Liveness and safety under the final rules: OrgAdmissionFinalApproval.cfg, OrgAdmissionFinalSelfAdmit.cfg.",
       "proofs": [
         {
@@ -498,64 +471,20 @@
       "scenarios": [
         {
           "current": {
-            "founder": 3,
-            "joiner": 3
+            "founder": 2,
+            "joiner": 2
           },
           "from": "self_admit",
           "minimal": {
             "founder": 1,
             "joiner": 1
           },
-          "rules": [
-            "delegate_checkpoint",
-            "bundle_adopt"
-          ]
-        },
-        {
-          "current": {
-            "founder": 4,
-            "joiner": 3
-          },
-          "from": "approval",
-          "minimal": {
-            "founder": 2,
-            "joiner": 2
-          },
-          "rules": [
-            "bundle_adopt"
-          ]
-        },
-        {
-          "current": {
-            "founder": 4,
-            "joiner": 3
-          },
-          "from": "approval",
-          "minimal": {
-            "founder": 2,
-            "joiner": 2
-          },
-          "rules": [
-            "bundle_adopt",
-            "delegate_checkpoint"
-          ]
-        },
-        {
-          "current": {
-            "founder": 3,
-            "joiner": 3
-          },
-          "from": "self_admit",
-          "minimal": {
-            "founder": 2,
-            "joiner": 1
-          },
           "rules": []
         },
         {
           "current": {
-            "founder": 4,
-            "joiner": 3
+            "founder": 3,
+            "joiner": 2
           },
           "from": "approval",
           "minimal": {
@@ -563,40 +492,13 @@
             "joiner": 2
           },
           "rules": []
-        },
-        {
-          "current": {
-            "founder": 3,
-            "joiner": 3
-          },
-          "from": "self_admit",
-          "minimal": {
-            "founder": 1,
-            "joiner": 1
-          },
-          "rules": [
-            "delegate_checkpoint"
-          ]
-        },
-        {
-          "current": {
-            "founder": 4,
-            "joiner": 3
-          },
-          "from": "approval",
-          "minimal": {
-            "founder": 2,
-            "joiner": 2
-          },
-          "rules": [
-            "delegate_checkpoint"
-          ]
         }
       ],
       "states": {
         "approval": {
           "description": "Founded org (F0 done), invite role requires the founder's approval.",
           "holds": [
+            "checkpoint_delegate_grant@founder",
             "ledger_heads@founder",
             "registry_binding@founder",
             "checkpoint_seed",
@@ -611,6 +513,7 @@
         "self_admit": {
           "description": "Founded org (F0 done), invite role self-admits.",
           "holds": [
+            "checkpoint_delegate_grant@founder",
             "ledger_heads@founder",
             "registry_binding@founder",
             "checkpoint_seed",
@@ -1852,51 +1755,6 @@
         "symbol": "signAdmission"
       }
     },
-    "ceremony.checkpoint_delegate_grant": {
-      "actors": [
-        "founder"
-      ],
-      "authority": [
-        "persona_signing_key"
-      ],
-      "crib": [
-        "\u00a78",
-        "\u00a711"
-      ],
-      "effects": {
-        "writes": [
-          "a hot delegate grant carrying a checkpoint scope"
-        ]
-      },
-      "notes": "Not built: the storage delegate's scopes exclude checkpoint today (storagekit/delegate.py:storage_delegate_scopes). Operator ruling 1 (2026-09-25) accepts a checkpoint scope on the hot delegate; the grant keeps the built proof-of-possession form (fold.py:_h_delegate), which DelegateCheckpointNoPoP shows is load-bearing for attribution.",
-      "opens": "persona",
-      "produces": [
-        "checkpoint_delegate_grant"
-      ],
-      "proofs": [
-        {
-          "framework": "tamarin",
-          "lemma": "checkpoint_attributable",
-          "theory": "DelegateCheckpoint"
-        },
-        {
-          "framework": "tamarin",
-          "lemma": "no_attribution_without_grant",
-          "theory": "DelegateCheckpoint"
-        }
-      ],
-      "requires": [
-        "persona_signing_key",
-        "ledger_heads"
-      ],
-      "rule": "delegate_checkpoint",
-      "source": {
-        "file": "tools/network/storagekit/tamarin/DelegateCheckpoint.spthy",
-        "kind": "ceremony",
-        "symbol": "Grant_Checkpoint_Delegate"
-      },
-      "status": "designed"
-    },
     "ceremony.checkpoint_publish": {
       "actors": [
         "founder"
@@ -1912,7 +1770,7 @@
           "checkpoint {v, org, seq, prev, ledger_head, members_root, checkpointers_root, ts, signer, proof, proof_index} at the registry (network_routes.py:post_membership_checkpoint); the signer caches it adopted"
         ]
       },
-      "notes": "Step F4. Only callers: full sign-in (signon_preparation.py:125-133) and the scoped sign-on (network-signon.mjs:1560-1577). Nothing publishes at admission.",
+      "notes": "The persona-signed form: a full sign-in (signon_preparation.py), the scoped sign-on (network-signon.mjs), and the approver's window right after an admission when no checkpoint-scoped delegate can publish (claim_service._persona_checkpoint_work, C5b). At admission the built path is delegate.checkpoint_publish.",
       "opens": "persona",
       "preconditions": [
         "The signer is in the checkpointers set of the previously adopted checkpoint (membership_checkpoint.py:139-149).",
@@ -2154,10 +2012,23 @@
           "ninety-day signed delegate event and personal audited seed on re-mint only"
         ]
       },
-      "notes": "A reuse sign-in adds no ledger event. Workflow graph://b437ecfb-e23.",
+      "notes": "A reuse sign-in adds no ledger event. Workflow graph://b437ecfb-e23. For a checkpointer the grant also carries membership:checkpoint (storage_delegate_scopes(checkpointer=True); operator ruling 1, 2026-09-25; built c7d6992a), and a recorded grant without it is re-minted at the next sign-on (org_storage_delegate.prepare remint_required). The proof-of-possession form is unchanged.",
       "opens": "persona",
       "produces": [
-        "delegate_grant"
+        "delegate_grant",
+        "checkpoint_delegate_grant"
+      ],
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "checkpoint_attributable",
+          "theory": "DelegateCheckpoint"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "no_attribution_without_grant",
+          "theory": "DelegateCheckpoint"
+        }
       ],
       "requires": [
         "persona_signing_key",
@@ -2304,7 +2175,7 @@
           "no ceremony"
         ]
       },
-      "notes": "Proposed rule Checkpoint-at-admission with a hot signer (operator ruling 1, 2026-09-25). Not built.",
+      "notes": "Checkpoint at admission with a hot signer (operator ruling 1, 2026-09-25; built c7d6992a..3f15ea10): after a claim admits, a revocation or a role change, when either root of the fold differs from the newest retained record, the delegate-signed record is posted and retained; a registry seq/prev refusal re-reads and re-assembles, bounded; chaining uses the registry's signed bytes kept beside the adopted tuple.",
       "opens": "delegate",
       "produces": [
         "checkpoint_including_joiner",
@@ -2339,13 +2210,11 @@
         "ledger_heads",
         "checkpoint_seed"
       ],
-      "rule": "delegate_checkpoint",
       "source": {
-        "file": "tools/network/TLA/OrgAdmission.tla",
+        "file": "tools/dashboard/membership_checkpoint.py",
         "kind": "module-op",
-        "symbol": "AdmitStep"
-      },
-      "status": "designed"
+        "symbol": "publish_after_membership_change"
+      }
     },
     "fleet.distribute_kem": {
       "authority": [
@@ -3310,71 +3179,39 @@
       ],
       "effects": {
         "writes": [
-          "org DB",
-          "ledger re-folded from genesis",
-          "binding",
-          "persona row",
-          "directory row",
-          "install seed (profiles only)"
+          "org DB, ledger re-folded from genesis, binding, persona row, directory row, install seed (profiles and the sponsor's addresses)",
+          "adoption BY FOLD of the checkpoint carried in the join bundle, bounded by the registry's record, atomically with the snapshot (OrgAdmission.tla bundle_adopt; OrgAdmissionBundleBound.tla)"
         ]
       },
-      "notes": "Step J5. The page forwards the bootstrap's reachability_rows in the outcome body (network-join.js installAdmitted) and the route seeds them (org_install_seed.seed_reachability). Deferred here: storage delegate, serve cert, fleet runtime, sync cert.",
+      "notes": "Step J5 (built 6d6f04ec..3f15ea10). The page forwards the bootstrap's reachability_rows and the bundled checkpoint; the route seeds the addresses and adopts the checkpoint by fold. Deferred here: storage delegate, serve cert, fleet runtime, sync cert (C6).",
       "opens": "none",
       "produces": [
         "ledger_heads",
         "registry_binding",
-        "install_seed_addresses"
-      ],
-      "requires": [
-        "bootstrap_snapshot"
-      ],
-      "source": {
-        "file": "tools/dashboard/network_routes.py",
-        "kind": "route",
-        "symbol": "post_join_outcome"
-      }
-    },
-    "route.join_install_bundle_adopt": {
-      "actors": [
-        "joiner"
-      ],
-      "authority": [
-        "admitted persona"
-      ],
-      "crib": [
-        "\u00a78"
-      ],
-      "effects": {
-        "writes": [
-          "the join install as route.join_install, and adoption BY FOLD of the founder's current signed checkpoint record carried in the join bundle, atomically with the snapshot"
-        ]
-      },
-      "notes": "Closes the install/registry race: today the install route adopts the registry's current record in the same request (network_routes.py: 943-945) but not atomically with the bootstrap snapshot fetched earlier over the join channel. With prover-downgrade and E-any-adm acceptance it removes the need for adopt-by-verification and for the registry to serve the signed record or chain (OrgAdmissionTransitionEAnyAdmDowngrade, OrgAdmissionX3EAnyAdmDowngrade). Not built.",
-      "opens": "none",
-      "produces": [
-        "ledger_heads",
-        "registry_binding",
-        "adopted_checkpoint",
-        "install_seed_addresses"
+        "install_seed_addresses",
+        "adopted_checkpoint"
       ],
       "proofs": [
         {
           "framework": "tla",
           "lemma": "EveryAdmittedMemberPulls",
           "theory": "OrgAdmission"
+        },
+        {
+          "framework": "tla",
+          "lemma": "NotAboveRegistry",
+          "theory": "OrgAdmissionBundleBound"
         }
       ],
       "requires": [
         "bootstrap_snapshot",
         "checkpoint_including_joiner"
       ],
-      "rule": "bundle_adopt",
       "source": {
-        "file": "tools/network/TLA/OrgAdmission.tla",
+        "file": "tools/dashboard/network_routes.py",
         "kind": "route",
-        "symbol": "Bootstrap"
-      },
-      "status": "designed"
+        "symbol": "post_join_outcome"
+      }
     },
     "route.link_publish": {
       "actors": [

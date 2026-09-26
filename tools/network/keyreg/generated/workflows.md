@@ -15,7 +15,6 @@ See the [reading guide](../GUIDE.md) and [key register](key-register.md).
 - [armor.revoke_factor](#workflow-armor-revoke_factor)
 - [armor.set_recovery](#workflow-armor-set_recovery)
 - [ceremony.admission_event](#workflow-ceremony-admission_event)
-- [ceremony.checkpoint_delegate_grant](#workflow-ceremony-checkpoint_delegate_grant)
 - [ceremony.checkpoint_publish](#workflow-ceremony-checkpoint_publish)
 - [ceremony.checkpoint_seed](#workflow-ceremony-checkpoint_seed)
 - [ceremony.claim_approval](#workflow-ceremony-claim_approval)
@@ -61,7 +60,6 @@ See the [reading guide](../GUIDE.md) and [key register](key-register.md).
 - [route.join_bootstrap](#workflow-route-join_bootstrap)
 - [route.join_context](#workflow-route-join_context)
 - [route.join_install](#workflow-route-join_install)
-- [route.join_install_bundle_adopt](#workflow-route-join_install_bundle_adopt)
 - [route.link_publish](#workflow-route-link_publish)
 - [route.relay_connect](#workflow-route-relay_connect)
 - [storage.advance_state](#workflow-storage-advance_state)
@@ -203,25 +201,6 @@ Built at the armor layer; exposed by no route or UI yet.
 
 Realizes P3 without re-signing the claim: a claim's author signature covers its whole payload including approvals and parents (events.py:618-619), and an approval covers only (kind, invite_ref, persona) (events.py:737-744). Built (auto-qrmlg.3 C5): the fold handler is fold.member_admission; the approver's browser signs the event right after the countersign that completed the threshold (org-membership.js approve), with no second invitee ceremony.
 
-<a id="workflow-ceremony-checkpoint_delegate_grant"></a>
-## ceremony.checkpoint_delegate_grant
-
-**Status:** designed
-
-**Authority:** persona_signing_key
-
-**Writes**
-
-- a hot delegate grant carrying a checkpoint scope
-
-**Workflow:** actors founder; opens persona; requires persona_signing_key AND ledger_heads; produces checkpoint_delegate_grant; rule delegate_checkpoint
-
-**Source:** `tools/network/storagekit/tamarin/DelegateCheckpoint.spthy:Grant_Checkpoint_Delegate` (ceremony)
-
-**Crib:** §8, §11
-
-Not built: the storage delegate's scopes exclude checkpoint today (storagekit/delegate.py:storage_delegate_scopes). Operator ruling 1 (2026-09-25) accepts a checkpoint scope on the hot delegate; the grant keeps the built proof-of-possession form (fold.py:_h_delegate), which DelegateCheckpointNoPoP shows is load-bearing for attribution.
-
 <a id="workflow-ceremony-checkpoint_publish"></a>
 ## ceremony.checkpoint_publish
 
@@ -244,7 +223,7 @@ Not built: the storage delegate's scopes exclude checkpoint today (storagekit/de
 
 **Crib:** §8
 
-Step F4. Only callers: full sign-in (signon_preparation.py:125-133) and the scoped sign-on (network-signon.mjs:1560-1577). Nothing publishes at admission.
+The persona-signed form: a full sign-in (signon_preparation.py), the scoped sign-on (network-signon.mjs), and the approver's window right after an admission when no checkpoint-scoped delegate can publish (claim_service._persona_checkpoint_work, C5b). At admission the built path is delegate.checkpoint_publish.
 
 <a id="workflow-ceremony-checkpoint_seed"></a>
 ## ceremony.checkpoint_seed
@@ -404,13 +383,13 @@ graph://35308bf7-584. Organization sign-in validates scoped KEM keys against cur
 
 - ninety-day signed delegate event and personal audited seed on re-mint only
 
-**Workflow:** actors founder, joiner; opens persona; requires persona_signing_key AND ledger_heads; produces delegate_grant
+**Workflow:** actors founder, joiner; opens persona; requires persona_signing_key AND ledger_heads; produces delegate_grant, checkpoint_delegate_grant
 
 **Source:** `tools/dashboard/static/js/ceremony/org-storage-delegate.js:prepareStorageDelegate` (ceremony)
 
 **Crib:** §7, §11
 
-A reuse sign-in adds no ledger event. Workflow graph://b437ecfb-e23.
+A reuse sign-in adds no ledger event. Workflow graph://b437ecfb-e23. For a checkpointer the grant also carries membership:checkpoint (storage_delegate_scopes(checkpointer=True); operator ruling 1, 2026-09-25; built c7d6992a), and a recorded grant without it is re-minted at the next sign-on (org_storage_delegate.prepare remint_required). The proof-of-possession form is unchanged.
 
 <a id="workflow-ceremony-personal_serve_cert_mint"></a>
 ## ceremony.personal_serve_cert_mint
@@ -509,7 +488,7 @@ Grant opening primitive, not a human-factor authorization or an audited-object r
 <a id="workflow-delegate-checkpoint_publish"></a>
 ## delegate.checkpoint_publish
 
-**Status:** designed
+**Status:** built
 
 **Authority:** agent_delegate_signing_key
 
@@ -518,13 +497,13 @@ Grant opening primitive, not a human-factor authorization or an audited-object r
 - advancing checkpoint signed by the checkpoint-scoped delegate at admission
 - no ceremony
 
-**Workflow:** actors founder; opens delegate; requires agent_delegate_signing_key AND checkpoint_delegate_grant AND member_admitted AND ledger_heads AND checkpoint_seed; produces checkpoint_including_joiner, adopted_checkpoint; rule delegate_checkpoint
+**Workflow:** actors founder; opens delegate; requires agent_delegate_signing_key AND checkpoint_delegate_grant AND member_admitted AND ledger_heads AND checkpoint_seed; produces checkpoint_including_joiner, adopted_checkpoint
 
-**Source:** `tools/network/TLA/OrgAdmission.tla:AdmitStep` (module-op)
+**Source:** `tools/dashboard/membership_checkpoint.py:publish_after_membership_change` (module-op)
 
 **Crib:** §8, §11
 
-Proposed rule Checkpoint-at-admission with a hot signer (operator ruling 1, 2026-09-25). Not built.
+Checkpoint at admission with a hot signer (operator ruling 1, 2026-09-25; built c7d6992a..3f15ea10): after a claim admits, a revocation or a role change, when either root of the fold differs from the newest retained record, the delegate-signed record is posted and retained; a registry seq/prev refusal re-reads and re-assembles, bounded; chaining uses the registry's signed bytes kept beside the adopted tuple.
 
 <a id="workflow-fleet-distribute_kem"></a>
 ## fleet.distribute_kem
@@ -1239,39 +1218,16 @@ Step J2. Executes on the founder's machine.
 
 **Writes**
 
-- org DB
-- ledger re-folded from genesis
-- binding
-- persona row
-- directory row
-- install seed (profiles only)
+- org DB, ledger re-folded from genesis, binding, persona row, directory row, install seed (profiles and the sponsor's addresses)
+- adoption BY FOLD of the checkpoint carried in the join bundle, bounded by the registry's record, atomically with the snapshot (OrgAdmission.tla bundle_adopt; OrgAdmissionBundleBound.tla)
 
-**Workflow:** actors joiner; opens none; requires bootstrap_snapshot; produces ledger_heads, registry_binding, install_seed_addresses
+**Workflow:** actors joiner; opens none; requires bootstrap_snapshot AND checkpoint_including_joiner; produces ledger_heads, registry_binding, install_seed_addresses, adopted_checkpoint
 
 **Source:** `tools/dashboard/network_routes.py:post_join_outcome` (route)
 
 **Crib:** §8
 
-Step J5. The page forwards the bootstrap's reachability_rows in the outcome body (network-join.js installAdmitted) and the route seeds them (org_install_seed.seed_reachability). Deferred here: storage delegate, serve cert, fleet runtime, sync cert.
-
-<a id="workflow-route-join_install_bundle_adopt"></a>
-## route.join_install_bundle_adopt
-
-**Status:** designed
-
-**Authority:** admitted persona
-
-**Writes**
-
-- the join install as route.join_install, and adoption BY FOLD of the founder's current signed checkpoint record carried in the join bundle, atomically with the snapshot
-
-**Workflow:** actors joiner; opens none; requires bootstrap_snapshot AND checkpoint_including_joiner; produces ledger_heads, registry_binding, adopted_checkpoint, install_seed_addresses; rule bundle_adopt
-
-**Source:** `tools/network/TLA/OrgAdmission.tla:Bootstrap` (route)
-
-**Crib:** §8
-
-Closes the install/registry race: today the install route adopts the registry's current record in the same request (network_routes.py: 943-945) but not atomically with the bootstrap snapshot fetched earlier over the join channel. With prover-downgrade and E-any-adm acceptance it removes the need for adopt-by-verification and for the registry to serve the signed record or chain (OrgAdmissionTransitionEAnyAdmDowngrade, OrgAdmissionX3EAnyAdmDowngrade). Not built.
+Step J5 (built 6d6f04ec..3f15ea10). The page forwards the bootstrap's reachability_rows and the bundled checkpoint; the route seeds the addresses and adopts the checkpoint by fold. Deferred here: storage delegate, serve cert, fleet runtime, sync cert (C6).
 
 <a id="workflow-route-link_publish"></a>
 ## route.link_publish

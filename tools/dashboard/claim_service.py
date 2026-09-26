@@ -254,6 +254,13 @@ def _persona_checkpoint_work(org: str, persona_pub: str, genesis_id: str) -> dic
         org_uuid = binding_member.payload.get("org_uuid") if binding_member else None
         decision = cp.checkpoint_due(org, persona_pub, ts=int(time.time()),
                                      genesis_id=genesis_id, org_uuid=org_uuid)
+        if decision.action == "chain-missing":
+            # Adopted by fold without the signed bytes: one registry read
+            # attaches them, then decide again (as the sign-on route does).
+            from tools.dashboard.network_routes import _adopt_registry_checkpoint
+            _adopt_registry_checkpoint(org)
+            decision = cp.checkpoint_due(org, persona_pub, ts=int(time.time()),
+                                         genesis_id=genesis_id, org_uuid=org_uuid)
     except Exception:
         return None
     if decision.action != "assemble" or decision.sign_with != cp.SIGN_WITH_PERSONA:
