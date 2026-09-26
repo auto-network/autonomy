@@ -60,7 +60,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from tools.data_paths import DATA_ROOT
+from tools.data_paths import DATA_ROOT, HOST_HOME_MOUNT
 
 from starlette.applications import Starlette
 from starlette.background import BackgroundTask
@@ -3972,71 +3972,6 @@ async def api_attention(request):
         "error": None,
     })
 
-async def api_active_sessions(request):
-    """Find currently active Claude Code sessions (JSONL files still being written)."""
-    import time
-    from pathlib import Path
-
-    threshold = int(request.query_params.get("threshold", "300"))  # seconds
-    # Operator's home, not this process's: containerized, the host's
-    # ~/.claude/projects is mounted at its host path and AUTONOMY_HOST_HOME
-    # names it; natively the two are the same.
-    projects_dir = (
-        Path(os.environ.get("AUTONOMY_HOST_HOME") or Path.home())
-        / ".claude" / "projects"
-    )
-    now = time.time()
-    sessions = []
-
-    if projects_dir.exists():
-        for jsonl in projects_dir.rglob("*.jsonl"):
-            try:
-                stat = jsonl.stat()
-                age = now - stat.st_mtime
-                if age < threshold:
-                    # Get last line for latest activity
-                    last_line = ""
-                    with open(jsonl, "rb") as f:
-                        f.seek(max(0, stat.st_size - 2000))
-                        last_line = f.read().decode("utf-8", errors="replace")
-
-                    # Extract latest user or assistant text
-                    latest = ""
-                    import json as _json
-                    for line in reversed(last_line.strip().split("\n")):
-                        try:
-                            e = _json.loads(line)
-                            if e.get("type") in ("user", "assistant") and not e.get("isSidechain"):
-                                msg = e.get("message", {})
-                                content = msg.get("content", "")
-                                if isinstance(content, str) and len(content) > 5:
-                                    latest = content[:150]
-                                    break
-                                elif isinstance(content, list):
-                                    for c in content:
-                                        if isinstance(c, dict) and c.get("type") == "text":
-                                            latest = c["text"][:150]
-                                            break
-                                    if latest:
-                                        break
-                        except _json.JSONDecodeError:
-                            continue
-
-                    sessions.append({
-                        "session_id": jsonl.stem,
-                        "project": jsonl.parent.name,
-                        "size_bytes": stat.st_size,
-                        "age_seconds": round(age),
-                        "active": age < 60,
-                        "latest": latest,
-                    })
-            except OSError:
-                continue
-
-    sessions.sort(key=lambda s: s["age_seconds"])
-    return JSONResponse(sessions)
-
-
 async def api_terminals(request):
     """List active terminal sessions (tmux-backed, DB-sourced)."""
     live_tmux = set(_list_dashboard_tmux())
@@ -7329,154 +7264,6 @@ async def api_session_background(request):
     return JSONResponse({"ok": True})
 
 
-async def api_terminal_unclaimed(request):
-    """Return unclaimed host tmux sessions — those with no jsonl_path yet.
-
-    GET /api/terminal/unclaimed
-    Returns live host sessions from dashboard.db that don't yet have a JSONL link.
-    """
-    sessions = await asyncio.to_thread(dashboard_db.get_live_sessions)
-    now = time.time()
-    result = []
-    for row in sessions:
-        if row["type"] != "host":
-            continue
-        if row.get("jsonl_path"):
-            continue  # already linked
-        # Verify still alive
-        alive = _tmux_session_exists(row["tmux_name"])
-        if not alive:
-            continue
-        elapsed = int(now - row["created_at"])
-        result.append({
-            "tmux_session": row["tmux_name"],
-            "elapsed_seconds": elapsed,
-            "cmd": "",
-        })
-    return JSONResponse(result)
-
-
-async def api_session_send_handshake(request):
-    """Send a handshake string to a candidate tmux session for link confirmation.
-
-    POST /api/session/send-handshake
-    Body: {"tmux_session": "auto-t6"}
-    Returns: {"ok": true, "handshake": "<the string sent>"}
-    """
-    body = await request.json()
-    tmux_session = (body.get("tmux_session") or "").strip()
-    if not tmux_session:
-        return JSONResponse({"error": "tmux_session is required"}, status_code=400)
-
-    handshake = "[dashboard] confirming terminal link \u2014 please reply with I SEE IT"
-
-    try:
-        exists = _tmux_session_exists(tmux_session)
-    except FileNotFoundError:
-        return JSONResponse(
-            {"error": "tmux is not available in this environment"},
-            status_code=503,
-        )
-    if not exists:
-        return JSONResponse(
-            {"error": f"tmux session '{tmux_session}' not found"},
-            status_code=404,
-        )
-
-    # Inject via unified tmux_send (per-session lock + double-Enter retry)
-    logger.warning("[send-handshake] tmux=%r", tmux_session)
-    try:
-        await tmux_send(tmux_session, handshake)
-    except FileNotFoundError:
-        return JSONResponse(
-            {"error": "tmux is not available in this environment"},
-            status_code=503,
-        )
-
-    return JSONResponse({"ok": True, "handshake": handshake})
-
-
-async def api_session_confirm_link(request):
-    """Confirm a terminal link after handshake — scans filesystem for JSONL.
-
-    POST /api/session/confirm-link
-    Body: {"tmux_session": "auto-t6", "handshake": "[dashboard] confirming..."}
-    Returns: {"ok": true, "project": "...", "session_id": "..."}
-
-    Scans ~/.claude/projects/ for the newest JSONL files containing the
-    handshake text.  No SSE/store dependency — solves the chicken-and-egg
-    problem where entries are empty because jsonl_path is NULL.
-    """
-    body = await request.json()
-    tmux_session = (body.get("tmux_session") or "").strip()
-    handshake_text = (body.get("handshake") or "").strip()
-
-    if not tmux_session:
-        return JSONResponse({"error": "tmux_session required"}, status_code=400)
-
-    # Scan all project directories for newest JSONL containing handshake
-    claude_projects = (
-        Path(os.environ.get("AUTONOMY_HOST_HOME") or Path.home())
-        / ".claude" / "projects"
-    )
-    if not claude_projects.exists():
-        return JSONResponse({"error": "no projects directory"}, status_code=404)
-
-    # Collect all JSONL files across all projects, sorted by mtime descending
-    all_jsonls = []
-    for project_dir in claude_projects.iterdir():
-        if not project_dir.is_dir():
-            continue
-        for jf in project_dir.glob("*.jsonl"):
-            all_jsonls.append(jf)
-
-    all_jsonls.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-
-    # Check newest files first — read last 5 entries for handshake text
-    for jf in all_jsonls[:5]:  # only check 5 newest files
-        try:
-            lines = jf.read_text(encoding="utf-8", errors="replace").strip().split("\n")
-            tail = lines[-5:] if len(lines) > 5 else lines
-            for line in tail:
-                if handshake_text and handshake_text in line:
-                    # Found it — this is our file
-                    project = jf.parent.name
-                    session_id = jf.stem
-                    logger.info("confirm-link: FOUND handshake in %s/%s", project, session_id[:12])
-                    dashboard_db.link_and_enrich(
-                        tmux_session,
-                        session_uuid=session_id,
-                        jsonl_path=str(jf),
-                        project=project,
-                    )
-                    # Install inotify watches so the tailer starts broadcasting
-                    # session:messages as new entries arrive. Without this, the
-                    # link is persisted in the DB but no live SSE flows —
-                    # the viewer only sees new content on /tail?after=0 fetches
-                    # (nav or force refresh). See signpost d931649b-413 §2/§7c.
-                    from tools.dashboard.session_monitor import _TailState
-                    if tmux_session not in session_monitor._tail_states:
-                        session_monitor._tail_states[tmux_session] = _TailState(
-                            resolution_dir=jf.parent,
-                        )
-                    session_monitor._add_file_watch(tmux_session, str(jf))
-                    session_monitor._add_dir_watch(tmux_session, str(jf.parent))
-                    # auto-suvcp: persisted re-attach + catch-up drain, so the
-                    # handshake transcript's existing bytes become visible
-                    # without waiting for the next write. The registry
-                    # publishes AFTER that drain (invariant 9) — no direct
-                    # broadcast here, or the card durably shows
-                    # resolved=true with zero entries (R3).
-                    session_monitor.observe_rollout(
-                        tmux_session, jf, source="confirm_link",
-                    )
-                    return JSONResponse({"ok": True, "project": project, "session_id": session_id})
-        except Exception:
-            continue
-
-    return JSONResponse({"error": "handshake not found in any recent JSONL"}, status_code=404)
-
-
 async def api_session_get(request):
     """GET /api/session/{tmux_name} — return session details."""
     tmux_name = request.path_params["tmux_name"]
@@ -10405,11 +10192,6 @@ def _own_dashboard_url() -> str:
     return _OWN_DASHBOARD_URL
 
 
-#: Where the operator's home is mounted read-only in the dashboard and the
-#: host terminal (docker-compose.yml; graph://89d3c8df-544 §3).
-HOST_HOME_MOUNT = "/host-home"
-
-
 def _bootstrap_host_credentials(alias: str | None) -> dict | None:
     """Import the operator's own Claude sign-in from the read-only home mount,
     once, and resolve again. None when the home holds no usable credential."""
@@ -10417,7 +10199,7 @@ def _bootstrap_host_credentials(alias: str | None) -> dict | None:
     from tools.graph import credential_import
 
     try:
-        report = credential_import.run_import(home=HOST_HOME_MOUNT)
+        report = credential_import.run_import(home=str(HOST_HOME_MOUNT))
         logger.info(
             "host terminal: credential bootstrap from %s: %s",
             HOST_HOME_MOUNT, credential_import.report_to_dict(report),
@@ -21490,7 +21272,6 @@ routes = [
     Route("/api/stats", api_stats),
     Route("/api/harness_usage", api_harness_usage),
     Route("/api/attention", api_attention),
-    Route("/api/active", api_active_sessions),
     Route("/api/dao/active_sessions", api_dao_active_sessions),
     Route("/api/_mock/harness-nonce", api_mock_harness_nonce),
     Route("/api/dao/recent_sessions", api_dao_recent_sessions),
@@ -21520,13 +21301,10 @@ routes = [
     Route("/api/chatwith/sessions", api_chatwith_sessions),
     Route("/api/dispatch/tail/{run}", api_dispatch_tail),
     Route("/api/dispatch/latest/{run}", api_dispatch_latest),
-    Route("/api/terminal/unclaimed", api_terminal_unclaimed),
     Route("/api/session/create", api_session_create, methods=["POST"]),
     Route("/api/session/resume", api_session_resume, methods=["POST"]),
     Route("/api/session/{tmux_name}/retry", api_session_retry, methods=["POST"]),
     Route("/api/session/{tmux_name}/restart", api_session_restart, methods=["POST"]),
-    Route("/api/session/send-handshake", api_session_send_handshake, methods=["POST"]),
-    Route("/api/session/confirm-link", api_session_confirm_link, methods=["POST"]),
     Route("/api/session/notify", api_session_notify, methods=["POST"]),
     Route("/api/agent-test/leases", api_agent_test_leases, methods=["POST"]),
     Route("/api/session/{tmux_name}", api_session_get, methods=["GET"]),

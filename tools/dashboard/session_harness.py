@@ -167,7 +167,6 @@ class SessionHarness(Protocol):
         tmux_name: str,
         row: dict | None = None,
         jsonl_path: Path | None = None,
-        handshake_text: str | None = None,
     ) -> dict | None:
         """Resolve a session onto its backing transcript and persist the link."""
 
@@ -322,11 +321,7 @@ class ClaudeSessionHarness:
         tmux_name: str,
         row: dict | None = None,
         jsonl_path: Path | None = None,
-        handshake_text: str | None = None,
     ) -> dict | None:
-        if handshake_text:
-            return _resolve_claude_handshake_link(tmux_name, handshake_text)
-
         if jsonl_path is not None:
             return _link_session_file(tmux_name, jsonl_path, project=(row or {}).get("project"))
         return None
@@ -503,9 +498,8 @@ class CodexSessionHarness:
         tmux_name: str,
         row: dict | None = None,
         jsonl_path: Path | None = None,
-        handshake_text: str | None = None,
     ) -> dict | None:
-        _ = row, handshake_text
+        _ = row
         if jsonl_path is None:
             return None
         return _link_session_file(
@@ -3815,9 +3809,7 @@ class GrokSessionHarness:
         tmux_name: str,
         row: dict | None = None,
         jsonl_path: Path | None = None,
-        handshake_text: str | None = None,
     ) -> dict | None:
-        _ = handshake_text
         if jsonl_path is None or not is_grok_transcript(jsonl_path):
             return None
         return _link_session_file(
@@ -4065,30 +4057,6 @@ def _link_session_file(
         "jsonl_path": jsonl_path,
         "resolution_dir": jsonl_path.parent,
     }
-
-
-def _resolve_claude_handshake_link(tmux_name: str, handshake_text: str) -> dict | None:
-    claude_projects = Path.home() / ".claude" / "projects"
-    if not claude_projects.exists():
-        return None
-
-    all_jsonls: list[Path] = []
-    for project_dir in claude_projects.iterdir():
-        if not project_dir.is_dir():
-            continue
-        for jsonl in project_dir.glob("*.jsonl"):
-            all_jsonls.append(jsonl)
-    all_jsonls.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-
-    for jsonl in all_jsonls[:5]:
-        try:
-            lines = jsonl.read_text(encoding="utf-8", errors="replace").strip().split("\n")
-        except OSError:
-            continue
-        tail = lines[-5:] if len(lines) > 5 else lines
-        if any(handshake_text in line for line in tail):
-            return _link_session_file(tmux_name, jsonl)
-    return None
 
 
 def _attach_live_monitoring(

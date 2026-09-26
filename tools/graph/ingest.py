@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .models import Source, Thought, Derivation, Entity, Edge, now_iso
 from .db import GraphDB, resolve_caller_db_path
-from tools.data_paths import DATA_ROOT
+from tools.data_paths import DATA_ROOT, HOST_HOME_MOUNT
 
 
 # ── Frontmatter Parser ───────────────────────────────────────
@@ -1001,16 +1001,11 @@ def _org_from_host_project_path(file_path: Path) -> str | None:
     return _HOST_PROJECT_TO_ORG.get(parent_name)
 
 
-#: The operator's home, mounted read-only in the dashboard and the host
-#: terminal (graph://89d3c8df-544 §5). Its transcripts are the operator's own
-#: pre-existing history; they are scanned when the mount exists and recorded
-#: under the host-canonical home (``AUTONOMY_HOST_HOME``).
-HOST_HOME_MOUNT = Path("/host-home")
-
-
 def _host_home_mount() -> Path | None:
-    """The operator-home mount when present and distinct from this
-    process's own home (natively the two roots are the same tree)."""
+    """The operator-home mount (:data:`HOST_HOME_MOUNT`) when present and
+    distinct from this process's own home (natively the two roots are the
+    same tree). Its transcripts are the operator's own pre-existing history,
+    recorded under the host-canonical home (``AUTONOMY_HOST_HOME``)."""
     try:
         if not HOST_HOME_MOUNT.is_dir():
             return None

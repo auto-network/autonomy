@@ -38,7 +38,7 @@ from agents.env_sources import (
     parse_capability_env_source,
     parse_workspace_env_source,
 )
-from tools.data_paths import DATA_ROOT
+from tools.data_paths import DATA_ROOT, HOST_HOME_MOUNT
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_IMAGE = "autonomy-session-platform"
@@ -1578,7 +1578,7 @@ def _host_terminal_profile() -> tuple[dict, list[str]]:
         str(DATA_ROOT): "/workspace/repo/data",
         str(REPO_ROOT / "orgs"): "/workspace/repo/orgs",
         HOST_DOCKER_SOCKET: HOST_DOCKER_SOCKET,
-        host_home: BindRefuseMissing("/host-home:ro"),
+        host_home: BindRefuseMissing(f"{HOST_HOME_MOUNT}:ro"),
     }
     args = [
         "--group-add", str(socket_gid),

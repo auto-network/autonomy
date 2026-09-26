@@ -399,10 +399,14 @@ def test_cli_import_reports_three_harnesses(warm_vault, tmp_path):
     assert "needs_sign_in" in out
 
 
-def test_operator_home_prefers_the_host_home(monkeypatch):
-    monkeypatch.setenv("AUTONOMY_HOST_HOME", "/hosthome/op")
-    assert ci.operator_home() == "/hosthome/op"
-    monkeypatch.delenv("AUTONOMY_HOST_HOME")
+def test_operator_home_prefers_the_host_home_mount(monkeypatch, tmp_path):
+    import tools.data_paths as data_paths
+
+    mount = tmp_path / "host-home"
+    mount.mkdir()
+    monkeypatch.setattr(data_paths, "HOST_HOME_MOUNT", mount)
+    assert ci.operator_home() == str(mount)
+    monkeypatch.setattr(data_paths, "HOST_HOME_MOUNT", tmp_path / "absent")
     assert ci.operator_home() == os.path.expanduser("~")
 
 

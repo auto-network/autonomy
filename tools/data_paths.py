@@ -295,6 +295,13 @@ def resolve_data_root() -> Optional[Path]:
 DATA_ROOT = resolve_data_root() or DEFAULT_DATA_ROOT
 
 
+#: The operator's home directory, mounted read-only in the dashboard and the
+#: host terminal on a Compose node (docker-compose.yml; graph://89d3c8df-544
+#: §3). Credential import and transcript ingest read the operator's files
+#: here; nothing is written.
+HOST_HOME_MOUNT = Path("/host-home")
+
+
 def local_session_path(stored: str) -> str:
     """Re-root a stored session-transcript path into THIS process's data frame.
 

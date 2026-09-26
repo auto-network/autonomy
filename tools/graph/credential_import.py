@@ -758,9 +758,13 @@ def report_to_dict(report: ImportReport) -> dict[str, Any]:
 
 def operator_home() -> str:
     """The operator's home directory as this process sees it: on a Compose
-    node the host home is mounted at its own path and named by
-    AUTONOMY_HOST_HOME; elsewhere it is this process's home."""
-    return os.environ.get("AUTONOMY_HOST_HOME") or os.path.expanduser("~")
+    node the read-only mount at /host-home (tools.data_paths.HOST_HOME_MOUNT);
+    elsewhere this process's own home."""
+    from tools.data_paths import HOST_HOME_MOUNT
+
+    if HOST_HOME_MOUNT.is_dir():
+        return str(HOST_HOME_MOUNT)
+    return os.path.expanduser("~")
 
 
 # ── CLI ──────────────────────────────────────────────────────
@@ -820,7 +824,7 @@ def attach_credentials_subparser(sub: Any) -> None:
     p_import.add_argument(
         "--home",
         default=None,
-        help="Override the home directory scanned (default: $AUTONOMY_HOST_HOME, else $HOME).",
+        help="Override the home directory scanned (default: /host-home when mounted, else $HOME).",
     )
     p_import.add_argument(
         "--dry-run",

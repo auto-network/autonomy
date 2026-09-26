@@ -162,11 +162,9 @@ describe('composer-active signal (_composerActive + _syncComposerSignal)', () =>
     assert.equal(v._composerActive, false);
   });
 
-  it('host session needs _linked (resolved); not active until linked', () => {
+  it('host terminal composer is active like any live session, linked or not', () => {
     store.isLive = true; store.sessionType = 'host'; store.resolved = false;
     const v = h.makeViewer('auto-test');
-    assert.equal(v._composerActive, false);
-    store.resolved = true;
     assert.equal(v._composerActive, true);
   });
 

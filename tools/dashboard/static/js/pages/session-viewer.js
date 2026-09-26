@@ -119,10 +119,6 @@
       get isWorking() {
         return this.isLive && this.activityState !== 'idle';
       },
-      get _linked() {
-        var s = Alpine.store('sessions')[this.sessionKey];
-        return s ? s.resolved : false;
-      },
       // auto-7v712 PART 1: build a row-shape compatible with the
       // window.Autonomy.lifecycle.* helpers from the current store
       // entry. Used by the pre-ready loading slot (session-view.html:5-18)
@@ -307,8 +303,7 @@
         // caption in both states. Other modes are unaffected (_panelChatOpen
         // defaults true). design.js drives the flag off its chatOpen.
         if (this._mode === 'panel' && !this._panelChatOpen) return false;
-        return !this.showTerminal && this.isLive && !!this._tmuxSession &&
-               (this.sessionType !== 'host' || this._linked);
+        return !this.showTerminal && this.isLive && !!this._tmuxSession;
       },
       // Cross-session dictation: we're viewing THIS session, but voice is bound to
       // a DIFFERENT one — so anything dictated goes elsewhere. Drives the violet
@@ -920,13 +915,6 @@
           this._lightboxPrevViewport = null;
         }
       },
-
-      // Link terminal (Tier 3)
-      linkState: 'idle',
-      linkCandidates: [],
-      selectedTmux: '',
-      linkError: '',
-      HANDSHAKE_STRING: '[dashboard] confirming terminal link \u2014 please reply with I SEE IT',
 
       // Elapsed-time tick for running tools (incremented every 1s)
       _tick: 0,
@@ -2719,72 +2707,6 @@
         } catch (e) {
           console.warn('[sessionViewer] background failed:', e);
         }
-      },
-
-      // ── Link terminal ───────────────────────────────────────────
-
-      async showLinkPicker() {
-        try {
-          var res = await fetch('/api/terminal/unclaimed');
-          this.linkCandidates = await res.json();
-        } catch (e) {
-          this.linkCandidates = [];
-        }
-        this.selectedTmux = '';
-        this.linkError = '';
-        this.linkState = 'picking';
-      },
-
-      async confirmLink() {
-        if (!this.selectedTmux) return;
-        this.linkState = 'handshaking';
-        try {
-          var hsResp = await fetch('/api/session/send-handshake', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ tmux_session: this.selectedTmux }),
-          });
-          var hsData = await hsResp.json();
-          var handshake = hsData.handshake || '';
-
-          var deadline = Date.now() + 15000;
-          while (Date.now() < deadline) {
-            await new Promise(function(r) { setTimeout(r, 2000); });
-            var resp = await fetch('/api/session/confirm-link', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                tmux_session: this.selectedTmux,
-                handshake: handshake,
-              }),
-            });
-            if (resp.ok) {
-              var data = await resp.json();
-              // Write to store (getters read from store)
-              var ss = window.getSessionStore(this.sessionKey);
-              ss.resolved = true;
-              this.linkState = 'confirmed';
-              if (data.project && data.project !== this.project) {
-                this.project = data.project;
-                this.projectLabel = _formatProject(data.project);
-                this._ensureWorkspaceName(data.project);
-              }
-              return;
-            }
-          }
-          this.linkState = 'failed';
-          this.linkError = 'Handshake timed out \u2014 file not found';
-        } catch (e) {
-          this.linkState = 'failed';
-          this.linkError = 'Error: ' + (e.message || e);
-        }
-      },
-
-      resetLink() {
-        this.linkState = 'idle';
-        this.selectedTmux = '';
-        this.linkError = '';
-        this.linkCandidates = [];
       },
 
       // ── Turn-correction overlay hydration / mutation ───────────
