@@ -45,6 +45,7 @@ import ipaddress
 import json
 import subprocess
 import sys
+from pathlib import Path
 from typing import Iterable
 
 # The address space this tool pins into, and the block size it carves. RFC 1918
@@ -53,6 +54,7 @@ from typing import Iterable
 # chosen block is disjoint from any bridge the daemon has already created. A /24
 # also caps the blast radius of any future collision at 256 addresses.
 DEFAULT_SPACE = "172.16.0.0/12"
+PROC_NET_ROUTE = "/proc/net/route"
 DEFAULT_PREFIX = 24
 
 # Docker's built-in default address pools, in force whenever the daemon has no
@@ -298,6 +300,43 @@ def parse_docker_pools(info_json: str) -> object:
         return None
 
 
+def parse_proc_net_route(text: str) -> tuple[list[str], list[dict]]:
+    """(routes, interfaces) from the kernel's ``/proc/net/route`` table.
+
+    The fallback for a machine without ``ip`` — notably an Autonomy session
+    container running a nested Docker daemon, whose own ``eth0`` network would
+    otherwise be invisible, so the chooser handed out that very /24 and the new
+    bridge took the container's gateway address (auto-0924-200146 lost all
+    egress twice). Destination and mask are little-endian hex. A directly
+    connected row (no gateway) stands in for the interface's network; ``cidr``
+    is that network rather than the host address, which is all the overlap
+    checks need.
+    """
+    routes: list[str] = []
+    interfaces: list[dict] = []
+    for line in text.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 8:
+            continue
+        iface, dest_hex, gw_hex, mask_hex = parts[0], parts[1], parts[2], parts[7]
+        try:
+            dest = ipaddress.IPv4Address(int(dest_hex, 16).to_bytes(4, "little"))
+            mask = ipaddress.IPv4Address(int(mask_hex, 16).to_bytes(4, "little"))
+            net = ipaddress.ip_network(f"{dest}/{mask}", strict=False)
+        except ValueError:
+            continue
+        if net.prefixlen == 0:
+            continue  # default route
+        routes.append(str(net))
+        if int(gw_hex, 16) == 0:
+            interfaces.append({
+                "iface": iface,
+                "cidr": str(net),
+                "docker": _is_docker_iface(iface),
+            })
+    return routes, interfaces
+
+
 # ── live reads (read-only, best-effort) ──────────────────────────────────
 
 def _run(argv: list[str]) -> str | None:
@@ -327,6 +366,16 @@ def read_host_cidrs() -> tuple[list[str], list[dict]]:
     addr_text = _run(["ip", "-o", "addr"])
     if addr_text is not None:
         interfaces = parse_ip_addr(addr_text)
+    if route_text is None or addr_text is None:
+        try:
+            proc_routes, proc_ifaces = parse_proc_net_route(
+                Path(PROC_NET_ROUTE).read_text())
+        except OSError:
+            proc_routes, proc_ifaces = [], []
+        if route_text is None:
+            routes = proc_routes
+        if addr_text is None:
+            interfaces = proc_ifaces
     return routes, interfaces
 
 

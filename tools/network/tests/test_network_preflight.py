@@ -218,3 +218,38 @@ def test_compose_file_declares_subnet_without_a_default():
     text = (REPO_ROOT / "docker-compose.yml").read_text()
     assert "${AUTONOMY_SUBNET:?" in text
     assert "${AUTONOMY_SUBNET:-" not in text
+
+
+# The route table of session container auto-0924-200146 (no `ip` binary) before
+# its nested quickstart: eth0 on 172.16.0.0/24 via gateway 172.16.0.1, plus the
+# nested daemon's own docker0.
+_SESSION_PROC_NET_ROUTE = (
+    "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"
+    "eth0\t00000000\t010010AC\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"
+    "eth0\t000010AC\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n"
+    "docker0\t000011AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n"
+)
+
+
+def test_parse_proc_net_route_reads_connected_networks():
+    routes, interfaces = np.parse_proc_net_route(_SESSION_PROC_NET_ROUTE)
+    assert routes == ["172.16.0.0/24", "172.17.0.0/16"]
+    assert interfaces == [
+        {"iface": "eth0", "cidr": "172.16.0.0/24", "docker": False},
+        {"iface": "docker0", "cidr": "172.17.0.0/16", "docker": True},
+    ]
+
+
+def test_without_ip_the_chooser_does_not_hand_out_the_hosts_own_network(monkeypatch, tmp_path):
+    """No `ip` binary: the chosen subnet must still avoid the network the
+    machine sits on, or the new bridge takes its gateway address."""
+    route_file = tmp_path / "route"
+    route_file.write_text(_SESSION_PROC_NET_ROUTE)
+    monkeypatch.setattr(np, "PROC_NET_ROUTE", str(route_file))
+    monkeypatch.setattr(np, "_run", lambda argv: None)  # neither ip nor docker present
+
+    report = np.build_report()
+
+    assert {"iface": "eth0", "cidr": "172.16.0.0/24", "docker": False} in report["interfaces"]
+    assert report["chosen_subnet"] is not None
+    assert report["chosen_subnet"] != "172.16.0.0/24"
