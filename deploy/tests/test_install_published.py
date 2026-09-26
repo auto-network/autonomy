@@ -28,7 +28,8 @@ def _lock(tmp_path: Path, node_digest: str = GOOD, node_ref: str | None = None) 
         f"AUTONOMY_NODE_IMAGE={node}\n"
         f"AUTONOMY_SESSION_IMAGE=ghcr.io/example/autonomy-session@sha256:{GOOD}\n"
         f"AUTONOMY_SESSION_PLATFORM_IMAGE=ghcr.io/example/autonomy-session-platform@sha256:{GOOD}\n"
-        f"AUTONOMY_SESSION_DIND_IMAGE=ghcr.io/example/autonomy-session-dind@sha256:{GOOD}\n",
+        f"AUTONOMY_SESSION_DIND_IMAGE=ghcr.io/example/autonomy-session-dind@sha256:{GOOD}\n"
+        f"AUTONOMY_HOST_TERMINAL_IMAGE=ghcr.io/example/autonomy-host-terminal@sha256:{GOOD}\n",
         encoding="utf-8",
     )
     return lock
@@ -79,10 +80,13 @@ def test_every_image_is_verified_with_the_embedded_key(tmp_path):
     result, calls = _run(tmp_path, _lock(tmp_path))
     assert result.returncode == 5  # fakes never answer /api/ping
     verifies = [line for line in calls.splitlines() if line.startswith("cosign verify")]
-    assert len(verifies) == 4
+    assert len(verifies) == 5
     assert all("--key" in line for line in verifies)
     lines = calls.splitlines()
     last_verify = max(i for i, line in enumerate(lines) if line.startswith("cosign verify"))
     first_pull = min(i for i, line in enumerate(lines) if line.startswith("docker pull"))
     assert last_verify < first_pull
     assert any(line.startswith("docker compose up -d --no-build") for line in lines)
+    # The launcher starts the host terminal from this local name.
+    assert any(line.startswith("docker tag ") and line.endswith(" autonomy-host-terminal")
+               for line in lines)
