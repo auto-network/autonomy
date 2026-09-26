@@ -1191,6 +1191,16 @@ def test_scan_all_worktrees_session_filter_skips_sessions(tmp_path, monkeypatch)
         repo_filter=lambda name: name == "not-upstream",
     ) == []
 
+    # The filter matches the logical repo name, not the session-unique
+    # on-disk directory (``upstream-<session>``): a targeted rescan by repo
+    # name must find the row, or the monitor keeps a stale one.
+    assert [row.repo_name for row in wm.scan_all_worktrees(
+        worktrees_dir=worktrees_dir,
+        live_session_names=set(),
+        session_filter=lambda name: name == session_a,
+        repo_filter=lambda name: name == "upstream",
+    )] == ["upstream"]
+
 
 def test_scan_all_worktrees_suppresses_rebased_copy_duplicates(tmp_path, monkeypatch):
     """A commit copied to another session branch under a different SHA

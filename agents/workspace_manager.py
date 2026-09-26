@@ -3247,7 +3247,14 @@ def scan_all_worktrees(
         for repo_dir in repo_dirs:
             if not repo_dir.is_dir():
                 continue
-            if repo_filter is not None and not repo_filter(repo_dir.name):
+            # The filter speaks logical repo names, the same names every
+            # caller passes (refresh_local_one's repo_name). Matching the
+            # session-unique on-disk basename instead silently excluded every
+            # ``<repo>-<session>`` worktree, so a targeted rescan returned
+            # nothing and the monitor kept the stale row.
+            if repo_filter is not None and not repo_filter(
+                _logical_repo_name(repo_dir.name, session_dir.name)
+            ):
                 continue
             # Only scan real git worktrees. A half-provisioned workspace dir
             # (e.g. clones not yet landed) has no `.git`; running git there
